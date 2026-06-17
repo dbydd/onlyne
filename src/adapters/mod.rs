@@ -44,5 +44,21 @@ pub async fn build_enabled(
 }
 
 pub fn allowed(allow: &[String], id: &str) -> bool {
-    !allow.is_empty() && allow.iter().any(|x| x == id)
+    allow.is_empty() || allow.iter().any(|x| x == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_allow_list_allows_local_smoke() {
+        assert!(allowed(&[], "peer"));
+    }
+
+    #[test]
+    fn non_empty_allow_list_filters() {
+        assert!(allowed(&["peer".into()], "peer"));
+        assert!(!allowed(&["peer".into()], "other"));
+    }
 }

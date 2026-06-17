@@ -18,9 +18,17 @@ pub struct App {
     pub events: EventBus,
     pub store: Store,
     adapters: Mutex<HashMap<String, Box<dyn Adapter>>>,
+    debug_reply: bool,
 }
 impl App {
     pub async fn load(workspace: Workspace) -> anyhow::Result<Arc<Self>> {
+        Self::load_with_debug(workspace, false).await
+    }
+
+    pub async fn load_with_debug(
+        workspace: Workspace,
+        debug_reply: bool,
+    ) -> anyhow::Result<Arc<Self>> {
         workspace.bootstrap()?;
         let cfg = config::load_config(&workspace.config_path())?;
         let env = Env::load(&workspace.dotenv_path(), &workspace.root().join(".env"));
@@ -39,6 +47,7 @@ impl App {
             events: EventBus::new(1024),
             store,
             adapters: Mutex::new(map),
+            debug_reply,
         }))
     }
     pub async fn start_all(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -47,6 +56,9 @@ impl App {
         tokio::spawn(async move {
             while let Some(m) = rx.recv().await {
                 let _ = app.store.append_message(&m).await;
+                if app.debug_reply {
+                    app.debug_reply_to(&m).await;
+                }
                 app.events.publish(Event::HistoryAppended {
                     channel_id: m.channel_id.clone(),
                     message_id: m.message_id.clone(),
@@ -126,6 +138,29 @@ impl App {
             _ => Err(anyhow!("unknown op {}", req.op)),
         }
     }
+    async fn debug_reply_to(&self, inbound: &MessageEnvelope) {
+        let msg = OutboundMessage {
+            channel_id: inbound.channel_id.clone(),
+            conversation_id: inbound.conversation_id.clone(),
+            text: Some(debug_reply_text(inbound)),
+            attachments: vec![],
+        };
+        let guard = self.adapters.lock().await;
+        let Some(a) = guard.get(&inbound.channel_id.0) else {
+            return;
+        };
+        match a.send_message(msg).await {
+            Ok(out) => {
+                let _ = self.store.append_message(&out).await;
+                self.events.publish(Event::OutboundMessage(out));
+            }
+            Err(e) => self.events.publish(Event::Warning {
+                channel_id: Some(inbound.channel_id.clone()),
+                message: format!("debug reply failed: {e}"),
+            }),
+        }
+    }
+
     async fn send(&self, req: Request) -> anyhow::Result<Value> {
         let channel = req.channel_id.context("channel_id required")?;
         let conversation = req.conversation_id.context("conversation_id required")?;
@@ -153,6 +188,48 @@ impl App {
         Ok(out)
     }
 }
+fn debug_reply_text(m: &MessageEnvelope) -> String {
+    let mut lines = vec![
+        "onlyne debug auth/context".to_string(),
+        format!("channel_id={}", m.channel_id.0),
+        format!("conversation_id={}", m.conversation_id.0),
+        format!("message_id={}", m.message_id.0),
+    ];
+    if let Some(v) = &m.sender_id {
+        lines.push(format!("sender_id={v}"));
+    }
+    if let Some(v) = &m.sender_name {
+        lines.push(format!("sender_name={v}"));
+    }
+    for key in [
+        "thread_id",
+        "parent_id",
+        "root_id",
+        "group_id",
+        "session_id",
+        "context_token",
+        "chat_id",
+        "message_thread_id",
+    ] {
+        if let Some(v) = m.platform_metadata.get(key) {
+            let value = if secretish(key) {
+                "<redacted>".to_string()
+            } else if let Some(s) = v.as_str() {
+                s.to_string()
+            } else {
+                v.to_string()
+            };
+            lines.push(format!("{key}={value}"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn secretish(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("token") || key.contains("secret") || key.contains("password")
+}
+
 fn event_sender(bus: EventBus) -> mpsc::Sender<Event> {
     let (tx, mut rx) = mpsc::channel(1024);
     tokio::spawn(async move {
@@ -161,4 +238,40 @@ fn event_sender(bus: EventBus) -> mpsc::Sender<Event> {
         }
     });
     tx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn debug_reply_text_includes_threadish_metadata() {
+        let msg = MessageEnvelope {
+            channel_id: ChannelId("weixin".into()),
+            conversation_id: ConversationId("peer@im.wechat".into()),
+            message_id: MessageId("m1".into()),
+            direction: Direction::Inbound,
+            sender_id: Some("sender".into()),
+            sender_name: Some("Alice".into()),
+            text: Some("hi".into()),
+            attachments: vec![],
+            delivery_state: DeliveryState::Delivered,
+            timestamp: Utc::now(),
+            platform_metadata: serde_json::json!({
+                "context_token":"secret-context",
+                "thread_id":"thread-1",
+                "parent_id": "parent-1"
+            }),
+        };
+        let out = debug_reply_text(&msg);
+        assert!(out.contains("channel_id=weixin"));
+        assert!(out.contains("conversation_id=peer@im.wechat"));
+        assert!(out.contains("sender_id=sender"));
+        assert!(out.contains("message_id=m1"));
+        assert!(out.contains("thread_id=thread-1"));
+        assert!(out.contains("parent_id=parent-1"));
+        assert!(out.contains("context_token=<redacted>"));
+        assert!(!out.contains("secret-context"));
+    }
 }

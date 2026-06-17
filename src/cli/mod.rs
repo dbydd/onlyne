@@ -21,9 +21,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     Init,
-    Run,
+    Run {
+        #[arg(long)]
+        debug: bool,
+    },
     Stdio,
-    Client { json: String },
+    Client {
+        json: String,
+    },
     ConfigCheck,
     Auth(AuthArgs),
 }
@@ -61,10 +66,10 @@ pub async fn run() -> anyhow::Result<()> {
             println!("initialized {}", ws.dir().display());
             Ok(())
         }
-        Cmd::Run => {
+        Cmd::Run { debug } => {
             let ws = Workspace::current()?;
             init_logging(&ws)?;
-            let app = App::load(ws).await?;
+            let app = App::load_with_debug(ws, debug).await?;
             app.start_all().await?;
             ipc::serve_socket(app).await
         }

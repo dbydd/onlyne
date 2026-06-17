@@ -86,6 +86,8 @@ onlyne auth weixin --api-url https://ilinkai.weixin.qq.com --bot-type 3
 
 Auth is intentionally workspace-local: it updates `.onlyne/config.toml` and `.onlyne/.env` in the current directory only.
 
+WeChat CLI smoke example: see `examples/wechat/`.
+
 ## Smoke checks
 
 Run from the repo after building:
