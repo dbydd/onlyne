@@ -1,6 +1,11 @@
 use crate::{app::App, auth, ipc, workspace::Workspace};
 use anyhow::Context;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{
+    generate,
+    shells::{Fish, Zsh},
+};
+use std::io;
 use std::time::Duration;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -18,6 +23,7 @@ struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
 }
+
 #[derive(Subcommand)]
 enum Cmd {
     Init,
@@ -31,6 +37,9 @@ enum Cmd {
     },
     ConfigCheck,
     Auth(AuthArgs),
+    ShellCompletions {
+        shell: CompletionShell,
+    },
 }
 
 #[derive(Args)]
@@ -57,6 +66,12 @@ enum AuthChannel {
     Weixin,
 }
 
+#[derive(Copy, Clone, ValueEnum)]
+enum CompletionShell {
+    Zsh,
+    Fish,
+}
+
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
@@ -81,6 +96,10 @@ pub async fn run() -> anyhow::Result<()> {
         }
         Cmd::Client { json } => client(json).await,
         Cmd::Auth(args) => auth_cmd(args).await,
+        Cmd::ShellCompletions { shell } => {
+            shell_completions(shell);
+            Ok(())
+        }
         Cmd::ConfigCheck => {
             let ws = Workspace::current()?;
             let app = App::load(ws).await?;
@@ -94,6 +113,7 @@ pub async fn run() -> anyhow::Result<()> {
         }
     }
 }
+
 async fn auth_cmd(args: AuthArgs) -> anyhow::Result<()> {
     let ws = Workspace::current()?;
     match args.channel {
@@ -129,6 +149,15 @@ async fn auth_cmd(args: AuthArgs) -> anyhow::Result<()> {
     }
 }
 
+fn shell_completions(shell: CompletionShell) {
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_string();
+    match shell {
+        CompletionShell::Zsh => generate(Zsh, &mut cmd, name, &mut io::stdout()),
+        CompletionShell::Fish => generate(Fish, &mut cmd, name, &mut io::stdout()),
+    }
+}
+
 fn init_logging(ws: &Workspace) -> anyhow::Result<()> {
     let file = tracing_appender::rolling::never(ws.log_path().parent().unwrap(), "daemon.log");
     fmt()
@@ -143,7 +172,11 @@ async fn client(line: String) -> anyhow::Result<()> {
         .await
         .context("connect onlyne socket")?;
     s.write_all(line.as_bytes()).await?;
-    s.write_all(b"\n").await?;
+    s.write_all(
+        b"
+",
+    )
+    .await?;
     let mut lines = BufReader::new(s).lines();
     if let Some(resp) = lines.next_line().await? {
         println!("{resp}");
@@ -159,4 +192,44 @@ fn redact(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap_complete::{
+        generate,
+        shells::{Fish, Zsh},
+    };
+
+    fn completion_text(shell: impl clap_complete::Generator) -> String {
+        let mut cmd = Cli::command();
+        let name = cmd.get_name().to_string();
+        let mut out = Vec::new();
+        generate(shell, &mut cmd, name, &mut out);
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn completion_command_is_exposed() {
+        let cmd = Cli::command();
+        assert!(
+            cmd.get_subcommands()
+                .any(|sc| sc.get_name() == "shell-completions")
+        );
+    }
+
+    #[test]
+    fn zsh_completion_mentions_onlyne() {
+        let text = completion_text(Zsh);
+        assert!(text.contains("#compdef onlyne"));
+        assert!(text.contains("shell-completions"));
+    }
+
+    #[test]
+    fn fish_completion_mentions_onlyne() {
+        let text = completion_text(Fish);
+        assert!(text.contains("complete -c onlyne"));
+        assert!(text.contains("shell-completions"));
+    }
 }

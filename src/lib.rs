@@ -5,7 +5,6 @@ pub mod cli;
 pub mod config;
 pub mod core;
 pub mod events;
-pub mod history;
 pub mod ipc;
 pub mod media;
 pub mod store;

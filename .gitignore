@@ -1,2 +1,5 @@
 target*
 .omx
+.onlyne/
+__pycache__/
+*.pyc

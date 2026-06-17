@@ -1,140 +1,120 @@
 # Onlyne
 
-Rust workspace-local IM channel daemon / broker.
+Onlyne is a small Rust daemon for local IM channel brokering. It gives local agents a thin, workspace-local way to send, receive, subscribe to, and browse messages across chat platforms.
 
-Onlyne stores runtime data under the current workspace's `.onlyne/` and exposes local agent-facing IPC over Unix socket or stdio using newline-delimited JSON.
+中文说明见 [README.zh-CN.md](README.zh-CN.md).
 
-Agent runtimes, web dashboards, schedulers, supervisor installers, and model/provider orchestration are intentionally out of scope.
+## What it is
 
-## Commands
+- Workspace-local: each working directory owns its own `.onlyne/` config, state, socket, logs, and cache.
+- CLI-first: run it in the foreground, wrap it with a supervisor, or use stdio mode from another process.
+- Local IPC: newline-delimited JSON over Unix socket or stdio.
+- Multi-channel: Telegram, Feishu/Lark, QQ Bot, and WeChat ilink adapters.
+- Lightweight history: local SQLite state and message history.
+- Event stream: local clients can subscribe to inbound/outbound and adapter events.
+
+Onlyne is not an agent runtime, model runner, scheduler, web dashboard, or prompt/memory system.
+
+## Install
+
+```bash
+cargo build --release
+```
+
+Use the built binary at `target/release/onlyne`, or run from source with `cargo run --`.
+
+## Quick start
 
 ```bash
 onlyne init
-onlyne config-check
-onlyne auth feishu
-onlyne auth weixin
 onlyne run
-onlyne stdio
+```
 
+In another terminal from the same workspace:
+
+```bash
+onlyne client '{"id":"1","op":"ping"}'
+onlyne client '{"id":"2","op":"status"}'
+```
+
+Stdio mode uses the same request schema:
+
+```bash
 echo '{"id":"1","op":"ping"}' | onlyne stdio
-onlyne client '{"id":"1","op":"status"}'
 ```
 
-## Local status
+## Workspace layout
 
-Verified locally:
+`onlyne init` creates runtime files under the current directory:
 
-- workspace-local `.onlyne/` bootstrap:
-  - `.onlyne/config.toml`
-  - `.onlyne/.env`
-  - `.onlyne/run/`
-  - `.onlyne/logs/`
-  - `.onlyne/cache/media/`
-  - `.onlyne/adapters/`
-- TOML config loading plus root `.env` and `.onlyne/.env` secret lookup
-- workspace-local `auth` command for Feishu/Lark and WeChat ilink login/bind
-- foreground daemon with Unix socket at `.onlyne/run/onlyne.sock`
-- stdio mode with the same NDJSON request/response schema
-- SQLite history store via `rusqlite`
-- local event bus and IPC subscribe/unsubscribe operations
-- malformed JSON and unknown-operation error responses
-
-Implemented IPC operations:
-
-- `ping`
-- `status`
-- `list_channels`
-- `list_conversations`
-- `subscribe_events`
-- `unsubscribe_events`
-- `send_message`
-- `reply_message`
-- `fetch_history`
-- `fetch_channel_history`
-- `fetch_all_history`
-- `start_adapter`
-- `stop_adapter`
-- `restart_adapter`
-
-Adapter lifecycle note: in this build, adapters start with `onlyne run` / `onlyne stdio`. Runtime `start_adapter`, `stop_adapter`, and `restart_adapter` are compatibility operations; they do not hot-start or hot-restart adapters.
-
-## Platform adapter status
-
-These paths are implemented in code but require live platform credentials and reachable vendor endpoints for real smoke tests.
-
-| Platform | Auth / pairing shape | Implemented path | Not locally verified |
-| --- | --- | --- | --- |
-| Telegram | Bot token via `TELEGRAM_BOT_TOKEN` or config; no QR pairing. | `getUpdates` receive, send text/media, download inbound media. | Real bot polling and send against Telegram. |
-| Feishu / Lark | `onlyne auth feishu` QR onboarding, or `--app-id` + `--app-secret` bind. | Saves app credentials to workspace `.onlyne`, tenant token, websocket receive path, OpenAPI text/media send. | Real tenant QR completion in this environment, real websocket connection, webhook/url-verification mode, tenant permissions. |
-| QQ Bot | `QQBOT_APP_ID` + `QQBOT_APP_SECRET`, optional sandbox. | Access token, gateway websocket, group text/media send. | Real gateway session, token expiry/401 retry behavior under long runs. |
-| WeChat ilink | `onlyne auth weixin` QR login, or `--token` bind. Sending needs a fresh per-peer `context_token` learned from inbound messages. | Saves ilink token to workspace `.onlyne`, long-poll receive, context-token text/media send, encrypted CDN media download/upload helpers. | Live WeChat QR completion in this environment, live CDN reachability, expired context-token recovery. |
-
-Auth command examples:
-
-```bash
-# QR onboarding; writes only to cwd/.onlyne/
-onlyne auth feishu
-onlyne auth weixin
-
-# Bind known credentials instead of scanning QR
-onlyne auth feishu --app-id cli_xxx --app-secret sec_xxx
-onlyne auth weixin --token eyJ...
-
-# WeChat operator overrides, when needed
-onlyne auth weixin --api-url https://ilinkai.weixin.qq.com --bot-type 3
+```text
+.onlyne/
+  config.toml
+  .env
+  state.db
+  run/onlyne.sock
+  logs/daemon.log
+  cache/media/
+  adapters/
 ```
 
-Auth is intentionally workspace-local: it updates `.onlyne/config.toml` and `.onlyne/.env` in the current directory only.
+Workspace data intentionally does not default to global mutable state.
 
-WeChat CLI smoke example: see `examples/wechat/`.
+## Channels
 
-## Smoke checks
+| Channel | Setup |
+| --- | --- |
+| Telegram | Put `TELEGRAM_BOT_TOKEN` in `.onlyne/.env` and enable `[adapters.telegram]`. |
+| Feishu/Lark | Run `onlyne auth feishu`, or bind with `--app-id` and `--app-secret`. |
+| QQ Bot | Put `QQBOT_APP_ID` and `QQBOT_APP_SECRET` in `.onlyne/.env` and enable `[adapters.qqbot]`. |
+| WeChat ilink | Run `onlyne auth weixin`, or bind with `--token`. |
 
-Run from the repo after building:
+Auth commands write only to the current workspace `.onlyne/` directory.
+
+## Common commands
 
 ```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+onlyne init
+onlyne run [--debug]
+onlyne stdio
+onlyne client '<json-request>'
+onlyne config-check
+onlyne auth feishu [--app-id <id> --app-secret <secret>]
+onlyne auth weixin [--token <token>]
+onlyne shell-completions zsh
+onlyne shell-completions fish
 ```
 
-Minimal workspace smoke:
+`onlyne run --debug` replies to inbound messages with redacted channel/conversation/thread metadata. Use it only while finding conversation IDs or platform thread fields.
 
-```bash
-tmp=$(mktemp -d)
-cd "$tmp"
-/path/to/onlyne init
-/path/to/onlyne stdio <<'JSON'
+## Examples
+
+- `examples/telegram/`
+- `examples/feishu/`
+- `examples/qqbot/`
+- `examples/wechat/`
+- `examples/broadcast/`
+- `examples/multicast/`
+- `examples/multi-channel/`
+
+The examples are pure CLI workflows. They keep secrets and runtime data in each example workspace's `.onlyne/`, which is ignored by git.
+
+## IPC
+
+Onlyne accepts newline-delimited JSON requests. See [docs/IPC.md](docs/IPC.md) for operation details.
+
+Minimal request:
+
+```json
 {"id":"1","op":"ping"}
-{"id":"2","op":"status"}
-{"id":"3","op":"list_channels"}
-{"id":"4","op":"fetch_all_history","limit":5}
-{"id":"5","op":"not_real"}
-{
-JSON
 ```
 
-Unix socket smoke:
+Minimal response:
 
-```bash
-/path/to/onlyne run &
-pid=$!
-/path/to/onlyne client '{"id":"1","op":"ping"}'
-/path/to/onlyne client '{"id":"2","op":"status"}'
-kill "$pid"
+```json
+{"id":"1","ok":true,"data":{"pong":true}}
 ```
 
-## Current verification evidence
+## Project status
 
-Last local verification in this workspace:
-
-- `cargo test`: 13 tests passed.
-- `cargo fmt --check`: passed.
-- `cargo clippy --all-targets -- -D warnings`: passed.
-- Temporary-workspace `onlyne init`: created the expected `.onlyne/` layout.
-- `onlyne stdio`: verified `ping`, `status`, `list_channels`, `fetch_all_history`, event subscription warning delivery, unknown op, and malformed JSON responses.
-- `onlyne auth --help`: verified Feishu/Weixin auth command surface.
-- `onlyne run` + `onlyne client`: verified Unix socket `ping` and `status`.
-
-No live platform credential or QR-completion smoke was run.
-# onlyne
+See [docs/STATUS.md](docs/STATUS.md) for current implementation notes and verification evidence.
