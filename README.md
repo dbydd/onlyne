@@ -27,6 +27,8 @@ Use the built binary at `target/release/onlyne`, or run from source with `cargo 
 
 ```bash
 onlyne init
+# Optional: export an agent skill into this workspace
+onlyne init --export-skill
 onlyne run
 ```
 
@@ -62,6 +64,8 @@ By default, commands start at the current directory and walk upward until they f
 
 Workspace data intentionally does not default to global mutable state.
 
+`onlyne init --export-skill` also writes a local agent skill to `.agents/skills/onlyne/SKILL.md` under the selected workspace root. This is intentionally workspace-local and does not touch `~/.agents/skills`.
+
 ## Channels
 
 | Channel | Setup |
@@ -78,7 +82,7 @@ Adapter SDKs: Feishu uses `openlark`, Telegram uses `teloxide`, and WeChat ilink
 ## Common commands
 
 ```bash
-onlyne [--workspace <dir>] init
+onlyne [--workspace <dir>] init [--export-skill]
 onlyne [--workspace <dir>] run [--debug]
 onlyne stdio
 onlyne client '<json-request>'

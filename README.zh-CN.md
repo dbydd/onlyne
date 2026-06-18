@@ -27,6 +27,8 @@ cargo build --release
 
 ```bash
 onlyne init
+# 可选：把 Onlyne agent skill 导出到当前工作区
+onlyne init --export-skill
 onlyne run
 ```
 
@@ -62,6 +64,8 @@ echo '{"id":"1","op":"ping"}' | onlyne stdio
 
 Onlyne 的工作区数据不会默认写到全局可变目录。
 
+`onlyne init --export-skill` 还会在选定工作区下写入本地 agent skill：`.agents/skills/onlyne/SKILL.md`。这是工作区本地导出，不会写入 `~/.agents/skills`。
+
 ## Channel 配置
 
 | Channel | 配置方式 |
@@ -78,7 +82,7 @@ Adapter SDK：飞书使用 `openlark`，Telegram 使用 `teloxide`，微信 ilin
 ## 常用命令
 
 ```bash
-onlyne [--workspace <dir>] init
+onlyne [--workspace <dir>] init [--export-skill]
 onlyne [--workspace <dir>] run [--debug]
 onlyne stdio
 onlyne client '<json-request>'

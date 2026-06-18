@@ -5,6 +5,7 @@ use clap_complete::{
     generate,
     shells::{Fish, Zsh},
 };
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -30,7 +31,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    Init,
+    Init(InitArgs),
     Run {
         #[arg(long)]
         debug: bool,
@@ -44,6 +45,12 @@ enum Cmd {
     ShellCompletions {
         shell: CompletionShell,
     },
+}
+
+#[derive(Args)]
+struct InitArgs {
+    #[arg(long)]
+    export_skill: bool,
 }
 
 #[derive(Args)]
@@ -80,10 +87,14 @@ pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let workspace = cli.workspace.clone();
     match cli.cmd {
-        Cmd::Init => {
+        Cmd::Init(args) => {
             let ws = resolve_workspace(workspace.clone())?;
             ws.bootstrap()?;
             println!("initialized {}", ws.dir().display());
+            if args.export_skill {
+                let path = export_agent_skill(&ws)?;
+                println!("exported skill {}", path.display());
+            }
             Ok(())
         }
         Cmd::Run { debug } => {
@@ -152,6 +163,79 @@ async fn auth_cmd(workspace: Option<PathBuf>, args: AuthArgs) -> anyhow::Result<
             .await
         }
     }
+}
+
+const ONLYNE_AGENT_SKILL: &str = r#"---
+name: onlyne
+description: Use when an agent needs to send, receive, subscribe to, or inspect workspace-local IM channel messages through Onlyne.
+---
+
+# Onlyne
+
+## Overview
+
+Onlyne is a workspace-local IM channel broker. Use it only as a local messaging bridge: send messages, receive subscribed events, and inspect local history through the workspace `.onlyne/` daemon state.
+
+## Rules
+
+- Run commands inside the project tree, or pass `--workspace <dir>`.
+- Do not write credentials into global home directories. Secrets belong in the selected workspace `.onlyne/.env`.
+- Do not commit `.onlyne/`, logs, runtime databases, sockets, or channel tokens.
+- Do not treat Onlyne as an agent runtime, model runner, scheduler, or prompt system.
+- Use `onlyne run --debug` only while discovering channel/conversation/thread metadata; debug replies are for setup, not normal operation.
+
+## Quick Reference
+
+| Need | Command |
+| --- | --- |
+| Initialize workspace | `onlyne init` |
+| Run daemon | `onlyne run` |
+| Run with metadata replies | `onlyne run --debug` |
+| Health check | `onlyne client '{"id":"ping","op":"ping"}'` |
+| Status/channels | `onlyne client '{"id":"status","op":"status"}'` |
+| Send text | `onlyne client '{"id":"send","op":"send_message","channel_id":"telegram","conversation_id":"CHAT_ID","text":"hello"}'` |
+| Reply text | `onlyne client '{"id":"reply","op":"reply_message","channel_id":"telegram","conversation_id":"CHAT_ID","text":"hello"}'` |
+| Read channel history | `onlyne client '{"id":"hist","op":"fetch_channel_history","channel_id":"telegram","limit":20}'` |
+| Read merged history | `onlyne client '{"id":"all","op":"fetch_all_history","limit":50}'` |
+
+## Subscribe to Events
+
+`onlyne client` prints one response and exits, so long-lived subscriptions should keep the Unix socket open. The socket path is always workspace-local: `.onlyne/run/onlyne.sock`.
+
+```bash
+python3 - <<'PY'
+import json, socket
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect('.onlyne/run/onlyne.sock')
+sock.sendall(b'{"id":"sub","op":"subscribe_events"}\n')
+while True:
+    print(sock.recv(65536).decode(), end='')
+PY
+```
+
+Subscribed event lines have `event:true`; request responses have `ok:true` or `ok:false`.
+
+## Discover Conversation IDs
+
+1. Start `onlyne run --debug` in the workspace.
+2. Send a normal message to the target platform bot/account.
+3. Read the platform reply; it contains redacted channel/conversation/thread metadata.
+4. Use the returned `channel_id` and `conversation_id` in `send_message` or `reply_message`.
+
+## Common Mistakes
+
+- If `connect onlyne socket` fails, start `onlyne run` in the same workspace or pass the same `--workspace <dir>` to both commands.
+- If history is empty, first verify the adapter is enabled and `status` shows the expected channel.
+- If sends go to the wrong place, rediscover the conversation with `--debug`; platform IDs are not interchangeable across Telegram, Feishu, QQ Bot, and WeChat.
+- If multiple examples should share config, initialize the parent directory once and run child commands under it so upward workspace discovery finds the same `.onlyne/`.
+"#;
+
+fn export_agent_skill(ws: &Workspace) -> anyhow::Result<PathBuf> {
+    let dir = ws.root().join(".agents/skills/onlyne");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("SKILL.md");
+    fs::write(&path, ONLYNE_AGENT_SKILL)?;
+    Ok(path)
 }
 
 fn resolve_workspace(path: Option<PathBuf>) -> anyhow::Result<Workspace> {
@@ -242,6 +326,37 @@ mod tests {
             Cli::try_parse_from(["onlyne", "config-check", "--workspace", "/tmp/onlyne-ws"])
                 .unwrap();
         assert_eq!(after.workspace, Some(PathBuf::from("/tmp/onlyne-ws")));
+    }
+
+    #[test]
+    fn init_export_skill_flag_is_parsed() {
+        let cli = Cli::try_parse_from(["onlyne", "init", "--export-skill"]).unwrap();
+        match cli.cmd {
+            Cmd::Init(args) => assert!(args.export_skill),
+            _ => panic!("expected init command"),
+        }
+    }
+
+    #[test]
+    fn export_skill_writes_workspace_local_agents_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+
+        let path = export_agent_skill(&ws).unwrap();
+
+        let expected = dir.path().join(".agents/skills/onlyne/SKILL.md");
+        assert_eq!(path, expected);
+        let body = std::fs::read_to_string(expected).unwrap();
+        assert!(body.contains("name: onlyne"));
+        assert!(body.contains("send_message"));
+        assert!(body.contains(".onlyne/.env"));
+        assert!(!dir.path().join(".agents/skills/SKILL.md").exists());
+    }
+
+    #[test]
+    fn completions_include_export_skill() {
+        let text = completion_text(Zsh);
+        assert!(text.contains("--export-skill"));
     }
 
     #[test]
