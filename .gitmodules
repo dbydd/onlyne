@@ -1,0 +1,3 @@
+[submodule "harness/pi-onlyne"]
+	path = harness/pi-onlyne
+	url = git@github.com:dbydd/pi-onlyne.git
