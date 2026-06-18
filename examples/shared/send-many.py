@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 import json, os, pathlib, socket, sys, time
-sock = pathlib.Path('.onlyne/run/onlyne.sock')
+
+start = pathlib.Path.cwd()
+for d in (start, *start.parents):
+    sock = d / '.onlyne/run/onlyne.sock'
+    if sock.exists():
+        break
+else:
+    sock = start / '.onlyne/run/onlyne.sock'
 text = os.environ.get('ONLYNE_TEXT', 'zig')
 raw = os.environ.get('ONLYNE_TARGETS', '')
 if not raw.strip():

@@ -6,6 +6,7 @@ use clap_complete::{
     shells::{Fish, Zsh},
 };
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -20,6 +21,9 @@ use tracing_subscriber::{EnvFilter, fmt};
     about = "Workspace-local IM channel daemon/broker"
 )]
 struct Cli {
+    #[arg(long, global = true)]
+    workspace: Option<PathBuf>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -74,34 +78,35 @@ enum CompletionShell {
 
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let workspace = cli.workspace.clone();
     match cli.cmd {
         Cmd::Init => {
-            let ws = Workspace::current()?;
+            let ws = resolve_workspace(workspace.clone())?;
             ws.bootstrap()?;
             println!("initialized {}", ws.dir().display());
             Ok(())
         }
         Cmd::Run { debug } => {
-            let ws = Workspace::current()?;
+            let ws = resolve_workspace(workspace.clone())?;
             init_logging(&ws)?;
             let app = App::load_with_debug(ws, debug).await?;
             app.start_all().await?;
             ipc::serve_socket(app).await
         }
         Cmd::Stdio => {
-            let ws = Workspace::current()?;
+            let ws = resolve_workspace(workspace.clone())?;
             let app = App::load(ws).await?;
             app.start_all().await?;
             ipc::handle_stdio(app).await
         }
-        Cmd::Client { json } => client(json).await,
-        Cmd::Auth(args) => auth_cmd(args).await,
+        Cmd::Client { json } => client(workspace.clone(), json).await,
+        Cmd::Auth(args) => auth_cmd(workspace.clone(), args).await,
         Cmd::ShellCompletions { shell } => {
             shell_completions(shell);
             Ok(())
         }
         Cmd::ConfigCheck => {
-            let ws = Workspace::current()?;
+            let ws = resolve_workspace(workspace.clone())?;
             let app = App::load(ws).await?;
             for (id, res) in app.check().await? {
                 match res {
@@ -114,8 +119,8 @@ pub async fn run() -> anyhow::Result<()> {
     }
 }
 
-async fn auth_cmd(args: AuthArgs) -> anyhow::Result<()> {
-    let ws = Workspace::current()?;
+async fn auth_cmd(workspace: Option<PathBuf>, args: AuthArgs) -> anyhow::Result<()> {
+    let ws = resolve_workspace(workspace)?;
     match args.channel {
         AuthChannel::Feishu => {
             if args.token.is_some() {
@@ -149,6 +154,13 @@ async fn auth_cmd(args: AuthArgs) -> anyhow::Result<()> {
     }
 }
 
+fn resolve_workspace(path: Option<PathBuf>) -> anyhow::Result<Workspace> {
+    match path {
+        Some(path) => Ok(Workspace::resolve(path)),
+        None => Workspace::current(),
+    }
+}
+
 fn shell_completions(shell: CompletionShell) {
     let mut cmd = Cli::command();
     let name = cmd.get_name().to_string();
@@ -166,8 +178,8 @@ fn init_logging(ws: &Workspace) -> anyhow::Result<()> {
         .init();
     Ok(())
 }
-async fn client(line: String) -> anyhow::Result<()> {
-    let ws = Workspace::current()?;
+async fn client(workspace: Option<PathBuf>, line: String) -> anyhow::Result<()> {
+    let ws = resolve_workspace(workspace)?;
     let mut s = UnixStream::connect(ws.socket_path())
         .await
         .context("connect onlyne socket")?;
@@ -217,6 +229,19 @@ mod tests {
             cmd.get_subcommands()
                 .any(|sc| sc.get_name() == "shell-completions")
         );
+    }
+
+    #[test]
+    fn workspace_flag_is_global() {
+        let before =
+            Cli::try_parse_from(["onlyne", "--workspace", "/tmp/onlyne-ws", "config-check"])
+                .unwrap();
+        assert_eq!(before.workspace, Some(PathBuf::from("/tmp/onlyne-ws")));
+
+        let after =
+            Cli::try_parse_from(["onlyne", "config-check", "--workspace", "/tmp/onlyne-ws"])
+                .unwrap();
+        assert_eq!(after.workspace, Some(PathBuf::from("/tmp/onlyne-ws")));
     }
 
     #[test]

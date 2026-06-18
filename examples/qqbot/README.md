@@ -1,8 +1,8 @@
 # QQ Bot CLI smoke example
 
-Pure CLI smoke for the QQ Bot adapter. Real gateway validation is manual.
+See `../README.md` for the shared validation flow, variables, and log files.
 
-## Setup
+## Prepare
 
 ```bash
 cargo build
@@ -15,7 +15,13 @@ python3 ../shared/enable_adapter.py qqbot
 ## Run
 
 ```bash
-ONLYNE_QQBOT_CONVERSATION_ID='<group_openid>' ./smoke-qqbot.sh
+./smoke-qqbot.sh
+# or send directly:
+ONLYNE_QQBOT_CONVERSATION_ID='<group_openid>' ONLYNE_TEXT='zig' ./smoke-qqbot.sh
 ```
 
-If `ONLYNE_QQBOT_CONVERSATION_ID` is absent, the script waits for any inbound QQ Bot text, sends `zig`, then fetches channel/all history.
+Without `ONLYNE_QQBOT_CONVERSATION_ID`, the script waits for any inbound QQ Bot text, sends `zig`, then fetches QQ Bot/all history.
+
+```bash
+./smoke-qqbot.sh --local-check
+```

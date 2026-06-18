@@ -56,20 +56,20 @@ impl App {
         tokio::spawn(async move {
             while let Some(m) = rx.recv().await {
                 let _ = app.store.append_message(&m).await;
+                app.publish_history_appended(&m);
+                app.events.publish(Event::InboundMessage(m.clone()));
                 if app.debug_reply {
-                    app.debug_reply_to(&m).await;
+                    let app = app.clone();
+                    tokio::spawn(async move {
+                        app.debug_reply_to(&m).await;
+                    });
                 }
-                app.events.publish(Event::HistoryAppended {
-                    channel_id: m.channel_id.clone(),
-                    message_id: m.message_id.clone(),
-                });
-                app.events.publish(Event::InboundMessage(m));
             }
         });
         let mut guard = self.adapters.lock().await;
         for (id, a) in guard.iter_mut() {
             let ctx = AdapterContext {
-                events: event_sender(self.events.clone()),
+                events: adapter_event_sender(self.clone()),
                 inbound: tx.clone(),
                 media_dir: self.workspace.media_dir(),
             };
@@ -152,6 +152,7 @@ impl App {
         match a.send_message(msg).await {
             Ok(out) => {
                 let _ = self.store.append_message(&out).await;
+                self.publish_history_appended(&out);
                 self.events.publish(Event::OutboundMessage(out));
             }
             Err(e) => self.events.publish(Event::Warning {
@@ -176,9 +177,34 @@ impl App {
             .ok_or_else(|| anyhow!("adapter {channel} not enabled"))?;
         let out = a.send_message(msg).await?;
         self.store.append_message(&out).await?;
+        self.publish_history_appended(&out);
         self.events.publish(Event::OutboundMessage(out.clone()));
         Ok(json!(out))
     }
+
+    async fn publish_adapter_event(&self, ev: Event) {
+        let health = match &ev {
+            Event::AdapterStarted { channel_id } => Some((channel_id, AdapterHealth::Ready)),
+            Event::AdapterStopped { channel_id } => Some((channel_id, AdapterHealth::Stopped)),
+            Event::AdapterReconnecting { channel_id, .. } => {
+                Some((channel_id, AdapterHealth::Reconnecting))
+            }
+            Event::AdapterFailed { channel_id, .. } => Some((channel_id, AdapterHealth::Failed)),
+            _ => None,
+        };
+        if let Some((channel_id, health)) = health {
+            let _ = self.store.upsert_channel(channel_id, health).await;
+        }
+        self.events.publish(ev);
+    }
+
+    fn publish_history_appended(&self, m: &MessageEnvelope) {
+        self.events.publish(Event::HistoryAppended {
+            channel_id: m.channel_id.clone(),
+            message_id: m.message_id.clone(),
+        });
+    }
+
     pub async fn check(&self) -> anyhow::Result<Vec<(String, Result<(), String>)>> {
         let guard = self.adapters.lock().await;
         let mut out = vec![];
@@ -230,11 +256,11 @@ fn secretish(key: &str) -> bool {
     key.contains("token") || key.contains("secret") || key.contains("password")
 }
 
-fn event_sender(bus: EventBus) -> mpsc::Sender<Event> {
+fn adapter_event_sender(app: Arc<App>) -> mpsc::Sender<Event> {
     let (tx, mut rx) = mpsc::channel(1024);
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
-            bus.publish(ev)
+            app.publish_adapter_event(ev).await;
         }
     });
     tx
@@ -244,6 +270,26 @@ fn event_sender(bus: EventBus) -> mpsc::Sender<Event> {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[tokio::test]
+    async fn adapter_events_update_channel_health() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+
+        app.store
+            .upsert_channel(&ChannelId("feishu".into()), AdapterHealth::Ready)
+            .await
+            .unwrap();
+        app.publish_adapter_event(Event::AdapterReconnecting {
+            channel_id: ChannelId("feishu".into()),
+            reason: "lost websocket".into(),
+        })
+        .await;
+
+        let channels = app.store.list_channels().await.unwrap();
+        assert!(matches!(channels[0].1, AdapterHealth::Reconnecting));
+    }
 
     #[test]
     fn debug_reply_text_includes_threadish_metadata() {

@@ -1,0 +1,7 @@
+.onlyne/
+*.log
+*.ndjson
+*auth.out
+*auth.err
+*smoke.out
+*smoke.err

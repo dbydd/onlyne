@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 import pathlib, sys
 adapter = sys.argv[1]
-p = pathlib.Path('.onlyne/config.toml')
+
+start = pathlib.Path.cwd()
+for d in (start, *start.parents):
+    p = d / '.onlyne/config.toml'
+    if p.exists():
+        break
+else:
+    raise SystemExit('no .onlyne/config.toml found; run onlyne init first')
 s = p.read_text()
 marker = f'[adapters.{adapter}]'
 i = s.index(marker)

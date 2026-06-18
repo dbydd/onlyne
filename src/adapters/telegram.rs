@@ -7,12 +7,17 @@ use crate::{
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
-use reqwest::{Client, multipart};
+use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
+};
+use teloxide::{
+    Bot,
+    prelude::Requester,
+    types::{ChatId, InputFile},
 };
 use tokio::{
     sync::mpsc,
@@ -24,21 +29,21 @@ pub struct TelegramAdapter {
     token: String,
     allow_chats: Vec<String>,
     client: Client,
+    bot: Bot,
     running: Arc<AtomicBool>,
     task: Option<JoinHandle<()>>,
 }
 impl TelegramAdapter {
     pub fn new(cfg: &TelegramConfig, env: &Env) -> anyhow::Result<Self> {
+        let token = env.secret(&cfg.token_env, &cfg.token, "telegram token")?;
         Ok(Self {
-            token: env.secret(&cfg.token_env, &cfg.token, "telegram token")?,
+            bot: Bot::new(token.clone()),
+            token,
             allow_chats: cfg.allow_chats.clone(),
             client: Client::new(),
             running: Arc::new(AtomicBool::new(false)),
             task: None,
         })
-    }
-    fn api(&self, method: &str) -> String {
-        format!("https://api.telegram.org/bot{}/{}", self.token, method)
     }
 }
 
@@ -177,29 +182,17 @@ impl Adapter for TelegramAdapter {
         Ok(vec![])
     }
     async fn send_message(&self, msg: OutboundMessage) -> anyhow::Result<MessageEnvelope> {
+        let chat = telegram_chat_id(&msg.conversation_id.0)?;
         let mut sent = None;
         for a in &msg.attachments {
-            sent = Some(self.send_attachment(&msg.conversation_id.0, a).await?);
+            sent = Some(self.send_attachment(chat, a).await?);
         }
         if let Some(text) = msg.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            let resp: Value = self
-                .client
-                .post(self.api("sendMessage"))
-                .json(&json!({"chat_id": msg.conversation_id.0, "text": text}))
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            if !resp.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-                return Err(anyhow!("telegram sendMessage failed: {resp}"));
-            }
-            let id = resp
-                .pointer("/result/message_id")
-                .and_then(Value::as_i64)
-                .unwrap_or_default()
-                .to_string();
-            sent = Some((MessageId(id), resp));
+            let m = self.bot.send_message(chat, text.to_string()).await?;
+            sent = Some((
+                MessageId(m.id.0.to_string()),
+                serde_json::to_value(&m).unwrap_or(Value::Null),
+            ));
         }
         let (message_id, platform_metadata) =
             sent.ok_or_else(|| anyhow!("telegram send_message needs text or attachments"))?;
@@ -218,25 +211,13 @@ impl Adapter for TelegramAdapter {
         })
     }
     async fn check(&self) -> anyhow::Result<()> {
-        let r: Value = self
-            .client
-            .get(self.api("getMe"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        if r.get("ok").and_then(Value::as_bool) == Some(true) {
-            Ok(())
-        } else {
-            Err(anyhow!("telegram getMe failed: {r}"))
-        }
+        self.bot.get_me().await.map(|_| ()).map_err(Into::into)
     }
 }
 impl TelegramAdapter {
     async fn send_attachment(
         &self,
-        chat_id: &str,
+        chat_id: ChatId,
         a: &AttachmentRef,
     ) -> anyhow::Result<(MessageId, Value)> {
         let src = a
@@ -246,39 +227,27 @@ impl TelegramAdapter {
             .or_else(|| a.url.clone())
             .ok_or_else(|| anyhow!("attachment needs path or url"))?;
         let bytes = media::read_bytes(&src).await?;
-        let part = multipart::Part::bytes(bytes)
-            .file_name(a.file_name.clone().unwrap_or_else(|| "media".into()));
-        let (method, field) = match a.kind {
-            AttachmentKind::Image => ("sendPhoto", "photo"),
-            AttachmentKind::Audio => ("sendAudio", "audio"),
-            AttachmentKind::Voice => ("sendVoice", "voice"),
-            AttachmentKind::Video => ("sendVideo", "video"),
-            AttachmentKind::File => ("sendDocument", "document"),
+        let name = a.file_name.clone().unwrap_or_else(|| "media".into());
+        let file = InputFile::memory(bytes).file_name(name);
+        let m = match a.kind {
+            AttachmentKind::Image => self.bot.send_photo(chat_id, file).await?,
+            AttachmentKind::Audio => self.bot.send_audio(chat_id, file).await?,
+            AttachmentKind::Voice => self.bot.send_voice(chat_id, file).await?,
+            AttachmentKind::Video => self.bot.send_video(chat_id, file).await?,
+            AttachmentKind::File => self.bot.send_document(chat_id, file).await?,
         };
-        let resp: Value = self
-            .client
-            .post(self.api(method))
-            .multipart(
-                multipart::Form::new()
-                    .text("chat_id", chat_id.to_string())
-                    .part(field.to_string(), part),
-            )
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        if !resp.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-            return Err(anyhow!("telegram {method} failed: {resp}"));
-        }
-        let id = resp
-            .pointer("/result/message_id")
-            .and_then(Value::as_i64)
-            .unwrap_or_default()
-            .to_string();
-        Ok((MessageId(id), resp))
+        Ok((
+            MessageId(m.id.0.to_string()),
+            serde_json::to_value(&m).unwrap_or(Value::Null),
+        ))
     }
 }
+fn telegram_chat_id(s: &str) -> anyhow::Result<ChatId> {
+    s.parse::<i64>()
+        .map(ChatId)
+        .with_context(|| format!("telegram chat id must be an integer: {s}"))
+}
+
 async fn handle_msg(
     client: &Client,
     token: &str,

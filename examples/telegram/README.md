@@ -1,8 +1,8 @@
 # Telegram CLI smoke example
 
-Pure CLI smoke for the Telegram adapter. Real platform validation is manual.
+See `../README.md` for the shared validation flow, variables, and log files.
 
-## Setup
+## Prepare
 
 ```bash
 cargo build
@@ -15,7 +15,13 @@ python3 ../shared/enable_adapter.py telegram
 ## Run
 
 ```bash
-ONLYNE_TELEGRAM_CONVERSATION_ID='<chat_id>' ./smoke-telegram.sh
+./smoke-telegram.sh
+# or send directly:
+ONLYNE_TELEGRAM_CONVERSATION_ID='<chat_id>' ONLYNE_TEXT='zig' ./smoke-telegram.sh
 ```
 
-If `ONLYNE_TELEGRAM_CONVERSATION_ID` is absent, the script waits for any inbound Telegram text, sends `zig`, then fetches channel/all history.
+Without `ONLYNE_TELEGRAM_CONVERSATION_ID`, the script waits for any inbound Telegram text, sends `zig`, then fetches Telegram/all history.
+
+```bash
+./smoke-telegram.sh --local-check
+```

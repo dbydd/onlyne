@@ -7,8 +7,13 @@ use crate::{
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
+#[allow(deprecated)]
+use open_lark::{
+    Config as LarkConfig,
+    ws_client::{EventDispatcherHandler, LarkWsClient},
+};
 use reqwest::{Client, multipart};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
@@ -19,7 +24,6 @@ use tokio::{
     task::JoinHandle,
     time::{Duration, sleep},
 };
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 pub struct FeishuAdapter {
     app_id: String,
@@ -83,18 +87,26 @@ impl Adapter for FeishuAdapter {
         let events = ctx.events.clone();
         self.task = Some(tokio::spawn(async move {
             while running.load(Ordering::SeqCst) {
-                if let Err(e) =
-                    feishu_ws_loop(&domain, &app_id, &app_secret, &allow, &inbound, &events).await
-                {
+                let reason =
+                    match feishu_ws_loop(&domain, &app_id, &app_secret, &allow, &inbound).await {
+                        Ok(()) => "websocket closed".to_string(),
+                        Err(e) => e.to_string(),
+                    };
+                if running.load(Ordering::SeqCst) {
                     let _ = events
                         .send(Event::AdapterReconnecting {
                             channel_id: ChannelId("feishu".into()),
-                            reason: e.to_string(),
+                            reason,
                         })
                         .await;
                     sleep(Duration::from_secs(5)).await;
                 }
             }
+            let _ = events
+                .send(Event::AdapterStopped {
+                    channel_id: ChannelId("feishu".into()),
+                })
+                .await;
         }));
         Ok(())
     }
@@ -156,10 +168,15 @@ impl FeishuAdapter {
         content: Value,
     ) -> anyhow::Result<(MessageId, Value)> {
         let body = json!({"receive_id":chat,"msg_type":msg_type,"content":content.to_string()});
+        let receive_id_type = if chat.starts_with("ou_") {
+            "open_id"
+        } else {
+            "chat_id"
+        };
         let v: Value = self
             .client
             .post(format!(
-                "{}/open-apis/im/v1/messages?receive_id_type=chat_id",
+                "{}/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
                 self.domain
             ))
             .bearer_auth(token)
@@ -237,78 +254,185 @@ async fn feishu_ws_loop(
     app_secret: &str,
     allow: &[String],
     inbound: &mpsc::Sender<MessageEnvelope>,
-    events: &mpsc::Sender<Event>,
 ) -> anyhow::Result<()> {
-    let ws_base = domain
-        .replace("https://", "wss://")
-        .replace("http://", "ws://");
-    let url = format!("{ws_base}/open-apis/ws/v1?app_id={app_id}&app_secret={app_secret}");
-    let (mut ws, _) = connect_async(url)
-        .await
-        .context("feishu websocket connect")?;
-    while let Some(msg) = ws.next().await {
-        match msg? {
-            Message::Text(t) => {
-                if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                    if v.get("type").and_then(Value::as_str) == Some("event_callback")
-                        || v.pointer("/header/event_type").is_some()
-                    {
-                        if let Some(env) = parse_feishu_event(v, allow) {
-                            let _ = inbound.send(env).await;
-                        }
-                    } else if v.get("type").and_then(Value::as_str) == Some("url_verification") {
-                        let _ = ws
-                            .send(Message::Text(
-                                json!({"challenge":v.get("challenge")}).to_string(),
-                            ))
-                            .await;
-                    }
+    let (payload_tx, mut payload_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let handler = EventDispatcherHandler::builder()
+        .payload_sender(payload_tx)
+        .build();
+    #[allow(deprecated)]
+    let cfg = Arc::new(
+        LarkConfig::builder()
+            .app_id(app_id.to_string())
+            .app_secret(app_secret.to_string())
+            .base_url(domain.to_string())
+            .timeout(Duration::from_secs(30))
+            .max_response_size(100 * 1024 * 1024)
+            .build()
+            .map_err(|e| anyhow!(e.to_string()))?,
+    );
+
+    let mut ws = tokio::spawn(async move { LarkWsClient::open(cfg, handler).await });
+    loop {
+        tokio::select! {
+            result = &mut ws => {
+                return match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(anyhow!(e.to_string())),
+                    Err(e) => Err(anyhow!(e)),
+                };
+            }
+            payload = payload_rx.recv() => {
+                let Some(payload) = payload else { return Ok(()); };
+                if let Some(env) = parse_feishu_event_payload(&payload, allow) {
+                    let _ = inbound.send(env).await;
                 }
             }
-            Message::Ping(p) => {
-                let _ = ws.send(Message::Pong(p)).await;
-            }
-            _ => {}
         }
     }
-    let _ = events
-        .send(Event::AdapterStopped {
-            channel_id: ChannelId("feishu".into()),
-        })
-        .await;
-    Ok(())
 }
-fn parse_feishu_event(v: Value, allow: &[String]) -> Option<MessageEnvelope> {
-    let ev = v.get("event").or_else(|| v.pointer("/schema/event"))?;
-    let msg = ev.get("message").unwrap_or(ev);
-    let chat = msg.get("chat_id").and_then(Value::as_str)?.to_string();
-    if !allowed(allow, &chat) {
+
+#[derive(Debug, Deserialize)]
+struct FeishuEnvelope {
+    header: FeishuHeader,
+    event: FeishuEvent,
+}
+#[derive(Debug, Deserialize)]
+struct FeishuHeader {
+    event_id: Option<String>,
+    event_type: String,
+}
+#[derive(Debug, Deserialize)]
+struct FeishuEvent {
+    sender: Option<FeishuSender>,
+    message: FeishuMessage,
+    chat: Option<FeishuChat>,
+}
+#[derive(Debug, Deserialize)]
+struct FeishuSender {
+    sender_id: FeishuSenderId,
+}
+#[derive(Debug, Deserialize)]
+struct FeishuSenderId {
+    open_id: Option<String>,
+}
+#[derive(Debug, Deserialize)]
+struct FeishuMessage {
+    message_id: Option<String>,
+    content: Option<String>,
+    chat_type: Option<String>,
+    chat_id: Option<String>,
+}
+#[derive(Debug, Deserialize)]
+struct FeishuChat {
+    chat_id: Option<String>,
+}
+
+fn parse_feishu_event_payload(payload: &[u8], allow: &[String]) -> Option<MessageEnvelope> {
+    let envelope: FeishuEnvelope = serde_json::from_slice(payload).ok()?;
+    if envelope.header.event_type != "im.message.receive_v1" {
         return None;
     }
-    let mid = msg
-        .get("message_id")
-        .and_then(Value::as_str)
-        .unwrap_or("feishu-in")
-        .to_string();
-    let content = msg.get("content").and_then(Value::as_str).unwrap_or("");
-    let text = serde_json::from_str::<Value>(content)
+    let chat_type = envelope
+        .event
+        .message
+        .chat_type
+        .as_deref()
+        .unwrap_or_default();
+    let conversation_id = if chat_type == "p2p" {
+        envelope
+            .event
+            .sender
+            .as_ref()
+            .and_then(|s| s.sender_id.open_id.clone())
+            .or_else(|| envelope.event.message.chat_id.clone())?
+    } else {
+        envelope
+            .event
+            .chat
+            .as_ref()
+            .and_then(|c| c.chat_id.clone())
+            .or_else(|| envelope.event.message.chat_id.clone())?
+    };
+    if !allowed(allow, &conversation_id) {
+        return None;
+    }
+    let content = envelope.event.message.content.unwrap_or_default();
+    let text = serde_json::from_str::<Value>(&content)
         .ok()
         .and_then(|c| c.get("text").and_then(Value::as_str).map(str::to_string))
-        .or_else(|| Some(content.to_string()));
+        .or_else(|| (!content.is_empty()).then_some(content));
     Some(MessageEnvelope {
         channel_id: ChannelId("feishu".into()),
-        conversation_id: ConversationId(chat),
-        message_id: MessageId(mid),
+        conversation_id: ConversationId(conversation_id),
+        message_id: MessageId(
+            envelope
+                .event
+                .message
+                .message_id
+                .or(envelope.header.event_id)
+                .unwrap_or_else(|| "feishu-in".into()),
+        ),
         direction: Direction::Inbound,
-        sender_id: ev
-            .pointer("/sender/sender_id/open_id")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        sender_id: envelope.event.sender.and_then(|s| s.sender_id.open_id),
         sender_name: None,
         text,
         attachments: vec![],
         delivery_state: DeliveryState::Delivered,
         timestamp: Utc::now(),
-        platform_metadata: v,
+        platform_metadata: serde_json::from_slice(payload).unwrap_or(Value::Null),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_p2p_event_to_open_id_conversation() {
+        let payload = br#"{
+            "header":{"event_id":"evt-1","event_type":"im.message.receive_v1"},
+            "event":{
+                "sender":{"sender_id":{"open_id":"ou_user"}},
+                "message":{"message_id":"om_1","chat_type":"p2p","chat_id":"oc_hidden","content":"{\"text\":\"hi\"}"}
+            }
+        }"#;
+
+        let msg = parse_feishu_event_payload(payload, &[]).unwrap();
+
+        assert_eq!(msg.conversation_id.0, "ou_user");
+        assert_eq!(msg.sender_id.as_deref(), Some("ou_user"));
+        assert_eq!(msg.text.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn parses_group_event_to_chat_id_conversation() {
+        let payload = br#"{
+            "header":{"event_id":"evt-2","event_type":"im.message.receive_v1"},
+            "event":{
+                "sender":{"sender_id":{"open_id":"ou_user"}},
+                "chat":{"chat_id":"oc_group"},
+                "message":{"message_id":"om_2","chat_type":"group","chat_id":"oc_group","content":"{\"text\":\"hello group\"}"}
+            }
+        }"#;
+
+        let msg = parse_feishu_event_payload(payload, &[]).unwrap();
+
+        assert_eq!(msg.conversation_id.0, "oc_group");
+        assert_eq!(msg.sender_id.as_deref(), Some("ou_user"));
+        assert_eq!(msg.text.as_deref(), Some("hello group"));
+    }
+
+    #[test]
+    fn allow_list_filters_resolved_conversation() {
+        let payload = br#"{
+            "header":{"event_id":"evt-3","event_type":"im.message.receive_v1"},
+            "event":{
+                "sender":{"sender_id":{"open_id":"ou_user"}},
+                "message":{"message_id":"om_3","chat_type":"p2p","chat_id":"oc_hidden","content":"{\"text\":\"hi\"}"}
+            }
+        }"#;
+
+        assert!(parse_feishu_event_payload(payload, &["other".into()]).is_none());
+        assert!(parse_feishu_event_payload(payload, &["ou_user".into()]).is_some());
+    }
 }

@@ -1,8 +1,8 @@
 # Feishu/Lark CLI smoke example
 
-Pure CLI smoke for the Feishu/Lark adapter. Real tenant QR/websocket validation is manual.
+See `../README.md` for the shared validation flow, variables, and log files.
 
-## Setup
+## Prepare
 
 ```bash
 cargo build
@@ -14,7 +14,13 @@ cd examples/feishu
 ## Run
 
 ```bash
-ONLYNE_FEISHU_CONVERSATION_ID='<chat_id>' ./smoke-feishu.sh
+./smoke-feishu.sh
+# or send directly:
+ONLYNE_FEISHU_CONVERSATION_ID='<chat_id>' ONLYNE_TEXT='zig' ./smoke-feishu.sh
 ```
 
-If `ONLYNE_FEISHU_CONVERSATION_ID` is absent, the script waits for any inbound Feishu/Lark text, sends `zig`, then fetches channel/all history.
+Without `ONLYNE_FEISHU_CONVERSATION_ID`, the script waits for any inbound Feishu/Lark text, sends `zig`, then fetches Feishu/all history.
+
+```bash
+./smoke-feishu.sh --local-check
+```

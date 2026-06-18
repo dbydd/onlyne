@@ -3,12 +3,13 @@ set -euo pipefail
 CHANNEL=${ONLYNE_CHANNEL:?set ONLYNE_CHANNEL}
 ENV_PREFIX=${ONLYNE_ENV_PREFIX:-${CHANNEL^^}}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-WORKSPACE=${ONLYNE_WORKSPACE:-$PWD}
+WORKSPACE=${ONLYNE_WORKSPACE:-}
+RUN_DIR=${WORKSPACE:-$PWD}
 ONLYNE_BIN=${ONLYNE_BIN:-$SCRIPT_DIR/../../target/debug/onlyne}
 TEXT=${ONLYNE_TEXT:-zig}
 TIMEOUT=${ONLYNE_TIMEOUT:-180}
-EVENT_LOG=${ONLYNE_EVENT_LOG:-$WORKSPACE/${CHANNEL}-events.ndjson}
-DAEMON_LOG=${ONLYNE_DAEMON_LOG:-$WORKSPACE/${CHANNEL}-daemon.log}
+EVENT_LOG=${ONLYNE_EVENT_LOG:-$RUN_DIR/${CHANNEL}-events.ndjson}
+DAEMON_LOG=${ONLYNE_DAEMON_LOG:-$RUN_DIR/${CHANNEL}-daemon.log}
 CONV_VAR="ONLYNE_${ENV_PREFIX}_CONVERSATION_ID"
 CONV=${!CONV_VAR:-}
 
@@ -21,11 +22,10 @@ fi
 
 [[ -x "$ONLYNE_BIN" ]] || { echo "onlyne binary not found: $ONLYNE_BIN" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 required" >&2; exit 1; }
-mkdir -p "$WORKSPACE"
-cd "$WORKSPACE"
+if [[ -n "$WORKSPACE" ]]; then mkdir -p "$WORKSPACE"; cd "$WORKSPACE"; fi
 "$ONLYNE_BIN" init >/dev/null
 python3 "$SCRIPT_DIR/enable_adapter.py" "$CHANNEL"
-rm -f "$EVENT_LOG" "$DAEMON_LOG" .onlyne/run/onlyne.sock
+rm -f "$EVENT_LOG" "$DAEMON_LOG"
 "$ONLYNE_BIN" run --debug >"$DAEMON_LOG" 2>&1 &
 DAEMON_PID=$!
 SUB_PID=""
@@ -38,13 +38,17 @@ cleanup() {
 trap cleanup EXIT
 
 echo "waiting for $CHANNEL daemon..."
+SOCKET=""
 for _ in $(seq 1 900); do
-  if [[ -S .onlyne/run/onlyne.sock ]] && "$ONLYNE_BIN" client '{"id":"probe","op":"ping"}' >/dev/null 2>&1; then break; fi
+  if STATUS=$("$ONLYNE_BIN" client '{"id":"probe","op":"status"}' 2>/dev/null); then
+    SOCKET=$(printf '%s' "$STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["socket"])')
+    [[ -S "$SOCKET" ]] && break
+  fi
   sleep 0.1
 done
-[[ -S .onlyne/run/onlyne.sock ]] || { echo "daemon socket did not appear; see $DAEMON_LOG" >&2; exit 1; }
+[[ -n "$SOCKET" && -S "$SOCKET" ]] || { echo "daemon socket did not appear; see $DAEMON_LOG" >&2; exit 1; }
 
-python3 - "$WORKSPACE/.onlyne/run/onlyne.sock" "$EVENT_LOG" <<'PY' &
+python3 - "$SOCKET" "$EVENT_LOG" <<'PY' &
 import socket, sys
 sock_path, log_path = sys.argv[1], sys.argv[2]
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(sock_path)
@@ -66,20 +70,38 @@ sleep 0.5
 
 if [[ -z "$CONV" ]]; then
   echo "Send any text to $CHANNEL now; Onlyne will reply with: $TEXT"
-  CONV=$(python3 - "$EVENT_LOG" "$TIMEOUT" "$CHANNEL" <<'PY'
-import json, pathlib, sys, time
-path=pathlib.Path(sys.argv[1]); end=time.time()+int(sys.argv[2]); channel=sys.argv[3]; seen=0
+  CONV=$(python3 - "$EVENT_LOG" "$TIMEOUT" "$CHANNEL" "$ONLYNE_BIN" <<'PY'
+import json, pathlib, subprocess, sys, time
+path=pathlib.Path(sys.argv[1]); end=time.time()+int(sys.argv[2]); channel=sys.argv[3]; bin=sys.argv[4]; seen=0
+
+def event_conv():
+    global seen
+    if not path.exists(): return None
+    lines=path.read_text(errors='replace').splitlines()
+    for line in lines[seen:]:
+        try: obj=json.loads(line)
+        except Exception: continue
+        if obj.get('type') == 'inbound_message':
+            data=obj.get('data',{}).get('data',{})
+            if data.get('channel_id') == channel and data.get('conversation_id'):
+                return data['conversation_id']
+    seen=len(lines)
+
+def history_conv():
+    req=json.dumps({"id":"wait-hist","op":"fetch_channel_history","channel_id":channel,"limit":20})
+    try:
+        out=subprocess.check_output([bin, 'client', req], text=True, stderr=subprocess.DEVNULL)
+        data=json.loads(out).get('data', [])
+    except Exception:
+        return None
+    for msg in data:
+        if msg.get('direction') == 'inbound' and msg.get('conversation_id'):
+            return msg['conversation_id']
+
 while time.time() < end:
-    if path.exists():
-        lines=path.read_text(errors='replace').splitlines()
-        for line in lines[seen:]:
-            try: obj=json.loads(line)
-            except Exception: continue
-            if obj.get('type') == 'inbound_message':
-                data=obj.get('data',{}).get('data',{})
-                if data.get('channel_id') == channel and data.get('conversation_id'):
-                    print(data['conversation_id']); raise SystemExit(0)
-        seen=len(lines)
+    conv=event_conv() or history_conv()
+    if conv:
+        print(conv); raise SystemExit(0)
     time.sleep(0.5)
 raise SystemExit(1)
 PY

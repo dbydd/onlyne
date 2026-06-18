@@ -6,7 +6,7 @@ Onlyne is a small Rust daemon for local IM channel brokering. It gives local age
 
 ## What it is
 
-- Workspace-local: each working directory owns its own `.onlyne/` config, state, socket, logs, and cache.
+- Workspace-local: the active workspace is the nearest parent directory with `.onlyne/`; each workspace owns its own config, state, socket, logs, and cache.
 - CLI-first: run it in the foreground, wrap it with a supervisor, or use stdio mode from another process.
 - Local IPC: newline-delimited JSON over Unix socket or stdio.
 - Multi-channel: Telegram, Feishu/Lark, QQ Bot, and WeChat ilink adapters.
@@ -30,7 +30,7 @@ onlyne init
 onlyne run
 ```
 
-In another terminal from the same workspace:
+In another terminal under the same workspace tree:
 
 ```bash
 onlyne client '{"id":"1","op":"ping"}'
@@ -45,7 +45,9 @@ echo '{"id":"1","op":"ping"}' | onlyne stdio
 
 ## Workspace layout
 
-`onlyne init` creates runtime files under the current directory:
+By default, commands start at the current directory and walk upward until they find the nearest `.onlyne/`. If no `.onlyne/` exists, the current directory is used, so `onlyne init` initializes the directory where it is run. Use `--workspace <dir>` to explicitly choose a workspace root.
+
+`onlyne init` creates runtime files under the selected workspace root:
 
 ```text
 .onlyne/
@@ -69,13 +71,15 @@ Workspace data intentionally does not default to global mutable state.
 | QQ Bot | Put `QQBOT_APP_ID` and `QQBOT_APP_SECRET` in `.onlyne/.env` and enable `[adapters.qqbot]`. |
 | WeChat ilink | Run `onlyne auth weixin`, or bind with `--token`. |
 
-Auth commands write only to the current workspace `.onlyne/` directory.
+Auth commands write only to the selected workspace `.onlyne/` directory.
+
+Adapter SDKs: Feishu uses `openlark`, Telegram uses `teloxide`, and WeChat ilink uses `wechat-ilink`. QQ Bot stays on a small direct API/gateway adapter because current Rust community crates are less mature for this project path.
 
 ## Common commands
 
 ```bash
-onlyne init
-onlyne run [--debug]
+onlyne [--workspace <dir>] init
+onlyne [--workspace <dir>] run [--debug]
 onlyne stdio
 onlyne client '<json-request>'
 onlyne config-check
@@ -97,7 +101,7 @@ onlyne shell-completions fish
 - `examples/multicast/`
 - `examples/multi-channel/`
 
-The examples are pure CLI workflows. They keep secrets and runtime data in each example workspace's `.onlyne/`, which is ignored by git.
+The examples are pure CLI workflows. Run `onlyne init` in `examples/` to share one ignored `examples/.onlyne/` workspace across child examples, or pass `--workspace <dir>` / `ONLYNE_WORKSPACE` for isolation.
 
 ## IPC
 

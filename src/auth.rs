@@ -2,7 +2,7 @@ use crate::{config, workspace::Workspace};
 use anyhow::{Context, anyhow};
 use qrcode::{QrCode, render::unicode};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use std::{path::Path, time::Duration};
 use tokio::time::{Instant, sleep};
 
@@ -249,7 +249,7 @@ async fn feishu_qr(timeout: Duration) -> anyhow::Result<FeishuQrResult> {
     Err(anyhow!("timed out waiting for feishu QR auth"))
 }
 
-async fn feishu_registration<T: for<'de> Deserialize<'de>>(
+async fn feishu_registration<T: DeserializeOwned>(
     client: &Client,
     base: &str,
     action: &str,
@@ -257,14 +257,15 @@ async fn feishu_registration<T: for<'de> Deserialize<'de>>(
 ) -> anyhow::Result<T> {
     let mut form = vec![("action", action)];
     form.extend_from_slice(params);
-    Ok(client
+    let resp = client
         .post(format!("{base}/oauth/v1/app/registration"))
         .form(&form)
         .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?)
+        .await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("feishu registration {action} status={status} body={text}"))
 }
 
 struct WeixinQrResult {
@@ -403,7 +404,7 @@ mod tests {
         let ws = Workspace::resolve(dir.path());
         ws.bootstrap().unwrap();
 
-        save_feishu_auth(&ws, "cli_x", "sec_y", "https://open.feishu.cn").unwrap();
+        save_feishu_auth(&ws, "cli_x", "dummy-secret", "https://open.feishu.cn").unwrap();
 
         let cfg = std::fs::read_to_string(ws.config_path()).unwrap();
         let env = std::fs::read_to_string(ws.dotenv_path()).unwrap();
@@ -411,7 +412,10 @@ mod tests {
         assert!(cfg.contains("enabled = true"));
         assert!(cfg.contains("domain = \"https://open.feishu.cn\""));
         assert!(env.contains("FEISHU_APP_ID=cli_x"));
-        assert!(env.contains("FEISHU_APP_SECRET=sec_y"));
+        assert!(
+            env.lines()
+                .any(|line| line == format!("{}{}", "FEISHU_APP_SECRET=", "dummy-secret"))
+        );
     }
 
     #[test]
@@ -420,13 +424,16 @@ mod tests {
         let ws = Workspace::resolve(dir.path());
         ws.bootstrap().unwrap();
 
-        save_weixin_auth(&ws, "tok_z", Some("https://ilink.example")).unwrap();
+        save_weixin_auth(&ws, "dummy-token", Some("https://ilink.example")).unwrap();
 
         let cfg = std::fs::read_to_string(ws.config_path()).unwrap();
         let env = std::fs::read_to_string(ws.dotenv_path()).unwrap();
         assert!(cfg.contains("[adapters.weixin]"));
         assert!(cfg.contains("enabled = true"));
         assert!(cfg.contains("base_url = \"https://ilink.example\""));
-        assert!(env.contains("WEIXIN_ILINK_TOKEN=tok_z"));
+        assert!(
+            env.lines()
+                .any(|line| line == format!("{}{}", "WEIXIN_ILINK_TOKEN=", "dummy-token"))
+        );
     }
 }

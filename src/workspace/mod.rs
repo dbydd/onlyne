@@ -15,8 +15,18 @@ impl Workspace {
         }
     }
 
+    pub fn discover(start: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let start = start.as_ref().to_path_buf();
+        for dir in start.ancestors() {
+            if dir.join(".onlyne").is_dir() {
+                return Ok(Self::resolve(dir));
+            }
+        }
+        Ok(Self::resolve(start))
+    }
+
     pub fn current() -> anyhow::Result<Self> {
-        Ok(Self::resolve(std::env::current_dir()?))
+        Self::discover(std::env::current_dir()?)
     }
 
     pub fn root(&self) -> &Path {
@@ -85,5 +95,29 @@ mod tests {
         assert!(ws.config_path().exists());
         assert!(ws.db_path().parent().unwrap().exists());
         assert!(ws.media_dir().exists());
+    }
+
+    #[test]
+    fn discovers_nearest_parent_onlyne() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let child = root.join("a/b");
+        std::fs::create_dir_all(child.clone()).unwrap();
+        Workspace::resolve(&root).bootstrap().unwrap();
+
+        let ws = Workspace::discover(&child).unwrap();
+
+        assert_eq!(ws.root(), root.as_path());
+    }
+
+    #[test]
+    fn discover_falls_back_to_start_when_no_onlyne_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("a/b");
+        std::fs::create_dir_all(child.clone()).unwrap();
+
+        let ws = Workspace::discover(&child).unwrap();
+
+        assert_eq!(ws.root(), child.as_path());
     }
 }
