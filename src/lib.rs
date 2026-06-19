@@ -6,6 +6,7 @@ pub mod config;
 pub mod core;
 pub mod events;
 pub mod ipc;
+pub mod markdown;
 pub mod media;
 pub mod store;
 pub mod workspace;

@@ -11,6 +11,7 @@ Onlyne uses newline-delimited JSON over Unix socket and stdio.
   "channel_id": "optional-channel",
   "conversation_id": "optional-conversation",
   "text": "optional text",
+  "format": "plain",
   "attachments": [],
   "limit": 100
 }
@@ -42,7 +43,7 @@ Malformed JSON uses `code=bad_json`.
 | `list_conversations` | Optional `channel_id`. |
 | `subscribe_events` | Starts async event lines on the same connection. |
 | `unsubscribe_events` | Stops event lines for the connection. |
-| `send_message` | Requires `channel_id` and `conversation_id`; uses `text` and optional `attachments`. |
+| `send_message` | Requires `channel_id` and `conversation_id`; uses `text`, optional `format` (`plain` or `markdown`), and optional `attachments`. |
 | `reply_message` | Currently same local send path as `send_message`. |
 | `fetch_history` | Merged history. |
 | `fetch_all_history` | Alias for merged history. |

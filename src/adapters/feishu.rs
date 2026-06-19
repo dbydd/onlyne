@@ -2,7 +2,7 @@ use crate::{
     adapters::allowed,
     config::{Env, FeishuConfig},
     core::*,
-    media,
+    markdown, media,
 };
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
@@ -30,6 +30,7 @@ pub struct FeishuAdapter {
     app_secret: String,
     domain: String,
     allow_chats: Vec<String>,
+    rich_text: bool,
     client: Client,
     running: Arc<AtomicBool>,
     task: Option<JoinHandle<()>>,
@@ -46,6 +47,7 @@ impl FeishuAdapter {
                 .trim_end_matches('/')
                 .into(),
             allow_chats: cfg.allow_chats.clone(),
+            rich_text: cfg.rich_text,
             client: Client::new(),
             running: Arc::new(AtomicBool::new(false)),
             task: None,
@@ -126,21 +128,40 @@ impl Adapter for FeishuAdapter {
     }
     async fn send_message(&self, msg: OutboundMessage) -> anyhow::Result<MessageEnvelope> {
         let token = self.token().await?;
-        let mut sent = None;
+        let mut sent = Vec::new();
+        if let Some(text) = msg.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let part = if msg.format == MessageFormat::Markdown {
+                if !self.rich_text {
+                    return Err(anyhow!("feishu rich_text disabled"));
+                }
+                let check = markdown::check(text);
+                if let Some(reason) = check.unsupported_reason {
+                    return Err(anyhow!("unsupported markdown for feishu card: {reason}"));
+                }
+                let card = feishu_markdown_card(text);
+                (
+                    "markdown_card",
+                    self.send_content(&token, &msg.conversation_id.0, "interactive", card)
+                        .await
+                        .map_err(|e| anyhow!("markdown rich send failed: {e}"))?,
+                )
+            } else {
+                (
+                    "text",
+                    self.send_content(&token, &msg.conversation_id.0, "text", json!({"text":text}))
+                        .await?,
+                )
+            };
+            sent.push(part);
+        }
         for a in &msg.attachments {
-            sent = Some(
+            sent.push((
+                "attachment",
                 self.send_attachment(&token, &msg.conversation_id.0, a)
                     .await?,
-            );
+            ));
         }
-        if let Some(text) = msg.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            sent = Some(
-                self.send_content(&token, &msg.conversation_id.0, "text", json!({"text":text}))
-                    .await?,
-            );
-        }
-        let (message_id, platform_metadata) =
-            sent.ok_or_else(|| anyhow!("feishu send_message needs text or attachments"))?;
+        let (message_id, platform_metadata) = delivery_metadata(sent)?;
         Ok(MessageEnvelope {
             channel_id: self.channel_id(),
             conversation_id: msg.conversation_id,
@@ -149,6 +170,7 @@ impl Adapter for FeishuAdapter {
             sender_id: None,
             sender_name: None,
             text: msg.text,
+            format: msg.format,
             attachments: msg.attachments,
             delivery_state: DeliveryState::Sent,
             timestamp: Utc::now(),
@@ -159,6 +181,31 @@ impl Adapter for FeishuAdapter {
         self.token().await.map(|_| ())
     }
 }
+fn feishu_markdown_card(markdown: &str) -> Value {
+    json!({
+        "config": {"wide_screen_mode": true},
+        "elements": [{"tag": "markdown", "content": markdown}]
+    })
+}
+
+fn delivery_metadata(sent: Vec<(&str, (MessageId, Value))>) -> anyhow::Result<(MessageId, Value)> {
+    let Some((_, (first_id, _))) = sent.first() else {
+        return Err(anyhow!("feishu send_message needs text or attachments"));
+    };
+    let parts: Vec<Value> = sent
+        .iter()
+        .map(|(kind, (id, meta))| json!({"kind": kind, "message_id": id.0, "metadata": meta}))
+        .collect();
+    let last = sent
+        .last()
+        .map(|(_, (_, meta))| meta.clone())
+        .unwrap_or(Value::Null);
+    Ok((
+        first_id.clone(),
+        json!({"delivery_parts": parts, "last_response": last}),
+    ))
+}
+
 impl FeishuAdapter {
     async fn send_content(
         &self,
@@ -376,6 +423,7 @@ fn parse_feishu_event_payload(payload: &[u8], allow: &[String]) -> Option<Messag
         sender_id: envelope.event.sender.and_then(|s| s.sender_id.open_id),
         sender_name: None,
         text,
+        format: MessageFormat::Plain,
         attachments: vec![],
         delivery_state: DeliveryState::Delivered,
         timestamp: Utc::now(),
@@ -420,6 +468,19 @@ mod tests {
         assert_eq!(msg.conversation_id.0, "oc_group");
         assert_eq!(msg.sender_id.as_deref(), Some("ou_user"));
         assert_eq!(msg.text.as_deref(), Some("hello group"));
+    }
+
+    #[test]
+    fn markdown_card_uses_interactive_markdown_element() {
+        let card = feishu_markdown_card("# hi");
+        assert_eq!(
+            card.pointer("/elements/0/tag").and_then(Value::as_str),
+            Some("markdown")
+        );
+        assert_eq!(
+            card.pointer("/elements/0/content").and_then(Value::as_str),
+            Some("# hi")
+        );
     }
 
     #[test]

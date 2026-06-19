@@ -55,6 +55,14 @@ pub enum AdapterHealth {
     Failed,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageFormat {
+    #[default]
+    Plain,
+    Markdown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentKind {
@@ -84,6 +92,8 @@ pub struct MessageEnvelope {
     pub sender_id: Option<String>,
     pub sender_name: Option<String>,
     pub text: Option<String>,
+    #[serde(default)]
+    pub format: MessageFormat,
     pub attachments: Vec<AttachmentRef>,
     pub delivery_state: DeliveryState,
     pub timestamp: DateTime<Utc>,
@@ -95,6 +105,8 @@ pub struct OutboundMessage {
     pub channel_id: ChannelId,
     pub conversation_id: ConversationId,
     pub text: Option<String>,
+    #[serde(default)]
+    pub format: MessageFormat,
     #[serde(default)]
     pub attachments: Vec<AttachmentRef>,
 }

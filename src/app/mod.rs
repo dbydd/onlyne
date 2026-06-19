@@ -4,6 +4,7 @@ use crate::{
     core::*,
     events::EventBus,
     ipc::Request,
+    markdown, media,
     store::Store,
     workspace::Workspace,
 };
@@ -143,6 +144,7 @@ impl App {
             channel_id: inbound.channel_id.clone(),
             conversation_id: inbound.conversation_id.clone(),
             text: Some(debug_reply_text(inbound)),
+            format: MessageFormat::Plain,
             attachments: vec![],
         };
         let guard = self.adapters.lock().await;
@@ -169,17 +171,102 @@ impl App {
             channel_id: ChannelId(channel.clone()),
             conversation_id: ConversationId(conversation),
             text: req.text,
+            format: req.format,
             attachments: req.attachments,
         };
+        self.validate_attachments(&msg.attachments).await?;
         let guard = self.adapters.lock().await;
         let a = guard
             .get(&channel)
             .ok_or_else(|| anyhow!("adapter {channel} not enabled"))?;
-        let out = a.send_message(msg).await?;
+        let out = match a.send_message(msg.clone()).await {
+            Ok(out) => out,
+            Err(e) if msg.format == MessageFormat::Markdown && markdown_should_fallback(&e) => {
+                self.markdown_fallback_send(a.as_ref(), msg, e.to_string())
+                    .await?
+            }
+            Err(e) => return Err(e),
+        };
         self.store.append_message(&out).await?;
         self.publish_history_appended(&out);
         self.events.publish(Event::OutboundMessage(out.clone()));
         Ok(json!(out))
+    }
+
+    async fn validate_attachments(&self, attachments: &[AttachmentRef]) -> anyhow::Result<()> {
+        for a in attachments {
+            if let Some(path) = &a.path {
+                let len = tokio::fs::metadata(path)
+                    .await
+                    .with_context(|| format!("read attachment metadata {}", path.display()))?
+                    .len();
+                if len > self.config.rich_text.max_attachment_bytes {
+                    return Err(anyhow!(
+                        "attachment too large: {} > {} bytes",
+                        len,
+                        self.config.rich_text.max_attachment_bytes
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn markdown_fallback_send(
+        &self,
+        adapter: &dyn Adapter,
+        msg: OutboundMessage,
+        reason: String,
+    ) -> anyhow::Result<MessageEnvelope> {
+        let markdown = msg.text.clone().unwrap_or_default();
+        let mut attachments = Vec::new();
+        let mut render_error = None;
+        match media::render_markdown_png(
+            &self.config.rich_text.renderer,
+            &self.workspace.rendered_dir(),
+            &markdown,
+            self.config.rich_text.max_rendered_image_bytes,
+        )
+        .await
+        {
+            Ok(path) => attachments.push(AttachmentRef {
+                kind: AttachmentKind::Image,
+                path: Some(path),
+                url: None,
+                file_name: Some("markdown.png".into()),
+                mime_type: Some("image/png".into()),
+                size: None,
+            }),
+            Err(e) => render_error = Some(e.to_string()),
+        }
+        attachments.extend(msg.attachments);
+        let mut out = adapter
+            .send_message(OutboundMessage {
+                channel_id: msg.channel_id,
+                conversation_id: msg.conversation_id,
+                text: Some(markdown.clone()),
+                format: MessageFormat::Plain,
+                attachments,
+            })
+            .await?;
+        out.format = MessageFormat::Markdown;
+        out.text = Some(markdown);
+        let fallback_plain = markdown::plain_text(out.text.as_deref().unwrap_or_default());
+        let mut meta = out.platform_metadata;
+        if !meta.is_object() {
+            meta = json!({"adapter_metadata": meta});
+        }
+        if let Some(obj) = meta.as_object_mut() {
+            obj.insert("format".into(), json!("markdown"));
+            obj.insert("fallback_used".into(), json!(true));
+            obj.insert("fallback_reason".into(), json!(reason));
+            obj.insert("fallback_plain_text".into(), json!(fallback_plain));
+            if let Some(e) = render_error {
+                obj.insert("render_error".into(), json!(e));
+            }
+        }
+        out.platform_metadata = meta;
+        Ok(out)
     }
 
     async fn publish_adapter_event(&self, ev: Event) {
@@ -214,6 +301,13 @@ impl App {
         Ok(out)
     }
 }
+fn markdown_should_fallback(e: &anyhow::Error) -> bool {
+    let s = e.to_string();
+    s.starts_with("unsupported markdown")
+        || s.contains("rich_text disabled")
+        || s.starts_with("markdown rich send failed")
+}
+
 fn debug_reply_text(m: &MessageEnvelope) -> String {
     let mut lines = vec![
         "onlyne debug auth/context".to_string(),
@@ -292,6 +386,16 @@ mod tests {
     }
 
     #[test]
+    fn markdown_fallback_only_handles_rich_body_failures() {
+        assert!(markdown_should_fallback(&anyhow!(
+            "markdown rich send failed: bad request"
+        )));
+        assert!(!markdown_should_fallback(&anyhow!(
+            "attachment needs path or url"
+        )));
+    }
+
+    #[test]
     fn debug_reply_text_includes_threadish_metadata() {
         let msg = MessageEnvelope {
             channel_id: ChannelId("weixin".into()),
@@ -301,6 +405,7 @@ mod tests {
             sender_id: Some("sender".into()),
             sender_name: Some("Alice".into()),
             text: Some("hi".into()),
+            format: MessageFormat::Plain,
             attachments: vec![],
             delivery_state: DeliveryState::Delivered,
             timestamp: Utc::now(),

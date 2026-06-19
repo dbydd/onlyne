@@ -183,16 +183,16 @@ impl Adapter for WeixinAdapter {
                 )
             })?;
         let mut receipt_ids = Vec::new();
+        if let Some(text) = msg.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let receipt = self.client.send_text_with_context(&context, text).await?;
+            receipt_ids.extend(receipt.message_ids);
+        }
         for attachment in &msg.attachments {
             let content = send_content_from_attachment(attachment).await?;
             let receipt = self
                 .client
                 .send_media_with_context(&context, content)
                 .await?;
-            receipt_ids.extend(receipt.message_ids);
-        }
-        if let Some(text) = msg.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            let receipt = self.client.send_text_with_context(&context, text).await?;
             receipt_ids.extend(receipt.message_ids);
         }
         if receipt_ids.is_empty() {
@@ -211,6 +211,7 @@ impl Adapter for WeixinAdapter {
             sender_id: None,
             sender_name: None,
             text: msg.text,
+            format: msg.format,
             attachments: msg.attachments,
             delivery_state: DeliveryState::Sent,
             timestamp: Utc::now(),
@@ -319,6 +320,7 @@ async fn weixin_msg_to_envelope(
         sender_id: Some(msg.user_id),
         sender_name: None,
         text: (!msg.text.is_empty()).then_some(msg.text),
+        format: MessageFormat::Plain,
         attachments,
         delivery_state: DeliveryState::Delivered,
         timestamp,

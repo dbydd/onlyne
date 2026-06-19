@@ -184,15 +184,15 @@ impl Adapter for TelegramAdapter {
     async fn send_message(&self, msg: OutboundMessage) -> anyhow::Result<MessageEnvelope> {
         let chat = telegram_chat_id(&msg.conversation_id.0)?;
         let mut sent = None;
-        for a in &msg.attachments {
-            sent = Some(self.send_attachment(chat, a).await?);
-        }
         if let Some(text) = msg.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             let m = self.bot.send_message(chat, text.to_string()).await?;
             sent = Some((
                 MessageId(m.id.0.to_string()),
                 serde_json::to_value(&m).unwrap_or(Value::Null),
             ));
+        }
+        for a in &msg.attachments {
+            sent = Some(self.send_attachment(chat, a).await?);
         }
         let (message_id, platform_metadata) =
             sent.ok_or_else(|| anyhow!("telegram send_message needs text or attachments"))?;
@@ -204,6 +204,7 @@ impl Adapter for TelegramAdapter {
             sender_id: None,
             sender_name: None,
             text: msg.text,
+            format: msg.format,
             attachments: msg.attachments,
             delivery_state: DeliveryState::Sent,
             timestamp: Utc::now(),
@@ -299,6 +300,7 @@ async fn handle_msg(
             .as_ref()
             .and_then(|u| u.username.clone().or(u.first_name.clone())),
         text: msg.text,
+        format: MessageFormat::Plain,
         attachments,
         delivery_state: DeliveryState::Delivered,
         timestamp: Utc::now(),

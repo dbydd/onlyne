@@ -53,6 +53,9 @@ impl Workspace {
     pub fn media_dir(&self) -> PathBuf {
         self.onlyne.join("cache/media")
     }
+    pub fn rendered_dir(&self) -> PathBuf {
+        self.onlyne.join("cache/rendered")
+    }
     pub fn adapter_dir(&self) -> PathBuf {
         self.onlyne.join("adapters")
     }
@@ -61,6 +64,7 @@ impl Workspace {
         std::fs::create_dir_all(self.onlyne.join("run"))?;
         std::fs::create_dir_all(self.onlyne.join("logs"))?;
         std::fs::create_dir_all(self.media_dir())?;
+        std::fs::create_dir_all(self.rendered_dir())?;
         std::fs::create_dir_all(self.adapter_dir())?;
         if !self.config_path().exists() {
             std::fs::write(self.config_path(), crate::config::DEFAULT_CONFIG)?;

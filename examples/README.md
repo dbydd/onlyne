@@ -26,6 +26,8 @@ Run a script syntax check without real platform credentials:
 | `ONLYNE_BIN` | Path to the `onlyne` binary. Defaults to `../../target/debug/onlyne` from the shared smoke scripts. |
 | `ONLYNE_WORKSPACE` | Explicit workspace directory. If unset, Onlyne walks upward and normally uses `examples/.onlyne` when it exists. |
 | `ONLYNE_TEXT` | Outbound text. Defaults to `zig`. |
+| `ONLYNE_FORMAT` | Outbound text format for scripts using `send-many.py`: `plain` or `markdown`. Defaults to `plain`. |
+| `ONLYNE_ATTACHMENTS` | JSON array of attachment refs for scripts using `send-many.py`. Defaults to `[]`. |
 | `ONLYNE_TIMEOUT` | Seconds to wait for an inbound message when no conversation id is set. Defaults to `180`. |
 | `ONLYNE_EVENT_LOG` | Event subscription capture file. Defaults to `<channel>-events.ndjson`. |
 | `ONLYNE_DAEMON_LOG` | Daemon stdout/stderr capture file. Defaults to `<channel>-daemon.log`. |
@@ -44,6 +46,7 @@ Channel variable names: `ONLYNE_TELEGRAM_CONVERSATION_ID`, `ONLYNE_FEISHU_CONVER
 | `broadcast/` | `smoke-broadcast.sh` | Send one text to many conversations on one channel. |
 | `multicast/` | `smoke-multicast.sh` | Send one text to selected conversations across channels. |
 | `multi-channel/` | `smoke-multi-channel.sh` | List channels, send to explicit targets, read all history. |
+| `rich-media/` | `smoke-rich-media.sh` | Send `format=markdown` messages and optional attachments. |
 
 Broadcast/multicast targets use:
 

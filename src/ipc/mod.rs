@@ -20,6 +20,8 @@ pub struct Request {
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
+    pub format: MessageFormat,
+    #[serde(default)]
     pub attachments: Vec<AttachmentRef>,
     #[serde(default)]
     pub limit: Option<u32>,
@@ -188,5 +190,15 @@ mod tests {
     fn request_parses() {
         let r: Request = serde_json::from_str(r#"{"id":"1","op":"ping"}"#).unwrap();
         assert_eq!(r.op, "ping");
+        assert_eq!(r.format, MessageFormat::Plain);
+    }
+
+    #[test]
+    fn request_parses_markdown_format() {
+        let r: Request = serde_json::from_str(
+            r##"{"id":"1","op":"send_message","text":"# hi","format":"markdown"}"##,
+        )
+        .unwrap();
+        assert_eq!(r.format, MessageFormat::Markdown);
     }
 }

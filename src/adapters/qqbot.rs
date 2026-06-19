@@ -28,6 +28,7 @@ pub struct QqBotAdapter {
     app_id: String,
     app_secret: String,
     sandbox: bool,
+    rich_text: bool,
     allow_chats: Vec<String>,
     client: Client,
     token: Arc<Mutex<Option<String>>>,
@@ -40,6 +41,7 @@ impl QqBotAdapter {
             app_id: env.secret(&cfg.app_id_env, &cfg.app_id, "qqbot app_id")?,
             app_secret: env.secret(&cfg.app_secret_env, &cfg.app_secret, "qqbot app_secret")?,
             sandbox: cfg.sandbox,
+            rich_text: cfg.rich_text,
             allow_chats: cfg.allow_chats.clone(),
             client: Client::new(),
             token: Arc::new(Mutex::new(None)),
@@ -120,25 +122,41 @@ impl Adapter for QqBotAdapter {
     }
     async fn send_message(&self, msg: OutboundMessage) -> anyhow::Result<MessageEnvelope> {
         let token = self.access_token().await?;
-        let mut sent = None;
+        let mut sent = Vec::new();
+        if let Some(text) = msg.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let body = if msg.format == MessageFormat::Markdown {
+                if !self.rich_text {
+                    return Err(anyhow!("qqbot rich_text disabled"));
+                }
+                qq_markdown_body(text)
+            } else {
+                json!({"content":text,"msg_type":0})
+            };
+            let kind = if msg.format == MessageFormat::Markdown {
+                "markdown"
+            } else {
+                "text"
+            };
+            let sent_body = self
+                .send_group(&token, &msg.conversation_id.0, body)
+                .await
+                .map_err(|e| {
+                    if msg.format == MessageFormat::Markdown {
+                        anyhow!("markdown rich send failed: {e}")
+                    } else {
+                        e
+                    }
+                })?;
+            sent.push((kind, sent_body));
+        }
         for a in &msg.attachments {
-            sent = Some(
+            sent.push((
+                "attachment",
                 self.send_attachment(&token, &msg.conversation_id.0, a)
                     .await?,
-            );
+            ));
         }
-        if let Some(text) = msg.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            sent = Some(
-                self.send_group(
-                    &token,
-                    &msg.conversation_id.0,
-                    json!({"content":text,"msg_type":0}),
-                )
-                .await?,
-            );
-        }
-        let (message_id, platform_metadata) =
-            sent.ok_or_else(|| anyhow!("qqbot send_message needs text or attachments"))?;
+        let (message_id, platform_metadata) = delivery_metadata(sent)?;
         Ok(MessageEnvelope {
             channel_id: self.channel_id(),
             conversation_id: msg.conversation_id,
@@ -147,6 +165,7 @@ impl Adapter for QqBotAdapter {
             sender_id: None,
             sender_name: None,
             text: msg.text,
+            format: msg.format,
             attachments: msg.attachments,
             delivery_state: DeliveryState::Sent,
             timestamp: Utc::now(),
@@ -171,6 +190,28 @@ impl Adapter for QqBotAdapter {
         }
     }
 }
+fn qq_markdown_body(text: &str) -> Value {
+    json!({"msg_type":2,"markdown":{"content":text}})
+}
+
+fn delivery_metadata(sent: Vec<(&str, (MessageId, Value))>) -> anyhow::Result<(MessageId, Value)> {
+    let Some((_, (first_id, _))) = sent.first() else {
+        return Err(anyhow!("qqbot send_message needs text or attachments"));
+    };
+    let parts: Vec<Value> = sent
+        .iter()
+        .map(|(kind, (id, meta))| json!({"kind": kind, "message_id": id.0, "metadata": meta}))
+        .collect();
+    let last = sent
+        .last()
+        .map(|(_, (_, meta))| meta.clone())
+        .unwrap_or(Value::Null);
+    Ok((
+        first_id.clone(),
+        json!({"delivery_parts": parts, "last_response": last}),
+    ))
+}
+
 impl QqBotAdapter {
     async fn send_group(
         &self,
@@ -334,9 +375,40 @@ fn parse_dispatch(v: Value, allow: &[String]) -> Option<MessageEnvelope> {
         sender_id: sender,
         sender_name: None,
         text: d.get("content").and_then(Value::as_str).map(str::to_string),
+        format: MessageFormat::Plain,
         attachments: vec![],
         delivery_state: DeliveryState::Delivered,
         timestamp: Utc::now(),
         platform_metadata: v,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_body_uses_qq_markdown_content() {
+        let body = qq_markdown_body("# hi");
+        assert_eq!(body.get("msg_type").and_then(Value::as_i64), Some(2));
+        assert_eq!(
+            body.pointer("/markdown/content").and_then(Value::as_str),
+            Some("# hi")
+        );
+    }
+
+    #[test]
+    fn delivery_metadata_keeps_first_id_and_parts() {
+        let (id, meta) = delivery_metadata(vec![
+            ("markdown", (MessageId("m1".into()), json!({"ok":1}))),
+            ("attachment", (MessageId("m2".into()), json!({"ok":2}))),
+        ])
+        .unwrap();
+        assert_eq!(id.0, "m1");
+        assert_eq!(
+            meta.pointer("/delivery_parts/1/message_id")
+                .and_then(Value::as_str),
+            Some("m2")
+        );
+    }
 }

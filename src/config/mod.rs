@@ -23,6 +23,7 @@ allow_chats = []
 enabled = false
 app_id_env = "FEISHU_APP_ID"
 app_secret_env = "FEISHU_APP_SECRET"
+rich_text = true
 allow_chats = []
 
 [adapters.qqbot]
@@ -30,6 +31,7 @@ enabled = false
 app_id_env = "QQBOT_APP_ID"
 app_secret_env = "QQBOT_APP_SECRET"
 sandbox = false
+rich_text = true
 allow_chats = []
 
 [adapters.weixin]
@@ -38,6 +40,16 @@ token_env = "WEIXIN_ILINK_TOKEN"
 base_url = ""
 cdn_base_url = "https://novac2c.cdn.weixin.qq.com/c2c"
 allow_chats = []
+
+[rich_text]
+max_attachment_bytes = 26214400
+max_rendered_image_bytes = 10485760
+
+[rich_text.renderer]
+enabled = false
+command = "onlyne-md2png"
+args = ["--out", "{output}"]
+timeout_seconds = 20
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -46,6 +58,64 @@ pub struct Config {
     pub workspace: WorkspaceConfig,
     #[serde(default)]
     pub adapters: AdapterConfigs,
+    #[serde(default)]
+    pub rich_text: RichTextConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RichTextConfig {
+    #[serde(default = "default_max_attachment_bytes")]
+    pub max_attachment_bytes: u64,
+    #[serde(default = "default_max_rendered_image_bytes")]
+    pub max_rendered_image_bytes: u64,
+    #[serde(default)]
+    pub renderer: RendererConfig,
+}
+impl Default for RichTextConfig {
+    fn default() -> Self {
+        Self {
+            max_attachment_bytes: default_max_attachment_bytes(),
+            max_rendered_image_bytes: default_max_rendered_image_bytes(),
+            renderer: RendererConfig::default(),
+        }
+    }
+}
+fn default_max_attachment_bytes() -> u64 {
+    25 * 1024 * 1024
+}
+fn default_max_rendered_image_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RendererConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_renderer_command")]
+    pub command: String,
+    #[serde(default = "default_renderer_args")]
+    pub args: Vec<String>,
+    #[serde(default = "default_renderer_timeout")]
+    pub timeout_seconds: u64,
+}
+impl Default for RendererConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            command: default_renderer_command(),
+            args: default_renderer_args(),
+            timeout_seconds: default_renderer_timeout(),
+        }
+    }
+}
+fn default_renderer_command() -> String {
+    "onlyne-md2png".into()
+}
+fn default_renderer_args() -> Vec<String> {
+    vec!["--out".into(), "{output}".into()]
+}
+fn default_renderer_timeout() -> u64 {
+    20
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +184,8 @@ pub struct FeishuConfig {
     pub app_secret_env: String,
     #[serde(default)]
     pub domain: Option<String>,
+    #[serde(default = "default_true")]
+    pub rich_text: bool,
     #[serde(default)]
     pub allow_chats: Vec<String>,
 }
@@ -126,6 +198,7 @@ impl Default for FeishuConfig {
             app_secret: None,
             app_secret_env: feishu_app_secret_env(),
             domain: None,
+            rich_text: true,
             allow_chats: vec![],
         }
     }
@@ -135,6 +208,9 @@ fn feishu_app_id_env() -> String {
 }
 fn feishu_app_secret_env() -> String {
     "FEISHU_APP_SECRET".into()
+}
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +227,8 @@ pub struct QqBotConfig {
     pub app_secret_env: String,
     #[serde(default)]
     pub sandbox: bool,
+    #[serde(default = "default_true")]
+    pub rich_text: bool,
     #[serde(default)]
     pub allow_chats: Vec<String>,
 }
@@ -163,6 +241,7 @@ impl Default for QqBotConfig {
             app_secret: None,
             app_secret_env: qqbot_app_secret_env(),
             sandbox: false,
+            rich_text: true,
             allow_chats: vec![],
         }
     }

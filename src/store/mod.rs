@@ -56,6 +56,7 @@ fn migrate_conn(conn: &Connection) -> anyhow::Result<()> {
               sender_id text,
               sender_name text,
               text text,
+              format text not null default '"plain"',
               attachments text not null,
               delivery_state text not null,
               timestamp text not null,
@@ -64,6 +65,23 @@ fn migrate_conn(conn: &Connection) -> anyhow::Result<()> {
             create index if not exists messages_channel_conversation_time on messages(channel_id, conversation_id, timestamp);
             create index if not exists messages_time on messages(timestamp);
         "#)?;
+    ensure_column(
+        conn,
+        "messages",
+        "format",
+        "text not null default '\"plain\"'",
+    )?;
+    Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, spec: &str) -> anyhow::Result<()> {
+    let mut stmt = conn.prepare(&format!("pragma table_info({table})"))?;
+    let cols = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !cols.iter().any(|c| c == column) {
+        conn.execute_batch(&format!("alter table {table} add column {column} {spec}"))?;
+    }
     Ok(())
 }
 
@@ -136,7 +154,7 @@ impl Store {
         };
         self.upsert_conversation(&conv).await?;
         let conn = self.conn.lock().await;
-        conn.execute("insert or replace into messages(channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, attachments, delivery_state, timestamp, platform_metadata) values(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)", params![m.channel_id.0, m.conversation_id.0, m.message_id.0, serde_json::to_string(&m.direction)?, m.sender_id, m.sender_name, m.text, serde_json::to_string(&m.attachments)?, serde_json::to_string(&m.delivery_state)?, m.timestamp.to_rfc3339(), m.platform_metadata.to_string()])?;
+        conn.execute("insert or replace into messages(channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, format, attachments, delivery_state, timestamp, platform_metadata) values(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)", params![m.channel_id.0, m.conversation_id.0, m.message_id.0, serde_json::to_string(&m.direction)?, m.sender_id, m.sender_name, m.text, serde_json::to_string(&m.format)?, serde_json::to_string(&m.attachments)?, serde_json::to_string(&m.delivery_state)?, m.timestamp.to_rfc3339(), m.platform_metadata.to_string()])?;
         Ok(())
     }
 
@@ -150,25 +168,26 @@ impl Store {
         let limit = limit.min(500);
         let (sql, args): (&str, Vec<String>) = match (channel_id, conversation_id) {
             (Some(c), Some(v)) => (
-                "select * from messages where channel_id=?1 and conversation_id=?2 order by timestamp desc limit ?3",
+                "select channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, format, attachments, delivery_state, timestamp, platform_metadata from messages where channel_id=?1 and conversation_id=?2 order by timestamp desc limit ?3",
                 vec![c.0.clone(), v.0.clone(), limit.to_string()],
             ),
             (Some(c), None) => (
-                "select * from messages where channel_id=?1 order by timestamp desc limit ?2",
+                "select channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, format, attachments, delivery_state, timestamp, platform_metadata from messages where channel_id=?1 order by timestamp desc limit ?2",
                 vec![c.0.clone(), limit.to_string()],
             ),
             _ => (
-                "select * from messages order by timestamp desc limit ?1",
+                "select channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, format, attachments, delivery_state, timestamp, platform_metadata from messages order by timestamp desc limit ?1",
                 vec![limit.to_string()],
             ),
         };
         let mut stmt = conn.prepare(sql)?;
         let to_msg = |row: &rusqlite::Row<'_>| -> rusqlite::Result<MessageEnvelope> {
             let direction: String = row.get(3)?;
-            let attachments: String = row.get(7)?;
-            let state: String = row.get(8)?;
-            let ts: String = row.get(9)?;
-            let meta: String = row.get(10)?;
+            let format: String = row.get(7)?;
+            let attachments: String = row.get(8)?;
+            let state: String = row.get(9)?;
+            let ts: String = row.get(10)?;
+            let meta: String = row.get(11)?;
             Ok(MessageEnvelope {
                 channel_id: ChannelId(row.get(0)?),
                 conversation_id: ConversationId(row.get(1)?),
@@ -177,6 +196,7 @@ impl Store {
                 sender_id: row.get(4)?,
                 sender_name: row.get(5)?,
                 text: row.get(6)?,
+                format: serde_json::from_str(&format).unwrap_or_default(),
                 attachments: serde_json::from_str(&attachments).unwrap_or_default(),
                 delivery_state: serde_json::from_str(&state).unwrap_or(DeliveryState::Failed),
                 timestamp: chrono::DateTime::parse_from_rfc3339(&ts)
@@ -234,6 +254,7 @@ mod tests {
             sender_id: None,
             sender_name: None,
             text: Some("hi".into()),
+            format: MessageFormat::Markdown,
             attachments: vec![],
             delivery_state: DeliveryState::Delivered,
             timestamp: chrono::Utc::now(),
@@ -252,6 +273,10 @@ mod tests {
                 .text
                 .as_deref(),
             Some("hi")
+        );
+        assert_eq!(
+            s.fetch_history(None, None, 10).await.unwrap()[0].format,
+            MessageFormat::Markdown
         );
     }
 }
