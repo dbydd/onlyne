@@ -2,6 +2,15 @@
 name = "onlyne"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+authors = ["dbydd <1992003927@qq.com>"]
+description = "Workspace-local IM channel daemon and broker for local agents"
+license = "MIT"
+repository = "https://github.com/dbydd/onlyne"
+homepage = "https://github.com/dbydd/onlyne"
+readme = "README.md"
+keywords = ["im", "messaging", "daemon", "ipc", "agents"]
+categories = ["command-line-utilities", "network-programming", "asynchronous"]
 
 [dependencies]
 anyhow = "1"
