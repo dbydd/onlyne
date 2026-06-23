@@ -11,6 +11,7 @@ const LARK_ACCOUNTS: &str = "https://accounts.larksuite.com";
 const FEISHU_OPEN: &str = "https://open.feishu.cn";
 const LARK_OPEN: &str = "https://open.larksuite.com";
 const WEIXIN_BASE: &str = "https://ilinkai.weixin.qq.com";
+const QQBOT_TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
 
 pub struct FeishuAuthOptions {
     pub app_id: Option<String>,
@@ -23,6 +24,12 @@ pub struct WeixinAuthOptions {
     pub api_url: String,
     pub bot_type: String,
     pub timeout: Duration,
+}
+
+pub struct QqBotAuthOptions {
+    pub app_id: Option<String>,
+    pub app_secret: Option<String>,
+    pub sandbox: bool,
 }
 
 pub async fn auth_feishu(ws: &Workspace, opts: FeishuAuthOptions) -> anyhow::Result<()> {
@@ -40,6 +47,17 @@ pub async fn auth_feishu(ws: &Workspace, opts: FeishuAuthOptions) -> anyhow::Res
     };
     save_feishu_auth(ws, &app_id, &app_secret, &domain)?;
     println!("feishu auth saved to {}", ws.dir().display());
+    Ok(())
+}
+
+pub async fn auth_qqbot(ws: &Workspace, opts: QqBotAuthOptions) -> anyhow::Result<()> {
+    ws.bootstrap()?;
+    let (Some(app_id), Some(app_secret)) = (opts.app_id, opts.app_secret) else {
+        return Err(anyhow!("qqbot auth needs both --app-id and --app-secret"));
+    };
+    validate_qqbot(&app_id, &app_secret).await?;
+    save_qqbot_auth(ws, &app_id, &app_secret, opts.sandbox)?;
+    println!("qqbot auth saved to {}", ws.dir().display());
     Ok(())
 }
 
@@ -75,6 +93,23 @@ pub fn save_feishu_auth(
     Ok(())
 }
 
+pub fn save_qqbot_auth(
+    ws: &Workspace,
+    app_id: &str,
+    app_secret: &str,
+    sandbox: bool,
+) -> anyhow::Result<()> {
+    let mut cfg = config::load_config(&ws.config_path())?;
+    cfg.adapters.qqbot.enabled = true;
+    cfg.adapters.qqbot.sandbox = sandbox;
+    cfg.adapters.qqbot.app_id = None;
+    cfg.adapters.qqbot.app_secret = None;
+    std::fs::write(ws.config_path(), toml::to_string_pretty(&cfg)?)?;
+    set_dotenv(&ws.dotenv_path(), "QQBOT_APP_ID", app_id)?;
+    set_dotenv(&ws.dotenv_path(), "QQBOT_APP_SECRET", app_secret)?;
+    Ok(())
+}
+
 pub fn save_weixin_auth(ws: &Workspace, token: &str, base_url: Option<&str>) -> anyhow::Result<()> {
     let mut cfg = config::load_config(&ws.config_path())?;
     cfg.adapters.weixin.enabled = true;
@@ -85,6 +120,26 @@ pub fn save_weixin_auth(ws: &Workspace, token: &str, base_url: Option<&str>) -> 
     std::fs::write(ws.config_path(), toml::to_string_pretty(&cfg)?)?;
     set_dotenv(&ws.dotenv_path(), "WEIXIN_ILINK_TOKEN", token)?;
     Ok(())
+}
+
+async fn validate_qqbot(app_id: &str, app_secret: &str) -> anyhow::Result<()> {
+    #[derive(Deserialize)]
+    struct Resp {
+        access_token: Option<String>,
+    }
+    let r: Resp = Client::new()
+        .post(QQBOT_TOKEN_URL)
+        .json(&serde_json::json!({"appId":app_id,"clientSecret":app_secret}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if r.access_token.is_some() {
+        Ok(())
+    } else {
+        Err(anyhow!("qqbot access_token missing"))
+    }
 }
 
 async fn validate_feishu(app_id: &str, app_secret: &str) -> anyhow::Result<String> {
@@ -415,6 +470,26 @@ mod tests {
         assert!(
             env.lines()
                 .any(|line| line == format!("{}{}", "FEISHU_APP_SECRET=", "dummy-secret"))
+        );
+    }
+
+    #[test]
+    fn stores_qqbot_credentials_workspace_locally() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        ws.bootstrap().unwrap();
+
+        save_qqbot_auth(&ws, "appid", "dummy-secret", true).unwrap();
+
+        let cfg = std::fs::read_to_string(ws.config_path()).unwrap();
+        let env = std::fs::read_to_string(ws.dotenv_path()).unwrap();
+        assert!(cfg.contains("[adapters.qqbot]"));
+        assert!(cfg.contains("enabled = true"));
+        assert!(cfg.contains("sandbox = true"));
+        assert!(env.contains("QQBOT_APP_ID=appid"));
+        assert!(
+            env.lines()
+                .any(|line| line == format!("{}{}", "QQBOT_APP_SECRET=", "dummy-secret"))
         );
     }
 

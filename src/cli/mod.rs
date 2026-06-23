@@ -63,6 +63,8 @@ struct AuthArgs {
     app_secret: Option<String>,
     #[arg(long)]
     token: Option<String>,
+    #[arg(long)]
+    sandbox: bool,
     #[arg(long, default_value = "https://ilinkai.weixin.qq.com")]
     api_url: String,
     #[arg(long, default_value = "3")]
@@ -74,6 +76,7 @@ struct AuthArgs {
 #[derive(Copy, Clone, ValueEnum)]
 enum AuthChannel {
     Feishu,
+    Qqbot,
     Weixin,
 }
 
@@ -134,6 +137,9 @@ async fn auth_cmd(workspace: Option<PathBuf>, args: AuthArgs) -> anyhow::Result<
     let ws = resolve_workspace(workspace)?;
     match args.channel {
         AuthChannel::Feishu => {
+            if args.sandbox {
+                anyhow::bail!("feishu auth does not use --sandbox");
+            }
             if args.token.is_some() {
                 anyhow::bail!("feishu auth does not use --token; use --app-id/--app-secret or QR");
             }
@@ -147,7 +153,27 @@ async fn auth_cmd(workspace: Option<PathBuf>, args: AuthArgs) -> anyhow::Result<
             )
             .await
         }
+        AuthChannel::Qqbot => {
+            if args.token.is_some() {
+                anyhow::bail!("qqbot auth does not use --token; use --app-id/--app-secret");
+            }
+            if args.api_url != "https://ilinkai.weixin.qq.com" || args.bot_type != "3" {
+                anyhow::bail!("qqbot auth does not use --api-url/--bot-type");
+            }
+            auth::auth_qqbot(
+                &ws,
+                auth::QqBotAuthOptions {
+                    app_id: args.app_id,
+                    app_secret: args.app_secret,
+                    sandbox: args.sandbox,
+                },
+            )
+            .await
+        }
         AuthChannel::Weixin => {
+            if args.sandbox {
+                anyhow::bail!("weixin auth does not use --sandbox");
+            }
             if args.app_id.is_some() || args.app_secret.is_some() {
                 anyhow::bail!("weixin auth does not use --app-id/--app-secret; use --token or QR");
             }

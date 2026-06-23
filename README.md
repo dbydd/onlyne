@@ -72,7 +72,7 @@ Workspace data intentionally does not default to global mutable state.
 | --- | --- |
 | Telegram | Put `TELEGRAM_BOT_TOKEN` in `.onlyne/.env` and enable `[adapters.telegram]`. |
 | Feishu/Lark | Run `onlyne auth feishu`, or bind with `--app-id` and `--app-secret`. |
-| QQ Bot | Put `QQBOT_APP_ID` and `QQBOT_APP_SECRET` in `.onlyne/.env` and enable `[adapters.qqbot]`. |
+| QQ Bot | Run `onlyne auth qqbot --app-id <id> --app-secret <secret>`; add `--sandbox` for sandbox credentials. |
 | WeChat ilink | Run `onlyne auth weixin`, or bind with `--token`. |
 
 Auth commands write only to the selected workspace `.onlyne/` directory.
@@ -88,6 +88,7 @@ onlyne stdio
 onlyne client '<json-request>'
 onlyne config-check
 onlyne auth feishu [--app-id <id> --app-secret <secret>]
+onlyne auth qqbot --app-id <id> --app-secret <secret> [--sandbox]
 onlyne auth weixin [--token <token>]
 onlyne shell-completions zsh
 onlyne shell-completions fish

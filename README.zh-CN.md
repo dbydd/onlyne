@@ -72,7 +72,7 @@ Onlyne 的工作区数据不会默认写到全局可变目录。
 | --- | --- |
 | Telegram | 在 `.onlyne/.env` 写入 `TELEGRAM_BOT_TOKEN`，并启用 `[adapters.telegram]`。 |
 | 飞书/Lark | 运行 `onlyne auth feishu` 扫码，或用 `--app-id` 和 `--app-secret` 绑定。 |
-| QQ Bot | 在 `.onlyne/.env` 写入 `QQBOT_APP_ID` 和 `QQBOT_APP_SECRET`，并启用 `[adapters.qqbot]`。 |
+| QQ Bot | 运行 `onlyne auth qqbot --app-id <id> --app-secret <secret>`；沙箱凭证加 `--sandbox`。 |
 | 微信 ilink | 运行 `onlyne auth weixin` 扫码，或用 `--token` 绑定。 |
 
 认证命令只会写入选定工作区的 `.onlyne/`。
@@ -88,6 +88,7 @@ onlyne stdio
 onlyne client '<json-request>'
 onlyne config-check
 onlyne auth feishu [--app-id <id> --app-secret <secret>]
+onlyne auth qqbot --app-id <id> --app-secret <secret> [--sandbox]
 onlyne auth weixin [--token <token>]
 onlyne shell-completions zsh
 onlyne shell-completions fish
