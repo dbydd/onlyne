@@ -199,12 +199,11 @@ impl App {
     }
 
     fn should_segment_tables(&self, msg: &OutboundMessage) -> bool {
-        self.config.rich_text.renderer.enabled
-            && msg.text.as_deref().is_some_and(|text| {
-                markdown::split_tables(text)
-                    .iter()
-                    .any(|s| matches!(s, markdown::MarkdownSegment::Table(_)))
-            })
+        msg.text.as_deref().is_some_and(|text| {
+            markdown::split_tables(text)
+                .iter()
+                .any(|s| matches!(s, markdown::MarkdownSegment::Table(_)))
+        })
     }
 
     async fn send_segmented_markdown(
@@ -227,33 +226,17 @@ impl App {
                         })
                         .await?,
                 ),
-                markdown::MarkdownSegment::Table(table) => {
-                    let path = media::render_markdown_png(
-                        &self.config.rich_text.renderer,
-                        &self.workspace.rendered_dir(),
-                        &table,
-                        self.config.rich_text.max_rendered_image_bytes,
-                    )
-                    .await?;
-                    sent.push(
-                        adapter
-                            .send_message(OutboundMessage {
-                                channel_id: msg.channel_id.clone(),
-                                conversation_id: msg.conversation_id.clone(),
-                                text: None,
-                                format: MessageFormat::Plain,
-                                attachments: vec![AttachmentRef {
-                                    kind: AttachmentKind::Image,
-                                    path: Some(path),
-                                    url: None,
-                                    file_name: Some("markdown-table.png".into()),
-                                    mime_type: Some("image/png".into()),
-                                    size: None,
-                                }],
-                            })
-                            .await?,
-                    );
-                }
+                markdown::MarkdownSegment::Table(table) => sent.push(
+                    adapter
+                        .send_message(OutboundMessage {
+                            channel_id: msg.channel_id.clone(),
+                            conversation_id: msg.conversation_id.clone(),
+                            text: Some(markdown::table_code_block(&table)),
+                            format: MessageFormat::Markdown,
+                            attachments: vec![],
+                        })
+                        .await?,
+                ),
             }
         }
         if !msg.attachments.is_empty() {

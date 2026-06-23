@@ -116,14 +116,14 @@ For `format=markdown`:
 1. Parse Markdown with `pulldown-cmark`.
 2. Ask adapter whether native rich output is enabled and supported.
 3. Try adapter native rich send.
-4. If conversion says unsupported or platform send fails with a formatting/rich-message error:
+4. If Markdown tables are present, split them out and send the table as a preformatted Markdown text block. This avoids platform table-rendering gaps without an external image renderer.
+5. If conversion says unsupported or platform send fails with a formatting/rich-message error:
    - Send raw Markdown text.
-   - Render Markdown to PNG with the configured external renderer.
-   - Send that PNG as an image attachment.
-5. Send original request attachments after the text/rich/fallback body.
-6. Store one logical message.
+   - If the optional renderer is configured, render Markdown to PNG and send that PNG as an image attachment.
+6. Send original request attachments after the text/rich/fallback body.
+7. Store one logical message.
 
-Whole-message fallback means: if a table, inline HTML, unsupported image node, or other node would be materially lost by the native converter, skip native rich send and use raw Markdown + PNG.
+Whole-message fallback means: if inline HTML, unsupported image node, or another non-table node would be materially lost by the native converter, skip native rich send and use raw Markdown + optional PNG.
 
 ## Logical history for multi-part delivery
 
@@ -135,12 +135,11 @@ Recommended `platform_metadata` shape:
 {
   "format": "markdown",
   "delivery_parts": [
-    {"kind":"raw_text","message_id":"...","state":"sent"},
-    {"kind":"rendered_image","message_id":"...","state":"sent","path":".onlyne/cache/rendered/...png"},
+    {"kind":"markdown_text","message_id":"...","state":"sent"},
+    {"kind":"markdown_text","message_id":"...","state":"sent"},
     {"kind":"attachment","message_id":"...","state":"sent","path":"report.pdf"}
   ],
-  "fallback_used": true,
-  "fallback_reason": "unsupported markdown table"
+  "fallback_used": false
 }
 ```
 

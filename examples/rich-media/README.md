@@ -6,7 +6,7 @@ This is meant for the first rich-media pass:
 
 - Feishu/Lark: sends an interactive card.
 - QQ Bot: sends `msg_type=2` with `markdown.content`.
-- If a channel falls back and `[rich_text.renderer]` is enabled, Onlyne sends raw Markdown text first, then the rendered PNG.
+- Markdown tables are split into separate preformatted text blocks so Telegram/Feishu/Weixin stay readable without an external renderer.
 
 ## Prepare
 
@@ -16,18 +16,6 @@ cargo run -- --workspace examples init
 # configure Feishu/QQ credentials, for example:
 cargo run -- --workspace examples auth qqbot --app-id '<app-id>' --app-secret '<app-secret>'
 ```
-
-Optional renderer config in `.onlyne/config.toml`:
-
-```toml
-[rich_text.renderer]
-enabled = true
-command = "./examples/render-md-table.sh"
-args = ["--out", "{output}"]
-timeout_seconds = 20
-```
-
-The renderer receives Markdown on stdin and writes PNG to `{output}`. The bundled example renderer requires ImageMagick `magick` and is intentionally boring: it is for table fallback smoke tests, not pretty output.
 
 ## Run
 
