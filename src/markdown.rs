@@ -133,61 +133,6 @@ pub enum MarkdownSegment {
     Table(String),
 }
 
-pub fn table_code_block(table: &str) -> String {
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    for line in table.lines().map(str::trim).filter(|l| l.contains('|')) {
-        let cells: Vec<String> = line
-            .trim_matches('|')
-            .split('|')
-            .map(|c| c.trim().to_string())
-            .collect();
-        if cells.iter().all(|c| {
-            let c = c.replace(':', "");
-            c.chars().all(|ch| ch == '-') && c.contains('-')
-        }) {
-            continue;
-        }
-        rows.push(cells);
-    }
-    if rows.is_empty() {
-        return format!("```\n{}\n```", table.trim());
-    }
-    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
-    for row in &mut rows {
-        row.resize(cols, String::new());
-    }
-    let widths: Vec<usize> = (0..cols)
-        .map(|i| rows.iter().map(|r| display_width(&r[i])).max().unwrap_or(0))
-        .collect();
-    let mut out = String::from("```\n");
-    for (ri, row) in rows.iter().enumerate() {
-        out.push('│');
-        for (cell, width) in row.iter().zip(&widths) {
-            out.push(' ');
-            out.push_str(cell);
-            for _ in 0..(width.saturating_sub(display_width(cell)) + 1) {
-                out.push(' ');
-            }
-            out.push('│');
-        }
-        out.push('\n');
-        if ri == 0 && rows.len() > 1 {
-            out.push('├');
-            for (i, width) in widths.iter().enumerate() {
-                out.push_str(&"─".repeat(width + 2));
-                out.push(if i + 1 == widths.len() { '┤' } else { '┼' });
-            }
-            out.push('\n');
-        }
-    }
-    out.push_str("```");
-    out
-}
-
-fn display_width(s: &str) -> usize {
-    s.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
-}
-
 pub fn split_tables(input: &str) -> Vec<MarkdownSegment> {
     let lines: Vec<&str> = input.lines().collect();
     let mut out = Vec::new();
@@ -303,15 +248,6 @@ mod tests {
     }
 
     #[test]
-    fn table_code_block_formats_cells() {
-        let out = table_code_block("| 渠道 | 状态 |\n| --- | --- |\n| Telegram | HTML |\n");
-        assert!(out.starts_with("```\n"));
-        assert!(out.contains("│ 渠道"));
-        assert!(out.contains("Telegram"));
-        assert!(out.ends_with("```"));
-    }
-
-    #[test]
     fn splits_first_h1_for_card_header() {
         let (title, body) = split_first_heading("# Title\n\nbody");
         assert_eq!(title.as_deref(), Some("Title"));
@@ -319,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn flags_html_for_whole_message_fallback() {
+    fn flags_html_as_unsupported() {
         let check = check("hello <span>raw</span>");
         assert_eq!(check.unsupported_reason.as_deref(), Some("html"));
     }

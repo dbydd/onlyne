@@ -183,14 +183,7 @@ impl App {
             self.send_segmented_markdown(a.as_ref(), msg.clone())
                 .await?
         } else {
-            match a.send_message(msg.clone()).await {
-                Ok(out) => out,
-                Err(e) if msg.format == MessageFormat::Markdown && markdown_should_fallback(&e) => {
-                    self.markdown_fallback_send(a.as_ref(), msg, e.to_string())
-                        .await?
-                }
-                Err(e) => return Err(e),
-            }
+            a.send_message(msg.clone()).await?
         };
         self.store.append_message(&out).await?;
         self.publish_history_appended(&out);
@@ -226,17 +219,29 @@ impl App {
                         })
                         .await?,
                 ),
-                markdown::MarkdownSegment::Table(table) => sent.push(
-                    adapter
-                        .send_message(OutboundMessage {
-                            channel_id: msg.channel_id.clone(),
-                            conversation_id: msg.conversation_id.clone(),
-                            text: Some(markdown::table_code_block(&table)),
-                            format: MessageFormat::Markdown,
-                            attachments: vec![],
-                        })
-                        .await?,
-                ),
+                markdown::MarkdownSegment::Table(table) => {
+                    let path =
+                        media::render_markdown_table_png(&self.workspace.rendered_dir(), &table)
+                            .await?;
+                    sent.push(
+                        adapter
+                            .send_message(OutboundMessage {
+                                channel_id: msg.channel_id.clone(),
+                                conversation_id: msg.conversation_id.clone(),
+                                text: None,
+                                format: MessageFormat::Plain,
+                                attachments: vec![AttachmentRef {
+                                    kind: AttachmentKind::Image,
+                                    path: Some(path),
+                                    url: None,
+                                    file_name: Some("markdown-table.png".into()),
+                                    mime_type: Some("image/png".into()),
+                                    size: None,
+                                }],
+                            })
+                            .await?,
+                    );
+                }
             }
         }
         if !msg.attachments.is_empty() {
@@ -272,63 +277,6 @@ impl App {
             }
         }
         Ok(())
-    }
-
-    async fn markdown_fallback_send(
-        &self,
-        adapter: &dyn Adapter,
-        msg: OutboundMessage,
-        reason: String,
-    ) -> anyhow::Result<MessageEnvelope> {
-        let markdown = msg.text.clone().unwrap_or_default();
-        let mut attachments = Vec::new();
-        let mut render_error = None;
-        match media::render_markdown_png(
-            &self.config.rich_text.renderer,
-            &self.workspace.rendered_dir(),
-            &markdown,
-            self.config.rich_text.max_rendered_image_bytes,
-        )
-        .await
-        {
-            Ok(path) => attachments.push(AttachmentRef {
-                kind: AttachmentKind::Image,
-                path: Some(path),
-                url: None,
-                file_name: Some("markdown.png".into()),
-                mime_type: Some("image/png".into()),
-                size: None,
-            }),
-            Err(e) => render_error = Some(e.to_string()),
-        }
-        attachments.extend(msg.attachments);
-        let mut out = adapter
-            .send_message(OutboundMessage {
-                channel_id: msg.channel_id,
-                conversation_id: msg.conversation_id,
-                text: Some(markdown.clone()),
-                format: MessageFormat::Plain,
-                attachments,
-            })
-            .await?;
-        out.format = MessageFormat::Markdown;
-        out.text = Some(markdown);
-        let fallback_plain = markdown::plain_text(out.text.as_deref().unwrap_or_default());
-        let mut meta = out.platform_metadata;
-        if !meta.is_object() {
-            meta = json!({"adapter_metadata": meta});
-        }
-        if let Some(obj) = meta.as_object_mut() {
-            obj.insert("format".into(), json!("markdown"));
-            obj.insert("fallback_used".into(), json!(true));
-            obj.insert("fallback_reason".into(), json!(reason));
-            obj.insert("fallback_plain_text".into(), json!(fallback_plain));
-            if let Some(e) = render_error {
-                obj.insert("render_error".into(), json!(e));
-            }
-        }
-        out.platform_metadata = meta;
-        Ok(out)
     }
 
     async fn publish_adapter_event(&self, ev: Event) {
@@ -394,13 +342,6 @@ fn merge_segmented_envelopes(
         timestamp: chrono::Utc::now(),
         platform_metadata: json!({"segmented": true, "delivery_parts": parts}),
     })
-}
-
-fn markdown_should_fallback(e: &anyhow::Error) -> bool {
-    let s = e.to_string();
-    s.starts_with("unsupported markdown")
-        || s.contains("rich_text disabled")
-        || s.starts_with("markdown rich send failed")
 }
 
 fn debug_reply_text(m: &MessageEnvelope) -> String {
@@ -478,16 +419,6 @@ mod tests {
 
         let channels = app.store.list_channels().await.unwrap();
         assert!(matches!(channels[0].1, AdapterHealth::Reconnecting));
-    }
-
-    #[test]
-    fn markdown_fallback_only_handles_rich_body_failures() {
-        assert!(markdown_should_fallback(&anyhow!(
-            "markdown rich send failed: bad request"
-        )));
-        assert!(!markdown_should_fallback(&anyhow!(
-            "attachment needs path or url"
-        )));
     }
 
     #[test]

@@ -1,12 +1,12 @@
-use crate::config::RendererConfig;
 use anyhow::{Context, anyhow};
+use resvg::{tiny_skia, usvg};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
 };
-use tokio::{fs, io::AsyncWriteExt, process::Command, time::timeout};
+use tokio::{fs, process::Command};
+use unicode_display_width::width as display_width;
 
 pub async fn read_bytes(path_or_url: &str) -> anyhow::Result<Vec<u8>> {
     if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
@@ -32,49 +32,127 @@ pub async fn cache_bytes(
     Ok(path)
 }
 
-pub async fn render_markdown_png(
-    cfg: &RendererConfig,
-    root: &Path,
-    markdown: &str,
-    max_bytes: u64,
-) -> anyhow::Result<PathBuf> {
-    if !cfg.enabled {
-        return Err(anyhow!("markdown renderer disabled"));
-    }
+pub async fn render_markdown_table_png(root: &Path, table: &str) -> anyhow::Result<PathBuf> {
     fs::create_dir_all(root).await?;
-    let path = root.join(format!("{}.png", &hex(markdown.as_bytes())[..16]));
-    let args: Vec<String> = cfg
-        .args
-        .iter()
-        .map(|a| a.replace("{output}", &path.to_string_lossy()))
-        .collect();
-    let mut child = Command::new(&cfg.command)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("run markdown renderer {}", cfg.command))?;
-    let mut stdin = child.stdin.take().context("open renderer stdin")?;
-    stdin.write_all(markdown.as_bytes()).await?;
-    drop(stdin);
-    let status = timeout(Duration::from_secs(cfg.timeout_seconds), child.wait())
-        .await
-        .context("markdown renderer timed out")??;
-    if !status.success() {
-        return Err(anyhow!("markdown renderer exited with {status}"));
-    }
-    let meta = fs::metadata(&path)
-        .await
-        .with_context(|| format!("renderer did not write {}", path.display()))?;
-    if meta.len() > max_bytes {
-        return Err(anyhow!(
-            "rendered image too large: {} > {} bytes",
-            meta.len(),
-            max_bytes
-        ));
-    }
+    let path = root.join(format!("{}.png", &hex(table.as_bytes())[..16]));
+    let bytes = tokio::task::spawn_blocking({
+        let table = table.to_string();
+        move || render_table_png_bytes(&table)
+    })
+    .await??;
+    fs::write(&path, bytes).await?;
     Ok(path)
+}
+
+fn render_table_png_bytes(table: &str) -> anyhow::Result<Vec<u8>> {
+    let rows = parse_table_rows(table);
+    if rows.is_empty() {
+        return Err(anyhow!("markdown table has no rows"));
+    }
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let rows: Vec<Vec<String>> = rows
+        .into_iter()
+        .map(|mut row| {
+            row.resize(cols, String::new());
+            row
+        })
+        .collect();
+    let col_widths: Vec<u32> = (0..cols)
+        .map(|i| {
+            rows.iter()
+                .map(|row| display_width(row[i].as_str()) as usize)
+                .max()
+                .unwrap_or(0)
+                .clamp(4, 28) as u32
+                * 14
+                + 36
+        })
+        .collect();
+    let row_h = 56u32;
+    let pad = 24u32;
+    let width = col_widths.iter().sum::<u32>() + pad * 2;
+    let height = row_h * rows.len() as u32 + pad * 2;
+    let svg = table_svg(&rows, &col_widths, width, height, row_h, pad);
+
+    let mut opt = usvg::Options::default();
+    opt.fontdb_mut().load_system_fonts();
+    opt.font_family = "sans-serif".into();
+    let tree = usvg::Tree::from_str(&svg, &opt)?;
+    let size = tree.size();
+    let mut pixmap = tiny_skia::Pixmap::new(size.width() as u32, size.height() as u32)
+        .context("create table pixmap")?;
+    pixmap.fill(tiny_skia::Color::WHITE);
+    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
+    Ok(pixmap.encode_png()?)
+}
+
+fn parse_table_rows(table: &str) -> Vec<Vec<String>> {
+    table
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains('|'))
+        .filter_map(|line| {
+            let cells: Vec<String> = line
+                .trim_matches('|')
+                .split('|')
+                .map(|cell| cell.trim().to_string())
+                .collect();
+            if cells.iter().all(|cell| {
+                let c = cell.replace(':', "");
+                c.contains('-') && c.chars().all(|ch| ch == '-')
+            }) {
+                None
+            } else {
+                Some(cells)
+            }
+        })
+        .collect()
+}
+
+fn table_svg(
+    rows: &[Vec<String>],
+    col_widths: &[u32],
+    width: u32,
+    height: u32,
+    row_h: u32,
+    pad: u32,
+) -> String {
+    let mut out = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><rect width="100%" height="100%" fill="#ffffff"/>"##
+    );
+    let font = "-apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans CJK SC, Noto Sans CJK, Arial Unicode MS, sans-serif";
+    for (ri, row) in rows.iter().enumerate() {
+        let y = pad + ri as u32 * row_h;
+        let mut x = pad;
+        for (ci, cell) in row.iter().enumerate() {
+            let w = col_widths[ci];
+            let fill = if ri == 0 { "#f6f8fa" } else { "#ffffff" };
+            let weight = if ri == 0 { 700 } else { 400 };
+            out.push_str(&format!(
+                r##"<rect x="{x}" y="{y}" width="{w}" height="{row_h}" fill="{fill}" stroke="#d0d7de" stroke-width="2"/><text x="{}" y="{}" fill="#111111" font-family="{}" font-size="22" font-weight="{}">{}</text>"##,
+                x + 14,
+                y + 36,
+                escape_xml(font),
+                weight,
+                escape_xml(cell)
+            ));
+            x += w;
+        }
+    }
+    out.push_str("</svg>");
+    out
+}
+
+fn escape_xml(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            '&' => "&amp;".chars().collect::<Vec<_>>(),
+            '<' => "&lt;".chars().collect(),
+            '>' => "&gt;".chars().collect(),
+            '"' => "&quot;".chars().collect(),
+            _ => vec![c],
+        })
+        .collect()
 }
 
 pub async fn ffmpeg_convert(input: &Path, output: &Path, args: &[&str]) -> anyhow::Result<()> {
@@ -133,27 +211,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renderer_gets_stdin_and_output_arg() {
+    async fn renders_markdown_table_png() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("renderer.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nwhile [ \"$1\" != \"--out\" ]; do shift; done\nout=$2\ncat >/dev/null\nprintf '\\211PNG\\r\\n\\032\\n' > \"$out\"\n",
+        let out = render_markdown_table_png(
+            dir.path(),
+            "| 渠道 | 状态 |\n| --- | --- |\n| Telegram | HTML 富文本 |",
         )
+        .await
         .unwrap();
-        let _ = std::process::Command::new("chmod")
-            .arg("+x")
-            .arg(&script)
-            .status();
-        let cfg = RendererConfig {
-            enabled: true,
-            command: script.to_string_lossy().to_string(),
-            args: vec!["--out".into(), "{output}".into()],
-            timeout_seconds: 5,
-        };
-        let out = render_markdown_png(&cfg, dir.path(), "# hi", 100)
-            .await
-            .unwrap();
-        assert!(out.exists());
+        let bytes = std::fs::read(out).unwrap();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(bytes.len() > 1000);
     }
 }

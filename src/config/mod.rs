@@ -43,13 +43,6 @@ allow_chats = []
 
 [rich_text]
 max_attachment_bytes = 26214400
-max_rendered_image_bytes = 10485760
-
-[rich_text.renderer]
-enabled = false
-command = "onlyne-md2png"
-args = ["--out", "{output}"]
-timeout_seconds = 20
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -66,58 +59,17 @@ pub struct Config {
 pub struct RichTextConfig {
     #[serde(default = "default_max_attachment_bytes")]
     pub max_attachment_bytes: u64,
-    #[serde(default = "default_max_rendered_image_bytes")]
-    pub max_rendered_image_bytes: u64,
-    #[serde(default)]
-    pub renderer: RendererConfig,
 }
 impl Default for RichTextConfig {
     fn default() -> Self {
         Self {
             max_attachment_bytes: default_max_attachment_bytes(),
-            max_rendered_image_bytes: default_max_rendered_image_bytes(),
-            renderer: RendererConfig::default(),
         }
     }
 }
 fn default_max_attachment_bytes() -> u64 {
     25 * 1024 * 1024
 }
-fn default_max_rendered_image_bytes() -> u64 {
-    10 * 1024 * 1024
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RendererConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_renderer_command")]
-    pub command: String,
-    #[serde(default = "default_renderer_args")]
-    pub args: Vec<String>,
-    #[serde(default = "default_renderer_timeout")]
-    pub timeout_seconds: u64,
-}
-impl Default for RendererConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            command: default_renderer_command(),
-            args: default_renderer_args(),
-            timeout_seconds: default_renderer_timeout(),
-        }
-    }
-}
-fn default_renderer_command() -> String {
-    "onlyne-md2png".into()
-}
-fn default_renderer_args() -> Vec<String> {
-    vec!["--out".into(), "{output}".into()]
-}
-fn default_renderer_timeout() -> u64 {
-    20
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
     pub name: String,

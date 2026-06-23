@@ -23,6 +23,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts"] }
 rusqlite = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
@@ -36,6 +37,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-display-width = "0.2"
 url = "2"
 
 [dev-dependencies]
