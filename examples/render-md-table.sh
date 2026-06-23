@@ -12,14 +12,18 @@ tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 src="$tmpdir/table.md"
 cat > "$src"
+if command -v magick >/dev/null; then
+  font_args=()
+  for f in /System/Library/Fonts/Menlo.ttc /System/Library/Fonts/SFNSMono.ttf /Library/Fonts/Arial.ttf; do
+    if [[ -f "$f" ]]; then font_args=(-font "$f"); break; fi
+  done
+  magick -background white -fill '#111111' "${font_args[@]}" -pointsize 28 -size 1200x "caption:@$src" "$out"
+  exit 0
+fi
 if command -v qlmanage >/dev/null; then
   qlmanage -t -s 1200 -o "$tmpdir" "$src" >/dev/null 2>&1
   cp "$src.png" "$out"
   exit 0
 fi
-if command -v magick >/dev/null; then
-  magick -background white -fill '#111111' -pointsize 22 -size 1200x "caption:@$src" "$out"
-  exit 0
-fi
-echo "need qlmanage or ImageMagick magick" >&2
+echo "need ImageMagick magick or qlmanage" >&2
 exit 127
