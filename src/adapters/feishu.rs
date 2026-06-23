@@ -182,10 +182,55 @@ impl Adapter for FeishuAdapter {
     }
 }
 fn feishu_markdown_card(markdown: &str) -> Value {
-    json!({
+    let (title, body) = markdown::split_first_heading(markdown);
+    let body = feishu_markdown_body(&body);
+    let mut card = json!({
         "config": {"wide_screen_mode": true},
-        "elements": [{"tag": "markdown", "content": markdown}]
-    })
+        "elements": [{"tag": "markdown", "content": body}]
+    });
+    if let Some(title) = title {
+        card["header"] =
+            json!({"template": "blue", "title": {"tag": "plain_text", "content": title}});
+    }
+    card
+}
+
+fn feishu_markdown_body(markdown: &str) -> String {
+    let chars: Vec<char> = markdown.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '`' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let mut run = 1;
+        while i + run < chars.len() && chars[i + run] == '`' {
+            run += 1;
+        }
+        if run != 1 {
+            out.extend(std::iter::repeat_n('`', run));
+            i += run;
+            continue;
+        }
+        i += 1;
+        let mut code = String::new();
+        while i < chars.len() && chars[i] != '`' {
+            code.push(chars[i]);
+            i += 1;
+        }
+        if i < chars.len() {
+            i += 1;
+            out.push_str("\n```\n");
+            out.push_str(&code);
+            out.push_str("\n```\n");
+        } else {
+            out.push('`');
+            out.push_str(&code);
+        }
+    }
+    out.trim().to_string()
 }
 
 fn delivery_metadata(sent: Vec<(&str, (MessageId, Value))>) -> anyhow::Result<(MessageId, Value)> {
@@ -471,15 +516,20 @@ mod tests {
     }
 
     #[test]
-    fn markdown_card_uses_interactive_markdown_element() {
-        let card = feishu_markdown_card("# hi");
+    fn markdown_card_uses_markdown_body_and_header() {
+        let card = feishu_markdown_card("# hi\n\n`code`");
+        assert_eq!(
+            card.pointer("/header/title/content")
+                .and_then(Value::as_str),
+            Some("hi")
+        );
         assert_eq!(
             card.pointer("/elements/0/tag").and_then(Value::as_str),
             Some("markdown")
         );
         assert_eq!(
             card.pointer("/elements/0/content").and_then(Value::as_str),
-            Some("# hi")
+            Some("```\ncode\n```")
         );
     }
 

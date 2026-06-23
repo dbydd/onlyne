@@ -14,7 +14,7 @@ pub fn run_targets(default_format: &str) -> anyhow::Result<()> {
         Ok(v) => v,
         Err(_) => stored_targets(&socket)?,
     };
-    let text = env::var("ONLYNE_TEXT").unwrap_or_else(|_| "zig".into());
+    let text = env::var("ONLYNE_TEXT").unwrap_or_else(|_| default_text(default_format));
     let format = env::var("ONLYNE_FORMAT").unwrap_or_else(|_| default_format.into());
     let attachments: Value =
         serde_json::from_str(&env::var("ONLYNE_ATTACHMENTS").unwrap_or_else(|_| "[]".into()))?;
@@ -85,6 +85,15 @@ pub fn fetch_all_history(limit: u32) -> anyhow::Result<()> {
         )?
     );
     Ok(())
+}
+
+fn default_text(format: &str) -> String {
+    if format == "markdown" {
+        "# Onlyne 富文本测试\n\n- **粗体** / _斜体_\n- `inline code`\n- [Onlyne](https://github.com/dbydd/onlyne)\n\n| 渠道 | 状态 |\n| --- | --- |\n| Telegram | HTML 富文本 |\n| Feishu | Lark MD 卡片 |\n\n```rust\nprintln!(\"hello rich media\");\n```"
+            .into()
+    } else {
+        "zig".into()
+    }
 }
 
 fn stored_targets(socket: &PathBuf) -> anyhow::Result<String> {

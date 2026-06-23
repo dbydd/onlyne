@@ -71,6 +71,87 @@ pub fn plain_text(input: &str) -> String {
     check(input).plain_text
 }
 
+pub fn telegram_html(input: &str) -> String {
+    let mut out = String::new();
+    let parser = Parser::new_ext(input, options());
+    for ev in parser {
+        match ev {
+            Event::Start(tag) => match tag {
+                Tag::Paragraph => {}
+                Tag::Heading { .. } => out.push_str("<b>"),
+                Tag::Strong => out.push_str("<b>"),
+                Tag::Emphasis => out.push_str("<i>"),
+                Tag::Strikethrough => out.push_str("<s>"),
+                Tag::CodeBlock(_) => out.push_str("<pre><code>"),
+                Tag::Link { dest_url, .. } => {
+                    out.push_str("<a href=\"");
+                    escape_html(&dest_url, &mut out);
+                    out.push_str("\">");
+                }
+                Tag::List(_) => {}
+                Tag::Item => out.push_str("• "),
+                Tag::BlockQuote(_) => out.push_str("<blockquote>"),
+                Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell => {}
+                _ => {}
+            },
+            Event::End(tag) => match tag {
+                TagEnd::Paragraph | TagEnd::Item | TagEnd::TableRow => {
+                    if !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                }
+                TagEnd::Heading(_) => out.push_str("</b>\n"),
+                TagEnd::Strong => out.push_str("</b>"),
+                TagEnd::Emphasis => out.push_str("</i>"),
+                TagEnd::Strikethrough => out.push_str("</s>"),
+                TagEnd::CodeBlock => out.push_str("</code></pre>\n"),
+                TagEnd::Link => out.push_str("</a>"),
+                TagEnd::BlockQuote(_) => out.push_str("</blockquote>\n"),
+                TagEnd::TableCell => out.push_str(" | "),
+                _ => {}
+            },
+            Event::Text(t) => escape_html(&t, &mut out),
+            Event::Code(t) => {
+                out.push_str("<code>");
+                escape_html(&t, &mut out);
+                out.push_str("</code>");
+            }
+            Event::SoftBreak | Event::HardBreak => out.push('\n'),
+            Event::Rule => out.push_str("\n---\n"),
+            Event::Html(t) | Event::InlineHtml(t) => escape_html(&t, &mut out),
+            Event::FootnoteReference(t) => escape_html(&t, &mut out),
+            Event::TaskListMarker(done) => out.push_str(if done { "☑ " } else { "☐ " }),
+            Event::InlineMath(t) | Event::DisplayMath(t) => escape_html(&t, &mut out),
+        }
+    }
+    tidy(&out)
+}
+
+pub fn split_first_heading(input: &str) -> (Option<String>, String) {
+    let mut lines = input.lines();
+    if let Some(first) = lines.next() {
+        if let Some(title) = first.strip_prefix("# ").filter(|s| !s.trim().is_empty()) {
+            return (
+                Some(title.trim().to_string()),
+                lines.collect::<Vec<_>>().join("\n").trim().to_string(),
+            );
+        }
+    }
+    (None, input.to_string())
+}
+
+fn escape_html(input: &str, out: &mut String) {
+    for c in input.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+}
+
 fn options() -> Options {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -99,6 +180,22 @@ mod tests {
         assert!(out.contains("Hi"));
         assert!(out.contains("bold code"));
         assert!(out.contains("https://example.com"));
+    }
+
+    #[test]
+    fn renders_common_markdown_to_telegram_html() {
+        let out = telegram_html("# Hi\n\n- **bold** `code`\n- [link](https://example.com)");
+        assert!(out.contains("<b>Hi</b>"));
+        assert!(out.contains("<b>bold</b>"));
+        assert!(out.contains("<code>code</code>"));
+        assert!(out.contains("<a href=\"https://example.com\">link</a>"));
+    }
+
+    #[test]
+    fn splits_first_h1_for_card_header() {
+        let (title, body) = split_first_heading("# Title\n\nbody");
+        assert_eq!(title.as_deref(), Some("Title"));
+        assert_eq!(body, "body");
     }
 
     #[test]

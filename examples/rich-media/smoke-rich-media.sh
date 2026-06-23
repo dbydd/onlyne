@@ -16,6 +16,11 @@ export ONLYNE_TEXT=${ONLYNE_TEXT:-'# Onlyne rich message smoke
 - `inline code`
 - [Onlyne](https://github.com/dbydd/onlyne)
 
+| channel | status |
+| --- | --- |
+| Telegram | HTML rich text |
+| Feishu | Lark MD card |
+
 ```rust
 println!("hello rich media");
 ```'}

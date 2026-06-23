@@ -7,9 +7,13 @@ use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::{
     sync::Mutex,
@@ -29,7 +33,8 @@ pub struct WeixinAdapter {
     allow_chats: Vec<String>,
     client: Arc<WechatIlinkClient>,
     running: Arc<AtomicBool>,
-    contexts: Arc<Mutex<std::collections::HashMap<String, WechatContext>>>,
+    contexts: Arc<Mutex<HashMap<String, WechatContext>>>,
+    context_path: PathBuf,
     task: Option<JoinHandle<()>>,
 }
 
@@ -37,7 +42,7 @@ impl WeixinAdapter {
     pub fn new(
         cfg: &WeixinConfig,
         env: &Env,
-        _ws: &crate::workspace::Workspace,
+        ws: &crate::workspace::Workspace,
     ) -> anyhow::Result<Self> {
         let token = env.secret(&cfg.token_env, &cfg.token, "weixin token")?;
         let base = cfg
@@ -60,13 +65,16 @@ impl WeixinAdapter {
                 })
                 .build(),
         );
+        let context_path = ws.adapter_dir().join("weixin-contexts.json");
+        let contexts = load_contexts(&context_path, &ws.db_path());
         Ok(Self {
             token,
             base,
             allow_chats: cfg.allow_chats.clone(),
             client,
             running: Arc::new(AtomicBool::new(false)),
-            contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            contexts: Arc::new(Mutex::new(contexts)),
+            context_path,
             task: None,
         })
     }
@@ -88,6 +96,7 @@ impl Adapter for WeixinAdapter {
         let events = ctx.events.clone();
         let media_dir = ctx.media_dir.clone();
         let contexts = self.contexts.clone();
+        let context_path = self.context_path.clone();
         self.task = Some(tokio::spawn(async move {
             while running.load(Ordering::SeqCst) {
                 let mut stream = client.clone().events_from_cursor(None);
@@ -103,12 +112,18 @@ impl Adapter for WeixinAdapter {
                     }
                     match stream.next().await {
                         Some(Ok(WechatEvent::ContextObserved(c))) => {
-                            contexts.lock().await.insert(c.user_id.clone(), c);
+                            save_context(&contexts, &context_path, c).await;
                         }
                         Some(Ok(WechatEvent::Message(msg))) => {
-                            if let Some(env) =
-                                weixin_msg_to_envelope(&client, &allow, &media_dir, &contexts, msg)
-                                    .await
+                            if let Some(env) = weixin_msg_to_envelope(
+                                &client,
+                                &allow,
+                                &media_dir,
+                                &contexts,
+                                &context_path,
+                                msg,
+                            )
+                            .await
                             {
                                 let _ = inbound.send(env).await;
                             }
@@ -274,18 +289,91 @@ async fn send_content_from_attachment(a: &AttachmentRef) -> anyhow::Result<SendC
     })
 }
 
+fn load_contexts(path: &Path, db_path: &Path) -> HashMap<String, WechatContext> {
+    if let Some(contexts) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<HashMap<String, WechatContext>>(&s).ok())
+    {
+        return contexts;
+    }
+    let mut out = HashMap::new();
+    let Ok(conn) = rusqlite::Connection::open(db_path) else {
+        return out;
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "select conversation_id, message_id, timestamp, platform_metadata from messages where channel_id='weixin' order by timestamp desc",
+    ) else {
+        return out;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    }) else {
+        return out;
+    };
+    for row in rows.flatten() {
+        let (user_id, message_id, ts, meta) = row;
+        if out.contains_key(&user_id) {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&meta) else {
+            continue;
+        };
+        let Some(token) = v.get("context_token").and_then(Value::as_str) else {
+            continue;
+        };
+        out.insert(
+            user_id.clone(),
+            WechatContext {
+                account_key: v
+                    .get("to_user_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                user_id,
+                context_token: token.to_string(),
+                observed_at_unix_ms: chrono::DateTime::parse_from_rfc3339(&ts)
+                    .map(|d| d.timestamp_millis())
+                    .unwrap_or_default(),
+                source_message_id: Some(message_id),
+            },
+        );
+    }
+    out
+}
+
+async fn save_context(
+    contexts: &Arc<Mutex<HashMap<String, WechatContext>>>,
+    path: &Path,
+    context: WechatContext,
+) {
+    let mut guard = contexts.lock().await;
+    guard.insert(context.user_id.clone(), context);
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    if let Ok(bytes) = serde_json::to_vec_pretty(&*guard) {
+        let _ = tokio::fs::write(path, bytes).await;
+    }
+}
+
 async fn weixin_msg_to_envelope(
     client: &Arc<WechatIlinkClient>,
     allow: &[String],
-    media_root: &std::path::Path,
-    contexts: &Arc<Mutex<std::collections::HashMap<String, WechatContext>>>,
+    media_root: &Path,
+    contexts: &Arc<Mutex<HashMap<String, WechatContext>>>,
+    context_path: &Path,
     msg: IncomingMessage,
 ) -> Option<MessageEnvelope> {
     if !allowed(allow, &msg.user_id) {
         return None;
     }
     if let Some(c) = msg.context.clone() {
-        contexts.lock().await.insert(c.user_id.clone(), c);
+        save_context(contexts, context_path, c).await;
     }
     let mut attachments = Vec::new();
     if let Ok(Some(download)) = client.download(&msg).await

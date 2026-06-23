@@ -2,7 +2,7 @@ use crate::{
     adapters::allowed,
     config::{Env, TelegramConfig},
     core::*,
-    media,
+    markdown, media,
 };
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
@@ -16,8 +16,9 @@ use std::sync::{
 };
 use teloxide::{
     Bot,
+    payloads::SendMessageSetters,
     prelude::Requester,
-    types::{ChatId, InputFile},
+    types::{ChatId, InputFile, ParseMode},
 };
 use tokio::{
     sync::mpsc,
@@ -185,7 +186,19 @@ impl Adapter for TelegramAdapter {
         let chat = telegram_chat_id(&msg.conversation_id.0)?;
         let mut sent = None;
         if let Some(text) = msg.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            let m = self.bot.send_message(chat, text.to_string()).await?;
+            let request = self.bot.send_message(
+                chat,
+                if msg.format == MessageFormat::Markdown {
+                    markdown::telegram_html(text)
+                } else {
+                    text.to_string()
+                },
+            );
+            let m = if msg.format == MessageFormat::Markdown {
+                request.parse_mode(ParseMode::Html).await?
+            } else {
+                request.await?
+            };
             sent = Some((
                 MessageId(m.id.0.to_string()),
                 serde_json::to_value(&m).unwrap_or(Value::Null),
