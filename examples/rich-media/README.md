@@ -12,9 +12,9 @@ This is meant for the first rich-media pass:
 
 ```bash
 cargo build
-cd examples/rich-media
-../../target/debug/onlyne init
-# configure Feishu/QQ credentials in the selected .onlyne/.env and enable adapters
+cargo run -- init
+# configure Feishu/QQ credentials, for example:
+cargo run -- auth qqbot --app-id '<app-id>' --app-secret '<app-secret>'
 ```
 
 Optional renderer config in `.onlyne/config.toml`:
@@ -33,22 +33,16 @@ The renderer receives Markdown on stdin and writes PNG to `{output}`.
 
 ```bash
 # one target
-ONLYNE_TARGETS='feishu:oc_xxx' ./smoke-rich-media.sh
+ONLYNE_TARGETS='feishu:oc_xxx' cargo run --example rich_media
 
 # many targets
-ONLYNE_TARGETS='feishu:oc_xxx,qqbot:group_openid' ./smoke-rich-media.sh
+ONLYNE_TARGETS='feishu:oc_xxx,qqbot:group_openid' cargo run --example rich_media
 
 # custom markdown
-ONLYNE_TARGETS='qqbot:group_openid' ONLYNE_TEXT=$'# Title\n\n- item\n- `code`' ./smoke-rich-media.sh
+ONLYNE_TARGETS='qqbot:group_openid' ONLYNE_TEXT=$'# Title\n\n- item\n- `code`' cargo run --example rich_media
 
 # with attachments
 ONLYNE_TARGETS='feishu:oc_xxx' \
 ONLYNE_ATTACHMENTS='[{"kind":"file","path":"/tmp/report.pdf","file_name":"report.pdf","mime_type":"application/pdf"}]' \
-./smoke-rich-media.sh
-```
-
-Local script check:
-
-```bash
-./smoke-rich-media.sh --local-check
+cargo run --example rich_media
 ```
