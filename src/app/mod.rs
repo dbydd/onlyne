@@ -179,18 +179,97 @@ impl App {
         let a = guard
             .get(&channel)
             .ok_or_else(|| anyhow!("adapter {channel} not enabled"))?;
-        let out = match a.send_message(msg.clone()).await {
-            Ok(out) => out,
-            Err(e) if msg.format == MessageFormat::Markdown && markdown_should_fallback(&e) => {
-                self.markdown_fallback_send(a.as_ref(), msg, e.to_string())
-                    .await?
+        let out = if msg.format == MessageFormat::Markdown && self.should_segment_tables(&msg) {
+            self.send_segmented_markdown(a.as_ref(), msg.clone())
+                .await?
+        } else {
+            match a.send_message(msg.clone()).await {
+                Ok(out) => out,
+                Err(e) if msg.format == MessageFormat::Markdown && markdown_should_fallback(&e) => {
+                    self.markdown_fallback_send(a.as_ref(), msg, e.to_string())
+                        .await?
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
         };
         self.store.append_message(&out).await?;
         self.publish_history_appended(&out);
         self.events.publish(Event::OutboundMessage(out.clone()));
         Ok(json!(out))
+    }
+
+    fn should_segment_tables(&self, msg: &OutboundMessage) -> bool {
+        self.config.rich_text.renderer.enabled
+            && msg.text.as_deref().is_some_and(|text| {
+                markdown::split_tables(text)
+                    .iter()
+                    .any(|s| matches!(s, markdown::MarkdownSegment::Table(_)))
+            })
+    }
+
+    async fn send_segmented_markdown(
+        &self,
+        adapter: &dyn Adapter,
+        msg: OutboundMessage,
+    ) -> anyhow::Result<MessageEnvelope> {
+        let text = msg.text.clone().unwrap_or_default();
+        let mut sent = Vec::new();
+        for segment in markdown::split_tables(&text) {
+            match segment {
+                markdown::MarkdownSegment::Text(text) => sent.push(
+                    adapter
+                        .send_message(OutboundMessage {
+                            channel_id: msg.channel_id.clone(),
+                            conversation_id: msg.conversation_id.clone(),
+                            text: Some(text),
+                            format: MessageFormat::Markdown,
+                            attachments: vec![],
+                        })
+                        .await?,
+                ),
+                markdown::MarkdownSegment::Table(table) => {
+                    let path = media::render_markdown_png(
+                        &self.config.rich_text.renderer,
+                        &self.workspace.rendered_dir(),
+                        &table,
+                        self.config.rich_text.max_rendered_image_bytes,
+                    )
+                    .await?;
+                    sent.push(
+                        adapter
+                            .send_message(OutboundMessage {
+                                channel_id: msg.channel_id.clone(),
+                                conversation_id: msg.conversation_id.clone(),
+                                text: None,
+                                format: MessageFormat::Plain,
+                                attachments: vec![AttachmentRef {
+                                    kind: AttachmentKind::Image,
+                                    path: Some(path),
+                                    url: None,
+                                    file_name: Some("markdown-table.png".into()),
+                                    mime_type: Some("image/png".into()),
+                                    size: None,
+                                }],
+                            })
+                            .await?,
+                    );
+                }
+            }
+        }
+        if !msg.attachments.is_empty() {
+            sent.push(
+                adapter
+                    .send_message(OutboundMessage {
+                        channel_id: msg.channel_id.clone(),
+                        conversation_id: msg.conversation_id.clone(),
+                        text: None,
+                        format: MessageFormat::Plain,
+                        attachments: msg.attachments.clone(),
+                    })
+                    .await?,
+            );
+        }
+        merge_segmented_envelopes(msg, sent)
     }
 
     async fn validate_attachments(&self, attachments: &[AttachmentRef]) -> anyhow::Result<()> {
@@ -301,6 +380,39 @@ impl App {
         Ok(out)
     }
 }
+fn merge_segmented_envelopes(
+    msg: OutboundMessage,
+    sent: Vec<MessageEnvelope>,
+) -> anyhow::Result<MessageEnvelope> {
+    let Some(first) = sent.first() else {
+        return Err(anyhow!("markdown send produced no segments"));
+    };
+    let parts: Vec<Value> = sent
+        .iter()
+        .map(|env| {
+            json!({
+                "kind": if env.attachments.iter().any(|a| matches!(a.kind, AttachmentKind::Image)) { "rendered_table" } else { "markdown_text" },
+                "message_id": env.message_id.0,
+                "metadata": env.platform_metadata,
+            })
+        })
+        .collect();
+    Ok(MessageEnvelope {
+        channel_id: msg.channel_id,
+        conversation_id: msg.conversation_id,
+        message_id: first.message_id.clone(),
+        direction: Direction::Outbound,
+        sender_id: None,
+        sender_name: None,
+        text: msg.text,
+        format: MessageFormat::Markdown,
+        attachments: msg.attachments,
+        delivery_state: DeliveryState::Sent,
+        timestamp: chrono::Utc::now(),
+        platform_metadata: json!({"segmented": true, "delivery_parts": parts}),
+    })
+}
+
 fn markdown_should_fallback(e: &anyhow::Error) -> bool {
     let s = e.to_string();
     s.starts_with("unsupported markdown")

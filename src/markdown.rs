@@ -127,6 +127,53 @@ pub fn telegram_html(input: &str) -> String {
     tidy(&out)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkdownSegment {
+    Text(String),
+    Table(String),
+}
+
+pub fn split_tables(input: &str) -> Vec<MarkdownSegment> {
+    let lines: Vec<&str> = input.lines().collect();
+    let mut out = Vec::new();
+    let mut buf = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if i + 1 < lines.len() && looks_like_table_header(lines[i], lines[i + 1]) {
+            flush_text(&mut out, &mut buf);
+            let mut table = vec![lines[i], lines[i + 1]];
+            i += 2;
+            while i < lines.len() && lines[i].contains('|') && !lines[i].trim().is_empty() {
+                table.push(lines[i]);
+                i += 1;
+            }
+            out.push(MarkdownSegment::Table(table.join("\n")));
+            continue;
+        }
+        buf.push(lines[i]);
+        i += 1;
+    }
+    flush_text(&mut out, &mut buf);
+    out
+}
+
+fn looks_like_table_header(header: &str, sep: &str) -> bool {
+    header.contains('|')
+        && sep.contains('|')
+        && sep
+            .chars()
+            .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
+        && sep.contains("---")
+}
+
+fn flush_text(out: &mut Vec<MarkdownSegment>, buf: &mut Vec<&str>) {
+    let text = buf.join("\n").trim().to_string();
+    if !text.is_empty() {
+        out.push(MarkdownSegment::Text(text));
+    }
+    buf.clear();
+}
+
 pub fn split_first_heading(input: &str) -> (Option<String>, String) {
     let mut lines = input.lines();
     if let Some(first) = lines.next() {
@@ -189,6 +236,15 @@ mod tests {
         assert!(out.contains("<b>bold</b>"));
         assert!(out.contains("<code>code</code>"));
         assert!(out.contains("<a href=\"https://example.com\">link</a>"));
+    }
+
+    #[test]
+    fn splits_table_segments() {
+        let parts = split_tables("before\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nafter");
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(&parts[0], MarkdownSegment::Text(s) if s == "before"));
+        assert!(matches!(&parts[1], MarkdownSegment::Table(s) if s.contains("| 1 | 2 |")));
+        assert!(matches!(&parts[2], MarkdownSegment::Text(s) if s == "after"));
     }
 
     #[test]

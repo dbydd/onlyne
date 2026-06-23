@@ -22,12 +22,12 @@ Optional renderer config in `.onlyne/config.toml`:
 ```toml
 [rich_text.renderer]
 enabled = true
-command = "onlyne-md2png"
+command = "./examples/render-md-table.sh"
 args = ["--out", "{output}"]
 timeout_seconds = 20
 ```
 
-The renderer receives Markdown on stdin and writes PNG to `{output}`.
+The renderer receives Markdown on stdin and writes PNG to `{output}`. The bundled example renderer requires ImageMagick `magick` and is intentionally boring: it is for table fallback smoke tests, not pretty output.
 
 ## Run
 

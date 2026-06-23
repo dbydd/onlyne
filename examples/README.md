@@ -45,4 +45,4 @@ Channel variable names: `ONLYNE_TELEGRAM_CONVERSATION_ID`, `ONLYNE_FEISHU_CONVER
 | `multi_channel` | List channels, send to explicit targets, read merged history. |
 | `rich_media` | Send `format=markdown` messages and optional attachments. |
 
-Examples require the daemon to already be running; they do not spawn or supervise Onlyne.
+Examples require the daemon to already be running; they do not spawn or supervise Onlyne. For Markdown table-to-image fallback, enable `[rich_text.renderer]` and point it at `./examples/render-md-table.sh` or your own renderer.
