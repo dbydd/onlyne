@@ -1,263 +1,71 @@
-# Rich text and media support spec
+# Rich media and Markdown
 
-This spec captures the agreed first implementation for Markdown, rich text, images, and files in Onlyne.
-
-## Goals
-
-- Keep Onlyne a thin workspace-local message broker.
-- Let agents send Markdown with one request.
-- Let adapters render Markdown as the best native rich message each channel supports.
-- If native rich rendering cannot preserve the message, send raw Markdown text first, then a rendered long PNG.
-- Send and receive files/images using local workspace storage, not global state.
-
-## Non-goals
-
-- No web UI, dashboard, prompt engine, scheduler, model runtime, or agent orchestration.
-- No platform-native payloads leaking into the core request schema.
-- No built-in browser runtime in the daemon.
-- No base64 blobs in newline JSON IPC for the first version.
-
-## User decisions from grill-me
-
-- Canonical content model: `text` plus `format`.
-- `format=markdown` means `text` contains Markdown.
-- Existing callers keep `format` omitted or `format=plain`.
-- Per-channel adapters should attempt their best native rich format.
-- Unsupported Markdown features should be handled in the specific adapter path, not by a global raw-Markdown fallback.
-- Markdown tables are split and rendered to PNG with Rust `resvg` because common IM Markdown renderers do not support tables reliably.
-- Attachment sources: local `path` or remote `url` only.
-- Inbound media: download into `.onlyne/cache/` and expose local paths.
-- Sending order when text and attachments both exist: text first, attachments after.
-- History records one logical outbound message even if delivery fan-outs into multiple platform messages.
-- Add `pulldown-cmark` for Markdown parsing/conversion.
-- Add `resvg` for Rust-native table PNG rendering.
-- Default media limits should be conservative.
-- Implementation priority: Feishu/Lark first, QQ second.
-- Feishu/Lark rich shape: interactive card.
-- QQ rich shape: `msg_type=2` with `markdown.content`.
-- Capabilities are adapter-built-in with config overrides.
-
-## Platform capability baseline
-
-| Channel | Native rich output | First strategy | Fallback strategy | Attachments |
-| --- | --- | --- | --- | --- |
-| Feishu/Lark | Interactive cards and rich message structures. | Convert Markdown to an interactive card. | Split tables into Rust-rendered PNG image parts. Other gaps are adapter-specific fixes. | Upload image/file via OpenAPI, then send message content. |
-| QQ Bot | `msg_type=2` Markdown object with `markdown.content`; media uses `msg_type=7`. | Send `markdown.content` directly where available. | Split tables into Rust-rendered PNG media parts. Other gaps are adapter-specific fixes. | Upload file/media, then send `media.file_info`. |
-| Telegram | Bot API formatting via HTML/entities. | Convert Markdown to Telegram-compatible HTML. | Split tables into Rust-rendered PNG/photo parts. Other gaps are adapter-specific fixes. | Existing photo/document/audio/voice/video send path. |
-| Weixin/WeChat ilink | No reliable native Markdown for this adapter path. | Send readable text / media parts. | Split tables into Rust-rendered PNG image parts. | Existing media send path. |
-
-Notes:
-
-- Feishu cards are chosen over `post` for this version.
-- QQ templates are not required for this version; use direct Markdown content.
-- Platform docs and permissions vary. Config overrides can disable rich output per channel.
-
-## IPC changes
-
-Current request shape remains newline-delimited JSON.
-
-Add optional field:
+Onlyne keeps the agent-facing API simple: callers still send one `send_message` request with `text`, `format`, and optional `attachments`.
 
 ```json
 {
-  "id": "send-1",
   "op": "send_message",
-  "channel_id": "qqbot",
-  "conversation_id": "GROUP_OPENID",
-  "text": "# Build passed\n\n- commit: `abc123`\n- [logs](https://example.com)",
+  "channel_id": "telegram",
+  "conversation_id": "...",
+  "text": "# Report\n\n| A | B |\n| --- | --- |\n| 1 | 2 |",
   "format": "markdown",
   "attachments": []
 }
 ```
 
-`format` values:
+## External API contract
 
-| Value | Meaning |
+- `format` defaults to `plain`.
+- `format=markdown` means `text` is the whole Markdown document.
+- Attachment inputs stay `path` or `url` only.
+- If one request fans out into multiple platform messages, history still stores one logical outbound message with `platform_metadata.delivery_parts`.
+
+Agents do not pre-split Markdown. They keep writing a whole Markdown string to the socket/CLI/harness.
+
+## Current per-channel behavior
+
+| Channel | Markdown behavior |
 | --- | --- |
-| omitted | Same as `plain` for backwards compatibility. |
-| `plain` | Send `text` as ordinary text. |
-| `markdown` | Treat `text` as Markdown and run the rich pipeline. |
+| QQ Bot | Sends the whole Markdown document directly as `msg_type=2` / `markdown.content`. QQ's extended Markdown handles tables and formulas. |
+| Telegram | Converts supported Markdown to Telegram HTML. Tables are split and sent as rendered PNG image parts. |
+| Feishu/Lark | Converts supported Markdown to an interactive card. Tables are split and sent as rendered PNG image parts. |
+| Weixin/WeChat | Sends readable text segments. Tables are split and sent as rendered PNG image parts. |
 
-Do not add `markdown` as a separate text field in this version.
+Unsupported rendering should be fixed in the adapter that mishandles it. There is no app-level raw-Markdown fallback pipeline.
 
-## Core model changes
+## Table rendering
 
-Add a small enum:
+For non-QQ adapters, Markdown tables are rendered in-process:
 
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum MessageFormat {
-    #[default]
-    Plain,
-    Markdown,
-}
-```
+- parser/splitter: small line-based GFM table detector in `markdown::split_tables`
+- renderer: Rust `resvg` + system fonts
+- output: `.onlyne/cache/rendered/{hash}.png`
 
-Extend:
+No ImageMagick, browser, `qlmanage`, renderer subprocess, timeout, or rendered-image size knob.
 
-- `ipc::Request { format: MessageFormat }`
-- `core::OutboundMessage { format: MessageFormat }`
-- `core::MessageEnvelope { format: MessageFormat }` if migration cost is acceptable.
+## Delivery metadata
 
-If avoiding a DB migration in the first code slice, store the outbound/inbound format in `platform_metadata.format` and migrate later. Prefer a real `format` column if touching history schema anyway.
-
-## Delivery pipeline
-
-For `format=plain`:
-
-1. Send `text` as ordinary text.
-2. Send attachments in request order.
-3. Store one logical message.
-
-For `format=markdown`:
-
-1. Parse Markdown with `pulldown-cmark`.
-2. If Markdown tables are present, split before/after them.
-3. Send non-table segments through the target adapter's native Markdown path.
-4. Render each table segment to PNG in Rust with `resvg` and send it as an image part.
-5. Send original request attachments after text/table parts.
-6. Store one logical message.
-
-No generic raw-Markdown fallback is maintained in `app`; unsupported syntax should be fixed in the specific adapter converter that mishandles it.
-
-## Logical history for multi-part delivery
-
-Even if one request produces multiple platform messages, Onlyne stores one `MessageEnvelope`.
-
-Recommended `platform_metadata` shape:
+Typical multipart logical message:
 
 ```json
 {
   "format": "markdown",
+  "segmented": true,
   "delivery_parts": [
-    {"kind":"markdown_text","message_id":"...","state":"sent"},
-    {"kind":"rendered_table","message_id":"...","state":"sent","path":".onlyne/cache/rendered/...png"},
-    {"kind":"attachment","message_id":"...","state":"sent","path":"report.pdf"}
+    {"kind": "markdown_text", "message_id": "..."},
+    {"kind": "rendered_table", "message_id": "..."},
+    {"kind": "markdown_text", "message_id": "..."}
   ]
 }
 ```
 
-Envelope `message_id` should be the first successfully sent platform message id. If no platform id is available, use `now_id("out")`.
+## Verification
 
-## Table PNG rendering
-
-Contract:
-
-- Onlyne renders Markdown table segments in-process with Rust `resvg`.
-- Rendered PNGs are written under `.onlyne/cache/rendered/`.
-- No external renderer command is required.
-
-## Media limits
-
-Only user-supplied outbound attachments are prechecked with `max_attachment_bytes`; table images are generated by Onlyne and sent directly.
-
-## Inbound media
-
-On receive:
-
-1. Detect platform media/file/image/audio/video where each adapter exposes it.
-2. Download bytes when possible.
-3. Store under `.onlyne/cache/media/{channel}/{hash-prefix}/{safe-name}`.
-4. Put local path in `AttachmentRef.path`.
-5. Preserve platform IDs and raw metadata under `platform_metadata`.
-6. Append to history and publish `inbound_message` as today.
-
-For inbound rich text:
-
-- `MessageEnvelope.text` should be readable Markdown when practical.
-- Preserve raw platform entities/card/post payloads in `platform_metadata`.
-
-## Adapter-specific first pass
-
-### Feishu/Lark
-
-Implement first.
-
-- `format=plain`: current `msg_type=text` path.
-- `format=markdown`: convert Markdown AST to an interactive card.
-- Use card components that preserve common Markdown blocks.
-- If conversion mishandles a node, fix this adapter's Markdown conversion.
-- Existing image/file upload is reused for rendered table PNGs and attachments.
-
-### QQ Bot
-
-Implement second.
-
-- `format=plain`: current `msg_type=0` path.
-- `format=markdown`: send body with `msg_type=2` and `markdown: { "content": text }`.
-- If API rejects markdown send, fix this adapter path or return the platform error.
-- Existing media upload is reused for rendered table PNGs and attachments.
-
-### Telegram
-
-Later pass.
-
-- Convert Markdown to Telegram-safe MarkdownV2/HTML or entities.
-- Telegram escaping is strict; conversion errors should be fixed in the Telegram converter.
-
-### Weixin/WeChat
-
-- No native Markdown path in this adapter.
-- `format=markdown` sends readable text plus rendered table PNG parts where needed.
-
-## Tests / acceptance checklist
-
-### Schema and compatibility
-
-- [ ] Old `send_message` request without `format` still sends plain text.
-- [ ] `format=plain` preserves existing behavior.
-- [ ] `format=markdown` parses and routes through rich pipeline.
-- [ ] Unknown `format` returns a clear bad-request error.
-
-### Markdown conversion
-
-- [ ] `pulldown-cmark` parser handles headings, paragraphs, lists, links, code, code fences, blockquotes.
-- [ ] Adapter-specific converters preserve supported Markdown syntax.
-
-### Table rendering
-
-- [ ] Markdown tables are rendered to PNG by Rust `resvg`.
-- [ ] No external renderer command is needed.
-
-### Feishu
-
-- [ ] `format=markdown` sends interactive card for supported Markdown.
-- [ ] Markdown tables are sent as image parts.
-- [ ] Original attachments are sent after the body.
-- [ ] Platform message IDs are recorded in one logical envelope.
-
-### QQ
-
-- [ ] `format=markdown` sends `msg_type=2` with `markdown.content`.
-- [ ] Markdown API errors surface clearly.
-- [ ] Media upload path works for rendered PNG.
-- [ ] Platform message IDs are recorded in one logical envelope.
-
-### Inbound media
-
-- [ ] Telegram/Weixin existing downloads still land under `.onlyne/cache/`.
-- [ ] Feishu inbound media support adds local cached paths when implemented.
-- [ ] Oversized inbound media is skipped with warning metadata.
-
-### History and events
-
-- [ ] One logical outbound history row per `send_message` request.
-- [ ] `platform_metadata.delivery_parts` includes every platform send attempt.
-- [ ] `outbound_message` event contains the logical envelope.
-- [ ] `history_appended` fires once per logical message.
-
-## Minimal implementation order
-
-1. Add `format` to IPC/core request path; keep old requests plain.
-2. Add config defaults for rich text and media limits.
-3. Add Markdown utility module using `pulldown-cmark`:
-   - parse/check support
-   - plain-text strip
-   - adapter conversion helpers
-4. Add Rust table PNG helper in `media` module.
-5. Refactor send path to support logical multi-part delivery metadata.
-6. Implement Feishu interactive card Markdown send.
-7. Implement QQ `markdown.content` send.
-8. Add tests for schema, table rendering, Feishu/QQ request-body construction.
-9. Later: Telegram converter and Weixin polish.
+```bash
+cargo fmt
+cargo check --examples
+cargo test
+cargo run -- --workspace examples run
+cargo run --example rich_media
+ONLYNE_TARGETS='qqbot:<conversation>' cargo run --example rich_media
+```

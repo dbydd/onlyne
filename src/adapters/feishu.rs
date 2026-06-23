@@ -134,8 +134,7 @@ impl Adapter for FeishuAdapter {
                 if !self.rich_text {
                     return Err(anyhow!("feishu rich_text disabled"));
                 }
-                let check = markdown::check(text);
-                if let Some(reason) = check.unsupported_reason {
+                if let Some(reason) = markdown::unsupported_reason(text) {
                     return Err(anyhow!("unsupported markdown for feishu card: {reason}"));
                 }
                 let card = feishu_markdown_card(text);
