@@ -179,7 +179,9 @@ impl App {
         let a = guard
             .get(&channel)
             .ok_or_else(|| anyhow!("adapter {channel} not enabled"))?;
-        let out = if msg.format == MessageFormat::Markdown && self.should_segment_tables(&msg) {
+        let out = if msg.format == MessageFormat::Markdown
+            && self.should_segment_tables(&msg, &channel)
+        {
             self.send_segmented_markdown(a.as_ref(), msg.clone())
                 .await?
         } else {
@@ -191,12 +193,13 @@ impl App {
         Ok(json!(out))
     }
 
-    fn should_segment_tables(&self, msg: &OutboundMessage) -> bool {
-        msg.text.as_deref().is_some_and(|text| {
-            markdown::split_tables(text)
-                .iter()
-                .any(|s| matches!(s, markdown::MarkdownSegment::Table(_)))
-        })
+    fn should_segment_tables(&self, msg: &OutboundMessage, channel: &str) -> bool {
+        channel != "qqbot"
+            && msg.text.as_deref().is_some_and(|text| {
+                markdown::split_tables(text)
+                    .iter()
+                    .any(|s| matches!(s, markdown::MarkdownSegment::Table(_)))
+            })
     }
 
     async fn send_segmented_markdown(

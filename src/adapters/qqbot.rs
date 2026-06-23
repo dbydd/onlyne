@@ -6,9 +6,10 @@ use crate::{
 };
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use reqwest::{Client, multipart};
+use reqwest::Client;
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
@@ -219,16 +220,35 @@ impl QqBotAdapter {
         conv: &str,
         body: Value,
     ) -> anyhow::Result<(MessageId, Value)> {
-        let v: Value = self
+        match self.send_scoped(token, "groups", conv, body.clone()).await {
+            Ok(v) => Ok(v),
+            Err(group_err) => self
+                .send_scoped(token, "users", conv, body)
+                .await
+                .with_context(|| format!("qqbot group send failed first: {group_err}")),
+        }
+    }
+
+    async fn send_scoped(
+        &self,
+        token: &str,
+        scope: &str,
+        conv: &str,
+        body: Value,
+    ) -> anyhow::Result<(MessageId, Value)> {
+        let resp = self
             .client
-            .post(format!("{}/v2/groups/{conv}/messages", self.base()))
+            .post(format!("{}/v2/{scope}/{conv}/messages", self.base()))
             .header("Authorization", format!("QQBot {token}"))
             .json(&body)
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("qqbot {scope} message {status}: {text}"));
+        }
+        let v: Value = serde_json::from_str(&text)?;
         let id = v
             .get("id")
             .or_else(|| v.get("msg_id"))
@@ -256,30 +276,56 @@ impl QqBotAdapter {
             AttachmentKind::Video => 2,
             AttachmentKind::File | AttachmentKind::Audio | AttachmentKind::Voice => 4,
         };
-        let form = multipart::Form::new()
-            .text("file_type", file_type.to_string())
-            .text("srv_send_msg", "false")
-            .part(
-                "file_data",
-                multipart::Part::bytes(bytes)
-                    .file_name(a.file_name.clone().unwrap_or_else(|| "media".into())),
-            );
-        let v: Value = self
+        let name = a.file_name.clone().unwrap_or_else(|| "media".into());
+        match self
+            .send_attachment_scoped(token, "groups", conv, file_type, &name, bytes.clone())
+            .await
+        {
+            Ok(v) => Ok(v),
+            Err(group_err) => self
+                .send_attachment_scoped(token, "users", conv, file_type, &name, bytes)
+                .await
+                .with_context(|| format!("qqbot group upload failed first: {group_err}")),
+        }
+    }
+
+    async fn send_attachment_scoped(
+        &self,
+        token: &str,
+        scope: &str,
+        conv: &str,
+        file_type: i32,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<(MessageId, Value)> {
+        let mut body = json!({
+            "file_type": file_type,
+            "file_data": BASE64.encode(bytes),
+            "srv_send_msg": false,
+        });
+        if file_type == 4 {
+            body["file_name"] = json!(name);
+        }
+        let resp = self
             .client
-            .post(format!("{}/v2/groups/{conv}/files", self.base()))
+            .post(format!("{}/v2/{scope}/{conv}/files", self.base()))
             .header("Authorization", format!("QQBot {token}"))
-            .multipart(form)
+            .json(&body)
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("qqbot {scope} upload {status}: {text}"));
+        }
+        let v: Value = serde_json::from_str(&text)?;
         let info = v
             .get("file_info")
             .and_then(Value::as_str)
             .context("qqbot file_info")?;
-        self.send_group(
+        self.send_scoped(
             token,
+            scope,
             conv,
             json!({"msg_type":7,"media":{"file_info":info}}),
         )
