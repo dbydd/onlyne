@@ -12,9 +12,9 @@ This is meant for the first rich-media pass:
 
 ```bash
 cargo build
-cargo run -- init
+cargo run -- --workspace examples init
 # configure Feishu/QQ credentials, for example:
-cargo run -- auth qqbot --app-id '<app-id>' --app-secret '<app-secret>'
+cargo run -- --workspace examples auth qqbot --app-id '<app-id>' --app-secret '<app-secret>'
 ```
 
 Optional renderer config in `.onlyne/config.toml`:
@@ -33,6 +33,8 @@ The renderer receives Markdown on stdin and writes PNG to `{output}`.
 
 ```bash
 # one target
+cargo run --example rich_media
+# or explicit target:
 ONLYNE_TARGETS='feishu:oc_xxx' cargo run --example rich_media
 
 # many targets
