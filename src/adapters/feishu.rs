@@ -14,7 +14,7 @@ use open_lark::{
 };
 use reqwest::{Client, multipart};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -182,16 +182,81 @@ impl Adapter for FeishuAdapter {
 }
 fn feishu_markdown_card(markdown: &str) -> Value {
     let (title, body) = markdown::split_first_heading(markdown);
-    let body = feishu_markdown_body(&body);
     let mut card = json!({
         "config": {"wide_screen_mode": true},
-        "elements": [{"tag": "markdown", "content": body}]
+        "elements": feishu_markdown_elements(&body),
     });
     if let Some(title) = title {
         card["header"] =
             json!({"template": "blue", "title": {"tag": "plain_text", "content": title}});
     }
     card
+}
+
+fn feishu_markdown_elements(markdown: &str) -> Vec<Value> {
+    let mut elements = Vec::new();
+    for segment in markdown::split_tables(markdown) {
+        match segment {
+            markdown::MarkdownSegment::Text(text) => {
+                let content = feishu_markdown_body(&text);
+                if !content.is_empty() {
+                    elements.push(json!({"tag": "markdown", "content": content}));
+                }
+            }
+            markdown::MarkdownSegment::Table(table) => {
+                if let Some(table) = feishu_table_element(&table) {
+                    elements.push(table);
+                }
+            }
+        }
+    }
+    if elements.is_empty() {
+        elements.push(json!({"tag": "markdown", "content": feishu_markdown_body(markdown)}));
+    }
+    elements
+}
+
+fn feishu_table_element(table: &str) -> Option<Value> {
+    let rows = markdown::parse_table_rows(table);
+    let header = rows.first()?;
+    let width = header.len();
+    if width == 0 {
+        return None;
+    }
+    let columns: Vec<Value> = header
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            json!({
+                "name": format!("col_{i}"),
+                "display_name": if name.is_empty() { format!("Column {}", i + 1) } else { name.clone() },
+                "data_type": "text",
+                "width": "auto",
+            })
+        })
+        .collect();
+    let data_rows: Vec<Value> = rows
+        .iter()
+        .skip(1)
+        .map(|row| {
+            let mut obj = Map::new();
+            for i in 0..width {
+                obj.insert(
+                    format!("col_{i}"),
+                    Value::String(row.get(i).cloned().unwrap_or_default()),
+                );
+            }
+            Value::Object(obj)
+        })
+        .collect();
+    Some(json!({
+        "tag": "table",
+        "page_size": data_rows.len().clamp(1, 10),
+        "row_height": "low",
+        "header_style": {"background_style": "grey", "bold": true},
+        "columns": columns,
+        "rows": data_rows,
+    }))
 }
 
 fn feishu_markdown_body(markdown: &str) -> String {
@@ -529,6 +594,34 @@ mod tests {
         assert_eq!(
             card.pointer("/elements/0/content").and_then(Value::as_str),
             Some("```\ncode\n```")
+        );
+    }
+
+    #[test]
+    fn markdown_card_renders_tables_as_card_tables() {
+        let card = feishu_markdown_card("before\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nafter");
+
+        assert_eq!(
+            card.pointer("/elements/0/content").and_then(Value::as_str),
+            Some("before")
+        );
+        assert_eq!(
+            card.pointer("/elements/1/tag").and_then(Value::as_str),
+            Some("table")
+        );
+        assert_eq!(
+            card.pointer("/elements/1/columns/0/display_name")
+                .and_then(Value::as_str),
+            Some("A")
+        );
+        assert_eq!(
+            card.pointer("/elements/1/rows/0/col_1")
+                .and_then(Value::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            card.pointer("/elements/2/content").and_then(Value::as_str),
+            Some("after")
         );
     }
 

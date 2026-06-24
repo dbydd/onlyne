@@ -45,4 +45,4 @@ Channel variable names: `ONLYNE_TELEGRAM_CONVERSATION_ID`, `ONLYNE_FEISHU_CONVER
 | `multi_channel` | List channels, send to explicit targets, read merged history. |
 | `rich_media` | Send `format=markdown` messages and optional attachments. |
 
-Examples require the daemon to already be running; they do not spawn or supervise Onlyne. Markdown tables are split out and rendered to PNG with Rust `resvg`, no external renderer command.
+Examples require the daemon to already be running; they do not spawn or supervise Onlyne. Telegram/Weixin Markdown tables are split out and rendered to PNG with Rust `resvg`; Feishu keeps tables inside the interactive card.

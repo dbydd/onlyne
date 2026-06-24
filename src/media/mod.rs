@@ -1,3 +1,4 @@
+use crate::markdown;
 use anyhow::{Context, anyhow};
 use resvg::{tiny_skia, usvg};
 use sha2::{Digest, Sha256};
@@ -45,7 +46,7 @@ pub async fn render_markdown_table_png(root: &Path, table: &str) -> anyhow::Resu
 }
 
 fn render_table_png_bytes(table: &str) -> anyhow::Result<Vec<u8>> {
-    let rows = parse_table_rows(table);
+    let rows = markdown::parse_table_rows(table);
     if rows.is_empty() {
         return Err(anyhow!("markdown table has no rows"));
     }
@@ -84,29 +85,6 @@ fn render_table_png_bytes(table: &str) -> anyhow::Result<Vec<u8>> {
     pixmap.fill(tiny_skia::Color::WHITE);
     resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
     Ok(pixmap.encode_png()?)
-}
-
-fn parse_table_rows(table: &str) -> Vec<Vec<String>> {
-    table
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.contains('|'))
-        .filter_map(|line| {
-            let cells: Vec<String> = line
-                .trim_matches('|')
-                .split('|')
-                .map(|cell| cell.trim().to_string())
-                .collect();
-            if cells.iter().all(|cell| {
-                let c = cell.replace(':', "");
-                c.contains('-') && c.chars().all(|ch| ch == '-')
-            }) {
-                None
-            } else {
-                Some(cells)
-            }
-        })
-        .collect()
 }
 
 fn table_svg(

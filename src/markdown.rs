@@ -100,6 +100,29 @@ pub fn split_tables(input: &str) -> Vec<MarkdownSegment> {
     out
 }
 
+pub fn parse_table_rows(table: &str) -> Vec<Vec<String>> {
+    table
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains('|'))
+        .filter_map(|line| {
+            let cells: Vec<String> = line
+                .trim_matches('|')
+                .split('|')
+                .map(|cell| cell.trim().to_string())
+                .collect();
+            if cells.iter().all(|cell| {
+                let c = cell.replace(':', "");
+                c.contains('-') && c.chars().all(|ch| ch == '-')
+            }) {
+                None
+            } else {
+                Some(cells)
+            }
+        })
+        .collect()
+}
+
 fn looks_like_table_header(header: &str, sep: &str) -> bool {
     header.contains('|')
         && sep.contains('|')
@@ -180,6 +203,12 @@ mod tests {
         assert!(matches!(&parts[0], MarkdownSegment::Text(s) if s == "before"));
         assert!(matches!(&parts[1], MarkdownSegment::Table(s) if s.contains("| 1 | 2 |")));
         assert!(matches!(&parts[2], MarkdownSegment::Text(s) if s == "after"));
+    }
+
+    #[test]
+    fn parses_table_rows_without_separator() {
+        let rows = parse_table_rows("| A | B |\n| --- | :---: |\n| 1 | 2 |");
+        assert_eq!(rows, vec![vec!["A", "B"], vec!["1", "2"]]);
     }
 
     #[test]

@@ -195,6 +195,7 @@ impl App {
 
     fn should_segment_tables(&self, msg: &OutboundMessage, channel: &str) -> bool {
         channel != "qqbot"
+            && channel != "feishu"
             && msg.text.as_deref().is_some_and(|text| {
                 markdown::split_tables(text)
                     .iter()
@@ -422,6 +423,23 @@ mod tests {
 
         let channels = app.store.list_channels().await.unwrap();
         assert!(matches!(channels[0].1, AdapterHealth::Reconnecting));
+    }
+
+    #[tokio::test]
+    async fn feishu_tables_are_not_split_into_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        let msg = OutboundMessage {
+            channel_id: ChannelId("feishu".into()),
+            conversation_id: ConversationId("oc_1".into()),
+            text: Some("| A | B |\n| --- | --- |\n| 1 | 2 |".into()),
+            format: MessageFormat::Markdown,
+            attachments: vec![],
+        };
+
+        assert!(!app.should_segment_tables(&msg, "feishu"));
+        assert!(app.should_segment_tables(&msg, "telegram"));
     }
 
     #[test]
