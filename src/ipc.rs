@@ -20,7 +20,9 @@ pub struct Request {
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
-    pub format: MessageFormat,
+    pub format: Option<MessageFormat>,
+    #[serde(default)]
+    pub raw_text: bool,
     #[serde(default)]
     pub attachments: Vec<AttachmentRef>,
     #[serde(default)]
@@ -190,7 +192,8 @@ mod tests {
     fn request_parses() {
         let r: Request = serde_json::from_str(r#"{"id":"1","op":"ping"}"#).unwrap();
         assert_eq!(r.op, "ping");
-        assert_eq!(r.format, MessageFormat::Plain);
+        assert_eq!(r.format, None);
+        assert!(!r.raw_text);
     }
 
     #[test]
@@ -199,6 +202,15 @@ mod tests {
             r##"{"id":"1","op":"send_message","text":"# hi","format":"markdown"}"##,
         )
         .unwrap();
-        assert_eq!(r.format, MessageFormat::Markdown);
+        assert_eq!(r.format, Some(MessageFormat::Markdown));
+    }
+
+    #[test]
+    fn request_parses_raw_text() {
+        let r: Request = serde_json::from_str(
+            r##"{"id":"1","op":"send_message","text":"# literal","raw_text":true}"##,
+        )
+        .unwrap();
+        assert!(r.raw_text);
     }
 }

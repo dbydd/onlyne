@@ -1,6 +1,6 @@
 # Rich media and Markdown
 
-Onlyne keeps the agent-facing API simple: callers still send one `send_message` request with `text`, `format`, and optional `attachments`.
+Onlyne keeps the agent-facing API simple: callers still send one `send_message` request with `text` and optional `attachments`.
 
 ```json
 {
@@ -8,15 +8,15 @@ Onlyne keeps the agent-facing API simple: callers still send one `send_message` 
   "channel_id": "telegram",
   "conversation_id": "...",
   "text": "# Report\n\n| A | B |\n| --- | --- |\n| 1 | 2 |",
-  "format": "markdown",
   "attachments": []
 }
 ```
 
 ## External API contract
 
-- `format` defaults to `plain`.
-- `format=markdown` means `text` is the whole Markdown document.
+- `text` is treated as one whole Markdown document by default.
+- Set `raw_text:true` only when text must be sent literally.
+- Legacy `format:"plain"` and `format:"markdown"` are still accepted.
 - Attachment inputs stay `path` or `url` only.
 - If one request fans out into multiple platform messages, history still stores one logical outbound message with `platform_metadata.delivery_parts`.
 

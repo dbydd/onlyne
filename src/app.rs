@@ -165,13 +165,14 @@ impl App {
     }
 
     async fn send(&self, req: Request) -> anyhow::Result<Value> {
+        let format = request_format(&req);
         let channel = req.channel_id.context("channel_id required")?;
         let conversation = req.conversation_id.context("conversation_id required")?;
         let msg = OutboundMessage {
             channel_id: ChannelId(channel.clone()),
             conversation_id: ConversationId(conversation),
             text: req.text,
-            format: req.format,
+            format,
             attachments: req.attachments,
         };
         self.validate_attachments(&msg.attachments).await?;
@@ -315,6 +316,14 @@ impl App {
         Ok(out)
     }
 }
+fn request_format(req: &Request) -> MessageFormat {
+    if req.raw_text {
+        MessageFormat::Plain
+    } else {
+        req.format.clone().unwrap_or(MessageFormat::Markdown)
+    }
+}
+
 fn merge_segmented_envelopes(
     msg: OutboundMessage,
     sent: Vec<MessageEnvelope>,
@@ -440,6 +449,15 @@ mod tests {
 
         assert!(!app.should_segment_tables(&msg, "feishu"));
         assert!(app.should_segment_tables(&msg, "telegram"));
+    }
+
+    #[test]
+    fn request_format_defaults_to_markdown_unless_raw() {
+        let mut req: Request =
+            serde_json::from_str(r##"{"op":"send_message","text":"# hi"}"##).unwrap();
+        assert_eq!(request_format(&req), MessageFormat::Markdown);
+        req.raw_text = true;
+        assert_eq!(request_format(&req), MessageFormat::Plain);
     }
 
     #[test]
