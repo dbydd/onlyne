@@ -225,6 +225,38 @@ Onlyne is a workspace-local IM channel broker. Use it only as a local messaging 
 | Reply text | `onlyne client '{"id":"reply","op":"reply_message","channel_id":"telegram","text":"hello","raw_text":true}'` |
 | Read channel history | `onlyne client '{"id":"hist","op":"fetch_channel_history","channel_id":"telegram","limit":20}'` |
 | Read merged history | `onlyne client '{"id":"all","op":"fetch_all_history","limit":50}'` |
+| FIFO send | `printf '# report\n' > .onlyne/channels/qqbot/in` |
+| FIFO receive | `cat .onlyne/channels/qqbot/out` |
+
+## File Descriptor IO
+
+When the daemon is running, each enabled channel plus `loopback` exposes FIFO files under `.onlyne/channels/<channel>/`:
+
+```text
+.onlyne/channels/qqbot/in
+.onlyne/channels/qqbot/out
+```
+
+- Write one message to `in`; EOF ends the message.
+- Read one inbound message from `out`; it blocks until a message is available.
+- FIFO input format is configured with `in_format = "markdown" | "raw_text"`.
+- FIFO output behavior is configured with `out_content = "latest_only" | "with_history"` and `out_cursor = "retain" | "consume"`.
+- `loopback/in` wakes the local agent session through Onlyne loopback.
+- `examples/fifo/smoke-fifo-all-qq.sh` writes all channels via FIFO and reads QQ inbound through `.onlyne/channels/qqbot/out`.
+
+## Config Schema
+
+Workspace config starts with Taplo's schema hint:
+
+```toml
+#:schema ./onlyne-config.schema.json
+```
+
+Refresh the generated schema after changing Rust config types:
+
+```bash
+cargo run --bin gen-schema > onlyne-config.schema.json
+```
 
 ## Subscribe to Events
 
@@ -398,6 +430,8 @@ mod tests {
         assert!(body.contains("loopback"));
         assert!(body.contains("onlyne_loopback"));
         assert!(body.contains("raw_text"));
+        assert!(body.contains(".onlyne/channels/qqbot/out"));
+        assert!(body.contains("gen-schema"));
         assert!(body.contains(".onlyne/.env"));
         assert!(!dir.path().join(".agents/skills/SKILL.md").exists());
     }
