@@ -1,6 +1,6 @@
 ---
 name: onlyne-channel-smoke
-description: Use this skill whenever working on Onlyne channel adapter examples, local CLI smoke tests, broadcast/multicast/multi-channel flows, or workspace-local auth/debug validation. It keeps work inside .onlyne, avoids real credential leakage, and uses the existing Unix socket/stdio protocol instead of adding runtime abstractions.
+description: Use this skill whenever working on Onlyne channel adapter examples, local CLI/FIFO smoke tests, broadcast/multicast/multi-channel flows, or workspace-local auth/debug validation. It keeps work inside .onlyne, avoids real credential leakage, and uses the existing Unix socket/stdio/FIFO protocol instead of adding runtime abstractions.
 ---
 
 # Onlyne Channel Smoke Skill

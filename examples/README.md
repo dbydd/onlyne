@@ -28,7 +28,7 @@ cargo run --example rich_media
 | `ONLYNE_FORMAT` | `plain` or `markdown`. Defaults to `plain`, except `rich_media` defaults to `markdown`. |
 | `ONLYNE_ATTACHMENTS` | JSON array of attachment refs. Defaults to `[]`. |
 | `ONLYNE_TARGETS` | Optional `channel[,channel...]`; if unset, examples read stored channels from `examples/.onlyne/state.db` through the daemon. |
-| `ONLYNE_<CHANNEL>_CONVERSATION_ID` | Required known target conversation id for channel smoke scripts; scripts write it to `bind_conversation_id`. |
+| `ONLYNE_<CHANNEL>_CONVERSATION_ID` | Known target conversation id for channel smoke scripts; scripts write it to `bind_conversation_id` and may fall back to stored history. |
 
 Channel variable names: `ONLYNE_TELEGRAM_CONVERSATION_ID`, `ONLYNE_FEISHU_CONVERSATION_ID`, `ONLYNE_QQBOT_CONVERSATION_ID`, `ONLYNE_WECHAT_CONVERSATION_ID`.
 
@@ -43,6 +43,7 @@ Channel variable names: `ONLYNE_TELEGRAM_CONVERSATION_ID`, `ONLYNE_FEISHU_CONVER
 | `broadcast` | Send one text to many configured channels. |
 | `multicast` | Alias-style many-channel sender. |
 | `multi_channel` | List channels, send to explicit targets, read merged history. |
+| `fifo/smoke-fifo-all-qq.sh` | Write all outbound channels through `.onlyne/channels/<channel>/in`, then read QQ inbound from `.onlyne/channels/qqbot/out`. |
 | `rich_media` | Send `format=markdown` messages and optional attachments. |
 
 Examples require the daemon to already be running; they do not spawn or supervise Onlyne. Telegram/WeChat Markdown tables are split out and rendered to PNG with Rust `resvg`; Feishu keeps tables inside the interactive card.
