@@ -3,7 +3,7 @@
 Config schema is generated from Rust config types with `schemars`:
 
 ```bash
-cargo run --bin gen-schema > onlyne-config.schema.json
+cargo run --features schema --bin gen-schema > onlyne-config.schema.json
 ```
 
 Workspace configs include Taplo's schema hint:

@@ -36,6 +36,7 @@ This file tracks implementation and verification notes. The root README is the p
 - `cd harness/pi-onlyne && npm run check`
 - Example scripts support `--local-check` where applicable.
 - `onlyne shell-completions zsh` and `onlyne shell-completions fish` generate completion scripts.
+- `cargo build --release` currently produces a stripped size-optimized binary around 7.3 MiB on macOS arm64.
 
 Live platform smoke is intentionally manual because it requires real credentials and may send external messages.
 

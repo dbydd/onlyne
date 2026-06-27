@@ -255,7 +255,7 @@ Workspace config starts with Taplo's schema hint:
 Refresh the generated schema after changing Rust config types:
 
 ```bash
-cargo run --bin gen-schema > onlyne-config.schema.json
+cargo run --features schema --bin gen-schema > onlyne-config.schema.json
 ```
 
 ## Subscribe to Events
