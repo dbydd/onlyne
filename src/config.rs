@@ -14,6 +14,16 @@ pub const DEFAULT_DOTENV: &str = r#"# Onlyne workspace-local secrets.
 pub const DEFAULT_CONFIG: &str = r#"[workspace]
 name = "onlyne"
 
+[io]
+out_content = "latest_only"
+out_cursor = "consume"
+history_context_messages = 20
+
+[loopback.io]
+out_content = "latest_only"
+out_cursor = "consume"
+history_context_messages = 20
+
 [adapters.telegram]
 enabled = false
 token = "$TELEGRAM_BOT_TOKEN"
@@ -53,6 +63,10 @@ pub struct Config {
     pub adapters: AdapterConfigs,
     #[serde(default)]
     pub rich_text: RichTextConfig,
+    #[serde(default)]
+    pub io: IoConfig,
+    #[serde(default)]
+    pub loopback: LoopbackConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +84,51 @@ impl Default for RichTextConfig {
 fn default_max_attachment_bytes() -> u64 {
     25 * 1024 * 1024
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IoOutContent {
+    #[default]
+    LatestOnly,
+    WithHistory,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IoOutCursor {
+    Retain,
+    #[default]
+    Consume,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IoConfig {
+    #[serde(default)]
+    pub out_content: IoOutContent,
+    #[serde(default)]
+    pub out_cursor: IoOutCursor,
+    #[serde(default = "default_history_context_messages")]
+    pub history_context_messages: u32,
+}
+impl Default for IoConfig {
+    fn default() -> Self {
+        Self {
+            out_content: IoOutContent::default(),
+            out_cursor: IoOutCursor::default(),
+            history_context_messages: default_history_context_messages(),
+        }
+    }
+}
+fn default_history_context_messages() -> u32 {
+    20
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LoopbackConfig {
+    #[serde(default)]
+    pub io: IoConfig,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
     pub name: String,
@@ -105,6 +164,8 @@ pub struct TelegramConfig {
     #[serde(default, deserialize_with = "empty_string_none")]
     pub bind_conversation_id: Option<String>,
     #[serde(default)]
+    pub io: Option<IoConfig>,
+    #[serde(default)]
     pub proxy: Option<String>,
 }
 impl Default for TelegramConfig {
@@ -114,6 +175,7 @@ impl Default for TelegramConfig {
             token: telegram_token(),
             token_env: None,
             bind_conversation_id: None,
+            io: None,
             proxy: None,
         }
     }
@@ -140,6 +202,8 @@ pub struct FeishuConfig {
     pub rich_text: bool,
     #[serde(default, deserialize_with = "empty_string_none")]
     pub bind_conversation_id: Option<String>,
+    #[serde(default)]
+    pub io: Option<IoConfig>,
 }
 impl Default for FeishuConfig {
     fn default() -> Self {
@@ -152,6 +216,7 @@ impl Default for FeishuConfig {
             domain: None,
             rich_text: true,
             bind_conversation_id: None,
+            io: None,
         }
     }
 }
@@ -183,6 +248,8 @@ pub struct QqBotConfig {
     pub rich_text: bool,
     #[serde(default, deserialize_with = "empty_string_none")]
     pub bind_conversation_id: Option<String>,
+    #[serde(default)]
+    pub io: Option<IoConfig>,
 }
 impl Default for QqBotConfig {
     fn default() -> Self {
@@ -195,6 +262,7 @@ impl Default for QqBotConfig {
             sandbox: false,
             rich_text: true,
             bind_conversation_id: None,
+            io: None,
         }
     }
 }
@@ -219,6 +287,8 @@ pub struct WechatConfig {
     pub cdn_base_url: String,
     #[serde(default, deserialize_with = "empty_string_none")]
     pub bind_conversation_id: Option<String>,
+    #[serde(default)]
+    pub io: Option<IoConfig>,
 }
 impl Default for WechatConfig {
     fn default() -> Self {
@@ -229,6 +299,7 @@ impl Default for WechatConfig {
             base_url: None,
             cdn_base_url: default_weixin_cdn(),
             bind_conversation_id: None,
+            io: None,
         }
     }
 }

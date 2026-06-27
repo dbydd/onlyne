@@ -1,6 +1,6 @@
 use crate::{
     adapters,
-    config::{self, Config, Env},
+    config::{self, Config, Env, IoConfig, IoOutContent, IoOutCursor},
     core::*,
     events::EventBus,
     ipc::Request,
@@ -10,8 +10,12 @@ use crate::{
 };
 use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{Mutex, mpsc};
+use std::{collections::HashMap, os::unix::fs::FileTypeExt, sync::Arc};
+use tokio::{
+    fs::OpenOptions,
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::{Mutex, mpsc},
+};
 
 pub struct App {
     pub workspace: Workspace,
@@ -102,6 +106,30 @@ impl App {
         }
         Ok(())
     }
+    pub async fn start_channel_io(self: &Arc<Self>) -> anyhow::Result<()> {
+        for channel in self.io_channels().await {
+            ensure_channel_fifos(&self.workspace, &channel)?;
+            let app = self.clone();
+            let ch = channel.clone();
+            tokio::spawn(async move {
+                app.channel_in_loop(ch).await;
+            });
+            let app = self.clone();
+            tokio::spawn(async move {
+                app.channel_out_loop(channel).await;
+            });
+        }
+        Ok(())
+    }
+
+    async fn io_channels(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.adapters.lock().await.keys().cloned().collect();
+        out.push("loopback".into());
+        out.sort();
+        out.dedup();
+        out
+    }
+
     pub async fn handle(&self, req: Request) -> anyhow::Result<Value> {
         match req.op.as_str() {
             "ping" => Ok(json!({"pong":true})),
@@ -115,6 +143,7 @@ impl App {
             }
             "send_message" | "reply_message" => self.send(req).await,
             "loopback" => self.loopback(req).await,
+            "mark_io_consumed" => self.mark_io_consumed(req).await,
             "fetch_history" | "fetch_all_history" => Ok(json!(
                 self.store
                     .fetch_history(None, None, req.limit.unwrap_or(100))
@@ -145,6 +174,17 @@ impl App {
             _ => Err(anyhow!("unknown op {}", req.op)),
         }
     }
+    async fn mark_io_consumed(&self, req: Request) -> anyhow::Result<Value> {
+        let id = MessageId(req.message_id.context("message_id required")?);
+        let msg = self
+            .store
+            .find_message(&id)
+            .await?
+            .context("message not found")?;
+        self.store.mark_io_consumed(&msg).await?;
+        Ok(json!({"consumed":true}))
+    }
+
     async fn loopback(&self, req: Request) -> anyhow::Result<Value> {
         let format = request_format(&req);
         let msg = MessageEnvelope {
@@ -168,6 +208,155 @@ impl App {
         self.publish_history_appended(&msg);
         self.events.publish(Event::InboundMessage(msg.clone()));
         Ok(json!(msg))
+    }
+
+    async fn channel_in_loop(self: Arc<Self>, channel: String) {
+        let path = self.workspace.channel_dir(&channel).join("in");
+        loop {
+            match OpenOptions::new().read(true).open(&path).await {
+                Ok(mut file) => {
+                    let mut text = String::new();
+                    if file.read_to_string(&mut text).await.is_ok() && !text.trim().is_empty() {
+                        if channel == "loopback" {
+                            let _ = self.inject_loopback(text).await;
+                        } else {
+                            let req = Request {
+                                id: None,
+                                op: "send_message".into(),
+                                channel_id: Some(channel.clone()),
+                                message_id: None,
+                                text: Some(text),
+                                format: None,
+                                raw_text: false,
+                                attachments: vec![],
+                                limit: None,
+                            };
+                            if let Err(e) = self.send(req).await {
+                                self.events.publish(Event::Warning {
+                                    channel_id: Some(ChannelId(channel.clone())),
+                                    message: format!("channel in send failed: {e}"),
+                                });
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.events.publish(Event::Warning {
+                        channel_id: Some(ChannelId(channel.clone())),
+                        message: format!("open channel in failed: {e}"),
+                    });
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
+    async fn channel_out_loop(self: Arc<Self>, channel: String) {
+        let path = self.workspace.channel_dir(&channel).join("out");
+        loop {
+            match OpenOptions::new().write(true).open(&path).await {
+                Ok(mut file) => {
+                    if let Some(msg) = self.next_io_message(&channel).await {
+                        let rendered = self.render_io_message(&channel, &msg).await;
+                        if file.write_all(rendered.as_bytes()).await.is_ok()
+                            && self.io_config(&channel).out_cursor == IoOutCursor::Consume
+                        {
+                            let _ = self.store.mark_io_consumed(&msg).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.events.publish(Event::Warning {
+                        channel_id: Some(ChannelId(channel.clone())),
+                        message: format!("open channel out failed: {e}"),
+                    });
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
+    async fn next_io_message(&self, channel: &str) -> Option<MessageEnvelope> {
+        loop {
+            let cfg = self.io_config(channel);
+            let id = ChannelId(channel.to_string());
+            let msg = if cfg.out_cursor == IoOutCursor::Consume {
+                self.store
+                    .next_inbound_after_cursor(&id)
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                self.store.latest_inbound(&id).await.ok().flatten()
+            };
+            if msg.is_some() {
+                return msg;
+            }
+            let mut rx = self.events.subscribe();
+            while let Ok(ev) = rx.recv().await {
+                if matches!(ev, Event::InboundMessage(ref m) if m.channel_id.0 == channel) {
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn render_io_message(&self, channel: &str, msg: &MessageEnvelope) -> String {
+        let cfg = self.io_config(channel);
+        if cfg.out_content == IoOutContent::LatestOnly {
+            return format!("{}\n", msg.text.clone().unwrap_or_default());
+        }
+        let history = self
+            .store
+            .fetch_history(
+                Some(&msg.channel_id),
+                Some(&msg.conversation_id),
+                cfg.history_context_messages,
+            )
+            .await
+            .unwrap_or_default();
+        let mut out = String::from("--- history ---\n");
+        for m in history
+            .iter()
+            .rev()
+            .filter(|m| m.message_id != msg.message_id)
+        {
+            out.push_str(&transcript_line(m));
+        }
+        out.push_str("--- new ---\n");
+        out.push_str(&transcript_line(msg));
+        out
+    }
+
+    fn io_config(&self, channel: &str) -> IoConfig {
+        let mut cfg = self.config.io.clone();
+        let override_cfg = match channel {
+            "telegram" => self.config.adapters.telegram.io.as_ref(),
+            "feishu" => self.config.adapters.feishu.io.as_ref(),
+            "qqbot" => self.config.adapters.qqbot.io.as_ref(),
+            "wechat" => self.config.adapters.wechat.io.as_ref(),
+            "loopback" => Some(&self.config.loopback.io),
+            _ => None,
+        };
+        if let Some(override_cfg) = override_cfg {
+            cfg = override_cfg.clone();
+        }
+        cfg
+    }
+
+    async fn inject_loopback(&self, text: String) -> anyhow::Result<Value> {
+        self.loopback(Request {
+            id: None,
+            op: "loopback".into(),
+            channel_id: None,
+            message_id: None,
+            text: Some(text),
+            format: None,
+            raw_text: true,
+            attachments: vec![],
+            limit: None,
+        })
+        .await
     }
 
     async fn accept_or_prompt_handshake(&self, inbound: &MessageEnvelope) -> bool {
@@ -412,6 +601,42 @@ impl App {
         Ok(out)
     }
 }
+fn ensure_channel_fifos(workspace: &Workspace, channel: &str) -> anyhow::Result<()> {
+    let dir = workspace.channel_dir(channel);
+    std::fs::create_dir_all(&dir)?;
+    for name in ["in", "out"] {
+        let path = dir.join(name);
+        if path.exists() {
+            if path.metadata()?.file_type().is_fifo() {
+                continue;
+            }
+            std::fs::remove_file(&path)?;
+        }
+        let status = std::process::Command::new("mkfifo").arg(&path).status()?;
+        if !status.success() {
+            return Err(anyhow!("mkfifo failed for {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn transcript_line(m: &MessageEnvelope) -> String {
+    let sender = m
+        .sender_name
+        .as_deref()
+        .or(m.sender_id.as_deref())
+        .unwrap_or(match m.direction {
+            Direction::Inbound => "inbound",
+            Direction::Outbound => "outbound",
+        });
+    format!(
+        "[{} {}] {}\n",
+        m.timestamp.to_rfc3339(),
+        sender,
+        m.text.clone().unwrap_or_default()
+    )
+}
+
 fn adapter_bindings(cfg: &Config, env: &Env) -> HashMap<String, String> {
     [
         (

@@ -64,6 +64,12 @@ fn migrate_conn(conn: &Connection) -> anyhow::Result<()> {
             );
             create index if not exists messages_channel_conversation_time on messages(channel_id, conversation_id, timestamp);
             create index if not exists messages_time on messages(timestamp);
+            create table if not exists io_cursors (
+              channel_id text primary key,
+              message_id text not null,
+              timestamp text not null,
+              updated_at text not null
+            );
         "#)?;
     ensure_column(
         conn,
@@ -72,6 +78,31 @@ fn migrate_conn(conn: &Connection) -> anyhow::Result<()> {
         "text not null default '\"plain\"'",
     )?;
     Ok(())
+}
+
+fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageEnvelope> {
+    let direction: String = row.get(3)?;
+    let format: String = row.get(7)?;
+    let attachments: String = row.get(8)?;
+    let state: String = row.get(9)?;
+    let ts: String = row.get(10)?;
+    let meta: String = row.get(11)?;
+    Ok(MessageEnvelope {
+        channel_id: ChannelId(row.get(0)?),
+        conversation_id: ConversationId(row.get(1)?),
+        message_id: MessageId(row.get(2)?),
+        direction: serde_json::from_str(&direction).unwrap_or(Direction::Inbound),
+        sender_id: row.get(4)?,
+        sender_name: row.get(5)?,
+        text: row.get(6)?,
+        format: serde_json::from_str(&format).unwrap_or_default(),
+        attachments: serde_json::from_str(&attachments).unwrap_or_default(),
+        delivery_state: serde_json::from_str(&state).unwrap_or(DeliveryState::Failed),
+        timestamp: chrono::DateTime::parse_from_rfc3339(&ts)
+            .map(|d| d.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now()),
+        platform_metadata: serde_json::from_str(&meta).unwrap_or_default(),
+    })
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, spec: &str) -> anyhow::Result<()> {
@@ -225,6 +256,75 @@ impl Store {
         Ok(rows)
     }
 
+    pub async fn next_inbound_after_cursor(
+        &self,
+        channel: &ChannelId,
+    ) -> anyhow::Result<Option<MessageEnvelope>> {
+        let cursor = self.io_cursor(channel).await?;
+        let conn = self.conn.lock().await;
+        let sql = if cursor.is_some() {
+            "select channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, format, attachments, delivery_state, timestamp, platform_metadata from messages where channel_id=?1 and direction=?2 and timestamp>?3 order by timestamp asc limit 1"
+        } else {
+            "select channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, format, attachments, delivery_state, timestamp, platform_metadata from messages where channel_id=?1 and direction=?2 order by timestamp asc limit 1"
+        };
+        let direction = serde_json::to_string(&Direction::Inbound)?;
+        let mut stmt = conn.prepare(sql)?;
+        let row = if let Some((_, ts)) = cursor {
+            stmt.query_row(params![channel.0, direction, ts], message_from_row)
+                .optional()?
+        } else {
+            stmt.query_row(params![channel.0, direction], message_from_row)
+                .optional()?
+        };
+        Ok(row)
+    }
+
+    pub async fn latest_inbound(
+        &self,
+        channel: &ChannelId,
+    ) -> anyhow::Result<Option<MessageEnvelope>> {
+        let conn = self.conn.lock().await;
+        let direction = serde_json::to_string(&Direction::Inbound)?;
+        conn.query_row(
+            "select channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, format, attachments, delivery_state, timestamp, platform_metadata from messages where channel_id=?1 and direction=?2 order by timestamp desc limit 1",
+            params![channel.0, direction],
+            message_from_row,
+        )
+        .optional()
+        .context("latest inbound")
+    }
+
+    pub async fn find_message(&self, id: &MessageId) -> anyhow::Result<Option<MessageEnvelope>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "select channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, format, attachments, delivery_state, timestamp, platform_metadata from messages where message_id=?1",
+            params![id.0],
+            message_from_row,
+        )
+        .optional()
+        .context("find message")
+    }
+
+    pub async fn mark_io_consumed(&self, m: &MessageEnvelope) -> anyhow::Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "insert into io_cursors(channel_id, message_id, timestamp, updated_at) values(?1, ?2, ?3, ?4) on conflict(channel_id) do update set message_id=excluded.message_id, timestamp=excluded.timestamp, updated_at=excluded.updated_at",
+            params![m.channel_id.0, m.message_id.0, m.timestamp.to_rfc3339(), chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    async fn io_cursor(&self, channel: &ChannelId) -> anyhow::Result<Option<(MessageId, String)>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "select message_id, timestamp from io_cursors where channel_id=?1",
+            params![channel.0],
+            |row| Ok((MessageId(row.get(0)?), row.get(1)?)),
+        )
+        .optional()
+        .context("io cursor")
+    }
+
     pub async fn find_conversation(
         &self,
         channel: &ChannelId,
@@ -242,6 +342,43 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn io_cursor_consumes_inbound_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path().join("state.db")).unwrap();
+        let m = MessageEnvelope {
+            channel_id: ChannelId("loopback".into()),
+            conversation_id: ConversationId("self".into()),
+            message_id: MessageId("m1".into()),
+            direction: Direction::Inbound,
+            sender_id: None,
+            sender_name: None,
+            text: Some("wake".into()),
+            format: MessageFormat::Plain,
+            attachments: vec![],
+            delivery_state: DeliveryState::Delivered,
+            timestamp: chrono::Utc::now(),
+            platform_metadata: serde_json::json!({}),
+        };
+        s.append_message(&m).await.unwrap();
+
+        assert_eq!(
+            s.next_inbound_after_cursor(&ChannelId("loopback".into()))
+                .await
+                .unwrap()
+                .unwrap()
+                .message_id,
+            MessageId("m1".into())
+        );
+        s.mark_io_consumed(&m).await.unwrap();
+        assert!(
+            s.next_inbound_after_cursor(&ChannelId("loopback".into()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn history_roundtrip() {
         let dir = tempfile::tempdir().unwrap();

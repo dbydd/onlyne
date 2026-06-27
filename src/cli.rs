@@ -103,6 +103,7 @@ pub async fn run() -> anyhow::Result<()> {
             init_logging(&ws)?;
             let app = App::load_with_debug(ws, debug).await?;
             app.start_all().await?;
+            app.start_channel_io().await?;
             ipc::serve_socket(app).await
         }
         Cmd::Stdio => {

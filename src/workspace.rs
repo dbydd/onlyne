@@ -59,6 +59,12 @@ impl Workspace {
     pub fn adapter_dir(&self) -> PathBuf {
         self.onlyne.join("adapters")
     }
+    pub fn channels_dir(&self) -> PathBuf {
+        self.onlyne.join("channels")
+    }
+    pub fn channel_dir(&self, channel: &str) -> PathBuf {
+        self.channels_dir().join(channel)
+    }
 
     pub fn bootstrap(&self) -> anyhow::Result<()> {
         std::fs::create_dir_all(self.onlyne.join("run"))?;
@@ -66,6 +72,7 @@ impl Workspace {
         std::fs::create_dir_all(self.media_dir())?;
         std::fs::create_dir_all(self.rendered_dir())?;
         std::fs::create_dir_all(self.adapter_dir())?;
+        std::fs::create_dir_all(self.channels_dir())?;
         if !self.config_path().exists() {
             std::fs::write(self.config_path(), crate::config::DEFAULT_CONFIG)?;
         }
