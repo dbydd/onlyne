@@ -15,11 +15,13 @@ pub const DEFAULT_CONFIG: &str = r#"[workspace]
 name = "onlyne"
 
 [io]
+in_format = "markdown"
 out_content = "latest_only"
 out_cursor = "consume"
 history_context_messages = 20
 
 [loopback.io]
+in_format = "markdown"
 out_content = "latest_only"
 out_cursor = "consume"
 history_context_messages = 20
@@ -87,6 +89,14 @@ fn default_max_attachment_bytes() -> u64 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
+pub enum IoInFormat {
+    #[default]
+    Markdown,
+    RawText,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum IoOutContent {
     #[default]
     LatestOnly,
@@ -104,6 +114,8 @@ pub enum IoOutCursor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IoConfig {
     #[serde(default)]
+    pub in_format: IoInFormat,
+    #[serde(default)]
     pub out_content: IoOutContent,
     #[serde(default)]
     pub out_cursor: IoOutCursor,
@@ -113,6 +125,7 @@ pub struct IoConfig {
 impl Default for IoConfig {
     fn default() -> Self {
         Self {
+            in_format: IoInFormat::default(),
             out_content: IoOutContent::default(),
             out_cursor: IoOutCursor::default(),
             history_context_messages: default_history_context_messages(),

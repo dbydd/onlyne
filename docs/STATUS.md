@@ -10,7 +10,7 @@ This file tracks implementation and verification notes. The root README is the p
 - Stdio mode using the same NDJSON schema.
 - SQLite history store.
 - Event subscription over local IPC.
-- Per-channel FIFO IO under `.onlyne/channels/<channel>/`.
+- Per-channel FIFO IO under `.onlyne/channels/<channel>/`, including configurable Markdown/raw-text input.
 - Loopback activation messages over local IPC.
 - Singleton channel routing via per-adapter `bind_conversation_id`.
 - Workspace-local agent skill export via `onlyne export-skill`.

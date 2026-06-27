@@ -1,6 +1,6 @@
 use crate::{
     adapters,
-    config::{self, Config, Env, IoConfig, IoOutContent, IoOutCursor},
+    config::{self, Config, Env, IoConfig, IoInFormat, IoOutContent, IoOutCursor},
     core::*,
     events::EventBus,
     ipc::Request,
@@ -220,6 +220,8 @@ impl App {
                         if channel == "loopback" {
                             let _ = self.inject_loopback(text).await;
                         } else {
+                            let raw_text =
+                                self.io_config(&channel).in_format == IoInFormat::RawText;
                             let req = Request {
                                 id: None,
                                 op: "send_message".into(),
@@ -227,7 +229,7 @@ impl App {
                                 message_id: None,
                                 text: Some(text),
                                 format: None,
-                                raw_text: false,
+                                raw_text,
                                 attachments: vec![],
                                 limit: None,
                             };
@@ -345,6 +347,7 @@ impl App {
     }
 
     async fn inject_loopback(&self, text: String) -> anyhow::Result<Value> {
+        let raw_text = self.io_config("loopback").in_format == IoInFormat::RawText;
         self.loopback(Request {
             id: None,
             op: "loopback".into(),
@@ -352,7 +355,7 @@ impl App {
             message_id: None,
             text: Some(text),
             format: None,
-            raw_text: true,
+            raw_text,
             attachments: vec![],
             limit: None,
         })

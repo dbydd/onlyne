@@ -34,6 +34,7 @@ Rules:
 - One open/write/close lifecycle is one message; EOF terminates the message.
 - Multi-line writes are preserved.
 - Content is treated as Markdown by default, matching `send_message` IPC semantics.
+- Set `in_format = "raw_text"` to send FIFO input literally.
 - External channels route through the channel's configured or `/handshake`-bound `bind_conversation_id`.
 - `loopback/in` injects a local loopback inbound activation message.
 - No conversation id is accepted through the FIFO path.
@@ -65,6 +66,7 @@ Global defaults live in `[io]`:
 
 ```toml
 [io]
+in_format = "markdown"      # markdown | raw_text
 out_content = "latest_only" # latest_only | with_history
 out_cursor = "consume"      # retain | consume
 history_context_messages = 20
@@ -74,6 +76,7 @@ Per-channel overrides live under adapter IO tables:
 
 ```toml
 [adapters.telegram.io]
+in_format = "raw_text"
 out_content = "with_history"
 out_cursor = "retain"
 history_context_messages = 50
@@ -83,6 +86,7 @@ history_context_messages = 50
 
 ```toml
 [loopback.io]
+in_format = "markdown"
 out_content = "latest_only"
 out_cursor = "consume"
 ```
