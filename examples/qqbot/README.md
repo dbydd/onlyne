@@ -15,12 +15,10 @@ cd examples/qqbot
 ## Run
 
 ```bash
-./smoke-qqbot.sh
-# or send directly:
 ONLYNE_QQBOT_CONVERSATION_ID='<group_openid>' ONLYNE_TEXT='zig' ./smoke-qqbot.sh
 ```
 
-Without `ONLYNE_QQBOT_CONVERSATION_ID`, the script waits for any inbound QQ Bot text, sends `zig`, then fetches QQ Bot/all history.
+The script writes `ONLYNE_QQBOT_CONVERSATION_ID` to `[adapters.qqbot].bind_conversation_id`, sends `zig`, then fetches QQ Bot/all history.
 
 ```bash
 ./smoke-qqbot.sh --local-check

@@ -68,50 +68,40 @@ sleep 0.5
 "$ONLYNE_BIN" client '{"id":"status","op":"status"}'
 "$ONLYNE_BIN" client '{"id":"channels","op":"list_channels"}'
 
-if [[ -z "$CONV" ]]; then
-  echo "Send any text to $CHANNEL now; Onlyne will reply with: $TEXT"
-  CONV=$(python3 - "$EVENT_LOG" "$TIMEOUT" "$CHANNEL" "$ONLYNE_BIN" <<'PY'
-import json, pathlib, subprocess, sys, time
-path=pathlib.Path(sys.argv[1]); end=time.time()+int(sys.argv[2]); channel=sys.argv[3]; bin=sys.argv[4]; seen=0
-
-def event_conv():
-    global seen
-    if not path.exists(): return None
-    lines=path.read_text(errors='replace').splitlines()
-    for line in lines[seen:]:
-        try: obj=json.loads(line)
-        except Exception: continue
-        if obj.get('type') == 'inbound_message':
-            data=obj.get('data',{}).get('data',{})
-            if data.get('channel_id') == channel and data.get('conversation_id'):
-                return data['conversation_id']
-    seen=len(lines)
-
-def history_conv():
-    req=json.dumps({"id":"wait-hist","op":"fetch_channel_history","channel_id":channel,"limit":20})
-    try:
-        out=subprocess.check_output([bin, 'client', req], text=True, stderr=subprocess.DEVNULL)
-        data=json.loads(out).get('data', [])
-    except Exception:
-        return None
-    for msg in data:
-        if msg.get('direction') == 'inbound' and msg.get('conversation_id'):
-            return msg['conversation_id']
-
-while time.time() < end:
-    conv=event_conv() or history_conv()
-    if conv:
-        print(conv); raise SystemExit(0)
-    time.sleep(0.5)
-raise SystemExit(1)
+[[ -n "$CONV" ]] || { echo "set $CONV_VAR to the single configured conversation id" >&2; exit 3; }
+python3 - "$CHANNEL" "$CONV" <<'PY'
+import pathlib, sys
+channel, conv = sys.argv[1], sys.argv[2]
+path = pathlib.Path('.onlyne/config.toml')
+text = path.read_text()
+needle = f'[adapters.{channel}]\n'
+if needle not in text:
+    raise SystemExit(f'missing {needle.strip()} in {path}')
+lines = text.splitlines()
+out = []
+in_section = False
+wrote = False
+for line in lines:
+    if line.startswith('[adapters.'):
+        if in_section and not wrote:
+            out.append(f'bind_conversation_id = "{conv}"')
+            wrote = True
+        in_section = line == needle.strip()
+    if in_section and line.startswith('bind_conversation_id ='):
+        if not wrote:
+            out.append(f'bind_conversation_id = "{conv}"')
+            wrote = True
+        continue
+    out.append(line)
+if in_section and not wrote:
+    out.append(f'bind_conversation_id = "{conv}"')
+path.write_text('\n'.join(out) + '\n')
 PY
-) || { echo "no inbound $CHANNEL message captured; see $EVENT_LOG and $DAEMON_LOG" >&2; exit 3; }
-fi
 
-echo "sending '$TEXT' to $CHANNEL conversation: $CONV"
-REQ=$(python3 - "$CHANNEL" "$CONV" "$TEXT" <<'PY'
+echo "sending '$TEXT' to bound $CHANNEL conversation: $CONV"
+REQ=$(python3 - "$CHANNEL" "$TEXT" <<'PY'
 import json, sys
-print(json.dumps({"id":"send","op":"send_message","channel_id":sys.argv[1],"conversation_id":sys.argv[2],"text":sys.argv[3]}, ensure_ascii=False))
+print(json.dumps({"id":"send","op":"send_message","channel_id":sys.argv[1],"text":sys.argv[2]}, ensure_ascii=False))
 PY
 )
 "$ONLYNE_BIN" client "$REQ"

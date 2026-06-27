@@ -31,7 +31,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    Init(InitArgs),
+    Init,
+    ExportSkill,
     Run {
         #[arg(long)]
         debug: bool,
@@ -45,12 +46,6 @@ enum Cmd {
     ShellCompletions {
         shell: CompletionShell,
     },
-}
-
-#[derive(Args)]
-struct InitArgs {
-    #[arg(long)]
-    export_skill: bool,
 }
 
 #[derive(Args)]
@@ -77,7 +72,8 @@ struct AuthArgs {
 enum AuthChannel {
     Feishu,
     Qqbot,
-    Weixin,
+    #[value(alias = "weixin")]
+    Wechat,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -90,14 +86,16 @@ pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let workspace = cli.workspace.clone();
     match cli.cmd {
-        Cmd::Init(args) => {
+        Cmd::Init => {
             let ws = resolve_workspace(workspace.clone())?;
             ws.bootstrap()?;
             println!("initialized {}", ws.dir().display());
-            if args.export_skill {
-                let path = export_agent_skill(&ws)?;
-                println!("exported skill {}", path.display());
-            }
+            Ok(())
+        }
+        Cmd::ExportSkill => {
+            let ws = resolve_workspace(workspace.clone())?;
+            let path = export_agent_skill(&ws)?;
+            println!("exported skill {}", path.display());
             Ok(())
         }
         Cmd::Run { debug } => {
@@ -170,12 +168,12 @@ async fn auth_cmd(workspace: Option<PathBuf>, args: AuthArgs) -> anyhow::Result<
             )
             .await
         }
-        AuthChannel::Weixin => {
+        AuthChannel::Wechat => {
             if args.sandbox {
-                anyhow::bail!("weixin auth does not use --sandbox");
+                anyhow::bail!("wechat auth does not use --sandbox");
             }
             if args.app_id.is_some() || args.app_secret.is_some() {
-                anyhow::bail!("weixin auth does not use --app-id/--app-secret; use --token or QR");
+                anyhow::bail!("wechat auth does not use --app-id/--app-secret; use --token or QR");
             }
             auth::auth_weixin(
                 &ws,
@@ -215,13 +213,15 @@ Onlyne is a workspace-local IM channel broker. Use it only as a local messaging 
 | Need | Command |
 | --- | --- |
 | Initialize workspace | `onlyne init` |
+| Export/update local skill | `onlyne export-skill` |
 | Run daemon | `onlyne run` |
 | Run with metadata replies | `onlyne run --debug` |
 | Health check | `onlyne client '{"id":"ping","op":"ping"}'` |
 | Status/channels | `onlyne client '{"id":"status","op":"status"}'` |
-| Send Markdown | `onlyne client '{"id":"send","op":"send_message","channel_id":"qqbot","conversation_id":"ID","text":"# Report\\n\\n| A | B |\\n|---|---|\\n| 1 | 2 |"}'` |
-| Send literal text | `onlyne client '{"id":"send","op":"send_message","channel_id":"telegram","conversation_id":"CHAT_ID","text":"# not a heading","raw_text":true}'` |
-| Reply text | `onlyne client '{"id":"reply","op":"reply_message","channel_id":"telegram","conversation_id":"CHAT_ID","text":"hello","raw_text":true}'` |
+| Send Markdown | `onlyne client '{"id":"send","op":"send_message","channel_id":"qqbot","text":"# Report\\n\\n| A | B |\\n|---|---|\\n| 1 | 2 |"}'` |
+| Send literal text | `onlyne client '{"id":"send","op":"send_message","channel_id":"telegram","text":"# not a heading","raw_text":true}'` |
+| Wake local agent | `onlyne client '{"id":"wake","op":"loopback","text":"background job needs attention","raw_text":true}'` |
+| Reply text | `onlyne client '{"id":"reply","op":"reply_message","channel_id":"telegram","text":"hello","raw_text":true}'` |
 | Read channel history | `onlyne client '{"id":"hist","op":"fetch_channel_history","channel_id":"telegram","limit":20}'` |
 | Read merged history | `onlyne client '{"id":"all","op":"fetch_all_history","limit":50}'` |
 
@@ -247,17 +247,18 @@ Subscribed event lines have `event:true`; request responses have `ok:true` or `o
 External callers send one whole Markdown document in `text`; Markdown is the default. Do not split tables, formulas, or code blocks before sending. Set `raw_text:true` only for literal plain text.
 
 - QQ Bot receives the whole document as QQ extended Markdown (`msg_type=2`, `markdown.content`), including tables and formulas.
-- Telegram and Weixin may internally split Markdown tables into rendered image parts.
+- Telegram and WeChat may internally split Markdown tables into rendered image parts.
 - Feishu sends Markdown as an interactive card and keeps supported table content in-card.
 - The response/history may contain `platform_metadata.delivery_parts` when one logical send becomes multiple platform messages.
 
 If the host agent has Onlyne tools, prefer:
 
 ```text
-onlyne_send({ channelId, conversationId, text })
+onlyne_send({ channelId, text })
 onlyne_broadcast({ targets, text })
+onlyne_loopback({ text, rawText? })
 // raw literal text only:
-onlyne_send({ channelId, conversationId, text, rawText: true })
+onlyne_send({ channelId, text, rawText: true })
 ```
 
 Otherwise use the CLI/socket request shown above.
@@ -267,7 +268,7 @@ Otherwise use the CLI/socket request shown above.
 1. Start `onlyne run --debug` in the workspace.
 2. Send a normal message to the target platform bot/account.
 3. Read the platform reply; it contains redacted channel/conversation/thread metadata.
-4. Use the returned `channel_id` and `conversation_id` in `send_message` or `reply_message`.
+4. Put the returned conversation value into that adapter's `bind_conversation_id`, then send with only `channel_id`.
 
 ## Common Mistakes
 
@@ -376,12 +377,9 @@ mod tests {
     }
 
     #[test]
-    fn init_export_skill_flag_is_parsed() {
-        let cli = Cli::try_parse_from(["onlyne", "init", "--export-skill"]).unwrap();
-        match cli.cmd {
-            Cmd::Init(args) => assert!(args.export_skill),
-            _ => panic!("expected init command"),
-        }
+    fn export_skill_command_is_parsed() {
+        let cli = Cli::try_parse_from(["onlyne", "export-skill"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::ExportSkill));
     }
 
     #[test]
@@ -396,6 +394,8 @@ mod tests {
         let body = std::fs::read_to_string(expected).unwrap();
         assert!(body.contains("name: onlyne"));
         assert!(body.contains("send_message"));
+        assert!(body.contains("loopback"));
+        assert!(body.contains("onlyne_loopback"));
         assert!(body.contains("raw_text"));
         assert!(body.contains(".onlyne/.env"));
         assert!(!dir.path().join(".agents/skills/SKILL.md").exists());
@@ -404,7 +404,8 @@ mod tests {
     #[test]
     fn completions_include_export_skill() {
         let text = completion_text(Zsh);
-        assert!(text.contains("--export-skill"));
+        assert!(text.contains("export-skill"));
+        assert!(!text.contains("--export-skill"));
     }
 
     #[test]

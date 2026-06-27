@@ -27,8 +27,8 @@ cargo build --release
 
 ```bash
 onlyne init
-# 可选：把 Onlyne agent skill 导出到当前工作区
-onlyne init --export-skill
+# 可选：把 Onlyne agent skill 导出/更新到当前工作区
+onlyne export-skill
 onlyne run
 ```
 
@@ -37,7 +37,10 @@ onlyne run
 ```bash
 onlyne client '{"id":"1","op":"ping"}'
 onlyne client '{"id":"2","op":"status"}'
+onlyne client '{"id":"wake","op":"loopback","text":"后台任务需要处理","raw_text":true}'
 ```
+
+`loopback` 会写入本地 `loopback` channel 的入站消息，订阅中的 agent 可以用后台脚本唤醒自己，不需要外部 IM adapter。
 
 stdio 模式使用同一套请求格式：
 
@@ -64,16 +67,18 @@ echo '{"id":"1","op":"ping"}' | onlyne stdio
 
 Onlyne 的工作区数据不会默认写到全局可变目录。
 
-`onlyne init --export-skill` 还会在选定工作区下写入本地 agent skill：`.agents/skills/onlyne/SKILL.md`。这是工作区本地导出，不会写入 `~/.agents/skills`。
+`onlyne export-skill` 会在选定工作区下写入或更新本地 agent skill：`.agents/skills/onlyne/SKILL.md`。这是工作区本地导出，不会写入 `~/.agents/skills`。
 
 ## Channel 配置
 
+每个启用的 channel 都是单会话路由：可以配置一个 `bind_conversation_id`，也可以留空并在 adapter 连通后从目标会话发送 `/handshake` 自动绑定。agent 发送时只传 `channel_id`（`telegram`、`feishu`、`qqbot`、`wechat`）。未绑定 channel 收到非 `/handshake` 消息时会提示发送 `/handshake`。
+
 | Channel | 配置方式 |
 | --- | --- |
-| Telegram | 在 `.onlyne/.env` 写入 `TELEGRAM_BOT_TOKEN`，并启用 `[adapters.telegram]`。 |
-| 飞书/Lark | 运行 `onlyne auth feishu` 扫码，或用 `--app-id` 和 `--app-secret` 绑定。 |
-| QQ Bot | 运行 `onlyne auth qqbot --app-id <id> --app-secret <secret>`；沙箱凭证加 `--sandbox`。 |
-| 微信 ilink | 运行 `onlyne auth weixin` 扫码，或用 `--token` 绑定。 |
+| Telegram | 在 `.onlyne/.env` 写入 `TELEGRAM_BOT_TOKEN`，启用 `[adapters.telegram]`，然后设置 `bind_conversation_id` 或发送 `/handshake`。 |
+| 飞书/Lark | 运行 `onlyne auth feishu`，启用 `[adapters.feishu]`，然后设置 `bind_conversation_id` 或发送 `/handshake`。 |
+| QQ Bot | 运行 `onlyne auth qqbot --app-id <id> --app-secret <secret>`；沙箱凭证加 `--sandbox`；设置 `bind_conversation_id` 或发送 `/handshake`。 |
+| 微信 ilink | 运行 `onlyne auth wechat`，启用 `[adapters.wechat]`，然后设置 `bind_conversation_id` 或发送 `/handshake`。 |
 
 认证命令只会写入选定工作区的 `.onlyne/`。
 
@@ -82,14 +87,15 @@ Adapter SDK：飞书使用 `openlark`，Telegram 使用 `teloxide`，微信 ilin
 ## 常用命令
 
 ```bash
-onlyne [--workspace <dir>] init [--export-skill]
+onlyne [--workspace <dir>] init
+onlyne [--workspace <dir>] export-skill
 onlyne [--workspace <dir>] run [--debug]
 onlyne stdio
 onlyne client '<json-request>'
 onlyne config-check
 onlyne auth feishu [--app-id <id> --app-secret <secret>]
 onlyne auth qqbot --app-id <id> --app-secret <secret> [--sandbox]
-onlyne auth weixin [--token <token>]
+onlyne auth wechat [--token <token>]
 onlyne shell-completions zsh
 onlyne shell-completions fish
 ```

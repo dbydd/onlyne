@@ -9,7 +9,6 @@ Onlyne uses newline-delimited JSON over Unix socket and stdio.
   "id": "optional-client-id",
   "op": "ping",
   "channel_id": "optional-channel",
-  "conversation_id": "optional-conversation",
   "text": "optional text, treated as Markdown by default",
   "raw_text": false,
   "format": "markdown",
@@ -44,11 +43,12 @@ Malformed JSON uses `code=bad_json`.
 | `list_conversations` | Optional `channel_id`. |
 | `subscribe_events` | Starts async event lines on the same connection. |
 | `unsubscribe_events` | Stops event lines for the connection. |
-| `send_message` | Requires `channel_id` and `conversation_id`; uses `text` as Markdown by default, optional `raw_text:true` for literal text, legacy optional `format` (`plain` or `markdown`), and optional `attachments`. |
+| `send_message` | Requires `channel_id`; Onlyne routes to that channel's configured or `/handshake`-bound `bind_conversation_id`. Uses `text` as Markdown by default, optional `raw_text:true` for literal text, legacy optional `format` (`plain` or `markdown`), and optional `attachments`. |
 | `reply_message` | Currently same local send path as `send_message`. |
+| `loopback` | Injects a local inbound activation message on channel `loopback`; optional `text`, `raw_text`, `format`, and `attachments`. |
 | `fetch_history` | Merged history. |
 | `fetch_all_history` | Alias for merged history. |
-| `fetch_channel_history` | Requires `channel_id`; optional `conversation_id`. |
+| `fetch_channel_history` | Requires `channel_id`; returns that channel's configured conversation history. |
 | `start_adapter` | Compatibility response; adapters start with daemon startup. |
 | `stop_adapter` | Compatibility response. |
 | `restart_adapter` | Compatibility response. |

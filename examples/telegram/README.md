@@ -15,12 +15,10 @@ python3 ../shared/enable_adapter.py telegram
 ## Run
 
 ```bash
-./smoke-telegram.sh
-# or send directly:
 ONLYNE_TELEGRAM_CONVERSATION_ID='<chat_id>' ONLYNE_TEXT='zig' ./smoke-telegram.sh
 ```
 
-Without `ONLYNE_TELEGRAM_CONVERSATION_ID`, the script waits for any inbound Telegram text, sends `zig`, then fetches Telegram/all history.
+The script writes `ONLYNE_TELEGRAM_CONVERSATION_ID` to `[adapters.telegram].bind_conversation_id`, sends `zig`, then fetches Telegram/all history.
 
 ```bash
 ./smoke-telegram.sh --local-check

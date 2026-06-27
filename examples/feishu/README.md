@@ -14,12 +14,10 @@ cd examples/feishu
 ## Run
 
 ```bash
-./smoke-feishu.sh
-# or send directly:
 ONLYNE_FEISHU_CONVERSATION_ID='<chat_id>' ONLYNE_TEXT='zig' ./smoke-feishu.sh
 ```
 
-Without `ONLYNE_FEISHU_CONVERSATION_ID`, the script waits for any inbound Feishu/Lark text, sends `zig`, then fetches Feishu/all history.
+The script writes `ONLYNE_FEISHU_CONVERSATION_ID` to `[adapters.feishu].bind_conversation_id`, sends `zig`, then fetches Feishu/all history.
 
 ```bash
 ./smoke-feishu.sh --local-check

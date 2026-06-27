@@ -27,8 +27,8 @@ Use the built binary at `target/release/onlyne`, or run from source with `cargo 
 
 ```bash
 onlyne init
-# Optional: export an agent skill into this workspace
-onlyne init --export-skill
+# Optional: export/update an agent skill into this workspace
+onlyne export-skill
 onlyne run
 ```
 
@@ -37,7 +37,10 @@ In another terminal under the same workspace tree:
 ```bash
 onlyne client '{"id":"1","op":"ping"}'
 onlyne client '{"id":"2","op":"status"}'
+onlyne client '{"id":"wake","op":"loopback","text":"background job needs attention","raw_text":true}'
 ```
+
+`loopback` writes a local inbound message on channel `loopback`, so subscribed agents can wake themselves from background scripts without an external IM adapter.
 
 Stdio mode uses the same request schema:
 
@@ -64,16 +67,18 @@ By default, commands start at the current directory and walk upward until they f
 
 Workspace data intentionally does not default to global mutable state.
 
-`onlyne init --export-skill` also writes a local agent skill to `.agents/skills/onlyne/SKILL.md` under the selected workspace root. This is intentionally workspace-local and does not touch `~/.agents/skills`.
+`onlyne export-skill` writes or updates a local agent skill at `.agents/skills/onlyne/SKILL.md` under the selected workspace root. This is intentionally workspace-local and does not touch `~/.agents/skills`.
 
 ## Channels
 
+Each enabled channel is singleton-routed: configure one `bind_conversation_id`, or leave it empty and send `/handshake` from the desired conversation after the adapter connects. Agents send with only `channel_id` (`telegram`, `feishu`, `qqbot`, or `wechat`). Non-handshake messages to an unbound channel get prompted to send `/handshake`.
+
 | Channel | Setup |
 | --- | --- |
-| Telegram | Put `TELEGRAM_BOT_TOKEN` in `.onlyne/.env` and enable `[adapters.telegram]`. |
-| Feishu/Lark | Run `onlyne auth feishu`, or bind with `--app-id` and `--app-secret`. |
-| QQ Bot | Run `onlyne auth qqbot --app-id <id> --app-secret <secret>`; add `--sandbox` for sandbox credentials. |
-| WeChat ilink | Run `onlyne auth weixin`, or bind with `--token`. |
+| Telegram | Put `TELEGRAM_BOT_TOKEN` in `.onlyne/.env`, enable `[adapters.telegram]`, then set `bind_conversation_id` or send `/handshake`. |
+| Feishu/Lark | Run `onlyne auth feishu`, enable `[adapters.feishu]`, then set `bind_conversation_id` or send `/handshake`. |
+| QQ Bot | Run `onlyne auth qqbot --app-id <id> --app-secret <secret>`; add `--sandbox` for sandbox credentials; set `bind_conversation_id` or send `/handshake`. |
+| WeChat ilink | Run `onlyne auth wechat`, enable `[adapters.wechat]`, then set `bind_conversation_id` or send `/handshake`. |
 
 Auth commands write only to the selected workspace `.onlyne/` directory.
 
@@ -82,14 +87,15 @@ Adapter SDKs: Feishu uses `openlark`, Telegram uses `teloxide`, and WeChat ilink
 ## Common commands
 
 ```bash
-onlyne [--workspace <dir>] init [--export-skill]
+onlyne [--workspace <dir>] init
+onlyne [--workspace <dir>] export-skill
 onlyne [--workspace <dir>] run [--debug]
 onlyne stdio
 onlyne client '<json-request>'
 onlyne config-check
 onlyne auth feishu [--app-id <id> --app-secret <secret>]
 onlyne auth qqbot --app-id <id> --app-secret <secret> [--sandbox]
-onlyne auth weixin [--token <token>]
+onlyne auth wechat [--token <token>]
 onlyne shell-completions zsh
 onlyne shell-completions fish
 ```

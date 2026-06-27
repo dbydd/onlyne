@@ -16,11 +16,11 @@ PY2
     cat >&2 <<'MSG'
 No WEIXIN_ILINK_TOKEN found in .onlyne/.env
 Run first:
-  ../../target/debug/onlyne auth weixin
+  ../../target/debug/onlyne auth wechat
   # or
-  ../../target/debug/onlyne auth weixin --token '<token>'
+  ../../target/debug/onlyne auth wechat --token '<token>'
 MSG
     exit 2
   fi
 fi
-ONLYNE_CHANNEL=weixin ONLYNE_ENV_PREFIX=WECHAT ../shared/channel-smoke.sh "$@"
+ONLYNE_CHANNEL=wechat ONLYNE_ENV_PREFIX=WECHAT ../shared/channel-smoke.sh "$@"

@@ -39,14 +39,14 @@ Single channel:
 
 ```bash
 cd examples/wechat
-../../target/debug/onlyne auth weixin
-./smoke-wechat.sh
+../../target/debug/onlyne auth wechat
+ONLYNE_WECHAT_CONVERSATION_ID='<peer_user_id>' ./smoke-wechat.sh
 ```
 
 Explicit target send:
 
 ```bash
-ONLYNE_TARGETS='weixin:peer@im.wechat,telegram:12345' ONLYNE_TEXT='zig' examples/shared/send-many.py
+ONLYNE_TARGETS='wechat,telegram' ONLYNE_TEXT='zig' examples/shared/send-many.py
 ```
 
 Shell completions:

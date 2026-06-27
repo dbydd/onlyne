@@ -1,5 +1,5 @@
 use crate::{
-    adapters::allowed,
+    adapters::bound_matches,
     config::{Env, TelegramConfig},
     core::*,
     markdown, media,
@@ -28,7 +28,7 @@ use tokio::{
 
 pub struct TelegramAdapter {
     token: String,
-    allow_chats: Vec<String>,
+    bind_conversation_id: Option<String>,
     client: Client,
     bot: Bot,
     running: Arc<AtomicBool>,
@@ -36,11 +36,11 @@ pub struct TelegramAdapter {
 }
 impl TelegramAdapter {
     pub fn new(cfg: &TelegramConfig, env: &Env) -> anyhow::Result<Self> {
-        let token = env.secret(&cfg.token_env, &cfg.token, "telegram token")?;
+        let token = env.secret(&cfg.token, &cfg.token_env, "telegram token")?;
         Ok(Self {
             bot: Bot::new(token.clone()),
             token,
-            allow_chats: cfg.allow_chats.clone(),
+            bind_conversation_id: cfg.bind_conversation_id.clone(),
             client: Client::new(),
             running: Arc::new(AtomicBool::new(false)),
             task: None,
@@ -107,7 +107,7 @@ impl Adapter for TelegramAdapter {
         let token = self.token.clone();
         let client = self.client.clone();
         let running = self.running.clone();
-        let allow = self.allow_chats.clone();
+        let bind = self.bind_conversation_id.clone();
         let inbound = ctx.inbound.clone();
         let events = ctx.events.clone();
         let media_dir = ctx.media_dir.clone();
@@ -127,7 +127,7 @@ impl Adapter for TelegramAdapter {
                                 offset = upd.update_id + 1;
                                 if let Some(msg) = upd.message {
                                     handle_msg(
-                                        &client, &token, &allow, &media_dir, &inbound, &events, msg,
+                                        &client, &token, &bind, &media_dir, &inbound, &events, msg,
                                     )
                                     .await;
                                 }
@@ -265,18 +265,18 @@ fn telegram_chat_id(s: &str) -> anyhow::Result<ChatId> {
 async fn handle_msg(
     client: &Client,
     token: &str,
-    allow: &[String],
+    bind: &Option<String>,
     media_root: &std::path::Path,
     inbound: &mpsc::Sender<MessageEnvelope>,
     events: &mpsc::Sender<Event>,
     msg: TgMessage,
 ) {
     let chat = msg.chat.id.to_string();
-    if !allowed(allow, &chat) {
+    if !bound_matches(bind, &chat) {
         let _ = events
             .send(Event::Warning {
                 channel_id: Some(ChannelId("telegram".into())),
-                message: format!("rejected telegram chat {chat}; add to allow_chats"),
+                message: format!("rejected telegram chat {chat}; add to bind_conversation_id"),
             })
             .await;
         return;

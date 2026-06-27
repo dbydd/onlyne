@@ -19,6 +19,7 @@ pub struct App {
     pub events: EventBus,
     pub store: Store,
     adapters: Mutex<HashMap<String, Box<dyn Adapter>>>,
+    bindings: Mutex<HashMap<String, String>>,
     debug_reply: bool,
 }
 impl App {
@@ -42,12 +43,14 @@ impl App {
                 .await?;
             map.insert(id, a);
         }
+        let bindings = adapter_bindings(&cfg, &env);
         Ok(Arc::new(Self {
             workspace,
             config: cfg,
             events: EventBus::new(1024),
             store,
             adapters: Mutex::new(map),
+            bindings: Mutex::new(bindings),
             debug_reply,
         }))
     }
@@ -56,6 +59,9 @@ impl App {
         let app = self.clone();
         tokio::spawn(async move {
             while let Some(m) = rx.recv().await {
+                if !app.accept_or_prompt_handshake(&m).await {
+                    continue;
+                }
                 let _ = app.store.append_message(&m).await;
                 app.publish_history_appended(&m);
                 app.events.publish(Event::InboundMessage(m.clone()));
@@ -108,6 +114,7 @@ impl App {
                 Ok(json!(self.store.list_conversations(c.as_ref()).await?))
             }
             "send_message" | "reply_message" => self.send(req).await,
+            "loopback" => self.loopback(req).await,
             "fetch_history" | "fetch_all_history" => Ok(json!(
                 self.store
                     .fetch_history(None, None, req.limit.unwrap_or(100))
@@ -118,10 +125,9 @@ impl App {
                     .channel_id
                     .map(ChannelId)
                     .context("channel_id required")?;
-                let v = req.conversation_id.map(ConversationId);
                 Ok(json!(
                     self.store
-                        .fetch_history(Some(&c), v.as_ref(), req.limit.unwrap_or(100))
+                        .fetch_history(Some(&c), None, req.limit.unwrap_or(100))
                         .await?
                 ))
             }
@@ -139,6 +145,87 @@ impl App {
             _ => Err(anyhow!("unknown op {}", req.op)),
         }
     }
+    async fn loopback(&self, req: Request) -> anyhow::Result<Value> {
+        let format = request_format(&req);
+        let msg = MessageEnvelope {
+            channel_id: ChannelId("loopback".into()),
+            conversation_id: ConversationId("self".into()),
+            message_id: now_id("loopback"),
+            direction: Direction::Inbound,
+            sender_id: Some("local".into()),
+            sender_name: Some("Onlyne Loopback".into()),
+            text: req.text.or_else(|| Some("loopback activation".into())),
+            format,
+            attachments: req.attachments,
+            delivery_state: DeliveryState::Delivered,
+            timestamp: chrono::Utc::now(),
+            platform_metadata: json!({"source":"loopback"}),
+        };
+        self.store
+            .upsert_channel(&msg.channel_id, AdapterHealth::Ready)
+            .await?;
+        self.store.append_message(&msg).await?;
+        self.publish_history_appended(&msg);
+        self.events.publish(Event::InboundMessage(msg.clone()));
+        Ok(json!(msg))
+    }
+
+    async fn accept_or_prompt_handshake(&self, inbound: &MessageEnvelope) -> bool {
+        let channel = &inbound.channel_id.0;
+        let conversation = &inbound.conversation_id.0;
+        if let Some(bind) = self.bindings.lock().await.get(channel).cloned() {
+            return bind == *conversation;
+        }
+        if inbound
+            .text
+            .as_deref()
+            .is_some_and(|s| s.trim() == "/handshake")
+        {
+            self.bindings
+                .lock()
+                .await
+                .insert(channel.clone(), conversation.clone());
+            if let Err(e) = set_config_binding(&self.workspace.config_path(), channel, conversation)
+            {
+                self.events.publish(Event::Warning {
+                    channel_id: Some(inbound.channel_id.clone()),
+                    message: format!("handshake bound in memory but config update failed: {e}"),
+                });
+            }
+            self.events.publish(Event::WorkspaceStateChanged {
+                message: format!("bound {channel} to {conversation}"),
+            });
+            return true;
+        }
+        self.prompt_handshake(inbound).await;
+        false
+    }
+
+    async fn prompt_handshake(&self, inbound: &MessageEnvelope) {
+        let msg = OutboundMessage {
+            channel_id: inbound.channel_id.clone(),
+            conversation_id: inbound.conversation_id.clone(),
+            text: Some("Onlyne is not bound to this conversation yet. Send /handshake here to bind this channel.".into()),
+            format: MessageFormat::Plain,
+            attachments: vec![],
+        };
+        let guard = self.adapters.lock().await;
+        let Some(a) = guard.get(&inbound.channel_id.0) else {
+            return;
+        };
+        match a.send_message(msg).await {
+            Ok(out) => {
+                let _ = self.store.append_message(&out).await;
+                self.publish_history_appended(&out);
+                self.events.publish(Event::OutboundMessage(out));
+            }
+            Err(e) => self.events.publish(Event::Warning {
+                channel_id: Some(inbound.channel_id.clone()),
+                message: format!("handshake prompt failed: {e}"),
+            }),
+        }
+    }
+
     async fn debug_reply_to(&self, inbound: &MessageEnvelope) {
         let msg = OutboundMessage {
             channel_id: inbound.channel_id.clone(),
@@ -167,7 +254,7 @@ impl App {
     async fn send(&self, req: Request) -> anyhow::Result<Value> {
         let format = request_format(&req);
         let channel = req.channel_id.context("channel_id required")?;
-        let conversation = req.conversation_id.context("conversation_id required")?;
+        let conversation = self.bound_conversation(&channel).await?;
         let msg = OutboundMessage {
             channel_id: ChannelId(channel.clone()),
             conversation_id: ConversationId(conversation),
@@ -192,6 +279,15 @@ impl App {
         self.publish_history_appended(&out);
         self.events.publish(Event::OutboundMessage(out.clone()));
         Ok(json!(out))
+    }
+
+    async fn bound_conversation(&self, channel: &str) -> anyhow::Result<String> {
+        self.bindings
+            .lock()
+            .await
+            .get(channel)
+            .cloned()
+            .ok_or_else(|| anyhow!("channel {channel} has no bind_conversation_id; send /handshake from the target conversation"))
     }
 
     fn should_segment_tables(&self, msg: &OutboundMessage, channel: &str) -> bool {
@@ -316,6 +412,72 @@ impl App {
         Ok(out)
     }
 }
+fn adapter_bindings(cfg: &Config, env: &Env) -> HashMap<String, String> {
+    [
+        (
+            "telegram",
+            env.value(&cfg.adapters.telegram.bind_conversation_id),
+        ),
+        (
+            "feishu",
+            env.value(&cfg.adapters.feishu.bind_conversation_id),
+        ),
+        ("qqbot", env.value(&cfg.adapters.qqbot.bind_conversation_id)),
+        (
+            "wechat",
+            env.value(&cfg.adapters.wechat.bind_conversation_id),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(k, v)| v.map(|v| (k.to_string(), v)))
+    .collect()
+}
+
+fn set_config_binding(
+    path: &std::path::Path,
+    channel: &str,
+    conversation: &str,
+) -> anyhow::Result<()> {
+    let mut lines: Vec<String> = std::fs::read_to_string(path)?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let headers: Vec<String> = if channel == "wechat" {
+        vec!["[adapters.wechat]".into(), "[adapters.weixin]".into()]
+    } else {
+        vec![format!("[adapters.{channel}]")]
+    };
+    let start = lines
+        .iter()
+        .position(|line| headers.iter().any(|h| line.trim() == h))
+        .ok_or_else(|| anyhow!("missing adapter config for {channel}"))?;
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, line)| line.trim_start().starts_with('['))
+        .map(|(i, _)| i)
+        .unwrap_or(lines.len());
+    if let Some(i) =
+        (start + 1..end).find(|&i| lines[i].trim_start().starts_with("bind_conversation_id"))
+    {
+        lines[i] = format!(
+            "bind_conversation_id = \"{}\"",
+            conversation.replace('"', "\\\"")
+        );
+    } else {
+        lines.insert(
+            start + 1,
+            format!(
+                "bind_conversation_id = \"{}\"",
+                conversation.replace('"', "\\\"")
+            ),
+        );
+    }
+    std::fs::write(path, format!("{}\n", lines.join("\n")))?;
+    Ok(())
+}
+
 fn request_format(req: &Request) -> MessageFormat {
     if req.raw_text {
         MessageFormat::Plain
@@ -435,6 +597,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loopback_injects_inbound_history_and_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        let mut rx = app.events.subscribe();
+
+        app.handle(
+            serde_json::from_str(r##"{"op":"loopback","text":"wake","raw_text":true}"##).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let history = app
+            .store
+            .fetch_history(Some(&ChannelId("loopback".into())), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(history[0].conversation_id.0, "self");
+        assert_eq!(history[0].text.as_deref(), Some("wake"));
+        assert!(matches!(history[0].direction, Direction::Inbound));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Event::HistoryAppended { .. }
+        ));
+        assert!(matches!(rx.try_recv().unwrap(), Event::InboundMessage(_)));
+    }
+
+    #[tokio::test]
+    async fn handshake_binds_empty_channel_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws.clone()).await.unwrap();
+        let msg = MessageEnvelope {
+            channel_id: ChannelId("telegram".into()),
+            conversation_id: ConversationId("chat-1".into()),
+            message_id: MessageId("m1".into()),
+            direction: Direction::Inbound,
+            sender_id: None,
+            sender_name: None,
+            text: Some("/handshake".into()),
+            format: MessageFormat::Plain,
+            attachments: vec![],
+            delivery_state: DeliveryState::Delivered,
+            timestamp: Utc::now(),
+            platform_metadata: serde_json::json!({}),
+        };
+
+        assert!(app.accept_or_prompt_handshake(&msg).await);
+        assert_eq!(app.bound_conversation("telegram").await.unwrap(), "chat-1");
+        assert!(
+            std::fs::read_to_string(ws.config_path())
+                .unwrap()
+                .contains("bind_conversation_id = \"chat-1\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn non_handshake_does_not_bind_empty_channel_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        let msg = MessageEnvelope {
+            channel_id: ChannelId("telegram".into()),
+            conversation_id: ConversationId("chat-1".into()),
+            message_id: MessageId("m1".into()),
+            direction: Direction::Inbound,
+            sender_id: None,
+            sender_name: None,
+            text: Some("hello".into()),
+            format: MessageFormat::Plain,
+            attachments: vec![],
+            delivery_state: DeliveryState::Delivered,
+            timestamp: Utc::now(),
+            platform_metadata: serde_json::json!({}),
+        };
+
+        assert!(!app.accept_or_prompt_handshake(&msg).await);
+        assert!(app.bound_conversation("telegram").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn bound_conversation_uses_channel_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        ws.bootstrap().unwrap();
+        let mut cfg = std::fs::read_to_string(ws.config_path()).unwrap();
+        cfg = cfg.replacen(
+            "bind_conversation_id = \"\"",
+            "bind_conversation_id = \"chat-1\"",
+            1,
+        );
+        std::fs::write(ws.config_path(), cfg).unwrap();
+        let app = App::load(ws).await.unwrap();
+
+        assert_eq!(app.bound_conversation("telegram").await.unwrap(), "chat-1");
+        assert!(app.bound_conversation("feishu").await.is_err());
+    }
+
+    #[tokio::test]
     async fn feishu_tables_are_not_split_into_images() {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::resolve(dir.path());
@@ -463,7 +724,7 @@ mod tests {
     #[test]
     fn debug_reply_text_includes_threadish_metadata() {
         let msg = MessageEnvelope {
-            channel_id: ChannelId("weixin".into()),
+            channel_id: ChannelId("wechat".into()),
             conversation_id: ConversationId("peer@im.wechat".into()),
             message_id: MessageId("m1".into()),
             direction: Direction::Inbound,
@@ -481,7 +742,7 @@ mod tests {
             }),
         };
         let out = debug_reply_text(&msg);
-        assert!(out.contains("channel_id=weixin"));
+        assert!(out.contains("channel_id=wechat"));
         assert!(out.contains("conversation_id=peer@im.wechat"));
         assert!(out.contains("sender_id=sender"));
         assert!(out.contains("message_id=m1"));

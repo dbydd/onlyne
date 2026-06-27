@@ -1,5 +1,5 @@
 use crate::{
-    adapters::allowed,
+    adapters::bound_matches,
     config::{Env, FeishuConfig},
     core::*,
     markdown, media,
@@ -29,7 +29,7 @@ pub struct FeishuAdapter {
     app_id: String,
     app_secret: String,
     domain: String,
-    allow_chats: Vec<String>,
+    bind_conversation_id: Option<String>,
     rich_text: bool,
     client: Client,
     running: Arc<AtomicBool>,
@@ -38,15 +38,15 @@ pub struct FeishuAdapter {
 impl FeishuAdapter {
     pub fn new(cfg: &FeishuConfig, env: &Env) -> anyhow::Result<Self> {
         Ok(Self {
-            app_id: env.secret(&cfg.app_id_env, &cfg.app_id, "feishu app_id")?,
-            app_secret: env.secret(&cfg.app_secret_env, &cfg.app_secret, "feishu app_secret")?,
+            app_id: env.secret(&cfg.app_id, &cfg.app_id_env, "feishu app_id")?,
+            app_secret: env.secret(&cfg.app_secret, &cfg.app_secret_env, "feishu app_secret")?,
             domain: cfg
                 .domain
                 .clone()
                 .unwrap_or_else(|| "https://open.feishu.cn".into())
                 .trim_end_matches('/')
                 .into(),
-            allow_chats: cfg.allow_chats.clone(),
+            bind_conversation_id: cfg.bind_conversation_id.clone(),
             rich_text: cfg.rich_text,
             client: Client::new(),
             running: Arc::new(AtomicBool::new(false)),
@@ -83,14 +83,14 @@ impl Adapter for FeishuAdapter {
         let domain = self.domain.clone();
         let app_id = self.app_id.clone();
         let app_secret = self.app_secret.clone();
-        let allow = self.allow_chats.clone();
+        let bind = self.bind_conversation_id.clone();
         let running = self.running.clone();
         let inbound = ctx.inbound.clone();
         let events = ctx.events.clone();
         self.task = Some(tokio::spawn(async move {
             while running.load(Ordering::SeqCst) {
                 let reason =
-                    match feishu_ws_loop(&domain, &app_id, &app_secret, &allow, &inbound).await {
+                    match feishu_ws_loop(&domain, &app_id, &app_secret, &bind, &inbound).await {
                         Ok(()) => "websocket closed".to_string(),
                         Err(e) => e.to_string(),
                     };
@@ -408,7 +408,7 @@ async fn feishu_ws_loop(
     domain: &str,
     app_id: &str,
     app_secret: &str,
-    allow: &[String],
+    bind: &Option<String>,
     inbound: &mpsc::Sender<MessageEnvelope>,
 ) -> anyhow::Result<()> {
     let (payload_tx, mut payload_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -439,7 +439,7 @@ async fn feishu_ws_loop(
             }
             payload = payload_rx.recv() => {
                 let Some(payload) = payload else { return Ok(()); };
-                if let Some(env) = parse_feishu_event_payload(&payload, allow) {
+                if let Some(env) = parse_feishu_event_payload(&payload, bind) {
                     let _ = inbound.send(env).await;
                 }
             }
@@ -483,7 +483,7 @@ struct FeishuChat {
     chat_id: Option<String>,
 }
 
-fn parse_feishu_event_payload(payload: &[u8], allow: &[String]) -> Option<MessageEnvelope> {
+fn parse_feishu_event_payload(payload: &[u8], bind: &Option<String>) -> Option<MessageEnvelope> {
     let envelope: FeishuEnvelope = serde_json::from_slice(payload).ok()?;
     if envelope.header.event_type != "im.message.receive_v1" {
         return None;
@@ -509,7 +509,7 @@ fn parse_feishu_event_payload(payload: &[u8], allow: &[String]) -> Option<Messag
             .and_then(|c| c.chat_id.clone())
             .or_else(|| envelope.event.message.chat_id.clone())?
     };
-    if !allowed(allow, &conversation_id) {
+    if !bound_matches(bind, &conversation_id) {
         return None;
     }
     let content = envelope.event.message.content.unwrap_or_default();
@@ -554,7 +554,7 @@ mod tests {
             }
         }"#;
 
-        let msg = parse_feishu_event_payload(payload, &[]).unwrap();
+        let msg = parse_feishu_event_payload(payload, &Some("ou_user".into())).unwrap();
 
         assert_eq!(msg.conversation_id.0, "ou_user");
         assert_eq!(msg.sender_id.as_deref(), Some("ou_user"));
@@ -572,7 +572,7 @@ mod tests {
             }
         }"#;
 
-        let msg = parse_feishu_event_payload(payload, &[]).unwrap();
+        let msg = parse_feishu_event_payload(payload, &Some("oc_group".into())).unwrap();
 
         assert_eq!(msg.conversation_id.0, "oc_group");
         assert_eq!(msg.sender_id.as_deref(), Some("ou_user"));
@@ -626,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_list_filters_resolved_conversation() {
+    fn binding_filters_resolved_conversation() {
         let payload = br#"{
             "header":{"event_id":"evt-3","event_type":"im.message.receive_v1"},
             "event":{
@@ -635,7 +635,7 @@ mod tests {
             }
         }"#;
 
-        assert!(parse_feishu_event_payload(payload, &["other".into()]).is_none());
-        assert!(parse_feishu_event_payload(payload, &["ou_user".into()]).is_some());
+        assert!(parse_feishu_event_payload(payload, &Some("other".into())).is_none());
+        assert!(parse_feishu_event_payload(payload, &Some("ou_user".into())).is_some());
     }
 }

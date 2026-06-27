@@ -10,6 +10,9 @@ This file tracks implementation and verification notes. The root README is the p
 - Stdio mode using the same NDJSON schema.
 - SQLite history store.
 - Event subscription over local IPC.
+- Loopback activation messages over local IPC.
+- Singleton channel routing via per-adapter `bind_conversation_id`.
+- Workspace-local agent skill export via `onlyne export-skill`.
 - Feishu/Lark and WeChat auth helpers.
 - Zsh/fish completion generation.
 - CLI examples for single-channel, broadcast, multicast, and multi-channel workflows.
@@ -27,8 +30,18 @@ This file tracks implementation and verification notes. The root README is the p
 
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
-- `cargo test` currently covers 19 tests.
+- `cargo test` currently covers 48 tests.
+- `cd harness/pi-onlyne && npm run check`
 - Example scripts support `--local-check` where applicable.
 - `onlyne shell-completions zsh` and `onlyne shell-completions fish` generate completion scripts.
 
 Live platform smoke is intentionally manual because it requires real credentials and may send external messages.
+
+## Archived next requirement
+
+Expose per-channel file-descriptor style IO under `.onlyne/channels/<channel>/`:
+
+- `in`: write side, so local scripts can `echo 'message' > .onlyne/channels/telegram/in` and send through that channel's bound conversation.
+- `out`: read side, so local scripts can `cat .onlyne/channels/telegram/out` and consume one inbound message.
+- Keep paths stable enough for symlinks.
+- Preserve singleton channel routing: channel name selects the adapter; conversation is still the configured or `/handshake`-bound `bind_conversation_id`.

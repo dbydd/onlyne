@@ -16,8 +16,6 @@ pub struct Request {
     #[serde(default)]
     pub channel_id: Option<String>,
     #[serde(default)]
-    pub conversation_id: Option<String>,
-    #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
     pub format: Option<MessageFormat>,

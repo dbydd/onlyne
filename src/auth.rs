@@ -72,7 +72,7 @@ pub async fn auth_weixin(ws: &Workspace, opts: WeixinAuthOptions) -> anyhow::Res
         (r.token, r.base_url.unwrap_or(base))
     };
     save_weixin_auth(ws, &token, Some(&actual_base))?;
-    println!("weixin auth saved to {}", ws.dir().display());
+    println!("wechat auth saved to {}", ws.dir().display());
     Ok(())
 }
 
@@ -85,8 +85,8 @@ pub fn save_feishu_auth(
     let mut cfg = config::load_config(&ws.config_path())?;
     cfg.adapters.feishu.enabled = true;
     cfg.adapters.feishu.domain = Some(domain.to_string());
-    cfg.adapters.feishu.app_id = None;
-    cfg.adapters.feishu.app_secret = None;
+    cfg.adapters.feishu.app_id = Some("$FEISHU_APP_ID".into());
+    cfg.adapters.feishu.app_secret = Some("$FEISHU_APP_SECRET".into());
     std::fs::write(ws.config_path(), toml::to_string_pretty(&cfg)?)?;
     set_dotenv(&ws.dotenv_path(), "FEISHU_APP_ID", app_id)?;
     set_dotenv(&ws.dotenv_path(), "FEISHU_APP_SECRET", app_secret)?;
@@ -102,8 +102,8 @@ pub fn save_qqbot_auth(
     let mut cfg = config::load_config(&ws.config_path())?;
     cfg.adapters.qqbot.enabled = true;
     cfg.adapters.qqbot.sandbox = sandbox;
-    cfg.adapters.qqbot.app_id = None;
-    cfg.adapters.qqbot.app_secret = None;
+    cfg.adapters.qqbot.app_id = Some("$QQBOT_APP_ID".into());
+    cfg.adapters.qqbot.app_secret = Some("$QQBOT_APP_SECRET".into());
     std::fs::write(ws.config_path(), toml::to_string_pretty(&cfg)?)?;
     set_dotenv(&ws.dotenv_path(), "QQBOT_APP_ID", app_id)?;
     set_dotenv(&ws.dotenv_path(), "QQBOT_APP_SECRET", app_secret)?;
@@ -112,11 +112,11 @@ pub fn save_qqbot_auth(
 
 pub fn save_weixin_auth(ws: &Workspace, token: &str, base_url: Option<&str>) -> anyhow::Result<()> {
     let mut cfg = config::load_config(&ws.config_path())?;
-    cfg.adapters.weixin.enabled = true;
+    cfg.adapters.wechat.enabled = true;
     if let Some(base) = base_url.filter(|s| !s.trim().is_empty()) {
-        cfg.adapters.weixin.base_url = Some(trim_base(base));
+        cfg.adapters.wechat.base_url = Some(trim_base(base));
     }
-    cfg.adapters.weixin.token = None;
+    cfg.adapters.wechat.token = Some("$WEIXIN_ILINK_TOKEN".into());
     std::fs::write(ws.config_path(), toml::to_string_pretty(&cfg)?)?;
     set_dotenv(&ws.dotenv_path(), "WEIXIN_ILINK_TOKEN", token)?;
     Ok(())
@@ -357,7 +357,7 @@ async fn weixin_qr(
         .json()
         .await?;
     if qr.qrcode.is_empty() || qr.qrcode_img_content.is_empty() {
-        return Err(anyhow!("weixin QR response missing qrcode"));
+        return Err(anyhow!("wechat QR response missing qrcode"));
     }
     println!(
         "Open WeChat and scan this QR URL:\n{}\n",
@@ -382,13 +382,13 @@ async fn weixin_qr(
                     base_url: (!status.baseurl.is_empty()).then_some(status.baseurl),
                 });
             }
-            "expired" => return Err(anyhow!("weixin QR expired; rerun auth")),
+            "expired" => return Err(anyhow!("wechat QR expired; rerun auth")),
             "scaned" => println!("scanned; confirm on phone..."),
             _ => {}
         }
         sleep(Duration::from_secs(1)).await;
     }
-    Err(anyhow!("timed out waiting for weixin QR auth"))
+    Err(anyhow!("timed out waiting for wechat QR auth"))
 }
 
 async fn verify_weixin_token(base: &str, token: &str) -> anyhow::Result<()> {
@@ -503,7 +503,7 @@ mod tests {
 
         let cfg = std::fs::read_to_string(ws.config_path()).unwrap();
         let env = std::fs::read_to_string(ws.dotenv_path()).unwrap();
-        assert!(cfg.contains("[adapters.weixin]"));
+        assert!(cfg.contains("[adapters.wechat]"));
         assert!(cfg.contains("enabled = true"));
         assert!(cfg.contains("base_url = \"https://ilink.example\""));
         assert!(

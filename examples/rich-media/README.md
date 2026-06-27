@@ -6,7 +6,7 @@ This is meant for the first rich-media pass:
 
 - Feishu/Lark: sends an interactive card.
 - QQ Bot: sends `msg_type=2` with `markdown.content`.
-- Markdown tables are split into separate Rust-rendered PNGs so Telegram/Feishu/Weixin stay readable without an external renderer command.
+- Markdown tables are split into separate Rust-rendered PNGs so Telegram/Feishu/WeChat stay readable without an external renderer command.
 
 ## Prepare
 

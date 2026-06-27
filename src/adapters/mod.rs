@@ -33,9 +33,9 @@ pub async fn build_enabled(
             env,
         )?));
     }
-    if cfg.adapters.weixin.enabled {
+    if cfg.adapters.wechat.enabled {
         out.push(Box::new(weixin::WeixinAdapter::new(
-            &cfg.adapters.weixin,
+            &cfg.adapters.wechat,
             env,
             ws,
         )?));
@@ -43,8 +43,8 @@ pub async fn build_enabled(
     Ok(out)
 }
 
-pub fn allowed(allow: &[String], id: &str) -> bool {
-    allow.is_empty() || allow.iter().any(|x| x == id)
+pub fn bound_matches(bind: &Option<String>, id: &str) -> bool {
+    bind.as_deref().is_none_or(|x| x == id)
 }
 
 #[cfg(test)]
@@ -52,13 +52,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_allow_list_allows_local_smoke() {
-        assert!(allowed(&[], "peer"));
+    fn missing_binding_allows_handshake_window() {
+        assert!(bound_matches(&None, "peer"));
     }
 
     #[test]
-    fn non_empty_allow_list_filters() {
-        assert!(allowed(&["peer".into()], "peer"));
-        assert!(!allowed(&["peer".into()], "other"));
+    fn binding_filters() {
+        assert!(bound_matches(&Some("peer".into()), "peer"));
+        assert!(!bound_matches(&Some("peer".into()), "other"));
     }
 }

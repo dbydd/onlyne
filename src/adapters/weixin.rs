@@ -1,6 +1,6 @@
 use crate::{
-    adapters::allowed,
-    config::{Env, WeixinConfig},
+    adapters::bound_matches,
+    config::{Env, WechatConfig},
     core::*,
 };
 use anyhow::{Context, anyhow};
@@ -30,7 +30,7 @@ const VERSION: &str = "onlyne-weixin/1.0";
 pub struct WeixinAdapter {
     token: String,
     base: String,
-    allow_chats: Vec<String>,
+    bind_conversation_id: Option<String>,
     client: Arc<WechatIlinkClient>,
     running: Arc<AtomicBool>,
     contexts: Arc<Mutex<HashMap<String, WechatContext>>>,
@@ -40,11 +40,11 @@ pub struct WeixinAdapter {
 
 impl WeixinAdapter {
     pub fn new(
-        cfg: &WeixinConfig,
+        cfg: &WechatConfig,
         env: &Env,
         ws: &crate::workspace::Workspace,
     ) -> anyhow::Result<Self> {
-        let token = env.secret(&cfg.token_env, &cfg.token, "weixin token")?;
+        let token = env.secret(&cfg.token, &cfg.token_env, "wechat token")?;
         let base = cfg
             .base_url
             .clone()
@@ -70,7 +70,7 @@ impl WeixinAdapter {
         Ok(Self {
             token,
             base,
-            allow_chats: cfg.allow_chats.clone(),
+            bind_conversation_id: cfg.bind_conversation_id.clone(),
             client,
             running: Arc::new(AtomicBool::new(false)),
             contexts: Arc::new(Mutex::new(contexts)),
@@ -83,7 +83,7 @@ impl WeixinAdapter {
 #[async_trait]
 impl Adapter for WeixinAdapter {
     fn channel_id(&self) -> ChannelId {
-        ChannelId("weixin".into())
+        ChannelId("wechat".into())
     }
 
     async fn start(&mut self, ctx: AdapterContext) -> anyhow::Result<()> {
@@ -91,7 +91,7 @@ impl Adapter for WeixinAdapter {
         self.running.store(true, Ordering::SeqCst);
         let client = self.client.clone();
         let running = self.running.clone();
-        let allow = self.allow_chats.clone();
+        let bind = self.bind_conversation_id.clone();
         let inbound = ctx.inbound.clone();
         let events = ctx.events.clone();
         let media_dir = ctx.media_dir.clone();
@@ -105,7 +105,7 @@ impl Adapter for WeixinAdapter {
                         client.stop().await;
                         let _ = events
                             .send(Event::AdapterStopped {
-                                channel_id: ChannelId("weixin".into()),
+                                channel_id: ChannelId("wechat".into()),
                             })
                             .await;
                         return;
@@ -117,7 +117,7 @@ impl Adapter for WeixinAdapter {
                         Some(Ok(WechatEvent::Message(msg))) => {
                             if let Some(env) = weixin_msg_to_envelope(
                                 &client,
-                                &allow,
+                                &bind,
                                 &media_dir,
                                 &contexts,
                                 &context_path,
@@ -131,7 +131,7 @@ impl Adapter for WeixinAdapter {
                         Some(Ok(WechatEvent::AuthSessionExpired { account_key })) => {
                             let _ = events
                                 .send(Event::AdapterFailed {
-                                    channel_id: ChannelId("weixin".into()),
+                                    channel_id: ChannelId("wechat".into()),
                                     error: format!("weixin auth expired: {account_key}"),
                                 })
                                 .await;
@@ -141,7 +141,7 @@ impl Adapter for WeixinAdapter {
                         Some(Ok(WechatEvent::UserInteractionRequested { reason, .. })) => {
                             let _ = events
                                 .send(Event::Warning {
-                                    channel_id: Some(ChannelId("weixin".into())),
+                                    channel_id: Some(ChannelId("wechat".into())),
                                     message: format!(
                                         "weixin user interaction suggested: {reason:?}"
                                     ),
@@ -151,7 +151,7 @@ impl Adapter for WeixinAdapter {
                         Some(Err(e)) => {
                             let _ = events
                                 .send(Event::AdapterReconnecting {
-                                    channel_id: ChannelId("weixin".into()),
+                                    channel_id: ChannelId("wechat".into()),
                                     reason: e.to_string(),
                                 })
                                 .await;
@@ -301,7 +301,7 @@ fn load_contexts(path: &Path, db_path: &Path) -> HashMap<String, WechatContext> 
         return out;
     };
     let Ok(mut stmt) = conn.prepare(
-        "select conversation_id, message_id, timestamp, platform_metadata from messages where channel_id='weixin' order by timestamp desc",
+        "select conversation_id, message_id, timestamp, platform_metadata from messages where channel_id='wechat' order by timestamp desc",
     ) else {
         return out;
     };
@@ -363,13 +363,13 @@ async fn save_context(
 
 async fn weixin_msg_to_envelope(
     client: &Arc<WechatIlinkClient>,
-    allow: &[String],
+    bind: &Option<String>,
     media_root: &Path,
     contexts: &Arc<Mutex<HashMap<String, WechatContext>>>,
     context_path: &Path,
     msg: IncomingMessage,
 ) -> Option<MessageEnvelope> {
-    if !allowed(allow, &msg.user_id) {
+    if !bound_matches(bind, &msg.user_id) {
         return None;
     }
     if let Some(c) = msg.context.clone() {
@@ -401,7 +401,7 @@ async fn weixin_msg_to_envelope(
     }
     let timestamp: DateTime<Utc> = msg.timestamp.into();
     Some(MessageEnvelope {
-        channel_id: ChannelId("weixin".into()),
+        channel_id: ChannelId("wechat".into()),
         conversation_id: ConversationId(msg.user_id.clone()),
         message_id: MessageId(msg.message_id.clone().unwrap_or_else(|| now_id("weixin").0)),
         direction: Direction::Inbound,

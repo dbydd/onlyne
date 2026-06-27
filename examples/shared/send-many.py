@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, pathlib, socket, sys, time
+import json, os, pathlib, socket
 
 start = pathlib.Path.cwd()
 for d in (start, *start.parents):
@@ -17,17 +17,12 @@ except json.JSONDecodeError as e:
     raise SystemExit(f'bad ONLYNE_ATTACHMENTS JSON: {e}')
 raw = os.environ.get('ONLYNE_TARGETS', '')
 if not raw.strip():
-    raise SystemExit('set ONLYNE_TARGETS as channel:conversation[,channel:conversation...]')
-items = []
-for part in raw.split(','):
-    channel, sep, conv = part.partition(':')
-    if not sep or not channel or not conv:
-        raise SystemExit(f'bad target {part!r}; want channel:conversation')
-    items.append((channel, conv))
+    raise SystemExit('set ONLYNE_TARGETS as channel[,channel...]')
+items = [part.strip() for part in raw.split(',') if part.strip()]
 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
     s.connect(str(sock))
-    for n, (channel, conv) in enumerate(items, 1):
-        req = {"id": f"send-{n}", "op":"send_message", "channel_id":channel, "conversation_id":conv, "text":text, "format":fmt, "attachments":attachments}
+    for n, channel in enumerate(items, 1):
+        req = {"id": f"send-{n}", "op":"send_message", "channel_id":channel, "text":text, "format":fmt, "attachments":attachments}
         s.sendall((json.dumps(req, ensure_ascii=False) + '\n').encode())
         line = b''
         while not line.endswith(b'\n'):

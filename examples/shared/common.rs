@@ -18,15 +18,16 @@ pub fn run_targets(default_format: &str) -> anyhow::Result<()> {
     let format = env::var("ONLYNE_FORMAT").unwrap_or_else(|_| default_format.into());
     let attachments: Value =
         serde_json::from_str(&env::var("ONLYNE_ATTACHMENTS").unwrap_or_else(|_| "[]".into()))?;
-    for (n, target) in targets.split(',').enumerate() {
-        let Some((channel, conversation)) = target.split_once(':') else {
-            anyhow::bail!("bad target {target:?}; want channel:conversation");
-        };
+    for (n, channel) in targets
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .enumerate()
+    {
         let req = json!({
             "id": format!("send-{}", n + 1),
             "op": "send_message",
             "channel_id": channel,
-            "conversation_id": conversation,
             "text": text,
             "format": format,
             "attachments": attachments,
@@ -41,13 +42,7 @@ pub fn run_channel(channel: &str, env_prefix: &str) -> anyhow::Result<()> {
         return run_targets("plain");
     }
     let socket = socket_path()?;
-    let var = format!("ONLYNE_{env_prefix}_CONVERSATION_ID");
-    let conversation = match env::var(&var) {
-        Ok(v) => v,
-        Err(_) => first_conversation(&socket, channel).map_err(|e| {
-            anyhow::anyhow!("{e}; set {var}, set ONLYNE_TARGETS='{channel}:conversation', or send one inbound message first")
-        })?,
-    };
+    let _ = env_prefix;
     let text = env::var("ONLYNE_TEXT").unwrap_or_else(|_| "zig".into());
     let format = env::var("ONLYNE_FORMAT").unwrap_or_else(|_| "plain".into());
     let attachments: Value =
@@ -56,7 +51,6 @@ pub fn run_channel(channel: &str, env_prefix: &str) -> anyhow::Result<()> {
         "id": "send-1",
         "op": "send_message",
         "channel_id": channel,
-        "conversation_id": conversation,
         "text": text,
         "format": format,
         "attachments": attachments,
@@ -104,7 +98,7 @@ fn stored_targets(socket: &PathBuf) -> anyhow::Result<String> {
     let Some(items) = res.get("data").and_then(Value::as_array) else {
         anyhow::bail!("list_conversations returned no data")
     };
-    let targets: Vec<String> = items.iter().filter_map(conversation_target).collect();
+    let targets: Vec<String> = items.iter().filter_map(channel_target).collect();
     if targets.is_empty() {
         anyhow::bail!(
             "no stored conversations in examples/.onlyne; send one inbound message first or set ONLYNE_TARGETS"
@@ -113,27 +107,8 @@ fn stored_targets(socket: &PathBuf) -> anyhow::Result<String> {
     Ok(targets.join(","))
 }
 
-fn first_conversation(socket: &PathBuf, channel: &str) -> anyhow::Result<String> {
-    let res = request(
-        socket,
-        &json!({"id":"conversations","op":"list_conversations","channel_id":channel}),
-    )?;
-    let Some(items) = res.get("data").and_then(Value::as_array) else {
-        anyhow::bail!("list_conversations returned no data")
-    };
-    items
-        .iter()
-        .filter_map(conversation_target)
-        .find_map(|target| target.split_once(':').map(|(_, c)| c.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("no stored {channel} conversation in examples/.onlyne"))
-}
-
-fn conversation_target(v: &Value) -> Option<String> {
-    Some(format!(
-        "{}:{}",
-        v.get("channel_id")?.as_str()?,
-        v.get("conversation_id")?.as_str()?
-    ))
+fn channel_target(v: &Value) -> Option<String> {
+    v.get("channel_id")?.as_str().map(str::to_string)
 }
 
 fn request(socket: &PathBuf, req: &Value) -> anyhow::Result<Value> {

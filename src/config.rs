@@ -1,5 +1,5 @@
 use anyhow::{Context, anyhow};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::HashMap, path::Path};
 
 pub const DEFAULT_DOTENV: &str = r#"# Onlyne workspace-local secrets.
@@ -16,30 +16,30 @@ name = "onlyne"
 
 [adapters.telegram]
 enabled = false
-token_env = "TELEGRAM_BOT_TOKEN"
-allow_chats = []
+token = "$TELEGRAM_BOT_TOKEN"
+bind_conversation_id = ""
 
 [adapters.feishu]
 enabled = false
-app_id_env = "FEISHU_APP_ID"
-app_secret_env = "FEISHU_APP_SECRET"
+app_id = "$FEISHU_APP_ID"
+app_secret = "$FEISHU_APP_SECRET"
 rich_text = true
-allow_chats = []
+bind_conversation_id = ""
 
 [adapters.qqbot]
 enabled = false
-app_id_env = "QQBOT_APP_ID"
-app_secret_env = "QQBOT_APP_SECRET"
+app_id = "$QQBOT_APP_ID"
+app_secret = "$QQBOT_APP_SECRET"
 sandbox = false
 rich_text = true
-allow_chats = []
+bind_conversation_id = ""
 
-[adapters.weixin]
+[adapters.wechat]
 enabled = false
-token_env = "WEIXIN_ILINK_TOKEN"
+token = "$WEIXIN_ILINK_TOKEN"
 base_url = ""
 cdn_base_url = "https://novac2c.cdn.weixin.qq.com/c2c"
-allow_chats = []
+bind_conversation_id = ""
 
 [rich_text]
 max_attachment_bytes = 26214400
@@ -90,8 +90,8 @@ pub struct AdapterConfigs {
     pub feishu: FeishuConfig,
     #[serde(default)]
     pub qqbot: QqBotConfig,
-    #[serde(default)]
-    pub weixin: WeixinConfig,
+    #[serde(default, alias = "weixin")]
+    pub wechat: WechatConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,10 +100,10 @@ pub struct TelegramConfig {
     pub enabled: bool,
     #[serde(default)]
     pub token: Option<String>,
-    #[serde(default = "telegram_token_env")]
-    pub token_env: String,
-    #[serde(default)]
-    pub allow_chats: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
+    #[serde(default, deserialize_with = "empty_string_none")]
+    pub bind_conversation_id: Option<String>,
     #[serde(default)]
     pub proxy: Option<String>,
 }
@@ -111,15 +111,15 @@ impl Default for TelegramConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            token: None,
-            token_env: telegram_token_env(),
-            allow_chats: vec![],
+            token: telegram_token(),
+            token_env: None,
+            bind_conversation_id: None,
             proxy: None,
         }
     }
 }
-fn telegram_token_env() -> String {
-    "TELEGRAM_BOT_TOKEN".into()
+fn telegram_token() -> Option<String> {
+    Some("$TELEGRAM_BOT_TOKEN".into())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,38 +128,38 @@ pub struct FeishuConfig {
     pub enabled: bool,
     #[serde(default)]
     pub app_id: Option<String>,
-    #[serde(default = "feishu_app_id_env")]
-    pub app_id_env: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id_env: Option<String>,
     #[serde(default)]
     pub app_secret: Option<String>,
-    #[serde(default = "feishu_app_secret_env")]
-    pub app_secret_env: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_secret_env: Option<String>,
     #[serde(default)]
     pub domain: Option<String>,
     #[serde(default = "default_true")]
     pub rich_text: bool,
-    #[serde(default)]
-    pub allow_chats: Vec<String>,
+    #[serde(default, deserialize_with = "empty_string_none")]
+    pub bind_conversation_id: Option<String>,
 }
 impl Default for FeishuConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            app_id: None,
-            app_id_env: feishu_app_id_env(),
-            app_secret: None,
-            app_secret_env: feishu_app_secret_env(),
+            app_id: feishu_app_id(),
+            app_id_env: None,
+            app_secret: feishu_app_secret(),
+            app_secret_env: None,
             domain: None,
             rich_text: true,
-            allow_chats: vec![],
+            bind_conversation_id: None,
         }
     }
 }
-fn feishu_app_id_env() -> String {
-    "FEISHU_APP_ID".into()
+fn feishu_app_id() -> Option<String> {
+    Some("$FEISHU_APP_ID".into())
 }
-fn feishu_app_secret_env() -> String {
-    "FEISHU_APP_SECRET".into()
+fn feishu_app_secret() -> Option<String> {
+    Some("$FEISHU_APP_SECRET".into())
 }
 fn default_true() -> bool {
     true
@@ -171,72 +171,79 @@ pub struct QqBotConfig {
     pub enabled: bool,
     #[serde(default)]
     pub app_id: Option<String>,
-    #[serde(default = "qqbot_app_id_env")]
-    pub app_id_env: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id_env: Option<String>,
     #[serde(default)]
     pub app_secret: Option<String>,
-    #[serde(default = "qqbot_app_secret_env")]
-    pub app_secret_env: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_secret_env: Option<String>,
     #[serde(default)]
     pub sandbox: bool,
     #[serde(default = "default_true")]
     pub rich_text: bool,
-    #[serde(default)]
-    pub allow_chats: Vec<String>,
+    #[serde(default, deserialize_with = "empty_string_none")]
+    pub bind_conversation_id: Option<String>,
 }
 impl Default for QqBotConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            app_id: None,
-            app_id_env: qqbot_app_id_env(),
-            app_secret: None,
-            app_secret_env: qqbot_app_secret_env(),
+            app_id: qqbot_app_id(),
+            app_id_env: None,
+            app_secret: qqbot_app_secret(),
+            app_secret_env: None,
             sandbox: false,
             rich_text: true,
-            allow_chats: vec![],
+            bind_conversation_id: None,
         }
     }
 }
-fn qqbot_app_id_env() -> String {
-    "QQBOT_APP_ID".into()
+fn qqbot_app_id() -> Option<String> {
+    Some("$QQBOT_APP_ID".into())
 }
-fn qqbot_app_secret_env() -> String {
-    "QQBOT_APP_SECRET".into()
+fn qqbot_app_secret() -> Option<String> {
+    Some("$QQBOT_APP_SECRET".into())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WeixinConfig {
+pub struct WechatConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub token: Option<String>,
-    #[serde(default = "weixin_token_env")]
-    pub token_env: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default = "default_weixin_cdn")]
     pub cdn_base_url: String,
-    #[serde(default)]
-    pub allow_chats: Vec<String>,
+    #[serde(default, deserialize_with = "empty_string_none")]
+    pub bind_conversation_id: Option<String>,
 }
-impl Default for WeixinConfig {
+impl Default for WechatConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            token: None,
-            token_env: weixin_token_env(),
+            token: weixin_token(),
+            token_env: None,
             base_url: None,
             cdn_base_url: default_weixin_cdn(),
-            allow_chats: vec![],
+            bind_conversation_id: None,
         }
     }
 }
-fn weixin_token_env() -> String {
-    "WEIXIN_ILINK_TOKEN".into()
+fn weixin_token() -> Option<String> {
+    Some("$WEIXIN_ILINK_TOKEN".into())
 }
 fn default_weixin_cdn() -> String {
     "https://novac2c.cdn.weixin.qq.com/c2c".into()
+}
+
+fn empty_string_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.filter(|s| !s.trim().is_empty()))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -254,18 +261,35 @@ impl Env {
         }
         Self { vars }
     }
+    pub fn value(&self, raw: &Option<String>) -> Option<String> {
+        let value = raw.as_ref()?.trim();
+        if value.is_empty() {
+            None
+        } else if let Some(name) = value.strip_prefix('$') {
+            self.vars
+                .get(name)
+                .cloned()
+                .filter(|s| !s.trim().is_empty())
+        } else {
+            Some(value.to_string())
+        }
+    }
+
     pub fn secret(
         &self,
-        env_name: &str,
-        inline: &Option<String>,
+        value: &Option<String>,
+        legacy_env: &Option<String>,
         label: &str,
     ) -> anyhow::Result<String> {
-        self.vars
-            .get(env_name)
-            .cloned()
-            .or_else(|| inline.clone())
+        self.value(value)
+            .or_else(|| {
+                legacy_env
+                    .as_ref()
+                    .and_then(|name| self.vars.get(name))
+                    .cloned()
+            })
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| anyhow!("missing secret {label}; set {env_name} or config value"))
+            .ok_or_else(|| anyhow!("missing secret {label}; set config value or ${label}"))
     }
 }
 
@@ -296,7 +320,46 @@ mod tests {
     use super::*;
     #[test]
     fn config_parses_default() {
-        toml::from_str::<Config>(DEFAULT_CONFIG).unwrap();
+        let cfg = toml::from_str::<Config>(DEFAULT_CONFIG).unwrap();
+        assert_eq!(cfg.adapters.wechat.bind_conversation_id, None);
+    }
+
+    #[test]
+    fn config_parses_bind_conversation_id() {
+        let cfg: Config = toml::from_str(
+            r#"[adapters.telegram]
+token_env = "OLD_TG_TOKEN"
+bind_conversation_id = "123"
+
+[adapters.weixin]
+bind_conversation_id = "wx"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.adapters.telegram.token, None);
+        assert_eq!(
+            cfg.adapters.telegram.token_env.as_deref(),
+            Some("OLD_TG_TOKEN")
+        );
+        assert_eq!(
+            cfg.adapters.telegram.bind_conversation_id.as_deref(),
+            Some("123")
+        );
+        assert_eq!(
+            cfg.adapters.wechat.bind_conversation_id.as_deref(),
+            Some("wx")
+        );
+    }
+
+    #[test]
+    fn env_resolves_dollar_values() {
+        let mut env = Env::default();
+        env.vars.insert("CHAT".into(), "chat-1".into());
+        assert_eq!(env.value(&Some("$CHAT".into())).as_deref(), Some("chat-1"));
+        assert_eq!(
+            env.value(&Some("literal".into())).as_deref(),
+            Some("literal")
+        );
     }
     #[test]
     fn dotenv_reads_values() {

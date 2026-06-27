@@ -1,5 +1,5 @@
 use crate::{
-    adapters::allowed,
+    adapters::bound_matches,
     config::{Env, QqBotConfig},
     core::*,
     media,
@@ -30,7 +30,7 @@ pub struct QqBotAdapter {
     app_secret: String,
     sandbox: bool,
     rich_text: bool,
-    allow_chats: Vec<String>,
+    bind_conversation_id: Option<String>,
     client: Client,
     token: Arc<Mutex<Option<String>>>,
     running: Arc<AtomicBool>,
@@ -39,11 +39,11 @@ pub struct QqBotAdapter {
 impl QqBotAdapter {
     pub fn new(cfg: &QqBotConfig, env: &Env) -> anyhow::Result<Self> {
         Ok(Self {
-            app_id: env.secret(&cfg.app_id_env, &cfg.app_id, "qqbot app_id")?,
-            app_secret: env.secret(&cfg.app_secret_env, &cfg.app_secret, "qqbot app_secret")?,
+            app_id: env.secret(&cfg.app_id, &cfg.app_id_env, "qqbot app_id")?,
+            app_secret: env.secret(&cfg.app_secret, &cfg.app_secret_env, "qqbot app_secret")?,
             sandbox: cfg.sandbox,
             rich_text: cfg.rich_text,
-            allow_chats: cfg.allow_chats.clone(),
+            bind_conversation_id: cfg.bind_conversation_id.clone(),
             client: Client::new(),
             token: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
@@ -86,14 +86,14 @@ impl Adapter for QqBotAdapter {
         let app_id = self.app_id.clone();
         let app_secret = self.app_secret.clone();
         let sandbox = self.sandbox;
-        let allow = self.allow_chats.clone();
+        let bind = self.bind_conversation_id.clone();
         let running = self.running.clone();
         let inbound = ctx.inbound.clone();
         let events = ctx.events.clone();
         self.task = Some(tokio::spawn(async move {
             while running.load(Ordering::SeqCst) {
                 if let Err(e) =
-                    qq_loop(&app_id, &app_secret, sandbox, &allow, &inbound, &events).await
+                    qq_loop(&app_id, &app_secret, sandbox, &bind, &inbound, &events).await
                 {
                     let _ = events
                         .send(Event::AdapterReconnecting {
@@ -350,7 +350,7 @@ async fn qq_loop(
     app_id: &str,
     app_secret: &str,
     sandbox: bool,
-    allow: &[String],
+    bind: &Option<String>,
     inbound: &mpsc::Sender<MessageEnvelope>,
     events: &mpsc::Sender<Event>,
 ) -> anyhow::Result<()> {
@@ -373,7 +373,7 @@ async fn qq_loop(
     let mut seq: Option<i64> = None;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(40));
     loop {
-        tokio::select! { _=heartbeat.tick()=>{let _=ws.send(Message::Text(json!({"op":1,"d":seq}).to_string())).await;}, item=ws.next()=>{let Some(item)=item else{break};if let Message::Text(t)=item?{let v:Value=serde_json::from_str(&t)?;if let Some(s)=v.get("s").and_then(Value::as_i64){seq=Some(s);}match v.get("op").and_then(Value::as_i64).unwrap_or(-1){10=>{let interval=v.pointer("/d/heartbeat_interval").and_then(Value::as_u64).unwrap_or(41250);heartbeat=tokio::time::interval(Duration::from_millis(interval));ws.send(Message::Text(json!({"op":2,"d":{"token":format!("QQBot {token}"),"intents":INTENTS,"shard":[0,1]}}).to_string())).await?;},0=>{if let Some(env)=parse_dispatch(v,allow){let _=inbound.send(env).await;}},7|9=>return Err(anyhow!("qqbot reconnect requested")),_=>{}}}}}
+        tokio::select! { _=heartbeat.tick()=>{let _=ws.send(Message::Text(json!({"op":1,"d":seq}).to_string())).await;}, item=ws.next()=>{let Some(item)=item else{break};if let Message::Text(t)=item?{let v:Value=serde_json::from_str(&t)?;if let Some(s)=v.get("s").and_then(Value::as_i64){seq=Some(s);}match v.get("op").and_then(Value::as_i64).unwrap_or(-1){10=>{let interval=v.pointer("/d/heartbeat_interval").and_then(Value::as_u64).unwrap_or(41250);heartbeat=tokio::time::interval(Duration::from_millis(interval));ws.send(Message::Text(json!({"op":2,"d":{"token":format!("QQBot {token}"),"intents":INTENTS,"shard":[0,1]}}).to_string())).await?;},0=>{if let Some(env)=parse_dispatch(v,bind){let _=inbound.send(env).await;}},7|9=>return Err(anyhow!("qqbot reconnect requested")),_=>{}}}}}
     }
     let _ = events
         .send(Event::AdapterStopped {
@@ -382,7 +382,7 @@ async fn qq_loop(
         .await;
     Ok(())
 }
-fn parse_dispatch(v: Value, allow: &[String]) -> Option<MessageEnvelope> {
+fn parse_dispatch(v: Value, bind: &Option<String>) -> Option<MessageEnvelope> {
     if v.get("op").and_then(Value::as_i64) != Some(0) {
         return None;
     }
@@ -404,7 +404,7 @@ fn parse_dispatch(v: Value, allow: &[String]) -> Option<MessageEnvelope> {
                 .map(str::to_string),
         )
     };
-    if !allowed(allow, &conv) {
+    if !bound_matches(bind, &conv) {
         return None;
     }
     Some(MessageEnvelope {
