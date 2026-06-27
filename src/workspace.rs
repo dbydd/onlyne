@@ -75,6 +75,8 @@ impl Workspace {
         std::fs::create_dir_all(self.channels_dir())?;
         if !self.config_path().exists() {
             std::fs::write(self.config_path(), crate::config::DEFAULT_CONFIG)?;
+            let schema = include_str!(concat!(env!("OUT_DIR"), "/onlyne-config.schema.json"));
+            let _ = std::fs::write(self.onlyne.join("onlyne-config.schema.json"), schema);
         }
         if !self.dotenv_path().exists() {
             std::fs::write(self.dotenv_path(), crate::config::DEFAULT_DOTENV)?;

@@ -1,0 +1,484 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Config",
+  "type": "object",
+  "properties": {
+    "adapters": {
+      "default": {
+        "feishu": {
+          "app_id": "$FEISHU_APP_ID",
+          "app_secret": "$FEISHU_APP_SECRET",
+          "bind_conversation_id": null,
+          "domain": null,
+          "enabled": false,
+          "io": null,
+          "rich_text": true
+        },
+        "qqbot": {
+          "app_id": "$QQBOT_APP_ID",
+          "app_secret": "$QQBOT_APP_SECRET",
+          "bind_conversation_id": null,
+          "enabled": false,
+          "io": null,
+          "rich_text": true,
+          "sandbox": false
+        },
+        "telegram": {
+          "bind_conversation_id": null,
+          "enabled": false,
+          "io": null,
+          "proxy": null,
+          "token": "$TELEGRAM_BOT_TOKEN"
+        },
+        "wechat": {
+          "base_url": null,
+          "bind_conversation_id": null,
+          "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
+          "enabled": false,
+          "io": null,
+          "token": "$WEIXIN_ILINK_TOKEN"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/AdapterConfigs"
+        }
+      ]
+    },
+    "io": {
+      "default": {
+        "history_context_messages": 20,
+        "in_format": "markdown",
+        "out_content": "latest_only",
+        "out_cursor": "consume"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/IoConfig"
+        }
+      ]
+    },
+    "loopback": {
+      "default": {
+        "io": {
+          "history_context_messages": 20,
+          "in_format": "markdown",
+          "out_content": "latest_only",
+          "out_cursor": "consume"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/LoopbackConfig"
+        }
+      ]
+    },
+    "rich_text": {
+      "default": {
+        "max_attachment_bytes": 26214400
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/RichTextConfig"
+        }
+      ]
+    },
+    "workspace": {
+      "default": {
+        "name": "onlyne"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/WorkspaceConfig"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "AdapterConfigs": {
+      "type": "object",
+      "properties": {
+        "feishu": {
+          "default": {
+            "app_id": "$FEISHU_APP_ID",
+            "app_secret": "$FEISHU_APP_SECRET",
+            "bind_conversation_id": null,
+            "domain": null,
+            "enabled": false,
+            "io": null,
+            "rich_text": true
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/FeishuConfig"
+            }
+          ]
+        },
+        "qqbot": {
+          "default": {
+            "app_id": "$QQBOT_APP_ID",
+            "app_secret": "$QQBOT_APP_SECRET",
+            "bind_conversation_id": null,
+            "enabled": false,
+            "io": null,
+            "rich_text": true,
+            "sandbox": false
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/QqBotConfig"
+            }
+          ]
+        },
+        "telegram": {
+          "default": {
+            "bind_conversation_id": null,
+            "enabled": false,
+            "io": null,
+            "proxy": null,
+            "token": "$TELEGRAM_BOT_TOKEN"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/TelegramConfig"
+            }
+          ]
+        },
+        "wechat": {
+          "default": {
+            "base_url": null,
+            "bind_conversation_id": null,
+            "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
+            "enabled": false,
+            "io": null,
+            "token": "$WEIXIN_ILINK_TOKEN"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/WechatConfig"
+            }
+          ]
+        }
+      }
+    },
+    "FeishuConfig": {
+      "type": "object",
+      "properties": {
+        "app_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "app_id_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "app_secret": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "app_secret_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bind_conversation_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "domain": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "io": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IoConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rich_text": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "IoConfig": {
+      "type": "object",
+      "properties": {
+        "history_context_messages": {
+          "default": 20,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "in_format": {
+          "default": "markdown",
+          "allOf": [
+            {
+              "$ref": "#/definitions/IoInFormat"
+            }
+          ]
+        },
+        "out_content": {
+          "default": "latest_only",
+          "allOf": [
+            {
+              "$ref": "#/definitions/IoOutContent"
+            }
+          ]
+        },
+        "out_cursor": {
+          "default": "consume",
+          "allOf": [
+            {
+              "$ref": "#/definitions/IoOutCursor"
+            }
+          ]
+        }
+      }
+    },
+    "IoInFormat": {
+      "type": "string",
+      "enum": [
+        "markdown",
+        "raw_text"
+      ]
+    },
+    "IoOutContent": {
+      "type": "string",
+      "enum": [
+        "latest_only",
+        "with_history"
+      ]
+    },
+    "IoOutCursor": {
+      "type": "string",
+      "enum": [
+        "retain",
+        "consume"
+      ]
+    },
+    "LoopbackConfig": {
+      "type": "object",
+      "properties": {
+        "io": {
+          "default": {
+            "history_context_messages": 20,
+            "in_format": "markdown",
+            "out_content": "latest_only",
+            "out_cursor": "consume"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/IoConfig"
+            }
+          ]
+        }
+      }
+    },
+    "QqBotConfig": {
+      "type": "object",
+      "properties": {
+        "app_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "app_id_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "app_secret": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "app_secret_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bind_conversation_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "io": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IoConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rich_text": {
+          "default": true,
+          "type": "boolean"
+        },
+        "sandbox": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "RichTextConfig": {
+      "type": "object",
+      "properties": {
+        "max_attachment_bytes": {
+          "default": 26214400,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "TelegramConfig": {
+      "type": "object",
+      "properties": {
+        "bind_conversation_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "io": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IoConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proxy": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "WechatConfig": {
+      "type": "object",
+      "properties": {
+        "base_url": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bind_conversation_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cdn_base_url": {
+          "default": "https://novac2c.cdn.weixin.qq.com/c2c",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "io": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IoConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "token": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "WorkspaceConfig": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -2,6 +2,7 @@
 name = "onlyne"
 version = "0.2.4"
 edition = "2024"
+build = "build.rs"
 rust-version = "1.85"
 authors = ["dbydd <1992003927@qq.com>"]
 description = "Workspace-local IM channel daemon and broker for local agents"
@@ -14,6 +15,7 @@ categories = ["command-line-utilities", "network-programming", "asynchronous"]
 
 [dependencies]
 anyhow = "1"
+schemars = "0.8"
 base64 = "0.22"
 async-trait = "0.1"
 openlark = { version = "0.17.0", default-features = false, features = ["websocket"] }

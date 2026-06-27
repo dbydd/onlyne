@@ -1,5 +1,17 @@
 # Channel FIFO IO Design
 
+Config schema is generated from Rust config types with `schemars`:
+
+```bash
+cargo run --bin gen-schema > onlyne-config.schema.json
+```
+
+Workspace configs include Taplo's schema hint:
+
+```toml
+#:schema ./onlyne-config.schema.json
+```
+
 Onlyne exposes each singleton channel as file-descriptor style IO under the workspace-local `.onlyne/channels/<channel>/` directory.
 
 ## Paths

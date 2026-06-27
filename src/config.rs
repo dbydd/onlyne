@@ -1,4 +1,5 @@
 use anyhow::{Context, anyhow};
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::HashMap, path::Path};
 
@@ -11,7 +12,8 @@ pub const DEFAULT_DOTENV: &str = r#"# Onlyne workspace-local secrets.
 # WEIXIN_ILINK_TOKEN=
 "#;
 
-pub const DEFAULT_CONFIG: &str = r#"[workspace]
+pub const DEFAULT_CONFIG: &str = r#"#:schema ./onlyne-config.schema.json
+[workspace]
 name = "onlyne"
 
 [io]
@@ -57,7 +59,7 @@ bind_conversation_id = ""
 max_attachment_bytes = 26214400
 "#;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct Config {
     #[serde(default)]
     pub workspace: WorkspaceConfig,
@@ -71,7 +73,7 @@ pub struct Config {
     pub loopback: LoopbackConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RichTextConfig {
     #[serde(default = "default_max_attachment_bytes")]
     pub max_attachment_bytes: u64,
@@ -87,7 +89,7 @@ fn default_max_attachment_bytes() -> u64 {
     25 * 1024 * 1024
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum IoInFormat {
     #[default]
@@ -95,7 +97,7 @@ pub enum IoInFormat {
     RawText,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum IoOutContent {
     #[default]
@@ -103,7 +105,7 @@ pub enum IoOutContent {
     WithHistory,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum IoOutCursor {
     Retain,
@@ -111,7 +113,7 @@ pub enum IoOutCursor {
     Consume,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct IoConfig {
     #[serde(default)]
     pub in_format: IoInFormat,
@@ -136,13 +138,13 @@ fn default_history_context_messages() -> u32 {
     20
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct LoopbackConfig {
     #[serde(default)]
     pub io: IoConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceConfig {
     pub name: String,
 }
@@ -154,7 +156,7 @@ impl Default for WorkspaceConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct AdapterConfigs {
     #[serde(default)]
     pub telegram: TelegramConfig,
@@ -166,7 +168,7 @@ pub struct AdapterConfigs {
     pub wechat: WechatConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TelegramConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -197,7 +199,7 @@ fn telegram_token() -> Option<String> {
     Some("$TELEGRAM_BOT_TOKEN".into())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FeishuConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -243,7 +245,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct QqBotConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -286,7 +288,7 @@ fn qqbot_app_secret() -> Option<String> {
     Some("$QQBOT_APP_SECRET".into())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WechatConfig {
     #[serde(default)]
     pub enabled: bool,
