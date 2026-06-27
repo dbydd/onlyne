@@ -17,7 +17,7 @@ This file tracks implementation and verification notes. The root README is the p
 - Workspace-local agent skill export via `onlyne export-skill`.
 - Feishu/Lark and WeChat auth helpers.
 - Zsh/fish completion generation.
-- CLI examples for single-channel, broadcast, multicast, and multi-channel workflows.
+- CLI/FIFO examples for single-channel, broadcast, multicast, multi-channel, and file-descriptor workflows.
 
 ## Adapter notes
 
