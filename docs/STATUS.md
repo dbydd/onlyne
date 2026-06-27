@@ -42,6 +42,9 @@ Live platform smoke is intentionally manual because it requires real credentials
 Expose per-channel file-descriptor style IO under `.onlyne/channels/<channel>/`:
 
 - `in`: write side, so local scripts can `echo 'message' > .onlyne/channels/telegram/in` and send through that channel's bound conversation.
-- `out`: read side, so local scripts can `cat .onlyne/channels/telegram/out` and consume one inbound message.
+- `out`: read side, so local scripts can `cat .onlyne/channels/telegram/out`.
+- `out` read behavior must be configurable as the 2x2 combination of:
+  - content mode: latest new message with conversation history context, or latest message only.
+  - cursor mode: retain after read, or consume/advance after read.
 - Keep paths stable enough for symlinks.
 - Preserve singleton channel routing: channel name selects the adapter; conversation is still the configured or `/handshake`-bound `bind_conversation_id`.
