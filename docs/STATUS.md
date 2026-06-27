@@ -46,5 +46,7 @@ Expose per-channel file-descriptor style IO under `.onlyne/channels/<channel>/`:
 - `out` read behavior must be configurable as the 2x2 combination of:
   - content mode: latest new message with conversation history context, or latest message only.
   - cursor mode: retain after read, or consume/advance after read.
+- File IO cursors must synchronize with other local consumers. Example: if pi-onlyne has already surfaced an inbound notification, then a consume-mode `out` for the same channel must not later include that already-consumed new message.
+- Include a `loopback` channel directory with the same `in`/`out` behavior.
 - Keep paths stable enough for symlinks.
 - Preserve singleton channel routing: channel name selects the adapter; conversation is still the configured or `/handshake`-bound `bind_conversation_id`.
