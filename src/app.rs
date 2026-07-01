@@ -16,6 +16,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{Mutex, mpsc},
 };
+use tracing::{info, warn};
 
 pub struct App {
     pub workspace: Workspace,
@@ -66,6 +67,7 @@ impl App {
                 if !app.accept_or_prompt_handshake(&m).await {
                     continue;
                 }
+                info!(channel_id = %m.channel_id.0, conversation_id = %m.conversation_id.0, message_id = %m.message_id.0, "inbound message accepted");
                 let _ = app.store.append_message(&m).await;
                 app.publish_history_appended(&m);
                 app.events.publish(Event::InboundMessage(m.clone()));
@@ -86,6 +88,7 @@ impl App {
             };
             match a.start(ctx).await {
                 Ok(()) => {
+                    info!(channel_id = %id, "adapter started");
                     self.store
                         .upsert_channel(&ChannelId(id.clone()), AdapterHealth::Ready)
                         .await?;
@@ -94,6 +97,7 @@ impl App {
                     });
                 }
                 Err(e) => {
+                    warn!(channel_id = %id, error = %e, "adapter failed to start");
                     self.store
                         .upsert_channel(&ChannelId(id.clone()), AdapterHealth::Failed)
                         .await?;
@@ -366,7 +370,11 @@ impl App {
         let channel = &inbound.channel_id.0;
         let conversation = &inbound.conversation_id.0;
         if let Some(bind) = self.bindings.lock().await.get(channel).cloned() {
-            return bind == *conversation;
+            let accepted = bind == *conversation;
+            if !accepted {
+                info!(channel_id = %channel, conversation_id = %conversation, "ignored inbound from unbound conversation");
+            }
+            return accepted;
         }
         if inbound
             .text
@@ -379,25 +387,46 @@ impl App {
                 .insert(channel.clone(), conversation.clone());
             if let Err(e) = set_config_binding(&self.workspace.config_path(), channel, conversation)
             {
+                warn!(channel_id = %channel, error = %e, "handshake config update failed");
                 self.events.publish(Event::Warning {
                     channel_id: Some(inbound.channel_id.clone()),
                     message: format!("handshake bound in memory but config update failed: {e}"),
                 });
             }
+            info!(channel_id = %channel, conversation_id = %conversation, "handshake bound conversation");
             self.events.publish(Event::WorkspaceStateChanged {
                 message: format!("bound {channel} to {conversation}"),
             });
-            return true;
+            self.confirm_handshake(inbound).await;
+            return false;
         }
         self.prompt_handshake(inbound).await;
         false
     }
 
     async fn prompt_handshake(&self, inbound: &MessageEnvelope) {
+        self.send_internal_notice(
+            inbound,
+            "Onlyne is not bound to this conversation yet. Send /handshake here to bind this channel.",
+            "handshake prompt failed",
+        )
+        .await;
+    }
+
+    async fn confirm_handshake(&self, inbound: &MessageEnvelope) {
+        self.send_internal_notice(
+            inbound,
+            "Onlyne handshake complete. This channel is now bound to this conversation.",
+            "handshake confirmation failed",
+        )
+        .await;
+    }
+
+    async fn send_internal_notice(&self, inbound: &MessageEnvelope, text: &str, err_context: &str) {
         let msg = OutboundMessage {
             channel_id: inbound.channel_id.clone(),
             conversation_id: inbound.conversation_id.clone(),
-            text: Some("Onlyne is not bound to this conversation yet. Send /handshake here to bind this channel.".into()),
+            text: Some(text.into()),
             format: MessageFormat::Plain,
             attachments: vec![],
         };
@@ -411,10 +440,13 @@ impl App {
                 self.publish_history_appended(&out);
                 self.events.publish(Event::OutboundMessage(out));
             }
-            Err(e) => self.events.publish(Event::Warning {
-                channel_id: Some(inbound.channel_id.clone()),
-                message: format!("handshake prompt failed: {e}"),
-            }),
+            Err(e) => {
+                warn!(channel_id = %inbound.channel_id.0, error = %e, "{err_context}");
+                self.events.publish(Event::Warning {
+                    channel_id: Some(inbound.channel_id.clone()),
+                    message: format!("{err_context}: {e}"),
+                })
+            }
         }
     }
 
@@ -872,7 +904,7 @@ mod tests {
             platform_metadata: serde_json::json!({}),
         };
 
-        assert!(app.accept_or_prompt_handshake(&msg).await);
+        assert!(!app.accept_or_prompt_handshake(&msg).await);
         assert_eq!(app.bound_conversation("telegram").await.unwrap(), "chat-1");
         assert!(
             std::fs::read_to_string(ws.config_path())

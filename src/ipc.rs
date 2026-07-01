@@ -8,6 +8,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
     sync::Mutex,
 };
+use tracing::info;
 
 #[derive(Debug, Deserialize)]
 pub struct Request {
@@ -41,9 +42,15 @@ struct Resp<'a> {
 pub async fn serve_socket(app: Arc<App>) -> anyhow::Result<()> {
     let path = app.workspace.socket_path();
     if path.exists() {
-        let _ = std::fs::remove_file(&path);
+        match UnixStream::connect(&path).await {
+            Ok(_) => anyhow::bail!("onlyne daemon already running at {}", path.display()),
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
     let listener = UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?;
+    info!(socket = %path.display(), "ipc socket listening");
     loop {
         let (s, _) = listener.accept().await?;
         let a = app.clone();

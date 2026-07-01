@@ -100,8 +100,11 @@ pub async fn run() -> anyhow::Result<()> {
         }
         Cmd::Run { debug } => {
             let ws = resolve_workspace(workspace.clone())?;
+            ws.bootstrap()?;
             init_logging(&ws)?;
-            let app = App::load_with_debug(ws, debug).await?;
+            let debug_mode = debug;
+            tracing::info!(workspace = %ws.root().display(), socket = %ws.socket_path().display(), debug = debug_mode, "starting onlyne daemon");
+            let app = App::load_with_debug(ws, debug_mode).await?;
             app.start_all().await?;
             app.start_channel_io().await?;
             ipc::serve_socket(app).await
@@ -336,10 +339,18 @@ fn shell_completions(shell: CompletionShell) {
 }
 
 fn init_logging(ws: &Workspace) -> anyhow::Result<()> {
-    let file = tracing_appender::rolling::never(ws.log_path().parent().unwrap(), "daemon.log");
+    let log_path = ws.log_path();
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_writer(file)
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(move || {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .expect("open daemon log")
+        })
         .init();
     Ok(())
 }
