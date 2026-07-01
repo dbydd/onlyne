@@ -221,6 +221,7 @@ impl App {
                 Ok(mut file) => {
                     let mut text = String::new();
                     if file.read_to_string(&mut text).await.is_ok() && !text.trim().is_empty() {
+                        let text = decode_fifo_escapes(&text);
                         if channel == "loopback" {
                             let _ = self.inject_loopback(text).await;
                         } else {
@@ -655,6 +656,33 @@ fn ensure_channel_fifos(workspace: &Workspace, channel: &str) -> anyhow::Result<
     Ok(())
 }
 
+fn decode_fifo_escapes(input: &str) -> String {
+    if !input.contains('\\') {
+        return input.to_string();
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 fn transcript_line(m: &MessageEnvelope) -> String {
     let sender = m
         .sender_name
@@ -854,6 +882,16 @@ mod tests {
 
         let channels = app.store.list_channels().await.unwrap();
         assert!(matches!(channels[0].1, AdapterHealth::Reconnecting));
+    }
+
+    #[test]
+    fn fifo_input_decodes_common_escapes() {
+        assert_eq!(
+            decode_fifo_escapes("a\\nb\\t\\\\c\\\"d\\x"),
+            "a\nb\t\\c\"d\\x"
+        );
+        assert_eq!(decode_fifo_escapes("plain"), "plain");
+        assert_eq!(decode_fifo_escapes("trail\\"), "trail\\");
     }
 
     #[tokio::test]
