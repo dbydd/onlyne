@@ -58,6 +58,16 @@
         }
       ]
     },
+    "logging": {
+      "default": {
+        "level": "info"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/LoggingConfig"
+        }
+      ]
+    },
     "loopback": {
       "default": {
         "io": {
@@ -280,6 +290,15 @@
         "retain",
         "consume"
       ]
+    },
+    "LoggingConfig": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "default": "info",
+          "type": "string"
+        }
+      }
     },
     "LoopbackConfig": {
       "type": "object",

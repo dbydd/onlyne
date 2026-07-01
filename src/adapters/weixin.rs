@@ -70,7 +70,7 @@ impl WeixinAdapter {
         Ok(Self {
             token,
             base,
-            bind_conversation_id: cfg.bind_conversation_id.clone(),
+            bind_conversation_id: env.value(&cfg.bind_conversation_id),
             client,
             running: Arc::new(AtomicBool::new(false)),
             contexts: Arc::new(Mutex::new(contexts)),

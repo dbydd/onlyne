@@ -17,6 +17,9 @@ pub const DEFAULT_CONFIG: &str = r#"#:schema ./onlyne-config.schema.json
 [workspace]
 name = "onlyne"
 
+[logging]
+level = "info"
+
 [io]
 in_format = "markdown"
 out_content = "latest_only"
@@ -65,6 +68,8 @@ max_attachment_bytes = 26214400
 pub struct Config {
     #[serde(default)]
     pub workspace: WorkspaceConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
     #[serde(default)]
     pub adapters: AdapterConfigs,
     #[serde(default)]
@@ -163,6 +168,23 @@ impl Default for WorkspaceConfig {
             name: "onlyne".into(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct LoggingConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+}
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+        }
+    }
+}
+fn default_log_level() -> String {
+    "info".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -421,6 +443,7 @@ mod tests {
     #[test]
     fn config_parses_default() {
         let cfg = toml::from_str::<Config>(DEFAULT_CONFIG).unwrap();
+        assert_eq!(cfg.logging.level, "info");
         assert_eq!(cfg.adapters.wechat.bind_conversation_id, None);
     }
 

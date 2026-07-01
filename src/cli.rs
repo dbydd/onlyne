@@ -1,4 +1,4 @@
-use crate::{app::App, auth, ipc, workspace::Workspace};
+use crate::{app::App, auth, config, ipc, workspace::Workspace};
 use anyhow::Context;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{
@@ -340,7 +340,12 @@ fn shell_completions(shell: CompletionShell) {
 
 fn init_logging(ws: &Workspace) -> anyhow::Result<()> {
     let log_path = ws.log_path();
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let cfg = config::load_config(&ws.config_path())?;
+    let filter = match EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(_) => EnvFilter::try_new(&cfg.logging.level)
+            .with_context(|| format!("invalid logging.level {:?}", cfg.logging.level))?,
+    };
     fmt()
         .with_env_filter(filter)
         .with_ansi(false)

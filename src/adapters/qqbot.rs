@@ -43,7 +43,7 @@ impl QqBotAdapter {
             app_secret: env.secret(&cfg.app_secret, &cfg.app_secret_env, "qqbot app_secret")?,
             sandbox: cfg.sandbox,
             rich_text: cfg.rich_text,
-            bind_conversation_id: cfg.bind_conversation_id.clone(),
+            bind_conversation_id: env.value(&cfg.bind_conversation_id),
             client: Client::new(),
             token: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
@@ -432,6 +432,27 @@ fn parse_dispatch(v: Value, bind: &Option<String>) -> Option<MessageEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bind_conversation_id_resolves_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+        std::fs::write(&env_path, "CHAT=group-1\n").unwrap();
+        let env = Env::load(&env_path, &dir.path().join("missing"));
+        let cfg = QqBotConfig {
+            enabled: true,
+            app_id: Some("app".into()),
+            app_id_env: None,
+            app_secret: Some("secret".into()),
+            app_secret_env: None,
+            sandbox: false,
+            rich_text: true,
+            bind_conversation_id: Some("$CHAT".into()),
+            io: None,
+        };
+        let adapter = QqBotAdapter::new(&cfg, &env).unwrap();
+        assert_eq!(adapter.bind_conversation_id.as_deref(), Some("group-1"));
+    }
 
     #[test]
     fn markdown_body_uses_qq_markdown_content() {

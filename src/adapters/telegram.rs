@@ -40,7 +40,7 @@ impl TelegramAdapter {
         Ok(Self {
             bot: Bot::new(token.clone()),
             token,
-            bind_conversation_id: cfg.bind_conversation_id.clone(),
+            bind_conversation_id: env.value(&cfg.bind_conversation_id),
             client: Client::new(),
             running: Arc::new(AtomicBool::new(false)),
             task: None,

@@ -46,7 +46,7 @@ impl FeishuAdapter {
                 .unwrap_or_else(|| "https://open.feishu.cn".into())
                 .trim_end_matches('/')
                 .into(),
-            bind_conversation_id: cfg.bind_conversation_id.clone(),
+            bind_conversation_id: env.value(&cfg.bind_conversation_id),
             rich_text: cfg.rich_text,
             client: Client::new(),
             running: Arc::new(AtomicBool::new(false)),
