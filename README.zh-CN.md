@@ -90,6 +90,8 @@ Adapter SDK：飞书使用 `openlark`，Telegram 使用 `teloxide`，微信 ilin
 onlyne [--workspace <dir>] init
 onlyne [--workspace <dir>] export-skill
 onlyne [--workspace <dir>] run [--debug]
+onlyne [--workspace <dir>] stop
+onlyne [--workspace <dir>] restart [--debug]
 onlyne stdio
 onlyne client '<json-request>'
 onlyne config-check
@@ -99,6 +101,8 @@ onlyne auth wechat [--token <token>]
 onlyne shell-completions zsh
 onlyne shell-completions fish
 ```
+
+`onlyne stop` 会请求当前工作区 daemon 退出。`onlyne restart` 会先停止当前工作区 daemon（如果存在），再以前台方式启动 `run`。
 
 `onlyne run --debug` 会在收到入站消息后，向同平台同会话回复脱敏后的 channel/conversation/thread 元数据。它只适合用来查 conversation id 或平台 thread 字段。
 

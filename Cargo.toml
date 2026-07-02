@@ -1,6 +1,6 @@
 [package]
 name = "onlyne"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 build = "build.rs"
 rust-version = "1.85"

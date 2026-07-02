@@ -90,6 +90,8 @@ Adapter SDKs: Feishu uses `openlark`, Telegram uses `teloxide`, and WeChat ilink
 onlyne [--workspace <dir>] init
 onlyne [--workspace <dir>] export-skill
 onlyne [--workspace <dir>] run [--debug]
+onlyne [--workspace <dir>] stop
+onlyne [--workspace <dir>] restart [--debug]
 onlyne stdio
 onlyne client '<json-request>'
 onlyne config-check
@@ -99,6 +101,8 @@ onlyne auth wechat [--token <token>]
 onlyne shell-completions zsh
 onlyne shell-completions fish
 ```
+
+`onlyne stop` asks the workspace-local daemon to exit. `onlyne restart` stops the current workspace daemon if present, then starts `run` in the foreground.
 
 `onlyne run --debug` replies to inbound messages with redacted channel/conversation/thread metadata. Use it only while finding conversation IDs or platform thread fields.
 

@@ -43,6 +43,7 @@ Malformed JSON uses `code=bad_json`.
 | `list_conversations` | Optional `channel_id`. |
 | `subscribe_events` | Starts async event lines on the same connection. |
 | `unsubscribe_events` | Stops event lines for the connection. |
+| `shutdown` | Requests the workspace-local daemon to exit after responding. Used by `onlyne stop` / `onlyne restart`. |
 | `send_message` | Requires `channel_id`; Onlyne routes to that channel's configured or `/handshake`-bound `bind_conversation_id`. Uses `text` as Markdown by default, optional `raw_text:true` for literal text, legacy optional `format` (`plain` or `markdown`), and optional `attachments`. |
 | `reply_message` | Currently same local send path as `send_message`. |
 | `loopback` | Injects a local inbound activation message on channel `loopback`; optional `text`, `raw_text`, `format`, and `attachments`. |

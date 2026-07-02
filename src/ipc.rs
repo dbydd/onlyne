@@ -130,6 +130,21 @@ where
                         },
                     )
                     .await?;
+                } else if req.op == "shutdown" {
+                    write(
+                        &writer,
+                        &Resp {
+                            id: &req.id,
+                            ok: true,
+                            data: Some(json!({"shutting_down":true})),
+                            error: None,
+                        },
+                    )
+                    .await?;
+                    tokio::spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        std::process::exit(0);
+                    });
                 } else {
                     let id = req.id.clone();
                     match app.handle(req).await {

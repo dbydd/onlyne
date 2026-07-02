@@ -5,6 +5,7 @@ use clap_complete::{
     generate,
     shells::{Fish, Zsh},
 };
+use serde_json::json;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -34,6 +35,11 @@ enum Cmd {
     Init,
     ExportSkill,
     Run {
+        #[arg(long)]
+        debug: bool,
+    },
+    Stop,
+    Restart {
         #[arg(long)]
         debug: bool,
     },
@@ -98,18 +104,11 @@ pub async fn run() -> anyhow::Result<()> {
             println!("exported skill {}", path.display());
             Ok(())
         }
-        Cmd::Run { debug } => {
-            let ws = resolve_workspace(workspace.clone())?;
-            ws.bootstrap()?;
-            init_logging(&ws)?;
-            let debug_mode = debug;
-            tracing::info!(workspace = %ws.root().display(), socket = %ws.socket_path().display(), debug = debug_mode, "starting onlyne daemon");
-            let socket_path = ws.socket_path();
-            let listener = ipc::bind_socket(&socket_path).await?;
-            let app = App::load_with_debug(ws, debug_mode).await?;
-            app.start_all().await?;
-            app.start_channel_io().await?;
-            ipc::serve_bound_socket(app, listener, &socket_path).await
+        Cmd::Run { debug } => run_daemon(workspace.clone(), debug).await,
+        Cmd::Stop => stop_daemon(workspace.clone(), false).await,
+        Cmd::Restart { debug } => {
+            stop_daemon(workspace.clone(), true).await?;
+            run_daemon(workspace.clone(), debug).await
         }
         Cmd::Stdio => {
             let ws = resolve_workspace(workspace.clone())?;
@@ -135,6 +134,46 @@ pub async fn run() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+async fn run_daemon(workspace: Option<PathBuf>, debug: bool) -> anyhow::Result<()> {
+    let ws = resolve_workspace(workspace)?;
+    ws.bootstrap()?;
+    init_logging(&ws)?;
+    let debug_mode = debug;
+    tracing::info!(workspace = %ws.root().display(), socket = %ws.socket_path().display(), debug = debug_mode, "starting onlyne daemon");
+    let socket_path = ws.socket_path();
+    let listener = ipc::bind_socket(&socket_path).await?;
+    let app = App::load_with_debug(ws, debug_mode).await?;
+    app.start_all().await?;
+    app.start_channel_io().await?;
+    ipc::serve_bound_socket(app, listener, &socket_path).await
+}
+
+async fn stop_daemon(workspace: Option<PathBuf>, ignore_not_running: bool) -> anyhow::Result<()> {
+    let ws = resolve_workspace(workspace)?;
+    let line = json!({"id":"stop","op":"shutdown"}).to_string();
+    match socket_request(&ws, &line).await {
+        Ok(resp) => println!("{resp}"),
+        Err(e) if ignore_not_running => {
+            eprintln!("onlyne was not running: {e}");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    }
+    let socket = ws.socket_path();
+    for _ in 0..40 {
+        if UnixStream::connect(&socket).await.is_err() {
+            if socket.exists() {
+                let _ = std::fs::remove_file(&socket);
+            }
+            println!("stopped {}", socket.display());
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    println!("stop requested; daemon still closing {}", socket.display());
+    Ok(())
 }
 
 async fn auth_cmd(workspace: Option<PathBuf>, args: AuthArgs) -> anyhow::Result<()> {
@@ -222,6 +261,8 @@ Onlyne is a workspace-local IM channel broker. Use it only as a local messaging 
 | Export/update local skill | `onlyne export-skill` |
 | Run daemon | `onlyne run` |
 | Run with metadata replies | `onlyne run --debug` |
+| Stop daemon | `onlyne stop` |
+| Restart daemon | `onlyne restart` |
 | Health check | `onlyne client '{"id":"ping","op":"ping"}'` |
 | Status/channels | `onlyne client '{"id":"status","op":"status"}'` |
 | Send Markdown | `onlyne client '{"id":"send","op":"send_message","channel_id":"qqbot","text":"# Report\\n\\n| A | B |\\n|---|---|\\n| 1 | 2 |"}'` |
@@ -363,20 +404,21 @@ fn init_logging(ws: &Workspace) -> anyhow::Result<()> {
 }
 async fn client(workspace: Option<PathBuf>, line: String) -> anyhow::Result<()> {
     let ws = resolve_workspace(workspace)?;
+    println!("{}", socket_request(&ws, &line).await?);
+    Ok(())
+}
+
+async fn socket_request(ws: &Workspace, line: &str) -> anyhow::Result<String> {
     let mut s = UnixStream::connect(ws.socket_path())
         .await
         .context("connect onlyne socket")?;
     s.write_all(line.as_bytes()).await?;
-    s.write_all(
-        b"
-",
-    )
-    .await?;
+    s.write_all(b"\n").await?;
     let mut lines = BufReader::new(s).lines();
-    if let Some(resp) = lines.next_line().await? {
-        println!("{resp}");
-    }
-    Ok(())
+    lines
+        .next_line()
+        .await?
+        .context("onlyne socket closed without response")
 }
 fn redact(s: &str) -> String {
     let mut out = s.to_string();
@@ -434,6 +476,15 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_commands_are_parsed() {
+        let stop = Cli::try_parse_from(["onlyne", "stop"]).unwrap();
+        assert!(matches!(stop.cmd, Cmd::Stop));
+
+        let restart = Cli::try_parse_from(["onlyne", "restart", "--debug"]).unwrap();
+        assert!(matches!(restart.cmd, Cmd::Restart { debug: true }));
+    }
+
+    #[test]
     fn export_skill_writes_workspace_local_agents_skill() {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::resolve(dir.path());
@@ -458,6 +509,8 @@ mod tests {
     fn completions_include_export_skill() {
         let text = completion_text(Zsh);
         assert!(text.contains("export-skill"));
+        assert!(text.contains("restart"));
+        assert!(text.contains("stop"));
         assert!(!text.contains("--export-skill"));
     }
 
