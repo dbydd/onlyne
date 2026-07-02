@@ -494,21 +494,26 @@ fn parse_feishu_event_payload(payload: &[u8], bind: &Option<String>) -> Option<M
         .chat_type
         .as_deref()
         .unwrap_or_default();
-    let conversation_id = if chat_type == "p2p" {
-        envelope
+    let mut candidates = Vec::new();
+    if chat_type == "p2p" {
+        if let Some(open_id) = envelope
             .event
             .sender
             .as_ref()
             .and_then(|s| s.sender_id.open_id.clone())
-            .or_else(|| envelope.event.message.chat_id.clone())?
-    } else {
-        envelope
-            .event
-            .chat
-            .as_ref()
-            .and_then(|c| c.chat_id.clone())
-            .or_else(|| envelope.event.message.chat_id.clone())?
-    };
+        {
+            candidates.push(open_id);
+        }
+    } else if let Some(chat_id) = envelope.event.chat.as_ref().and_then(|c| c.chat_id.clone()) {
+        candidates.push(chat_id);
+    }
+    if let Some(chat_id) = envelope.event.message.chat_id.clone() {
+        candidates.push(chat_id);
+    }
+    let conversation_id = bind
+        .as_deref()
+        .and_then(|b| candidates.iter().find(|id| id.as_str() == b).cloned())
+        .or_else(|| candidates.first().cloned())?;
     if !bound_matches(bind, &conversation_id) {
         return None;
     }
@@ -557,6 +562,23 @@ mod tests {
         let msg = parse_feishu_event_payload(payload, &Some("ou_user".into())).unwrap();
 
         assert_eq!(msg.conversation_id.0, "ou_user");
+        assert_eq!(msg.sender_id.as_deref(), Some("ou_user"));
+        assert_eq!(msg.text.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn parses_p2p_event_to_bound_chat_id_when_configured() {
+        let payload = br#"{
+            "header":{"event_id":"evt-1","event_type":"im.message.receive_v1"},
+            "event":{
+                "sender":{"sender_id":{"open_id":"ou_user"}},
+                "message":{"message_id":"om_1","chat_type":"p2p","chat_id":"oc_hidden","content":"{\"text\":\"hi\"}"}
+            }
+        }"#;
+
+        let msg = parse_feishu_event_payload(payload, &Some("oc_hidden".into())).unwrap();
+
+        assert_eq!(msg.conversation_id.0, "oc_hidden");
         assert_eq!(msg.sender_id.as_deref(), Some("ou_user"));
         assert_eq!(msg.text.as_deref(), Some("hi"));
     }
