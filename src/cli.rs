@@ -252,6 +252,7 @@ Onlyne is a workspace-local IM channel broker. Use it only as a local messaging 
 - Do not commit `.onlyne/`, logs, runtime databases, sockets, or channel tokens.
 - Do not treat Onlyne as an agent runtime, model runner, scheduler, or prompt system.
 - Use `onlyne run --debug` only while discovering channel/conversation/thread metadata; debug replies are for setup, not normal operation.
+- If pi-onlyne manages the daemon, do not shell out `nohup onlyne run`, `pkill -f 'onlyne run'`, or manual restart scripts. Use `/onlyne daemon start|stop|restart` or the `onlyne_daemon_start` / `onlyne_daemon_stop` / `onlyne_daemon_restart` tools instead.
 
 ## Quick Reference
 
@@ -259,10 +260,11 @@ Onlyne is a workspace-local IM channel broker. Use it only as a local messaging 
 | --- | --- |
 | Initialize workspace | `onlyne init` |
 | Export/update local skill | `onlyne export-skill` |
-| Run daemon | `onlyne run` |
+| Run daemon manually | `onlyne run` |
 | Run with metadata replies | `onlyne run --debug` |
-| Stop daemon | `onlyne stop` |
-| Restart daemon | `onlyne restart` |
+| Stop manual daemon | `onlyne stop` |
+| Restart manual daemon | `onlyne restart` |
+| Manage daemon from pi-onlyne | `/onlyne daemon start`, `/onlyne daemon stop`, `/onlyne daemon restart`, or `onlyne_daemon_*` tools |
 | Health check | `onlyne client '{"id":"ping","op":"ping"}'` |
 | Status/channels | `onlyne client '{"id":"status","op":"status"}'` |
 | Send Markdown | `onlyne client '{"id":"send","op":"send_message","channel_id":"qqbot","text":"# Report\\n\\n| A | B |\\n|---|---|\\n| 1 | 2 |"}'` |
