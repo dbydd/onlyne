@@ -2,7 +2,7 @@ use crate::{app::App, core::*};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
@@ -39,17 +39,29 @@ struct Resp<'a> {
     error: Option<Value>,
 }
 
-pub async fn serve_socket(app: Arc<App>) -> anyhow::Result<()> {
-    let path = app.workspace.socket_path();
+pub async fn bind_socket(path: &Path) -> anyhow::Result<UnixListener> {
     if path.exists() {
-        match UnixStream::connect(&path).await {
+        match UnixStream::connect(path).await {
             Ok(_) => anyhow::bail!("onlyne daemon already running at {}", path.display()),
             Err(_) => {
-                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(path);
             }
         }
     }
-    let listener = UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?;
+    UnixListener::bind(path).with_context(|| format!("bind {}", path.display()))
+}
+
+pub async fn serve_socket(app: Arc<App>) -> anyhow::Result<()> {
+    let path = app.workspace.socket_path();
+    let listener = bind_socket(&path).await?;
+    serve_bound_socket(app, listener, &path).await
+}
+
+pub async fn serve_bound_socket(
+    app: Arc<App>,
+    listener: UnixListener,
+    path: &Path,
+) -> anyhow::Result<()> {
     info!(socket = %path.display(), "ipc socket listening");
     loop {
         let (s, _) = listener.accept().await?;

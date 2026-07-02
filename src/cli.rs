@@ -104,10 +104,12 @@ pub async fn run() -> anyhow::Result<()> {
             init_logging(&ws)?;
             let debug_mode = debug;
             tracing::info!(workspace = %ws.root().display(), socket = %ws.socket_path().display(), debug = debug_mode, "starting onlyne daemon");
+            let socket_path = ws.socket_path();
+            let listener = ipc::bind_socket(&socket_path).await?;
             let app = App::load_with_debug(ws, debug_mode).await?;
             app.start_all().await?;
             app.start_channel_io().await?;
-            ipc::serve_socket(app).await
+            ipc::serve_bound_socket(app, listener, &socket_path).await
         }
         Cmd::Stdio => {
             let ws = resolve_workspace(workspace.clone())?;
