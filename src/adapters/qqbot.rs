@@ -18,13 +18,27 @@ use std::sync::{
 use tokio::{
     sync::{Mutex, mpsc},
     task::JoinHandle,
-    time::{Duration, sleep},
+    time::{Duration, Instant, sleep},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 const TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
 const PROD: &str = "https://api.sgroup.qq.com";
 const SANDBOX: &str = "https://sandbox.api.sgroup.qq.com";
 const INTENTS: i64 = (1 << 25) | (1 << 26);
+const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(300);
+
+#[derive(Clone)]
+struct QqAccessToken {
+    value: String,
+    expires_at: Instant,
+}
+
+impl QqAccessToken {
+    fn is_valid(&self) -> bool {
+        Instant::now() + TOKEN_REFRESH_SKEW < self.expires_at
+    }
+}
+
 pub struct QqBotAdapter {
     app_id: String,
     app_secret: String,
@@ -32,7 +46,7 @@ pub struct QqBotAdapter {
     rich_text: bool,
     bind_conversation_id: Option<String>,
     client: Client,
-    token: Arc<Mutex<Option<String>>>,
+    token: Arc<Mutex<Option<QqAccessToken>>>,
     running: Arc<AtomicBool>,
     task: Option<JoinHandle<()>>,
 }
@@ -54,25 +68,24 @@ impl QqBotAdapter {
         if self.sandbox { SANDBOX } else { PROD }
     }
     async fn access_token(&self) -> anyhow::Result<String> {
-        if let Some(t) = self.token.lock().await.clone() {
-            return Ok(t);
+        if let Some(t) = self
+            .token
+            .lock()
+            .await
+            .clone()
+            .filter(QqAccessToken::is_valid)
+        {
+            return Ok(t.value);
         }
-        let v: Value = self
-            .client
-            .post(TOKEN_URL)
-            .json(&json!({"appId":self.app_id,"clientSecret":self.app_secret}))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let t = v
-            .get("access_token")
-            .and_then(Value::as_str)
-            .context("qqbot access_token")?
-            .to_string();
+        let t = qq_token(&self.client, &self.app_id, &self.app_secret).await?;
         *self.token.lock().await = Some(t.clone());
-        Ok(t)
+        Ok(t.value)
+    }
+
+    async fn refresh_access_token(&self) -> anyhow::Result<String> {
+        let t = qq_token(&self.client, &self.app_id, &self.app_secret).await?;
+        *self.token.lock().await = Some(t.clone());
+        Ok(t.value)
     }
 }
 #[async_trait]
@@ -122,7 +135,7 @@ impl Adapter for QqBotAdapter {
         Ok(vec![])
     }
     async fn send_message(&self, msg: OutboundMessage) -> anyhow::Result<MessageEnvelope> {
-        let token = self.access_token().await?;
+        let mut token = self.access_token().await?;
         let mut sent = Vec::new();
         if let Some(text) = msg.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             let body = if msg.format == MessageFormat::Markdown {
@@ -138,24 +151,37 @@ impl Adapter for QqBotAdapter {
             } else {
                 "text"
             };
-            let sent_body = self
-                .send_group(&token, &msg.conversation_id.0, body)
+            let sent_body = match self
+                .send_group(&token, &msg.conversation_id.0, body.clone())
                 .await
-                .map_err(|e| {
-                    if msg.format == MessageFormat::Markdown {
-                        anyhow!("markdown rich send failed: {e}")
-                    } else {
-                        e
-                    }
-                })?;
+            {
+                Ok(v) => v,
+                Err(e) if is_qq_auth_error(&e) => {
+                    token = self.refresh_access_token().await?;
+                    self.send_group(&token, &msg.conversation_id.0, body)
+                        .await?
+                }
+                Err(e) if msg.format == MessageFormat::Markdown => {
+                    return Err(anyhow!("markdown rich send failed: {e}"));
+                }
+                Err(e) => return Err(e),
+            };
             sent.push((kind, sent_body));
         }
         for a in &msg.attachments {
-            sent.push((
-                "attachment",
-                self.send_attachment(&token, &msg.conversation_id.0, a)
-                    .await?,
-            ));
+            let attachment = match self
+                .send_attachment(&token, &msg.conversation_id.0, a)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) if is_qq_auth_error(&e) => {
+                    token = self.refresh_access_token().await?;
+                    self.send_attachment(&token, &msg.conversation_id.0, a)
+                        .await?
+                }
+                Err(e) => return Err(e),
+            };
+            sent.push(("attachment", attachment));
         }
         let (message_id, platform_metadata) = delivery_metadata(sent)?;
         Ok(MessageEnvelope {
@@ -193,6 +219,15 @@ impl Adapter for QqBotAdapter {
 }
 fn qq_markdown_body(text: &str) -> Value {
     json!({"msg_type":2,"markdown":{"content":text}})
+}
+
+fn is_qq_auth_error(e: &anyhow::Error) -> bool {
+    let s = e.to_string().to_ascii_lowercase();
+    s.contains("401")
+        || s.contains("access_token")
+        || s.contains("invalid token")
+        || s.contains("token expired")
+        || s.contains("qqbot token")
 }
 
 fn delivery_metadata(sent: Vec<(&str, (MessageId, Value))>) -> anyhow::Result<(MessageId, Value)> {
@@ -332,7 +367,11 @@ impl QqBotAdapter {
         .await
     }
 }
-async fn qq_token(client: &Client, app_id: &str, app_secret: &str) -> anyhow::Result<String> {
+async fn qq_token(
+    client: &Client,
+    app_id: &str,
+    app_secret: &str,
+) -> anyhow::Result<QqAccessToken> {
     let v: Value = client
         .post(TOKEN_URL)
         .json(&json!({"appId":app_id,"clientSecret":app_secret}))
@@ -341,10 +380,20 @@ async fn qq_token(client: &Client, app_id: &str, app_secret: &str) -> anyhow::Re
         .error_for_status()?
         .json()
         .await?;
-    Ok(v.get("access_token")
+    let value = v
+        .get("access_token")
         .and_then(Value::as_str)
         .context("qqbot token")?
-        .to_string())
+        .to_string();
+    let expires_in = v
+        .get("expires_in")
+        .or_else(|| v.get("expiresIn"))
+        .and_then(Value::as_u64)
+        .unwrap_or(7200);
+    Ok(QqAccessToken {
+        value,
+        expires_at: Instant::now() + Duration::from_secs(expires_in),
+    })
 }
 async fn qq_loop(
     app_id: &str,
@@ -355,7 +404,7 @@ async fn qq_loop(
     events: &mpsc::Sender<Event>,
 ) -> anyhow::Result<()> {
     let client = Client::new();
-    let token = qq_token(&client, app_id, app_secret).await?;
+    let token = qq_token(&client, app_id, app_secret).await?.value;
     let base = if sandbox { SANDBOX } else { PROD };
     let gw: Value = client
         .get(format!("{base}/gateway/bot"))
@@ -432,6 +481,32 @@ fn parse_dispatch(v: Value, bind: &Option<String>) -> Option<MessageEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_token_validity_uses_refresh_skew() {
+        let valid = QqAccessToken {
+            value: "t".into(),
+            expires_at: Instant::now() + TOKEN_REFRESH_SKEW + Duration::from_secs(1),
+        };
+        assert!(valid.is_valid());
+
+        let expiring = QqAccessToken {
+            value: "t".into(),
+            expires_at: Instant::now() + TOKEN_REFRESH_SKEW,
+        };
+        assert!(!expiring.is_valid());
+    }
+
+    #[test]
+    fn detects_qq_auth_errors() {
+        assert!(is_qq_auth_error(&anyhow!(
+            "qqbot groups message 401: token expired"
+        )));
+        assert!(is_qq_auth_error(&anyhow!("access_token invalid")));
+        assert!(!is_qq_auth_error(&anyhow!(
+            "qqbot groups message 400: bad request"
+        )));
+    }
 
     #[test]
     fn bind_conversation_id_resolves_env() {
