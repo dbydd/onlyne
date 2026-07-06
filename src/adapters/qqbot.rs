@@ -108,10 +108,12 @@ impl Adapter for QqBotAdapter {
                 if let Err(e) =
                     qq_loop(&app_id, &app_secret, sandbox, &bind, &inbound, &events).await
                 {
+                    let reason = e.to_string();
+                    tracing::warn!(error = %reason, "qqbot reconnecting");
                     let _ = events
                         .send(Event::AdapterReconnecting {
                             channel_id: ChannelId("qqbot".into()),
-                            reason: e.to_string(),
+                            reason,
                         })
                         .await;
                     sleep(Duration::from_secs(5)).await;
@@ -419,17 +421,52 @@ async fn qq_loop(
         .and_then(Value::as_str)
         .context("gateway url")?;
     let (mut ws, _) = connect_async(url).await?;
-    let mut seq: Option<i64> = None;
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(40));
-    loop {
-        tokio::select! { _=heartbeat.tick()=>{let _=ws.send(Message::Text(json!({"op":1,"d":seq}).to_string().into())).await;}, item=ws.next()=>{let Some(item)=item else{break};if let Message::Text(t)=item?{let v:Value=serde_json::from_str(&t)?;if let Some(s)=v.get("s").and_then(Value::as_i64){seq=Some(s);}match v.get("op").and_then(Value::as_i64).unwrap_or(-1){10=>{let interval=v.pointer("/d/heartbeat_interval").and_then(Value::as_u64).unwrap_or(41250);heartbeat=tokio::time::interval(Duration::from_millis(interval));ws.send(Message::Text(json!({"op":2,"d":{"token":format!("QQBot {token}"),"intents":INTENTS,"shard":[0,1]}}).to_string().into())).await?;},0=>{if let Some(env)=parse_dispatch(v,bind){let _=inbound.send(env).await;}},7|9=>return Err(anyhow!("qqbot reconnect requested")),_=>{}}}}}
-    }
     let _ = events
-        .send(Event::AdapterStopped {
+        .send(Event::AdapterStarted {
             channel_id: ChannelId("qqbot".into()),
         })
         .await;
-    Ok(())
+    let mut seq: Option<i64> = None;
+    let mut heartbeat_period = Duration::from_secs(40);
+    let mut heartbeat =
+        tokio::time::interval_at(Instant::now() + heartbeat_period, heartbeat_period);
+    let mut last_rx = Instant::now();
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                if last_rx.elapsed() > heartbeat_period * 3 {
+                    return Err(anyhow!("qqbot heartbeat timeout"));
+                }
+                ws.send(Message::Text(json!({"op":1,"d":seq}).to_string().into())).await?;
+            }
+            item = ws.next() => {
+                let Some(item) = item else {
+                    return Err(anyhow!("qqbot websocket closed"));
+                };
+                if let Message::Text(t) = item? {
+                    last_rx = Instant::now();
+                    let v: Value = serde_json::from_str(&t)?;
+                    if let Some(s) = v.get("s").and_then(Value::as_i64) {
+                        seq = Some(s);
+                    }
+                    match v.get("op").and_then(Value::as_i64).unwrap_or(-1) {
+                        10 => {
+                            heartbeat_period = Duration::from_millis(v.pointer("/d/heartbeat_interval").and_then(Value::as_u64).unwrap_or(41250));
+                            heartbeat = tokio::time::interval_at(Instant::now() + heartbeat_period, heartbeat_period);
+                            ws.send(Message::Text(json!({"op":2,"d":{"token":format!("QQBot {token}"),"intents":INTENTS,"shard":[0,1]}}).to_string().into())).await?;
+                        }
+                        0 => {
+                            if let Some(env) = parse_dispatch(v, bind) {
+                                let _ = inbound.send(env).await;
+                            }
+                        }
+                        7 | 9 => return Err(anyhow!("qqbot reconnect requested")),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
 }
 fn parse_dispatch(v: Value, bind: &Option<String>) -> Option<MessageEnvelope> {
     if v.get("op").and_then(Value::as_i64) != Some(0) {
