@@ -8,7 +8,8 @@ Examples are runnable with `cargo run --example <name>`. By default they use the
 cargo build
 cargo run -- --workspace examples init
 cargo run -- --workspace examples auth feishu
-# or: cargo run -- --workspace examples auth qqbot --app-id '<app-id>' --app-secret '<app-secret>'
+# or QR/qclaw: cargo run -- --workspace examples auth qqbot
+# or manual: cargo run -- --workspace examples auth qqbot --app-id '<app-id>' --app-secret '<app-secret>'
 cargo run -- --workspace examples run
 ```
 

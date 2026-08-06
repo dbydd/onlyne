@@ -209,6 +209,7 @@ async fn auth_cmd(workspace: Option<PathBuf>, args: AuthArgs) -> anyhow::Result<
                     app_id: args.app_id,
                     app_secret: args.app_secret,
                     sandbox: args.sandbox,
+                    timeout: Duration::from_secs(args.timeout),
                 },
             )
             .await

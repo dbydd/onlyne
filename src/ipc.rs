@@ -17,6 +17,8 @@ pub struct Request {
     #[serde(default)]
     pub channel_id: Option<String>,
     #[serde(default)]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
     pub message_id: Option<String>,
     #[serde(default)]
     pub text: Option<String>,
@@ -233,10 +235,11 @@ mod tests {
     #[test]
     fn request_parses_markdown_format() {
         let r: Request = serde_json::from_str(
-            r##"{"id":"1","op":"send_message","text":"# hi","format":"markdown"}"##,
+            r##"{"id":"1","op":"send_message","conversation_id":"group:g1","text":"# hi","format":"markdown"}"##,
         )
         .unwrap();
         assert_eq!(r.format, Some(MessageFormat::Markdown));
+        assert_eq!(r.conversation_id.as_deref(), Some("group:g1"));
     }
 
     #[test]

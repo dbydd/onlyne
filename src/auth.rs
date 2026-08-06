@@ -1,8 +1,15 @@
 use crate::{config, workspace::Workspace};
+use aes_gcm::{
+    Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
+};
 use anyhow::{Context, anyhow};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use qrcode::{QrCode, render::unicode};
+use rand::{RngCore, rngs::OsRng};
 use reqwest::Client;
 use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::Value;
 use std::{path::Path, time::Duration};
 use tokio::time::{Instant, sleep};
 
@@ -12,6 +19,8 @@ const FEISHU_OPEN: &str = "https://open.feishu.cn";
 const LARK_OPEN: &str = "https://open.larksuite.com";
 const WEIXIN_BASE: &str = "https://ilinkai.weixin.qq.com";
 const QQBOT_TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
+const QQOFFICIAL_BIND_HOST: &str = "q.qq.com";
+const QQOFFICIAL_QR_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct FeishuAuthOptions {
     pub app_id: Option<String>,
@@ -30,6 +39,7 @@ pub struct QqBotAuthOptions {
     pub app_id: Option<String>,
     pub app_secret: Option<String>,
     pub sandbox: bool,
+    pub timeout: Duration,
 }
 
 pub async fn auth_feishu(ws: &Workspace, opts: FeishuAuthOptions) -> anyhow::Result<()> {
@@ -52,8 +62,20 @@ pub async fn auth_feishu(ws: &Workspace, opts: FeishuAuthOptions) -> anyhow::Res
 
 pub async fn auth_qqbot(ws: &Workspace, opts: QqBotAuthOptions) -> anyhow::Result<()> {
     ws.bootstrap()?;
-    let (Some(app_id), Some(app_secret)) = (opts.app_id, opts.app_secret) else {
-        return Err(anyhow!("qqbot auth needs both --app-id and --app-secret"));
+    let (app_id, app_secret) = match (opts.app_id, opts.app_secret) {
+        (Some(id), Some(secret)) => (id, secret),
+        (None, None) => {
+            if opts.sandbox {
+                return Err(anyhow!("qqbot QR auth does not use --sandbox"));
+            }
+            let r = qqofficial_qr(opts.timeout).await?;
+            (r.app_id, r.app_secret)
+        }
+        _ => {
+            return Err(anyhow!(
+                "qqbot auth needs both --app-id and --app-secret, or neither for QR auth"
+            ));
+        }
     };
     validate_qqbot(&app_id, &app_secret).await?;
     save_qqbot_auth(ws, &app_id, &app_secret, opts.sandbox)?;
@@ -104,9 +126,18 @@ pub fn save_qqbot_auth(
     cfg.adapters.qqbot.sandbox = sandbox;
     cfg.adapters.qqbot.app_id = Some("$QQBOT_APP_ID".into());
     cfg.adapters.qqbot.app_secret = Some("$QQBOT_APP_SECRET".into());
+    cfg.adapters.qqbot.bind_conversation_id = None;
     std::fs::write(ws.config_path(), toml::to_string_pretty(&cfg)?)?;
     set_dotenv(&ws.dotenv_path(), "QQBOT_APP_ID", app_id)?;
     set_dotenv(&ws.dotenv_path(), "QQBOT_APP_SECRET", app_secret)?;
+    remove_dotenv_keys(
+        &ws.dotenv_path(),
+        &[
+            "QQ_CONVERSATION_ID",
+            "QQBOT_CONVERSATION_ID",
+            "ONLYNE_QQBOT_CONVERSATION_ID",
+        ],
+    )?;
     Ok(())
 }
 
@@ -120,6 +151,128 @@ pub fn save_weixin_auth(ws: &Workspace, token: &str, base_url: Option<&str>) -> 
     std::fs::write(ws.config_path(), toml::to_string_pretty(&cfg)?)?;
     set_dotenv(&ws.dotenv_path(), "WEIXIN_ILINK_TOKEN", token)?;
     Ok(())
+}
+
+struct QqOfficialQrResult {
+    app_id: String,
+    app_secret: String,
+}
+
+async fn qqofficial_qr(timeout: Duration) -> anyhow::Result<QqOfficialQrResult> {
+    let client = Client::builder().timeout(Duration::from_secs(15)).build()?;
+    let bind_key = qqofficial_bind_key();
+    let created = qqofficial_post(
+        &client,
+        &format!("https://{QQOFFICIAL_BIND_HOST}/lite/create_bind_task"),
+        &serde_json::json!({"key": bind_key}),
+    )
+    .await?;
+    let data = created.get("data").and_then(Value::as_object);
+    let task_id = data
+        .and_then(|d| d.get("task_id"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .context("qqbot bind task_id missing")?;
+    let qr_url = format!(
+        "https://{QQOFFICIAL_BIND_HOST}/qqbot/openclaw/connect.html?task_id={}&_wv=2",
+        url::form_urlencoded::byte_serialize(task_id.as_bytes()).collect::<String>()
+    );
+    println!("Open QQ and scan this QQ Official Bot QR URL:\n{qr_url}\n");
+    print_qr(&qr_url);
+
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let polled = qqofficial_post(
+            &client,
+            &format!("https://{QQOFFICIAL_BIND_HOST}/lite/poll_bind_result"),
+            &serde_json::json!({"task_id": task_id}),
+        )
+        .await?;
+        if let Some(result) = qqofficial_login_result(&polled, &bind_key)? {
+            return Ok(result);
+        }
+        sleep(QQOFFICIAL_QR_POLL_INTERVAL).await;
+    }
+    Err(anyhow!("timed out waiting for qqbot QR auth"))
+}
+
+async fn qqofficial_post(client: &Client, url: &str, payload: &Value) -> anyhow::Result<Value> {
+    let resp = client
+        .post(url)
+        .header("Accept", "application/json")
+        .json(payload)
+        .send()
+        .await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    let v: Value = serde_json::from_str(&text)
+        .with_context(|| format!("qqbot bind api status={status} body={text}"))?;
+    if v.get("retcode").is_some_and(|c| c.as_i64() != Some(0)) {
+        let msg = v
+            .get("msg")
+            .or_else(|| v.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("QQ bot bind API failed");
+        return Err(anyhow!(msg.to_string()));
+    }
+    Ok(v)
+}
+
+fn qqofficial_login_result(
+    v: &Value,
+    bind_key: &str,
+) -> anyhow::Result<Option<QqOfficialQrResult>> {
+    let data = v.get("data").and_then(Value::as_object);
+    let status = data
+        .and_then(|d| d.get("status"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    match status {
+        2 => {
+            let app_id = data
+                .and_then(|d| d.get("bot_appid"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .context("qqbot QR completed without appid")?
+                .to_string();
+            let encrypted = data
+                .and_then(|d| d.get("bot_encrypt_secret"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .context("qqbot QR completed without encrypted secret")?;
+            Ok(Some(QqOfficialQrResult {
+                app_id,
+                app_secret: decrypt_qqofficial_secret(encrypted, bind_key)?,
+            }))
+        }
+        3 => Err(anyhow!("qqbot QR expired")),
+        _ => Ok(None),
+    }
+}
+
+fn qqofficial_bind_key() -> String {
+    let mut key = [0u8; 32];
+    OsRng.fill_bytes(&mut key);
+    BASE64.encode(key)
+}
+
+fn decrypt_qqofficial_secret(encrypted_secret: &str, bind_key: &str) -> anyhow::Result<String> {
+    let key = BASE64
+        .decode(bind_key)
+        .context("qqbot bind key base64 decode failed")?;
+    let raw = BASE64
+        .decode(encrypted_secret)
+        .context("qqbot encrypted secret base64 decode failed")?;
+    if key.len() != 32 || raw.len() <= 28 {
+        return Err(anyhow!("qqbot encrypted secret format invalid"));
+    }
+    let nonce = Nonce::from_slice(&raw[..12]);
+    let ciphertext_and_tag = &raw[12..];
+    let cipher = Aes256Gcm::new_from_slice(&key).context("qqbot bind key invalid")?;
+    let plain = cipher
+        .decrypt(nonce, ciphertext_and_tag)
+        .map_err(|_| anyhow!("qqbot encrypted secret decrypt failed"))?;
+    String::from_utf8(plain).context("qqbot decrypted secret is not utf-8")
 }
 
 async fn validate_qqbot(app_id: &str, app_secret: &str) -> anyhow::Result<()> {
@@ -431,6 +584,22 @@ fn set_dotenv(path: &Path, key: &str, value: &str) -> anyhow::Result<()> {
     std::fs::write(path, text).with_context(|| format!("write {}", path.display()))
 }
 
+fn remove_dotenv_keys(path: &Path, keys: &[&str]) -> anyhow::Result<()> {
+    let old = std::fs::read_to_string(path).unwrap_or_default();
+    let mut text = old
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start().trim_start_matches('#').trim_start();
+            !keys
+                .iter()
+                .any(|key| trimmed.starts_with(&format!("{key}=")))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.push('\n');
+    std::fs::write(path, text).with_context(|| format!("write {}", path.display()))
+}
+
 fn trim_base(s: &str) -> String {
     let s = s.trim().trim_end_matches('/');
     if s.is_empty() {
@@ -478,6 +647,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::resolve(dir.path());
         ws.bootstrap().unwrap();
+        let mut old_cfg = config::load_config(&ws.config_path()).unwrap();
+        old_cfg.adapters.qqbot.bind_conversation_id = Some("$QQ_CONVERSATION_ID".into());
+        std::fs::write(ws.config_path(), toml::to_string_pretty(&old_cfg).unwrap()).unwrap();
+        set_dotenv(&ws.dotenv_path(), "QQ_CONVERSATION_ID", "old-conversation").unwrap();
 
         save_qqbot_auth(&ws, "appid", "dummy-secret", true).unwrap();
 
@@ -486,6 +659,8 @@ mod tests {
         assert!(cfg.contains("[adapters.qqbot]"));
         assert!(cfg.contains("enabled = true"));
         assert!(cfg.contains("sandbox = true"));
+        assert!(!cfg.contains("bind_conversation_id"));
+        assert!(!env.contains("QQ_CONVERSATION_ID="));
         assert!(env.contains("QQBOT_APP_ID=appid"));
         assert!(
             env.lines()

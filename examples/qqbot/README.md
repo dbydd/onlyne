@@ -8,8 +8,10 @@ See `../README.md` for the shared validation flow, variables, and log files.
 cargo build
 cd examples/qqbot
 ../../target/debug/onlyne init
-../../target/debug/onlyne auth qqbot --app-id '<app-id>' --app-secret '<app-secret>'
-# add --sandbox when using QQ Bot sandbox credentials
+../../target/debug/onlyne auth qqbot
+# or manual credentials:
+# ../../target/debug/onlyne auth qqbot --app-id '<app-id>' --app-secret '<app-secret>'
+# add --sandbox only when using manual QQ Bot sandbox credentials
 ```
 
 ## Run

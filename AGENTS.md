@@ -118,7 +118,7 @@ Dependency rule:
 ## 4. Reference repo usage rule
 
 Reference repo:
-- `/Users/dbydd/vibe-agent-working-dir/git-projects/onlyne_ref_cc_connect`
+- `../onlyne_ref_cc_connect` (sibling directory, outside this repo)
 
 Use cc-connect **only as protocol / adapter behavior reference**.
 

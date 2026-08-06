@@ -25,7 +25,7 @@ This file tracks implementation and verification notes. The root README is the p
 | --- | --- | --- |
 | Telegram | Bot token, `getUpdates`, send text/media, media download. | Real bot polling and send. |
 | Feishu/Lark | QR/app credential auth, tenant token, websocket receive, OpenAPI send. | Tenant QR completion, permissions, websocket in target tenant. |
-| QQ Bot | App access token, gateway websocket, group text/media send. | Real gateway session and long-run token refresh behavior. |
+| QQ Bot | qclaw QR/manual auth, official gateway websocket, group/C2C/channel event parsing, scene-aware text/media send. | Live qclaw QR completion and long-run gateway behavior. |
 | WeChat ilink | QR/token auth, long-poll receive, context-token send, CDN media helpers. | Live CDN edge cases and expired context-token recovery. |
 
 ## Latest local checks

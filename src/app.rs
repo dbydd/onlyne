@@ -231,6 +231,7 @@ impl App {
                                 id: None,
                                 op: "send_message".into(),
                                 channel_id: Some(channel.clone()),
+                                conversation_id: None,
                                 message_id: None,
                                 text: Some(text),
                                 format: None,
@@ -357,6 +358,7 @@ impl App {
             id: None,
             op: "loopback".into(),
             channel_id: None,
+            conversation_id: None,
             message_id: None,
             text: Some(text),
             format: None,
@@ -428,6 +430,7 @@ impl App {
             channel_id: inbound.channel_id.clone(),
             conversation_id: inbound.conversation_id.clone(),
             text: Some(text.into()),
+            reply_to_message_id: Some(inbound.message_id.clone()),
             format: MessageFormat::Plain,
             attachments: vec![],
         };
@@ -456,6 +459,7 @@ impl App {
             channel_id: inbound.channel_id.clone(),
             conversation_id: inbound.conversation_id.clone(),
             text: Some(debug_reply_text(inbound)),
+            reply_to_message_id: Some(inbound.message_id.clone()),
             format: MessageFormat::Plain,
             attachments: vec![],
         };
@@ -479,11 +483,28 @@ impl App {
     async fn send(&self, req: Request) -> anyhow::Result<Value> {
         let format = request_format(&req);
         let channel = req.channel_id.context("channel_id required")?;
-        let conversation = self.bound_conversation(&channel).await?;
+        let reply_to_message_id = if req.op == "reply_message" {
+            Some(MessageId(req.message_id.context("message_id required")?))
+        } else {
+            req.message_id.map(MessageId)
+        };
+        let conversation = match req.conversation_id {
+            Some(id) => id,
+            None => match &reply_to_message_id {
+                Some(id) => self
+                    .store
+                    .find_message(id)
+                    .await?
+                    .map(|m| m.conversation_id.0)
+                    .unwrap_or(self.bound_conversation(&channel).await?),
+                None => self.bound_conversation(&channel).await?,
+            },
+        };
         let msg = OutboundMessage {
             channel_id: ChannelId(channel.clone()),
             conversation_id: ConversationId(conversation),
             text: req.text,
+            reply_to_message_id,
             format,
             attachments: req.attachments,
         };
@@ -540,6 +561,7 @@ impl App {
                             channel_id: msg.channel_id.clone(),
                             conversation_id: msg.conversation_id.clone(),
                             text: Some(text),
+                            reply_to_message_id: msg.reply_to_message_id.clone(),
                             format: MessageFormat::Markdown,
                             attachments: vec![],
                         })
@@ -555,6 +577,7 @@ impl App {
                                 channel_id: msg.channel_id.clone(),
                                 conversation_id: msg.conversation_id.clone(),
                                 text: None,
+                                reply_to_message_id: msg.reply_to_message_id.clone(),
                                 format: MessageFormat::Plain,
                                 attachments: vec![AttachmentRef {
                                     kind: AttachmentKind::Image,
@@ -577,6 +600,7 @@ impl App {
                         channel_id: msg.channel_id.clone(),
                         conversation_id: msg.conversation_id.clone(),
                         text: None,
+                        reply_to_message_id: msg.reply_to_message_id.clone(),
                         format: MessageFormat::Plain,
                         attachments: msg.attachments.clone(),
                     })
@@ -1002,6 +1026,7 @@ mod tests {
             channel_id: ChannelId("feishu".into()),
             conversation_id: ConversationId("oc_1".into()),
             text: Some("| A | B |\n| --- | --- |\n| 1 | 2 |".into()),
+            reply_to_message_id: None,
             format: MessageFormat::Markdown,
             attachments: vec![],
         };

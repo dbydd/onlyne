@@ -13,8 +13,10 @@ This is meant for the first rich-media pass:
 ```bash
 cargo build
 cargo run -- --workspace examples init
-# configure Feishu/QQ credentials, for example:
-cargo run -- --workspace examples auth qqbot --app-id '<app-id>' --app-secret '<app-secret>'
+# configure QQ via qclaw QR, for example:
+cargo run -- --workspace examples auth qqbot
+# or manual credentials:
+# cargo run -- --workspace examples auth qqbot --app-id '<app-id>' --app-secret '<app-secret>'
 ```
 
 ## Run
