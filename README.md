@@ -77,12 +77,12 @@ Each enabled channel is singleton-routed: configure one `bind_conversation_id`, 
 | --- | --- |
 | Telegram | Put `TELEGRAM_BOT_TOKEN` in `.onlyne/.env`, enable `[adapters.telegram]`, then set `bind_conversation_id` or send `/handshake`. |
 | Feishu/Lark | Run `onlyne auth feishu`, enable `[adapters.feishu]`, then set `bind_conversation_id` or send `/handshake`. |
-| QQ Bot | Run `onlyne auth qqbot --app-id <id> --app-secret <secret>`; add `--sandbox` for sandbox credentials; set `bind_conversation_id` or send `/handshake`. |
+| QQ Bot | Run `onlyne auth qqbot` to create/bind through qclaw QR, or pass `--app-id <id> --app-secret <secret>` manually; add `--sandbox` only for manual sandbox credentials; set `bind_conversation_id` or send `/handshake`. |
 | WeChat ilink | Run `onlyne auth wechat`, enable `[adapters.wechat]`, then set `bind_conversation_id` or send `/handshake`. |
 
 Auth commands write only to the selected workspace `.onlyne/` directory.
 
-Adapter SDKs: Feishu uses `openlark`, Telegram uses `teloxide`, and WeChat ilink uses `wechat-ilink`. QQ Bot stays on a small direct API/gateway adapter because current Rust community crates are less mature for this project path.
+Adapter SDKs: Feishu uses `openlark`, Telegram uses `teloxide`, and WeChat ilink uses `wechat-ilink`. QQ Bot uses qclaw QR binding plus a small direct official API/gateway adapter.
 
 ## Common commands
 
@@ -96,7 +96,7 @@ onlyne stdio
 onlyne client '<json-request>'
 onlyne config-check
 onlyne auth feishu [--app-id <id> --app-secret <secret>]
-onlyne auth qqbot --app-id <id> --app-secret <secret> [--sandbox]
+onlyne auth qqbot [--app-id <id> --app-secret <secret> [--sandbox]]
 onlyne auth wechat [--token <token>]
 onlyne shell-completions zsh
 onlyne shell-completions fish

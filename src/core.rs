@@ -106,6 +106,8 @@ pub struct OutboundMessage {
     pub conversation_id: ConversationId,
     pub text: Option<String>,
     #[serde(default)]
+    pub reply_to_message_id: Option<MessageId>,
+    #[serde(default)]
     pub format: MessageFormat,
     #[serde(default)]
     pub attachments: Vec<AttachmentRef>,

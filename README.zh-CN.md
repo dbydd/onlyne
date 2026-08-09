@@ -77,12 +77,12 @@ Onlyne 的工作区数据不会默认写到全局可变目录。
 | --- | --- |
 | Telegram | 在 `.onlyne/.env` 写入 `TELEGRAM_BOT_TOKEN`，启用 `[adapters.telegram]`，然后设置 `bind_conversation_id` 或发送 `/handshake`。 |
 | 飞书/Lark | 运行 `onlyne auth feishu`，启用 `[adapters.feishu]`，然后设置 `bind_conversation_id` 或发送 `/handshake`。 |
-| QQ Bot | 运行 `onlyne auth qqbot --app-id <id> --app-secret <secret>`；沙箱凭证加 `--sandbox`；设置 `bind_conversation_id` 或发送 `/handshake`。 |
+| QQ Bot | 运行 `onlyne auth qqbot` 通过 qclaw 扫码创建/绑定，或传 `--app-id <id> --app-secret <secret>` 手动配置；只有手动沙箱凭证才加 `--sandbox`；设置 `bind_conversation_id` 或发送 `/handshake`。 |
 | 微信 ilink | 运行 `onlyne auth wechat`，启用 `[adapters.wechat]`，然后设置 `bind_conversation_id` 或发送 `/handshake`。 |
 
 认证命令只会写入选定工作区的 `.onlyne/`。
 
-Adapter SDK：飞书使用 `openlark`，Telegram 使用 `teloxide`，微信 ilink 使用 `wechat-ilink`。QQ Bot 暂时保留轻量直接 API/gateway adapter，因为当前 Rust 社区 crate 对本项目路径还不够成熟。
+Adapter SDK：飞书使用 `openlark`，Telegram 使用 `teloxide`，微信 ilink 使用 `wechat-ilink`。QQ Bot 使用 qclaw 扫码绑定和轻量官方 API/gateway adapter。
 
 ## 常用命令
 
@@ -96,7 +96,7 @@ onlyne stdio
 onlyne client '<json-request>'
 onlyne config-check
 onlyne auth feishu [--app-id <id> --app-secret <secret>]
-onlyne auth qqbot --app-id <id> --app-secret <secret> [--sandbox]
+onlyne auth qqbot [--app-id <id> --app-secret <secret> [--sandbox]]
 onlyne auth wechat [--token <token>]
 onlyne shell-completions zsh
 onlyne shell-completions fish
