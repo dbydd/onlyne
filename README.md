@@ -134,6 +134,15 @@ Minimal response:
 {"id":"1","ok":true,"data":{"pong":true}}
 ```
 
+## Agent harness integrations
+
+Onlyne speaks newline-delimited JSON over a Unix socket, so any local agent can bridge to IM channels. First-party harness plugins live as submodules under `harness/`:
+
+- [`harness/pi-onlyne`](harness/pi-onlyne) — Pi extension (tools + inbox watch).
+- [`harness/dsh-onlyne`](harness/dsh-onlyne) — DeepSeek Harness plugin (tools + inbox watch).
+
+Both share the per-project `.pi/onlyne.json` config, so one workspace can be bridged by either harness without reconfiguration.
+
 ## Project status
 
 See [docs/STATUS.md](docs/STATUS.md) for current implementation notes and verification evidence.
