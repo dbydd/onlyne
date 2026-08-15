@@ -17,6 +17,14 @@ Onlyne is not an agent runtime, model runner, scheduler, web dashboard, or promp
 
 ## Install
 
+The `onlyne` binary is published on [crates.io](https://crates.io/crates/onlyne):
+
+```bash
+cargo install onlyne
+```
+
+Or build from source:
+
 ```bash
 cargo build --release
 ```
@@ -133,6 +141,15 @@ Minimal response:
 ```json
 {"id":"1","ok":true,"data":{"pong":true}}
 ```
+
+## Agent harness integrations
+
+Onlyne speaks newline-delimited JSON over a Unix socket, so any local agent can bridge to IM channels. First-party harness plugins live as submodules under `harness/`:
+
+- [`harness/pi-onlyne`](harness/pi-onlyne) — Pi extension (tools + inbox watch).
+- [`harness/dsh-onlyne`](harness/dsh-onlyne) — DeepSeek Harness plugin (tools + inbox watch).
+
+Both share the per-project `.pi/onlyne.json` config, so one workspace can be bridged by either harness without reconfiguration.
 
 ## Project status
 
