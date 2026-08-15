@@ -17,6 +17,14 @@ Onlyne 不是 agent runtime、模型运行器、调度器、Web 管理后台，�
 
 ## 安装
 
+`onlyne` 二进制已发布到 [crates.io](https://crates.io/crates/onlyne)：
+
+```bash
+cargo install onlyne
+```
+
+或从源码构建：
+
 ```bash
 cargo build --release
 ```

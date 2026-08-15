@@ -17,6 +17,14 @@ Onlyne is not an agent runtime, model runner, scheduler, web dashboard, or promp
 
 ## Install
 
+The `onlyne` binary is published on [crates.io](https://crates.io/crates/onlyne):
+
+```bash
+cargo install onlyne
+```
+
+Or build from source:
+
 ```bash
 cargo build --release
 ```
