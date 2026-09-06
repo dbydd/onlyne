@@ -10,7 +10,14 @@ use crate::{
 };
 use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
-use std::{collections::HashMap, os::unix::fs::FileTypeExt, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    os::unix::fs::FileTypeExt,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 use tokio::{
     fs::OpenOptions,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -26,6 +33,19 @@ pub struct App {
     adapters: Mutex<HashMap<String, Box<dyn Adapter>>>,
     bindings: Mutex<HashMap<String, String>>,
     debug_reply: bool,
+    /// Priority event pump for tiered `subscribe_events` delivery.
+    /// Each subscriber registers (priority, sender); each event is relayed
+    /// highest-tier-first with a per-tier `consume` verdict window.
+    pub(crate) subscribers: Mutex<Vec<PrioritySubscriber>>,
+    pub(crate) event_seq: AtomicU64,
+    pub(crate) consumed_seqs: Mutex<HashSet<u64>>,
+}
+
+/// One event-subscription connection on the priority bus.
+#[derive(Clone)]
+pub(crate) struct PrioritySubscriber {
+    pub(crate) priority: u32,
+    pub(crate) tx: tokio::sync::mpsc::Sender<String>,
 }
 impl App {
     pub async fn load(workspace: Workspace) -> anyhow::Result<Arc<Self>> {
@@ -57,6 +77,9 @@ impl App {
             adapters: Mutex::new(map),
             bindings: Mutex::new(bindings),
             debug_reply,
+            subscribers: Mutex::new(vec![]),
+            event_seq: AtomicU64::new(1),
+            consumed_seqs: Mutex::new(HashSet::new()),
         }))
     }
     pub async fn start_all(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -238,6 +261,9 @@ impl App {
                                 raw_text,
                                 attachments: vec![],
                                 limit: None,
+                                priority: 0,
+                                consume_timeout_ms: None,
+                                event_seq: None,
                             };
                             if let Err(e) = self.send(req).await {
                                 self.events.publish(Event::Warning {
@@ -365,6 +391,9 @@ impl App {
             raw_text,
             attachments: vec![],
             limit: None,
+            priority: 0,
+            consume_timeout_ms: None,
+            event_seq: None,
         })
         .await
     }
@@ -871,6 +900,102 @@ fn debug_reply_text(m: &MessageEnvelope) -> String {
 fn secretish(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     key.contains("token") || key.contains("secret") || key.contains("password")
+}
+
+impl App {
+    /// Register a tiered event subscriber. Returns the event line receiver.
+    pub async fn register_subscriber(
+        &self,
+        priority: u32,
+    ) -> tokio::sync::mpsc::Receiver<String> {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let mut subs = self.subscribers.lock().await;
+        subs.push(PrioritySubscriber { priority, tx });
+        subs.sort_by(|a, b| b.priority.cmp(&a.priority));
+        rx
+    }
+
+    /// Record a `consume` verdict for an event_seq.
+    pub async fn mark_consumed(&self, seq: u64) {
+        self.consumed_seqs.lock().await.insert(seq);
+    }
+
+    /// Tiered subscription pump for one connection: relays each broadcast
+    /// event highest-tier-first. Per tier, the event (tagged with a fresh
+    /// `event_seq`) is fanned out to that tier's members, then the pump
+    /// waits `consume_timeout_ms` for a `consume` verdict before continuing
+    /// to the next lower tier. A consumed event skips all lower tiers.
+    /// Connections that never subscribed with priority (legacy) sit at
+    /// tier 0 and keep the old broadcast behavior among themselves.
+    pub async fn pump_subscription<W: tokio::io::AsyncWrite + Unpin + Send + 'static>(
+        self: &Arc<Self>,
+        priority: u32,
+        consume_timeout_ms: u64,
+        writer: Arc<tokio::sync::Mutex<W>>,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        let inbox = self.register_subscriber(priority).await;
+        // Forward tier lines to the socket as they arrive. The relay loop
+        // below owns tier fan-out; this task only bridges inbox -> socket.
+        let pump_writer = writer.clone();
+        tokio::spawn(async move {
+            let mut inbox = inbox;
+            while let Some(line) = inbox.recv().await {
+                let mut g = pump_writer.lock().await;
+                if g.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+                if g.write_all(b"\n").await.is_err() {
+                    break;
+                }
+                let _ = g.flush().await;
+            }
+        });
+        let mut bus = self.events.subscribe();
+        while let Ok(ev) = bus.recv().await {
+            let line = serde_json::json!({"event":true,"type":crate::ipc::event_type(&ev),"data":ev})
+                .to_string();
+            // Snapshot tiers highest-first.
+            let tiers: Vec<Vec<tokio::sync::mpsc::Sender<String>>> = {
+                let subs = self.subscribers.lock().await;
+                let mut tiers: Vec<(u32, Vec<tokio::sync::mpsc::Sender<String>>)> = vec![];
+                for s in subs.iter() {
+                    match tiers.last_mut() {
+                        Some((p, members)) if *p == s.priority => {
+                            members.push(s.tx.clone())
+                        }
+                        _ => tiers.push((s.priority, vec![s.tx.clone()])),
+                    }
+                }
+                tiers.into_iter().map(|(_, m)| m).collect()
+            };
+            // One event object, one verdict window: tag a single event_seq
+            // shared by every tier, so a `consume` verdict names the same seq
+            // no matter which tier receives it first.
+            let seq = self.event_seq.fetch_add(1, Ordering::Relaxed);
+            let tagged = tag_event_seq(&line, seq);
+            for members in tiers {
+                for tx in &members {
+                    let _ = tx.send(tagged.clone()).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(consume_timeout_ms)).await;
+                if self.consumed_seqs.lock().await.remove(&seq) {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Attach a fresh `event_seq` to a pre-serialized event line object.
+fn tag_event_seq(line: &str, seq: u64) -> String {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(mut v) => {
+            v["event_seq"] = serde_json::json!(seq);
+            serde_json::to_string(&v).unwrap_or_else(|_| line.to_string())
+        }
+        Err(_) => line.to_string(),
+    }
 }
 
 fn adapter_event_sender(app: Arc<App>) -> mpsc::Sender<Event> {

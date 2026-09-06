@@ -10,6 +10,9 @@ use tokio::{
 };
 use tracing::info;
 
+/// Default per-tier wait for a `consume` verdict before lower tiers run.
+const DEFAULT_CONSUME_TIMEOUT_MS: u64 = 150;
+
 #[derive(Debug, Deserialize)]
 pub struct Request {
     pub id: Option<String>,
@@ -30,6 +33,25 @@ pub struct Request {
     pub attachments: Vec<AttachmentRef>,
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Priority delivery tier for `subscribe_events`.
+    ///
+    /// Subscribers carry a `priority` number; the daemon relays each event
+    /// to subscriber tiers from highest to lowest, waiting
+    /// `consume_timeout_ms` per tier. Any connection in the tier may reply
+    /// with the `consume` op to stop delivery to lower tiers.
+    /// Default 0 preserves the legacy broadcast-to-all behavior.
+    #[serde(default)]
+    pub priority: u32,
+    /// Milliseconds the daemon waits per priority tier for a `consume`
+    /// verdict before continuing to the next lower tier. Only read from
+    /// `subscribe_events`. Defaults to 150ms.
+    #[serde(default)]
+    pub consume_timeout_ms: Option<u64>,
+    /// Consumed verdict for the `consume` op: the referenced event was
+    /// handled and lower-priority tiers must not receive it. Carries the
+    /// `event_seq` of the consumed event line.
+    #[serde(default)]
+    pub event_seq: Option<u64>,
 }
 #[derive(Serialize)]
 struct Resp<'a> {
@@ -97,16 +119,40 @@ where
         let req: Result<Request, _> = serde_json::from_str(&line);
         match req {
             Ok(req) => {
-                if req.op == "subscribe_events" {
-                    let mut rx = app.events.subscribe();
+                if req.op == "consume" {
+                    let Some(seq) = req.event_seq else {
+                        write(
+                            &writer,
+                            &Resp {
+                                id: &req.id,
+                                ok: false,
+                                data: None,
+                                error: Some(json!({"code":"error","message":"event_seq required"})),
+                            },
+                        )
+                        .await?;
+                        continue;
+                    };
+                    app.mark_consumed(seq).await;
+                    write(
+                        &writer,
+                        &Resp {
+                            id: &req.id,
+                            ok: true,
+                            data: Some(json!({"consumed":seq})),
+                            error: None,
+                        },
+                    )
+                    .await?;
+                } else if req.op == "subscribe_events" {
+                    let priority = req.priority;
+                    let timeout = req.consume_timeout_ms.unwrap_or(DEFAULT_CONSUME_TIMEOUT_MS);
                     let w = writer.clone();
+                    let pump_app = app.clone();
                     event_task = Some(tokio::spawn(async move {
-                        while let Ok(ev) = rx.recv().await {
-                            let line = json!({"event":true,"type":event_type(&ev),"data":ev})
-                                .to_string()
-                                + "\n";
-                            let _ = w.lock().await.write_all(line.as_bytes()).await;
-                        }
+                        pump_app
+                            .pump_subscription(priority, timeout, w)
+                            .await;
                     }));
                     write(
                         &writer,
@@ -201,7 +247,7 @@ async fn write<W: AsyncWrite + Unpin>(w: &Arc<Mutex<W>>, r: &Resp<'_>) -> anyhow
     g.flush().await?;
     Ok(())
 }
-fn event_type(ev: &Event) -> &'static str {
+pub(crate) fn event_type(ev: &Event) -> &'static str {
     match ev {
         Event::InboundMessage(_) => "inbound_message",
         Event::OutboundMessage(_) => "outbound_message",
@@ -214,6 +260,53 @@ fn event_type(ev: &Event) -> &'static str {
         Event::WorkspaceStateChanged { .. } => "workspace_state_changed",
         Event::Warning { .. } => "warning",
         Event::Error { .. } => "error",
+    }
+}
+
+#[cfg(test)]
+mod priority_tests {
+    use super::*;
+    use crate::{app::App, core::*, workspace::Workspace};
+
+    #[test]
+    fn request_parses_priority_and_timeout() {
+        let r: Request = serde_json::from_str(
+            r#"{"id":"s","op":"subscribe_events","priority":4294967295,"consume_timeout_ms":50}"#,
+        )
+        .unwrap();
+        assert_eq!(r.priority, u32::MAX);
+        assert_eq!(r.consume_timeout_ms, Some(50));
+        // Legacy subscriptions default to tier 0 with no timeout override.
+        let r: Request =
+            serde_json::from_str(r#"{"id":"s","op":"subscribe_events"}"#).unwrap();
+        assert_eq!(r.priority, 0);
+        assert_eq!(r.consume_timeout_ms, None);
+        // consume verdict requires an event_seq.
+        let r: Request =
+            serde_json::from_str(r#"{"id":"c","op":"consume","event_seq":41}"#).unwrap();
+        assert_eq!(r.event_seq, Some(41));
+    }
+
+    #[tokio::test]
+    async fn consumed_seq_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        app.mark_consumed(7).await;
+        assert!(app.consumed_seqs.lock().await.contains(&7));
+    }
+
+    #[tokio::test]
+    async fn subscriber_tiers_sort_high_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        let _lo = app.register_subscriber(0).await;
+        let _hi = app.register_subscriber(99).await;
+        let subs = app.subscribers.lock().await;
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0].priority, 99);
+        assert_eq!(subs[1].priority, 0);
     }
 }
 
