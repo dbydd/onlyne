@@ -266,7 +266,7 @@ pub(crate) fn event_type(ev: &Event) -> &'static str {
 #[cfg(test)]
 mod priority_tests {
     use super::*;
-    use crate::{app::App, core::*, workspace::Workspace};
+    use crate::{app::App, workspace::Workspace};
 
     #[test]
     fn request_parses_priority_and_timeout() {

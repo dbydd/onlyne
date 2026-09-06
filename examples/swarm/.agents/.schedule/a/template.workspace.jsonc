@@ -1,0 +1,1 @@
+{"name": "a", "role": "Read the incoming task, produce a concise completion reply, and include the exact payload marker.", "model": {"provider": "configured", "model": "configured", "effort": "low"}, "back_edges": []}
