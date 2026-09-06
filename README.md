@@ -97,7 +97,7 @@ By default, commands start at the current directory and walk upward until they f
   config.toml
   .env
   state.db
-  run/onlyne.sock
+  run/s
   logs/daemon.log
   cache/media/
   adapters/

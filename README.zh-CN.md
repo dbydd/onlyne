@@ -67,7 +67,7 @@ echo '{"id":"1","op":"ping"}' | onlyne stdio
   config.toml
   .env
   state.db
-  run/onlyne.sock
+  run/s
   logs/daemon.log
   cache/media/
   adapters/

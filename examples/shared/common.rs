@@ -126,13 +126,13 @@ fn socket_path() -> anyhow::Result<PathBuf> {
         return Ok(path.into());
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let examples = manifest.join("examples/.onlyne/run/onlyne.sock");
+    let examples = manifest.join("examples/.onlyne/run/s");
     if examples.exists() {
         return Ok(examples);
     }
     let cwd = env::current_dir()?;
     for dir in cwd.ancestors() {
-        let p = dir.join(".onlyne/run/onlyne.sock");
+        let p = dir.join(".onlyne/run/s");
         if p.exists() {
             return Ok(p);
         }

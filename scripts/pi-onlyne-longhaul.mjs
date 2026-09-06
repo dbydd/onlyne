@@ -8,7 +8,7 @@ const args = parseArgs(process.argv.slice(2));
 const root = findWorkspace(args.workspace ? resolve(String(args.workspace)) : process.cwd());
 if (!root) die('no .onlyne workspace found; run from the project or pass --workspace <dir>');
 
-const socketPath = join(root, '.onlyne', 'run', 'onlyne.sock');
+const socketPath = join(root, '.onlyne', 'run', 's');
 const logPath = String(args.log ?? join(root, '.onlyne', 'logs', 'pi-onlyne-longhaul.jsonl'));
 mkdirSync(dirname(logPath), { recursive: true });
 const logFd = openSync(logPath, 'a');
