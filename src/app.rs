@@ -39,6 +39,8 @@ pub struct App {
     pub(crate) subscribers: Mutex<Vec<PrioritySubscriber>>,
     pub(crate) event_seq: AtomicU64,
     pub(crate) consumed_seqs: Mutex<HashSet<u64>>,
+    /// Ensures exactly one central relay task per daemon process.
+    relay_started: tokio::sync::OnceCell<()>,
 }
 
 /// One event-subscription connection on the priority bus.
@@ -80,6 +82,7 @@ impl App {
             subscribers: Mutex::new(vec![]),
             event_seq: AtomicU64::new(1),
             consumed_seqs: Mutex::new(HashSet::new()),
+            relay_started: tokio::sync::OnceCell::new(),
         }))
     }
     pub async fn start_all(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -1003,27 +1006,38 @@ impl App {
     ) {
         use tokio::io::AsyncWriteExt;
         let inbox = self.register_subscriber(priority).await;
-        // Forward tier lines to the socket as they arrive. The relay loop
-        // below owns tier fan-out; this task only bridges inbox -> socket.
-        let pump_writer = writer.clone();
-        tokio::spawn(async move {
-            let mut inbox = inbox;
-            while let Some(line) = inbox.recv().await {
-                let mut g = pump_writer.lock().await;
-                if g.write_all(line.as_bytes()).await.is_err() {
-                    break;
-                }
-                if g.write_all(b"\n").await.is_err() {
-                    break;
-                }
-                let _ = g.flush().await;
+        // Exactly one central relay per daemon: it owns tier fan-out, so each
+        // broadcast event is relayed once no matter how many subscribers exist.
+        let relay_app = self.clone();
+        self.relay_started
+            .get_or_init(|| async move {
+                tokio::spawn(async move {
+                    relay_app.central_relay(consume_timeout_ms).await;
+                });
+            })
+            .await;
+        // Bridge inbox -> socket for this connection only.
+        let mut inbox = inbox;
+        while let Some(line) = inbox.recv().await {
+            let mut g = writer.lock().await;
+            if g.write_all(line.as_bytes()).await.is_err() {
+                break;
             }
-        });
+            if g.write_all(b"\n").await.is_err() {
+                break;
+            }
+            let _ = g.flush().await;
+        }
+    }
+
+    /// Central relay: the single task that fans each broadcast event out to
+    /// subscriber tiers highest-first, one shared event_seq per event, with a
+    /// per-tier `consume` verdict window. Consumed events skip lower tiers.
+    async fn central_relay(self: Arc<Self>, consume_timeout_ms: u64) {
         let mut bus = self.events.subscribe();
         while let Ok(ev) = bus.recv().await {
             let line = serde_json::json!({"event":true,"type":crate::ipc::event_type(&ev),"data":ev})
                 .to_string();
-            // Snapshot tiers highest-first.
             let tiers: Vec<Vec<tokio::sync::mpsc::Sender<String>>> = {
                 let subs = self.subscribers.lock().await;
                 let mut tiers: Vec<(u32, Vec<tokio::sync::mpsc::Sender<String>>)> = vec![];
@@ -1037,9 +1051,8 @@ impl App {
                 }
                 tiers.into_iter().map(|(_, m)| m).collect()
             };
-            // One event object, one verdict window: tag a single event_seq
-            // shared by every tier, so a `consume` verdict names the same seq
-            // no matter which tier receives it first.
+            // One event object, one verdict window: a single shared event_seq
+            // so a `consume` verdict names the same seq in every tier.
             let seq = self.event_seq.fetch_add(1, Ordering::Relaxed);
             let tagged = tag_event_seq(&line, seq);
             for members in tiers {
