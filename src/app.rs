@@ -552,6 +552,34 @@ impl App {
     async fn send(&self, req: Request) -> anyhow::Result<Value> {
         let format = request_format(&req);
         let channel = req.channel_id.context("channel_id required")?;
+        // Loopback has no platform adapter: a send to loopback is a local
+        // echo recorded as an outbound message (swarm task replies, local
+        // handoffs). It lands in history and fans out as OutboundMessage so
+        // tiered subscribers (scheduler) observe task completions.
+        if channel == "loopback" {
+            let conversation = req.conversation_id.unwrap_or_else(|| "self".into());
+            let msg = MessageEnvelope {
+                channel_id: ChannelId("loopback".into()),
+                conversation_id: ConversationId(conversation),
+                message_id: now_id("loopback"),
+                direction: Direction::Outbound,
+                sender_id: Some("local".into()),
+                sender_name: Some("Onlyne Loopback".into()),
+                text: req.text,
+                format,
+                attachments: req.attachments,
+                delivery_state: DeliveryState::Delivered,
+                timestamp: chrono::Utc::now(),
+                platform_metadata: json!({"source":"loopback","local_echo":true}),
+            };
+            self.store
+                .upsert_channel(&msg.channel_id, AdapterHealth::Ready)
+                .await?;
+            self.store.append_message(&msg).await?;
+            self.publish_history_appended(&msg);
+            self.events.publish(Event::OutboundMessage(msg.clone()));
+            return Ok(json!(msg));
+        }
         let reply_to_message_id = if req.op == "reply_message" {
             Some(MessageId(req.message_id.context("message_id required")?))
         } else {
@@ -1081,6 +1109,34 @@ mod tests {
         );
         assert_eq!(decode_fifo_escapes("plain"), "plain");
         assert_eq!(decode_fifo_escapes("trail\\"), "trail\\");
+    }
+
+    #[tokio::test]
+    async fn loopback_send_is_local_outbound_echo() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        let mut rx = app.events.subscribe();
+        let out: Value = app
+            .handle(
+                serde_json::from_str(
+                    r##"{"op":"send_message","channel_id":"loopback","text":"echo-body"}"##,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["direction"], "outbound");
+        assert_eq!(out["text"], "echo-body");
+        // Drain: history_appended then outbound_message.
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Event::HistoryAppended { .. }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Event::OutboundMessage(_)
+        ));
     }
 
     #[tokio::test]
