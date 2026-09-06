@@ -287,32 +287,41 @@ impl App {
                 Ok(mut file) => {
                     let mut text = String::new();
                     if file.read_to_string(&mut text).await.is_ok() && !text.trim().is_empty() {
-                        let text = decode_fifo_escapes(&text);
-                        if channel == "loopback" {
-                            let _ = self.inject_loopback(text).await;
-                        } else {
-                            let raw_text =
-                                self.io_config(&channel).in_format == IoInFormat::RawText;
-                            let req = Request {
-                                id: None,
-                                op: "send_message".into(),
-                                channel_id: Some(channel.clone()),
-                                conversation_id: None,
-                                message_id: None,
-                                text: Some(text),
-                                format: None,
-                                raw_text,
-                                attachments: vec![],
-                                limit: None,
-                                priority: 0,
-                                consume_timeout_ms: None,
-                                event_seq: None,
-                            };
-                            if let Err(e) = self.send(req).await {
-                                self.events.publish(Event::Warning {
-                                    channel_id: Some(ChannelId(channel.clone())),
-                                    message: format!("channel in send failed: {e}"),
-                                });
+                        // Split coalesced writes: concurrent O_WRONLY opens can
+                        // land in one read (EOF arrives only after ALL writers
+                        // close). Each `---swarm` header starts a new message;
+                        // non-swarm text keeps the old single-message behavior.
+                        for chunk in split_swarm_messages(&text) {
+                            let chunk = decode_fifo_escapes(&chunk);
+                            if chunk.trim().is_empty() {
+                                continue;
+                            }
+                            if channel == "loopback" {
+                                let _ = self.inject_loopback(chunk).await;
+                            } else {
+                                let raw_text =
+                                    self.io_config(&channel).in_format == IoInFormat::RawText;
+                                let req = Request {
+                                    id: None,
+                                    op: "send_message".into(),
+                                    channel_id: Some(channel.clone()),
+                                    conversation_id: None,
+                                    message_id: None,
+                                    text: Some(chunk),
+                                    format: None,
+                                    raw_text,
+                                    attachments: vec![],
+                                    limit: None,
+                                    priority: 0,
+                                    consume_timeout_ms: None,
+                                    event_seq: None,
+                                };
+                                if let Err(e) = self.send(req).await {
+                                    self.events.publish(Event::Warning {
+                                        channel_id: Some(ChannelId(channel.clone())),
+                                        message: format!("channel in send failed: {e}"),
+                                    });
+                                }
                             }
                         }
                     }
@@ -780,6 +789,25 @@ fn ensure_channel_fifos(workspace: &Workspace, channel: &str) -> anyhow::Result<
     Ok(())
 }
 
+/// Split one FIFO read into individual messages. Concurrent writers can
+/// coalesce into a single read; each `---swarm` header line starts a new
+/// message. Text before the first header (or text with no header at all) is
+/// returned as a single leading chunk, preserving legacy behavior.
+fn split_swarm_messages(input: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut cur = String::new();
+    for line in input.split_inclusive('\n') {
+        if line.trim_end() == "---swarm" && !cur.trim().is_empty() {
+            chunks.push(std::mem::take(&mut cur));
+        }
+        cur.push_str(line);
+    }
+    if !cur.trim().is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+
 fn decode_fifo_escapes(input: &str) -> String {
     if !input.contains('\\') {
         return input.to_string();
@@ -1053,11 +1081,20 @@ impl App {
             };
             // One event object, one verdict window: a single shared event_seq
             // so a `consume` verdict names the same seq in every tier.
+            //
+            // Liveness: the mpsc send below is only awaited with a timeout.
+            // A slow/disconnected tier member must never stall the whole
+            // relay (that drops exactly one tier's verdict window instead of
+            // every later event for all tiers).
             let seq = self.event_seq.fetch_add(1, Ordering::Relaxed);
             let tagged = tag_event_seq(&line, seq);
             for members in tiers {
                 for tx in &members {
-                    let _ = tx.send(tagged.clone()).await;
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(50),
+                        tx.send(tagged.clone()),
+                    )
+                    .await;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(consume_timeout_ms)).await;
                 if self.consumed_seqs.lock().await.remove(&seq) {
@@ -1112,6 +1149,21 @@ mod tests {
 
         let channels = app.store.list_channels().await.unwrap();
         assert!(matches!(channels[0].1, AdapterHealth::Reconnecting));
+    }
+
+    #[test]
+    fn fifo_read_splits_coalesced_swarm_writes() {
+        let a = "---swarm\ntask_id: 1\n---\nbody a\n";
+        let b = "---swarm\ntask_id: 2\n---\nbody b\n";
+        let both = format!("{a}{b}");
+        let parts = split_swarm_messages(&both);
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].contains("task_id: 1"));
+        assert!(parts[1].contains("task_id: 2"));
+        // No header: single chunk (legacy behavior).
+        assert_eq!(split_swarm_messages("plain text\n"), vec!["plain text\n"]);
+        // Single message with header: single chunk.
+        assert_eq!(split_swarm_messages(a), vec![a]);
     }
 
     #[test]
