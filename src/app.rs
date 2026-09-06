@@ -231,7 +231,10 @@ impl App {
             .upsert_channel(&msg.channel_id, AdapterHealth::Ready)
             .await?;
         self.store.append_message(&msg).await?;
-        self.publish_history_appended(&msg);
+        // NOTE: no HistoryAppended publish here. The tiered pump assigns one
+        // event_seq per relayed event; a double publish (history + state)
+        // would emit two consume windows for one handshake and let the
+        // scheduler's consume of the first starve the second at lower tiers.
         self.events.publish(Event::WorkspaceStateChanged {
             message: format!("swarm_ready {}", body),
         });
