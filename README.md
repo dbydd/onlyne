@@ -31,6 +31,36 @@ cargo build --release
 
 Use the built binary at `target/release/onlyne`, or run from source with `cargo run --`.
 
+## Runtime requirements
+
+- macOS or Linux with Unix domain socket support
+- Rust 1.85 or newer for source builds
+- Network access for enabled adapters
+- Workspace credentials stored in `.onlyne/.env` or adapter-specific files
+- A supervisor such as launchd or systemd when running the daemon detached
+
+Onlyne bundles SQLite and Rust TLS support, so a separate database service and system TLS installation are unnecessary.
+
+## Release and source builds
+
+The published crate includes the daemon binary and its adapter implementations:
+
+```bash
+cargo install onlyne --locked
+onlyne --version
+```
+
+The repository build uses the same package metadata as crates.io:
+
+```bash
+cargo build --release
+cargo test
+cargo publish --dry-run
+```
+
+The `onlyne-swarm` scheduler is released as a separate crate from its [独立仓库](https://github.com/dbydd/onlyne-swarm). The Pi integration is released as the [`pi-onlyne`](https://www.npmjs.com/package/pi-onlyne) npm package.
+
+
 ## Quick start
 
 ```bash
@@ -123,6 +153,8 @@ onlyne shell-completions fish
 - `examples/broadcast/`
 - `examples/multicast/`
 - `examples/multi-channel/`
+- `examples/swarm/` — short-path live fixture for Onlyne + pi-onlyne + onlyne-swarm
+
 
 The examples are pure CLI workflows. Run `onlyne init` in `examples/` to share one ignored `examples/.onlyne/` workspace across child examples, or pass `--workspace <dir>` / `ONLYNE_WORKSPACE` for isolation.
 
