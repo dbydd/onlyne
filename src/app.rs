@@ -170,6 +170,7 @@ impl App {
             }
             "send_message" | "reply_message" => self.send(req).await,
             "loopback" => self.loopback(req).await,
+            "swarm_ready" => self.swarm_ready(req).await,
             "mark_io_consumed" => self.mark_io_consumed(req).await,
             "fetch_history" | "fetch_all_history" => Ok(json!(
                 self.store
@@ -201,6 +202,42 @@ impl App {
             _ => Err(anyhow!("unknown op {}", req.op)),
         }
     }
+    /// Swarm handshake: a pi-onlyne session in swarm mode reports itself
+    /// ready for task delivery. The payload (`req.text` JSON) carries
+    /// `{workspace, terminal_handle}`. Published as an event so the swarm
+    /// scheduler (top-priority subscriber) can match a pending task and
+    /// write loopback/in. Also recorded in history for TUI visibility.
+    async fn swarm_ready(&self, req: Request) -> anyhow::Result<Value> {
+        let body: Value = req
+            .text
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(Value::Null);
+        let msg = MessageEnvelope {
+            channel_id: ChannelId("loopback".into()),
+            conversation_id: ConversationId("swarm-ready".into()),
+            message_id: now_id("swarm-ready"),
+            direction: Direction::Inbound,
+            sender_id: Some("swarm".into()),
+            sender_name: Some("Swarm Ready".into()),
+            text: Some(format!("swarm_ready {}", body)),
+            format: MessageFormat::Plain,
+            attachments: vec![],
+            delivery_state: DeliveryState::Delivered,
+            timestamp: chrono::Utc::now(),
+            platform_metadata: serde_json::json!({"source":"swarm_ready","body":body}),
+        };
+        self.store
+            .upsert_channel(&msg.channel_id, AdapterHealth::Ready)
+            .await?;
+        self.store.append_message(&msg).await?;
+        self.publish_history_appended(&msg);
+        self.events.publish(Event::WorkspaceStateChanged {
+            message: format!("swarm_ready {}", body),
+        });
+        Ok(json!({"ready":true,"body":body}))
+    }
+
     async fn mark_io_consumed(&self, req: Request) -> anyhow::Result<Value> {
         let id = MessageId(req.message_id.context("message_id required")?);
         let msg = self

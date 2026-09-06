@@ -48,6 +48,7 @@ Malformed JSON uses `code=bad_json`.
 | `send_message` | Requires `channel_id`; Onlyne routes to that channel's configured or `/handshake`-bound `bind_conversation_id`. Uses `text` as Markdown by default, optional `raw_text:true` for literal text, legacy optional `format` (`plain` or `markdown`), and optional `attachments`. |
 | `reply_message` | Currently same local send path as `send_message`. |
 | `loopback` | Injects a local inbound activation message on channel `loopback`; optional `text`, `raw_text`, `format`, and `attachments`. |
+| `swarm_ready` | Swarm handshake: pi-onlyne swarm mode reports readiness. `text` carries JSON `{workspace, terminal_handle}`. Recorded in history and published as a `workspace_state_changed` event carrying the body, so the scheduler can match a pending task. |
 | `fetch_history` | Merged history. |
 | `fetch_all_history` | Alias for merged history. |
 | `fetch_channel_history` | Requires `channel_id`; returns that channel's configured conversation history. |
