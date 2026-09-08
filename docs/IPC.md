@@ -49,6 +49,7 @@ Malformed JSON uses `code=bad_json`.
 | `reply_message` | Currently same local send path as `send_message`. |
 | `loopback` | Injects a local inbound activation message on channel `loopback`; optional `text`, `raw_text`, `format`, and `attachments`. |
 | `swarm_ready` | Swarm handshake: pi-onlyne swarm mode reports readiness. `text` carries JSON `{workspace, terminal_handle}`. Recorded in history and published as a `workspace_state_changed` event carrying the body, so the scheduler can match a pending task. |
+| `swarm_recycled` | Swarm reclaim ack: pi-onlyne confirms it accepted a `---swarm-ctl` recycle signal or called `swarm_quit`. `text` carries JSON `{workspace, terminal_handle, task_id, reason}`. Recorded in history and published as a `workspace_state_changed` event carrying the body, so the scheduler can close the terminal with no kill. |
 | `fetch_history` | Merged history. |
 | `fetch_all_history` | Alias for merged history. |
 | `fetch_channel_history` | Requires `channel_id`; returns that channel's configured conversation history. |

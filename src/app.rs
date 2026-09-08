@@ -174,6 +174,7 @@ impl App {
             "send_message" | "reply_message" => self.send(req).await,
             "loopback" => self.loopback(req).await,
             "swarm_ready" => self.swarm_ready(req).await,
+            "swarm_recycled" => self.swarm_recycled(req).await,
             "mark_io_consumed" => self.mark_io_consumed(req).await,
             "fetch_history" | "fetch_all_history" => Ok(json!(
                 self.store
@@ -242,6 +243,42 @@ impl App {
             message: format!("swarm_ready {}", body),
         });
         Ok(json!({"ready":true,"body":body}))
+    }
+
+    /// Swarm recycle ack: a pi-onlyne session reports it accepted a recycle
+    /// signal (or quit on its own) and is exiting. Payload (`req.text` JSON)
+    /// carries `{task_id, terminal_handle, reason}`. Published as an event so
+    /// the swarm scheduler can close the books and the tab. Also recorded in
+    /// history for TUI visibility. Same single-publish shape as swarm_ready
+    /// (no HistoryAppended: one event, one consume window).
+    async fn swarm_recycled(&self, req: Request) -> anyhow::Result<Value> {
+        let body: Value = req
+            .text
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(Value::Null);
+        let msg = MessageEnvelope {
+            channel_id: ChannelId("loopback".into()),
+            conversation_id: ConversationId("swarm-ready".into()),
+            message_id: now_id("swarm-ready"),
+            direction: Direction::Inbound,
+            sender_id: Some("swarm".into()),
+            sender_name: Some("Swarm Recycled".into()),
+            text: Some(format!("swarm_recycled {}", body)),
+            format: MessageFormat::Plain,
+            attachments: vec![],
+            delivery_state: DeliveryState::Delivered,
+            timestamp: chrono::Utc::now(),
+            platform_metadata: serde_json::json!({"source":"swarm_recycled","body":body}),
+        };
+        self.store
+            .upsert_channel(&msg.channel_id, AdapterHealth::Ready)
+            .await?;
+        self.store.append_message(&msg).await?;
+        self.events.publish(Event::WorkspaceStateChanged {
+            message: format!("swarm_recycled {}", body),
+        });
+        Ok(json!({"recycled":true,"body":body}))
     }
 
     async fn mark_io_consumed(&self, req: Request) -> anyhow::Result<Value> {
@@ -797,7 +834,8 @@ fn split_swarm_messages(input: &str) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut cur = String::new();
     for line in input.split_inclusive('\n') {
-        if line.trim_end() == "---swarm" && !cur.trim().is_empty() {
+        let trimmed = line.trim_end();
+        if (trimmed == "---swarm" || trimmed == "---swarm-ctl") && !cur.trim().is_empty() {
             chunks.push(std::mem::take(&mut cur));
         }
         cur.push_str(line);
@@ -1164,6 +1202,12 @@ mod tests {
         assert_eq!(split_swarm_messages("plain text\n"), vec!["plain text\n"]);
         // Single message with header: single chunk.
         assert_eq!(split_swarm_messages(a), vec![a]);
+        // Ctl wire splits off a preceding task wire (reclaim protocol).
+        let ctl = "---swarm-ctl\nop: recycle\ntask_id: 1\nreason: cancel\n---\n";
+        let mixed = format!("{a}{ctl}");
+        let parts = split_swarm_messages(&mixed);
+        assert_eq!(parts.len(), 2);
+        assert!(parts[1].starts_with("---swarm-ctl\n"));
     }
 
     #[test]
@@ -1230,6 +1274,48 @@ mod tests {
             Event::HistoryAppended { .. }
         ));
         assert!(matches!(rx.try_recv().unwrap(), Event::InboundMessage(_)));
+    }
+
+    #[tokio::test]
+    async fn swarm_recycled_records_ack_and_publishes_one_state_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        let mut rx = app.events.subscribe();
+
+        let body = r#"{"task_id":"task-1","terminal_handle":"term-1","reason":"quit:test"}"#;
+        let out = app
+            .handle(
+                serde_json::from_str(&format!(
+                    r#"{{"op":"swarm_recycled","text":{}}}"#,
+                    serde_json::to_string(body).unwrap()
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["recycled"], true);
+
+        let history = app
+            .store
+            .fetch_history(Some(&ChannelId("loopback".into())), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(history[0].conversation_id.0, "swarm-ready");
+        assert!(history[0]
+            .text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("swarm_recycled"));
+        // Recycled mirrors ready: one state event, no history-appended
+        // double publish / priority consume window.
+        match rx.try_recv().unwrap() {
+            Event::WorkspaceStateChanged { message } => {
+                assert!(message.contains("swarm_recycled"));
+            }
+            other => panic!("expected recycle state event, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
