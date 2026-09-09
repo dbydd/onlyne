@@ -175,6 +175,8 @@ impl App {
             "loopback" => self.loopback(req).await,
             "swarm_ready" => self.swarm_ready(req).await,
             "swarm_recycled" => self.swarm_recycled(req).await,
+            "swarm_busy" => self.swarm_activity(req, "swarm_busy").await,
+            "swarm_idle" => self.swarm_activity(req, "swarm_idle").await,
             "mark_io_consumed" => self.mark_io_consumed(req).await,
             "fetch_history" | "fetch_all_history" => Ok(json!(
                 self.store
@@ -243,6 +245,40 @@ impl App {
             message: format!("swarm_ready {}", body),
         });
         Ok(json!({"ready":true,"body":body}))
+    }
+
+    /// Swarm hop activity (R4): `swarm_busy` (turn started) and `swarm_idle`
+    /// (turn ended, no out). Same single-publish shape as swarm_ready — one
+    /// event, one consume window, no HistoryAppended. `kind` is the message
+    /// prefix so the scheduler routes on it.
+    async fn swarm_activity(&self, req: Request, kind: &str) -> anyhow::Result<Value> {
+        let body: Value = req
+            .text
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(Value::Null);
+        let msg = MessageEnvelope {
+            channel_id: ChannelId("loopback".into()),
+            conversation_id: ConversationId("swarm-ready".into()),
+            message_id: now_id("swarm-ready"),
+            direction: Direction::Inbound,
+            sender_id: Some("swarm".into()),
+            sender_name: Some("Swarm Activity".into()),
+            text: Some(format!("{kind} {body}")),
+            format: MessageFormat::Plain,
+            attachments: vec![],
+            delivery_state: DeliveryState::Delivered,
+            timestamp: chrono::Utc::now(),
+            platform_metadata: serde_json::json!({"source": kind, "body": body}),
+        };
+        self.store
+            .upsert_channel(&msg.channel_id, AdapterHealth::Ready)
+            .await?;
+        self.store.append_message(&msg).await?;
+        self.events.publish(Event::WorkspaceStateChanged {
+            message: format!("{kind} {body}"),
+        });
+        Ok(json!({"activity": kind, "body": body}))
     }
 
     /// Swarm recycle ack: a pi-onlyne session reports it accepted a recycle
@@ -1316,6 +1352,57 @@ mod tests {
             other => panic!("expected recycle state event, got {other:?}"),
         }
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn swarm_busy_idle_publish_one_state_event_each() {
+        // R4: hop activity ops ride the same single-publish channel as
+        // swarm_ready/swarm_recycled: one state event per op, no
+        // HistoryAppended double window.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        let mut rx = app.events.subscribe();
+
+        for (op, kind) in [("swarm_busy", "busy"), ("swarm_idle", "idle")] {
+            let body = format!(
+                r#"{{"workspace":".","terminal_handle":"term-1","task_id":"task-{kind}"{}}}"#,
+                if kind == "idle" { ",\"pending_exit\":true" } else { "" }
+            );
+            let out = app
+                .handle(
+                    serde_json::from_str(&format!(
+                        r#"{{"op":"{op}","text":{}}}"#,
+                        serde_json::to_string(&body).unwrap()
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(out["activity"], op);
+            match rx.try_recv().unwrap() {
+                Event::WorkspaceStateChanged { message } => {
+                    assert!(message.starts_with(op), "{message}");
+                    assert!(message.contains(&format!("task-{kind}")), "{message}");
+                }
+                other => panic!("expected activity state event, got {other:?}"),
+            }
+            // Exactly one event per op.
+            assert!(rx.try_recv().is_err());
+        }
+
+        // History carries both lines for TUI visibility.
+        let history = app
+            .store
+            .fetch_history(Some(&ChannelId("loopback".into())), None, 10)
+            .await
+            .unwrap();
+        let texts: Vec<String> = history
+            .iter()
+            .filter_map(|m| m.text.clone())
+            .collect();
+        assert!(texts.iter().any(|t| t.starts_with("swarm_busy")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.starts_with("swarm_idle")), "{texts:?}");
     }
 
     #[tokio::test]
