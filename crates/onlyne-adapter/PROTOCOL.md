@@ -1,0 +1,86 @@
+# Onlyne adapter protocol
+
+This document is the normative socket contract for external TypeScript plugins. The transport is an 8-byte-free length-prefixed JSON frame from `onlyne-frame`: a four-byte big-endian `u32` body length followed by one UTF-8 JSON object. The examples below show the JSON body.
+
+Each request has `id` and a response has `reply_to`. Request operation payloads use `{\"op\":...,\"args\":...}`. Host notifications omit `id`; plugin notifications omit `id` when no response is needed.
+
+## Frame table
+
+| Direction | Frame | JSON example |
+| --- | --- | --- |
+| plugin → host | `hello` | `{"id":1,"op":"hello","args":{"protocol":1,"plugin":"onlyne-agent-pi","version":"1.0.0","kind":"agent","capabilities":["register","report","inject","recycle"],"mount":{"kind":"agent","data":{"role":"planner","session":"8b1c","task_id":null,"pid":4212}}}}` |
+| host → plugin | `welcome` | `{"reply_to":1,"op":"welcome","args":{"protocol":1,"role":"planner","session_id":"s1","generation":1,"prose":"Read the incoming task","server":{"connected":true,"cluster":"local","name":"server"},"host_capabilities":["inject"]}}` |
+| plugin → host | `report.ready` | `{"id":2,"op":"report","args":{"kind":"ready","data":{"task_id":"task-1","session_id":"s1","generation":1,"seq":1}}}` |
+| plugin → host | `report.heartbeat` | `{"id":3,"op":"report","args":{"kind":"heartbeat","data":{"task_id":"task-1","generation":1,"seq":2,"observed":{"state":"running"}}}}` |
+| plugin → host | `report.complete` | `{"id":4,"op":"report","args":{"kind":"complete","data":{"task_id":"task-1","outcome":"done","head":"finished"}}}` |
+| plugin → host | `report.fault` | `{"id":5,"op":"report","args":{"kind":"fault","data":{"task_id":"task-1","session_id":"s1","generation":1,"seq":3,"kind":"runtime","reason":"failed","desired":null,"observed":null}}}` |
+| plugin → host | `session_register` | `{"id":6,"op":"session_register","args":{"session_id":"s1","pid":4212,"generation":1,"title":"swarm:planner:s1","task_id":"task-1"}}` |
+| plugin → host | `assign_ack` | `{"id":7,"op":"assign_ack","args":{"task_id":"task-1","accepted":true,"reason":null}}` |
+| plugin → host | `send` | `{"id":8,"op":"send","args":{"protocol":1,"id":"...","op_id":"o-...","kind":"task","from":{"role":{"role":"planner"}},"to":{"role":{"role":"builder"}},"body":{"text":"build it"},"ts":"2026-01-01T00:00:00Z","admin":false}}` |
+| host → plugin | `assign` | `{"op":"assign","args":{"envelope":{"protocol":1,"id":"...","kind":"task","from":{"role":{"role":"planner"}},"to":{"role":{"role":"builder"}},"body":{"text":"build it"},"ts":"2026-01-01T00:00:00Z","admin":false},"prose":"Read the incoming task","task_id":"task-1","generation":1,"parent":null}}` |
+| host → plugin | `probe` | `{"op":"probe","args":{"task_id":"task-1"}}` |
+| host → plugin | `recycle` | `{"op":"recycle","args":{"task_id":"task-1","reason":"operator","outcome":"cancelled"}}` |
+| host → plugin | `config_get` | `{"op":"config_get","args":{"key":"model.name"}}` |
+| plugin → host | `deliver` (gateway) | `{"id":9,"op":"deliver","args":{"msg_id":"m1","envelope":{"protocol":1,"id":"...","kind":"note","from":{"gateway":{"gateway":"fg1","channel":"fake","conversation":"c1"}},"to":{"role":{"role":"planner"}},"body":{"text":"hello"},"ts":"2026-01-01T00:00:00Z","admin":false}}}` |
+| plugin → host | `register_channel` (gateway) | `{"id":10,"op":"register_channel","args":{"platform":"fake","channel":"fg1","conversations":null}}` |
+| plugin → host | `health` (gateway) | `{"id":11,"op":"health","args":{"state":"online","detail":null,"uptime_s":3}}` |
+| plugin → host | `typing` (gateway) | `{"id":12,"op":"typing","args":{"conversation":"c1","seconds":3}}` |
+| host → plugin | `render_send` (gateway) | `{"op":"render_send","args":{"envelope":{"protocol":1,"id":"...","kind":"note","from":{"role":{"role":"planner"}},"to":{"gateway":{"gateway":"fg1","channel":"fake","conversation":"c1"}},"body":{"text":"hello"},"ts":"2026-01-01T00:00:00Z","admin":false},"conversation":"c1","gateway_ref":"r1"}}` |
+| plugin → host | `detach` | `{"id":13,"op":"detach","args":{"reason":"operator"}}` |
+| host → plugin | `bye` | `{"op":"bye","args":{"reason":"shutdown"}}` |
+| either | response success | `{"reply_to":8,"ok":true,"data":{"msg_id":"..."}}` |
+| either | response error | `{"reply_to":8,"ok":false,"error":{"code":"invalid","message":"body requires text or image","field":"body"}}` |
+
+`AdapterMsg` also permits response objects without a `reply_to` for host-side dispatchers that use a fire-and-forget notification. Implementations should preserve request ids whenever they are supplied.
+
+## Mounts and capabilities
+
+Agent plugins use `kind: agent` and `mount.data.role`. Gateways use `kind: gateway` and `mount.data.gateway` plus `platform`. Agent connections may send `report`, `session_register`, `assign_ack`, `send`, and `detach`. Gateway connections may send `deliver`, `register_channel`, `health`, `typing`, and `detach`. A forbidden operation returns `forbidden` with an `op` field and a message naming the operation and mount kind.
+
+`register` binds the process to a task. `report` pushes lifecycle facts. `inject` declares support for `assign`. `recycle` declares that the plugin tears down its process when asked. `probe` declares fresh resource observations. `typing` and `conversations` describe gateway features.
+
+A missing `recycle` makes the host judge resource loss through `probe`. A missing `report` moves the affected session to `idle_fault` and records a fault. A missing `inject` sends the payload through process stdin or argv and determines terminal state from the exit code and last output line.
+
+## Handshake and errors
+
+The first frame must be `hello`. The server accepts it for exactly five seconds. Any other first frame receives `invalid`, the exact message `hello required first`, field `op`, and the connection closes. A hello that arrives after the window causes a silent close and a `tracing::warn!` entry; a local peer pid is included when available.
+
+Reachable socket errors are `invalid`, `unknown_op`, `duplicate`, `conflict`, `unauthorized`, `forbidden`, `frame_too_large`, `bad_frame`, `protocol_version`, and `internal`. Envelope validation may identify `body`, `body.text`, `body.image.mime`, or `body.image.data_base64`.
+
+## AgentSurface
+
+The optional external coding-agent face has these members. Every member returns `Result<(), SurfaceGap>` and defaults to `SurfaceGap::Unsupported(name)`:
+
+`config_path`, `register_tool`, `register_command`, `wake_user(WakeUser { text, deliver_as })`, `send_custom_entry`, `on_turn_lifecycle`, `exit`, `wrap_result`, `set_active_tools`, `set_status`, `set_title`, `set_model`, `set_thinking_level`.
+
+`wake_user` represents both `sendUserMessage(text, {deliverAs:"followUp"})` and `followup(createUserMessage(text))`. Hosts can collect `SurfaceGaps::report()` to log exactly one line for each unsupported member.
+
+## In-process plugin trait
+
+Gateway binaries implement `GatewayPlugin` from `onlyne-adapter`. The trait keeps platform SDK dependencies at the plugin boundary. The plugin receives finished text plus optional PNG bytes through `Outbound`; rendering stays in the gateway binary. A plugin does not link `resvg`, `pulldown-cmark`, or the test kit.
+
+The fixed signatures are:
+
+```rust
+#[async_trait]
+pub trait GatewayPlugin: Send {
+    fn platform(&self) -> &'static str;
+    fn capabilities(&self) -> Vec<Capability>;
+    async fn start(&mut self, host: &mut dyn GatewayHost) -> Result<(), AdapterError>;
+    async fn send(&mut self, msg: &Outbound) -> Result<SendReceipt, AdapterError>;
+    async fn probe(&mut self) -> Result<AdapterHealth, AdapterError>;
+    async fn stop(&mut self, reason: &str) -> Result<(), AdapterError>;
+    fn onboarding(&mut self) -> Result<Option<OnboardingPrompt>, AdapterError> { Ok(None) }
+    async fn list_conversations(&mut self) -> Result<Vec<ConversationInfo>, AdapterError> { Ok(vec![]) }
+}
+
+#[async_trait]
+pub trait GatewayHost: Send {
+    async fn deliver_inbound(&mut self, envelope: &Envelope) -> Result<(), AdapterError>;
+    async fn report_health(&mut self, health: &HealthArgs) -> Result<(), AdapterError>;
+    async fn register_channel(&mut self, args: &RegisterChannelArgs) -> Result<(), AdapterError>;
+    async fn typing(&mut self, args: &TypingArgs) -> Result<(), AdapterError>;
+}
+```
+
+`onboarding` and `list_conversations` are the two defaulted members. `OnboardingPrompt` has `Qr` and `ManualCode` kinds. An empty conversation list from `list_conversations` means the capability is absent; the `status` view reports it as `unsupported`. `AdapterError` carries an `ErrorCode` and a message, so plugin failures map to socket errors without a server dependency.

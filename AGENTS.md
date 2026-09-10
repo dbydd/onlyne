@@ -1,27 +1,28 @@
 # Onlyne Codex Execution Contract
 
-This repository is for building a **small, Rust-based, workspace-local IM channel daemon / broker**.
+This repository is for building a **small, Rust-based, workspace-local agent channel and routing layer**.
 
 Read this file before changing anything.
 
 ## 0. Product boundary
 
-Onlyne is **not**:
-- a full agent runtime
-- a model runner
-- a cron / workflow engine
-- a web admin product
-- a chat UI platform
-- a session-planning / memory / prompt-management system
+Onlyne v1.0.0 is:
+- a server that routes envelopes, holds the ledger, projects session state, records faults, and exposes admin operations with zero orchestration policy
+- a client that owns one role's session execution inside one workspace
+- a gateway that owns chat-platform translation, rendering, auth, and platform-local correlation state
+- one adapter protocol mounted on two sides: agent plugins attach to the client, and IM gateway plugins attach to the server-side gateway path
+- a local channel layer for agents that need role-addressed messaging
 
-Onlyne **is**:
-- a thin local channel layer for agents that have no native messaging tools
-- a workspace-local daemon that can be launched by CLI
-- a local broker exposing Unix socket / stdio / pipe friendly interfaces
-- a multiprotocol adapter layer for QQ / WeChat / Feishu / Telegram
-- a lightweight event + history substrate
+Onlyne v1.0.0 leaves outside:
+- workspace file sync
+- agent work artifacts
+- large media transfer
+- model runtime
+- prompt management beyond role prose in `spec.toml`
+- cron and workflow scheduling
+- web admin
 
-If you find yourself building anything beyond that boundary, stop and cut scope back.
+If you find yourself building outside that boundary, stop and cut scope back.
 
 ## 1. Core product requirements
 
@@ -41,7 +42,7 @@ The implementation must satisfy all of the following:
 3. **CLI-first launch model**
    - primary entrypoint is CLI
    - daemon can be launched from CLI in foreground or detached/background-compatible mode
-   - design must be compatible with launchd/systemd wrapping, but do not overbuild system integration inside core logic
+   - design must be compatible with launchd/systemd wrapping; keep system integration outside core logic
 
 4. **Local agent-facing interfaces**
    - Unix domain socket is first-class
@@ -55,7 +56,7 @@ The implementation must satisfy all of the following:
      - Feishu/Lark
      - QQ
      - WeChat
-   - first implementation may land adapters incrementally, but architecture must not hardcode the first adapter everywhere
+   - first implementation may land adapters incrementally; architecture must keep adapter shape portable across platforms
 
 6. **History**
    - per-channel history browsing
@@ -136,113 +137,201 @@ From the reference study, keep only what matters:
 
 ## 5. Workspace model
 
-The current working directory defines the active workspace.
+Onlyne v1.0.0 has two `.onlyne/` trees.
 
-Inside each workspace:
+Server root, selected by `onlyne-server run --root <dir>`:
 
-`.onlyne/` should contain at least a design-ready layout like:
+```text
+<server-root>/.onlyne/
+  spec.toml
+  state.db
+  run/s
+  run/server.pid
+  logs/server.log
+  keys/server.key
+  templates/<topology>/<role>/
+  ws/<topology>/<role>/
+  cache/
+```
 
-- `.onlyne/config.toml`
-- `.onlyne/state.db`
-- `.onlyne/run/s`
-- `.onlyne/run/onlyne.pid`
-- `.onlyne/logs/daemon.log`
-- `.onlyne/history/`
-- `.onlyne/cache/`
-- `.onlyne/adapters/`
+Role workspace, selected by `onlyne-client run --workspace <dir>`:
 
-Exact naming can evolve, but the workspace-local invariant cannot be broken.
+```text
+<workspace>/.onlyne/
+  config.toml
+  client.db
+  run/s
+  run/client.pid
+  logs/client.log
+  keys/role.key
+  agent/<pkg>/
+```
 
-Never default to global mutable state under `~/.config/onlyne` for active workspace data.
-Global config may exist later for convenience, but workspace data stays local.
+A legacy workspace layout is a hard refusal. If `.onlyne/state.db` contains `io_cursors` or `loopback_idempotency`, or `.onlyne/channels/` exists, the command prints `onlyne: legacy workspace layout; v1.0.0 does not migrate` and exits 2.
+
+Active workspace data stays local to the selected server root or role workspace. Runtime data must never default to global mutable state under `~/.config/onlyne`.
 
 ## 6. IPC contract expectations
 
-Primary local IPC should be one of:
-- JSON-RPC 2.0 over Unix socket
-or
-- line-delimited JSON command/event framing over Unix socket
+Onlyne v1.0.0 uses length-prefixed JSON frames: `u32` big-endian length plus UTF-8 JSON. One connection carries `req`, `res`, `ev`, `ack`, `ping`, `pong`, and `bye` frames. Frames above `MAX_FRAME_BYTES` return `error{code:"frame_too_large"}` and close the connection.
 
-stdio mode should use the same or nearly the same message schema.
+Client to server op vocabulary is closed:
+- `hello`
+- `send`
+- `pull`
+- `ack`
+- `report`
+- `session_sync`
+- `subscribe`
+- `query_ledger`
+- `query_sessions`
+- `query_roles`
+- `query_faults`
+- `control`
+- `bye`
 
-Minimum local operations to support early:
-- ping
-- status
-- list_channels
-- list_conversations
-- subscribe_events
-- unsubscribe_events
-- send_message
-- reply_message
-- fetch_history
-- fetch_channel_history
-- fetch_all_history
-- start_adapter
-- stop_adapter
-- restart_adapter
+Admin op vocabulary is closed:
+- `status`
+- `roles`
+- `sessions`
+- `ledger`
+- `faults`
+- `watch`
+- `history`
+- `spec_diff`
+- `reload`
+- `send`
+- `control`
+- `repair_inspect`
+- `repair_adopt`
+- `repair_rebind`
+- `repair_retry`
+- `repair_fail`
+- `repair_close`
+- `repair_ack`
 
-Event push model must be explicit.
-Clients should be able to subscribe and receive async updates without polling-only design.
+Gateway to server op vocabulary is closed:
+- `hello`
+- `register_channel`
+- `deliver`
+- `render_send`
+- `health`
+- `typing`
+- `bye`
+
+Adapter plugin vocabulary uses the same protocol on both mount kinds. Plugin-to-host ops are `hello`, `welcome`, `report`, `session_register`, `assign_ack`, `send`, `deliver`, and `detach`. Host-to-plugin ops are `welcome`, `assign`, `render_send`, `probe`, `recycle`, `config_get`, and `bye`.
+
+`res.error.code` is a closed set:
+- `invalid`
+- `unknown_op`
+- `acl_denied`
+- `unknown_role`
+- `recipient_offline`
+- `duplicate`
+- `conflict`
+- `unauthorized`
+- `forbidden`
+- `not_admin`
+- `frame_too_large`
+- `bad_frame`
+- `protocol_version`
+- `internal`
+
+Process exit codes used by user-facing commands:
+- exit 2: legacy workspace layout, with `onlyne: legacy workspace layout; v1.0.0 does not migrate`
+- exit 3: socket resolution failure, with `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`
+- exit 4: template, generation, or operator input refusal, including `onlyne: refusing to overwrite <path>; pass --force`, `onlyne: template for role <r> is ambiguous: <p1>, <p2>`, `onlyne: no template directory named <r> under <template_root>`, `onlyne: no role matches the requested templates/roles`, `onlyne: generated workspace embeds absolute path <path>`, and `onlyne: agent_package not set in spec.toml [server]`
+
+Spec parse failures print `spec.toml:<line>: <message>`. Schema marker mismatch prints `onlyne: unsupported schema; v1.0.0 does not migrate`. Thin entrypoint binary lookup failure prints `onlyne: missing binary <path>; run cargo build --workspace`. Old wire format failures use `protocol_version` or `bad_frame`.
+
+Event push model must be explicit. Clients should be able to subscribe and receive async updates with cursor resync.
 
 ## 7. Channel model expectations
 
 Define stable internal abstractions.
 At minimum:
 
-- Adapter
-- ChannelId
-- ConversationId
-- MessageId
-- MessageEnvelope
-- OutboundMessage
-- AttachmentRef
-- DeliveryState
-- AdapterHealth
+- Principal
+- MsgKind
+- Envelope
+- Body
+- ImagePart
+- Causality
+- ControlOp
+- Outcome
+- Frame
+- ErrorCode
 - Event
+- LedgerState
+- Lifecycle
+- Report
+- Receipt
+- Welcome
+- HandshakeArgs
+- AdapterMsg
+- Capability
+- Mount
+- HelloArgs
+- HelloAck
 
 Internal message model should preserve enough metadata to support:
 - reply threading where platform supports it
 - sender identity
 - timestamps
-- attachments
-- raw transport metadata retention when needed
+- text plus one inline image
+- causality with task, parent task, reply target, hop, and attempt
+- gateway-local correlation for raw platform payloads
 
-But do not let raw platform payloads leak through every layer.
+Raw platform payloads stay inside gateway-local storage. Cross-process envelopes carry `Principal::Gateway`, `reply_to`, and causality fields.
 
 ## 8. Persistence expectations
 
 Keep persistence minimal and robust.
 
-Preferred:
-- sqlite for structured state/history indexes
-- optional file blobs/logs under `.onlyne/`
+Server database persists:
+- `schema_marker`
+- `roles`
+- `sessions`
+- `ledger`
+- `events`
+- `faults`
+- `inbox_cursors`
+
+Client database persists:
+- `schema_marker`
+- `sessions`
+- `intents`
+- `out_head_cache`
+- `prose_cache`
+- `config_cache`
 
 Persist at least:
-- workspace config
-- adapter runtime state needed for restart/reconnect
-- conversation index
-- message history index/content
-- pending outbound jobs if you implement queueing
-- event cursor/checkpoint state where platform protocol requires it
+- server spec source hash per role
+- server ledger state and body JSON retention
+- session projection mirror on the server
+- client-authoritative lifecycle rows
+- outbound intents with `op_id`, attempt, state, next attempt time, receipt, and last error
+- event cursor/checkpoint state where protocol requires it
+
+Schema gates expect `('onlyne-server',1,1)` or `('onlyne-client',1,1)`. A mismatch, old table, or `swarm` prefix prints `onlyne: unsupported schema; v1.0.0 does not migrate`.
 
 Do not introduce Redis, Kafka, Postgres, Docker services, or anything similarly heavy.
 
 ## 9. Broadcast and update events
 
-The daemon should provide a local pub/sub style event stream.
+The server should provide a local pub/sub style event stream.
 
 Important event classes:
 - inbound_message
 - outbound_message
-- delivery_update
-- adapter_started
-- adapter_stopped
-- adapter_reconnecting
-- adapter_failed
+- ledger_state_changed
+- session_state
+- role_presence
+- gateway_health
 - history_appended
 - workspace_state_changed
 - warning
-- error
+- fault
 
 Broadcast means local connected clients can observe daemon changes.
 This is not an internet-scale bus; keep it local and simple.
@@ -266,29 +355,37 @@ No launchd-specific logic in core business code.
 - Prefer boring, robust code over abstraction theatre
 - Avoid framework addiction
 - Avoid giant generic trait hierarchies unless they clearly reduce complexity
-- Do not invent plugin systems prematurely
+- Keep one adapter protocol with two mount kinds: agent on client and gateway on server
+- Keep plugin crates limited to SDK traits, protocol types, and platform implementation code
+- Keep automatic policy out of the delivery path; supervisor roles and admin repair verbs own recovery choices
+- Enforce binary boundaries through feature gates
+- Keep platform SDKs out of `onlyne-server` and `onlyne-client`
+- Keep ledger, router, and TLS server internals out of `onlyne-gateway`
 - Do not add web frontend, TUI, or dashboard unless explicitly asked
 - Do not implement cron, scheduler, prompt engine, model provider, or agent shelling features
 - Do not overdesign for 20 future platforms before the first working local path exists
 
 ## 12. Delivery strategy
 
-Even though the project is small, do not return a half-product.
-The first serious implementation pass should aim to land:
+v1.0.0 delivery is complete when these are true:
 
-- Rust project scaffold
-- workspace resolution
-- `.onlyne/` bootstrap
-- CLI entrypoint
-- daemon start path
-- Unix socket IPC skeleton
-- event bus skeleton
-- store skeleton
-- one adapter path chosen as first real adapter
-- history read/write baseline
-- enough tests to validate workspace-local behavior and IPC framing
+- three daemon binaries ship: `onlyne-server`, `onlyne-client`, and `onlyne-gateway`
+- one thin entrypoint ships: `onlyne`
+- adapter SDK ships with conformance fixtures and `onlyne-agent-fake`
+- four platform gateway plugins ship behind Cargo features: `telegram`, `feishu`, `qqbot`, and `weixin`
+- `onlyne server generate` creates relocatable role workspaces from templates
+- `onlyne-client init` registers a role by printing a `[[client]]` fragment
+- verification case 1 proves single-machine task delivery through fake backend and fake agent
+- verification case 2 proves ACL hard refusal
+- verification case 3 proves `op_id` idempotency and conflict handling
+- verification case 4 proves disconnect and recovery ordering
+- verification case 5 proves aggregate-role federation
+- verification case 6 proves gateway mount consistency
+- verification case 7 proves legacy layout refusal at exit 2
+- verification case 8 proves formatting, linting, tests, and binary firewall checks
+- verification case 9 proves generate plus relocate
 
-But when working in this repository, always respect the current task asked by the user. Do not jump ahead if the current ask is only planning or scaffolding.
+When working in this repository, always respect the current task asked by the user. Avoid jumping ahead when the current ask is planning or scaffolding.
 
 ## 13. What to study in cc-connect before coding
 

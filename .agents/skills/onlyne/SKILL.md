@@ -1,123 +1,241 @@
 ---
 name: onlyne
-description: Use when an agent needs to send, receive, subscribe to, or inspect workspace-local IM channel messages through Onlyne.
+description: Use when an agent needs to send tasks, inspect the ledger, watch events, manage clients, generate workspaces, or operate Onlyne v1.0.0 sockets.
 ---
 
 # Onlyne
 
 ## Overview
 
-Onlyne is a workspace-local IM channel broker. Use it only as a local messaging bridge: send messages, receive subscribed events, and inspect local history through the workspace `.onlyne/` daemon state.
+Onlyne v1.0.0 is a local channel and routing layer for agents. The server routes envelopes and holds the ledger. The client runs one role's sessions inside one workspace. The gateway translates one chat platform. Agent and gateway plugins use the same adapter protocol on different mount kinds.
 
 ## Rules
 
-- Run commands inside the project tree, or pass `--workspace <dir>`.
-- Do not write credentials into global home directories. Secrets belong in the selected workspace `.onlyne/.env`.
-- Do not commit `.onlyne/`, logs, runtime databases, sockets, or channel tokens.
-- Do not treat Onlyne as an agent runtime, model runner, scheduler, or prompt system.
-- Use `onlyne run --debug` only while discovering channel/conversation/thread metadata; debug replies are for setup, not normal operation.
-- If pi-onlyne manages the daemon, do not shell out `nohup onlyne run`, `pkill -f 'onlyne run'`, or manual restart scripts. Use `/onlyne daemon start|stop|restart` or the `onlyne_daemon_start` / `onlyne_daemon_stop` / `onlyne_daemon_restart` tools instead.
+- Keep runtime state under the selected `<server-root>/.onlyne/` or `<workspace>/.onlyne/` tree.
+- Treat `<server-root>/.onlyne/spec.toml` as the single source of truth for roles, keys, ACLs, prose, gateways, and routes.
+- Use `onlyne-client init` or `onlyne server generate` to create role keys and workspace config.
+- Append generated `[[client]]` fragments to `spec.toml`, then run `onlyne reload` or `onlyne server reload`.
+- Use `ONLYNE_BACKEND=fake` plus `onlyne-agent-fake` for local e2e checks.
+- Keep real platform credentials out of smoke runs.
 
-## Quick Reference
+## Resolve a socket
 
-| Need | Command |
-| --- | --- |
-| Initialize workspace | `onlyne init` |
-| Export/update local skill | `onlyne export-skill` |
-| Run daemon manually | `onlyne run` |
-| Run with metadata replies | `onlyne run --debug` |
-| Stop manual daemon | `onlyne stop` |
-| Restart manual daemon | `onlyne restart` |
-| Manage daemon from pi-onlyne | `/onlyne daemon start`, `/onlyne daemon stop`, `/onlyne daemon restart`, or `onlyne_daemon_*` tools |
-| Health check | `onlyne client '{"id":"ping","op":"ping"}'` |
-| Status/channels | `onlyne client '{"id":"status","op":"status"}'` |
-| Send Markdown | `onlyne client '{"id":"send","op":"send_message","channel_id":"qqbot","text":"# Report\\n\\n| A | B |\\n|---|---|\\n| 1 | 2 |"}'` |
-| Send literal text | `onlyne client '{"id":"send","op":"send_message","channel_id":"telegram","text":"# not a heading","raw_text":true}'` |
-| Wake local agent | `onlyne client '{"id":"wake","op":"loopback","text":"background job needs attention","raw_text":true}'` |
-| Reply text | `onlyne client '{"id":"reply","op":"reply_message","channel_id":"telegram","text":"hello","raw_text":true}'` |
-| Read channel history | `onlyne client '{"id":"hist","op":"fetch_channel_history","channel_id":"telegram","limit":20}'` |
-| Read merged history | `onlyne client '{"id":"all","op":"fetch_all_history","limit":50}'` |
-| FIFO send | `printf '# report\n' > .onlyne/channels/qqbot/in` |
-| FIFO receive | `cat .onlyne/channels/qqbot/out` |
+CLI socket resolution order:
 
-## File Descriptor IO
+1. `--socket <path>` uses the exact socket path.
+2. `--server-root <dir>` uses `<dir>/.onlyne/run/s` for the admin surface.
+3. `--workspace <dir>` uses `<dir>/.onlyne/run/s` for the client surface.
+4. Upward discovery from the current directory finds `.onlyne/run/s`.
 
-When the daemon is running, each enabled channel plus `loopback` exposes FIFO files under `.onlyne/channels/<channel>/`:
+Missing socket failure is exit 3:
 
 ```text
-.onlyne/channels/qqbot/in
-.onlyne/channels/qqbot/out
+onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace
 ```
 
-- Write one message to `in`; EOF ends the message.
-- Read one inbound message from `out`; it blocks until a message is available.
-- FIFO input format is configured with `in_format = "markdown" | "raw_text"`.
-- FIFO output behavior is configured with `out_content = "latest_only" | "with_history"` and `out_cursor = "retain" | "consume"`.
-- `loopback/in` wakes the local agent session through Onlyne loopback.
-- `examples/fifo/smoke-fifo-all-qq.sh` writes all channels via FIFO and reads QQ inbound through `.onlyne/channels/qqbot/out`.
+Useful probes:
 
-## Config Schema
+```bash
+onlyne --server-root "$SERVER" status
+onlyne --workspace "$WS" ping
+onlyne --socket "$SOCK" status
+```
 
-Workspace config starts with Taplo's schema hint:
+## Send a task
+
+Send a role-addressed task through the admin surface:
+
+```bash
+onlyne --server-root "$SERVER" send --from planner --to builder --text "build the patch"
+```
+
+Send from a role workspace through the client surface:
+
+```bash
+onlyne --workspace "$WS" send --to reviewer --text "review this change"
+```
+
+Use `--task <id>` to attach causality to an existing task family. Use `--note` for free text that creates no session. Offline `note` delivery returns `recipient_offline`.
+
+## Check a ledger row
+
+Read a task from the server ledger:
+
+```bash
+onlyne --server-root "$SERVER" ledger --task "$TASK"
+```
+
+Expected task path in the primary smoke run:
+
+```text
+queued -> in_flight -> acked
+```
+
+The completion head appears in `out_head`. Session state lives in the server projection and client-authoritative `client.db`.
+
+## Watch events
+
+Watch the admin event stream:
+
+```bash
+onlyne --server-root "$SERVER" watch
+```
+
+Watch from a role workspace:
+
+```bash
+onlyne --workspace "$WS" watch
+```
+
+Observation events are at-most-once. Event frames carry monotonic `seq`. A lagging client resubscribes with `since_seq` after comparing `pong.server_seq` with its cursor.
+
+## Start and stop a client
+
+Foreground role daemon:
+
+```bash
+onlyne-client run --workspace "$WS"
+```
+
+Managed client commands through the thin entrypoint:
+
+```bash
+onlyne client start --workspace "$WS"
+onlyne client status --workspace "$WS"
+onlyne client stop --workspace "$WS"
+```
+
+A client owns one role. Running sessions reach terminal state during disconnect. Outgoing completions persist as intents and flush after reconnect.
+
+## Register a role with init
+
+Create a minimal workspace and a `[[client]]` fragment:
+
+```bash
+onlyne-client init --workspace "$WS" --role "$ROLE" --server-root "$SERVER" > "$ROLE.spec.toml"
+cat "$ROLE.spec.toml" >> "$SERVER/.onlyne/spec.toml"
+onlyne --server-root "$SERVER" reload
+```
+
+The fragment starts with:
 
 ```toml
-#:schema ./onlyne-config.schema.json
+[[client]]
+role = "planner"
+key = "ed25519/<base64>"
 ```
 
-Refresh the generated schema after changing Rust config types:
+`init` creates `W/.onlyne/keys/role.key` and `W/.onlyne/config.toml`. The operator owns the spec append and reload.
+
+## Generate workspaces
+
+Generate role workspaces from server templates:
 
 ```bash
-cargo run --features schema --bin gen-schema > onlyne-config.schema.json
+onlyne server generate --root "$SERVER" --out "$OUT" > "$OUT/spec-frag.toml"
 ```
 
-## Subscribe to Events
+The default output root is `<server-root>/.onlyne/ws`. Template selection uses role name basename matching under `template_root`. `--template` and `--role` select an intersection.
 
-`onlyne client` prints one response and exits, so long-lived subscriptions should keep the Unix socket open. The socket path is always workspace-local: `.onlyne/run/s`.
-
-```bash
-python3 - <<'PY'
-import json, socket
-sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-sock.connect('.onlyne/run/s')
-sock.sendall(b'{"id":"sub","op":"subscribe_events"}\n')
-while True:
-    print(sock.recv(65536).decode(), end='')
-PY
-```
-
-Subscribed event lines have `event:true`; request responses have `ok:true` or `ok:false`.
-
-## Markdown Semantics
-
-External callers send one whole Markdown document in `text`; Markdown is the default. Do not split tables, formulas, or code blocks before sending. Set `raw_text:true` only for literal plain text.
-
-- QQ Bot receives the whole document as QQ extended Markdown (`msg_type=2`, `markdown.content`), including tables and formulas.
-- Telegram and WeChat may internally split Markdown tables into rendered image parts.
-- Feishu sends Markdown as an interactive card and keeps supported table content in-card.
-- The response/history may contain `platform_metadata.delivery_parts` when one logical send becomes multiple platform messages.
-
-If the host agent has Onlyne tools, prefer:
+Closed placeholders:
 
 ```text
-onlyne_send({ channelId, text })
-onlyne_broadcast({ targets, text })
-onlyne_loopback({ text, rawText? })
-// raw literal text only:
-onlyne_send({ channelId, text, rawText: true })
+{{role}}
+{{cluster}}
+{{server_name}}
+{{listen}}
+{{cert_pin}}
+{{admin}}
+{{max_sessions}}
+{{agent_package}}
 ```
 
-Otherwise use the CLI/socket request shown above.
+Generation scans output bytes for absolute paths. A hit deletes the generated output and exits 4 with:
 
-## Discover Conversation IDs
+```text
+onlyne: generated workspace embeds absolute path <path>
+```
 
-1. Start `onlyne run --debug` in the workspace.
-2. Send a normal message to the target platform bot/account.
-3. Read the platform reply; it contains redacted channel/conversation/thread metadata.
-4. Put the returned conversation value into that adapter's `bind_conversation_id`, then send with only `channel_id`.
+## Run a fake agent
 
-## Common Mistakes
+Build first, then run the fake backend and fake agent script:
 
-- If `connect onlyne socket` fails, start `onlyne run` in the same workspace or pass the same `--workspace <dir>` to both commands.
-- If history is empty, first verify the adapter is enabled and `status` shows the expected channel.
-- If sends go to the wrong place, rediscover the conversation with `--debug`; platform IDs are not interchangeable across Telegram, Feishu, QQ Bot, and WeChat.
-- If multiple examples should share config, initialize the parent directory once and run child commands under it so upward workspace discovery finds the same `.onlyne/`.
+```bash
+cargo build --workspace
+ONLYNE_BACKEND=fake onlyne-client run --workspace "$WS" &
+onlyne-agent-fake --workspace "$WS" --script \
+  "$SRC/crates/onlyne-testkit/scripts/echo-complete.json" &
+```
+
+`echo-complete.json` receives `assign`, checks prose, and completes with an echo result.
+
+## Exit codes and errors
+
+| Code | Meaning | Exact user-facing string |
+|---|---|---|
+| 2 | Legacy workspace layout | `onlyne: legacy workspace layout; v1.0.0 does not migrate` |
+| 3 | Socket resolution failure | `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace` |
+| 4 | Existing output refusal | `onlyne: refusing to overwrite <path>; pass --force` |
+| 4 | Ambiguous template | `onlyne: template for role <r> is ambiguous: <p1>, <p2>` |
+| 4 | Missing template | `onlyne: no template directory named <r> under <template_root>` |
+| 4 | Empty role/template intersection | `onlyne: no role matches the requested templates/roles` |
+| 4 | Absolute path in generated output | `onlyne: generated workspace embeds absolute path <path>` |
+| 4 | Missing `agent_package` for placeholder use | `onlyne: agent_package not set in spec.toml [server]` |
+
+Other hard failures:
+
+```text
+spec.toml:<line>: <message>
+onlyne: unsupported schema; v1.0.0 does not migrate
+onlyne: missing binary <path>; run cargo build --workspace
+```
+
+Frame error codes are closed: `invalid`, `unknown_op`, `acl_denied`, `unknown_role`, `recipient_offline`, `duplicate`, `conflict`, `unauthorized`, `forbidden`, `not_admin`, `frame_too_large`, `bad_frame`, `protocol_version`, and `internal`.
+
+## Smoke
+
+Verification case 1 local task run:
+
+1. Build the workspace.
+   ```bash
+   cargo build --workspace
+   ```
+2. Set source and temp roots.
+   ```bash
+   SRC=$(pwd); tmp=$(mktemp -d)
+   ```
+3. Initialize the server root.
+   ```bash
+   "$SRC/target/debug/onlyne-server" init --root "$tmp/server" --listen 127.0.0.1:7899
+   ```
+4. Run the server.
+   ```bash
+   "$SRC/target/debug/onlyne-server" run --root "$tmp/server" &
+   ```
+5. Wait for readiness.
+   ```bash
+   "$SRC/target/debug/onlyne" --server-root "$tmp/server" wait-ready
+   ```
+6. Initialize the planner role and capture the registration fragment.
+   ```bash
+   "$SRC/target/debug/onlyne-client" init --workspace "$tmp/planner" --role planner \
+     --server-root "$tmp/server" > "$tmp/planner.spec.toml"
+   ```
+7. Append the fragment and reload the server spec.
+   ```bash
+   cat "$tmp/planner.spec.toml" >> "$tmp/server/.onlyne/spec.toml"
+   "$SRC/target/debug/onlyne" --server-root "$tmp/server" reload
+   ```
+8. Run the planner client.
+   ```bash
+   "$SRC/target/debug/onlyne-client" run --workspace "$tmp/planner" &
+   ```
+9. Run the fake agent.
+   ```bash
+   "$SRC/target/debug/onlyne-agent-fake" --workspace "$tmp/planner" --script \
+     "$SRC/crates/onlyne-testkit/scripts/echo-complete.json" &
+   ```
+10. Send the local task and inspect the resulting task in `ledger` and `sessions`.
+   ```bash
+   "$SRC/target/debug/onlyne" --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
+   ```

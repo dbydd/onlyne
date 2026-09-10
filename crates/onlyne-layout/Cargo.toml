@@ -1,0 +1,11 @@
+[package]
+name = "onlyne-layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onlyne v1 workspace layout: server root and role workspace discovery, bootstrap, legacy refusal"
+
+[dev-dependencies]
+tempfile = { version = "3" }

@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/dbydd/onlyne-swarm/main/template.workspace.schema.json",
+  "title": "onlyne-swarm workspace template",
+  "description": "Full starter template for .agents/.schedule/<name>/template.workspace.jsonc. Every key ships with its default; delete anything unchanged.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Editor hint pointing at this schema file. Ignored by the scheduler.",
+      "default": "./template.workspace.schema.json"
+    },
+    "name": {
+      "type": "string",
+      "description": "Workspace name. Defaults to the template directory name when empty.",
+      "default": ""
+    },
+    "role": {
+      "type": "string",
+      "description": "Inline system prompt delivered to the session before the task payload.",
+      "default": ""
+    },
+    "model": {
+      "type": "object",
+      "description": "Session launcher metadata kept verbatim in the merged snapshot.",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string", "default": "" },
+        "model": { "type": "string", "default": "" },
+        "effort": { "type": "string", "default": "" }
+      },
+      "default": { "provider": "", "model": "", "effort": "" }
+    },
+    "back_edges": {
+      "type": "array",
+      "description": "Callback targets as tree paths, relative to this workspace. Cyclic edges are allowed; missing targets fail sync.",
+      "items": { "type": "string" },
+      "default": []
+    }
+  }
+}

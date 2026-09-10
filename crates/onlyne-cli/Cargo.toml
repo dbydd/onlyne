@@ -1,0 +1,25 @@
+[package]
+name = "onlyne-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onlyne v1 human entrypoint: thin forwarder to local daemons"
+
+[[bin]]
+name = "onlyne"
+path = "src/main.rs"
+
+[dependencies]
+onlyne-frame = { workspace = true }
+onlyne-proto = { workspace = true }
+base64 = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

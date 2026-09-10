@@ -1,147 +1,110 @@
 # Onlyne
 
-Onlyne 是一个小型 Rust 本地 IM channel daemon / broker。它让本地 agent 可以通过 workspace-local 的方式收发消息、订阅事件、查看历史，并接入多个聊天平台。
+Onlyne 是 agent 的本地 channel 与 routing 层：`onlyne-server` 路由消息并持有 ledger，`onlyne-client` 在每个工作区运行一个 role 的 session，`onlyne-gateway` 翻译一个聊天平台，coding-agent 插件通过同一份 adapter protocol 接入。
 
 English README: [README.md](README.md).
 
-## 它是什么
+## Process picture
 
-- 工作区本地：默认使用从当前目录向上找到的最近 `.onlyne/` 作为工作区；每个工作区都有自己的配置、状态、socket、日志和缓存。
-- CLI 优先：可以前台运行，也可以交给 systemd/launchd 等外部 supervisor 包装，还可以用 stdio 模式被其他进程拉起。
-- 本地 IPC：Unix socket 或 stdio 上的 newline-delimited JSON。
-- 多 channel：Telegram、飞书/Lark、QQ Bot、微信 ilink。
-- 轻量历史：用本地 SQLite 保存状态和消息历史。
-- 事件流：本地客户端可以订阅入站、出站和适配器状态事件。
-
-Onlyne 不是 agent runtime、模型运行器、调度器、Web 管理后台，也不是 prompt/memory 系统。
-
-## 安装
-
-`onlyne` 二进制已发布到 [crates.io](https://crates.io/crates/onlyne)：
-
-```bash
-cargo install onlyne
+```mermaid
+graph LR
+  P[Pi host + onlyne-agent-pi] -->|adapter protocol| C[onlyne-client role workspace]
+  D[dsh host + onlyne-agent-dsh] -->|adapter protocol| C
+  C -->|TLS frame| S[onlyne-server]
+  S -->|adapter protocol| G[onlyne-gateway telegram feishu qqbot wechat]
+  G --> H[human IM]
+  C2[onlyne-client supervisor role] -->|aggregate role link| SP[parent onlyne-server]
+  S --- SADM[admin.sock local]
 ```
 
-或从源码构建：
+## Binaries
+
+- `onlyne-server`：server-root daemon，负责 spec 加载、路由、ledger、fault、admin socket、gateway host、workspace generate。
+- `onlyne-client`：workspace daemon，负责一个 role 的 session lifecycle、process backend、本地 intent、agent adapter socket。
+- `onlyne-gateway`：单个平台 gateway 进程，通过 `telegram`、`feishu`、`qqbot`、`weixin` 选择平台。
+- `onlyne`：瘦人机入口，负责 daemon exec、socket 命令、消息动词、status、watch、repair、generate、completions。
+- `onlyne-agent-fake`：testkit 产物，用于 e2e verification。
+- v1.0.0 以硬错误拒绝 legacy workspace layout、unsupported schema、old wire format。发行包无 migration tool。
+
+## Quickstart
 
 ```bash
-cargo build --release
+set -euo pipefail
+cargo build --workspace
+SRC=$(pwd); tmp=$(mktemp -d)
+"$SRC/target/debug/onlyne-server" init --root "$tmp/server" \
+  --listen 127.0.0.1:7899
+"$SRC/target/debug/onlyne-server" run --root "$tmp/server" &
+"$SRC/target/debug/onlyne" --server-root "$tmp/server" wait-ready
+"$SRC/target/debug/onlyne-client" init --workspace "$tmp/planner" --role planner \
+  --server-root "$tmp/server" > "$tmp/planner.spec.toml"
+cat "$tmp/planner.spec.toml" >> "$tmp/server/.onlyne/spec.toml"
+"$SRC/target/debug/onlyne" --server-root "$tmp/server" reload
+"$SRC/target/debug/onlyne-client" run --workspace "$tmp/planner" &
+"$SRC/target/debug/onlyne-agent-fake" --workspace "$tmp/planner" --script \
+  "$SRC/crates/onlyne-testkit/scripts/echo-complete.json" &
+"$SRC/target/debug/onlyne" --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-构建产物在 `target/release/onlyne`。开发时也可以使用 `cargo run --`。
+期望结果：`send` 输出一行 JSON，`ok = true`，任务为 UUID，`data.state = "in_flight"`；该任务的 ledger 达到 `acked`，session projection 达到 `public_lifecycle = "exited"` 和 `outcome = "done"`。
 
-## 快速开始
+## Directory layout
 
-```bash
-onlyne init
-# 可选：把 Onlyne agent skill 导出/更新到当前工作区
-onlyne export-skill
-onlyne run
-```
-
-在同一个工作区树下的另一个终端运行：
-
-```bash
-onlyne client '{"id":"1","op":"ping"}'
-onlyne client '{"id":"2","op":"status"}'
-onlyne client '{"id":"wake","op":"loopback","text":"后台任务需要处理","raw_text":true}'
-```
-
-`loopback` 会写入本地 `loopback` channel 的入站消息，订阅中的 agent 可以用后台脚本唤醒自己，不需要外部 IM adapter。
-
-stdio 模式使用同一套请求格式：
-
-```bash
-echo '{"id":"1","op":"ping"}' | onlyne stdio
-```
-
-## 工作区目录
-
-默认情况下，Onlyne 会从当前目录开始向上查找最近的 `.onlyne/`，找到后把它所在目录作为工作区。如果没有找到 `.onlyne/`，则使用当前目录，因此 `onlyne init` 会初始化执行命令时所在的目录。也可以用 `--workspace <dir>` 显式指定工作区根目录。
-
-`onlyne init` 会在选定工作区下创建：
+由 `onlyne-server run --root <dir>` 选择的 server root：
 
 ```text
-.onlyne/
-  config.toml
-  .env
-  state.db
-  run/s
-  logs/daemon.log
-  cache/media/
-  adapters/
+<server-root>/.onlyne/
+  spec.toml                 # 单一中央真相
+  state.db                  # server ledger，SQLite WAL
+  run/s                     # admin unix socket，0600
+  run/server.pid
+  logs/server.log
+  keys/server.key           # ed25519 与 TLS 私钥，PEM，0600
+  templates/<topology>/<role>/
+  ws/<topology>/<role>/     # generate 默认输出，整个目录可搬迁
+  cache/                    # gateway render 临时空间
 ```
 
-Onlyne 的工作区数据不会默认写到全局可变目录。
+由 `onlyne-client run --workspace <dir>` 选择的 role workspace：
 
-`onlyne export-skill` 会在选定工作区下写入或更新本地 agent skill：`.agents/skills/onlyne/SKILL.md`。这是工作区本地导出，不会写入 `~/.agents/skills`。
-
-## Channel 配置
-
-每个启用的 channel 都是单会话路由：可以配置一个 `bind_conversation_id`，也可以留空并在 adapter 连通后从目标会话发送 `/handshake` 自动绑定。agent 发送时只传 `channel_id`（`telegram`、`feishu`、`qqbot`、`wechat`）。未绑定 channel 收到非 `/handshake` 消息时会提示发送 `/handshake`。
-
-| Channel | 配置方式 |
-| --- | --- |
-| Telegram | 在 `.onlyne/.env` 写入 `TELEGRAM_BOT_TOKEN`，启用 `[adapters.telegram]`，然后设置 `bind_conversation_id` 或发送 `/handshake`。 |
-| 飞书/Lark | 运行 `onlyne auth feishu`，启用 `[adapters.feishu]`，然后设置 `bind_conversation_id` 或发送 `/handshake`。 |
-| QQ Bot | 运行 `onlyne auth qqbot` 通过 qclaw 扫码创建/绑定，或传 `--app-id <id> --app-secret <secret>` 手动配置；只有手动沙箱凭证才加 `--sandbox`；设置 `bind_conversation_id` 或发送 `/handshake`。 |
-| 微信 ilink | 运行 `onlyne auth wechat`，启用 `[adapters.wechat]`，然后设置 `bind_conversation_id` 或发送 `/handshake`。 |
-
-认证命令只会写入选定工作区的 `.onlyne/`。
-
-Adapter SDK：飞书使用 `openlark`，Telegram 使用 `teloxide`，微信 ilink 使用 `wechat-ilink`。QQ Bot 使用 qclaw 扫码绑定和轻量官方 API/gateway adapter。
-
-## 常用命令
-
-```bash
-onlyne [--workspace <dir>] init
-onlyne [--workspace <dir>] export-skill
-onlyne [--workspace <dir>] run [--debug]
-onlyne [--workspace <dir>] stop
-onlyne [--workspace <dir>] restart [--debug]
-onlyne stdio
-onlyne client '<json-request>'
-onlyne config-check
-onlyne auth feishu [--app-id <id> --app-secret <secret>]
-onlyne auth qqbot [--app-id <id> --app-secret <secret> [--sandbox]]
-onlyne auth wechat [--token <token>]
-onlyne shell-completions zsh
-onlyne shell-completions fish
+```text
+<workspace>/.onlyne/
+  config.toml               # role 身份、server endpoint、本地 plugins
+  client.db                 # sessions、intents、inbox cursors、本地 caches
+  run/s                     # client unix socket，供 adapter plugins 与 CLI 使用
+  run/client.pid
+  logs/client.log
+  keys/role.key             # spec.toml 中登记 role 的私钥
+  agent/<pkg>/              # generate vendor 的 coding-agent plugin package
 ```
 
-`onlyne stop` 会请求当前工作区 daemon 退出。`onlyne restart` 会先停止当前工作区 daemon（如果存在），再以前台方式启动 `run`。
+Legacy workspace layout 以 exit 2 结束，并输出 `onlyne: legacy workspace layout; v1.0.0 does not migrate`。Unsupported schema 通过 schema gate 硬拒，并输出 `onlyne: unsupported schema; v1.0.0 does not migrate`。
 
-`onlyne run --debug` 会在收到入站消息后，向同平台同会话回复脱敏后的 channel/conversation/thread 元数据。它只适合用来查 conversation id 或平台 thread 字段。
+## Configuration
 
-## 示例
+`<server-root>/.onlyne/spec.toml` 是 role 名、公钥、ACL、prose、session concurrency、timeouts、routes、gateways、`session_command` 的单一真相。
 
-- `examples/telegram/`
-- `examples/feishu/`
-- `examples/qqbot/`
-- `examples/wechat/`
-- `examples/broadcast/`
-- `examples/multicast/`
-- `examples/multi-channel/`
+`onlyne-server run` 在启动时完整解析 `spec.toml`。任何未知键或类型错误会拒绝启动，并输出 `spec.toml:<line>: <message>`。`onlyne server reload` 和 `SIGHUP` 会解析到临时 config，校验通过后原子替换 live config。校验失败会保留 active config，并记录 `fault{kind:"spec_reload_failed"}`。
 
-这些示例都是纯 CLI 工作流。建议在 `examples/` 下运行 `onlyne init`，让所有子目录共用被 git 忽略的 `examples/.onlyne/` 工作区；如果要隔离，也可以用 `--workspace <dir>` 或 `ONLYNE_WORKSPACE`。
+Role registration 使用 TOML fragment。`onlyne-client init --workspace W --role R --server-root S` 创建 `W/.onlyne/keys/role.key`，写入 `W/.onlyne/config.toml`，并打印首行为 `[[client]]` 的 fragment，包含 `role` 与 `key = "ed25519/<base64>"`。操作员追加 fragment 到 `spec.toml` 后运行 `onlyne reload`。
 
-## IPC
+Socket resolution 固定为：`--socket <path>` 优先，`--server-root <dir>` 映射到 `<dir>/.onlyne/run/s`，`--workspace <dir>` 或向上发现映射到 `<workspace>/.onlyne/run/s`。缺少 socket 时 exit 3，并输出 `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`。
 
-Onlyne 接收 newline-delimited JSON 请求。操作详情见 [docs/IPC.md](docs/IPC.md)。
+## What changed in 1.0.0
 
-最小请求：
+- 移除 FIFO channel I/O → socket 上的 length-prefixed JSON frames 与 shared adapter protocol。
+- 移除 `loopback` → 通过 `onlyne send --to <own-role> --note` 向自身 role 投递 `note`。
+- 移除 `---swarm` body headers → `Envelope`、`MsgKind`、`Causality`、`ControlOp` 字段。
+- 移除 adapter start/stop ops → supervisor 管理 `onlyne-gateway` 进程。
+- 移除 daemon 内的四平台 factory → `onlyne-gateway` 加载 feature-gated gateway plugin crates。
+- 移除 offline delivery mesh → server-ledger 为 control-plane messages 排队，offline `note` 返回 `recipient_offline`。
+- 移除 automatic retry 与 recovery tasks → durable client intents 加 explicit supervisor/admin repair verbs。
+- 移除 web/admin surface → local admin unix socket 提供 `status`、`ledger`、`watch`、`repair_*`、`reload`、`spec_diff`。
+- 移除 `harness/` submodules → adapter SDK、protocol schemas、conformance fixtures、external plugin packages。
 
-```json
-{"id":"1","op":"ping"}
-```
+## Pointers
 
-最小响应：
-
-```json
-{"id":"1","ok":true,"data":{"pong":true}}
-```
-
-## 项目状态
-
-当前实现说明和验证记录见 [docs/STATUS.md](docs/STATUS.md)。
+- `docs/v1-PLAN.md`：权威 v1.0.0 design 与 verification cases。
+- `docs/v1-CONTRACT.md`：work split、crate ownership、socket resolution、exit codes。
+- `docs/v1-ARCHITECTURE.md`：crates、sockets、ledger、lifecycle、generation、federation 的 engineer onboarding map。
+- `crates/onlyne-adapter/PROTOCOL.md`：coding-agent plugins 与 IM gateways 共用的 adapter protocol。

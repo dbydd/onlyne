@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ClientConfig",
+  "description": "Client-side `<workspace>/.onlyne/config.toml`.",
+  "type": "object",
+  "required": [
+    "cert_pin",
+    "key_path",
+    "role",
+    "server"
+  ],
+  "properties": {
+    "cert_pin": {
+      "description": "Server certificate SPKI fingerprint.",
+      "type": "string"
+    },
+    "key_path": {
+      "description": "Path to this role's private key file.",
+      "type": "string"
+    },
+    "plugins": {
+      "description": "Local plugin list.",
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "role": {
+      "description": "Role name used for this workspace.",
+      "type": "string"
+    },
+    "server": {
+      "description": "Server endpoint.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/ServerEndpoint"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ServerEndpoint": {
+      "description": "Server host and port pair used by the client.",
+      "type": "object",
+      "required": [
+        "host",
+        "port"
+      ],
+      "properties": {
+        "host": {
+          "description": "Hostname or address, possibly a `$NAME` env reference.",
+          "type": "string"
+        },
+        "port": {
+          "description": "TCP port.",
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

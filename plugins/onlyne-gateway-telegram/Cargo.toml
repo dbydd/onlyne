@@ -1,0 +1,17 @@
+[package]
+name = "onlyne-gateway-telegram"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onlyne v1 telegram gateway plugin"
+
+[dependencies]
+async-trait = { version = "0.1", workspace = true }
+base64 = { version = "0.22", workspace = true }
+serde = { version = "1", features = ["derive"], workspace = true }
+serde_json = { version = "1", workspace = true }
+teloxide = { version = "0.17.0", default-features = false, features = ["rustls"] }
+onlyne-adapter = { workspace = true }
+onlyne-proto = { workspace = true }

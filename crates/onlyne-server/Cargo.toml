@@ -1,0 +1,30 @@
+[package]
+name = "onlyne-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onlyne v1 server: routing, ledger, gateway host, admin socket"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+onlyne-adapter = { path = "../onlyne-adapter", version = "1.0.0" }
+onlyne-config = { path = "../onlyne-config", version = "1.0.0" }
+onlyne-frame = { path = "../onlyne-frame", version = "1.0.0" }
+onlyne-layout = { path = "../onlyne-layout", version = "1.0.0" }
+onlyne-net = { path = "../onlyne-net", version = "1.0.0" }
+onlyne-proto = { path = "../onlyne-proto", version = "1.0.0" }
+onlyne-store = { path = "../onlyne-store", version = "1.0.0" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+base64 = "0.22"
+tempfile = "3"

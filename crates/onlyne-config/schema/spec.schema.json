@@ -1,0 +1,300 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Spec",
+  "description": "Cluster spec loaded from `<server-root>/.onlyne/spec.toml`.",
+  "type": "object",
+  "required": [
+    "server"
+  ],
+  "properties": {
+    "client": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ClientEntry"
+      }
+    },
+    "gateway": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/GatewayEntry"
+      }
+    },
+    "route": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/RouteEntry"
+      }
+    },
+    "server": {
+      "$ref": "#/definitions/ServerSection"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ClientEntry": {
+      "description": "`[[client]]` entry. Aggregate roles use the same struct and carry an annotation in `aggregate`.",
+      "type": "object",
+      "required": [
+        "key",
+        "role"
+      ],
+      "properties": {
+        "admin": {
+          "default": false,
+          "type": "boolean"
+        },
+        "aggregate": {
+          "default": "",
+          "type": "string"
+        },
+        "allowed_senders": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_targets": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "intent": {
+          "default": {
+            "attempts": 3,
+            "backoff_ms": [
+              1000,
+              2000,
+              4000
+            ]
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/IntentPolicy"
+            }
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "max_sessions": {
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "prose": {
+          "default": "",
+          "type": "string"
+        },
+        "reuse": {
+          "default": false,
+          "type": "boolean"
+        },
+        "role": {
+          "type": "string"
+        },
+        "session_command": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "default": {
+            "idle_ms": 60000,
+            "ready_ms": 30000,
+            "running_ms": 120000
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/Timeouts"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "GatewayEntry": {
+      "description": "`[[gateway]]` entry.",
+      "type": "object",
+      "required": [
+        "id",
+        "key",
+        "platform"
+      ],
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "IntentPolicy": {
+      "description": "Intent retry policy for coding-agent responses.",
+      "type": "object",
+      "properties": {
+        "attempts": {
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "backoff_ms": {
+          "default": [
+            1000,
+            2000,
+            4000
+          ],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RouteEntry": {
+      "description": "External inbound message route.",
+      "type": "object",
+      "required": [
+        "channel",
+        "gateway",
+        "to"
+      ],
+      "properties": {
+        "channel": {
+          "type": "string"
+        },
+        "conversation": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "to": {
+          "$ref": "#/definitions/RouteTarget"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RouteTarget": {
+      "description": "Destination role and optional fixed session for a route.",
+      "type": "object",
+      "required": [
+        "role"
+      ],
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "session": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ServerSection": {
+      "description": "`[server]` section for the cluster.",
+      "type": "object",
+      "required": [
+        "cert_pin",
+        "listen",
+        "name"
+      ],
+      "properties": {
+        "agent_package": {
+          "default": "",
+          "type": "string"
+        },
+        "cert_pin": {
+          "type": "string"
+        },
+        "fault_history_days": {
+          "default": 14,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "heartbeat_timeout_ms": {
+          "default": 30000,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "listen": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "note_queue": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resync_lag": {
+          "default": 256,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "template_root": {
+          "default": ".onlyne/templates",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Timeouts": {
+      "description": "Client timeout policy in milliseconds.",
+      "type": "object",
+      "properties": {
+        "idle_ms": {
+          "default": 60000,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "ready_ms": {
+          "default": 30000,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "running_ms": {
+          "default": 120000,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,188 +1,110 @@
 # Onlyne
 
-Onlyne is a small Rust daemon for local IM channel brokering. It gives local agents a thin, workspace-local way to send, receive, subscribe to, and browse messages across chat platforms.
+Onlyne is a local channel and routing layer for agents: `onlyne-server` routes messages and holds the ledger, `onlyne-client` runs one role's sessions per workspace, `onlyne-gateway` translates one chat platform, and coding-agent plugins attach over one adapter protocol.
 
 中文说明见 [README.zh-CN.md](README.zh-CN.md).
 
-## What it is
+## Process picture
 
-- Workspace-local: the active workspace is the nearest parent directory with `.onlyne/`; each workspace owns its own config, state, socket, logs, and cache.
-- CLI-first: run it in the foreground, wrap it with a supervisor, or use stdio mode from another process.
-- Local IPC: newline-delimited JSON over Unix socket or stdio.
-- Multi-channel: Telegram, Feishu/Lark, QQ Bot, and WeChat ilink adapters.
-- Lightweight history: local SQLite state and message history.
-- Event stream: local clients can subscribe to inbound/outbound and adapter events.
-
-Onlyne is not an agent runtime, model runner, scheduler, web dashboard, or prompt/memory system.
-
-## Install
-
-The `onlyne` binary is published on [crates.io](https://crates.io/crates/onlyne):
-
-```bash
-cargo install onlyne
+```mermaid
+graph LR
+  P[Pi host + onlyne-agent-pi] -->|adapter protocol| C[onlyne-client role workspace]
+  D[dsh host + onlyne-agent-dsh] -->|adapter protocol| C
+  C -->|TLS frame| S[onlyne-server]
+  S -->|adapter protocol| G[onlyne-gateway telegram feishu qqbot wechat]
+  G --> H[human IM]
+  C2[onlyne-client supervisor role] -->|aggregate role link| SP[parent onlyne-server]
+  S --- SADM[admin.sock local]
 ```
 
-Or build from source:
+## Binaries
+
+- `onlyne-server`: server-root daemon for spec loading, routing, ledger state, faults, admin socket, gateway hosting, and workspace generation.
+- `onlyne-client`: workspace daemon for one role, session lifecycle, process backend, local intents, and agent adapter socket.
+- `onlyne-gateway`: platform process for one IM gateway, selected with `telegram`, `feishu`, `qqbot`, or `weixin`.
+- `onlyne`: thin human entrypoint for daemon execs, socket commands, message verbs, status, watch, repair, generate, and completions.
+- `onlyne-agent-fake`: testkit artifact used by e2e verification.
+- v1.0.0 refuses legacy workspace layouts, unsupported schemas, and old wire formats with hard errors. No migration tool ships.
+
+## Quickstart
 
 ```bash
-cargo build --release
+set -euo pipefail
+cargo build --workspace
+SRC=$(pwd); tmp=$(mktemp -d)
+"$SRC/target/debug/onlyne-server" init --root "$tmp/server" \
+  --listen 127.0.0.1:7899
+"$SRC/target/debug/onlyne-server" run --root "$tmp/server" &
+"$SRC/target/debug/onlyne" --server-root "$tmp/server" wait-ready
+"$SRC/target/debug/onlyne-client" init --workspace "$tmp/planner" --role planner \
+  --server-root "$tmp/server" > "$tmp/planner.spec.toml"
+cat "$tmp/planner.spec.toml" >> "$tmp/server/.onlyne/spec.toml"
+"$SRC/target/debug/onlyne" --server-root "$tmp/server" reload
+"$SRC/target/debug/onlyne-client" run --workspace "$tmp/planner" &
+"$SRC/target/debug/onlyne-agent-fake" --workspace "$tmp/planner" --script \
+  "$SRC/crates/onlyne-testkit/scripts/echo-complete.json" &
+"$SRC/target/debug/onlyne" --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-Use the built binary at `target/release/onlyne`, or run from source with `cargo run --`.
+Expected result: `send` prints one JSON response with `ok = true`, a UUID task, and `data.state = "in_flight"`; the ledger for that task reaches `acked`, and the session projection reaches `public_lifecycle = "exited"` with `outcome = "done"`.
 
-## Runtime requirements
+## Directory layout
 
-- macOS or Linux with Unix domain socket support
-- Rust 1.85 or newer for source builds
-- Network access for enabled adapters
-- Workspace credentials stored in `.onlyne/.env` or adapter-specific files
-- A supervisor such as launchd or systemd when running the daemon detached
-
-Onlyne bundles SQLite and Rust TLS support, so a separate database service and system TLS installation are unnecessary.
-
-## Release and source builds
-
-The published crate includes the daemon binary and its adapter implementations:
-
-```bash
-cargo install onlyne --locked
-onlyne --version
-```
-
-The repository build uses the same package metadata as crates.io:
-
-```bash
-cargo build --release
-cargo test
-cargo publish --dry-run
-```
-
-The `onlyne-swarm` scheduler is released as a separate crate from its [独立仓库](https://github.com/dbydd/onlyne-swarm). The Pi integration is released as the [`pi-onlyne`](https://www.npmjs.com/package/pi-onlyne) npm package.
-
-
-## Quick start
-
-```bash
-onlyne init
-# Optional: export/update an agent skill into this workspace
-onlyne export-skill
-onlyne run
-```
-
-In another terminal under the same workspace tree:
-
-```bash
-onlyne client '{"id":"1","op":"ping"}'
-onlyne client '{"id":"2","op":"status"}'
-onlyne client '{"id":"wake","op":"loopback","text":"background job needs attention","raw_text":true}'
-```
-
-`loopback` writes a local inbound message on channel `loopback`, so subscribed agents can wake themselves from background scripts without an external IM adapter.
-
-Stdio mode uses the same request schema:
-
-```bash
-echo '{"id":"1","op":"ping"}' | onlyne stdio
-```
-
-## Workspace layout
-
-By default, commands start at the current directory and walk upward until they find the nearest `.onlyne/`. If no `.onlyne/` exists, the current directory is used, so `onlyne init` initializes the directory where it is run. Use `--workspace <dir>` to explicitly choose a workspace root.
-
-`onlyne init` creates runtime files under the selected workspace root:
+Server root selected by `onlyne-server run --root <dir>`:
 
 ```text
-.onlyne/
-  config.toml
-  .env
-  state.db
-  run/s
-  logs/daemon.log
-  cache/media/
-  adapters/
+<server-root>/.onlyne/
+  spec.toml                 # single central source of truth
+  state.db                  # server ledger in SQLite WAL mode
+  run/s                     # admin unix socket, 0600
+  run/server.pid
+  logs/server.log
+  keys/server.key           # ed25519 and TLS private key, PEM, 0600
+  templates/<topology>/<role>/
+  ws/<topology>/<role>/     # default generate output, relocatable as a directory
+  cache/                    # gateway render scratch space
 ```
 
-Workspace data intentionally does not default to global mutable state.
+Role workspace selected by `onlyne-client run --workspace <dir>`:
 
-`onlyne export-skill` writes or updates a local agent skill at `.agents/skills/onlyne/SKILL.md` under the selected workspace root. This is intentionally workspace-local and does not touch `~/.agents/skills`.
-
-## Channels
-
-Each enabled channel is singleton-routed: configure one `bind_conversation_id`, or leave it empty and send `/handshake` from the desired conversation after the adapter connects. Agents send with only `channel_id` (`telegram`, `feishu`, `qqbot`, or `wechat`). Non-handshake messages to an unbound channel get prompted to send `/handshake`.
-
-| Channel | Setup |
-| --- | --- |
-| Telegram | Put `TELEGRAM_BOT_TOKEN` in `.onlyne/.env`, enable `[adapters.telegram]`, then set `bind_conversation_id` or send `/handshake`. |
-| Feishu/Lark | Run `onlyne auth feishu`, enable `[adapters.feishu]`, then set `bind_conversation_id` or send `/handshake`. |
-| QQ Bot | Run `onlyne auth qqbot` to create/bind through qclaw QR, or pass `--app-id <id> --app-secret <secret>` manually; add `--sandbox` only for manual sandbox credentials; set `bind_conversation_id` or send `/handshake`. |
-| WeChat ilink | Run `onlyne auth wechat`, enable `[adapters.wechat]`, then set `bind_conversation_id` or send `/handshake`. |
-
-Auth commands write only to the selected workspace `.onlyne/` directory.
-
-Adapter SDKs: Feishu uses `openlark`, Telegram uses `teloxide`, and WeChat ilink uses `wechat-ilink`. QQ Bot uses qclaw QR binding plus a small direct official API/gateway adapter.
-
-## Common commands
-
-```bash
-onlyne [--workspace <dir>] init
-onlyne [--workspace <dir>] export-skill
-onlyne [--workspace <dir>] run [--debug]
-onlyne [--workspace <dir>] stop
-onlyne [--workspace <dir>] restart [--debug]
-onlyne stdio
-onlyne client '<json-request>'
-onlyne config-check
-onlyne auth feishu [--app-id <id> --app-secret <secret>]
-onlyne auth qqbot [--app-id <id> --app-secret <secret> [--sandbox]]
-onlyne auth wechat [--token <token>]
-onlyne shell-completions zsh
-onlyne shell-completions fish
+```text
+<workspace>/.onlyne/
+  config.toml               # role identity, server endpoint, local plugins
+  client.db                 # sessions, intents, inbox cursors, local caches
+  run/s                     # client unix socket for adapter plugins and CLI
+  run/client.pid
+  logs/client.log
+  keys/role.key             # private key for the role registered in spec.toml
+  agent/<pkg>/              # vendored coding-agent plugin package from generate
 ```
 
-`onlyne stop` asks the workspace-local daemon to exit. `onlyne restart` stops the current workspace daemon if present, then starts `run` in the foreground.
+A legacy workspace layout exits 2 with `onlyne: legacy workspace layout; v1.0.0 does not migrate`. An unsupported schema exits through the hard schema gate with `onlyne: unsupported schema; v1.0.0 does not migrate`.
 
-`onlyne run --debug` replies to inbound messages with redacted channel/conversation/thread metadata. Use it only while finding conversation IDs or platform thread fields.
+## Configuration
 
-## Examples
+`<server-root>/.onlyne/spec.toml` is the single source of truth for role names, public keys, ACLs, prose, session concurrency, timeouts, routes, gateways, and `session_command`.
 
-- `examples/telegram/`
-- `examples/feishu/`
-- `examples/qqbot/`
-- `examples/wechat/`
-- `examples/broadcast/`
-- `examples/multicast/`
-- `examples/multi-channel/`
-- `examples/swarm/` — short-path live fixture for Onlyne + pi-onlyne + onlyne-swarm
+`onlyne-server run` fully parses `spec.toml` at startup. Unknown keys and type errors refuse startup with `spec.toml:<line>: <message>`. `onlyne server reload` and `SIGHUP` parse into a temporary config, validate it, then atomically replace the live config. Failed reloads keep the active config and record `fault{kind:"spec_reload_failed"}`.
 
+Role registration flows through a TOML fragment. `onlyne-client init --workspace W --role R --server-root S` creates `W/.onlyne/keys/role.key`, writes `W/.onlyne/config.toml`, and prints a fragment whose first line is `[[client]]` with `role` and `key = "ed25519/<base64>"`. The operator appends that fragment to `spec.toml` and runs `onlyne reload`.
 
-The examples are pure CLI workflows. Run `onlyne init` in `examples/` to share one ignored `examples/.onlyne/` workspace across child examples, or pass `--workspace <dir>` / `ONLYNE_WORKSPACE` for isolation.
+Socket resolution is fixed: `--socket <path>` wins, `--server-root <dir>` maps to `<dir>/.onlyne/run/s`, and `--workspace <dir>` or upward discovery maps to `<workspace>/.onlyne/run/s`. A missing socket exits 3 with `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`.
 
-## IPC
+## What changed in 1.0.0
 
-Onlyne accepts newline-delimited JSON requests. See [docs/IPC.md](docs/IPC.md) for operation details.
+- Removed FIFO channel I/O → length-prefixed JSON frames over sockets and the shared adapter protocol.
+- Removed `loopback` → self-addressed `note` delivery through `onlyne send --to <own-role> --note`.
+- Removed `---swarm` body headers → `Envelope`, `MsgKind`, `Causality`, and `ControlOp` fields.
+- Removed adapter start/stop ops → supervisor-managed `onlyne-gateway` processes.
+- Removed the four-platform factory inside the daemon → feature-gated gateway plugin crates loaded by `onlyne-gateway`.
+- Removed offline delivery mesh → server-ledger queuing for control-plane messages and `recipient_offline` for offline `note`.
+- Removed automatic retry and recovery tasks → durable client intents plus explicit supervisor/admin repair verbs.
+- Removed the web/admin surface → local admin unix socket with `status`, `ledger`, `watch`, `repair_*`, `reload`, and `spec_diff`.
+- Removed `harness/` submodules → adapter SDK, protocol schemas, conformance fixtures, and external plugin packages.
 
-Minimal request:
+## Pointers
 
-```json
-{"id":"1","op":"ping"}
-```
-
-Minimal response:
-
-```json
-{"id":"1","ok":true,"data":{"pong":true}}
-```
-
-## Agent harness integrations
-
-Onlyne speaks newline-delimited JSON over a Unix socket, so any local agent can bridge to IM channels. First-party harness plugins live as submodules under `harness/`:
-
-- [`harness/pi-onlyne`](harness/pi-onlyne) — Pi extension (tools + inbox watch).
-- [`harness/dsh-onlyne`](harness/dsh-onlyne) — DeepSeek Harness plugin (tools + inbox watch).
-
-Both share the per-project `.pi/onlyne.json` config, so one workspace can be bridged by either harness without reconfiguration.
-
-## Project status
-
-See [docs/STATUS.md](docs/STATUS.md) for current implementation notes and verification evidence.
+- `docs/v1-PLAN.md`: authoritative v1.0.0 design and verification cases.
+- `docs/v1-CONTRACT.md`: work split, crate ownership, socket resolution, and exit codes.
+- `docs/v1-ARCHITECTURE.md`: engineer onboarding map for crates, sockets, ledger, lifecycle, generation, and federation.
+- `crates/onlyne-adapter/PROTOCOL.md`: adapter protocol for coding-agent plugins and IM gateways.
