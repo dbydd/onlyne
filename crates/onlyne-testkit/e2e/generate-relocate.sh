@@ -32,7 +32,7 @@ server_pid=$cluster_server_pid
 cp -R "$SRC/.onlyne.example/templates/." "$tmp/server/.onlyne/templates/"
 spec="$tmp/server/.onlyne/spec.toml"
 seed_key=$(mint_key "$tmp/builder-seed" "$tmp/server" "$tmp/builder-seed.frag.toml")
-seed_bytes=$(wc -c < "$spec")
+seed_bytes=$(wc -c < "$spec" | tr -d ' ')
 {
   echo '[[client]]'
   echo 'role = "builder"'
@@ -72,7 +72,11 @@ cat "$tmp/frag.toml" >> "$spec"
 # --- the move (plan line 513): another absolute path, no edit inside the tree ---
 mkdir -p "$tmp/elsewhere"
 mv "$ws" "$tmp/elsewhere/b1"
-[ -z "$(command grep -rl "$tmp/gen" "$tmp/elsewhere/b1" 2>/dev/null || true)" ] || fail "the moved workspace must carry no generation-time absolute path" "$(command grep -rl "$tmp/gen" "$tmp/elsewhere/b1" 2>/dev/null || true)"
+# Plan line 391 bans two prefixes from the output: the `--out` tree and the
+# server root, so the case scans for both after the move.
+for prefix in "$tmp/gen" "$tmp/server"; do
+  [ -z "$(command grep -rl "$prefix" "$tmp/elsewhere/b1" 2>/dev/null || true)" ] || fail "the moved workspace must carry no generation-time absolute path" "prefix=$prefix $(command grep -rl "$prefix" "$tmp/elsewhere/b1" 2>/dev/null || true)"
+done
 
 # The generated key reaches the server, because the fragment the command printed
 # is what the spec now holds.

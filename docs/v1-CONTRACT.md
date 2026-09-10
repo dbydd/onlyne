@@ -4,7 +4,7 @@ Read this before touching code. The director owns commits, the root `Cargo.toml`
 
 ## Repo state
 
-Cargo workspace, `members = ["crates/*", "plugins/*"]`, 18 packages. `crates/onlyne-legacy/` holds the pre-v1 daemon; it is read-only reference material and gets deleted in S12. `vendor/harness/onlyne-swarm/src/` is a read-only snapshot of the deleted orchestrator submodule: the source of the session kernel being ported.
+Cargo workspace, `members = ["crates/*", "plugins/*"]`, 18 packages. `crates/onlyne-legacy/` and the `vendor/` snapshot of the deleted orchestrator submodule are gone: S12 closed the port and the removal landed with it.
 `docs/v1-PLAN.md` is the full design spec (527 lines, Chinese). Read the section your task names before writing code; it wins over a worker brief wherever they disagree, with file ownership as the exception.
 
 ## Ownership
@@ -44,7 +44,7 @@ Cargo workspace, `members = ["crates/*", "plugins/*"]`, 18 packages. `crates/onl
 - The reason is the dependency direction in this section: `Spec` is a TOML document with `deny_unknown_fields`, line-number diagnostics, `spec_hash` canonicalisation, and a reload diff, and none of that belongs on the wire. The semantics as data live in `crates/onlyne-config/tests/acl_table.rs`.
 - `onlyne-session` does not depend on `onlyne-proto`, `onlyne-store`, or `onlyne-net`. Persistence crosses the `SessionLedger` trait defined in `crates/onlyne-session/src/reconcile.rs`.
 - `onlyne-store` implements `onlyne-session::SessionLedger` for the client database, and exposes the server ledger API described in §10 of the plan.
-- JSON Schemas live beside their types: `crates/onlyne-proto/schema/{envelope,adapter}.schema.json`, `crates/onlyne-config/schema/{spec,config-client}.schema.json`. Two `gen-schema` binaries, one per crate.
+- JSON Schemas live beside their types: `crates/onlyne-proto/schema/{envelope,adapter}.schema.json`, `crates/onlyne-config/schema/{spec,config-client}.schema.json`. Each crate carries one schema tool, `gen-schema` in `onlyne-proto` and `config-schema` in `onlyne-config`, so the two binaries have their own names on disk.
 
 ## CLI vocabulary (`onlyne-cli`, output is JSON by default)
 
