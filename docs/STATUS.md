@@ -11,7 +11,7 @@ v1.0.0 is the active state. `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONT
 
 ## Crate state
 
-Counts come from `cargo test --workspace` on 2026-09-11 (461 passed, 0 failed), one line per crate with its libraries and integration targets summed.
+Counts come from `cargo test --workspace` on 2026-09-11 (462 passed, 0 failed), one line per crate with its libraries and integration targets summed.
 
 - [x] `onlyne-proto` green with envelope, frame variants, ops, errors, and events: 57 unit + 5 wire vectors + 1 sizes.
 - [x] `onlyne-frame` green with length-prefixed codec: 9.
@@ -24,7 +24,7 @@ Counts come from `cargo test --workspace` on 2026-09-11 (461 passed, 0 failed), 
 - [x] `onlyne-server` green with router, relay, projection, faults, admin, and generate: 47 delivery + 26 generate.
 - [x] `onlyne-client` green with runloop, intents, adapter socket, and dispatch: 15 unit + 20 scenarios.
 - [x] `onlyne-gateway` green with shared kit: 47.
-- [x] `onlyne-cli` green with entrypoint and socket resolution: 20.
+- [x] `onlyne-cli` green with entrypoint and socket resolution: 21.
 - [x] `onlyne-testkit` green with fake agent, fake gateway, and conformance: 2 binaries + 11 conformance.
 - [x] Four gateway plugins green behind `telegram`, `feishu`, `qqbot`, and `weixin` features: 11, 10, 10, 13.
 

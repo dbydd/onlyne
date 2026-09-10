@@ -69,7 +69,7 @@ A missing daemon binary makes the CLI and the e2e script print exactly this to s
 `onlyne: missing binary <path>; run cargo build --workspace`
 `onlyne cluster export-prose` prints raw prose by default and takes `--json`. It issues the existing role query and adds no protocol op.
 
-Socket resolution, in this order: `--socket <path>` → `--server-root <dir>` as `<dir>/.onlyne/run/s` → `--workspace <dir>` or the current directory upward for `.onlyne/run/s`. None found writes exactly this to stderr and exits 3:
+Socket resolution, in this order: `--socket <path>` → `--server-root <dir>` as `<dir>/.onlyne/run/s` → `--workspace <dir>` or the current directory upward for `.onlyne/run/s`. A path that never resolves and a path that resolves to nothing on disk answer alike, and both write exactly this to stderr and exit 3, with stdout left empty so a script reads no answer body:
 
 ```
 onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace
