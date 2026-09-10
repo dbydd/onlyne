@@ -144,7 +144,7 @@ Inside each workspace:
 
 - `.onlyne/config.toml`
 - `.onlyne/state.db`
-- `.onlyne/run/onlyne.sock`
+- `.onlyne/run/s`
 - `.onlyne/run/onlyne.pid`
 - `.onlyne/logs/daemon.log`
 - `.onlyne/history/`

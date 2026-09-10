@@ -24,7 +24,7 @@ cargo run --example rich_media
 
 | Variable | Meaning |
 | --- | --- |
-| `ONLYNE_SOCKET` | Explicit Unix socket path. If unset, examples use `examples/.onlyne/run/onlyne.sock`, then nearest parent `.onlyne`. |
+| `ONLYNE_SOCKET` | Explicit Unix socket path. If unset, examples use `examples/.onlyne/run/s`, then nearest parent `.onlyne`. |
 | `ONLYNE_TEXT` | Outbound text. Defaults to `zig`, except `rich_media` defaults to markdown content. |
 | `ONLYNE_FORMAT` | `plain` or `markdown`. Defaults to `plain`, except `rich_media` defaults to `markdown`. |
 | `ONLYNE_ATTACHMENTS` | JSON array of attachment refs. Defaults to `[]`. |

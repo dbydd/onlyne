@@ -1,6 +1,7 @@
 target*
 .omx
 .pi/
+.pi*/
 .onlyne/
 __pycache__/
 *.pyc

@@ -3,11 +3,11 @@ import json, os, pathlib, socket
 
 start = pathlib.Path.cwd()
 for d in (start, *start.parents):
-    sock = d / '.onlyne/run/onlyne.sock'
+    sock = d / '.onlyne/run/s'
     if sock.exists():
         break
 else:
-    sock = start / '.onlyne/run/onlyne.sock'
+    sock = start / '.onlyne/run/s'
 text = os.environ.get('ONLYNE_TEXT', 'zig')
 fmt = os.environ.get('ONLYNE_FORMAT', 'plain')
 attachments_raw = os.environ.get('ONLYNE_ATTACHMENTS', '[]')

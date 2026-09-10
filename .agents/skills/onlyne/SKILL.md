@@ -72,13 +72,13 @@ cargo run --features schema --bin gen-schema > onlyne-config.schema.json
 
 ## Subscribe to Events
 
-`onlyne client` prints one response and exits, so long-lived subscriptions should keep the Unix socket open. The socket path is always workspace-local: `.onlyne/run/onlyne.sock`.
+`onlyne client` prints one response and exits, so long-lived subscriptions should keep the Unix socket open. The socket path is always workspace-local: `.onlyne/run/s`.
 
 ```bash
 python3 - <<'PY'
 import json, socket
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-sock.connect('.onlyne/run/onlyne.sock')
+sock.connect('.onlyne/run/s')
 sock.sendall(b'{"id":"sub","op":"subscribe_events"}\n')
 while True:
     print(sock.recv(65536).decode(), end='')

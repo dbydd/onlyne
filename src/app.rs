@@ -10,7 +10,14 @@ use crate::{
 };
 use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
-use std::{collections::HashMap, os::unix::fs::FileTypeExt, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    os::unix::fs::FileTypeExt,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 use tokio::{
     fs::OpenOptions,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -26,6 +33,21 @@ pub struct App {
     adapters: Mutex<HashMap<String, Box<dyn Adapter>>>,
     bindings: Mutex<HashMap<String, String>>,
     debug_reply: bool,
+    /// Priority event pump for tiered `subscribe_events` delivery.
+    /// Each subscriber registers (priority, sender); each event is relayed
+    /// highest-tier-first with a per-tier `consume` verdict window.
+    pub(crate) subscribers: Mutex<Vec<PrioritySubscriber>>,
+    pub(crate) event_seq: AtomicU64,
+    pub(crate) consumed_seqs: Mutex<HashSet<u64>>,
+    /// Ensures exactly one central relay task per daemon process.
+    relay_started: tokio::sync::OnceCell<()>,
+}
+
+/// One event-subscription connection on the priority bus.
+#[derive(Clone)]
+pub(crate) struct PrioritySubscriber {
+    pub(crate) priority: u32,
+    pub(crate) tx: tokio::sync::mpsc::Sender<String>,
 }
 impl App {
     pub async fn load(workspace: Workspace) -> anyhow::Result<Arc<Self>> {
@@ -57,6 +79,10 @@ impl App {
             adapters: Mutex::new(map),
             bindings: Mutex::new(bindings),
             debug_reply,
+            subscribers: Mutex::new(vec![]),
+            event_seq: AtomicU64::new(1),
+            consumed_seqs: Mutex::new(HashSet::new()),
+            relay_started: tokio::sync::OnceCell::new(),
         }))
     }
     pub async fn start_all(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -111,6 +137,9 @@ impl App {
         Ok(())
     }
     pub async fn start_channel_io(self: &Arc<Self>) -> anyhow::Result<()> {
+        if self.config.swarm.enabled {
+            return Ok(());
+        }
         for channel in self.io_channels().await {
             ensure_channel_fifos(&self.workspace, &channel)?;
             let app = self.clone();
@@ -147,22 +176,46 @@ impl App {
             }
             "send_message" | "reply_message" => self.send(req).await,
             "loopback" => self.loopback(req).await,
+            "swarm_ready" => self.swarm_ready(req).await,
+            "swarm_recycled" => self.swarm_recycled(req).await,
+            "swarm_busy" => self.swarm_activity(req, "swarm_busy").await,
+            "swarm_idle" => self.swarm_activity(req, "swarm_idle").await,
             "mark_io_consumed" => self.mark_io_consumed(req).await,
-            "fetch_history" | "fetch_all_history" => Ok(json!(
-                self.store
-                    .fetch_history(None, None, req.limit.unwrap_or(100))
-                    .await?
-            )),
+            "fetch_history" | "fetch_all_history" => {
+                let page = self
+                    .store
+                    .fetch_history_page(
+                        None,
+                        None,
+                        req.limit.unwrap_or(100),
+                        req.offset.unwrap_or(0),
+                    )
+                    .await?;
+                if req.offset.is_some() {
+                    Ok(json!(page))
+                } else {
+                    Ok(json!(page.messages))
+                }
+            }
             "fetch_channel_history" => {
                 let c = req
                     .channel_id
                     .map(ChannelId)
                     .context("channel_id required")?;
-                Ok(json!(
-                    self.store
-                        .fetch_history(Some(&c), None, req.limit.unwrap_or(100))
-                        .await?
-                ))
+                let page = self
+                    .store
+                    .fetch_history_page(
+                        Some(&c),
+                        None,
+                        req.limit.unwrap_or(100),
+                        req.offset.unwrap_or(0),
+                    )
+                    .await?;
+                if req.offset.is_some() {
+                    Ok(json!(page))
+                } else {
+                    Ok(json!(page.messages))
+                }
             }
             "start_adapter" => {
                 let id = req.channel_id.context("channel_id required")?;
@@ -178,6 +231,115 @@ impl App {
             _ => Err(anyhow!("unknown op {}", req.op)),
         }
     }
+    /// Swarm handshake: a pi-onlyne session in swarm mode reports itself
+    /// ready for task delivery. The payload (`req.text` JSON) carries
+    /// `{workspace, terminal_handle}`. Published as an event so the swarm
+    /// scheduler (top-priority subscriber) can match a pending task and
+    /// write loopback/in. Also recorded in history for TUI visibility.
+    async fn swarm_ready(&self, req: Request) -> anyhow::Result<Value> {
+        let body: Value = req
+            .text
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(Value::Null);
+        let msg = MessageEnvelope {
+            channel_id: ChannelId("loopback".into()),
+            conversation_id: ConversationId("swarm-ready".into()),
+            message_id: now_id("swarm-ready"),
+            direction: Direction::Inbound,
+            sender_id: Some("swarm".into()),
+            sender_name: Some("Swarm Ready".into()),
+            text: Some(format!("swarm_ready {}", body)),
+            format: MessageFormat::Plain,
+            attachments: vec![],
+            delivery_state: DeliveryState::Delivered,
+            timestamp: chrono::Utc::now(),
+            platform_metadata: serde_json::json!({"source":"swarm_ready","body":body}),
+        };
+        self.store
+            .upsert_channel(&msg.channel_id, AdapterHealth::Ready)
+            .await?;
+        self.store.append_message(&msg).await?;
+        // NOTE: no HistoryAppended publish here. The tiered pump assigns one
+        // event_seq per relayed event; a double publish (history + state)
+        // would emit two consume windows for one handshake and let the
+        // scheduler's consume of the first starve the second at lower tiers.
+        self.events.publish(Event::WorkspaceStateChanged {
+            message: format!("swarm_ready {}", body),
+        });
+        Ok(json!({"ready":true,"body":body}))
+    }
+
+    /// Swarm hop activity (R4): `swarm_busy` (turn started) and `swarm_idle`
+    /// (turn ended, no out). Same single-publish shape as swarm_ready — one
+    /// event, one consume window, no HistoryAppended. `kind` is the message
+    /// prefix so the scheduler routes on it.
+    async fn swarm_activity(&self, req: Request, kind: &str) -> anyhow::Result<Value> {
+        let body: Value = req
+            .text
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(Value::Null);
+        let msg = MessageEnvelope {
+            channel_id: ChannelId("loopback".into()),
+            conversation_id: ConversationId("swarm-ready".into()),
+            message_id: now_id("swarm-ready"),
+            direction: Direction::Inbound,
+            sender_id: Some("swarm".into()),
+            sender_name: Some("Swarm Activity".into()),
+            text: Some(format!("{kind} {body}")),
+            format: MessageFormat::Plain,
+            attachments: vec![],
+            delivery_state: DeliveryState::Delivered,
+            timestamp: chrono::Utc::now(),
+            platform_metadata: serde_json::json!({"source": kind, "body": body}),
+        };
+        self.store
+            .upsert_channel(&msg.channel_id, AdapterHealth::Ready)
+            .await?;
+        self.store.append_message(&msg).await?;
+        self.events.publish(Event::WorkspaceStateChanged {
+            message: format!("{kind} {body}"),
+        });
+        Ok(json!({"activity": kind, "body": body}))
+    }
+
+    /// Swarm recycle ack: a pi-onlyne session reports it accepted a recycle
+    /// signal (or quit on its own) and is exiting. Payload (`req.text` JSON)
+    /// carries `{task_id, terminal_handle, reason}`. Published as an event so
+    /// the swarm scheduler can close the books and the tab. Also recorded in
+    /// history for TUI visibility. Same single-publish shape as swarm_ready
+    /// (no HistoryAppended: one event, one consume window).
+    async fn swarm_recycled(&self, req: Request) -> anyhow::Result<Value> {
+        let body: Value = req
+            .text
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(Value::Null);
+        let msg = MessageEnvelope {
+            channel_id: ChannelId("loopback".into()),
+            conversation_id: ConversationId("swarm-ready".into()),
+            message_id: now_id("swarm-ready"),
+            direction: Direction::Inbound,
+            sender_id: Some("swarm".into()),
+            sender_name: Some("Swarm Recycled".into()),
+            text: Some(format!("swarm_recycled {}", body)),
+            format: MessageFormat::Plain,
+            attachments: vec![],
+            delivery_state: DeliveryState::Delivered,
+            timestamp: chrono::Utc::now(),
+            platform_metadata: serde_json::json!({"source":"swarm_recycled","body":body}),
+        };
+        self.store
+            .upsert_channel(&msg.channel_id, AdapterHealth::Ready)
+            .await?;
+        self.store.append_message(&msg).await?;
+        self.events.publish(Event::WorkspaceStateChanged {
+            message: format!("swarm_recycled {}", body),
+        });
+        Ok(json!({"recycled":true,"body":body}))
+    }
+
     async fn mark_io_consumed(&self, req: Request) -> anyhow::Result<Value> {
         let id = MessageId(req.message_id.context("message_id required")?);
         let msg = self
@@ -191,6 +353,14 @@ impl App {
 
     async fn loopback(&self, req: Request) -> anyhow::Result<Value> {
         let format = request_format(&req);
+        let fingerprint = serde_json::to_string(
+            &json!({"text":req.text.clone(),"format":format,"attachments":req.attachments,"raw_text":req.raw_text}),
+        )?;
+        let op_id = req
+            .op_id
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .map(str::to_owned);
         let msg = MessageEnvelope {
             channel_id: ChannelId("loopback".into()),
             conversation_id: ConversationId("self".into()),
@@ -208,10 +378,21 @@ impl App {
         self.store
             .upsert_channel(&msg.channel_id, AdapterHealth::Ready)
             .await?;
-        self.store.append_message(&msg).await?;
+        let receipt = json!(msg);
+        let existing = if let Some(op_id) = op_id.as_deref() {
+            self.store
+                .append_idempotent_message(&msg, op_id, &fingerprint, &receipt)
+                .await?
+        } else {
+            self.store.append_message(&msg).await?;
+            None
+        };
+        if let Some(existing) = existing {
+            return Ok(existing);
+        }
         self.publish_history_appended(&msg);
         self.events.publish(Event::InboundMessage(msg.clone()));
-        Ok(json!(msg))
+        Ok(receipt)
     }
 
     async fn channel_in_loop(self: Arc<Self>, channel: String) {
@@ -221,29 +402,43 @@ impl App {
                 Ok(mut file) => {
                     let mut text = String::new();
                     if file.read_to_string(&mut text).await.is_ok() && !text.trim().is_empty() {
-                        let text = decode_fifo_escapes(&text);
-                        if channel == "loopback" {
-                            let _ = self.inject_loopback(text).await;
-                        } else {
-                            let raw_text =
-                                self.io_config(&channel).in_format == IoInFormat::RawText;
-                            let req = Request {
-                                id: None,
-                                op: "send_message".into(),
-                                channel_id: Some(channel.clone()),
-                                conversation_id: None,
-                                message_id: None,
-                                text: Some(text),
-                                format: None,
-                                raw_text,
-                                attachments: vec![],
-                                limit: None,
-                            };
-                            if let Err(e) = self.send(req).await {
-                                self.events.publish(Event::Warning {
-                                    channel_id: Some(ChannelId(channel.clone())),
-                                    message: format!("channel in send failed: {e}"),
-                                });
+                        // Split coalesced writes: concurrent O_WRONLY opens can
+                        // land in one read (EOF arrives only after ALL writers
+                        // close). Each `---swarm` header starts a new message;
+                        // non-swarm text keeps the old single-message behavior.
+                        for chunk in split_swarm_messages(&text) {
+                            let chunk = decode_fifo_escapes(&chunk);
+                            if chunk.trim().is_empty() {
+                                continue;
+                            }
+                            if channel == "loopback" {
+                                let _ = self.inject_loopback(chunk).await;
+                            } else {
+                                let raw_text =
+                                    self.io_config(&channel).in_format == IoInFormat::RawText;
+                                let req = Request {
+                                    id: None,
+                                    op: "send_message".into(),
+                                    channel_id: Some(channel.clone()),
+                                    conversation_id: None,
+                                    message_id: None,
+                                    text: Some(chunk),
+                                    format: None,
+                                    raw_text,
+                                    attachments: vec![],
+                                    limit: None,
+                                    priority: 0,
+                                    consume_timeout_ms: None,
+                                    event_seq: None,
+                                    op_id: None,
+                                    offset: None,
+                                };
+                                if let Err(e) = self.send(req).await {
+                                    self.events.publish(Event::Warning {
+                                        channel_id: Some(ChannelId(channel.clone())),
+                                        message: format!("channel in send failed: {e}"),
+                                    });
+                                }
                             }
                         }
                     }
@@ -365,6 +560,11 @@ impl App {
             raw_text,
             attachments: vec![],
             limit: None,
+            priority: 0,
+            consume_timeout_ms: None,
+            event_seq: None,
+            op_id: None,
+            offset: None,
         })
         .await
     }
@@ -483,6 +683,34 @@ impl App {
     async fn send(&self, req: Request) -> anyhow::Result<Value> {
         let format = request_format(&req);
         let channel = req.channel_id.context("channel_id required")?;
+        // Loopback has no platform adapter: a send to loopback is a local
+        // echo recorded as an outbound message (swarm task replies, local
+        // handoffs). It lands in history and fans out as OutboundMessage so
+        // tiered subscribers (scheduler) observe task completions.
+        if channel == "loopback" {
+            let conversation = req.conversation_id.unwrap_or_else(|| "self".into());
+            let msg = MessageEnvelope {
+                channel_id: ChannelId("loopback".into()),
+                conversation_id: ConversationId(conversation),
+                message_id: now_id("loopback"),
+                direction: Direction::Outbound,
+                sender_id: Some("local".into()),
+                sender_name: Some("Onlyne Loopback".into()),
+                text: req.text,
+                format,
+                attachments: req.attachments,
+                delivery_state: DeliveryState::Delivered,
+                timestamp: chrono::Utc::now(),
+                platform_metadata: json!({"source":"loopback","local_echo":true}),
+            };
+            self.store
+                .upsert_channel(&msg.channel_id, AdapterHealth::Ready)
+                .await?;
+            self.store.append_message(&msg).await?;
+            self.publish_history_appended(&msg);
+            self.events.publish(Event::OutboundMessage(msg.clone()));
+            return Ok(json!(msg));
+        }
         let reply_to_message_id = if req.op == "reply_message" {
             Some(MessageId(req.message_id.context("message_id required")?))
         } else {
@@ -680,6 +908,26 @@ fn ensure_channel_fifos(workspace: &Workspace, channel: &str) -> anyhow::Result<
     Ok(())
 }
 
+/// Split one FIFO read into individual messages. Concurrent writers can
+/// coalesce into a single read; each `---swarm` header line starts a new
+/// message. Text before the first header (or text with no header at all) is
+/// returned as a single leading chunk, preserving legacy behavior.
+fn split_swarm_messages(input: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut cur = String::new();
+    for line in input.split_inclusive('\n') {
+        let trimmed = line.trim_end();
+        if (trimmed == "---swarm" || trimmed == "---swarm-ctl") && !cur.trim().is_empty() {
+            chunks.push(std::mem::take(&mut cur));
+        }
+        cur.push_str(line);
+    }
+    if !cur.trim().is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+
 fn decode_fifo_escapes(input: &str) -> String {
     if !input.contains('\\') {
         return input.to_string();
@@ -873,6 +1121,117 @@ fn secretish(key: &str) -> bool {
     key.contains("token") || key.contains("secret") || key.contains("password")
 }
 
+impl App {
+    /// Register a tiered event subscriber. Returns the event line receiver.
+    pub async fn register_subscriber(&self, priority: u32) -> tokio::sync::mpsc::Receiver<String> {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let mut subs = self.subscribers.lock().await;
+        subs.push(PrioritySubscriber { priority, tx });
+        subs.sort_by(|a, b| b.priority.cmp(&a.priority));
+        rx
+    }
+
+    /// Record a `consume` verdict for an event_seq.
+    pub async fn mark_consumed(&self, seq: u64) {
+        self.consumed_seqs.lock().await.insert(seq);
+    }
+
+    /// Tiered subscription pump for one connection: relays each broadcast
+    /// event highest-tier-first. Per tier, the event (tagged with a fresh
+    /// `event_seq`) is fanned out to that tier's members, then the pump
+    /// waits `consume_timeout_ms` for a `consume` verdict before continuing
+    /// to the next lower tier. A consumed event skips all lower tiers.
+    /// Connections that never subscribed with priority (legacy) sit at
+    /// tier 0 and keep the old broadcast behavior among themselves.
+    pub async fn pump_subscription<W: tokio::io::AsyncWrite + Unpin + Send + 'static>(
+        self: &Arc<Self>,
+        priority: u32,
+        consume_timeout_ms: u64,
+        writer: Arc<tokio::sync::Mutex<W>>,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        let inbox = self.register_subscriber(priority).await;
+        // Exactly one central relay per daemon: it owns tier fan-out, so each
+        // broadcast event is relayed once no matter how many subscribers exist.
+        let relay_app = self.clone();
+        self.relay_started
+            .get_or_init(|| async move {
+                tokio::spawn(async move {
+                    relay_app.central_relay(consume_timeout_ms).await;
+                });
+            })
+            .await;
+        // Bridge inbox -> socket for this connection only.
+        let mut inbox = inbox;
+        while let Some(line) = inbox.recv().await {
+            let mut g = writer.lock().await;
+            if g.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+            if g.write_all(b"\n").await.is_err() {
+                break;
+            }
+            let _ = g.flush().await;
+        }
+    }
+
+    /// Central relay: the single task that fans each broadcast event out to
+    /// subscriber tiers highest-first, one shared event_seq per event, with a
+    /// per-tier `consume` verdict window. Consumed events skip lower tiers.
+    async fn central_relay(self: Arc<Self>, consume_timeout_ms: u64) {
+        let mut bus = self.events.subscribe();
+        while let Ok(ev) = bus.recv().await {
+            let line =
+                serde_json::json!({"event":true,"type":crate::ipc::event_type(&ev),"data":ev})
+                    .to_string();
+            let tiers: Vec<Vec<tokio::sync::mpsc::Sender<String>>> = {
+                let subs = self.subscribers.lock().await;
+                let mut tiers: Vec<(u32, Vec<tokio::sync::mpsc::Sender<String>>)> = vec![];
+                for s in subs.iter() {
+                    match tiers.last_mut() {
+                        Some((p, members)) if *p == s.priority => members.push(s.tx.clone()),
+                        _ => tiers.push((s.priority, vec![s.tx.clone()])),
+                    }
+                }
+                tiers.into_iter().map(|(_, m)| m).collect()
+            };
+            // One event object, one verdict window: a single shared event_seq
+            // so a `consume` verdict names the same seq in every tier.
+            //
+            // Liveness: the mpsc send below is only awaited with a timeout.
+            // A slow/disconnected tier member must never stall the whole
+            // relay (that drops exactly one tier's verdict window instead of
+            // every later event for all tiers).
+            let seq = self.event_seq.fetch_add(1, Ordering::Relaxed);
+            let tagged = tag_event_seq(&line, seq);
+            for members in tiers {
+                for tx in &members {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(50),
+                        tx.send(tagged.clone()),
+                    )
+                    .await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(consume_timeout_ms)).await;
+                if self.consumed_seqs.lock().await.remove(&seq) {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Attach a fresh `event_seq` to a pre-serialized event line object.
+fn tag_event_seq(line: &str, seq: u64) -> String {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(mut v) => {
+            v["event_seq"] = serde_json::json!(seq);
+            serde_json::to_string(&v).unwrap_or_else(|_| line.to_string())
+        }
+        Err(_) => line.to_string(),
+    }
+}
+
 fn adapter_event_sender(app: Arc<App>) -> mpsc::Sender<Event> {
     let (tx, mut rx) = mpsc::channel(1024);
     tokio::spawn(async move {
@@ -909,6 +1268,27 @@ mod tests {
     }
 
     #[test]
+    fn fifo_read_splits_coalesced_swarm_writes() {
+        let a = "---swarm\ntask_id: 1\n---\nbody a\n";
+        let b = "---swarm\ntask_id: 2\n---\nbody b\n";
+        let both = format!("{a}{b}");
+        let parts = split_swarm_messages(&both);
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].contains("task_id: 1"));
+        assert!(parts[1].contains("task_id: 2"));
+        // No header: single chunk (legacy behavior).
+        assert_eq!(split_swarm_messages("plain text\n"), vec!["plain text\n"]);
+        // Single message with header: single chunk.
+        assert_eq!(split_swarm_messages(a), vec![a]);
+        // Ctl wire splits off a preceding task wire (reclaim protocol).
+        let ctl = "---swarm-ctl\nop: recycle\ntask_id: 1\nreason: cancel\n---\n";
+        let mixed = format!("{a}{ctl}");
+        let parts = split_swarm_messages(&mixed);
+        assert_eq!(parts.len(), 2);
+        assert!(parts[1].starts_with("---swarm-ctl\n"));
+    }
+
+    #[test]
     fn fifo_input_decodes_common_escapes() {
         assert_eq!(
             decode_fifo_escapes("a\\nb\\t\\\\c\\\"d\\x"),
@@ -916,6 +1296,90 @@ mod tests {
         );
         assert_eq!(decode_fifo_escapes("plain"), "plain");
         assert_eq!(decode_fifo_escapes("trail\\"), "trail\\");
+    }
+
+    #[tokio::test]
+    async fn swarm_mode_does_not_create_any_channel_fifos() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        ws.bootstrap().unwrap();
+        std::fs::write(
+            ws.config_path(),
+            format!(
+                "{}\n[swarm]\nenabled = true\n",
+                crate::config::DEFAULT_CONFIG
+            ),
+        )
+        .unwrap();
+        let app = App::load(ws.clone()).await.unwrap();
+        app.start_channel_io().await.unwrap();
+        assert!(!ws.channel_dir("loopback").join("in").exists());
+        assert!(!ws.channel_dir("loopback").join("out").exists());
+    }
+
+    #[tokio::test]
+    async fn loopback_send_is_local_outbound_echo() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        let mut rx = app.events.subscribe();
+        let out: Value = app
+            .handle(
+                serde_json::from_str(
+                    r##"{"op":"send_message","channel_id":"loopback","text":"echo-body"}"##,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["direction"], "outbound");
+        assert_eq!(out["text"], "echo-body");
+        // Drain: history_appended then outbound_message.
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Event::HistoryAppended { .. }
+        ));
+        assert!(matches!(rx.try_recv().unwrap(), Event::OutboundMessage(_)));
+    }
+
+    #[tokio::test]
+    async fn loopback_op_id_is_durable_and_conflicts_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        let request = || {
+            serde_json::from_str::<Request>(
+                r#"{"op":"loopback","op_id":"op-1","text":"wake","raw_text":true}"#,
+            )
+            .unwrap()
+        };
+        let (first, second) = tokio::join!(app.handle(request()), app.handle(request()));
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first, second);
+        let history = app
+            .store
+            .fetch_history(Some(&ChannelId("loopback".into())), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        let conflict = app
+            .handle(
+                serde_json::from_str::<Request>(
+                    r#"{"op":"loopback","op_id":"op-1","text":"different","raw_text":true}"#,
+                )
+                .unwrap(),
+            )
+            .await;
+        assert!(conflict.unwrap_err().to_string().contains("op_id conflict"));
+        assert_eq!(
+            app.store
+                .fetch_history(Some(&ChannelId("loopback".into())), None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -944,6 +1408,108 @@ mod tests {
             Event::HistoryAppended { .. }
         ));
         assert!(matches!(rx.try_recv().unwrap(), Event::InboundMessage(_)));
+    }
+
+    #[tokio::test]
+    async fn swarm_recycled_records_ack_and_publishes_one_state_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        let mut rx = app.events.subscribe();
+
+        let body = r#"{"task_id":"task-1","terminal_handle":"term-1","reason":"quit:test"}"#;
+        let out = app
+            .handle(
+                serde_json::from_str(&format!(
+                    r#"{{"op":"swarm_recycled","text":{}}}"#,
+                    serde_json::to_string(body).unwrap()
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["recycled"], true);
+
+        let history = app
+            .store
+            .fetch_history(Some(&ChannelId("loopback".into())), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(history[0].conversation_id.0, "swarm-ready");
+        assert!(
+            history[0]
+                .text
+                .as_deref()
+                .unwrap_or_default()
+                .contains("swarm_recycled")
+        );
+        // Recycled mirrors ready: one state event, no history-appended
+        // double publish / priority consume window.
+        match rx.try_recv().unwrap() {
+            Event::WorkspaceStateChanged { message } => {
+                assert!(message.contains("swarm_recycled"));
+            }
+            other => panic!("expected recycle state event, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn swarm_busy_idle_publish_one_state_event_each() {
+        // R4: hop activity ops ride the same single-publish channel as
+        // swarm_ready/swarm_recycled: one state event per op, no
+        // HistoryAppended double window.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        let mut rx = app.events.subscribe();
+
+        for (op, kind) in [("swarm_busy", "busy"), ("swarm_idle", "idle")] {
+            let body = format!(
+                r#"{{"workspace":".","terminal_handle":"term-1","task_id":"task-{kind}"{}}}"#,
+                if kind == "idle" {
+                    ",\"pending_exit\":true"
+                } else {
+                    ""
+                }
+            );
+            let out = app
+                .handle(
+                    serde_json::from_str(&format!(
+                        r#"{{"op":"{op}","text":{}}}"#,
+                        serde_json::to_string(&body).unwrap()
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(out["activity"], op);
+            match rx.try_recv().unwrap() {
+                Event::WorkspaceStateChanged { message } => {
+                    assert!(message.starts_with(op), "{message}");
+                    assert!(message.contains(&format!("task-{kind}")), "{message}");
+                }
+                other => panic!("expected activity state event, got {other:?}"),
+            }
+            // Exactly one event per op.
+            assert!(rx.try_recv().is_err());
+        }
+
+        // History carries both lines for TUI visibility.
+        let history = app
+            .store
+            .fetch_history(Some(&ChannelId("loopback".into())), None, 10)
+            .await
+            .unwrap();
+        let texts: Vec<String> = history.iter().filter_map(|m| m.text.clone()).collect();
+        assert!(
+            texts.iter().any(|t| t.starts_with("swarm_busy")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.starts_with("swarm_idle")),
+            "{texts:?}"
+        );
     }
 
     #[tokio::test]

@@ -45,7 +45,7 @@ impl Workspace {
         self.onlyne.join("state.db")
     }
     pub fn socket_path(&self) -> PathBuf {
-        self.onlyne.join("run/onlyne.sock")
+        self.onlyne.join("run/s")
     }
     pub fn log_path(&self) -> PathBuf {
         self.onlyne.join("logs/daemon.log")
@@ -95,10 +95,7 @@ mod tests {
             ws.config_path(),
             PathBuf::from("/tmp/x/.onlyne/config.toml")
         );
-        assert_eq!(
-            ws.socket_path(),
-            PathBuf::from("/tmp/x/.onlyne/run/onlyne.sock")
-        );
+        assert_eq!(ws.socket_path(), PathBuf::from("/tmp/x/.onlyne/run/s"));
     }
     #[test]
     fn bootstrap_creates_layout() {

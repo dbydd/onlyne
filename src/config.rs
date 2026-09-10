@@ -78,6 +78,15 @@ pub struct Config {
     pub io: IoConfig,
     #[serde(default)]
     pub loopback: LoopbackConfig,
+    #[serde(default)]
+    pub swarm: SwarmConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct SwarmConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
