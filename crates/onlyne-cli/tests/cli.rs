@@ -44,6 +44,31 @@ fn no_socket_prints_the_exact_hint_and_exits_three() {
     );
 }
 
+/// A socket path that resolves and then proves absent reads as the same operator
+/// problem, so it answers with the canonical hint and exit 3.
+#[test]
+fn a_resolved_but_absent_socket_prints_the_hint_and_exits_three() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("run").join("s");
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--socket",
+            socket.to_str().unwrap(),
+            "--as",
+            "admin",
+            "status",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(EXIT_NO_SOCKET));
+    assert_eq!(stderr_of(&output), format!("{NO_SOCKET_MESSAGE}\n"));
+    assert!(
+        output.stdout.is_empty(),
+        "a missing socket must not print an answer body"
+    );
+}
+
 /// `--from` is rejected on the client surface and required on the admin one;
 /// both are local validation failures, so they print a hint and exit 2.
 #[test]

@@ -59,7 +59,15 @@ pub async fn open(flags: &GlobalFlags, target: &SocketTarget) -> Result<UnixStre
 }
 
 /// A socket that refused, disappeared, or never answered in time.
+///
+/// An absent path is the same operator problem as a path that never resolved,
+/// so it answers with the canonical hint and the resolution exit code. A refused
+/// socket or a silent one keeps the JSON answer a script already parses.
 pub fn connect_error(error: &std::io::Error, timeout_ms: u64) -> i32 {
+    if error.kind() == ErrorKind::NotFound {
+        eprintln!("{}", NoSocket::MESSAGE);
+        return EXIT_NO_SOCKET;
+    }
     let json = if error.kind() == ErrorKind::TimedOut {
         render::timeout_json(timeout_ms)
     } else {
