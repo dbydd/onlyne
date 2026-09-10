@@ -123,7 +123,11 @@ async fn main() {
                     workspace,
                     config.role,
                     format!("{}:{}", config.server.host, config.server.port),
-                    config.key_path.clone(),
+                    // A generated workspace stores `key_path` relative to
+                    // `.onlyne` so the tree stays valid wherever it is moved
+                    // (plan §11 line 391). `init` writes an absolute path, which
+                    // reaches the same file unchanged.
+                    path.resolve_key_path(&config.key_path),
                     config.cert_pin,
                 ))
                 .await

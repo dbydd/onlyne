@@ -328,6 +328,20 @@ impl RoleWorkspace {
         self.keys_dir().join("role.key")
     }
 
+    /// The role key a workspace config names.
+    ///
+    /// `generate` writes `keys/role.key`, which is relative to the `.onlyne`
+    /// directory the config itself sits in, so a workspace stays valid after it
+    /// moves; `init` writes the absolute path, which resolves to the same file.
+    pub fn resolve_key_path(&self, configured: &str) -> PathBuf {
+        let path = Path::new(configured);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.dir().join(path)
+        }
+    }
+
     pub fn agent_dir(&self, package: &str) -> PathBuf {
         self.onlyne.join("agent").join(package)
     }
@@ -518,6 +532,16 @@ mod tests {
         assert_eq!(layout.pid_path(), root.join(".onlyne/run/client.pid"));
         assert_eq!(layout.log_path(), root.join(".onlyne/logs/client.log"));
         assert_eq!(layout.key_path(), root.join(".onlyne/keys/role.key"));
+        // Both spellings a config can carry reach the one file `generate` and
+        // `init` write, which is what makes a generated tree movable.
+        assert_eq!(
+            layout.resolve_key_path("keys/role.key"),
+            root.join(".onlyne/keys/role.key")
+        );
+        assert_eq!(
+            layout.resolve_key_path("/elsewhere/keys/role.key"),
+            PathBuf::from("/elsewhere/keys/role.key")
+        );
         assert_eq!(layout.agent_dir("pi"), root.join(".onlyne/agent/pi"));
     }
 
