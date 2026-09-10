@@ -52,6 +52,10 @@ pub struct Request {
     /// `event_seq` of the consumed event line.
     #[serde(default)]
     pub event_seq: Option<u64>,
+    #[serde(default)]
+    pub op_id: Option<String>,
+    #[serde(default)]
+    pub offset: Option<u32>,
 }
 #[derive(Serialize)]
 struct Resp<'a> {
@@ -150,9 +154,7 @@ where
                     let w = writer.clone();
                     let pump_app = app.clone();
                     event_task = Some(tokio::spawn(async move {
-                        pump_app
-                            .pump_subscription(priority, timeout, w)
-                            .await;
+                        pump_app.pump_subscription(priority, timeout, w).await;
                     }));
                     write(
                         &writer,
@@ -277,8 +279,7 @@ mod priority_tests {
         assert_eq!(r.priority, u32::MAX);
         assert_eq!(r.consume_timeout_ms, Some(50));
         // Legacy subscriptions default to tier 0 with no timeout override.
-        let r: Request =
-            serde_json::from_str(r#"{"id":"s","op":"subscribe_events"}"#).unwrap();
+        let r: Request = serde_json::from_str(r#"{"id":"s","op":"subscribe_events"}"#).unwrap();
         assert_eq!(r.priority, 0);
         assert_eq!(r.consume_timeout_ms, None);
         // consume verdict requires an event_seq.

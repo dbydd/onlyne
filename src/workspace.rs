@@ -95,10 +95,7 @@ mod tests {
             ws.config_path(),
             PathBuf::from("/tmp/x/.onlyne/config.toml")
         );
-        assert_eq!(
-            ws.socket_path(),
-            PathBuf::from("/tmp/x/.onlyne/run/s")
-        );
+        assert_eq!(ws.socket_path(), PathBuf::from("/tmp/x/.onlyne/run/s"));
     }
     #[test]
     fn bootstrap_creates_layout() {

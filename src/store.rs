@@ -1,12 +1,26 @@
 use crate::core::*;
 use anyhow::Context;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio::sync::Mutex;
 
 pub struct Store {
     path: PathBuf,
     conn: Mutex<Connection>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryPage {
+    pub messages: Vec<MessageEnvelope>,
+    pub has_more: bool,
+    pub next_offset: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IdempotencyReceipt {
+    pub fingerprint: String,
+    pub receipt: serde_json::Value,
 }
 
 impl Store {
@@ -69,6 +83,12 @@ fn migrate_conn(conn: &Connection) -> anyhow::Result<()> {
               message_id text not null,
               timestamp text not null,
               updated_at text not null
+            );
+            create table if not exists loopback_idempotency (
+              op_id text primary key,
+              fingerprint text not null,
+              receipt_json text not null,
+              created_at text not null
             );
         "#)?;
     ensure_column(
@@ -176,6 +196,66 @@ impl Store {
         Ok(rows)
     }
 
+    pub async fn append_idempotent_message(
+        &self,
+        m: &MessageEnvelope,
+        op_id: &str,
+        fingerprint: &str,
+        receipt: &serde_json::Value,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some((existing_fingerprint, receipt_json)) = tx
+            .query_row(
+                "select fingerprint, receipt_json from loopback_idempotency where op_id=?1",
+                params![op_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            if existing_fingerprint != fingerprint {
+                anyhow::bail!("op_id conflict: request differs from durable receipt");
+            }
+            let existing = serde_json::from_str(&receipt_json).unwrap_or(serde_json::Value::Null);
+            tx.commit()?;
+            return Ok(Some(existing));
+        }
+
+        tx.execute(
+            "insert into conversations(channel_id, conversation_id, title, platform_metadata, updated_at) values(?1, ?2, ?3, ?4, ?5) on conflict(channel_id, conversation_id) do update set title=excluded.title, platform_metadata=excluded.platform_metadata, updated_at=excluded.updated_at",
+            params![
+                &m.channel_id.0,
+                &m.conversation_id.0,
+                &Option::<String>::None,
+                "{}",
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        tx.execute(
+            "insert or replace into messages(channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, format, attachments, delivery_state, timestamp, platform_metadata) values(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                &m.channel_id.0,
+                &m.conversation_id.0,
+                &m.message_id.0,
+                serde_json::to_string(&m.direction)?,
+                &m.sender_id,
+                &m.sender_name,
+                &m.text,
+                serde_json::to_string(&m.format)?,
+                serde_json::to_string(&m.attachments)?,
+                serde_json::to_string(&m.delivery_state)?,
+                m.timestamp.to_rfc3339(),
+                m.platform_metadata.to_string()
+            ],
+        )?;
+        tx.execute(
+            "insert into loopback_idempotency(op_id, fingerprint, receipt_json, created_at) values(?1, ?2, ?3, ?4)",
+            params![op_id, fingerprint, receipt.to_string(), chrono::Utc::now().to_rfc3339()],
+        )?;
+        tx.commit()?;
+        Ok(None)
+    }
+
     pub async fn append_message(&self, m: &MessageEnvelope) -> anyhow::Result<()> {
         let conv = Conversation {
             channel_id: m.channel_id.clone(),
@@ -256,6 +336,75 @@ impl Store {
         Ok(rows)
     }
 
+    pub async fn fetch_history_page(
+        &self,
+        channel_id: Option<&ChannelId>,
+        conversation_id: Option<&ConversationId>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<HistoryPage> {
+        let conn = self.conn.lock().await;
+        let page_limit = limit.clamp(1, 500);
+        let sql = match (channel_id, conversation_id) {
+            (Some(_), Some(_)) => {
+                "select channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, format, attachments, delivery_state, timestamp, platform_metadata from messages where channel_id=?1 and conversation_id=?2 order by timestamp desc, rowid desc limit ?3 offset ?4"
+            }
+            (Some(_), None) => {
+                "select channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, format, attachments, delivery_state, timestamp, platform_metadata from messages where channel_id=?1 order by timestamp desc, rowid desc limit ?2 offset ?3"
+            }
+            _ => {
+                "select channel_id, conversation_id, message_id, direction, sender_id, sender_name, text, format, attachments, delivery_state, timestamp, platform_metadata from messages order by timestamp desc, rowid desc limit ?1 offset ?2"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = match (channel_id, conversation_id) {
+            (Some(c), Some(v)) => stmt
+                .query_map(params![c.0, v.0, page_limit + 1, offset], message_from_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+            (Some(c), None) => stmt
+                .query_map(params![c.0, page_limit + 1, offset], message_from_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => stmt
+                .query_map(params![page_limit + 1, offset], message_from_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        let has_more = rows.len() > page_limit as usize;
+        let mut messages = rows;
+        messages.truncate(page_limit as usize);
+        Ok(HistoryPage {
+            messages,
+            has_more,
+            next_offset: has_more.then_some(offset.saturating_add(page_limit)),
+        })
+    }
+
+    pub async fn idempotency_get(&self, op_id: &str) -> anyhow::Result<Option<IdempotencyReceipt>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "select fingerprint, receipt_json from loopback_idempotency where op_id=?1",
+            params![op_id],
+            |row| {
+                let receipt: String = row.get(1)?;
+                Ok(IdempotencyReceipt {
+                    fingerprint: row.get(0)?,
+                    receipt: serde_json::from_str(&receipt).unwrap_or(serde_json::Value::Null),
+                })
+            },
+        )
+        .optional()
+        .context("read loopback idempotency")
+    }
+
+    pub async fn idempotency_put(
+        &self,
+        op_id: &str,
+        fingerprint: &str,
+        receipt: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute("insert into loopback_idempotency(op_id, fingerprint, receipt_json, created_at) values(?1, ?2, ?3, ?4)", params![op_id, fingerprint, receipt.to_string(), chrono::Utc::now().to_rfc3339()])?;
+        Ok(())
+    }
     pub async fn next_inbound_after_cursor(
         &self,
         channel: &ChannelId,
@@ -277,6 +426,17 @@ impl Store {
                 .optional()?
         };
         Ok(row)
+    }
+
+    async fn io_cursor(&self, channel: &ChannelId) -> anyhow::Result<Option<(MessageId, String)>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "select message_id, timestamp from io_cursors where channel_id=?1",
+            params![channel.0],
+            |row| Ok((MessageId(row.get(0)?), row.get(1)?)),
+        )
+        .optional()
+        .context("io cursor")
     }
 
     pub async fn latest_inbound(
@@ -313,18 +473,6 @@ impl Store {
         )?;
         Ok(())
     }
-
-    async fn io_cursor(&self, channel: &ChannelId) -> anyhow::Result<Option<(MessageId, String)>> {
-        let conn = self.conn.lock().await;
-        conn.query_row(
-            "select message_id, timestamp from io_cursors where channel_id=?1",
-            params![channel.0],
-            |row| Ok((MessageId(row.get(0)?), row.get(1)?)),
-        )
-        .optional()
-        .context("io cursor")
-    }
-
     pub async fn find_conversation(
         &self,
         channel: &ChannelId,

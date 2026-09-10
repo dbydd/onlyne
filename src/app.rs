@@ -137,6 +137,9 @@ impl App {
         Ok(())
     }
     pub async fn start_channel_io(self: &Arc<Self>) -> anyhow::Result<()> {
+        if self.config.swarm.enabled {
+            return Ok(());
+        }
         for channel in self.io_channels().await {
             ensure_channel_fifos(&self.workspace, &channel)?;
             let app = self.clone();
@@ -178,21 +181,41 @@ impl App {
             "swarm_busy" => self.swarm_activity(req, "swarm_busy").await,
             "swarm_idle" => self.swarm_activity(req, "swarm_idle").await,
             "mark_io_consumed" => self.mark_io_consumed(req).await,
-            "fetch_history" | "fetch_all_history" => Ok(json!(
-                self.store
-                    .fetch_history(None, None, req.limit.unwrap_or(100))
-                    .await?
-            )),
+            "fetch_history" | "fetch_all_history" => {
+                let page = self
+                    .store
+                    .fetch_history_page(
+                        None,
+                        None,
+                        req.limit.unwrap_or(100),
+                        req.offset.unwrap_or(0),
+                    )
+                    .await?;
+                if req.offset.is_some() {
+                    Ok(json!(page))
+                } else {
+                    Ok(json!(page.messages))
+                }
+            }
             "fetch_channel_history" => {
                 let c = req
                     .channel_id
                     .map(ChannelId)
                     .context("channel_id required")?;
-                Ok(json!(
-                    self.store
-                        .fetch_history(Some(&c), None, req.limit.unwrap_or(100))
-                        .await?
-                ))
+                let page = self
+                    .store
+                    .fetch_history_page(
+                        Some(&c),
+                        None,
+                        req.limit.unwrap_or(100),
+                        req.offset.unwrap_or(0),
+                    )
+                    .await?;
+                if req.offset.is_some() {
+                    Ok(json!(page))
+                } else {
+                    Ok(json!(page.messages))
+                }
             }
             "start_adapter" => {
                 let id = req.channel_id.context("channel_id required")?;
@@ -330,6 +353,14 @@ impl App {
 
     async fn loopback(&self, req: Request) -> anyhow::Result<Value> {
         let format = request_format(&req);
+        let fingerprint = serde_json::to_string(
+            &json!({"text":req.text.clone(),"format":format,"attachments":req.attachments,"raw_text":req.raw_text}),
+        )?;
+        let op_id = req
+            .op_id
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .map(str::to_owned);
         let msg = MessageEnvelope {
             channel_id: ChannelId("loopback".into()),
             conversation_id: ConversationId("self".into()),
@@ -347,10 +378,21 @@ impl App {
         self.store
             .upsert_channel(&msg.channel_id, AdapterHealth::Ready)
             .await?;
-        self.store.append_message(&msg).await?;
+        let receipt = json!(msg);
+        let existing = if let Some(op_id) = op_id.as_deref() {
+            self.store
+                .append_idempotent_message(&msg, op_id, &fingerprint, &receipt)
+                .await?
+        } else {
+            self.store.append_message(&msg).await?;
+            None
+        };
+        if let Some(existing) = existing {
+            return Ok(existing);
+        }
         self.publish_history_appended(&msg);
         self.events.publish(Event::InboundMessage(msg.clone()));
-        Ok(json!(msg))
+        Ok(receipt)
     }
 
     async fn channel_in_loop(self: Arc<Self>, channel: String) {
@@ -388,6 +430,8 @@ impl App {
                                     priority: 0,
                                     consume_timeout_ms: None,
                                     event_seq: None,
+                                    op_id: None,
+                                    offset: None,
                                 };
                                 if let Err(e) = self.send(req).await {
                                     self.events.publish(Event::Warning {
@@ -519,6 +563,8 @@ impl App {
             priority: 0,
             consume_timeout_ms: None,
             event_seq: None,
+            op_id: None,
+            offset: None,
         })
         .await
     }
@@ -1077,10 +1123,7 @@ fn secretish(key: &str) -> bool {
 
 impl App {
     /// Register a tiered event subscriber. Returns the event line receiver.
-    pub async fn register_subscriber(
-        &self,
-        priority: u32,
-    ) -> tokio::sync::mpsc::Receiver<String> {
+    pub async fn register_subscriber(&self, priority: u32) -> tokio::sync::mpsc::Receiver<String> {
         let (tx, rx) = tokio::sync::mpsc::channel(256);
         let mut subs = self.subscribers.lock().await;
         subs.push(PrioritySubscriber { priority, tx });
@@ -1138,16 +1181,15 @@ impl App {
     async fn central_relay(self: Arc<Self>, consume_timeout_ms: u64) {
         let mut bus = self.events.subscribe();
         while let Ok(ev) = bus.recv().await {
-            let line = serde_json::json!({"event":true,"type":crate::ipc::event_type(&ev),"data":ev})
-                .to_string();
+            let line =
+                serde_json::json!({"event":true,"type":crate::ipc::event_type(&ev),"data":ev})
+                    .to_string();
             let tiers: Vec<Vec<tokio::sync::mpsc::Sender<String>>> = {
                 let subs = self.subscribers.lock().await;
                 let mut tiers: Vec<(u32, Vec<tokio::sync::mpsc::Sender<String>>)> = vec![];
                 for s in subs.iter() {
                     match tiers.last_mut() {
-                        Some((p, members)) if *p == s.priority => {
-                            members.push(s.tx.clone())
-                        }
+                        Some((p, members)) if *p == s.priority => members.push(s.tx.clone()),
                         _ => tiers.push((s.priority, vec![s.tx.clone()])),
                     }
                 }
@@ -1257,6 +1299,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn swarm_mode_does_not_create_any_channel_fifos() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        ws.bootstrap().unwrap();
+        std::fs::write(
+            ws.config_path(),
+            format!(
+                "{}\n[swarm]\nenabled = true\n",
+                crate::config::DEFAULT_CONFIG
+            ),
+        )
+        .unwrap();
+        let app = App::load(ws.clone()).await.unwrap();
+        app.start_channel_io().await.unwrap();
+        assert!(!ws.channel_dir("loopback").join("in").exists());
+        assert!(!ws.channel_dir("loopback").join("out").exists());
+    }
+
+    #[tokio::test]
     async fn loopback_send_is_local_outbound_echo() {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::resolve(dir.path());
@@ -1278,10 +1339,47 @@ mod tests {
             rx.try_recv().unwrap(),
             Event::HistoryAppended { .. }
         ));
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            Event::OutboundMessage(_)
-        ));
+        assert!(matches!(rx.try_recv().unwrap(), Event::OutboundMessage(_)));
+    }
+
+    #[tokio::test]
+    async fn loopback_op_id_is_durable_and_conflicts_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path());
+        let app = App::load(ws).await.unwrap();
+        let request = || {
+            serde_json::from_str::<Request>(
+                r#"{"op":"loopback","op_id":"op-1","text":"wake","raw_text":true}"#,
+            )
+            .unwrap()
+        };
+        let (first, second) = tokio::join!(app.handle(request()), app.handle(request()));
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first, second);
+        let history = app
+            .store
+            .fetch_history(Some(&ChannelId("loopback".into())), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        let conflict = app
+            .handle(
+                serde_json::from_str::<Request>(
+                    r#"{"op":"loopback","op_id":"op-1","text":"different","raw_text":true}"#,
+                )
+                .unwrap(),
+            )
+            .await;
+        assert!(conflict.unwrap_err().to_string().contains("op_id conflict"));
+        assert_eq!(
+            app.store
+                .fetch_history(Some(&ChannelId("loopback".into())), None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1338,11 +1436,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(history[0].conversation_id.0, "swarm-ready");
-        assert!(history[0]
-            .text
-            .as_deref()
-            .unwrap_or_default()
-            .contains("swarm_recycled"));
+        assert!(
+            history[0]
+                .text
+                .as_deref()
+                .unwrap_or_default()
+                .contains("swarm_recycled")
+        );
         // Recycled mirrors ready: one state event, no history-appended
         // double publish / priority consume window.
         match rx.try_recv().unwrap() {
@@ -1367,7 +1467,11 @@ mod tests {
         for (op, kind) in [("swarm_busy", "busy"), ("swarm_idle", "idle")] {
             let body = format!(
                 r#"{{"workspace":".","terminal_handle":"term-1","task_id":"task-{kind}"{}}}"#,
-                if kind == "idle" { ",\"pending_exit\":true" } else { "" }
+                if kind == "idle" {
+                    ",\"pending_exit\":true"
+                } else {
+                    ""
+                }
             );
             let out = app
                 .handle(
@@ -1397,12 +1501,15 @@ mod tests {
             .fetch_history(Some(&ChannelId("loopback".into())), None, 10)
             .await
             .unwrap();
-        let texts: Vec<String> = history
-            .iter()
-            .filter_map(|m| m.text.clone())
-            .collect();
-        assert!(texts.iter().any(|t| t.starts_with("swarm_busy")), "{texts:?}");
-        assert!(texts.iter().any(|t| t.starts_with("swarm_idle")), "{texts:?}");
+        let texts: Vec<String> = history.iter().filter_map(|m| m.text.clone()).collect();
+        assert!(
+            texts.iter().any(|t| t.starts_with("swarm_busy")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.starts_with("swarm_idle")),
+            "{texts:?}"
+        );
     }
 
     #[tokio::test]
