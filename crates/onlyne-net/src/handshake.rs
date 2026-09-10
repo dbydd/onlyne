@@ -1,3 +1,14 @@
+//! The ed25519 admission handshake: the server sends 32 random bytes, the peer
+//! signs them with its role key, and the server verifies the signature against the
+//! spec-registered public key.
+//!
+//! The claim the handshake carries is transport-owned, and a reader here needs the
+//! two halves of it. `HandshakeArgs::agent` names the program that connected, which
+//! is what a protocol or version mismatch is about. `HandshakeArgs::mount:
+//! Option<Mount>` names the configured instance the connection serves, which is
+//! the identity the ACL and the routing use. The same `onlyne_proto::Mount` rides
+//! the adapter surface in `onlyne_proto::adapter::HelloArgs::mount`.
+//!
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::Verifier;
 use onlyne_frame::{is_bad_frame, is_too_large, read_frame, write_frame};
@@ -215,7 +226,7 @@ where
     })
 }
 
-pub async fn offer<S>(
+pub async fn connect<S>(
     stream: &mut S,
     role: &str,
     keys: &KeyPair,
@@ -227,7 +238,7 @@ pub async fn offer<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    offer_with_timeout(
+    connect_with_timeout(
         stream,
         role,
         keys,
@@ -240,7 +251,7 @@ where
     .await
 }
 #[allow(clippy::too_many_arguments)]
-pub async fn offer_with_timeout<S>(
+pub async fn connect_with_timeout<S>(
     stream: &mut S,
     role: &str,
     keys: &KeyPair,

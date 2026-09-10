@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"shutdown\",\"args\":{\"reason\":\"operator\",\"grace_ms\":500}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "admin shutdown closes the listener after a grace window"
+}

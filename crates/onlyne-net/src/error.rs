@@ -6,6 +6,12 @@ pub enum NetError {
     ProtocolVersion { peer: u16, expected: u16 },
     Unauthorized(String),
     Rejected { code: String, message: String },
+    /// The transport died. The supervisor dials again.
+    Disconnected(String),
+    /// The handle sits between connections and accepts no frame.
+    NotReady,
+    /// The caller's own deadline elapsed while the request was in flight.
+    RequestTimeout,
     HandshakeTimeout,
     FrameTooLarge,
     BadFrame,
@@ -27,6 +33,9 @@ impl fmt::Display for NetError {
             ),
             Self::Unauthorized(detail) => write!(f, "unauthorized: {detail}"),
             Self::Rejected { code, message } => write!(f, "rejected ({code}): {message}"),
+            Self::Disconnected(detail) => write!(f, "disconnected: {detail}"),
+            Self::NotReady => f.write_str("the connection is not ready"),
+            Self::RequestTimeout => f.write_str("request timed out"),
             Self::HandshakeTimeout => f.write_str("handshake timed out"),
             Self::FrameTooLarge => f.write_str("frame too large"),
             Self::BadFrame => f.write_str("bad frame"),

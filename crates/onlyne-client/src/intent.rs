@@ -107,6 +107,9 @@ impl IntentMachine {
 }
 
 pub fn op_for_intent(row: &IntentRow) -> Result<ClientOp> {
+    if let Ok(op) = serde_json::from_value::<ClientOp>(row.env_json.clone()) {
+        return Ok(op);
+    }
     let envelope: Envelope = serde_json::from_value(row.env_json.clone())?;
     Ok(ClientOp::Send(Box::new(envelope)))
 }

@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"status\",\"args\":{}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "admin status returns the cluster summary"
+}

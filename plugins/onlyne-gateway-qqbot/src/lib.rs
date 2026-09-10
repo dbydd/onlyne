@@ -15,13 +15,16 @@ use onlyne_adapter::{
     SendReceipt,
 };
 use onlyne_proto::{
-    Body, Capability, Causality, ConversationInfo, Envelope, HealthArgs, IMAGE_DATA_MAX_BYTES,
-    MsgKind, Principal, RegisterChannelArgs, new_envelope, new_task_id,
+    Body, Capability, Causality, Envelope, HealthArgs, IMAGE_DATA_MAX_BYTES, MsgKind, Principal,
+    RegisterChannelArgs, new_envelope, new_task_id,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::HashMap, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 const CHANNEL: &str = "qqbot";
 const TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
@@ -98,7 +101,8 @@ impl GatewayRef {
     }
 
     pub fn encode(&self) -> String {
-        let bytes = serde_json::to_vec(self).expect("GatewayRef contains only serializable strings");
+        let bytes =
+            serde_json::to_vec(self).expect("GatewayRef contains only serializable strings");
         format!("qqbot-ref-v1:{}", URL_SAFE_NO_PAD.encode(bytes))
     }
 
@@ -217,10 +221,7 @@ pub fn translate_inbound_json(json_text: &str) -> Result<Envelope, AdapterError>
 }
 
 /// Translate a supported event while explicitly selecting Note or Task.
-pub fn translate_inbound_event_as(
-    event: &Value,
-    kind: MsgKind,
-) -> Result<Envelope, AdapterError> {
+pub fn translate_inbound_event_as(event: &Value, kind: MsgKind) -> Result<Envelope, AdapterError> {
     if !matches!(kind, MsgKind::Note | MsgKind::Task) {
         return Err(AdapterError::Unexpected(format!(
             "qqbot inbound kind must be note or task, got {kind}"
@@ -318,7 +319,7 @@ fn parse_inbound_event(event: &Value) -> Result<ParsedInbound, AdapterError> {
         other => {
             return Err(AdapterError::Unexpected(format!(
                 "unsupported qqbot message type: {other}"
-            )))
+            )));
         }
     };
     if parsed.text.is_none() {
@@ -353,7 +354,10 @@ fn required_string(value: &Value, field: &str) -> Result<String, AdapterError> {
 
 fn nested_required_string(value: &Value, fields: &[&str]) -> Result<String, AdapterError> {
     nested_string(value, fields).ok_or_else(|| {
-        AdapterError::Unexpected(format!("qqbot inbound field {} is missing", fields.join(".")))
+        AdapterError::Unexpected(format!(
+            "qqbot inbound field {} is missing",
+            fields.join(".")
+        ))
     })
 }
 
@@ -444,7 +448,11 @@ pub fn outbound_message_request_json(
     } else {
         body["msg_seq"] = json!(msg_seq.max(1));
     }
-    if let Some(reply_to) = msg.reply_to.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(reply_to) = msg
+        .reply_to
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         body["msg_id"] = json!(reply_to);
     }
     Ok(body)
@@ -452,14 +460,12 @@ pub fn outbound_message_request_json(
 
 /// Build the QQ group/C2C media upload request. It performs the size check
 /// before the request body is returned, and therefore before any upload call.
-pub fn outbound_upload_request_json(
-    msg: &Outbound,
-    scene: QqScene,
-) -> Result<Value, AdapterError> {
+pub fn outbound_upload_request_json(msg: &Outbound, scene: QqScene) -> Result<Value, AdapterError> {
     validate_outbound(msg)?;
-    let image = msg.image.as_ref().ok_or_else(|| {
-        AdapterError::Unexpected("qqbot upload request requires an image".into())
-    })?;
+    let image = msg
+        .image
+        .as_ref()
+        .ok_or_else(|| AdapterError::Unexpected("qqbot upload request requires an image".into()))?;
     let file_type = if image.mime == "image/gif" { 2 } else { 1 };
     let mut body = json!({
         "file_type": file_type,
@@ -472,7 +478,7 @@ pub fn outbound_upload_request_json(
         QqScene::Channel | QqScene::Direct => {
             return Err(AdapterError::Unexpected(
                 "qqbot image uploads are only supported for group and c2c scenes".into(),
-            ))
+            ));
         }
     }
     Ok(body)
@@ -493,7 +499,11 @@ fn parse_target(conversation: &str) -> Result<(String, QqScene, Option<GatewayRe
                 reference.channel
             )));
         }
-        return Ok((reference.conversation.clone(), reference.scene, Some(reference)));
+        return Ok((
+            reference.conversation.clone(),
+            reference.scene,
+            Some(reference),
+        ));
     }
     for (prefix, scene) in [
         ("group:", QqScene::Group),
@@ -571,7 +581,11 @@ impl QqBotPlugin {
     }
 
     fn api_base(&self) -> &'static str {
-        if self.sandbox { SANDBOX_API_URL } else { API_URL }
+        if self.sandbox {
+            SANDBOX_API_URL
+        } else {
+            API_URL
+        }
     }
 
     fn next_sequence(&mut self) -> u64 {
@@ -599,7 +613,9 @@ impl QqBotPlugin {
             }))
             .send()
             .await
-            .map_err(|error| AdapterError::Unexpected(format!("qqbot token request failed: {error}")))?;
+            .map_err(|error| {
+                AdapterError::Unexpected(format!("qqbot token request failed: {error}"))
+            })?;
         let status = response.status();
         let text = response.text().await.map_err(|error| {
             AdapterError::Unexpected(format!("qqbot token response failed: {error}"))
@@ -614,7 +630,9 @@ impl QqBotPlugin {
             .get("access_token")
             .and_then(Value::as_str)
             .filter(|token| !token.trim().is_empty())
-            .ok_or_else(|| AdapterError::Unexpected("qqbot token response omitted access_token".into()))?
+            .ok_or_else(|| {
+                AdapterError::Unexpected("qqbot token response omitted access_token".into())
+            })?
             .to_owned();
         let expires_in = value
             .get("expires_in")
@@ -639,9 +657,10 @@ impl QqBotPlugin {
             .await
             .map_err(|error| AdapterError::Unexpected(format!("qqbot request failed: {error}")))?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| {
-            AdapterError::Unexpected(format!("qqbot response failed: {error}"))
-        })?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| AdapterError::Unexpected(format!("qqbot response failed: {error}")))?;
         if !status.is_success() {
             return Err(AdapterError::Unexpected(format!(
                 "qqbot request {path} {status}: {text}"
@@ -661,7 +680,9 @@ impl QqBotPlugin {
         body: Value,
     ) -> Result<String, AdapterError> {
         let path = scene.upload_endpoint(conversation).ok_or_else(|| {
-            AdapterError::Unexpected("qqbot image uploads are only supported for group and c2c scenes".into())
+            AdapterError::Unexpected(
+                "qqbot image uploads are only supported for group and c2c scenes".into(),
+            )
         })?;
         let result = self.post_api(token, &path, body).await?;
         result
@@ -670,7 +691,9 @@ impl QqBotPlugin {
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned)
-            .ok_or_else(|| AdapterError::Unexpected("qqbot upload response omitted file_info".into()))
+            .ok_or_else(|| {
+                AdapterError::Unexpected("qqbot upload response omitted file_info".into())
+            })
     }
 }
 
@@ -718,7 +741,10 @@ impl GatewayPlugin for QqBotPlugin {
         let token = self.access_token().await?;
         let file_info = if msg.image.is_some() {
             let upload = outbound_upload_request_json(msg, scene)?;
-            Some(self.upload_image(&token, scene, &conversation, upload).await?)
+            Some(
+                self.upload_image(&token, scene, &conversation, upload)
+                    .await?,
+            )
         } else {
             None
         };
@@ -734,7 +760,8 @@ impl GatewayPlugin for QqBotPlugin {
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| format!("qqbot-out-{sequence}"));
-        self.refs.remember_message(CHANNEL, conversation, external_id.clone(), scene);
+        self.refs
+            .remember_message(CHANNEL, conversation, external_id.clone(), scene);
         if let Some(reference) = reference {
             self.refs.remember(reference);
         }
@@ -766,11 +793,6 @@ impl GatewayPlugin for QqBotPlugin {
         } else {
             Ok(Some(onboarding_prompt()))
         }
-    }
-
-    async fn list_conversations(&mut self) -> Result<Vec<ConversationInfo>, AdapterError> {
-        // QQ does not provide a stable, permission-independent enumeration API.
-        Ok(vec![])
     }
 }
 
@@ -885,6 +907,10 @@ mod tests {
         let mut msg = text_outbound();
         msg.kind = MsgKind::Completion;
         let error = translate_outbound(&msg).unwrap_err();
-        assert!(error.to_string().contains("unsupported qqbot outbound message kind"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported qqbot outbound message kind")
+        );
     }
 }

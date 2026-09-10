@@ -29,6 +29,7 @@ pub mod envelope;
 pub mod event;
 pub mod frame;
 pub mod ops;
+pub mod text;
 
 pub use adapter::{
     AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, ByeNotice, Capability, ClusterMount,
@@ -56,6 +57,11 @@ pub use ops::{
     QuerySessionsArgs, Receipt, RecoveryPhase, RegisterChannelArgs, RepairAck, RepairAdopt,
     RepairFail, RepairRebind, RepairTarget, Report, ResourcePhase, RoleInfo, SessionProjection,
     SessionRow, SessionSyncArgs, ShutdownArgs, Subscribe, Welcome
+};
+
+pub use text::{
+    BINARY_NOT_FOUND_PREFIX, LEGACY_WORKSPACE_MESSAGE, NO_SOCKET_MESSAGE,
+    UNSUPPORTED_SCHEMA_MESSAGE, binary_not_found,
 };
 
 /// Wire protocol revision, carried in every [`envelope::Envelope`] and handshake.

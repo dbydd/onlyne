@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"health\",\"args\":{\"state\":\"online\",\"uptime_s\":12}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "gateway health reports one of online, reconnecting, failed with an uptime in seconds"
+}

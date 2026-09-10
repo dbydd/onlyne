@@ -179,7 +179,9 @@ fn outbound_text_builds_sdk_payload() {
         Some("user-1")
     );
     assert_eq!(
-        payload.get("context_token").and_then(|value| value.as_str()),
+        payload
+            .get("context_token")
+            .and_then(|value| value.as_str()),
         Some("ctx-token")
     );
     let item_text = payload
@@ -259,7 +261,10 @@ fn unsupported_voice_is_rejected_cleanly() {
         external_id: None,
     };
     let err = inbound_event_to_envelope(&event, test_principal()).expect_err("voice unsupported");
-    assert!(err.to_string().contains("unsupported weixin message type: voice"));
+    assert!(
+        err.to_string()
+            .contains("unsupported weixin message type: voice")
+    );
 }
 
 #[test]
@@ -272,4 +277,13 @@ fn oversized_image_is_rejected_before_upload() {
     };
     let err = decode_outbound_image(&part).expect_err("image ceiling must fail first");
     assert!(err.to_string().contains(&IMAGE_BYTES_MAX.to_string()));
+}
+
+#[test]
+fn declared_typing_capability_answers_with_a_platform_no_op() {
+    let mut plugin = WeixinPlugin::new(WeixinConfig::default());
+    assert!(plugin.capabilities().contains(&Capability::Typing));
+    block_on(plugin.set_typing("user-7", true))
+        .expect("the declared capability answers without a platform error");
+    block_on(plugin.set_typing("user-7", false)).expect("the off half stays a no-op");
 }

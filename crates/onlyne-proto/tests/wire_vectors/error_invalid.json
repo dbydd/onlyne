@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"res\",\"id\":\"r1\",\"ok\":false,\"error\":{\"code\":\"invalid\",\"message\":\"refused\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "error code invalid spells exactly invalid on the wire; retryable=false"
+}

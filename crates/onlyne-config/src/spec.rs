@@ -140,6 +140,55 @@ pub struct IntentPolicy {
     pub backoff_ms: Vec<u64>,
 }
 
+/// Message class dimension of the ACL table.
+///
+/// The class split follows the `onlyne-proto::MsgKind` semantics in `docs/v1-PLAN.md`
+/// §3 while keeping this crate free of protocol dependencies. The mapping the
+/// server applies is `Task` and `Completion` to `MsgKindClass::Any`, `Note` to
+/// `MsgKindClass::Note`, and `Control` to `MsgKindClass::Control`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MsgKindClass {
+    /// Ordinary directed delivery: `Task` and `Completion` traffic.
+    Any,
+    /// Free-text `Note` traffic that creates no session.
+    Note,
+    /// Control-plane ops: `recycle`, `probe`, `snapshot`, `cancel`.
+    Control,
+}
+
+/// One permitted directed role edge.
+///
+/// `Spec::acl_edges` is the only place where `"*"` has meaning: it expands the
+/// wildcards against the registered role names and emits concrete rows, so a
+/// stored `"*"` endpoint is a bug. The server maps each row into
+/// `onlyne_net::AclTable`, and `onlyne_net::acl_allows` answers a permit
+/// question by looking up the concrete pair plus `admin`.
+///
+/// Field list consumed by the server:
+/// * `from: String` — sending role name, never `"*"`.
+/// * `to: String` — receiving role name, never `"*"`.
+/// * `kind: MsgKindClass` — `Any`, `Note`, or `Control`.
+/// * `admin: bool` — the sending role's `[[client]] admin` flag, which satisfies
+///   the `Control` requirement for that row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AclEdge {
+    /// Sending role name.
+    pub from: String,
+    /// Receiving role name.
+    pub to: String,
+    /// Message class this row permits.
+    pub kind: MsgKindClass,
+    /// Sender's `admin` flag as written in `[[client]]`.
+    pub admin: bool,
+}
+
+/// Message classes emitted per permitted pair, in table order.
+pub const ACL_EDGE_KINDS: [MsgKindClass; 3] =
+    [MsgKindClass::Any, MsgKindClass::Note, MsgKindClass::Control];
+
 impl Default for ServerSection {
     fn default() -> Self {
         Self {
@@ -222,6 +271,102 @@ impl Spec {
         let value = toml::Value::try_from(self).expect("spec serializes to TOML value");
         spec_hash(&canonical_bytes(&value))
     }
+
+    /// Complete set of permitted directed role edges, one row per message class.
+    ///
+    /// An ordered pair `from -> to` is permitted when both sides agree:
+    /// `from.allowed_targets` names `to` and `to.allowed_senders` names `from`.
+    /// The wildcard `"*"` covers every other registered role on both sides:
+    /// `allowed_targets = ["*"]` reaches every role except the sender itself,
+    /// and `allowed_senders = ["*"]` admits every role except the receiver
+    /// itself. Self-delivery therefore requires the role's own name in both
+    /// lists, spelled out in the file, which is what makes Verification case 1
+    /// in `docs/v1-PLAN.md` line 496 legal: the `onlyne-client init` fragment
+    /// emits `allowed_senders = ["*", "<self>"]` plus
+    /// `allowed_targets = ["<self>"]`.
+    ///
+    /// This function is the single arbiter of wildcard meaning. Rows carry
+    /// concrete role names only, and `"*"` never reaches the table.
+    ///
+    /// Names that match no registered role are dropped, which keeps
+    /// `aggregate`-only annotations and stale names out of the table. The
+    /// `aggregate` field is an annotation and contributes no rows.
+    ///
+    /// A minimal registered role from the `init` fragment carries
+    /// `allowed_senders = ["*", "<its own name>"]` and
+    /// `allowed_targets = ["<its own name>"]`, which yields exactly one outbound
+    /// edge, to itself, plus inbound from every other registered role.
+    ///
+    /// Gateway inbound traffic is not covered here. The `[[route]]` table maps
+    /// gateway, channel, and conversation to a role, and the server owns that
+    /// gateway-side ACL decision. This function reads a [`Spec`] and returns a
+    /// value; it mutates nothing, schedules nothing, and consults no clock.
+    pub fn acl_edges(&self) -> Vec<AclEdge> {
+        let roles = self.role_names();
+        let mut edges = Vec::new();
+        for sender in &self.client {
+            for target in expand_targets(&sender.allowed_targets, &sender.role, &roles) {
+                let Some(receiver) = self
+                    .client
+                    .iter()
+                    .find(|entry| entry.role == target.as_str())
+                else {
+                    continue;
+                };
+                if !expand_senders(&receiver.allowed_senders, &receiver.role, &roles)
+                    .iter()
+                    .any(|name| name == &sender.role)
+                {
+                    continue;
+                }
+                for kind in ACL_EDGE_KINDS {
+                    edges.push(AclEdge {
+                        from: sender.role.clone(),
+                        to: target.clone(),
+                        kind,
+                        admin: sender.admin,
+                    });
+                }
+            }
+        }
+        edges
+    }
+
+    /// Registered role names in document order.
+    pub fn role_names(&self) -> Vec<String> {
+        self.client.iter().map(|entry| entry.role.clone()).collect()
+    }
+}
+
+/// Expand one `allowed_targets` list: `"*"` means every registered role except
+/// `sender`, other names are kept when they name a registered role.
+fn expand_targets(list: &[String], sender: &str, roles: &[String]) -> Vec<String> {
+    expand(list, sender, roles)
+}
+
+/// Expand one `allowed_senders` list: `"*"` means every registered role except
+/// `receiver`, other names are kept when they name a registered role.
+fn expand_senders(list: &[String], receiver: &str, roles: &[String]) -> Vec<String> {
+    expand(list, receiver, roles)
+}
+
+/// Expand one ACL list. `"*"` covers every registered role except `owner`, the
+/// role whose own list is being read; other names are kept when they name a
+/// registered role.
+fn expand(list: &[String], owner: &str, roles: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in list {
+        if item == "*" {
+            for role in roles {
+                if role != owner && !out.contains(role) {
+                    out.push(role.clone());
+                }
+            }
+        } else if roles.contains(item) && !out.contains(item) {
+            out.push(item.clone());
+        }
+    }
+    out
 }
 
 fn validate(spec: &Spec, value: &toml::Value, text: &str, file: &str) -> Result<(), SpecError> {

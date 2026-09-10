@@ -2,6 +2,7 @@
 
 pub mod accept;
 pub mod adapter_socket;
+pub mod daemon;
 pub mod dispatch;
 pub mod init;
 pub mod intent;

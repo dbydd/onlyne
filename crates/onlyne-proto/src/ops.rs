@@ -109,6 +109,11 @@ impl SessionProjection {
 }
 
 /// The report envelope kinds a client pushes (§6, §7).
+///
+/// `cluster_ref` names the origin cluster on a relayed report, so a federated
+/// projection can say where it came from. Only the three state-carrying kinds
+/// hold it: `Fault` carries no projection, and a ninth optional field there
+/// would push `Report` and `ClientOp` from 192 to 224 bytes on the hot path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "data")]
 pub enum Report {
@@ -118,6 +123,8 @@ pub enum Report {
         session_id: String,
         generation: u64,
         seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cluster_ref: Option<String>,
     },
     /// Liveness plus the reducer's own view of the world.
     Heartbeat {
@@ -125,6 +132,8 @@ pub enum Report {
         generation: u64,
         seq: u64,
         observed: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cluster_ref: Option<String>,
     },
     /// Terminal result for a task; `head` is the summary the ledger keeps.
     Complete {
@@ -134,6 +143,8 @@ pub enum Report {
         head: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cluster_ref: Option<String>,
     },
     /// Something needs a supervisor decision. The server records and forwards.
     Fault {
@@ -510,6 +521,9 @@ pub struct Welcome {
 
 /// Repair verbs on the admin surface (§8). Each one is a transactional ledger
 /// edit; none of them runs automatically.
+/// `Shutdown` goes beyond the §8 line 320 list — the graceful stop that
+/// `onlyne server stop` needs over the admin socket — because that line's
+/// zero-policy rule bars automatic repair, not an operator-requested stop.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "op", content = "args")]
 pub enum AdminOp {
@@ -681,6 +695,14 @@ pub struct ShutdownArgs {
 }
 
 /// The gateway-to-server vocabulary (§8).
+///
+/// This enum keeps five inbound verbs. §7 line 308 puts `render_send` in the
+/// host-to-plugin direction and §7 line 322 marks `typing` an optional
+/// capability, so both travel on the adapter socket, whose `AdapterMsg` is
+/// untagged over `PluginOp` and `HostOp`: this enum is the gateway-to-server
+/// half, and the host-to-plugin half is `HostOp::RenderSend` with `typing` as
+/// `PluginOp::Typing`. Adding either verb here would give one socket two
+/// spellings of the same capability.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "op", content = "args")]
 pub enum GatewayOp {
@@ -796,6 +818,7 @@ mod tests {
                     session_id: "s".into(),
                     generation: 1,
                     seq: 3,
+                    cluster_ref: Some("cluster-b".into()),
                 }),
                 "report",
             ),
@@ -851,6 +874,7 @@ mod tests {
         assert_eq!(cases.len(), 13);
     }
 
+// Rejection-path marker only: this pre-v1 `loopback` op name must stay outside the closed vocabulary (plan §8 line 324).
     #[test]
     fn unknown_op_name_is_a_decode_failure() {
         let err = serde_json::from_value::<ClientOp>(serde_json::json!({"op":"loopback","args":{}}))
@@ -869,7 +893,8 @@ mod tests {
             task_id: new_task_id(),
             session_id: "s".into(),
             generation: 1,
-            seq: 1
+            seq: 1,
+            cluster_ref: None
         })
         .is_readonly());
     }
@@ -881,6 +906,7 @@ mod tests {
             session_id: "s".into(),
             generation: 2,
             seq: 9,
+            cluster_ref: None,
         };
         assert_eq!(ready.version(), Some((2, 9)));
         assert_eq!(ready.kind_name(), "ready");

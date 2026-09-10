@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"query_ledger\",\"args\":{\"task\":\"11111111-1111-4111-8111-111111111111\",\"limit\":50}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "client query_ledger filters rows by any subset of the stored ledger columns"
+}

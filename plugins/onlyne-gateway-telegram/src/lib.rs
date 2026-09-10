@@ -10,12 +10,23 @@ pub mod auth;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use onlyne_adapter::{
+    AdapterError, AdapterHealth, GatewayHost, GatewayPlugin, OnboardingKind, OnboardingPrompt,
+    Outbound, SendReceipt,
+};
+use onlyne_proto::{
+    Capability, Causality, ConversationInfo, Envelope, ErrorCode, HealthArgs, IMAGE_DATA_MAX_BYTES,
+    IMAGE_MIMES, MsgKind, Principal, RegisterChannelArgs, new_envelope, new_task_id,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashMap, time::Instant};
-use teloxide::{Bot, payloads::SendPhotoSetters, prelude::Requester, types::{ChatId, InputFile}};
-use onlyne_adapter::{AdapterError, AdapterHealth, GatewayHost, GatewayPlugin, OnboardingKind, OnboardingPrompt, Outbound, SendReceipt};
-use onlyne_proto::{Capability, ConversationInfo, Causality, Envelope, ErrorCode, HealthArgs, IMAGE_DATA_MAX_BYTES, IMAGE_MIMES, MsgKind, Principal, RegisterChannelArgs, new_envelope, new_task_id};
+use teloxide::{
+    Bot,
+    payloads::SendPhotoSetters,
+    prelude::Requester,
+    types::{ChatAction, ChatId, InputFile},
+};
 
 pub const PLATFORM: &str = "telegram";
 
@@ -50,7 +61,9 @@ impl GatewayRef {
     }
 
     pub fn decode(value: &str) -> Result<Self, AdapterError> {
-        let encoded = value.strip_prefix("tg1.").ok_or_else(|| invalid("gateway_ref must start with tg1."))?;
+        let encoded = value
+            .strip_prefix("tg1.")
+            .ok_or_else(|| invalid("gateway_ref must start with tg1."))?;
         let raw = URL_SAFE_NO_PAD
             .decode(encoded)
             .map_err(|err| invalid(format!("invalid gateway_ref encoding: {err}")))?;
@@ -60,12 +73,7 @@ impl GatewayRef {
 }
 
 /// Stable mapping helper used by the gateway host's local correlation table.
-pub fn gateway_ref(
-    channel: &str,
-    conversation: &str,
-    external_id: &str,
-    scene: &str,
-) -> String {
+pub fn gateway_ref(channel: &str, conversation: &str, external_id: &str, scene: &str) -> String {
     GatewayRef::new(channel, conversation, external_id, scene).encode()
 }
 
@@ -131,17 +139,29 @@ pub fn inbound_update(
         .ok_or_else(|| invalid("Telegram message has no chat"))?;
     let conversation = scalar_string(chat.get("id"))
         .ok_or_else(|| invalid("Telegram chat.id must be a string or integer"))?;
-    let _external_id = scalar_string(message.get("message_id"))
+    let external_id = scalar_string(message.get("message_id"))
         .ok_or_else(|| invalid("Telegram message.message_id must be a string or integer"))?;
-    let _scene = chat
+    let scene = chat
         .get("type")
         .and_then(Value::as_str)
         .or_else(|| message.get("scene").and_then(Value::as_str))
         .unwrap_or("chat");
 
-    for unsupported in ["document", "audio", "voice", "video", "animation", "sticker", "location", "contact", "poll"] {
+    for unsupported in [
+        "document",
+        "audio",
+        "voice",
+        "video",
+        "animation",
+        "sticker",
+        "location",
+        "contact",
+        "poll",
+    ] {
         if message.get(unsupported).is_some() {
-            return Err(invalid(format!("unsupported Telegram message type: {unsupported}")));
+            return Err(invalid(format!(
+                "unsupported Telegram message type: {unsupported}"
+            )));
         }
     }
 
@@ -154,15 +174,33 @@ pub fn inbound_update(
         .get("kind")
         .and_then(Value::as_str)
         .or_else(|| message.get("onlyne_kind").and_then(Value::as_str))
-        .unwrap_or_else(|| if text.as_deref().is_some_and(|s| s.starts_with("/task ")) { "task" } else { "note" });
+        .unwrap_or_else(|| {
+            if text.as_deref().is_some_and(|s| s.starts_with("/task ")) {
+                "task"
+            } else {
+                "note"
+            }
+        });
     let (kind, text) = match kind {
-        "note" => (MsgKind::Note, text.map(|s| s.strip_prefix("/note ").unwrap_or(&s).to_owned())),
-        "task" => (MsgKind::Task, text.map(|s| s.strip_prefix("/task ").unwrap_or(&s).to_owned())),
-        other => return Err(invalid(format!("unsupported Telegram message kind: {other}"))),
+        "note" => (
+            MsgKind::Note,
+            text.map(|s| s.strip_prefix("/note ").unwrap_or(&s).to_owned()),
+        ),
+        "task" => (
+            MsgKind::Task,
+            text.map(|s| s.strip_prefix("/task ").unwrap_or(&s).to_owned()),
+        ),
+        other => {
+            return Err(invalid(format!(
+                "unsupported Telegram message kind: {other}"
+            )));
+        }
     };
 
     let image = if let Some(photos) = message.get("photo").and_then(Value::as_array) {
-        let selected = photos.last().ok_or_else(|| invalid("Telegram photo array is empty"))?;
+        let selected = photos
+            .last()
+            .ok_or_else(|| invalid("Telegram photo array is empty"))?;
         let data = selected
             .get("data_base64")
             .or_else(|| selected.get("data"))
@@ -171,7 +209,9 @@ pub fn inbound_update(
             Some(encoded) => {
                 let bytes = decode_image(encoded)?;
                 if bytes.len() > IMAGE_DATA_MAX_BYTES {
-                    return Err(invalid(format!("image exceeds {IMAGE_DATA_MAX_BYTES} bytes")));
+                    return Err(invalid(format!(
+                        "image exceeds {IMAGE_DATA_MAX_BYTES} bytes"
+                    )));
                 }
                 Some(onlyne_proto::ImagePart {
                     data_base64: encoded.to_owned(),
@@ -186,27 +226,44 @@ pub fn inbound_update(
     };
 
     if text.is_none() && image.is_none() && message.get("photo").is_none() {
-        return Err(invalid("unsupported Telegram message type: message has no text or image"));
+        return Err(invalid(
+            "unsupported Telegram message type: message has no text or image",
+        ));
     }
     let body = onlyne_proto::Body {
         text: text.or_else(|| message.get("photo").map(|_| "[telegram image]".into())),
         image,
     };
-    let from = Principal::gateway(PLATFORM.to_owned() + ":" + gateway_id, PLATFORM, Some(conversation.clone()));
+    let from = Principal::gateway(
+        PLATFORM.to_owned() + ":" + gateway_id,
+        PLATFORM,
+        Some(conversation.clone()),
+    );
     let to = Principal::role(target_role);
-    let causality = (kind == MsgKind::Task).then(|| Causality::root(new_task_id()));
+    let causality = (kind == MsgKind::Task).then(|| {
+        let mut chain = Causality::root(new_task_id());
+        chain.reply_to = Some(gateway_ref(PLATFORM, &conversation, &external_id, scene));
+        chain
+    });
     new_envelope(kind, from, to, body, causality).map_err(|err| invalid(err.to_string()))
 }
 
 /// Alias retained for host integrations that call the operation a translation.
-pub fn translate_inbound(update: &Value, gateway_id: &str, target_role: &str) -> Result<Envelope, AdapterError> {
+pub fn translate_inbound(
+    update: &Value,
+    gateway_id: &str,
+    target_role: &str,
+) -> Result<Envelope, AdapterError> {
     inbound_update(update, gateway_id, target_role)
 }
 
 /// Build the JSON shape sent to Telegram's `sendMessage` or `sendPhoto` API.
 pub fn outbound_request(msg: &Outbound) -> Result<Value, AdapterError> {
     if !matches!(msg.kind, MsgKind::Note | MsgKind::Task) {
-        return Err(invalid(format!("unsupported outbound message kind: {}", msg.kind)));
+        return Err(invalid(format!(
+            "unsupported outbound message kind: {}",
+            msg.kind
+        )));
     }
     if msg.conversation.trim().is_empty() {
         return Err(invalid("Telegram conversation must not be empty"));
@@ -218,11 +275,17 @@ pub fn outbound_request(msg: &Outbound) -> Result<Value, AdapterError> {
         Ok(id) => Value::from(id),
         Err(_) => Value::from(msg.conversation.clone()),
     };
-    let reply = msg.reply_to.as_deref().and_then(|s| s.parse::<i64>().ok()).map(Value::from);
+    let reply = msg
+        .reply_to
+        .as_deref()
+        .and_then(|s| s.parse::<i64>().ok())
+        .map(Value::from);
     if let Some(image) = &msg.image {
         let bytes = decode_image(&image.data_base64)?;
         if bytes.len() > IMAGE_DATA_MAX_BYTES {
-            return Err(invalid(format!("image exceeds {IMAGE_DATA_MAX_BYTES} bytes")));
+            return Err(invalid(format!(
+                "image exceeds {IMAGE_DATA_MAX_BYTES} bytes"
+            )));
         }
         if !IMAGE_MIMES.contains(&image.mime.as_str()) {
             return Err(invalid(format!("unsupported image mime: {}", image.mime)));
@@ -258,6 +321,24 @@ pub fn outbound_request(msg: &Outbound) -> Result<Value, AdapterError> {
 
 pub fn translate_outbound(msg: &Outbound) -> Result<Value, AdapterError> {
     outbound_request(msg)
+}
+
+/// The Telegram Bot API request that shows the typing indicator.
+///
+/// Telegram exposes no request that hides the indicator; it expires on its own,
+/// so `on: false` builds no request.
+pub fn typing_request(conversation: &str, on: bool) -> Result<Option<Value>, AdapterError> {
+    if !on {
+        return Ok(None);
+    }
+    let chat = conversation
+        .parse::<i64>()
+        .map_err(|_| invalid("Telegram typing requires a numeric chat id"))?;
+    Ok(Some(json!({
+        "method": "sendChatAction",
+        "chat_id": chat,
+        "action": "typing",
+    })))
 }
 
 /// A Telegram Bot API gateway plugin.  Polling/webhook ownership remains with
@@ -311,6 +392,23 @@ impl TelegramPlugin {
     pub fn token(&self) -> &str {
         &self.token
     }
+    /// Emit the platform typing indicator for one conversation.
+    ///
+    /// The plugin declares `Capability::Typing`, so this call reaches
+    /// `sendChatAction`; the off half is a documented no-op.
+    pub async fn set_typing(&mut self, conversation: &str, on: bool) -> Result<(), AdapterError> {
+        let Some(request) = typing_request(conversation, on)? else {
+            return Ok(());
+        };
+        let chat = request["chat_id"]
+            .as_i64()
+            .ok_or_else(|| invalid("Telegram typing requires a numeric chat id"))?;
+        self.bot
+            .send_chat_action(ChatId(chat), ChatAction::Typing)
+            .await
+            .map_err(|err| unexpected(format!("Telegram sendChatAction failed: {err}")))?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -330,7 +428,10 @@ impl GatewayPlugin for TelegramPlugin {
             platform: PLATFORM.into(),
             channel: self.gateway_id.clone(),
             conversations: self.bind_conversation.as_ref().map(|conversation| {
-                vec![ConversationInfo { conversation: conversation.clone(), title: None }]
+                vec![ConversationInfo {
+                    conversation: conversation.clone(),
+                    title: None,
+                }]
             }),
         })
         .await?;
@@ -344,16 +445,23 @@ impl GatewayPlugin for TelegramPlugin {
 
     async fn send(&mut self, msg: &Outbound) -> Result<SendReceipt, AdapterError> {
         let request = outbound_request(msg)?;
-        let chat = request["chat_id"].as_i64().ok_or_else(|| invalid("Telegram send requires numeric chat id"))?;
+        let chat = request["chat_id"]
+            .as_i64()
+            .ok_or_else(|| invalid("Telegram send requires numeric chat id"))?;
         let chat = ChatId(chat);
         let sent = match request["method"].as_str() {
             Some("sendMessage") => self
                 .bot
-                .send_message(chat, request["text"].as_str().unwrap_or_default().to_owned())
+                .send_message(
+                    chat,
+                    request["text"].as_str().unwrap_or_default().to_owned(),
+                )
                 .await
                 .map_err(|err| unexpected(format!("Telegram sendMessage failed: {err}")))?,
             Some("sendPhoto") => {
-                let encoded = request["photo"]["data_base64"].as_str().ok_or_else(|| invalid("Telegram photo data is missing"))?;
+                let encoded = request["photo"]["data_base64"]
+                    .as_str()
+                    .ok_or_else(|| invalid("Telegram photo data is missing"))?;
                 let bytes = decode_image(encoded)?;
                 self.bot
                     .send_photo(chat, InputFile::memory(bytes))
@@ -363,7 +471,9 @@ impl GatewayPlugin for TelegramPlugin {
             }
             _ => return Err(invalid("unsupported Telegram request method")),
         };
-        Ok(SendReceipt { external_id: sent.id.0.to_string() })
+        Ok(SendReceipt {
+            external_id: sent.id.0.to_string(),
+        })
     }
 
     async fn probe(&mut self) -> Result<AdapterHealth, AdapterError> {
@@ -386,7 +496,9 @@ impl GatewayPlugin for TelegramPlugin {
     fn onboarding(&mut self) -> Result<Option<OnboardingPrompt>, AdapterError> {
         Ok(Some(OnboardingPrompt {
             kind: OnboardingKind::ManualCode,
-            payload: "Set TELEGRAM_BOT_TOKEN to the token from @BotFather, then restart the gateway.".into(),
+            payload:
+                "Set TELEGRAM_BOT_TOKEN to the token from @BotFather, then restart the gateway."
+                    .into(),
             expires_in: None,
         }))
     }
@@ -420,7 +532,13 @@ mod tests {
     use base64::engine::general_purpose::STANDARD;
 
     fn outbound(text: &str) -> Outbound {
-        Outbound { conversation: "42".into(), text: text.into(), image: None, reply_to: None, kind: MsgKind::Note }
+        Outbound {
+            conversation: "42".into(),
+            text: text.into(),
+            image: None,
+            reply_to: None,
+            kind: MsgKind::Note,
+        }
     }
 
     #[test]
@@ -434,11 +552,25 @@ mod tests {
 
     #[test]
     fn task_command_uses_task_kind() {
-        let update = json!({"message": {"message_id": 1, "text": "/task ship it", "chat": {"id": "c1"}}});
+        let update =
+            json!({"message": {"message_id": 1, "text": "/task ship it", "chat": {"id": "c1"}}});
         let env = inbound_update(&update, "g1", "planner").unwrap();
         assert_eq!(env.kind, MsgKind::Task);
         assert_eq!(env.body.text.as_deref(), Some("ship it"));
-        assert!(env.causality.is_some());
+        let chain = env.causality.expect("task carries causality");
+        let handle = chain.reply_to.expect("task carries its correlation handle");
+        let decoded = parse_gateway_ref(&handle).expect("handle decodes");
+        assert_eq!(decoded.channel, PLATFORM);
+        assert_eq!(decoded.conversation, "c1");
+        assert_eq!(decoded.external_id, "1");
+        assert_eq!(decoded.scene, "chat");
+    }
+
+    #[test]
+    fn note_keeps_no_causality() {
+        let update = json!({"message": {"message_id": 2, "text": "hello", "chat": {"id": "c1"}}});
+        let env = inbound_update(&update, "g1", "planner").unwrap();
+        assert!(env.causality.is_none());
     }
 
     #[test]
@@ -452,28 +584,65 @@ mod tests {
     #[test]
     fn gateway_ref_round_trips_and_table_indexes() {
         let value = GatewayRef::new("telegram", "42", "99", "private");
-        let encoded = gateway_ref(&value.channel, &value.conversation, &value.external_id, &value.scene);
+        let encoded = gateway_ref(
+            &value.channel,
+            &value.conversation,
+            &value.external_id,
+            &value.scene,
+        );
         assert_eq!(parse_gateway_ref(&encoded).unwrap(), value);
         let mut table = GatewayRefTable::default();
         let key = table.insert(value.clone());
         assert_eq!(table.resolve(&key), Some(&value));
-        assert_eq!(table.lookup("telegram", "42", "99", "private"), Some(key.as_str()));
+        assert_eq!(
+            table.lookup("telegram", "42", "99", "private"),
+            Some(key.as_str())
+        );
     }
 
     #[test]
     fn unsupported_telegram_media_is_clean_error() {
-        let update = json!({"message": {"message_id": 1, "document": {"file_id": "f"}, "chat": {"id": 42}}});
+        let update =
+            json!({"message": {"message_id": 1, "document": {"file_id": "f"}, "chat": {"id": 42}}});
         let err = inbound_update(&update, "g1", "planner").unwrap_err();
-        assert!(err.to_string().contains("unsupported Telegram message type"));
+        assert!(
+            err.to_string()
+                .contains("unsupported Telegram message type")
+        );
     }
 
     #[test]
     fn image_limit_is_rejected_before_request_upload() {
         let bytes = vec![b'x'; IMAGE_DATA_MAX_BYTES + 1];
-        let image = onlyne_proto::ImagePart { data_base64: STANDARD.encode(bytes), mime: "image/png".into(), name: None };
+        let image = onlyne_proto::ImagePart {
+            data_base64: STANDARD.encode(bytes),
+            mime: "image/png".into(),
+            name: None,
+        };
         let mut msg = outbound("caption");
         msg.image = Some(image);
         let err = outbound_request(&msg).unwrap_err();
         assert!(err.to_string().contains("image exceeds 2097152 bytes"));
+    }
+
+    #[test]
+    fn typing_on_reaches_send_chat_action() {
+        let request = typing_request("42", true)
+            .expect("typing on builds a request")
+            .expect("typing on emits a platform call");
+        assert_eq!(request["method"], "sendChatAction");
+        assert_eq!(request["chat_id"], 42);
+        assert_eq!(request["action"], "typing");
+    }
+
+    #[test]
+    fn typing_off_is_a_documented_no_op() {
+        assert!(
+            typing_request("42", false)
+                .expect("typing off is not an error")
+                .is_none()
+        );
+        let err = typing_request("not-numeric", true).unwrap_err();
+        assert!(err.to_string().contains("numeric chat id"));
     }
 }

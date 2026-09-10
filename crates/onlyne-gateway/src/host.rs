@@ -73,12 +73,13 @@ impl Host {
         self.gateway.health(state, detail, self.uptime_s()).await
     }
 
+    /// Report the platform typing state for one conversation to the server.
     pub async fn send_typing(
         &self,
         conversation: impl Into<String>,
-        seconds: u32,
+        on: bool,
     ) -> Result<(), AdapterError> {
-        self.gateway.typing(conversation, seconds).await
+        self.gateway.typing(conversation, on).await
     }
 
     pub async fn deliver(&self, envelope: &Envelope) -> Result<(), AdapterError> {
@@ -122,8 +123,7 @@ impl GatewayHost for Host {
     }
 
     async fn typing(&mut self, args: &TypingArgs) -> Result<(), AdapterError> {
-        self.send_typing(args.conversation.clone(), args.seconds)
-            .await
+        self.send_typing(args.conversation.clone(), args.on).await
     }
 }
 

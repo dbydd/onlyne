@@ -1,0 +1,8 @@
+# Local override fragment for role planner.
+# docs/v1-PLAN.md §11 line 384: template discovery walks the template root and takes the directory
+# whose basename equals the role name; its parent path is the topology. This file therefore lives at
+# templates/dev/planner/ for role planner in topology dev.
+# docs/v1-PLAN.md §11 line 374: generate merges this fragment with the values derived from spec.toml,
+# and the derived document wins on every overlapping key. Only keys that need a local decision belong
+# here, such as the local plugin list.
+plugins = ["pi-onlyne"]

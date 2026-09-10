@@ -322,10 +322,10 @@ fn markdown_text(input: &str) -> String {
                 _ => {}
             },
             Event::End(tag) => match tag {
-                TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item | TagEnd::CodeBlock => {
-                    if !out.ends_with('\n') {
-                        out.push('\n');
-                    }
+                TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item | TagEnd::CodeBlock
+                    if !out.ends_with('\n') =>
+                {
+                    out.push('\n');
                 }
                 _ => {}
             },

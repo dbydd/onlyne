@@ -5,7 +5,7 @@ use clap::Parser;
 use onlyne_adapter::AdapterClient;
 use onlyne_testkit::{
     AgentScript, FakeAgent, default_agent_capabilities, parse_capability_csv,
-    read_script_from_stdin, script_from_path, socket_from_workspace,
+    read_script_from_stdin, role_from_workspace, script_from_path, socket_from_workspace,
 };
 use tokio::time::{Duration, sleep};
 
@@ -16,8 +16,9 @@ struct Args {
     workspace: Option<PathBuf>,
     #[arg(long)]
     socket: Option<PathBuf>,
-    #[arg(long, default_value = "fake")]
-    role: String,
+    /// Role to mount; the workspace config names it when omitted.
+    #[arg(long)]
+    role: Option<String>,
     #[arg(long)]
     script: Option<PathBuf>,
     #[arg(long)]
@@ -33,6 +34,10 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let workspace = args.workspace.unwrap_or(std::env::current_dir()?);
     let socket = args.socket.unwrap_or_else(|| socket_from_workspace(&workspace));
+    let role = match args.role {
+        Some(role) => role,
+        None => role_from_workspace(&workspace)?,
+    };
     let script = if args.stdin_script {
         read_script_from_stdin().await?
     } else if let Some(path) = args.script.as_deref() {
@@ -60,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
     for _attempt in 0..20 {
         match AdapterClient::connect_unix(&socket).await {
             Ok(handle) => {
-                let agent = FakeAgent::new(args.role.clone(), capabilities.clone(), script.clone(), workspace.clone());
+                let agent = FakeAgent::new(role.clone(), capabilities.clone(), script.clone(), workspace.clone());
                 agent.run(&handle).await?;
                 if args.once {
                     return Ok(());

@@ -8,6 +8,7 @@ use crate::NetError;
 
 pub const KEY_PREFIX: &str = "ed25519/";
 
+#[derive(Clone)]
 pub struct KeyPair(SigningKey);
 
 impl KeyPair {

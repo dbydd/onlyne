@@ -769,6 +769,17 @@ pub fn socket_from_workspace(workspace: &Path) -> PathBuf {
     workspace.join(".onlyne").join("run").join("s")
 }
 
+/// Role one workspace serves, read from its `.onlyne/config.toml`.
+///
+/// The fake agent mounts the role its workspace owns. `--role` stays available
+/// as an override for a workspace whose config is not the source of the name.
+pub fn role_from_workspace(workspace: &Path) -> Result<String> {
+    let path = workspace.join(".onlyne").join("config.toml");
+    let config = onlyne_config::ClientConfig::load(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    Ok(config.role)
+}
+
 pub async fn read_script_from_stdin() -> Result<AgentScript> {
     let mut buf = Vec::new();
     let mut stdin = tokio::io::stdin();

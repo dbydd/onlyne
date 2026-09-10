@@ -196,18 +196,53 @@ fn build_envelope(
     }
 }
 
-/// Apply `--request` to the payload, wrapping it in the surface's op.
-fn request_of(flags: &GlobalFlags, payload: SendPayload) -> Result<Outbound, String> {
+/// A `--request` failure: a malformed override, or an override the protocol
+/// rejects.
+enum RequestError {
+    /// The override did not parse into the shape this verb sends.
+    Override(String),
+    /// The override parsed, and the protocol rejected the envelope it carries.
+    Invalid(String),
+}
+
+impl RequestError {
+    /// Print the failure in this crate's local validation shape.
+    fn report(self) -> i32 {
+        match self {
+            RequestError::Override(message) => runtime::request_error(message),
+            RequestError::Invalid(message) => runtime::usage_error(message),
+        }
+    }
+}
+
+/// Apply `--request` to the payload, validate the envelope it carries, and wrap
+/// it in the surface's op. A pinned object that breaks a protocol rule is
+/// refused here, so the operator reads the field name in its own shell.
+fn request_of(flags: &GlobalFlags, payload: SendPayload) -> Result<Outbound, RequestError> {
     match payload {
         SendPayload::Client(envelope) => {
-            let envelope = flags.override_args(*envelope)?;
+            let envelope = override_envelope(flags, *envelope, |envelope| envelope)?;
             Ok(Outbound::client(new_id(), ClientOp::Send(Box::new(envelope))))
         }
         SendPayload::Admin(admin_send) => {
-            let admin_send = flags.override_args(admin_send)?;
+            let admin_send = override_envelope(flags, admin_send, |send| &send.envelope)?;
             Ok(Outbound::admin(new_id(), AdminOp::Send(admin_send)))
         }
     }
+}
+
+/// Replace the args with `--request` when given, then run `onlyne-proto`'s
+/// validator over the envelope they carry, so no second rule set lives here.
+fn override_envelope<T: serde::de::DeserializeOwned>(
+    flags: &GlobalFlags,
+    built: T,
+    envelope: impl Fn(&T) -> &Envelope,
+) -> Result<T, RequestError> {
+    let value = flags.override_args(built).map_err(RequestError::Override)?;
+    envelope(&value)
+        .validate()
+        .map_err(|error| RequestError::Invalid(format!("onlyne: {error}")))?;
+    Ok(value)
 }
 
 /// Connect, send one request, print the answer, and return its exit code.
@@ -361,7 +396,7 @@ async fn send_inner(
     };
     let request = match request_of(flags, payload) {
         Ok(request) => request,
-        Err(message) => return runtime::request_error(message),
+        Err(error) => return error.report(),
     };
     run_one(flags, target, &request).await
 }
@@ -427,7 +462,7 @@ async fn reply_inner(
     };
     let request = match request_of(flags, payload) {
         Ok(request) => request,
-        Err(message) => return runtime::request_error(message),
+        Err(error) => return error.report(),
     };
     match wire::request_res(&mut stream, &request, flags.timeout_ms).await {
         Ok(body) => runtime::finish(&body, flags),
@@ -514,7 +549,7 @@ async fn complete_inner(
     };
     let request = match request_of(flags, payload) {
         Ok(request) => request,
-        Err(message) => return runtime::request_error(message),
+        Err(error) => return error.report(),
     };
     match wire::request_res(&mut stream, &request, flags.timeout_ms).await {
         Ok(body) if !body.ok => return runtime::finish(&body, flags),
@@ -592,7 +627,7 @@ async fn handoff_inner(
     };
     let request = match request_of(flags, payload) {
         Ok(request) => request,
-        Err(message) => return runtime::request_error(message),
+        Err(error) => return error.report(),
     };
     match wire::request_res(&mut stream, &request, flags.timeout_ms).await {
         Ok(body) => runtime::finish(&body, flags),
@@ -601,6 +636,9 @@ async fn handoff_inner(
 }
 
 pub fn control(flags: &GlobalFlags, sender: &SenderArgs, args: ControlVerbArgs) -> i32 {
+    if flags.request.is_some() {
+        return runtime::usage_error("onlyne: --request is not supported by control");
+    }
     let Some(target) = runtime::target(flags) else {
         return EXIT_NO_SOCKET;
     };

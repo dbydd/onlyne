@@ -115,6 +115,17 @@ pub struct ClusterMount {
 }
 
 /// Plugin and gateway mount data, discriminated by [`MountKind`].
+///
+/// The mount names the configured instance the connection serves, and that is the
+/// identity the ACL and the routing use: `gateway` holds a `[[gateway]]` id and
+/// `role` holds a spec role name, both taken from the server's spec, because one
+/// plugin crate can back several configured instances with their own credentials,
+/// channels, and `[[route]]` bindings.
+///
+/// The program name travels in its own field. `HelloArgs::plugin` on this surface
+/// and `HandshakeArgs::agent` on a role connection name the crate that connected,
+/// which is the thing a protocol or version mismatch is about. Deriving the
+/// instance from the program would collapse the several-instances case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "data")]
 pub enum Mount {
@@ -341,13 +352,13 @@ pub struct ConfigGetArgs {
     pub key: String,
 }
 
-/// `typing`: platform typing indicator for one conversation.
+/// `typing`: platform typing indicator for one conversation. `on` starts the
+/// indicator and `false` stops it, which is the pair a platform API exposes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case", default)]
 pub struct TypingArgs {
     pub conversation: String,
-    /// Seconds the indicator should hold; the platform clamps it.
-    pub seconds: u32,
+    pub on: bool,
 }
 
 /// `detach`: the plugin leaves; the reason is recorded verbatim.
@@ -565,6 +576,7 @@ mod tests {
             generation: 1,
             seq: 14,
             observed: serde_json::json!({"state": "running"}),
+            cluster_ref: None,
         });
         let value = serde_json::to_value(&op).expect("encode");
         assert_eq!(value["op"], "report");
@@ -648,6 +660,7 @@ mod tests {
             generation: 1,
             seq: 14,
             observed: serde_json::json!({"state": "running"}),
+            cluster_ref: None,
         }));
         let value = serde_json::to_value(&plugin).expect("encode plugin op");
         assert_eq!(value["op"], "report");

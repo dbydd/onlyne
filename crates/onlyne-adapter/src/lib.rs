@@ -4,19 +4,22 @@
 //! platform gateways on server sockets.
 
 pub mod conn {
-    pub use super::{AdapterClient, AdapterError, AdapterIo, AdapterServer, IncomingFrame, Result, ServerConnection};
+    pub use super::{
+        AdapterClient, AdapterError, AdapterIo, AdapterServer, IncomingFrame, Result,
+        ServerConnection,
+    };
 }
 
 pub mod handshake {
-    pub use super::{reject_late_hello, AdapterServer, HELLO_TIMEOUT};
+    pub use super::{AdapterServer, HELLO_TIMEOUT, reject_late_hello};
 }
 
 pub mod caps {
-    pub use super::{degrade_for, CapabilitySet, HostGap};
+    pub use super::{CapabilitySet, HostGap, degrade_for};
 }
 
 pub mod report {
-    pub use super::{accept_report_generation, ReportSender};
+    pub use super::{ReportSender, accept_report_generation};
 }
 
 pub mod dispatch {
@@ -24,7 +27,10 @@ pub mod dispatch {
 }
 
 pub mod plugin;
-pub use plugin::{AdapterHealth, GatewayHost, GatewayPlugin, OnboardingKind, OnboardingPrompt, Outbound, SendReceipt};
+pub use plugin::{
+    AdapterHealth, GatewayHost, GatewayPlugin, OnboardingKind, OnboardingPrompt, Outbound,
+    SendReceipt,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -39,11 +45,10 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use onlyne_frame::{read_frame, write_frame};
 use onlyne_proto::{
-    AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, ConfigGetArgs, Delivery,
-    DetachArgs, Envelope, ErrorCode, GatewayHealth, GatewayMount, HELLO_REQUIRED_MESSAGE,
-    HealthArgs, HostOp, ImagePart, Outcome,
-    PluginOp, Principal, Receipt, RegisterChannelArgs, Report, RenderSendArgs, ResBody,
-    SessionRegisterArgs, TypingArgs,
+    AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, ConfigGetArgs, Delivery, DetachArgs,
+    Envelope, ErrorCode, GatewayHealth, GatewayMount, HELLO_REQUIRED_MESSAGE, HealthArgs, HostOp,
+    ImagePart, Outcome, PluginOp, Principal, Receipt, RegisterChannelArgs, RenderSendArgs, Report,
+    ResBody, SessionRegisterArgs, TypingArgs,
 };
 pub use onlyne_proto::{Capability, HelloAck, HelloArgs, Mount, MountKind, PROTOCOL_VERSION};
 use serde_json::{Value, json};
@@ -55,17 +60,17 @@ use tracing::warn;
 
 pub mod prelude {
     pub use crate::{
-        accept_report_generation, degrade_for, AdapterClient, AdapterError, AdapterHealth,
-        AdapterIo, AdapterServer, AgentHandle, AgentSurface, CapabilitySet, GatewayHandle,
-        GatewayHost, GatewayPlugin, Host, HostDispatcher, HostGap, IncomingFrame, MountKind,
-        OnboardingKind, OnboardingPrompt, Outbound, ReportSender, SendReceipt, SurfaceGap,
-        SurfaceGaps, WakeUser,
+        AdapterClient, AdapterError, AdapterHealth, AdapterIo, AdapterServer, AgentHandle,
+        AgentSurface, CapabilitySet, GatewayHandle, GatewayHost, GatewayPlugin, Host,
+        HostDispatcher, HostGap, IncomingFrame, MountKind, OnboardingKind, OnboardingPrompt,
+        Outbound, ReportSender, SendReceipt, SurfaceGap, SurfaceGaps, WakeUser,
+        accept_report_generation, degrade_for,
     };
     pub use onlyne_proto::{
         AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, ByeNotice, Capability, ConfigGetArgs,
         Delivery, DetachArgs, Envelope, ErrorCode, GatewayHealth, GatewayMount, HealthArgs,
         HelloAck, HelloArgs, HostOp, Mount, Outcome, PluginOp, Principal, Receipt, RecycleArgs,
-        RegisterChannelArgs, Report, RenderSendArgs, ResBody, ServerInfo, SessionRegisterArgs,
+        RegisterChannelArgs, RenderSendArgs, Report, ResBody, ServerInfo, SessionRegisterArgs,
         TypingArgs,
     };
 }
@@ -230,7 +235,12 @@ impl AdapterIo {
         let (incoming_tx, incoming_rx) = mpsc::channel(128);
         let pending = Arc::new(Mutex::new(HashMap::new()));
         tokio::spawn(writer_loop(writer, rx, write_timeout));
-        tokio::spawn(reader_loop(reader, read_timeout, pending.clone(), incoming_tx));
+        tokio::spawn(reader_loop(
+            reader,
+            read_timeout,
+            pending.clone(),
+            incoming_tx,
+        ));
         (
             AdapterIo {
                 tx,
@@ -375,7 +385,11 @@ async fn reader_loop<R>(
                 }
             }
             msg => {
-                if incoming.send(IncomingFrame { id, reply_to, msg }).await.is_err() {
+                if incoming
+                    .send(IncomingFrame { id, reply_to, msg })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -445,8 +459,14 @@ impl AdapterServer {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
         F: FnOnce(&HelloArgs) -> std::result::Result<HelloAck, (ErrorCode, String)> + Send,
     {
-        Self::accept_with_timeouts(stream, DEFAULT_READ_TIMEOUT, DEFAULT_WRITE_TIMEOUT, None, welcome)
-            .await
+        Self::accept_with_timeouts(
+            stream,
+            DEFAULT_READ_TIMEOUT,
+            DEFAULT_WRITE_TIMEOUT,
+            None,
+            welcome,
+        )
+        .await
     }
 
     pub async fn accept_with_timeouts<S, F>(
@@ -561,7 +581,8 @@ impl AdapterServer {
         timeout(DEFAULT_WRITE_TIMEOUT, write_frame(&mut stream, &wire))
             .await
             .map_err(|_| AdapterError::Timeout("write"))??;
-        let (io, inbound) = AdapterIo::new_with_inbound(stream, DEFAULT_READ_TIMEOUT, DEFAULT_WRITE_TIMEOUT);
+        let (io, inbound) =
+            AdapterIo::new_with_inbound(stream, DEFAULT_READ_TIMEOUT, DEFAULT_WRITE_TIMEOUT);
         Ok(ServerConnection {
             hello,
             ack,
@@ -583,7 +604,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     tokio::time::sleep(HELLO_TIMEOUT).await;
-    if let Ok(Ok(Some(_))) = timeout(Duration::from_millis(1), read_frame::<_, WireMessage>(&mut stream)).await {
+    if let Ok(Ok(Some(_))) = timeout(
+        Duration::from_millis(1),
+        read_frame::<_, WireMessage>(&mut stream),
+    )
+    .await
+    {
         if let Some(pid) = peer_pid {
             warn!(peer_pid = pid, "adapter hello timeout elapsed");
         } else {
@@ -630,7 +656,11 @@ impl CapabilitySet {
         if missing.is_empty() {
             Ok(())
         } else {
-            let names = missing.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            let names = missing
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             Err((ErrorCode::Forbidden, format!("missing capability: {names}")))
         }
     }
@@ -707,12 +737,19 @@ impl ReportSender {
         *self.session_id.lock().await = Some(session_id.into());
     }
 
-    pub async fn ready(&self, task_id: impl Into<String>, session_id: impl Into<String>) -> Result<Report> {
+    pub async fn ready(
+        &self,
+        task_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Result<Report> {
         let report = Report::Ready {
             task_id: task_id.into(),
             session_id: session_id.into(),
             generation: self.generation(),
             seq: self.next_seq(),
+            // A local report has no origin cluster; a connection speaking for a
+            // sub-cluster carries that name in `hello`'s `Mount::Cluster`.
+            cluster_ref: None,
         };
         self.send(report.clone()).await?;
         Ok(report)
@@ -724,23 +761,35 @@ impl ReportSender {
             generation: self.generation(),
             seq: self.next_seq(),
             observed,
+            cluster_ref: None,
         };
         self.send(report.clone()).await?;
         Ok(report)
     }
 
-    pub async fn complete(&self, task_id: impl Into<String>, outcome: Outcome, head: Option<String>) -> Result<Report> {
+    pub async fn complete(
+        &self,
+        task_id: impl Into<String>,
+        outcome: Outcome,
+        head: Option<String>,
+    ) -> Result<Report> {
         let report = Report::Complete {
             task_id: task_id.into(),
             outcome,
             head,
             reply_to: None,
+            cluster_ref: None,
         };
         self.send(report.clone()).await?;
         Ok(report)
     }
 
-    pub async fn fault(&self, task_id: Option<String>, kind: impl Into<String>, reason: impl Into<String>) -> Result<Report> {
+    pub async fn fault(
+        &self,
+        task_id: Option<String>,
+        kind: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<Report> {
         let report = Report::Fault {
             task_id,
             session_id: self.session_id.lock().await.clone(),
@@ -779,15 +828,30 @@ pub trait Host: Send + Sync {
         Err((ErrorCode::UnknownOp, "report is unsupported".to_string()))
     }
 
-    async fn session_register(&self, _args: &SessionRegisterArgs) -> std::result::Result<(), (ErrorCode, String)> {
-        Err((ErrorCode::UnknownOp, "session_register is unsupported".to_string()))
+    async fn session_register(
+        &self,
+        _args: &SessionRegisterArgs,
+    ) -> std::result::Result<(), (ErrorCode, String)> {
+        Err((
+            ErrorCode::UnknownOp,
+            "session_register is unsupported".to_string(),
+        ))
     }
 
-    async fn assign_ack(&self, _ack: &AssignAckArgs) -> std::result::Result<(), (ErrorCode, String)> {
-        Err((ErrorCode::UnknownOp, "assign_ack is unsupported".to_string()))
+    async fn assign_ack(
+        &self,
+        _ack: &AssignAckArgs,
+    ) -> std::result::Result<(), (ErrorCode, String)> {
+        Err((
+            ErrorCode::UnknownOp,
+            "assign_ack is unsupported".to_string(),
+        ))
     }
 
-    async fn send(&self, _envelope: &Envelope) -> std::result::Result<Receipt, (ErrorCode, String)> {
+    async fn send(
+        &self,
+        _envelope: &Envelope,
+    ) -> std::result::Result<Receipt, (ErrorCode, String)> {
         Err((ErrorCode::UnknownOp, "send is unsupported".to_string()))
     }
 
@@ -795,8 +859,14 @@ pub trait Host: Send + Sync {
         Err((ErrorCode::UnknownOp, "deliver is unsupported".to_string()))
     }
 
-    async fn register_channel(&self, _args: &RegisterChannelArgs) -> std::result::Result<(), (ErrorCode, String)> {
-        Err((ErrorCode::UnknownOp, "register_channel is unsupported".to_string()))
+    async fn register_channel(
+        &self,
+        _args: &RegisterChannelArgs,
+    ) -> std::result::Result<(), (ErrorCode, String)> {
+        Err((
+            ErrorCode::UnknownOp,
+            "register_channel is unsupported".to_string(),
+        ))
     }
 
     async fn health(&self, _args: &HealthArgs) -> std::result::Result<(), (ErrorCode, String)> {
@@ -832,21 +902,39 @@ where
         result_to_body(match op {
             PluginOp::Hello(args) => self.host.hello(&args).await.map(|ack| json!(ack)),
             PluginOp::Report(report) => self.host.report(&report).await.map(|_| Value::Null),
-            PluginOp::SessionRegister(args) => self.host.session_register(&args).await.map(|_| Value::Null),
+            PluginOp::SessionRegister(args) => {
+                self.host.session_register(&args).await.map(|_| Value::Null)
+            }
             PluginOp::AssignAck(ack) => self.host.assign_ack(&ack).await.map(|_| Value::Null),
             PluginOp::Send(envelope) => match envelope.validate() {
-                Ok(()) => self.host.send(&envelope).await.map(|receipt| json!(receipt)),
-                Err(err) => return ResBody::err(ErrorCode::Invalid, err.message().to_string(), Some(err.field().to_string())),
+                Ok(()) => self
+                    .host
+                    .send(&envelope)
+                    .await
+                    .map(|receipt| json!(receipt)),
+                Err(err) => {
+                    return ResBody::err(
+                        ErrorCode::Invalid,
+                        err.message().to_string(),
+                        Some(err.field().to_string()),
+                    );
+                }
             },
             PluginOp::Deliver(delivery) => self.host.deliver(&delivery).await.map(|_| Value::Null),
-            PluginOp::RegisterChannel(args) => self.host.register_channel(&args).await.map(|_| Value::Null),
+            PluginOp::RegisterChannel(args) => {
+                self.host.register_channel(&args).await.map(|_| Value::Null)
+            }
             PluginOp::Health(args) => self.host.health(&args).await.map(|_| Value::Null),
             PluginOp::Typing(args) => self.host.typing(&args).await.map(|_| Value::Null),
             PluginOp::Detach(args) => self.host.detach(&args).await.map(|_| Value::Null),
         })
     }
 
-    pub async fn serve(&self, io: AdapterIo, mut inbound: mpsc::Receiver<IncomingFrame>) -> Result<()> {
+    pub async fn serve(
+        &self,
+        io: AdapterIo,
+        mut inbound: mpsc::Receiver<IncomingFrame>,
+    ) -> Result<()> {
         while let Some(frame) = inbound.recv().await {
             if let AdapterMsg::Plugin(op) = frame.msg {
                 let body = self.dispatch(op).await;
@@ -883,7 +971,11 @@ where
         if allowed {
             Ok(())
         } else {
-            Err(format!("op {} forbidden on {:?} mount", op.name(), self.mount))
+            Err(format!(
+                "op {} forbidden on {:?} mount",
+                op.name(),
+                self.mount
+            ))
         }
     }
 }
@@ -970,7 +1062,9 @@ impl AgentHandle {
             Some(frame) => match frame.msg {
                 AdapterMsg::Host(op) => Ok(op),
                 AdapterMsg::Res(body) => Err(AdapterError::Protocol(body)),
-                AdapterMsg::Plugin(_) => Err(AdapterError::Unexpected("plugin op on client inbound".to_string())),
+                AdapterMsg::Plugin(_) => Err(AdapterError::Unexpected(
+                    "plugin op on client inbound".to_string(),
+                )),
             },
             None => Err(AdapterError::Closed),
         }
@@ -1005,7 +1099,11 @@ impl AgentHandle {
         self.reports.heartbeat(task_id, observed).await.map(|_| ())
     }
 
-    pub async fn recycle_ack(&self, task_id: impl Into<String>, reason: impl Into<String>) -> Result<()> {
+    pub async fn recycle_ack(
+        &self,
+        task_id: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<()> {
         self.reports
             .fault(Some(task_id.into()), "recycle_ack", reason.into())
             .await
@@ -1014,23 +1112,43 @@ impl AgentHandle {
 
     pub async fn config_get(&self, key: impl Into<String>) -> Result<Value> {
         self.io
-            .request_ok(AdapterMsg::Host(HostOp::ConfigGet(ConfigGetArgs { key: key.into() })))
+            .request_ok(AdapterMsg::Host(HostOp::ConfigGet(ConfigGetArgs {
+                key: key.into(),
+            })))
             .await
     }
 
-    pub async fn report_ready(&self, task_id: impl Into<String>, session_id: impl Into<String>) -> Result<Report> {
+    pub async fn report_ready(
+        &self,
+        task_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Result<Report> {
         self.reports.ready(task_id, session_id).await
     }
 
-    pub async fn report_heartbeat(&self, task_id: impl Into<String>, observed: Value) -> Result<Report> {
+    pub async fn report_heartbeat(
+        &self,
+        task_id: impl Into<String>,
+        observed: Value,
+    ) -> Result<Report> {
         self.reports.heartbeat(task_id, observed).await
     }
 
-    pub async fn report_complete(&self, task_id: impl Into<String>, outcome: Outcome, head: Option<String>) -> Result<Report> {
+    pub async fn report_complete(
+        &self,
+        task_id: impl Into<String>,
+        outcome: Outcome,
+        head: Option<String>,
+    ) -> Result<Report> {
         self.reports.complete(task_id, outcome, head).await
     }
 
-    pub async fn report_fault(&self, task_id: Option<String>, kind: impl Into<String>, reason: impl Into<String>) -> Result<Report> {
+    pub async fn report_fault(
+        &self,
+        task_id: Option<String>,
+        kind: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<Report> {
         self.reports.fault(task_id, kind, reason).await
     }
 
@@ -1120,7 +1238,9 @@ impl GatewayHandle {
             Some(frame) => match frame.msg {
                 AdapterMsg::Host(op) => Ok(op),
                 AdapterMsg::Res(body) => Err(AdapterError::Protocol(body)),
-                AdapterMsg::Plugin(_) => Err(AdapterError::Unexpected("plugin op on gateway inbound".to_string())),
+                AdapterMsg::Plugin(_) => Err(AdapterError::Unexpected(
+                    "plugin op on gateway inbound".to_string(),
+                )),
             },
             None => Err(AdapterError::Closed),
         }
@@ -1146,7 +1266,12 @@ impl GatewayHandle {
         }
     }
 
-    pub async fn health(&self, state: GatewayHealth, detail: Option<String>, uptime_s: u64) -> Result<()> {
+    pub async fn health(
+        &self,
+        state: GatewayHealth,
+        detail: Option<String>,
+        uptime_s: u64,
+    ) -> Result<()> {
         let mut args = HealthArgs::from(state);
         args.detail = detail;
         args.uptime_s = uptime_s;
@@ -1156,11 +1281,15 @@ impl GatewayHandle {
             .map(|_| ())
     }
 
-    pub async fn typing(&self, conversation: impl Into<String>, seconds: u32) -> Result<()> {
+    /// Report the platform typing state for one conversation.
+    ///
+    /// The indicator travels as a state, so a caller that only turns it on
+    /// leaves a stuck indicator on the platform.
+    pub async fn typing(&self, conversation: impl Into<String>, on: bool) -> Result<()> {
         self.io
             .request_ok(AdapterMsg::Plugin(PluginOp::Typing(TypingArgs {
                 conversation: conversation.into(),
-                seconds,
+                on,
             })))
             .await
             .map(|_| ())
@@ -1177,14 +1306,19 @@ impl GatewayHandle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SurfaceGap {
     Unsupported(&'static str),
-    Failed { member: &'static str, reason: String },
+    Failed {
+        member: &'static str,
+        reason: String,
+    },
 }
 
 impl fmt::Display for SurfaceGap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SurfaceGap::Unsupported(member) => write!(f, "unsupported surface member: {member}"),
-            SurfaceGap::Failed { member, reason } => write!(f, "surface member {member} failed: {reason}"),
+            SurfaceGap::Failed { member, reason } => {
+                write!(f, "surface member {member} failed: {reason}")
+            }
         }
     }
 }
@@ -1351,9 +1485,18 @@ mod tests {
     #[test]
     fn degrade_covers_required_gaps() {
         assert!(degrade_for(&[]).is_empty());
-        assert_eq!(degrade_for(&[Capability::Recycle])[0].action, "recycle missing means the host judges resource loss through probe");
-        assert_eq!(degrade_for(&[Capability::Report])[0].action, "report missing means the affected session moves to idle_fault with a recorded fault");
-        assert_eq!(degrade_for(&[Capability::Inject])[0].action, "assign missing means the payload travels through process stdin or argv and the terminal state comes from the exit code plus the last output line");
+        assert_eq!(
+            degrade_for(&[Capability::Recycle])[0].action,
+            "recycle missing means the host judges resource loss through probe"
+        );
+        assert_eq!(
+            degrade_for(&[Capability::Report])[0].action,
+            "report missing means the affected session moves to idle_fault with a recorded fault"
+        );
+        assert_eq!(
+            degrade_for(&[Capability::Inject])[0].action,
+            "assign missing means the payload travels through process stdin or argv and the terminal state comes from the exit code plus the last output line"
+        );
     }
 
     #[test]
@@ -1367,7 +1510,9 @@ mod tests {
     #[test]
     fn capability_require_names_missing() {
         let set = CapabilitySet::new(vec![Capability::Report]);
-        let err = set.require(&[Capability::Report, Capability::Recycle]).unwrap_err();
+        let err = set
+            .require(&[Capability::Report, Capability::Recycle])
+            .unwrap_err();
         assert_eq!(err.0, ErrorCode::Forbidden);
         assert!(err.1.contains("recycle"));
     }
@@ -1375,15 +1520,24 @@ mod tests {
     #[tokio::test]
     async fn pre_hello_frame_is_rejected() {
         let (client, server) = tokio::io::duplex(4096);
-        let server_task = tokio::spawn(async move { AdapterServer::accept(server, |_| Ok(ack())).await });
+        let server_task =
+            tokio::spawn(async move { AdapterServer::accept(server, |_| Ok(ack())).await });
         let io = AdapterIo::new(client, Duration::from_secs(1), Duration::from_secs(1));
         let body = io
-            .request(AdapterMsg::Plugin(PluginOp::Send(Box::new(envelope("early")))))
+            .request(AdapterMsg::Plugin(PluginOp::Send(Box::new(envelope(
+                "early",
+            )))))
             .await
             .expect("pre hello response");
         assert!(!body.ok);
-        assert_eq!(body.error.as_ref().map(|e| e.code), Some(ErrorCode::Unauthorized));
-        assert_eq!(body.error.as_ref().map(|e| e.message.as_str()), Some(HELLO_REQUIRED_MESSAGE));
+        assert_eq!(
+            body.error.as_ref().map(|e| e.code),
+            Some(ErrorCode::Unauthorized)
+        );
+        assert_eq!(
+            body.error.as_ref().map(|e| e.message.as_str()),
+            Some(HELLO_REQUIRED_MESSAGE)
+        );
         let server_err = match server_task.await.expect("server task") {
             Ok(_) => panic!("server accepted pre-hello frame"),
             Err(err) => err,
@@ -1395,11 +1549,17 @@ mod tests {
 
     #[async_trait]
     impl Host for SendHost {
-        async fn hello(&self, _args: &HelloArgs) -> std::result::Result<HelloAck, (ErrorCode, String)> {
+        async fn hello(
+            &self,
+            _args: &HelloArgs,
+        ) -> std::result::Result<HelloAck, (ErrorCode, String)> {
             Ok(ack())
         }
 
-        async fn send(&self, envelope: &Envelope) -> std::result::Result<Receipt, (ErrorCode, String)> {
+        async fn send(
+            &self,
+            envelope: &Envelope,
+        ) -> std::result::Result<Receipt, (ErrorCode, String)> {
             Ok(Receipt {
                 msg_id: envelope.id.clone(),
                 op_id: envelope.op_id.clone(),
@@ -1415,7 +1575,9 @@ mod tests {
     #[tokio::test]
     async fn dispatcher_rejects_gateway_op_on_agent_mount() {
         let dispatcher = HostDispatcher::new(MountKind::Agent, Arc::new(SendHost));
-        let body = dispatcher.dispatch(PluginOp::Health(HealthArgs::default())).await;
+        let body = dispatcher
+            .dispatch(PluginOp::Health(HealthArgs::default()))
+            .await;
         assert!(!body.ok);
         let error = body.error.expect("error");
         assert_eq!(error.code, ErrorCode::Forbidden);

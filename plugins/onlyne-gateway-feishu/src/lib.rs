@@ -50,6 +50,8 @@ pub const CHANNEL: &str = "feishu";
 /// cleanly instead of half-parsed.
 pub const SUPPORTED_MESSAGE_TYPES: [&str; 2] = ["text", "post"];
 
+/// The 2 MiB decoded-image ceiling, from the shared protocol.
+pub const IMAGE_MAX_BYTES: usize = IMAGE_DATA_MAX_BYTES;
 
 /// Default role inbound Feishu messages are addressed to when the host does
 /// not supply one.
@@ -309,22 +311,24 @@ fn inbound_event(
             "feishu message has no readable text".to_string(),
         )
     })?;
+
     let external_id = msg
         .message_id
         .clone()
-        .or_else(|| ev.header.event_id.clone())
-        .unwrap_or_else(|| "feishu-in".to_string());
-
+        .or_else(|| ev.header.event_id.clone());
     let from = Principal::gateway(
         gateway_id.to_string(),
         CHANNEL.to_string(),
-        Some(conversation),
+        Some(conversation.clone()),
     );
     let to = Principal::role(target_role.to_string());
-    let (msg_kind, causality) = match kind {
+    let (msg_kind, mut causality) = match kind {
         InboundKind::Note => (MsgKind::Note, None),
         InboundKind::Task => (MsgKind::Task, Some(Causality::root(new_task_id()))),
     };
+    if let (Some(chain), Some(external_id)) = (causality.as_mut(), external_id.as_deref()) {
+        chain.reply_to = Some(gateway_ref(CHANNEL, &conversation, external_id, None));
+    }
     new_envelope(msg_kind, from, to, Body::text(text), causality)
         .map_err(|e| AdapterError::new(ErrorCode::Invalid, format!("feishu envelope: {e}")))
 }
@@ -785,6 +789,7 @@ impl FeishuPlugin {
         &self.refs
     }
 
+    #[allow(deprecated)]
     fn lark_config(&self) -> Result<open_lark::Config, AdapterError> {
         #[allow(deprecated)]
         open_lark::Config::builder()
@@ -869,7 +874,7 @@ impl GatewayPlugin for FeishuPlugin {
                     match inbound_event(&ev, "feishu", DEFAULT_TARGET_ROLE, InboundKind::Note) {
                         Ok(envelope) => {
                             if let (Some(conversation), Some(external_id)) = (
-                                envelope.from_gateway_conversation().map(str::to_string),
+                                gateway_conversation(&envelope).map(str::to_string),
                                 external_id,
                             ) {
                                 self.refs.insert(GatewayRef {
@@ -941,10 +946,7 @@ impl GatewayPlugin for FeishuPlugin {
         Ok(Some(OnboardingPrompt {
             kind: OnboardingKind::ManualCode,
             payload: format!(
-                "Create a Feishu custom app at {}/app, grant im:message and im:resource "
-                    + "permissions, then export {APP_ID_ENV} and {APP_SECRET_ENV} "
-                    + "(set {DOMAIN_ENV}=https://open.larksuite.com for Lark International).",
-                DEFAULT_DOMAIN
+                "Create a Feishu custom app at {DEFAULT_DOMAIN}/app, grant im:message and im:resource permissions, then export {APP_ID_ENV} and {APP_SECRET_ENV} (set {DOMAIN_ENV}=https://open.larksuite.com for Lark International)."
             ),
             expires_in: None,
         }))
@@ -1024,18 +1026,19 @@ impl FeishuPlugin {
     }
 }
 
-impl Envelope {
-    fn from_gateway_conversation(&self) -> Option<&str> {
-        match &self.from {
-            Principal::Gateway {
-                conversation: Some(c),
-                ..
-            } => Some(c),
-            _ => None,
-        }
+fn gateway_conversation(envelope: &Envelope) -> Option<&str> {
+    match &envelope.from {
+        Principal::Gateway {
+            conversation: Some(c),
+            ..
+        } => Some(c),
+        _ => None,
     }
 }
 
+// The open_lark WebSocket client takes its own deprecated config type until
+// the upstream client builder replaces it.
+#[allow(deprecated)]
 fn spawn_websocket(config: open_lark::Config) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     tokio::spawn(async move {
@@ -1053,4 +1056,135 @@ fn spawn_websocket(config: open_lark::Config) -> tokio::sync::mpsc::UnboundedRec
     rx
 }
 
-use base64::engine::general_purpose::STANDARD_URL_SAFE_NO_PAD;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onlyne_adapter::plugin::Outbound;
+    use onlyne_proto::ImagePart;
+
+    fn text_event() -> Value {
+        json!({
+            "header": {"event_id": "evt-1", "event_type": "im.message.receive_v1"},
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou_user"}},
+                "message": {
+                    "message_id": "om_1",
+                    "message_type": "text",
+                    "chat_type": "p2p",
+                    "chat_id": "oc_hidden",
+                    "content": "{\"text\":\"hi\"}"
+                }
+            }
+        })
+    }
+
+    fn plain_outbound() -> Outbound {
+        Outbound {
+            conversation: "oc_group".into(),
+            text: "hello".into(),
+            image: None,
+            reply_to: None,
+            kind: MsgKind::Note,
+        }
+    }
+
+    #[test]
+    fn inbound_text_maps_to_gateway_note() {
+        let env = inbound_update(&text_event(), "gw", "planner", InboundKind::Note)
+            .expect("inbound text");
+        assert_eq!(env.kind, MsgKind::Note);
+        match &env.from {
+            Principal::Gateway {
+                gateway,
+                channel,
+                conversation,
+            } => {
+                assert_eq!(gateway, "gw");
+                assert_eq!(channel, CHANNEL);
+                assert_eq!(conversation.as_deref(), Some("ou_user"));
+            }
+            other => panic!("unexpected from: {other:?}"),
+        }
+        assert_eq!(env.body.text.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn inbound_task_carries_causality() {
+        let env = inbound_update(&text_event(), "gw", "planner", InboundKind::Task)
+            .expect("inbound task");
+        assert_eq!(env.kind, MsgKind::Task);
+        assert!(env.causality.is_some());
+    }
+
+    #[test]
+    fn outbound_plain_text_routes_to_text_request() {
+        let request = outbound_request(&plain_outbound()).expect("text request");
+        assert_eq!(request["msg_type"], Value::String("text".into()));
+        assert_eq!(request["receive_id"], Value::String("oc_group".into()));
+        assert!(request["content"].as_str().unwrap().contains("hello"));
+    }
+
+    #[test]
+    fn outbound_markdown_routes_to_interactive_card() {
+        let msg = Outbound {
+            text: "# hi\n\n**bold**".into(),
+            ..plain_outbound()
+        };
+        let request = outbound_request(&msg).expect("card request");
+        assert_eq!(request["msg_type"], Value::String("interactive".into()));
+        let card: Value =
+            serde_json::from_str(request["content"].as_str().unwrap()).expect("card json");
+        assert_eq!(
+            card.pointer("/header/title/content")
+                .and_then(Value::as_str),
+            Some("hi")
+        );
+    }
+
+    #[test]
+    fn gateway_ref_round_trip() {
+        let encoded = gateway_ref("feishu", "oc_group", "om_1", Some("reply"));
+        let decoded = parse_gateway_ref(&encoded).expect("decode");
+        assert_eq!(
+            decoded,
+            GatewayRef {
+                channel: "feishu".into(),
+                conversation: "oc_group".into(),
+                external_id: "om_1".into(),
+                scene: Some("reply".into()),
+            }
+        );
+        let mut table = GatewayRefTable::new();
+        let stored = table.insert(decoded.clone());
+        assert_eq!(table.by_external("om_1"), Some(&decoded));
+        assert_eq!(table.by_conversation("feishu", "oc_group"), Some(&decoded));
+        assert_eq!(parse_gateway_ref(&stored), Some(decoded));
+        assert!(parse_gateway_ref("not-a-ref").is_none());
+    }
+
+    #[test]
+    fn unsupported_message_type_is_clean_error() {
+        let mut payload = text_event();
+        payload["event"]["message"]["message_type"] = Value::String("image".into());
+        let err = inbound_update(&payload, "gw", "planner", InboundKind::Note).unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported message type"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn oversized_image_rejected_before_upload() {
+        let big = vec![0u8; IMAGE_MAX_BYTES + 1];
+        let msg = Outbound {
+            image: Some(ImagePart {
+                data_base64: base64::engine::general_purpose::STANDARD.encode(&big),
+                mime: "image/png".into(),
+                name: None,
+            }),
+            ..plain_outbound()
+        };
+        let err = outbound_parts(&msg).unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+}

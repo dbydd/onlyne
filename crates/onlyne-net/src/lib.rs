@@ -10,11 +10,17 @@ pub mod handshake;
 pub mod identity;
 pub mod tls;
 
-pub use acl::{AclDeny, AclDenyReason, AclTable, MsgClass, RoleAcl, acl_allows, table_from};
+pub use acl::{
+    AclDeny, AclDenyReason, AclEdge, AclTable, MsgClass, RoleAcl, acl_allows, table_from,
+};
 pub use backoff::Backoff;
-pub use conn::{TcpListen, TlsConn};
+pub use conn::{
+    CLOSE_REASON, ClientConn, ConnHandle, ConnReadiness, ConnSettings, DEFAULT_RESYNC_LAG,
+    GatewayConn, OUTBOUND_QUEUE_DEPTH, RESYNC_LAG_KIND, TcpListen, TlsConn, dial, is_permanent,
+    resync_lag_of,
+};
 pub use handshake::{
-    Challenge, HandshakeOk, HelloAck, accept, accept_with_timeout, offer, offer_with_timeout,
+    Challenge, HandshakeOk, HelloAck, accept, accept_with_timeout, connect, connect_with_timeout,
 };
 pub use identity::{KEY_PREFIX, KeyPair, challenge_message, parse_public};
 pub use tls::{
@@ -44,37 +50,33 @@ mod tests {
         let sender = KeyPair::from_seed([1; 32]);
         let target = KeyPair::from_seed([2; 32]);
         let other = KeyPair::from_seed([3; 32]);
-        let table = table_from([
-            (
-                "sender".to_string(),
-                sender.public_str(),
-                false,
-                vec!["*".to_string()],
-                vec!["target".to_string()],
-            ),
-            (
-                "target".to_string(),
-                target.public_str(),
-                false,
-                vec!["sender".to_string()],
-                vec![],
-            ),
-            (
-                "admin".to_string(),
-                other.public_str(),
-                true,
-                vec!["*".to_string()],
-                vec!["*".to_string()],
-            ),
-        ])
+        let edge = |from: &str, to: &str, class: MsgClass, admin: bool| AclEdge {
+            from: from.to_string(),
+            to: to.to_string(),
+            class,
+            admin,
+        };
+        let mut edges = Vec::new();
+        for class in [MsgClass::Any, MsgClass::Note, MsgClass::Control] {
+            edges.push(edge("sender", "target", class, false));
+            edges.push(edge("admin", "admin", class, true));
+        }
+        let table = AclTable::new(
+            [
+                ("sender".to_string(), sender.public_str(), false),
+                ("target".to_string(), target.public_str(), false),
+                ("admin".to_string(), other.public_str(), true),
+            ],
+            edges,
+        )
         .unwrap();
-        let deny = acl_allows(&table, "admin", "target", MsgClass::Task, None).unwrap_err();
-        assert_eq!(deny.reason, AclDenyReason::SenderNotAllowed);
-        assert_eq!(deny.field, "from.role");
-        let deny = acl_allows(&table, "sender", "admin", MsgClass::Task, None).unwrap_err();
+        let deny = acl_allows(&table, "admin", "target", MsgClass::Any, None).unwrap_err();
         assert_eq!(deny.reason, AclDenyReason::TargetNotAllowed);
         assert_eq!(deny.field, "to.role");
-        let deny = acl_allows(&table, "sender", "missing", MsgClass::Task, None).unwrap_err();
+        let deny = acl_allows(&table, "sender", "admin", MsgClass::Any, None).unwrap_err();
+        assert_eq!(deny.reason, AclDenyReason::TargetNotAllowed);
+        assert_eq!(deny.field, "to.role");
+        let deny = acl_allows(&table, "sender", "missing", MsgClass::Any, None).unwrap_err();
         assert_eq!(deny.reason, AclDenyReason::UnknownRole);
         assert_eq!(deny.field, "to.role");
         let allowed = acl_allows(&table, "admin", "admin", MsgClass::Control, None);
@@ -115,17 +117,11 @@ mod tests {
     #[tokio::test]
     async fn handshake_round_trip_and_acl_refusal() {
         let key = KeyPair::from_seed([4; 32]);
-        let table = table_from([(
-            "worker".to_string(),
-            key.public_str(),
-            false,
-            vec!["*".to_string()],
-            vec!["*".to_string()],
-        )])
-        .unwrap();
+        let table = AclTable::new([("worker".to_string(), key.public_str(), false)], Vec::new())
+            .unwrap();
         let (mut left, mut right) = duplex(16 * 1024);
         let server = tokio::spawn(async move { accept(&mut left, &table, 1).await });
-        let ack = offer(&mut right, "worker", &key, 1, "agent", "1.0", false)
+        let ack = connect(&mut right, "worker", &key, 1, "agent", "1.0", false)
             .await
             .unwrap();
         assert!(ack.ok);
@@ -137,20 +133,17 @@ mod tests {
         let registered = KeyPair::from_seed([11; 32]);
         let foreign = KeyPair::from_seed([12; 32]);
         let tamper_key = KeyPair::from_seed([13; 32]);
-        let table = table_from([(
-            "worker".to_string(),
-            registered.public_str(),
-            false,
-            vec!["*".to_string()],
-            vec!["*".to_string()],
-        )])
+        let table = AclTable::new(
+            [("worker".to_string(), registered.public_str(), false)],
+            Vec::new(),
+        )
         .unwrap();
         let timeout_limit = Duration::from_secs(5);
 
         let (mut left, mut right) = duplex(16 * 1024);
         let server_table = table.clone();
         let server = tokio::spawn(async move { accept(&mut left, &server_table, 1).await });
-        let error = offer(&mut right, "worker", &foreign, 1, "agent", "1.0", false)
+        let error = connect(&mut right, "worker", &foreign, 1, "agent", "1.0", false)
             .await
             .unwrap_err();
         assert!(matches!(error, NetError::Rejected { code, .. } if code == "unauthorized"));
@@ -165,7 +158,7 @@ mod tests {
         let server = tokio::spawn(async move {
             accept_with_timeout(&mut left, &server_table, 1, timeout_limit).await
         });
-        let error = offer_with_timeout(
+        let error = connect_with_timeout(
             &mut right,
             "worker",
             &tamper_key,
@@ -185,7 +178,7 @@ mod tests {
         let server = tokio::spawn(async move {
             accept_with_timeout(&mut left, &server_table, 1, timeout_limit).await
         });
-        let error = offer_with_timeout(
+        let error = connect_with_timeout(
             &mut right,
             "worker",
             &registered,
@@ -212,18 +205,15 @@ mod tests {
     async fn handshake_rejects_unregistered_key_before_request() {
         let registered = KeyPair::from_seed([31; 32]);
         let foreign = KeyPair::from_seed([32; 32]);
-        let table = table_from([(
-            "worker".to_string(),
-            registered.public_str(),
-            false,
-            vec!["*".to_string()],
-            vec!["*".to_string()],
-        )])
+        let table = AclTable::new(
+            [("worker".to_string(), registered.public_str(), false)],
+            Vec::new(),
+        )
         .unwrap();
         let (mut left, mut right) = duplex(16 * 1024);
         let server_table = table.clone();
         let server = tokio::spawn(async move { accept(&mut left, &server_table, 1).await });
-        let error = offer(&mut right, "worker", &foreign, 1, "agent", "1.0", false)
+        let error = connect(&mut right, "worker", &foreign, 1, "agent", "1.0", false)
             .await
             .unwrap_err();
         assert!(matches!(error, NetError::Rejected { code, .. } if code == "unauthorized"));
@@ -237,13 +227,10 @@ mod tests {
     #[tokio::test]
     async fn handshake_rejects_protocol_version_mismatch() {
         let registered = KeyPair::from_seed([33; 32]);
-        let table = table_from([(
-            "worker".to_string(),
-            registered.public_str(),
-            false,
-            vec!["*".to_string()],
-            vec!["*".to_string()],
-        )])
+        let table = AclTable::new(
+            [("worker".to_string(), registered.public_str(), false)],
+            Vec::new(),
+        )
         .unwrap();
         let timeout_limit = Duration::from_secs(5);
         let (mut left, mut right) = duplex(16 * 1024);
@@ -251,7 +238,7 @@ mod tests {
         let server = tokio::spawn(async move {
             accept_with_timeout(&mut left, &server_table, 1, timeout_limit).await
         });
-        let error = offer_with_timeout(
+        let error = connect_with_timeout(
             &mut right,
             "worker",
             &registered,
@@ -278,13 +265,10 @@ mod tests {
     async fn handshake_rejects_tampered_challenge() {
         use onlyne_frame::{read_frame, write_frame};
         let registered = KeyPair::from_seed([21; 32]);
-        let table = table_from([(
-            "worker".to_string(),
-            registered.public_str(),
-            false,
-            vec!["*".to_string()],
-            vec!["*".to_string()],
-        )])
+        let table = AclTable::new(
+            [("worker".to_string(), registered.public_str(), false)],
+            Vec::new(),
+        )
         .unwrap();
         let (mut left, mut right) = duplex(16 * 1024);
         let server = tokio::spawn(async move { accept(&mut left, &table, 1).await });
@@ -315,13 +299,10 @@ mod tests {
     #[tokio::test]
     async fn handshake_times_out_without_hello() {
         let registered = KeyPair::from_seed([22; 32]);
-        let table = table_from([(
-            "worker".to_string(),
-            registered.public_str(),
-            false,
-            vec!["*".to_string()],
-            vec!["*".to_string()],
-        )])
+        let table = AclTable::new(
+            [("worker".to_string(), registered.public_str(), false)],
+            Vec::new(),
+        )
         .unwrap();
         let (mut left, _right) = duplex(16 * 1024);
         let error = accept_with_timeout(&mut left, &table, 1, Duration::from_millis(50))

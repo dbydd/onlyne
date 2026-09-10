@@ -11,7 +11,7 @@ graph LR
   P[Pi host + onlyne-agent-pi] -->|adapter protocol| C[onlyne-client role workspace]
   D[dsh host + onlyne-agent-dsh] -->|adapter protocol| C
   C -->|TLS frame| S[onlyne-server]
-  S -->|adapter protocol| G[onlyne-gateway telegram feishu qqbot wechat]
+  S -->|adapter protocol| G[onlyne-gateway telegram feishu qqbot weixin]
   G --> H[human IM]
   C2[onlyne-client supervisor role] -->|aggregate role link| SP[parent onlyne-server]
   S --- SADM[admin.sock local]
@@ -46,7 +46,7 @@ cat "$tmp/planner.spec.toml" >> "$tmp/server/.onlyne/spec.toml"
 "$SRC/target/debug/onlyne" --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-Expected result: `send` prints one JSON response with `ok = true`, a UUID task, and `data.state = "in_flight"`; the ledger for that task reaches `acked`, and the session projection reaches `public_lifecycle = "exited"` with `outcome = "done"`. The full init/run/reload/send path is plan-defined; the landed `crates/onlyne-testkit/e2e/local-task.sh` covers server, client, fake agent, and status over `--workspace`.
+Expected result of plan verification case 1: `send` prints one JSON response with `ok = true`, a UUID task, and `data.state = "in_flight"`; the ledger for that task reaches `acked`, and the session projection reaches `public_lifecycle = "exited"` with `outcome = "done"`. The landed `crates/onlyne-testkit/e2e/local-task.sh` drives that sequence against server, client, fake agent, `ledger`, and `sessions`.
 
 ## Directory layout
 
@@ -70,7 +70,7 @@ Role workspace selected by `onlyne-client run --workspace <dir>`:
 ```text
 <workspace>/.onlyne/
   config.toml               # role identity, server endpoint, local plugins
-  client.db                 # sessions, intents, inbox cursors, local caches
+  client.db                 # sessions, intents, out_head and prose caches, local events
   run/s                     # client unix socket for adapter plugins and CLI
   run/client.pid
   logs/client.log
@@ -84,7 +84,7 @@ A legacy workspace layout exits 2 with `onlyne: legacy workspace layout; v1.0.0 
 
 `<server-root>/.onlyne/spec.toml` is the single source of truth for role names, public keys, ACLs, prose, session concurrency, timeouts, routes, gateways, and `session_command`.
 
-`onlyne-server run` fully parses `spec.toml` at startup. Unknown keys and type errors refuse startup with `spec.toml:<line>: <message>`. `onlyne server reload` and `SIGHUP` parse into a temporary config, validate it, then atomically replace the live config. Failed reloads keep the active config and record `fault{kind:"spec_reload_failed"}`. The reload path is plan-defined and lands with the server runtime.
+`onlyne-server run` fully parses `spec.toml` at startup. Unknown keys and type errors refuse startup with `spec.toml:<line>: <message>`. `onlyne reload` and `SIGHUP` parse into a temporary config, validate it, then replace the live spec, the ACL table, and the role rows, and announce `spec_reloaded`. A failed reload records `fault{kind:"spec_reload_failed"}`, keeps the active config, and answers with `invalid`.
 
 Role registration flows through a TOML fragment. `onlyne-client init --workspace W --role R --server-root S` creates `W/.onlyne/keys/role.key`, writes `W/.onlyne/config.toml`, and prints a fragment whose first line is `[[client]]` with `role` and `key = "ed25519/<base64>"`. The operator appends that fragment to `spec.toml` and runs `onlyne reload`.
 

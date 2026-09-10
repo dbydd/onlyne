@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"ev\",\"seq\":41,\"type\":\"role_presence\",\"data\":{\"role\":\"builder\",\"state\":\"draining\",\"sessions\":2}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "role_presence reports draining while a role finishes its sessions"
+}

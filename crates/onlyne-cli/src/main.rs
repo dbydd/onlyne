@@ -4,8 +4,12 @@
 //! `ping`) and bare admin nouns (`status`, `roles`, `sessions`, `ledger`,
 //! `faults`, `watch`, `history`, `spec_diff`, `reload`, `wait-ready`,
 //! `repair`, `cluster export-prose`) share one resolution path: resolve a
-//! socket, write one frame, print one JSON line, return one exit code.
-//! `server`, `client`, `gateway`, and `generate` exec a sibling binary and
+//! socket, write one frame, print one JSON line, return one exit code. The
+//! admin nouns keep that path inside this process, so `onlyne server roles`
+//! and `onlyne roles` issue the same frame.
+//!
+//! `onlyne server init|run|start|stop|status|generate|reload`, `onlyne
+//! client`, and `onlyne gateway run|list|auth` exec a sibling binary and
 //! inherit stdio.
 
 mod admin;
@@ -43,12 +47,12 @@ struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Verb {
-    /// Run the onlyne server, forwarding every remaining argument.
-    Server(RestArgs),
+    /// Run the onlyne server; lifecycle verbs exec, admin nouns query here.
+    Server(ServerCmd),
     /// Run the onlyne client, forwarding every remaining argument.
     Client(RestArgs),
-    /// Run the onlyne gateway, forwarding every remaining argument.
-    Gateway(RestArgs),
+    /// Run the onlyne gateway; platform verbs exec, `status` queries here.
+    Gateway(GatewayCmd),
     /// Deliver a message to a role.
     Send(SendCmd),
     /// Answer an envelope by its msg id.
@@ -98,9 +102,72 @@ enum Verb {
 
 #[derive(clap::Args, Debug, Clone)]
 struct RestArgs {
-    /// Arguments forwarded to the sibling, verbatim.
-    #[arg(trailing_var_arg = true)]
+    /// Arguments forwarded to the sibling, verbatim, flags included.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
+}
+
+/// The `server` group: the lifecycle verbs exec `onlyne-server`, and the
+/// admin query and repair nouns resolve against the admin socket here.
+#[derive(clap::Args, Debug, Clone)]
+struct ServerCmd {
+    #[command(subcommand)]
+    verb: Option<ServerVerb>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum ServerVerb {
+    /// Create the server root and its `[server]` spec template.
+    Init(RestArgs),
+    /// Bind the listeners and serve the cluster.
+    Run(RestArgs),
+    /// Spawn a detached daemon and wait for the admin socket.
+    Start(RestArgs),
+    /// Signal the recorded daemon and wait for it to exit.
+    Stop(RestArgs),
+    /// Report process state for a server root.
+    Status(RestArgs),
+    /// Render role workspaces from the templates under the server root.
+    Generate(RestArgs),
+    /// Re-read the spec on disk.
+    Reload(RestArgs),
+    /// List roles, optionally filtered by `--role`.
+    Roles(AdminRolesCmd),
+    /// List sessions.
+    Sessions(SessionsCmd),
+    /// List ledger rows.
+    Ledger(LedgerCmd),
+    /// List recorded faults.
+    Faults(FaultsCmd),
+    /// Stream event frames; `--follow` keeps the connection open.
+    Watch(WatchCmd),
+    /// Replay recorded envelopes.
+    History(HistoryCmd),
+    /// Drive the recovery verbs.
+    Repair(RepairCmd),
+    /// A verb outside the server vocabulary.
+    #[command(external_subcommand)]
+    Unknown(Vec<String>),
+}
+
+/// The `gateway` group: the platform verbs exec `onlyne-gateway`, and `status`
+/// reads the registered gateways from the admin socket here.
+#[derive(clap::Args, Debug, Clone)]
+struct GatewayCmd {
+    #[command(subcommand)]
+    verb: Option<GatewayVerb>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum GatewayVerb {
+    /// Serve one platform: `run <telegram|feishu|qqbot|weixin>`.
+    Run(RestArgs),
+    /// List the gateways declared under the server root.
+    List(RestArgs),
+    /// Platform onboarding, the former `auth` verb.
+    Auth(RestArgs),
+    /// Report the registered gateways and their capabilities.
+    Status,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -262,9 +329,9 @@ fn run() -> i32 {
     };
     let flags = &cli.flags;
     match verb {
-        Verb::Server(rest) => forward::exec("onlyne-server", &rest.args),
+        Verb::Server(cmd) => server(flags, cmd),
         Verb::Client(rest) => forward::exec("onlyne-client", &rest.args),
-        Verb::Gateway(rest) => forward::exec("onlyne-gateway", &rest.args),
+        Verb::Gateway(cmd) => gateway(flags, cmd),
         Verb::Send(cmd) => verbs::send(flags, &cmd.sender, cmd.args),
         Verb::Reply(cmd) => verbs::reply(flags, &cmd.sender, cmd.args),
         Verb::Complete(cmd) => verbs::complete(flags, &cmd.sender, cmd.args),
@@ -351,6 +418,60 @@ fn generate(flags: &GlobalFlags, cmd: GenerateCmd) -> i32 {
         args.push("--force".to_string());
     }
     forward::exec("onlyne-server", &args)
+}
+
+/// The `server` group. The lifecycle verbs exec `onlyne-server`; the admin
+/// query and repair nouns resolve against the admin socket in this process.
+fn server(flags: &GlobalFlags, cmd: ServerCmd) -> i32 {
+    let Some(verb) = cmd.verb else {
+        return forward::exec("onlyne-server", &[]);
+    };
+    match verb {
+        ServerVerb::Init(rest) => sibling_exec("onlyne-server", "init", &rest),
+        ServerVerb::Run(rest) => sibling_exec("onlyne-server", "run", &rest),
+        ServerVerb::Start(rest) => sibling_exec("onlyne-server", "start", &rest),
+        ServerVerb::Stop(rest) => sibling_exec("onlyne-server", "stop", &rest),
+        ServerVerb::Status(rest) => sibling_exec("onlyne-server", "status", &rest),
+        ServerVerb::Generate(rest) => sibling_exec("onlyne-server", "generate", &rest),
+        ServerVerb::Reload(rest) => sibling_exec("onlyne-server", "reload", &rest),
+        ServerVerb::Roles(cmd) => admin::roles(flags, cmd.args),
+        ServerVerb::Sessions(cmd) => admin::sessions(flags, cmd.args),
+        ServerVerb::Ledger(cmd) => admin::ledger(flags, cmd.args),
+        ServerVerb::Faults(cmd) => admin::faults(flags, cmd.args),
+        ServerVerb::Watch(cmd) => admin::watch(flags, cmd.args),
+        ServerVerb::History(cmd) => admin::history(flags, cmd.args),
+        ServerVerb::Repair(cmd) => admin::repair(flags, cmd.verb),
+        ServerVerb::Unknown(args) => unknown_server_verb(&args),
+    }
+}
+
+/// Run a sibling daemon's `<verb>` with the remaining arguments verbatim,
+/// flags included.
+fn sibling_exec(bin: &str, verb: &str, rest: &RestArgs) -> i32 {
+    let mut args = Vec::with_capacity(rest.args.len() + 1);
+    args.push(verb.to_string());
+    args.extend(rest.args.iter().cloned());
+    forward::exec(bin, &args)
+}
+
+/// The refusal for a verb outside the server vocabulary.
+fn unknown_server_verb(args: &[String]) -> i32 {
+    let name = args.first().map(String::as_str).unwrap_or_default();
+    runtime::usage_error(format!("onlyne: unknown server verb {name}"))
+}
+
+/// The `gateway` group. The platform verbs exec `onlyne-gateway`; `status`
+/// reports the registered gateways, read from `AdminOp::Status`.
+fn gateway(flags: &GlobalFlags, cmd: GatewayCmd) -> i32 {
+    let Some(verb) = cmd.verb else {
+        return forward::exec("onlyne-gateway", &[]);
+    };
+    match verb {
+        GatewayVerb::Run(rest) => sibling_exec("onlyne-gateway", "run", &rest),
+        GatewayVerb::List(rest) => sibling_exec("onlyne-gateway", "list", &rest),
+        GatewayVerb::Auth(rest) => sibling_exec("onlyne-gateway", "auth", &rest),
+        GatewayVerb::Status => admin::status(flags),
+    }
 }
 
 fn main() {

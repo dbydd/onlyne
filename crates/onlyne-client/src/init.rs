@@ -11,6 +11,8 @@ pub struct InitArgs {
     pub workspace: PathBuf,
     pub role: String,
     pub server_root: PathBuf,
+    /// Role control plane text, copied into the printed spec slice (§5).
+    pub prose: String,
 }
 
 fn key_material(path: &Path) -> Result<Vec<u8>> {
@@ -52,7 +54,37 @@ pub async fn init(args: InitArgs) -> Result<String> {
     );
     std::fs::write(workspace.config_path(), config)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&key);
-    Ok(format!("[[client]]\nrole = {:?}\nkey = \"ed25519/{encoded}\"\n", args.role))
+    Ok(fragment(&args.role, &encoded, &args.prose))
+}
+
+/// The `[[client]]` slice `init` prints for `spec.toml`.
+///
+/// The ACL lines make the role deliverable to itself, which is what the
+/// end-to-end script exercises with `send --from planner --to planner`.
+pub fn fragment(role: &str, encoded_key: &str, prose: &str) -> String {
+    let role = toml_string(role);
+    format!(
+        "[[client]]\nrole = {role}\nkey = \"ed25519/{encoded_key}\"\nadmin = false\nmax_sessions = 1\nallowed_senders = [\"*\", {role}]\nallowed_targets = [{role}]\nprose = {prose}\nreuse = true\n",
+        prose = toml_string(prose),
+    )
+}
+
+/// One TOML basic string, with the characters a basic string cannot hold escaped.
+pub fn toml_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 pub fn legacy_error_code() -> i32 { 2 }

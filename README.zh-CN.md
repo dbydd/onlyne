@@ -11,7 +11,7 @@ graph LR
   P[Pi host + onlyne-agent-pi] -->|adapter protocol| C[onlyne-client role workspace]
   D[dsh host + onlyne-agent-dsh] -->|adapter protocol| C
   C -->|TLS frame| S[onlyne-server]
-  S -->|adapter protocol| G[onlyne-gateway telegram feishu qqbot wechat]
+  S -->|adapter protocol| G[onlyne-gateway telegram feishu qqbot weixin]
   G --> H[human IM]
   C2[onlyne-client supervisor role] -->|aggregate role link| SP[parent onlyne-server]
   S --- SADM[admin.sock local]
@@ -46,7 +46,7 @@ cat "$tmp/planner.spec.toml" >> "$tmp/server/.onlyne/spec.toml"
 "$SRC/target/debug/onlyne" --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-期望结果：`send` 输出一行 JSON，`ok = true`，任务为 UUID，`data.state = "in_flight"`；该任务的 ledger 达到 `acked`，session projection 达到 `public_lifecycle = "exited"` 和 `outcome = "done"`。完整的 init/run/reload/send 路径由 plan 定义；已落地的 `crates/onlyne-testkit/e2e/local-task.sh` 覆盖 server、client、fake agent 与 `--workspace` 上的 status。
+Plan verification case 1 的期望结果：`send` 输出一行 JSON，`ok = true`，任务为 UUID，`data.state = "in_flight"`；该任务的 ledger 达到 `acked`，session projection 达到 `public_lifecycle = "exited"` 与 `outcome = "done"`。已落地的 `crates/onlyne-testkit/e2e/local-task.sh` 按该顺序驱动 server、client、fake agent、`ledger` 与 `sessions`。
 
 ## Directory layout
 
@@ -70,7 +70,7 @@ cat "$tmp/planner.spec.toml" >> "$tmp/server/.onlyne/spec.toml"
 ```text
 <workspace>/.onlyne/
   config.toml               # role 身份、server endpoint、本地 plugins
-  client.db                 # sessions、intents、inbox cursors、本地 caches
+  client.db                 # sessions、intents、out_head 与 prose caches、本地 events
   run/s                     # client unix socket，供 adapter plugins 与 CLI 使用
   run/client.pid
   logs/client.log
@@ -84,7 +84,7 @@ Legacy workspace layout 以 exit 2 结束，并输出 `onlyne: legacy workspace 
 
 `<server-root>/.onlyne/spec.toml` 是 role 名、公钥、ACL、prose、session concurrency、timeouts、routes、gateways、`session_command` 的单一真相。
 
-`onlyne-server run` 在启动时完整解析 `spec.toml`。任何未知键或类型错误会拒绝启动，并输出 `spec.toml:<line>: <message>`。`onlyne server reload` 和 `SIGHUP` 会解析到临时 config，校验通过后原子替换 live config。校验失败会保留 active config，并记录 `fault{kind:"spec_reload_failed"}`。reload 路径由 plan 定义，随 server runtime 落地。
+`onlyne-server run` 在启动时完整解析 `spec.toml`。任何未知键或类型错误会拒绝启动，并输出 `spec.toml:<line>: <message>`。`onlyne reload` 与 `SIGHUP` 会解析到临时 config，校验通过后替换 live spec、ACL 表与 role 行，并广播 `spec_reloaded`。校验失败会保留 active config、记录 `fault{kind:"spec_reload_failed"}`，并以 `invalid` 答复。
 
 Role registration 使用 TOML fragment。`onlyne-client init --workspace W --role R --server-root S` 创建 `W/.onlyne/keys/role.key`，写入 `W/.onlyne/config.toml`，并打印首行为 `[[client]]` 的 fragment，包含 `role` 与 `key = "ed25519/<base64>"`。操作员追加 fragment 到 `spec.toml` 后运行 `onlyne reload`。
 

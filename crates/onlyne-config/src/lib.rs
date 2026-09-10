@@ -34,11 +34,12 @@ pub use error::SpecError;
 pub use hash::{canonical_bytes, spec_hash};
 pub use redact_impl::SECRET_KEYS;
 pub use spec::{
-    ALLOWED_PLACEHOLDERS, ClientEntry, DEFAULT_AGENT_PACKAGE, DEFAULT_BACKOFF_MS,
-    DEFAULT_CERT_PIN_PREFIX, DEFAULT_FAULT_HISTORY_DAYS, DEFAULT_HEARTBEAT_TIMEOUT_MS,
-    DEFAULT_INTENT_ATTEMPTS, DEFAULT_KEY_PREFIX, DEFAULT_MAX_SESSIONS, DEFAULT_NOTE_QUEUE,
-    DEFAULT_RESYNC_LAG, DEFAULT_TEMPLATE_ROOT, GatewayEntry, IntentPolicy, KEY_BYTE_LEN,
-    RouteEntry, RouteTarget, ServerSection, Spec, Timeouts,
+    ACL_EDGE_KINDS, ALLOWED_PLACEHOLDERS, AclEdge, ClientEntry, DEFAULT_AGENT_PACKAGE,
+    DEFAULT_BACKOFF_MS, DEFAULT_CERT_PIN_PREFIX, DEFAULT_FAULT_HISTORY_DAYS,
+    DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_INTENT_ATTEMPTS, DEFAULT_KEY_PREFIX,
+    DEFAULT_MAX_SESSIONS, DEFAULT_NOTE_QUEUE, DEFAULT_RESYNC_LAG, DEFAULT_TEMPLATE_ROOT,
+    GatewayEntry, IntentPolicy, KEY_BYTE_LEN, MsgKindClass, RouteEntry, RouteTarget, ServerSection,
+    Spec, Timeouts,
 };
 pub use template::{
     Placeholders, Template, TemplateError, discover, load_tree, local_override, merge_fragment,

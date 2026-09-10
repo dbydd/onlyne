@@ -3,7 +3,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use onlyne_proto::{Envelope, LedgerQuery, LedgerState, MsgKind, QueryFaultsArgs, QuerySessionsArgs};
+use onlyne_proto::{
+    Envelope, Event, FaultEvent, LedgerQuery, LedgerState, LedgerStateEvent, MsgKind, Principal,
+    QueryFaultsArgs, QuerySessionsArgs,
+};
 use rusqlite::types::{Type, Value as SqlValue};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -410,6 +413,78 @@ impl ServerLedger {
         Ok(changed)
     }
 
+    /// Move one in-flight row back to `queued` and publish its `ledger_state`
+    /// event in the same transaction. A row already `queued` is returned
+    /// unchanged, so a disconnect path that fires twice settles once.
+    pub fn requeue_one(&self, msg_id: &str) -> StoreResult<LedgerRow> {
+        let conn = self.conn()?;
+        let current = ledger_by_msg_id(&conn, msg_id)?;
+        if current.state == LedgerState::Queued {
+            return Ok(current);
+        }
+        ensure_transition_allowed(current.state, LedgerState::Queued)?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE ledger SET state='queued' WHERE msg_id=?",
+            params![msg_id],
+        )?;
+        let updated = ledger_by_msg_id(&tx, msg_id)?;
+        let event = ledger_state_event(&updated, LedgerState::Queued, None)?;
+        append_event_conn(&tx, "ledger_state", &event)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    /// Move one queued row to `expired` and publish its `ledger_state` event in
+    /// the same transaction.
+    pub fn expire_one(&self, msg_id: &str, reason: &str) -> StoreResult<LedgerRow> {
+        let conn = self.conn()?;
+        let current = ledger_by_msg_id(&conn, msg_id)?;
+        ensure_transition_allowed(current.state, LedgerState::Expired)?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE ledger SET state='expired',reason=? WHERE msg_id=?",
+            params![reason, msg_id],
+        )?;
+        let updated = ledger_by_msg_id(&tx, msg_id)?;
+        let event = ledger_state_event(&updated, LedgerState::Expired, Some(reason.to_string()))?;
+        append_event_conn(&tx, "ledger_state", &event)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    /// Move every `open` fault of a task to `next_state`, publishing one `fault`
+    /// event per moved row in the same transaction. Returns the moved rows.
+    pub fn update_fault_state(
+        &self,
+        task_id: &str,
+        next_state: &str,
+        reason: &str,
+    ) -> StoreResult<Vec<ServerFaultRow>> {
+        let conn = self.conn()?;
+        let tx = conn.unchecked_transaction()?;
+        let ids = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM faults WHERE task_id=? AND state='open' ORDER BY id",
+            )?;
+            stmt.query_map(params![task_id], |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut moved = Vec::with_capacity(ids.len());
+        for id in ids {
+            tx.execute(
+                "UPDATE faults SET state=?,reason=? WHERE id=?",
+                params![next_state, reason, id],
+            )?;
+            let row = fault_row_by_id(&tx, id)?;
+            let event = fault_event(&row)?;
+            append_event_conn(&tx, "fault", &event)?;
+            moved.push(row);
+        }
+        tx.commit()?;
+        Ok(moved)
+    }
+
     pub fn ledger_query(&self, query: LedgerQuery) -> StoreResult<Vec<LedgerRow>> {
         let conn = self.conn()?;
         let mut clauses = Vec::new();
@@ -662,6 +737,7 @@ fn user_tables(conn: &Connection) -> StoreResult<Vec<String>> {
     Ok(rows)
 }
 
+// Rejection-path markers only: these names identify pre-v1 tables and the `swarm` prefix that the schema gate refuses (plan §10 line 370).
 fn is_legacy_table(name: &str) -> bool {
     matches!(name, "io_cursors" | "loopback_idempotency" | "pending_replies")
         || name.starts_with("swarm")
@@ -838,6 +914,78 @@ fn server_fault_row(r: &Row<'_>) -> rusqlite::Result<ServerFaultRow> {
         state: r.get(13)?,
         created_at: r.get(14)?,
     })
+}
+
+fn ledger_by_msg_id(conn: &Connection, msg_id: &str) -> StoreResult<LedgerRow> {
+    conn.query_row(
+        &format!("SELECT {LEDGER_COLUMNS} FROM ledger WHERE msg_id=?"),
+        params![msg_id],
+        ledger_row,
+    )
+    .optional()?
+    .ok_or(StoreError::NotFound)
+}
+
+fn fault_row_by_id(conn: &Connection, id: i64) -> StoreResult<ServerFaultRow> {
+    conn.query_row(
+        &format!("SELECT {FAULT_COLUMNS} FROM faults WHERE id=?"),
+        params![id],
+        server_fault_row,
+    )
+    .optional()?
+    .ok_or(StoreError::NotFound)
+}
+
+/// The exact `Event::LedgerState` payload `State::emit` stores, so a store-side
+/// transition and a server-side one produce the same event row.
+fn ledger_state_event(
+    row: &LedgerRow,
+    state: LedgerState,
+    reason: Option<String>,
+) -> StoreResult<Value> {
+    let event = Event::LedgerState(LedgerStateEvent {
+        msg_id: row.msg_id.clone(),
+        op_id: row.op_id.clone(),
+        kind: row.kind,
+        from: serde_json::from_str(&row.from_json).unwrap_or_else(|_| Principal::role("unknown")),
+        to: serde_json::from_str(&row.to_json).unwrap_or_else(|_| Principal::role("unknown")),
+        task: row.task.clone(),
+        state,
+        outcome: None,
+        reason,
+    });
+    Ok(serde_json::to_value(&event)?)
+}
+
+/// The exact `Event::Fault` payload for one stored fault row.
+fn fault_event(row: &ServerFaultRow) -> StoreResult<Value> {
+    let event = Event::Fault(FaultEvent {
+        id: row.id,
+        task_id: row.task_id.clone(),
+        role: row.role.clone(),
+        session_id: row.session_id.clone(),
+        generation: row.generation.map(|value| value.max(0) as u64),
+        seq: row.seq.map(|value| value.max(0) as u64),
+        kind: row.kind.clone(),
+        reason: row.reason.clone(),
+        desired: row
+            .desired_json
+            .as_deref()
+            .and_then(|text| serde_json::from_str(text).ok()),
+        observed: row
+            .observed_json
+            .as_deref()
+            .and_then(|text| serde_json::from_str(text).ok()),
+        intent: row.intent.clone(),
+        attempt: row.attempt.map(|value| value.max(0) as u64),
+        backend_ref: row
+            .backend_ref
+            .as_deref()
+            .and_then(|text| serde_json::from_str(text).ok()),
+        state: Some(row.state.clone()),
+        created_at: Some(row.created_at),
+    });
+    Ok(serde_json::to_value(&event)?)
 }
 
 fn cursor_row(r: &Row<'_>) -> rusqlite::Result<CursorRow> {

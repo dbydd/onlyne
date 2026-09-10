@@ -50,7 +50,7 @@ impl AcceptPath {
     }
 
     pub fn ready_report(&self, task_id: &str, session_id: &str, generation: u64, seq: u64) -> Report {
-        Report::Ready { task_id: task_id.into(), session_id: session_id.into(), generation, seq }
+        Report::Ready { task_id: task_id.into(), session_id: session_id.into(), generation, seq, cluster_ref: None }
     }
 }
 

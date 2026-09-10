@@ -75,3 +75,13 @@ onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace
 1. proto + frame finish, session kernel, config/layout/store, net. These four are independent.
 2. server runtime, client runtime, adapter SDK + testkit, gateway kit.
 3. generate, federation path, legacy deletion, docs.
+
+## Process verbs versus admin queries
+
+`onlyne-server` owns the process verbs `init`, `run`, `start`, `stop`, `status`, `generate`, and `reload`; `reload --dry-run` prints `SpecDiff::render()`.
+`onlyne server roles|sessions|ledger|faults|watch|history|repair_*` stays in `onlyne-cli`, which resolves those verbs against the admin socket and formats the answers for a human, with no exec of `onlyne-server`.
+`onlyne-server status` answers the process question from its own tree: pid, socket path, uptime, spec hash, and store reachability.
+`onlyne status` on the CLI is the `AdminOp::Status` socket round-trip.
+The two answer different questions: one describes the local process, the other describes the live cluster.
+`onlyne client` and `onlyne gateway` follow the same split: each daemon binary owns `run`, `start`, `stop`, and its own `status`, and `onlyne-cli` resolves every query verb against that daemon's socket.
+Prose keeps direct additive sentences; contrastive rhetoric stays banned.

@@ -1,6 +1,7 @@
 use crate::kit::error::KitError;
 use sha2::{Digest, Sha256};
 use std::{
+    ffi::OsString,
     io,
     path::{Path, PathBuf},
     process::Stdio,
@@ -65,6 +66,20 @@ pub async fn ffmpeg_convert_default(
     ffmpeg_convert_with_program(FFMPEG_PROGRAM, input, output, args).await
 }
 
+/// The exact argument vector handed to the conversion program.
+///
+/// Order is part of the contract: overwrite, input, caller filters, output.
+pub fn ffmpeg_args(input: &Path, args: &[&str], output: &Path) -> Vec<OsString> {
+    let mut argv = vec![
+        OsString::from("-y"),
+        OsString::from("-i"),
+        input.as_os_str().to_os_string(),
+    ];
+    argv.extend(args.iter().map(OsString::from));
+    argv.push(output.as_os_str().to_os_string());
+    argv
+}
+
 async fn ffmpeg_convert_with_program(
     program: &str,
     input: &Path,
@@ -72,11 +87,7 @@ async fn ffmpeg_convert_with_program(
     args: &[&str],
 ) -> Result<(), KitError> {
     let status = Command::new(program)
-        .arg("-y")
-        .arg("-i")
-        .arg(input)
-        .args(args)
-        .arg(output)
+        .args(ffmpeg_args(input, args, output))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -165,6 +176,25 @@ mod tests {
                 actual
             }) if actual == MAX_IMAGE_BYTES + 1
         ));
+    }
+    #[test]
+    fn ffmpeg_argv_pins_program_argument_order() {
+        let argv = ffmpeg_args(
+            Path::new("in.raw"),
+            &["-frames:v", "1"],
+            Path::new("out.png"),
+        );
+        assert_eq!(
+            argv,
+            vec![
+                OsString::from("-y"),
+                OsString::from("-i"),
+                OsString::from("in.raw"),
+                OsString::from("-frames:v"),
+                OsString::from("1"),
+                OsString::from("out.png"),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,23 @@
+[Unit]
+Description=Onlyne role client for workspace %i
+Documentation=file:/srv/onlyne-ws/%i/.onlyne/config.toml
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/onlyne-ws/%i
+ExecStart=/usr/local/bin/onlyne-client run --workspace /srv/onlyne-ws/%i
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:/srv/onlyne-ws/%i/.onlyne/logs/client.log
+StandardError=append:/srv/onlyne-ws/%i/.onlyne/logs/client.log
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/onlyne-ws/%i
+
+[Install]
+WantedBy=multi-user.target

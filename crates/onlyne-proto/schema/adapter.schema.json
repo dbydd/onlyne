@@ -1373,7 +1373,7 @@
       }
     },
     "Report": {
-      "description": "The report envelope kinds a client pushes (§6, §7).",
+      "description": "The report envelope kinds a client pushes (§6, §7).\n\n`cluster_ref` names the origin cluster on a relayed report, so a federated projection can say where it came from. Only the three state-carrying kinds hold it: `Fault` carries no projection, and a ninth optional field there would push `Report` and `ClientOp` from 192 to 224 bytes on the hot path.",
       "oneOf": [
         {
           "description": "The ready barrier passed; the server may now deliver the payload.",
@@ -1392,6 +1392,12 @@
                 "task_id"
               ],
               "properties": {
+                "cluster_ref": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "generation": {
                   "type": "integer",
                   "format": "uint64",
@@ -1435,6 +1441,12 @@
                 "task_id"
               ],
               "properties": {
+                "cluster_ref": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "generation": {
                   "type": "integer",
                   "format": "uint64",
@@ -1474,6 +1486,12 @@
                 "task_id"
               ],
               "properties": {
+                "cluster_ref": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "head": {
                   "type": [
                     "string",
@@ -1643,19 +1661,16 @@
       }
     },
     "TypingArgs": {
-      "description": "`typing`: platform typing indicator for one conversation.",
+      "description": "`typing`: platform typing indicator for one conversation. `on` starts the indicator and `false` stops it, which is the pair a platform API exposes.",
       "type": "object",
       "properties": {
         "conversation": {
           "default": "",
           "type": "string"
         },
-        "seconds": {
-          "description": "Seconds the indicator should hold; the platform clamps it.",
-          "default": 0,
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0.0
+        "on": {
+          "default": false,
+          "type": "boolean"
         }
       }
     }

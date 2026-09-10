@@ -190,10 +190,7 @@ impl fmt::Display for ErrorCode {
 
 impl std::error::Error for ErrorCode {}
 
-/// One multiplexed frame. Boxing the observation-plane payload would only
-/// relocate the same bytes while the request arms already carry boxed
-/// envelopes, so the event size is accepted inline.
-#[allow(clippy::large_enum_variant)]
+/// One multiplexed frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "f")]
 pub enum Frame<R = ClientOp> {
@@ -209,11 +206,12 @@ pub enum Frame<R = ClientOp> {
         #[serde(flatten)]
         body: ResBody,
     },
-    /// An observation-plane push; `seq` is monotonic per server.
+    /// An observation-plane push; `seq` is monotonic per server. The event is
+    /// boxed so an ack, ping, or bye frame does not carry its 336 bytes.
     Ev {
         seq: u64,
         #[serde(flatten)]
-        event: Event,
+        event: Box<Event>,
     },
     /// Confirmation that the peer settled a delivery or event.
     Ack { seq: u64 },
@@ -278,7 +276,10 @@ impl Frame {
     }
 
     pub fn event(seq: u64, event: Event) -> Self {
-        Frame::Ev { seq, event }
+        Frame::Ev {
+            seq,
+            event: Box::new(event),
+        }
     }
 
     pub fn bye(reason: impl Into<String>) -> Self {
@@ -527,6 +528,7 @@ mod tests {
                 session_id: "s".into(),
                 generation: 1,
                 seq: 3,
+                cluster_ref: None,
             }),
             ClientOp::SessionSync(SessionSyncArgs {
                 task_id: new_task_id(),

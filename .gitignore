@@ -1,7 +1,11 @@
 target*
 .omx
-.pi/
-.pi*/
+# Pi editor and agent state at the repository root only: a nested .pi/ is deliberately outside this rule, because docs/v1-PLAN.md §11 line 374 lists <role>/.pi/settings.json and .pi/onlyne.json as role template content truth that a versioned template tree must track.
+/.pi/
+/.pi*/
+# Runtime Onlyne trees stay out of the index: <server-root>/.onlyne/ and <workspace>/.onlyne/.
 .onlyne/
+# Role template content truth carries one .onlyne/config.toml local-override fragment per role (docs/v1-PLAN.md §11 line 374), so a .onlyne directory below a templates path stays trackable.
+!**/templates/**/.onlyne/
 __pycache__/
 *.pyc

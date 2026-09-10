@@ -14,7 +14,7 @@ Onlyne v1.0.0 is a local channel and routing layer for agents. The server routes
 - Keep runtime state under the selected `<server-root>/.onlyne/` or `<workspace>/.onlyne/` tree.
 - Treat `<server-root>/.onlyne/spec.toml` as the single source of truth for roles, keys, ACLs, prose, gateways, and routes.
 - Use `onlyne-client init` or `onlyne server generate` to create role keys and workspace config.
-- Append generated `[[client]]` fragments to `spec.toml`, then run `onlyne reload` or `onlyne server reload`.
+- Append generated `[[client]]` fragments to `spec.toml`, then run `onlyne reload`.
 - Use `ONLYNE_BACKEND=fake` plus `onlyne-agent-fake` for local e2e checks.
 - Keep real platform credentials out of smoke runs.
 
@@ -49,13 +49,14 @@ Send a role-addressed task through the admin surface:
 onlyne --server-root "$SERVER" send --from planner --to builder --text "build the patch"
 ```
 
+`--from` is required for this admin-surface send and rejected for client-surface sends.
 Send from a role workspace through the client surface:
 
 ```bash
 onlyne --workspace "$WS" send --to reviewer --text "review this change"
 ```
 
-Use `--task <id>` to attach causality to an existing task family. Use `--note` for free text that creates no session. Offline `note` delivery returns `recipient_offline`. That refusal is plan-defined and lands with the server relay.
+Use `--task <id>` to attach causality to an existing task family. Use `--note` for free text that creates no session. Offline `note` delivery returns `recipient_offline`, and the row settles `rejected`. `reply --to <envelope-id>` answers that ledger row and addresses its recipient.
 
 ## Check a ledger row
 
@@ -88,6 +89,10 @@ onlyne --workspace "$WS" watch
 ```
 
 Observation events are at-most-once. Event frames carry monotonic `seq`. A lagging client resubscribes with `since_seq` after comparing `pong.server_seq` with its cursor.
+
+## CLI contract
+
+Top-level groups are `onlyne server <verb>`, `onlyne client <verb>`, and `onlyne gateway <verb>`. Under `server`, the lifecycle verbs (`init`, `run`, `start`, `stop`, `status`, `generate`, `reload`) exec `onlyne-server` and the admin nouns (`roles`, `sessions`, `ledger`, `faults`, `watch`, `history`, `repair`) query the admin socket. There is no `onlyne forward` verb. `spec_diff` takes the `spec-diff` alias. `--timeout` is primary with the `--timeout-ms` alias. `wait-ready` takes `--interval-ms` (default 200) under the global `--timeout` bound (default 10000). `--from` is a per-verb flag on `send`, `reply`, `complete`, `handoff`, and `control` for the admin surface only. Message and admin verbs print one JSON line; `cluster export-prose` prints raw prose unless `--json`. Exit codes: 0 success, 1 failed daemon answer or `wait-ready` bound hit, 2 local validation, 3 no socket, 127 missing sibling binary, 4 propagated generate-child failure.
 
 ## Start and stop a client
 
@@ -129,7 +134,11 @@ key = "ed25519/<base64>"
 
 ## Generate workspaces
 
-Generate role workspaces from server templates:
+Generate role workspaces from server templates, either top-level or through the server forward:
+
+```bash
+onlyne generate --root "$SERVER" --out "$OUT" > "$OUT/spec-frag.toml"
+```
 
 ```bash
 onlyne server generate --root "$SERVER" --out "$OUT" > "$OUT/spec-frag.toml"
@@ -167,14 +176,16 @@ onlyne-agent-fake --workspace "$WS" --script \
   "$SRC/crates/onlyne-testkit/scripts/echo-complete.json" &
 ```
 
-`echo-complete.json` receives `assign`, checks prose, and completes with an echo result.
-
-## Exit codes and errors
+`echo-complete.json` waits for `assign`, reports ready, completes with `outcome = "done"` using the assign body as its head, and writes the received `assign.prose` to `prose.log` inside the workspace.
 
 | Code | Meaning | Exact user-facing string |
 |---|---|---|
+| 0 | Success | one JSON line for message and admin verbs |
+| 1 | Failed daemon answer or `wait-ready` bound hit | daemon `ok:false` answer or `onlyne: server not ready after <ms>ms` |
 | 2 | Legacy workspace layout | `onlyne: legacy workspace layout; v1.0.0 does not migrate` |
+| 2 | Local validation | `onlyne: --from is only valid on the admin surface`, `onlyne: --from is required on the admin surface`, `onlyne: --ttl requires --note` |
 | 3 | Socket resolution failure | `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace` |
+| 127 | Missing sibling binary | `onlyne: binary not found: <name>` |
 | 4 | Existing output refusal | `onlyne: refusing to overwrite <path>; pass --force` |
 | 4 | Ambiguous template | `onlyne: template for role <r> is ambiguous: <p1>, <p2>` |
 | 4 | Missing template | `onlyne: no template directory named <r> under <template_root>` |
@@ -194,7 +205,7 @@ Frame error codes are closed: `invalid`, `unknown_op`, `acl_denied`, `unknown_ro
 
 ## Smoke
 
-Verification case 1 local task run (plan-defined; the landed script covers server, client, fake agent, and status over `--workspace`):
+Verification case 1 local task run (the landed script drives server, client, fake agent, `ledger`, and `sessions`):
 
 1. Build the workspace.
    ```bash

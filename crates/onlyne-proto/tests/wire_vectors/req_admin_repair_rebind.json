@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"repair_rebind\",\"args\":{\"task_id\":\"11111111-1111-4111-8111-111111111111\",\"session_id\":\"8b1c\",\"backend\":\"orca\",\"backend_ref\":{\"pane\":4},\"reason\":\"moved\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "admin repair_rebind replaces a backend reference and bumps the generation"
+}

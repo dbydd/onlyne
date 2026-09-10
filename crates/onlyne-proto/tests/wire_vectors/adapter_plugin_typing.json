@@ -1,0 +1,5 @@
+{
+  "frame": "{\"op\":\"typing\",\"args\":{\"conversation\":\"8b1c\",\"on\":true}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "typing carries the explicit on/off pair for one conversation, a gateway-mount capability"
+}

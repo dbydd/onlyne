@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"res\",\"id\":\"r1\",\"ok\":false,\"error\":{\"code\":\"acl_denied\",\"message\":\"planner may not send to reviewer\",\"field\":\"to.role\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "a rejection omits data entirely and names the offending field"
+}

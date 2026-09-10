@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"subscribe\",\"args\":{\"since_seq\":7,\"tiers\":[\"durable\"],\"kinds\":[],\"roles\":[]}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "client subscribe resumes the observation stream after since_seq with an empty filter meaning all"
+}

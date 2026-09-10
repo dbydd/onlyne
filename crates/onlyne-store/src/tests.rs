@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod ledger_gates {
     use chrono::{Duration, TimeZone, Utc};
-    use onlyne_proto::{Body, Causality, Envelope, LedgerState, MsgKind, Principal, new_envelope};
+    use onlyne_proto::{
+        Body, Causality, Envelope, LedgerQuery, LedgerState, MsgKind, Principal, new_envelope,
+    };
     use onlyne_session::lifecycle::Version;
     use onlyne_session::reconcile::{Bridge, feed_ready};
     use onlyne_session::{SessionLedger, VersionedSession, apply_persist};
@@ -10,7 +12,8 @@ mod ledger_gates {
     use tempfile::TempDir;
 
     use crate::{
-        Append, ClientStore, LedgerRow, ServerLedger, StoreError, transition_allowed,
+        Append, ClientStore, FaultQuery, LedgerRow, ServerFaultRow, ServerLedger, StoreError,
+        transition_allowed,
     };
 
     fn temp_db(name: &str) -> (TempDir, std::path::PathBuf) {
@@ -414,5 +417,212 @@ mod ledger_gates {
         assert_eq!(stored.kind, fault.kind);
         assert_eq!(stored.state, fault.state);
         assert_eq!(stored.created_at, fault.created_at);
+    }
+
+    fn block_event_type(path: &std::path::Path, kind: &str) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER block_events BEFORE INSERT ON events WHEN NEW.type='{kind}' BEGIN SELECT RAISE(ABORT,'forced event failure'); END;"
+        ))
+        .unwrap();
+    }
+
+    fn unblock_event_type(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("DROP TRIGGER block_events;").unwrap();
+    }
+
+    fn fault_draft(task_id: &str, kind: &str) -> ServerFaultRow {
+        ServerFaultRow {
+            id: 0,
+            task_id: Some(task_id.to_string()),
+            role: Some("worker".to_string()),
+            session_id: Some(task_id.to_string()),
+            generation: Some(1),
+            seq: Some(2),
+            desired_json: Some("{\"desired\":true}".to_string()),
+            observed_json: Some("{\"observed\":true}".to_string()),
+            intent: Some("reconcile:probe_dead".to_string()),
+            attempt: Some(1),
+            backend_ref: Some("{\"backend\":\"fake\"}".to_string()),
+            kind: kind.to_string(),
+            reason: "backend resource gone".to_string(),
+            state: "open".to_string(),
+            created_at: 1_789_000_000,
+        }
+    }
+
+    #[test]
+    fn late_ack_on_expired_row_is_refused_and_keeps_one_event() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+        let mut row = ledger(MsgKind::Note, "late ack", None, "fp-late");
+        row.msg_id = new_uuid(60);
+        store.append_ledger(&row).unwrap();
+        store.expire_one(&row.msg_id, "ttl elapsed").unwrap();
+        let err = store.mark_acked(&row.msg_id, fixed_time(30)).unwrap_err();
+        assert_eq!(
+            err,
+            StoreError::InvalidState {
+                from: "expired".to_string(),
+                to: "acked".to_string()
+            }
+        );
+        let stored = store
+            .ledger_query(LedgerQuery {
+                msg_id: Some(row.msg_id.clone()),
+                limit: 1,
+                ..LedgerQuery::default()
+            })
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].state, LedgerState::Expired);
+        assert_eq!(store.event_head().unwrap(), 1);
+    }
+
+    #[test]
+    fn requeue_one_moves_in_flight_row_and_publishes_one_event() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+        let mut row = ledger(MsgKind::Task, "requeue", Some("o-cccccccc-cccc-4ccc-8ccc-cccccccccccc"), "fp-r");
+        row.msg_id = new_uuid(61);
+        store.append_ledger(&row).unwrap();
+        store.mark_in_flight(&row.msg_id).unwrap();
+        let updated = store.requeue_one(&row.msg_id).unwrap();
+        assert_eq!(updated.state, LedgerState::Queued);
+        assert_eq!(store.event_head().unwrap(), 1);
+        let events = store.events_since(0, 10).unwrap();
+        assert_eq!(events[0].kind, "ledger_state");
+        assert_eq!(events[0].data["type"], "ledger_state");
+        assert_eq!(events[0].data["data"]["msg_id"], row.msg_id);
+        assert_eq!(events[0].data["data"]["state"], "queued");
+    }
+
+    #[test]
+    fn requeue_one_is_noop_on_queued_row() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+        let mut row = ledger(MsgKind::Task, "double requeue", Some("o-dddddddd-dddd-4ddd-8ddd-dddddddddddd"), "fp-d");
+        row.msg_id = new_uuid(62);
+        store.append_ledger(&row).unwrap();
+        let first = store.requeue_one(&row.msg_id).unwrap();
+        let second = store.requeue_one(&row.msg_id).unwrap();
+        assert_eq!(first.state, LedgerState::Queued);
+        assert_eq!(second.state, LedgerState::Queued);
+        assert_eq!(first.msg_id, second.msg_id);
+        assert_eq!(store.event_head().unwrap(), 0);
+    }
+
+    #[test]
+    fn expire_one_settles_queued_row_and_publishes_one_event() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+        let mut row = ledger(MsgKind::Note, "sweep me", None, "fp-sweep");
+        row.msg_id = new_uuid(63);
+        store.append_ledger(&row).unwrap();
+        let updated = store.expire_one(&row.msg_id, "ttl elapsed").unwrap();
+        assert_eq!(updated.state, LedgerState::Expired);
+        assert_eq!(updated.reason.as_deref(), Some("ttl elapsed"));
+        let events = store.events_since(0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "ledger_state");
+        assert_eq!(events[0].data["data"]["state"], "expired");
+        assert_eq!(events[0].data["data"]["reason"], "ttl elapsed");
+    }
+
+    #[test]
+    fn requeue_one_rolls_back_when_the_event_insert_fails() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+        let mut row = ledger(MsgKind::Task, "rollback", Some("o-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"), "fp-e");
+        row.msg_id = new_uuid(64);
+        store.append_ledger(&row).unwrap();
+        store.mark_in_flight(&row.msg_id).unwrap();
+        block_event_type(&path, "ledger_state");
+        let result = store.requeue_one(&row.msg_id);
+        unblock_event_type(&path);
+        assert!(result.is_err(), "blocked event insert must fail the call");
+        let stored = store
+            .ledger_query(LedgerQuery {
+                msg_id: Some(row.msg_id.clone()),
+                limit: 1,
+                ..LedgerQuery::default()
+            })
+            .unwrap();
+        assert_eq!(stored[0].state, LedgerState::InFlight);
+        assert_eq!(store.event_head().unwrap(), 0);
+    }
+
+    #[test]
+    fn expire_one_rolls_back_when_the_event_insert_fails() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+        let mut row = ledger(MsgKind::Note, "rollback expiry", None, "fp-x");
+        row.msg_id = new_uuid(65);
+        store.append_ledger(&row).unwrap();
+        block_event_type(&path, "ledger_state");
+        let result = store.expire_one(&row.msg_id, "ttl elapsed");
+        unblock_event_type(&path);
+        assert!(result.is_err(), "blocked event insert must fail the call");
+        let stored = store
+            .ledger_query(LedgerQuery {
+                msg_id: Some(row.msg_id.clone()),
+                limit: 1,
+                ..LedgerQuery::default()
+            })
+            .unwrap();
+        assert_eq!(stored[0].state, LedgerState::Queued);
+        assert_eq!(store.event_head().unwrap(), 0);
+    }
+
+    #[test]
+    fn update_fault_state_moves_open_faults_and_publishes_events() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+        let open_id = store.record_fault(&fault_draft("task-f-1", "probe_dead")).unwrap();
+        let settled_id = store.record_fault(&fault_draft("task-f-1", "older")).unwrap();
+        store.ack_fault(settled_id).unwrap();
+        let moved = store
+            .update_fault_state("task-f-1", "acked", "operator ack")
+            .unwrap();
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].id, open_id);
+        assert_eq!(moved[0].state, "acked");
+        assert_eq!(moved[0].reason, "operator ack");
+        let events = store.events_since(0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "fault");
+        assert_eq!(events[0].data["data"]["id"], open_id);
+        assert_eq!(events[0].data["data"]["state"], "acked");
+        let rows = store
+            .faults_query(FaultQuery {
+                task_id: Some("task-f-1".to_string()),
+                limit: 10,
+                ..FaultQuery::default()
+            })
+            .unwrap();
+        assert_eq!(rows.iter().filter(|row| row.state == "acked").count(), 2);
+        assert!(store.open_faults().unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_fault_state_rolls_back_when_the_event_insert_fails() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+        store.record_fault(&fault_draft("task-f-2", "probe_dead")).unwrap();
+        block_event_type(&path, "fault");
+        let result = store.update_fault_state("task-f-2", "acked", "operator ack");
+        unblock_event_type(&path);
+        assert!(result.is_err(), "blocked event insert must fail the call");
+        let rows = store
+            .faults_query(FaultQuery {
+                task_id: Some("task-f-2".to_string()),
+                limit: 10,
+                ..FaultQuery::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, "open");
+        assert_eq!(store.event_head().unwrap(), 0);
     }
 }

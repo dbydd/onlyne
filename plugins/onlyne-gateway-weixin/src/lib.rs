@@ -18,8 +18,8 @@ use onlyne_adapter::{
     SendReceipt,
 };
 use onlyne_proto::{
-    Body, Capability, Causality, ConversationInfo, Envelope, ErrorCode, IMAGE_DATA_MAX_BYTES,
-    ImagePart, MsgKind, Principal,
+    Body, Capability, Causality, Envelope, ErrorCode, IMAGE_DATA_MAX_BYTES, ImagePart, MsgKind,
+    Principal,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -112,9 +112,7 @@ impl GatewayRef {
                     format!("malformed weixin gateway_ref: {value}"),
                 )
             })?;
-        let external_id = entries
-            .remove("external_id")
-            .filter(|id| !id.is_empty());
+        let external_id = entries.remove("external_id").filter(|id| !id.is_empty());
         let scene = entries.remove("scene").filter(|scene| !scene.is_empty());
         Ok(GatewayRef {
             channel,
@@ -231,6 +229,16 @@ impl WeixinPlugin {
             .insert(context.user_id.clone(), context);
     }
 
+    /// The platform typing indicator.
+    ///
+    /// The iLink transport exposes text and image sends plus no indicator call,
+    /// so the declared `Capability::Typing` answers here with a documented
+    /// no-op.  The capability stays declared: the host asks, the plugin agrees,
+    /// and no platform error surfaces.
+    pub async fn set_typing(&mut self, _conversation: &str, _on: bool) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
     /// Resolve the SDK send target for one conversation.
     pub async fn send_context_for(
         &self,
@@ -330,21 +338,14 @@ pub fn inbound_event_to_envelope(
         }
     };
 
-    let from = Principal::gateway(
-        GATEWAY_ID,
-        CHANNEL_ID,
-        Some(message.user_id.clone()),
-    );
+    let from = Principal::gateway(GATEWAY_ID, CHANNEL_ID, Some(message.user_id.clone()));
     let kind = if looks_like_task(&body_text(&body)) {
         MsgKind::Task
     } else {
         MsgKind::Note
     };
-    let causality = match kind {
-        MsgKind::Task => Some(Causality::root(onlyne_proto::new_task_id())),
-        MsgKind::Note => None,
-        _ => None,
-    };
+    let mut causality =
+        (kind == MsgKind::Task).then(|| Causality::root(onlyne_proto::new_task_id()));
     let external_id = message
         .message_id
         .clone()
@@ -355,14 +356,15 @@ pub fn inbound_event_to_envelope(
         .clone()
         .filter(|session| !session.trim().is_empty());
     let gateway_ref = GatewayRef::new(message.user_id.clone(), external_id, scene);
-    let envelope = onlyne_proto::new_envelope(kind, from, to, body, causality).map_err(|err| {
-        AdapterError::new(ErrorCode::Invalid, format!("weixin envelope invalid: {err}"))
-    })?;
-    // Keep the opaque cross-process handle local: only the envelope id and the
-    // gateway's own ref table travel with the message.  Encoding here lets a
-    // caller persist the ref without re-deriving it from raw payload.
-    let _ = gateway_ref.encode();
-    Ok(envelope)
+    if let Some(chain) = causality.as_mut() {
+        chain.reply_to = Some(gateway_ref.encode());
+    }
+    onlyne_proto::new_envelope(kind, from, to, body, causality).map_err(|err| {
+        AdapterError::new(
+            ErrorCode::Invalid,
+            format!("weixin envelope invalid: {err}"),
+        )
+    })
 }
 
 fn body_text(body: &Body) -> String {
@@ -582,9 +584,10 @@ impl GatewayPlugin for WeixinPlugin {
     }
 
     async fn send(&mut self, msg: &Outbound) -> Result<SendReceipt, AdapterError> {
-        let client = self.client.clone().ok_or_else(|| {
-            AdapterError::new(ErrorCode::Invalid, "weixin plugin is not started")
-        })?;
+        let client = self
+            .client
+            .clone()
+            .ok_or_else(|| AdapterError::new(ErrorCode::Invalid, "weixin plugin is not started"))?;
         let request = outbound_to_request(self, msg).await?;
         let contexts = self.contexts.lock().await;
         let context = contexts
@@ -663,10 +666,6 @@ impl GatewayPlugin for WeixinPlugin {
             Ok(_) => Ok(None),
             Err(_) => Ok(Some(auth::qr_onboarding_prompt())),
         }
-    }
-
-    async fn list_conversations(&mut self) -> Result<Vec<ConversationInfo>, AdapterError> {
-        Ok(vec![])
     }
 }
 

@@ -1,0 +1,8 @@
+{
+  "op_id_conflict": "op_id conflict: request differs from durable receipt",
+  "no_socket": "onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace",
+  "binary_not_found_template": "onlyne: binary not found: <name>",
+  "binary_not_found_example": "onlyne: binary not found: onlyne-server",
+  "legacy_workspace": "onlyne: legacy workspace layout; v1.0.0 does not migrate",
+  "unsupported_schema": "onlyne: unsupported schema; v1.0.0 does not migrate"
+}

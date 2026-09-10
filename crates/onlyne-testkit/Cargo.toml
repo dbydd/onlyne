@@ -15,6 +15,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 onlyne-adapter = { path = "../onlyne-adapter" }
+onlyne-config = { path = "../onlyne-config" }
 onlyne-frame = { path = "../onlyne-frame" }
 onlyne-proto = { path = "../onlyne-proto" }
 serde = { version = "1", features = ["derive"] }

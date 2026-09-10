@@ -18,7 +18,10 @@ pub struct QqBotCredentials {
 impl QqBotCredentials {
     /// Resolve credentials from the process environment.
     pub fn from_env() -> Result<Self, AdapterError> {
-        Self::from_values(std::env::var(APP_ID_ENV).ok(), std::env::var(APP_SECRET_ENV).ok())
+        Self::from_values(
+            std::env::var(APP_ID_ENV).ok(),
+            std::env::var(APP_SECRET_ENV).ok(),
+        )
     }
 
     /// Resolve optional configured values, using the environment when a value
@@ -36,10 +39,7 @@ impl QqBotCredentials {
             .or_else(|| std::env::var(APP_SECRET_ENV).ok())
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| missing_credential(APP_SECRET_ENV))?;
-        Ok(Self {
-            app_id,
-            app_secret,
-        })
+        Ok(Self { app_id, app_secret })
     }
 }
 

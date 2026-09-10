@@ -59,13 +59,18 @@ pub struct GlobalFlags {
     /// `cluster export-prose` changes behaviour, wrapping the prose in an object.
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     pub json: bool,
-    /// Replace the constructed op body verbatim with this JSON object.
+    /// Replace the constructed args body verbatim with this JSON object.
+    /// `send`, `reply`, `complete`, and `handoff` consume it, and each one
+    /// validates the envelope the object carries before opening the socket.
+    /// `ping` and `control` refuse it: `ControlArgs` and `AdminControl` carry
+    /// no envelope, so there is nothing meaningful to override. Every other
+    /// verb ignores it.
     #[arg(long, global = true)]
     pub request: Option<String>,
 }
 
 impl GlobalFlags {
-    /// Replace the constructed op body verbatim with this JSON object.
+    /// The local sender role, read from `ONLYNE_ROLE`, defaulting to `cli`.
     pub fn local_role(&self) -> String {
         std::env::var(ROLE_ENV).unwrap_or_else(|_| DEFAULT_ROLE.to_string())
     }

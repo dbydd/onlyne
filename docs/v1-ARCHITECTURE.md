@@ -14,6 +14,7 @@ graph TD
   server --> store[onlyne-store]
   server --> config[onlyne-config]
   server --> layout[onlyne-layout]
+  server --> adapter[onlyne-adapter]
   client[onlyne-client] --> proto
   client --> frame
   client --> net
@@ -21,18 +22,20 @@ graph TD
   client --> config
   client --> layout
   client --> session[onlyne-session]
-  gateway[onlyne-gateway] --> adapter[onlyne-adapter]
-  gateway --> config[onlyne-config]
-  gateway --> net[onlyne-net]
+  client --> adapter
+  client -. dev-dependency .-> testkit[onlyne-testkit]
+  gateway[onlyne-gateway] --> adapter
+  gateway --> config
+  gateway --> net
   gateway --> proto
-  gateway --> frame
   cli[onlyne-cli] --> proto
-  testkit[onlyne-testkit] --> adapter
+  cli --> frame
+  testkit --> adapter
   testkit --> proto
   testkit --> frame
-  testkit --> session
+  store --> proto
   store --> session
-  net --> proto
+  net --> frame
   adapter --> proto
   adapter --> frame
   telegram[plugins/onlyne-gateway-telegram] --> adapter
@@ -128,7 +131,7 @@ The old vocabulary is gone: `loopback`, `swarm_ready`, `swarm_recycled`, `swarm_
 
 ## Ledger state
 
-The server ledger table stores `queued`, `in_flight`, `acked`, `rejected`, and `expired`. Body JSON is retained through ack and later pruned by retention. Source: Plan §10 lines 357-360.
+The server ledger table stores `queued`, `in_flight`, `acked`, `rejected`, and `expired` in `crates/onlyne-store/src/server.rs`. The server `ledger.body_json` column stays nullable for retention pruning. Source: Plan §10 lines 357-360.
 
 | Current state | Legal next states | Entry and exit meaning | Source |
 |---|---|---|---|
@@ -147,7 +150,7 @@ The client owns execution state authority. The server stores projections. Source
 
 | Dimension | Values | Source |
 |---|---|---|
-| `AgentState` | `Booting`, `Ready`, `Running`, `Idle`, `Gone` | Plan §6 line 280 |
+| `AgentState` | `Booting`, `Ready`, `Running`, `Idle`, `Gone` | Plan §6 line 280; `AgentState` in `crates/onlyne-session/src/lifecycle.rs` |
 | `DeliveryState` | `None`, `Pending`, `Retrying`, `Accepted`, `Exhausted` | Plan §6 line 280 |
 | `ResourceState` | `Detached`, `Attached`, `Closing`, `Closed` | Plan §6 line 280 |
 | `RecoveryState` | `None`, `IdleWaiting`, `IdleFault`, `Draining` | Plan §6 line 280 |
@@ -196,7 +199,7 @@ Generation flow:
 9. Scan output bytes for the generated output root and server root absolute prefixes.
 10. Delete this generation output on absolute-path match and return `onlyne: generated workspace embeds absolute path <path>`.
 11. Print a `[[client]]` TOML fragment and `<out>/.onlyne-generation.json`.
-12. Leave `spec.toml` editing to the operator or supervisor, followed by `onlyne server reload`.
+12. Leave `spec.toml` editing to the operator or supervisor, followed by `onlyne reload`.
 
 Source: Plan §11 lines 383-397.
 
@@ -206,17 +209,17 @@ Relocation guarantee: generated workspaces derive runtime paths from their own `
 
 ## Federation
 
-`onlyne cluster export-prose` names the aggregate role whose outward prose the parent consumes. Source: Plan S11 line 461; Contract line 63.
+`onlyne cluster export-prose` names the aggregate role whose outward prose the parent consumes. It prints one role's prose, raw by default and wrapped under `--json`, issues the existing role query, and adds no protocol op. Source: Plan S11 line 461; Contract line 65; `export_prose` in `crates/onlyne-cli/src/admin.rs`.
 
-The parent consumes that prose when composing its own role directive; federation adds zero protocol ops. Source: Plan S11 line 463; `export_prose` in `crates/onlyne-cli/src/admin.rs`.
+The parent consumes that prose when composing its own role directive; federation adds zero protocol ops. Source: Plan S11 lines 460-461; decision D14 at Plan line 28.
+
+The full convention set for the recursion path lives in `crates/onlyne-server/FEDERATION.md`.
+
 ## CLI verbs and flags
+
 Message and admin verbs print one JSON line; `cluster export-prose` prints raw prose unless `--json`. Source: `render_body` and `export_prose` paths in `crates/onlyne-cli/src`.
 
-## CLI verbs and flags
-
-Top-level forwards are `onlyne server <verb>`, `onlyne client <verb>`, and `onlyne gateway <verb>`, each dispatched to `forward::exec`. `onlyne` has no intermediate `forward` verb. `spec_diff` is primary with the `spec-diff` alias. `--timeout` is primary with the `--timeout-ms` alias. `wait-ready` takes `--interval-ms` (default 200) with the global `--timeout` bound (default 10000). `--from` is a per-verb flag on `send`, `reply`, `complete`, `handoff`, and `control` for the admin surface only. `reply --to <envelope-id>` answers that ledger row and addresses its recipient. Exit codes: 0 success, 1 failed daemon answer or `wait-ready` bound hit, 2 local validation, 3 no socket, 127 missing sibling binary, 4 propagated generate-child failure. Source: `Verb` and `GlobalFlags` in `crates/onlyne-cli/src/main.rs` plus `flags.rs`; `wait_ready` and `export_prose` in `crates/onlyne-cli/src/admin.rs`; `SenderArgs` in `crates/onlyne-cli/src/verbs.rs`; exit codes in `crates/onlyne-cli/src/runtime.rs`; pinned by six tests in `crates/onlyne-cli/tests/cli.rs`.
-
-The parent consumes that prose when composing its own role directive; federation adds zero protocol ops. Source: Plan S11 line 463; `export_prose` in `crates/onlyne-cli/src/admin.rs`.
+Top-level groups are `onlyne server <verb>`, `onlyne client <verb>`, and `onlyne gateway <verb>`. The `client` and `gateway` groups forward straight to `forward::exec`. Inside the `server` group, the lifecycle verbs (`init`, `run`, `start`, `stop`, `status`, `generate`, `reload`) exec `onlyne-server` with the remaining arguments verbatim, and the admin nouns (`roles`, `sessions`, `ledger`, `faults`, `watch`, `history`, `repair`) resolve against the admin socket inside the CLI process. `onlyne` has no intermediate `forward` verb. An unrecognized server verb is refused with exit 2. `spec_diff` is primary with the `spec-diff` alias. `--timeout` is primary with the `--timeout-ms` alias. `wait-ready` takes `--interval-ms` (default 200) with the global `--timeout` bound (default 10000). `--from` is a per-verb flag on `send`, `reply`, `complete`, `handoff`, and `control` for the admin surface only. `reply --to <envelope-id>` answers that ledger row and addresses its recipient. Exit codes: 0 success, 1 failed daemon answer or `wait-ready` bound hit, 2 local validation, 3 no socket, 127 missing sibling binary, 4 propagated generate-child failure. Source: `Verb` and `ServerVerb` in `crates/onlyne-cli/src/main.rs`; `forward::exec` in `crates/onlyne-cli/src/forward.rs`; `crates/onlyne-cli/tests/cli.rs`.
 
 ## Where the code lives
 

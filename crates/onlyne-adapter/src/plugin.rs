@@ -1,7 +1,10 @@
 //! In-process gateway plugin interfaces.
 
 use async_trait::async_trait;
-use onlyne_proto::{Capability, ConversationInfo, Envelope, HealthArgs, ImagePart, MsgKind, RegisterChannelArgs, TypingArgs};
+use onlyne_proto::{
+    Capability, ConversationInfo, Envelope, HealthArgs, ImagePart, MsgKind, RegisterChannelArgs,
+    TypingArgs,
+};
 
 use crate::{AdapterError, Result};
 
