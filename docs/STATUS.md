@@ -13,19 +13,19 @@ v1.0.0 is the active state. `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONT
 
 Counts come from `cargo test --workspace` on 2026-09-11 (461 passed, 0 failed), one line per crate with its libraries and integration targets summed.
 
-- [x] `onlyne-proto` green with envelope, frame variants, ops, errors, and events: 57 unit + 5 wire vectors + 1 schema statement.
-- [x] `onlyne-frame` green with length-prefixed codec: 9 unit + 1 schema statement.
+- [x] `onlyne-proto` green with envelope, frame variants, ops, errors, and events: 57 unit + 5 wire vectors + 1 sizes.
+- [x] `onlyne-frame` green with length-prefixed codec: 9.
 - [x] `onlyne-config` green with spec parse and reload: 11 template + 18 config contract + 17 ACL table + 3 spec example.
 - [x] `onlyne-layout` green with legacy refusal exit 2: 15.
-- [x] `onlyne-store` green with ledger and local DB: 24.
+- [x] `onlyne-store` green with ledger and local DB: 24 unit + 2 schema statements.
 - [x] `onlyne-session` green with lifecycle port: 33.
 - [x] `onlyne-net` green with TLS, handshake, ACL, and backoff: 25.
-- [x] `onlyne-adapter` green with SDK and protocol schema: 5 unit + 14 conformance.
-- [x] `onlyne-server` green with router, relay, projection, faults, admin, and generate: 47 delivery + 26 generate + 2 binaries.
+- [x] `onlyne-adapter` green with SDK and protocol schema: 5 unit + 3 conformance + 1 protocol doc.
+- [x] `onlyne-server` green with router, relay, projection, faults, admin, and generate: 47 delivery + 26 generate.
 - [x] `onlyne-client` green with runloop, intents, adapter socket, and dispatch: 15 unit + 20 scenarios.
 - [x] `onlyne-gateway` green with shared kit: 47.
 - [x] `onlyne-cli` green with entrypoint and socket resolution: 20.
-- [x] `onlyne-testkit` green with fake agent, fake gateway, and conformance: covered by the adapter conformance runner and the e2e cases below.
+- [x] `onlyne-testkit` green with fake agent, fake gateway, and conformance: 2 binaries + 11 conformance.
 - [x] Four gateway plugins green behind `telegram`, `feishu`, `qqbot`, and `weixin` features: 11, 10, 10, 13.
 
 ## Wave plan status
