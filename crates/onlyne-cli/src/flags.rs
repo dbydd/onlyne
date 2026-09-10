@@ -26,25 +26,23 @@ pub enum AsArg {
 }
 
 /// Flags every verb accepts. Declared once and flattened into each subcommand
-/// so `--socket`, `--timeout`, and `--request` behave the same everywhere.
+/// so `--socket` and `--timeout` behave the same everywhere; `--request`
+/// reaches the args body of the four verbs named below.
 #[derive(Debug, Clone, Args)]
 pub struct GlobalFlags {
     /// Unix socket path, used verbatim.
     #[arg(long, global = true)]
     pub socket: Option<PathBuf>,
-    /// Server root; the admin socket is `<dir>/.onlyne/run/s`.
+    /// Server root; the admin socket is `<dir>/.onlyne/run/s`. `--server-root`
+    /// selects the server, and a second cluster is addressed by giving it its
+    /// own root directory.
     #[arg(long, global = true)]
     pub server_root: Option<PathBuf>,
     /// Role workspace; the client socket is `<dir>/.onlyne/run/s`, searched upward.
     #[arg(long, global = true)]
     pub workspace: Option<PathBuf>,
     /// Surface hint for a `--socket` path with no other hint.
-    #[arg(
-        long = "as",
-        global = true,
-        default_value = "auto",
-        value_enum
-    )]
+    #[arg(long = "as", global = true, default_value = "auto", value_enum)]
     pub surface_hint: AsArg,
     /// Bound for every socket operation, in milliseconds.
     #[arg(long = "timeout", alias = "timeout-ms", global = true, default_value_t = DEFAULT_TIMEOUT_MS)]
@@ -62,9 +60,8 @@ pub struct GlobalFlags {
     /// Replace the constructed args body verbatim with this JSON object.
     /// `send`, `reply`, `complete`, and `handoff` consume it, and each one
     /// validates the envelope the object carries before opening the socket.
-    /// `ping` and `control` refuse it: `ControlArgs` and `AdminControl` carry
-    /// no envelope, so there is nothing meaningful to override. Every other
-    /// verb ignores it.
+    /// `ping` and `control` refuse it, since `ControlArgs` and `AdminControl`
+    /// carry no envelope to override, and every other verb ignores it.
     #[arg(long, global = true)]
     pub request: Option<String>,
 }

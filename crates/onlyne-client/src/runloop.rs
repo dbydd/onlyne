@@ -6,23 +6,28 @@
 //! the order the plan fixes for a reconnect: welcome, intent flush, event
 //! resume, pull.
 
+use crate::accept::AcceptPath;
+use crate::adapter_socket::AdapterSocket;
+use crate::dispatch::{ClientLink, DispatchState};
+use crate::intent::{IntentMachine, op_for_intent};
 use anyhow::{Result, anyhow};
 use onlyne_layout::RoleWorkspace;
 use onlyne_net::backoff::Backoff;
 use onlyne_net::conn::ConnReadiness;
 use onlyne_net::is_permanent;
-use onlyne_proto::{AckArgs, ClientOp, Delivery, EventTier, Frame, PullArgs, PullReply, Subscribe, Welcome};
+use onlyne_proto::{
+    AckArgs, ClientOp, Delivery, EventTier, Frame, PullArgs, PullReply, Subscribe, Welcome,
+};
 use onlyne_session::default_backend;
 use onlyne_store::ClientStore;
 use std::path::PathBuf;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use crate::accept::AcceptPath;
-use crate::adapter_socket::AdapterSocket;
-use crate::dispatch::{ClientLink, DispatchState};
-use crate::intent::{IntentMachine, op_for_intent};
 
 /// Attempt ceiling used until `welcome` carries the role's own value.
 pub const DEFAULT_INTENT_ATTEMPTS: u32 = 3;
@@ -44,11 +49,16 @@ pub const EVENT_CURSOR_KEY: &str = "event_seq";
 pub const NOT_READY_PAUSE_MS: u64 = 200;
 
 /// Ladder used until `welcome` carries the role's own values.
-pub fn default_intent_backoff() -> Vec<u64> { vec![1_000, 2_000, 4_000] }
+pub fn default_intent_backoff() -> Vec<u64> {
+    vec![1_000, 2_000, 4_000]
+}
 
 /// Reconnect ladder as durations, capped at the last rung.
 pub fn reconnect_backoff() -> Backoff {
-    Backoff::with_limits(Duration::from_secs(RECONNECT_LADDER_SECONDS[0]), Duration::from_secs(RECONNECT_LADDER_SECONDS[6]))
+    Backoff::with_limits(
+        Duration::from_secs(RECONNECT_LADDER_SECONDS[0]),
+        Duration::from_secs(RECONNECT_LADDER_SECONDS[6]),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -61,8 +71,20 @@ pub struct ClientInit {
 }
 
 impl ClientInit {
-    pub fn new(workspace: impl Into<PathBuf>, role: impl Into<String>, server: impl Into<String>, key_path: impl Into<PathBuf>, cert_pin: impl Into<String>) -> Self {
-        Self { workspace: workspace.into(), role: role.into(), server: server.into(), key_path: key_path.into(), cert_pin: cert_pin.into() }
+    pub fn new(
+        workspace: impl Into<PathBuf>,
+        role: impl Into<String>,
+        server: impl Into<String>,
+        key_path: impl Into<PathBuf>,
+        cert_pin: impl Into<String>,
+    ) -> Self {
+        Self {
+            workspace: workspace.into(),
+            role: role.into(),
+            server: server.into(),
+            key_path: key_path.into(),
+            cert_pin: cert_pin.into(),
+        }
     }
 }
 
@@ -78,21 +100,47 @@ pub struct RunState {
 impl RunState {
     pub fn new(init: &ClientInit, store: ClientStore) -> Result<Self> {
         let backend = default_backend()?;
-        let dispatch = DispatchState::new(init.role.clone(), init.workspace.clone(), Vec::new(), 1, false, Arc::from(backend), store.clone());
-        let intents = IntentMachine::new(store.clone(), DEFAULT_INTENT_ATTEMPTS, default_intent_backoff());
+        let dispatch = DispatchState::new(
+            init.role.clone(),
+            init.workspace.clone(),
+            Vec::new(),
+            1,
+            false,
+            Arc::from(backend),
+            store.clone(),
+        );
+        let intents = IntentMachine::new(
+            store.clone(),
+            DEFAULT_INTENT_ATTEMPTS,
+            default_intent_backoff(),
+        );
         let accept_new = dispatch.accept_new();
-        Ok(Self { accept_new, store, intents: Arc::new(parking_lot::Mutex::new(intents)), dispatch, welcome: Arc::new(Mutex::new(None)) })
+        Ok(Self {
+            accept_new,
+            store,
+            intents: Arc::new(parking_lot::Mutex::new(intents)),
+            dispatch,
+            welcome: Arc::new(Mutex::new(None)),
+        })
     }
 
     /// Adopt the role slice the server sent with `welcome`.
     async fn adopt(&self, welcome: &Welcome) {
-        self.dispatch.reconfigure(welcome.session_command.clone().unwrap_or_default(), welcome.max_sessions, welcome.reuse);
+        self.dispatch.reconfigure(
+            welcome.session_command.clone().unwrap_or_default(),
+            welcome.max_sessions,
+            welcome.reuse,
+        );
         {
             let mut intents = self.intents.lock();
             if let Some(attempts) = welcome.intent_attempts {
                 intents.attempts = attempts;
             }
-            if let Some(ladder) = welcome.intent_backoff_ms.as_ref().filter(|ladder| !ladder.is_empty()) {
+            if let Some(ladder) = welcome
+                .intent_backoff_ms
+                .as_ref()
+                .filter(|ladder| !ladder.is_empty())
+            {
                 intents.backoff_ms = ladder.clone();
             }
         }
@@ -102,7 +150,12 @@ impl RunState {
     /// Durable event cursor for the next `subscribe`. Zero asks the server for
     /// its current head.
     fn cursor(&self) -> u64 {
-        self.store.config(EVENT_CURSOR_KEY).ok().flatten().and_then(|value| value.parse().ok()).unwrap_or(0)
+        self.store
+            .config(EVENT_CURSOR_KEY)
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
     }
 
     fn set_cursor(&self, seq: u64) {
@@ -152,8 +205,19 @@ pub async fn run(init: ClientInit) -> Result<()> {
 async fn acceptor(init: ClientInit, state: RunState) -> Result<()> {
     loop {
         let workspace = RoleWorkspace::resolve(&init.workspace);
-        let cluster = state.store.config("cluster").ok().flatten().unwrap_or_default();
-        let socket = AdapterSocket { workspace: workspace.root().to_path_buf(), role: init.role.clone(), cluster, server: init.server.clone(), dispatch: state.dispatch.clone() };
+        let cluster = state
+            .store
+            .config("cluster")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let socket = AdapterSocket {
+            workspace: workspace.root().to_path_buf(),
+            role: init.role.clone(),
+            cluster,
+            server: init.server.clone(),
+            dispatch: state.dispatch.clone(),
+        };
         match socket.serve().await {
             Ok(()) => return Ok(()),
             Err(error) => tracing::warn!(error = %error, "adapter socket restarting"),
@@ -165,12 +229,21 @@ async fn acceptor(init: ClientInit, state: RunState) -> Result<()> {
 /// Drive one live link: welcome, flush, resume, then the four tasks.
 async fn run_link(init: &ClientInit, link: &ClientLink, state: &RunState) -> Result<()> {
     let welcome = link.welcome().clone();
-    state.store.put_prose(&welcome.role, &welcome.prose, &welcome.spec_hash)?;
+    state
+        .store
+        .put_prose(&welcome.role, &welcome.prose, &welcome.spec_hash)?;
     state.store.put_config("role", &welcome.role)?;
     state.store.put_config("cluster", &welcome.cluster)?;
     state.adopt(&welcome).await;
+    // §5 line 248: the aggregate name is a property of the spec entry the
+    // server bound this link to, so it can only come from the welcome. A plain
+    // role receives `None` and keeps sending reports without the key.
+    state
+        .dispatch
+        .set_cluster_ref(welcome.aggregate.clone().unwrap_or_default());
     flush_intents(link, state).await;
     subscribe(link, state.cursor()).await?;
+    state.accept_new.store(true, Ordering::SeqCst);
     let mut pull = tokio::spawn(pull_ack_loop(init.clone(), link.clone(), state.clone()));
     let mut flusher = tokio::spawn(flush_loop(link.clone(), state.clone()));
     let mut reader = tokio::spawn(read_events(link.clone(), state.clone()));
@@ -198,6 +271,9 @@ async fn watch_readiness(link: ClientLink, state: RunState) -> Result<()> {
             ConnReadiness::Ready => {
                 if !ready {
                     ready = true;
+                    // The link redials on its own, so its fresh connection needs
+                    // the routed `hello` before any queued frame reaches it.
+                    link.authenticate().await?;
                     state.accept_new.store(true, Ordering::SeqCst);
                     flush_intents(&link, &state).await;
                     subscribe(&link, state.cursor()).await?;
@@ -224,8 +300,22 @@ async fn pull_ack_loop(init: ClientInit, link: ClientLink, state: RunState) -> R
             sleep(Duration::from_millis(PULL_PAUSE_MS)).await;
             continue;
         }
-        settle_acks(&link, &state).await?;
-        let reply = match link.request(ClientOp::Pull(PullArgs { role: Some(init.role.clone()), limit: PULL_LIMIT, hold_ms: Some(PULL_HOLD_MS) })).await {
+        if !state.dispatch.has_capacity() {
+            // A full role stops asking for work, so the server keeps the next
+            // row in `queued` and offers it when a session frees (plan §5
+            // `max_sessions`). Pulling anyway would leave a row in flight with
+            // nowhere to run.
+            sleep(Duration::from_millis(PULL_PAUSE_MS)).await;
+            continue;
+        }
+        let reply = match link
+            .request(ClientOp::Pull(PullArgs {
+                role: Some(init.role.clone()),
+                limit: PULL_LIMIT,
+                hold_ms: Some(PULL_HOLD_MS),
+            }))
+            .await
+        {
             Ok(reply) => reply,
             Err(error) if transient(&error) => {
                 sleep(Duration::from_millis(NOT_READY_PAUSE_MS)).await;
@@ -241,51 +331,91 @@ async fn pull_ack_loop(init: ClientInit, link: ClientLink, state: RunState) -> R
         let Some(data) = reply.data else { continue };
         let pulled: PullReply = serde_json::from_value(data)?;
         for delivery in pulled.deliveries {
-            accept_delivery(&state, &delivery);
+            accept_delivery(&state, &delivery).await;
         }
         state.set_cursor(pulled.seq);
         sleep(Duration::from_millis(PULL_PAUSE_MS)).await;
     }
 }
 
-/// Whether the transport answered from a fresh link instead of a live one.
+/// Whether the transport answered from a fresh link or a live one.
 fn transient(error: &onlyne_net::NetError) -> bool {
-    matches!(error, onlyne_net::NetError::NotReady | onlyne_net::NetError::Disconnected(_) | onlyne_net::NetError::RequestTimeout)
+    matches!(
+        error,
+        onlyne_net::NetError::NotReady
+            | onlyne_net::NetError::Disconnected(_)
+            | onlyne_net::NetError::RequestTimeout
+    )
 }
 
 /// One delivery becomes a session, or an immediate refusal ack.
-fn accept_delivery(state: &RunState, delivery: &Delivery) {
+///
+/// A plugin mounted before any work existed is parked in the dispatcher, so the
+/// session staged here hands straight over to it. That is the order an
+/// always-running agent takes: it attaches first and receives its assignment
+/// when a task arrives (plan §6 line 285).
+async fn accept_delivery(state: &RunState, delivery: &Delivery) {
+    if !state.dispatch.has_capacity() {
+        // The row stays in flight on the server, which offers it again when a
+        // session frees (plan §5 `max_sessions`).
+        tracing::debug!(msg_id = %delivery.msg_id, "delivery waits for a free session");
+        return;
+    }
+    // A `Completion` is a terminal receipt, so it settles the row it names and
+    // starts no session (plan §3 line 152's `Completion`).
+    if delivery.envelope.kind == onlyne_proto::MsgKind::Completion {
+        state.dispatch.push_settled(AckArgs {
+            msg_id: delivery.msg_id.clone(),
+            op_id: None,
+            accepted: true,
+            reason: None,
+        });
+        return;
+    }
     let accept_new = state.accept_new.load(Ordering::SeqCst);
     let path = AcceptPath::new(state.dispatch.clone(), state.dispatch.role_prose());
     match path.accept_new(delivery, accept_new) {
-        Ok(Some(_session)) => {
+        Ok(Some(session)) => {
             if let Some(task_id) = delivery.envelope.task_id() {
                 state.dispatch.attach_msg_id(task_id, &delivery.msg_id);
             }
+            if let Some((io, capabilities)) = state.dispatch.plugin_transport() {
+                if let Err(error) = state
+                    .dispatch
+                    .hand_session(&session.task_id, io, capabilities)
+                    .await
+                {
+                    tracing::warn!(error = %error, task = %session.task_id, "parked hand-off refused");
+                }
+            }
         }
-        Ok(None) => state.dispatch.push_settled(AckArgs { msg_id: delivery.msg_id.clone(), op_id: None, accepted: false, reason: Some("client is not accepting new work".to_string()) }),
+        Ok(None) => state.dispatch.push_settled(AckArgs {
+            msg_id: delivery.msg_id.clone(),
+            op_id: None,
+            accepted: false,
+            reason: Some("client is not accepting new work".to_string()),
+        }),
         Err(error) => {
             tracing::warn!(error = %error, msg_id = %delivery.msg_id, "delivery refused");
-            state.dispatch.push_settled(AckArgs { msg_id: delivery.msg_id.clone(), op_id: None, accepted: false, reason: Some(error.to_string()) });
+            state.dispatch.push_settled(AckArgs {
+                msg_id: delivery.msg_id.clone(),
+                op_id: None,
+                accepted: false,
+                reason: Some(error.to_string()),
+            });
         }
     }
-}
-
-/// Send every ack a finished local session produced.
-async fn settle_acks(link: &ClientLink, state: &RunState) -> Result<()> {
-    for ack in state.dispatch.take_settled() {
-        if let Err(error) = link.request(ClientOp::Ack(ack.clone())).await {
-            state.dispatch.push_settled(ack);
-            return Err(anyhow!(error));
-        }
-    }
-    Ok(())
 }
 
 /// The flusher task: push the durable intent queue at the server.
 async fn flush_loop(link: ClientLink, state: RunState) -> Result<()> {
     loop {
-        flush_intents(&link, &state).await;
+        // The link redials behind the runtime's back, and a frame sent into that
+        // fresh connection is refused until its `hello` lands, so the queue waits
+        // for a ready link rather than spending a round trip on the refusal.
+        if link.readiness() == ConnReadiness::Ready {
+            flush_intents(&link, &state).await;
+        }
         sleep(Duration::from_millis(FLUSH_PAUSE_MS)).await;
     }
 }
@@ -307,16 +437,41 @@ async fn flush_intents(link: &ClientLink, state: &RunState) {
                 continue;
             }
         };
+        // §5 line 248: a supervisor's report names its cluster on the durable
+        // path too, so the flusher stamps the same rule `send_frame` applies.
+        let op = match op {
+            ClientOp::Report(report) => {
+                ClientOp::Report(crate::dispatch::with_cluster(&state.dispatch, report))
+            }
+            other => other,
+        };
         match link.request(op).await {
             Ok(body) => {
                 let machine = state.intents.lock();
-                if let Err(error) = machine.attempt(&row, Some(&body)) {
-                    tracing::warn!(error = %error, op_id = %row.op_id, "intent answer not recorded");
+                match machine.attempt(&row, Some(&body)) {
+                    Ok(crate::intent::IntentResult::Dropped(code, reason)) => {
+                        // Dropping is terminal for the row, so the reason stays in
+                        // the log rather than only in the deleted row (plan §6).
+                        tracing::warn!(
+                            op_id = %row.op_id,
+                            ?code,
+                            reason = %reason,
+                            "intent dropped by a permanent answer"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(error = %error, op_id = %row.op_id, "intent answer not recorded");
+                    }
                 }
             }
             Err(error) => {
+                // The link is down rather than the server refusing, so this row
+                // waits for the reconnect with its retry budget intact.
                 let machine = state.intents.lock();
-                let _ = machine.attempt(&row, None);
+                if let Err(record) = machine.defer(&row, "connection unavailable") {
+                    tracing::warn!(error = %record, op_id = %row.op_id, "intent deferral not recorded");
+                }
                 tracing::warn!(error = %error, op_id = %row.op_id, "intent send failed");
                 return;
             }
@@ -326,7 +481,12 @@ async fn flush_intents(link: &ClientLink, state: &RunState) {
 
 /// Start, or resume, the observation stream.
 async fn subscribe(link: &ClientLink, since_seq: u64) -> Result<()> {
-    let request = Subscribe { since_seq, tiers: vec![EventTier::Durable, EventTier::Advisory], kinds: Vec::new(), roles: Vec::new() };
+    let request = Subscribe {
+        since_seq,
+        tiers: vec![EventTier::Durable, EventTier::Advisory],
+        kinds: Vec::new(),
+        roles: Vec::new(),
+    };
     let reply = link.request(ClientOp::Subscribe(request)).await?;
     if !reply.ok {
         return Err(anyhow!("subscribe refused: {:?}", reply.error));
@@ -348,11 +508,16 @@ async fn read_events(link: ClientLink, state: RunState) -> Result<()> {
                 match frame {
                     Frame::Ev { seq, event } => {
                         let body = serde_json::to_value(&event)?;
-                        let kind = body.get("type").and_then(serde_json::Value::as_str).unwrap_or("event");
+                        let kind = body
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("event");
                         state.store.append_event(kind, &body)?;
                         state.set_cursor(seq);
                     }
-                    Frame::Pong { server_seq, .. } => state.set_cursor(server_seq.max(state.cursor())),
+                    Frame::Pong { server_seq, .. } => {
+                        state.set_cursor(server_seq.max(state.cursor()))
+                    }
                     _ => {}
                 }
             }
@@ -367,5 +532,8 @@ async fn read_events(link: ClientLink, state: RunState) -> Result<()> {
 
 /// The local accept path for the current role slice.
 pub fn accept_path(state: &RunState) -> Result<AcceptPath> {
-    Ok(AcceptPath::new(state.dispatch.clone(), state.dispatch.role_prose()))
+    Ok(AcceptPath::new(
+        state.dispatch.clone(),
+        state.dispatch.role_prose(),
+    ))
 }

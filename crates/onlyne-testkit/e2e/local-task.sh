@@ -8,8 +8,10 @@ server_pid=""
 client_pid=""
 fake_pid=""
 cleanup() {
-  kill "$server_pid" "$client_pid" "$fake_pid" 2>/dev/null || true
-  wait "$server_pid" "$client_pid" "$fake_pid" 2>/dev/null || true
+  # `setup_cluster` starts the server before it can fail, so its pid must be in
+  # the kill list even when the assignment below never ran.
+  kill "$server_pid" "$client_pid" "$fake_pid" "${cluster_server_pid:-}" 2>/dev/null || true
+  wait "$server_pid" "$client_pid" "$fake_pid" "${cluster_server_pid:-}" 2>/dev/null || true
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -21,13 +23,30 @@ trap cleanup EXIT
 # send needs (`--from planner --to planner`, line 496). `["*", "planner"]` is the
 # self pair: the wildcard covers every other registered role, and the role's own
 # name adds the self edge that a bare wildcard would deny.
-setup_cluster "$tmp/server" "$tmp/planner" planner cluster 127.0.0.1:7899 "$E2E_PROSE" '["*", "planner"]' '["planner"]'
+setup_cluster "$tmp/server" "$tmp/planner" planner cluster "" "$E2E_PROSE" 'allowed_senders = ["*", "planner"]
+allowed_targets = ["planner"]'
 server_pid=$cluster_server_pid
 
 "$CLIENT" run --workspace "$tmp/planner" >"$tmp/client.log" 2>&1 &
 client_pid=$!
 "$FAKE" --workspace "$tmp/planner" --script "$SRC/crates/onlyne-testkit/scripts/echo-complete.json" >"$tmp/fake.log" 2>&1 &
 fake_pid=$!
+
+# Plan line 432: a task aimed at a role that is not connected stays `queued`, so
+# the `in_flight` assertion below is an assertion about the connected case and the
+# script has to create that case. The poll watches the same admin `roles` answer
+# `Presence::Online` fills, bounded at 10s, so the case cannot pass by timing.
+registered=false
+for _ in $(seq 1 100); do
+  roles_out=$("$ONLYNE" --server-root "$tmp/server" roles 2>/dev/null) || true
+  printf '%s\n' "$roles_out" > "$tmp/roles.json"
+  if rows_any "$tmp/roles.json" state online 2>/dev/null; then
+    registered=true
+    break
+  fi
+  sleep 0.1
+done
+[ "$registered" = "true" ] || fail "planner must register before the send" "roles=$roles_out client=$(cat "$tmp/client.log" 2>/dev/null)"
 
 send_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "hello v1") || fail "send command failed" "$send_out"
 printf '%s\n' "$send_out" > "$tmp/send.json"
@@ -39,29 +58,32 @@ case "$task" in
 esac
 [ "$(json_field "$tmp/send.json" '.data.state' 'json.load(sys.stdin)["data"]["state"]')" = "in_flight" ] || fail "send data.state must be in_flight" "$send_out"
 
+# The shipped answers wrap rows in `data`: `{"ledger":[...]}` and
+# `{"sessions":[...]}` (crates/onlyne-server/src/router.rs:158-215), so the
+# assertions read rows through `rows_any` and `row_value`.
 ledger_out=""
 for _ in $(seq 1 120); do
   ledger_out=$("$ONLYNE" --server-root "$tmp/server" ledger --task "$task" 2>/dev/null) || true
   printf '%s\n' "$ledger_out" > "$tmp/ledger.json"
-  if [ "$(json_field "$tmp/ledger.json" '.state' 'json.load(sys.stdin).get("state","")')" = "acked" ] 2>/dev/null; then
+  if rows_any "$tmp/ledger.json" state acked 2>/dev/null; then
     break
   fi
   sleep 0.5
 done
-[ "$(json_field "$tmp/ledger.json" '.state' 'json.load(sys.stdin).get("state","")')" = "acked" ] || fail "ledger state must become acked" "ledger=$ledger_out fake=$(cat "$tmp/fake.log" 2>/dev/null)"
-json_field "$tmp/ledger.json" '.out_head' 'json.load(sys.stdin).get("out_head","")' | grep -q "hello v1" || fail "ledger out_head must contain hello v1" "$ledger_out"
+rows_any "$tmp/ledger.json" state acked || fail "ledger state must become acked" "ledger=$ledger_out fake=$(cat "$tmp/fake.log" 2>/dev/null)"
+row_value "$tmp/ledger.json" out_head state acked | grep -q "hello v1" || fail "ledger out_head must contain hello v1" "$ledger_out"
 
 sessions_out=""
 for _ in $(seq 1 120); do
   sessions_out=$("$ONLYNE" --server-root "$tmp/server" sessions --task "$task" 2>/dev/null) || true
   printf '%s\n' "$sessions_out" > "$tmp/sessions.json"
-  if [ "$(json_field "$tmp/sessions.json" '.public_lifecycle' 'json.load(sys.stdin)["public_lifecycle"]')" = "exited" ] 2>/dev/null; then
+  if rows_any "$tmp/sessions.json" public_lifecycle exited 2>/dev/null; then
     break
   fi
   sleep 0.5
 done
-[ "$(json_field "$tmp/sessions.json" '.public_lifecycle' 'json.load(sys.stdin)["public_lifecycle"]')" = "exited" ] || fail "sessions public_lifecycle must be exited" "sessions=$sessions_out fake=$(cat "$tmp/fake.log" 2>/dev/null)"
-[ "$(json_field "$tmp/sessions.json" '.outcome' 'json.load(sys.stdin)["outcome"]')" = "done" ] || fail "sessions outcome must be done" "$sessions_out"
+rows_any "$tmp/sessions.json" public_lifecycle exited || fail "sessions public_lifecycle must be exited" "sessions=$sessions_out fake=$(cat "$tmp/fake.log" 2>/dev/null)"
+[ "$(row_value "$tmp/sessions.json" outcome)" = "done" ] || fail "sessions outcome must be done" "$sessions_out"
 
 # Plan line 498: `echo-complete.json` asserts the agent's received `assign.prose`
 # equals the spec `prose`. The dump below is the same claim in file form.

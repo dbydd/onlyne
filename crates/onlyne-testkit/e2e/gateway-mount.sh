@@ -20,7 +20,8 @@ trap cleanup EXIT
 # `["*", "planner"]` is the self pair: the wildcard covers every other registered
 # role, and the role's own name adds the self edge that a bare wildcard would deny.
 # Its target list adds reviewer, the note recipient below.
-setup_cluster "$tmp/server" "$tmp/planner" planner cluster 127.0.0.1:7899 "$E2E_PROSE" '["*", "planner"]' '["planner", "reviewer"]'
+setup_cluster "$tmp/server" "$tmp/planner" planner cluster "" "$E2E_PROSE" 'allowed_senders = ["*", "planner"]
+allowed_targets = ["planner", "reviewer"]'
 server_pid=$cluster_server_pid
 
 # reviewer is registered without a running client, which is what case 6 means by
@@ -33,7 +34,7 @@ reviewer_key=$(mint_key "$tmp/reviewer-key" "$tmp/server" "$tmp/reviewer-key.fra
 {
   echo '[[client]]'
   echo 'role = "reviewer"'
-  printf 'key = "ed25519/%s"\n' "$reviewer_key"
+  printf 'key = "%s"\n' "$reviewer_key"
   echo 'allowed_senders = ["planner", "reviewer"]'
   echo 'allowed_targets = []'
   printf 'prose = "%s"\n' "$E2E_PROSE"
@@ -50,11 +51,29 @@ gw_key=$(mint_key "$tmp/gw-key" "$tmp/server" "$tmp/gw-key.frag.toml")
   printf 'key = "%s"\n' "$gw_key"
   echo 'enabled = true'
 } >> "$tmp/server/.onlyne/spec.toml"
+
+# The inbound direction: the platform conversation the fake gateway serves is
+# bound to planner by the route table, which is the only place a target role is
+# decided for gateway traffic (plan §5 lines 258-269).
+{
+  echo '[[route]]'
+  echo 'gateway = "fg1"'
+  echo 'channel = "fake"'
+  echo 'conversation = "c1"'
+  echo 'to = { role = "planner" }'
+} >> "$tmp/server/.onlyne/spec.toml"
 "$ONLYNE" --server-root "$tmp/server" reload
 
 # onlyne-gateway-fake is a testkit product, so no onlyne-gateway binary is needed.
-"$GW_FAKE" --platform fake --gateway-id fg1 --socket "$tmp/server/.onlyne/run/s" >"$tmp/gw-fake.log" 2>&1 &
+# A FIFO on stdin keeps the connection open and lets this case play the platform:
+# one line pushes an inbound human message, which the server answers by routing
+# it through `[[route]]` to planner and rendering planner's completion back.
+mkfifo "$tmp/gw-in"
+"$GW_FAKE" --platform fake --gateway-id fg1 --socket "$tmp/server/.onlyne/run/s" <"$tmp/gw-in" >"$tmp/gw-fake.log" 2>&1 &
 GW_FAKE_PID=$!
+# A read-write open on the FIFO never blocks, so the shell holds a writer
+# before the gateway process starts reading.
+exec 3<>"$tmp/gw-in"
 
 # Start the planner client and fake agent so a Task can be delivered to a registered conversation.
 "$CLIENT" run --workspace "$tmp/planner" >"$tmp/client.log" 2>&1 &
@@ -62,35 +81,35 @@ client_pid=$!
 "$FAKE" --workspace "$tmp/planner" --script "$SRC/crates/onlyne-testkit/scripts/echo-complete.json" >"$tmp/fake.log" 2>&1 &
 fake_pid=$!
 
-# Wait for FakeGateway to be registered by polling server status for the gateway id.
+# Wait for FakeGateway to report online; the spec entry exists from the moment
+# the case writes it, so the id alone would let a dead gateway through.
 status_out=""
-for _ in $(seq 1 100); do
+for _ in $(seq 1 200); do
   status_out=$("$ONLYNE" --server-root "$tmp/server" status 2>/dev/null) || status_out=''
   printf '%s\n' "$status_out" > "$tmp/status.json"
-  if echo "$status_out" | grep -q '"fg1"' 2>/dev/null; then
+  if echo "$status_out" | grep -q '"state":"online"' 2>/dev/null; then
     break
   fi
   sleep 0.1
 done
 echo "$status_out" | grep -q '"fg1"' || fail "gateway status must report gateway id fg1" "$status_out"
+echo "$status_out" | grep -q '"state":"online"' || fail "gateway status must report the gateway online" "$status_out $(cat "$tmp/gw-fake.log")"
 # capabilities field check: FakeGateway declares report, typing, conversations.
 echo "$status_out" | grep -q 'conversations' || fail "gateway status must report capabilities" "$status_out"
 
-# Send a Task and wait for a rendered line from FakeGateway, proving a
-# render_send frame arrived.
-task_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "gw deliver me") || fail "gateway send failed" "$task_out"
-printf '%s\n' "$task_out" > "$tmp/gw-send.json"
-task=$(json_field "$tmp/gw-send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
+# The fake gateway plays the platform: this line is the human message that
+# arrives on conversation c1 (plan line 505).
+printf '%s\n' '{"op":"inbound","conversation":"c1","text":"gw deliver me"}' >&3
 
 delivered=""
-for _ in $(seq 1 100); do
+for _ in $(seq 1 200); do
   if [ -s "$tmp/gw-fake.log" ] && grep -q '"rendered"' "$tmp/gw-fake.log" 2>/dev/null; then
     delivered=$(grep '"rendered"' "$tmp/gw-fake.log" | head -n 1)
     break
   fi
   sleep 0.1
 done
-[ -n "$delivered" ] || fail "FakeGateway must receive a render_send frame" "$(cat "$tmp/gw-fake.log")"
+[ -n "$delivered" ] || fail "FakeGateway must receive a render_send frame" "$(cat "$tmp/gw-fake.log") $(cat "$tmp/client.log") $(cat "$tmp/fake.log")"
 echo "$delivered" | grep -q "gw deliver me" || fail "rendered text must match sent text" "$delivered"
 
 # Send a note to an offline role (reviewer is not registered).
@@ -105,10 +124,10 @@ ledger_out=""
 for _ in $(seq 1 120); do
   ledger_out=$("$ONLYNE" --server-root "$tmp/server" ledger --role planner 2>/dev/null) || ledger_out=''
   printf '%s\n' "$ledger_out" > "$tmp/exp-ledger.json"
-  if [ "$(json_field "$tmp/exp-ledger.json" '.rows[-1].state' 'json.load(sys.stdin).get("rows",[{}])[-1].get("state","")')" = "expired" ] 2>/dev/null; then
+  if rows_any "$tmp/exp-ledger.json" state expired 2>/dev/null; then
     break
   fi
   sleep 0.5
 done
-[ "$(json_field "$tmp/exp-ledger.json" '.rows[-1].state' 'json.load(sys.stdin).get("rows",[{}])[-1].get("state","")')" = "expired" ] || fail "ttl note must end as expired" "ledger=$ledger_out send=$exp_out$(cat "$tmp/exp.err")"
+rows_any "$tmp/exp-ledger.json" state expired || fail "ttl note must end as expired" "ledger=$ledger_out send=$exp_out$(cat "$tmp/exp.err")"
 echo "PASS gateway-mount"

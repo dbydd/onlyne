@@ -8,8 +8,8 @@ use crate::state::State;
 use anyhow::Context;
 use chrono::Utc;
 use onlyne_proto::{
-    AgentPhase, DeliveryPhase, Event, Lifecycle, Outcome, QuerySessionsArgs, RecoveryPhase,
-    Report, ResourcePhase, SessionProjection, SessionRow, SessionStateEvent, SessionSyncArgs,
+    AgentPhase, DeliveryPhase, Event, Lifecycle, Outcome, QuerySessionsArgs, RecoveryPhase, Report,
+    ResourcePhase, SessionProjection, SessionRow, SessionStateEvent, SessionSyncArgs,
 };
 use onlyne_store::{ServerSessionRow, SessionWrite};
 use serde_json::Value;
@@ -50,7 +50,16 @@ pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<Proj
                 outcome: None,
                 observed: origin.map(|cluster| serde_json::json!({ "cluster_ref": cluster })),
             };
-            write(state, role, task_id, session_id, *generation, *seq, projection, None)
+            write(
+                state,
+                role,
+                task_id,
+                session_id,
+                *generation,
+                *seq,
+                projection,
+                None,
+            )
         }
         Report::Heartbeat {
             task_id,

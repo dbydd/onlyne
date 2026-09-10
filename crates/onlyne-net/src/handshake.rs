@@ -1,13 +1,19 @@
-//! The ed25519 admission handshake: the server sends 32 random bytes, the peer
-//! signs them with its role key, and the server verifies the signature against the
-//! spec-registered public key.
+//! The ed25519 admission handshake, and what identity means on each surface.
 //!
-//! The claim the handshake carries is transport-owned, and a reader here needs the
-//! two halves of it. `HandshakeArgs::agent` names the program that connected, which
-//! is what a protocol or version mismatch is about. `HandshakeArgs::mount:
-//! Option<Mount>` names the configured instance the connection serves, which is
-//! the identity the ACL and the routing use. The same `onlyne_proto::Mount` rides
-//! the adapter surface in `onlyne_proto::adapter::HelloArgs::mount`.
+//! On a role connection identity is the claimed `role` name plus the `key`, and
+//! [`accept`] admits that claim only when the key equals the key registered for
+//! that role in the spec, so a role beyond the key's authorisation is answered
+//! with `NetError::Unauthorized`.
+//! `protocol` must equal the wire revision, and a mismatch is answered with
+//! `NetError::ProtocolVersion`.
+//! `signature` is the peer's signature over the challenge, which proves possession
+//! of that key, and a connection that omits it is refused.
+//! `aggregate` marks a supervisor's connection for the sub-cluster it represents,
+//! the same cluster that `Report::cluster_ref` names on a report.
+//! This surface carries no `mount`: `Mount` belongs to the adapter surface, where
+//! the one listener uses `hello.kind` to split the admin surface from a gateway or
+//! agent mount, and the mount gates of `docs/v1-PLAN.md` §7 line 293 apply there.
+//! The same two rules are stated in `docs/v1-PLAN.md` §3 line 122.
 //!
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::Verifier;

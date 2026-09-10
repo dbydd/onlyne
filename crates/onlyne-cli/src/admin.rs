@@ -1,20 +1,17 @@
 //! The bare admin nouns, which talk to the resolved socket like the message verbs.
 
 use onlyne_proto::{
-    AdminOp, ClientOp, EventTier, Frame, HistoryArgs as ProtoHistoryArgs, LedgerQuery,
-    LedgerState, Lifecycle, MsgKind, Principal, QueryFaultsArgs, QueryRolesArgs,
-    QuerySessionsArgs, ResBody, RepairAck, RepairAdopt, RepairFail, RepairRebind, RepairTarget,
-    Subscribe, new_id,
+    AdminOp, ClientOp, EventTier, Frame, HistoryArgs as ProtoHistoryArgs, LedgerQuery, LedgerState,
+    Lifecycle, MsgKind, Principal, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, RepairAck,
+    RepairAdopt, RepairFail, RepairRebind, RepairTarget, ResBody, Subscribe, new_id,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
 use crate::flags::GlobalFlags;
-use crate::runtime::{
-    self, EXIT_ANSWER_FAILED, EXIT_NO_SOCKET, EXIT_OK, EXIT_VALIDATION,
-};
-use crate::socket::{Surface, SocketTarget};
+use crate::runtime::{self, EXIT_ANSWER_FAILED, EXIT_NO_SOCKET, EXIT_OK, EXIT_VALIDATION};
+use crate::socket::{SocketTarget, Surface};
 use crate::wire::{self, ExchangeError, Outbound};
 
 /// One `repair` verb on the admin surface.
@@ -199,7 +196,9 @@ fn admin_surface(flags: &GlobalFlags, verb: &str) -> Result<SocketTarget, i32> {
         return Err(EXIT_NO_SOCKET);
     };
     if target.surface != Surface::Admin {
-        return Err(runtime::usage_error(format!("onlyne: {verb} needs the admin surface")));
+        return Err(runtime::usage_error(format!(
+            "onlyne: {verb} needs the admin surface; pass --server-root <dir>, or --socket <path> with --as admin"
+        )));
     }
     Ok(target)
 }
@@ -249,13 +248,21 @@ fn query(flags: &GlobalFlags, admin: AdminOp, client: ClientOp) -> i32 {
 
 /// `status` reports the server; it needs the admin surface.
 pub fn status(flags: &GlobalFlags) -> i32 {
-    admin(flags, "status", AdminOp::Status(Value::Object(Default::default())))
+    admin(
+        flags,
+        "status",
+        AdminOp::Status(Value::Object(Default::default())),
+    )
 }
 
 /// `roles` lists roles, optionally filtered by `--role`.
 pub fn roles(flags: &GlobalFlags, args: RolesArgs) -> i32 {
     let filter = QueryRolesArgs { role: args.role };
-    query(flags, AdminOp::Roles(filter.clone()), ClientOp::QueryRoles(filter))
+    query(
+        flags,
+        AdminOp::Roles(filter.clone()),
+        ClientOp::QueryRoles(filter),
+    )
 }
 
 /// `sessions` lists sessions, mapped onto `query_sessions`.
@@ -284,7 +291,11 @@ pub fn ledger(flags: &GlobalFlags, args: LedgerArgs) -> i32 {
         kind: args.kind,
         limit: args.limit.unwrap_or_default(),
     };
-    query(flags, AdminOp::Ledger(filter.clone()), ClientOp::QueryLedger(filter))
+    query(
+        flags,
+        AdminOp::Ledger(filter.clone()),
+        ClientOp::QueryLedger(filter),
+    )
 }
 
 /// `faults` lists recorded faults.
@@ -404,8 +415,7 @@ async fn status_probe(target: &SocketTarget, timeout_ms: u64) -> Probe {
     let Ok(mut stream) = wire::connect(&target.path, timeout_ms).await else {
         return Probe::Failed;
     };
-    let request =
-        Outbound::admin(new_id(), AdminOp::Status(Value::Object(Default::default())));
+    let request = Outbound::admin(new_id(), AdminOp::Status(Value::Object(Default::default())));
     match wire::request_res(&mut stream, &request, timeout_ms).await {
         Ok(body) if body.ok => Probe::Ready(body),
         Ok(_) => Probe::NotReady,
@@ -495,7 +505,12 @@ fn prose_of(data: &Value, role: &str) -> Option<String> {
         .iter()
         .find(|entry| entry.get("role").and_then(Value::as_str) == Some(role))
         .or_else(|| entries.first())
-        .and_then(|entry| entry.get("prose").and_then(Value::as_str).map(str::to_string))
+        .and_then(|entry| {
+            entry
+                .get("prose")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
 }
 
 /// `cluster export-prose` prints one role's prose, raw by default so it can be

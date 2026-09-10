@@ -1,5 +1,5 @@
 {
-  "frame": "{\"op\":\"hello\",\"args\":{\"protocol\":1,\"plugin\":\"onlyne-agent-pi\",\"version\":\"1.0.0\",\"kind\":\"agent\",\"capabilities\":[\"register\",\"report\"],\"mount\":{\"kind\":\"agent\",\"data\":{\"role\":\"planner\",\"session\":\"8b1c\",\"pid\":4212}}}}",
+  "frame": "{\"op\":\"hello\",\"args\":{\"protocol\":1,\"plugin\":\"onlyne-agent-pi\",\"version\":\"1.0.0\",\"kind\":\"agent\",\"capabilities\":[\"register\",\"report\"],\"mount\":{\"role\":\"planner\",\"session\":\"8b1c\",\"pid\":4212}}}",
   "encoding": "u32_be_length_prefix_plus_utf8_json",
-  "note": "an adapter connection opens with hello carrying kind, capabilities and mount"
+  "note": "an adapter connection opens with hello carrying kind, capabilities and a flat mount object"
 }

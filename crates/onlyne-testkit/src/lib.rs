@@ -14,10 +14,10 @@ use onlyne_adapter::{
 };
 use onlyne_proto::{
     AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, Capability, Causality, Delivery,
-    DetachArgs, Envelope, ErrorCode, HealthArgs, HelloAck, HelloArgs, HostOp,
-    IMAGE_DATA_MAX_BYTES, LedgerState, Mount, MsgKind, Outcome, PROTOCOL_VERSION,
-    Principal, Receipt, RegisterChannelArgs, Report, RenderSendArgs, ResBody, ServerInfo,
-    SessionRegisterArgs, TypingArgs, new_envelope, new_id, new_op_id, new_task_id,
+    DetachArgs, Envelope, ErrorCode, HealthArgs, HelloAck, HelloArgs, HostOp, IMAGE_DATA_MAX_BYTES,
+    LedgerState, Mount, MsgKind, Outcome, PROTOCOL_VERSION, Principal, Receipt,
+    RegisterChannelArgs, RenderSendArgs, Report, ResBody, ServerInfo, SessionRegisterArgs,
+    TypingArgs, new_envelope, new_id, new_op_id, new_task_id,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -34,7 +34,11 @@ pub struct HostSimSpec {
 }
 
 impl HostSimSpec {
-    pub fn agent(role: impl Into<String>, prose: impl Into<String>, expected_capabilities: Vec<Capability>) -> Self {
+    pub fn agent(
+        role: impl Into<String>,
+        prose: impl Into<String>,
+        expected_capabilities: Vec<Capability>,
+    ) -> Self {
         HostSimSpec {
             role: role.into(),
             prose: prose.into(),
@@ -80,7 +84,13 @@ impl HostSim {
         })
     }
 
-    pub fn pair(spec: HostSimSpec) -> (Arc<Self>, AgentHandle, JoinHandle<onlyne_adapter::Result<()>>) {
+    pub fn pair(
+        spec: HostSimSpec,
+    ) -> (
+        Arc<Self>,
+        AgentHandle,
+        JoinHandle<onlyne_adapter::Result<()>>,
+    ) {
         let sim = Self::new(spec);
         let (agent, task) = sim.clone().connect_agent();
         (sim, agent, task)
@@ -88,15 +98,28 @@ impl HostSim {
 
     pub fn connect_agent(self: Arc<Self>) -> (AgentHandle, JoinHandle<onlyne_adapter::Result<()>>) {
         let (client, server) = tokio::io::duplex(16 * 1024 * 1024);
-        let agent = AdapterClient::connect_with_timeouts(client, Duration::from_secs(5), Duration::from_secs(5));
+        let agent = AdapterClient::connect_with_timeouts(
+            client,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
         let sim = self.clone();
         let task = tokio::spawn(async move { sim.serve_stream(server).await });
         (agent, task)
     }
 
-    pub fn connect_gateway(self: Arc<Self>) -> (onlyne_adapter::GatewayHandle, JoinHandle<onlyne_adapter::Result<()>>) {
+    pub fn connect_gateway(
+        self: Arc<Self>,
+    ) -> (
+        onlyne_adapter::GatewayHandle,
+        JoinHandle<onlyne_adapter::Result<()>>,
+    ) {
         let (client, server) = tokio::io::duplex(16 * 1024 * 1024);
-        let gateway = AdapterClient::gateway_with_timeouts(client, Duration::from_secs(5), Duration::from_secs(5));
+        let gateway = AdapterClient::gateway_with_timeouts(
+            client,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
         let sim = self.clone();
         let task = tokio::spawn(async move { sim.serve_stream(server).await });
         (gateway, task)
@@ -113,8 +136,12 @@ impl HostSim {
         })
         .await?;
         self.install_io(accepted.io.clone()).await;
-        self.emit_scripted().await.map_err(|err| onlyne_adapter::AdapterError::Unexpected(err.to_string()))?;
-        self.emit_ready_assigns().await.map_err(|err| onlyne_adapter::AdapterError::Unexpected(err.to_string()))?;
+        self.emit_scripted()
+            .await
+            .map_err(|err| onlyne_adapter::AdapterError::Unexpected(err.to_string()))?;
+        self.emit_ready_assigns()
+            .await
+            .map_err(|err| onlyne_adapter::AdapterError::Unexpected(err.to_string()))?;
         let dispatcher = HostDispatcher::new(accepted.hello.kind, self.clone());
         dispatcher.serve(accepted.io, accepted.inbound).await
     }
@@ -151,7 +178,9 @@ impl HostSim {
         let task_id = assign.task_id.clone();
         let emit = {
             let mut state = self.state.lock().await;
-            state.pending_assigns.insert(task_id.clone(), assign.clone());
+            state
+                .pending_assigns
+                .insert(task_id.clone(), assign.clone());
             if state.ready_tasks.contains(&task_id) {
                 state.io.clone().map(|io| (io, assign))
             } else {
@@ -203,7 +232,11 @@ impl HostSim {
         Ok(())
     }
 
-    pub async fn handle_missing_recycle(&self, task_id: impl Into<String>, timeout: Duration) -> Result<()> {
+    pub async fn handle_missing_recycle(
+        &self,
+        task_id: impl Into<String>,
+        timeout: Duration,
+    ) -> Result<()> {
         let task_id = task_id.into();
         let missing = self
             .state
@@ -225,7 +258,8 @@ impl HostSim {
 
     pub async fn probe_with_timeout(&self, task_id: String, timeout: Duration) -> Result<()> {
         let before = self.recorded().await.len();
-        self.emit_host(HostOp::Probe(json!({ "task_id": task_id }))).await?;
+        self.emit_host(HostOp::Probe(json!({ "task_id": task_id })))
+            .await?;
         tokio::time::sleep(timeout).await;
         let answered = self
             .recorded()
@@ -280,7 +314,8 @@ impl HostSim {
 #[async_trait]
 impl Host for HostSim {
     async fn hello(&self, args: &HelloArgs) -> std::result::Result<HelloAck, (ErrorCode, String)> {
-        self.record("hello", serde_json::to_value(args).unwrap_or(Value::Null)).await;
+        self.record("hello", serde_json::to_value(args).unwrap_or(Value::Null))
+            .await;
         let missing = args.missing(&self.spec.expected_capabilities);
         let mut state = self.state.lock().await;
         state.missing_capabilities = missing.clone();
@@ -304,7 +339,11 @@ impl Host for HostSim {
     }
 
     async fn report(&self, report: &Report) -> std::result::Result<(), (ErrorCode, String)> {
-        self.record("report", serde_json::to_value(report).unwrap_or(Value::Null)).await;
+        self.record(
+            "report",
+            serde_json::to_value(report).unwrap_or(Value::Null),
+        )
+        .await;
         let emit = {
             let mut state = self.state.lock().await;
             if let Some(version) = report.version() {
@@ -335,18 +374,36 @@ impl Host for HostSim {
         Ok(())
     }
 
-    async fn session_register(&self, args: &SessionRegisterArgs) -> std::result::Result<(), (ErrorCode, String)> {
-        self.record("session_register", serde_json::to_value(args).unwrap_or(Value::Null)).await;
+    async fn session_register(
+        &self,
+        args: &SessionRegisterArgs,
+    ) -> std::result::Result<(), (ErrorCode, String)> {
+        self.record(
+            "session_register",
+            serde_json::to_value(args).unwrap_or(Value::Null),
+        )
+        .await;
         Ok(())
     }
 
-    async fn assign_ack(&self, ack: &AssignAckArgs) -> std::result::Result<(), (ErrorCode, String)> {
-        self.record("assign_ack", serde_json::to_value(ack).unwrap_or(Value::Null)).await;
+    async fn assign_ack(
+        &self,
+        ack: &AssignAckArgs,
+    ) -> std::result::Result<(), (ErrorCode, String)> {
+        self.record(
+            "assign_ack",
+            serde_json::to_value(ack).unwrap_or(Value::Null),
+        )
+        .await;
         Ok(())
     }
 
     async fn send(&self, envelope: &Envelope) -> std::result::Result<Receipt, (ErrorCode, String)> {
-        self.record("send", serde_json::to_value(envelope).unwrap_or(Value::Null)).await;
+        self.record(
+            "send",
+            serde_json::to_value(envelope).unwrap_or(Value::Null),
+        )
+        .await;
         if let Err(err) = envelope.validate() {
             return Err((ErrorCode::Invalid, err.message().to_string()));
         }
@@ -370,36 +427,51 @@ impl Host for HostSim {
             task: envelope.task_id().map(str::to_string),
             state: LedgerState::Acked,
             enqueued_at: Utc::now(),
-            duplicate: false,
         };
         if let Some(op_id) = &envelope.op_id {
-            state.receipts.insert(op_id.clone(), (fingerprint, receipt.clone()));
+            state
+                .receipts
+                .insert(op_id.clone(), (fingerprint, receipt.clone()));
         }
         Ok(receipt)
     }
 
     async fn deliver(&self, delivery: &Delivery) -> std::result::Result<(), (ErrorCode, String)> {
-        self.record("deliver", serde_json::to_value(delivery).unwrap_or(Value::Null)).await;
+        self.record(
+            "deliver",
+            serde_json::to_value(delivery).unwrap_or(Value::Null),
+        )
+        .await;
         Ok(())
     }
 
-    async fn register_channel(&self, args: &RegisterChannelArgs) -> std::result::Result<(), (ErrorCode, String)> {
-        self.record("register_channel", serde_json::to_value(args).unwrap_or(Value::Null)).await;
+    async fn register_channel(
+        &self,
+        args: &RegisterChannelArgs,
+    ) -> std::result::Result<(), (ErrorCode, String)> {
+        self.record(
+            "register_channel",
+            serde_json::to_value(args).unwrap_or(Value::Null),
+        )
+        .await;
         Ok(())
     }
 
     async fn health(&self, args: &HealthArgs) -> std::result::Result<(), (ErrorCode, String)> {
-        self.record("health", serde_json::to_value(args).unwrap_or(Value::Null)).await;
+        self.record("health", serde_json::to_value(args).unwrap_or(Value::Null))
+            .await;
         Ok(())
     }
 
     async fn typing(&self, args: &TypingArgs) -> std::result::Result<(), (ErrorCode, String)> {
-        self.record("typing", serde_json::to_value(args).unwrap_or(Value::Null)).await;
+        self.record("typing", serde_json::to_value(args).unwrap_or(Value::Null))
+            .await;
         Ok(())
     }
 
     async fn detach(&self, args: &DetachArgs) -> std::result::Result<(), (ErrorCode, String)> {
-        self.record("detach", serde_json::to_value(args).unwrap_or(Value::Null)).await;
+        self.record("detach", serde_json::to_value(args).unwrap_or(Value::Null))
+            .await;
         Ok(())
     }
 }
@@ -438,7 +510,12 @@ pub struct FakeAgent {
 }
 
 impl FakeAgent {
-    pub fn new(role: impl Into<String>, capabilities: Vec<Capability>, script: AgentScript, workspace: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        role: impl Into<String>,
+        capabilities: Vec<Capability>,
+        script: AgentScript,
+        workspace: impl Into<PathBuf>,
+    ) -> Self {
         FakeAgent {
             role: role.into(),
             capabilities,
@@ -467,8 +544,15 @@ impl FakeAgent {
         Ok(())
     }
 
-    async fn run_step(&self, handle: &AgentHandle, state: &mut FakeAgentState, step: &Value) -> Result<()> {
-        let object = step.as_object().ok_or_else(|| anyhow!("script step must be an object"))?;
+    async fn run_step(
+        &self,
+        handle: &AgentHandle,
+        state: &mut FakeAgentState,
+        step: &Value,
+    ) -> Result<()> {
+        let object = step
+            .as_object()
+            .ok_or_else(|| anyhow!("script step must be an object"))?;
         let Some((name, value)) = object.iter().next() else {
             bail!("unknown step: empty");
         };
@@ -480,20 +564,32 @@ impl FakeAgent {
                 state.last_assign = Some(handle.wait_assign().await.context("wait assign")?);
             }
             "report" => {
-                let kind = value.as_str().ok_or_else(|| anyhow!("report step requires a string"))?;
-                let assign = state.last_assign.as_ref().ok_or_else(|| anyhow!("report requires assign"))?;
+                let kind = value
+                    .as_str()
+                    .ok_or_else(|| anyhow!("report step requires a string"))?;
+                let assign = state
+                    .last_assign
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("report requires assign"))?;
                 match kind {
                     "ready" => {
-                        handle.report_ready(assign.task_id.clone(), "sim-session").await?;
+                        handle
+                            .report_ready(assign.task_id.clone(), "sim-session")
+                            .await?;
                     }
                     "heartbeat" => {
-                        handle.report_heartbeat(assign.task_id.clone(), json!({ "state": "running" })).await?;
+                        handle
+                            .report_heartbeat(assign.task_id.clone(), json!({ "state": "running" }))
+                            .await?;
                     }
                     other => bail!("unknown step: report.{other}"),
                 }
             }
             "complete" => {
-                let assign = state.last_assign.as_ref().ok_or_else(|| anyhow!("complete requires assign"))?;
+                let assign = state
+                    .last_assign
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("complete requires assign"))?;
                 let outcome = value
                     .get("outcome")
                     .and_then(Value::as_str)
@@ -502,13 +598,21 @@ impl FakeAgent {
                 let head = match value.get("head_from").and_then(Value::as_str) {
                     Some("assign_body") => assign.envelope.body.text.clone(),
                     Some(other) => bail!("unknown step: complete.head_from.{other}"),
-                    None => value.get("head").and_then(Value::as_str).map(str::to_string),
+                    None => value
+                        .get("head")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                 };
-                handle.report_complete(assign.task_id.clone(), outcome, head).await?;
+                handle
+                    .report_complete(assign.task_id.clone(), outcome, head)
+                    .await?;
             }
             "fail" => {
                 let reason = value.as_str().unwrap_or("fake agent failure").to_string();
-                let task_id = state.last_assign.as_ref().map(|assign| assign.task_id.clone());
+                let task_id = state
+                    .last_assign
+                    .as_ref()
+                    .map(|assign| assign.task_id.clone());
                 handle.report_fault(task_id, "fake_agent", reason).await?;
             }
             "exit" => {
@@ -516,11 +620,15 @@ impl FakeAgent {
                 handle.exit(reason).await?;
             }
             "sleep_ms" => {
-                let ms = value.as_u64().ok_or_else(|| anyhow!("sleep_ms requires a number"))?;
+                let ms = value
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("sleep_ms requires a number"))?;
                 tokio::time::sleep(Duration::from_millis(ms)).await;
             }
             "assert_prose_equals" => {
-                let expected = value.as_str().ok_or_else(|| anyhow!("assert_prose_equals requires a string"))?;
+                let expected = value
+                    .as_str()
+                    .ok_or_else(|| anyhow!("assert_prose_equals requires a string"))?;
                 let actual = state
                     .last_assign
                     .as_ref()
@@ -531,16 +639,24 @@ impl FakeAgent {
                 }
             }
             "assert_field" => {
-                let path = value.get("path").and_then(Value::as_str).ok_or_else(|| anyhow!("assert_field.path required"))?;
-                let expected = value.get("equals").ok_or_else(|| anyhow!("assert_field.equals required"))?;
+                let path = value
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("assert_field.path required"))?;
+                let expected = value
+                    .get("equals")
+                    .ok_or_else(|| anyhow!("assert_field.equals required"))?;
                 let state_value = self.state_value(state)?;
-                let actual = value_path(&state_value, path).ok_or_else(|| anyhow!("assert_field missing path {path}"))?;
+                let actual = value_path(&state_value, path)
+                    .ok_or_else(|| anyhow!("assert_field missing path {path}"))?;
                 if actual != expected {
                     bail!("assert_field {path} failed: expected {expected}, got {actual}");
                 }
             }
             "echo_prose_to" => {
-                let file = value.as_str().ok_or_else(|| anyhow!("echo_prose_to requires a path"))?;
+                let file = value
+                    .as_str()
+                    .ok_or_else(|| anyhow!("echo_prose_to requires a path"))?;
                 let prose = state
                     .last_assign
                     .as_ref()
@@ -619,18 +735,35 @@ impl FakeGateway {
         })
     }
 
-    pub fn inbound_delivery(&self, conversation: impl Into<String>, text: impl Into<String>) -> Result<Delivery> {
+    /// One inbound platform message, shaped as the work a role should do.
+    ///
+    /// The human's line is a `Task` with a fresh task id, because the receiving
+    /// client dispatches work by `causality.task` (plan §3) and a `Note` starts
+    /// no session. The target role comes from the server's `[[route]]` table,
+    /// so the principal here is the deferring placeholder the plugin sends.
+    pub fn inbound_delivery(
+        &self,
+        conversation: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Result<Delivery> {
         let conversation = conversation.into();
+        let causality = Causality {
+            task: onlyne_proto::new_task_id(),
+            parent_task: None,
+            reply_to: None,
+            hop: 0,
+            attempt: 0,
+        };
         let envelope = new_envelope(
-            MsgKind::Note,
+            MsgKind::Task,
             Principal::Gateway {
                 gateway: self.gateway_id.clone(),
                 channel: self.platform.clone(),
                 conversation: Some(conversation),
             },
-            Principal::role("gateway"),
+            Principal::role("unrouted"),
             Body::text(text.into()),
-            None,
+            Some(causality),
         )?;
         Ok(Delivery {
             msg_id: envelope.id.clone(),
@@ -650,7 +783,8 @@ impl FakeGateway {
     {
         let mut lines = reader.lines();
         while let Some(line) = lines.next_line().await? {
-            let value: Value = serde_json::from_str(&line).context("parse fake gateway stdin line")?;
+            let value: Value =
+                serde_json::from_str(&line).context("parse fake gateway stdin line")?;
             match value.get("op").and_then(Value::as_str) {
                 Some("inbound") => {
                     let conversation = value
@@ -661,7 +795,9 @@ impl FakeGateway {
                         .get("text")
                         .and_then(Value::as_str)
                         .ok_or_else(|| anyhow!("inbound text required"))?;
-                    gateway.deliver_inbound(self.inbound_delivery(conversation, text)?).await?;
+                    gateway
+                        .deliver_inbound(self.inbound_delivery(conversation, text)?)
+                        .await?;
                 }
                 Some(other) => bail!("unknown gateway op: {other}"),
                 None => bail!("gateway op required"),
@@ -682,7 +818,11 @@ pub fn default_agent_capabilities() -> Vec<Capability> {
 }
 
 pub fn default_gateway_capabilities() -> Vec<Capability> {
-    vec![Capability::Report, Capability::Typing, Capability::Conversations]
+    vec![
+        Capability::Report,
+        Capability::Typing,
+        Capability::Conversations,
+    ]
 }
 
 pub fn sample_task_envelope(text: &str) -> Envelope {
@@ -788,16 +928,21 @@ pub async fn read_script_from_stdin() -> Result<AgentScript> {
 }
 
 pub fn script_from_path(path: &Path) -> Result<AgentScript> {
-    let file = std::fs::File::open(path).with_context(|| format!("open script {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("open script {}", path.display()))?;
     AgentScript::from_reader(file)
 }
 
-pub async fn run_fake_gateway_render_printer(handle: Arc<onlyne_adapter::GatewayHandle>) -> Result<()> {
+pub async fn run_fake_gateway_render_printer(
+    handle: Arc<onlyne_adapter::GatewayHandle>,
+) -> Result<()> {
     loop {
         let args = handle.wait_render_send().await?;
         let line = FakeGateway::render_line(&args);
         let mut stdout = tokio::io::stdout();
-        stdout.write_all(serde_json::to_string(&line)?.as_bytes()).await?;
+        stdout
+            .write_all(serde_json::to_string(&line)?.as_bytes())
+            .await?;
         stdout.write_all(b"\n").await?;
         stdout.flush().await?;
     }

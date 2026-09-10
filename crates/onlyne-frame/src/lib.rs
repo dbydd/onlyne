@@ -236,7 +236,6 @@ mod tests {
         assert_eq!(got, None);
     }
 
-
     #[tokio::test]
     async fn rejects_an_oversize_announced_length() {
         let (mut a, mut b) = duplex(64);

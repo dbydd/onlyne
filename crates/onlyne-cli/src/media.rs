@@ -1,7 +1,7 @@
 //! Inline image loading: magic-byte mime detection with an extension fallback.
 
 use base64::Engine;
-use onlyne_proto::{ImagePart, IMAGE_DATA_MAX_BYTES, IMAGE_MIMES};
+use onlyne_proto::{IMAGE_DATA_MAX_BYTES, IMAGE_MIMES, ImagePart};
 use std::path::Path;
 
 /// A local failure to attach an image.

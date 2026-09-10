@@ -11,6 +11,7 @@ use rusqlite::types::{Type, Value as SqlValue};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::error::{StoreError, StoreResult};
 use crate::transition_allowed;
@@ -39,11 +40,15 @@ CREATE TABLE IF NOT EXISTS sessions(
   delivery_state TEXT NOT NULL,
   resource_state TEXT NOT NULL,
   recovery_substate TEXT NOT NULL,
+  -- docs/v1-PLAN.md:356 requires the (generation, seq) gate and the kernel's isolate-after-N and terminate-after-N policy needs a persisted counter, so this pair carries DEFAULT_ISOLATE_AFTER and DEFAULT_TERMINATE_AFTER from crates/onlyne-session/src/reconcile.rs; the fence at line 354 omits both columns.
   desired_json TEXT NOT NULL,
   observed_json TEXT NOT NULL,
   mismatch_count INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  -- docs/v1-PLAN.md:354 types this column TEXT while SessionRecord.updated_at in crates/onlyne-session/src/reconcile.rs is i64 unix seconds, and the store encodes those seconds through its own helper on every write.
+  updated_at TEXT NOT NULL
 );
+-- Secondary index for session-addressed reads; task_id is the primary key per docs/v1-PLAN.md:354, and a re-keyed session can appear on two task rows.
+CREATE INDEX IF NOT EXISTS sessions_session_id_idx ON sessions(session_id);
 CREATE TABLE IF NOT EXISTS ledger(
   msg_id TEXT PRIMARY KEY,
   op_id TEXT UNIQUE,
@@ -59,6 +64,7 @@ CREATE TABLE IF NOT EXISTS ledger(
   reason TEXT,
   enqueued_at TEXT NOT NULL,
   acked_at TEXT,
+  -- docs/v1-PLAN.md:358 declares body_json TEXT NOT NULL while line 360 retains the body until acked plus retention_days and then sets NULL, so the document argues with itself and the code keeps the retention rule.
   body_json TEXT
 );
 CREATE INDEX IF NOT EXISTS ledger_state_enqueued_idx ON ledger(state,enqueued_at);
@@ -86,7 +92,8 @@ CREATE TABLE IF NOT EXISTS faults(
   kind TEXT NOT NULL,
   reason TEXT NOT NULL,
   state TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  -- docs/v1-PLAN.md:364 types this column TEXT while FaultRecord.created_at in crates/onlyne-session/src/reconcile.rs is i64 unix seconds, and the store encodes those seconds through its own helper on every write.
+  created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS faults_task_kind_generation_idx ON faults(task_id,kind,generation);
 CREATE INDEX IF NOT EXISTS faults_state_idx ON faults(state);
@@ -157,7 +164,7 @@ impl LedgerRow {
             op_id: envelope.op_id.clone(),
             fingerprint: Some(fingerprint.to_string()),
             kind: envelope.kind,
-            from_json: serde_json::to_string(&envelope.from)?,
+            from_json: sender_column(&envelope.from, envelope.admin)?,
             to_json: serde_json::to_string(&envelope.to)?,
             task: causality.map(|c| c.task.clone()),
             parent_task: causality.and_then(|c| c.parent_task.clone()),
@@ -170,6 +177,34 @@ impl LedgerRow {
             body_json: Some(body_json),
         })
     }
+}
+
+impl LedgerRow {
+    /// The sender principal this row recorded.
+    ///
+    /// The sender column carries the principal beside the admin marker, so a
+    /// row states whether an admin-surface send wrote it (plan §8 line 320)
+    /// without a second column. A column holding a bare principal decodes too.
+    pub fn sender(&self) -> Result<Principal, serde_json::Error> {
+        let value: Value = serde_json::from_str(&self.from_json)?;
+        serde_json::from_value(value.get("principal").cloned().unwrap_or(value))
+    }
+
+    /// Whether the send behind this row arrived on the admin surface.
+    pub fn sender_is_admin(&self) -> bool {
+        serde_json::from_str::<Value>(&self.from_json)
+            .ok()
+            .and_then(|value| value.get("admin").and_then(Value::as_bool))
+            .unwrap_or(false)
+    }
+}
+
+/// Encode the sender column: the principal plus the admin marker.
+fn sender_column(from: &Principal, admin: bool) -> StoreResult<String> {
+    Ok(serde_json::to_string(&serde_json::json!({
+        "admin": admin,
+        "principal": from,
+    }))?)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,7 +297,7 @@ impl ServerLedger {
                 bool_int(role.admin),
                 role.max_sessions,
                 role.spec_hash,
-                role.updated_at
+                unix_to_rfc3339(rfc3339_to_unix(&role.updated_at))
             ],
         )?;
         Ok(changed == 1)
@@ -271,7 +306,9 @@ impl ServerLedger {
     pub fn list_roles(&self) -> StoreResult<Vec<RoleRow>> {
         let conn = self.conn()?;
         let rows = conn
-            .prepare("SELECT name,key,admin,max_sessions,spec_hash,updated_at FROM roles ORDER BY name")?
+            .prepare(
+                "SELECT name,key,admin,max_sessions,spec_hash,updated_at FROM roles ORDER BY name",
+            )?
             .query_map([], role_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
@@ -312,7 +349,7 @@ impl ServerLedger {
                 write.desired_json,
                 write.observed_json,
                 write.mismatch_count,
-                write.updated_at
+                unix_to_rfc3339(write.updated_at)
             ],
         )?;
         Ok(changed == 1)
@@ -382,7 +419,12 @@ impl ServerLedger {
     }
 
     pub fn mark_rejected(&self, msg_id: &str, reason: &str) -> StoreResult<bool> {
-        self.transition_msg(msg_id, LedgerState::Rejected, None, Some(reason.to_string()))
+        self.transition_msg(
+            msg_id,
+            LedgerState::Rejected,
+            None,
+            Some(reason.to_string()),
+        )
     }
 
     pub fn expire_queued_before(&self, now: DateTime<Utc>) -> StoreResult<usize> {
@@ -437,10 +479,17 @@ impl ServerLedger {
 
     /// Move one queued row to `expired` and publish its `ledger_state` event in
     /// the same transaction.
+    /// Settle one row whose deadline passed.
+    ///
+    /// A row reaches this from `queued` while it waits for its role, and from
+    /// `in_flight` when the role held it past the deadline: the sender asked for
+    /// a deadline, so the sweep answers with `expired` in both states.
     pub fn expire_one(&self, msg_id: &str, reason: &str) -> StoreResult<LedgerRow> {
         let conn = self.conn()?;
         let current = ledger_by_msg_id(&conn, msg_id)?;
-        ensure_transition_allowed(current.state, LedgerState::Expired)?;
+        if !matches!(current.state, LedgerState::Queued | LedgerState::InFlight) {
+            ensure_transition_allowed(current.state, LedgerState::Expired)?;
+        }
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE ledger SET state='expired',reason=? WHERE msg_id=?",
@@ -464,9 +513,8 @@ impl ServerLedger {
         let conn = self.conn()?;
         let tx = conn.unchecked_transaction()?;
         let ids = {
-            let mut stmt = tx.prepare(
-                "SELECT id FROM faults WHERE task_id=? AND state='open' ORDER BY id",
-            )?;
+            let mut stmt =
+                tx.prepare("SELECT id FROM faults WHERE task_id=? AND state='open' ORDER BY id")?;
             stmt.query_map(params![task_id], |r| r.get::<_, i64>(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
@@ -502,7 +550,7 @@ impl ServerLedger {
             args.push(SqlValue::Text(msg_id));
         }
         if let Some(role) = query.role {
-            clauses.push("(json_extract(from_json,'$.role.role')=? OR json_extract(to_json,'$.role.role')=?)".to_string());
+            clauses.push("(json_extract(from_json,'$.principal.role.role')=? OR json_extract(to_json,'$.role.role')=?)".to_string());
             args.push(SqlValue::Text(role.clone()));
             args.push(SqlValue::Text(role));
         }
@@ -522,6 +570,24 @@ impl ServerLedger {
         let rows = conn
             .prepare(&sql)?
             .query_map(params_from_iter(args), ledger_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The plan's task-keyed ledger read: every row of one task across roles, in
+    /// insertion order. `docs/v1-PLAN.md` line 501 reads three rows back in order
+    /// after a reconnect and line 508 reads one task's rows after a relocation.
+    /// The ledger carries no monotonic column of its own, so the order is
+    /// `enqueued_at` with SQLite's `rowid` breaking ties between rows written in
+    /// one second: `rowid` is the insertion counter, and it makes the order the
+    /// ledger's write order without a second copy of that fact.
+    pub fn ledger_task(&self, task: &str, limit: u32) -> StoreResult<Vec<LedgerRow>> {
+        let conn = self.conn()?;
+        let rows = conn
+            .prepare(&format!(
+                "SELECT {LEDGER_COLUMNS} FROM ledger WHERE task=? ORDER BY enqueued_at,rowid LIMIT ?"
+            ))?
+            .query_map(params![task, sql_limit(limit)], ledger_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -568,7 +634,7 @@ impl ServerLedger {
                 fault.kind,
                 fault.reason,
                 fault.state,
-                fault.created_at
+                unix_to_rfc3339(fault.created_at)
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -669,7 +735,12 @@ impl ServerLedger {
         Ok(changed == 1)
     }
 
-    fn ledger_for_role(&self, role: &str, state: LedgerState, limit: u32) -> StoreResult<Vec<LedgerRow>> {
+    fn ledger_for_role(
+        &self,
+        role: &str,
+        state: LedgerState,
+        limit: u32,
+    ) -> StoreResult<Vec<LedgerRow>> {
         let conn = self.conn()?;
         let rows = conn
             .prepare(&format!(
@@ -715,7 +786,8 @@ fn ensure_schema(conn: &Connection, marker: &str, ddl: &str) -> StoreResult<()> 
         Some((SCHEMA_VERSION, PROTOCOL_VERSION)) => {}
         Some(_) => return Err(StoreError::unsupported_schema()),
         None => {
-            let marker_count: i64 = conn.query_row("SELECT COUNT(*) FROM schema_marker", [], |r| r.get(0))?;
+            let marker_count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM schema_marker", [], |r| r.get(0))?;
             if marker_count > 0 || !tables.is_empty() {
                 return Err(StoreError::unsupported_schema());
             }
@@ -739,12 +811,19 @@ fn user_tables(conn: &Connection) -> StoreResult<Vec<String>> {
 
 // Rejection-path markers only: these names identify pre-v1 tables and the `swarm` prefix that the schema gate refuses (plan §10 line 370).
 fn is_legacy_table(name: &str) -> bool {
-    matches!(name, "io_cursors" | "loopback_idempotency" | "pending_replies")
-        || name.starts_with("swarm")
+    matches!(
+        name,
+        "io_cursors" | "loopback_idempotency" | "pending_replies"
+    ) || name.starts_with("swarm")
 }
 
+/// One moment as RFC 3339 text.
+///
+/// Milliseconds rather than whole seconds: three acks inside one second are a
+/// normal run, and plan §Verification case 4 reads the stamps of a reconnect
+/// burst as the order they were settled in, which whole seconds collapse.
 pub fn rfc3339(now: DateTime<Utc>) -> String {
-    now.to_rfc3339_opts(SecondsFormat::Secs, true)
+    now.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 pub(crate) fn append_event_conn(conn: &Connection, kind: &str, data: &Value) -> StoreResult<i64> {
@@ -761,7 +840,9 @@ pub(crate) fn events_since_conn(
     limit: u32,
 ) -> StoreResult<Vec<EventRecord>> {
     let rows = conn
-        .prepare("SELECT seq,type,data_json,created_at FROM events WHERE seq>? ORDER BY seq LIMIT ?")?
+        .prepare(
+            "SELECT seq,type,data_json,created_at FROM events WHERE seq>? ORDER BY seq LIMIT ?",
+        )?
         .query_map(params![seq, sql_limit(limit)], event_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
@@ -839,13 +920,15 @@ fn ledger_row(r: &Row<'_>) -> rusqlite::Result<LedgerRow> {
         msg_id: r.get(0)?,
         op_id: r.get(1)?,
         fingerprint: r.get(2)?,
-        kind: parse_msg_kind(&kind).ok_or_else(|| conversion_error(3, format!("invalid message kind {kind}")))?,
+        kind: parse_msg_kind(&kind)
+            .ok_or_else(|| conversion_error(3, format!("invalid message kind {kind}")))?,
         from_json: r.get(4)?,
         to_json: r.get(5)?,
         task: r.get(6)?,
         parent_task: r.get(7)?,
         attempt: r.get(8)?,
-        state: parse_ledger_state(&state).ok_or_else(|| conversion_error(9, format!("invalid ledger state {state}")))?,
+        state: parse_ledger_state(&state)
+            .ok_or_else(|| conversion_error(9, format!("invalid ledger state {state}")))?,
         out_head: r.get(10)?,
         reason: r.get(11)?,
         enqueued_at: r.get(12)?,
@@ -881,7 +964,7 @@ fn session_row(r: &Row<'_>) -> rusqlite::Result<ServerSessionRow> {
         desired_json: r.get(10)?,
         observed_json: r.get(11)?,
         mismatch_count: r.get(12)?,
-        updated_at: r.get(13)?,
+        updated_at: rfc3339_to_unix(&r.get::<_, String>(13)?),
     })
 }
 
@@ -912,7 +995,7 @@ fn server_fault_row(r: &Row<'_>) -> rusqlite::Result<ServerFaultRow> {
         kind: r.get(11)?,
         reason: r.get(12)?,
         state: r.get(13)?,
-        created_at: r.get(14)?,
+        created_at: rfc3339_to_unix(&r.get::<_, String>(14)?),
     })
 }
 
@@ -947,7 +1030,7 @@ fn ledger_state_event(
         msg_id: row.msg_id.clone(),
         op_id: row.op_id.clone(),
         kind: row.kind,
-        from: serde_json::from_str(&row.from_json).unwrap_or_else(|_| Principal::role("unknown")),
+        from: row.sender().unwrap_or_else(|_| Principal::role("unknown")),
         to: serde_json::from_str(&row.to_json).unwrap_or_else(|_| Principal::role("unknown")),
         task: row.task.clone(),
         state,
@@ -1001,9 +1084,38 @@ fn bool_int(value: bool) -> i64 {
     if value { 1 } else { 0 }
 }
 
+/// Grapheme clusters kept by [`head_preview`].
+pub const OUT_HEAD_CLUSTERS: usize = 200;
+
+/// The one-line preview of a message body: the first [`OUT_HEAD_CLUSTERS`]
+/// grapheme clusters, cut on a cluster boundary, so a combining sequence, a ZWJ
+/// emoji, and a flag survive whole. `docs/v1-PLAN.md` line 358 keeps the first
+/// 200 字 of the body in `ledger.out_head` for the operator-facing ledger view,
+/// and the unit is grapheme clusters: a code-point cut lands inside a cluster
+/// and the preview renders as a broken glyph.
+pub fn head_preview(text: &str) -> String {
+    text.graphemes(true).take(OUT_HEAD_CLUSTERS).collect()
+}
+
 fn body_head(envelope: &Envelope, body_json: &str) -> String {
     let text = envelope.body.text.as_deref().unwrap_or(body_json);
-    text.chars().take(200).collect()
+    head_preview(text)
+}
+
+/// Encode a kernel timestamp, unix seconds, as the RFC 3339 text every other
+/// column in this schema uses. A value outside the representable range encodes
+/// as the epoch.
+pub(crate) fn unix_to_rfc3339(seconds: i64) -> String {
+    DateTime::from_timestamp(seconds, 0)
+        .map(rfc3339)
+        .unwrap_or_else(|| rfc3339(DateTime::UNIX_EPOCH))
+}
+
+/// Decode an RFC 3339 column back to the kernel's unix seconds.
+pub(crate) fn rfc3339_to_unix(text: &str) -> i64 {
+    DateTime::parse_from_rfc3339(text)
+        .map(|value| value.timestamp())
+        .unwrap_or(0)
 }
 
 fn parse_msg_kind(value: &str) -> Option<MsgKind> {

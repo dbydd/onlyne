@@ -1,6 +1,6 @@
 //! Canonical operator-facing text this protocol pins (decision D18).
 //!
-//! These constants are the canonical copies of the five protocol strings.
+//! These constants are the canonical copies of the protocol strings.
 //! `tests/text_vectors.json` pins their exact bytes, and each emitter keeps its
 //! own byte-exact assertions where it prints: `onlyne-layout`, `onlyne-store`,
 //! `onlyne-cli`, and the end-to-end scripts
@@ -18,7 +18,8 @@ pub const NO_SOCKET_MESSAGE: &str =
 pub const BINARY_NOT_FOUND_PREFIX: &str = "onlyne: binary not found: ";
 
 /// Emitted by `onlyne-layout` when a workspace still holds the pre-v1 layout.
-pub const LEGACY_WORKSPACE_MESSAGE: &str = "onlyne: legacy workspace layout; v1.0.0 does not migrate";
+pub const LEGACY_WORKSPACE_MESSAGE: &str =
+    "onlyne: legacy workspace layout; v1.0.0 does not migrate";
 
 /// Emitted by `onlyne-store` when a database schema marker does not match this revision.
 pub const UNSUPPORTED_SCHEMA_MESSAGE: &str = "onlyne: unsupported schema; v1.0.0 does not migrate";
@@ -26,4 +27,10 @@ pub const UNSUPPORTED_SCHEMA_MESSAGE: &str = "onlyne: unsupported schema; v1.0.0
 /// Emitted by `onlyne-cli`, naming the missing daemon binary.
 pub fn binary_not_found(name: &str) -> String {
     format!("{BINARY_NOT_FOUND_PREFIX}{name}")
+}
+
+/// Emitted by `Envelope::validate()` when a `Task`, `Completion`, or `Control`
+/// envelope arrives with no causality chain (§3 line 179's rule block).
+pub fn causality_required(kind: &str) -> String {
+    format!("causality is required for kind {kind}")
 }

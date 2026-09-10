@@ -8,7 +8,10 @@ use base64::{Engine, engine::general_purpose};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::Path,
+};
 
 pub const DEFAULT_NOTE_QUEUE: bool = false;
 pub const DEFAULT_FAULT_HISTORY_DAYS: u32 = 14;
@@ -274,16 +277,25 @@ impl Spec {
 
     /// Complete set of permitted directed role edges, one row per message class.
     ///
-    /// An ordered pair `from -> to` is permitted when both sides agree:
-    /// `from.allowed_targets` names `to` and `to.allowed_senders` names `from`.
-    /// The wildcard `"*"` covers every other registered role on both sides:
-    /// `allowed_targets = ["*"]` reaches every role except the sender itself,
-    /// and `allowed_senders = ["*"]` admits every role except the receiver
-    /// itself. Self-delivery therefore requires the role's own name in both
-    /// lists, spelled out in the file, which is what makes Verification case 1
-    /// in `docs/v1-PLAN.md` line 496 legal: the `onlyne-client init` fragment
-    /// emits `allowed_senders = ["*", "<self>"]` plus
-    /// `allowed_targets = ["<self>"]`.
+    /// Every registered role reaches itself with every class, listed or not. A
+    /// role may always address its own role, which is what the plan's example at
+    /// `docs/v1-PLAN.md` line 240 leaves out of `allowed_targets`, what line 324
+    /// states as `唤醒自己 = 向自身 role 发 note`, and what line 496 exercises
+    /// with `send --from planner --to planner`; line 498 requires that send to
+    /// answer `ok = true` with a task in `in_flight`.
+    ///
+    /// Beyond the self rows, an ordered pair `from -> to` is permitted when both
+    /// sides agree: `from.allowed_targets` names `to` and `to.allowed_senders`
+    /// names `from`. The wildcard `"*"` covers every other registered role on
+    /// both sides, so `allowed_targets = ["*"]` reaches every role except the
+    /// sender itself and `allowed_senders = ["*"]` admits every role except the
+    /// receiver itself.
+    ///
+    /// Pair rows are deduplicated, so a spec that also names its own role in
+    /// `allowed_targets` and `allowed_senders` produces the same single self row,
+    /// and the row count stays below the naive product of roles and classes. The
+    /// `onlyne-client init` fragment keeps those explicit entries as
+    /// belt-and-braces, which makes the intent visible in the file.
     ///
     /// This function is the single arbiter of wildcard meaning. Rows carry
     /// concrete role names only, and `"*"` never reaches the table.
@@ -292,18 +304,13 @@ impl Spec {
     /// `aggregate`-only annotations and stale names out of the table. The
     /// `aggregate` field is an annotation and contributes no rows.
     ///
-    /// A minimal registered role from the `init` fragment carries
-    /// `allowed_senders = ["*", "<its own name>"]` and
-    /// `allowed_targets = ["<its own name>"]`, which yields exactly one outbound
-    /// edge, to itself, plus inbound from every other registered role.
-    ///
     /// Gateway inbound traffic is not covered here. The `[[route]]` table maps
     /// gateway, channel, and conversation to a role, and the server owns that
     /// gateway-side ACL decision. This function reads a [`Spec`] and returns a
     /// value; it mutates nothing, schedules nothing, and consults no clock.
     pub fn acl_edges(&self) -> Vec<AclEdge> {
         let roles = self.role_names();
-        let mut edges = Vec::new();
+        let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
         for sender in &self.client {
             for target in expand_targets(&sender.allowed_targets, &sender.role, &roles) {
                 let Some(receiver) = self
@@ -319,14 +326,27 @@ impl Spec {
                 {
                     continue;
                 }
-                for kind in ACL_EDGE_KINDS {
-                    edges.push(AclEdge {
-                        from: sender.role.clone(),
-                        to: target.clone(),
-                        kind,
-                        admin: sender.admin,
-                    });
-                }
+                pairs.insert((sender.role.clone(), target));
+            }
+        }
+        for role in &roles {
+            pairs.insert((role.clone(), role.clone()));
+        }
+        let mut edges = Vec::with_capacity(pairs.len() * ACL_EDGE_KINDS.len());
+        for (from, to) in pairs {
+            let admin = self
+                .client
+                .iter()
+                .find(|entry| entry.role == from)
+                .map(|entry| entry.admin)
+                .unwrap_or_default();
+            for kind in ACL_EDGE_KINDS {
+                edges.push(AclEdge {
+                    from: from.clone(),
+                    to: to.clone(),
+                    kind,
+                    admin,
+                });
             }
         }
         edges

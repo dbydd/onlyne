@@ -2,10 +2,19 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetError {
-    PinMismatch { expected: String, got: String },
-    ProtocolVersion { peer: u16, expected: u16 },
+    PinMismatch {
+        expected: String,
+        got: String,
+    },
+    ProtocolVersion {
+        peer: u16,
+        expected: u16,
+    },
     Unauthorized(String),
-    Rejected { code: String, message: String },
+    Rejected {
+        code: String,
+        message: String,
+    },
     /// The transport died. The supervisor dials again.
     Disconnected(String),
     /// The handle sits between connections and accepts no frame.

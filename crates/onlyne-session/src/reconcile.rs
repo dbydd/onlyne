@@ -143,40 +143,38 @@ impl MemoryLedger {
     /// Insert a live session ref the bridge prefers over the stored reference.
     pub fn track_session(&self, session: SessionRef) {
         let mut sessions = self.sessions.lock().unwrap();
-        let entry = sessions
-            .entry(session.task_id.clone())
-            .or_insert_with(|| {
-                let record = SessionRecord {
-                    task_id: session.task_id.clone(),
-                    agent_state: String::new(),
-                    delivery_state: String::new(),
-                    resource_state: String::new(),
-                    public_lifecycle: String::new(),
-                    recovery_substate: String::new(),
-                    desired_json: String::new(),
-                    observed_json: String::new(),
-                    generation: 0,
-                    seq: -1,
-                    backend_ref: String::new(),
-                    mismatch_count: 0,
-                    updated_at: 0,
-                };
-                let stored = VersionedSession {
-                    agent_state: String::new(),
-                    delivery_state: String::new(),
-                    resource_state: String::new(),
-                    public_lifecycle: String::new(),
-                    recovery_substate: String::new(),
-                    desired_json: String::new(),
-                    observed_json: String::new(),
-                    generation: 0,
-                    seq: -1,
-                    backend_ref: String::new(),
-                    mismatch_count: 0,
-                    updated_at: 0,
-                };
-                (record, stored)
-            });
+        let entry = sessions.entry(session.task_id.clone()).or_insert_with(|| {
+            let record = SessionRecord {
+                task_id: session.task_id.clone(),
+                agent_state: String::new(),
+                delivery_state: String::new(),
+                resource_state: String::new(),
+                public_lifecycle: String::new(),
+                recovery_substate: String::new(),
+                desired_json: String::new(),
+                observed_json: String::new(),
+                generation: 0,
+                seq: -1,
+                backend_ref: String::new(),
+                mismatch_count: 0,
+                updated_at: 0,
+            };
+            let stored = VersionedSession {
+                agent_state: String::new(),
+                delivery_state: String::new(),
+                resource_state: String::new(),
+                public_lifecycle: String::new(),
+                recovery_substate: String::new(),
+                desired_json: String::new(),
+                observed_json: String::new(),
+                generation: 0,
+                seq: -1,
+                backend_ref: String::new(),
+                mismatch_count: 0,
+                updated_at: 0,
+            };
+            (record, stored)
+        });
         entry.0.backend_ref = serde_json::to_string(&session).unwrap_or_else(|_| "{}".into());
     }
 
@@ -270,7 +268,13 @@ impl SessionLedger for MemoryLedger {
     }
 
     fn task_attempt(&self, task_id: &str) -> anyhow::Result<i64> {
-        Ok(self.known.lock().unwrap().get(task_id).copied().unwrap_or(0))
+        Ok(self
+            .known
+            .lock()
+            .unwrap()
+            .get(task_id)
+            .copied()
+            .unwrap_or(0))
     }
 
     fn list_faults(&self, task_id: &str) -> anyhow::Result<Vec<FaultRecord>> {
@@ -289,15 +293,15 @@ impl SessionLedger for MemoryLedger {
         *next += 1;
         let id = *next;
         let mut faults = self.faults.lock().unwrap();
-        faults.push(FaultRecord { id, ..fault.clone() });
+        faults.push(FaultRecord {
+            id,
+            ..fault.clone()
+        });
         Ok(id)
     }
 
     fn emit(&self, kind: &str, data: serde_json::Value) {
-        self.events
-            .lock()
-            .unwrap()
-            .push((kind.to_string(), data));
+        self.events.lock().unwrap().push((kind.to_string(), data));
     }
 
     fn note_alert(&self, line: String) {
@@ -386,11 +390,7 @@ pub fn to_versioned(
 /// in-memory `SessionRef` is the freshest answer and is stored whole, so a
 /// restart can rebuild a probe target from the row alone. Without an in-memory
 /// session the previous reference survives: an event never invents a resource.
-fn backend_ref_json(
-    bridge: &Bridge,
-    task_id: &str,
-    row: Option<&SessionRecord>,
-) -> String {
+fn backend_ref_json(bridge: &Bridge, task_id: &str, row: Option<&SessionRecord>) -> String {
     if let Some(session) = bridge.live.lock().unwrap().get(task_id) {
         if let Ok(json) = serde_json::to_string(session) {
             return json;
@@ -409,10 +409,7 @@ fn backend_ref_json(
 /// a legal observation is rebuilt from `Observation::initial` at the row's own
 /// watermark: the reducer's protection against stale events is the watermark,
 /// and rewinding it would let an old report overwrite newer truth.
-pub fn stored_observation(
-    ledger: &dyn SessionLedger,
-    row: Option<&SessionRecord>,
-) -> Observation {
+pub fn stored_observation(ledger: &dyn SessionLedger, row: Option<&SessionRecord>) -> Observation {
     let Some(row) = row else {
         return initial_observation();
     };
@@ -532,7 +529,8 @@ pub fn apply_persist(
 ) -> anyhow::Result<Verdict> {
     let row = ledger.get_session(task_id)?;
     if row.is_none() {
-        let known = ledger.task_is_known(task_id)? || bridge.live.lock().unwrap().contains_key(task_id);
+        let known =
+            ledger.task_is_known(task_id)? || bridge.live.lock().unwrap().contains_key(task_id);
         if !known {
             tracing::warn!(
                 task = %task_id,
@@ -552,7 +550,15 @@ pub fn apply_persist(
         )?));
     }
     let verdict = lifecycle::apply(&current, event);
-    record_verdict(bridge, ledger, task_id, row.as_ref(), event, &current, verdict)?;
+    record_verdict(
+        bridge,
+        ledger,
+        task_id,
+        row.as_ref(),
+        event,
+        &current,
+        verdict,
+    )?;
     Ok(verdict)
 }
 
@@ -670,10 +676,7 @@ fn record_verdict(
 
 /// The next version for a session observed locally: same generation, one
 /// sequence past the stored watermark.
-pub fn next_version(
-    ledger: &dyn SessionLedger,
-    task_id: &str,
-) -> anyhow::Result<Version> {
+pub fn next_version(ledger: &dyn SessionLedger, task_id: &str) -> anyhow::Result<Version> {
     let row = ledger.get_session(task_id)?;
     let current = stored_observation(ledger, row.as_ref());
     Ok(Version::new(
@@ -769,8 +772,8 @@ pub fn feed_turn_started(
     ledger: &dyn SessionLedger,
     task_id: &str,
 ) -> anyhow::Result<Verdict> {
-    apply_at_next(bridge, ledger, task_id, |v| {
-        LifecycleEvent::TurnStarted { v }
+    apply_at_next(bridge, ledger, task_id, |v| LifecycleEvent::TurnStarted {
+        v,
     })
 }
 
@@ -840,8 +843,8 @@ pub fn feed_reconcile_ok(
     ledger: &dyn SessionLedger,
     task_id: &str,
 ) -> anyhow::Result<Verdict> {
-    apply_at_next(bridge, ledger, task_id, |v| {
-        LifecycleEvent::ReconcileOk { v }
+    apply_at_next(bridge, ledger, task_id, |v| LifecycleEvent::ReconcileOk {
+        v,
     })
 }
 
@@ -855,8 +858,8 @@ pub fn feed_delivered(
 ) -> anyhow::Result<Verdict> {
     let written = apply_at_next(bridge, ledger, task_id, |v| LifecycleEvent::Complete { v })?;
     if matches!(written, Verdict::Applied(_)) {
-        apply_at_next(bridge, ledger, task_id, |v| {
-            LifecycleEvent::IntentReceipt { v }
+        apply_at_next(bridge, ledger, task_id, |v| LifecycleEvent::IntentReceipt {
+            v,
         })?;
     }
     settle(bridge, ledger, task_id, Outcome::Done)
@@ -899,8 +902,7 @@ fn settle_body(obs: &Observation, outcome: Outcome) -> Observation {
     } else {
         obs.delivery
     };
-    let recovery = if outcome == Outcome::Done && agent == AgentState::Idle && obs.generation_live
-    {
+    let recovery = if outcome == Outcome::Done && agent == AgentState::Idle && obs.generation_live {
         RecoveryState::Draining
     } else {
         RecoveryState::None
@@ -996,7 +998,13 @@ pub fn reconcile_dead(
     tracing::warn!(task = %task_id, %reason, "open session lost its agent");
     let mut faulted = false;
     if obs.outcome == Outcome::Pending {
-        let outcome = record_fault(ledger, task_id, "probe_dead", "reconcile:probe_dead", &reason)?;
+        let outcome = record_fault(
+            ledger,
+            task_id,
+            "probe_dead",
+            "reconcile:probe_dead",
+            &reason,
+        )?;
         faulted = outcome.recorded();
         let verdict = feed_fail(bridge, ledger, task_id)?;
         let _ = verdict;
@@ -1030,7 +1038,13 @@ pub fn reconcile_mismatch(
     let terminated = matches!(&verdict, Verdict::Applied(next)
         if next.public == PublicLifecycle::Exited && next.outcome == Outcome::Failed);
     if at_the_limit && terminated {
-        let outcome = record_fault(ledger, task_id, "mismatch_terminate", "reconcile:mismatch", &reason)?;
+        let outcome = record_fault(
+            ledger,
+            task_id,
+            "mismatch_terminate",
+            "reconcile:mismatch",
+            &reason,
+        )?;
         return Ok(outcome.recorded());
     }
     Ok(false)
@@ -1039,11 +1053,7 @@ pub fn reconcile_mismatch(
 /// Resolve the backend resource the stored tuple names: the live in-memory
 /// session first, then the row's own `backend_ref` when it parses as a whole
 /// `SessionRef` for this task. Anything else is inconclusive and yields `None`.
-pub fn probe_target(
-    bridge: &Bridge,
-    task_id: &str,
-    row: &SessionRecord,
-) -> Option<SessionRef> {
+pub fn probe_target(bridge: &Bridge, task_id: &str, row: &SessionRecord) -> Option<SessionRef> {
     if let Some(session) = bridge.live.lock().unwrap().get(task_id) {
         return Some(session.clone());
     }
@@ -1178,7 +1188,11 @@ mod tests {
         let second = ledger.get_session("chain-1").unwrap().unwrap();
         assert_eq!(second.public_lifecycle, "idle");
         assert_eq!(second.seq, 2);
-        assert!(second.backend_ref.contains("term-chain"), "{}", second.backend_ref);
+        assert!(
+            second.backend_ref.contains("term-chain"),
+            "{}",
+            second.backend_ref
+        );
         feed_resource_attached(&bridge, &ledger, "chain-1").unwrap();
         feed_turn_started(&bridge, &ledger, "chain-1").unwrap();
         let third = ledger.get_session("chain-1").unwrap().unwrap();
@@ -1188,7 +1202,11 @@ mod tests {
         assert_eq!(third.seq, 4);
         let obs: Observation = serde_json::from_str(&third.observed_json).unwrap();
         assert!(lifecycle::is_legal(&obs));
-        assert!(third.desired_json.contains("turn_started"), "{}", third.desired_json);
+        assert!(
+            third.desired_json.contains("turn_started"),
+            "{}",
+            third.desired_json
+        );
 
         feed_turn_ended(&bridge, &ledger, "chain-1").unwrap();
         let events = ledger.events();
@@ -1271,7 +1289,6 @@ mod tests {
         assert_eq!(ledger.events().len(), event_count);
     }
 
-
     #[test]
     fn unadopted_generation_is_rejected_without_writing() {
         let ledger = MemoryLedger::new();
@@ -1321,8 +1338,18 @@ mod tests {
         let after = ledger.get_session("cr-1").unwrap().unwrap();
         assert_eq!(after.generation, 1);
         assert_eq!(after.seq, 6);
-        assert!(ledger.alerts().iter().any(|line| line.contains("cr-1") && line.contains("corrupt")));
-        assert!(ledger.events().iter().any(|(k, _)| k == "lifecycle_corrupt"));
+        assert!(
+            ledger
+                .alerts()
+                .iter()
+                .any(|line| line.contains("cr-1") && line.contains("corrupt"))
+        );
+        assert!(
+            ledger
+                .events()
+                .iter()
+                .any(|(k, _)| k == "lifecycle_corrupt")
+        );
     }
 
     #[test]
@@ -1401,7 +1428,6 @@ mod tests {
         assert!(backend.probe(&session).unwrap().alive);
     }
 
-
     #[test]
     fn inconclusive_probe_never_judges_a_generation_dead() {
         let ledger = MemoryLedger::new();
@@ -1448,14 +1474,17 @@ mod tests {
         ledger.track_task("fake-1", 1);
         let bridge = Bridge::new();
         let backend = FakeBackend::new();
-        assert!(backend.capabilities() == Capabilities {
-            spawn: true,
-            attach: true,
-            probe: true,
-            close: true,
-            focus: true,
-            rename: true,
-        });
+        assert!(
+            backend.capabilities()
+                == Capabilities {
+                    spawn: true,
+                    attach: true,
+                    probe: true,
+                    close: true,
+                    focus: true,
+                    rename: true,
+                }
+        );
         let session = backend
             .spawn(SpawnSpec {
                 cwd: ".".into(),
@@ -1469,7 +1498,11 @@ mod tests {
         bridge.track_live(session.clone());
         feed_created(&bridge, &ledger, "fake-1").unwrap();
         assert_eq!(
-            ledger.get_session("fake-1").unwrap().unwrap().public_lifecycle,
+            ledger
+                .get_session("fake-1")
+                .unwrap()
+                .unwrap()
+                .public_lifecycle,
             "created"
         );
         let probe = backend.probe(&session).unwrap();
@@ -1477,16 +1510,26 @@ mod tests {
         feed_resource_attached(&bridge, &ledger, "fake-1").unwrap();
         feed_ready(&bridge, &ledger, "fake-1").unwrap();
         assert_eq!(
-            ledger.get_session("fake-1").unwrap().unwrap().public_lifecycle,
+            ledger
+                .get_session("fake-1")
+                .unwrap()
+                .unwrap()
+                .public_lifecycle,
             "idle"
         );
         feed_turn_started(&bridge, &ledger, "fake-1").unwrap();
         assert_eq!(
-            ledger.get_session("fake-1").unwrap().unwrap().public_lifecycle,
+            ledger
+                .get_session("fake-1")
+                .unwrap()
+                .unwrap()
+                .public_lifecycle,
             "working"
         );
         feed_delivered(&bridge, &ledger, "fake-1").unwrap();
-        backend.close(&session, CloseReason::Completed, false).unwrap();
+        backend
+            .close(&session, CloseReason::Completed, false)
+            .unwrap();
         assert!(!backend.probe(&session).unwrap().alive);
         feed_resource_closed(&bridge, &ledger, "fake-1").unwrap();
         let closed = ledger.get_session("fake-1").unwrap().unwrap();

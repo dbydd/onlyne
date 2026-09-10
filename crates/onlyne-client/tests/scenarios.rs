@@ -1,22 +1,28 @@
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use onlyne_adapter::AdapterIo;
 use onlyne_client::{
     adapter_socket::AdapterSocket,
-    dispatch::{ClientLink, DispatchState, ReadyNotice, dispatch, on_plugin_report, on_ready, on_recycled, missing_capability, plugin_gap},
+    dispatch::{
+        ClientLink, DispatchState, ReadyNotice, dispatch, missing_capability, on_plugin_report,
+        on_ready, on_recycled, plugin_gap,
+    },
     init::{InitArgs, init, legacy_error_code},
     intent::{IntentMachine, IntentResult, op_for_intent, permanent_error},
     local_cli::LocalCli,
     runloop::ClientInit,
 };
 use onlyne_frame::{read_frame, write_frame};
-use onlyne_net::{KeyPair, TcpListen, TlsConn, accept as accept_handshake, gen_self_signed, server_config, table_from};
+use onlyne_net::{
+    KeyPair, TcpListen, TlsConn, accept as accept_handshake, gen_self_signed, server_config,
+    table_from,
+};
 use onlyne_proto::{
-    AdapterMsg, Capability, ClientOp, Envelope, ErrorCode, Frame, HostOp, MsgKind, PROTOCOL_VERSION,
-    QueryRolesArgs, Receipt, ResBody, Welcome,
-    new_envelope, new_task_id,
+    AdapterMsg, Capability, ClientOp, Envelope, ErrorCode, Frame, HelloArgs, HostOp, Mount,
+    MountKind, MsgKind, PROTOCOL_VERSION, PluginOp, QueryRolesArgs, Receipt, Report, ResBody,
+    Welcome, new_envelope, new_task_id,
 };
 use onlyne_session::SessionLedger;
 use onlyne_session::backend::fake::FakeBackend;
@@ -56,7 +62,9 @@ fn legacy_refusal_exits_2_and_creates_no_files() {
     assert!(res.is_err());
     assert_eq!(legacy_error_code(), 2);
     // Assert no files created in workspace beyond channels
-    let entries: Vec<_> = std::fs::read_dir(dir.path().join(".onlyne")).unwrap().collect();
+    let entries: Vec<_> = std::fs::read_dir(dir.path().join(".onlyne"))
+        .unwrap()
+        .collect();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].as_ref().unwrap().file_name(), "channels");
 }
@@ -70,26 +78,35 @@ fn permissions_mode_600_for_role_key_and_socket() {
     std::fs::write(&server_spec, "[server]\nname = \"srv\"\nlisten = \"127.0.0.1:7899\"\ncert_pin = \"sha256/0000000000000000000000000000000000000000000000000000000000000000\"\n").unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let fragment = rt.block_on(init(InitArgs {
-        workspace: ws_dir.path().to_path_buf(),
-        role: "planner".into(),
-        server_root: server_dir.path().to_path_buf(),
-        prose: "v1 smoke prose".into(),
-    })).unwrap();
+    let fragment = rt
+        .block_on(init(InitArgs {
+            workspace: ws_dir.path().to_path_buf(),
+            role: "planner".into(),
+            server_root: server_dir.path().to_path_buf(),
+            prose: "v1 smoke prose".into(),
+        }))
+        .unwrap();
     assert!(fragment.starts_with("[[client]]\n"));
     let lines: Vec<&str> = fragment.lines().collect();
     assert_eq!(lines.len(), 9, "fragment shape is fixed: {fragment:?}");
     assert_eq!(lines[0], "[[client]]");
     assert_eq!(lines[1], "role = \"planner\"");
-    assert!(lines[2].starts_with("key = \"ed25519/"), "key line is {}", lines[2]);
-    assert_eq!(&lines[3..], &[
-        "admin = false",
-        "max_sessions = 1",
-        "allowed_senders = [\"*\", \"planner\"]",
-        "allowed_targets = [\"planner\"]",
-        "prose = \"v1 smoke prose\"",
-        "reuse = true",
-    ]);
+    assert!(
+        lines[2].starts_with("key = \"ed25519/"),
+        "key line is {}",
+        lines[2]
+    );
+    assert_eq!(
+        &lines[3..],
+        &[
+            "admin = false",
+            "max_sessions = 1",
+            "allowed_senders = [\"*\", \"planner\"]",
+            "allowed_targets = [\"planner\"]",
+            "prose = \"v1 smoke prose\"",
+            "reuse = true",
+        ]
+    );
     assert!(fragment.ends_with("reuse = true\n"));
     assert!(fragment.contains("key = \"ed25519/"));
 
@@ -98,11 +115,27 @@ fn permissions_mode_600_for_role_key_and_socket() {
     let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
 
+    // The fragment publishes the public half of the stored seed, and that
+    // string is a curve point: a fragment carrying the seed instead publishes
+    // the private half and fails `parse_public` for roughly half of all seeds.
+    let stored = onlyne_net::KeyPair::load(&key_path).unwrap();
+    let published = lines[2].strip_prefix("key = ").unwrap().trim_matches('"');
+    assert_eq!(published, stored.public_str());
+    assert!(onlyne_net::parse_public(published).is_ok());
+
     // Stale socket cleanup and socket mode 0600
     let db_path = ws_dir.path().join(".onlyne/client.db");
     let store = ClientStore::open(&db_path).unwrap();
     let backend = Arc::new(FakeBackend::new());
-    let dispatch = DispatchState::new("planner", ws_dir.path(), vec!["agent".into()], 2, true, backend, store);
+    let dispatch = DispatchState::new(
+        "planner",
+        ws_dir.path(),
+        vec!["agent".into()],
+        2,
+        true,
+        backend,
+        store,
+    );
     let adapter = AdapterSocket {
         workspace: ws_dir.path().to_path_buf(),
         role: "planner".into(),
@@ -123,6 +156,97 @@ fn permissions_mode_600_for_role_key_and_socket() {
     drop(listener);
 }
 
+/// An admin `hello` reaches the host as `mount: null`, because the untagged
+/// `Mount` enum writes its unit variant that way and `Option<Mount>` reads
+/// `null` back as an absent mount. Admission reads `HelloArgs::kind`, which is
+/// the discriminant the split names, and this case crosses a real socket, so
+/// the encoding itself is what the assertion covers.
+#[tokio::test]
+async fn an_admin_hello_survives_the_wire_and_is_admitted() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(FakeBackend::new());
+    let dispatch = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        false,
+        backend,
+        store,
+    );
+    let adapter = AdapterSocket {
+        workspace: dir.path().to_path_buf(),
+        role: "planner".into(),
+        cluster: "c".into(),
+        server: "s".into(),
+        dispatch,
+    };
+    let socket = adapter.path();
+    let host = tokio::spawn(adapter.clone().serve());
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(socket.exists(), "the host bound {}", socket.display());
+
+    let admin = HelloArgs {
+        protocol: PROTOCOL_VERSION,
+        plugin: "onlyne-client-cli:demo".into(),
+        version: "1.0.0".into(),
+        kind: MountKind::Admin,
+        capabilities: Vec::new(),
+        mount: Some(Mount::Admin),
+    };
+    let encoded = serde_json::to_value(&admin).unwrap();
+    assert_eq!(
+        encoded["mount"],
+        serde_json::Value::Null,
+        "an untagged unit variant writes null"
+    );
+    let decoded: HelloArgs = serde_json::from_value(encoded).unwrap();
+    assert!(decoded.mount.is_none(), "null decodes as an absent mount");
+    assert_eq!(decoded.kind, MountKind::Admin);
+
+    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let io = AdapterIo::new(stream, Duration::from_secs(2), Duration::from_secs(2));
+    let body = io
+        .request(AdapterMsg::Plugin(PluginOp::Hello(admin)))
+        .await
+        .unwrap();
+    assert!(
+        body.ok,
+        "an admin probe crosses the socket and is admitted: {body:?}"
+    );
+    let HostOp::Welcome(ack) =
+        serde_json::from_value::<HostOp>(body.data.unwrap()).expect("welcome ack")
+    else {
+        panic!("the ack payload names no welcome");
+    };
+    assert_eq!(ack.role, "planner");
+
+    let anonymous = HelloArgs {
+        plugin: "onlyne-agent-anonymous".into(),
+        kind: MountKind::Agent,
+        mount: None,
+        ..decoded
+    };
+    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let io = AdapterIo::new(stream, Duration::from_secs(2), Duration::from_secs(2));
+    let refused = io
+        .request(AdapterMsg::Plugin(PluginOp::Hello(anonymous)))
+        .await
+        .unwrap();
+    assert!(!refused.ok, "kind gates admission: {refused:?}");
+    assert_eq!(
+        refused.error.map(|error| error.code),
+        Some(ErrorCode::Forbidden)
+    );
+    host.abort();
+}
+
 #[test]
 fn intent_acl_denial_drops_row_without_retry() {
     let dir = tempdir().unwrap();
@@ -137,8 +261,16 @@ fn intent_acl_denial_drops_row_without_retry() {
     let rows = store.flush_order().unwrap();
     assert_eq!(rows.len(), 1);
 
-    let res = machine.attempt(&rows[0], Some(&ResBody::err(ErrorCode::AclDenied, "acl denied", None))).unwrap();
-    assert!(matches!(res, IntentResult::Dropped(ErrorCode::AclDenied, _)));
+    let res = machine
+        .attempt(
+            &rows[0],
+            Some(&ResBody::err(ErrorCode::AclDenied, "acl denied", None)),
+        )
+        .unwrap();
+    assert!(matches!(
+        res,
+        IntentResult::Dropped(ErrorCode::AclDenied, _)
+    ));
     assert_eq!(store.pending_intent_count().unwrap(), 0);
 }
 
@@ -160,7 +292,6 @@ fn intent_idempotent_duplicate_settles_accepted() {
         task: Some("task-1".into()),
         state: onlyne_proto::LedgerState::Queued,
         enqueued_at: chrono::Utc::now(),
-        duplicate: true,
     };
     let body = ResBody::err_with_data(
         ErrorCode::Duplicate,
@@ -170,7 +301,7 @@ fn intent_idempotent_duplicate_settles_accepted() {
     );
 
     let res = machine.attempt(&rows[0], Some(&body)).unwrap();
-    assert!(matches!(res, IntentResult::Accepted(Some(r)) if r.duplicate));
+    assert!(matches!(res, IntentResult::Accepted(Some(r)) if r.msg_id == "msg-1"));
     assert_eq!(store.pending_intent_count().unwrap(), 0);
 }
 
@@ -187,17 +318,38 @@ fn intent_exhaustion_drives_fault_after_ceiling() {
     let row = &rows[0];
 
     // Attempt 1: internal -> Retryable
-    let res1 = machine.attempt(row, Some(&ResBody::err(ErrorCode::Internal, "internal error", None))).unwrap();
-    assert!(matches!(res1, IntentResult::Retryable(ErrorCode::Internal, _)));
+    let res1 = machine
+        .attempt(
+            row,
+            Some(&ResBody::err(ErrorCode::Internal, "internal error", None)),
+        )
+        .unwrap();
+    assert!(matches!(
+        res1,
+        IntentResult::Retryable(ErrorCode::Internal, _)
+    ));
 
     // Update row attempt to 2
     let rows = store.flush_order().unwrap();
-    let res2 = machine.attempt(&rows[0], Some(&ResBody::err(ErrorCode::Internal, "internal error", None))).unwrap();
-    assert!(matches!(res2, IntentResult::Retryable(ErrorCode::Internal, _)));
+    let res2 = machine
+        .attempt(
+            &rows[0],
+            Some(&ResBody::err(ErrorCode::Internal, "internal error", None)),
+        )
+        .unwrap();
+    assert!(matches!(
+        res2,
+        IntentResult::Retryable(ErrorCode::Internal, _)
+    ));
 
     // Attempt 3 reaches attempts ceiling (3) -> Exhausted
     let rows = store.flush_order().unwrap();
-    let res3 = machine.attempt(&rows[0], Some(&ResBody::err(ErrorCode::Internal, "internal error", None))).unwrap();
+    let res3 = machine
+        .attempt(
+            &rows[0],
+            Some(&ResBody::err(ErrorCode::Internal, "internal error", None)),
+        )
+        .unwrap();
     assert!(matches!(res3, IntentResult::Exhausted));
     assert_eq!(store.pending_intent_count().unwrap(), 0);
 
@@ -213,7 +365,15 @@ fn session_reuse_and_capacity_capping() {
     let db = dir.path().join("client.db");
     let store = ClientStore::open(&db).unwrap();
     let backend = Arc::new(FakeBackend::new());
-    let state = DispatchState::new("planner", dir.path(), vec!["echo".into()], 2, true, backend, store.clone());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        true,
+        backend,
+        store.clone(),
+    );
 
     let mut env1 = sample_envelope("planner", "task 1");
     let family1 = new_task_id();
@@ -229,7 +389,12 @@ fn session_reuse_and_capacity_capping() {
     assert_eq!(state.session_count(), 1);
 
     // Recycle task 1 so session becomes idle
-    on_recycled(&state, env1.task_id().unwrap(), "done").unwrap();
+    on_recycled(
+        &state,
+        env1.task_id().unwrap(),
+        onlyne_session::CloseReason::Completed,
+    )
+    .unwrap();
 
     // Task 2 with same family reuses session 1
     let mut env2 = sample_envelope("planner", "task 2");
@@ -241,10 +406,20 @@ fn session_reuse_and_capacity_capping() {
         attempt: 0,
     });
     let s2 = dispatch(&state, &env2).unwrap();
-    assert_eq!(s1.backend_ref, s2.backend_ref, "the same backend resource carries the next task");
+    assert_eq!(
+        s1.backend_ref, s2.backend_ref,
+        "the same backend resource carries the next task"
+    );
     assert_eq!(state.session_count(), 1);
-    let reused_row = store.get_session(env2.task_id().unwrap()).unwrap().expect("the reused task has a ledger row");
-    assert_ne!(reused_row.backend_ref.trim(), "{}", "a reused session must resolve to its backend resource");
+    let reused_row = store
+        .get_session(env2.task_id().unwrap())
+        .unwrap()
+        .expect("the reused task has a ledger row");
+    assert_ne!(
+        reused_row.backend_ref.trim(),
+        "{}",
+        "a reused session must resolve to its backend resource"
+    );
 
     // Task 3 with different family spawns session 2
     let mut env3 = sample_envelope("planner", "task 3");
@@ -278,14 +453,26 @@ fn redelivered_task_keeps_its_one_session() {
     let dir = tempdir().unwrap();
     let store = ClientStore::open(dir.path().join("client.db")).unwrap();
     let backend = Arc::new(FakeBackend::new());
-    let state = DispatchState::new("planner", dir.path(), vec!["echo".into()], 2, true, backend.clone(), store);
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        true,
+        backend.clone(),
+        store,
+    );
 
     let envelope = sample_envelope("planner", "task 1");
     let first = dispatch(&state, &envelope).unwrap();
     let again = dispatch(&state, &envelope).unwrap();
 
     assert_eq!(first.task_id, again.task_id);
-    assert_eq!(backend.sessions().len(), 1, "a redelivery must not spawn a second resource");
+    assert_eq!(
+        backend.sessions().len(),
+        1,
+        "a redelivery must not spawn a second resource"
+    );
     assert_eq!(state.session_count(), 1);
 }
 
@@ -295,14 +482,24 @@ async fn ready_barrier_orders_assign_after_ready() {
     let db = dir.path().join("client.db");
     let store = ClientStore::open(&db).unwrap();
     let backend = Arc::new(FakeBackend::new());
-    let state = DispatchState::new("planner", dir.path(), vec!["echo".into()], 2, true, backend, store);
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        true,
+        backend,
+        store,
+    );
 
     let env = sample_envelope("planner", "task 1");
     let task_id = env.task_id().unwrap().to_string();
     let session = dispatch(&state, &env).unwrap();
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-    let (io_client, mut client_inbound) = AdapterIo::new_with_inbound(client_io, Duration::from_secs(2), Duration::from_secs(2));
-    let (io_server, _server_inbound) = AdapterIo::new_with_inbound(server_io, Duration::from_secs(2), Duration::from_secs(2));
+    let (io_client, mut client_inbound) =
+        AdapterIo::new_with_inbound(client_io, Duration::from_secs(2), Duration::from_secs(2));
+    let (io_server, _server_inbound) =
+        AdapterIo::new_with_inbound(server_io, Duration::from_secs(2), Duration::from_secs(2));
 
     let (record_tx, mut record_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
@@ -313,9 +510,24 @@ async fn ready_barrier_orders_assign_after_ready() {
         }
     });
 
-    on_ready(&state, ReadyNotice { task_id: task_id.clone(), session_id: session.task_id.clone(), generation: 1, io: io_server, capabilities: vec![Capability::Inject] }, "prose").await.unwrap();
+    on_ready(
+        &state,
+        ReadyNotice {
+            task_id: task_id.clone(),
+            session_id: session.task_id.clone(),
+            generation: 1,
+            io: io_server,
+            capabilities: vec![Capability::Inject],
+        },
+        "prose",
+    )
+    .await
+    .unwrap();
 
-    let recorded = tokio::time::timeout(Duration::from_secs(2), record_rx.recv()).await.unwrap().unwrap();
+    let recorded = tokio::time::timeout(Duration::from_secs(2), record_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(recorded, format!("assign:{}", task_id));
     drop(io_client);
     assert!(record_rx.try_recv().is_err());
@@ -337,7 +549,6 @@ fn degradation_paths_cover_recycle_report_and_inject() {
 #[test]
 fn permanent_versus_retryable_error_split() {
     assert!(permanent_error(ErrorCode::AclDenied));
-    assert!(permanent_error(ErrorCode::Invalid));
     assert!(permanent_error(ErrorCode::Conflict));
     assert!(permanent_error(ErrorCode::Forbidden));
     assert!(permanent_error(ErrorCode::UnknownRole));
@@ -349,6 +560,42 @@ fn permanent_versus_retryable_error_split() {
     assert!(!permanent_error(ErrorCode::Internal));
     assert!(!permanent_error(ErrorCode::Duplicate));
     assert!(!permanent_error(ErrorCode::RecipientOffline));
+    // The server answers `invalid` for conditions a retry clears, such as a frame
+    // that arrives before the routed `hello`, so the row ends as an observable
+    // fault rather than a silent deletion.
+    assert!(!permanent_error(ErrorCode::Invalid));
+}
+
+#[test]
+fn intent_survives_a_frame_refused_before_the_routed_hello() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("client.db");
+    let store = ClientStore::open(&db).unwrap();
+    let machine = IntentMachine::new(store.clone(), 3, vec![1000, 2000]);
+
+    let envelope = sample_envelope("planner", "hello");
+    machine.enqueue(&envelope).unwrap();
+    let rows = store.flush_order().unwrap();
+
+    // The link layer redials on its own, so the first frame of a fresh
+    // connection can reach a session that has not read `hello` yet.
+    let res = machine
+        .attempt(
+            &rows[0],
+            Some(&ResBody::err(
+                ErrorCode::Invalid,
+                onlyne_proto::HELLO_REQUIRED_MESSAGE,
+                Some("op".to_string()),
+            )),
+        )
+        .unwrap();
+    assert!(matches!(
+        res,
+        IntentResult::Retryable(ErrorCode::Internal, _)
+    ));
+    assert_eq!(store.pending_intent_count().unwrap(), 1);
+    let kept = store.flush_order().unwrap();
+    assert_eq!(kept[0].attempt, rows[0].attempt);
 }
 
 #[tokio::test]
@@ -367,7 +614,15 @@ async fn pinned_tls_link_fetches_welcome_and_caches_prose() {
     let config = server_config(&certificate).unwrap();
     let mut listener = TcpListen::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
-    let table = table_from([("planner".to_string(), keypair.public_str(), false, Vec::new(), Vec::new())]).unwrap();
+    let table = table_from([(
+        "planner".to_string(),
+        keypair.public_str(),
+        false,
+        Vec::new(),
+        Vec::new(),
+    )])
+    .unwrap();
+    let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
 
     let welcome = Welcome {
         cluster: "cluster-b".into(),
@@ -378,6 +633,7 @@ async fn pinned_tls_link_fetches_welcome_and_caches_prose() {
         reuse: true,
         prose: "cluster b exposes planner".into(),
         spec_hash: "hash-spec-b".into(),
+        aggregate: Some("cluster-b".into()),
         allowed_targets: vec![],
         allowed_senders: vec![],
         session_command: None,
@@ -389,29 +645,93 @@ async fn pinned_tls_link_fetches_welcome_and_caches_prose() {
         seq: 10,
     };
 
+    let seen_server = seen.clone();
     let server = tokio::spawn(async move {
-        let accepted = listener.accept_next(&config).await.unwrap();
-        let TlsConn::Server(mut stream) = accepted else { panic!("server stream expected") };
-        // The pinned TLS handshake then the challenge signature, both real.
-        let ok = accept_handshake(&mut stream, &table, PROTOCOL_VERSION).await.unwrap();
-        assert_eq!(ok.role, "planner");
+        // Stay listening for the whole test, so the wrong-pin dial meets the
+        // pin check on a listening socket.
         loop {
-            let frame: Option<Frame<ClientOp>> = read_frame(&mut stream).await.unwrap();
-            let Some(frame) = frame else { break };
-            match frame {
-                Frame::Req { id, op } => match op {
-                    ClientOp::Hello(_) => write_frame(&mut stream, &Frame::ok(id, serde_json::to_value(&welcome).unwrap())).await.unwrap(),
-                    ClientOp::Subscribe(_) => write_frame(&mut stream, &Frame::ok(id, serde_json::json!({"subscribed": true}))).await.unwrap(),
-                    ClientOp::Pull(_) => write_frame(&mut stream, &Frame::ok(id, serde_json::json!({"deliveries": [], "seq": 11}))).await.unwrap(),
-                    _ => write_frame(&mut stream, &Frame::ok(id, serde_json::json!({}))).await.unwrap(),
-                },
-                Frame::Bye { .. } => break,
-                _ => {}
-            }
+            let Ok(accepted) = listener.accept_next(&config).await else {
+                break;
+            };
+            let table = table.clone();
+            let welcome = welcome.clone();
+            let seen = seen_server.clone();
+            tokio::spawn(async move {
+                let TlsConn::Server(mut stream) = accepted else {
+                    panic!("server stream expected")
+                };
+                // The pinned TLS handshake then the challenge signature, both real.
+                let Ok(ok) = accept_handshake(&mut stream, &table, PROTOCOL_VERSION).await else {
+                    return;
+                };
+                assert_eq!(ok.role, "planner");
+                loop {
+                    let frame: Option<Frame<ClientOp>> = match read_frame(&mut stream).await {
+                        Ok(frame) => frame,
+                        Err(_) => break,
+                    };
+                    let Some(frame) = frame else { break };
+                    match frame {
+                        Frame::Req { id, op } => {
+                            seen.lock()
+                                .unwrap()
+                                .push(serde_json::to_value(&op).unwrap());
+                            match op {
+                                ClientOp::Hello(_) => write_frame(
+                                    &mut stream,
+                                    &Frame::ok(id, serde_json::to_value(&welcome).unwrap()),
+                                )
+                                .await
+                                .unwrap(),
+                                ClientOp::Subscribe(_) => write_frame(
+                                    &mut stream,
+                                    &Frame::ok(id, serde_json::json!({"subscribed": true})),
+                                )
+                                .await
+                                .unwrap(),
+                                ClientOp::Pull(_) => write_frame(
+                                    &mut stream,
+                                    &Frame::ok(
+                                        id,
+                                        serde_json::json!({"deliveries": [], "seq": 11}),
+                                    ),
+                                )
+                                .await
+                                .unwrap(),
+                                _ => {
+                                    write_frame(&mut stream, &Frame::ok(id, serde_json::json!({})))
+                                        .await
+                                        .unwrap()
+                                }
+                            }
+                        }
+                        Frame::Bye { .. } => break,
+                        _ => {}
+                    }
+                }
+            });
         }
     });
 
-    let init = ClientInit::new(dir.path(), "planner", endpoint.clone(), key_path.clone(), certificate.spki_pin.clone());
+    // A report queued while the link was down: the flusher must carry the
+    // cluster name the welcome advertised, not the `None` it was stored with.
+    let queued = ClientOp::Report(Report::Ready {
+        task_id: "task-1".into(),
+        session_id: "s1".into(),
+        generation: 1,
+        seq: 1,
+        cluster_ref: None,
+    });
+    store
+        .enqueue_intent("report-1", &serde_json::to_value(&queued).unwrap())
+        .unwrap();
+    let init = ClientInit::new(
+        dir.path(),
+        "planner",
+        endpoint.clone(),
+        key_path.clone(),
+        certificate.spki_pin.clone(),
+    );
     let client = tokio::spawn(onlyne_client::run(init));
 
     let mut cached = None;
@@ -426,15 +746,47 @@ async fn pinned_tls_link_fetches_welcome_and_caches_prose() {
     assert_eq!(prose, "cluster b exposes planner");
     assert_eq!(hash, "hash-spec-b");
 
+    let mut report_frame = None;
+    for _ in 0..60 {
+        if let Some(found) = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|op| serde_json::to_string(op).unwrap().contains("cluster_ref"))
+        {
+            report_frame = Some(serde_json::to_string(found).unwrap());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let report_frame = report_frame.expect("the queued report reached the server");
+    assert!(
+        report_frame.contains("\"cluster_ref\":\"cluster-b\""),
+        "the aggregate name comes from the welcome, not the stored op: {report_frame}"
+    );
+
     let machine = IntentMachine::new(store.clone(), 3, vec![100]);
     let cli = LocalCli::with_role(machine, "planner");
-    let res = cli.query_roles_local(&QueryRolesArgs { role: Some("planner".into()) }).unwrap();
-    assert_eq!(res.data.unwrap()["roles"][0]["prose"], "cluster b exposes planner");
+    let res = cli
+        .query_roles_local(&QueryRolesArgs {
+            role: Some("planner".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        res.data.unwrap()["roles"][0]["prose"],
+        "cluster b exposes planner"
+    );
 
-    // A wrong pin must fail the dial, which proves the pin is checked.
+    // A wrong pin must fail the dial inside the bound, which proves the pin is checked.
     let bad_pin = format!("sha256/{}", "0".repeat(64));
     let bad = ClientInit::new(dir.path(), "planner", endpoint, key_path, bad_pin);
-    assert!(ClientLink::connect(&bad).await.is_err());
+    let refusal = tokio::time::timeout(Duration::from_secs(3), ClientLink::connect(&bad))
+        .await
+        .expect("the wrong-pin dial must answer inside 3s");
+    assert!(
+        matches!(refusal, Err(onlyne_net::NetError::PinMismatch { .. })),
+        "a wrong pin is refused as a pin mismatch"
+    );
 
     client.abort();
     server.abort();
@@ -457,22 +809,50 @@ impl RecordingOutbox {
 }
 
 impl onlyne_client::dispatch::Outbox for RecordingOutbox {
-    fn send(&self, op: ClientOp) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), onlyne_net::NetError>> + Send + '_>> {
+    fn send(
+        &self,
+        op: ClientOp,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), onlyne_net::NetError>> + Send + '_>,
+    > {
         Box::pin(async move {
             self.frames.lock().await.push(op);
             Ok(())
         })
     }
+
+    /// The recorder answers every request with an accepted body, so a caller
+    /// that reads the server's verdict records the frame and moves on.
+    fn request(
+        &self,
+        op: ClientOp,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<onlyne_proto::ResBody, onlyne_net::NetError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.frames.lock().await.push(op);
+            Ok(onlyne_proto::ResBody::ok(serde_json::Value::Null))
+        })
+    }
 }
 
 /// Spawn one task and settle its adapter transport; the caller reads the order.
-async fn spawn_ready(state: &DispatchState, text: &str) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+async fn spawn_ready(
+    state: &DispatchState,
+    text: &str,
+) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
     let env = sample_envelope("planner", text);
     let task_id = env.task_id().unwrap().to_string();
     let session = dispatch(state, &env).unwrap();
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-    let (io_client, mut client_inbound) = AdapterIo::new_with_inbound(client_io, Duration::from_secs(2), Duration::from_secs(2));
-    let (io_server, _server_inbound) = AdapterIo::new_with_inbound(server_io, Duration::from_secs(2), Duration::from_secs(2));
+    let (io_client, mut client_inbound) =
+        AdapterIo::new_with_inbound(client_io, Duration::from_secs(2), Duration::from_secs(2));
+    let (io_server, _server_inbound) =
+        AdapterIo::new_with_inbound(server_io, Duration::from_secs(2), Duration::from_secs(2));
     let (record_tx, record_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
         while let Some(frame) = client_inbound.recv().await {
@@ -482,7 +862,19 @@ async fn spawn_ready(state: &DispatchState, text: &str) -> (String, tokio::sync:
         }
         drop(io_client);
     });
-    on_ready(state, ReadyNotice { task_id: task_id.clone(), session_id: session.task_id.clone(), generation: 1, io: io_server, capabilities: vec![Capability::Inject] }, "prose").await.unwrap();
+    on_ready(
+        state,
+        ReadyNotice {
+            task_id: task_id.clone(),
+            session_id: session.task_id.clone(),
+            generation: 1,
+            io: io_server,
+            capabilities: vec![Capability::Inject],
+        },
+        "prose",
+    )
+    .await
+    .unwrap();
     (task_id, record_rx)
 }
 
@@ -491,17 +883,35 @@ async fn ready_is_reported_before_assign() {
     let dir = tempdir().unwrap();
     let store = ClientStore::open(dir.path().join("client.db")).unwrap();
     let backend = Arc::new(FakeBackend::new());
-    let state = DispatchState::new("planner", dir.path(), vec!["echo".into()], 2, true, backend, store);
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        true,
+        backend,
+        store,
+    );
     let outbox = Arc::new(RecordingOutbox::default());
     state.attach_outbox(outbox.clone());
 
     let (task_id, mut record_rx) = spawn_ready(&state, "task 1").await;
-    let recorded = tokio::time::timeout(Duration::from_secs(2), record_rx.recv()).await.unwrap().unwrap();
+    let recorded = tokio::time::timeout(Duration::from_secs(2), record_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(recorded, format!("assign:{}", task_id));
 
     let kinds = outbox.kinds().await;
-    assert_eq!(kinds.first(), Some(&"report"), "the ready report leaves first: {kinds:?}");
-    assert!(kinds.contains(&"session_sync"), "the projection follows the report: {kinds:?}");
+    assert_eq!(
+        kinds.first(),
+        Some(&"report"),
+        "the ready report leaves first: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"session_sync"),
+        "the projection follows the report: {kinds:?}"
+    );
 }
 
 #[tokio::test]
@@ -509,32 +919,52 @@ async fn lifecycle_write_emits_session_sync() {
     let dir = tempdir().unwrap();
     let store = ClientStore::open(dir.path().join("client.db")).unwrap();
     let backend = Arc::new(FakeBackend::new());
-    let state = DispatchState::new("planner", dir.path(), vec!["echo".into()], 2, true, backend, store.clone());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        true,
+        backend,
+        store.clone(),
+    );
     let outbox = Arc::new(RecordingOutbox::default());
     state.attach_outbox(outbox.clone());
     let (task_id, _assigns) = spawn_ready(&state, "task 1").await;
 
-    // The turn ended: the tuple moves to idle, which is a public state change.
-    let body = onlyne_session::Observation::build(
-        onlyne_session::Version::new(1, 9),
-        true,
-        0,
-        0,
-        0,
-        onlyne_session::AgentState::Idle,
-        onlyne_session::DeliveryState::None,
-        onlyne_session::ResourceState::Attached,
-        onlyne_session::RecoveryState::None,
-        onlyne_session::Outcome::Pending,
-    );
-    on_plugin_report(&state, onlyne_proto::Report::Heartbeat { task_id: task_id.clone(), generation: 1, seq: 9, observed: serde_json::to_value(&body).unwrap(), cluster_ref: None }).await.unwrap();
+    // A heartbeat whose version is the stored watermark plus one, and whose
+    // body is the stored observation with the agent idle: a legal transition.
+    let row = store.get_session(&task_id).unwrap().unwrap();
+    let mut body: onlyne_session::Observation = serde_json::from_str(&row.observed_json).unwrap();
+    body.agent = onlyne_session::AgentState::Idle;
+    body.version = onlyne_session::Version::new(row.generation as u64, row.seq as u64 + 1);
+    on_plugin_report(
+        &state,
+        onlyne_proto::Report::Heartbeat {
+            task_id: task_id.clone(),
+            generation: row.generation as u64,
+            seq: row.seq as u64 + 1,
+            observed: serde_json::to_value(body).unwrap(),
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
 
     let frames = outbox.frames().await;
-    let syncs: Vec<&ClientOp> = frames.iter().filter(|op| matches!(op, ClientOp::SessionSync(_))).collect();
-    let Some(ClientOp::SessionSync(args)) = syncs.last() else { panic!("a lifecycle write must publish its projection") };
+    let syncs: Vec<&ClientOp> = frames
+        .iter()
+        .filter(|op| matches!(op, ClientOp::SessionSync(_)))
+        .collect();
+    let Some(ClientOp::SessionSync(args)) = syncs.last() else {
+        panic!("a lifecycle write must publish its projection")
+    };
     assert_eq!(args.task_id, task_id);
     assert_eq!(args.projection.agent, onlyne_proto::AgentPhase::Idle);
-    assert_eq!(store.get_session(&task_id).unwrap().unwrap().agent_state, "idle");
+    assert_eq!(
+        store.get_session(&task_id).unwrap().unwrap().agent_state,
+        "idle"
+    );
 }
 
 #[tokio::test]
@@ -543,12 +973,213 @@ async fn report_when_link_down_lands_in_intents() {
     let store = ClientStore::open(dir.path().join("client.db")).unwrap();
     let backend = Arc::new(FakeBackend::new());
     // No outbox is installed, so the report takes the durable path.
-    let state = DispatchState::new("planner", dir.path(), vec!["echo".into()], 2, true, backend, store.clone());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        true,
+        backend,
+        store.clone(),
+    );
 
     let (task_id, _assigns) = spawn_ready(&state, "task 1").await;
 
-    assert!(!state.accept_new().load(std::sync::atomic::Ordering::SeqCst), "a frame that could not be sent parks intake");
-    assert_eq!(store.get_session(&task_id).unwrap().unwrap().agent_state, "ready", "the local tuple still advanced");
-    let queued: Vec<ClientOp> = store.flush_order().unwrap().iter().map(|row| op_for_intent(row).unwrap()).collect();
-    assert!(queued.iter().any(|op| matches!(op, ClientOp::Report(_))), "the frame reached the outbox: {:?}", queued.len());
+    assert!(
+        !state.accept_new().load(std::sync::atomic::Ordering::SeqCst),
+        "a frame that could not be sent parks intake"
+    );
+    assert_eq!(
+        store.get_session(&task_id).unwrap().unwrap().agent_state,
+        "ready",
+        "the local tuple advanced"
+    );
+    let queued: Vec<ClientOp> = store
+        .flush_order()
+        .unwrap()
+        .iter()
+        .map(|row| op_for_intent(row).unwrap())
+        .collect();
+    assert!(
+        queued.iter().any(|op| matches!(op, ClientOp::Report(_))),
+        "the frame reached the outbox: {:?}",
+        queued.len()
+    );
+}
+
+/// Reports the reason the dispatcher handed the backend.
+#[derive(Clone, Default)]
+struct ReasonBackend {
+    inner: FakeBackend,
+    reasons: Arc<parking_lot::Mutex<Vec<onlyne_session::CloseReason>>>,
+}
+
+impl onlyne_session::SessionBackend for ReasonBackend {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+    fn capabilities(&self) -> onlyne_session::Capabilities {
+        self.inner.capabilities()
+    }
+    fn available(&self) -> anyhow::Result<bool> {
+        self.inner.available()
+    }
+    fn spawn(&self, spec: onlyne_session::SpawnSpec) -> anyhow::Result<onlyne_session::SessionRef> {
+        self.inner.spawn(spec)
+    }
+    fn attach(
+        &self,
+        session: &onlyne_session::SessionRef,
+    ) -> anyhow::Result<onlyne_session::SessionRef> {
+        self.inner.attach(session)
+    }
+    fn probe(
+        &self,
+        session: &onlyne_session::SessionRef,
+    ) -> anyhow::Result<onlyne_session::ResourceProbe> {
+        self.inner.probe(session)
+    }
+    fn close(
+        &self,
+        session: &onlyne_session::SessionRef,
+        reason: onlyne_session::CloseReason,
+        force: bool,
+    ) -> anyhow::Result<()> {
+        self.reasons.lock().push(reason);
+        self.inner.close(session, reason, force)
+    }
+}
+
+#[test]
+fn cancelled_settle_closes_with_the_real_reason() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        false,
+        backend.clone(),
+        store,
+    );
+
+    let env = sample_envelope("planner", "task 1");
+    let task_id = env.task_id().unwrap().to_string();
+    dispatch(&state, &env).unwrap();
+    on_recycled(&state, &task_id, onlyne_session::CloseReason::Cancelled).unwrap();
+
+    assert_eq!(
+        backend.reasons.lock().as_slice(),
+        [onlyne_session::CloseReason::Cancelled]
+    );
+    assert_eq!(state.session_count(), 0);
+}
+
+#[test]
+fn detached_tuple_sees_no_close_call() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        false,
+        backend.clone(),
+        store.clone(),
+    );
+
+    let env = sample_envelope("planner", "task 1");
+    let task_id = env.task_id().unwrap().to_string();
+    dispatch(&state, &env).unwrap();
+
+    // Rewind the stored tuple to Detached at a higher watermark, which is the
+    // state a probe-confirmed loss leaves behind.
+    let row = store.get_session(&task_id).unwrap().unwrap();
+    store
+        .upsert_session(
+            &task_id,
+            &onlyne_session::VersionedSession {
+                agent_state: row.agent_state.clone(),
+                delivery_state: row.delivery_state.clone(),
+                resource_state: "detached".to_string(),
+                public_lifecycle: row.public_lifecycle.clone(),
+                recovery_substate: row.recovery_substate.clone(),
+                desired_json: row.desired_json.clone(),
+                observed_json: row.observed_json.clone(),
+                generation: row.generation,
+                seq: row.seq + 1,
+                backend_ref: row.backend_ref.clone(),
+                mismatch_count: row.mismatch_count,
+                updated_at: row.updated_at,
+            },
+        )
+        .unwrap();
+
+    on_recycled(&state, &task_id, onlyne_session::CloseReason::Completed).unwrap();
+
+    assert!(
+        backend.reasons.lock().is_empty(),
+        "a detached tuple has no resource to close"
+    );
+    assert_eq!(state.session_count(), 0);
+}
+
+#[test]
+fn a_supervisor_report_names_its_cluster() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec![],
+        1,
+        false,
+        Arc::new(FakeBackend::new()),
+        store,
+    );
+    state.set_cluster_ref("cluster-b");
+
+    let report = onlyne_proto::Report::Ready {
+        task_id: "t".into(),
+        session_id: "t".into(),
+        generation: 1,
+        seq: 1,
+        cluster_ref: None,
+    };
+    let value =
+        serde_json::to_value(onlyne_client::dispatch::with_cluster(&state, report)).unwrap();
+    assert_eq!(value["data"]["cluster_ref"], "cluster-b");
+}
+
+#[test]
+fn a_plain_role_report_omits_the_cluster_key() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec![],
+        1,
+        false,
+        Arc::new(FakeBackend::new()),
+        store,
+    );
+
+    let report = onlyne_proto::Report::Ready {
+        task_id: "t".into(),
+        session_id: "t".into(),
+        generation: 1,
+        seq: 1,
+        cluster_ref: None,
+    };
+    let value =
+        serde_json::to_value(onlyne_client::dispatch::with_cluster(&state, report)).unwrap();
+    assert!(
+        value["data"].get("cluster_ref").is_none(),
+        "a plain role omits the key: {value}"
+    );
 }

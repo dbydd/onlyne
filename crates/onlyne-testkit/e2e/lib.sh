@@ -15,6 +15,14 @@ fail() {
   exit 1
 }
 
+# `blocked <reason>` marks a case the tree cannot run yet, with exit 3, so a
+# refusal from another crate reads as blocked work rather than a passing test.
+blocked() {
+  echo "BLOCKED: $1" >&2
+  if [ -n "${2:-}" ]; then echo "---- observed ----" >&2; printf '%s\n' "$2" >&2; fi
+  exit 3
+}
+
 # Build directory holding the workspace binaries. `CARGO_TARGET_DIR` selects the
 # private target directory the brief asks for, `ONLYNE_BIN_DIR` overrides the
 # whole relative or absolute path, and the default matches a plain
@@ -35,6 +43,13 @@ bin() {
   printf '%s\n' "$path"
 }
 
+# `free_port` prints one currently unbound loopback port. Every case allocates
+# its own, so two cases never contend for one address and a leftover daemon from
+# an earlier run cannot make a later case read as a product failure.
+free_port() {
+  python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'
+}
+
 json_field() {
   local file=$1 expr_jq=$2 expr_py=$3
   if command -v python3 >/dev/null 2>&1; then
@@ -45,11 +60,6 @@ json_field() {
     fail "neither python3 nor jq is available"
   fi
 }
-
-# `ledger_table <answer-file> <out-file>` writes one tab-separated line per ledger
-# row: `<from role>\t<to role>\t<state>\t<body_json>\t<out_head>`.
-# A `ledger --task` answer arrives as one row and a bare `ledger` answer arrives
-# as a list under one of the keys the CLI accepts, so both shapes normalise here.
 # `from` and `to` decode the nested principal object and the stored JSON string,
 # mirroring `row_principal` in `crates/onlyne-cli/src/ledger.rs`.
 ledger_table() {
@@ -60,6 +70,8 @@ import sys
 
 
 def rows_of(raw):
+    if isinstance(raw, dict) and isinstance(raw.get("data"), (dict, list)):
+        raw = raw["data"]
     if isinstance(raw, list):
         return raw
     if isinstance(raw, dict):
@@ -106,18 +118,97 @@ for row in rows:
 PY
 }
 
-# `client_init <ws> <role> <server_dir> <spec> <fragment> [prose] [senders] [targets]`
-# writes one role workspace and appends its `[[client]]` fragment to a spec file.
-# The plan's acceptance list fixes the fragment shape: first line exactly
-# `[[client]]` and one `key = "ed25519/` entry.
+# `data_rows <answer-file>` prints one JSON object per line for every row in a
+# list answer, descending through the `data` envelope and the list keys the CLI
+# accepts (`rows`, `results`, `ledger`, `items`). A predicate script reads this
+# stream instead of guessing the answer shape again.
+data_rows() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+
+def rows_of(raw):
+    if isinstance(raw, dict) and isinstance(raw.get("data"), (dict, list)):
+        raw = raw["data"]
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        for key in ("rows", "results", "ledger", "items", "roles", "sessions", "faults"):
+            if isinstance(raw.get(key), list):
+                return raw[key]
+        return [raw]
+    return []
+
+
+with open(sys.argv[1]) as handle:
+    for row in rows_of(json.load(handle)):
+        if isinstance(row, dict):
+            print(json.dumps(row))
+PY
+}
+
+# `db_count <db-file> <sql>` prints one integer from a SQLite query. sqlite3 is
+# the primary reader, python3's stdlib module is the fallback, and a host with
+# neither fails loudly, so a missing reader can never turn an assertion silent.
+db_count() {
+  local db=$1 sql=$2
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$db" "$sql"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute(sys.argv[2]).fetchone()[0])' "$db" "$sql"
+  else
+    fail "neither sqlite3 nor python3 is available to read $db"
+  fi
+}
+
+# `rows_any <answer-file> <field> <value>` exits 0 when any row of a list answer
+# carries `field` equal to `value`. `data_rows` normalises the shipped
+# `{"ok":true,"data":{"ledger":[...]}}` envelope, so a predicate reads one shape.
+rows_any() {
+  data_rows "$1" | python3 -c '
+import json, sys
+field, want = sys.argv[1], sys.argv[2]
+try:
+    rows = [json.loads(line) for line in sys.stdin]
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if any(row.get(field) == want for row in rows) else 1)
+' "$2" "$3"
+}
+
+# `row_value <answer-file> <field> [<select-field> <select-value>]` prints `field`
+# from the first row whose `select-field` equals `select-value`, and from the first
+# row when no selector is given. Prints nothing when no row matches.
+row_value() {
+  data_rows "$1" | python3 -c '
+import json, sys
+field = sys.argv[1]
+select_field = sys.argv[2] if len(sys.argv) > 2 else ""
+select_value = sys.argv[3] if len(sys.argv) > 3 else ""
+try:
+    rows = [json.loads(line) for line in sys.stdin]
+except ValueError:
+    rows = []
+if select_field:
+    rows = [row for row in rows if row.get(select_field) == select_value]
+print(rows[0].get(field, "") if rows else "")
+' "$2" "${3:-}" "${4:-}"
+}
+
+# `client_init <ws> <role> <server_dir> <spec> <fragment> [prose] [acl]` writes
+# one role workspace and appends its `[[client]]` fragment to a spec file. The
+# plan's acceptance list fixes the fragment shape: first line exactly `[[client]]`
+# and one `key = "ed25519/` entry.
 #
 # `prose` travels through init's `--prose` flag, so the printed entry carries the
-# text the fake agent checks against its `assign.prose`. `senders` and `targets`
-# are TOML array literals, e.g. '["*", "planner"]'. init prints the rule's default
-# self pair, `["*", <role>]` and `[<role>]`, so a caller passing a different pair
-# has the fragment's two ACL lines dropped first.
+# text the fake agent checks against its `assign.prose`. `acl` carries the role's
+# two ACL lines as they appear in `spec.toml`, so one grep over the suite shows
+# every pair, e.g. 'allowed_senders = ["*", "planner"]
+# allowed_targets = ["planner"]'. init prints the rule's default self pair, and a
+# caller passing its own lines has the fragment's two ACL lines dropped first.
 client_init() {
-  local ws=$1 role=$2 server_dir=$3 spec=$4 fragment=$5 prose=${6:-} senders=${7:-} targets=${8:-}
+  local ws=$1 role=$2 server_dir=$3 spec=$4 fragment=$5 prose=${6:-} acl=${7:-}
   if [ -n "$prose" ]; then
     "$CLIENT" init --workspace "$ws" --role "$role" --server-root "$server_dir" --prose "$prose" > "$fragment"
   else
@@ -127,9 +218,15 @@ client_init() {
   first_line=$(head -n 1 "$fragment")
   [ "$first_line" = "[[client]]" ] || fail "init fragment first line must be [[client]]" "$first_line"
   grep -q 'key = "ed25519/' "$fragment" || fail "init fragment must contain key = \"ed25519/" "$(cat "$fragment")"
-  if [ -n "$senders" ] && [ -n "$targets" ]; then
-    grep -v -E '^(allowed_senders|allowed_targets) = ' "$fragment" >> "$spec"
-    printf 'allowed_senders = %s\nallowed_targets = %s\n' "$senders" "$targets" >> "$spec"
+  if [ -n "$acl" ]; then
+    # The override restates the lines it carries, so init's own copies of those
+    # lines are dropped first and the spec keeps one key each.
+    local strip='^(allowed_senders|allowed_targets) = '
+    case "$acl" in
+      *max_sessions*) strip='^(allowed_senders|allowed_targets|max_sessions) = ' ;;
+    esac
+    grep -v -E "$strip" "$fragment" >> "$spec"
+    printf '%s\n' "$acl" >> "$spec"
   else
     cat "$fragment" >> "$spec"
   fi
@@ -145,12 +242,13 @@ mint_key() {
   grep -o 'ed25519/[A-Za-z0-9+/=]*' "$fragment" | head -n 1
 }
 
-# `setup_cluster <server_dir> <ws_dir> [role] [tag] [listen] [prose] [senders] [targets]`
-# brings up one cluster and registers one role into it through `client_init`, so
-# the role's ACL pair and prose arrive in init's printed entry. Sets SERVER,
-# CLIENT, ONLYNE, FAKE and cluster_server_pid.
+# `setup_cluster <server_dir> <ws_dir> [role] [tag] [listen] [prose] [acl]` brings
+# up one cluster and registers one role into it through `client_init`, so the
+# role's ACL pair and prose arrive in init's printed entry. Sets SERVER, CLIENT,
+# ONLYNE, FAKE and cluster_server_pid.
 setup_cluster() {
-  local server_dir=$1 ws_dir=$2 role=${3:-planner} tag=${4:-cluster} listen=${5:-127.0.0.1:7899} prose=${6:-} senders=${7:-} targets=${8:-}
+  local server_dir=$1 ws_dir=$2 role=${3:-planner} tag=${4:-cluster} listen=${5:-} prose=${6:-} acl=${7:-}
+  [ -n "$listen" ] || listen="127.0.0.1:$(free_port)"
   SERVER=$(bin onlyne-server)
   CLIENT=$(bin onlyne-client)
   ONLYNE=$(bin onlyne)
@@ -165,7 +263,12 @@ setup_cluster() {
     fi
     sleep 0.1
   done
-  [ -n "$ready_out" ] || fail "$tag wait-ready never exited 0 inside 10 seconds" "$(cat "$tmp/$tag-wait-ready.err" 2>/dev/null)"
-  client_init "$ws_dir" "$role" "$server_dir" "$server_dir/.onlyne/spec.toml" "$tmp/$tag-spec.frag.toml" "$prose" "$senders" "$targets"
+  if [ -z "$ready_out" ]; then
+    # A daemon that never came up still owns its address until it exits, so the
+    # failure path reaps it before the case reports.
+    kill "$cluster_server_pid" 2>/dev/null || true
+    fail "$tag wait-ready never exited 0 inside 10 seconds" "$(cat "$tmp/$tag-wait-ready.err" 2>/dev/null) $(cat "$tmp/$tag-server.log" 2>/dev/null)"
+  fi
+  client_init "$ws_dir" "$role" "$server_dir" "$server_dir/.onlyne/spec.toml" "$tmp/$tag-spec.frag.toml" "$prose" "$acl"
   "$ONLYNE" --server-root "$server_dir" reload
 }

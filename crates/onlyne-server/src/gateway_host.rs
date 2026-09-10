@@ -14,8 +14,8 @@ use chrono::Utc;
 use onlyne_adapter::{Host, HostDispatcher};
 use onlyne_config::{RouteEntry, Spec};
 use onlyne_proto::{
-    AdapterMsg, Capability, Delivery, ErrorCode, Event, GatewayHealth, GatewayOp, GatewayMount,
-    HelloAck, HelloArgs, HealthArgs, HostOp, Mount, MountKind, PROTOCOL_VERSION,
+    AdapterMsg, Capability, Delivery, ErrorCode, Event, GatewayHealth, GatewayMount, GatewayOp,
+    HealthArgs, HelloAck, HelloArgs, HostOp, Mount, MountKind, PROTOCOL_VERSION,
     RegisterChannelArgs, RenderSendArgs, ResBody, ServerInfo,
 };
 use std::sync::Arc;
@@ -25,6 +25,8 @@ use tokio::sync::mpsc;
 pub const KIND_GATEWAY_UNCONFIGURED: &str = "gateway_unconfigured";
 /// Fault kind recorded when a registered gateway stops answering.
 pub const KIND_GATEWAY_LOSS: &str = "gateway_loss";
+/// Fault kind recorded when a presented platform disagrees with the entry.
+pub const KIND_GATEWAY_PLATFORM_MISMATCH: &str = "gateway_platform_mismatch";
 
 /// The route that carries an inbound platform conversation to a role.
 ///
@@ -65,9 +67,9 @@ pub fn select_outbound_route<'a>(
     });
     by_sender.or_else(|| {
         let wanted = reply_to?;
-        spec.route.iter().find(|route| {
-            route.gateway == gateway && route.to.session.as_deref() == Some(wanted)
-        })
+        spec.route
+            .iter()
+            .find(|route| route.gateway == gateway && route.to.session.as_deref() == Some(wanted))
     })
 }
 
@@ -99,10 +101,7 @@ pub enum OutboundPlan {
         conversation: String,
     },
     /// The gateway cannot take it now; the ledger row stays queued.
-    Held {
-        gateway: String,
-        reason: String,
-    },
+    Held { gateway: String, reason: String },
 }
 
 /// Whether a gateway link can receive a render call right now.
@@ -141,6 +140,11 @@ pub async fn render_outbound(
         ));
     }
     let reply_to = envelope.causality.as_ref().and_then(|c| c.reply_to.clone());
+    // §5's `[[route]]` semantics are written for the inbound direction, where
+    // the row chooses the role a platform conversation reaches. The outbound
+    // direction consults the same table for two other jobs: the row is the
+    // permit a role holds to address a gateway at all, and its `channel` and
+    // `conversation` name the platform target when the envelope carries none.
     let route = select_outbound_route(&spec, &gateway, &envelope.from, reply_to.as_deref())
         .ok_or_else(|| {
             RelayReject::new(
@@ -168,7 +172,8 @@ pub async fn render_outbound(
     let args = RenderSendArgs {
         envelope: Box::new(envelope.clone()),
         conversation: conversation.clone(),
-        gateway_ref: reply_to,
+        gateway_ref: reply_to.clone(),
+        reply_to,
     };
     io.notify(AdapterMsg::Host(HostOp::RenderSend(args)))
         .await
@@ -179,6 +184,14 @@ pub async fn render_outbound(
         gateway,
         conversation,
     })
+}
+
+/// Schedule the outbound pump for a freshly written gateway-targeted row.
+pub fn schedule_pump(state: &Arc<State>) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let _ = pump_outbound(&state).await;
+    });
 }
 
 /// Push every queued gateway-targeted row that its gateway can take.
@@ -286,6 +299,17 @@ pub fn validate_gateway(
             ));
         }
     }
+    if !platform.is_empty() && platform != entry.platform {
+        let reason = format!(
+            "gateway {} is configured as platform {} and presented {}",
+            entry.id, entry.platform, platform
+        );
+        let _ = record(
+            state,
+            FaultDraft::new(KIND_GATEWAY_PLATFORM_MISMATCH, &reason).with_role(gateway),
+        );
+        return Err((ErrorCode::Invalid, reason));
+    }
     let platform = if platform.is_empty() {
         entry.platform.clone()
     } else {
@@ -368,6 +392,17 @@ pub fn register_channels(
     platform: &str,
     args: &RegisterChannelArgs,
 ) -> Result<(), (ErrorCode, String)> {
+    if args.platform != platform {
+        let reason = format!(
+            "gateway {gateway} is mounted as platform {platform} and declared a channel for platform {}",
+            args.platform
+        );
+        let _ = record(
+            state,
+            FaultDraft::new(KIND_GATEWAY_PLATFORM_MISMATCH, &reason).with_role(gateway),
+        );
+        return Err((ErrorCode::Invalid, reason));
+    }
     let binding = ChannelBinding {
         gateway: gateway.to_string(),
         platform: platform.to_string(),
@@ -376,6 +411,13 @@ pub fn register_channels(
         registered_at: Utc::now(),
     };
     state.register_channel(binding);
+    // A gateway that just registered can take work, and a row queued before it
+    // arrived must not wait for the next health frame (plan §9's outbound
+    // direction). The pump is idempotent, so a later `health` redraws nothing.
+    let pump_state = state.clone();
+    tokio::spawn(async move {
+        let _ = pump_outbound(&pump_state).await;
+    });
     Ok(())
 }
 
@@ -464,7 +506,10 @@ pub fn health_sweep(state: &Arc<State>, now: chrono::DateTime<Utc>) -> Vec<Strin
         .unwrap_or(30_000);
     let mut lost = Vec::new();
     for gateway in state.stale_gateways(now, limit_ms) {
-        if state.touch_health(&gateway, GatewayHealth::Failed, now).is_none() {
+        if state
+            .touch_health(&gateway, GatewayHealth::Failed, now)
+            .is_none()
+        {
             continue;
         }
         let queued = state
@@ -476,7 +521,9 @@ pub fn health_sweep(state: &Arc<State>, now: chrono::DateTime<Utc>) -> Vec<Strin
             state,
             FaultDraft::new(
                 KIND_GATEWAY_LOSS,
-                format!("no health observation within {limit_ms}ms; {queued} queued row(s) retained"),
+                format!(
+                    "no health observation within {limit_ms}ms; {queued} queued row(s) retained"
+                ),
             )
             .with_role(&gateway)
             .with_observed(serde_json::json!({ "queued": queued })),
@@ -518,7 +565,12 @@ pub struct GatewayHostImpl {
 }
 
 impl GatewayHostImpl {
-    pub fn new(state: Arc<State>, gateway: String, platform: String, link: Arc<AdapterLink>) -> Self {
+    pub fn new(
+        state: Arc<State>,
+        gateway: String,
+        platform: String,
+        link: Arc<AdapterLink>,
+    ) -> Self {
         GatewayHostImpl {
             state,
             gateway,
@@ -548,7 +600,10 @@ impl Host for GatewayHostImpl {
         }
     }
 
-    async fn register_channel(&self, args: &RegisterChannelArgs) -> Result<(), (ErrorCode, String)> {
+    async fn register_channel(
+        &self,
+        args: &RegisterChannelArgs,
+    ) -> Result<(), (ErrorCode, String)> {
         register_channels(&self.state, &self.gateway, &self.platform, args)
     }
 
@@ -576,11 +631,7 @@ pub async fn serve_adapter(
         AdapterMsg::Plugin(onlyne_proto::PluginOp::Hello(args)) => args,
         _ => {
             let mut stream = stream;
-            let body = ResBody::err(
-                ErrorCode::Unauthorized,
-                onlyne_proto::HELLO_REQUIRED_MESSAGE,
-                Some("op".to_string()),
-            );
+            let body = crate::router::hello_required();
             let reply = onlyne_adapter::WireMessage {
                 id: None,
                 reply_to: Some(first.id.unwrap_or_default()),
@@ -649,50 +700,34 @@ pub async fn handle_gateway_op(
 ) -> ResBody {
     match op {
         GatewayOp::Hello(args) => {
-            let platform = match validate_gateway(
-                state,
-                &args.role,
-                "",
-                args.protocol,
-                Some(&args.key),
-            ) {
-                Ok(platform) => platform,
-                Err((code, message)) => return ResBody::err(code, message, None),
-            };
+            let platform =
+                match validate_gateway(state, &args.role, "", args.protocol, Some(&args.key)) {
+                    Ok(platform) => platform,
+                    Err((code, message)) => return ResBody::err(code, message, None),
+                };
             let ack = register_link(state, &args.role, &platform, None, Vec::new());
             ResBody::ok(serde_json::to_value(HostOp::Welcome(ack)).unwrap_or_default())
         }
         GatewayOp::RegisterChannel(args) => {
             let Some(gateway) = gateway else {
-                return ResBody::err(
-                    ErrorCode::Unauthorized,
-                    onlyne_proto::HELLO_REQUIRED_MESSAGE,
-                    Some("op".to_string()),
-                );
+                return crate::router::hello_required();
             };
-            match register_channels(state, gateway, &args.platform, &args) {
+            let platform = platform_of(state, gateway);
+            match register_channels(state, gateway, &platform, &args) {
                 Ok(()) => ResBody::ok(serde_json::json!({ "channel": args.channel })),
                 Err((code, message)) => ResBody::err(code, message, None),
             }
         }
         GatewayOp::Deliver(delivery) => {
             let Some(gateway) = gateway else {
-                return ResBody::err(
-                    ErrorCode::Unauthorized,
-                    onlyne_proto::HELLO_REQUIRED_MESSAGE,
-                    Some("op".to_string()),
-                );
+                return crate::router::hello_required();
             };
             let platform = platform_of(state, gateway);
             deliver(state, gateway, &platform, &delivery)
         }
         GatewayOp::Health(args) => {
             let Some(gateway) = gateway else {
-                return ResBody::err(
-                    ErrorCode::Unauthorized,
-                    onlyne_proto::HELLO_REQUIRED_MESSAGE,
-                    Some("op".to_string()),
-                );
+                return crate::router::hello_required();
             };
             let platform = platform_of(state, gateway);
             match apply_health(state, gateway, &platform, &args) {
@@ -702,11 +737,7 @@ pub async fn handle_gateway_op(
         }
         GatewayOp::Bye(args) => {
             let Some(gateway) = gateway else {
-                return ResBody::err(
-                    ErrorCode::Unauthorized,
-                    onlyne_proto::HELLO_REQUIRED_MESSAGE,
-                    Some("op".to_string()),
-                );
+                return crate::router::hello_required();
             };
             detach(state, gateway, &args.reason);
             ResBody::ok(serde_json::json!({ "bye": args.reason }))

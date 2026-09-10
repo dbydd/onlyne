@@ -17,6 +17,9 @@
     "AgentMount": {
       "description": "Where an agent plugin attaches itself within the role.",
       "type": "object",
+      "required": [
+        "role"
+      ],
       "properties": {
         "pid": {
           "description": "Process id, used for probe cross-checks on the local machine.",
@@ -28,7 +31,6 @@
           "minimum": 0.0
         },
         "role": {
-          "default": "",
           "type": "string"
         },
         "session": {
@@ -43,7 +45,8 @@
             "null"
           ]
         }
-      }
+      },
+      "additionalProperties": false
     },
     "AssignAckArgs": {
       "description": "`assign_ack`: whether the plugin took the payload.",
@@ -230,17 +233,20 @@
     "ClusterMount": {
       "description": "Where a sub-cluster's supervisor claims it speaks for another cluster.",
       "type": "object",
+      "required": [
+        "cluster",
+        "role"
+      ],
       "properties": {
         "cluster": {
-          "default": "",
           "type": "string"
         },
         "role": {
           "description": "The aggregate role name registered in the parent spec.",
-          "default": "",
           "type": "string"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "ConfigGetArgs": {
       "description": "`config_get`: dotted key into the role's local config.",
@@ -592,16 +598,19 @@
     "GatewayMount": {
       "description": "Gateway-side mount data carried in the same `hello` frame.",
       "type": "object",
+      "required": [
+        "gateway",
+        "platform"
+      ],
       "properties": {
         "gateway": {
-          "default": "",
           "type": "string"
         },
         "platform": {
-          "default": "",
           "type": "string"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "HealthArgs": {
       "description": "Gateway health report.",
@@ -879,76 +888,20 @@
       }
     },
     "Mount": {
-      "description": "Plugin and gateway mount data, discriminated by [`MountKind`].",
-      "oneOf": [
+      "description": "Plugin and gateway mount data, discriminated by [`MountKind`].\n\nThe mount names the configured instance the connection serves, and that is the identity the ACL and the routing use: `gateway` holds a `[[gateway]]` id and `role` holds a spec role name, both taken from the server's spec, because one plugin crate can back several configured instances with their own credentials, channels, and `[[route]]` bindings.\n\nThe program name travels in its own field. `HelloArgs::plugin` on this surface and `HandshakeArgs::agent` on a role connection name the crate that connected, which is the thing a protocol or version mismatch is about. Deriving the instance from the program would collapse the several-instances case.\n\nThe enum is untagged, so the wire form is the plan's own `hello` example at §7 line 298 — `\"mount\":{\"role\":\"planner\",\"session\":\"8b1c...\"}` — with `kind` beside it in the same args object rather than nested under a tag.\n\nUntagged matching is first-match-wins, so the variant order below is the disambiguation rule: `Agent`, then `Gateway`, then `Cluster`, then `Admin`. Each payload denies unknown fields, and that guard is what makes the order safe to read rather than a silent mis-decode: `AgentMount` and `ClusterMount` both carry `role`, so without it a cluster mount would decode as an agent mount. A new field belongs to the earliest variant that owns it, and making one collide with an earlier variant's set is a wire change this list must be updated for.\n\nA bare `Admin` mount serializes as JSON `null`; the sibling `kind` field is what identifies it.",
+      "anyOf": [
         {
-          "type": "object",
-          "required": [
-            "data",
-            "kind"
-          ],
-          "properties": {
-            "data": {
-              "$ref": "#/definitions/AgentMount"
-            },
-            "kind": {
-              "type": "string",
-              "enum": [
-                "agent"
-              ]
-            }
-          }
+          "$ref": "#/definitions/AgentMount"
         },
         {
-          "type": "object",
-          "required": [
-            "data",
-            "kind"
-          ],
-          "properties": {
-            "data": {
-              "$ref": "#/definitions/GatewayMount"
-            },
-            "kind": {
-              "type": "string",
-              "enum": [
-                "gateway"
-              ]
-            }
-          }
+          "$ref": "#/definitions/GatewayMount"
         },
         {
-          "type": "object",
-          "required": [
-            "data",
-            "kind"
-          ],
-          "properties": {
-            "data": {
-              "$ref": "#/definitions/ClusterMount"
-            },
-            "kind": {
-              "type": "string",
-              "enum": [
-                "cluster"
-              ]
-            }
-          }
+          "$ref": "#/definitions/ClusterMount"
         },
         {
           "description": "Admin tooling needs no mount data.",
-          "type": "object",
-          "required": [
-            "kind"
-          ],
-          "properties": {
-            "kind": {
-              "type": "string",
-              "enum": [
-                "admin"
-              ]
-            }
-          }
+          "type": "null"
         }
       ]
     },
@@ -1369,6 +1322,13 @@
             "string",
             "null"
           ]
+        },
+        "reply_to": {
+          "description": "Platform-side id of the message being replied to, opaque to the host and decoded by the plugin that minted it. §7 line 304 is the inbound `deliver` frame whose envelope's `causality.reply_to` is the only place the id can travel, and the host copies it out while rendering, so a plugin never parses an envelope to thread a reply. Pairs with [`Self::gateway_ref`], which names the conversation.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
@@ -1584,7 +1544,7 @@
       ]
     },
     "ResBody": {
-      "description": "The response body carried by [`Frame::Res`].\n\n`ok = true` pairs with `data`; `ok = false` pairs with `error`. A duplicate `op_id` answers with both: the rejection plus the original receipt.",
+      "description": "The response body carried by [`Frame::Res`].\n\n`ok = true` carries `data` and `ok = false` carries `error`, and neither may omit its own half. The one pair is the duplicate `op_id` replay: `ok = false` with an `error` naming `duplicate` and the replayed receipt in `data`, which is the shape `docs/v1-PLAN.md` case 3 at line 502 compares byte for byte.",
       "type": "object",
       "required": [
         "ok"

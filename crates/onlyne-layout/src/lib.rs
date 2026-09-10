@@ -82,11 +82,11 @@ pub fn detect_legacy_with_probe(
     }
     let db_path = onlyne.join("state.db");
     let tables = probe(&db_path).unwrap_or_default();
-// Rejection-path marker only: this name identifies the pre-v1 `io_cursors` table that v1 refuses (plan §2 line 108).
+    // Rejection-path marker only: this name identifies the pre-v1 `io_cursors` table that v1 refuses (plan §2 line 108).
     if tables.iter().any(|name| name == "io_cursors") {
         return Some(LegacyReason::IoCursorsTable);
     }
-// Rejection-path marker only: this name identifies the pre-v1 `loopback_idempotency` table that v1 refuses (plan §2 line 108).
+    // Rejection-path marker only: this name identifies the pre-v1 `loopback_idempotency` table that v1 refuses (plan §2 line 108).
     if tables.iter().any(|name| name == "loopback_idempotency") {
         return Some(LegacyReason::LoopbackIdempotencyTable);
     }
@@ -373,7 +373,7 @@ fn sqlite_master_text_scan(path: &Path) -> io::Result<Vec<String>> {
     let bytes = std::fs::read(path)?;
     let text = String::from_utf8_lossy(&bytes);
     let mut names = Vec::new();
-// Rejection-path markers only: these names identify pre-v1 tables that this text scan refuses (plan §2 line 108).
+    // Rejection-path markers only: these names identify pre-v1 tables that this text scan refuses (plan §2 line 108).
     for marker in ["io_cursors", "loopback_idempotency"] {
         if text.contains(marker) {
             names.push(marker.to_string());

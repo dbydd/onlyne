@@ -300,7 +300,10 @@ mod tests {
             "zellij"
         );
         assert_eq!(backend_for("fake", runner.clone()).unwrap().name(), "fake");
-        assert_eq!(backend_for("nope", runner.clone()).unwrap().name(), "zellij");
+        assert_eq!(
+            backend_for("nope", runner.clone()).unwrap().name(),
+            "zellij"
+        );
         // Empty and named modes resolve deterministically without probing.
         assert!(runner.0.lock().unwrap().is_empty());
     }

@@ -2,7 +2,7 @@
 //!
 //! ## Schema versus plan
 //!
-//! The `sessions.updated_at` columns are INTEGER Unix seconds because the frozen `SessionLedger` rows use `i64` timestamps.
+//! Every timestamp column in both databases is written by this crate's conversion helpers, `unix_to_rfc3339` and `rfc3339`, and no caller supplies a raw stored value: the kernel's `i64` seconds (`SessionWrite`, `ServerFaultRow`, `VersionedSession`, `FaultRecord`) convert at the write, and the one text input, `RoleRow::updated_at` from the server's `upsert_role` call sites, is re-encoded through the same helpers before the insert.
 //! The server `ledger.body_json` column is nullable because retention pruning clears acknowledged bodies after the cutoff.
 //! Extra indexes support ledger pulls, fault deduplication, due-intent ordering, and event-cursor scans.
 //! `schema_marker` records the v1.0.0 schema and protocol gate for each database.

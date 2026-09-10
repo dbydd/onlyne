@@ -1,7 +1,8 @@
 //! Frame router: one `match` per vocabulary (§6, §8).
 //!
 //! Every arm calls a landed handler. A frame that arrives before the handshake
-//! is refused with `HELLO_REQUIRED_MESSAGE`, and an op outside a connection's
+//! is refused with `HELLO_REQUIRED_MESSAGE` under `ErrorCode::Invalid`, which is
+//! the plan's spelling at §7 line 310, and an op outside a connection's
 //! vocabulary answers `ErrorCode::UnknownOp`.
 
 use crate::events;
@@ -15,8 +16,8 @@ use onlyne_config::Spec;
 use onlyne_layout::ServerRoot;
 use onlyne_proto::{
     AdminOp, Body, Causality, ClientOp, ControlOp, ErrorCode, Event, Frame, GatewayOp,
-    HELLO_REQUIRED_MESSAGE, LedgerEntry, MsgKind, Presence, Principal, QueryRolesArgs, Receipt,
-    ResBody, RoleInfo, RolePresence, SpecReloaded,
+    HELLO_REQUIRED_MESSAGE, LedgerEntry, MsgKind, Presence, Principal, QueryRolesArgs, ResBody,
+    RoleInfo, RolePresence, SpecReloaded,
 };
 use onlyne_store::RoleRow;
 use serde_json::{Value, json};
@@ -27,6 +28,11 @@ use tokio::sync::mpsc;
 #[derive(Debug, Default)]
 pub struct Session {
     pub role: Option<String>,
+    /// The role the transport handshake verified against the presented key.
+    /// `onlyne_net::handshake` checks the key against the registered key of the
+    /// claimed role, so this name is the sole authority for role identity on a
+    /// TLS connection.
+    pub authorised: Option<String>,
     pub admin: bool,
     pub authenticated: bool,
     pub session_id: Option<String>,
@@ -36,21 +42,17 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn with_sender(sender: mpsc::Sender<Frame>) -> Self {
+    /// A client session whose role identity the transport already settled.
+    pub fn with_sender(sender: mpsc::Sender<Frame>, authorised: &str) -> Self {
         Session {
+            authorised: Some(authorised.to_string()),
             sender: Some(sender),
             ..Session::default()
         }
     }
 
     fn role_or_reject(&self) -> Result<&str, ResBody> {
-        self.role.as_deref().ok_or_else(|| {
-            ResBody::err(
-                ErrorCode::Unauthorized,
-                HELLO_REQUIRED_MESSAGE,
-                Some("op".to_string()),
-            )
-        })
+        self.role.as_deref().ok_or_else(hello_required)
     }
 
     fn welcome(&mut self, role: &str, admin: bool) {
@@ -60,15 +62,24 @@ impl Session {
     }
 }
 
+/// The refusal a frame earns when it arrives before its `hello`.
+///
+/// §7 line 310 spells this `invalid` with the message below. `Unauthorized`
+/// belongs to the retryable set of `ErrorCode::is_permanent`, so answering that
+/// code would tell a plugin to keep retrying a handshake it cannot complete.
+pub(crate) fn hello_required() -> ResBody {
+    ResBody::err(
+        ErrorCode::Invalid,
+        HELLO_REQUIRED_MESSAGE,
+        Some("op".to_string()),
+    )
+}
+
 /// Route one client frame body.
 pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: ClientOp) -> ResBody {
     let pre_auth = matches!(op, ClientOp::Hello(_));
     if !session.authenticated && !pre_auth {
-        return ResBody::err(
-            ErrorCode::Unauthorized,
-            HELLO_REQUIRED_MESSAGE,
-            Some("op".to_string()),
-        );
+        return hello_required();
     }
     match op {
         ClientOp::Hello(args) => hello(state, session, args),
@@ -83,7 +94,10 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
             let owner = envelope
                 .task_id()
                 .and_then(|task| relay::task_owner(state, task));
-            reply_body(relay::send(state, &envelope, session.admin, owner.as_deref()))
+            reply_body(
+                state,
+                relay::send(state, &envelope, session.admin, owner.as_deref()),
+            )
         }
         ClientOp::Pull(args) => {
             let role = match session.role_or_reject() {
@@ -127,21 +141,19 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
                 Err(error) => internal(error),
             }
         }
-        ClientOp::Subscribe(subscribe) => {
-            match events::page_for(state, &subscribe) {
-                Ok(page) => {
-                    if let Some(sender) = session.sender.clone() {
-                        events::spawn_forwarder(
-                            state,
-                            events::EventFilter::from_subscribe(&subscribe),
-                            sender,
-                        );
-                    }
-                    ResBody::ok(events::page_json(&page))
+        ClientOp::Subscribe(subscribe) => match events::page_for(state, &subscribe) {
+            Ok(page) => {
+                if let Some(sender) = session.sender.clone() {
+                    events::spawn_forwarder(
+                        state,
+                        events::EventFilter::from_subscribe(&subscribe),
+                        sender,
+                    );
                 }
-                Err(error) => internal(error),
+                ResBody::ok(events::page_json(&page))
             }
-        }
+            Err(error) => internal(error),
+        },
         ClientOp::QueryLedger(query) => match state.ledger.ledger_query(query) {
             Ok(rows) => ResBody::ok(json!({
                 "ledger": rows.iter().map(relay::entry_from_row).collect::<Vec<LedgerEntry>>(),
@@ -167,12 +179,10 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
             };
             let envelope = control_envelope(&role, &args.op, args.to.as_deref());
             let owner = relay::task_owner(state, args.op.task_id());
-            reply_body(relay::send(
+            reply_body(
                 state,
-                &envelope,
-                session.admin,
-                owner.as_deref(),
-            ))
+                relay::send(state, &envelope, session.admin, owner.as_deref()),
+            )
         }
         ClientOp::Bye(args) => {
             if let Some(role) = session.role.clone() {
@@ -230,7 +240,7 @@ pub async fn dispatch_admin(state: &Arc<State>, session: &mut Session, op: Admin
             let owner = envelope
                 .task_id()
                 .and_then(|task| relay::task_owner(state, task));
-            reply_body(relay::send(state, &envelope, true, owner.as_deref()))
+            reply_body(state, relay::send(state, &envelope, true, owner.as_deref()))
         }
         AdminOp::Control(admin_control) => {
             let envelope = control_envelope(
@@ -239,7 +249,7 @@ pub async fn dispatch_admin(state: &Arc<State>, session: &mut Session, op: Admin
                 admin_control.to.as_deref(),
             );
             let owner = relay::task_owner(state, admin_control.op.task_id());
-            reply_body(relay::send(state, &envelope, true, owner.as_deref()))
+            reply_body(state, relay::send(state, &envelope, true, owner.as_deref()))
         }
         AdminOp::RepairInspect(_)
         | AdminOp::RepairAdopt(_)
@@ -275,19 +285,38 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
     let Some(spec) = state.spec_snapshot() else {
         return internal(anyhow::anyhow!("the spec is unavailable"));
     };
+    // The transport verdict is the sole source of role identity on a role
+    // connection: `onlyne_net::handshake` admitted this socket because the
+    // presented key equals the registered key of `authorised`, so a typed
+    // `hello` naming a second role is refused here, and the welcome below
+    // records the authorised name.
+    let authorised = session
+        .authorised
+        .clone()
+        .unwrap_or_else(|| args.role.clone());
+    if authorised != args.role {
+        return ResBody::err(
+            ErrorCode::Unauthorized,
+            format!(
+                "the transport authenticated role {authorised}; this hello claims {}",
+                args.role
+            ),
+            Some("role".to_string()),
+        );
+    }
     let Some(entry) = spec
         .client
         .iter()
-        .find(|entry| entry.role == args.role)
+        .find(|entry| entry.role == authorised)
         .cloned()
     else {
         return ResBody::err(
             ErrorCode::Unauthorized,
-            format!("unregistered role {}", args.role),
+            format!("unregistered role {authorised}"),
             Some("role".to_string()),
         );
     };
-    session.welcome(&entry.role, entry.admin);
+    session.welcome(&authorised, entry.admin);
     if let Some(sender) = session.sender.clone() {
         state.register_role(crate::state::RoleConnection {
             role: entry.role.clone(),
@@ -313,6 +342,12 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
         server: crate::version().to_string(),
         role: entry.role.clone(),
         admin: entry.admin,
+        // The label the plan puts on a supervisor's `[[client]]` entry (plan
+        // §5 line 248): a pure annotation. The core delivery path carries no
+        // aggregate branch (plan §5 line 274), so no ACL, routing, or ledger
+        // decision reads it, and `spec.toml` stays the only truth about which
+        // role represents which child cluster (plan §5 line 243).
+        aggregate: (!entry.aggregate.is_empty()).then(|| entry.aggregate.clone()),
         max_sessions: entry.max_sessions,
         reuse: entry.reuse,
         prose: entry.prose.clone(),
@@ -335,11 +370,7 @@ pub fn status(state: &Arc<State>) -> ResBody {
     let Some(spec) = state.spec_snapshot() else {
         return internal(anyhow::anyhow!("the spec is unavailable"));
     };
-    let connected_roles = state
-        .roles
-        .read()
-        .map(|table| table.len())
-        .unwrap_or(0);
+    let connected_roles = state.roles.read().map(|table| table.len()).unwrap_or(0);
     let gateways = gateway_rows(state);
     let connected_gateways = gateways
         .iter()
@@ -572,23 +603,35 @@ pub fn control_envelope(from: &str, op: &ControlOp, to: Option<&str>) -> onlyne_
 }
 
 /// Map one relay reply onto a response body.
-pub fn reply_body(reply: anyhow::Result<RelayReply>) -> ResBody {
+///
+/// A reply whose row targets a gateway conversation also schedules the outbound
+/// pump: the row is durable by then, and a push to a mounted gateway is the only
+/// delivery a platform conversation can take (plan §7 line 293).
+pub fn reply_body(
+    state: &std::sync::Arc<crate::state::State>,
+    reply: anyhow::Result<RelayReply>,
+) -> ResBody {
     match reply {
-        Ok(RelayReply::Accepted(outcome)) => ResBody::ok(receipt_json(&outcome.receipt)),
-        Ok(RelayReply::Duplicate(outcome)) => ResBody::err_with_data(
-            ErrorCode::Duplicate,
-            format!("duplicate op_id: replaying {}", outcome.receipt.msg_id),
-            Some("op_id".to_string()),
-            receipt_json(&outcome.receipt),
-        ),
+        Ok(RelayReply::Accepted(outcome)) => {
+            if outcome.pump_outbound {
+                crate::gateway_host::schedule_pump(state);
+            }
+            ResBody::ok(relay::receipt_json(&outcome.receipt))
+        }
+        Ok(RelayReply::Duplicate(outcome)) => {
+            if outcome.pump_outbound {
+                crate::gateway_host::schedule_pump(state);
+            }
+            ResBody::err_with_data(
+                ErrorCode::Duplicate,
+                format!("duplicate op_id: replaying {}", outcome.receipt.msg_id),
+                Some("op_id".to_string()),
+                relay::receipt_json(&outcome.receipt),
+            )
+        }
         Ok(RelayReply::Rejected(reject)) => reject.body(),
         Err(error) => internal(error),
     }
-}
-
-/// Serialise one receipt.
-pub fn receipt_json(receipt: &Receipt) -> Value {
-    serde_json::to_value(receipt).unwrap_or(Value::Null)
 }
 
 /// The response for an internal failure.

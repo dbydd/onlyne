@@ -6,8 +6,8 @@
 
 use onlyne_adapter::{Host, HostDispatcher};
 use onlyne_proto::{
-    Capability, ErrorCode, HealthArgs, HelloAck, HelloArgs, MountKind, PROTOCOL_VERSION, PluginOp,
-    ServerInfo, SessionRegisterArgs, TypingArgs,
+    Capability, ErrorCode, HealthArgs, HelloAck, HelloArgs, Mount, MountKind, PROTOCOL_VERSION,
+    PluginOp, ServerInfo, SessionRegisterArgs, TypingArgs,
 };
 use std::sync::Arc;
 
@@ -123,4 +123,28 @@ async fn declared_capability_error_surfaces_through_the_response_body() {
     let error = typing.error.expect("handler failure carries an error");
     assert_eq!(error.code, ErrorCode::Unauthorized);
     assert_eq!(error.message, "typing rejected for this conversation");
+}
+
+#[test]
+fn admin_mount_does_not_survive_the_wire() {
+    // `Mount` is untagged and `Mount::Admin` is a unit variant, so it writes
+    // JSON null and cannot be told apart from an absent mount. Hosts read
+    // `MountKind` for an admin or agent hello; only `Mount::Agent`,
+    // `Mount::Gateway`, and `Mount::Cluster` carry payloads.
+    let wire = serde_json::to_value(Some(Mount::Admin)).expect("admin mount encodes");
+    assert_eq!(wire, serde_json::Value::Null);
+    assert_eq!(serde_json::to_value(Option::<Mount>::None).unwrap(), wire);
+    let decoded: Option<Mount> = serde_json::from_value(wire).expect("null decodes");
+    assert_eq!(decoded, None, "an admin mount cannot round-trip");
+    let agent = serde_json::to_value(Some(Mount::Agent(onlyne_proto::AgentMount {
+        role: "planner".to_string(),
+        session: None,
+        task_id: None,
+        pid: None,
+    })))
+    .expect("agent mount encodes");
+    assert_eq!(
+        agent["role"], "planner",
+        "an untagged mount carries its payload inline, with no kind wrapper"
+    );
 }

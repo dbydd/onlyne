@@ -57,20 +57,23 @@ wait_acked() {
 # suite: `["*"]` reaches cluster-b and excludes planner, the role that carries it,
 # so the wildcard's self-exclusion is proven by the target side alone while the
 # senders list names planner for the traffic the parent accepts from itself.
-setup_cluster "$tmp/parent" "$tmp/planner" planner parent 127.0.0.1:7899 "$E2E_PROSE" '["*", "planner"]' '["*"]'
+setup_cluster "$tmp/parent" "$tmp/planner" planner parent "" "$E2E_PROSE" 'allowed_senders = ["*", "planner"]
+allowed_targets = ["*"]'
 track "$cluster_server_pid"
 
 # --- child cluster: builder on 127.0.0.1:7898 --------------------------------
 # Builder's pair is the rule's self pair: `["*", "builder"]` reaches every other
 # registered role in the child cluster, and the self name delivers the child
 # round trip back to builder.
-setup_cluster "$tmp/child" "$tmp/builder" builder child 127.0.0.1:7898 "$CHILD_PROSE" '["*", "builder"]' '["builder"]'
+setup_cluster "$tmp/child" "$tmp/builder" builder child "" "$CHILD_PROSE" 'allowed_senders = ["*", "builder"]
+allowed_targets = ["builder"]'
 track "$cluster_server_pid"
 
 # --- the child supervisor joins the parent as aggregate role cluster-b -------
 # cluster-b names itself in both lists, because the supervisor posts its own
 # completions through it, and names planner as a target for that completion.
-client_init "$tmp/cluster-b" cluster-b "$tmp/parent" "$tmp/parent/.onlyne/spec.toml" "$tmp/cluster-b.frag.toml" "$AGG_PROSE" '["planner", "cluster-b"]' '["planner", "cluster-b"]'
+client_init "$tmp/cluster-b" cluster-b "$tmp/parent" "$tmp/parent/.onlyne/spec.toml" "$tmp/cluster-b.frag.toml" "$AGG_PROSE" 'allowed_senders = ["planner", "cluster-b"]
+allowed_targets = ["planner", "cluster-b"]'
 printf 'aggregate = "cluster-b"\n' >> "$tmp/parent/.onlyne/spec.toml"
 
 # --- fake gateway on the parent, no credential -------------------------------
@@ -87,8 +90,15 @@ gw_key=$(mint_key "$tmp/gw-key" "$tmp/parent" "$tmp/gw-key.frag.toml")
 "$ONLYNE" --server-root "$tmp/parent" reload
 "$ONLYNE" --server-root "$tmp/child" reload
 
-"$GW_FAKE" --platform fake --gateway-id fg1 --socket "$tmp/parent/.onlyne/run/s" >"$tmp/gw-fake.log" 2>&1 &
-track $!
+# A FIFO on stdin holds the gateway open: a pipeline would leave a `tail -f`
+# sibling that no pid list can reach, and the case would hang on its reap.
+mkfifo "$tmp/gw-in"
+"$GW_FAKE" --platform fake --gateway-id fg1 --socket "$tmp/parent/.onlyne/run/s" <"$tmp/gw-in" >"$tmp/gw-fake.log" 2>&1 &
+gw_pid=$!
+track "$gw_pid"
+# A read-write open on the FIFO never blocks, so the shell holds a writer before
+# the gateway process starts reading.
+exec 3<>"$tmp/gw-in"
 
 agent_script "$AGG_PROSE" > "$tmp/cluster-b-script.json"
 agent_script "$CHILD_PROSE" > "$tmp/builder-script.json"
@@ -99,6 +109,12 @@ track $!
 "$CLIENT" run --workspace "$tmp/builder" >"$tmp/builder-client.log" 2>&1 &
 track $!
 "$FAKE" --workspace "$tmp/builder" --script "$tmp/builder-script.json" >"$tmp/builder-fake.log" 2>&1 &
+track $!
+# The parent round trip closes on the planner side: cluster-b answers the parent
+# task with its completion, and that receipt settles only once the role it names
+# is online to read it. The planner needs no agent for this leg, because a
+# completion is a receipt rather than work (plan §3 line 152).
+"$CLIENT" run --workspace "$tmp/planner" >"$tmp/planner-client.log" 2>&1 &
 track $!
 
 # The parent still serves the gateway surface while an aggregate role is attached.
@@ -128,6 +144,17 @@ printf '%s\n' "$parent_send" > "$tmp/parent-send.json"
 [ "$(json_field "$tmp/parent-send.json" '.ok' 'json.load(sys.stdin)["ok"]')" = "True" ] || [ "$(json_field "$tmp/parent-send.json" '.ok' 'json.load(sys.stdin)["ok"]')" = "true" ] || fail "parent send ok must be true" "$parent_send"
 parent_task=$(json_field "$tmp/parent-send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
 wait_acked "$tmp/parent" "$parent_task" "$tmp/parent-task.json" || fail "parent ledger never reached acked" "$(cat "$tmp/parent-task.json" 2>/dev/null) fake=$(cat "$tmp/cluster-b-fake.log" 2>/dev/null)"
+# The round trip settles in two rows: the task planner sent and the completion
+# cluster-b answers with. `wait_acked` returns on the first of them, so this case
+# polls for the aggregate's own ack before reading the table.
+for _ in $(seq 1 120); do
+  "$ONLYNE" --server-root "$tmp/parent" ledger --task "$parent_task" > "$tmp/parent-task.json" 2>/dev/null || true
+  ledger_table "$tmp/parent-task.json" "$tmp/parent-task.json.tsv"
+  if cut -f1,3 "$tmp/parent-task.json.tsv" | grep -F -x -q -e "$(printf 'cluster-b\tacked')"; then
+    break
+  fi
+  sleep 0.25
+done
 cut -f1,3 "$tmp/parent-task.json.tsv" | grep -F -x -q -e "$(printf 'cluster-b\tacked')" || fail "parent ledger must settle acked with from.role = cluster-b" "$(cat "$tmp/parent-task.json.tsv")"
 
 # --- parent ledger holds parent-visible roles only ---------------------------

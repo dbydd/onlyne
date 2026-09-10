@@ -56,7 +56,10 @@ fn load_vectors() -> Vec<Vector> {
                     .as_str()
                     .expect("encoding is a string")
                     .to_string(),
-                note: object["note"].as_str().expect("note is a string").to_string(),
+                note: object["note"]
+                    .as_str()
+                    .expect("note is a string")
+                    .to_string(),
                 name,
             }
         })
@@ -95,7 +98,10 @@ fn vector_family(name: &str) -> &str {
         "error",
         "adapter",
     ] {
-        if name.strip_prefix(family).is_some_and(|rest| rest.starts_with('_')) {
+        if name
+            .strip_prefix(family)
+            .is_some_and(|rest| rest.starts_with('_'))
+        {
             return family;
         }
     }
@@ -185,11 +191,11 @@ fn every_vector_matches_its_published_type() {
         ("req_client", 13usize),
         ("req_gateway", 5),
         ("req_admin", 19),
-        ("res", 9),
+        ("res", 11),
         ("ev", 6),
         ("frame", 4),
         ("error", 14),
-        ("adapter", 5),
+        ("adapter", 11),
     ];
     for (family, count) in expected {
         assert_eq!(
@@ -198,7 +204,7 @@ fn every_vector_matches_its_published_type() {
             "{family}: vector count"
         );
     }
-    assert_eq!(vectors.len(), 75, "total vector count");
+    assert_eq!(vectors.len(), 83, "total vector count");
 }
 
 #[test]
@@ -226,7 +232,10 @@ fn frame_bytes_carry_the_documented_length_prefix() {
         );
         pinned += 1;
     }
-    assert_eq!(pinned, 1, "one representative vector pins the length prefix");
+    assert_eq!(
+        pinned, 1,
+        "one representative vector pins the length prefix"
+    );
 }
 
 #[test]
@@ -244,7 +253,11 @@ fn the_vectors_are_the_source_of_truth_for_retryable_codes() {
             permanent.insert(code.to_string());
         }
     }
-    assert_eq!(retryable.len(), 4, "exactly four codes retry: {retryable:?}");
+    assert_eq!(
+        retryable.len(),
+        4,
+        "exactly four codes retry: {retryable:?}"
+    );
     assert_eq!(
         retryable,
         ["duplicate", "internal", "recipient_offline", "unauthorized"]
@@ -253,7 +266,11 @@ fn the_vectors_are_the_source_of_truth_for_retryable_codes() {
             .collect::<BTreeSet<_>>(),
         "the vector notes name the retryable set"
     );
-    assert_eq!(retryable.len() + permanent.len(), 14, "all codes are covered");
+    assert_eq!(
+        retryable.len() + permanent.len(),
+        14,
+        "all codes are covered"
+    );
 }
 
 /// A minimal validator for the subset `schemars` emits. Any keyword outside
@@ -498,7 +515,12 @@ fn every_vector_validates_against_the_embedded_schemas() {
         carriers,
         [
             "adapter_host_assign",
+            "adapter_host_render_send",
             "adapter_plugin_send",
+            "adapter_plugin_send_cluster",
+            "adapter_plugin_send_completion",
+            "adapter_plugin_send_downstream",
+            "adapter_plugin_send_note",
             "req_admin_send",
             "req_client_send",
             "req_gateway_deliver",
@@ -508,7 +530,10 @@ fn every_vector_validates_against_the_embedded_schemas() {
         .collect::<BTreeSet<_>>(),
         "every vector carrying an Envelope is schema-checked"
     );
-    assert_eq!(adapter_messages, 5, "every adapter vector is schema-checked");
+    assert_eq!(
+        adapter_messages, 11,
+        "every adapter vector is schema-checked"
+    );
 }
 
 #[test]
@@ -528,7 +553,10 @@ fn protocol_text_vectors_match_the_crate_constants() {
     assert_eq!(string("op_id_conflict"), OP_ID_CONFLICT_MESSAGE);
     assert_eq!(string("no_socket"), text::NO_SOCKET_MESSAGE);
     assert_eq!(string("legacy_workspace"), text::LEGACY_WORKSPACE_MESSAGE);
-    assert_eq!(string("unsupported_schema"), text::UNSUPPORTED_SCHEMA_MESSAGE);
+    assert_eq!(
+        string("unsupported_schema"),
+        text::UNSUPPORTED_SCHEMA_MESSAGE
+    );
     assert_eq!(
         string("binary_not_found_example"),
         text::binary_not_found("onlyne-server")
@@ -540,5 +568,9 @@ fn protocol_text_vectors_match_the_crate_constants() {
     assert_eq!(
         OP_ID_CONFLICT_MESSAGE,
         "op_id conflict: request differs from durable receipt"
+    );
+    assert_eq!(
+        string("causality_required_control"),
+        text::causality_required("control")
     );
 }

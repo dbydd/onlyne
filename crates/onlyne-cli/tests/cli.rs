@@ -1,14 +1,15 @@
 //! End-to-end contracts of the `onlyne` binary, exercised through real sockets
 //! and a real `exec`, so the messages, exit codes and stream split stay pinned.
 
+use onlyne_proto::{NO_SOCKET_MESSAGE, binary_not_found};
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 const EXIT_OK: i32 = 0;
@@ -36,10 +37,7 @@ fn no_socket_prints_the_exact_hint_and_exits_three() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(EXIT_NO_SOCKET));
-    assert_eq!(
-        stderr_of(&output),
-        "onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace\n"
-    );
+    assert_eq!(stderr_of(&output), format!("{NO_SOCKET_MESSAGE}\n"));
     assert!(
         output.stdout.is_empty(),
         "a local resolution failure must not print an answer"
@@ -92,7 +90,10 @@ fn from_is_rejected_on_client_and_required_on_admin() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
-    assert_eq!(stderr_of(&output), "onlyne: --from is required on the admin surface\n");
+    assert_eq!(
+        stderr_of(&output),
+        "onlyne: --from is required on the admin surface\n"
+    );
 }
 
 /// An image over the protocol ceiling is refused locally, before any socket is
@@ -143,11 +144,14 @@ fn generate_forwards_the_argv_to_onlyne_server() {
                   echo 'rendering spec' >&2\n\
                   printf '%s\n' '[[client]] roles: worker'\n";
     stub_binary(&bin_dir, "onlyne-server", script);
+    // The stub shares the directory of the CLI copy, which `resolve_sibling`
+    // probes before `PATH`, so the real daemons the suite just built cannot win.
+    let cli = onlyne_in(&bin_dir);
 
     let root = dir.path().join("srv");
     let out = dir.path().join("ws");
 
-    let output = Command::new(bin())
+    let output = Command::new(&cli)
         .current_dir(dir.path())
         .env("ONLYNE_ARGV", &argv_out)
         .env("PATH", path_with(&bin_dir))
@@ -179,7 +183,11 @@ fn generate_forwards_the_argv_to_onlyne_server() {
     );
     assert_eq!(
         std::fs::read_to_string(&argv_out).unwrap(),
-        format!("generate\n--root\n{}\n--template\nspec/roles.yaml\n--role\nworker\n--out\n{}\n--force\n", root.display(), out.display())
+        format!(
+            "generate\n--root\n{}\n--template\nspec/roles.yaml\n--role\nworker\n--out\n{}\n--force\n",
+            root.display(),
+            out.display()
+        )
     );
 }
 
@@ -231,12 +239,16 @@ fn wait_ready_reports_the_bound_when_the_server_never_answers() {
 
     assert_eq!(output.status.code(), Some(EXIT_ANSWER_FAILED));
     assert_eq!(stderr_of(&output), "onlyne: server not ready after 300ms\n");
-    assert!(output.stdout.is_empty(), "a local timeout prints a hint, not json");
+    assert!(
+        output.stdout.is_empty(),
+        "a local timeout prints a hint, not json"
+    );
 }
 
-/// With a `PATH` that carries no daemon sibling, `onlyne server <verb>` reports
-/// the missing binary verbatim and exits 127. The binary is copied to a scratch
-/// dir first, so the "next to the exe" lookup cannot find one either.
+/// With a `PATH` that carries no daemon sibling, an exec verb reports the
+/// canonical line byte for byte, including the `onlyne: ` prefix, and exits 127.
+/// The binary is copied to a scratch dir first, so the "next to the exe" lookup
+/// cannot find one either.
 #[test]
 fn missing_sibling_binary_reports_the_exact_line_and_exit_127() {
     let dir = tempfile::tempdir().unwrap();
@@ -244,25 +256,104 @@ fn missing_sibling_binary_reports_the_exact_line_and_exit_127() {
     let empty_bin = dir.path().join("bin");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&empty_bin).unwrap();
-    let copy = dir.path().join("onlyne");
-    std::fs::copy(env!("CARGO_BIN_EXE_onlyne"), &copy).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&copy).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&copy, perms).unwrap();
-    }
+    let copy = onlyne_in(dir.path());
 
     let output = Command::new(&copy)
         .current_dir(dir.path())
         .env("PATH", empty_bin.to_str().unwrap())
-        .args(["--server-root", root.to_str().unwrap(), "server", "status"])
+        .args(["--server-root", root.to_str().unwrap(), "server", "run"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(EXIT_NO_SIBLING));
-    assert_eq!(stderr_of(&output), "onlyne: binary not found: onlyne-server\n");
-    assert!(output.stdout.is_empty(), "a missing sibling prints a hint, not an answer");
+    assert_eq!(
+        stderr_of(&output),
+        format!("{}\n", binary_not_found("onlyne-server")).as_str(),
+        "the whole line, prefix and newline included, is the canonical text"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a missing sibling prints a hint, not an answer"
+    );
+}
+
+/// The two status meanings stay distinct, and the admin-socket query wins:
+/// `onlyne status`, `onlyne reload`, and `onlyne server status` reach the
+/// socket with no `onlyne-server` binary on `PATH` anywhere.
+#[test]
+fn status_and_reload_never_exec() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("srv");
+    let empty_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&empty_bin).unwrap();
+    let answer = serde_json::json!({"f": "res", "id": "r1", "ok": true, "data": {"cluster": "c1"}});
+
+    let cases = [
+        (vec!["status"], "status"),
+        (vec!["reload"], "reload"),
+        (vec!["server", "status"], "status"),
+    ];
+    for (args, op) in cases {
+        let listener = admin_listener(&root);
+        let server = serve_once(listener, answer.clone());
+        let label = args.join(" ");
+        let output = Command::new(bin())
+            .current_dir(dir.path())
+            .env("PATH", empty_bin.as_os_str())
+            .arg("--server-root")
+            .arg(root.as_os_str())
+            .args(&args)
+            .output()
+            .unwrap();
+        let request = server.join().unwrap().unwrap_or_else(|| {
+            panic!("`onlyne {label}` must query the socket with no sibling present")
+        });
+
+        assert_eq!(
+            output.status.code(),
+            Some(EXIT_OK),
+            "`onlyne {label}` needs no binary"
+        );
+        assert_eq!(request["f"], "req");
+        assert_eq!(
+            request["op"], op,
+            "`onlyne {label}` round-trips AdminOp::{op}"
+        );
+        let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            stdout["ok"], true,
+            "`onlyne {label}` answers well-formed json"
+        );
+        assert_eq!(stdout["data"]["cluster"], "c1");
+    }
+}
+
+/// `status` resolved to a client-surface socket is a local refusal that names
+/// the flag the operator must add.
+#[test]
+fn status_without_a_role_names_the_missing_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    // A role workspace with its client socket in place: the path a supervisor
+    // agent's shell resolves, where `status` has nothing to answer from.
+    let client_socket = workspace.join(".onlyne").join("run").join("s");
+    std::fs::create_dir_all(client_socket.parent().unwrap()).unwrap();
+    std::fs::write(&client_socket, "").unwrap();
+
+    let output = Command::new(bin())
+        .current_dir(&workspace)
+        .arg("status")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+    assert_eq!(
+        stderr_of(&output),
+        "onlyne: status needs the admin surface; pass --server-root <dir>, or --socket <path> with --as admin\n"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a refusal that reached the socket would print a json answer here"
+    );
 }
 
 /// The `server` group resolves its admin nouns in this process: `server roles`
@@ -291,7 +382,10 @@ fn server_roles_queries_the_admin_socket_and_never_execs() {
         .args(["--server-root", root.to_str().unwrap(), "server", "roles"])
         .output()
         .unwrap();
-    let request = server.join().unwrap().expect("the CLI must reach the socket");
+    let request = server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the socket");
 
     assert_eq!(output.status.code(), Some(EXIT_OK));
     assert_eq!(request["f"], "req");
@@ -317,7 +411,10 @@ fn unknown_server_verb_is_refused_with_exit_two() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
-    assert_eq!(stderr_of(&output), "onlyne: unknown server verb frobnicate\n");
+    assert_eq!(
+        stderr_of(&output),
+        "onlyne: unknown server verb frobnicate\n"
+    );
     assert!(
         output.stdout.is_empty(),
         "a refused verb prints a hint, not an answer"
@@ -330,9 +427,10 @@ fn generate_propagates_the_child_exit_four() {
     let dir = tempfile::tempdir().unwrap();
     let bin_dir = dir.path().join("bin");
     stub_binary(&bin_dir, "onlyne-server", "#!/bin/sh\nexit 4\n");
+    let cli = onlyne_in(&bin_dir);
     let root = dir.path().join("srv");
 
-    let output = Command::new(bin())
+    let output = Command::new(&cli)
         .current_dir(dir.path())
         .env("PATH", path_with(&bin_dir))
         .args(["generate", "--server-root", root.to_str().unwrap()])
@@ -377,11 +475,17 @@ fn file_dash_reads_the_body_from_stdin() {
         .write_all(b"body from stdin")
         .unwrap();
     let output = child.wait_with_output().unwrap();
-    let request = server.join().unwrap().expect("the CLI must reach the socket");
+    let request = server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the socket");
 
     assert_eq!(output.status.code(), Some(EXIT_OK));
     assert_eq!(request["args"]["from"], "planner");
-    assert_eq!(request["args"]["envelope"]["body"]["text"], "body from stdin");
+    assert_eq!(
+        request["args"]["envelope"]["body"]["text"],
+        "body from stdin"
+    );
 }
 
 /// `--pretty` indents the whole answer; `--quiet` keeps only its payload.
@@ -402,10 +506,18 @@ fn pretty_and_quiet_shape_the_answer() {
     let server = serve_once(listener, answer());
     let output = Command::new(bin())
         .current_dir(dir.path())
-        .args(["--server-root", root.to_str().unwrap(), "--pretty", "status"])
+        .args([
+            "--server-root",
+            root.to_str().unwrap(),
+            "--pretty",
+            "status",
+        ])
         .output()
         .unwrap();
-    server.join().unwrap().expect("the CLI must reach the socket");
+    server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the socket");
     assert_eq!(output.status.code(), Some(EXIT_OK));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
@@ -419,9 +531,15 @@ fn pretty_and_quiet_shape_the_answer() {
         .args(["--server-root", root.to_str().unwrap(), "--quiet", "status"])
         .output()
         .unwrap();
-    server.join().unwrap().expect("the CLI must reach the socket");
+    server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the socket");
     assert_eq!(output.status.code(), Some(EXIT_OK));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "{\"a\":1,\"b\":2}\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"a\":1,\"b\":2}\n"
+    );
 }
 
 /// `completions zsh` prints one zsh script on stdout, and nothing on stderr.
@@ -480,11 +598,17 @@ fn request_replaces_the_constructed_args_wholesale() {
         ])
         .output()
         .unwrap();
-    let request = server.join().unwrap().expect("the CLI must reach the socket");
+    let request = server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the socket");
 
     assert_eq!(output.status.code(), Some(EXIT_OK));
     assert_eq!(request["op"], "send");
-    assert_eq!(request["args"], given, "the pinned object reaches the wire as given");
+    assert_eq!(
+        request["args"], given,
+        "the pinned object reaches the wire as given"
+    );
     assert_eq!(request["args"]["envelope"]["body"]["text"], "pinned body");
 }
 
@@ -651,6 +775,19 @@ fn write_frame(stream: &mut std::os::unix::net::UnixStream, value: &serde_json::
     stream.flush().unwrap();
 }
 
+/// Copy the built CLI into `dir`, so `resolve_sibling`'s exe-adjacent probe
+/// reads that directory and the real daemons in the cargo target directory
+/// cannot shadow the stubs beside it.
+fn onlyne_in(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let copy = dir.join("onlyne");
+    std::fs::copy(env!("CARGO_BIN_EXE_onlyne"), &copy).unwrap();
+    let mut perms = std::fs::metadata(&copy).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&copy, perms).unwrap();
+    copy
+}
+
 /// Write an executable stub binary named `name` into `dir`.
 fn stub_binary(dir: &Path, name: &str, script: &str) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
@@ -682,9 +819,10 @@ fn server_lifecycle_verbs_forward_the_argv_verbatim() {
         "onlyne-server",
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ONLYNE_ARGV\"\n",
     );
+    let cli = onlyne_in(&bin_dir);
     let root = dir.path().join("srv");
 
-    let output = Command::new(bin())
+    let output = Command::new(&cli)
         .current_dir(dir.path())
         .env("ONLYNE_ARGV", &argv_out)
         .env("PATH", path_with(&bin_dir))
@@ -701,7 +839,10 @@ fn server_lifecycle_verbs_forward_the_argv_verbatim() {
     assert_eq!(output.status.code(), Some(EXIT_OK));
     assert_eq!(
         std::fs::read_to_string(&argv_out).unwrap(),
-        format!("init\n--root\n{}\n--listen\n127.0.0.1:7899\n", root.display())
+        format!(
+            "init\n--root\n{}\n--listen\n127.0.0.1:7899\n",
+            root.display()
+        )
     );
 }
 
@@ -730,7 +871,10 @@ fn gateway_status_queries_the_admin_socket() {
         .args(["--server-root", root.to_str().unwrap(), "gateway", "status"])
         .output()
         .unwrap();
-    let request = server.join().unwrap().expect("the CLI must reach the socket");
+    let request = server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the socket");
 
     assert_eq!(output.status.code(), Some(EXIT_OK));
     assert_eq!(request["op"], "status");
@@ -756,9 +900,10 @@ fn gateway_run_forwards_to_onlyne_gateway() {
         "onlyne-gateway",
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ONLYNE_ARGV\"\n",
     );
+    let cli = onlyne_in(&bin_dir);
     let root = dir.path().join("srv");
 
-    let output = Command::new(bin())
+    let output = Command::new(&cli)
         .current_dir(dir.path())
         .env("ONLYNE_ARGV", &argv_out)
         .env("PATH", path_with(&bin_dir))

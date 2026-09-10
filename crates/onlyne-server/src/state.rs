@@ -64,12 +64,15 @@ pub fn acl_from_spec(spec: &Spec) -> anyhow::Result<AclTable> {
         .client
         .iter()
         .map(|entry| (entry.role.clone(), entry.key.clone(), entry.admin));
-    let edges = spec.acl_edges().into_iter().map(|edge| onlyne_net::AclEdge {
-        from: edge.from,
-        to: edge.to,
-        class: msg_class(edge.kind),
-        admin: edge.admin,
-    });
+    let edges = spec
+        .acl_edges()
+        .into_iter()
+        .map(|edge| onlyne_net::AclEdge {
+            from: edge.from,
+            to: edge.to,
+            class: msg_class(edge.kind),
+            admin: edge.admin,
+        });
     Ok(AclTable::new(roles, edges)?)
 }
 
@@ -189,10 +192,7 @@ impl Server {
         let layout = onlyne_layout::ServerRoot::resolve(&init.root);
         layout.bootstrap()?;
         let spec = Spec::load(layout.spec_path())?;
-        let ledger = ServerLedger::open(
-            layout.state_db_path(),
-            spec.server.fault_history_days,
-        )?;
+        let ledger = ServerLedger::open(layout.state_db_path(), spec.server.fault_history_days)?;
         let (events, _) = broadcast::channel(256);
         let server = Arc::new(Self {
             acl: RwLock::new(Arc::new(acl_from_spec(&spec)?)),
@@ -228,7 +228,10 @@ impl Server {
     }
 
     pub fn replace_spec(&self, next: Spec) -> Option<Spec> {
-        self.spec.write().ok().map(|mut guard| std::mem::replace(&mut *guard, next))
+        self.spec
+            .write()
+            .ok()
+            .map(|mut guard| std::mem::replace(&mut *guard, next))
     }
 
     pub fn role(&self, name: &str) -> Option<ClientEntry> {
@@ -242,11 +245,18 @@ impl Server {
     }
 
     pub fn is_connected(&self, role: &str) -> bool {
-        self.roles.read().map(|table| table.contains(role)).unwrap_or(false)
+        self.roles
+            .read()
+            .map(|table| table.contains(role))
+            .unwrap_or(false)
     }
 
     pub fn role_sender(&self, role: &str) -> Option<mpsc::Sender<Frame>> {
-        self.roles.read().ok()?.get(role).map(|conn| conn.sender.clone())
+        self.roles
+            .read()
+            .ok()?
+            .get(role)
+            .map(|conn| conn.sender.clone())
     }
 
     pub fn register_role(&self, conn: RoleConnection) {
@@ -274,7 +284,10 @@ impl Server {
     }
 
     pub fn emit(&self, event: Event) -> anyhow::Result<u64> {
-        let seq = self.ledger.append_event(event.type_name(), &serde_json::to_value(&event)?)? as u64;
+        let seq = self
+            .ledger
+            .append_event(event.type_name(), &serde_json::to_value(&event)?)?
+            as u64;
         let _ = self.events.send(Arc::new(Frame::event(seq, event)));
         Ok(seq)
     }
@@ -356,10 +369,7 @@ impl Server {
     /// Record a channel declaration from a gateway.
     pub fn register_channel(&self, binding: ChannelBinding) {
         if let Ok(mut table) = self.channels.write() {
-            table.insert(
-                format!("{}:{}", binding.gateway, binding.channel),
-                binding,
-            );
+            table.insert(format!("{}:{}", binding.gateway, binding.channel), binding);
         }
     }
 
@@ -394,7 +404,11 @@ impl Server {
 
     /// Health of one connected gateway.
     pub fn gateway_health(&self, gateway: &str) -> Option<GatewayHealth> {
-        self.gateways.read().ok()?.get(gateway).map(|link| link.health)
+        self.gateways
+            .read()
+            .ok()?
+            .get(gateway)
+            .map(|link| link.health)
     }
 
     /// Note a health observation and report whether it changed the state.

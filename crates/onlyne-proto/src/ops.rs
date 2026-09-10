@@ -23,9 +23,6 @@ pub struct Receipt {
     pub task: Option<String>,
     pub state: LedgerState,
     pub enqueued_at: DateTime<Utc>,
-    /// Set when the server replayed an existing receipt for a duplicate
-    /// `op_id`; the payload is byte-identical to the first answer.
-    pub duplicate: bool,
 }
 
 /// Agent-side lifecycle fact, as reported by the plugin and stored verbatim.
@@ -190,11 +187,11 @@ impl Report {
             Report::Ready {
                 generation, seq, ..
             } => Some((*generation, *seq)),
-            Report::Heartbeat { generation, seq, .. } => Some((*generation, *seq)),
+            Report::Heartbeat {
+                generation, seq, ..
+            } => Some((*generation, *seq)),
             Report::Fault {
-                generation,
-                seq,
-                ..
+                generation, seq, ..
             } => Some((
                 (*generation).unwrap_or_default(),
                 (*seq).unwrap_or_default(),
@@ -327,6 +324,11 @@ pub struct LedgerEntry {
     pub state: LedgerState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub out_head: Option<String>,
+    /// The stored envelope body, which retention clears after the ack window
+    /// (plan §8 line 360). An auditor reads this field to see what the row
+    /// carried, so it travels with the row rather than in a side channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_json: Option<String>,
     pub enqueued_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acked_at: Option<DateTime<Utc>>,
@@ -501,6 +503,16 @@ pub struct Welcome {
     pub reuse: bool,
     pub prose: String,
     pub spec_hash: String,
+    /// The cluster this authenticated role represents, or `None` for a plain
+    /// role; the server fills it from the role's own `[[client]]` entry, whose
+    /// `aggregate` key (line 248) is the only source, and a plain role's frame
+    /// omits the key entirely. The spec stays the only truth about topology
+    /// (§5 line 216, decision D13 at line 27), so no process may claim a cluster
+    /// identity from a command-line flag. A client stamps its reports with the
+    /// value beside `Principal::Cluster` (line 122), which the federation rule
+    /// at line 462 keeps to aggregate roles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate: Option<String>,
     pub allowed_targets: Vec<String>,
     pub allowed_senders: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -765,7 +777,7 @@ pub struct HealthArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope::{Body, Causality, new_task_id, MsgKind};
+    use crate::envelope::{Body, Causality, MsgKind, new_task_id};
     use crate::{PROTOCOL_VERSION, envelope};
 
     fn task() -> Envelope {
@@ -841,17 +853,28 @@ mod tests {
                 }),
                 "subscribe",
             ),
-            (ClientOp::QueryLedger(LedgerQuery::default()), "query_ledger"),
+            (
+                ClientOp::QueryLedger(LedgerQuery::default()),
+                "query_ledger",
+            ),
             (
                 ClientOp::QuerySessions(QuerySessionsArgs::default()),
                 "query_sessions",
             ),
-            (ClientOp::QueryRoles(QueryRolesArgs::default()), "query_roles"),
-            (ClientOp::QueryFaults(QueryFaultsArgs::default()), "query_faults"),
+            (
+                ClientOp::QueryRoles(QueryRolesArgs::default()),
+                "query_roles",
+            ),
+            (
+                ClientOp::QueryFaults(QueryFaultsArgs::default()),
+                "query_faults",
+            ),
             (
                 ClientOp::Control(ControlArgs {
                     to: Some("builder".into()),
-                    op: crate::envelope::ControlOp::Probe { task_id: new_task_id() },
+                    op: crate::envelope::ControlOp::Probe {
+                        task_id: new_task_id(),
+                    },
                 }),
                 "control",
             ),
@@ -874,11 +897,12 @@ mod tests {
         assert_eq!(cases.len(), 13);
     }
 
-// Rejection-path marker only: this pre-v1 `loopback` op name must stay outside the closed vocabulary (plan §8 line 324).
+    // Rejection-path marker only: this pre-v1 `loopback` op name must stay outside the closed vocabulary (plan §8 line 324).
     #[test]
     fn unknown_op_name_is_a_decode_failure() {
-        let err = serde_json::from_value::<ClientOp>(serde_json::json!({"op":"loopback","args":{}}))
-            .expect_err("closed vocabulary");
+        let err =
+            serde_json::from_value::<ClientOp>(serde_json::json!({"op":"loopback","args":{}}))
+                .expect_err("closed vocabulary");
         assert!(err.to_string().contains("loopback"), "err = {err}");
     }
 
@@ -889,14 +913,16 @@ mod tests {
         assert!(!hello.is_readonly());
         assert!(ClientOp::Pull(PullArgs::default()).is_readonly());
         assert!(!ClientOp::Send(Box::new(task())).is_readonly());
-        assert!(!ClientOp::Report(Report::Ready {
-            task_id: new_task_id(),
-            session_id: "s".into(),
-            generation: 1,
-            seq: 1,
-            cluster_ref: None
-        })
-        .is_readonly());
+        assert!(
+            !ClientOp::Report(Report::Ready {
+                task_id: new_task_id(),
+                session_id: "s".into(),
+                generation: 1,
+                seq: 1,
+                cluster_ref: None
+            })
+            .is_readonly()
+        );
     }
 
     #[test]
@@ -929,8 +955,7 @@ mod tests {
 
     #[test]
     fn session_projection_defaults_to_created_and_detached() {
-        let value =
-            serde_json::to_value(SessionProjection::default_working()).expect("encode");
+        let value = serde_json::to_value(SessionProjection::default_working()).expect("encode");
         assert_eq!(value["lifecycle"], "created");
         assert_eq!(value["agent"], "booting");
         assert_eq!(value["delivery"], "none");
@@ -958,14 +983,8 @@ mod tests {
     fn admin_vocabulary_is_closed_and_named() {
         let ops: Vec<(AdminOp, &str)> = vec![
             (AdminOp::Status(Value::Null), "status"),
-            (
-                AdminOp::Roles(QueryRolesArgs::default()),
-                "roles",
-            ),
-            (
-                AdminOp::Sessions(QuerySessionsArgs::default()),
-                "sessions",
-            ),
+            (AdminOp::Roles(QueryRolesArgs::default()), "roles"),
+            (AdminOp::Sessions(QuerySessionsArgs::default()), "sessions"),
             (AdminOp::Ledger(LedgerQuery::default()), "ledger"),
             (AdminOp::Faults(QueryFaultsArgs::default()), "faults"),
             (AdminOp::Watch(Subscribe::default()), "watch"),
@@ -982,7 +1001,9 @@ mod tests {
             (
                 AdminOp::Control(AdminControl {
                     from: "planner".into(),
-                    op: crate::envelope::ControlOp::Snapshot { task_id: new_task_id() },
+                    op: crate::envelope::ControlOp::Snapshot {
+                        task_id: new_task_id(),
+                    },
                     to: None,
                 }),
                 "control",
@@ -1102,11 +1123,9 @@ mod tests {
             task: Some(new_task_id()),
             state: LedgerState::InFlight,
             enqueued_at: Utc::now(),
-            duplicate: false,
         };
         let value = serde_json::to_value(&receipt).expect("encode");
         assert_eq!(value["state"], "in_flight");
         assert_eq!(value["kind"], "task");
-        assert_eq!(value["duplicate"], false);
     }
 }

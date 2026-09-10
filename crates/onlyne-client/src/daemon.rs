@@ -81,7 +81,10 @@ impl StatusReport {
 
 /// One operator line for a successful `start`.
 pub fn start_line(pid: u32, socket: &Path) -> String {
-    format!("onlyne: client started pid {pid} socket {}", socket.display())
+    format!(
+        "onlyne: client started pid {pid} socket {}",
+        socket.display()
+    )
 }
 
 /// Pid file for a role workspace.
@@ -99,7 +102,8 @@ pub fn write_pid_file(path: &Path, pid: u32) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    std::fs::write(path, format!("{pid}\n")).with_context(|| format!("write {}", path.display()))?;
+    std::fs::write(path, format!("{pid}\n"))
+        .with_context(|| format!("write {}", path.display()))?;
     apply_private_mode(path).map_err(|error| anyhow!(error))?;
     Ok(())
 }
@@ -165,7 +169,9 @@ pub fn start(workspace: &Path) -> Result<u32> {
         .append(true)
         .open(&log_path)
         .with_context(|| format!("open {}", log_path.display()))?;
-    let errors = log.try_clone().with_context(|| format!("clone {}", log_path.display()))?;
+    let errors = log
+        .try_clone()
+        .with_context(|| format!("clone {}", log_path.display()))?;
     let binary = std::env::current_exe().context("resolve the onlyne-client binary path")?;
     let mut command = Command::new(binary);
     command
@@ -180,7 +186,9 @@ pub fn start(workspace: &Path) -> Result<u32> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = command.spawn().with_context(|| format!("spawn {}", layout.root().display()))?;
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("spawn {}", layout.root().display()))?;
     let pid = child.id();
     write_pid_file(&pid_path, pid)?;
     let socket = layout.socket_path();
@@ -200,10 +208,16 @@ fn wait_for_socket(path: &Path, child: &mut Child) -> Result<()> {
             return Ok(());
         }
         if let Some(status) = child.try_wait().context("poll the client child")? {
-            return Err(anyhow!("onlyne: client exited with {status} before binding {}", path.display()));
+            return Err(anyhow!(
+                "onlyne: client exited with {status} before binding {}",
+                path.display()
+            ));
         }
         if Instant::now() >= deadline {
-            return Err(anyhow!("onlyne: client did not bind {} within {SOCKET_WAIT_MS}ms", path.display()));
+            return Err(anyhow!(
+                "onlyne: client did not bind {} within {SOCKET_WAIT_MS}ms",
+                path.display()
+            ));
         }
         std::thread::sleep(Duration::from_millis(POLL_MS));
     }
@@ -217,7 +231,8 @@ pub fn stop(workspace: &Path) -> Result<StopOutcome> {
         return Ok(StopOutcome::NotRunning);
     };
     if !process_alive(pid) {
-        std::fs::remove_file(&pid_path).with_context(|| format!("remove {}", pid_path.display()))?;
+        std::fs::remove_file(&pid_path)
+            .with_context(|| format!("remove {}", pid_path.display()))?;
         remove_socket(&layout.socket_path())?;
         return Ok(StopOutcome::Stale(pid));
     }
@@ -225,7 +240,9 @@ pub fn stop(workspace: &Path) -> Result<StopOutcome> {
     let deadline = Instant::now() + Duration::from_millis(STOP_WAIT_MS);
     while process_alive(pid) {
         if Instant::now() >= deadline {
-            return Err(anyhow!("onlyne: client {pid} did not stop within {STOP_WAIT_MS}ms"));
+            return Err(anyhow!(
+                "onlyne: client {pid} did not stop within {STOP_WAIT_MS}ms"
+            ));
         }
         std::thread::sleep(Duration::from_millis(POLL_MS));
     }
@@ -265,7 +282,10 @@ pub fn fault_count(layout: &RoleWorkspace) -> Result<usize> {
     }
     let store = onlyne_store::ClientStore::open(&path)?;
     let events = store.events_since(0, FAULT_SCAN_LIMIT)?;
-    Ok(events.iter().filter(|event| event.kind == "session_fault").count())
+    Ok(events
+        .iter()
+        .filter(|event| event.kind == "session_fault")
+        .count())
 }
 
 #[cfg(test)]
@@ -330,7 +350,11 @@ mod tests {
         assert_eq!(report.pid, std::process::id());
         assert_eq!(report.socket, layout.socket_path());
         assert_eq!(report.faults, 0);
-        assert!(report.line().contains(&format!("pid {}", std::process::id())));
+        assert!(
+            report
+                .line()
+                .contains(&format!("pid {}", std::process::id()))
+        );
         assert!(report.line().contains("faults 0"));
     }
 

@@ -7,7 +7,7 @@ use tokio::net::UnixStream;
 
 use crate::flags::GlobalFlags;
 use crate::render;
-use crate::socket::{resolve_socket, NoSocket, SocketTarget};
+use crate::socket::{NoSocket, SocketTarget, resolve_socket};
 use crate::wire::{self, ExchangeError};
 
 pub const EXIT_OK: i32 = 0;
@@ -44,7 +44,8 @@ pub fn usage_error(message: impl Into<String>) -> i32 {
     EXIT_VALIDATION
 }
 
-/// The `--request` failure shape, carrying the serde message.
+/// The `--request` override failure, carrying the serde message. The four
+/// verbs that consume `--request` are `send`, `reply`, `complete`, `handoff`.
 pub fn request_error(message: String) -> i32 {
     usage_error(format!("onlyne: --request: {message}"))
 }
@@ -71,12 +72,14 @@ pub fn connect_error(error: &std::io::Error, timeout_ms: u64) -> i32 {
 /// An exchange failure, printed as JSON so a script always sees JSON.
 pub fn exchange_error(error: &ExchangeError, timeout_ms: u64) -> i32 {
     let (code, message) = match error {
-        ExchangeError::Timeout => {
-            (ErrorCode::Internal, format!("socket timeout after {timeout_ms}ms"))
-        }
-        ExchangeError::Closed => {
-            (ErrorCode::Internal, "socket closed before an answer arrived".to_string())
-        }
+        ExchangeError::Timeout => (
+            ErrorCode::Internal,
+            format!("socket timeout after {timeout_ms}ms"),
+        ),
+        ExchangeError::Closed => (
+            ErrorCode::Internal,
+            "socket closed before an answer arrived".to_string(),
+        ),
         ExchangeError::Wire(code, message) => (*code, message.clone()),
     };
     println!("{}", render::local_error_json(code, message, None));
@@ -86,9 +89,5 @@ pub fn exchange_error(error: &ExchangeError, timeout_ms: u64) -> i32 {
 /// Print one answer body and return its exit code.
 pub fn finish(body: &ResBody, flags: &GlobalFlags) -> i32 {
     println!("{}", render::render_body(body, flags));
-    if body.ok {
-        EXIT_OK
-    } else {
-        EXIT_ANSWER_FAILED
-    }
+    if body.ok { EXIT_OK } else { EXIT_ANSWER_FAILED }
 }

@@ -1,9 +1,9 @@
 //! The send path and the pull/ack delivery path (§8, §10).
 //!
 //! One accepted send runs the same fixed step order: envelope validation,
-//! recipient resolution, ACL, idempotency, one ledger row, delivery. A refusal
-//! never reaches the ledger except where the ledger is the audit trail of the
-//! refusal itself.
+//! recipient resolution, ACL, the offline note gate, idempotency, one ledger
+//! row, delivery. A refusal writes no ledger row, so a sender keeps its
+//! `op_id` usable for the retry that succeeds once the recipient is online.
 
 use crate::events;
 use crate::gateway_host::{resolve_inbound_route, select_outbound_route};
@@ -20,12 +20,21 @@ use onlyne_proto::{
 use onlyne_store::{Append, LedgerRow};
 use serde_json::Value;
 
+/// How often [`spawn_expiry_sweep`] settles queued notes past their deadline.
+///
+/// A note carries its lifetime in `Envelope::ttl_ms`, a millisecond budget, and
+/// the plan settles an elapsed one as `expired` (plan line 505). One second
+/// bounds the overshoot of the shortest ttl a sender can usefully express.
+pub const SWEEP_INTERVAL_MS: u64 = 1000;
+
 /// A send the server accepted and recorded.
 #[derive(Debug, Clone)]
 pub struct SendOutcome {
     pub receipt: Receipt,
     pub row: LedgerRow,
     pub online: bool,
+    /// The row targets a platform conversation, so the gateway pump covers it.
+    pub pump_outbound: bool,
 }
 
 /// A send the server refused, carrying the wire error it answers with.
@@ -75,7 +84,10 @@ impl RelayReply {
             RelayReply::Accepted(outcome) => ResBody::ok(receipt_json(&outcome.receipt)),
             RelayReply::Duplicate(outcome) => ResBody::err_with_data(
                 ErrorCode::Duplicate,
-                format!("duplicate op_id: replaying the durable receipt for {}", outcome.receipt.msg_id),
+                format!(
+                    "duplicate op_id: replaying the durable receipt for {}",
+                    outcome.receipt.msg_id
+                ),
                 Some("op_id".to_string()),
                 receipt_json(&outcome.receipt),
             ),
@@ -218,12 +230,8 @@ pub fn check_acl(
             },
         ) => {
             let reply_to = to_role;
-            let outbound = select_outbound_route(
-                spec,
-                gateway,
-                &Principal::role(role),
-                Some(reply_to),
-            );
+            let outbound =
+                select_outbound_route(spec, gateway, &Principal::role(role), Some(reply_to));
             match outbound {
                 Some(_) => Ok(()),
                 None => Err(RelayReject::new(
@@ -291,13 +299,45 @@ pub fn send(
         )));
     }
     let spec = state.spec_snapshot().context("the spec is unavailable")?;
-    let to_role = match resolve_target(&spec, &envelope.to) {
-        Ok(role) => role,
-        Err(reject) => return Ok(RelayReply::Rejected(reject)),
-    };
     if let Err(reject) = resolve_sender(&spec, &envelope.from) {
         return Ok(RelayReply::Rejected(reject));
     }
+    // A gateway process carries no routing policy (plan §5 line 243): the
+    // `[[route]]` table owns the target role, so an inbound delivery resolves
+    // through it even when its envelope names no role. Every other sender names
+    // its target itself.
+    let (to_role, routed) = match &envelope.from {
+        Principal::Gateway {
+            gateway,
+            channel,
+            conversation,
+        } => {
+            let Some(route) =
+                resolve_inbound_route(&spec, gateway, channel, conversation.as_deref())
+            else {
+                return Ok(RelayReply::Rejected(RelayReject::new(
+                    ErrorCode::AclDenied,
+                    format!("no [[route]] row carries gateway {gateway} channel {channel}"),
+                    Some("route"),
+                )));
+            };
+            let role = route.to.role.clone();
+            // The route decided the target, so the row records that decision:
+            // the plugin's own `to` names the conversation it serves, and a row
+            // keeping it would leave the resolved role unable to pull its work.
+            let mut routed = envelope.clone();
+            routed.to = match route.to.session.clone() {
+                Some(session) => Principal::role_session(role.as_str(), session),
+                None => Principal::role(role.as_str()),
+            };
+            (role, routed)
+        }
+        _ => match resolve_target(&spec, &envelope.to) {
+            Ok(role) => (role, envelope.clone()),
+            Err(reject) => return Ok(RelayReply::Rejected(reject)),
+        },
+    };
+    let envelope = &routed;
     let table = state.acl_table();
     if let Err(reject) = check_acl(
         &table,
@@ -313,9 +353,20 @@ pub fn send(
     ) {
         return Ok(RelayReply::Rejected(reject));
     }
+    let online = state.is_connected(to_role.as_str());
+    if envelope.kind == MsgKind::Note && !spec.server.note_queue && !online {
+        return Ok(RelayReply::Rejected(RelayReject::new(
+            ErrorCode::RecipientOffline,
+            format!("recipient role {to_role} is offline"),
+            Some("to.role"),
+        )));
+    }
+    // A platform target leaves through the gateway pump, so the row waits in
+    // `queued` until that push happens: presence on the role side says nothing
+    // about a conversation (plan §7 line 293).
+    let to_gateway = matches!(envelope.to, Principal::Gateway { .. });
     let fingerprint = envelope.fingerprint();
-    let mut row = LedgerRow::from_envelope(envelope, &fingerprint)?;
-    row.from_json = sender_json(&row.from_json, admin)?;
+    let row = LedgerRow::from_envelope(envelope, &fingerprint)?;
     match state.ledger.append_ledger(&row)? {
         Append::Duplicate {
             existing,
@@ -323,8 +374,9 @@ pub fn send(
         } => {
             if fingerprint_matches {
                 Ok(RelayReply::Duplicate(Box::new(SendOutcome {
-                    receipt: receipt_from(&existing, true),
-                    online: state.is_connected(to_role.as_str()),
+                    pump_outbound: to_gateway,
+                    receipt: receipt_from(&existing),
+                    online,
                     row: existing,
                 })))
             } else {
@@ -336,20 +388,12 @@ pub fn send(
             }
         }
         Append::Accepted(row) => {
-            let online = state.is_connected(to_role.as_str());
-            if envelope.kind == MsgKind::Note && !spec.server.note_queue && !online {
-                state.ledger.mark_rejected(&row.msg_id, "recipient_offline")?;
-                return Ok(RelayReply::Rejected(RelayReject::new(
-                    ErrorCode::RecipientOffline,
-                    format!("recipient role {to_role} is offline"),
-                    Some("to.role"),
-                )));
-            }
             if let Some(ttl_ms) = envelope.ttl_ms {
                 let deadline = envelope.ts + chrono::Duration::milliseconds(ttl_ms as i64);
                 state.note_expiry(&row.msg_id, deadline);
             }
-            let delivered_state = if online {
+            let deliverable = online && !to_gateway;
+            let delivered_state = if deliverable {
                 state.ledger.mark_in_flight(&row.msg_id)?;
                 LedgerState::InFlight
             } else {
@@ -357,10 +401,14 @@ pub fn send(
             };
             let event = ledger_event(&row, delivered_state, None, None);
             let seq = events::publish(state, Event::LedgerState(event))?;
-            if online {
+            if deliverable {
                 push_delivery(state, &to_role, seq, &row, delivered_state);
             }
+            // A row aimed at a platform conversation leaves as a rendered push.
+            // `gateway_host::pump_outbound` covers it, and the router calls that
+            // after every accepted send (plan §7 line 293's outbound direction).
             Ok(RelayReply::Accepted(Box::new(SendOutcome {
+                pump_outbound: to_gateway,
                 receipt: Receipt {
                     msg_id: row.msg_id.clone(),
                     op_id: row.op_id.clone(),
@@ -368,7 +416,6 @@ pub fn send(
                     task: row.task.clone(),
                     state: delivered_state,
                     enqueued_at: parse_time(&row.enqueued_at),
-                    duplicate: false,
                 },
                 row,
                 online,
@@ -400,7 +447,15 @@ pub fn pull(
             seq: head,
         });
     }
-    let mut candidates = state.ledger.queued_for(role, 8)?;
+    // `note` rows are logged and expired, never pulled: §3 line 152 gives them
+    // no session, and the client's accept path refuses an envelope without a
+    // task, which would turn a chat line into a rejection.
+    let mut candidates: Vec<_> = state
+        .ledger
+        .queued_for(role, 8)?
+        .into_iter()
+        .filter(|row| row.kind != MsgKind::Note)
+        .collect();
     for row in state.ledger.in_flight_for(role)? {
         if state.open_delivery(role, session_id).is_none() && candidates.is_empty() {
             candidates.push(row);
@@ -414,7 +469,9 @@ pub fn pull(
             seq: head,
         });
     };
-    state.ledger.mark_in_flight(&row.msg_id)?;
+    if row.state == LedgerState::Queued {
+        state.ledger.mark_in_flight(&row.msg_id)?;
+    }
     let session_row = row
         .task
         .as_deref()
@@ -446,10 +503,7 @@ pub fn pull(
 }
 
 /// Settle one delivery, moving it to `acked` or `rejected`.
-pub fn ack(
-    state: &State,
-    args: &AckArgs,
-) -> anyhow::Result<Result<LedgerStateEvent, RelayReject>> {
+pub fn ack(state: &State, args: &AckArgs) -> anyhow::Result<Result<LedgerStateEvent, RelayReject>> {
     let Some(row) = state
         .ledger
         .ledger_query(LedgerQuery {
@@ -467,6 +521,16 @@ pub fn ack(
         )));
     };
     let ticket = state.take_delivery(&args.msg_id);
+    // An ack is at-least-once (D11), so a repeated ack of a row already settled
+    // answers with the state it holds instead of failing the transition. The
+    // client's durable ack intent is what makes the repeat normal.
+    if matches!(
+        row.state,
+        LedgerState::Acked | LedgerState::Rejected | LedgerState::Expired
+    ) {
+        let event = ledger_event(&row, row.state, None, args.reason.clone());
+        return Ok(Ok(event));
+    }
     if row.state == LedgerState::Queued {
         state.ledger.mark_in_flight(&row.msg_id)?;
     }
@@ -489,7 +553,7 @@ pub fn ack(
 
 /// A delivery reachable by `pull`, rebuilt from its durable row.
 pub fn delivery_from(row: &LedgerRow) -> anyhow::Result<Delivery> {
-    let from: Principal = serde_json::from_str(&row.from_json).context("decode ledger sender")?;
+    let from = row.sender().context("decode ledger sender")?;
     let to: Principal = serde_json::from_str(&row.to_json).context("decode ledger target")?;
     let body: Body = match row.body_json.as_deref() {
         Some(text) => serde_json::from_str(text).context("decode ledger body")?,
@@ -522,8 +586,20 @@ pub fn delivery_from(row: &LedgerRow) -> anyhow::Result<Delivery> {
 }
 
 /// Re-queue a role's in-flight rows when its connection drops.
+///
+/// `ServerLedger::requeue_one` moves one row and publishes its `ledger_state`
+/// event in the same transaction, so an operator watching the observation plane
+/// sees the requeue that follows a dropped link. A row that settled between the
+/// read and the move is left alone.
 pub fn disconnect(state: &State, role: &str) -> anyhow::Result<usize> {
-    let requeued = state.ledger.requeue_in_flight(role)?;
+    let mut requeued = 0usize;
+    for row in state.ledger.in_flight_for(role)? {
+        match state.ledger.requeue_one(&row.msg_id) {
+            Ok(_) => requeued += 1,
+            Err(onlyne_store::StoreError::InvalidState { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     state.clear_deliveries(role);
     state.unregister_role(role);
     state.emit(Event::RolePresence(RolePresence {
@@ -568,7 +644,7 @@ pub fn ledger_event(
         msg_id: row.msg_id.clone(),
         op_id: row.op_id.clone(),
         kind: row.kind,
-        from: serde_json::from_str(&row.from_json).unwrap_or_else(|_| Principal::role("unknown")),
+        from: row.sender().unwrap_or_else(|_| Principal::role("unknown")),
         to: serde_json::from_str(&row.to_json).unwrap_or_else(|_| Principal::role("unknown")),
         task: row.task.clone(),
         state,
@@ -583,13 +659,14 @@ pub fn entry_from_row(row: &LedgerRow) -> onlyne_proto::LedgerEntry {
         msg_id: row.msg_id.clone(),
         op_id: row.op_id.clone(),
         kind: row.kind,
-        from: serde_json::from_str(&row.from_json).unwrap_or_else(|_| Principal::role("unknown")),
+        from: row.sender().unwrap_or_else(|_| Principal::role("unknown")),
         to: serde_json::from_str(&row.to_json).unwrap_or_else(|_| Principal::role("unknown")),
         task: row.task.clone(),
         parent_task: row.parent_task.clone(),
         attempt: row.attempt.max(0) as u32,
         state: row.state,
         out_head: row.out_head.clone(),
+        body_json: row.body_json.clone(),
         enqueued_at: parse_time(&row.enqueued_at),
         acked_at: row
             .acked_at
@@ -605,7 +682,11 @@ pub fn receipt_json(receipt: &Receipt) -> Value {
 }
 
 /// Receipt rebuilt from a durable row.
-pub fn receipt_from(row: &LedgerRow, duplicate: bool) -> Receipt {
+///
+/// A replay answers with the stored value field for field, which is what
+/// Verification case 3 compares (plan line 502). Both answers therefore
+/// serialize identically for one `op_id`.
+pub fn receipt_from(row: &LedgerRow) -> Receipt {
     Receipt {
         msg_id: row.msg_id.clone(),
         op_id: row.op_id.clone(),
@@ -613,20 +694,7 @@ pub fn receipt_from(row: &LedgerRow, duplicate: bool) -> Receipt {
         task: row.task.clone(),
         state: row.state,
         enqueued_at: parse_time(&row.enqueued_at),
-        duplicate,
     }
-}
-
-/// The sender JSON of a ledger row, carrying the admin marker when set.
-fn sender_json(from_json: &str, admin: bool) -> anyhow::Result<String> {
-    if !admin {
-        return Ok(from_json.to_string());
-    }
-    let mut value: Value = serde_json::from_str(from_json).context("decode the sender")?;
-    if let Some(map) = value.as_object_mut() {
-        map.insert("admin".to_string(), Value::Bool(true));
-    }
-    Ok(serde_json::to_string(&value)?)
 }
 
 fn parse_time(text: &str) -> DateTime<Utc> {

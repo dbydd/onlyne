@@ -69,14 +69,11 @@ impl SessionBackend for FakeBackend {
             backend_ref: serde_json::json!({"id": spec.task_id}),
             generation: 1,
         };
-        Self::guard(&self.state, &session.task_id, "state")?
-            .insert(spec.task_id, session.clone());
+        Self::guard(&self.state, &session.task_id, "state")?.insert(spec.task_id, session.clone());
         Ok(session)
     }
     fn attach(&self, session: &SessionRef) -> Result<SessionRef> {
-        if Self::guard(&self.state, &session.task_id, "state")?
-            .contains_key(&session.task_id)
-        {
+        if Self::guard(&self.state, &session.task_id, "state")?.contains_key(&session.task_id) {
             Ok(session.clone())
         } else {
             anyhow::bail!("fake session not found: {}", session.task_id)

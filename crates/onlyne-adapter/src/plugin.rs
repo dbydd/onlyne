@@ -77,6 +77,13 @@ pub trait GatewayHost: Send {
     async fn deliver_inbound(&mut self, envelope: &Envelope) -> Result<(), AdapterError>;
     async fn report_health(&mut self, health: &HealthArgs) -> Result<(), AdapterError>;
     async fn register_channel(&mut self, args: &RegisterChannelArgs) -> Result<(), AdapterError>;
+    /// Report the platform typing state for one conversation.
+    ///
+    /// `on: true` starts the indicator and `on: false` stops it.  The pair is a
+    /// state, so a caller that only turns it on leaves a stuck indicator on the
+    /// platform.  A plugin declaring `Capability::Typing` answers without a
+    /// platform error, and one that does not declare it answers through the
+    /// host's absence path.
     async fn typing(&mut self, args: &TypingArgs) -> Result<(), AdapterError>;
 }
 

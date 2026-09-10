@@ -1,10 +1,10 @@
 //! Resolution and execution of the three sibling daemon binaries.
 
+use crate::runtime::EXIT_NO_SIBLING;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use crate::runtime::EXIT_NO_SIBLING;
 
 /// A file that exists and carries an executable bit.
 fn is_executable_file(path: &Path) -> bool {
@@ -48,7 +48,9 @@ pub fn resolve_sibling(name: &str) -> Option<PathBuf> {
 /// Run the daemon in place of this process, inheriting stdio.
 pub fn exec(bin_name: &str, args: &[String]) -> i32 {
     let Some(path) = resolve_sibling(bin_name) else {
-        eprintln!("onlyne: binary not found: {bin_name}");
+        // The canonical line is owned by `onlyne_proto::text`, so the emitter
+        // and the assertions in `tests/cli.rs` share one literal.
+        eprintln!("{}", onlyne_proto::binary_not_found(bin_name));
         return EXIT_NO_SIBLING;
     };
     let mut command = Command::new(&path);

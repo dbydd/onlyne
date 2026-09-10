@@ -241,7 +241,9 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
                     ..QueryFaultsArgs::default()
                 },
             )?;
-            Ok(Ok(json!({ "task_id": target.task_id, "session": session, "faults": faults })))
+            Ok(Ok(
+                json!({ "task_id": target.task_id, "session": session, "faults": faults }),
+            ))
         }
         AdminOp::RepairAdopt(adopt) => {
             let Some(row) = state.ledger.get_session_row(&adopt.task_id)? else {
@@ -320,13 +322,24 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
                     Some("task_id"),
                 )));
             }
-            let reason = target.reason.clone().unwrap_or_else(|| "operator retry".to_string());
+            let reason = target
+                .reason
+                .clone()
+                .unwrap_or_else(|| "operator retry".to_string());
             transition_task_faults(state, &target.task_id, "retried", &reason)?;
-            Ok(Ok(json!({ "task_id": target.task_id, "requeued": requeued })))
+            Ok(Ok(
+                json!({ "task_id": target.task_id, "requeued": requeued }),
+            ))
         }
         AdminOp::RepairFail(fail) => {
             let reason = fail.reason.clone();
-            settle_task(state, &fail.task_id, Lifecycle::Exited, Outcome::Failed, &reason)?;
+            settle_task(
+                state,
+                &fail.task_id,
+                Lifecycle::Exited,
+                Outcome::Failed,
+                &reason,
+            )?;
             transition_task_faults(state, &fail.task_id, "failed", &reason)?;
             Ok(Ok(json!({ "task_id": fail.task_id, "outcome": "failed" })))
         }
@@ -335,9 +348,17 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
                 .reason
                 .clone()
                 .unwrap_or_else(|| "operator close".to_string());
-            settle_task(state, &target.task_id, Lifecycle::Exited, Outcome::Cancelled, &reason)?;
+            settle_task(
+                state,
+                &target.task_id,
+                Lifecycle::Exited,
+                Outcome::Cancelled,
+                &reason,
+            )?;
             transition_task_faults(state, &target.task_id, "closed", &reason)?;
-            Ok(Ok(json!({ "task_id": target.task_id, "lifecycle": "exited" })))
+            Ok(Ok(
+                json!({ "task_id": target.task_id, "lifecycle": "exited" }),
+            ))
         }
         AdminOp::RepairAck(ack) => {
             let closed = state.ledger.ack_fault(ack.fault_id)?;

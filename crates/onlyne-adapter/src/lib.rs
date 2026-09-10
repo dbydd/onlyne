@@ -497,7 +497,7 @@ impl AdapterServer {
             AdapterMsg::Plugin(PluginOp::Hello(args)) => args,
             _ => {
                 let body = ResBody::err(
-                    ErrorCode::Unauthorized,
+                    ErrorCode::Invalid,
                     HELLO_REQUIRED_MESSAGE,
                     Some("op".to_string()),
                 );
@@ -505,7 +505,7 @@ impl AdapterServer {
                 let message = WireMessage::response(reply_to, body);
                 let _ = timeout(write_timeout, write_frame(&mut stream, &message)).await;
                 return Err(AdapterError::wire(
-                    ErrorCode::Unauthorized,
+                    ErrorCode::Invalid,
                     HELLO_REQUIRED_MESSAGE,
                     Some("op"),
                 ));
@@ -550,18 +550,35 @@ impl AdapterServer {
                 return Err(AdapterError::Timeout("hello"));
             }
         };
+        Self::accept_from_first(stream, first, welcome).await
+    }
+
+    /// Finish a handshake whose first frame the caller already read.
+    ///
+    /// A socket that serves two vocabularies reads the opening frame to tell
+    /// them apart, then hands the adapter frame here (plan §7 line 293).
+    pub async fn accept_from_first<S, F, Fut>(
+        mut stream: S,
+        first: WireMessage,
+        welcome: F,
+    ) -> Result<ServerConnection>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        F: FnOnce(HelloArgs) -> Fut + Send,
+        Fut: Future<Output = std::result::Result<HelloAck, (ErrorCode, String)>> + Send,
+    {
         let hello = match first.msg {
             AdapterMsg::Plugin(PluginOp::Hello(args)) => args,
             _ => {
                 let body = ResBody::err(
-                    ErrorCode::Unauthorized,
+                    ErrorCode::Invalid,
                     HELLO_REQUIRED_MESSAGE,
                     Some("op".to_string()),
                 );
                 let wire = WireMessage::response(first.id.unwrap_or_default(), body);
                 let _ = timeout(DEFAULT_WRITE_TIMEOUT, write_frame(&mut stream, &wire)).await;
                 return Err(AdapterError::wire(
-                    ErrorCode::Unauthorized,
+                    ErrorCode::Invalid,
                     HELLO_REQUIRED_MESSAGE,
                     Some("op"),
                 ));
@@ -1532,7 +1549,7 @@ mod tests {
         assert!(!body.ok);
         assert_eq!(
             body.error.as_ref().map(|e| e.code),
-            Some(ErrorCode::Unauthorized)
+            Some(ErrorCode::Invalid)
         );
         assert_eq!(
             body.error.as_ref().map(|e| e.message.as_str()),
@@ -1542,7 +1559,7 @@ mod tests {
             Ok(_) => panic!("server accepted pre-hello frame"),
             Err(err) => err,
         };
-        assert_eq!(server_err.code(), Some(ErrorCode::Unauthorized));
+        assert_eq!(server_err.code(), Some(ErrorCode::Invalid));
     }
 
     struct SendHost;
@@ -1567,7 +1584,6 @@ mod tests {
                 task: envelope.task_id().map(str::to_string),
                 state: LedgerState::Acked,
                 enqueued_at: chrono::Utc::now(),
-                duplicate: false,
             })
         }
     }

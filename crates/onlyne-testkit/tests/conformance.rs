@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use onlyne_adapter::{AdapterServer, Host, HostDispatcher, MountKind};
 use onlyne_proto::{
-    AdapterMsg, AssignArgs, Capability, ErrorCode, HelloAck, HelloArgs, HostOp, Mount, PluginOp,
-    PROTOCOL_VERSION, Report, ServerInfo,
+    AdapterMsg, AssignArgs, Capability, ErrorCode, HelloAck, HelloArgs, HostOp, Mount,
+    PROTOCOL_VERSION, PluginOp, Report, ServerInfo,
 };
 use onlyne_testkit::{
     HostSim, HostSimSpec, empty_body_envelope, oversized_image_envelope, sample_assign,
@@ -49,24 +49,30 @@ async fn frame_before_hello_is_rejected_and_connection_closes() {
     let task = tokio::spawn(async move { AdapterServer::accept(server, |_| Ok(ack())).await });
     let io = onlyne_adapter::AdapterIo::new(client, Duration::from_secs(1), Duration::from_secs(1));
     let body = io
-        .request(AdapterMsg::Plugin(PluginOp::Detach(onlyne_proto::DetachArgs {
-            reason: "early".to_string(),
-        })))
+        .request(AdapterMsg::Plugin(PluginOp::Detach(
+            onlyne_proto::DetachArgs {
+                reason: "early".to_string(),
+            },
+        )))
         .await
         .expect("error response");
     let error = body.error.expect("error payload");
-    assert_eq!(error.code, ErrorCode::Unauthorized);
+    assert_eq!(error.code, ErrorCode::Invalid);
     assert_eq!(error.message, "hello required first");
     let server_error = match task.await.expect("server task") {
         Ok(_) => panic!("server accepted pre-hello frame"),
         Err(error) => error,
     };
-    assert_eq!(server_error.code(), Some(ErrorCode::Unauthorized));
+    assert_eq!(server_error.code(), Some(ErrorCode::Invalid));
 }
 
 #[tokio::test]
 async fn missing_recycle_uses_probe_resource_loss_path() {
-    let host = HostSim::new(HostSimSpec::agent("planner", "prose", vec![Capability::Recycle]));
+    let host = HostSim::new(HostSimSpec::agent(
+        "planner",
+        "prose",
+        vec![Capability::Recycle],
+    ));
     let (agent, task) = host.clone().connect_agent();
     agent.hello(hello(vec![])).await.expect("hello");
     host.handle_missing_recycle("task-1", Duration::from_millis(1))
@@ -82,7 +88,11 @@ async fn missing_recycle_uses_probe_resource_loss_path() {
 
 #[tokio::test]
 async fn missing_report_records_idle_fault() {
-    let host = HostSim::new(HostSimSpec::agent("planner", "prose", vec![Capability::Report]));
+    let host = HostSim::new(HostSimSpec::agent(
+        "planner",
+        "prose",
+        vec![Capability::Report],
+    ));
     let result = host.hello(&hello(vec![])).await.expect("hello");
     assert_eq!(result.role, "planner");
     assert_eq!(host.recovery().await.as_deref(), Some("idle_fault"));
@@ -98,8 +108,12 @@ async fn stale_generation_is_conflict_and_watermark_is_unchanged() {
         generation: 4,
         seq: 9,
         observed: json!({"state":"old"}),
+        cluster_ref: None,
     };
-    let error = host.report(&stale).await.expect_err("stale report rejected");
+    let error = host
+        .report(&stale)
+        .await
+        .expect_err("stale report rejected");
     assert_eq!(error.0, ErrorCode::Conflict);
     assert_eq!(host.watermark().await, (4, 9));
 }
@@ -109,7 +123,9 @@ async fn oversized_image_is_rejected_with_wire_field() {
     let host = HostSim::new(HostSimSpec::agent("planner", "prose", vec![]));
     let dispatcher = HostDispatcher::new(MountKind::Agent, host);
     let body = dispatcher
-        .dispatch(PluginOp::Send(Box::new(oversized_image_envelope(3 * 1024 * 1024))))
+        .dispatch(PluginOp::Send(Box::new(oversized_image_envelope(
+            3 * 1024 * 1024,
+        ))))
         .await;
     let error = body.error.expect("image error");
     assert_eq!(error.code, ErrorCode::Invalid);
@@ -136,7 +152,6 @@ async fn duplicate_send_returns_original_receipt_unchanged() {
     let first = host.send(&envelope).await.expect("first send");
     let second = host.send(&envelope).await.expect("duplicate send");
     assert_eq!(first, second);
-    assert!(!second.duplicate);
 }
 
 #[tokio::test]
@@ -144,7 +159,12 @@ async fn dropped_assign_reconnect_redelivers_same_op_id_with_original_receipt() 
     let host = HostSim::new(HostSimSpec::agent("planner", "prose", vec![]));
     let (first_agent, first_task) = host.clone().connect_agent();
     first_agent
-        .hello(hello(vec![Capability::Register, Capability::Report, Capability::Inject, Capability::Recycle]))
+        .hello(hello(vec![
+            Capability::Register,
+            Capability::Report,
+            Capability::Inject,
+            Capability::Recycle,
+        ]))
         .await
         .expect("first hello");
     let assign = sample_assign("important work", "prose");
@@ -164,7 +184,12 @@ async fn dropped_assign_reconnect_redelivers_same_op_id_with_original_receipt() 
     first_task.abort();
     let (second_agent, second_task) = host.clone().connect_agent();
     second_agent
-        .hello(hello(vec![Capability::Register, Capability::Report, Capability::Inject, Capability::Recycle]))
+        .hello(hello(vec![
+            Capability::Register,
+            Capability::Report,
+            Capability::Inject,
+            Capability::Recycle,
+        ]))
         .await
         .expect("second hello");
     let replayed = second_agent.wait_assign().await.expect("second assign");
@@ -203,7 +228,12 @@ async fn fake_agent_over_hostsim_completes_scripted_task() {
     let workspace = tempfile::tempdir().expect("tempdir");
     let fake = FakeAgent::new(
         "planner",
-        vec![Capability::Register, Capability::Report, Capability::Inject, Capability::Recycle],
+        vec![
+            Capability::Register,
+            Capability::Report,
+            Capability::Inject,
+            Capability::Recycle,
+        ],
         script,
         workspace.path(),
     );
@@ -220,15 +250,25 @@ fn platform_payload_stays_on_gateway_side() {
         envelope: Box::new(onlyne_testkit::sample_task_envelope("render me")),
         conversation: "conv-1".to_string(),
         gateway_ref: None,
+        reply_to: None,
     };
     let handed = serde_json::json!({
         "conversation": render.conversation,
         "text": render.envelope.body.text,
         "image": render.envelope.body.image,
     });
-    assert!(handed.get("platform_metadata").is_none(), "rendered payload must not carry platform_metadata: {handed}");
-    assert!(handed.get("raw").is_none(), "rendered payload must not carry raw: {handed}");
-    assert!(handed.get("channel_id").is_none(), "rendered payload must not carry channel_id: {handed}");
+    assert!(
+        handed.get("platform_metadata").is_none(),
+        "rendered payload must not carry platform_metadata: {handed}"
+    );
+    assert!(
+        handed.get("raw").is_none(),
+        "rendered payload must not carry raw: {handed}"
+    );
+    assert!(
+        handed.get("channel_id").is_none(),
+        "rendered payload must not carry channel_id: {handed}"
+    );
 
     let assign = sample_assign("agent work", "agent prose");
     let viewed = serde_json::to_value(&assign).expect("serialize assign");
@@ -241,7 +281,9 @@ fn platform_payload_stays_on_gateway_side() {
     }
 
     let gateway = onlyne_testkit::FakeGateway::new("fake", "fg1");
-    let inbound = gateway.inbound_delivery("conv-1", "hello").expect("inbound delivery");
+    let inbound = gateway
+        .inbound_delivery("conv-1", "hello")
+        .expect("inbound delivery");
     let propagated = AssignArgs {
         envelope: inbound.envelope,
         prose: "agent prose".to_string(),

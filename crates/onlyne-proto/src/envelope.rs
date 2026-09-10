@@ -390,7 +390,6 @@ pub fn new_envelope(
 }
 
 impl Envelope {
-
     /// Copy with an incremented `causality.attempt`, keeping `op_id` intact so a
     /// retry stays idempotent.
     pub fn redelivered(&self) -> Envelope {
@@ -411,7 +410,10 @@ impl Envelope {
         if self.protocol != PROTOCOL_VERSION {
             return Err(Error::invalid(
                 "protocol",
-                format!("protocol {} unsupported, expected {PROTOCOL_VERSION}", self.protocol),
+                format!(
+                    "protocol {} unsupported, expected {PROTOCOL_VERSION}",
+                    self.protocol
+                ),
             ));
         }
         if Uuid::parse_str(&self.id).is_err() {
@@ -430,10 +432,16 @@ impl Envelope {
             }
         }
         if self.from.role_name() == Some("") {
-            return Err(Error::invalid("from.role", "role name must not be empty".to_string()));
+            return Err(Error::invalid(
+                "from.role",
+                "role name must not be empty".to_string(),
+            ));
         }
         if self.to.role_name() == Some("") {
-            return Err(Error::invalid("to.role", "role name must not be empty".to_string()));
+            return Err(Error::invalid(
+                "to.role",
+                "role name must not be empty".to_string(),
+            ));
         }
         self.body.validate()?;
         match self.kind {
@@ -457,7 +465,7 @@ impl Envelope {
         if self.kind.is_control_plane() && self.causality.is_none() {
             return Err(Error::invalid(
                 "causality",
-                format!("causality is required for kind {}", self.kind),
+                crate::text::causality_required(&self.kind.to_string()),
             ));
         }
         if let Some(causality) = &self.causality {
@@ -528,7 +536,10 @@ fn validate_op_id(op_id: &str) -> Result<()> {
         ));
     };
     if Uuid::parse_str(rest).is_err() {
-        return Err(Error::invalid("op_id", "op_id must carry a uuid".to_string()));
+        return Err(Error::invalid(
+            "op_id",
+            "op_id must carry a uuid".to_string(),
+        ));
     }
     Ok(())
 }
@@ -683,7 +694,9 @@ mod tests {
     fn control_plane_kinds_require_causality_and_op_id() {
         let mut env = task("x");
         env.causality = None;
-        assert_eq!(env.validate().unwrap_err().field(), "causality");
+        let err = env.validate().unwrap_err();
+        assert_eq!(err.field(), "causality");
+        assert_eq!(err.message(), crate::text::causality_required("task"));
         let mut env = task("x");
         env.op_id = None;
         let err = env.validate().unwrap_err();
@@ -738,7 +751,13 @@ mod tests {
             Principal::gateway("tg1", "telegram", Some("42".into())).to_string(),
             "gw:tg1:telegram:42"
         );
-        assert_eq!(Principal::Cluster { cluster: "b".into() }.to_string(), "cluster:b");
+        assert_eq!(
+            Principal::Cluster {
+                cluster: "b".into()
+            }
+            .to_string(),
+            "cluster:b"
+        );
         assert_eq!(Principal::role("a").role_name(), Some("a"));
         assert_eq!(Principal::role("a").kind(), "role");
     }

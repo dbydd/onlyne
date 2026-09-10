@@ -78,14 +78,9 @@ impl AclTable {
                 return Err(NetError::MalformedKey(format!("duplicate role {name}")));
             }
             let key = parse_public(&key)?;
-            table.roles.insert(
-                name.clone(),
-                RoleAcl {
-                    name,
-                    key,
-                    admin,
-                },
-            );
+            table
+                .roles
+                .insert(name.clone(), RoleAcl { name, key, admin });
         }
         for edge in edges {
             table.push_edge(edge)?;
@@ -99,14 +94,8 @@ impl AclTable {
             return Err(NetError::MalformedKey(format!("duplicate role {name}")));
         }
         let key = parse_public(&key)?;
-        self.roles.insert(
-            name.clone(),
-            RoleAcl {
-                name,
-                key,
-                admin,
-            },
-        );
+        self.roles
+            .insert(name.clone(), RoleAcl { name, key, admin });
         Ok(())
     }
 
@@ -415,8 +404,14 @@ mod tests {
             ],
         )
         .unwrap();
-        let deny =
-            acl_allows(&delivery_only, "planner", "builder", MsgClass::Control, None).unwrap_err();
+        let deny = acl_allows(
+            &delivery_only,
+            "planner",
+            "builder",
+            MsgClass::Control,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(deny.reason, AclDenyReason::TargetNotAllowed);
         assert_eq!(deny.field, "to.role");
 
@@ -425,7 +420,14 @@ mod tests {
         assert_eq!(deny.reason, AclDenyReason::AdminRequired);
         assert_eq!(deny.field, "admin");
         assert!(
-            acl_allows(&control, "planner", "builder", MsgClass::Control, Some("planner")).is_ok(),
+            acl_allows(
+                &control,
+                "planner",
+                "builder",
+                MsgClass::Control,
+                Some("planner")
+            )
+            .is_ok(),
             "the task owner may control its own task"
         );
 

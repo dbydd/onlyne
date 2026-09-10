@@ -4,12 +4,12 @@
 use chrono::Utc;
 use onlyne_config::Spec;
 use onlyne_proto::{
-    AckArgs, AdminControl, AdminOp, AdminSend, Body, Causality, ClientOp, ControlOp, ControlArgs,
-    Delivery, Envelope, ErrorCode, Event, Frame, GatewayOp, HandshakeArgs, HealthArgs,
-    HistoryArgs, LedgerQuery, LedgerState, MsgKind, OP_ID_CONFLICT_MESSAGE, Outcome, Principal,
-    PullArgs, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, Report, RepairAck, RepairAdopt,
-    RepairFail, RepairRebind, RepairTarget, ResBody, SessionProjection, SessionSyncArgs,
-    ShutdownArgs, Subscribe,
+    AckArgs, AdminControl, AdminOp, AdminSend, Body, Causality, ClientOp, ControlArgs, ControlOp,
+    Delivery, Envelope, ErrorCode, Event, Frame, GatewayOp, HandshakeArgs, HealthArgs, HistoryArgs,
+    LedgerQuery, LedgerState, MsgKind, OP_ID_CONFLICT_MESSAGE, Outcome, Principal, PullArgs,
+    QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, RepairAck, RepairAdopt, RepairFail,
+    RepairRebind, RepairTarget, Report, ResBody, SessionProjection, SessionSyncArgs, ShutdownArgs,
+    Subscribe,
 };
 use onlyne_server::state::{ChannelBinding, DeliveryTicket, RoleConnection, Server, ServerInit};
 use onlyne_server::{events, faults, gateway_host, projection, relay, router};
@@ -17,8 +17,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-const CERT_PIN: &str =
-    "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+const CERT_PIN: &str = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
 fn key() -> String {
     onlyne_net::KeyPair::from_seed([7_u8; 32]).public_str()
@@ -119,6 +118,18 @@ fn task(from: &str, to: &str, text: &str) -> Envelope {
     .expect("valid task")
 }
 
+fn hello_args(role: &str) -> HandshakeArgs {
+    HandshakeArgs {
+        protocol: onlyne_proto::PROTOCOL_VERSION,
+        role: role.to_string(),
+        key: key(),
+        signature: String::new(),
+        agent: "test".to_string(),
+        version: "1.0.0".to_string(),
+        aggregate: false,
+    }
+}
+
 fn accepted(reply: relay::RelayReply) -> relay::SendOutcome {
     match reply {
         relay::RelayReply::Accepted(outcome) => *outcome,
@@ -130,7 +141,10 @@ fn rejected(reply: relay::RelayReply) -> relay::RelayReject {
     match reply {
         relay::RelayReply::Rejected(reject) => reject,
         relay::RelayReply::Duplicate(outcome) => {
-            panic!("expected a rejection, got a duplicate {:?}", outcome.receipt)
+            panic!(
+                "expected a rejection, got a duplicate {:?}",
+                outcome.receipt
+            )
         }
         other => panic!("expected a rejection, got {other:?}"),
     }
@@ -144,6 +158,15 @@ fn ledger_rows(state: &Arc<onlyne_server::State>) -> Vec<onlyne_store::LedgerRow
             ..LedgerQuery::default()
         })
         .expect("ledger query")
+}
+
+fn ledger_state_events(state: &Arc<onlyne_server::State>) -> Vec<onlyne_proto::EventRow> {
+    events::replay(state, 0, &events::EventFilter::default(), 500)
+        .expect("replay")
+        .rows
+        .into_iter()
+        .filter(|row| row.event.type_name() == "ledger_state")
+        .collect()
 }
 
 fn assert_not_internal(body: &ResBody) {
@@ -169,8 +192,13 @@ fn send_refuses_an_envelope_that_fails_validation() {
 
 #[test]
 fn acl_denial_names_the_field_and_writes_no_row() {
-    let fixture = fixture();
-    let envelope = note("builder", "builder", "x");
+    let three_roles = format!(
+        "{}\n[[client]]\nrole = \"reviewer\"\nkey = \"{}\"\nallowed_senders = [\"planner\"]\nallowed_targets = [\"planner\"]\n",
+        spec_text(),
+        key()
+    );
+    let fixture = fixture_with(&three_roles);
+    let envelope = note("builder", "reviewer", "x");
     let reject = rejected(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
     assert_eq!(reject.code, ErrorCode::AclDenied);
     assert_eq!(reject.field.as_deref(), Some("to.role"));
@@ -183,20 +211,25 @@ fn acl_denial_names_the_field_and_writes_no_row() {
 }
 
 #[test]
-fn duplicate_op_id_replays_the_durable_receipt_and_conflict_is_refused() {
+fn a_duplicate_op_id_replays_the_first_receipt_byte_for_byte() {
     let fixture = fixture();
     let first = task("planner", "planner", "hello");
     let outcome = accepted(relay::send(&fixture.state, &first, false, None).expect("relay"));
-    assert!(!outcome.receipt.duplicate);
+    let first_data = relay::receipt_json(&outcome.receipt);
 
-    let replay = relay::send(&fixture.state, &first, false, None).expect("relay");
-    let body = replay.body();
+    let body = relay::send(&fixture.state, &first, false, None)
+        .expect("relay")
+        .body();
     assert!(!body.ok);
     let error = body.error.clone().expect("error");
     assert_eq!(error.code, ErrorCode::Duplicate);
-    let data = body.data.clone().expect("the replayed receipt");
-    assert_eq!(data["msg_id"], json!(outcome.receipt.msg_id));
-    assert_eq!(data["duplicate"], json!(true));
+    let replay_data = body.data.clone().expect("the replayed receipt");
+    assert_eq!(
+        serde_json::to_string(&replay_data).expect("encode the replay"),
+        serde_json::to_string(&first_data).expect("encode the first answer"),
+        "the replayed data is the first receipt byte for byte"
+    );
+    assert_eq!(replay_data["msg_id"], json!(outcome.receipt.msg_id));
 
     let mut changed = first.clone();
     changed.body = Body::text("different");
@@ -208,9 +241,11 @@ fn duplicate_op_id_replays_the_durable_receipt_and_conflict_is_refused() {
     assert_eq!(error.code, ErrorCode::Conflict);
     assert_eq!(error.message, OP_ID_CONFLICT_MESSAGE);
     assert_eq!(ledger_rows(&fixture.state).len(), 1);
-    assert!(rejected(relay::send(&fixture.state, &changed, false, None).expect("relay"))
-        .message
-        .eq(OP_ID_CONFLICT_MESSAGE));
+    assert!(
+        rejected(relay::send(&fixture.state, &changed, false, None).expect("relay"))
+            .message
+            .eq(OP_ID_CONFLICT_MESSAGE)
+    );
 }
 
 #[test]
@@ -249,14 +284,16 @@ fn pull_hands_one_row_per_session_and_records_its_ticket() {
     let fixture = fixture();
     let envelope = task("planner", "builder", "work");
     let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
-    let reply = relay::pull(&fixture.state, "builder", Some("sess-1"), &PullArgs::default())
-        .expect("pull");
+    let reply = relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
     assert_eq!(reply.deliveries.len(), 1);
     assert_eq!(reply.deliveries[0].msg_id, outcome.receipt.msg_id);
-    assert_eq!(
-        ledger_rows(&fixture.state)[0].state,
-        LedgerState::InFlight
-    );
+    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::InFlight);
     let ticket = fixture
         .state
         .open_delivery("builder", Some("sess-1"))
@@ -264,8 +301,13 @@ fn pull_hands_one_row_per_session_and_records_its_ticket() {
     assert_eq!(ticket.session_id.as_deref(), Some("sess-1"));
     assert!(ticket.seq >= 1);
     assert!(ticket.delivered_at <= Utc::now());
-    let second = relay::pull(&fixture.state, "builder", Some("sess-1"), &PullArgs::default())
-        .expect("pull");
+    let second = relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
     assert!(second.deliveries.is_empty());
     let cursor = fixture
         .state
@@ -273,7 +315,10 @@ fn pull_hands_one_row_per_session_and_records_its_ticket() {
         .cursor_for("builder")
         .expect("cursor query")
         .expect("a cursor");
-    assert_eq!(cursor.last_msg_id.as_deref(), Some(outcome.receipt.msg_id.as_str()));
+    assert_eq!(
+        cursor.last_msg_id.as_deref(),
+        Some(outcome.receipt.msg_id.as_str())
+    );
 }
 
 #[test]
@@ -281,7 +326,13 @@ fn ack_settles_the_row_and_emits_every_observable() {
     let fixture = fixture();
     let envelope = task("planner", "builder", "work");
     let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
-    relay::pull(&fixture.state, "builder", Some("sess-1"), &PullArgs::default()).expect("pull");
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
     let event = relay::ack(
         &fixture.state,
         &AckArgs {
@@ -309,11 +360,13 @@ fn ack_settles_the_row_and_emits_every_observable() {
             "the ledger_state event omits {field}"
         );
     }
-    assert_eq!(
-        ledger_rows(&fixture.state)[0].state,
-        LedgerState::Acked
+    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Acked);
+    assert!(
+        fixture
+            .state
+            .open_delivery("builder", Some("sess-1"))
+            .is_none()
     );
-    assert!(fixture.state.open_delivery("builder", Some("sess-1")).is_none());
 }
 
 #[test]
@@ -321,11 +374,14 @@ fn disconnect_requeues_in_flight_rows_without_duplicating_them() {
     let fixture = fixture();
     let envelope = task("planner", "builder", "work");
     let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
-    relay::pull(&fixture.state, "builder", Some("sess-1"), &PullArgs::default()).expect("pull");
-    assert_eq!(
-        ledger_rows(&fixture.state)[0].state,
-        LedgerState::InFlight
-    );
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::InFlight);
     let requeued = relay::disconnect(&fixture.state, "builder").expect("disconnect");
     assert_eq!(requeued, 1);
     let rows = ledger_rows(&fixture.state);
@@ -335,19 +391,57 @@ fn disconnect_requeues_in_flight_rows_without_duplicating_them() {
 }
 
 #[test]
-fn a_note_reaches_an_offline_role_only_when_note_queue_allows_it() {
+fn a_note_reaches_an_offline_role_when_note_queue_allows_it() {
     let fixture = fixture();
     let envelope = note("planner", "builder", "fyi");
-    accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    assert_eq!(outcome.receipt.state, LedgerState::Queued);
+    assert_eq!(ledger_rows(&fixture.state).len(), 1);
+}
 
+#[test]
+fn a_note_to_an_offline_role_is_refused_before_the_ledger_row_exists() {
     let quiet = fixture_with(&spec_text().replace("note_queue = true", "note_queue = false"));
     let envelope = note("planner", "builder", "fyi");
     let reject = rejected(relay::send(&quiet.state, &envelope, false, None).expect("relay"));
     assert_eq!(reject.code, ErrorCode::RecipientOffline);
     assert_eq!(reject.field.as_deref(), Some("to.role"));
+    assert!(
+        ledger_rows(&quiet.state).is_empty(),
+        "a refusal writes no ledger row and burns no op_id"
+    );
+
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    quiet.state.register_role(RoleConnection {
+        role: "builder".to_string(),
+        sender,
+        last_seq: 0,
+        connected_at: Utc::now(),
+        draining: false,
+    });
+    let outcome = accepted(relay::send(&quiet.state, &envelope, false, None).expect("relay"));
     let rows = ledger_rows(&quiet.state);
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].state, LedgerState::Rejected);
+    assert_eq!(rows[0].op_id.as_deref(), envelope.op_id.as_deref());
+    assert_eq!(rows[0].msg_id, outcome.receipt.msg_id);
+    assert_eq!(rows[0].state, LedgerState::InFlight);
+}
+
+#[test]
+fn a_requeue_publishes_exactly_one_ledger_state_event() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    let before = ledger_state_events(&fixture.state).len();
+    relay::disconnect(&fixture.state, "builder").expect("disconnect");
+    assert_eq!(ledger_state_events(&fixture.state).len(), before + 1);
 }
 
 #[test]
@@ -360,10 +454,7 @@ fn sweep_expired_settles_a_queued_note_and_emits() {
     let expired = relay::sweep_expired(&fixture.state, Utc::now() + chrono::Duration::seconds(5))
         .expect("sweep");
     assert_eq!(expired, vec![outcome.receipt.msg_id.clone()]);
-    assert_eq!(
-        ledger_rows(&fixture.state)[0].state,
-        LedgerState::Expired
-    );
+    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Expired);
     assert!(fixture.state.event_head() > head_before);
 }
 
@@ -400,22 +491,12 @@ fn replay_resumes_from_a_cursor() {
     accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
     let envelope = note("planner", "planner", "again");
     accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
-    let page = events::replay(
-        &fixture.state,
-        0,
-        &events::EventFilter::default(),
-        100,
-    )
-    .expect("replay");
+    let page =
+        events::replay(&fixture.state, 0, &events::EventFilter::default(), 100).expect("replay");
     assert!(page.rows.len() >= 2);
     let head = page.head;
-    let page = events::replay(
-        &fixture.state,
-        head,
-        &events::EventFilter::default(),
-        100,
-    )
-    .expect("replay");
+    let page =
+        events::replay(&fixture.state, head, &events::EventFilter::default(), 100).expect("replay");
     assert!(page.rows.is_empty());
     assert!(page.notice.is_none());
 }
@@ -456,18 +537,26 @@ fn the_projection_gate_refuses_a_stale_watermark() {
         seq,
         projection: SessionProjection::default_working(),
     };
-    assert!(projection::session_sync(&fixture.state, "builder", &write(1, 5))
-        .expect("sync")
-        .applied);
-    assert!(!projection::session_sync(&fixture.state, "builder", &write(1, 4))
-        .expect("sync")
-        .applied);
-    assert!(!projection::session_sync(&fixture.state, "builder", &write(1, 5))
-        .expect("sync")
-        .applied);
-    assert!(projection::session_sync(&fixture.state, "builder", &write(2, 0))
-        .expect("sync")
-        .applied);
+    assert!(
+        projection::session_sync(&fixture.state, "builder", &write(1, 5))
+            .expect("sync")
+            .applied
+    );
+    assert!(
+        !projection::session_sync(&fixture.state, "builder", &write(1, 4))
+            .expect("sync")
+            .applied
+    );
+    assert!(
+        !projection::session_sync(&fixture.state, "builder", &write(1, 5))
+            .expect("sync")
+            .applied
+    );
+    assert!(
+        projection::session_sync(&fixture.state, "builder", &write(2, 0))
+            .expect("sync")
+            .applied
+    );
     let rows = projection::sessions(
         &fixture.state,
         QuerySessionsArgs {
@@ -494,6 +583,7 @@ fn reports_produce_session_rows_and_events() {
             session_id: "sess-1".to_string(),
             generation: 1,
             seq: 1,
+            cluster_ref: None,
         },
     )
     .expect("report");
@@ -506,6 +596,7 @@ fn reports_produce_session_rows_and_events() {
             outcome: Outcome::Done,
             head: Some("finished".to_string()),
             reply_to: None,
+            cluster_ref: None,
         },
     )
     .expect("report");
@@ -515,12 +606,57 @@ fn reports_produce_session_rows_and_events() {
         .expect("a row");
     assert_eq!(row.public_lifecycle, onlyne_proto::Lifecycle::Exited);
     assert_eq!(row.outcome, Some(Outcome::Done));
-    let page = events::replay(&fixture.state, 0, &events::EventFilter::default(), 100)
-        .expect("replay");
-    assert!(page
+    let page =
+        events::replay(&fixture.state, 0, &events::EventFilter::default(), 100).expect("replay");
+    assert!(
+        page.rows
+            .iter()
+            .any(|row| row.event.type_name() == "session_state")
+    );
+}
+
+#[test]
+fn a_cluster_bearing_report_marks_its_projection() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    let applied = projection::report(
+        &fixture.state,
+        "builder",
+        &Report::Ready {
+            task_id: task_id.clone(),
+            session_id: "sess-1".to_string(),
+            generation: 1,
+            seq: 1,
+            cluster_ref: Some("cluster-b".to_string()),
+        },
+    )
+    .expect("report");
+    assert!(applied.applied);
+
+    let row = projection::session_row(&fixture.state, &task_id)
+        .expect("row")
+        .expect("a row");
+    let marked = row
+        .projection
+        .observed
+        .as_ref()
+        .and_then(|observed| observed.get("cluster_ref"))
+        .and_then(|cluster| cluster.as_str());
+    assert_eq!(marked, Some("cluster-b"));
+    assert_eq!(row.projection.lifecycle, onlyne_proto::Lifecycle::Working);
+
+    let page =
+        events::replay(&fixture.state, 0, &events::EventFilter::default(), 100).expect("replay");
+    let payload = page
         .rows
         .iter()
-        .any(|row| row.event.type_name() == "session_state"));
+        .find(|row| row.event.type_name() == "session_state")
+        .map(|row| serde_json::to_value(&row.event).expect("encode the event"))
+        .expect("a session_state event");
+    assert_eq!(
+        payload["data"]["projection"]["observed"]["cluster_ref"],
+        json!("cluster-b")
+    );
 }
 
 #[test]
@@ -546,10 +682,13 @@ fn a_recorded_fault_is_queryable_and_acknowledgeable() {
     assert_eq!(open.len(), 1);
     assert_eq!(open[0].state.as_deref(), Some(faults::STATE_OPEN));
 
-    let outcome = faults::repair(&fixture.state, &AdminOp::RepairAck(RepairAck {
-        fault_id: event.id,
-        reason: "handled".to_string(),
-    }))
+    let outcome = faults::repair(
+        &fixture.state,
+        &AdminOp::RepairAck(RepairAck {
+            fault_id: event.id,
+            reason: "handled".to_string(),
+        }),
+    )
     .expect("repair")
     .expect("accepted");
     assert_eq!(outcome["state"], json!("acked"));
@@ -600,10 +739,7 @@ fn repair_fail_settles_the_task_and_publishes_a_fault_event() {
     .expect("repair")
     .expect("accepted");
     assert!(fixture.state.event_head() > head_before);
-    assert_eq!(
-        ledger_rows(&fixture.state)[0].state,
-        LedgerState::Rejected
-    );
+    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Rejected);
     let row = projection::session_row(&fixture.state, &task_id)
         .expect("row")
         .expect("a row");
@@ -751,7 +887,8 @@ fn a_missing_health_report_moves_presence_and_keeps_queued_outbound() {
     queued.to = Principal::gateway("gw1", "chan1", Some("conv1".to_string()));
     accepted(relay::send(&fixture.state, &queued, false, None).expect("relay"));
 
-    let lost = gateway_host::health_sweep(&fixture.state, Utc::now() + chrono::Duration::seconds(5));
+    let lost =
+        gateway_host::health_sweep(&fixture.state, Utc::now() + chrono::Duration::seconds(5));
     assert_eq!(lost, vec!["gw1".to_string()]);
     assert_eq!(
         fixture.state.gateway_health("gw1"),
@@ -908,27 +1045,80 @@ async fn a_frame_before_hello_is_refused() {
     .await;
     assert!(!body.ok);
     let error = body.error.expect("error");
-    assert_eq!(error.code, ErrorCode::Unauthorized);
+    assert_eq!(error.code, ErrorCode::Invalid);
     assert_eq!(error.message, onlyne_proto::HELLO_REQUIRED_MESSAGE);
     assert!(ledger_rows(&fixture.state).is_empty());
 }
 
 #[tokio::test]
+async fn a_hello_cannot_claim_a_role_beyond_its_key() {
+    let fixture = fixture();
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    let mut session = router::Session::with_sender(sender, "planner");
+    let body = router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(hello_args("builder")),
+    )
+    .await;
+    assert!(!body.ok);
+    let error = body.error.clone().expect("error");
+    assert_eq!(error.code, ErrorCode::Unauthorized);
+    assert_eq!(error.field.as_deref(), Some("role"));
+    assert!(
+        error.message.contains("planner") && error.message.contains("builder"),
+        "the refusal names both values: {}",
+        error.message
+    );
+    assert!(session.role.is_none());
+    assert!(!session.authenticated);
+
+    let send = router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Send(Box::new(note("builder", "planner", "not mine"))),
+    )
+    .await;
+    assert!(!send.ok);
+    assert_eq!(send.error.expect("error").code, ErrorCode::Invalid);
+    assert!(ledger_rows(&fixture.state).is_empty());
+}
+
+#[tokio::test]
+async fn the_admitted_role_still_reaches_welcome() {
+    let fixture = fixture();
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    let mut session = router::Session::with_sender(sender, "planner");
+    let body = router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(hello_args("planner")),
+    )
+    .await;
+    assert!(body.ok, "{body:?}");
+    assert_eq!(session.role.as_deref(), Some("planner"));
+    assert!(session.authenticated);
+    assert_eq!(body.data.expect("welcome")["role"], json!("planner"));
+
+    let send = router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Send(Box::new(note("planner", "planner", "mine"))),
+    )
+    .await;
+    assert!(send.ok, "{send:?}");
+    assert_eq!(ledger_rows(&fixture.state).len(), 1);
+}
+
+#[tokio::test]
 async fn every_client_and_gateway_arm_answers_without_internal_failure() {
     let fixture = fixture();
-    let mut session = router::Session::default();
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    let mut session = router::Session::with_sender(sender, "planner");
     let hello = router::dispatch_client(
         &fixture.state,
         &mut session,
-        ClientOp::Hello(HandshakeArgs {
-            protocol: onlyne_proto::PROTOCOL_VERSION,
-            role: "planner".to_string(),
-            key: key(),
-            signature: String::new(),
-            agent: "test".to_string(),
-            version: "1.0.0".to_string(),
-            aggregate: false,
-        }),
+        ClientOp::Hello(hello_args("planner")),
     )
     .await;
     assert!(hello.ok, "{hello:?}");
@@ -948,12 +1138,14 @@ async fn every_client_and_gateway_arm_answers_without_internal_failure() {
             session_id: "sess-1".to_string(),
             generation: 1,
             seq: 1,
+            cluster_ref: None,
         }),
         ClientOp::Report(Report::Complete {
             task_id: task_id.clone(),
             outcome: Outcome::Done,
             head: None,
             reply_to: None,
+            cluster_ref: None,
         }),
         ClientOp::Report(Report::Fault {
             task_id: Some(task_id.clone()),
@@ -1273,12 +1465,53 @@ async fn the_run_socket_answers_a_status_frame_and_is_private() {
         AdminOp::Status(serde_json::Value::Object(Default::default())),
     );
     write_frame(&mut stream, &request).await.expect("write");
-    let answer: Frame = read_frame(&mut stream).await.expect("read").expect("a frame");
+    let answer: Frame = read_frame(&mut stream)
+        .await
+        .expect("read")
+        .expect("a frame");
     match answer {
         Frame::Res { id, body } => {
             assert_eq!(id, "r1");
             assert!(body.ok, "{body:?}");
             assert_eq!(body.data.expect("data")["ok"], json!(true));
+        }
+        other => panic!("expected a response, got {other:?}"),
+    }
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_pre_hello_gateway_frame_is_refused_with_the_invalid_code() {
+    use onlyne_frame::{read_frame, write_frame};
+    use tokio::net::UnixStream;
+
+    let fixture = fixture();
+    let listener = onlyne_server::admin::bind(&fixture.state).expect("bind");
+    let path = onlyne_layout::ServerRoot::resolve(&fixture.root).socket_path();
+    let state = fixture.state.clone();
+    let task = tokio::spawn(async move {
+        let _ = onlyne_server::admin::serve_socket(state, listener).await;
+    });
+    let mut stream = UnixStream::connect(&path).await.expect("connect");
+    let request = Frame::<GatewayOp>::req(
+        "r1",
+        GatewayOp::Health(HealthArgs {
+            state: "online".to_string(),
+            detail: None,
+            uptime_s: 1,
+        }),
+    );
+    write_frame(&mut stream, &request).await.expect("write");
+    let answer: Frame = read_frame(&mut stream)
+        .await
+        .expect("read")
+        .expect("a frame");
+    match answer {
+        Frame::Res { body, .. } => {
+            assert!(!body.ok);
+            let error = body.error.expect("error");
+            assert_eq!(error.code, ErrorCode::Invalid);
+            assert_eq!(error.message, onlyne_proto::HELLO_REQUIRED_MESSAGE);
         }
         other => panic!("expected a response, got {other:?}"),
     }
@@ -1325,4 +1558,134 @@ fn channel_bindings_round_trip_through_the_registry() {
     assert_eq!(fixture.state.channels_for("gw1").len(), 1);
     assert_eq!(fixture.state.clear_channels("gw1"), 1);
     assert!(fixture.state.channels_for("gw1").is_empty());
+}
+
+#[tokio::test]
+async fn a_supervisor_welcome_carries_its_aggregate_label() {
+    let text = spec_text().replace(
+        "role = \"planner\"\n",
+        "role = \"planner\"\naggregate = \"cluster-b\"\n",
+    );
+    let fixture = fixture_with(&text);
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    let mut session = router::Session::with_sender(sender, "planner");
+    let body = router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(hello_args("planner")),
+    )
+    .await;
+    assert!(body.ok, "{body:?}");
+    let data = body.data.expect("welcome");
+    assert_eq!(data["aggregate"], json!("cluster-b"));
+}
+
+#[tokio::test]
+async fn a_plain_role_welcome_omits_the_key() {
+    let fixture = fixture();
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    let mut session = router::Session::with_sender(sender, "planner");
+    let body = router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(hello_args("planner")),
+    )
+    .await;
+    assert!(body.ok, "{body:?}");
+    let text = serde_json::to_string(&body.data.expect("welcome")).expect("encode the welcome");
+    assert!(
+        !text.contains("\"aggregate\""),
+        "a plain role's welcome omits the key: {text}"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_unlinks_the_admin_socket() {
+    let fixture = fixture();
+    let layout = onlyne_layout::ServerRoot::resolve(&fixture.root);
+    let listener = onlyne_server::admin::bind(&fixture.state).expect("bind");
+    let path = layout.socket_path();
+    assert!(
+        path.exists(),
+        "the run socket is bound at {}",
+        path.display()
+    );
+    drop(listener);
+    onlyne_server::admin::unlink(&fixture.state).expect("unlink");
+    assert!(!path.exists(), "the run socket is gone after shutdown");
+    onlyne_server::admin::unlink(&fixture.state).expect("a second unlink is a no-op");
+}
+
+#[test]
+fn start_clears_a_stale_socket_from_a_dead_pid() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("server");
+    std::fs::create_dir_all(root.join(".onlyne/run")).expect("create the run dir");
+    let layout = onlyne_layout::ServerRoot::resolve(&root);
+    std::fs::write(layout.socket_path(), b"").expect("write a stale socket file");
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn true");
+    let pid = child.id();
+    child.wait().expect("reap the child");
+    std::fs::write(layout.pid_path(), format!("{pid}\n")).expect("write the pid file");
+    assert!(onlyne_server::cli::clear_stale_socket(&layout));
+    assert!(!layout.socket_path().exists());
+}
+
+#[tokio::test]
+async fn a_wrong_platform_channel_registration_is_refused() {
+    let fixture = fixture();
+    let error = gateway_host::register_channels(
+        &fixture.state,
+        "gw1",
+        "telegram",
+        &onlyne_proto::RegisterChannelArgs {
+            platform: "feishu".to_string(),
+            channel: "chan1".to_string(),
+            conversations: None,
+        },
+    )
+    .expect_err("a platform mismatch is refused");
+    assert_eq!(error.0, ErrorCode::Invalid);
+    assert!(error.1.contains("telegram") && error.1.contains("feishu"));
+    assert!(fixture.state.channels_for("gw1").is_empty());
+    assert_eq!(
+        faults::query(
+            &fixture.state,
+            &QueryFaultsArgs {
+                limit: 10,
+                ..QueryFaultsArgs::default()
+            }
+        )
+        .expect("faults")
+        .iter()
+        .filter(|fault| fault.kind == gateway_host::KIND_GATEWAY_PLATFORM_MISMATCH)
+        .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_wrong_gateway_mount_is_refused_at_hello() {
+    let fixture = fixture();
+    let link = std::sync::Arc::new(onlyne_server::state::AdapterLink::default());
+    let error = gateway_host::welcome(
+        &fixture.state,
+        link,
+        &onlyne_proto::HelloArgs {
+            protocol: onlyne_proto::PROTOCOL_VERSION,
+            plugin: "onlyne-gateway-feishu".to_string(),
+            version: "1.0.0".to_string(),
+            kind: onlyne_proto::MountKind::Gateway,
+            capabilities: vec![],
+            mount: Some(onlyne_proto::Mount::Gateway(onlyne_proto::GatewayMount {
+                gateway: "gw1".to_string(),
+                platform: "feishu".to_string(),
+            })),
+        },
+    )
+    .expect_err("a mount platform beyond the spec entry is refused");
+    assert_eq!(error.0, ErrorCode::Invalid);
+    assert!(error.1.contains("telegram") && error.1.contains("feishu"));
 }

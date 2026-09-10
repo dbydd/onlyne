@@ -221,10 +221,10 @@ impl ServerCertVerifier for PinnedVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        server_name: &ServerName<'_>,
-        ocsp_response: &[u8],
-        now: UnixTime,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
     ) -> Result<ServerCertVerified, TlsError> {
         let got = spki_pin_of(end_entity.as_ref())
             .map_err(|_| TlsError::InvalidCertificate(rustls::CertificateError::BadEncoding))?;
@@ -236,17 +236,13 @@ impl ServerCertVerifier for PinnedVerifier {
                 },
             ))));
         }
-        let mut roots = RootCertStore::empty();
-        roots
-            .add(end_entity.clone())
-            .map_err(|_| TlsError::InvalidCertificate(rustls::CertificateError::BadEncoding))?;
-        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
-            Arc::new(roots),
-            self.provider.clone(),
-        )
-        .build()
-        .map_err(|error| TlsError::General(error.to_string()))?;
-        verifier.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+        // The pin is the whole trust decision (plan D9): the leaf is
+        // self-issued, so a chain walk against it proves nothing the SPKI
+        // comparison has not already proved, and the endpoint name is an
+        // operator-supplied address rather than a name the certificate can
+        // carry. Possession of the pinned key arrives with the handshake
+        // signature verified in `verify_tls13_signature`.
+        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(

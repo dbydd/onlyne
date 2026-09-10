@@ -35,16 +35,16 @@ pub use adapter::{
     AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, ByeNotice, Capability, ClusterMount,
     ConfigGetArgs, DetachArgs, GatewayBinding, GatewayMount, HELLO_REQUIRED_MESSAGE,
     HELLO_TIMEOUT_MS, HelloAck, HelloArgs, HostOp, Mount, MountKind, MsgDirection, PluginOp,
-    RecycleArgs, RenderSendArgs, ServerInfo, SessionRegisterArgs, TypingArgs, WelcomeSlice
+    RecycleArgs, RenderSendArgs, ServerInfo, SessionRegisterArgs, TypingArgs, WelcomeSlice,
 };
 pub use envelope::{
     BODY_TEXT_MAX_BYTES, Body, Causality, ControlOp, Envelope, Error, IMAGE_DATA_MAX_BYTES,
-    IMAGE_MIMES, ImagePart, MsgKind, Outcome, Principal, Result, new_envelope, new_id,
-    new_op_id, new_task_id, sha256_hex
+    IMAGE_MIMES, ImagePart, MsgKind, Outcome, Principal, Result, new_envelope, new_id, new_op_id,
+    new_task_id, sha256_hex,
 };
 pub use event::{
     Event, EventRow, EventTier, FaultEvent, GatewayHealth, LedgerState, LedgerStateEvent,
-    Lifecycle, Presence, RolePresence, SessionStateEvent, SpecReloaded
+    Lifecycle, Presence, RolePresence, SessionStateEvent, SpecReloaded,
 };
 pub use frame::{
     AdminFrame, ErrorCode, ErrorPayload, Frame, GatewayFrame, MAX_ERROR_MESSAGE_BYTES,
@@ -52,11 +52,11 @@ pub use frame::{
 };
 pub use ops::{
     AckArgs, AdminControl, AdminOp, AdminSend, AgentPhase, ByeArgs, ClientOp, ControlArgs,
-    ConversationInfo, Delivery, DeliveryPhase, GatewayOp, HandshakeArgs, HealthArgs,
-    HistoryArgs, LedgerEntry, LedgerQuery, PullArgs, PullReply, QueryFaultsArgs, QueryRolesArgs,
+    ConversationInfo, Delivery, DeliveryPhase, GatewayOp, HandshakeArgs, HealthArgs, HistoryArgs,
+    LedgerEntry, LedgerQuery, PullArgs, PullReply, QueryFaultsArgs, QueryRolesArgs,
     QuerySessionsArgs, Receipt, RecoveryPhase, RegisterChannelArgs, RepairAck, RepairAdopt,
     RepairFail, RepairRebind, RepairTarget, Report, ResourcePhase, RoleInfo, SessionProjection,
-    SessionRow, SessionSyncArgs, ShutdownArgs, Subscribe, Welcome
+    SessionRow, SessionSyncArgs, ShutdownArgs, Subscribe, Welcome,
 };
 
 pub use text::{

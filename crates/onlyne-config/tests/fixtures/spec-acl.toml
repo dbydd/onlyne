@@ -2,6 +2,11 @@
 #
 # Registered roles, in document order: planner, builder, reviewer, silent,
 # isolated, _supervisor, scout. Every ACL case in the test cites one of these.
+#
+# Expected table: 20 permitted pairs = 13 cross-role pairs + 7 unconditional
+# self pairs (one per role), and 60 rows = 20 pairs x 3 classes
+# (Any, Note, Control). The self pair is unconditional, so `planner` naming
+# itself in both lists adds no extra row.
 
 [server]
 name = "cluster-acl"

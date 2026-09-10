@@ -16,8 +16,8 @@ pub use acl::{
 pub use backoff::Backoff;
 pub use conn::{
     CLOSE_REASON, ClientConn, ConnHandle, ConnReadiness, ConnSettings, DEFAULT_RESYNC_LAG,
-    GatewayConn, OUTBOUND_QUEUE_DEPTH, RESYNC_LAG_KIND, TcpListen, TlsConn, dial, is_permanent,
-    resync_lag_of,
+    GatewayConn, OUTBOUND_QUEUE_DEPTH, RESYNC_LAG_KIND, TcpListen, TlsConn, accept_tls, dial,
+    is_permanent, resync_lag_of,
 };
 pub use handshake::{
     Challenge, HandshakeOk, HelloAck, accept, accept_with_timeout, connect, connect_with_timeout,
@@ -26,6 +26,7 @@ pub use identity::{KEY_PREFIX, KeyPair, challenge_message, parse_public};
 pub use tls::{
     ServerCert, client_config, gen_self_signed, load_or_create, server_config, spki_pin_of,
 };
+pub use tokio::net::TcpStream;
 
 #[cfg(test)]
 mod tests {
@@ -117,8 +118,11 @@ mod tests {
     #[tokio::test]
     async fn handshake_round_trip_and_acl_refusal() {
         let key = KeyPair::from_seed([4; 32]);
-        let table = AclTable::new([("worker".to_string(), key.public_str(), false)], Vec::new())
-            .unwrap();
+        let table = AclTable::new(
+            [("worker".to_string(), key.public_str(), false)],
+            Vec::new(),
+        )
+        .unwrap();
         let (mut left, mut right) = duplex(16 * 1024);
         let server = tokio::spawn(async move { accept(&mut left, &table, 1).await });
         let ack = connect(&mut right, "worker", &key, 1, "agent", "1.0", false)

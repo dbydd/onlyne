@@ -1,10 +1,14 @@
 //! Extraction of the ledger fields a reply or handoff needs to link causality.
+//!
+//! `hop` is the counter this module reads; a row's `attempt` is the server's
+//! delivery counter and `causality.attempt` on an envelope is the sender's view
+//! through the transport, which reply and handoff never read back.
 
 use onlyne_proto::{AdminOp, ClientOp, ErrorCode, LedgerQuery};
 use serde_json::Value;
 use tokio::net::UnixStream;
 
-use crate::socket::{Surface, SocketTarget};
+use crate::socket::{SocketTarget, Surface};
 use crate::wire::{self, ExchangeError};
 
 /// The response shapes a `query_ledger` answer may take, in the order they are
@@ -52,7 +56,11 @@ pub fn row_text<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
 
 /// Hop count of a row, read from the stored envelope when the column is absent.
 pub fn row_hop(row: &Value) -> Option<u32> {
-    if let Some(hop) = row.get("hop").and_then(Value::as_u64).and_then(|hop| u32::try_from(hop).ok()) {
+    if let Some(hop) = row
+        .get("hop")
+        .and_then(Value::as_u64)
+        .and_then(|hop| u32::try_from(hop).ok())
+    {
         return Some(hop);
     }
     for body in [
@@ -65,7 +73,12 @@ pub fn row_hop(row: &Value) -> Option<u32> {
     .iter()
     .flatten()
     {
-        if let Some(hop) = body.get("causality").and_then(|c| c.get("hop")).and_then(Value::as_u64).and_then(|hop| u32::try_from(hop).ok()) {
+        if let Some(hop) = body
+            .get("causality")
+            .and_then(|c| c.get("hop"))
+            .and_then(Value::as_u64)
+            .and_then(|hop| u32::try_from(hop).ok())
+        {
             return Some(hop);
         }
     }

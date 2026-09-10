@@ -1,9 +1,9 @@
 //! The message verbs: send, reply, complete, handoff, control, who, ping.
 
 use onlyne_proto::{
-    AdminControl, AdminOp, AdminSend, Body, ClientOp, ControlArgs, ControlOp, Causality,
-    Envelope, ErrorCode, Frame, ImagePart, LedgerQuery, MsgKind, Outcome, Principal,
-    QueryRolesArgs, Report, new_envelope, new_id, new_task_id,
+    AdminControl, AdminOp, AdminSend, Body, Causality, ClientOp, ControlArgs, ControlOp, Envelope,
+    ErrorCode, Frame, ImagePart, LedgerQuery, MsgKind, Outcome, Principal, QueryRolesArgs, Report,
+    new_envelope, new_id, new_task_id,
 };
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -12,10 +12,8 @@ use crate::flags::GlobalFlags;
 use crate::ledger;
 use crate::media;
 use crate::render;
-use crate::runtime::{
-    self, EXIT_ANSWER_FAILED, EXIT_NO_SOCKET, EXIT_OK,
-};
-use crate::socket::{Surface, SocketTarget};
+use crate::runtime::{self, EXIT_ANSWER_FAILED, EXIT_NO_SOCKET, EXIT_OK};
+use crate::socket::{SocketTarget, Surface};
 use crate::wire::{self, ExchangeError, Outbound};
 
 /// Sender flag shared by every verb that builds an `AdminSend` on the admin surface.
@@ -132,7 +130,7 @@ fn build_send(
     let sender_role = match (target.surface, spec.from) {
         (Surface::Admin, Some(role)) => Some(role),
         (Surface::Admin, None) => {
-            return Err("onlyne: --from is required on the admin surface".to_string())
+            return Err("onlyne: --from is required on the admin surface".to_string());
         }
         (Surface::Client, _) => None,
     };
@@ -150,7 +148,10 @@ fn build_send(
         spec.ttl_ms,
     )?;
     Ok(match sender_role {
-        Some(role) => SendPayload::Admin(AdminSend { from: role, envelope: Box::new(envelope) }),
+        Some(role) => SendPayload::Admin(AdminSend {
+            from: role,
+            envelope: Box::new(envelope),
+        }),
         None => SendPayload::Client(Box::new(envelope)),
     })
 }
@@ -222,7 +223,10 @@ fn request_of(flags: &GlobalFlags, payload: SendPayload) -> Result<Outbound, Req
     match payload {
         SendPayload::Client(envelope) => {
             let envelope = override_envelope(flags, *envelope, |envelope| envelope)?;
-            Ok(Outbound::client(new_id(), ClientOp::Send(Box::new(envelope))))
+            Ok(Outbound::client(
+                new_id(),
+                ClientOp::Send(Box::new(envelope)),
+            ))
         }
         SendPayload::Admin(admin_send) => {
             let admin_send = override_envelope(flags, admin_send, |send| &send.envelope)?;
@@ -280,9 +284,9 @@ async fn lookup_row(
 
 /// The task id of a ledger row, from the column or the stored envelope.
 fn row_task(row: &serde_json::Value) -> Option<String> {
-    ledger::row_text(row, "task").map(str::to_string).or_else(|| {
-        row_causality_text(row, "task")
-    })
+    ledger::row_text(row, "task")
+        .map(str::to_string)
+        .or_else(|| row_causality_text(row, "task"))
 }
 
 /// A field of the stored envelope's causality, when the row keeps no column.
@@ -332,7 +336,8 @@ fn handoff_causality(row: &serde_json::Value, parent: &str) -> Causality {
 
 /// Read the recipient a reply goes to, from the row it answers.
 fn reply_target(row: &serde_json::Value) -> Option<String> {
-    let principal = ledger::row_principal(row, "to_json").or_else(|| ledger::row_principal(row, "to"));
+    let principal =
+        ledger::row_principal(row, "to_json").or_else(|| ledger::row_principal(row, "to"));
     principal.and_then(|principal| match principal {
         Principal::Role { role, .. } => Some(role),
         _ => None,
@@ -369,7 +374,11 @@ async fn send_inner(
         },
         None => None,
     };
-    let kind = if args.note { MsgKind::Note } else { MsgKind::Task };
+    let kind = if args.note {
+        MsgKind::Note
+    } else {
+        MsgKind::Task
+    };
     let ttl_ms = if args.note { args.ttl } else { None };
     let causality = Causality {
         task: args.task.unwrap_or_else(new_task_id),
@@ -512,10 +521,12 @@ async fn complete_inner(
             };
             match ledger::row_text(&row, "out_head") {
                 Some(head) => head.to_string(),
-                None => return runtime::usage_error(format!(
-                    "onlyne: ledger row for task {} has no out_head",
-                    args.task
-                )),
+                None => {
+                    return runtime::usage_error(format!(
+                        "onlyne: ledger row for task {} has no out_head",
+                        args.task
+                    ));
+                }
             }
         }
     };
@@ -563,6 +574,9 @@ async fn complete_inner(
             outcome: args.outcome,
             head: Some(head),
             reply_to: Some(reply_to),
+            // The command line speaks as a role, whose cluster identity comes
+            // from the server's spec, so a CLI-authored report never names one.
+            cluster_ref: None,
         }),
     );
     match wire::request_res(&mut stream, &report, flags.timeout_ms).await {
@@ -657,18 +671,19 @@ async fn control_inner(
     let op = args.op;
     let op_name = op.name().to_string();
     if control_requires_reason(&op)
-        && args.reason.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && args
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
     {
         return runtime::usage_error(format!("onlyne: --reason is required for {op_name}"));
     }
     let request = match target.surface {
-        Surface::Client => Outbound::client(
-            new_id(),
-            ClientOp::Control(ControlArgs {
-                to: args.to,
-                op,
-            }),
-        ),
+        Surface::Client => {
+            Outbound::client(new_id(), ClientOp::Control(ControlArgs { to: args.to, op }))
+        }
         Surface::Admin => match sender.from.clone() {
             Some(from) => Outbound::admin(
                 new_id(),
@@ -717,10 +732,7 @@ pub fn ping(flags: &GlobalFlags) -> i32 {
         match wire::recv_frame(&mut stream, flags.timeout_ms).await {
             Ok(answer) => match &answer {
                 Frame::Pong { .. } => {
-                    println!(
-                        "{}",
-                        render::render_pong(&answer, flags)
-                    );
+                    println!("{}", render::render_pong(&answer, flags));
                     EXIT_OK
                 }
                 other => {

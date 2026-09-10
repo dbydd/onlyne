@@ -9,11 +9,8 @@ use onlyne_adapter::{AdapterError, GatewayPlugin};
 use onlyne_config::{GatewayEntry, Spec};
 use onlyne_gateway::{
     host::{self, Host},
-    kit::{
-        self, KitError,
-        media::{self, MAX_IMAGE_BYTES},
-    },
-    refs::{GatewayRef, GatewayRefStore},
+    kit::{self, KitError, media},
+    refs::{self, GatewayRef, GatewayRefStore},
 };
 use onlyne_net::Backoff;
 use onlyne_proto::{
@@ -407,6 +404,7 @@ enum ActivePlugin {
 }
 
 impl ActivePlugin {
+    /// The trait object behind the linked plugin.
     fn gateway(&mut self) -> &mut dyn GatewayPlugin {
         match self {
             #[cfg(feature = "telegram")]
@@ -417,10 +415,17 @@ impl ActivePlugin {
             ActivePlugin::Qqbot(plugin) => plugin.as_mut(),
             #[cfg(feature = "weixin")]
             ActivePlugin::Weixin(plugin) => plugin.as_mut(),
+            // With no platform feature the enum has no variant to match.
+            #[cfg(not(any(
+                feature = "telegram",
+                feature = "feishu",
+                feature = "qqbot",
+                feature = "weixin"
+            )))]
+            _ => match *self {},
         }
     }
 
-    /// Whether the linked plugin declares the typing capability.
     fn typing_declared(&mut self) -> bool {
         self.gateway().capabilities().contains(&Capability::Typing)
     }
@@ -434,11 +439,21 @@ impl ActivePlugin {
             #[cfg(feature = "telegram")]
             ActivePlugin::Telegram(plugin) => plugin.set_typing(conversation, on).await,
             #[cfg(feature = "feishu")]
-            ActivePlugin::Feishu(_) => Err(AdapterError::Unexpected(unsupported_host_op("typing"))),
+            ActivePlugin::Feishu(_) => Err(typing_absent(conversation, on)),
             #[cfg(feature = "qqbot")]
-            ActivePlugin::Qqbot(_) => Err(AdapterError::Unexpected(unsupported_host_op("typing"))),
+            ActivePlugin::Qqbot(_) => Err(typing_absent(conversation, on)),
             #[cfg(feature = "weixin")]
             ActivePlugin::Weixin(plugin) => plugin.set_typing(conversation, on).await,
+            #[cfg(not(any(
+                feature = "telegram",
+                feature = "feishu",
+                feature = "qqbot",
+                feature = "weixin"
+            )))]
+            _ => {
+                let _ = (conversation, on);
+                match *self {}
+            }
         }
     }
 }
@@ -448,12 +463,28 @@ fn unsupported_host_op(op: &str) -> String {
     format!("gateway received unsupported host op {op}")
 }
 
+/// The refusal a mount gives when it holds no typing capability.
+#[cfg(any(feature = "feishu", feature = "qqbot"))]
+fn typing_absent(conversation: &str, on: bool) -> AdapterError {
+    AdapterError::Unexpected(format!(
+        "{} for conversation {conversation} (on: {on})",
+        unsupported_host_op("typing")
+    ))
+}
+
 fn build_plugin(
     platform: &str,
     gateway_id: &str,
     token: Option<&str>,
     source: CredentialSource,
 ) -> Result<ActivePlugin, BuildError> {
+    #[cfg(not(any(
+        feature = "telegram",
+        feature = "feishu",
+        feature = "qqbot",
+        feature = "weixin"
+    )))]
+    let _ = (token, source);
     if gateway_id.trim().is_empty() {
         return Err(BuildError::Credentials(AdapterError::new(
             ErrorCode::Invalid,
@@ -695,13 +726,30 @@ async fn report_unconfigured(server_root: &Path, entry: &GatewayEntry, err: &Ada
         .await;
 }
 
+/// The platform this mount may serve.
+///
+/// A binary links one platform's plugin, so a spec entry from another platform
+/// is refused here with both names in the detail.
+fn mounted_platform(
+    plugin_platform: &'static str,
+    entry_platform: &str,
+) -> Result<&'static str, String> {
+    if plugin_platform == entry_platform {
+        Ok(plugin_platform)
+    } else {
+        Err(format!(
+            "refusing mount: this binary links the {plugin_platform} plugin and the spec entry declares platform {entry_platform}"
+        ))
+    }
+}
+
 async fn run_once(
     server_root: &Path,
     entry: &GatewayEntry,
     routes: &[onlyne_config::RouteEntry],
     plugin: &mut ActivePlugin,
 ) -> Result<ActivePlugin, String> {
-    let platform = entry.platform.as_str();
+    let platform = mounted_platform(plugin.gateway().platform(), entry.platform.as_str())?;
     let router = Router::new(entry.id.clone(), platform.to_string(), routes.to_vec());
     let refs =
         GatewayRefStore::open(&db_path(server_root, &entry.id)).map_err(|err| err.to_string())?;
@@ -766,17 +814,16 @@ async fn handle_render_send(
     plugin: &mut ActivePlugin,
     render: &RenderSendArgs,
 ) -> Result<(), String> {
-    let reply_to = match render.gateway_ref.as_deref() {
-        Some(handle) => {
-            let guard = shared.lock().await;
-            guard
-                .refs
-                .resolve(handle)
-                .map_err(|err| err.to_string())?
-                .map(|row| row.external_id)
-                .filter(|external_id| !external_id.trim().is_empty())
-        }
-        None => None,
+    let reply_to = {
+        let guard = shared.lock().await;
+        resolve_reply_target(
+            &guard.refs,
+            platform,
+            &render.conversation,
+            render.gateway_ref.as_deref(),
+            render.reply_to.as_deref(),
+        )
+        .map_err(|err| err.to_string())?
     };
     let outbound = outbound_from_envelope(
         platform,
@@ -817,6 +864,30 @@ async fn handle_render_send(
             .await;
     }
     Ok(())
+}
+
+/// The platform message id an outbound message answers.
+///
+/// Precedence: the frame's own `reply_to`, then the handle it names, then the
+/// newest row on record for that conversation.  A conversation with no history
+/// stays unthreaded.
+fn resolve_reply_target(
+    refs: &GatewayRefStore,
+    channel: &str,
+    conversation: &str,
+    gateway_ref: Option<&str>,
+    reply_to: Option<&str>,
+) -> Result<Option<String>, refs::RefError> {
+    if let Some(reply_to) = reply_to.filter(|reply_to| !reply_to.trim().is_empty()) {
+        return Ok(Some(reply_to.to_string()));
+    }
+    let row = match gateway_ref {
+        Some(handle) => refs.resolve(handle)?,
+        None => refs.newest_for_conversation(channel, conversation)?,
+    };
+    Ok(row
+        .map(|row| row.external_id)
+        .filter(|external_id| !external_id.trim().is_empty()))
 }
 
 async fn report_probe(
@@ -895,12 +966,6 @@ fn finished_image(envelope: &Envelope) -> Result<Option<ImagePart>, KitError> {
         KitError::Unsupported(format!("envelope image is not valid base64: {err}"))
     })?;
     media::ensure_image_budget(&bytes)?;
-    if bytes.len() > MAX_IMAGE_BYTES {
-        return Err(KitError::OversizedPayload {
-            max: MAX_IMAGE_BYTES,
-            actual: bytes.len(),
-        });
-    }
     Ok(Some(image))
 }
 
@@ -1046,7 +1111,9 @@ impl onlyne_adapter::GatewayHost for PluginHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use onlyne_proto::{Body, Causality, MsgKind, new_envelope, new_task_id};
+    use onlyne_proto::{Body, MsgKind, new_envelope};
+    #[cfg(feature = "telegram")]
+    use onlyne_proto::{Causality, new_task_id};
 
     fn router() -> Router {
         Router::new(
@@ -1411,6 +1478,63 @@ mod tests {
         assert!(
             err.to_string().contains(&unsupported_host_op("typing")),
             "err = {err}"
+        );
+    }
+
+    #[test]
+    fn a_matching_platform_mount_is_admitted() {
+        assert_eq!(
+            mounted_platform("telegram", "telegram").expect("same platform mounts"),
+            "telegram"
+        );
+    }
+
+    #[test]
+    fn a_mismatched_platform_mount_is_refused_with_both_names() {
+        let err = mounted_platform("telegram", "feishu").unwrap_err();
+        assert!(err.contains("telegram"), "err = {err}");
+        assert!(err.contains("feishu"), "err = {err}");
+    }
+
+    #[cfg(feature = "telegram")]
+    #[test]
+    fn a_reply_threads_to_the_recorded_handle() {
+        let mut refs = GatewayRefStore::open_in_memory().unwrap();
+        let handle = onlyne_gateway_telegram::gateway_ref("telegram", "c1", "ext-9", "private");
+        refs.record(
+            &handle,
+            &GatewayRef::new("telegram", "c1", "ext-9", Some("private".to_string())),
+        )
+        .unwrap();
+
+        let threaded = resolve_reply_target(&refs, "telegram", "c1", None, None).unwrap();
+        assert_eq!(threaded.as_deref(), Some("ext-9"));
+
+        let explicit_handle =
+            resolve_reply_target(&refs, "telegram", "c1", Some(&handle), None).unwrap();
+        assert_eq!(explicit_handle.as_deref(), Some("ext-9"));
+
+        let frame_field =
+            resolve_reply_target(&refs, "telegram", "c1", Some(&handle), Some("ext-frame"))
+                .unwrap();
+        assert_eq!(
+            frame_field.as_deref(),
+            Some("ext-frame"),
+            "the frame's own reply_to wins over the table"
+        );
+    }
+
+    #[test]
+    fn a_fresh_message_to_a_conversation_needs_no_history() {
+        let refs = GatewayRefStore::open_in_memory().unwrap();
+        assert_eq!(
+            resolve_reply_target(&refs, "telegram", "c-fresh", None, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_reply_target(&refs, "telegram", "c-fresh", Some("unknown-handle"), None)
+                .unwrap(),
+            None
         );
     }
 }

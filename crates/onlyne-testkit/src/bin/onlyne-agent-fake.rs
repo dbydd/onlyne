@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-
 use clap::Parser;
 use onlyne_adapter::AdapterClient;
 use onlyne_testkit::{
@@ -33,7 +32,9 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let workspace = args.workspace.unwrap_or(std::env::current_dir()?);
-    let socket = args.socket.unwrap_or_else(|| socket_from_workspace(&workspace));
+    let socket = args
+        .socket
+        .unwrap_or_else(|| socket_from_workspace(&workspace));
     let role = match args.role {
         Some(role) => role,
         None => role_from_workspace(&workspace)?,
@@ -65,7 +66,12 @@ async fn main() -> anyhow::Result<()> {
     for _attempt in 0..20 {
         match AdapterClient::connect_unix(&socket).await {
             Ok(handle) => {
-                let agent = FakeAgent::new(role.clone(), capabilities.clone(), script.clone(), workspace.clone());
+                let agent = FakeAgent::new(
+                    role.clone(),
+                    capabilities.clone(),
+                    script.clone(),
+                    workspace.clone(),
+                );
                 agent.run(&handle).await?;
                 if args.once {
                     return Ok(());
@@ -78,5 +84,11 @@ async fn main() -> anyhow::Result<()> {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    Err(anyhow::anyhow!("unable to connect to adapter socket {}: {}", socket.display(), last_error.map(|e| e.to_string()).unwrap_or_else(|| "unknown error".to_string())))
+    Err(anyhow::anyhow!(
+        "unable to connect to adapter socket {}: {}",
+        socket.display(),
+        last_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown error".to_string())
+    ))
 }

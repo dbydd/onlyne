@@ -26,7 +26,10 @@ async fn main() -> anyhow::Result<()> {
         match AdapterClient::connect_gateway_unix(&args.socket).await {
             Ok(handle) => break handle,
             Err(err) => {
-                eprintln!("onlyne-gateway-fake: waiting for {}: {err}", args.socket.display());
+                eprintln!(
+                    "onlyne-gateway-fake: waiting for {}: {err}",
+                    args.socket.display()
+                );
                 sleep(Duration::from_millis(100)).await;
             }
         }
@@ -38,7 +41,11 @@ async fn main() -> anyhow::Result<()> {
             plugin: "onlyne-gateway-fake".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             kind: MountKind::Gateway,
-            capabilities: vec![Capability::Report, Capability::Typing, Capability::Conversations],
+            capabilities: vec![
+                Capability::Report,
+                Capability::Typing,
+                Capability::Conversations,
+            ],
             mount: Some(onlyne_proto::Mount::Gateway(onlyne_proto::GatewayMount {
                 gateway: args.gateway_id.clone(),
                 platform: args.platform.clone(),
@@ -64,9 +71,17 @@ async fn main() -> anyhow::Result<()> {
     while let Some(line) = lines.next_line().await? {
         let value: serde_json::Value = serde_json::from_str(&line)?;
         if value.get("op").and_then(serde_json::Value::as_str) == Some("inbound") {
-            let conversation = value.get("conversation").and_then(serde_json::Value::as_str).ok_or_else(|| anyhow::anyhow!("inbound conversation required"))?;
-            let text = value.get("text").and_then(serde_json::Value::as_str).ok_or_else(|| anyhow::anyhow!("inbound text required"))?;
-            gateway.deliver_inbound(fake.inbound_delivery(conversation, text)?).await?;
+            let conversation = value
+                .get("conversation")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("inbound conversation required"))?;
+            let text = value
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("inbound text required"))?;
+            gateway
+                .deliver_inbound(fake.inbound_delivery(conversation, text)?)
+                .await?;
         } else {
             anyhow::bail!("unknown gateway input")
         }

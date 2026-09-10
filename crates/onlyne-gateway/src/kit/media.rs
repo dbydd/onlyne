@@ -212,4 +212,35 @@ mod tests {
                 if program == "onlyne-ffmpeg-missing-for-test"
         ));
     }
+
+    #[tokio::test]
+    async fn ffmpeg_nonzero_exit_becomes_a_kit_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.raw");
+        let output = dir.path().join("output.png");
+        std::fs::write(&input, b"data").unwrap();
+        let program = dir.path().join("failing-converter");
+        std::fs::write(&program, "#!/bin/sh\nexit 7\n").unwrap();
+        let mut perms = std::fs::metadata(&program).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&program, perms).unwrap();
+
+        let err = ffmpeg_convert(
+            program.to_str().unwrap(),
+            &input,
+            &output,
+            &["-frames:v", "1"],
+        )
+        .await
+        .unwrap_err();
+        match err {
+            KitError::Unsupported(detail) => {
+                assert!(detail.contains("exited with"), "detail = {detail}");
+            }
+            other => panic!("expected KitError::Unsupported, got {other:?}"),
+        }
+        assert!(!output.exists(), "a failed conversion writes no output");
+    }
 }

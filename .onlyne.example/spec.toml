@@ -17,7 +17,7 @@
 
 # docs/v1-PLAN.md §5 line 221
 [server]
-# name sets the cluster name, used in the handshake and in {{cluster}} plus {{server_name}} substitution. Read by onlyne-server at startup and by the generate driver. Default: empty string, refused at startup.
+# name is the cluster's identity, the single key behind both placeholder spellings: {{cluster}} and {{server_name}} in a template both resolve from this value (crates/onlyne-config/src/template.rs Placeholders carries the two names). Read by onlyne-server at startup, in the handshake, and by the generate driver. Default: empty string, refused at startup.
 name = "cluster-a"
 # listen sets the server TCP bind address. Read by onlyne-server listeners and by the generate driver for {{listen}}. Default: empty string, refused at startup.
 listen = "127.0.0.1:7811"

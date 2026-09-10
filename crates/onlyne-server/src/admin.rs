@@ -4,9 +4,9 @@
 //! `hello` is a gateway process, and a connection that opens with a request
 //! frame speaks the admin vocabulary. The socket is bound `0600`.
 
+use crate::ServerInit;
 use crate::router::{self, Session};
 use crate::state::State;
-use crate::ServerInit;
 use anyhow::Context;
 use onlyne_frame::{read_frame, write_frame};
 use onlyne_layout::{ServerRoot, apply_private_mode};
@@ -31,9 +31,26 @@ pub fn bind(state: &State) -> anyhow::Result<UnixListener> {
     }
     let listener = UnixListener::bind(&path)
         .with_context(|| format!("bind the admin socket {}", path.display()))?;
-    apply_private_mode(&path)
-        .with_context(|| format!("apply 0600 to {}", path.display()))?;
+    apply_private_mode(&path).with_context(|| format!("apply 0600 to {}", path.display()))?;
     Ok(listener)
+}
+
+/// Remove the run socket this server bound.
+///
+/// Every exit route calls this before the process leaves, so a client that
+/// retries the path after a shutdown finds it absent and reports the plan's
+/// absent-path answer rather than a connection refusal (plan line 344).
+pub fn unlink(state: &State) -> anyhow::Result<()> {
+    let layout = ServerRoot::resolve(&state.root);
+    let path = layout.socket_path();
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(anyhow::Error::new(error)
+                .context(format!("remove the run socket {}", path.display())))
+        }
+    }
 }
 
 /// Accept connections on the run socket until it fails.

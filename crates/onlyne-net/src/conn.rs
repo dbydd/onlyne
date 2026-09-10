@@ -168,15 +168,29 @@ impl TcpListen {
         Ok(self.listener.local_addr()?)
     }
 
-    pub async fn accept_next(&mut self, config: &ServerConfig) -> Result<TlsConn, NetError> {
-        let (stream, _) = self.listener.accept().await?;
-        let acceptor = TlsAcceptor::from(Arc::new(config.clone()));
-        acceptor
-            .accept(stream)
-            .await
-            .map(TlsConn::Server)
-            .map_err(map_tls_io_error)
+    /// Accept one TCP connection without running the TLS handshake.
+    ///
+    /// Keeping the two steps apart lets a caller serve each handshake on its
+    /// own task, so a peer that fails or stalls one connection leaves the
+    /// listener accepting (plan §4 line 198).
+    pub async fn accept(&mut self) -> Result<TcpStream, NetError> {
+        Ok(self.listener.accept().await?.0)
     }
+
+    pub async fn accept_next(&mut self, config: &ServerConfig) -> Result<TlsConn, NetError> {
+        let stream = self.accept().await?;
+        accept_tls(stream, config).await
+    }
+}
+
+/// Complete the TLS handshake for one accepted connection.
+pub async fn accept_tls(stream: TcpStream, config: &ServerConfig) -> Result<TlsConn, NetError> {
+    let acceptor = TlsAcceptor::from(Arc::new(config.clone()));
+    acceptor
+        .accept(stream)
+        .await
+        .map(TlsConn::Server)
+        .map_err(map_tls_io_error)
 }
 
 /// Open a pinned TLS connection and hand back the client stream.
@@ -393,16 +407,9 @@ impl<Op: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> ConnHandl
     ///
     /// The frame keeps a caller-supplied id and receives a generated one when the
     /// id is empty. `BadFrame` answers any frame that opens no request.
-    pub async fn request(
-        &self,
-        frame: Frame<Op>,
-        timeout: Duration,
-    ) -> Result<ResBody, NetError> {
+    pub async fn request(&self, frame: Frame<Op>, timeout: Duration) -> Result<ResBody, NetError> {
         let frame = assign_id(frame)?;
-        let id = frame
-            .id()
-            .ok_or(NetError::BadFrame)?
-            .to_string();
+        let id = frame.id().ok_or(NetError::BadFrame)?.to_string();
         let (waiter, answer) = oneshot::channel();
         {
             let mut pending = self.inner.pending.lock().await;
@@ -476,10 +483,7 @@ impl<Op: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> ConnHandl
 /// Any other frame without an id passes through untouched.
 fn assign_id<Op>(frame: Frame<Op>) -> Result<Frame<Op>, NetError> {
     match frame {
-        Frame::Req { id, op } if id.is_empty() => Ok(Frame::Req {
-            id: new_id(),
-            op,
-        }),
+        Frame::Req { id, op } if id.is_empty() => Ok(Frame::Req { id: new_id(), op }),
         other => Ok(other),
     }
 }
@@ -829,9 +833,7 @@ async fn run_supervisor<S, P, Op>(
     loop {
         match run_session(&mut stream, &inner, &mut outbound, &settings).await {
             SessionEnd::Closed(reason) => {
-                inner
-                    .stop(Some(NetError::Disconnected(reason)))
-                    .await;
+                inner.stop(Some(NetError::Disconnected(reason))).await;
                 return;
             }
             SessionEnd::Dead(error) => {
@@ -912,9 +914,7 @@ fn publish<Op: Clone>(inner: &ConnInner<Op>, frame: Frame<Op>) {
 /// Two free queue slots are required, so the report and the frame behind it both
 /// survive the write.
 fn report_lag<Op: Clone>(inner: &ConnInner<Op>) {
-    if inner.dropped.load(Ordering::SeqCst) == 0
-        || inner.events.len() + 2 > inner.resync_lag
-    {
+    if inner.dropped.load(Ordering::SeqCst) == 0 || inner.events.len() + 2 > inner.resync_lag {
         return;
     }
     let lag = inner.dropped.swap(0, Ordering::SeqCst);
@@ -1262,11 +1262,8 @@ mod tests {
         };
         let handle: ClientConn = dial(&address, &key, &pin, ROLE, settings).await.unwrap();
         let waiter = handle.clone();
-        let pending = tokio::spawn(async move {
-            waiter
-                .request(request(), Duration::from_secs(10))
-                .await
-        });
+        let pending =
+            tokio::spawn(async move { waiter.request(request(), Duration::from_secs(10)).await });
         let outcome = tokio::time::timeout(Duration::from_secs(3), pending)
             .await
             .expect("the death completes the waiter")
@@ -1355,11 +1352,8 @@ mod tests {
 
         let handle: ClientConn = dial(&address, &key, &pin, ROLE, settings()).await.unwrap();
         let waiter = handle.clone();
-        let pending = tokio::spawn(async move {
-            waiter
-                .request(request(), Duration::from_secs(10))
-                .await
-        });
+        let pending =
+            tokio::spawn(async move { waiter.request(request(), Duration::from_secs(10)).await });
         held.await.unwrap();
         handle.close().await.unwrap();
         let outcome = tokio::time::timeout(Duration::from_secs(3), pending)
@@ -1423,5 +1417,40 @@ mod tests {
             "expected a disconnect, got {failure:?}"
         );
         assert_eq!(handle.readiness(), ConnReadiness::Closed);
+    }
+
+    #[tokio::test]
+    async fn a_silent_peer_times_out_the_request() {
+        let Harness {
+            mut listener,
+            config,
+            pin,
+            address,
+        } = harness().await;
+        let key = KeyPair::from_seed([50; 32]);
+        let table = table(&[&key]);
+        let (release, hold) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let mut stream = admit(&mut listener, &config, &table)
+                .await
+                .expect("the client is admitted");
+            let _request: Frame<ClientOp> = read_frame(&mut stream).await.unwrap().unwrap();
+            let _ = hold.await;
+        });
+
+        let handle: ClientConn = dial(&address, &key, &pin, ROLE, settings()).await.unwrap();
+        let outcome = handle.request(request(), Duration::from_millis(200)).await;
+        assert!(
+            matches!(outcome, Err(NetError::RequestTimeout)),
+            "expected the caller's deadline to fire, got {outcome:?}"
+        );
+        assert_eq!(
+            handle.readiness(),
+            ConnReadiness::Ready,
+            "the silent peer keeps the link up; only this call gave up"
+        );
+        let _ = handle.close().await;
+        release.send(()).unwrap();
+        server.await.unwrap();
     }
 }

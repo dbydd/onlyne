@@ -13,7 +13,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Seconds a connection gets to send its `hello` before the host drops it.
+/// Milliseconds a connection gets to send its `hello` before the host drops it;
+/// §7 line 310 fixes the budget at five seconds.
+///
+/// A connection that sends any other frame first is answered
+/// `error{code:"invalid",message:"hello required first"}` and closed, which is
+/// the same line's wording and the code the adapter surface uses.
 pub const HELLO_TIMEOUT_MS: u64 = 5_000;
 
 /// The exact rejection a host returns when a frame arrives pre-handshake.
@@ -34,7 +39,9 @@ pub enum MountKind {
 
 /// Optional plugin abilities. Absence of an entry is a declared gap: the host
 /// degrades and records a fault rather than assuming support.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     /// Bind a live process to a task via `session_register`.
@@ -85,7 +92,7 @@ impl std::fmt::Display for Capability {
 
 /// Where an agent plugin attaches itself within the role.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "snake_case", default)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct AgentMount {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,7 +106,7 @@ pub struct AgentMount {
 
 /// Gateway-side mount data carried in the same `hello` frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "snake_case", default)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct GatewayMount {
     pub gateway: String,
     pub platform: String,
@@ -107,7 +114,7 @@ pub struct GatewayMount {
 
 /// Where a sub-cluster's supervisor claims it speaks for another cluster.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "snake_case", default)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ClusterMount {
     pub cluster: String,
     /// The aggregate role name registered in the parent spec.
@@ -126,8 +133,24 @@ pub struct ClusterMount {
 /// and `HandshakeArgs::agent` on a role connection name the crate that connected,
 /// which is the thing a protocol or version mismatch is about. Deriving the
 /// instance from the program would collapse the several-instances case.
+///
+/// The enum is untagged, so the wire form is the plan's own `hello` example at
+/// §7 line 298 — `"mount":{"role":"planner","session":"8b1c..."}` — with `kind`
+/// beside it in the same args object rather than nested under a tag.
+///
+/// Untagged matching is first-match-wins, so the variant order below is the
+/// disambiguation rule: `Agent`, then `Gateway`, then `Cluster`, then `Admin`.
+/// Each payload denies unknown fields, and that guard is what makes the order
+/// safe to read rather than a silent mis-decode: `AgentMount` and `ClusterMount`
+/// both carry `role`, so without it a cluster mount would decode as an agent
+/// mount. A new field belongs to the earliest variant that owns it, and making
+/// one collide with an earlier variant's set is a wire change this list must be
+/// updated for.
+///
+/// A bare `Admin` mount serializes as JSON `null`; the sibling `kind` field is
+/// what identifies it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "data")]
+#[serde(untagged)]
 pub enum Mount {
     Agent(AgentMount),
     Gateway(GatewayMount),
@@ -159,11 +182,7 @@ impl HelloArgs {
 
     /// The declared gaps against `expected`, in declaration order.
     pub fn missing(&self, expected: &[Capability]) -> Vec<Capability> {
-        expected
-            .iter()
-            .copied()
-            .filter(|c| !self.has(*c))
-            .collect()
+        expected.iter().copied().filter(|c| !self.has(*c)).collect()
     }
 }
 
@@ -244,7 +263,9 @@ impl PluginOp {
     pub fn is_gateway(self) -> bool {
         matches!(
             self,
-            PluginOp::Deliver(_) | PluginOp::RegisterChannel(_) | PluginOp::Health(_)
+            PluginOp::Deliver(_)
+                | PluginOp::RegisterChannel(_)
+                | PluginOp::Health(_)
                 | PluginOp::Typing(_)
         )
     }
@@ -332,6 +353,14 @@ pub struct RenderSendArgs {
     /// Opaque handle stored in the gateway's own table (§10.3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_ref: Option<String>,
+    /// Platform-side id of the message being replied to, opaque to the host and
+    /// decoded by the plugin that minted it. §7 line 304 is the inbound
+    /// `deliver` frame whose envelope's `causality.reply_to` is the only place
+    /// the id can travel, and the host copies it out while rendering, so a
+    /// plugin never parses an envelope to thread a reply. Pairs with
+    /// [`Self::gateway_ref`], which names the conversation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
 }
 
 /// `recycle`: reason is mandatory so the ledger records the decision.
@@ -490,10 +519,76 @@ mod tests {
         assert_eq!(value["op"], "hello");
         assert_eq!(value["args"]["kind"], "agent");
         assert_eq!(value["args"]["capabilities"][0], "register");
-        assert_eq!(value["args"]["mount"]["kind"], "agent");
-        assert_eq!(value["args"]["mount"]["data"]["role"], "planner");
+        assert_eq!(value["args"]["mount"]["role"], "planner");
+        assert_eq!(value["args"]["mount"]["session"], "8b1c");
+        assert!(
+            value["args"]["mount"].get("kind").is_none(),
+            "the mount object is flat; `kind` sits beside it in args"
+        );
         let back: PluginOp = serde_json::from_value(value).expect("decode");
         assert_eq!(back, hello);
+    }
+
+    #[test]
+    fn mounts_disambiguate_by_field_set_in_declaration_order() {
+        let cluster = Mount::Cluster(ClusterMount {
+            cluster: "cluster-b".into(),
+            role: "cluster-b".into(),
+        });
+        let value = serde_json::to_value(&cluster).expect("encode cluster mount");
+        assert_eq!(
+            value,
+            serde_json::json!({"cluster": "cluster-b", "role": "cluster-b"})
+        );
+        let back: Mount = serde_json::from_value(value).expect("decode cluster mount");
+        assert_eq!(
+            back, cluster,
+            "a cluster mount must not decode as an agent mount"
+        );
+
+        let gateway = Mount::Gateway(GatewayMount {
+            gateway: "gw1".into(),
+            platform: "telegram".into(),
+        });
+        let value = serde_json::to_value(&gateway).expect("encode gateway mount");
+        assert_eq!(
+            value,
+            serde_json::json!({"gateway": "gw1", "platform": "telegram"})
+        );
+        assert_eq!(
+            serde_json::from_value::<Mount>(value).expect("decode gateway mount"),
+            gateway
+        );
+
+        let admin: Mount =
+            serde_json::from_value(serde_json::json!(null)).expect("decode admin mount");
+        assert_eq!(admin, Mount::Admin);
+        // A unit variant in an untagged enum writes `null`, which `Option<Mount>`
+        // reads back as `None`: a receiver that needs the admin identity reads
+        // `HelloArgs::kind` (a `MountKind`), never the absence of a mount.
+        assert_eq!(
+            serde_json::to_value(Mount::Admin).expect("encode admin mount"),
+            serde_json::Value::Null
+        );
+
+        serde_json::from_value::<Mount>(serde_json::json!({"cluster": "b"}))
+            .expect_err("a mount missing its identifying fields matches no variant");
+        serde_json::from_value::<Mount>(serde_json::json!({}))
+            .expect_err("an empty mount names nothing and is refused");
+    }
+
+    #[test]
+    fn every_capability_the_plan_declares_round_trips() {
+        // §7 line 298 declares `register`, `report`, `inject`, `recycle`; line
+        // 310 turns a missing `report` into an `idle_fault`; line 322 makes
+        // `typing` optional and `probe` the fallback for a missing `recycle`. An
+        // external TypeScript plugin declares these exact strings against the
+        // exported schema, so a string the plan uses must never be refused here.
+        for name in ["register", "report", "inject", "recycle", "probe", "typing"] {
+            let capability: Capability = serde_json::from_value(serde_json::json!(name))
+                .unwrap_or_else(|e| panic!("{name} is a declared capability but refused: {e}"));
+            assert_eq!(capability.as_str(), name, "{name} does not round-trip");
+        }
     }
 
     #[test]
@@ -520,8 +615,7 @@ mod tests {
         assert_eq!(msg.direction(), MsgDirection::ToHost);
         assert_eq!(msg.op_name(), Some("send"));
 
-        let to_plugin =
-            serde_json::json!({"op":"probe","args":null});
+        let to_plugin = serde_json::json!({"op":"probe","args":null});
         let msg: AdapterMsg = serde_json::from_value(to_plugin).expect("host op decodes");
         assert_eq!(msg.direction(), MsgDirection::ToPlugin);
         assert_eq!(msg.op_name(), Some("probe"));
@@ -536,17 +630,22 @@ mod tests {
     fn a_frame_that_is_not_an_op_is_rejected() {
         let err = serde_json::from_value::<AdapterMsg>(serde_json::json!({"type":"noise"}))
             .expect_err("unrecognised");
-        assert!(err.to_string().contains("data did not match"), "err = {err}");
+        assert!(
+            err.to_string().contains("data did not match"),
+            "err = {err}"
+        );
     }
 
     #[test]
     fn gateway_only_ops_are_marked_and_preauth_is_hello_only() {
         assert!(PluginOp::Health(HealthArgs::default()).is_gateway());
-        assert!(PluginOp::Deliver(Delivery {
-            msg_id: "m".into(),
-            envelope: Box::new(note("x")),
-        })
-        .is_gateway());
+        assert!(
+            PluginOp::Deliver(Delivery {
+                msg_id: "m".into(),
+                envelope: Box::new(note("x")),
+            })
+            .is_gateway()
+        );
         assert!(!PluginOp::Send(Box::new(note("y"))).is_gateway());
         assert!(PluginOp::Hello(HelloArgs::default()).is_pre_auth());
         assert!(!PluginOp::Send(Box::new(note("y"))).is_pre_auth());
@@ -638,6 +737,7 @@ mod tests {
             reuse: true,
             prose: "Read the incoming task".into(),
             spec_hash: "abc".into(),
+            aggregate: Some("cluster-b".into()),
             allowed_targets: vec!["builder".into()],
             allowed_senders: vec!["*".into()],
             session_command: Some(vec!["pi".into(), "--session-id".into(), "{session}".into()]),
@@ -650,7 +750,10 @@ mod tests {
         };
         assert_eq!(welcome.role, "planner");
         assert_eq!(welcome.max_sessions, 3);
-        assert_eq!(SessionProjection::default_working().lifecycle, LifecycleMarker::created());
+        assert_eq!(
+            SessionProjection::default_working().lifecycle,
+            LifecycleMarker::created()
+        );
     }
 
     #[test]

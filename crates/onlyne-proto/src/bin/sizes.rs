@@ -11,12 +11,7 @@ use onlyne_proto::*;
 use std::mem::size_of;
 
 fn struct_row<T>(name: &str) {
-    println!(
-        "{name:<22} {:>5}  {:<30} {:>5}",
-        size_of::<T>(),
-        "-",
-        "-"
-    );
+    println!("{name:<22} {:>5}  {:<30} {:>5}", size_of::<T>(), "-", "-");
 }
 
 fn enum_row(name: &str, total: usize, variants: &[(&str, usize)]) {
@@ -67,7 +62,10 @@ fn main() {
             ("SessionSync(SessionSyncArgs)", size_of::<SessionSyncArgs>()),
             ("Subscribe(Subscribe)", size_of::<Subscribe>()),
             ("QueryLedger(LedgerQuery)", size_of::<LedgerQuery>()),
-            ("QuerySessions(QuerySessionsArgs)", size_of::<QuerySessionsArgs>()),
+            (
+                "QuerySessions(QuerySessionsArgs)",
+                size_of::<QuerySessionsArgs>(),
+            ),
             ("QueryRoles(QueryRolesArgs)", size_of::<QueryRolesArgs>()),
             ("QueryFaults(QueryFaultsArgs)", size_of::<QueryFaultsArgs>()),
             ("Control(ControlArgs)", size_of::<ControlArgs>()),
@@ -81,7 +79,10 @@ fn main() {
         &[
             ("Status(Value)", size_of::<serde_json::Value>()),
             ("Roles(QueryRolesArgs)", size_of::<QueryRolesArgs>()),
-            ("Sessions(QuerySessionsArgs)", size_of::<QuerySessionsArgs>()),
+            (
+                "Sessions(QuerySessionsArgs)",
+                size_of::<QuerySessionsArgs>(),
+            ),
             ("Ledger(LedgerQuery)", size_of::<LedgerQuery>()),
             ("Faults(QueryFaultsArgs)", size_of::<QueryFaultsArgs>()),
             ("Watch(Subscribe)", size_of::<Subscribe>()),
@@ -106,7 +107,10 @@ fn main() {
         size_of::<GatewayOp>(),
         &[
             ("Hello(HandshakeArgs)", size_of::<HandshakeArgs>()),
-            ("RegisterChannel(RegisterChannelArgs)", size_of::<RegisterChannelArgs>()),
+            (
+                "RegisterChannel(RegisterChannelArgs)",
+                size_of::<RegisterChannelArgs>(),
+            ),
             ("Deliver(Delivery)", size_of::<Delivery>()),
             ("Health(HealthArgs)", size_of::<HealthArgs>()),
             ("Bye(ByeArgs)", size_of::<ByeArgs>()),
@@ -119,11 +123,17 @@ fn main() {
         &[
             ("Hello(HelloArgs)", size_of::<HelloArgs>()),
             ("Report(Report)", size_of::<Report>()),
-            ("SessionRegister(SessionRegisterArgs)", size_of::<SessionRegisterArgs>()),
+            (
+                "SessionRegister(SessionRegisterArgs)",
+                size_of::<SessionRegisterArgs>(),
+            ),
             ("AssignAck(AssignAckArgs)", size_of::<AssignAckArgs>()),
             ("Send(Box<Envelope>)", size_of::<Box<Envelope>>()),
             ("Deliver(Delivery)", size_of::<Delivery>()),
-            ("RegisterChannel(RegisterChannelArgs)", size_of::<RegisterChannelArgs>()),
+            (
+                "RegisterChannel(RegisterChannelArgs)",
+                size_of::<RegisterChannelArgs>(),
+            ),
             ("Health(HealthArgs)", size_of::<HealthArgs>()),
             ("Typing(TypingArgs)", size_of::<TypingArgs>()),
             ("Detach(DetachArgs)", size_of::<DetachArgs>()),
@@ -159,8 +169,14 @@ fn main() {
         size_of::<Event>(),
         &[
             ("RolePresence(RolePresence)", size_of::<RolePresence>()),
-            ("SessionState(SessionStateEvent)", size_of::<SessionStateEvent>()),
-            ("LedgerState(LedgerStateEvent)", size_of::<LedgerStateEvent>()),
+            (
+                "SessionState(SessionStateEvent)",
+                size_of::<SessionStateEvent>(),
+            ),
+            (
+                "LedgerState(LedgerStateEvent)",
+                size_of::<LedgerStateEvent>(),
+            ),
             ("Fault(FaultEvent)", size_of::<FaultEvent>()),
             (
                 "GatewayPresence(String,String,GatewayHealth,Option<String>)",
@@ -174,8 +190,14 @@ fn main() {
         "Report",
         size_of::<Report>(),
         &[
-            ("Ready(String,String,u64,u64)", size_of::<(String, String, u64, u64)>()),
-            ("Heartbeat(String,u64,u64,Value)", size_of::<(String, u64, u64, serde_json::Value)>()),
+            (
+                "Ready(String,String,u64,u64)",
+                size_of::<(String, String, u64, u64)>(),
+            ),
+            (
+                "Heartbeat(String,u64,u64,Value)",
+                size_of::<(String, u64, u64, serde_json::Value)>(),
+            ),
             (
                 "Complete(String,Outcome,Option<String>,Option<String>)",
                 size_of::<(String, Outcome, Option<String>, Option<String>)>(),

@@ -58,22 +58,21 @@ fn every_endpoint_names_a_registered_role() {
 }
 
 #[test]
-fn init_fragment_self_delivery_needs_the_own_name_in_both_lists() {
+fn init_fragment_self_delivery_holds_with_and_without_the_explicit_entries() {
+    // The shipped fragment keeps `allowed_senders = ["*", "<self>"]` and
+    // `allowed_targets = ["<self>"]` as belt-and-braces. The unconditional self
+    // edge makes the row present either way, and the pair set stays identical.
     let with_self = Spec::parse_str(INIT_FRAGMENT).expect("init fragment parses");
-    assert!(has_edge(
-        &with_self.acl_edges(),
-        "planner",
-        "planner",
-        MsgKindClass::Any
-    ));
-
     let wildcard_only = Spec::parse_str(INIT_FRAGMENT_NO_SELF).expect("fragment parses");
-    assert!(!has_edge(
-        &wildcard_only.acl_edges(),
-        "planner",
-        "planner",
-        MsgKindClass::Any
-    ));
+    for spec in [&with_self, &wildcard_only] {
+        assert!(has_edge(
+            &spec.acl_edges(),
+            "planner",
+            "planner",
+            MsgKindClass::Any
+        ));
+    }
+    assert_eq!(with_self.acl_edges(), wildcard_only.acl_edges());
 }
 
 /// One expected permission lookup.
@@ -96,11 +95,11 @@ const CASES: &[Case] = &[
         expected: false,
     },
     Case {
-        name: "empty targets: no outbound to self",
+        name: "self edge exists for a role with no grants at all",
         from: "silent",
         to: "silent",
         kind: MsgKindClass::Any,
-        expected: false,
+        expected: true,
     },
     Case {
         name: "empty targets: still receives from planner",
@@ -124,27 +123,34 @@ const CASES: &[Case] = &[
         kind: MsgKindClass::Any,
         expected: true,
     },
-    // 3. Wildcard excludes self; explicit self name includes self.
+    // 3. The self edge is unconditional; the wildcard covers every other role.
     Case {
-        name: "explicit self name permits planner -> planner",
+        name: "explicit self name does not change the self row",
         from: "planner",
         to: "planner",
         kind: MsgKindClass::Any,
         expected: true,
     },
     Case {
-        name: "wildcard senders alone deny builder -> builder",
+        name: "self edge exists for builder despite wildcard senders",
         from: "builder",
         to: "builder",
         kind: MsgKindClass::Any,
-        expected: false,
+        expected: true,
     },
     Case {
-        name: "wildcard alone denies isolated -> isolated",
+        name: "self edge exists for a role that refuses all senders",
         from: "isolated",
         to: "isolated",
         kind: MsgKindClass::Any,
-        expected: false,
+        expected: true,
+    },
+    Case {
+        name: "self edge exists for the aggregate role in the control class",
+        from: "_supervisor",
+        to: "_supervisor",
+        kind: MsgKindClass::Control,
+        expected: true,
     },
     Case {
         name: "wildcard covers other roles",
@@ -244,17 +250,37 @@ fn table_driven_acl_cases() {
 }
 
 #[test]
-fn empty_targets_role_has_zero_outbound_and_still_receives() {
+fn empty_targets_role_reaches_only_itself_and_still_receives() {
     let edges = spec().acl_edges();
-    assert!(edges.iter().all(|edge| edge.from != "silent"));
-    assert!(edges.iter().any(|edge| edge.to == "silent"));
+    let outbound: Vec<&str> = edges
+        .iter()
+        .filter(|edge| edge.from == "silent")
+        .map(|edge| edge.to.as_str())
+        .collect();
+    assert!(!outbound.is_empty());
+    assert!(outbound.iter().all(|to| *to == "silent"));
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge.to == "silent" && edge.from != "silent")
+    );
 }
 
 #[test]
-fn empty_senders_role_has_zero_inbound_and_still_sends() {
+fn empty_senders_role_admits_only_itself_and_still_sends() {
     let edges = spec().acl_edges();
-    assert!(edges.iter().all(|edge| edge.to != "isolated"));
-    assert!(edges.iter().any(|edge| edge.from == "isolated"));
+    let inbound: Vec<&str> = edges
+        .iter()
+        .filter(|edge| edge.to == "isolated")
+        .map(|edge| edge.from.as_str())
+        .collect();
+    assert!(!inbound.is_empty());
+    assert!(inbound.iter().all(|from| *from == "isolated"));
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge.from == "isolated" && edge.to != "isolated")
+    );
 }
 
 #[test]
@@ -289,17 +315,46 @@ fn wildcard_expands_to_every_other_role_and_explicit_self_adds_its_own() {
     isolated_targets.sort_unstable();
     isolated_targets.dedup();
     // The wildcard grant becomes a row only where the receiver accepts
-    // `isolated`; `reviewer` and `_supervisor` name only `planner`.
+    // `isolated`; `reviewer` and `_supervisor` name only `planner`. The self row
+    // arrives from the unconditional rule.
     assert_eq!(
         isolated_targets,
-        vec!["builder", "planner", "scout", "silent"]
+        vec!["builder", "isolated", "planner", "scout", "silent"]
     );
 }
+
 #[test]
-fn wildcard_never_includes_the_role_itself() {
+fn every_registered_role_reaches_itself_with_every_class() {
+    let spec = spec();
+    let edges = spec.acl_edges();
+    for role in spec.role_names() {
+        for kind in [MsgKindClass::Any, MsgKindClass::Note, MsgKindClass::Control] {
+            assert!(
+                has_edge(&edges, &role, &role, kind),
+                "missing self edge for {role} in {kind:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_explicit_self_name_does_not_duplicate_the_self_row() {
     let edges = spec().acl_edges();
-    assert!(!has_edge(&edges, "isolated", "isolated", MsgKindClass::Any));
-    assert!(has_edge(&edges, "planner", "planner", MsgKindClass::Any));
+    // `planner` lists itself in both lists and `silent` lists nothing.
+    for role in ["planner", "silent"] {
+        let count = edges
+            .iter()
+            .filter(|edge| edge.from == role && edge.to == role)
+            .count();
+        assert_eq!(count, 3, "{role} self rows");
+    }
+}
+
+#[test]
+fn wildcard_covers_every_other_registered_role() {
+    let edges = spec().acl_edges();
+    assert!(has_edge(&edges, "isolated", "silent", MsgKindClass::Any));
+    assert!(has_edge(&edges, "planner", "reviewer", MsgKindClass::Any));
 }
 
 /// The table is the only decision surface this crate publishes; permit
@@ -311,7 +366,7 @@ fn has_edge(edges: &[AclEdge], from: &str, to: &str, kind: MsgKindClass) -> bool
 }
 
 #[test]
-fn aggregate_role_reaches_only_the_parent_visible_role() {
+fn aggregate_role_reaches_itself_and_the_parent_visible_role() {
     let mut targets: Vec<String> = spec()
         .acl_edges()
         .iter()
@@ -320,7 +375,7 @@ fn aggregate_role_reaches_only_the_parent_visible_role() {
         .collect();
     targets.sort();
     targets.dedup();
-    assert_eq!(targets, vec!["planner"]);
+    assert_eq!(targets, vec!["_supervisor", "planner"]);
 }
 
 #[test]
@@ -375,8 +430,10 @@ fn every_permitted_pair_carries_three_class_rows() {
         .iter()
         .map(|edge| (edge.from.as_str(), edge.to.as_str()))
         .collect();
-    assert_eq!(pairs.len(), 14);
+    // 13 cross-role pairs plus 7 unconditional self pairs over 7 roles.
+    assert_eq!(pairs.len(), 20);
     assert_eq!(edges.len(), pairs.len() * 3);
+    assert_eq!(edges.len(), 60);
     for (from, to) in &pairs {
         for kind in [MsgKindClass::Any, MsgKindClass::Note, MsgKindClass::Control] {
             assert!(

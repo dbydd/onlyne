@@ -61,6 +61,9 @@ impl fmt::Display for RefError {
 impl std::error::Error for RefError {}
 
 /// The gateway's local `gateway_ref` table.
+///
+/// Newest row first: a reply into a conversation threads to that
+/// conversation's most recently recorded message.
 pub struct GatewayRefStore {
     conn: Connection,
 }
@@ -136,6 +139,36 @@ impl GatewayRefStore {
                 "select channel, conversation, external_id, scene from gateway_ref
                  where handle = ?1 order by updated_at desc limit 1",
                 params![handle],
+                |row| {
+                    let scene: String = row.get(3)?;
+                    Ok(GatewayRef {
+                        channel: row.get(0)?,
+                        conversation: row.get(1)?,
+                        external_id: row.get(2)?,
+                        scene: (!scene.is_empty()).then_some(scene),
+                    })
+                },
+            )
+            .optional()
+            .map_err(|err| RefError::Sql(err.to_string()))
+    }
+
+    /// The newest row recorded for one conversation.
+    ///
+    /// A reply carries no handle when the sender addresses the conversation
+    /// alone, so the newest row for that conversation supplies the platform
+    /// message id the reply threads to.
+    pub fn newest_for_conversation(
+        &self,
+        channel: &str,
+        conversation: &str,
+    ) -> Result<Option<GatewayRef>, RefError> {
+        self.conn
+            .query_row(
+                "select channel, conversation, external_id, scene from gateway_ref
+                 where channel = ?1 and conversation = ?2
+                 order by updated_at desc, rowid desc limit 1",
+                params![channel, conversation],
                 |row| {
                     let scene: String = row.get(3)?;
                     Ok(GatewayRef {
@@ -227,6 +260,24 @@ mod tests {
         store.record("qq.bare", &bare).unwrap();
         assert_eq!(store.find(&bare).unwrap().as_deref(), Some("qq.bare"));
         assert!(store.resolve("qq.absent").unwrap().is_none());
+    }
+
+    #[test]
+    fn newest_row_wins_for_one_conversation() {
+        let mut store = GatewayRefStore::open_in_memory().unwrap();
+        store.record("tg1.older", &row("42", "99")).unwrap();
+        store.record("tg1.newer", &row("42", "100")).unwrap();
+        let newest = store
+            .newest_for_conversation("telegram", "42")
+            .unwrap()
+            .expect("rows exist for this conversation");
+        assert_eq!(newest.external_id, "100");
+        assert!(
+            store
+                .newest_for_conversation("telegram", "absent")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

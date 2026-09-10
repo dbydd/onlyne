@@ -1,16 +1,16 @@
 //! `onlyne` — one socket, one protocol, three sibling binaries.
 //!
-//! Message verbs (`send`, `reply`, `complete`, `handoff`, `control`, `who`,
-//! `ping`) and bare admin nouns (`status`, `roles`, `sessions`, `ledger`,
-//! `faults`, `watch`, `history`, `spec_diff`, `reload`, `wait-ready`,
-//! `repair`, `cluster export-prose`) share one resolution path: resolve a
-//! socket, write one frame, print one JSON line, return one exit code. The
-//! admin nouns keep that path inside this process, so `onlyne server roles`
-//! and `onlyne roles` issue the same frame.
-//!
-//! `onlyne server init|run|start|stop|status|generate|reload`, `onlyne
-//! client`, and `onlyne gateway run|list|auth` exec a sibling binary and
-//! inherit stdio.
+//! `onlyne server <verb>` execs the server binary for the process verbs
+//! (`init`, `run`, `start`, `stop`, `generate`, `reload`), and `onlyne status`,
+//! `onlyne reload`, and `onlyne server status` are in-process admin-socket
+//! queries with no exec, because keeping `status` working while the daemon runs
+//! and its binary is absent is worth the rule; `onlyne client <verb>` and
+//! `onlyne gateway run|list|auth` exec their sibling, `onlyne gateway status`
+//! queries here, and the admin nouns (`roles`, `sessions`, `ledger`, `faults`,
+//! `watch`, `history`, `spec_diff`, `wait-ready`, `repair`) plus the message
+//! verbs (`send`, `reply`, `complete`, `handoff`, `control`, `who`, `ping`)
+//! share one path in this process: resolve a socket, write one frame, print one
+//! JSON line, return one exit code.
 
 mod admin;
 mod flags;
@@ -35,7 +35,7 @@ use crate::flags::GlobalFlags;
     bin_name = "onlyne",
     version,
     about = "One socket, one protocol, three sibling binaries.",
-    subcommand_negates_reqs = true,
+    subcommand_negates_reqs = true
 )]
 struct Cli {
     #[command(flatten)]
@@ -125,8 +125,8 @@ enum ServerVerb {
     Start(RestArgs),
     /// Signal the recorded daemon and wait for it to exit.
     Stop(RestArgs),
-    /// Report process state for a server root.
-    Status(RestArgs),
+    /// Report server status through the admin socket.
+    Status,
     /// Render role workspaces from the templates under the server root.
     Generate(RestArgs),
     /// Re-read the spec on disk.
@@ -380,12 +380,7 @@ fn run() -> i32 {
         }
         Verb::Completions(cmd) => {
             let mut stdout = std::io::stdout();
-            clap_complete::generate(
-                cmd.shell,
-                &mut Cli::command(),
-                "onlyne",
-                &mut stdout,
-            );
+            clap_complete::generate(cmd.shell, &mut Cli::command(), "onlyne", &mut stdout);
             runtime::EXIT_OK
         }
     }
@@ -431,7 +426,7 @@ fn server(flags: &GlobalFlags, cmd: ServerCmd) -> i32 {
         ServerVerb::Run(rest) => sibling_exec("onlyne-server", "run", &rest),
         ServerVerb::Start(rest) => sibling_exec("onlyne-server", "start", &rest),
         ServerVerb::Stop(rest) => sibling_exec("onlyne-server", "stop", &rest),
-        ServerVerb::Status(rest) => sibling_exec("onlyne-server", "status", &rest),
+        ServerVerb::Status => admin::status(flags),
         ServerVerb::Generate(rest) => sibling_exec("onlyne-server", "generate", &rest),
         ServerVerb::Reload(rest) => sibling_exec("onlyne-server", "reload", &rest),
         ServerVerb::Roles(cmd) => admin::roles(flags, cmd.args),
@@ -461,7 +456,7 @@ fn unknown_server_verb(args: &[String]) -> i32 {
 }
 
 /// The `gateway` group. The platform verbs exec `onlyne-gateway`; `status`
-/// reports the registered gateways, read from `AdminOp::Status`.
+/// reports the connected gateways from `AdminOp::Status::connected_gateways`.
 fn gateway(flags: &GlobalFlags, cmd: GatewayCmd) -> i32 {
     let Some(verb) = cmd.verb else {
         return forward::exec("onlyne-gateway", &[]);

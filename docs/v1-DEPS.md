@@ -77,6 +77,7 @@ This inventory reads every `Cargo.toml` under `crates/` except `crates/onlyne-le
 | `tracing` | `0.1` | [] | onlyne-adapter, onlyne-client, onlyne-server, onlyne-store, onlyne-testkit |
 | `tracing` | workspace | [] | onlyne-gateway-feishu, onlyne-session |
 | `unicode-display-width` | `0.2` | [] | onlyne-gateway |
+| `unicode-segmentation` | `1` | [] | onlyne-store |
 | `uuid` | `1.0` | [`v4`, `serde`] | onlyne-client |
 | `uuid` | `1` | [`v4`, `serde`] | onlyne-server |
 | `uuid` | workspace | [] | onlyne-proto |
@@ -128,6 +129,7 @@ A crate in parentheses declares the dependency in `[dev-dependencies]` or `[buil
 | `onlyne-server` | `onlyne-proto` | `dependencies` | `1.0.0` | `../onlyne-proto` |
 | `onlyne-server` | `onlyne-store` | `dependencies` | `1.0.0` | `../onlyne-store` |
 | `onlyne-server` | `onlyne-testkit` | `dev-dependencies` | `1.0.0` | `../onlyne-testkit` |
+| `onlyne-store` | `onlyne-frame` | `dev-dependencies` | unspecified | `../onlyne-frame` |
 | `onlyne-store` | `onlyne-proto` | `dependencies` | unspecified | `../onlyne-proto` |
 | `onlyne-store` | `onlyne-session` | `dependencies` | unspecified | `../onlyne-session` |
 | `onlyne-testkit` | `onlyne-adapter` | `dependencies` | unspecified | `../onlyne-adapter` |
@@ -290,6 +292,7 @@ pulldown-cmark = "0.12"
 qrcode = { version = "0.14", default-features = false }
 resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts"] }
 unicode-display-width = "0.2"
+unicode-segmentation = "1"                                # onlyne-store cuts ledger.out_head on a grapheme boundary
 
 # platform SDKs and their HTTP transport, gateway side only
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots", "multipart"] }  # forced by onlyne-gateway-feishu (multipart image upload) and onlyne-gateway-qqbot

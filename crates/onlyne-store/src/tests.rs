@@ -23,9 +23,7 @@ mod ledger_gates {
     }
 
     fn fixed_time(offset: i64) -> chrono::DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 9, 10, 12, 0, 0)
-            .unwrap()
-            + Duration::seconds(offset)
+        Utc.with_ymd_and_hms(2026, 9, 10, 12, 0, 0).unwrap() + Duration::seconds(offset)
     }
 
     fn envelope(kind: MsgKind, text: &str, op_id: Option<&str>) -> Envelope {
@@ -63,7 +61,9 @@ mod ledger_gates {
             observed_json: format!("{{\"observed\":\"{value}\"}}"),
             generation,
             seq,
-            backend_ref: format!("{{\"backend\":\"fake\",\"task_id\":\"task-1\",\"value\":\"{value}\"}}"),
+            backend_ref: format!(
+                "{{\"backend\":\"fake\",\"task_id\":\"task-1\",\"value\":\"{value}\"}}"
+            ),
             mismatch_count: seq,
             updated_at: 1_789_000_000 + seq,
         }
@@ -145,7 +145,12 @@ mod ledger_gates {
     fn append_ledger_idempotency_and_null_op_id() {
         let (_dir, path) = temp_db("server.db");
         let store = ServerLedger::open(&path, 14).unwrap();
-        let first = ledger(MsgKind::Task, "first", Some("o-11111111-1111-4111-8111-111111111111"), "fp-a");
+        let first = ledger(
+            MsgKind::Task,
+            "first",
+            Some("o-11111111-1111-4111-8111-111111111111"),
+            "fp-a",
+        );
         let accepted = store.append_ledger(&first).unwrap();
         assert!(matches!(accepted, Append::Accepted(_)));
 
@@ -153,7 +158,10 @@ mod ledger_gates {
         duplicate_same.msg_id = new_uuid(12);
         let result = store.append_ledger(&duplicate_same).unwrap();
         match result {
-            Append::Duplicate { existing, fingerprint_matches } => {
+            Append::Duplicate {
+                existing,
+                fingerprint_matches,
+            } => {
                 assert!(fingerprint_matches);
                 assert_eq!(existing.msg_id, first.msg_id);
             }
@@ -165,7 +173,10 @@ mod ledger_gates {
         duplicate_different.fingerprint = Some("fp-b".to_string());
         let result = store.append_ledger(&duplicate_different).unwrap();
         match result {
-            Append::Duplicate { existing, fingerprint_matches } => {
+            Append::Duplicate {
+                existing,
+                fingerprint_matches,
+            } => {
                 assert!(!fingerprint_matches);
                 assert_eq!(existing.fingerprint.as_deref(), Some("fp-a"));
             }
@@ -176,19 +187,41 @@ mod ledger_gates {
         note_a.msg_id = new_uuid(14);
         let mut note_b = ledger(MsgKind::Note, "b", None, "note-b");
         note_b.msg_id = new_uuid(15);
-        assert!(matches!(store.append_ledger(&note_a).unwrap(), Append::Accepted(_)));
-        assert!(matches!(store.append_ledger(&note_b).unwrap(), Append::Accepted(_)));
+        assert!(matches!(
+            store.append_ledger(&note_a).unwrap(),
+            Append::Accepted(_)
+        ));
+        assert!(matches!(
+            store.append_ledger(&note_b).unwrap(),
+            Append::Accepted(_)
+        ));
     }
 
     #[test]
     fn monotonic_session_gate_accepts_only_newer_watermarks() {
         let (_dir, path) = temp_db("client.db");
         let store = ClientStore::open(&path).unwrap();
-        assert!(store.upsert_session("task-1", &versioned(1, 5, "a")).unwrap());
-        assert!(!store.upsert_session("task-1", &versioned(1, 4, "b")).unwrap());
+        assert!(
+            store
+                .upsert_session("task-1", &versioned(1, 5, "a"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .upsert_session("task-1", &versioned(1, 4, "b"))
+                .unwrap()
+        );
         assert_eq!(store.get_session("task-1").unwrap().unwrap().seq, 5);
-        assert!(store.upsert_session("task-1", &versioned(2, 0, "c")).unwrap());
-        assert!(!store.upsert_session("task-1", &versioned(1, 99, "d")).unwrap());
+        assert!(
+            store
+                .upsert_session("task-1", &versioned(2, 0, "c"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .upsert_session("task-1", &versioned(1, 99, "d"))
+                .unwrap()
+        );
         let row = store.get_session("task-1").unwrap().unwrap();
         assert_eq!((row.generation, row.seq), (2, 0));
         assert!(row.desired_json.contains("c"));
@@ -220,7 +253,12 @@ mod ledger_gates {
 
         let (_dir, path) = temp_db("server.db");
         let store = ServerLedger::open(&path, 14).unwrap();
-        let mut row = ledger(MsgKind::Task, "first", Some("o-22222222-2222-4222-8222-222222222222"), "fp-a");
+        let mut row = ledger(
+            MsgKind::Task,
+            "first",
+            Some("o-22222222-2222-4222-8222-222222222222"),
+            "fp-a",
+        );
         row.msg_id = new_uuid(20);
         store.append_ledger(&row).unwrap();
         store.mark_in_flight(&row.msg_id).unwrap();
@@ -239,16 +277,32 @@ mod ledger_gates {
     fn queued_for_fifo_and_requeue_in_flight_preserves_rows() {
         let (_dir, path) = temp_db("server.db");
         let store = ServerLedger::open(&path, 14).unwrap();
-        let mut second = ledger(MsgKind::Task, "second", Some("o-33333333-3333-4333-8333-333333333333"), "fp-2");
+        let mut second = ledger(
+            MsgKind::Task,
+            "second",
+            Some("o-33333333-3333-4333-8333-333333333333"),
+            "fp-2",
+        );
         second.msg_id = new_uuid(30);
         second.enqueued_at = crate::rfc3339(fixed_time(20));
-        let mut first = ledger(MsgKind::Task, "first", Some("o-44444444-4444-4444-8444-444444444444"), "fp-1");
+        let mut first = ledger(
+            MsgKind::Task,
+            "first",
+            Some("o-44444444-4444-4444-8444-444444444444"),
+            "fp-1",
+        );
         first.msg_id = new_uuid(31);
         first.enqueued_at = crate::rfc3339(fixed_time(10));
         store.append_ledger(&second).unwrap();
         store.append_ledger(&first).unwrap();
         let queued = store.queued_for("worker", 10).unwrap();
-        assert_eq!(queued.iter().map(|row| row.msg_id.as_str()).collect::<Vec<_>>(), vec![first.msg_id.as_str(), second.msg_id.as_str()]);
+        assert_eq!(
+            queued
+                .iter()
+                .map(|row| row.msg_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![first.msg_id.as_str(), second.msg_id.as_str()]
+        );
 
         store.mark_in_flight(&first.msg_id).unwrap();
         assert_eq!(store.in_flight_for("worker").unwrap().len(), 1);
@@ -271,8 +325,16 @@ mod ledger_gates {
         store.append_ledger(&fresh).unwrap();
         assert_eq!(store.expire_queued_before(fixed_time(10)).unwrap(), 1);
         let rows = store.ledger_query(Default::default()).unwrap();
-        let old_state = rows.iter().find(|row| row.msg_id == old.msg_id).unwrap().state;
-        let fresh_state = rows.iter().find(|row| row.msg_id == fresh.msg_id).unwrap().state;
+        let old_state = rows
+            .iter()
+            .find(|row| row.msg_id == old.msg_id)
+            .unwrap()
+            .state;
+        let fresh_state = rows
+            .iter()
+            .find(|row| row.msg_id == fresh.msg_id)
+            .unwrap()
+            .state;
         assert_eq!(old_state, LedgerState::Expired);
         assert_eq!(fresh_state, LedgerState::Queued);
     }
@@ -281,9 +343,19 @@ mod ledger_gates {
     fn prune_nulls_old_acked_body_and_keeps_out_head_and_fresh_body() {
         let (_dir, path) = temp_db("server.db");
         let store = ServerLedger::open(&path, 14).unwrap();
-        let mut old = ledger(MsgKind::Task, "old body", Some("o-55555555-5555-4555-8555-555555555555"), "fp-old");
+        let mut old = ledger(
+            MsgKind::Task,
+            "old body",
+            Some("o-55555555-5555-4555-8555-555555555555"),
+            "fp-old",
+        );
         old.msg_id = new_uuid(50);
-        let mut fresh = ledger(MsgKind::Task, "fresh body", Some("o-66666666-6666-4666-8666-666666666666"), "fp-fresh");
+        let mut fresh = ledger(
+            MsgKind::Task,
+            "fresh body",
+            Some("o-66666666-6666-4666-8666-666666666666"),
+            "fp-fresh",
+        );
         fresh.msg_id = new_uuid(51);
         store.append_ledger(&old).unwrap();
         store.append_ledger(&fresh).unwrap();
@@ -297,43 +369,139 @@ mod ledger_gates {
         assert_eq!(old_row.body_json, None);
         assert_eq!(old_row.out_head.as_deref(), Some("old body"));
         let fresh_row = rows.iter().find(|row| row.msg_id == fresh.msg_id).unwrap();
-        assert!(fresh_row.body_json.as_deref().unwrap().contains("fresh body"));
+        assert!(
+            fresh_row
+                .body_json
+                .as_deref()
+                .unwrap()
+                .contains("fresh body")
+        );
     }
 
     #[test]
     fn intent_queue_lifecycle_and_flush_order() {
         let (_dir, path) = temp_db("client.db");
         let store = ClientStore::open(&path).unwrap();
-        let env = envelope(MsgKind::Task, "intent", Some("o-77777777-7777-4777-8777-777777777777"));
+        let env = envelope(
+            MsgKind::Task,
+            "intent",
+            Some("o-77777777-7777-4777-8777-777777777777"),
+        );
         let env_json = serde_json::to_value(&env).unwrap();
-        assert!(store.enqueue_intent(env.op_id.as_deref().unwrap(), &env_json).unwrap());
+        assert!(
+            store
+                .enqueue_intent(env.op_id.as_deref().unwrap(), &env_json)
+                .unwrap()
+        );
         let now = Utc::now();
-        assert_eq!(store.due_intents(now - Duration::seconds(1), 10).unwrap().len(), 0);
-        assert_eq!(store.due_intents(now + Duration::seconds(1), 10).unwrap().len(), 1);
-        assert!(store
-            .bump_intent(env.op_id.as_deref().unwrap(), now + Duration::seconds(20), "retry")
-            .unwrap());
-        assert_eq!(store.due_intents(now + Duration::seconds(10), 10).unwrap().len(), 0);
-        assert_eq!(store.due_intents(now + Duration::seconds(21), 10).unwrap()[0].state, "retrying");
-        assert!(store.accept_intent(env.op_id.as_deref().unwrap(), &json!({"ok": true})).unwrap());
-        assert_eq!(store.due_intents(now + Duration::seconds(100), 10).unwrap().len(), 0);
+        assert_eq!(
+            store
+                .due_intents(now - Duration::seconds(1), 10)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            store
+                .due_intents(now + Duration::seconds(1), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .bump_intent(
+                    env.op_id.as_deref().unwrap(),
+                    now + Duration::seconds(20),
+                    "retry"
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .due_intents(now + Duration::seconds(10), 10)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            store.due_intents(now + Duration::seconds(21), 10).unwrap()[0].state,
+            "retrying"
+        );
+        assert!(
+            store
+                .accept_intent(env.op_id.as_deref().unwrap(), &json!({"ok": true}))
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .due_intents(now + Duration::seconds(100), 10)
+                .unwrap()
+                .len(),
+            0
+        );
 
-        let env2 = envelope(MsgKind::Task, "intent2", Some("o-88888888-8888-4888-8888-888888888888"));
+        let env2 = envelope(
+            MsgKind::Task,
+            "intent2",
+            Some("o-88888888-8888-4888-8888-888888888888"),
+        );
         let env2_json = serde_json::to_value(&env2).unwrap();
-        assert!(store.enqueue_intent(env2.op_id.as_deref().unwrap(), &env2_json).unwrap());
-        assert!(store.bump_intent(env2.op_id.as_deref().unwrap(), fixed_time(1), "one").unwrap());
-        assert!(store.bump_intent(env2.op_id.as_deref().unwrap(), fixed_time(2), "two").unwrap());
-        assert!(store.bump_intent(env2.op_id.as_deref().unwrap(), fixed_time(3), "three").unwrap());
-        assert!(store.exhaust_intent(env2.op_id.as_deref().unwrap(), "exhausted").unwrap());
+        assert!(
+            store
+                .enqueue_intent(env2.op_id.as_deref().unwrap(), &env2_json)
+                .unwrap()
+        );
+        assert!(
+            store
+                .bump_intent(env2.op_id.as_deref().unwrap(), fixed_time(1), "one")
+                .unwrap()
+        );
+        assert!(
+            store
+                .bump_intent(env2.op_id.as_deref().unwrap(), fixed_time(2), "two")
+                .unwrap()
+        );
+        assert!(
+            store
+                .bump_intent(env2.op_id.as_deref().unwrap(), fixed_time(3), "three")
+                .unwrap()
+        );
+        assert!(
+            store
+                .exhaust_intent(env2.op_id.as_deref().unwrap(), "exhausted")
+                .unwrap()
+        );
         assert_eq!(store.due_intents(fixed_time(4), 10).unwrap().len(), 0);
 
-        let env3 = envelope(MsgKind::Task, "intent3", Some("o-99999999-9999-4999-8999-999999999999"));
-        let env4 = envelope(MsgKind::Task, "intent4", Some("o-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"));
-        store.enqueue_intent(env3.op_id.as_deref().unwrap(), &serde_json::to_value(&env3).unwrap()).unwrap();
-        store.enqueue_intent(env4.op_id.as_deref().unwrap(), &serde_json::to_value(&env4).unwrap()).unwrap();
+        let env3 = envelope(
+            MsgKind::Task,
+            "intent3",
+            Some("o-99999999-9999-4999-8999-999999999999"),
+        );
+        let env4 = envelope(
+            MsgKind::Task,
+            "intent4",
+            Some("o-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        );
+        store
+            .enqueue_intent(
+                env3.op_id.as_deref().unwrap(),
+                &serde_json::to_value(&env3).unwrap(),
+            )
+            .unwrap();
+        store
+            .enqueue_intent(
+                env4.op_id.as_deref().unwrap(),
+                &serde_json::to_value(&env4).unwrap(),
+            )
+            .unwrap();
         let order = store.flush_order().unwrap();
         assert_eq!(
-            order.iter().map(|row| row.op_id.as_str()).collect::<Vec<_>>(),
+            order
+                .iter()
+                .map(|row| row.op_id.as_str())
+                .collect::<Vec<_>>(),
             vec![
                 env3.op_id.as_deref().unwrap(),
                 env4.op_id.as_deref().unwrap(),
@@ -362,8 +530,17 @@ mod ledger_gates {
         let store = ClientStore::open(&path).unwrap();
         let bridge = Bridge::new();
         let task_id = new_uuid(10);
-        let env = envelope(MsgKind::Task, "tracked", Some("o-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"));
-        store.enqueue_intent(env.op_id.as_deref().unwrap(), &serde_json::to_value(&env).unwrap()).unwrap();
+        let env = envelope(
+            MsgKind::Task,
+            "tracked",
+            Some("o-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        );
+        store
+            .enqueue_intent(
+                env.op_id.as_deref().unwrap(),
+                &serde_json::to_value(&env).unwrap(),
+            )
+            .unwrap();
         apply_persist(
             &bridge,
             &store,
@@ -484,7 +661,12 @@ mod ledger_gates {
     fn requeue_one_moves_in_flight_row_and_publishes_one_event() {
         let (_dir, path) = temp_db("server.db");
         let store = ServerLedger::open(&path, 14).unwrap();
-        let mut row = ledger(MsgKind::Task, "requeue", Some("o-cccccccc-cccc-4ccc-8ccc-cccccccccccc"), "fp-r");
+        let mut row = ledger(
+            MsgKind::Task,
+            "requeue",
+            Some("o-cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+            "fp-r",
+        );
         row.msg_id = new_uuid(61);
         store.append_ledger(&row).unwrap();
         store.mark_in_flight(&row.msg_id).unwrap();
@@ -502,7 +684,12 @@ mod ledger_gates {
     fn requeue_one_is_noop_on_queued_row() {
         let (_dir, path) = temp_db("server.db");
         let store = ServerLedger::open(&path, 14).unwrap();
-        let mut row = ledger(MsgKind::Task, "double requeue", Some("o-dddddddd-dddd-4ddd-8ddd-dddddddddddd"), "fp-d");
+        let mut row = ledger(
+            MsgKind::Task,
+            "double requeue",
+            Some("o-dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+            "fp-d",
+        );
         row.msg_id = new_uuid(62);
         store.append_ledger(&row).unwrap();
         let first = store.requeue_one(&row.msg_id).unwrap();
@@ -534,7 +721,12 @@ mod ledger_gates {
     fn requeue_one_rolls_back_when_the_event_insert_fails() {
         let (_dir, path) = temp_db("server.db");
         let store = ServerLedger::open(&path, 14).unwrap();
-        let mut row = ledger(MsgKind::Task, "rollback", Some("o-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"), "fp-e");
+        let mut row = ledger(
+            MsgKind::Task,
+            "rollback",
+            Some("o-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+            "fp-e",
+        );
         row.msg_id = new_uuid(64);
         store.append_ledger(&row).unwrap();
         store.mark_in_flight(&row.msg_id).unwrap();
@@ -579,8 +771,12 @@ mod ledger_gates {
     fn update_fault_state_moves_open_faults_and_publishes_events() {
         let (_dir, path) = temp_db("server.db");
         let store = ServerLedger::open(&path, 14).unwrap();
-        let open_id = store.record_fault(&fault_draft("task-f-1", "probe_dead")).unwrap();
-        let settled_id = store.record_fault(&fault_draft("task-f-1", "older")).unwrap();
+        let open_id = store
+            .record_fault(&fault_draft("task-f-1", "probe_dead"))
+            .unwrap();
+        let settled_id = store
+            .record_fault(&fault_draft("task-f-1", "older"))
+            .unwrap();
         store.ack_fault(settled_id).unwrap();
         let moved = store
             .update_fault_state("task-f-1", "acked", "operator ack")
@@ -609,7 +805,9 @@ mod ledger_gates {
     fn update_fault_state_rolls_back_when_the_event_insert_fails() {
         let (_dir, path) = temp_db("server.db");
         let store = ServerLedger::open(&path, 14).unwrap();
-        store.record_fault(&fault_draft("task-f-2", "probe_dead")).unwrap();
+        store
+            .record_fault(&fault_draft("task-f-2", "probe_dead"))
+            .unwrap();
         block_event_type(&path, "fault");
         let result = store.update_fault_state("task-f-2", "acked", "operator ack");
         unblock_event_type(&path);
@@ -624,5 +822,106 @@ mod ledger_gates {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].state, "open");
         assert_eq!(store.event_head().unwrap(), 0);
+    }
+
+    /// The preview is grapheme-safe: a multi-byte scalar, a combining sequence,
+    /// and a ZWJ emoji each survive whole, and the empty and exact-ceiling
+    /// bodies stay untouched.
+    #[test]
+    fn out_head_never_splits_a_multibyte_scalar() {
+        use unicode_segmentation::UnicodeSegmentation;
+
+        use crate::server::{OUT_HEAD_CLUSTERS, head_preview};
+
+        assert_eq!(head_preview(""), "");
+        assert_eq!(head_preview("héllo — v1"), "héllo — v1");
+
+        let exact: String = "é".repeat(OUT_HEAD_CLUSTERS);
+        assert_eq!(head_preview(&exact), exact);
+
+        let over: String = "é".repeat(OUT_HEAD_CLUSTERS + 1);
+        let head = head_preview(&over);
+        assert_eq!(head.graphemes(true).count(), OUT_HEAD_CLUSTERS);
+        assert_eq!(head, "é".repeat(OUT_HEAD_CLUSTERS));
+        assert!(head.is_char_boundary(head.len()));
+        assert!(head.len() < onlyne_frame::MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn out_head_keeps_combining_and_zwj_clusters_intact() {
+        use crate::server::{OUT_HEAD_CLUSTERS, head_preview};
+        use unicode_segmentation::UnicodeSegmentation;
+
+        let combining = "e\u{0301}".repeat(OUT_HEAD_CLUSTERS + 40);
+        let head = head_preview(&combining);
+        assert_eq!(head.graphemes(true).count(), OUT_HEAD_CLUSTERS);
+        assert!(head.ends_with("e\u{0301}"), "combining mark was orphaned");
+        assert!(
+            head.graphemes(true).all(|cluster| cluster == "e\u{0301}"),
+            "every kept cluster is the whole sequence"
+        );
+
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        let zwj = family.repeat(OUT_HEAD_CLUSTERS + 7);
+        let head = head_preview(&zwj);
+        assert_eq!(head.graphemes(true).count(), OUT_HEAD_CLUSTERS);
+        assert!(head.ends_with(family), "a ZWJ sequence was cut mid-cluster");
+        assert_eq!(head.matches('\u{200D}').count(), OUT_HEAD_CLUSTERS * 3);
+        assert!(head.len() < onlyne_frame::MAX_FRAME_BYTES);
+
+        let flag = "\u{1F1EF}\u{1F1F5}".repeat(OUT_HEAD_CLUSTERS + 3);
+        let head = head_preview(&flag);
+        assert_eq!(head.graphemes(true).count(), OUT_HEAD_CLUSTERS);
+        assert!(head.ends_with("\u{1F1EF}\u{1F1F5}"), "a flag was split");
+    }
+
+    /// The plan reads one task's ledger rows back in write order. Three rows
+    /// written inside one `enqueued_at` second still come back in insertion
+    /// order, and the general view keeps its newest-first presentation.
+    #[test]
+    fn task_keyed_ledger_read_is_insertion_ordered() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+        let task = new_uuid(10);
+        let mut ids = Vec::new();
+        for (index, op) in [
+            "o-66666666-6666-4666-8666-666666666666",
+            "o-77777777-7777-4777-8777-777777777777",
+            "o-88888888-8888-4888-8888-888888888888",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut row = ledger(MsgKind::Task, "payload", Some(op), "fp-order");
+            row.msg_id = new_uuid(70 + index as u8);
+            row.enqueued_at = crate::rfc3339(fixed_time(0));
+            store.append_ledger(&row).unwrap();
+            ids.push(row.msg_id);
+        }
+
+        let ordered = store.ledger_task(&task, 10).unwrap();
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|row| row.msg_id.as_str())
+                .collect::<Vec<_>>(),
+            ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            "task-keyed read follows the write order"
+        );
+
+        let view = store
+            .ledger_query(LedgerQuery {
+                task: Some(task.clone()),
+                limit: 10,
+                ..LedgerQuery::default()
+            })
+            .unwrap();
+        assert_eq!(
+            view.iter()
+                .map(|row| row.msg_id.as_str())
+                .collect::<Vec<_>>(),
+            ids.iter().rev().map(String::as_str).collect::<Vec<_>>(),
+            "the general view stays newest first"
+        );
     }
 }

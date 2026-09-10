@@ -120,12 +120,27 @@ impl Output {
     }
 }
 
+/// Route `tracing` output to stderr, which `start` redirects into
+/// `.onlyne/logs/server.log` (plan §2).
+///
+/// A process that already installed a subscriber keeps it, so a test harness
+/// can capture its own spans.
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 pub async fn entrypoint() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     entrypoint_with(args).await
 }
 
 pub async fn entrypoint_with(args: Vec<String>) -> i32 {
+    init_logging();
     let argv = std::iter::once("onlyne-server".to_string()).chain(args);
     let cli = match Cli::try_parse_from(argv) {
         Ok(cli) => cli,
@@ -307,6 +322,34 @@ async fn run_command(root: &Path, output: Output) -> i32 {
     }
 }
 
+/// Remove a run socket left behind by a server that is no longer running.
+///
+/// A `SIGKILL`ed server leaves its bound path on disk. The readiness poll below
+/// watches that path, so the start path removes it first; the recorded pid
+/// decides, and a live pid keeps the path for the already-running answer above.
+pub fn clear_stale_socket(layout: &ServerRoot) -> bool {
+    let socket = layout.socket_path();
+    if !socket.exists() {
+        return false;
+    }
+    if read_pid(&layout.pid_path())
+        .filter(|pid| process_alive(*pid))
+        .is_some()
+    {
+        return false;
+    }
+    match fs::remove_file(&socket) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "onlyne-server: remove the stale socket {}: {error}",
+                socket.display()
+            );
+            false
+        }
+    }
+}
+
 /// Spawn `run` detached, record its pid, and wait for the admin socket.
 async fn start_command(root: &Path, output: Output) -> i32 {
     let layout = ServerRoot::resolve(root);
@@ -315,6 +358,7 @@ async fn start_command(root: &Path, output: Output) -> i32 {
         eprintln!("onlyne: server already running at pid {pid}");
         return 2;
     }
+    clear_stale_socket(&layout);
     if let Err(error) = layout.bootstrap() {
         eprintln!("onlyne-server: {error}");
         return 1;

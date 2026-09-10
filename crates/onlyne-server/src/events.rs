@@ -141,7 +141,11 @@ pub fn replay(
     limit: u32,
 ) -> anyhow::Result<ReplayPage> {
     let head = state.event_head().max(0) as u64;
-    let wanted = if limit == 0 { DEFAULT_REPLAY_LIMIT } else { limit };
+    let wanted = if limit == 0 {
+        DEFAULT_REPLAY_LIMIT
+    } else {
+        limit
+    };
     let records = state
         .ledger
         .events_since(since_seq.min(i64::MAX as u64) as i64, wanted)

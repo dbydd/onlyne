@@ -30,10 +30,14 @@ pub const CLIENT_DDL: &str = r#"CREATE TABLE IF NOT EXISTS sessions(
   observed_json TEXT NOT NULL,
   backend TEXT,
   backend_ref TEXT,
+  -- docs/v1-PLAN.md:356 requires the (generation, seq) gate and the kernel's isolate-after-N and terminate-after-N policy needs a persisted counter, so this pair carries DEFAULT_ISOLATE_AFTER and DEFAULT_TERMINATE_AFTER from crates/onlyne-session/src/reconcile.rs; the fence at line 368 lists neither column.
   desired_json TEXT NOT NULL,
   mismatch_count INTEGER NOT NULL DEFAULT 0,
-  updated_at INTEGER NOT NULL
+  -- docs/v1-PLAN.md:368 defers the session fields to the lifecycle store, whose SessionRecord.updated_at in crates/onlyne-session/src/reconcile.rs is i64 unix seconds, and the store encodes those seconds through its own helper on every write.
+  updated_at TEXT NOT NULL
 );
+-- Secondary index for the kernel's session-addressed delete and close paths; task_id stays the primary key so a task holds one projection row.
+CREATE INDEX IF NOT EXISTS sessions_session_id_idx ON sessions(session_id);
 CREATE TABLE IF NOT EXISTS intents(
   op_id TEXT PRIMARY KEY,
   env_json TEXT NOT NULL,
@@ -60,6 +64,7 @@ CREATE TABLE IF NOT EXISTS config_cache(
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+-- docs/v1-PLAN.md:368 lists no client faults table; the bridge records faults locally so a restart still shows them.
 CREATE TABLE IF NOT EXISTS faults(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id TEXT,
@@ -70,15 +75,16 @@ CREATE TABLE IF NOT EXISTS faults(
   desired_json TEXT,
   observed_json TEXT,
   intent TEXT,
+  -- docs/v1-PLAN.md:287 makes an exhausted intent observable through the local fault and the fault report; the attempt count is what an operator reads before intervening.
   attempt INTEGER,
   backend_ref TEXT,
   kind TEXT NOT NULL,
   reason TEXT NOT NULL,
   state TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  -- docs/v1-PLAN.md:364 types the server's faults.created_at TEXT while FaultRecord.created_at in crates/onlyne-session/src/reconcile.rs is i64 unix seconds, and the store encodes those seconds through its own helper on every write.
+  created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS faults_task_kind_generation_idx ON faults(task_id,kind,generation);
-CREATE INDEX IF NOT EXISTS faults_state_idx ON faults(state);
 CREATE TABLE IF NOT EXISTS events(
   seq INTEGER PRIMARY KEY,
   type TEXT NOT NULL,
@@ -157,6 +163,26 @@ impl ClientStore {
         Ok(changed == 1)
     }
 
+    /// Push an intent's next attempt forward without consuming its budget.
+    ///
+    /// A transport failure is not the server refusing the message, so the plan's
+    /// disconnect rule keeps the queue intact and the reconnect flushes it
+    /// (plan §6 line 289). Counting those against `intent.attempts` would drop a
+    /// completion that was written while the link was down.
+    pub fn defer_intent(
+        &self,
+        op_id: &str,
+        next_attempt_at: DateTime<Utc>,
+        error: &str,
+    ) -> StoreResult<bool> {
+        let conn = self.conn()?;
+        let changed = conn.execute(
+            "UPDATE intents SET state='retrying',next_attempt_at=?,last_error=?,updated_at=? WHERE op_id=? AND state IN ('pending','retrying')",
+            params![rfc3339(next_attempt_at), error, rfc3339(Utc::now()), op_id],
+        )?;
+        Ok(changed == 1)
+    }
+
     pub fn accept_intent(&self, op_id: &str, receipt_json: &Value) -> StoreResult<bool> {
         let conn = self.conn()?;
         let changed = conn.execute(
@@ -214,7 +240,7 @@ impl ClientStore {
         let conn = self.conn()?;
         Ok(conn.execute(
             "INSERT INTO out_head_cache(task_id,head) VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET head=excluded.head",
-            params![task_id, head],
+            params![task_id, crate::server::head_preview(head)],
         )? == 1)
     }
 
@@ -309,7 +335,7 @@ impl SessionLedger for ClientStore {
                 version.backend_ref,
                 version.desired_json,
                 version.mismatch_count,
-                version.updated_at
+                crate::server::unix_to_rfc3339(version.updated_at)
             ],
         )?;
         Ok(changed == 1)
@@ -361,7 +387,7 @@ impl SessionLedger for ClientStore {
                 fault.kind,
                 fault.reason,
                 fault.state,
-                fault.created_at
+                crate::server::unix_to_rfc3339(fault.created_at)
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -432,7 +458,7 @@ fn session_record_row(r: &Row<'_>) -> rusqlite::Result<SessionRecord> {
         seq: r.get(9)?,
         backend_ref: r.get(10)?,
         mismatch_count: r.get(11)?,
-        updated_at: r.get(12)?,
+        updated_at: crate::server::rfc3339_to_unix(&r.get::<_, String>(12)?),
     })
 }
 
@@ -443,22 +469,32 @@ fn fault_record_row(r: &Row<'_>) -> rusqlite::Result<FaultRecord> {
         session_id: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
         generation: r.get::<_, Option<i64>>(3)?.unwrap_or_default(),
         seq: r.get::<_, Option<i64>>(4)?.unwrap_or_default(),
-        desired_json: r.get::<_, Option<String>>(5)?.unwrap_or_else(|| "{}".to_string()),
-        observed_json: r.get::<_, Option<String>>(6)?.unwrap_or_else(|| "{}".to_string()),
+        desired_json: r
+            .get::<_, Option<String>>(5)?
+            .unwrap_or_else(|| "{}".to_string()),
+        observed_json: r
+            .get::<_, Option<String>>(6)?
+            .unwrap_or_else(|| "{}".to_string()),
         intent: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
         attempt: r.get::<_, Option<i64>>(8)?.unwrap_or_default(),
-        backend_ref: r.get::<_, Option<String>>(9)?.unwrap_or_else(|| "{}".to_string()),
+        backend_ref: r
+            .get::<_, Option<String>>(9)?
+            .unwrap_or_else(|| "{}".to_string()),
         kind: r.get(10)?,
         reason: r.get(11)?,
         state: r.get(12)?,
-        created_at: r.get::<_, Option<i64>>(13)?.unwrap_or_default(),
+        created_at: r
+            .get::<_, Option<String>>(13)?
+            .map(|text| crate::server::rfc3339_to_unix(&text))
+            .unwrap_or_default(),
     })
 }
 
 fn intent_row(r: &Row<'_>) -> rusqlite::Result<IntentRow> {
     let env_text: String = r.get(1)?;
     let receipt_text: Option<String> = r.get(5)?;
-    let env_json = serde_json::from_str(&env_text).map_err(|e| conversion_error(1, e.to_string()))?;
+    let env_json =
+        serde_json::from_str(&env_text).map_err(|e| conversion_error(1, e.to_string()))?;
     let receipt_json = receipt_text
         .map(|text| serde_json::from_str(&text).map_err(|e| conversion_error(5, e.to_string())))
         .transpose()?;

@@ -162,11 +162,7 @@ fn folder_record_id(runner: &dyn Runner, command: &str, path: &Path) -> Option<S
 }
 
 /// Look up the Orca project setup id whose path matches a workspace path.
-fn folder_record_setup_id(
-    runner: &dyn Runner,
-    command: &str,
-    path: &Path,
-) -> Option<String> {
+fn folder_record_setup_id(runner: &dyn Runner, command: &str, path: &Path) -> Option<String> {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let output = runner
         .run(
@@ -364,7 +360,11 @@ mod tests {
                 _env: &BTreeMap<String, String>,
             ) -> Result<CommandOutput> {
                 self.calls.lock().unwrap().push(args.to_vec());
-                let text = args.iter().map(String::as_str).collect::<Vec<_>>().join(" ");
+                let text = args
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let body = if text.contains("setup-delete") {
                     serde_json::json!({"ok": true}).to_string()
                 } else if text.contains("setups") {
@@ -399,7 +399,11 @@ mod tests {
         let state = prune_folder_record(&runner, "orca", missing);
         assert_eq!(state, FolderRecordState::Pruned);
         let calls = runner.calls.lock().unwrap();
-        assert!(calls.iter().any(|args| args.contains(&"setup-delete".to_string())));
+        assert!(
+            calls
+                .iter()
+                .any(|args| args.contains(&"setup-delete".to_string()))
+        );
     }
 
     #[test]

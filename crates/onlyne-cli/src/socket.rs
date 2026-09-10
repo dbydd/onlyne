@@ -27,8 +27,8 @@ pub struct SocketTarget {
 pub struct NoSocket;
 
 impl NoSocket {
-    pub const MESSAGE: &'static str =
-        "onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace";
+    /// The canonical hint, owned by `onlyne_proto::text`.
+    pub const MESSAGE: &'static str = onlyne_proto::NO_SOCKET_MESSAGE;
 }
 
 fn hint_surface(hint: AsArg) -> Option<Surface> {
@@ -64,8 +64,9 @@ pub fn resolve_socket(flags: &GlobalFlags) -> Result<SocketTarget, NoSocket> {
         });
     }
     if let Some(root) = &flags.server_root {
+        let path = root.join(SOCKET_RELATIVE);
         return Ok(SocketTarget {
-            path: root.join(SOCKET_RELATIVE),
+            path,
             surface: Surface::Admin,
         });
     }

@@ -18,8 +18,10 @@ pub const OP_ID_CONFLICT_MESSAGE: &str = "op_id conflict: request differs from d
 
 /// The response body carried by [`Frame::Res`].
 ///
-/// `ok = true` pairs with `data`; `ok = false` pairs with `error`. A duplicate
-/// `op_id` answers with both: the rejection plus the original receipt.
+/// `ok = true` carries `data` and `ok = false` carries `error`, and neither may
+/// omit its own half. The one pair is the duplicate `op_id` replay: `ok = false`
+/// with an `error` naming `duplicate` and the replayed receipt in `data`, which
+/// is the shape `docs/v1-PLAN.md` case 3 at line 502 compares byte for byte.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct ResBody {
@@ -231,10 +233,7 @@ pub type GatewayFrame = Frame<GatewayOp>;
 
 impl<R> Frame<R> {
     pub fn req(id: impl Into<String>, op: R) -> Self {
-        Frame::Req {
-            id: id.into(),
-            op,
-        }
+        Frame::Req { id: id.into(), op }
     }
 
     /// The request id, when this frame opens or answers one.
@@ -288,8 +287,6 @@ impl Frame {
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -361,17 +358,25 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicate_rejection_still_carries_the_original_data() {
-        let body = ResBody::err_with_data(
+    fn a_response_pairs_data_with_error_only_for_the_duplicate_replay() {
+        let accepted = ResBody::ok(serde_json::json!({"msg_id": "m1"}));
+        assert!(accepted.ok);
+        assert!(accepted.error.is_none(), "an acceptance names no error");
+
+        let replay = ResBody::err_with_data(
             ErrorCode::Duplicate,
             "already accepted",
             None,
             serde_json::json!({"msg_id": "m1"}),
         );
-        let value = serde_json::to_value(&body).expect("encode");
+        let value = serde_json::to_value(&replay).expect("encode");
         assert_eq!(value["ok"], false);
         assert_eq!(value["data"]["msg_id"], "m1");
         assert_eq!(value["error"]["code"], "duplicate");
+
+        let denied = ResBody::err(ErrorCode::AclDenied, "denied", None);
+        assert!(denied.error.is_some(), "a rejection names its error");
+        assert!(denied.data.is_none(), "a plain rejection carries no data");
     }
 
     #[test]
@@ -442,7 +447,11 @@ mod tests {
 
     #[test]
     fn heartbeat_frames_carry_the_server_cursor() {
-        let value = serde_json::to_value(Frame::<ClientOp>::Pong { t: 7, server_seq: 42 }).expect("encode");
+        let value = serde_json::to_value(Frame::<ClientOp>::Pong {
+            t: 7,
+            server_seq: 42,
+        })
+        .expect("encode");
         assert_eq!(
             value,
             serde_json::json!({"f": "pong", "t": 7, "server_seq": 42})
@@ -473,8 +482,8 @@ mod tests {
                 hold_ms: Some(500),
             }),
         );
-        let back: Frame = serde_json::from_value(serde_json::to_value(&frame).expect("e"))
-            .expect("decode");
+        let back: Frame =
+            serde_json::from_value(serde_json::to_value(&frame).expect("e")).expect("decode");
         assert_eq!(back, frame);
         assert_eq!(back.id(), Some("r9"));
     }
@@ -605,7 +614,8 @@ mod tests {
     fn client_frame_rejects_admin_request_vocab() {
         let admin: AdminFrame = Frame::req("a2", AdminOp::Roles(QueryRolesArgs::default()));
         let value = serde_json::to_value(admin).expect("admin frame encodes");
-        let err = serde_json::from_value::<Frame>(value).expect_err("client vocab rejects admin op");
+        let err =
+            serde_json::from_value::<Frame>(value).expect_err("client vocab rejects admin op");
         assert!(err.to_string().contains("roles"), "err = {err}");
     }
 }

@@ -1,9 +1,7 @@
-use anyhow::{Context, Result, anyhow};
-use base64::Engine;
-use ed25519_dalek::SigningKey;
+use anyhow::{Result, anyhow};
 use onlyne_config::Spec;
-use onlyne_layout::{RoleWorkspace, ServerRoot, apply_private_mode, detect_legacy, LEGACY_WORKSPACE_MESSAGE};
-use rand::rngs::OsRng;
+use onlyne_layout::{LEGACY_WORKSPACE_MESSAGE, RoleWorkspace, ServerRoot, detect_legacy};
+use onlyne_net::KeyPair;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -15,16 +13,19 @@ pub struct InitArgs {
     pub prose: String,
 }
 
-fn key_material(path: &Path) -> Result<Vec<u8>> {
+/// The role identity, loaded from `role.key` or generated there.
+///
+/// The file holds the 32-byte ed25519 seed; the spec fragment publishes the
+/// matching public key. Every producer of a role key routes through
+/// `onlyne_net::KeyPair`, so the file, the fragment, and the handshake all
+/// describe one identity.
+fn role_key(path: &Path) -> Result<KeyPair> {
     if path.exists() {
-        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        if bytes.len() != 32 { return Err(anyhow!("role key must contain 32 bytes")); }
-        return Ok(bytes);
+        return KeyPair::load(path).map_err(|error| anyhow!(error.to_string()));
     }
-    let signing = SigningKey::generate(&mut OsRng);
-    let bytes = signing.to_bytes().to_vec();
-    std::fs::write(path, &bytes).with_context(|| format!("write {}", path.display()))?;
-    Ok(bytes)
+    let key = KeyPair::generate();
+    key.save(path).map_err(|error| anyhow!(error.to_string()))?;
+    Ok(key)
 }
 
 fn server_section(root: &Path) -> Result<(String, String, String)> {
@@ -40,10 +41,12 @@ pub async fn init(args: InitArgs) -> Result<String> {
     }
     let workspace = RoleWorkspace::resolve(&args.workspace);
     workspace.bootstrap()?;
-    let key = key_material(&workspace.key_path())?;
-    apply_private_mode(&workspace.key_path()).map_err(|e| anyhow!(e))?;
+    let key = role_key(&workspace.key_path())?;
     let (listen, cert_pin, _server_name) = server_section(&args.server_root)?;
-    let (host, port) = listen.rsplit_once(':').map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or(0))).unwrap_or((listen, 0));
+    let (host, port) = listen
+        .rsplit_once(':')
+        .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or(0)))
+        .unwrap_or((listen, 0));
     let config = format!(
         "role = {role:?}\ncert_pin = {pin:?}\nkey_path = {key_path:?}\nplugins = []\n\n[server]\nhost = {host:?}\nport = {port}\n",
         role = args.role,
@@ -53,19 +56,21 @@ pub async fn init(args: InitArgs) -> Result<String> {
         port = port,
     );
     std::fs::write(workspace.config_path(), config)?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&key);
-    Ok(fragment(&args.role, &encoded, &args.prose))
+    Ok(fragment(&args.role, &key.public_str(), &args.prose))
 }
 
 /// The `[[client]]` slice `init` prints for `spec.toml`.
 ///
 /// The ACL lines make the role deliverable to itself, which is what the
 /// end-to-end script exercises with `send --from planner --to planner`.
-pub fn fragment(role: &str, encoded_key: &str, prose: &str) -> String {
+/// `public_key` arrives in the `ed25519/<base64>` form `KeyPair::public_str`
+/// produces, which is the same string the handshake verifies against.
+pub fn fragment(role: &str, public_key: &str, prose: &str) -> String {
     let role = toml_string(role);
+    let key = toml_string(public_key);
+    let prose = toml_string(prose);
     format!(
-        "[[client]]\nrole = {role}\nkey = \"ed25519/{encoded_key}\"\nadmin = false\nmax_sessions = 1\nallowed_senders = [\"*\", {role}]\nallowed_targets = [{role}]\nprose = {prose}\nreuse = true\n",
-        prose = toml_string(prose),
+        "[[client]]\nrole = {role}\nkey = {key}\nadmin = false\nmax_sessions = 1\nallowed_senders = [\"*\", {role}]\nallowed_targets = [{role}]\nprose = {prose}\nreuse = true\n",
     )
 }
 
@@ -87,4 +92,6 @@ pub fn toml_string(text: &str) -> String {
     out
 }
 
-pub fn legacy_error_code() -> i32 { 2 }
+pub fn legacy_error_code() -> i32 {
+    2
+}
