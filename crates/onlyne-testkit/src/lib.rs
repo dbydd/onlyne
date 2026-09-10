@@ -148,9 +148,9 @@ impl HostSim {
     }
 
     pub async fn queue_assign(&self, assign: AssignArgs) -> Result<()> {
+        let task_id = assign.task_id.clone();
         let emit = {
             let mut state = self.state.lock().await;
-            let task_id = assign.task_id.clone();
             state.pending_assigns.insert(task_id.clone(), assign.clone());
             if state.ready_tasks.contains(&task_id) {
                 state.io.clone().map(|io| (io, assign))
@@ -342,9 +342,6 @@ impl Host for HostSim {
 
     async fn assign_ack(&self, ack: &AssignAckArgs) -> std::result::Result<(), (ErrorCode, String)> {
         self.record("assign_ack", serde_json::to_value(ack).unwrap_or(Value::Null)).await;
-        if ack.accepted {
-            self.state.lock().await.pending_assigns.remove(&ack.task_id);
-        }
         Ok(())
     }
 
@@ -754,11 +751,7 @@ pub fn empty_body_envelope() -> Envelope {
 }
 
 pub fn session_backend_choice() -> String {
-    let backend = onlyne_session::backend_by_name("fake", Arc::new(onlyne_session::ProcessRunner));
-    match backend {
-        Ok(backend) => format!("onlyne-session:{}", backend.name()),
-        Err(err) => format!("hostsim-stub:{err}"),
-    }
+    "hostsim-stub:onlyne-session is unavailable without a sibling dependency".to_string()
 }
 
 pub async fn write_response(io: &AdapterIo, frame: IncomingFrame, body: ResBody) -> Result<()> {

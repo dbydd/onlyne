@@ -347,7 +347,7 @@ impl SessionLedger for ClientStore {
     fn insert_fault(&self, fault: &FaultRecord) -> anyhow::Result<i64> {
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO faults(task_id,role,session_id,generation,seq,desired_json,observed_json,intent,attempt,backend_ref,kind,reason,state,created_at) VALUES(?,NULL,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO faults(task_id,role,session_id,generation,seq,desired_json,observed_json,intent,attempt,backend_ref,kind,reason,state,created_at) VALUES(?,NULL,?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 fault.task_id,
                 fault.session_id,

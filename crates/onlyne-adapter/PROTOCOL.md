@@ -43,9 +43,9 @@ A missing `recycle` makes the host judge resource loss through `probe`. A missin
 
 ## Handshake and errors
 
-The first frame must be `hello`. The server accepts it for exactly five seconds. Any other first frame receives `invalid`, the exact message `hello required first`, field `op`, and the connection closes. A hello that arrives after the window causes a silent close and a `tracing::warn!` entry; a local peer pid is included when available.
+The first frame must be `hello`. The server accepts it for exactly five seconds. Any other first frame receives `unauthorized`, the exact message `hello required first`, field `op`, and the connection closes. A hello that arrives after the window causes a silent close and a `tracing::warn!` entry; a local peer pid is included when available.
 
-Reachable socket errors are `invalid`, `unknown_op`, `duplicate`, `conflict`, `unauthorized`, `forbidden`, `frame_too_large`, `bad_frame`, `protocol_version`, and `internal`. Envelope validation may identify `body`, `body.text`, `body.image.mime`, or `body.image.data_base64`.
+Platform-owned data stays on the gateway side. A gateway plugin receiving `RenderSendArgs` gets envelope plus rendered text and image only. An agent receiving `AssignArgs` gets envelope, prose, and intent only. Neither serialized payload carries `platform_metadata`, `raw`, or `channel_id`. The SDK documents this rule and the conformance suite inspects the delivered bytes. The wire types carry no raw metadata field, so a plugin cannot smuggle platform data into an agent payload through these frames.
 
 ## AgentSurface
 
@@ -58,6 +58,8 @@ The optional external coding-agent face has these members. Every member returns 
 ## In-process plugin trait
 
 Gateway binaries implement `GatewayPlugin` from `onlyne-adapter`. The trait keeps platform SDK dependencies at the plugin boundary. The plugin receives finished text plus optional PNG bytes through `Outbound`; rendering stays in the gateway binary. A plugin does not link `resvg`, `pulldown-cmark`, or the test kit.
+The internal host-side multiplexer buffers frames via `QueuedFrame`, while the plugin-side send payload carries `Outbound`.
+The gateway binary converts an inbound or outbound task into an `Outbound` envelope before handing it to a plugin.
 
 The fixed signatures are:
 

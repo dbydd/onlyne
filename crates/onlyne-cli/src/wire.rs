@@ -20,24 +20,12 @@ pub enum AdminFrame {
     },
 }
 
-/// Request frame for an op the proto vocabulary does not declare yet.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case", tag = "f")]
-pub enum ExtensionFrame {
-    Req {
-        id: String,
-        op: &'static str,
-        args: serde_json::Value,
-    },
-}
-
 /// One request frame, in whichever vocabulary the surface needs.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum Outbound {
     Client(Frame),
     Admin(AdminFrame),
-    Extension(ExtensionFrame),
 }
 
 impl Outbound {
@@ -47,10 +35,6 @@ impl Outbound {
 
     pub fn admin(id: String, op: AdminOp) -> Self {
         Outbound::Admin(AdminFrame::Req { id, op })
-    }
-
-    pub fn extension(id: String, op: &'static str, args: serde_json::Value) -> Self {
-        Outbound::Extension(ExtensionFrame::Req { id, op, args })
     }
 }
 

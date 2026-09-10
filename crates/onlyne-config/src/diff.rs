@@ -30,17 +30,6 @@ pub struct RoleChange {
     pub changed_fields: Vec<String>,
 }
 
-/// One field value replacement inside a role.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct FieldChange {
-    /// Field key.
-    pub field: String,
-    /// Previous rendering.
-    pub before: String,
-    /// New rendering.
-    pub after: String,
-}
-
 impl SpecDiff {
     /// Diff two specs. Roles are keyed by `role`; routes are keyed by
     /// `gateway/channel/conversation/to.role/to.session` in document order.

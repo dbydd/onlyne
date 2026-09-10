@@ -190,7 +190,10 @@ impl fmt::Display for ErrorCode {
 
 impl std::error::Error for ErrorCode {}
 
-/// One multiplexed frame.
+/// One multiplexed frame. Boxing the observation-plane payload would only
+/// relocate the same bytes while the request arms already carry boxed
+/// envelopes, so the event size is accepted inline.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "f")]
 pub enum Frame<R = ClientOp> {

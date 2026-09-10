@@ -21,7 +21,8 @@ impl AcceptPath {
     pub fn accept_new(&self, delivery: &Delivery, accept_new: bool) -> Result<Option<SessionRef>> {
         if !accept_new { return Ok(None); }
         delivery.envelope.validate().map_err(|e| anyhow!(e.to_string()))?;
-        let task = delivery.envelope.task_id().context("delivery missing causality.task")?;
+        let task_id = delivery.envelope.task_id().context("delivery missing causality.task")?;
+        let _ = task_id;
         Ok(Some(dispatch(&self.dispatch, &delivery.envelope)?))
     }
 

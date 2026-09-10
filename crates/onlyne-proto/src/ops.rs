@@ -5,7 +5,7 @@
 //! live in [`crate::adapter`].
 
 use crate::envelope::{Envelope, MsgKind, Outcome, Principal};
-use crate::event::{EventTier, LedgerState, Lifecycle};
+use crate::event::{EventTier, LedgerState, Lifecycle, Presence};
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -80,6 +80,7 @@ pub enum RecoveryPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case", default)]
 pub struct SessionProjection {
+    #[serde(alias = "public_lifecycle")]
     pub lifecycle: Lifecycle,
     pub agent: AgentPhase,
     pub delivery: DeliveryPhase,
@@ -278,6 +279,61 @@ pub struct QuerySessionsArgs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<Lifecycle>,
     pub limit: u32,
+}
+
+/// One `query_sessions` answer row: the stored projection with its address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionRow {
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    pub session_id: String,
+    pub generation: u64,
+    pub seq: u64,
+    pub public_lifecycle: Lifecycle,
+    pub projection: SessionProjection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Outcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+/// One `query_ledger` answer row: the observable ledger projection for one send.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct LedgerEntry {
+    pub msg_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_id: Option<String>,
+    pub kind: MsgKind,
+    pub from: Principal,
+    pub to: Principal,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task: Option<String>,
+    pub attempt: u32,
+    pub state: LedgerState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out_head: Option<String>,
+    pub enqueued_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acked_at: Option<DateTime<Utc>>,
+}
+/// One `roles` answer row: the registry record plus live presence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct RoleInfo {
+    pub name: String,
+    pub admin: bool,
+    pub max_sessions: u32,
+    pub spec_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prose: Option<String>,
+    pub state: Presence,
+    pub sessions: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// `query_roles` filter.
@@ -855,6 +911,21 @@ mod tests {
         assert_eq!(value["resource"], "detached");
         assert_eq!(value["recovery"], "none");
         assert!(value.get("outcome").is_none());
+    }
+
+    #[test]
+    fn session_projection_accepts_public_lifecycle_alias() {
+        let value = serde_json::json!({
+            "public_lifecycle": "exited",
+            "agent": "gone",
+            "delivery": "accepted",
+            "resource": "closed",
+            "recovery": "none",
+            "outcome": "done"
+        });
+        let projection: SessionProjection = serde_json::from_value(value).expect("decode alias");
+        assert_eq!(projection.lifecycle, Lifecycle::Exited);
+        assert_eq!(projection.outcome, Some(Outcome::Done));
     }
 
     #[test]

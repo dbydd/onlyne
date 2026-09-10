@@ -21,7 +21,7 @@ graph LR
 
 - `onlyne-server`：server-root daemon，负责 spec 加载、路由、ledger、fault、admin socket、gateway host、workspace generate。
 - `onlyne-client`：workspace daemon，负责一个 role 的 session lifecycle、process backend、本地 intent、agent adapter socket。
-- `onlyne-gateway`：单个平台 gateway 进程，通过 `telegram`、`feishu`、`qqbot`、`weixin` 选择平台。
+- `onlyne-gateway`：单个平台 gateway 进程，运行形式为 `onlyne-gateway --platform telegram|feishu|qqbot|weixin --server-root <dir>`。
 - `onlyne`：瘦人机入口，负责 daemon exec、socket 命令、消息动词、status、watch、repair、generate、completions。
 - `onlyne-agent-fake`：testkit 产物，用于 e2e verification。
 - v1.0.0 以硬错误拒绝 legacy workspace layout、unsupported schema、old wire format。发行包无 migration tool。
@@ -46,7 +46,7 @@ cat "$tmp/planner.spec.toml" >> "$tmp/server/.onlyne/spec.toml"
 "$SRC/target/debug/onlyne" --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-期望结果：`send` 输出一行 JSON，`ok = true`，任务为 UUID，`data.state = "in_flight"`；该任务的 ledger 达到 `acked`，session projection 达到 `public_lifecycle = "exited"` 和 `outcome = "done"`。
+期望结果：`send` 输出一行 JSON，`ok = true`，任务为 UUID，`data.state = "in_flight"`；该任务的 ledger 达到 `acked`，session projection 达到 `public_lifecycle = "exited"` 和 `outcome = "done"`。完整的 init/run/reload/send 路径由 plan 定义；已落地的 `crates/onlyne-testkit/e2e/local-task.sh` 覆盖 server、client、fake agent 与 `--workspace` 上的 status。
 
 ## Directory layout
 
@@ -84,7 +84,7 @@ Legacy workspace layout 以 exit 2 结束，并输出 `onlyne: legacy workspace 
 
 `<server-root>/.onlyne/spec.toml` 是 role 名、公钥、ACL、prose、session concurrency、timeouts、routes、gateways、`session_command` 的单一真相。
 
-`onlyne-server run` 在启动时完整解析 `spec.toml`。任何未知键或类型错误会拒绝启动，并输出 `spec.toml:<line>: <message>`。`onlyne server reload` 和 `SIGHUP` 会解析到临时 config，校验通过后原子替换 live config。校验失败会保留 active config，并记录 `fault{kind:"spec_reload_failed"}`。
+`onlyne-server run` 在启动时完整解析 `spec.toml`。任何未知键或类型错误会拒绝启动，并输出 `spec.toml:<line>: <message>`。`onlyne server reload` 和 `SIGHUP` 会解析到临时 config，校验通过后原子替换 live config。校验失败会保留 active config，并记录 `fault{kind:"spec_reload_failed"}`。reload 路径由 plan 定义，随 server runtime 落地。
 
 Role registration 使用 TOML fragment。`onlyne-client init --workspace W --role R --server-root S` 创建 `W/.onlyne/keys/role.key`，写入 `W/.onlyne/config.toml`，并打印首行为 `[[client]]` 的 fragment，包含 `role` 与 `key = "ed25519/<base64>"`。操作员追加 fragment 到 `spec.toml` 后运行 `onlyne reload`。
 

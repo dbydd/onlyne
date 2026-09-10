@@ -39,13 +39,13 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use onlyne_frame::{read_frame, write_frame};
 use onlyne_proto::{
-    AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, Capability, ConfigGetArgs, Delivery,
+    AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, ConfigGetArgs, Delivery,
     DetachArgs, Envelope, ErrorCode, GatewayHealth, GatewayMount, HELLO_REQUIRED_MESSAGE,
-    HealthArgs, HelloAck, HelloArgs, HostOp, ImagePart, Mount, Outcome, PROTOCOL_VERSION,
+    HealthArgs, HostOp, ImagePart, Outcome,
     PluginOp, Principal, Receipt, RegisterChannelArgs, Report, RenderSendArgs, ResBody,
     SessionRegisterArgs, TypingArgs,
 };
-pub use onlyne_proto::MountKind;
+pub use onlyne_proto::{Capability, HelloAck, HelloArgs, Mount, MountKind, PROTOCOL_VERSION};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf, split};
 use tokio::net::UnixStream;
@@ -477,7 +477,7 @@ impl AdapterServer {
             AdapterMsg::Plugin(PluginOp::Hello(args)) => args,
             _ => {
                 let body = ResBody::err(
-                    ErrorCode::Invalid,
+                    ErrorCode::Unauthorized,
                     HELLO_REQUIRED_MESSAGE,
                     Some("op".to_string()),
                 );
@@ -485,7 +485,7 @@ impl AdapterServer {
                 let message = WireMessage::response(reply_to, body);
                 let _ = timeout(write_timeout, write_frame(&mut stream, &message)).await;
                 return Err(AdapterError::wire(
-                    ErrorCode::Invalid,
+                    ErrorCode::Unauthorized,
                     HELLO_REQUIRED_MESSAGE,
                     Some("op"),
                 ));
@@ -534,14 +534,14 @@ impl AdapterServer {
             AdapterMsg::Plugin(PluginOp::Hello(args)) => args,
             _ => {
                 let body = ResBody::err(
-                    ErrorCode::Invalid,
+                    ErrorCode::Unauthorized,
                     HELLO_REQUIRED_MESSAGE,
                     Some("op".to_string()),
                 );
                 let wire = WireMessage::response(first.id.unwrap_or_default(), body);
                 let _ = timeout(DEFAULT_WRITE_TIMEOUT, write_frame(&mut stream, &wire)).await;
                 return Err(AdapterError::wire(
-                    ErrorCode::Invalid,
+                    ErrorCode::Unauthorized,
                     HELLO_REQUIRED_MESSAGE,
                     Some("op"),
                 ));
@@ -1382,13 +1382,13 @@ mod tests {
             .await
             .expect("pre hello response");
         assert!(!body.ok);
-        assert_eq!(body.error.as_ref().map(|e| e.code), Some(ErrorCode::Invalid));
+        assert_eq!(body.error.as_ref().map(|e| e.code), Some(ErrorCode::Unauthorized));
         assert_eq!(body.error.as_ref().map(|e| e.message.as_str()), Some(HELLO_REQUIRED_MESSAGE));
         let server_err = match server_task.await.expect("server task") {
             Ok(_) => panic!("server accepted pre-hello frame"),
             Err(err) => err,
         };
-        assert_eq!(server_err.code(), Some(ErrorCode::Invalid));
+        assert_eq!(server_err.code(), Some(ErrorCode::Unauthorized));
     }
 
     struct SendHost;

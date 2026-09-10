@@ -52,10 +52,10 @@ pub use frame::{
 pub use ops::{
     AckArgs, AdminControl, AdminOp, AdminSend, AgentPhase, ByeArgs, ClientOp, ControlArgs,
     ConversationInfo, Delivery, DeliveryPhase, GatewayOp, HandshakeArgs, HealthArgs,
-    HistoryArgs, LedgerQuery, PullArgs, PullReply, QueryFaultsArgs, QueryRolesArgs,
+    HistoryArgs, LedgerEntry, LedgerQuery, PullArgs, PullReply, QueryFaultsArgs, QueryRolesArgs,
     QuerySessionsArgs, Receipt, RecoveryPhase, RegisterChannelArgs, RepairAck, RepairAdopt,
-    RepairFail, RepairRebind, RepairTarget, Report, ResourcePhase, SessionProjection,
-    SessionSyncArgs, ShutdownArgs, Subscribe, Welcome
+    RepairFail, RepairRebind, RepairTarget, Report, ResourcePhase, RoleInfo, SessionProjection,
+    SessionRow, SessionSyncArgs, ShutdownArgs, Subscribe, Welcome
 };
 
 /// Wire protocol revision, carried in every [`envelope::Envelope`] and handshake.

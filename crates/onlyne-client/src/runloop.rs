@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use onlyne_frame::{read_frame, write_frame};
 use onlyne_net::TlsConn;
-use onlyne_proto::{ClientOp, Frame, HandshakeArgs, PullArgs, PullReply, Welcome, PROTOCOL_VERSION};
+use onlyne_proto::{ClientOp, Frame, HandshakeArgs, PullArgs, Welcome, PROTOCOL_VERSION};
 use onlyne_session::default_backend;
 use onlyne_store::ClientStore;
 use std::collections::HashMap;
@@ -78,17 +78,16 @@ async fn flush_intents(state: RunState, tx: mpsc::Sender<Frame<ClientOp>>, pendi
         let envelope = serde_json::from_value(row.env_json.clone())?;
         let id = onlyne_proto::new_id(); let (response_tx, response_rx) = oneshot::channel(); pending.lock().await.insert(id.clone(), response_tx);
         tx.send(Frame::req(id, ClientOp::Send(Box::new(envelope)))).await.map_err(|_| anyhow!("writer closed"))?;
-        if let Ok(body) = response_rx.await { let frame = Frame::Res { id: String::new(), body }; let _ = state.intents.attempt(&row, Some(&frame))?; }
+        match response_rx.await { Ok(body) => { let _ = state.intents.attempt(&row, Some(&body))?; } _ => { let _ = state.intents.attempt(&row, None)?; } }
     }
     Ok(())
 }
-
 pub async fn reconnect_ladder() { for seconds in [1_u64, 2, 4, 8, 16, 32, 60] { sleep(Duration::from_secs(seconds)).await; } }
 
 pub async fn run(init: ClientInit) -> Result<()> {
     let workspace = onlyne_layout::RoleWorkspace::resolve(&init.workspace);
     let store = ClientStore::open(workspace.client_db_path())?;
-    let state = RunState::new(&init, store)?;
+    let _state = RunState::new(&init, store)?;
     let mut conn = TlsConn::connect(&init.server, &init.cert_pin).await.map_err(|e| anyhow!(e))?;
     let hello_id = onlyne_proto::new_id();
     let hello = HandshakeArgs { protocol: PROTOCOL_VERSION, role: init.role, key: init.key, signature: String::new(), agent: "onlyne-client".into(), version: env!("CARGO_PKG_VERSION").into(), aggregate: false };

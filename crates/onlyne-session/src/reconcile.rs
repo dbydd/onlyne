@@ -1367,6 +1367,40 @@ mod tests {
         let _ = reconcile_probe(&bridge, &ledger, &backend, "dead-1").unwrap();
         assert_eq!(ledger.list_faults("dead-1").unwrap().len(), 1);
     }
+    #[test]
+    fn forced_probe_failure_drives_the_dead_branch() {
+        let ledger = MemoryLedger::new();
+        ledger.track_task("forced-1", 1);
+        let bridge = Bridge::new();
+        let backend = FakeBackend::new();
+        let session = backend
+            .spawn(SpawnSpec {
+                cwd: ".".into(),
+                task_id: "forced-1".into(),
+                command: vec!["agent".into()],
+                env: BTreeMap::new(),
+                focus: None,
+                rename: None,
+            })
+            .unwrap();
+        bridge.track_live(session.clone());
+        feed_created(&bridge, &ledger, "forced-1").unwrap();
+        feed_resource_attached(&bridge, &ledger, "forced-1").unwrap();
+        feed_ready(&bridge, &ledger, "forced-1").unwrap();
+        feed_turn_started(&bridge, &ledger, "forced-1").unwrap();
+        backend.fail_probe("forced-1");
+        let probe = backend.probe(&session).unwrap();
+        assert!(!probe.alive);
+        assert!(!probe.attached);
+        let verdict = reconcile_probe(&bridge, &ledger, &backend, "forced-1").unwrap();
+        assert_eq!(verdict, ProbeVerdict::DeadFaulted);
+        let faults = ledger.list_faults("forced-1").unwrap();
+        assert_eq!(faults.len(), 1, "{faults:?}");
+        assert_eq!(faults[0].kind, "probe_dead");
+        backend.clear_probe_failure("forced-1");
+        assert!(backend.probe(&session).unwrap().alive);
+    }
+
 
     #[test]
     fn inconclusive_probe_never_judges_a_generation_dead() {

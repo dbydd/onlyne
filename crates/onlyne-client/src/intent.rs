@@ -1,10 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use onlyne_proto::{ClientOp, ErrorCode, Envelope, Frame, Receipt, Report};
+use onlyne_proto::{ClientOp, ErrorCode, Envelope, Receipt, Report, ResBody};
 use onlyne_store::{ClientStore, IntentRow};
 use rusqlite::Connection;
-use serde_json::{Value, json};
-use std::path::Path;
+use serde_json::Value;
 use std::time::Duration;
 
 pub const PERMANENT_ERRORS: &[ErrorCode] = &[
@@ -38,6 +37,8 @@ impl IntentMachine {
         Ok(self.store.enqueue_intent(op_id, &serde_json::to_value(envelope)?)?)
     }
 
+    pub fn enqueue_value(&self, op_id: &str, envelope: &Value) -> Result<bool> { Ok(self.store.enqueue_intent(op_id, envelope)?) }
+
     pub fn pending(&self) -> Result<Vec<IntentRow>> { Ok(self.store.flush_order()?) }
 
     pub fn next_delay(&self, attempt: u32) -> Duration {
@@ -45,9 +46,9 @@ impl IntentMachine {
         Duration::from_millis(self.backoff_ms.get(idx).copied().or_else(|| self.backoff_ms.last().copied()).unwrap_or(1_000))
     }
 
-    pub fn attempt(&self, row: &IntentRow, response: Option<&Frame>) -> Result<IntentResult> {
+    pub fn attempt(&self, row: &IntentRow, response: Option<&ResBody>) -> Result<IntentResult> {
         let op_id = row.op_id.as_str();
-        let Some(frame) = response else {
+        let Some(body) = response else {
             let next = row.attempt.saturating_add(1) as u32;
             if next >= self.attempts {
                 self.store.exhaust_intent(op_id, "intent attempts exhausted")?;
@@ -58,7 +59,6 @@ impl IntentMachine {
             self.store.bump_intent(op_id, due, "connection unavailable")?;
             return Ok(IntentResult::Retryable(ErrorCode::Internal, "connection unavailable".into()));
         };
-        let Frame::Res { body, .. } = frame else { return Ok(IntentResult::Retryable(ErrorCode::BadFrame, "expected response".into())); };
         self.apply_response(row, body)
     }
 
@@ -99,7 +99,9 @@ impl IntentMachine {
     fn record_exhausted(&self, env: &Value, attempt: i64, reason: &str) -> Result<()> {
         let task = env.get("causality").and_then(|v| v.get("task")).and_then(Value::as_str).unwrap_or("");
         let _ = onlyne_session::record_fault(&self.store, task, "intent_exhausted", "intent", reason)?;
-        let _ = (attempt, json!(Report::Fault { task_id: Some(task.to_string()), session_id: None, generation: None, seq: None, kind: "intent_exhausted".into(), reason: reason.into(), desired: None, observed: None }));
+        let _ = attempt;
+        let report = Report::Fault { task_id: Some(task.to_string()), session_id: None, generation: None, seq: None, kind: "intent_exhausted".into(), reason: reason.into(), desired: None, observed: None };
+        let _ = self.store.append_event("report_fault", &serde_json::to_value(&report).unwrap_or(Value::Null));
         Ok(())
     }
 }

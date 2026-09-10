@@ -1,8 +1,12 @@
 use onlyne_adapter::{AdapterError, GatewayHandle, GatewayHost};
-use onlyne_proto::{Delivery, Envelope, GatewayHealth, HealthArgs, RegisterChannelArgs, TypingArgs};
-use std::{path::{Path, PathBuf}, time::Instant};
+use onlyne_proto::{
+    Delivery, Envelope, GatewayHealth, HealthArgs, RegisterChannelArgs, TypingArgs,
+};
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 use tokio::net::UnixStream;
-
 
 /// Server-facing gateway host for a platform plugin.
 ///
@@ -16,7 +20,11 @@ pub struct Host {
 }
 
 impl Host {
-    pub fn new(gateway: GatewayHandle, gateway_id: impl Into<String>, platform: impl Into<String>) -> Self {
+    pub fn new(
+        gateway: GatewayHandle,
+        gateway_id: impl Into<String>,
+        platform: impl Into<String>,
+    ) -> Self {
         Self {
             gateway,
             started: Instant::now(),
@@ -101,7 +109,7 @@ impl GatewayHost for Host {
             other => {
                 return Err(AdapterError::Unexpected(format!(
                     "unknown gateway health state: {other}"
-                )))
+                )));
             }
         };
         self.gateway
@@ -114,7 +122,8 @@ impl GatewayHost for Host {
     }
 
     async fn typing(&mut self, args: &TypingArgs) -> Result<(), AdapterError> {
-        self.send_typing(args.conversation.clone(), args.seconds).await
+        self.send_typing(args.conversation.clone(), args.seconds)
+            .await
     }
 }
 
@@ -134,8 +143,14 @@ mod tests {
     #[test]
     fn paths_are_derived_from_caller_server_root() {
         let root = Path::new("/tmp/server");
-        assert_eq!(socket_path(root), PathBuf::from("/tmp/server/.onlyne/run/s"));
-        assert_eq!(spec_path(root), PathBuf::from("/tmp/server/.onlyne/spec.toml"));
+        assert_eq!(
+            socket_path(root),
+            PathBuf::from("/tmp/server/.onlyne/run/s")
+        );
+        assert_eq!(
+            spec_path(root),
+            PathBuf::from("/tmp/server/.onlyne/spec.toml")
+        );
     }
 
     #[test]

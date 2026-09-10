@@ -43,8 +43,12 @@ struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Verb {
-    /// Run a sibling binary, forwarding every remaining argument.
-    Forward(ForwardCmd),
+    /// Run the onlyne server, forwarding every remaining argument.
+    Server(RestArgs),
+    /// Run the onlyne client, forwarding every remaining argument.
+    Client(RestArgs),
+    /// Run the onlyne gateway, forwarding every remaining argument.
+    Gateway(RestArgs),
     /// Deliver a message to a role.
     Send(SendCmd),
     /// Answer an envelope by its msg id.
@@ -90,22 +94,6 @@ enum Verb {
     Version,
     /// Emit a shell completion script.
     Completions(CompletionsCmd),
-}
-
-#[derive(clap::Args, Debug, Clone)]
-struct ForwardCmd {
-    #[command(subcommand)]
-    binary: ForwardBinary,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-enum ForwardBinary {
-    /// Run the onlyne server.
-    Server(RestArgs),
-    /// Run the onlyne gateway.
-    Gateway(RestArgs),
-    /// Run the onlyne client.
-    Client(RestArgs),
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -274,11 +262,9 @@ fn run() -> i32 {
     };
     let flags = &cli.flags;
     match verb {
-        Verb::Forward(cmd) => match cmd.binary {
-            ForwardBinary::Server(rest) => forward::exec("onlyne-server", &rest.args),
-            ForwardBinary::Gateway(rest) => forward::exec("onlyne-gateway", &rest.args),
-            ForwardBinary::Client(rest) => forward::exec("onlyne-client", &rest.args),
-        },
+        Verb::Server(rest) => forward::exec("onlyne-server", &rest.args),
+        Verb::Client(rest) => forward::exec("onlyne-client", &rest.args),
+        Verb::Gateway(rest) => forward::exec("onlyne-gateway", &rest.args),
         Verb::Send(cmd) => verbs::send(flags, &cmd.sender, cmd.args),
         Verb::Reply(cmd) => verbs::reply(flags, &cmd.sender, cmd.args),
         Verb::Complete(cmd) => verbs::complete(flags, &cmd.sender, cmd.args),
@@ -327,7 +313,7 @@ fn run() -> i32 {
         }
         Verb::Completions(cmd) => {
             let mut stdout = std::io::stdout();
-            let _ = clap_complete::generate(
+            clap_complete::generate(
                 cmd.shell,
                 &mut Cli::command(),
                 "onlyne",

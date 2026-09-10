@@ -45,12 +45,15 @@ pub fn render_body(body: &ResBody, flags: &GlobalFlags) -> String {
 }
 
 /// Render a `pong` frame as the response body scripts expect.
-pub fn render_pong(frame: &Frame::Pong, flags: &GlobalFlags) -> String {
+pub fn render_pong(frame: &Frame, flags: &GlobalFlags) -> String {
+    let Frame::Pong { t, server_seq } = frame else {
+        return encode(flags.pretty, &serde_json::Value::Null);
+    };
     let body = PongBody {
         ok: true,
         data: PongData {
-            t: frame.t,
-            server_seq: frame.server_seq,
+            t: *t,
+            server_seq: *server_seq,
         },
     };
     if flags.quiet {

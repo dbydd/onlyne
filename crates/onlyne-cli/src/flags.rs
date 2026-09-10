@@ -47,7 +47,7 @@ pub struct GlobalFlags {
     )]
     pub surface_hint: AsArg,
     /// Bound for every socket operation, in milliseconds.
-    #[arg(long, global = true, default_value_t = DEFAULT_TIMEOUT_MS)]
+    #[arg(long = "timeout", alias = "timeout-ms", global = true, default_value_t = DEFAULT_TIMEOUT_MS)]
     pub timeout_ms: u64,
     /// Print the answer with two-space indentation.
     #[arg(long, global = true)]
@@ -55,8 +55,8 @@ pub struct GlobalFlags {
     /// Print only the payload object of the answer.
     #[arg(long, global = true)]
     pub quiet: bool,
-    /// Wrap the payload of `cluster export-prose`; every other verb prints json
-    /// regardless, so the flag is accepted and kept for script legibility.
+    /// Accepted for script legibility. Every verb already prints json; only
+    /// `cluster export-prose` changes behaviour, wrapping the prose in an object.
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     pub json: bool,
     /// Replace the constructed op body verbatim with this JSON object.

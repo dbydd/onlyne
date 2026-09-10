@@ -445,6 +445,20 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::net::UnixListener;
+    #[test]
+    fn legacy_refusal_message_is_byte_exact_without_trailing_newline() {
+        let expected = "onlyne: legacy workspace layout; v1.0.0 does not migrate";
+        assert_eq!(LEGACY_WORKSPACE_MESSAGE, expected);
+        assert!(!LEGACY_WORKSPACE_MESSAGE.ends_with('\n'));
+        assert_eq!(
+            LEGACY_WORKSPACE_MESSAGE.as_bytes(),
+            b"onlyne: legacy workspace layout; v1.0.0 does not migrate"
+        );
+        assert_eq!(
+            format!("{LEGACY_WORKSPACE_MESSAGE}\n").len(),
+            expected.len() + 1
+        );
+    }
 
     #[test]
     fn server_paths_are_exact() {

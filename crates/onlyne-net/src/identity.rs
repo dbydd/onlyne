@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use std::fs;
@@ -6,9 +6,9 @@ use std::path::Path;
 
 use crate::NetError;
 
-const KEY_PREFIX: &str = "ed25519/";
+pub const KEY_PREFIX: &str = "ed25519/";
 
-pub struct KeyPair(pub SigningKey);
+pub struct KeyPair(SigningKey);
 
 impl KeyPair {
     pub fn generate() -> Self {
@@ -22,9 +22,14 @@ impl KeyPair {
     pub fn load(path: &Path) -> Result<Self, NetError> {
         let bytes = fs::read(path)?;
         if bytes.len() != 32 {
-            return Err(NetError::MalformedKey(format!("seed must be exactly 32 bytes, got {}", bytes.len())));
+            return Err(NetError::MalformedKey(format!(
+                "seed must be exactly 32 bytes, got {}",
+                bytes.len()
+            )));
         }
-        let seed: [u8; 32] = bytes.try_into().map_err(|_| NetError::MalformedKey("seed".to_string()))?;
+        let seed: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| NetError::MalformedKey("seed".to_string()))?;
         Ok(Self::from_seed(seed))
     }
 
@@ -34,7 +39,10 @@ impl KeyPair {
     }
 
     pub fn public_str(&self) -> String {
-        format!("{KEY_PREFIX}{}", STANDARD.encode(self.0.verifying_key().to_bytes()))
+        format!(
+            "{KEY_PREFIX}{}",
+            STANDARD.encode(self.0.verifying_key().to_bytes())
+        )
     }
 
     pub fn sign(&self, message: &[u8]) -> String {
@@ -56,7 +64,11 @@ pub fn parse_public(text: &str) -> Result<VerifyingKey, NetError> {
     let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
         NetError::MalformedKey("field key must decode to exactly 32 bytes".to_string())
     })?;
-    VerifyingKey::from_bytes(&bytes).map_err(|error| NetError::MalformedKey(format!("field key is not a valid ed25519 public key: {error}")))
+    VerifyingKey::from_bytes(&bytes).map_err(|error| {
+        NetError::MalformedKey(format!(
+            "field key is not a valid ed25519 public key: {error}"
+        ))
+    })
 }
 
 pub fn challenge_message(challenge: &[u8; 32], role: &str, protocol: u16) -> Vec<u8> {
@@ -82,7 +94,11 @@ fn set_private_mode(path: &Path) -> Result<(), NetError> {
 }
 
 pub(crate) fn decode_signature(text: &str) -> Result<Signature, NetError> {
-    let bytes = STANDARD.decode(text).map_err(|_| NetError::Unauthorized("invalid signature encoding".to_string()))?;
-    let bytes: [u8; 64] = bytes.try_into().map_err(|_| NetError::Unauthorized("invalid signature length".to_string()))?;
+    let bytes = STANDARD
+        .decode(text)
+        .map_err(|_| NetError::Unauthorized("invalid signature encoding".to_string()))?;
+    let bytes: [u8; 64] = bytes
+        .try_into()
+        .map_err(|_| NetError::Unauthorized("invalid signature length".to_string()))?;
     Ok(Signature::from_bytes(&bytes))
 }

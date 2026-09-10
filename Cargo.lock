@@ -836,6 +836,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1884,18 +1894,23 @@ dependencies = [
  "chrono",
  "clap",
  "ed25519-dalek",
+ "flate2",
  "onlyne-adapter",
  "onlyne-config",
  "onlyne-frame",
  "onlyne-layout",
+ "onlyne-net",
  "onlyne-proto",
  "onlyne-session",
  "onlyne-store",
+ "onlyne-testkit",
  "parking_lot",
  "rand 0.8.6",
  "rusqlite",
  "serde",
  "serde_json",
+ "tar",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",
@@ -1929,8 +1944,18 @@ name = "onlyne-gateway"
 version = "1.0.0"
 dependencies = [
  "aes-gcm",
+ "async-trait",
  "base64",
  "chrono",
+ "clap",
+ "onlyne-adapter",
+ "onlyne-config",
+ "onlyne-gateway-feishu",
+ "onlyne-gateway-qqbot",
+ "onlyne-gateway-telegram",
+ "onlyne-gateway-weixin",
+ "onlyne-net",
+ "onlyne-proto",
  "pulldown-cmark",
  "qrcode",
  "resvg",
@@ -1945,6 +1970,19 @@ dependencies = [
 [[package]]
 name = "onlyne-gateway-feishu"
 version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "onlyne-adapter",
+ "onlyne-proto",
+ "openlark",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "onlyne-gateway-qqbot"
@@ -2087,6 +2125,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "uuid",
 ]
@@ -2131,7 +2170,6 @@ dependencies = [
  "onlyne-adapter",
  "onlyne-frame",
  "onlyne-proto",
- "onlyne-session",
  "serde",
  "serde_json",
  "tempfile",
@@ -3536,6 +3574,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20f34339676cdcab560c9a82300c4c2581f68b9369aedf0fae86f2ff9565ff3e"
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "teloxide"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4779,6 +4828,16 @@ dependencies = [
  "rusticata-macros",
  "thiserror 1.0.69",
  "time",
+]
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
 ]
 
 [[package]]

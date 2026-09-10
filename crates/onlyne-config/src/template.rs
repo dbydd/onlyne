@@ -3,6 +3,21 @@
 //! A template is selected by role directory basename. Its parent directory under
 //! the template root is the topology name. Template files remain opaque bytes;
 //! UTF-8 files receive the closed placeholder substitution pass.
+//!
+//! ## Template API
+//! * [`Template`]: selected template record used by the `onlyne-server` generate driver.
+//! * [`Placeholders`]: substitution bag used by the `onlyne-server` generate driver.
+//! * [`TemplateError`]: failure type used by the `onlyne-server` generate driver.
+//! * [`discover`]: role directory locator called by the `onlyne-server` generate driver.
+//! * [`load_tree`]: file reader called by the `onlyne-server` generate driver.
+//! * [`local_override`]: fragment reader called by the `onlyne-server` generate driver.
+//! * [`merge_fragment`]: table merger called by the `onlyne-server` generate driver.
+//! * [`substitute`]: template replacer called by the `onlyne-server` generate driver.
+//! * [`substitute_at`]: path-aware replacer called by the `onlyne-server` generate driver.
+//! * [`scan_for_prefixes`]: prefix guard called by the `onlyne-server` generate driver.
+//!
+//! Placeholders are closed to `role`, `cluster`, `server_name`, `listen`, `cert_pin`, `admin`, `max_sessions`, and `agent_package`.
+//! The file `.onlyne/config.toml` is the single carried exception to dot-directory pruning.
 
 use std::{
     borrow::Cow,
@@ -121,7 +136,7 @@ impl From<io::Error> for TemplateError {
 /// pruned while searching.
 pub fn discover(template_root: &Path, role: &str) -> Result<Vec<Template>, TemplateError> {
     let mut matches = Vec::new();
-    collect_role_dirs(template_root, role, &mut matches)
+    collect_role_dirs(template_root, template_root, role, &mut matches)
         .map_err(|source| TemplateError::io(template_root, source))?;
     matches.sort_by(|a, b| a.relative.cmp(&b.relative));
     if matches.is_empty() {
@@ -154,8 +169,8 @@ pub fn load_tree(template: &Template) -> Result<Vec<(String, Vec<u8>)>, Template
 /// Load the optional `.onlyne/config.toml` local override fragment.
 ///
 /// The fragment is parsed as a TOML value and is carried separately from the
-/// opaque template file list. Invalid TOML returns an [`io::Error`] wrapped in
-/// [`TemplateError::Io`] so callers retain the path.
+/// opaque template file list. A missing file, non-UTF8 bytes, or invalid TOML
+/// yields `None`.
 pub fn local_override(template: &Template) -> Option<toml::Value> {
     let path = template.role_dir.join(".onlyne/config.toml");
     let bytes = fs::read(path).ok()?;
@@ -271,8 +286,13 @@ pub fn scan_for_prefixes(
     Ok(())
 }
 
-fn collect_role_dirs(root: &Path, role: &str, matches: &mut Vec<Template>) -> io::Result<()> {
-    let mut entries: Vec<_> = fs::read_dir(root)?.collect::<Result<Vec<_>, io::Error>>()?;
+fn collect_role_dirs(
+    template_root: &Path,
+    current: &Path,
+    role: &str,
+    matches: &mut Vec<Template>,
+) -> io::Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(current)?.collect::<Result<Vec<_>, io::Error>>()?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let file_type = entry.file_type()?;
@@ -286,13 +306,13 @@ fn collect_role_dirs(root: &Path, role: &str, matches: &mut Vec<Template>) -> io
         let path = entry.path();
         if name.to_string_lossy() == role {
             let relative_path = path
-                .strip_prefix(root)
+                .strip_prefix(template_root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            let parent = path.parent().unwrap_or(root);
+            let parent = path.parent().unwrap_or(template_root);
             let topology = parent
-                .strip_prefix(root)
+                .strip_prefix(template_root)
                 .unwrap_or(parent)
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -302,7 +322,7 @@ fn collect_role_dirs(root: &Path, role: &str, matches: &mut Vec<Template>) -> io
                 relative: relative_path,
             });
         }
-        collect_role_dirs(&path, role, matches)?;
+        collect_role_dirs(template_root, &path, role, matches)?;
     }
     Ok(())
 }

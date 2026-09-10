@@ -17,8 +17,14 @@ pub enum NetError {
 impl fmt::Display for NetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PinMismatch { expected, got } => write!(f, "certificate pin mismatch: expected {expected}, got {got}"),
-            Self::ProtocolVersion { peer, expected } => write!(f, "protocol version mismatch: peer {peer}, expected {expected}"),
+            Self::PinMismatch { expected, got } => write!(
+                f,
+                "certificate pin mismatch: expected {expected}, got {got}"
+            ),
+            Self::ProtocolVersion { peer, expected } => write!(
+                f,
+                "protocol version mismatch: peer {peer}, expected {expected}"
+            ),
             Self::Unauthorized(detail) => write!(f, "unauthorized: {detail}"),
             Self::Rejected { code, message } => write!(f, "rejected ({code}): {message}"),
             Self::HandshakeTimeout => f.write_str("handshake timed out"),

@@ -1,6 +1,7 @@
 //! Inline image loading: magic-byte mime detection with an extension fallback.
 
-use onlyne_proto::{Envelope, ImagePart, IMAGE_DATA_MAX_BYTES, IMAGE_MIMES};
+use base64::Engine;
+use onlyne_proto::{ImagePart, IMAGE_DATA_MAX_BYTES, IMAGE_MIMES};
 use std::path::Path;
 
 /// A local failure to attach an image.
@@ -88,11 +89,4 @@ pub fn load_image_part(path: &Path) -> Result<ImagePart, MediaError> {
         mime: mime.to_string(),
         name,
     })
-}
-
-/// Attach an image to an envelope body, keeping any text already present.
-pub fn with_image(env: &Envelope, part: ImagePart) -> Envelope {
-    let mut next = env.clone();
-    next.body.image = Some(part);
-    next
 }

@@ -1,57 +1,45 @@
 # Onlyne Status
 
-This file tracks implementation and verification notes. The root README is the product manual.
+v1.0.0 is the active state. `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONTRACT.md` owns the work split. Root README files are the user manual.
 
-## Implemented locally
+## Three-process shape
 
-- Workspace-local `.onlyne/` bootstrap.
-- TOML config plus root `.env` / `.onlyne/.env` secret lookup.
-- Foreground daemon with Unix socket.
-- Stdio mode using the same NDJSON schema.
-- SQLite history store.
-- Event subscription over local IPC.
-- Per-channel FIFO IO under `.onlyne/channels/<channel>/`, including configurable Markdown/raw-text input.
-- Taplo-compatible config schema generated from Rust config types via `schemars`.
-- Loopback activation messages over local IPC.
-- Singleton channel routing via per-adapter `bind_conversation_id`.
-- Workspace-local agent skill export via `onlyne export-skill`.
-- Feishu/Lark and WeChat auth helpers.
-- Zsh/fish completion generation.
-- CLI/FIFO examples for single-channel, broadcast, multicast, multi-channel, and file-descriptor workflows.
+- `onlyne-server` routes envelopes and holds the ledger.
+- `onlyne-client` owns one role workspace and its session execution.
+- `onlyne-gateway` translates one chat platform through a feature-gated plugin.
+- Agent plugins and gateway plugins use one adapter protocol over two mount kinds.
 
-## Adapter notes
+## Crate state
 
-| Platform | Implemented | Needs live validation |
-| --- | --- | --- |
-| Telegram | Bot token, `getUpdates`, send text/media, media download. | Real bot polling and send. |
-| Feishu/Lark | QR/app credential auth, tenant token, websocket receive, OpenAPI send. | Tenant QR completion, permissions, websocket in target tenant. |
-| QQ Bot | qclaw QR/manual auth, official gateway websocket, group/C2C/channel event parsing, scene-aware text/media send. | Live qclaw QR completion and long-run gateway behavior. |
-| WeChat ilink | QR/token auth, long-poll receive, context-token send, CDN media helpers. | Live CDN edge cases and expired context-token recovery. |
+- [ ] `onlyne-proto` green with envelope, frame variants, ops, errors, and events test count recorded here.
+- [ ] `onlyne-frame` green with length-prefixed codec test count recorded here.
+- [ ] `onlyne-config` green with spec parse and reload test count recorded here.
+- [ ] `onlyne-layout` green with legacy refusal exit 2 test count recorded here.
+- [ ] `onlyne-store` green with ledger and local DB test count recorded here.
+- [ ] `onlyne-session` green with lifecycle port test count recorded here.
+- [ ] `onlyne-net` green with TLS, handshake, ACL, and backoff test count recorded here.
+- [ ] `onlyne-adapter` green with SDK and protocol schema test count recorded here.
+- [ ] `onlyne-server` green with router, relay, projection, faults, admin, and generate test count recorded here.
+- [ ] `onlyne-client` green with runloop, intents, adapter socket, and dispatch test count recorded here.
+- [ ] `onlyne-gateway` green with shared kit test count recorded here.
+- [ ] `onlyne-cli` green with entrypoint and socket resolution test count recorded here.
+- [ ] `onlyne-testkit` green with fake agent, fake gateway, and conformance test count recorded here.
+- [ ] Four gateway plugins green behind `telegram`, `feishu`, `qqbot`, and `weixin` features.
 
-## Latest local checks
+## Wave plan status
 
-- `cargo fmt --check`
-- `cargo clippy --all-targets -- -D warnings`
-- `cargo test` currently covers 49 tests.
-- `cd harness/pi-onlyne && npm run check`
-- Example scripts support `--local-check` where applicable.
-- `onlyne shell-completions zsh` and `onlyne shell-completions fish` generate completion scripts.
-- `cargo build --release` currently produces a stripped size-optimized binary around 7.3 MiB on macOS arm64.
+- [ ] Wave 1 closed: proto, frame, session kernel, config/layout/store, net.
+- [ ] Wave 2 closed: server runtime, client runtime, adapter SDK plus testkit, gateway kit.
+- [ ] Wave 3 closed: generate, federation path, legacy deletion, docs.
 
-Live platform smoke is intentionally manual because it requires real credentials and may send external messages.
+## Open verification cases
 
-## Channel FIFO IO notes
-
-See [CHANNEL_IO.md](CHANNEL_IO.md) for the design.
-
-Onlyne exposes per-channel file-descriptor style IO under `.onlyne/channels/<channel>/`:
-
-- `in`: write side, so local scripts can `echo 'message' > .onlyne/channels/telegram/in` and send through that channel's bound conversation.
-- `out`: read side, so local scripts can `cat .onlyne/channels/telegram/out`.
-- `out` read behavior must be configurable as the 2x2 combination of:
-  - content mode: latest new message with conversation history context, or latest message only.
-  - cursor mode: retain after read, or consume/advance after read.
-- File IO cursors must synchronize with other local consumers. Example: if pi-onlyne has already surfaced an inbound notification, then a consume-mode `out` for the same channel must not later include that already-consumed new message.
-- Include a `loopback` channel directory with the same `in`/`out` behavior.
-- Keep paths stable enough for symlinks.
-- Preserve singleton channel routing: channel name selects the adapter; conversation is still the configured or `/handshake`-bound `bind_conversation_id`.
+- [ ] Case 1: single-machine fake-backend task reaches `acked`.
+- [ ] Case 2: ACL refusal emits `acl_denied`.
+- [ ] Case 3: repeated `op_id` emits `duplicate`; changed body emits `conflict`.
+- [ ] Case 4: disconnect keeps queue state and reconnect flushes in order.
+- [ ] Case 5: aggregate-role federation preserves the parent ledger boundary.
+- [ ] Case 6: gateway mount delivers platform traffic.
+- [ ] Case 7: legacy workspace exits 2.
+- [ ] Case 8: formatting, lint, workspace tests, and binary firewall checks pass.
+- [ ] Case 9: generate produces relocatable workspaces.

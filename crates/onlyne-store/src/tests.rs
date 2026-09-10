@@ -380,4 +380,39 @@ mod ledger_gates {
         assert!(store.list_faults(&task_id).unwrap().is_empty());
         assert!(store.event_head().unwrap() >= 2);
     }
+
+    #[test]
+    fn insert_fault_round_trips_task_columns() {
+        let (_dir, path) = temp_db("client-fault.db");
+        let store = ClientStore::open(&path).unwrap();
+        let fault = onlyne_session::FaultRecord {
+            id: 999,
+            task_id: "task-fault-1".to_string(),
+            session_id: "task-fault-1".to_string(),
+            generation: 2,
+            seq: 7,
+            desired_json: "{\"desired\":true}".to_string(),
+            observed_json: "{\"observed\":true}".to_string(),
+            intent: "reconcile:probe_dead".to_string(),
+            attempt: 3,
+            backend_ref: "{\"backend\":\"fake\"}".to_string(),
+            kind: "probe_dead".to_string(),
+            reason: "backend resource gone".to_string(),
+            state: "open".to_string(),
+            created_at: 1_789_000_000,
+        };
+        let assigned = store.insert_fault(&fault).unwrap();
+        assert!(assigned > 0);
+        let rows = store.list_faults("task-fault-1").unwrap();
+        assert_eq!(rows.len(), 1);
+        let stored = &rows[0];
+        assert_eq!(stored.id, assigned);
+        assert_eq!(stored.task_id, fault.task_id);
+        assert_eq!(stored.session_id, fault.session_id);
+        assert_eq!(stored.generation, fault.generation);
+        assert_eq!(stored.seq, fault.seq);
+        assert_eq!(stored.kind, fault.kind);
+        assert_eq!(stored.state, fault.state);
+        assert_eq!(stored.created_at, fault.created_at);
+    }
 }

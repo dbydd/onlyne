@@ -1,7 +1,7 @@
 use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
 
-use crate::{identity::parse_public, NetError};
+use crate::{NetError, identity::parse_public};
 
 #[derive(Debug, Clone)]
 pub struct RoleAcl {
@@ -36,7 +36,16 @@ pub fn table_from(
             return Err(NetError::MalformedKey(format!("duplicate role {name}")));
         }
         let key = parse_public(&key)?;
-        roles.insert(name.clone(), RoleAcl { name, key, admin, allowed_senders, allowed_targets });
+        roles.insert(
+            name.clone(),
+            RoleAcl {
+                name,
+                key,
+                admin,
+                allowed_senders,
+                allowed_targets,
+            },
+        );
     }
     Ok(AclTable { roles })
 }
@@ -81,14 +90,22 @@ pub fn acl_allows(
         field: "to.role",
         detail: format!("unknown target role {to}"),
     })?;
-    if !target.allowed_senders.iter().any(|allowed| allowed == "*" || allowed == from) {
+    if !target
+        .allowed_senders
+        .iter()
+        .any(|allowed| allowed == "*" || allowed == from)
+    {
         return Err(AclDeny {
             reason: AclDenyReason::SenderNotAllowed,
             field: "from.role",
             detail: format!("sender role {from} is not allowed to deliver to {to}"),
         });
     }
-    if !sender.allowed_targets.iter().any(|allowed| allowed == "*" || allowed == to) {
+    if !sender
+        .allowed_targets
+        .iter()
+        .any(|allowed| allowed == "*" || allowed == to)
+    {
         return Err(AclDeny {
             reason: AclDenyReason::TargetNotAllowed,
             field: "to.role",

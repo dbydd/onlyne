@@ -2,7 +2,7 @@ use crate::{
     SpecError,
     diff::SpecDiff,
     hash::{canonical_bytes, spec_hash},
-    locate::{key_line_in_array_entry, key_line_in_table, line_from_span},
+    locate::{array_entry_lines, key_line_in_array_entry, key_line_in_table, line_from_span},
 };
 use base64::{Engine, engine::general_purpose};
 use schemars::JsonSchema;
@@ -273,10 +273,86 @@ fn serde_error_line(text: &str, span: Option<std::ops::Range<usize>>, message: &
     if let Some(literal) = invalid_type_literal(message) {
         return locate_value_line(text, literal);
     }
+    if let Some(field) = missing_field(message) {
+        return locate_table_line(text, field);
+    }
     if let Some(field) = expected_field(message) {
         return locate_field_line(text, field);
     }
     line
+}
+
+fn missing_field(message: &str) -> Option<&str> {
+    message
+        .strip_prefix("missing field `")
+        .and_then(|rest| rest.split_once('`').map(|(field, _)| field))
+}
+
+fn locate_table_line(text: &str, field: &str) -> usize {
+    const SERVER_FIELDS: &[&str] = &[
+        "server",
+        "name",
+        "listen",
+        "cert_pin",
+        "note_queue",
+        "fault_history_days",
+        "resync_lag",
+        "heartbeat_timeout_ms",
+        "agent_package",
+        "template_root",
+    ];
+    const CLIENT_FIELDS: &[&str] = &[
+        "client",
+        "role",
+        "prose",
+        "admin",
+        "max_sessions",
+        "reuse",
+        "allowed_senders",
+        "allowed_targets",
+        "session_command",
+        "timeout",
+        "intent",
+        "aggregate",
+        "ready_ms",
+        "running_ms",
+        "idle_ms",
+        "attempts",
+        "backoff_ms",
+    ];
+    const GATEWAY_FIELDS: &[&str] = &["gateway", "id", "platform", "enabled"];
+    const ROUTE_FIELDS: &[&str] = &["route", "channel", "conversation", "to", "session"];
+    if field == "key" {
+        let mut starts = array_entry_lines(text, "client");
+        starts.extend(array_entry_lines(text, "gateway"));
+        return starts.into_iter().min().unwrap_or(1);
+    }
+    if SERVER_FIELDS.contains(&field) {
+        return text
+            .lines()
+            .enumerate()
+            .find_map(|(idx, line)| (line.trim() == "[server]").then_some(idx + 1))
+            .unwrap_or(1);
+    }
+    if CLIENT_FIELDS.contains(&field) {
+        return array_entry_lines(text, "client")
+            .into_iter()
+            .min()
+            .unwrap_or(1);
+    }
+    if GATEWAY_FIELDS.contains(&field) {
+        return array_entry_lines(text, "gateway")
+            .into_iter()
+            .min()
+            .unwrap_or(1);
+    }
+    if ROUTE_FIELDS.contains(&field) {
+        return array_entry_lines(text, "route")
+            .into_iter()
+            .min()
+            .unwrap_or(1);
+    }
+    locate_field_line(text, field)
 }
 
 fn unknown_field(message: &str) -> Option<&str> {

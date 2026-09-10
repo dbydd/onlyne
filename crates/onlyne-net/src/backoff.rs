@@ -2,9 +2,9 @@ use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct Backoff {
-    attempt: u32,
-    cap: Duration,
-    base: Duration,
+    pub attempt: u32,
+    pub cap: Duration,
+    pub base: Duration,
 }
 
 impl Default for Backoff {
@@ -14,12 +14,21 @@ impl Default for Backoff {
 }
 
 impl Backoff {
+    /// Create a backoff with a one second base and a sixty second cap.
     pub fn new() -> Self {
-        Self { attempt: 0, cap: Duration::from_secs(60), base: Duration::from_secs(1) }
+        Self {
+            attempt: 0,
+            cap: Duration::from_secs(60),
+            base: Duration::from_secs(1),
+        }
     }
 
     pub fn with_limits(base: Duration, cap: Duration) -> Self {
-        Self { attempt: 0, cap, base }
+        Self {
+            attempt: 0,
+            cap,
+            base,
+        }
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -30,6 +39,7 @@ impl Backoff {
         Duration::from_secs(seconds).min(self.cap)
     }
 
+    /// Scale the next delay into half to full using a supplied factor.
     pub fn with_jitter(&mut self, rng_factor: f64) -> Duration {
         let delay = self.next();
         let factor = rng_factor.clamp(0.0, 1.0);

@@ -159,7 +159,19 @@ pub struct FaultEvent {
     pub kind: String,
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_ref: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -290,7 +302,13 @@ mod tests {
             seq: None,
             kind: "idle_fault".into(),
             reason: "no heartbeat".into(),
+            desired: None,
             observed: None,
+            intent: None,
+            attempt: None,
+            backend_ref: None,
+            state: None,
+            created_at: None,
         });
         assert_eq!(fault.tier(), EventTier::Advisory);
         let value = serde_json::to_value(&fault).expect("encode");

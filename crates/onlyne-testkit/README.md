@@ -16,6 +16,8 @@ Supported steps are `wait_assign`, `report` (`ready` or `heartbeat`), `complete`
 
 `onlyne-gateway-fake --platform fake --gateway-id fg1 --socket PATH` connects as a gateway mount. Each host `render_send` is printed as `{"op":"rendered","conversation":...,"text":...,"has_image":...}`. Each stdin line `{"op":"inbound","conversation":"c1","text":"hello"}` sends a `deliver` frame with `Principal::Gateway` as its sender.
 
+The three-way conformance fixture uses the testkit stub because `onlyne-testkit` does not depend on `onlyne-session`.
+
 ## Backend choice
 
-The three-way fixture uses the `onlyne-session` fake backend when that crate compiles. The current workspace resolves it as `onlyne-session:fake`.
+The three-way fixture uses the testkit stub backend because only the local crate may declare the `onlyne-session` dependency.

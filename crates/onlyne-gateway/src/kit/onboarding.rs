@@ -17,30 +17,45 @@ use std::{
 use tokio::time::{Instant, sleep};
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("***")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credential {
-    pub token: String,
+    pub token: Secret,
     pub expiry: Option<DateTime<Utc>>,
 }
 
-impl fmt::Debug for Credential {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Credential")
-            .field("token", &"***")
-            .field("expiry", &self.expiry)
-            .finish()
-    }
-}
-
 impl Credential {
-    pub fn new(token: impl Into<String>, expiry: Option<DateTime<Utc>>) -> Self {
-        Self {
-            token: token.into(),
-            expiry,
-        }
+    pub fn new(token: Secret, expiry: Option<DateTime<Utc>>) -> Self {
+        Self { token, expiry }
     }
 
     pub fn bearer(token: impl Into<String>) -> Self {
-        Self::new(token, None)
+        Self {
+            token: Secret::new(token),
+            expiry: None,
+        }
     }
 }
 

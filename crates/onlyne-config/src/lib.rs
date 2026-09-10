@@ -28,7 +28,7 @@ mod spec;
 pub mod template;
 
 pub use client::{ClientConfig, ServerEndpoint};
-pub use diff::{FieldChange, RoleChange, SpecDiff};
+pub use diff::{RoleChange, SpecDiff};
 pub use env::Env;
 pub use error::SpecError;
 pub use hash::{canonical_bytes, spec_hash};

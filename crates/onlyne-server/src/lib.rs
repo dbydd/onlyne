@@ -1,14 +1,10 @@
 pub mod admin;
 pub mod cli;
-pub mod events;
-pub mod faults;
-pub mod gateway_host;
-pub mod projection;
-pub mod relay;
-pub mod router;
+pub mod generate;
 pub mod state;
 
 pub use state::{GatewayConnection, GatewayRegistry, ListenerHandles, RoleConnection, RoleRegistry, Server, ServerInit};
+pub use generate::{GenerateArgs, GenerateError, GenerateReport, GeneratedRole, generate};
 
 pub async fn run(init: ServerInit) -> anyhow::Result<()> {
     admin::run(init).await

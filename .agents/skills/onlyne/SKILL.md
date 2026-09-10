@@ -55,7 +55,7 @@ Send from a role workspace through the client surface:
 onlyne --workspace "$WS" send --to reviewer --text "review this change"
 ```
 
-Use `--task <id>` to attach causality to an existing task family. Use `--note` for free text that creates no session. Offline `note` delivery returns `recipient_offline`.
+Use `--task <id>` to attach causality to an existing task family. Use `--note` for free text that creates no session. Offline `note` delivery returns `recipient_offline`. That refusal is plan-defined and lands with the server relay.
 
 ## Check a ledger row
 
@@ -187,14 +187,14 @@ Other hard failures:
 ```text
 spec.toml:<line>: <message>
 onlyne: unsupported schema; v1.0.0 does not migrate
-onlyne: missing binary <path>; run cargo build --workspace
+onlyne: binary not found: <name>
 ```
 
 Frame error codes are closed: `invalid`, `unknown_op`, `acl_denied`, `unknown_role`, `recipient_offline`, `duplicate`, `conflict`, `unauthorized`, `forbidden`, `not_admin`, `frame_too_large`, `bad_frame`, `protocol_version`, and `internal`.
 
 ## Smoke
 
-Verification case 1 local task run:
+Verification case 1 local task run (plan-defined; the landed script covers server, client, fake agent, and status over `--workspace`):
 
 1. Build the workspace.
    ```bash

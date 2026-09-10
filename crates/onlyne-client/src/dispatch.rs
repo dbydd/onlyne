@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use onlyne_adapter::AdapterIo;
 use onlyne_proto::{AdapterMsg, AssignArgs, Capability, Envelope, HostOp, Outcome, Report};
-use onlyne_session::{Bridge, SessionBackend, SessionRef, SpawnSpec, feed_created, feed_dispatched, feed_ready, feed_resource_closed, feed_turn_started, settle};
+use onlyne_session::{Bridge, SessionBackend, SessionLedger, SessionRef, SpawnSpec, feed_created, feed_dispatched, feed_ready, feed_resource_closed, feed_turn_started, settle};
 use onlyne_store::ClientStore;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap};
@@ -41,6 +41,10 @@ impl DispatchState {
     }
 
     pub fn session_count(&self) -> usize { self.inner.lock().sessions.len() }
+    pub fn role(&self) -> String { self.inner.lock().role.clone() }
+    pub fn workspace(&self) -> PathBuf { self.inner.lock().workspace.clone() }
+    pub fn command(&self) -> Vec<String> { self.inner.lock().command.clone() }
+    pub fn backend_name(&self, task_id: &str) -> Option<String> { self.inner.lock().sessions.values().find(|slot| slot.task_id.as_deref() == Some(task_id)).map(|slot| slot.session.backend.clone()) }
     pub fn bind_adapter(&self, session_id: &str, io: AdapterIo, capabilities: Vec<Capability>) -> Result<()> {
         let mut inner = self.inner.lock();
         let slot = inner.sessions.values_mut().find(|slot| slot.session.backend_ref.get("id").and_then(|v| v.as_str()) == Some(session_id) || slot.session.task_id == session_id).ok_or_else(|| anyhow!("unknown session {session_id}"))?;

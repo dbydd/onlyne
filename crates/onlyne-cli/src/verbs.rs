@@ -1,19 +1,19 @@
 //! The message verbs: send, reply, complete, handoff, control, who, ping.
 
 use onlyne_proto::{
-    AdminControl, AdminOp, AdminSend, Body, ClientOp, ControlOp, Causality, Envelope, ErrorCode,
-    Frame, LedgerQuery, MsgKind, Outcome, Principal, QueryRolesArgs, Report, new_envelope,
-    new_id, new_task_id,
+    AdminControl, AdminOp, AdminSend, Body, ClientOp, ControlArgs, ControlOp, Causality,
+    Envelope, ErrorCode, Frame, ImagePart, LedgerQuery, MsgKind, Outcome, Principal,
+    QueryRolesArgs, Report, new_envelope, new_id, new_task_id,
 };
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::flags::GlobalFlags;
 use crate::ledger;
-use crate::media::{self, ImagePart};
+use crate::media;
 use crate::render;
 use crate::runtime::{
-    self, EXIT_ANSWER_FAILED, EXIT_NO_SOCKET, EXIT_OK, EXIT_VALIDATION,
+    self, EXIT_ANSWER_FAILED, EXIT_NO_SOCKET, EXIT_OK,
 };
 use crate::socket::{Surface, SocketTarget};
 use crate::wire::{self, ExchangeError, Outbound};
@@ -109,8 +109,50 @@ pub fn build_control_op(
 
 /// The payload a send carries, on whichever surface it travels.
 enum SendPayload {
-    Client(Envelope),
+    Client(Box<Envelope>),
     Admin(AdminSend),
+}
+
+/// The six values a send needs, grouped so [`build_send`] stays short.
+struct SendSpec {
+    kind: MsgKind,
+    to: String,
+    from: Option<String>,
+    text: Option<String>,
+    image: Option<ImagePart>,
+    causality: Causality,
+    ttl_ms: Option<u64>,
+}
+
+fn build_send(
+    flags: &GlobalFlags,
+    target: &SocketTarget,
+    spec: SendSpec,
+) -> Result<SendPayload, String> {
+    let sender_role = match (target.surface, spec.from) {
+        (Surface::Admin, Some(role)) => Some(role),
+        (Surface::Admin, None) => {
+            return Err("onlyne: --from is required on the admin surface".to_string())
+        }
+        (Surface::Client, _) => None,
+    };
+    let principal = match sender_role.as_deref() {
+        Some(role) => Principal::role(role),
+        None => Principal::role(flags.local_role()),
+    };
+    let envelope = build_envelope(
+        spec.kind,
+        principal,
+        &spec.to,
+        spec.text,
+        spec.image,
+        spec.causality,
+        spec.ttl_ms,
+    )?;
+    Ok(match sender_role {
+        Some(role) => SendPayload::Admin(AdminSend { from: role, envelope: Box::new(envelope) }),
+        None => SendPayload::Client(Box::new(envelope)),
+    })
 }
 
 /// Read the text a send carries, from `--text` or `--file`.
@@ -154,37 +196,11 @@ fn build_envelope(
     }
 }
 
-/// Build the send payload for the chosen surface.
-fn build_send(
-    flags: &GlobalFlags,
-    target: &SocketTarget,
-    kind: MsgKind,
-    sender: &SenderArgs,
-    to: &str,
-    text: Option<String>,
-    image: Option<ImagePart>,
-    causality: Causality,
-    ttl_ms: Option<u64>,
-) -> Result<SendPayload, String> {
-    let (principal, sender_role) = match (target.surface, sender.from.clone()) {
-        (Surface::Admin, Some(role)) => (Principal::role(&role), Some(role)),
-        (Surface::Admin, None) => {
-            return Err("--from is required on the admin surface".to_string())
-        }
-        (Surface::Client, _) => (Principal::role(flags.local_role()), None),
-    };
-    let envelope = build_envelope(kind, principal, to, text, image, causality, ttl_ms)?;
-    Ok(match sender_role {
-        Some(role) => SendPayload::Admin(AdminSend { from: role, envelope }),
-        None => SendPayload::Client(envelope),
-    })
-}
-
 /// Apply `--request` to the payload, wrapping it in the surface's op.
 fn request_of(flags: &GlobalFlags, payload: SendPayload) -> Result<Outbound, String> {
     match payload {
         SendPayload::Client(envelope) => {
-            let envelope = flags.override_args(envelope)?;
+            let envelope = flags.override_args(*envelope)?;
             Ok(Outbound::client(new_id(), ClientOp::Send(Box::new(envelope))))
         }
         SendPayload::Admin(admin_send) => {
@@ -240,7 +256,8 @@ fn row_causality_text(row: &serde_json::Value, key: &str) -> Option<String> {
         row.get("body"),
         row.get("body_json")
             .and_then(serde_json::Value::as_str)
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .as_ref(),
     ]
     .iter()
     .flatten()
@@ -329,13 +346,15 @@ async fn send_inner(
     let payload = match build_send(
         flags,
         target,
-        kind,
-        sender,
-        &args.to,
-        text,
-        image,
-        causality,
-        ttl_ms,
+        SendSpec {
+            kind,
+            to: args.to,
+            from: sender.from.clone(),
+            text,
+            image,
+            causality,
+            ttl_ms,
+        },
     ) {
         Ok(payload) => payload,
         Err(message) => return runtime::usage_error(message),
@@ -367,7 +386,7 @@ async fn reply_inner(
         Ok(stream) => stream,
         Err(code) => return code,
     };
-    let Some(row) = match lookup_row(
+    let row = match lookup_row(
         &mut stream,
         flags,
         target,
@@ -380,7 +399,8 @@ async fn reply_inner(
     {
         Ok(row) => row,
         Err(error) => return runtime::exchange_error(&error, flags.timeout_ms),
-    } else {
+    };
+    let Some(row) = row else {
         return missing_row(flags, "envelope", &args.to);
     };
     let Some(to) = reply_target(&row) else {
@@ -392,13 +412,15 @@ async fn reply_inner(
     let payload = match build_send(
         flags,
         target,
-        MsgKind::Note,
-        sender,
-        &to,
-        Some(args.text),
-        None,
-        reply_causality(&row, &args.to),
-        None,
+        SendSpec {
+            kind: MsgKind::Note,
+            to,
+            from: sender.from.clone(),
+            text: Some(args.text),
+            image: None,
+            causality: reply_causality(&row, &args.to),
+            ttl_ms: None,
+        },
     ) {
         Ok(payload) => payload,
         Err(message) => return runtime::usage_error(message),
@@ -436,7 +458,7 @@ async fn complete_inner(
     let head = match args.head_from {
         HeadFrom::Local => head_of(&args.text),
         HeadFrom::Ledger => {
-            let Some(row) = match lookup_row(
+            let row = match lookup_row(
                 &mut stream,
                 flags,
                 target,
@@ -449,7 +471,8 @@ async fn complete_inner(
             {
                 Ok(row) => row,
                 Err(error) => return runtime::exchange_error(&error, flags.timeout_ms),
-            } else {
+            };
+            let Some(row) = row else {
                 return missing_row(flags, "task", &args.task);
             };
             match ledger::row_text(&row, "out_head") {
@@ -472,13 +495,15 @@ async fn complete_inner(
     let payload = match build_send(
         flags,
         target,
-        MsgKind::Completion,
-        sender,
-        &to,
-        Some(args.text),
-        None,
-        causality,
-        None,
+        SendSpec {
+            kind: MsgKind::Completion,
+            to,
+            from: sender.from.clone(),
+            text: Some(args.text),
+            image: None,
+            causality,
+            ttl_ms: None,
+        },
     ) {
         Ok(payload) => payload,
         Err(message) => return runtime::usage_error(message),
@@ -531,10 +556,11 @@ async fn handoff_inner(
         Ok(stream) => stream,
         Err(code) => return code,
     };
-    let Some(row) = match lookup_row(
+    let ledger_rows = match ledger::query(
         &mut stream,
-        flags,
+        flags.timeout_ms,
         target,
+        new_id(),
         LedgerQuery {
             task: Some(args.task.clone()),
             ..Default::default()
@@ -542,21 +568,24 @@ async fn handoff_inner(
     )
     .await
     {
-        Ok(row) => row,
+        Ok(rows) => rows,
         Err(error) => return runtime::exchange_error(&error, flags.timeout_ms),
-    } else {
+    };
+    let Some(row) = ledger::deepest(&ledger_rows) else {
         return missing_row(flags, "task", &args.task);
     };
     let payload = match build_send(
         flags,
         target,
-        MsgKind::Task,
-        sender,
-        &args.to,
-        Some(args.text),
-        None,
-        handoff_causality(&row, &args.task),
-        None,
+        SendSpec {
+            kind: MsgKind::Task,
+            to: args.to,
+            from: sender.from.clone(),
+            text: Some(args.text),
+            image: None,
+            causality: handoff_causality(row, &args.task),
+            ttl_ms: None,
+        },
     ) {
         Ok(payload) => payload,
         Err(message) => return runtime::usage_error(message),
@@ -597,7 +626,7 @@ async fn control_inner(
     let request = match target.surface {
         Surface::Client => Outbound::client(
             new_id(),
-            ClientOp::Control(onlyne_proto::ControlArgs {
+            ClientOp::Control(ControlArgs {
                 to: args.to,
                 op,
             }),
@@ -643,16 +672,16 @@ pub fn ping(flags: &GlobalFlags) -> i32 {
             Ok(stream) => stream,
             Err(code) => return code,
         };
-        let probe = Frame::Ping { t: now_millis() };
+        let probe: Frame = Frame::Ping { t: now_millis() };
         if let Err(error) = wire::send_frame(&mut stream, &probe, flags.timeout_ms).await {
             return runtime::exchange_error(&error, flags.timeout_ms);
         }
         match wire::recv_frame(&mut stream, flags.timeout_ms).await {
-            Ok(answer) => match answer {
-                Frame::Pong { t, server_seq } => {
+            Ok(answer) => match &answer {
+                Frame::Pong { .. } => {
                     println!(
                         "{}",
-                        render::render_pong(&Frame::Pong { t, server_seq }, flags)
+                        render::render_pong(&answer, flags)
                     );
                     EXIT_OK
                 }
@@ -663,7 +692,7 @@ pub fn ping(flags: &GlobalFlags) -> i32 {
                             ErrorCode::BadFrame,
                             format!(
                                 "expected a pong frame, got a {} frame",
-                                wire::frame_name(&other)
+                                wire::frame_name(other)
                             ),
                             None
                         )
@@ -710,7 +739,7 @@ pub struct SendArgs {
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct ReplyArgs {
-    /// Recipient role.
+    /// Envelope id being answered.
     #[arg(long)]
     pub to: String,
     /// Reply text.

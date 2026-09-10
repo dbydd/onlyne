@@ -23,7 +23,7 @@ pub fn rows_of(data: &Value) -> Vec<Value> {
                     return rows.clone();
                 }
             }
-            if ROW_FIELD_KEYS.iter().any(|key| map.contains_key(key)) {
+            if ROW_FIELD_KEYS.iter().any(|key| map.contains_key(*key)) {
                 return vec![data.clone()];
             }
             vec![]
@@ -38,19 +38,12 @@ pub fn deepest(rows: &[Value]) -> Option<&Value> {
 }
 /// A stored principal, held either as a JSON object or as a JSON string.
 pub fn row_principal(row: &Value, key: &str) -> Option<onlyne_proto::Principal> {
-    let Some(raw) = row.get(key) else {
-        return None;
-    };
+    let raw = row.get(key)?;
     let object = match raw {
         Value::String(text) => serde_json::from_str::<Value>(text).ok(),
         other => Some(other.clone()),
     };
     object.and_then(|value| serde_json::from_value(value).ok())
-}
-
-/// The row that carries `msg_id`.
-pub fn by_msg_id(rows: &[Value], msg_id: &str) -> Option<&Value> {
-    rows.iter().find(|row| row_text(row, "msg_id") == Some(msg_id))
 }
 
 pub fn row_text<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
@@ -59,19 +52,20 @@ pub fn row_text<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
 
 /// Hop count of a row, read from the stored envelope when the column is absent.
 pub fn row_hop(row: &Value) -> Option<u32> {
-    if let Some(hop) = row.get("hop").and_then(Value::as_u32) {
+    if let Some(hop) = row.get("hop").and_then(Value::as_u64).and_then(|hop| u32::try_from(hop).ok()) {
         return Some(hop);
     }
     for body in [
         row.get("body"),
         row.get("body_json")
             .and_then(Value::as_str)
-            .and_then(|raw| serde_json::from_str::<Value>(raw).ok()),
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .as_ref(),
     ]
     .iter()
     .flatten()
     {
-        if let Some(hop) = body.get("causality").and_then(|c| c.get("hop")).and_then(Value::as_u32) {
+        if let Some(hop) = body.get("causality").and_then(|c| c.get("hop")).and_then(Value::as_u64).and_then(|hop| u32::try_from(hop).ok()) {
             return Some(hop);
         }
     }

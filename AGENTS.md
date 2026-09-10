@@ -28,45 +28,41 @@ If you find yourself building outside that boundary, stop and cut scope back.
 
 The implementation must satisfy all of the following:
 
-1. **Daemon is not unique**
-   - do not design a single global singleton service for the machine
-   - each workspace can have its own daemon instance
-   - multiple workspaces may run separate daemons simultaneously
+1. **Process scope**
+   - one `onlyne-server` serves one server root
+   - one `onlyne-client` serves one role workspace
+   - one `onlyne-gateway` process serves one selected platform
+   - multiple server roots and role workspaces may run simultaneously
 
 2. **Workspace-local model**
-   - the current directory is the workspace root
-   - all config, state, runtime files, history, pid, logs, sockets live under:
-     - `./.onlyne/`
-   - running `onlyne` in a directory reads and writes that directory’s `.onlyne`
+   - the selected server root owns server config, ledger, events, faults, sockets, keys, logs, templates, generated workspaces
+   - the selected role workspace owns client config, sessions, intents, keys, socket, logs
+   - active data stays under the relevant `.onlyne/` tree
 
 3. **CLI-first launch model**
    - primary entrypoint is CLI
-   - daemon can be launched from CLI in foreground or detached/background-compatible mode
-   - design must be compatible with launchd/systemd wrapping; keep system integration outside core logic
+   - server, client, and gateway run in the foreground from CLI
+   - launchd/systemd wrappers stay outside core logic
 
-4. **Local agent-facing interfaces**
-   - Unix domain socket is first-class
-   - stdio mode is first-class
-   - named pipe / raw pipe friendly framing is supported by design
-   - local loopback HTTP is optional at most, never the primary control plane
+4. **Three socket surfaces**
+   - role connections use TCP plus TLS 1.3 with certificate pinning and ed25519 admission
+   - agent adapters connect to the client unix socket
+   - gateway adapters and admin commands connect to the server unix socket
 
-5. **Channel abstraction**
-   - must support adapter architecture for:
-     - Telegram
-     - Feishu/Lark
-     - QQ
-     - WeChat
-   - first implementation may land adapters incrementally; architecture must keep adapter shape portable across platforms
+5. **Gateway abstraction**
+   - v1.0.0 ships four feature-gated gateway plugins: Telegram, Feishu/Lark, QQ, WeChat
+   - each plugin depends on `onlyne-adapter` and `onlyne-proto`
 
-6. **History**
-   - per-channel history browsing
-   - merged all-channel history browsing
-   - history should be local, minimal, inspectable, and not require heavy infra
+6. **Ledger and event history**
+   - `onlyne history` reads persisted events
+   - `onlyne ledger` reads delivery rows
+   - `onlyne sessions` reads session projections
+   - `onlyne faults` reads recorded faults
 
-7. **Broadcast/event bus**
-   - allow local clients to subscribe to update events
-   - allow broadcast of important daemon/channel updates to connected local clients
-   - events should include inbound message, outbound message, delivery state, adapter health changes, and permission/update notices
+7. **Observation stream**
+   - local clients subscribe to update events with cursor resync
+   - durable classes: `ledger_state`, `session_state`
+   - advisory classes: `role_presence`, `fault`, `gateway_presence`, `spec_reloaded`
 
 8. **Agent integration out of scope**
    - do not implement model adapters, prompt orchestration, tool routing, coding-agent lifecycle management, or any runtime-specific coupling
@@ -81,8 +77,9 @@ Preferred baseline:
 - async runtime: tokio
 - CLI: clap
 - config/state serialization: serde
-- local DB: sqlite via sqlx or rusqlite
-- Unix socket IPC: tokio + serde JSON / JSON-RPC or line-delimited JSON
+- local DB: sqlite via rusqlite
+- role connections: tokio plus rustls over TCP
+- local sockets: tokio plus length-prefixed JSON frames
 - logging: tracing
 
 Do not introduce unnecessary heavyweight dependencies.
@@ -91,30 +88,32 @@ Do not introduce unnecessary heavyweight dependencies.
 
 Use a narrow layered architecture.
 
-Suggested high-level modules:
+High-level layout for v1.0.0:
 
-- `src/main.rs`
-- `src/cli/`
-- `src/app/`
-- `src/config/`
-- `src/workspace/`
-- `src/ipc/`
-- `src/core/`
-- `src/store/`
-- `src/history/`
-- `src/events/`
-- `src/adapters/telegram/`
-- `src/adapters/feishu/`
-- `src/adapters/qq/`
-- `src/adapters/wechat/`
-- `src/util/`
+- `crates/onlyne-proto/`
+- `crates/onlyne-frame/`
+- `crates/onlyne-config/`
+- `crates/onlyne-layout/`
+- `crates/onlyne-store/`
+- `crates/onlyne-session/`
+- `crates/onlyne-net/`
+- `crates/onlyne-adapter/`
+- `crates/onlyne-server/`
+- `crates/onlyne-client/`
+- `crates/onlyne-gateway/`
+- `crates/onlyne-cli/`
+- `crates/onlyne-testkit/`
+- `plugins/onlyne-gateway-telegram/`
+- `plugins/onlyne-gateway-feishu/`
+- `plugins/onlyne-gateway-qqbot/`
+- `plugins/onlyne-gateway-weixin/`
 
 Dependency rule:
-- adapters depend on core traits
-- IPC depends on core/event types
-- store depends on domain models, not adapter-specific SDK types
-- core must not depend on any single adapter implementation
-- workspace resolution must be reusable by CLI, daemon, and tests
+- `onlyne-proto` has no tokio dependency
+- `onlyne-session` stays reducer plus backend trait with no store, proto, net dependency
+- `onlyne-server` and `onlyne-client` share proto, frame, net, store, config, layout
+- plugins depend on `onlyne-adapter` and `onlyne-proto`
+- layout resolution stays reusable by CLI, daemons, and tests
 
 ## 4. Reference repo usage rule
 
@@ -175,7 +174,7 @@ Active workspace data stays local to the selected server root or role workspace.
 
 Onlyne v1.0.0 uses length-prefixed JSON frames: `u32` big-endian length plus UTF-8 JSON. One connection carries `req`, `res`, `ev`, `ack`, `ping`, `pong`, and `bye` frames. Frames above `MAX_FRAME_BYTES` return `error{code:"frame_too_large"}` and close the connection.
 
-Client to server op vocabulary is closed:
+Client to server op vocabulary has thirteen closed verbs:
 - `hello`
 - `send`
 - `pull`
@@ -190,7 +189,7 @@ Client to server op vocabulary is closed:
 - `control`
 - `bye`
 
-Admin op vocabulary is closed:
+Admin op vocabulary has nineteen closed verbs: eight reads plus `reload`, `send`, `control`, seven `repair_*` verbs with suffixes `inspect`, `adopt`, `rebind`, `retry`, `fail`, `close`, `ack`, plus `shutdown`:
 - `status`
 - `roles`
 - `sessions`
@@ -209,15 +208,16 @@ Admin op vocabulary is closed:
 - `repair_fail`
 - `repair_close`
 - `repair_ack`
+- `shutdown`
 
-Gateway to server op vocabulary is closed:
+Gateway to server op vocabulary has five closed verbs:
 - `hello`
 - `register_channel`
 - `deliver`
-- `render_send`
 - `health`
-- `typing`
 - `bye`
+
+`render_send` travels host to gateway plugin. `typing` stays an optional gateway capability.
 
 Adapter plugin vocabulary uses the same protocol on both mount kinds. Plugin-to-host ops are `hello`, `welcome`, `report`, `session_register`, `assign_ack`, `send`, `deliver`, and `detach`. Host-to-plugin ops are `welcome`, `assign`, `render_send`, `probe`, `recycle`, `config_get`, and `bye`.
 
@@ -242,14 +242,14 @@ Process exit codes used by user-facing commands:
 - exit 3: socket resolution failure, with `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`
 - exit 4: template, generation, or operator input refusal, including `onlyne: refusing to overwrite <path>; pass --force`, `onlyne: template for role <r> is ambiguous: <p1>, <p2>`, `onlyne: no template directory named <r> under <template_root>`, `onlyne: no role matches the requested templates/roles`, `onlyne: generated workspace embeds absolute path <path>`, and `onlyne: agent_package not set in spec.toml [server]`
 
-Spec parse failures print `spec.toml:<line>: <message>`. Schema marker mismatch prints `onlyne: unsupported schema; v1.0.0 does not migrate`. Thin entrypoint binary lookup failure prints `onlyne: missing binary <path>; run cargo build --workspace`. Old wire format failures use `protocol_version` or `bad_frame`.
+Spec parse failures print `spec.toml:<line>: <message>`. Schema marker mismatch prints `onlyne: unsupported schema; v1.0.0 does not migrate`. Missing daemon binaries exit 127 with `onlyne: missing binary <path>; run cargo build --workspace`. Old wire format failures use `protocol_version` or `bad_frame`.
 
 Event push model must be explicit. Clients should be able to subscribe and receive async updates with cursor resync.
 
-## 7. Channel model expectations
+## 7. Message model expectations
 
-Define stable internal abstractions.
-At minimum:
+Define stable protocol and projection types.
+The public vocabulary lives in `onlyne-proto`:
 
 - Principal
 - MsgKind
@@ -321,17 +321,8 @@ Do not introduce Redis, Kafka, Postgres, Docker services, or anything similarly 
 
 The server should provide a local pub/sub style event stream.
 
-Important event classes:
-- inbound_message
-- outbound_message
-- ledger_state_changed
-- session_state
-- role_presence
-- gateway_health
-- history_appended
-- workspace_state_changed
-- warning
-- fault
+- durable: `ledger_state`, `session_state`
+- advisory: `role_presence`, `fault`, `gateway_presence`, `spec_reloaded`
 
 Broadcast means local connected clients can observe daemon changes.
 This is not an internet-scale bus; keep it local and simple.
@@ -340,10 +331,9 @@ This is not an internet-scale bus; keep it local and simple.
 
 Onlyne must run well in these modes:
 
-1. foreground daemon from CLI
+1. foreground server, client, or gateway from CLI
 2. background-capable process wrapped by launchd
 3. background-capable process wrapped by systemd
-4. stdio/pipe mode for agent-spawned subprocess usage
 
 Do not tightly couple daemon logic to one supervisor.
 No assumptions that systemd is always present.
@@ -441,8 +431,8 @@ If implementing IPC framing, include regression tests for malformed messages and
 Whenever uncertain, choose the option that is:
 1. more local
 2. thinner
-3. easier for an agent to call via socket/stdio
+3. easier for an agent to call through a socket
 4. less coupled to a specific runtime
-5. easier to supervise with launchd/systemd without internalizing those supervisors
+5. easier to supervise with launchd/systemd while supervisors stay outside core
 
 That is the product.

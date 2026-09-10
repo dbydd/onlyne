@@ -4,7 +4,7 @@ This onboarding map follows `docs/v1-PLAN.md` and `docs/v1-CONTRACT.md`. Source 
 
 ## Package graph
 
-The workspace contains fourteen crates plus four gateway plugins during the v1.0.0 cutover. The release graph uses thirteen v1 crates, four plugin crates, and the transient `onlyne-legacy` reference crate named by the contract. Source: `docs/v1-PLAN.md` §1 lines 53-76; `docs/v1-CONTRACT.md` Ownership lines 12-22.
+The workspace has fourteen crates under `crates/` plus four gateway plugins under `plugins/`. Source: `docs/v1-PLAN.md` §1 lines 53-76; `docs/v1-CONTRACT.md` Ownership lines 12-22.
 
 ```mermaid
 graph TD
@@ -22,12 +22,14 @@ graph TD
   client --> layout
   client --> session[onlyne-session]
   gateway[onlyne-gateway] --> adapter[onlyne-adapter]
+  gateway --> config[onlyne-config]
+  gateway --> net[onlyne-net]
   gateway --> proto
   gateway --> frame
   cli[onlyne-cli] --> proto
-  cli --> frame
   testkit[onlyne-testkit] --> adapter
   testkit --> proto
+  testkit --> frame
   testkit --> session
   store --> session
   net --> proto
@@ -72,11 +74,11 @@ graph TD
 | Server binary | `onlyne-server` excludes platform SDKs plus `resvg` and `pulldown-cmark`. | Plan §1 line 76 |
 | Gateway binary | `onlyne-gateway` excludes ledger, router, and TLS server internals. | Plan §1 line 76 |
 | Client binary | `onlyne-client` excludes every platform SDK. | Plan §1 line 76 |
-| CLI binary | `onlyne` carries zero business logic and forwards to daemons or sockets. | Plan §9 lines 342-344; Contract lines 61-63 |
+| CLI binary | `onlyne` resolves one socket and sends one frame for message and admin verbs; `server`, `client`, `gateway`, and `generate` exec sibling binaries. | Plan §9 lines 342-344; `run` in `crates/onlyne-cli/src/main.rs`; `exec` in `crates/onlyne-cli/src/forward.rs` |
 
 ## Message model
 
-`Envelope` is the single cross-process message. It carries `protocol`, `id`, `op_id`, `kind`, `from`, `to`, optional `causality`, `body`, `ts`, optional `ttl_ms`, and `admin`. Source: Plan §3 lines 114-175.
+`Envelope` is the single cross-process message. It carries `protocol`, `id`, `op_id`, `kind`, `from`, `to`, optional `control`, optional `causality`, `body`, `ts`, optional `ttl_ms`, and `admin`. Source: Plan §3 lines 114-175; `Envelope` in `crates/onlyne-proto/src/envelope.rs`.
 
 | Kind | Meaning | Source |
 |---|---|---|
@@ -117,9 +119,9 @@ Socket discovery for CLI commands is fixed: `--socket <path>` wins, `--server-ro
 | Surface | Closed op set | Source |
 |---|---|---|
 | Client to server | `hello`, `send`, `pull`, `ack`, `report`, `session_sync`, `subscribe`, `query_ledger`, `query_sessions`, `query_roles`, `query_faults`, `control`, `bye` | Plan §8 line 318 |
-| Admin | `status`, `roles`, `sessions`, `ledger`, `faults`, `watch`, `history`, `spec_diff`, `reload`, `send`, `control`, `repair_inspect`, `repair_adopt`, `repair_rebind`, `repair_retry`, `repair_fail`, `repair_close`, `repair_ack` | Plan §8 line 320 |
-| Gateway to server | `hello`, `register_channel`, `deliver`, `render_send`, `health`, `typing`, `bye` | Plan §8 line 322 |
-| Adapter plugin to host | `hello`, `welcome`, `report`, `session_register`, `assign_ack`, `send`, `deliver`, `detach` | Plan §7 lines 295-306 |
+| Admin | `status`, `roles`, `sessions`, `ledger`, `faults`, `watch`, `history`, `spec_diff`, `reload`, `send`, `control`, `repair_inspect`, `repair_adopt`, `repair_rebind`, `repair_retry`, `repair_fail`, `repair_close`, `repair_ack`, `shutdown` | Plan §8 line 320; `AdminOp` in `crates/onlyne-proto/src/ops.rs` |
+| Gateway to server | `hello`, `register_channel`, `deliver`, `health`, `bye` (`render_send` travels host to gateway; `typing` is an optional gateway capability) | Plan §8 line 322; `GatewayOp` in `crates/onlyne-proto/src/ops.rs`; `HostOp::RenderSend` and `PluginOp::Typing` in `crates/onlyne-proto/src/adapter.rs` |
+| Adapter plugin to host | `hello`, `report`, `session_register`, `assign_ack`, `send`, `deliver`, `register_channel`, `health`, `typing`, `detach` | `PluginOp` in `crates/onlyne-proto/src/adapter.rs`; frame names in `crates/onlyne-adapter/PROTOCOL.md` |
 | Host to plugin | `welcome`, `assign`, `render_send`, `probe`, `recycle`, `config_get`, `bye` | Plan §7 line 308 |
 
 The old vocabulary is gone: `loopback`, `swarm_ready`, `swarm_recycled`, `swarm_busy`, `swarm_idle`, `mark_io_consumed`, `consume`, `start_adapter`, `stop_adapter`, `restart_adapter`, the old `fetch_history_page` shape, and raw `onlyne client '<json>'` pass-through. Source: Plan §8 line 324.
@@ -132,7 +134,7 @@ The server ledger table stores `queued`, `in_flight`, `acked`, `rejected`, and `
 |---|---|---|---|
 | start | `queued` | Accepted `send` writes the durable row after ACL. | Plan §5 line 274; Plan S6 line 432 |
 | `queued` | `in_flight`, `expired`, `rejected` | Pull delivery moves work to a live role; TTL expiry creates `expired`; hard route or operator failure can create `rejected`. | Plan S6 line 432; Plan §10 line 360; inference from admin repair verbs in Plan §8 line 320 |
-| `in_flight` | `acked`, `rejected` | `ack` settles successful delivery; operator repair can fail the row. | Plan S6 line 432; inference from `repair_fail` in Plan §8 line 320 |
+| `in_flight` | `acked`, `queued`, `rejected` | `ack` settles successful delivery; requeue returns the row to `queued`; operator repair can fail the row. | Plan S6 line 432; `transition_allowed` in `crates/onlyne-store/src/lib.rs`; `repair_fail` in Plan §8 line 320 |
 | `acked` | terminal | Completed delivery with receipt and optional `out_head`. | Plan S6 line 432; Plan Verification case 1 lines 496-498 |
 | `rejected` | terminal | Durable refusal after the operation has a row. | Plan §10 line 360; inference from closed error set in Plan §4 line 212 |
 | `expired` | terminal | TTL-driven terminal state. | Plan §10 line 360; Plan Verification case 6 line 505 |
@@ -177,6 +179,8 @@ Generation command:
 onlyne server generate --root <server-root> [--template <relative-path>]... [--role <name>]... [--out <dir>] [--force]
 ```
 
+Top-level `onlyne generate --root <server-root>` builds the same argv and execs `onlyne-server`; `onlyne server generate` forwards through the generic forward.
+
 Source: Plan §11 lines 376-381.
 
 Generation flow:
@@ -202,11 +206,17 @@ Relocation guarantee: generated workspaces derive runtime paths from their own `
 
 ## Federation
 
-Federation uses ordinary role rows. A child cluster exposes one aggregate role to its parent server, and that aggregate role is a normal `[[client]]` entry with its own key. Source: Plan D14 line 28; Plan §5 lines 245-249; Plan S11 lines 458-463.
+`onlyne cluster export-prose` names the aggregate role whose outward prose the parent consumes. Source: Plan S11 line 461; Contract line 63.
 
-The parent ledger sees aggregate role traffic. Child role names and child prose stay below the aggregate boundary. Source: Verification case 5 line 504; Plan S11 line 463.
+The parent consumes that prose when composing its own role directive; federation adds zero protocol ops. Source: Plan S11 line 463; `export_prose` in `crates/onlyne-cli/src/admin.rs`.
+## CLI verbs and flags
+Message and admin verbs print one JSON line; `cluster export-prose` prints raw prose unless `--json`. Source: `render_body` and `export_prose` paths in `crates/onlyne-cli/src`.
 
-`onlyne cluster export-prose` prints the outward prose for the aggregate role and adds no protocol op. Source: Plan S11 line 461; Contract line 63.
+## CLI verbs and flags
+
+Top-level forwards are `onlyne server <verb>`, `onlyne client <verb>`, and `onlyne gateway <verb>`, each dispatched to `forward::exec`. `onlyne` has no intermediate `forward` verb. `spec_diff` is primary with the `spec-diff` alias. `--timeout` is primary with the `--timeout-ms` alias. `wait-ready` takes `--interval-ms` (default 200) with the global `--timeout` bound (default 10000). `--from` is a per-verb flag on `send`, `reply`, `complete`, `handoff`, and `control` for the admin surface only. `reply --to <envelope-id>` answers that ledger row and addresses its recipient. Exit codes: 0 success, 1 failed daemon answer or `wait-ready` bound hit, 2 local validation, 3 no socket, 127 missing sibling binary, 4 propagated generate-child failure. Source: `Verb` and `GlobalFlags` in `crates/onlyne-cli/src/main.rs` plus `flags.rs`; `wait_ready` and `export_prose` in `crates/onlyne-cli/src/admin.rs`; `SenderArgs` in `crates/onlyne-cli/src/verbs.rs`; exit codes in `crates/onlyne-cli/src/runtime.rs`; pinned by six tests in `crates/onlyne-cli/tests/cli.rs`.
+
+The parent consumes that prose when composing its own role directive; federation adds zero protocol ops. Source: Plan S11 line 463; `export_prose` in `crates/onlyne-cli/src/admin.rs`.
 
 ## Where the code lives
 

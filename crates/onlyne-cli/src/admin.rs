@@ -1,19 +1,18 @@
 //! The bare admin nouns, which talk to the resolved socket like the message verbs.
 
 use onlyne_proto::{
-    AdminOp, ClientOp, EventTier, HistoryArgs, LedgerQuery, LedgerState, Lifecycle, MsgKind,
-    QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, ResBody, RepairAck, RepairAdopt,
-    RepairFail, RepairRebind, RepairTarget, Subscribe, new_id,
+    AdminOp, ClientOp, EventTier, Frame, HistoryArgs as ProtoHistoryArgs, LedgerQuery,
+    LedgerState, Lifecycle, MsgKind, Principal, QueryFaultsArgs, QueryRolesArgs,
+    QuerySessionsArgs, ResBody, RepairAck, RepairAdopt, RepairFail, RepairRebind, RepairTarget,
+    Subscribe, new_id,
 };
-use onlyne_frame::Frame;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::flags::GlobalFlags;
 use crate::runtime::{
-    self, EXIT_ANSWER_FAILED, EXIT_GENERATE_FAILED, EXIT_NO_SOCKET, EXIT_OK, EXIT_VALIDATION,
+    self, EXIT_ANSWER_FAILED, EXIT_NO_SOCKET, EXIT_OK, EXIT_VALIDATION,
 };
 use crate::socket::{Surface, SocketTarget};
 use crate::wire::{self, ExchangeError, Outbound};
@@ -335,10 +334,10 @@ pub fn watch(flags: &GlobalFlags, args: WatchArgs) -> i32 {
         loop {
             match wire::recv_frame(&mut stream, flags.timeout_ms).await {
                 Ok(Frame::Ev { seq, event }) => {
+                    let frame: Frame = Frame::Ev { seq, event };
                     println!(
                         "{}",
-                        serde_json::to_string(&Frame::Ev { seq, event })
-                            .expect("serialisable frame")
+                        serde_json::to_string(&frame).expect("serialisable frame")
                     );
                 }
                 Ok(Frame::Res { body, .. }) if !body.ok => {
@@ -364,7 +363,7 @@ pub fn history(flags: &GlobalFlags, args: HistoryArgs) -> i32 {
     admin(
         flags,
         "history",
-        AdminOp::History(HistoryArgs {
+        AdminOp::History(ProtoHistoryArgs {
             since_seq: args.since.unwrap_or_default(),
             limit: args.limit.unwrap_or_default(),
             kind: args.kind,
@@ -394,8 +393,8 @@ pub fn reload(flags: &GlobalFlags) -> i32 {
 enum Probe {
     /// `status` answered `ok: true`.
     Ready(ResBody),
-    /// `status` answered but reported the server as not ready.
-    Refused(ResBody),
+    /// `status` answered, but the answer was not `ok: true`.
+    NotReady,
     /// No answer; the server is not listening yet.
     Failed,
 }
@@ -409,7 +408,7 @@ async fn status_probe(target: &SocketTarget, timeout_ms: u64) -> Probe {
         Outbound::admin(new_id(), AdminOp::Status(Value::Object(Default::default())));
     match wire::request_res(&mut stream, &request, timeout_ms).await {
         Ok(body) if body.ok => Probe::Ready(body),
-        Ok(body) => Probe::Refused(body),
+        Ok(_) => Probe::NotReady,
         Err(_) => Probe::Failed,
     }
 }
@@ -456,21 +455,21 @@ pub fn repair(flags: &GlobalFlags, verb: RepairVerb) -> i32 {
             task_id: args.task,
             session_id: args.session_id,
             backend: args.backend,
-            backend_ref: args.backend_ref,
+            backend_ref: serde_json::json!(args.backend_ref),
             reason: args.reason,
         }),
         RepairVerb::Rebind(args) => AdminOp::RepairRebind(RepairRebind {
             task_id: args.task,
             session_id: args.session_id,
             backend: args.backend,
-            backend_ref: args.backend_ref,
+            backend_ref: serde_json::json!(args.backend_ref),
             reason: args.reason,
         }),
         RepairVerb::Retry(args) => AdminOp::RepairRetry(repair_target(args)),
         RepairVerb::Fail(args) => AdminOp::RepairFail(RepairFail {
             task_id: args.task,
             reason: args.reason,
-            notify: args.notify,
+            notify: args.notify.map(|role| Principal::role(&role)),
         }),
         RepairVerb::Close(args) => AdminOp::RepairClose(repair_target(args)),
         RepairVerb::Ack(args) => AdminOp::RepairAck(RepairAck {

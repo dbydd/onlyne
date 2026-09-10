@@ -176,6 +176,50 @@ cert_pin = "{CERT_HEX}"
     .unwrap_err();
     assert!(err.to_string().starts_with("spec.toml:3:"), "{err}");
 }
+#[test]
+fn missing_server_name_points_at_server_table() {
+    let err = Spec::parse_str(
+        r#"[server]
+listen = "0.0.0.0:7811"
+cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
+"#,
+    )
+    .unwrap_err();
+    assert_eq!(err.to_string(), "spec.toml:1: missing field `name`");
+}
+
+#[test]
+fn missing_client_key_points_at_client_table() {
+    let err = Spec::parse_str(&format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[client]]
+role = "planner"
+"#
+    ))
+    .unwrap_err();
+    assert_eq!(err.to_string(), "spec.toml:6: missing field `key`");
+}
+
+#[test]
+fn missing_route_target_points_at_route_table() {
+    let err = Spec::parse_str(&format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[route]]
+gateway = "tg1"
+channel = "telegram"
+"#
+    ))
+    .unwrap_err();
+    assert_eq!(err.to_string(), "spec.toml:6: missing field `to`");
+}
 
 #[test]
 fn client_config_unknown_key_has_line_number() {

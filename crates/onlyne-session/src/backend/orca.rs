@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 pub struct OrcaBackend {
@@ -76,6 +77,120 @@ fn spawn_command(spec: &SpawnSpec) -> Result<String> {
     }
     Ok(command)
 }
+
+/// Result of checking one Orca folder record against the filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FolderRecordState {
+    Live,
+    Pruned,
+    LeftAlone,
+}
+
+/// Prune one stale Orca folder record.
+///
+/// Orca keeps folder-kind nodes as Orca-side metadata with no directory
+/// backlink. A node whose workspace path no longer exists is a ghost
+/// pointing at nothing and gets removed. Anything else stays untouched.
+fn prune_folder_record(runner: &dyn Runner, command: &str, path: &Path) -> FolderRecordState {
+    if path.exists() {
+        return FolderRecordState::Live;
+    }
+    let Some(_node_id) = folder_record_id(runner, command, path) else {
+        return FolderRecordState::Pruned;
+    };
+    match folder_record_setup_id(runner, command, path) {
+        Some(setup_id) => {
+            let output = runner.run(
+                command,
+                &[
+                    "project".into(),
+                    "setup-delete".into(),
+                    "--setup".into(),
+                    setup_id,
+                    "--json".into(),
+                ],
+                None,
+                &BTreeMap::new(),
+            );
+            match output {
+                Ok(output) => {
+                    let accepted = serde_json::from_slice::<Value>(&output.stdout)
+                        .ok()
+                        .and_then(|value| value.get("ok")?.as_bool())
+                        == Some(true);
+                    if accepted {
+                        FolderRecordState::Pruned
+                    } else {
+                        FolderRecordState::LeftAlone
+                    }
+                }
+                Err(_) => FolderRecordState::LeftAlone,
+            }
+        }
+        None => FolderRecordState::LeftAlone,
+    }
+}
+
+/// Look up the Orca folder node id for a workspace path.
+fn folder_record_id(runner: &dyn Runner, command: &str, path: &Path) -> Option<String> {
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let output = runner
+        .run(
+            command,
+            &[
+                "worktree".into(),
+                "show".into(),
+                "--worktree".into(),
+                format!("path:{}", canon.display()),
+                "--json".into(),
+            ],
+            None,
+            &BTreeMap::new(),
+        )
+        .ok()?;
+    if output.status != 0 {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).ok()?;
+    if value.get("ok")?.as_bool() != Some(true) {
+        return None;
+    }
+    value
+        .pointer("/result/worktree/id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Look up the Orca project setup id whose path matches a workspace path.
+fn folder_record_setup_id(
+    runner: &dyn Runner,
+    command: &str,
+    path: &Path,
+) -> Option<String> {
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let output = runner
+        .run(
+            command,
+            &["project".into(), "setups".into(), "--json".into()],
+            None,
+            &BTreeMap::new(),
+        )
+        .ok()?;
+    if output.status != 0 {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let setups = value.pointer("/result/setups")?.as_array()?;
+    for setup in setups {
+        let candidate = setup.get("path")?.as_str()?;
+        let canon_candidate =
+            std::fs::canonicalize(candidate).unwrap_or_else(|_| Path::new(candidate).to_path_buf());
+        if canon_candidate == canon {
+            return setup.get("id")?.as_str().map(str::to_owned);
+        }
+    }
+    None
+}
 impl SessionBackend for OrcaBackend {
     fn name(&self) -> &'static str {
         "orca"
@@ -103,18 +218,19 @@ impl SessionBackend for OrcaBackend {
             .unwrap_or(false))
     }
     fn spawn(&self, spec: SpawnSpec) -> Result<SessionRef> {
+        let _ = prune_folder_record(self.runner.as_ref(), &self.command, &spec.cwd);
         let title = spec
             .rename
             .clone()
             .unwrap_or_else(|| format!("onlyne:{}", spec.task_id));
-        let command = spawn_command(&spec)?;
+        let shell = spawn_command(&spec)?;
         let mut args = vec![
             "terminal".into(),
             "create".into(),
             "--title".into(),
             title,
             "--command".into(),
-            command,
+            shell,
         ];
         if spec.focus.unwrap_or(false) {
             args.push("--focus".into());
@@ -231,5 +347,89 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.to_string().contains("requires a command"));
+    }
+
+    #[test]
+    fn missing_workspace_prunes_the_folder_record() {
+        use std::sync::Mutex;
+        struct ScriptRunner {
+            calls: Mutex<Vec<Vec<String>>>,
+        }
+        impl Runner for ScriptRunner {
+            fn run(
+                &self,
+                _program: &str,
+                args: &[String],
+                _cwd: Option<&Path>,
+                _env: &BTreeMap<String, String>,
+            ) -> Result<CommandOutput> {
+                self.calls.lock().unwrap().push(args.to_vec());
+                let text = args.iter().map(String::as_str).collect::<Vec<_>>().join(" ");
+                let body = if text.contains("setup-delete") {
+                    serde_json::json!({"ok": true}).to_string()
+                } else if text.contains("setups") {
+                    serde_json::json!({
+                        "ok": true,
+                        "result": {
+                            "setups": [
+                                {"id": "setup-ghost", "path": "/tmp/onlyne-ghost-missing"}
+                            ]
+                        }
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                        "ok": true,
+                        "result": {"worktree": {"id": "node-ghost"}}
+                    })
+                    .to_string()
+                };
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: body.into_bytes(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let runner = ScriptRunner {
+            calls: Mutex::new(Vec::new()),
+        };
+        let missing = Path::new("/tmp/onlyne-ghost-missing");
+        assert!(!missing.exists());
+        let state = prune_folder_record(&runner, "orca", missing);
+        assert_eq!(state, FolderRecordState::Pruned);
+        let calls = runner.calls.lock().unwrap();
+        assert!(calls.iter().any(|args| args.contains(&"setup-delete".to_string())));
+    }
+
+    #[test]
+    fn existing_workspace_leaves_the_folder_record_alone() {
+        use std::sync::Mutex;
+        struct SilentRunner {
+            calls: Mutex<usize>,
+        }
+        impl Runner for SilentRunner {
+            fn run(
+                &self,
+                _program: &str,
+                _args: &[String],
+                _cwd: Option<&Path>,
+                _env: &BTreeMap<String, String>,
+            ) -> Result<CommandOutput> {
+                *self.calls.lock().unwrap() += 1;
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"{}".to_vec(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let runner = SilentRunner {
+            calls: Mutex::new(0),
+        };
+        let state = prune_folder_record(&runner, "orca", dir.path());
+        assert_eq!(state, FolderRecordState::Live);
+        assert_eq!(*runner.calls.lock().unwrap(), 0);
     }
 }

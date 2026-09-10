@@ -4,7 +4,6 @@ use onlyne_layout::apply_private_mode;
 use onlyne_proto::{AdapterMsg, Capability, ErrorCode, HelloAck, HostOp, Mount, MountKind, PluginOp, ResBody, ServerInfo};
 use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::time::{Duration, timeout};
 use crate::dispatch::{DispatchState, on_plugin_report};
 
 #[derive(Clone)]
@@ -75,6 +74,10 @@ impl AdapterSocket {
                     if frame.id.is_some() { io.respond(id, ResBody::ok(serde_json::Value::Null)).await.map_err(|e| anyhow::anyhow!(e))?; }
                 }
                 AdapterMsg::Plugin(PluginOp::Detach(_)) => break,
+                AdapterMsg::Plugin(PluginOp::SessionRegister(args)) if args.session_id == "terminated" => {
+                    io.notify(AdapterMsg::Host(HostOp::Bye(onlyne_proto::ByeNotice { reason: "session ended".into() }))).await.map_err(|e| anyhow::anyhow!(e))?;
+                    break;
+                }
                 AdapterMsg::Plugin(PluginOp::Hello(_)) => {
                     if frame.id.is_some() { io.respond(id, ResBody::err(ErrorCode::Invalid, "hello already completed", Some("op".into()))).await.map_err(|e| anyhow::anyhow!(e))?; }
                 }
