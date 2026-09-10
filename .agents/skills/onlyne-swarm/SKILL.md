@@ -119,9 +119,11 @@ re-adopts live sessions either way.
 swarm-ready gates apply equally to root and every instance:
 `.onlyne/config.toml` has `[swarm] enabled = true`, `.pi/onlyne.json` has
 `watch.autoStart = true`, `.pi/settings.json` `packages` include pi-onlyne.
-Instances are backfilled by `run_sync`; root is operator-maintained —
-`status` `not_swarm_ready` reports which gate root is missing. A relay back
-to `_root` must pass root's gates too.
+New instances receive these gates once through `bootstrap_child`. Existing
+instances are operator-owned; `run_sync` preserves their files and reports
+readiness gaps. Template layers carry role, model, and back-edge declarations;
+`.schedule/<role>/.pi/**` remains inert workspace metadata. The root is also
+operator-maintained. A relay back to `_root` must pass root's gates too.
 
 Then from another shell in the same root:
 
