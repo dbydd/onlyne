@@ -115,10 +115,15 @@ export function readyReport({ taskId, sessionId, generation, seq }) {
  * reducer type), not a loose status string: the host deserialises it and rejects
  * anything that is not a legal state tuple.
  */
-export function heartbeatReport({ taskId, generation, seq, agent }) {
+export function heartbeatReport({ taskId, generation, seq, agent, host = null }) {
   return {
     kind: "heartbeat",
-    data: { task_id: taskId, generation, seq, observed: observationFor(agent, { generation, seq }) },
+    data: {
+      task_id: taskId,
+      generation,
+      seq,
+      observed: observationFor(agent, { generation, seq, host }),
+    },
   };
 }
 
@@ -159,11 +164,15 @@ export function detachArgs(reason) {
  * than passed through: the plugin owns the agent dimension (the host never
  * synthesises turn state), and leaves delivery at `none`/outcome `pending`,
  * which is its own truth until it reports a completion.
+ *
+ * `host` is where this process runs (`hostBinding`); it is attached only when
+ * the environment names a pane, so a pi outside Orca reports a tuple with no
+ * host field at all.
  * @param {"booting"|"ready"|"running"|"idle"|"gone"} agent
  */
-export function observationFor(agent, { generation, seq }) {
+export function observationFor(agent, { generation, seq, host = null }) {
   const state = agent === "booting" || agent === "gone" ? "booting" : agent;
-  return {
+  const observed = {
     version: { generation, seq },
     generation_live: true,
     // onlyne-session/src/reconcile.rs: DEFAULT_ISOLATE_AFTER / DEFAULT_TERMINATE_AFTER.
@@ -177,6 +186,34 @@ export function observationFor(agent, { generation, seq }) {
     outcome: "pending",
     public: state === "running" ? "working" : state === "ready" || state === "idle" ? "idle" : "created",
   };
+  if (host) observed.host = host;
+  return observed;
+}
+
+/**
+ * The Orca pane this process was spawned in, in the shape `onlyne-session`'s
+ * `HostRef` deserialises (`{"orca":{…}}`), or null outside a pane.
+ *
+ * An Orca pane exports `ORCA_PANE_KEY` — `<tab_id>:<leaf_id>`, beside
+ * `ORCA_TAB_ID` and `ORCA_TERMINAL_HANDLE` — into the command it was started
+ * with (measured 2026-09-11 on Orca 1.4.198), and this plugin is spawned with
+ * the environment it inherited, so the binding is inherited rather than
+ * guessed: this process is the only component that can state, from the inside,
+ * which Orca pane an onlyne session is. No field is invented: the ids come from
+ * the key and from the environment, and a missing handle is simply absent.
+ *
+ * @param {Record<string, string | undefined>} env
+ */
+export function hostBinding(env) {
+  const named = typeof env?.ORCA_PANE_KEY === "string" ? env.ORCA_PANE_KEY.trim() : "";
+  const [keyTab, keyLeaf] = named.includes(":") ? named.split(":") : [];
+  const tabId = env?.ORCA_TAB_ID || keyTab || "";
+  const leafId = env?.ORCA_LEAF_ID || keyLeaf || "";
+  if (!tabId || !leafId) return null;
+  const orca = { pane_key: `${tabId}:${leafId}`, tab_id: tabId, leaf_id: leafId };
+  const handle = env?.ORCA_TERMINAL_HANDLE;
+  if (typeof handle === "string" && handle) orca.handle = handle;
+  return { orca };
 }
 
 /** One inline image part, from raw bytes. */

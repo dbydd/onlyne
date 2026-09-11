@@ -20,6 +20,7 @@ import {
   heartbeatReport,
   helloArgs,
   headOf,
+  hostBinding,
   imagePart,
   injectionText,
   normalizeOutcome,
@@ -30,7 +31,6 @@ import {
   stdinTaskText,
   welcomeFrom,
 } from "./protocol.mjs";
-import { paneClaim, paneKeyFrom, publishPaneClaim } from "./attribution.mjs";
 
 /** Reconnect ladder in milliseconds, capped like the client's own. */
 export const RECONNECT_LADDER_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
@@ -100,13 +100,11 @@ export class OnlyneAgent {
     this.helloTimeoutMs = options.helloTimeoutMs ?? HELLO_TIMEOUT_MS;
     this.settleFallbackMs = options.settleFallbackMs ?? SETTLE_FALLBACK_MS;
     this.createConnection = options.createConnection ?? ((path) => createConnection(path));
-    // Where this pane's binding goes (attribution.mjs): its own file under the
-    // workspace's `pi-panes/`, so a sibling pi in the same workspace is never
-    // overwritten. Injected by the tests, which must not touch the workspace
-    // they run in.
-    this.claimStore = options.claimStore ?? {
-      publish: (claim, paneKey) => publishPaneClaim({ workspace: options.cwd, claim, paneKey }),
-    };
+    // The pane this process was spawned in, reported on every heartbeat so the
+    // supervisor board can attribute the tab (protocol.mjs `hostBinding`). Read
+    // once: the environment of a process never changes. Injected by the tests,
+    // which must not depend on the pane they run in.
+    this.host = options.host !== undefined ? options.host : hostBinding(process.env);
     this.timer = options.timer ?? {
       set: (fn, ms) => setTimeout(fn, ms),
       clear: (handle) => clearTimeout(handle),
@@ -152,7 +150,6 @@ export class OnlyneAgent {
   stop(reason = "quit") {
     if (this.closed) return;
     this.closed = true;
-    this.clearClaim();
     this.clearTimers();
     const socket = this.socket;
     if (this.connected && socket && !socket.destroyed) {
@@ -166,25 +163,6 @@ export class OnlyneAgent {
     this.connected = false;
     this.socket = null;
     this.surface.status?.("onlyne: detached");
-  }
-
-  /**
-   * Publish this pane's binding so the supervisor board can attribute the tab
-   * (`integrations/orca-plugin/src/board.mjs`). A no-op outside an Orca pane,
-   * and never fatal.
-   */
-  publishClaim(taskId = this.envTaskId) {
-    const claim = paneClaim(process.env, { role: this.role, taskId });
-    this.claimStore.publish(claim, claim?.pane_key ?? null);
-  }
-
-  /**
-   * Drop this pane's claim: the session ended, or this process is leaving. The
-   * pane key is the process's own, so a clear can only ever remove the file
-   * this process published — never a sibling pane's.
-   */
-  clearClaim() {
-    this.claimStore.publish(null, paneKeyFrom(process.env));
   }
 
   /** One line for `/onlyne status`. */
@@ -307,7 +285,6 @@ export class OnlyneAgent {
     this.surface.status?.(`onlyne: ${welcome.role}`);
     this.log(`welcome role=${welcome.role} generation=${welcome.generation} capabilities=${welcome.hostCapabilities.join(",")}`);
     this.surface.welcome?.(welcome);
-    this.publishClaim();
     const prose = welcome.prose.trim();
     if (prose && !this.deliveredProse.has(prose)) {
       this.deliveredProse.add(prose);
@@ -413,9 +390,6 @@ export class OnlyneAgent {
     else if (op === "config_get") void this.onConfigGet(args);
     else if (op === "bye") {
       this.log(`host bye: ${args.reason ?? "unspecified"}`);
-      // The session ended, but pi may live on to be handed another task, so the
-      // claim goes with the session rather than with the socket.
-      this.clearClaim();
       this.dropSocket();
     } else if (op) this.log(`ignoring host op ${op}`);
   }
@@ -477,6 +451,7 @@ export class OnlyneAgent {
       generation: this.generation,
       seq: this.seq,
       agent,
+      host: this.host,
     }));
     this.stats.reports += 1;
   }
@@ -538,7 +513,6 @@ export class OnlyneAgent {
     }
     this.injectedTasks.add(taskId);
     this.stats.assigns += 1;
-    this.publishClaim(taskId);
     if (typeof args.generation === "number") this.generation = args.generation;
 
     const attachments = this.writeAttachments(taskId, envelope);

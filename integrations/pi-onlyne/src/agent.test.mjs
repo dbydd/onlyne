@@ -3,14 +3,13 @@
 // wire vector, so the input side is byte-identical to what the client sends.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 
-import { PANE_CLAIMS_RELATIVE_DIR, paneClaimFileName } from "./attribution.mjs";
 import { OnlyneAgent } from "./agent.mjs";
 import { createFrameDecoder, encodeFrame } from "./frame.mjs";
 import { SEQ_BASE, readyReport } from "./protocol.mjs";
@@ -21,6 +20,24 @@ const ASSIGN_FRAME = existsSync(VECTOR_DIR)
   : null;
 const TASK_ID = "11111111-1111-4111-8111-111111111111";
 const SESSION_ID = "8b1c";
+const PANE_KEY = "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560";
+const PANE_TAB = "45e603f7-0772-48aa-bcf6-832272747713";
+const PANE_LEAF = "b6d067b6-9255-4f5c-a13f-24f194ea0560";
+/** Exactly the ORCA_* environment an Orca pane exports (measured on 1.4.198). */
+const PANE_ENV = {
+  ORCA_PANE_KEY: PANE_KEY,
+  ORCA_TAB_ID: PANE_TAB,
+  ORCA_LEAF_ID: PANE_LEAF,
+  ORCA_TERMINAL_HANDLE: "term_1",
+};
+
+/** The `observed` bodies of every heartbeat the fake host received. */
+function heartbeats(host) {
+  return host
+    .of("report")
+    .filter((args) => args.kind === "heartbeat")
+    .map((args) => args.data.observed);
+}
 
 /** Poll until `predicate` holds, so a test never races the event loop. */
 async function waitFor(predicate, { timeoutMs = 2_000, stepMs = 5 } = {}) {
@@ -162,7 +179,7 @@ async function startAgent({ surface = fakeSurface(), capabilities, options = {},
     settleFallbackMs: options.settleFallbackMs ?? 30_000,
     heartbeatMs: options.heartbeatMs ?? 60_000,
     ...(capabilities ? { capabilities } : {}),
-    ...(options.claimStore ? { claimStore: options.claimStore } : {}),
+    ...(options.host !== undefined ? { host: options.host } : {}),
   });
   cleanups.push(async () => {
     agent.stop("test");
@@ -214,99 +231,127 @@ async function inOrcaPane(env, body) {
   }
 }
 
-test("the pane claim follows the session: mount, assign, bye, stop", async () => {
-  const published = [];
-  const claimStore = { publish: (claim) => published.push(claim) };
-  const { agent, host } = await startAgent({ options: { claimStore } });
-  const paneKey = "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560";
+/** One mounted agent: the socket is up and the ready report has landed, so a
+ * push from the test cannot race the dial. */
+async function mountedAgent(options = {}) {
+  const started = await startAgent(options);
+  started.agent.start();
+  await waitFor(() => (started.host.of("report").length >= 1 ? true : null));
+  return started;
+}
 
-  await inOrcaPane({ ORCA_PANE_KEY: paneKey, ORCA_TERMINAL_HANDLE: "term_1" }, async () => {
-    agent.start();
-    // Mount: the pane binding is stated as soon as the welcome is adopted.
-    const [mounted] = await waitFor(() => (published.length === 1 ? published : null));
-    assert.deepEqual(mounted, {
-      pane_key: paneKey,
-      tab_id: "45e603f7-0772-48aa-bcf6-832272747713",
-      leaf_id: "b6d067b6-9255-4f5c-a13f-24f194ea0560",
-      handle: "term_1",
-      worktree_id: null,
-      role: "planner",
-      task_id: TASK_ID,
+test("every heartbeat names the Orca pane this process was spawned in", async () => {
+  await inOrcaPane(PANE_ENV, async () => {
+    const { host } = await mountedAgent();
+    host.notify("assign", assignArgs());
+    await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
+
+    host.notify("probe", {});
+    const [observed] = await waitFor(() => (heartbeats(host).length ? heartbeats(host) : null));
+    assert.deepEqual(observed.host, {
+      orca: { pane_key: PANE_KEY, tab_id: PANE_TAB, leaf_id: PANE_LEAF, handle: "term_1" },
     });
+    // The binding rides beside the state dimensions instead of replacing them.
+    assert.equal(observed.agent, "running");
+    assert.equal(observed.public, "working");
+    assert.equal(observed.version.generation, 1);
+  });
+});
 
-    // A task named after the mount refreshes the claim rather than leaving a
-    // stale task id in it.
+test("a reconnect reports the same pane", async () => {
+  await inOrcaPane(PANE_ENV, async () => {
+    const { agent, host } = await mountedAgent();
+    host.notify("assign", assignArgs());
+    await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
+    host.notify("probe", {});
+    await waitFor(() => (heartbeats(host).length ? true : null));
+
+    // The binding is process state: a client restarting under the plugin cannot
+    // move the pane the process runs in.
+    for (const socket of [...host.sockets]) socket.destroy();
+    await waitFor(() => (host.connections >= 2 ? true : null));
+    await waitFor(() => (agent.connected === true ? true : null));
+    const reports = await waitFor(() => (heartbeats(host).length >= 2 ? heartbeats(host) : null));
+    assert.deepEqual(reports.at(-1).host, reports[0].host);
+  });
+});
+
+test("a second task in the same pane reports the same pane", async () => {
+  await inOrcaPane(PANE_ENV, async () => {
+    const { host } = await mountedAgent();
+    host.notify("assign", assignArgs());
+    await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
+    host.notify("probe", {});
+    await waitFor(() => (heartbeats(host).length ? true : null));
+
+    // The binding belongs to the process, not to the task: handing this pane
+    // another task cannot change where the process runs.
     host.notify("assign", { ...assignArgs(), task_id: "22222222-2222-4222-8222-222222222222" });
-    await waitFor(() => (published.length === 2 ? true : null));
-    assert.equal(published[1].task_id, "22222222-2222-4222-8222-222222222222");
-    assert.equal(published[1].pane_key, paneKey, "the pane is what the claim is for");
-
-    // The host ended the session while pi stays up: the claim goes with it.
-    host.notify("bye", { reason: "session ended" });
-    await waitFor(() => (published.length === 3 ? true : null));
-    assert.equal(published[2], null);
-
-    agent.stop("test");
-    assert.equal(published.at(-1), null);
+    await waitFor(() => (host.of("assign_ack").length === 2 ? true : null));
+    host.notify("probe", {});
+    const reports = await waitFor(() => (heartbeats(host).length >= 2 ? heartbeats(host) : null));
+    assert.deepEqual(reports.at(-1).host, reports[0].host);
   });
 });
 
-test("the claim lands in this pane's own file, and a dropped socket keeps it", async () => {
-  const { agent, host, dir } = await startAgent();
-  const paneKey = "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560";
-  const claimPath = join(dir, PANE_CLAIMS_RELATIVE_DIR, paneClaimFileName(paneKey));
+test("a pi outside an Orca pane reports no host at all", async () => {
+  await inOrcaPane({}, async () => {
+    const { host } = await mountedAgent();
+    host.notify("assign", assignArgs());
+    await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
+    host.notify("probe", {});
 
-  await inOrcaPane({ ORCA_PANE_KEY: paneKey, ORCA_TERMINAL_HANDLE: "term_1" }, async () => {
-    agent.start();
-    // Mount: the claim is a file of its own, named after this pane.
-    await waitFor(() => (existsSync(claimPath) ? true : null));
-    const mounted = JSON.parse(readFileSync(claimPath, "utf8"));
-    assert.equal(mounted.pane_key, paneKey);
-    assert.equal(mounted.handle, "term_1");
-    assert.equal(mounted.role, "planner");
-    assert.match(mounted.updated_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-
-    // An assignment refreshes the claim in place: still one file for the pane.
-    const reassigned = "22222222-2222-4222-8222-222222222222";
-    host.notify("assign", { ...assignArgs(), task_id: reassigned });
-    await waitFor(() => (JSON.parse(readFileSync(claimPath, "utf8")).task_id === reassigned ? true : null));
-    assert.deepEqual(readdirSync(join(dir, PANE_CLAIMS_RELATIVE_DIR)), [paneClaimFileName(paneKey)]);
-
-    // The socket dying is not the session ending: pi stays up and may be handed
-    // another task, so the claim stays. The host is gone for good here, so
-    // nothing can put the file back and the assertion is a real one.
-    await host.close();
-    await waitFor(() => (agent.connected === false ? true : null));
-    assert.equal(existsSync(claimPath), true, "a dropped socket does not clear the claim");
+    const [observed] = await waitFor(() => (heartbeats(host).length ? heartbeats(host) : null));
+    assert.equal("host" in observed, false, "no pane, no binding");
+    assert.equal(observed.agent, "running", "the tuple is still a full observation");
   });
 });
 
-test("stop removes this pane's claim file", async () => {
-  const { agent, host, dir } = await startAgent();
-  const paneKey = "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560";
-  const claimPath = join(dir, PANE_CLAIMS_RELATIVE_DIR, paneClaimFileName(paneKey));
+test("a pane that exports no handle reports the pane without inventing one", async () => {
+  await inOrcaPane({ ORCA_PANE_KEY: PANE_KEY }, async () => {
+    const { host } = await mountedAgent();
+    host.notify("assign", assignArgs());
+    await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
+    host.notify("probe", {});
 
-  await inOrcaPane({ ORCA_PANE_KEY: paneKey }, async () => {
-    agent.start();
-    await waitFor(() => (existsSync(claimPath) ? true : null));
-
-    agent.stop("test");
-    assert.equal(existsSync(claimPath), false, "the plugin left, so its claim went with it");
+    const [observed] = await waitFor(() => (heartbeats(host).length ? heartbeats(host) : null));
+    // The pane key carries both ids; the handle is a field the environment
+    // either has or has not, and a missing one is absent rather than empty.
+    assert.deepEqual(observed.host, {
+      orca: { pane_key: PANE_KEY, tab_id: PANE_TAB, leaf_id: PANE_LEAF },
+    });
   });
 });
 
-test("outside an Orca pane no claim is ever published", async () => {
-  const published = [];
-  const { agent } = await startAgent({ options: { claimStore: { publish: (claim) => published.push(claim) } } });
-  const saved = process.env.ORCA_PANE_KEY;
-  delete process.env.ORCA_PANE_KEY;
-  try {
-    agent.start();
-    await waitFor(() => (published.length === 1 ? true : null));
-    assert.deepEqual(published, [null], "a plain pi session claims nothing");
-  } finally {
-    if (saved !== undefined) process.env.ORCA_PANE_KEY = saved;
-  }
+test("the binding is the environment the process was spawned with", async () => {
+  await inOrcaPane(PANE_ENV, async () => {
+    const { host } = await mountedAgent();
+    // A later change to the environment cannot move the process: what is
+    // reported is the pane it was started in.
+    process.env.ORCA_PANE_KEY = "aaaa1111-1111-4111-8111-111111111111:bbbb2222-2222-4222-8222-222222222222";
+    host.notify("assign", assignArgs());
+    await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
+    host.notify("probe", {});
+
+    const [observed] = await waitFor(() => (heartbeats(host).length ? heartbeats(host) : null));
+    assert.equal(observed.host.orca.pane_key, PANE_KEY);
+  });
+});
+
+test("a session writes nothing under the workspace: the binding is protocol data", async () => {
+  await inOrcaPane(PANE_ENV, async () => {
+    const { host, dir } = await mountedAgent();
+    host.notify("assign", assignArgs());
+    await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
+    host.notify("probe", {});
+    await waitFor(() => (heartbeats(host).length ? true : null));
+
+    assert.equal(
+      existsSync(join(dir, ".onlyne")),
+      false,
+      "the plugin keeps no cache file; the pane travels in the observation"
+    );
+  });
 });
 
 test("a fresh agent opens with hello, registers and reports ready", async () => {

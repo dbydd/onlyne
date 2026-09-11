@@ -16,6 +16,7 @@ import {
   headOf,
   heartbeatReport,
   helloArgs,
+  hostBinding,
   imagePart,
   injectionText,
   normalizeOutcome,
@@ -144,6 +145,72 @@ test("every observation is a state tuple the reducer calls legal", () => {
     assert.equal(observed.delivery, "none");
     assert.equal(observed.recovery, "none");
   }
+});
+
+const PANE_KEY = "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560";
+const PANE_ENV = {
+  ORCA_PANE_KEY: PANE_KEY,
+  ORCA_TAB_ID: "45e603f7-0772-48aa-bcf6-832272747713",
+  ORCA_LEAF_ID: "b6d067b6-9255-4f5c-a13f-24f194ea0560",
+  ORCA_TERMINAL_HANDLE: "term_1",
+};
+
+test("hostBinding names the Orca pane the environment exports", () => {
+  // The shape is `onlyne-session`'s `HostRef`: `{"orca":{…}}`, so the Rust side
+  // deserialises the observation without a second translation.
+  assert.deepEqual(hostBinding(PANE_ENV), {
+    orca: {
+      pane_key: PANE_KEY,
+      tab_id: "45e603f7-0772-48aa-bcf6-832272747713",
+      leaf_id: "b6d067b6-9255-4f5c-a13f-24f194ea0560",
+      handle: "term_1",
+    },
+  });
+});
+
+test("hostBinding reads the ids out of the pane key and invents nothing", () => {
+  // The pane key is `<tab_id>:<leaf_id>`; the handle is a separate export, and
+  // a missing one is absent rather than empty.
+  assert.deepEqual(hostBinding({ ORCA_PANE_KEY: PANE_KEY }), {
+    orca: {
+      pane_key: PANE_KEY,
+      tab_id: "45e603f7-0772-48aa-bcf6-832272747713",
+      leaf_id: "b6d067b6-9255-4f5c-a13f-24f194ea0560",
+    },
+  });
+  // An explicit id outranks the key's own spelling of it.
+  const explicit = hostBinding({ ...PANE_ENV, ORCA_TAB_ID: "aaaa1111-1111-4111-8111-111111111111" });
+  assert.equal(explicit.orca.tab_id, "aaaa1111-1111-4111-8111-111111111111");
+  assert.equal(explicit.orca.pane_key, "aaaa1111-1111-4111-8111-111111111111:b6d067b6-9255-4f5c-a13f-24f194ea0560");
+});
+
+test("hostBinding is null when the environment names no pane", () => {
+  assert.equal(hostBinding({}), null, "a plain shell is not in a pane");
+  assert.equal(hostBinding(undefined), null);
+  // A pane key without a leaf names no pane, and one id alone is not a pane.
+  assert.equal(hostBinding({ ORCA_PANE_KEY: "not-a-pane-key" }), null);
+  assert.equal(hostBinding({ ORCA_TAB_ID: "tab-only" }), null);
+});
+
+test("observationFor attaches the host only when there is one", () => {
+  const bare = observationFor("running", { generation: 1, seq: 2 });
+  assert.equal("host" in bare, false, "a tuple without a pane carries no host key");
+
+  const hosted = observationFor("running", { generation: 1, seq: 2, host: hostBinding(PANE_ENV) });
+  assert.deepEqual(hosted.host, hostBinding(PANE_ENV));
+  // The binding rides beside the dimensions: the tuple is still the same state.
+  const { host, ...dimensions } = hosted;
+  assert.deepEqual(dimensions, bare);
+});
+
+test("heartbeatReport carries the host inside observed", () => {
+  const report = heartbeatReport({ taskId: "t1", generation: 1, seq: SEQ_BASE + 1, agent: "idle", host: hostBinding(PANE_ENV) });
+  assert.equal(report.data.observed.host.orca.pane_key, PANE_KEY);
+  assert.equal(report.data.observed.agent, "idle");
+  assert.equal(
+    "host" in heartbeatReport({ taskId: "t1", generation: 1, seq: SEQ_BASE + 2, agent: "idle" }).data.observed,
+    false
+  );
 });
 
 test("a completion names an outcome and a single-line head", () => {
