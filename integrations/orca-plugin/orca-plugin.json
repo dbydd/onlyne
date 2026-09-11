@@ -1,0 +1,63 @@
+{
+  "manifestVersion": 1,
+  "id": "onlyne-sessions",
+  "publisher": "onlyne",
+  "name": "Onlyne Sessions",
+  "version": "0.1.0",
+  "description": "只读 role 会话管理器：把 Orca worktree、onlyne tab 映射文件、活体 tab 与会话状态合成一块看板，并提供跳转/复制命令。Read-only role session manager for Onlyne.",
+  "engines": {
+    "orca": ">=1.4.0"
+  },
+  "pluginApi": 1,
+  "main": "main.mjs",
+  "contributes": {
+    "panels": [
+      {
+        "id": "board",
+        "title": "Onlyne Sessions",
+        "icon": "layers",
+        "entry": "panel.html"
+      }
+    ],
+    "commands": [
+      {
+        "id": "onlyne-sessions.refresh",
+        "title": "Onlyne Sessions: 重新扫描 role 会话"
+      },
+      {
+        "id": "onlyne-sessions.board",
+        "title": "Onlyne Sessions: 推送映射看板"
+      },
+      {
+        "id": "onlyne-sessions.focus",
+        "title": "Onlyne Sessions: 跳到 role tab（args.task 前缀，唯一命中才切）"
+      },
+      {
+        "id": "onlyne-sessions.copy-agent-context",
+        "title": "Onlyne Sessions: 取 agent 上下文（pane_key/handle/selector）"
+      }
+    ],
+    "events": [
+      {
+        "on": "worktree.created"
+      },
+      {
+        "on": "worktree.removed"
+      },
+      {
+        "on": "agent.status.changed"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "notifications:show"
+    },
+    {
+      "kind": "events:subscribe"
+    }
+  ]
+}

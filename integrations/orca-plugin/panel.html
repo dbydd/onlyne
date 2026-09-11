@@ -1,0 +1,224 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 14px 14px 24px;
+        background: var(--background, #1b1b1f);
+        color: var(--foreground, #e6e6e9);
+        font: 12px/1.55 ui-sans-serif, -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
+      }
+      h1 { margin: 0 0 2px; font-size: 14px; font-weight: 600; }
+      h2 { margin: 16px 0 6px; font-size: 12px; font-weight: 600; color: var(--muted-foreground, #9a9aa2); text-transform: uppercase; letter-spacing: 0.04em; }
+      p { margin: 0 0 8px; }
+      .meta { color: var(--muted-foreground, #9a9aa2); }
+      .card {
+        margin: 10px 0;
+        padding: 10px 12px;
+        border: 1px solid var(--border, #33333a);
+        border-radius: var(--radius, 8px);
+        background: var(--card, #232329);
+      }
+      .warn { border-color: var(--destructive, #b4443c); }
+      code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; }
+      .row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
+      button {
+        font: inherit;
+        padding: 5px 9px;
+        color: var(--foreground, #e6e6e9);
+        background: var(--secondary, #2c2c33);
+        border: 1px solid var(--border, #33333a);
+        border-radius: var(--radius, 8px);
+        cursor: pointer;
+      }
+      button:hover { background: var(--accent, #33333a); }
+      .legend { display: grid; grid-template-columns: 1.2em 1fr; gap: 2px 6px; }
+      .live { color: #3fb950; }
+      .dead { color: var(--muted-foreground, #9a9aa2); }
+      .gone { color: #d29922; }
+      ul { margin: 4px 0 0; padding-left: 18px; }
+      li { margin: 2px 0; }
+      .error { color: #f85149; white-space: pre-wrap; }
+      .ok { color: #3fb950; }
+      .kv { display: grid; grid-template-columns: 7.5em 1fr; gap: 2px 8px; }
+      .kv span:first-child { color: var(--muted-foreground, #9a9aa2); }
+    </style>
+  </head>
+  <body>
+    <h1>Onlyne Sessions</h1>
+    <p class="meta">只读 role 会话管理器 · pluginApi v1（EXPERIMENTAL）</p>
+
+    <div class="card warn">
+      <p><strong>这块面板是静态沙箱文档。</strong>Orca 只允许面板调用三个 host 方法
+        （<code>workspace.readContext</code> / <code>terminal.sendText</code> /
+        <code>notifications.show</code>），面板不能读插件 worker 的状态、不能调用插件命令、
+        不能 fetch 任何本地文件。</p>
+      <p>所以实时映射不在面板里，而在<strong>桌面通知</strong>与
+        <strong>设置 → Plugins → 该插件的日志</strong>里：映射结构变化时插件会推一条看板通知。</p>
+    </div>
+
+    <h2>当前工作区（面板唯一能读到的实时信息）</h2>
+    <div class="card">
+      <div class="kv" id="workspace">
+        <span>工作区</span><span class="mono">—</span>
+      </div>
+      <div class="row">
+        <button id="read-context">读取当前工作区</button>
+      </div>
+    </div>
+
+    <h2>看板怎么看</h2>
+    <div class="card">
+      <div class="legend">
+        <span class="live">●</span><span>活 tab：<code>connected</code> 且 mapping <code>state=spawned</code></span>
+        <span class="dead">○</span><span>只有 mapping 行：tab 已经不在（或这台机不是 orca backend）</span>
+        <span class="gone">✕</span><span>worktree 已移除，保留 10 分钟便于对照</span>
+      </div>
+      <p style="margin-top:8px">每行四段：<code>task</code> · <code>lifecycle/agent</code>（拿不到 client socket 时退化为 mapping 的 <code>state</code>）· <code>lastOutputAt</code> 相对时间 · <code>pane_key</code> 短形（<code>tab8:leaf8</code>）。</p>
+      <p>顶部一行是 summary：<code>N roles · M live tabs · K working</code>。
+        没有任何 role 工作区时只有一句话：<em>等 supervisor 拉起 role client</em>
+        （role 工作区里要出现 <code>.onlyne/cache/orca-tabs.jsonl</code>）。</p>
+    </div>
+
+    <h2>命令</h2>
+    <div class="card">
+      <p class="meta">面板不能直接触发插件命令；点按钮会把该跑的命令名发成一条通知，去命令面板执行即可。</p>
+      <div class="row">
+        <button data-hint="Onlyne Sessions: 推送映射看板">推送看板</button>
+        <button data-hint="Onlyne Sessions: 重新扫描 role 会话">重新扫描</button>
+        <button data-hint="Onlyne Sessions: 跳到 role tab（args.task 前缀，唯一命中才切）">跳转 tab</button>
+        <button data-hint="Onlyne Sessions: 取 agent 上下文（pane_key/handle/selector）">取 agent 上下文</button>
+      </div>
+      <p class="meta" style="margin-top:8px">跳转只认 <code>args.task</code> 前缀；命令面板传不了参数，
+        所以「跳转 tab」在没有参数时只在<em>恰有一个活 tab</em>的情况下生效，否则会通知候选清单。
+        需要带前缀调用时用 <code>plugins.invokeCommand</code>：
+        <code>{"pluginKey":"onlyne.onlyne-sessions","commandId":"onlyne-sessions.focus","args":{"task":"task8"}}</code></p>
+      <p class="meta">跳转会切前台焦点（<code>orca terminal switch</code>），只在你自己触发时发生。</p>
+    </div>
+
+    <h2>权限（consent）</h2>
+    <div class="card">
+      <ul>
+        <li><code>workspace:read</code> —— 读当前焦点工作区的名字/分支/tab id（本面板的读取按钮）</li>
+        <li><code>notifications:show</code> —— 推送看板与错误</li>
+        <li><code>events:subscribe</code> —— worktree 创建/移除、agent 状态变化后 2s 防抖重扫</li>
+      </ul>
+      <p class="meta" id="capability-note">面板自己的调用失败时会显示错误码（例如 <code>consent_required</code>：去 Settings → Plugins 里补授权）。</p>
+    </div>
+
+    <h2>已知边界</h2>
+    <div class="card">
+      <ul>
+        <li>生命周期只属于 onlyne backend：插件绝不建/关/改名 tab，也不写任何 onlyne 文件。</li>
+        <li>会话状态只从该 workspace 自己的 client socket（<code>.onlyne/run/s</code>）读；读不到就退化为 mapping 的 <code>state</code>，不猜。</li>
+        <li>5s 兜底重扫只在 worker 活着时跑；worker 被回收后，下一个事件或命令会重新拉起它。</li>
+        <li>pluginApi v1 仍是 EXPERIMENTAL：Orca 升级后请先跑一次「重新扫描」确认 JOIN 还成立。</li>
+      </ul>
+    </div>
+
+    <p class="error" id="error"></p>
+    <p class="ok" id="status"></p>
+
+    <script>
+      'use strict'
+      var CALL_TIMEOUT_MS = 6000
+
+      function el(id) { return document.getElementById(id) }
+
+      function setError(text) {
+        el('error').textContent = text || ''
+      }
+
+      function setStatus(text) {
+        el('status').textContent = text || ''
+      }
+
+      function call(action, params, timeoutMs) {
+        return new Promise(function (resolve) {
+          var requestId = 'onlyne-' + Date.now() + '-' + Math.floor(Math.random() * 1e6)
+          var settled = false
+          function done(result) {
+            if (settled) return
+            settled = true
+            window.removeEventListener('message', onMessage)
+            resolve(result)
+          }
+          function onMessage(event) {
+            var data = event.data
+            if (!data || data.type !== 'orca-panel-action-result' || data.requestId !== requestId) return
+            done(data)
+          }
+          window.addEventListener('message', onMessage)
+          window.parent.postMessage(
+            { type: 'orca-panel-action', requestId: requestId, action: action, params: params || {} },
+            '*'
+          )
+          setTimeout(function () {
+            done({ ok: false, errorCode: 'timeout', error: 'host did not answer within ' + (timeoutMs || CALL_TIMEOUT_MS) + 'ms' })
+          }, timeoutMs || CALL_TIMEOUT_MS)
+        })
+      }
+
+      function readContext() {
+        setError('')
+        setStatus('读取中…')
+        call('workspace.readContext', {}).then(function (result) {
+          if (!result.ok) {
+            setStatus('')
+            setError('workspace.readContext 失败：' + (result.errorCode || result.error || 'unknown'))
+            return
+          }
+          var value = result.value
+          if (!value) {
+            setStatus('')
+            el('workspace').innerHTML = '<span>工作区</span><span class="mono">没有焦点工作区</span>'
+            return
+          }
+          var rows = ''
+          rows += '<span>工作区</span><span class="mono">' + escapeHtml(value.displayName || '—') + '</span>'
+          rows += '<span>分支</span><span class="mono">' + escapeHtml(value.branch || '—') + '</span>'
+          rows += '<span>tab 数</span><span class="mono">' + ((value.terminals && value.terminals.length) || 0) + '</span>'
+          el('workspace').innerHTML = rows
+          setStatus('已读取 ' + new Date().toLocaleTimeString())
+        })
+      }
+
+      function escapeHtml(text) {
+        return String(text).replace(/[&<>"']/g, function (ch) {
+          return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+        })
+      }
+
+      function runHint(commandTitle) {
+        setError('')
+        setStatus('发送提示通知…')
+        call('notifications.show', {
+          title: 'Onlyne Sessions',
+          body: '请到命令面板执行：' + commandTitle
+        }).then(function (result) {
+          if (!result.ok) {
+            setStatus('')
+            setError('notifications.show 失败：' + (result.errorCode || result.error || 'unknown'))
+            return
+          }
+          setStatus('已发送：' + commandTitle)
+        })
+      }
+
+      el('read-context').addEventListener('click', readContext)
+      var hints = document.querySelectorAll('button[data-hint]')
+      for (var i = 0; i < hints.length; i++) {
+        ;(function (button) {
+          button.addEventListener('click', function () {
+            runHint(button.getAttribute('data-hint'))
+          })
+        })(hints[i])
+      }
+
+      readContext()
+    </script>
+  </body>
+</html>
