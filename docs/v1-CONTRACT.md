@@ -4,7 +4,7 @@ Read this before touching code. The director owns commits, the root `Cargo.toml`
 
 ## Repo state
 
-Cargo workspace, `members = ["crates/*", "plugins/*"]`, 17 packages: 13 under `crates/` and the four gateway plugins. The pre-v1 daemon under `crates/onlyne-legacy/` and the `vendor/` snapshot of the orchestrator submodule are gone: the lifecycle and reconcile kernel they carried now lives in `crates/onlyne-session/`, and S12 removed the source trees.
+Cargo workspace, `members = ["crates/*", "plugins/*"]`, 18 packages: 14 under `crates/` and the four gateway plugins. The pre-v1 daemon under `crates/onlyne-legacy/` and the `vendor/` snapshot of the orchestrator submodule are gone: the lifecycle and reconcile kernel they carried now lives in `crates/onlyne-session/`, and S12 removed the source trees.
 `docs/v1-PLAN.md` is the full design spec (527 lines, Chinese). Read the section your task names before writing code; it wins over a worker brief wherever they disagree, with file ownership as the exception.
 
 ## Ownership

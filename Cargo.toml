@@ -14,6 +14,7 @@ default-members = [
   "crates/onlyne-client",
   "crates/onlyne-gateway",
   "crates/onlyne-cli",
+  "crates/onlyne-tui",
   "crates/onlyne-testkit",
   "plugins/onlyne-gateway-telegram",
   "plugins/onlyne-gateway-feishu",

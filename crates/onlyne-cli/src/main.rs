@@ -94,6 +94,8 @@ enum Verb {
     Repair(RepairCmd),
     /// Cluster-level verbs.
     Cluster(ClusterCmd),
+    /// Observe the admin socket in a terminal, forwarding to onlyne-tui.
+    Tui(RestArgs),
     /// Print the version and each sibling's path.
     Version,
     /// Emit a shell completion script.
@@ -371,6 +373,7 @@ fn run() -> i32 {
         Verb::Generate(cmd) => generate(flags, cmd),
         Verb::WaitReady(cmd) => admin::wait_ready(flags, cmd.args),
         Verb::Repair(cmd) => admin::repair(flags, cmd.verb),
+        Verb::Tui(rest) => tui(flags, &rest),
         Verb::Cluster(cmd) => match cmd.verb {
             ClusterVerb::ExportProse(args) => admin::export_prose(flags, args),
         },
@@ -412,7 +415,26 @@ fn generate(flags: &GlobalFlags, cmd: GenerateCmd) -> i32 {
     if cmd.force {
         args.push("--force".to_string());
     }
+
     forward::exec("onlyne-server", &args)
+}
+/// `tui` execs `onlyne-tui`, carrying the server selector through so
+/// `onlyne --server-root <dir> tui` reaches the same socket the CLI would.
+fn tui(flags: &GlobalFlags, rest: &RestArgs) -> i32 {
+    let mut args = rest.args.clone();
+    if let Some(socket) = &flags.socket {
+        args.push("--socket".to_string());
+        args.push(socket.to_string_lossy().to_string());
+    }
+    if let Some(root) = &flags.server_root {
+        args.push("--server-root".to_string());
+        args.push(root.to_string_lossy().to_string());
+    }
+    if let Some(workspace) = &flags.workspace {
+        args.push("--workspace".to_string());
+        args.push(workspace.to_string_lossy().to_string());
+    }
+    forward::exec("onlyne-tui", &args)
 }
 
 /// The `server` group. The lifecycle verbs exec `onlyne-server`; the admin

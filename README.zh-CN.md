@@ -23,6 +23,7 @@ graph LR
 - `onlyne-client`：workspace daemon，负责一个 role 的 session lifecycle、process backend、本地 intent、agent adapter socket。
 - `onlyne-gateway`：单个平台 gateway 进程，运行形式为 `onlyne-gateway --platform telegram|feishu|qqbot|weixin --server-root <dir>`。
 - `onlyne`：瘦人机入口，负责 daemon exec、socket 命令、消息动词、status、watch、repair、generate、completions。
+- `onlyne-tui`：admin socket 上的 ratatui 观测 TUI，含实时 role 网络图与 swarm 风格的 history、按 task 详情页。
 - `onlyne-agent-fake`：testkit 产物，用于 e2e verification。
 - v1.0.0 以硬错误拒绝 legacy workspace layout、unsupported schema、old wire format。发行包无 migration tool。
 

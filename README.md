@@ -23,6 +23,7 @@ graph LR
 - `onlyne-client`: workspace daemon for one role, session lifecycle, process backend, local intents, and agent adapter socket.
 - `onlyne-gateway`: platform process for one IM gateway, run as `onlyne-gateway --platform telegram|feishu|qqbot|weixin --server-root <dir>`.
 - `onlyne`: thin human entrypoint for daemon execs, socket commands, message verbs, status, watch, repair, generate, and completions.
+- `onlyne-tui`: ratatui observation TUI over the admin socket, with a live role network graph and a swarm-style history and per-task detail page.
 - `onlyne-agent-fake`: testkit artifact used by e2e verification.
 - v1.0.0 refuses legacy workspace layouts, unsupported schemas, and old wire formats with hard errors. No migration tool ships.
 
