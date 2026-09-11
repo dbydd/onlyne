@@ -51,10 +51,15 @@ refused before any write, with exit 2 and the byte-exact line
 
 ## Backends
 
-`ONLYNE_BACKEND` selects the session backend: `auto`, `zellij`, `orca`, `fake`.
-The default is `zellij`. `auto` probes zellij, orca, then fake and takes the
-first one that reports usable. `fake` runs sessions in process and needs no
-external tool, which is why the end-to-end scripts use it.
+`ONLYNE_BACKEND` selects the session backend: `auto`, `zellij`, `orca`, `fake`,
+`exec`. The default is `zellij`. `auto` probes zellij, orca, then fake and takes
+the first one that reports usable. `fake` runs sessions in process and needs no
+external tool, which is why the end-to-end scripts use it. `exec` spawns the
+role's `session_command` as a child of the client, with stdin held open and the
+child's output appended to `.onlyne/logs/session-<task>.log`; it is never
+reached through `auto`, because running an agent with no terminal around it is a
+deliberate choice for a headless host (`crates/onlyne-testkit/e2e/pi-live.sh`
+makes it), not a fallback to discover.
 
 `[orca] worktree` in `config.toml` says which Orca tab list a session tab
 joins. Three states:

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod exec;
 pub mod fake;
 pub mod orca;
 pub mod zellij;
@@ -302,6 +303,7 @@ pub fn backend_by_name(
         "orca" => Ok(Box::new(orca::OrcaBackend::with_policy(runner, policy))),
         "zellij" => Ok(Box::new(zellij::ZellijBackend::new(runner))),
         "fake" => Ok(Box::new(fake::FakeBackend::new())),
+        "exec" => Ok(Box::new(exec::ExecBackend::new())),
         other => Err(anyhow::anyhow!("unknown session backend: {other}")),
     }
 }
@@ -328,12 +330,16 @@ pub fn backend_for(
 }
 
 /// Client default backend: deterministic, driven by `ONLYNE_BACKEND`
-/// (`auto` | `zellij` | `orca` | `fake`), defaulting to `zellij`.
+/// (`auto` | `zellij` | `orca` | `fake` | `exec`), defaulting to `zellij`.
 /// Capability discovery is available through the explicit `auto` value, so an
 /// installed backend only joins selection when the operator asks for it.
 ///
+/// `exec` is never part of `auto`: it spawns the session command as a child of
+/// this process with no terminal around it, which is a deliberate choice a case
+/// or a headless host makes (see `backend::exec`), not a fallback to discover.
+///
 /// `worktree` is the workspace config's `[orca] worktree` policy; only the
-/// Orca backend reads it, zellij and fake ignore it.
+/// Orca backend reads it, the other three ignore it.
 pub fn default_backend(worktree: WorktreePolicy) -> Result<Box<dyn SessionBackend>> {
     backend_for(
         &std::env::var("ONLYNE_BACKEND").unwrap_or_default(),
@@ -463,6 +469,13 @@ mod tests {
                 .unwrap()
                 .name(),
             "fake"
+        );
+        // `exec` is opt-in only: naming it selects it, `auto` never reaches it.
+        assert_eq!(
+            backend_for("exec", runner.clone(), WorktreePolicy::Host)
+                .unwrap()
+                .name(),
+            "exec"
         );
         assert_eq!(
             backend_for("nope", runner.clone(), WorktreePolicy::Host)
