@@ -215,6 +215,10 @@ watchdog ping 与 action 结果。**worker→panel 没有通道**，v1 也不打
 worktrees, hidden, claimed? }`，另有 `summary.hiddenTabs`。申报文件缺失、读不到或格式坏掉都是
 正常状态，不是错误——只说明那个 workspace 还没申报过，坏掉的文件贡献 0 条申报而不是一次失败。
 
+但它不是**无声**的：`board.claims` 给出 `{ published, unpublished }`，面板的范围说明会逐个点名
+「配置了但没读到申报」的 workspace——`piWorkspaces` 是手写的列表，写错了不能和「swarm 还没
+挂载」长得一模一样。
+
 ### 轴 B —— session（每个 root、每个动词各一次）
 
 按配置顺序，对每个 server root：
@@ -258,6 +262,7 @@ tab 落在「未 join 的 tab」一节。除此之外不推断任何东西。
 | 情况 | 结果 |
 | --- | --- |
 | `serverRoots` 缺失/为空 | 合法：只剩 tab 轴，完全不调用 `onlyne` |
+| 某个 `piWorkspaces` 条目没有任何申报 | 不算错误：它会出现在 `board.claims.unpublished` 里，并被面板的范围说明点名；tab 轴退回 worktree 启发式 |
 | `orca terminal list` 失败（如 `missing_binary`） | `ok:false` + 错误码；session 轴照常渲染，只是全部未 join |
 | 某个 root 的 socket 不存在 | 该 root 报 `cli_error` 与那句 no-socket 提示；其他 root 与 tab 轴照常渲染 |
 | onlyne CLI 不认识 `--server-root`/`sessions`（如 0.6.0） | 该动词 `cli_surface_mismatch`；一个动词失败不会盖掉另一个 |

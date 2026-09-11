@@ -283,9 +283,10 @@ export function summarize({ roots, tabs, allTabs = tabs, rows, strayTabs }) {
  * @param {object} options.orca    createOrcaCli()
  * @param {object} options.onlyne  createOnlyneCli()
  * @param {string[]} [options.serverRoots] configured roots, in config order
- * @param {Function} [options.readClaims] returns the pi adapters' pane claims
- *   (`claims.mjs`, read from the configured pi workspaces); absent means none,
- *   which leaves the worktree heuristic in charge of the tab axis
+ * @param {Function} [options.readClaims] returns `{claims, unpublished}` — the
+ *   pi adapters' pane claims and the configured workspaces that produced none
+ *   (`claims.mjs`); absent means none at all, which leaves the worktree
+ *   heuristic in charge of the tab axis
  * @param {Function} [options.now]
  * @returns {Promise<object>} the board; `ok` tracks the tab axis only, so an
  *   unreachable root still leaves `ok:true` with its own entry in `errors`.
@@ -308,7 +309,8 @@ export async function collectBoard({
   if (!tabsScan.ok) {
     errors.push({ scope: "orca", axis: "tabs", code: tabsScan.code, message: tabsScan.message });
   }
-  const claims = (readClaims ?? (() => []))();
+  const claimRead = (readClaims ?? (() => ({ claims: [], unpublished: [] })))();
+  const claims = claimRead.claims ?? [];
   const { tabs, scope } = scopeByClaims(allTabs, claims) ?? scopeTabs(allTabs, serverRoots);
 
   const tabsByTask = indexTabsByTask(tabs);
@@ -377,6 +379,7 @@ export async function collectBoard({
   ];
 
   return {
+    claims: { published: claims.length, unpublished: claimRead.unpublished ?? [] },
     scannedAt,
     ok: tabsScan.ok,
     errors,

@@ -109,10 +109,10 @@ export function panelFingerprint(board) {
   const errors = [...board.errors]
     .map((error) => `${error.scope}|${error.axis}|${error.code}|${error.message}`)
     .sort();
-  // `scope` belongs in the fingerprint even though it is not a row: the summary
-  // note is rendered from it, so a scope that changes source or worktrees while
-  // the counts stay put still changes what the panel must show.
-  return JSON.stringify([board.summary, board.scope ?? null, errors, rows]);
+  // `scope` and the claim read belong in the fingerprint even though neither is
+  // a row: the note below is rendered from them, so a tab axis that changes who
+  // it was scoped by still changes what the panel must show.
+  return JSON.stringify([board.summary, board.scope ?? null, board.claims ?? null, errors, rows]);
 }
 
 /**
@@ -127,6 +127,7 @@ export function boardPayload(board, { generatedAt = Date.now(), panel = null } =
     panel,
     summary: board?.summary ?? null,
     scope: board?.scope ?? null,
+    claims: board?.claims ?? null,
     errors: board?.errors ?? [],
     roots: board?.roots ?? [],
     strayTabs: board?.strayTabs ?? [],
@@ -228,15 +229,29 @@ function straySection(tabs) {
 function scopeNote(board) {
   const scope = board?.scope;
   const hidden = board?.summary?.hiddenTabs ?? 0;
+  const unpublished = board?.claims?.unpublished ?? [];
+  const listed = unpublished.map((path) => `<code>${escapeHtml(path)}</code>`).join(" ");
+  // A configured workspace with no claim is worth naming: `piWorkspaces` is a
+  // hand-written list, and without this line a typo in it looks exactly like a
+  // swarm that has not mounted yet.
+  const missing = unpublished.length
+    ? `；另有 ${unpublished.length} 个 workspace 没读到 pane 申报：${listed}`
+    : "";
   if (!scope || !scope.derived) {
-    return "tab 轴：pi 插件还没申报 pane，也推不出 worktree，列出全部 tab";
+    if (!unpublished.length) {
+      return "tab 轴：pi 插件还没申报 pane，也推不出 worktree，列出全部 tab";
+    }
+    return (
+      `tab 轴：配置的 ${unpublished.length} 个 workspace 都没读到 pane 申报（${listed}），` +
+      "也推不出 worktree，列出全部 tab"
+    );
   }
   const worktrees = scope.worktrees.map((path) => `<code>${escapeHtml(path)}</code>`).join(" ");
   const who =
     scope.source === "adapter"
       ? `pi 插件申报的 ${scope.claimed} 个 pane`
       : `${worktrees} 里的 tab（一个 worktree 一个 server）`;
-  return `tab 轴：只列 ${who}，其余 ${hidden} 个 tab 不计入`;
+  return `tab 轴：只列 ${who}，其余 ${hidden} 个 tab 不计入${missing}`;
 }
 
 /**

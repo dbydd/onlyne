@@ -247,6 +247,11 @@ worktrees, hidden, claimed? }`, alongside `summary.hiddenTabs`. A missing, unrea
 claim file is a normal state, never an error: it only means that workspace has published nothing,
 and a workspace whose `pi-pane.json` is malformed contributes no claim rather than a failure.
 
+It is not *silent*, though. `board.claims` reports `{ published, unpublished }`, and the panel's
+scope note names every configured workspace that produced no claim — because `piWorkspaces` is a
+hand-written list, and a typo in it would otherwise be indistinguishable from a swarm that has not
+mounted yet.
+
 ### Axis B — sessions (one call per root per verb)
 
 For each configured server root, in config order:
@@ -294,6 +299,7 @@ that matches nothing renders in the stray-tab section. Nothing more is inferred.
 | situation | result |
 | --- | --- |
 | `serverRoots` absent/empty | valid: tab axis only, `onlyne` is never invoked |
+| a `piWorkspaces` entry publishes no claim | not an error: it is listed in `board.claims.unpublished` and named in the panel's scope note; the tab axis falls back to the worktree heuristic |
 | `orca terminal list` fails (e.g. `missing_binary`) | `ok:false` + the error code; the session axis is still rendered, unjoined |
 | a root's socket is absent | that root reports `cli_error` with the canonical no-socket hint; other roots and the tab axis still render |
 | onlyne CLI without `--server-root`/`sessions` (e.g. 0.6.0) | `cli_surface_mismatch` on that verb; a failing verb never hides the other one |

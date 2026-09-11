@@ -31,31 +31,47 @@ function claimFile(overrides = {}) {
 
 test("a claim reader turns the adapter's file into a pane claim", () => {
   const reader = createClaimReader({ readFile: () => claimFile() });
-  const claims = reader([WS]);
+  const { claims, unpublished } = reader([WS]);
 
   assert.equal(claims.length, 1);
   assert.equal(claims[0].paneKey, PANE);
   assert.equal(claims[0].role, "planner");
   assert.equal(claims[0].workspace, WS);
+  assert.deepEqual(unpublished, []);
 });
 
-test("a missing, malformed or duplicated claim degrades to fewer claims", () => {
+test("a workspace that publishes nothing is reported, not silently dropped", () => {
   const missing = createClaimReader({
     readFile: () => {
       throw new Error("ENOENT");
     },
   });
-  assert.deepEqual(missing([WS]), []);
+  assert.deepEqual(missing([WS]), { claims: [], unpublished: [WS] });
 
+  // Readable but unusable counts as nothing published: the file that is there
+  // is not a claim, so naming the workspace is the honest answer either way.
   const malformed = createClaimReader({ readFile: () => "{ not json" });
-  assert.deepEqual(malformed([WS]), []);
+  assert.deepEqual(malformed([WS, "/srv/swarm/builder"]), {
+    claims: [],
+    unpublished: [WS, "/srv/swarm/builder"],
+  });
 
   const noPane = createClaimReader({ readFile: () => JSON.stringify({ role: "planner" }) });
-  assert.deepEqual(noPane([WS]), [], "a claim without a pane key attributes nothing");
+  assert.deepEqual(
+    noPane([WS]),
+    { claims: [], unpublished: [WS] },
+    "a claim without a pane key attributes nothing"
+  );
 
-  // Two roots publishing the same pane key is one claim, not two.
-  const duplicated = createClaimReader({ readFile: () => claimFile() });
-  assert.equal(duplicated([WS, "/srv/swarm/builder"]).length, 1);
+  assert.deepEqual(missing([]), { claims: [], unpublished: [] });
+});
+
+test("workspaces that publish the same pane are one claim, none unpublished", () => {
+  const reader = createClaimReader({ readFile: () => claimFile() });
+  const { claims, unpublished } = reader([WS, "/srv/swarm/builder"]);
+
+  assert.equal(claims.length, 1, "one pane key is one claim");
+  assert.deepEqual(unpublished, [], "both workspaces published, even if identically");
 });
 
 test("a claim wins over the worktree heuristic", async () => {
@@ -77,7 +93,7 @@ test("a claim wins over the worktree heuristic", async () => {
     }),
     onlyne: fakeOnlyne({ sessions: { [ROOT]: [sessionRow()] }, roles: { [ROOT]: [roleRow()] } }),
     serverRoots: [ROOT],
-    readClaims: () => [{ paneKey: PANE, workspace: WS }],
+    readClaims: () => ({ claims: [{ paneKey: PANE, workspace: WS }], unpublished: [] }),
   });
 
   assert.equal(board.scope.source, "adapter");
@@ -91,7 +107,7 @@ test("a stale claim for a pane Orca no longer lists hides nothing else", async (
     orca: fakeOrca({ tabs: [tabRow({ worktreePath: "/repo/swarm" })] }),
     onlyne: fakeOnlyne({ sessions: { [ROOT]: [sessionRow()] }, roles: { [ROOT]: [roleRow()] } }),
     serverRoots: [ROOT],
-    readClaims: () => [{ paneKey: "gone-tab:gone-leaf", workspace: WS }],
+    readClaims: () => ({ claims: [{ paneKey: "gone-tab:gone-leaf", workspace: WS }], unpublished: [] }),
   });
 
   // Claims exist, so the heuristic is off; nothing matches, so the tab axis is
@@ -106,7 +122,7 @@ test("no claim falls back to the worktree heuristic", async () => {
     orca: fakeOrca({ tabs: [tabRow({ worktreePath: "/repo/swarm" }), tabRow({ handle: "term_x" })] }),
     onlyne: fakeOnlyne({ sessions: { [ROOT]: [sessionRow()] }, roles: { [ROOT]: [roleRow()] } }),
     serverRoots: ["/repo/swarm/cluster"],
-    readClaims: () => [],
+    readClaims: () => ({ claims: [], unpublished: [] }),
   });
 
   assert.equal(board.scope.source, "worktree");

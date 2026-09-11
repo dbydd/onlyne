@@ -35,13 +35,14 @@ async function boardFixture({
   failures = {},
   roots = [ROOT],
   tabFailure = null,
-  claims = null
+  claims = null,
+  unpublished = []
 } = {}) {
   return collectBoard({
     orca: fakeOrca({ tabs, tabFailure }),
     onlyne: fakeOnlyne({ sessions: { [ROOT]: sessions }, roles: { [ROOT]: roles }, failures }),
     serverRoots: roots,
-    readClaims: claims ? () => claims : undefined
+    readClaims: claims || unpublished.length ? () => ({ claims: claims ?? [], unpublished }) : undefined
   });
 }
 
@@ -102,6 +103,36 @@ test("the document says what the tab axis was scoped to", async () => {
   assert.match(unscoped, /pi 插件还没申报 pane/);
   assert.equal(summaryLine(outside).includes("hidden"), false);
   assert.equal(outside.summary.hiddenTabs, 0);
+});
+
+test("a configured workspace that published nothing is named in the note", async () => {
+  const PANE = "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560";
+
+  // A claim arrived from one workspace, and another was configured but silent:
+  // the board keeps working and names the silent one, so a typo in a
+  // hand-written `piWorkspaces` list cannot hide as a swarm that has not booted.
+  const partial = await boardFixture({
+    tabs: [tabRow({ paneKey: PANE, worktreePath: "/repo/other-swarm" })],
+    roots: ["/repo/other-swarm/cluster"],
+    claims: [{ paneKey: PANE, workspace: "/srv/swarm/planner" }],
+    unpublished: ["/srv/swarm/builder"]
+  });
+  const scoped = renderPanelDocument(partial, { generatedAt: 1 });
+  assert.match(scoped, /只列 pi 插件申报的 1 个 pane/);
+  assert.match(scoped, /另有 1 个 workspace 没读到 pane 申报：<code>\/srv\/swarm\/builder<\/code>/);
+
+  // Nothing published at all, and no worktree to fall back on: the note is the
+  // only thing standing between the operator and "the filter is broken".
+  const silent = await boardFixture({ roots: ["/srv/elsewhere"], unpublished: ["/srv/swarm/planner"] });
+  const unscoped = renderPanelDocument(silent, { generatedAt: 1 });
+  assert.match(unscoped, /配置的 1 个 workspace 都没读到 pane 申报（<code>\/srv\/swarm\/planner<\/code>）/);
+  assert.match(unscoped, /列出全部 tab/);
+
+  // Publishing is a change the panel must show even when no count moves: the
+  // note mentions the workspace, so the fingerprint has to follow it.
+  const before = await boardFixture({ roots: ["/srv/elsewhere"] });
+  assert.equal(summaryLine(before), summaryLine(silent), "the counts are identical");
+  assert.notEqual(panelFingerprint(before), panelFingerprint(silent));
 });
 
 test("the session age uses the epoch seconds the admin rows carry", async () => {
