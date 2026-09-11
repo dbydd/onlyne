@@ -48,17 +48,29 @@ cleanup() {
     wait "$client_pid" 2>/dev/null || true
   fi
   # A tab the drain did not reap still belongs to this case, and its handle is
-  # the one this script read out of its own tab map.
+  # the one this script read out of its own tab map. A close that does not take
+  # is reported and fails the run: a leftover tab is real residue, and a
+  # swallowed verdict is how one piles up unnoticed.
   if [ -n "$handle" ] && [ -f "$tmp/host-tabs-now.json" ]; then
     if ! python3 "$tmp/orca_case.py" tab-gone "$tmp/host-tabs-now.json" "$pane_key" >/dev/null 2>&1; then
       printf 'cleanup: closing leftover tab %s\n' "$handle" >&2
-      orca terminal close --terminal "$handle" --json >/dev/null 2>&1 || true
+      if ! closed=$(orca terminal close --terminal "$handle" --json 2>&1); then
+        # The close may have raced the drain, so only a tab the list still
+        # carries after it counts as residue.
+        orca terminal list --worktree "$host_worktree" --json > "$tmp/host-tabs-now.json" 2>/dev/null || true
+        if ! python3 "$tmp/orca_case.py" tab-gone "$tmp/host-tabs-now.json" "$pane_key" >/dev/null 2>&1; then
+          printf 'cleanup: leftover tab %s survived its close: %s\n' "$handle" "$closed" >&2
+          status=1
+        fi
+      fi
     fi
   fi
   kill "$server_pid" 2>/dev/null || true
   wait "$server_pid" 2>/dev/null || true
   rm -rf "$tmp"
-  return $status
+  # `return` from an EXIT trap leaves the script's status alone, so the verdict
+  # has to leave through `exit`.
+  exit $status
 }
 trap cleanup EXIT
 . "$SRC/crates/onlyne-testkit/e2e/lib.sh"
@@ -317,7 +329,7 @@ if [ "$gone" != true ]; then
   # The fallback the contract allows: the case closes the one handle it read out
   # of its own map, then re-checks. Reaching it is a finding, not a crash.
   echo "NOTE: the drain left tab $handle behind; closing it with the script's own handle"
-  orca terminal close --terminal "$handle" --json > "$tmp/close.json" 2>/dev/null || true
+  orca terminal close --terminal "$handle" --json > "$tmp/close.json" 2>&1 || true
   for _ in $(seq 1 50); do
     orca terminal list --worktree "$host_worktree" --json > "$tmp/host-tabs-now.json" 2>/dev/null || true
     if python3 "$tmp/orca_case.py" tab-gone "$tmp/host-tabs-now.json" "$pane_key" 2>/dev/null; then
@@ -327,8 +339,11 @@ if [ "$gone" != true ]; then
     sleep 0.2
   done
 fi
-[ "$gone" = true ] || fail "the closed tab must disappear from the host worktree's terminal list" \
-  "$(cat "$tmp/host-tabs-now.json" 2>/dev/null)"
+if [ "$gone" != true ]; then
+  fail "the closed tab must disappear from the host worktree's terminal list" \
+    "close: $(cat "$tmp/close.json" 2>/dev/null)
+list: $(cat "$tmp/host-tabs-now.json" 2>/dev/null)"
+fi
 echo "PASS orca drain: tab $handle is gone after SIGTERM"
 
 python3 "$tmp/orca_case.py" map-closed "$mapping" "$pane_key" || fail \
