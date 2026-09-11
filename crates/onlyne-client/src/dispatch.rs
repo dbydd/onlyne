@@ -44,11 +44,14 @@ struct DispatchInner {
     pub accept_new: Arc<AtomicBool>,
     /// Aggregate name this role supervises, empty for a plain role.
     pub cluster_ref: String,
-    /// The adapter transport this role's agent attached, held for every session
-    /// the role runs. A plugin the client spawned learns its session from the
-    /// assignment, so the client keeps the connection and hands each staged
-    /// session to it in turn (plan §6 line 285).
-    pub plugin_transport: Option<(AdapterIo, Vec<Capability>)>,
+    /// The adapter connection serving each session of this role, keyed by the
+    /// session id the plugin mounted with (`ONLYNE_SESSION_ID`). A plugin the
+    /// client spawned names the one session it was spawned for, so a task
+    /// never rides the connection of an earlier one.
+    pub transports: HashMap<String, (AdapterIo, Vec<Capability>)>,
+    /// A plugin that mounted naming no session: an always-running agent
+    /// waiting for this role's next assignment (plan §6 line 285).
+    pub parked: Option<(AdapterIo, Vec<Capability>)>,
 }
 
 #[derive(Clone)]
@@ -57,8 +60,6 @@ pub struct SessionSlot {
     pub family: String,
     pub task_id: Option<String>,
     pub ready: bool,
-    pub capabilities: Vec<Capability>,
-    pub io: Option<AdapterIo>,
     /// Payload held until the adapter reports ready, which keeps the ready
     /// barrier of §6 ahead of the `assign` frame.
     pub payload: Option<Envelope>,
@@ -86,11 +87,15 @@ fn store_ack(inner: &DispatchInner, mut ack: AckArgs) {
     }
 }
 
-/// A staged session that a plugin connection can serve.
-pub struct PendingSlot {
-    pub task_id: String,
-    pub session_id: String,
-    pub generation: u64,
+/// Whether one session slot is the session an adapter mount named.
+///
+/// The mount carries the id the client spawned the plugin with
+/// (`ONLYNE_SESSION_ID`), which is the slot's key and its stored reference; a
+/// slot a later task reused also answers to the task it serves.
+fn names_session(key: &str, slot: &SessionSlot, session_id: &str) -> bool {
+    key == session_id
+        || slot.session.task_id == session_id
+        || slot.task_id.as_deref() == Some(session_id)
 }
 
 impl DispatchState {
@@ -117,7 +122,8 @@ impl DispatchState {
                 outbox: None,
                 accept_new: Arc::new(AtomicBool::new(true)),
                 cluster_ref: String::new(),
-                plugin_transport: None,
+                transports: HashMap::new(),
+                parked: None,
             })),
         }
     }
@@ -139,25 +145,17 @@ impl DispatchState {
             .find(|slot| slot.task_id.as_deref() == Some(task_id))
             .map(|slot| slot.session.backend.clone())
     }
-    /// Bind one adapter transport to the session serving `task_id`.
+    /// Bind one adapter connection to the session it named.
     ///
-    /// The plan keys cross-machine identity on `task_id`, so no backend-specific
-    /// reference spelling enters this lookup.
-    pub fn bind_adapter(
-        &self,
-        task_id: &str,
-        io: AdapterIo,
-        capabilities: Vec<Capability>,
-    ) -> Result<()> {
-        let mut inner = self.inner.lock();
-        let slot = inner
-            .sessions
-            .values_mut()
-            .find(|slot| slot.task_id.as_deref() == Some(task_id))
-            .ok_or_else(|| anyhow!("unknown session {task_id}"))?;
-        slot.io = Some(io);
-        slot.capabilities = capabilities;
-        Ok(())
+    /// The name is the session id the client spawned the plugin with, which is
+    /// enough on its own: a plugin that mounts before the client staged its
+    /// session is remembered here and takes the payload the moment it is
+    /// staged, and a plugin that mounts after finds its session waiting.
+    pub fn bind_adapter(&self, session_id: &str, io: AdapterIo, capabilities: Vec<Capability>) {
+        self.inner
+            .lock()
+            .transports
+            .insert(session_id.to_string(), (io, capabilities));
     }
 
     /// Remember the delivery handle for one task.
@@ -170,34 +168,6 @@ impl DispatchState {
         {
             slot.msg_id = Some(msg_id.to_string());
         }
-    }
-
-    /// The session a fresh plugin connection should serve.
-    ///
-    /// An exact session match wins. A mount that names no session takes the
-    /// staged session still waiting for a plugin, which is the case §6 line 285
-    /// describes: the payload waits in the client until the adapter arrives,
-    /// because a plugin the client spawned learns its session only from the
-    /// assignment.
-    pub fn pending_plugin_slot(&self, session_id: Option<&str>) -> Option<PendingSlot> {
-        let inner = self.inner.lock();
-        let mut staged: Vec<&SessionSlot> = inner
-            .sessions
-            .values()
-            .filter(|slot| slot.payload.is_some() && !slot.ready)
-            .collect();
-        staged.sort_by(|left, right| left.session.task_id.cmp(&right.session.task_id));
-        let slot = match session_id {
-            Some(wanted) => staged
-                .into_iter()
-                .find(|slot| slot.session.task_id == wanted)?,
-            None => staged.into_iter().next()?,
-        };
-        Some(PendingSlot {
-            task_id: slot.session.task_id.clone(),
-            session_id: slot.session.task_id.clone(),
-            generation: slot.session.generation,
-        })
     }
 
     /// Queue an ack the client owes the server.
@@ -264,9 +234,64 @@ impl DispatchState {
         self.inner.lock().cluster_ref = aggregate.into();
     }
 
-    /// Remember the transport this role's agent attached.
-    pub fn set_plugin_transport(&self, io: AdapterIo, capabilities: Vec<Capability>) {
-        self.inner.lock().plugin_transport = Some((io, capabilities));
+    /// Park one plugin connection as this role's waiting agent.
+    ///
+    /// Only a mount that names no session parks: it is a plugin that attached
+    /// before any work existed, so it takes the next session this role stages
+    /// (plan §6 line 285).
+    pub fn park_transport(&self, io: AdapterIo, capabilities: Vec<Capability>) {
+        self.inner.lock().parked = Some((io, capabilities));
+    }
+
+    /// Take the parked plugin connection, if a role agent is waiting.
+    ///
+    /// The park is consumed rather than read: one parked agent takes one
+    /// staged session, so the task after it goes to that task's own
+    /// connection instead of riding this one a second time.
+    pub fn take_parked_transport(&self) -> Option<(AdapterIo, Vec<Capability>)> {
+        self.inner.lock().parked.take()
+    }
+
+    /// The connection that serves one session, when its plugin is attached.
+    ///
+    /// A plugin names the session it was spawned for, and a later task of a
+    /// reused session arrives under its own task id, so the slot's key is the
+    /// other spelling worth trying.
+    pub fn session_transport(&self, session_id: &str) -> Option<(AdapterIo, Vec<Capability>)> {
+        let inner = self.inner.lock();
+        if let Some(transport) = inner.transports.get(session_id) {
+            return Some(transport.clone());
+        }
+        let key = inner
+            .sessions
+            .iter()
+            .find(|(key, slot)| names_session(key, slot, session_id))
+            .map(|(key, _)| key.clone())?;
+        inner.transports.get(&key).cloned()
+    }
+
+    /// A plugin connection ended and stops serving whatever it bound.
+    ///
+    /// An idle slot is exactly what `reuse` would hand the next task to, and it
+    /// is only reusable while its agent is attached, so the slot goes: no task
+    /// is ever routed to a session whose process left. A slot with work in
+    /// flight keeps its row — the lifecycle owns that state. A connection that
+    /// mounted no session was the parked agent, and nothing may be handed to it.
+    pub fn release_connection(&self, session_id: Option<&str>) {
+        let mut inner = self.inner.lock();
+        let Some(session_id) = session_id else {
+            inner.parked = None;
+            return;
+        };
+        inner.transports.remove(session_id);
+        let idle = inner
+            .sessions
+            .iter()
+            .find(|(key, slot)| names_session(key, slot, session_id) && slot.task_id.is_none())
+            .map(|(key, _)| key.clone());
+        if let Some(key) = idle {
+            inner.sessions.remove(&key);
+        }
     }
 
     /// Bind a plugin transport to one staged session and hand it the payload.
@@ -280,7 +305,6 @@ impl DispatchState {
         io: AdapterIo,
         capabilities: Vec<Capability>,
     ) -> Result<()> {
-        self.bind_adapter(task_id, io.clone(), capabilities.clone())?;
         let prose = self.role_prose();
         on_ready(
             self,
@@ -319,9 +343,23 @@ impl DispatchState {
             || inner.sessions.values().any(|slot| slot.task_id.is_none())
     }
 
-    /// The transport to hand a staged session to, when an agent is attached.
-    pub fn plugin_transport(&self) -> Option<(AdapterIo, Vec<Capability>)> {
-        self.inner.lock().plugin_transport.clone()
+    /// Route one staged session to the connection that serves it.
+    ///
+    /// The session's own connection comes first: a plugin the client spawned
+    /// mounts with this session's id in `ONLYNE_SESSION_ID`, and a plugin that
+    /// reconnected mounts with it again, so its assignment rides that socket
+    /// alone. A plugin parked for the role takes the next staged session, once.
+    /// A session with neither waits: its own plugin is still coming up, and its
+    /// mount hands the payload over. Answers whether a transport was found.
+    pub async fn hand_staged(&self, session_id: &str) -> Result<bool> {
+        let transport = self
+            .session_transport(session_id)
+            .or_else(|| self.take_parked_transport());
+        let Some((io, capabilities)) = transport else {
+            return Ok(false);
+        };
+        self.hand_session(session_id, io, capabilities).await?;
+        Ok(true)
     }
 
     /// Ask the server one question over the live link.
@@ -457,8 +495,6 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
             family,
             task_id: Some(task_id),
             ready: false,
-            capabilities: Vec::new(),
-            io: None,
             payload: Some(envelope.clone()),
             msg_id: None,
             origin: Some(envelope.from.clone()),
@@ -509,8 +545,6 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
         };
         slot.origin = Some(payload.from.clone());
         slot.ready = true;
-        slot.io = Some(io.clone());
-        slot.capabilities = capabilities.clone();
         let verdict = feed_ready(&inner.bridge, &inner.store, &task_id)?;
         let version = note_verdict(&verdict, &task_id).unwrap_or(Version::new(generation, 0));
         (payload, io, version)

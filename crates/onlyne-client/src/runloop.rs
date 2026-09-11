@@ -430,14 +430,11 @@ async fn accept_delivery(state: &RunState, delivery: &Delivery) {
             if let Some(task_id) = delivery.envelope.task_id() {
                 state.dispatch.attach_msg_id(task_id, &delivery.msg_id);
             }
-            if let Some((io, capabilities)) = state.dispatch.plugin_transport() {
-                if let Err(error) = state
-                    .dispatch
-                    .hand_session(&session.task_id, io, capabilities)
-                    .await
-                {
-                    tracing::warn!(error = %error, task = %session.task_id, "parked hand-off refused");
-                }
+            // A plugin attached to this session takes the payload now, or the
+            // one parked for the role does; a session whose own plugin is
+            // still starting waits for its mount to hand it over.
+            if let Err(error) = state.dispatch.hand_staged(&session.task_id).await {
+                tracing::warn!(error = %error, task = %session.task_id, "staged hand-off refused");
             }
         }
         Ok(None) => state.dispatch.push_settled(AckArgs {

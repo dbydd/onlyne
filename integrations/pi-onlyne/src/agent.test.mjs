@@ -54,15 +54,21 @@ async function waitFor(predicate, { timeoutMs = 2_000, stepMs = 5 } = {}) {
  * A minimal host: records every frame it receives, answers every request, and
  * can push notifications at any time. `coalesceAssign` puts an assignment in
  * the same chunk as the hello reply, the way a client handing over a staged
- * session does when both frames are ready at once.
+ * session does when both frames are ready at once. `holdCompletion` keeps
+ * `report` requests carrying a `complete` unanswered until `releaseReports`,
+ * which is the window a test needs to prove what the plugin does not do before
+ * the client has acknowledged the outcome. The ready and heartbeat reports are
+ * never held: the handshake waits on them.
  */
 class FakeHost {
-  constructor({ coalesceAssign = null } = {}) {
+  constructor({ coalesceAssign = null, holdCompletion = false } = {}) {
     this.server = createServer((socket) => this.onConnection(socket));
     this.frames = [];
     this.sockets = new Set();
     this.connections = 0;
     this.coalesceAssign = coalesceAssign;
+    this.holdCompletion = holdCompletion;
+    this.held = [];
   }
 
   listen(path) {
@@ -103,11 +109,24 @@ class FakeHost {
         },
       };
     }
+    if (this.holdCompletion && frame.op === "report" && frame.args?.kind === "complete") {
+      this.held.push({ socket, id: frame.id });
+      return;
+    }
     const reply = encodeFrame({ reply_to: frame.id, ...body });
     const push = frame.op === "hello" && this.coalesceAssign
       ? encodeFrame({ op: "assign", args: this.coalesceAssign })
       : null;
     socket.write(push ? Buffer.concat([reply, push]) : reply);
+  }
+
+  /** Answer the completion reports held so far, the way the client would. */
+  releaseReports() {
+    const held = this.held;
+    this.held = [];
+    for (const entry of held) {
+      entry.socket.write(encodeFrame({ reply_to: entry.id, ok: true, data: null }));
+    }
   }
 
   notify(op, args) {
@@ -159,10 +178,16 @@ function fakeSurface(options = {}) {
 }
 
 /** One agent on a fresh temp workspace socket. */
-async function startAgent({ surface = fakeSurface(), capabilities, options = {}, coalesceAssign = null } = {}) {
+async function startAgent({
+  surface = fakeSurface(),
+  capabilities,
+  options = {},
+  coalesceAssign = null,
+  holdCompletion = false,
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), "pi-onlyne-agent-"));
   const socketPath = join(dir, "s");
-  const host = new FakeHost({ coalesceAssign });
+  const host = new FakeHost({ coalesceAssign, holdCompletion });
   await host.listen(socketPath);
   const logs = [];
   const agent = new OnlyneAgent({
@@ -468,6 +493,8 @@ test("turn hooks report running then idle, and a settle completes done with the 
   const complete = await waitFor(() => host.of("report").find((report) => report.kind === "complete"));
   assert.deepEqual(complete, { kind: "complete", data: { task_id: TASK_ID, outcome: "done", head: "OK" } });
   assert.deepEqual(agent.status().tasks, []);
+  // The completion ends the session: the process that ran it is asked to leave.
+  assert.deepEqual(surface.calls.exits, ["done"]);
   // Heartbeats stop with the last task, so a settled session stops writing.
   const reports = host.of("report").length;
   await new Promise((resolve) => setTimeout(resolve, 120));
@@ -564,6 +591,39 @@ test("an explicit tool outcome wins and a second completion is refused", async (
   const completes = host.of("report").filter((report) => report.kind === "complete");
   assert.equal(completes.length, 1);
   assert.equal(completes[0].data.outcome, "failed");
+  // One session asks for one exit, even when a second completion is refused.
+  assert.deepEqual(surface.calls.exits, ["failed"]);
+});
+
+// The exit is a consequence of the client's acknowledgement, not of the
+// completion call: the client answers a `report` only after it has settled the
+// session row and written the `Completion` envelope, so a report still in
+// flight must leave the process running (this is the frame the client
+// duplicates into its intent queue when its own link is down).
+test("the exit waits for the client's acknowledgement of the completion report", async () => {
+  const { agent, host, surface } = await startAgent({ holdCompletion: true });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+  agent.onTurnStart();
+  agent.onTurnEnd();
+  agent.noteAssistantText("OK");
+
+  const completion = agent.complete(TASK_ID, "done", "OK");
+  await waitFor(() =>
+    host.of("report").some((report) => report.kind === "complete") ? true : null,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.deepEqual(
+    surface.calls.exits,
+    [],
+    "an unacknowledged completion must not take the process down",
+  );
+
+  host.releaseReports();
+  await completion;
+  assert.deepEqual(surface.calls.exits, ["done"]);
 });
 
 test("an inbound image is written under the workspace and handed to pi", async () => {
@@ -643,12 +703,21 @@ test("a completion reported while the socket is down is flushed after reconnect"
   await waitFor(() => (agent.status().connected === false ? true : null));
   const queued = await agent.completeFromTool({ outcome: "done" });
   assert.equal(queued.queued, true);
+  assert.deepEqual(
+    surface.calls.exits,
+    [],
+    "a completion this process could not hand over keeps it alive",
+  );
 
   await waitFor(() => (host.connections >= 2 ? true : null));
   const complete = await waitFor(() => host.of("report").find((report) => report.kind === "complete"));
   assert.equal(complete.data.head, "done offline");
   assert.equal(agent.status().connected, true, "the plugin re-hellos after a disconnect");
   const hellos = host.of("hello");
+  // The flusher's acknowledgement is the handover the queued report was
+  // waiting for, so the process leaves once it lands.
+  await waitFor(() => (surface.calls.exits.length === 1 ? true : null));
+  assert.deepEqual(surface.calls.exits, ["done"]);
   assert.equal(hellos.length, 2);
   assert.deepEqual(hellos[1].mount, hellos[0].mount);
 });

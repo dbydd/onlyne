@@ -26,6 +26,7 @@ hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{r
   ├─ assign_ack{accepted:true}
   ├─ report.heartbeat{running|idle} — per turn, and every 10s while a task is live
   ├─ report.complete{outcome, head} — the ledger's terminal fact
+  │    └─ the client's answer is the handover: pi is asked to shut down, then detaches
   ├─ probe ──► one heartbeat
   ◀── recycle ──► complete (if unsettled) → stop → pi exits
   └─ detach{reason} when pi shuts down
@@ -118,7 +119,7 @@ Degradations, and what the host does with each:
 | no `sendMessage` | probed | the role prose from `welcome` is not injected as context; the task itself still arrives |
 | no `appendEntry` | probed | no `onlyne-assign` / `onlyne-complete` session entries are recorded |
 | no `ui.setStatus` | guarded | the footer status line is skipped |
-| no `ctx.shutdown` | guarded | `recycle` stops the plugin but leaves pi running |
+| no `ctx.shutdown` | guarded | `recycle` and a completion still settle the task; the process stays up for the operator to close |
 
 ## 3. Tools
 
@@ -135,9 +136,10 @@ to the core's 2 MiB ceiling and its four accepted mime types.
 ### `onlyne_complete{outcome?, text?}`
 
 Ends the current task with an explicit outcome (`done` default, or `failed`). The `text`
-becomes the ledger `head` (whitespace-collapsed, capped at 200 characters). The tool
-returns `terminate: true`, so pi ends the batch instead of asking the model for one more
-turn.
+becomes the ledger `head` (whitespace-collapsed, capped at 200 characters). The call also
+ends the session's process: once the client has acknowledged the completion report (see
+§4), the plugin asks pi to shut down through `ctx.shutdown()`. pi 0.85.1 has no
+tool-result `terminate` handling.
 
 ## 4. Outcome rules
 
@@ -158,8 +160,12 @@ One completion is sent per task, at the first of these events:
 `head` is a single line, capped at 200 characters, matching what the client puts in
 `out_head` and what the receipt carries.
 
-The completion is durable across a client restart: if the socket is down when the outcome
-is decided, the report is held and flushed immediately after the next `hello` answers.
+A reported completion ends the session's process. `report.complete` goes out as a request,
+and the client answers it only after it has settled the session row, acked the delivery
+and written the `Completion` envelope; the plugin asks pi to shut down at that answer.
+An outcome the socket could not carry is queued and flushed after the next `hello`, and
+that flush's answer is the handover that ends the process. A completion the host refused
+leaves the process running, so the task is never lost to an exit.
 
 ## 5. Protocol notes and deviations
 

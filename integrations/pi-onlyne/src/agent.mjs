@@ -132,6 +132,8 @@ export class OnlyneAgent {
     this.deferredPushes = [];
     this.agentState = "ready";
     this.lastError = null;
+    /** Whether pi has already been asked to end this process (`exitSession`). */
+    this.exitRequested = false;
     this.stats = { assigns: 0, duplicates: 0, injections: 0, completions: 0, reports: 0, reconnects: 0, recycles: 0 };
   }
 
@@ -580,12 +582,12 @@ export class OnlyneAgent {
     const taskId = args.task_id ?? this.activeTaskId();
     this.log(`recycle task=${taskId ?? "?"} reason=${args.reason ?? "?"} outcome=${args.outcome ?? "-"}`);
     if (taskId && args.outcome && this.tasks.get(taskId) && !this.tasks.get(taskId).completed) {
-      await this.complete(taskId, args.outcome, `recycled: ${args.reason ?? "operator"}`).catch((error) =>
-        this.log(`recycle completion refused: ${error.message}`),
-      );
+      await this.complete(taskId, args.outcome, `recycled: ${args.reason ?? "operator"}`, {
+        exitProcess: false,
+      }).catch((error) => this.log(`recycle completion refused: ${error.message}`));
     }
     this.stop(`recycle:${args.reason ?? "operator"}`);
-    this.surface.exit?.(args.reason ?? "recycle");
+    this.exitSession(args.reason ?? "recycle");
   }
 
   // ------------------------------------------------------------ pi → plugin
@@ -693,8 +695,21 @@ export class OnlyneAgent {
   /**
    * Report the terminal fact. If the socket is down the report is remembered and
    * flushed on the next hello, so a completion survives a client restart.
+   *
+   * The `report` request is the durable handover, and it is the reason the exit
+   * waits for its answer: the client replies from `serve_connection`
+   * (`crates/onlyne-client/src/adapter_socket.rs`) only after `on_out` settled
+   * the session row, acked the delivery and wrote the `Completion` envelope —
+   * onto the server link, or into `client.db` intents when that link is down
+   * (`crates/onlyne-client/src/dispatch.rs` `on_out`). A returned response
+   * therefore means this process can leave without losing the outcome, and a
+   * rejected or queued report must never exit.
+   *
+   * @param {{ exitProcess?: boolean }} [options] `false` for the recycle path,
+   * which ends the process after its own detach frame instead.
    */
-  async complete(taskId, outcome, head) {
+  async complete(taskId, outcome, head, options = {}) {
+    const exitProcess = options.exitProcess ?? true;
     const normalized = normalizeOutcome(outcome);
     const summary = headOf(head);
     const task = this.tasks.get(taskId);
@@ -702,7 +717,7 @@ export class OnlyneAgent {
     if (task) task.completed = true;
     const report = completeReport({ taskId, outcome: normalized, head: summary });
     if (!this.connected) {
-      this.pendingCompletion = { taskId, report };
+      this.pendingCompletion = { taskId, report, outcome: normalized, exitProcess };
       this.surface.status?.(`onlyne: ${taskId.slice(0, 8)} ${normalized} (queued)`);
       this.log(`completion for ${taskId} queued: socket is down`);
       return { taskId, outcome: normalized, head: summary, queued: true };
@@ -712,8 +727,26 @@ export class OnlyneAgent {
     this.surface.status?.(`onlyne: ${taskId.slice(0, 8)} ${normalized}`);
     this.surface.customEntry?.("onlyne-complete", { taskId, outcome: normalized, head: summary });
     this.log(`completion ${taskId} ${normalized} head=${JSON.stringify(summary.slice(0, 60))}`);
-    if (this.activeTasks().length === 0) this.stopHeartbeat();
+    if (this.activeTasks().length === 0) {
+      this.stopHeartbeat();
+      if (exitProcess) this.exitSession(normalized);
+    }
     return { taskId, outcome: normalized, head: summary };
+  }
+
+  /**
+   * Ask pi to end the process this session runs in.
+   *
+   * One `ctx.shutdown()` per process: pi marks the request and runs its
+   * teardown at `agent_settled` (`modes/interactive/interactive-mode.js`,
+   * `modes/rpc/rpc-mode.js` in pi 0.85.1), which then emits `session_shutdown`
+   * and that hook detaches this connection. The client daemon is unaffected:
+   * the role runtime outlives every session it spawns.
+   */
+  exitSession(reason) {
+    if (this.exitRequested) return;
+    this.exitRequested = true;
+    this.surface.exit?.(reason);
   }
 
   async flushPendingCompletion() {
@@ -724,6 +757,9 @@ export class OnlyneAgent {
       await this.request("report", pending.report);
       this.stats.completions += 1;
       this.log(`queued completion for ${pending.taskId} flushed after reconnect`);
+      if (pending.exitProcess && this.activeTasks().length === 0) {
+        this.exitSession(pending.outcome);
+      }
     } catch (error) {
       this.pendingCompletion = pending;
       this.log(`queued completion still refused: ${error.message}`);

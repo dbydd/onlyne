@@ -188,15 +188,17 @@ impl AdapterSocket {
     async fn serve_connection(&self, mut connection: ServerConnection) -> Result<()> {
         let io = connection.io.clone();
         let capabilities = connection.hello.capabilities.clone();
-        // A plugin the client spawned learns its session from the assignment,
-        // so a mount that names nothing takes the staged session of this role
-        // and the ready barrier of §6 runs now: the local `ready` row and its
-        // report reach the server before the `assign` frame leaves.
-        if connection.hello.kind == onlyne_proto::MountKind::Agent {
-            let mounted = match connection.hello.mount.as_ref() {
-                Some(onlyne_proto::Mount::Agent(agent)) => agent.session.clone(),
-                _ => None,
-            };
+        let agent = connection.hello.kind == onlyne_proto::MountKind::Agent;
+        // The session this connection serves, when it is an agent mount: the
+        // plugin names it with the id the client spawned it for, or names
+        // nothing and serves whatever session the role stages next.
+        let mounted = match connection.hello.mount.as_ref() {
+            Some(onlyne_proto::Mount::Agent(mount)) => mount.session.clone(),
+            _ => None,
+        };
+        if agent {
+            // The ready barrier of §6 runs now: the local `ready` row and its
+            // report reach the server before the `assign` frame leaves.
             self.hand_over(mounted.as_deref(), io.clone(), capabilities.clone())
                 .await;
         }
@@ -303,34 +305,36 @@ impl AdapterSocket {
                 }
             }
         }
+        if agent {
+            // The connection is over: what it bound stops being reachable, so
+            // no later task of this role is routed to it.
+            self.dispatch.release_connection(mounted.as_deref());
+        }
         Ok(())
     }
 
-    /// Hand the staged session of this role to a freshly mounted plugin.
+    /// Bind a freshly mounted plugin to the session it names, or park it.
     ///
-    /// The mount may name its session, which is the shape an agent runtime
-    /// that knows its own id sends, and any other mount takes the single
-    /// staged session. A connection that finds nothing staged stays idle,
-    /// which is the state a plugin connecting before any work exists.
+    /// A mount that names its session is that session's transport: the
+    /// connection takes the staged payload for it and nothing else, because the
+    /// id names the one session the client spawned this plugin for. A mount
+    /// that names nothing is a plugin that arrived before any work existed: it
+    /// waits as this role's parked agent and takes the next staged session
+    /// (plan §6 line 285).
     async fn hand_over(
         &self,
         session_id: Option<&str>,
         io: AdapterIo,
         capabilities: Vec<Capability>,
     ) {
-        // The transport stays available for every session this role runs: a
-        // plugin serving one assignment after another reuses one connection.
-        self.dispatch
-            .set_plugin_transport(io.clone(), capabilities.clone());
-        let Some(slot) = self.dispatch.pending_plugin_slot(session_id) else {
+        let Some(session_id) = session_id else {
+            self.dispatch.park_transport(io, capabilities);
             return;
         };
-        if let Err(error) = self
-            .dispatch
-            .hand_session(&slot.task_id, io, capabilities)
-            .await
-        {
-            tracing::warn!(error = %error, task = %slot.task_id, "staged hand-off refused");
+        self.dispatch
+            .bind_adapter(session_id, io, capabilities.clone());
+        if let Err(error) = self.dispatch.hand_staged(session_id).await {
+            tracing::warn!(error = %error, session = %session_id, "staged hand-off refused");
         }
     }
 }

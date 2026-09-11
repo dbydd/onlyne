@@ -175,8 +175,11 @@ export default function onlyne(pi: ExtensionAPI) {
         }),
         async execute(_toolCallId, params) {
           if (!agent) throw new Error("onlyne: session is not connected");
+          // The exit is not a tool-result flag: pi 0.85.1 has no tool-result
+          // `terminate` handling. `agent.complete` asks the surface to shut the
+          // process down once the client has acknowledged the report.
           const result = await agent.completeFromTool({ outcome: params.outcome, text: params.text });
-          return { ...textResult(`onlyne task ${result.taskId} -> ${result.outcome}`, result), terminate: true };
+          return textResult(`onlyne task ${result.taskId} -> ${result.outcome}`, result);
         },
       }));
     } catch (error) {

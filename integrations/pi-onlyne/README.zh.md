@@ -23,6 +23,7 @@ hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{r
   ├─ assign_ack{accepted:true}
   ├─ report.heartbeat{running|idle} —— 每个 turn，以及任务存续期间每 10 秒
   ├─ report.complete{outcome, head} —— ledger 的终态事实
+  │    └─ client 的应答就是交接点：插件据此让 pi 退出，随后 detach
   ├─ probe ──► 一条 heartbeat
   ◀── recycle ──► （未终态则先 complete）→ 停插件 → pi 退出
   └─ pi 退出时 detach{reason}
@@ -112,7 +113,7 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 | `sendMessage` | `session_start` | `welcome` 的 role prose 不再作为上下文注入；任务本身照常到达 |
 | `appendEntry` | `session_start` | 不再写 `onlyne-assign` / `onlyne-complete` 会话条目 |
 | `ui.setStatus` | 调用点保护 | 跳过 footer 状态行 |
-| `ctx.shutdown` | 调用点保护 | `recycle` 只停插件，不退出 pi |
+| `ctx.shutdown` | 调用点保护 | `recycle` 与 completion 照常结算任务；进程留给操作者自己关闭 |
 
 ## 3. 工具面
 
@@ -128,7 +129,9 @@ mime 约束。
 ### `onlyne_complete{outcome?, text?}`
 
 显式结束当前任务，`outcome` 缺省 `done`，也可 `failed`。`text` 成为 ledger 的 `head`
-（空白折叠，截到 200 字符）。工具返回 `terminate: true`，pi 因此结束本批而不再多跑一轮。
+（空白折叠，截到 200 字符）。这一调用同时结束所在 session 的进程：client 应答完 completion
+报告（见 §4）之后，插件通过 `ctx.shutdown()` 让 pi 退出。pi 0.85.1 没有 tool-result
+`terminate` 处理。
 
 ## 4. outcome 判定规则
 
@@ -145,8 +148,10 @@ mime 约束。
 
 `head` 恒为单行、上限 200 字符，与 client 写入 `out_head` 和回执携带的内容一致。
 
-completion 在 client 重启时也不丢：如果决定 outcome 时 socket 已断，报告被记住，并在下一次
-`hello` 应答后立刻补发。
+报出去的 completion 会结束所在 session 的进程。`report.complete` 以请求形式发出，client 只有
+在结算 session 行、ack 掉投递、并写好 `Completion` envelope 之后才应答；插件在这个应答处让 pi
+退出。socket 当时送不出去的 outcome 会被记住，并在下一次 `hello` 后补发，那次补发的应答就是
+结束进程的交接点。被宿主拒掉的 completion 不会让进程退出，任务不会因为退出而丢失。
 
 ## 5. 协议说明与偏差
 

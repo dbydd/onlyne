@@ -1,13 +1,15 @@
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use onlyne_adapter::AdapterIo;
 use onlyne_client::{
+    accept::AcceptPath,
     adapter_socket::AdapterSocket,
     dispatch::{
         ClientLink, DispatchState, ReadyNotice, dispatch, missing_capability, on_plugin_report,
-        on_ready, on_recycled, plugin_gap, session_alive,
+        on_ready, on_recycled, plugin_gap, projection_of, session_alive,
     },
     init::{InitArgs, init, legacy_error_code},
     intent::{IntentMachine, IntentResult, op_for_intent, permanent_error},
@@ -20,9 +22,9 @@ use onlyne_net::{
     table_from,
 };
 use onlyne_proto::{
-    AdapterMsg, Capability, ClientOp, Envelope, ErrorCode, Frame, HelloArgs, HostOp, Mount,
-    MountKind, MsgKind, PROTOCOL_VERSION, PluginOp, QueryRolesArgs, Receipt, Report, ResBody,
-    Welcome, new_envelope, new_task_id,
+    AdapterMsg, AgentMount, Capability, ClientOp, Delivery, DetachArgs, Envelope, ErrorCode, Frame,
+    HelloArgs, HostOp, Lifecycle, Mount, MountKind, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp,
+    QueryRolesArgs, Receipt, Report, ResBody, Welcome, new_envelope, new_task_id,
 };
 use onlyne_session::SessionLedger;
 use onlyne_session::backend::fake::FakeBackend;
@@ -1274,4 +1276,324 @@ fn a_reminted_reference_is_written_back_before_the_next_probe() {
         1,
         "one remint is enough once the slot holds the fresh handle"
     );
+}
+
+/// One delivery of a fresh task to this role, as the pull loop receives it.
+fn task_delivery(text: &str) -> Delivery {
+    Delivery {
+        msg_id: format!("msg-{}", new_task_id()),
+        envelope: Box::new(sample_envelope("planner", text)),
+    }
+}
+
+/// Hand one delivery to this role the way the pull loop does: stage the
+/// session, then route its payload to whichever connection serves it.
+async fn deliver(state: &DispatchState, delivery: &Delivery) -> String {
+    let path = AcceptPath::new(state.clone(), String::new());
+    let session = path
+        .accept_new(delivery, true)
+        .unwrap()
+        .expect("a fresh task is accepted");
+    let task_id = delivery.envelope.task_id().unwrap().to_string();
+    state.attach_msg_id(&task_id, &delivery.msg_id);
+    state.hand_staged(&session.task_id).await.unwrap();
+    task_id
+}
+
+/// Mount one plugin on the role socket and record every `assign` it receives.
+///
+/// `session` is `ONLYNE_SESSION_ID` as the plugin reads it: a plugin the client
+/// spawned names the session it was spawned for, and `None` is the
+/// always-running agent that attached before any work existed. The returned
+/// [`AdapterIo`] is the plugin's half of the connection.
+async fn mount_plugin(
+    socket: &Path,
+    session: Option<&str>,
+) -> (AdapterIo, tokio::sync::mpsc::UnboundedReceiver<String>) {
+    let stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .expect("the role socket accepts a plugin");
+    let (io, mut inbound) =
+        AdapterIo::new_with_inbound(stream, Duration::from_secs(5), Duration::from_secs(5));
+    let (assigns_tx, assigns_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(frame) = inbound.recv().await {
+            if let AdapterMsg::Host(HostOp::Assign(assign)) = frame.msg {
+                let _ = assigns_tx.send(assign.task_id);
+            }
+        }
+    });
+    let hello = HelloArgs {
+        protocol: PROTOCOL_VERSION,
+        plugin: "onlyne-agent-test".into(),
+        version: "1.0.0".into(),
+        kind: MountKind::Agent,
+        capabilities: vec![Capability::Report, Capability::Inject, Capability::Recycle],
+        mount: Some(Mount::Agent(AgentMount {
+            role: "planner".into(),
+            session: session.map(str::to_string),
+            task_id: session.map(str::to_string),
+            pid: None,
+        })),
+    };
+    let body = io
+        .request(AdapterMsg::Plugin(PluginOp::Hello(hello)))
+        .await
+        .expect("the mount answers");
+    assert!(body.ok, "the role socket admits this plugin: {body:?}");
+    (io, assigns_rx)
+}
+
+/// Poll a state predicate so a socket-level hand-off is never raced.
+async fn eventually(mut predicate: impl FnMut() -> bool, what: &str) {
+    for _ in 0..400 {
+        if predicate() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+/// Bind the role socket and answer every connection on it until this returns.
+async fn serve_role_socket(
+    state: &DispatchState,
+    dir: &Path,
+) -> (PathBuf, tokio::task::JoinHandle<anyhow::Result<()>>) {
+    let adapter = AdapterSocket {
+        workspace: dir.to_path_buf(),
+        role: "planner".into(),
+        cluster: "c".into(),
+        server: "s".into(),
+        dispatch: state.clone(),
+    };
+    let socket = adapter.path();
+    let host = tokio::spawn(adapter.serve());
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(socket.exists(), "the host bound {}", socket.display());
+    (socket, host)
+}
+
+/// A settled task is `exited`/`done` in the projection the client publishes.
+fn assert_settled(store: &ClientStore, task_id: &str) {
+    let row = store
+        .get_session(task_id)
+        .unwrap()
+        .expect("the settled session keeps its row");
+    let projection = projection_of(&row);
+    assert_eq!(
+        projection.lifecycle,
+        Lifecycle::Exited,
+        "the settled session publishes exited"
+    );
+    assert_eq!(
+        projection.outcome,
+        Some(Outcome::Done),
+        "the settled session publishes its outcome"
+    );
+    // The whole tuple survives the settle: the projection a supervisor reads
+    // must carry the resource dimension beside the lifecycle, so a row can
+    // never read `exited` with a missing resource leg.
+    let observed = projection
+        .observed
+        .as_ref()
+        .expect("a settled session publishes its raw observation");
+    assert!(
+        observed.get("resource").is_some(),
+        "the published tuple carries the resource dimension: {observed}"
+    );
+}
+
+/// With `reuse = false` a second task must get a session and a connection of
+/// its own, and it must be spawned by the client that is already running.
+///
+/// Before this case passed, a plugin's connection was remembered as the whole
+/// role's transport (`DispatchInner::plugin_transport`), so the assignment of
+/// the second task was written to the finished session's socket: the first
+/// process answered it and no second session was ever spawned, which is the
+/// live defect (task B's `onlyne-assign` entry inside task A's pi session
+/// file, a single tab, two session rows).
+///
+/// The client itself is not part of a session's lifecycle: it stays up after
+/// the session settles and serves the next task, which the admin hello at the
+/// end asserts on the same socket.
+#[tokio::test]
+async fn reuse_off_gives_the_second_task_its_own_session_and_connection() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(FakeBackend::new());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        2,
+        false,
+        backend.clone(),
+        store.clone(),
+    );
+    let outbox = Arc::new(RecordingOutbox::default());
+    state.attach_outbox(outbox.clone());
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    // Task A: the session is staged, then its plugin mounts under that id.
+    let first_task = deliver(&state, &task_delivery("task A")).await;
+    // The connection stays open on purpose: the session is settled while its
+    // process is still reachable, which is the state the live defect left.
+    let (_first_io, mut first_assigns) = mount_plugin(&socket, Some(&first_task)).await;
+    let assigned = tokio::time::timeout(Duration::from_secs(2), first_assigns.recv())
+        .await
+        .expect("the mounted session is handed its payload")
+        .expect("the plugin connection is still open");
+    assert_eq!(assigned, first_task);
+
+    // It completes; no reuse means the slot goes with the settled task.
+    on_plugin_report(
+        &state,
+        Report::Complete {
+            task_id: first_task.clone(),
+            outcome: Outcome::Done,
+            head: Some("A done".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state.session_count(),
+        0,
+        "without reuse a settled session leaves the live map"
+    );
+    assert_settled(&store, &first_task);
+    assert!(
+        !session_alive(&state, &first_task),
+        "the client stops routing to a settled session"
+    );
+
+    // Task B: a second session is spawned, and its assignment rides its own
+    // connection rather than the finished one.
+    let second_task = deliver(&state, &task_delivery("task B")).await;
+    assert_ne!(second_task, first_task);
+    assert_eq!(
+        backend.sessions().len(),
+        2,
+        "the second task spawns a second resource"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), first_assigns.recv())
+            .await
+            .is_err(),
+        "the finished session's connection is never handed another task"
+    );
+    let (_second_io, mut second_assigns) = mount_plugin(&socket, Some(&second_task)).await;
+    let assigned = tokio::time::timeout(Duration::from_secs(2), second_assigns.recv())
+        .await
+        .expect("the second session is handed its payload")
+        .expect("the second plugin connection is still open");
+    assert_eq!(
+        assigned, second_task,
+        "the second assign names the second task"
+    );
+
+    // The client is not reaped by a session ending: its socket still answers.
+    let admin = HelloArgs {
+        protocol: PROTOCOL_VERSION,
+        plugin: "onlyne-client-cli:test".into(),
+        version: "1.0.0".into(),
+        kind: MountKind::Admin,
+        capabilities: Vec::new(),
+        mount: Some(Mount::Admin),
+    };
+    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let io = AdapterIo::new(stream, Duration::from_secs(2), Duration::from_secs(2));
+    let body = io
+        .request(AdapterMsg::Plugin(PluginOp::Hello(admin)))
+        .await
+        .expect("the client socket answers after a session settled");
+    assert!(
+        body.ok,
+        "the client keeps serving for the next task: {body:?}"
+    );
+
+    let syncs = outbox
+        .kinds()
+        .await
+        .iter()
+        .filter(|kind| **kind == "session_sync")
+        .count();
+    assert!(
+        syncs >= 2,
+        "both sessions published a projection over the live link: {syncs}"
+    );
+    host.abort();
+}
+
+/// `reuse` hands the next task to an idle session, and an idle session is only
+/// usable while its agent is attached. A plugin that detached — the shape a
+/// session process that exited itself leaves behind, and the shape an operator
+/// `/onlyne disconnect` leaves — takes its slot out of the map, so the next
+/// task spawns a new session instead of writing into a dead connection.
+#[tokio::test]
+async fn an_idle_session_whose_plugin_left_is_not_reused() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(FakeBackend::new());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        2,
+        true,
+        backend.clone(),
+        store.clone(),
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    let first_task = deliver(&state, &task_delivery("task A")).await;
+    let (first_io, mut first_assigns) = mount_plugin(&socket, Some(&first_task)).await;
+    tokio::time::timeout(Duration::from_secs(2), first_assigns.recv())
+        .await
+        .expect("the mounted session is handed its payload");
+
+    on_plugin_report(
+        &state,
+        Report::Complete {
+            task_id: first_task.clone(),
+            outcome: Outcome::Done,
+            head: Some("A done".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_settled(&store, &first_task);
+    assert_eq!(
+        state.session_count(),
+        1,
+        "reuse keeps the idle slot for the role's next task"
+    );
+
+    // The plugin leaves: the connection it served on is over.
+    first_io
+        .notify(AdapterMsg::Plugin(PluginOp::Detach(DetachArgs {
+            reason: "plugin left".into(),
+        })))
+        .await
+        .unwrap();
+    eventually(|| state.session_count() == 0, "the idle slot to go").await;
+
+    let second_task = deliver(&state, &task_delivery("task B")).await;
+    assert_eq!(
+        backend.sessions().len(),
+        2,
+        "a session whose plugin left cannot carry the next task"
+    );
+    let _second_io = mount_plugin(&socket, Some(&second_task)).await;
+    host.abort();
 }
