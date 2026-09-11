@@ -64,9 +64,9 @@ is what a script reads.
 ## Backends
 
 `ONLYNE_BACKEND` selects the session backend: `auto`, `zellij`, `orca`, `fake`,
-`exec`. The default is `zellij`. `auto` probes zellij, orca, then fake and takes
-the first one that reports usable. `fake` runs sessions in process and needs no
-external tool, which is why the end-to-end scripts use it. `exec` spawns the
+`exec`. An empty value discovers by capability — it probes `orca`, `zellij`,
+then `fake` and takes the first one that reports usable; `auto` means the same.
+`fake` runs sessions in process and needs no external tool, which is why the end-to-end scripts use it. `exec` spawns the
 role's `session_command` as a child of the client, with stdin held open and the
 child's output appended to `.onlyne/logs/session-<task>.log`; it is never
 reached through `auto`, because running an agent with no terminal around it is a

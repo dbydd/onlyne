@@ -271,17 +271,20 @@ pub(crate) fn unsupported(backend: &str, operation: &str, detail: &str) -> anyho
     anyhow::anyhow!("runtime backend {backend} does not support {operation}: {detail}")
 }
 
-/// Probe order: zellij, then orca, then fake as the last resort. `fake` is
-/// always available, so `auto` resolves on any machine; explicit names still
-/// select one backend only. Reached through `ONLYNE_BACKEND=auto`, or directly
-/// by callers that want capability discovery.
+/// Probe order: orca, then zellij, then fake as the last resort. The Orca
+/// probe answers only while the Orca runtime is reachable from this process,
+/// so a session lands on the screen the operator is actually driving; an
+/// installed zellij CLI counts as live infrastructure second, and `fake` is
+/// always available, so `auto` resolves on any machine. Explicit names still
+/// select one backend only. Reached through `ONLYNE_BACKEND=auto`, or
+/// directly by callers that want capability discovery.
 pub fn select_backend(
     runner: Arc<dyn Runner>,
     policy: WorktreePolicy,
 ) -> Result<Box<dyn SessionBackend>> {
     let backends: [Box<dyn SessionBackend>; 3] = [
+        Box::new(orca::OrcaBackend::with_policy(runner.clone(), policy)),
         Box::new(zellij::ZellijBackend::new(runner.clone())),
-        Box::new(orca::OrcaBackend::with_policy(runner, policy)),
         Box::new(fake::FakeBackend::new()),
     ];
     for backend in backends {
@@ -290,7 +293,7 @@ pub fn select_backend(
         }
     }
     Err(anyhow::anyhow!(
-        "no usable session backend available (tried zellij, orca, fake)"
+        "no usable session backend available (tried orca, zellij, fake)"
     ))
 }
 
@@ -309,30 +312,32 @@ pub fn backend_by_name(
 }
 
 /// Resolve a backend name to a concrete backend. `auto` probes capability.
-/// Empty or unknown names fall back to `"zellij"` with the reason logged.
+/// Empty and unknown names enter capability discovery too, the reason logged,
+/// so the default follows the live environment rather than one binary's
+/// presence.
 pub fn backend_for(
     requested: &str,
     runner: Arc<dyn Runner>,
     policy: WorktreePolicy,
 ) -> Result<Box<dyn SessionBackend>> {
     let name = requested.trim();
-    if name.eq_ignore_ascii_case("auto") {
+    if name.eq_ignore_ascii_case("auto") || name.is_empty() {
         return select_backend(runner, policy);
     }
-    let name = if name.is_empty() { "zellij" } else { name };
     match backend_by_name(name, runner.clone(), policy.clone()) {
         Ok(b) => Ok(b),
         Err(e) => {
-            tracing::warn!("ONLYNE_BACKEND={requested} unusable ({e}); falling back to zellij");
-            backend_by_name("zellij", runner, policy)
+            tracing::warn!("ONLYNE_BACKEND={requested} unusable ({e}); discovering by capability");
+            select_backend(runner, policy)
         }
     }
 }
 
-/// Client default backend: deterministic, driven by `ONLYNE_BACKEND`
-/// (`auto` | `zellij` | `orca` | `fake` | `exec`), defaulting to `zellij`.
-/// Capability discovery is available through the explicit `auto` value, so an
-/// installed backend only joins selection when the operator asks for it.
+/// Client default backend: driven by `ONLYNE_BACKEND`
+/// (`auto` | `zellij` | `orca` | `fake` | `exec`). An empty value discovers
+/// capabilities in order `orca → zellij → fake`, so the default follows the
+/// screen the process can actually see; the explicit `auto` value means the
+/// same.
 ///
 /// `exec` is never part of `auto`: it spawns the session command as a child of
 /// this process with no terminal around it, which is a deliberate choice a case
@@ -413,11 +418,11 @@ mod tests {
         let runner = Arc::new(ProbeRunner::default());
         let backend = select_backend(runner.clone(), WorktreePolicy::Host).unwrap();
         assert_eq!(backend.name(), "fake");
-        assert_eq!(runner.calls()[0].0, "zellij");
+        assert_eq!(runner.calls()[0].0, "orca");
     }
 
     #[test]
-    fn auto_selection_uses_the_documented_priority() {
+    fn auto_selection_takes_orca_while_the_runtime_answers() {
         #[derive(Default)]
         struct AutoRunner {
             calls: Mutex<Vec<String>>,
@@ -431,11 +436,11 @@ mod tests {
                 _: &BTreeMap<String, String>,
             ) -> Result<CommandOutput> {
                 self.calls.lock().push(program.to_owned());
-                let zellij = program == "zellij";
+                let orca = program == "orca";
                 Ok(CommandOutput {
-                    status: if zellij { 0 } else { 1 },
-                    stdout: if zellij {
-                        b"session\n".to_vec()
+                    status: if orca { 0 } else { 1 },
+                    stdout: if orca {
+                        br#"{"ok":true,"result":{"terminals":[]}}"#.to_vec()
                     } else {
                         vec![]
                     },
@@ -445,19 +450,36 @@ mod tests {
         }
         let runner = Arc::new(AutoRunner::default());
         let backend = backend_for("AUTO", runner.clone(), WorktreePolicy::Host).unwrap();
+        assert_eq!(backend.name(), "orca");
+        assert_eq!(runner.calls.lock().as_slice(), &["orca".to_string()]);
+    }
+
+    /// An installed zellij CLI with no reachable Orca runtime still lands on
+    /// zellij: the Orca probe fails its one call and discovery moves on.
+    #[test]
+    fn auto_selection_takes_zellij_when_the_orca_runtime_is_out_of_reach() {
+        let runner = Arc::new(ProbeRunner::default().reply(1, "").reply(0, "bg\n"));
+        let backend = select_backend(runner.clone(), WorktreePolicy::Host).unwrap();
         assert_eq!(backend.name(), "zellij");
-        assert_eq!(runner.calls.lock().as_slice(), &["zellij".to_string()]);
+        let calls = runner.calls();
+        assert_eq!(
+            (calls[0].0.as_str(), calls[1].0.as_str()),
+            ("orca", "zellij")
+        );
     }
 
     #[test]
-    fn scheduler_default_uses_zellij_unless_auto_is_requested() {
+    fn the_empty_name_discovers_and_named_backends_stay_exact() {
         let runner = Arc::new(ProbeRunner::default());
+        // An empty request probes; the scripted runner answers nothing, so
+        // fake takes it after orca and zellij each fail their one probe.
         assert_eq!(
             backend_for("", runner.clone(), WorktreePolicy::Host)
                 .unwrap()
                 .name(),
-            "zellij"
+            "fake"
         );
+        assert_eq!(runner.calls().len(), 2);
         assert_eq!(
             backend_for("zellij", runner.clone(), WorktreePolicy::Host)
                 .unwrap()
@@ -470,21 +492,23 @@ mod tests {
                 .name(),
             "fake"
         );
-        // `exec` is opt-in only: naming it selects it, `auto` never reaches it.
+        // `exec` is opt-in only: naming it selects it, discovery never reaches it.
         assert_eq!(
             backend_for("exec", runner.clone(), WorktreePolicy::Host)
                 .unwrap()
                 .name(),
             "exec"
         );
+        // Named selections never probe.
+        assert_eq!(runner.calls().len(), 2);
+        // An unknown name logs its reason and discovers as well.
         assert_eq!(
             backend_for("nope", runner.clone(), WorktreePolicy::Host)
                 .unwrap()
                 .name(),
-            "zellij"
+            "fake"
         );
-        // Empty and named modes resolve deterministically without probing.
-        assert!(runner.calls().is_empty());
+        assert_eq!(runner.calls().len(), 4);
     }
 
     /// Orca is the only backend that reads the policy, and the JSON error body
