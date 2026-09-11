@@ -12,6 +12,7 @@ workspace manifest, so `cargo run --example <name>` has nothing to build from th
 | `crates/onlyne-testkit/e2e/gateway-mount.sh` | fake gateway registration and inbound routing to a role |
 | `crates/onlyne-testkit/e2e/idempotency.sh` | duplicate and conflict answers for one repeated `op_id` |
 | `crates/onlyne-testkit/e2e/legacy-layout.sh` | refusal of a pre-v1 workspace, exit code 2 |
+| `crates/onlyne-testkit/e2e/running-lights.sh` | a six-role ring: a token handed on with `onlyne handoff` twelve times, and two TUI frames of it moving |
 
 `crates/onlyne-testkit/e2e/lib.sh` holds the shared helpers; callers set `SRC` and `tmp` first. Every
 script runs with `ONLYNE_BACKEND=fake` and the `fake` gateway, and no real platform credential
