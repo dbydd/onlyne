@@ -1214,7 +1214,7 @@ mod tests {
                             "paneKey": "tab-9:leaf-9",
                             "tabId": "tab-9",
                             "leafId": "leaf-9",
-                            "title": "dbydd@workstation: ~/work",
+                            "title": "someone@workstation: ~/work",
                             "lastOutputAt": 11
                         }]
                     })),
