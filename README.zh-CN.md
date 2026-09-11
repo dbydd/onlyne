@@ -141,6 +141,8 @@ target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner
 - `docs/v1-ARCHITECTURE.md` — crate 地图、socket、账本、生命周期、生成、联邦。
 - `crates/onlyne-adapter/PROTOCOL.md` — agent 与 gateway 共用的 adapter 面。
 - `examples/supervisor/README.md` — 活环 demo，含操作者口吻的使用记录。
-- `.agents/skills/onlyne/SKILL.md` — agent 驾驶集群的现场手册。
+- `skills/onlyne-supervisor/SKILL.md` — 集群操作 agent 的驾驶手册。
+- `skills/onlyne-role/SKILL.md` — 环上角色干活的手册。
+- `.agents/skills/onlyne/SKILL.md` — 本仓库的开发指导。
 
 MIT © dbydd

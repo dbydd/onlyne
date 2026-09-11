@@ -141,6 +141,8 @@ Every workspace is self-contained and portable: `onlyne server generate` lays ro
 - `docs/v1-ARCHITECTURE.md` — crate map, sockets, ledger, lifecycle, generation, federation.
 - `crates/onlyne-adapter/PROTOCOL.md` — the adapter surface for agents and gateways.
 - `examples/supervisor/README.md` — the live ring demo, operator voice included.
-- `.agents/skills/onlyne/SKILL.md` — the field manual an agent uses to drive a cluster.
+- `skills/onlyne-supervisor/SKILL.md` — the operating manual for a cluster supervisor agent.
+- `skills/onlyne-role/SKILL.md` — the handbook for a role working its task.
+- `.agents/skills/onlyne/SKILL.md` — development guidance for this repository.
 
 MIT © dbydd
