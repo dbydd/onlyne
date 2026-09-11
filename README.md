@@ -71,6 +71,16 @@ graph LR
 
 **One protocol, two mounts.** The adapter protocol that pi speaks is the protocol the Telegram gateway speaks: `hello` handshake, capability bits, `report` observations, `assign` payloads. Bring a new coding agent or a new chat platform by implementing the same small surface (`crates/onlyne-adapter/PROTOCOL.md`).
 
+## Design notes
+
+Two commitments shape the codebase.
+
+**Transport, not runtime.** Onlyne owns routing, receipts, recovery. Judgment stays with the agents on either side of a socket: the daemons carry no prompt logic, no scheduler, no model calls. Every feature decision answers one question first — does this belong to the message bus or to an agent? — and delivery truth alone enters the bus.
+
+**Context is a lossy channel, by design.** State that must survive lives in SQLite: the server ledger, the client intent queue, the durable outbox. Each hop's agent context receives only what that hop needs — text plus at most one image, one task per session, prose refetched from its single source. The lighter the carried context, the deeper the cluster can run.
+
+The second commitment has machine-checked backing. `proofs/` is a core Lean 4 development (toolchain 4.33.1, zero dependencies, `lake build` green, zero `sorry`). Three axioms state the rot: a context-carried fact's reliability decays monotonically with depth and reaches zero on any deepening trace. Twelve theorems do the rest — an impossibility result for every protocol that carries coordination state inside context, a rescue theorem whose external-ledger model keeps a violation bound that depends only on transport steps, one combinator lemma per design decision (carrier minimality, authority split, content by reference, idempotent redelivery, delivery creates the task, file-truth reload, single-source prose, one-shot sessions), and a closing theorem exhibiting this repository's design as a model of the safe side. `proofs/BRIEF.md` is the contract the prover worked to.
+
 ## Concepts in one table
 
 | Kind | Purpose | Delivery |
