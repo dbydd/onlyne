@@ -1001,6 +1001,23 @@ mod tests {
         })
     }
 
+    /// Whether the row carrying `needle` reverses a cell at or after the
+    /// needle's own column: a neighbour further left stays unmarked.
+    fn reversed_right_of(buffer: &ratatui::buffer::Buffer, needle: &str) -> bool {
+        (0..buffer.area().height).any(|y| {
+            let row = row_text(buffer, y);
+            let Some(start) = row.find(needle) else {
+                return false;
+            };
+            (start as u16..buffer.area().width).any(|x| {
+                buffer[(x, y)]
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::REVERSED)
+            })
+        })
+    }
+
     fn reversed_count(buffer: &ratatui::buffer::Buffer) -> usize {
         (0..buffer.area().height)
             .map(|y| {
@@ -1047,7 +1064,12 @@ mod tests {
         let text = render_once_text(&snapshot, &UiState::default(), 90, 24);
         assert!(text.matches('╭').count() >= 2, "{text}");
         assert!(text.contains("⬡planner*"), "{text}");
-        assert!(text.contains('▶'), "{text}");
+        assert!(
+            ['▶', '◀', '▲', '▼']
+                .iter()
+                .any(|arrow| text.contains(*arrow)),
+            "the hop carries an arrowhead into its target\n{text}"
+        );
         assert!(text.contains('◐'), "{text}");
         assert!(
             text.contains("local + server"),
@@ -1076,7 +1098,7 @@ mod tests {
             buffer_text(&cursor)
         );
         assert!(
-            !row_has_reversed(&cursor, "╭─b"),
+            !reversed_right_of(&cursor, "╭─b"),
             "another role's label is not\n{}",
             buffer_text(&cursor)
         );

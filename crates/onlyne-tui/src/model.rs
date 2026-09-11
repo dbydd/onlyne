@@ -300,8 +300,8 @@ pub struct UiState {
     /// Whether the views list only the sessions still holding a slot. `a`
     /// flips it, and the history views keep their own state filter.
     pub active_only: bool,
-    /// Whether control-plane out-edges are drawn. They crowd the ring, so the
-    /// page hides them until `e`.
+    /// Whether control-plane out-edges are drawn. They crowd the chain, so
+    /// the page hides them until `e`.
     pub show_control_edges: bool,
     /// The pane's subject: page 1 holds a role, page 2 a task.
     pub detail: Option<Detail>,
@@ -805,7 +805,8 @@ pub fn visible_sessions(snapshot: &Snapshot, active_only: bool) -> Vec<&SessionR
         .collect()
 }
 /// A control-plane role: the supervisor and every aggregate role. Its box
-/// leaves the ring, and its spoke edges stay off the map until `e`.
+/// takes a row of its own below the chain, and its spoke edges stay off the
+/// map until `e`.
 pub fn control_role(name: &str, aggregate: Option<&str>) -> bool {
     name.starts_with('_') || aggregate.is_some()
 }
@@ -833,55 +834,34 @@ pub fn boxes_overlap(places: &[RolePlace], w: usize, h: usize) -> bool {
     })
 }
 
-/// The gap one box leaves its neighbour.
-const PLACE_GAP: usize = 2;
+/// The gutter the placement keeps between two columns and two rows of boxes,
+/// and the outer gutter it keeps at the world's left and right edges. Hops
+/// route along these, so no stroke ever crosses a box.
+pub const GRID_GAP: usize = 2;
+pub const ROW_GAP: usize = 2;
+pub const PLACE_MARGIN: usize = 1;
+
+/// How many boxes a world of `width` fits on one row. `world_size` sizes the
+/// world from this same count, so the two always agree.
+pub fn columns_for(width: usize, node_w: usize) -> usize {
+    ((width.saturating_sub(2 * PLACE_MARGIN) + GRID_GAP) / (node_w + GRID_GAP)).max(1)
+}
 
 /// Where each slot's box goes inside a `w`x`h` world of `node_w`x`node_h`
 /// boxes.
 ///
-/// The ring is the placement the map wants; the serpentine grid is what a
-/// world that cannot hold one gets, wrapping onto more rows instead of
-/// overlapping. Pure: equal inputs give equal corners.
+/// Cycle roles fill the world's rows in order, snaking left to right and then
+/// right to left so the chain reads straight down the page. Control roles take
+/// a row of their own below them. Pure: equal inputs give equal corners.
 pub fn role_positions(
     slots: &[RoleSlot],
     w: usize,
-    h: usize,
+    _h: usize,
     node_w: usize,
     node_h: usize,
 ) -> Vec<(String, RolePlace)> {
-    if let Some(ring) = ring_places(slots, w, h, node_w, node_h) {
-        return ring;
-    }
-    let points = grid_points(slots.len(), w, h, node_w, node_h);
-    slots
-        .iter()
-        .enumerate()
-        .map(|(index, slot)| {
-            let place = points
-                .get(index)
-                .copied()
-                .unwrap_or(RolePlace { x: 0, y: 0 });
-            (slot.name.clone(), place)
-        })
-        .collect()
-}
-
-/// The ring placement, or `None` when the world cannot hold one: fewer than
-/// three cycle roles, under three node rows, or an ellipse whose boxes would
-/// touch after rounding.
-///
-/// Cycle roles read clockwise from the top of the inscribed ellipse, so their
-/// boxes trace the ring the ACL forms. Control roles take the free middle,
-/// then the top or bottom edge, then the first free corner.
-pub fn ring_places(
-    slots: &[RoleSlot],
-    w: usize,
-    h: usize,
-    node_w: usize,
-    node_h: usize,
-) -> Option<Vec<(String, RolePlace)>> {
     if slots.is_empty() || node_w == 0 || node_h == 0 {
-        return None;
+        return Vec::new();
     }
     let cycle: Vec<usize> = slots
         .iter()
@@ -895,149 +875,50 @@ pub fn ring_places(
         .filter(|(_, slot)| slot.control)
         .map(|(index, _)| index)
         .collect();
-    if cycle.len() < 3 || h < node_h.saturating_mul(3) {
-        return None;
-    }
-    let points = ring_points(cycle.len(), w, h, node_w, node_h);
-    if boxes_overlap(&points, node_w, node_h) {
-        return None;
-    }
     let mut placed: Vec<Option<RolePlace>> = vec![None; slots.len()];
-    for (index, point) in cycle.iter().zip(points.iter()) {
-        placed[*index] = Some(*point);
+    let per_row = columns_for(w, node_w).max(1);
+    let rows = cycle.len().div_ceil(per_row).max(1);
+    for (order, index) in cycle.iter().enumerate() {
+        let (row, column) = serpentine(order, per_row);
+        placed[*index] = Some(cell(row, column, node_w, node_h));
     }
+    let control_row = if cycle.is_empty() { 0 } else { rows };
     for (order, index) in control.iter().enumerate() {
-        let anchor = control_anchor(&placed, w, h, node_w, node_h);
-        if order == 0 && anchor.is_none() {
-            // The ring covers every anchor; a wider world can pull one free.
-            return None;
-        }
-        let place = anchor.or_else(|| free_place(&placed, w, h, node_w, node_h))?;
-        placed[*index] = Some(place);
+        let allowed = columns_for(w, node_w);
+        let row = control_row + order / allowed;
+        let column = order % allowed;
+        placed[*index] = Some(cell(row, column, node_w, node_h));
     }
-    Some(
-        slots
-            .iter()
-            .enumerate()
-            .map(|(index, slot)| {
-                let place = placed[index].unwrap_or(RolePlace { x: 0, y: 0 });
-                (slot.name.clone(), place)
-            })
-            .collect(),
-    )
-}
 
-/// Corners on the inscribed ellipse, clockwise from the top.
-fn ring_points(count: usize, w: usize, h: usize, node_w: usize, node_h: usize) -> Vec<RolePlace> {
-    let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
-    let rx = w.saturating_sub(node_w) as f64 / 2.0;
-    let ry = h.saturating_sub(node_h) as f64 / 2.0;
-    (0..count)
-        .map(|index| {
-            let angle =
-                -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * index as f64 / count as f64;
-            RolePlace {
-                x: corner(cx + rx * angle.cos() - node_w as f64 / 2.0, w, node_w),
-                y: corner(cy + ry * angle.sin() - node_h as f64 / 2.0, h, node_h),
-            }
+    slots
+        .iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            let place = placed[index].unwrap_or(RolePlace { x: 0, y: 0 });
+            (slot.name.clone(), place)
         })
         .collect()
 }
 
-fn corner(value: f64, extent: usize, size: usize) -> usize {
-    (value.round().max(0.0) as usize).min(extent.saturating_sub(size))
-}
-
-/// Row-major corners that snake left to right, then right to left, wrapping
-/// onto the next row once the row is full.
-fn grid_points(count: usize, w: usize, h: usize, node_w: usize, node_h: usize) -> Vec<RolePlace> {
-    if count == 0 {
-        return Vec::new();
-    }
-    let per_row = ((w + PLACE_GAP) / (node_w + PLACE_GAP)).max(1);
-    let rows = count.div_ceil(per_row);
-    let column_step = if per_row > 1 {
-        w.saturating_sub(node_w) / (per_row - 1)
+/// One chain index on the serpentine: even rows run left to right, odd rows
+/// right to left.
+fn serpentine(order: usize, per_row: usize) -> (usize, usize) {
+    let row = order / per_row;
+    let column = order % per_row;
+    let column = if row % 2 == 1 {
+        per_row - 1 - column
     } else {
-        0
+        column
     };
-    let row_step = if rows > 1 {
-        h.saturating_sub(node_h) / (rows - 1)
-    } else {
-        0
-    };
-    (0..count)
-        .map(|index| {
-            let row = index / per_row;
-            let column = index % per_row;
-            let column = if row % 2 == 1 {
-                per_row - 1 - column
-            } else {
-                column
-            };
-            RolePlace {
-                x: (column * column_step).min(w.saturating_sub(node_w)),
-                y: (row * row_step).min(h.saturating_sub(node_h)),
-            }
-        })
-        .collect()
+    (row, column)
 }
 
-/// The middle when the ring leaves it free, then the top or bottom edge: the
-/// anchors a control role reads best from. `None` means the ring covers all
-/// three, which a wider world can undo.
-fn control_anchor(
-    placed: &[Option<RolePlace>],
-    w: usize,
-    h: usize,
-    node_w: usize,
-    node_h: usize,
-) -> Option<RolePlace> {
-    let taken: Vec<RolePlace> = placed.iter().flatten().copied().collect();
-    let mid_x = w.saturating_sub(node_w) / 2;
-    let anchors = [
-        RolePlace {
-            x: mid_x,
-            y: h.saturating_sub(node_h) / 2,
-        },
-        RolePlace { x: mid_x, y: 0 },
-        RolePlace {
-            x: mid_x,
-            y: h.saturating_sub(node_h),
-        },
-    ];
-    anchors
-        .into_iter()
-        .find(|place| is_free(*place, &taken, node_w, node_h))
-}
-
-/// The first free cell of the world, reading order.
-fn free_place(
-    placed: &[Option<RolePlace>],
-    w: usize,
-    h: usize,
-    node_w: usize,
-    node_h: usize,
-) -> Option<RolePlace> {
-    let taken: Vec<RolePlace> = placed.iter().flatten().copied().collect();
-    for y in 0..=h.saturating_sub(node_h) {
-        for x in 0..=w.saturating_sub(node_w) {
-            let place = RolePlace { x, y };
-            if is_free(place, &taken, node_w, node_h) {
-                return Some(place);
-            }
-        }
+/// The top-left corner of the box at a grid row and column.
+fn cell(row: usize, column: usize, node_w: usize, node_h: usize) -> RolePlace {
+    RolePlace {
+        x: PLACE_MARGIN + column * (node_w + GRID_GAP),
+        y: row * (node_h + ROW_GAP),
     }
-    None
-}
-
-fn is_free(place: RolePlace, taken: &[RolePlace], node_w: usize, node_h: usize) -> bool {
-    !taken.iter().any(|other| {
-        place.x < other.x + node_w
-            && other.x < place.x + node_w
-            && place.y < other.y + node_h
-            && other.y < place.y + node_h
-    })
 }
 
 /// The edges the map draws: every ACL target, minus the control-plane spokes
@@ -1359,20 +1240,8 @@ mod tests {
             .collect()
     }
 
-    fn centres(places: &[RolePlace], w: usize, h: usize) -> Vec<(f64, f64)> {
-        places
-            .iter()
-            .map(|place| {
-                (
-                    place.x as f64 + w as f64 / 2.0,
-                    place.y as f64 + h as f64 / 2.0,
-                )
-            })
-            .collect()
-    }
-
     #[test]
-    fn cycle_roles_trace_a_ring_with_their_neighbours_nearest() {
+    fn cycle_roles_fill_the_rows_in_chain_order() {
         let ring = slots(&[
             ("a", false),
             ("b", false),
@@ -1380,40 +1249,27 @@ mod tests {
             ("d", false),
             ("e", false),
         ]);
-        let placed = role_positions(&ring, 42, 29, 14, 7);
-        assert_eq!(placed.len(), 5);
+        let placed = role_positions(&ring, 50, 20, 14, 7);
+        let at = |name: &str| {
+            placed
+                .iter()
+                .find(|(slot, _)| slot == name)
+                .map(|(_, place)| *place)
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
         let points: Vec<RolePlace> = placed.iter().map(|(_, place)| *place).collect();
         assert!(!boxes_overlap(&points, 14, 7), "{points:?}");
-        let distinct: std::collections::BTreeSet<(usize, usize)> =
-            points.iter().map(|place| (place.x, place.y)).collect();
-        assert_eq!(distinct.len(), 5, "{points:?}");
-        let centres = centres(&points, 14, 7);
-        for (index, centre) in centres.iter().enumerate() {
-            let nearest = centres
-                .iter()
-                .enumerate()
-                .filter(|(other, _)| *other != index)
-                .min_by(|(_, a), (_, b)| {
-                    distance(*centre, **a)
-                        .partial_cmp(&distance(*centre, **b))
-                        .expect("finite distances")
-                })
-                .map(|(other, _)| other)
-                .expect("another box");
-            let neighbours = [(index + 1) % 5, (index + 4) % 5];
-            assert!(
-                neighbours.contains(&nearest),
-                "box {index} sits nearest to {nearest}, not a ring neighbour\n{points:?}"
-            );
-        }
-    }
-
-    fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
-        ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
+        // a, b, c read left to right; d drops under c and e follows it back.
+        assert_eq!(at("a").y, at("b").y);
+        assert_eq!(at("b").y, at("c").y);
+        assert!(at("a").x < at("b").x && at("b").x < at("c").x, "{points:?}");
+        assert_eq!(at("d").x, at("c").x, "{points:?}");
+        assert_eq!(at("e").x, at("b").x, "{points:?}");
+        assert!(at("d").y > at("c").y, "{points:?}");
     }
 
     #[test]
-    fn a_world_too_shallow_for_a_ring_wraps_onto_more_rows() {
+    fn the_grid_wraps_the_chain_onto_more_rows() {
         let ring = slots(&[
             ("a", false),
             ("b", false),
@@ -1434,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn the_control_role_takes_the_free_middle() {
+    fn the_control_role_gets_a_row_of_its_own() {
         let all = slots(&[
             ("a", false),
             ("b", false),
@@ -1443,7 +1299,7 @@ mod tests {
             ("e", false),
             ("_supervisor", true),
         ]);
-        let placed = role_positions(&all, 44, 25, 14, 7);
+        let placed = role_positions(&all, 44, 40, 14, 7);
         let points: Vec<RolePlace> = placed.iter().map(|(_, place)| *place).collect();
         assert!(!boxes_overlap(&points, 14, 7), "{points:?}");
         let supervisor = placed
@@ -1451,13 +1307,20 @@ mod tests {
             .find(|(name, _)| name == "_supervisor")
             .map(|(_, place)| *place)
             .expect("the control slot");
-        assert_eq!(supervisor, RolePlace { x: 15, y: 9 }, "{points:?}");
-        // A world that leaves the ring no middle still keeps the boxes apart.
-        let tight: Vec<RolePlace> = role_positions(&all, 42, 29, 14, 7)
-            .into_iter()
-            .map(|(_, place)| place)
+        let cycle: Vec<RolePlace> = placed
+            .iter()
+            .filter(|(name, _)| name != "_supervisor")
+            .map(|(_, place)| *place)
             .collect();
-        assert!(!boxes_overlap(&tight, 14, 7), "{tight:?}");
+        assert!(
+            cycle.iter().all(|place| place.y < supervisor.y),
+            "the control role sits below the chain\n{points:?}"
+        );
+        assert_eq!(
+            cycle.iter().filter(|place| place.y == supervisor.y).count(),
+            0,
+            "{points:?}"
+        );
     }
 
     #[test]

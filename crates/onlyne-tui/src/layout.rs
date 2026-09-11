@@ -1,4 +1,4 @@
-use crate::model::{RoleSlot, control_role, ring_places, role_positions};
+use crate::model::{GRID_GAP, PLACE_MARGIN, ROW_GAP, RoleSlot, control_role, role_positions};
 use std::collections::BTreeMap;
 
 /// The widest a role box draws. A box's own text only asks for what it needs,
@@ -8,8 +8,6 @@ const NODE_W: usize = 28;
 const NODE_MIN_W: usize = 14;
 /// Box height.
 const NODE_H: usize = 7;
-/// The gap the grid leaves between two boxes.
-const GRID_GAP: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayoutNode {
@@ -167,7 +165,7 @@ impl Canvas {
 }
 
 /// The box size every role draws at: the longest line a role shows, held
-/// between the width that still reads and the width the ring has room for.
+/// between the width that still reads and the width the grid has room for.
 pub fn box_width(nodes: &[LayoutNode]) -> usize {
     let longest = nodes.iter().map(longest_line).max().unwrap_or(8);
     (longest + 4).clamp(NODE_MIN_W, NODE_W)
@@ -196,73 +194,34 @@ fn slots_of(nodes: &[LayoutNode]) -> Vec<RoleSlot> {
         .collect()
 }
 
-/// The smallest world that holds the map without two boxes touching, and
-/// without the control plane landing on top of the ring.
-///
-/// A cycle keeps its ring: the map asks for the smallest world the ellipse and
-/// its anchor fit in, and only a map that cannot draw one falls back to the
-/// serpentine grid.
+/// The world the map draws in: the serpentine grid's own extent, with the
+/// gutters every hop routes along.
 pub fn world_size(nodes: &[LayoutNode]) -> (usize, usize) {
     let slots = slots_of(nodes);
     let node_w = box_width(nodes);
     let cycle = slots.iter().filter(|slot| !slot.control).count();
-    if cycle >= 3 {
-        if let Some(world) = ring_world(&slots, node_w) {
-            return world;
-        }
-    }
-    grid_world(slots.len(), node_w)
-}
-
-/// The world the ring reads from: the smallest area the ellipse fits in with a
-/// free anchor, then the narrowest of those.
-fn ring_world(slots: &[RoleSlot], node_w: usize) -> Option<(usize, usize)> {
-    let mut best: Option<(usize, usize)> = None;
-    let mut width = node_w * 3;
-    while width <= node_w * 4 + 8 {
-        let mut height = NODE_H * 3 + 4;
-        while height <= NODE_H * 6 {
-            if ring_places(slots, width, height, node_w, NODE_H).is_some() {
-                let area = width * height;
-                let current = best.map(|(w, h)| w * h);
-                if current.map(|current| area < current).unwrap_or(true)
-                    || current == Some(area) && best.map(|(w, _)| width < w).unwrap_or(false)
-                {
-                    best = Some((width, height));
-                }
-            }
-            height += 2;
-        }
-        width += 2;
-    }
-    best
-}
-
-/// The serpentine grid world: `per_row` boxes to a row, wrapped as needed.
-fn grid_world(count: usize, node_w: usize) -> (usize, usize) {
-    if count == 0 {
-        return (node_w, NODE_H);
-    }
-    let per_row = count_columns(count);
-    let rows = count.div_ceil(per_row).max(1);
+    let control = slots.iter().filter(|slot| slot.control).count();
+    let per_row = columns_for_world(cycle.max(1));
+    let rows = cycle.div_ceil(per_row.max(1)).max(1) + usize::from(control > 0);
     (
-        node_w * per_row + GRID_GAP * (per_row - 1),
-        NODE_H * rows + GRID_GAP * (rows - 1),
+        2 * PLACE_MARGIN + node_w * per_row + GRID_GAP * (per_row - 1),
+        // One gutter row under the last row: hops that dip below the band need
+        // a row to run along, and the map's own extent never supplies one.
+        NODE_H * rows + ROW_GAP * rows,
     )
 }
 
-/// The columns a grid world uses: enough to keep the boxes from stacking into
+/// The columns a grid world uses: enough to keep the chain from stacking into
 /// one tall column.
-fn count_columns(count: usize) -> usize {
+fn columns_for_world(count: usize) -> usize {
     let mut columns = 1;
     while columns * columns < count {
         columns += 1;
     }
     columns
 }
-
-/// Draw the role map: the ring the ACL forms, one box per role, one segment
-/// per hop.
+/// Draw the role map: the serpentine grid of boxes, one orthogonal hop per ACL
+/// target.
 pub fn layout(nodes: &[LayoutNode], edges: &[LayoutEdge], w: u16, h: u16) -> Canvas {
     let width = w as usize;
     let height = h as usize;
@@ -288,10 +247,17 @@ pub fn layout(nodes: &[LayoutNode], edges: &[LayoutEdge], w: u16, h: u16) -> Can
             },
         );
     }
-    // Hops first, so a box border stays on top of every line that reaches it.
+    // Hops first, so a box border stays on top of every line that reaches it;
+    // their arrowheads last, so two hops sharing a gutter cannot erase the
+    // other's direction.
+    let mut tips = Vec::new();
     for edge in edges {
-        draw_edge(&mut canvas, &boxes, edge);
+        draw_edge(&mut canvas, &boxes, edge, &mut tips);
     }
+    for (cell, ch, kind) in tips {
+        put(&mut canvas, cell.0, cell.1, ch, kind);
+    }
+    erase_strays(&mut canvas);
     for node in nodes {
         if let Some(rect) = boxes.get(&node.name) {
             let (label, label_x) = draw_node(&mut canvas, node, rect);
@@ -324,9 +290,16 @@ pub fn role_box(nodes: &[LayoutNode], name: &str, world: (usize, usize)) -> Opti
         })
 }
 
-/// One hop: a straight segment between the two boxes' facing borders, with an
-/// arrowhead on the target end.
-fn draw_edge(canvas: &mut Canvas, boxes: &BTreeMap<String, NodeBox>, edge: &LayoutEdge) {
+/// One hop: an orthogonal route that leaves a box border, runs along the
+/// world's gutters, and ends on the cell against the target's border with the
+/// arrowhead pointing into it. No cell ever sits inside a box or floats away
+/// from a border or gutter.
+fn draw_edge(
+    canvas: &mut Canvas,
+    boxes: &BTreeMap<String, NodeBox>,
+    edge: &LayoutEdge,
+    tips: &mut Vec<((usize, usize), char, CellKind)>,
+) {
     let (Some(from), Some(to)) = (boxes.get(&edge.from), boxes.get(&edge.to)) else {
         return;
     };
@@ -335,112 +308,262 @@ fn draw_edge(canvas: &mut Canvas, boxes: &BTreeMap<String, NodeBox>, edge: &Layo
     } else {
         CellKind::Edge
     };
-    let start = anchor(from, center(to));
-    let end = anchor(to, center(from));
+    let route = route(from, to, canvas.width, canvas.height);
     let mut path = Vec::new();
-    stroke(canvas, boxes, start, end, kind, &mut path);
-    if let Some(tip) = path.last().copied() {
-        put(canvas, tip.0, tip.1, '▶', kind);
+    for (index, cell) in route.iter().enumerate() {
+        if inside_any_box(boxes, *cell) {
+            continue;
+        }
+        let ch = if index + 1 == route.len() {
+            ' '
+        } else {
+            turn(&route, index)
+        };
+        if index + 1 == route.len() {
+            tips.push((*cell, arrowhead(to, *cell), kind));
+        }
+        put(canvas, cell.0, cell.1, ch, kind);
+        path.push(*cell);
     }
     canvas
         .edge_paths
         .insert((edge.from.clone(), edge.to.clone()), path);
 }
-
-/// The middle of a box.
-fn center(rect: &NodeBox) -> (i64, i64) {
-    ((rect.x + rect.w / 2) as i64, (rect.y + rect.h / 2) as i64)
-}
-
-/// The border cell a line from the box's middle toward `toward` leaves by.
-fn anchor(rect: &NodeBox, toward: (i64, i64)) -> (usize, usize) {
-    let centre = center(rect);
-    let dx = (toward.0 - centre.0) as f64;
-    let dy = (toward.1 - centre.1) as f64;
-    let tx = if dx.abs() > f64::EPSILON {
-        (rect.w as f64 / 2.0) / dx.abs()
-    } else {
-        f64::INFINITY
-    };
-    let ty = if dy.abs() > f64::EPSILON {
-        (rect.h as f64 / 2.0) / dy.abs()
-    } else {
-        f64::INFINITY
-    };
-    let t = tx.min(ty);
-    let x = (centre.0 as f64 + dx * t).round() as i64;
-    let y = (centre.1 as f64 + dy * t).round() as i64;
+/// The box's row and column in the grid, read back off its corner.
+fn grid_of(rect: &NodeBox) -> (usize, usize) {
     (
-        x.clamp(rect.x as i64, (rect.x + rect.w - 1) as i64) as usize,
-        y.clamp(rect.y as i64, (rect.y + rect.h - 1) as i64) as usize,
+        rect.y / (rect.h + ROW_GAP).max(1),
+        (rect.x.saturating_sub(PLACE_MARGIN)) / (rect.w + GRID_GAP).max(1),
     )
 }
 
-/// Stroke a segment, skipping the inside of every box so no hop writes over a
-/// border or a title.
-fn stroke(
-    canvas: &mut Canvas,
-    boxes: &BTreeMap<String, NodeBox>,
-    start: (usize, usize),
-    end: (usize, usize),
-    kind: CellKind,
-    path: &mut Vec<(usize, usize)>,
-) {
-    let mut previous: Option<(usize, usize)> = None;
-    for cell in line(start, end) {
-        if inside_any_box(boxes, cell) {
-            previous = None;
-            continue;
+/// The cells a hop's path takes, from the cell against the source's border to
+/// the cell against the target's.
+fn route(from: &NodeBox, to: &NodeBox, world_w: usize, world_h: usize) -> Vec<(usize, usize)> {
+    let (fr, fc) = grid_of(from);
+    let (tr, tc) = grid_of(to);
+    let fmid = from.x + from.w / 2;
+    let tmid = to.x + to.w / 2;
+    let mid_y = from.y + from.h / 2;
+    // Neighbours on one row: one run straight through the gutter between them.
+    if fr == tr && fc.abs_diff(tc) == 1 {
+        return if tc > fc {
+            hline(from.x + from.w, to.x.saturating_sub(1), mid_y)
+        } else {
+            hline(to.x + to.w, from.x.saturating_sub(1), mid_y)
+                .into_iter()
+                .rev()
+                .collect()
+        };
+    }
+    // Neighbours on one column: one run through the gutter between the rows.
+    if fc == tc && fr.abs_diff(tr) == 1 {
+        let cells = vline(fmid, from.y + from.h, to.y.saturating_sub(1));
+        return if tr > fr {
+            cells
+        } else {
+            cells.into_iter().rev().collect()
+        };
+    }
+    let mut points;
+    if fr == tr {
+        // Same row, further apart: dip under the row, run across, come up.
+        let gutter = (from.y + from.h).min(world_h.saturating_sub(1));
+        points = vec![(fmid, gutter), (tmid, gutter), (tmid, to.y + to.h)];
+    } else if tr.abs_diff(fr) == 1 {
+        // Neighbouring rows: the single gutter between them carries the run.
+        let (gutter, entry) = if tr > fr {
+            (from.y + from.h, to.y.saturating_sub(1))
+        } else {
+            (from.y.saturating_sub(1), to.y + to.h)
+        };
+        points = vec![(fmid, gutter), (tmid, gutter), (tmid, entry)];
+    } else {
+        // Distant rows: leave the band along an outer gutter column, travel
+        // beside it, and come back in on the target's own gutter row.
+        let (start, channel, entry) = if tr > fr {
+            (
+                from.y + from.h,
+                world_w.saturating_sub(1),
+                to.y.saturating_sub(1),
+            )
+        } else {
+            (from.y.saturating_sub(1), 0, to.y + to.h)
+        };
+        let channel_x = if tc >= fc {
+            channel
+        } else if channel == 0 {
+            world_w.saturating_sub(1)
+        } else {
+            0
+        };
+        points = vec![(fmid, start), (channel_x, start), (channel_x, entry)];
+        push(&mut points, (tmid, entry));
+    }
+    expand(&points)
+}
+
+/// Add an axis-aligned step to `next`, turning once when both axes differ.
+fn push(points: &mut Vec<(usize, usize)>, next: (usize, usize)) {
+    let Some(last) = points.last().copied() else {
+        points.push(next);
+        return;
+    };
+    if last == next {
+        return;
+    }
+    if last.0 != next.0 && last.1 != next.1 {
+        points.push((last.0, next.1));
+    }
+    points.push(next);
+}
+
+/// Walk the waypoints in order, so the cells come back in the order the hop
+/// travels: source first, target last.
+fn expand(points: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut cells: Vec<(usize, usize)> = Vec::new();
+    for pair in points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if a.1 == b.1 {
+            let step = if b.0 >= a.0 { 1isize } else { -1 };
+            let mut x = a.0 as isize;
+            while x != b.0 as isize + step {
+                push_cell(&mut cells, (x.max(0) as usize, a.1));
+                x += step;
+            }
+        } else {
+            let step = if b.1 >= a.1 { 1isize } else { -1 };
+            let mut y = a.1 as isize;
+            while y != b.1 as isize + step {
+                push_cell(&mut cells, (a.0, y.max(0) as usize));
+                y += step;
+            }
         }
-        let ch = stroke_char(previous.unwrap_or(start), cell);
-        put(canvas, cell.0, cell.1, ch, kind);
-        path.push(cell);
-        previous = Some(cell);
+    }
+    if cells.is_empty() {
+        cells.extend(points.iter().copied());
+    }
+    cells
+}
+
+fn push_cell(cells: &mut Vec<(usize, usize)>, cell: (usize, usize)) {
+    if cells.last().copied() != Some(cell) {
+        cells.push(cell);
     }
 }
 
-/// The line char one step of `to - from` draws.
-fn stroke_char(from: (usize, usize), to: (usize, usize)) -> char {
-    let dx = to.0 as isize - from.0 as isize;
-    let dy = to.1 as isize - from.1 as isize;
-    match (dx.signum(), dy.signum()) {
-        (0, _) => '│',
-        (_, 0) => '─',
-        (1, -1) | (-1, 1) => '╱',
-        _ => '╲',
+fn hline(x1: usize, x2: usize, y: usize) -> Vec<(usize, usize)> {
+    (x1.min(x2)..=x1.max(x2)).map(|x| (x, y)).collect()
+}
+
+fn vline(x: usize, y1: usize, y2: usize) -> Vec<(usize, usize)> {
+    (y1.min(y2)..=y1.max(y2)).map(|y| (x, y)).collect()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+fn direction(from: (usize, usize), to: (usize, usize)) -> Dir {
+    if to.1 < from.1 {
+        Dir::Up
+    } else if to.1 > from.1 {
+        Dir::Down
+    } else if to.0 < from.0 {
+        Dir::Left
+    } else {
+        Dir::Right
     }
 }
 
+/// The corner glyph where two runs meet.
+fn join(from: Dir, to: Dir) -> char {
+    match (from, to) {
+        (Dir::Right, Dir::Down) | (Dir::Up, Dir::Left) => '╗',
+        (Dir::Left, Dir::Down) | (Dir::Up, Dir::Right) => '╔',
+        (Dir::Right, Dir::Up) | (Dir::Down, Dir::Left) => '╝',
+        (Dir::Left, Dir::Up) | (Dir::Down, Dir::Right) => '╚',
+        (Dir::Up, Dir::Up | Dir::Down) | (Dir::Down, Dir::Up | Dir::Down) => '│',
+        _ => '─',
+    }
+}
+
+/// A stroke cell with nothing beside it would float free of every box and
+/// gutter; drop it, so each drawn cell either touches a border or lies on a
+/// run. Arrowheads stay: they are the point of the drawing.
+fn erase_strays(canvas: &mut Canvas) {
+    let mut stray = Vec::new();
+    for y in 0..canvas.height {
+        for x in 0..canvas.width {
+            if !is_stroke(canvas.cells[y][x]) {
+                continue;
+            }
+            let linked = [
+                (x as isize - 1, y as isize),
+                (x as isize + 1, y as isize),
+                (x as isize, y as isize - 1),
+                (x as isize, y as isize + 1),
+            ]
+            .into_iter()
+            .any(|(nx, ny)| is_stroke(canvas.at(nx, ny)));
+            let arrow = matches!(canvas.cells[y][x].ch, '▶' | '◀' | '▲' | '▼');
+            if !linked && !arrow {
+                stray.push((x, y));
+            }
+        }
+    }
+    for (x, y) in stray {
+        canvas.cells[y][x] = Cell::blank();
+    }
+}
+
+fn is_stroke(cell: Cell) -> bool {
+    matches!(cell.kind, CellKind::Edge | CellKind::ActiveEdge)
+}
+fn turn(route: &[(usize, usize)], index: usize) -> char {
+    let here = route[index];
+    let previous = index
+        .checked_sub(1)
+        .and_then(|prev| route.get(prev))
+        .copied();
+    let next = route.get(index + 1).copied();
+    match (previous, next) {
+        (Some(previous), Some(next)) if previous != next => {
+            join(direction(previous, here), direction(here, next))
+        }
+        (Some(previous), _) => match direction(previous, here) {
+            Dir::Up | Dir::Down => '│',
+            Dir::Left | Dir::Right => '─',
+        },
+        _ => '─',
+    }
+}
+
+/// The arrowhead for the cell against `target`'s border: which border the cell
+/// touches decides which way it points.
+fn arrowhead(target: &NodeBox, cell: (usize, usize)) -> char {
+    if cell.1 + 1 == target.y {
+        '▼'
+    } else if cell.1 == target.y + target.h {
+        '▲'
+    } else if cell.0 + 1 == target.x {
+        '▶'
+    } else if cell.0 == target.x + target.w {
+        '◀'
+    } else {
+        '▶'
+    }
+}
+
+/// The cells a box occupies, for the guard that keeps a stroke out of it.
 fn inside_any_box(boxes: &BTreeMap<String, NodeBox>, cell: (usize, usize)) -> bool {
     boxes.values().any(|rect| {
         cell.0 >= rect.x && cell.0 < rect.x + rect.w && cell.1 >= rect.y && cell.1 < rect.y + rect.h
     })
-}
-
-/// Every cell on the segment, start and end included.
-fn line(start: (usize, usize), end: (usize, usize)) -> Vec<(usize, usize)> {
-    let (x1, y1) = (end.0 as isize, end.1 as isize);
-    let (mut x, mut y) = (start.0 as isize, start.1 as isize);
-    let (dx, dy) = ((x1 - x).abs(), -(y1 - y).abs());
-    let (sx, sy) = (if x < x1 { 1 } else { -1 }, if y < y1 { 1 } else { -1 });
-    let mut error = dx + dy;
-    let mut cells = Vec::new();
-    loop {
-        cells.push((x.max(0) as usize, y.max(0) as usize));
-        if x == x1 && y == y1 {
-            break;
-        }
-        let twice = 2 * error;
-        if twice >= dy {
-            error += dy;
-            x += sx;
-        }
-        if twice <= dx {
-            error += dx;
-            y += sy;
-        }
-    }
-    cells
 }
 
 /// Draw one role's box and report the title it wrote and where it starts, so
@@ -601,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn the_ring_draws_every_box_without_overlap() {
+    fn the_grid_draws_every_box_without_overlap() {
         let names = ["a", "b", "c", "d", "e", "_supervisor"];
         let nodes: Vec<LayoutNode> = names.iter().map(|name| node(name)).collect();
         let world = world_size(&nodes);
@@ -626,13 +749,85 @@ mod tests {
         for name in names {
             assert!(text.contains(&format!("╭─{name}")), "{text}");
         }
-        let rows: std::collections::BTreeSet<usize> = canvas
-            .node_boxes
-            .iter()
-            .filter(|rect| rect.name != "_supervisor")
-            .map(|rect| rect.y)
-            .collect();
-        assert!(rows.len() >= 3, "the ring spreads over rows\n{text}");
+        let row_of = |name: &str| {
+            canvas
+                .node_boxes
+                .iter()
+                .find(|rect| rect.name == name)
+                .map(|rect| rect.y)
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
+        assert_eq!(row_of("a"), row_of("b"));
+        assert_eq!(row_of("b"), row_of("c"));
+        assert!(row_of("d") > row_of("c"), "{text}");
+        assert_eq!(row_of("d"), row_of("e"));
+        assert!(
+            row_of("_supervisor") > row_of("e"),
+            "the control role keeps its own row\n{text}"
+        );
+    }
+
+    /// Every hop is a run of horizontal or vertical steps, and its arrowhead
+    /// lands against the target's border: the shape the operator asked for.
+    #[test]
+    fn every_hop_runs_orthogonally_and_lands_on_its_target() {
+        let names = ["a", "b", "c", "d", "e", "_supervisor"];
+        let nodes: Vec<LayoutNode> = names.iter().map(|name| node(name)).collect();
+        let edges = vec![
+            hop("a", "b", true),
+            hop("b", "c", false),
+            hop("c", "d", true),
+            hop("d", "e", false),
+            hop("e", "a", false),
+            hop("_supervisor", "c", false),
+            hop("a", "d", true),
+        ];
+        let world = world_size(&nodes);
+        let canvas = layout(&nodes, &edges, world.0 as u16, world.1 as u16);
+        let text = canvas.text();
+        assert_eq!(canvas.edge_paths.len(), edges.len(), "{text}");
+        for edge in &edges {
+            let path = canvas
+                .edge_paths
+                .get(&(edge.from.clone(), edge.to.clone()))
+                .unwrap_or_else(|| panic!("no path for {}→{}\n{text}", edge.from, edge.to));
+            for step in path.windows(2) {
+                assert!(
+                    step[0].0 == step[1].0 || step[0].1 == step[1].1,
+                    "{}→{} steps diagonally at {step:?}\n{text}",
+                    edge.from,
+                    edge.to
+                );
+                assert!(
+                    step[0].0.abs_diff(step[1].0) <= 1 && step[0].1.abs_diff(step[1].1) <= 1,
+                    "{}→{} jumps at {step:?}\n{text}",
+                    edge.from,
+                    edge.to
+                );
+            }
+            let target = canvas
+                .node_boxes
+                .iter()
+                .find(|rect| rect.name == edge.to)
+                .expect("the target box");
+            let tip = *path.last().expect("a route");
+            assert!(
+                ['▶', '◀', '▲', '▼'].contains(&canvas.cells[tip.1][tip.0].ch),
+                "{}→{} ends on {:?}, not an arrowhead\n{text}",
+                edge.from,
+                edge.to,
+                canvas.cells[tip.1][tip.0].ch
+            );
+            assert!(
+                tip.0 + 1 == target.x
+                    || tip.0 == target.x + target.w
+                    || tip.1 + 1 == target.y
+                    || tip.1 == target.y + target.h,
+                "{}→{} ends at {tip:?}, away from {target:?}\n{text}",
+                edge.from,
+                edge.to
+            );
+        }
     }
 
     #[test]

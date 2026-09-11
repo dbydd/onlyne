@@ -153,7 +153,12 @@ async fn once_prints_the_role_network_and_the_busy_star() {
         text.contains("⬡planner"),
         "the aggregate role carries its marker\n{text}"
     );
-    assert!(text.contains('▶'), "an arrow reaches the target\n{text}");
+    assert!(
+        ['▶', '◀', '▲', '▼']
+            .iter()
+            .any(|arrow| text.contains(*arrow)),
+        "an arrow reaches the target\n{text}"
+    );
     assert!(
         text.contains('◐'),
         "the running session shows its glyph\n{text}"
@@ -171,13 +176,24 @@ async fn once_prints_the_role_network_and_the_busy_star() {
         text.contains("acl peers"),
         "the page-1 panel follows the selected role\n{text}"
     );
-    let map_row = text
-        .lines()
-        .find(|line| line.contains("╭─⬡planner"))
-        .unwrap_or_else(|| panic!("no planner box\n{text}"));
+    let line_of = |needle: &str| {
+        text.lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no {needle} box\n{text}"))
+    };
+    let column_of = |needle: &str| {
+        text.lines()
+            .find(|line| line.contains(needle))
+            .and_then(|line| line.find(needle))
+    };
     assert!(
-        map_row.contains("╭─builder"),
-        "boxes sit side by side, not in a list\n{text}"
+        line_of("╭─builder") < line_of("╭─⬡planner"),
+        "the grid sets the boxes out in rows, not one list\n{text}"
+    );
+    assert_eq!(
+        column_of("╭─builder"),
+        column_of("╭─⬡planner"),
+        "the hop between them is a straight vertical run\n{text}"
     );
 
     let swarm = once(&root, Some("2"));
