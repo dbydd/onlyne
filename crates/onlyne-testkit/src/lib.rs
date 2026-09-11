@@ -1,6 +1,6 @@
 //! Onlyne adapter conformance fixtures.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -483,6 +483,14 @@ pub struct AgentScript {
     pub hello: ScriptHello,
     #[serde(default)]
     pub steps: Vec<Value>,
+    /// Serve every assign that arrives instead of just the first.
+    ///
+    /// A script without this flag runs its steps once, which is all a case that
+    /// sends one task needs. An agent that stays mounted and takes the next
+    /// task — the running-lights ring hands the same role two of them — sets it
+    /// and loops back to `wait_assign` after the last step.
+    #[serde(default)]
+    pub repeat: bool,
 }
 
 impl AgentScript {
@@ -538,8 +546,13 @@ impl FakeAgent {
             welcome,
             last_assign: None,
         };
-        for step in &self.script.steps {
-            self.run_step(handle, &mut state, step).await?;
+        loop {
+            for step in &self.script.steps {
+                self.run_step(handle, &mut state, step).await?;
+            }
+            if !self.script.repeat {
+                break;
+            }
         }
         Ok(())
     }
@@ -653,6 +666,65 @@ impl FakeAgent {
                     bail!("assert_field {path} failed: expected {expected}, got {actual}");
                 }
             }
+            "handoff" => {
+                let assign = state
+                    .last_assign
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("handoff requires assign"))?;
+                let step = HandoffStep::parse(value)?;
+                let hop = assign_hop(assign);
+                if matches!(step.max_hop, Some(max) if hop >= max) {
+                    return Ok(());
+                }
+                let values = self.template_values(assign);
+                let to = expand_placeholders(&step.to, &values)?;
+                let text = expand_placeholders(&step.text, &values)?;
+                let output = tokio::process::Command::new(cli_binary()?)
+                    .arg("--workspace")
+                    .arg(&self.workspace)
+                    .arg("handoff")
+                    .arg("--task")
+                    .arg(&assign.task_id)
+                    .arg("--to")
+                    .arg(&to)
+                    .arg("--text")
+                    .arg(&text)
+                    .env("ONLYNE_ROLE", &self.role)
+                    .output()
+                    .await
+                    .with_context(|| format!("run handoff of {}", assign.task_id))?;
+                if !output.status.success() {
+                    bail!(
+                        "handoff to {to} failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                }
+            }
+            "echo_field_to" => {
+                let path_field = value
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("echo_field_to.path required"))?;
+                let file = value
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("echo_field_to.file required"))?;
+                let state_value = self.state_value(state)?;
+                let found = value_path(&state_value, path_field)
+                    .ok_or_else(|| anyhow!("echo_field_to missing path {path_field}"))?;
+                let line = match found {
+                    Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                };
+                let path = path_in_workspace(&self.workspace, file);
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                let mut written = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+                written.push_str(&line);
+                written.push('\n');
+                tokio::fs::write(path, written).await?;
+            }
             "echo_prose_to" => {
                 let file = value
                     .as_str()
@@ -679,6 +751,25 @@ impl FakeAgent {
             "assign": state.last_assign,
         }))
     }
+
+    /// Values a `handoff` template may name, read off the incoming assign.
+    ///
+    /// `next_role` is the one value the script cannot name itself: it describes
+    /// the ring the agent sits in, not the agent, so it arrives in the spawn
+    /// environment beside the workspace the agent was started with.
+    fn template_values(&self, assign: &AssignArgs) -> BTreeMap<&'static str, String> {
+        let hop = assign_hop(assign);
+        let mut values = BTreeMap::new();
+        values.insert("role", self.role.clone());
+        values.insert("workspace", self.workspace.display().to_string());
+        values.insert("task", assign.task_id.clone());
+        values.insert("hop", hop.to_string());
+        values.insert("next_hop", (hop + 1).to_string());
+        if let Ok(next) = std::env::var(NEXT_ROLE_ENV) {
+            values.insert("next_role", next);
+        }
+        values
+    }
 }
 
 struct FakeAgentState {
@@ -701,6 +792,120 @@ fn path_in_workspace(workspace: &Path, file: &str) -> PathBuf {
     } else {
         workspace.join(path)
     }
+}
+
+/// Environment variable naming the role a `handoff` step passes the task to.
+pub const NEXT_ROLE_ENV: &str = "ONLYNE_NEXT_ROLE";
+/// Environment variable naming the `onlyne` binary a `handoff` step runs.
+pub const CLI_ENV: &str = "ONLYNE_CLI";
+
+/// One `handoff` step: where the incoming task goes next, and how deep the
+/// chain may run before the agent keeps the task instead of passing it on.
+///
+/// `to` and `text` carry `{name}` placeholders (`role`, `task`, `hop`,
+/// `next_hop`, `next_role`, `workspace`). The step drives the product's own
+/// `onlyne handoff`, which reads the parent row back to link causality, so the
+/// fixture exercises the shipped path rather than a second envelope builder.
+#[derive(Debug, Clone)]
+struct HandoffStep {
+    to: String,
+    text: String,
+    /// Highest hop that still passes the task on. Absent means every hop does.
+    max_hop: Option<u32>,
+}
+
+impl HandoffStep {
+    fn parse(value: &Value) -> Result<Self> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| anyhow!("handoff step requires an object"))?;
+        for key in object.keys() {
+            if !matches!(key.as_str(), "to" | "text" | "max_hop") {
+                bail!("unknown handoff field: {key}");
+            }
+        }
+        let field = |name: &str| -> Result<&str> {
+            object
+                .get(name)
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("handoff.{name} requires a string"))
+        };
+        let max_hop = match object.get("max_hop") {
+            Some(value) => {
+                let hop = value
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("handoff.max_hop requires an integer"))?;
+                Some(u32::try_from(hop).context("handoff.max_hop exceeds u32")?)
+            }
+            None => None,
+        };
+        Ok(Self {
+            to: field("to")?.to_string(),
+            text: field("text")?.to_string(),
+            max_hop,
+        })
+    }
+}
+
+/// Hop count the incoming assign carries, from the envelope's causality.
+fn assign_hop(assign: &AssignArgs) -> u32 {
+    assign
+        .envelope
+        .causality
+        .as_ref()
+        .map(|causality| causality.hop)
+        .unwrap_or(0)
+}
+
+/// Fill every `{name}` in a `handoff` template from `values`.
+///
+/// A name with no value stops the step instead of reaching the CLI: the text
+/// is an argument to a real process, so a typo has to fail before it runs.
+fn expand_placeholders(template: &str, values: &BTreeMap<&'static str, String>) -> Result<String> {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start + 1..];
+        let end = tail
+            .find('}')
+            .ok_or_else(|| anyhow!("handoff template {template:?} has an unclosed placeholder"))?;
+        let name = &tail[..end];
+        let value = values.get(name).ok_or_else(|| {
+            if name == "next_role" {
+                anyhow!("handoff names {{next_role}}, which needs {NEXT_ROLE_ENV} set")
+            } else {
+                anyhow!("unknown handoff placeholder {{{name}}}")
+            }
+        })?;
+        out.push_str(value);
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// The `onlyne` binary a `handoff` step drives.
+///
+/// `ONLYNE_CLI` names it outright. Otherwise it is the `onlyne` built beside
+/// the agent, which is the layout every e2e case has: the case starts
+/// `onlyne-agent-fake` and `onlyne` out of one build directory.
+fn cli_binary() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var(CLI_ENV) {
+        return Ok(PathBuf::from(path));
+    }
+    let exe = std::env::current_exe().context("locate the fake agent binary")?;
+    let sibling = exe
+        .parent()
+        .ok_or_else(|| anyhow!("the fake agent binary has no directory"))?
+        .join("onlyne");
+    if !sibling.is_file() {
+        bail!(
+            "handoff needs {CLI_ENV} set: {} is not a file",
+            sibling.display()
+        );
+    }
+    Ok(sibling)
 }
 
 fn parse_outcome(value: &str) -> Result<Outcome> {
@@ -962,4 +1167,40 @@ pub fn parse_capability_csv(csv: &str) -> Result<Vec<Capability>> {
                 .ok_or_else(|| anyhow!("unknown capability: {name}"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn values(pairs: &[(&'static str, &str)]) -> BTreeMap<&'static str, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| (*name, (*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn handoff_template_fills_named_placeholders_only() {
+        let filled = values(&[("role", "light2"), ("next_hop", "5")]);
+        let text =
+            expand_placeholders("{role} carries the token to hop {next_hop}", &filled).unwrap();
+        assert_eq!(text, "light2 carries the token to hop 5");
+    }
+
+    #[test]
+    fn handoff_template_refuses_a_name_the_agent_cannot_fill() {
+        let err = expand_placeholders("go to {next_role}", &values(&[])).unwrap_err();
+        assert!(err.to_string().contains(NEXT_ROLE_ENV), "{err}");
+        let err = expand_placeholders("go to {nex_role}", &values(&[])).unwrap_err();
+        assert!(err.to_string().contains("nex_role"), "{err}");
+    }
+
+    #[test]
+    fn handoff_step_refuses_a_field_it_does_not_implement() {
+        let step = json!({"to": "{next_role}", "text": "x"});
+        assert!(HandoffStep::parse(&step).unwrap().max_hop.is_none());
+        let err = HandoffStep::parse(&json!({"to": "b", "text": "x", "hops": 3})).unwrap_err();
+        assert!(err.to_string().contains("hops"), "{err}");
+    }
 }

@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
                     .unwrap_or_else(default_agent_capabilities),
             },
             steps: Vec::new(),
+            repeat: false,
         }
     };
     let capabilities = args
