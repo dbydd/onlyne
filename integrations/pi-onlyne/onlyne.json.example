@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "watch": {
+    "autoStart": true
+  }
+}
