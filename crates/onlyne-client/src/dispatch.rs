@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 #[derive(Clone)]
@@ -720,20 +720,76 @@ fn release_locked(
     Ok(())
 }
 
+/// Whether the session serving `task_id` still has a live resource.
+///
+/// `attach` runs first because a backend can re-resolve a resource whose
+/// stored reference went stale (Orca mints a new terminal handle per PTY
+/// incarnation). A refreshed reference is written back to the slot and the
+/// bridge, which is what makes the next probe, close, or ledger write target
+/// the current resource. An attach the backend cannot answer is not proof of
+/// death, so the probe decides.
 pub fn session_alive(state: &DispatchState, task_id: &str) -> bool {
-    let inner = state.inner.lock();
-    inner
+    let mut inner = state.inner.lock();
+    let Some(key) = inner
         .sessions
-        .values()
-        .find(|slot| slot.task_id.as_deref() == Some(task_id))
-        .map(|slot| {
-            inner
-                .backend
-                .probe(&slot.session)
-                .map(|p| p.alive)
-                .unwrap_or(false)
-        })
+        .iter()
+        .find(|(_, slot)| slot.task_id.as_deref() == Some(task_id))
+        .map(|(key, _)| key.clone())
+    else {
+        return false;
+    };
+    let session = inner.sessions[&key].session.clone();
+    let session = match inner.backend.attach(&session) {
+        Ok(refreshed) => {
+            if refreshed != session {
+                inner.bridge.track_live(refreshed.clone());
+                if let Some(slot) = inner.sessions.get_mut(&key) {
+                    slot.session = refreshed.clone();
+                }
+            }
+            refreshed
+        }
+        Err(_) => session,
+    };
+    inner
+        .backend
+        .probe(&session)
+        .map(|probe| probe.alive)
         .unwrap_or(false)
+}
+
+/// Close every live session's resource with `reason` and forget the slots.
+///
+/// This is the shutdown path: a stopped client must not leave resources behind
+/// that only it can address, and each backend's own record of the resource —
+/// the Orca tab map included — ends with the session. `budget` bounds the whole
+/// sweep, because `onlyne-client stop` waits 10 seconds for the process to
+/// leave and a slow backend CLI must not turn a stop into a hang; whatever the
+/// budget cuts off is reported and dropped anyway.
+pub fn close_all(state: &DispatchState, reason: onlyne_session::CloseReason, budget: Duration) {
+    let started = Instant::now();
+    let mut inner = state.inner.lock();
+    let sessions: Vec<(String, SessionRef)> = inner
+        .sessions
+        .iter()
+        .map(|(key, slot)| (key.clone(), slot.session.clone()))
+        .collect();
+    for (key, session) in sessions {
+        if started.elapsed() > budget {
+            tracing::warn!(
+                task = %session.task_id,
+                "shutdown close budget reached; the resource is left behind"
+            );
+        } else if let Err(error) = inner.backend.close(&session, reason, false) {
+            tracing::warn!(
+                task = %session.task_id,
+                error = %error,
+                "session close failed during shutdown"
+            );
+        }
+        inner.bridge.untrack_live(&session.task_id);
+        inner.sessions.remove(&key);
+    }
 }
 
 pub async fn on_plugin_report(state: &DispatchState, report: Report) -> Result<()> {

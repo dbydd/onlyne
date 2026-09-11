@@ -7,7 +7,7 @@ use onlyne_client::{
     adapter_socket::AdapterSocket,
     dispatch::{
         ClientLink, DispatchState, ReadyNotice, dispatch, missing_capability, on_plugin_report,
-        on_ready, on_recycled, plugin_gap,
+        on_ready, on_recycled, plugin_gap, session_alive,
     },
     init::{InitArgs, init, legacy_error_code},
     intent::{IntentMachine, IntentResult, op_for_intent, permanent_error},
@@ -1181,5 +1181,97 @@ fn a_plain_role_report_omits_the_cluster_key() {
     assert!(
         value["data"].get("cluster_ref").is_none(),
         "a plain role omits the key: {value}"
+    );
+}
+
+/// Remints the way Orca does: the first `attach` answers a different
+/// reference, which the dispatcher has to persist before the next probe.
+#[derive(Clone, Default)]
+struct RemintBackend {
+    inner: FakeBackend,
+    probes: Arc<parking_lot::Mutex<Vec<String>>>,
+    remints: Arc<parking_lot::Mutex<usize>>,
+}
+
+impl onlyne_session::SessionBackend for RemintBackend {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+    fn capabilities(&self) -> onlyne_session::Capabilities {
+        self.inner.capabilities()
+    }
+    fn available(&self) -> anyhow::Result<bool> {
+        self.inner.available()
+    }
+    fn spawn(&self, spec: onlyne_session::SpawnSpec) -> anyhow::Result<onlyne_session::SessionRef> {
+        self.inner.spawn(spec)
+    }
+    fn attach(
+        &self,
+        session: &onlyne_session::SessionRef,
+    ) -> anyhow::Result<onlyne_session::SessionRef> {
+        let mut remints = self.remints.lock();
+        if *remints > 0 {
+            return Ok(session.clone());
+        }
+        *remints += 1;
+        Ok(onlyne_session::SessionRef {
+            backend_ref: serde_json::json!({"id": session.task_id, "handle": "term_two"}),
+            generation: session.generation + 1,
+            ..session.clone()
+        })
+    }
+    fn probe(
+        &self,
+        session: &onlyne_session::SessionRef,
+    ) -> anyhow::Result<onlyne_session::ResourceProbe> {
+        self.probes.lock().push(session.backend_ref.to_string());
+        self.inner.probe(session)
+    }
+    fn close(
+        &self,
+        session: &onlyne_session::SessionRef,
+        reason: onlyne_session::CloseReason,
+        force: bool,
+    ) -> anyhow::Result<()> {
+        self.inner.close(session, reason, force)
+    }
+}
+
+#[test]
+fn a_reminted_reference_is_written_back_before_the_next_probe() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(RemintBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        false,
+        backend.clone(),
+        store,
+    );
+    let env = sample_envelope("planner", "task 1");
+    let task_id = env.task_id().unwrap().to_string();
+    dispatch(&state, &env).unwrap();
+
+    assert!(session_alive(&state, &task_id));
+    assert!(session_alive(&state, &task_id));
+
+    let probes = backend.probes.lock().clone();
+    assert_eq!(probes.len(), 2, "{probes:?}");
+    assert!(
+        probes[0].contains("term_two"),
+        "the remint reached the first probe: {probes:?}"
+    );
+    assert!(
+        probes[1].contains("term_two"),
+        "the reminted reference was persisted for the next probe: {probes:?}"
+    );
+    assert_eq!(
+        *backend.remints.lock(),
+        1,
+        "one remint is enough once the slot holds the fresh handle"
     );
 }

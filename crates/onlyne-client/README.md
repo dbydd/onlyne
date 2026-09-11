@@ -26,7 +26,7 @@ One workspace, one role, one daemon. Many concurrent sessions inside the role.
 
 | path | mode | content |
 | --- | --- | --- |
-| `.onlyne/config.toml` | | role, `cert_pin`, `key_path`, `[server]` host and port, `[[plugin]]` entries |
+| `.onlyne/config.toml` | | role, `cert_pin`, `key_path`, `[server]` host and port, `[orca]` worktree, `[[plugin]]` entries |
 | `.onlyne/client.db` | | SQLite: `intents`, `sessions`, `faults`, `prose_cache`, `config_cache`, `events` |
 | `.onlyne/keys/role.key` | `0600` | 32 raw ed25519 bytes, generated once |
 | `.onlyne/run/` | `0700` | runtime directory |
@@ -34,6 +34,7 @@ One workspace, one role, one daemon. Many concurrent sessions inside the role.
 | `.onlyne/run/client.pid` | `0600` | pid written by `start`, removed by `stop` |
 | `.onlyne/logs/client.log` | | stdout and stderr of the `start` child |
 | `.onlyne/agent/<id>/` | | installed plugin package with `plugin.toml` |
+| `.onlyne/cache/orca-tabs.jsonl` | | append-only Orca tab to session map, written by the Orca backend for plugins |
 
 `init` never writes `spec.toml`. A workspace holding the pre-v1 layout is
 refused before any write, with exit 2 and the byte-exact line
@@ -54,6 +55,25 @@ refused before any write, with exit 2 and the byte-exact line
 The default is `zellij`. `auto` probes zellij, orca, then fake and takes the
 first one that reports usable. `fake` runs sessions in process and needs no
 external tool, which is why the end-to-end scripts use it.
+
+`[orca] worktree` in `config.toml` says where an Orca tab lands: `auto` (the
+default) addresses `path:<canonical workspace>`, registering the workspace with
+`orca repo add` the first time; `inherit` passes no selector and leaves the
+choice to Orca's active worktree; any other value is used verbatim as an Orca
+worktree selector (`path:<abs>`, `id:<…>`, `name:<…>`).
+
+Two rules measured against Orca 1.4.198 shape `auto`:
+
+* `path:` selectors match Orca's worktree rows by exact path, so the selector
+  carries the canonical path (`pwd -P`): `/tmp/x` does not resolve where
+  `/private/tmp/x` does.
+* `orca repo add` accepts git checkouts only — the runtime RPC behind it takes a
+  `kind`, the CLI exposes no flag for it, and no other public command registers
+  a folder. A generated (non-git) role workspace therefore fails `auto` with that
+  remedy in the message: add the directory as an Orca project once (desktop:
+  *Add project → from folder*), then `auto` resolves it, or point
+  `[orca] worktree` at a selector that already resolves. It never falls back to
+  Orca's active worktree.
 
 ## Server link
 

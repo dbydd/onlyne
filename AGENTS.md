@@ -164,6 +164,7 @@ Role workspace, selected by `onlyne-client run --workspace <dir>`:
   logs/client.log
   keys/role.key
   agent/<pkg>/
+  cache/orca-tabs.jsonl
 ```
 
 A legacy workspace layout is a hard refusal. If `.onlyne/state.db` contains `io_cursors` or `loopback_idempotency`, or `.onlyne/channels/` exists, the command prints `onlyne: legacy workspace layout; v1.0.0 does not migrate` and exits 2.

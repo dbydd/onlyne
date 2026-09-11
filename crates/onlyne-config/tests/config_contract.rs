@@ -503,3 +503,26 @@ fn generated_schemas_parse_as_json() {
     serde_json::from_str::<serde_json::Value>(config_client_schema()).unwrap();
     serde_json::from_str::<serde_json::Value>(onlyne_config::spec_schema()).unwrap();
 }
+
+#[test]
+fn orca_worktree_defaults_to_auto_and_reads_a_selector() {
+    let base = r#"role = "planner"
+cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
+key_path = "keys/role.key"
+
+[server]
+host = "127.0.0.1"
+port = 7811
+"#;
+    assert_eq!(ClientConfig::parse_str(base).unwrap().orca.worktree, "auto");
+    assert_eq!(
+        ClientConfig::parse_str(&format!("{base}\n[orca]\nworktree = \"inherit\"\n"))
+            .unwrap()
+            .orca
+            .worktree,
+        "inherit"
+    );
+    let err = ClientConfig::parse_str(&format!("{base}\n[orca]\nworktree = \"auto\"\nextra = 1\n"))
+        .unwrap_err();
+    assert!(err.to_string().starts_with("config.toml:11:"), "{err}");
+}

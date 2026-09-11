@@ -6,7 +6,8 @@ pub mod reconcile;
 
 pub use backend::{
     Capabilities, CloseReason, CommandOutput, ProcessRunner, ResourceProbe, Runner, SessionBackend,
-    SessionRef, SpawnSpec, backend_by_name, backend_for, default_backend, select_backend,
+    SessionRef, SpawnSpec, WorktreePolicy, backend_by_name, backend_for, default_backend,
+    select_backend,
 };
 pub use lifecycle::{
     AgentState, DeliveryState, IgnoredReason, LifecycleEvent, Observation, Outcome,

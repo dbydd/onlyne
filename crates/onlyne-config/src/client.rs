@@ -18,6 +18,34 @@ pub struct ClientConfig {
     /// Local plugin list.
     #[serde(default)]
     pub plugins: Vec<String>,
+    /// Orca session backend settings.
+    #[serde(default)]
+    pub orca: OrcaSection,
+}
+
+/// `[orca]` — settings for the Orca session backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OrcaSection {
+    /// Where a spawned terminal lands: `auto` (the default) registers the
+    /// role workspace as an Orca folder on first use, `inherit` leaves the
+    /// choice to Orca's active worktree, and any other value is used verbatim
+    /// as an Orca worktree selector (`path:<abs>`, `id:<…>`, `name:<…>`,
+    /// `branch:<…>`).
+    #[serde(default = "default_orca_worktree")]
+    pub worktree: String,
+}
+
+impl Default for OrcaSection {
+    fn default() -> Self {
+        Self {
+            worktree: default_orca_worktree(),
+        }
+    }
+}
+
+fn default_orca_worktree() -> String {
+    "auto".to_string()
 }
 
 impl ClientConfig {

@@ -79,6 +79,7 @@ tokio = { version = "1", features = [
   "process",
   "sync",
   "time",
+  "signal",
 ] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 toml = "0.8"

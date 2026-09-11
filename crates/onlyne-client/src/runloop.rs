@@ -8,7 +8,7 @@
 
 use crate::accept::AcceptPath;
 use crate::adapter_socket::AdapterSocket;
-use crate::dispatch::{ClientLink, DispatchState};
+use crate::dispatch::{self, ClientLink, DispatchState};
 use crate::intent::{IntentMachine, op_for_intent};
 use anyhow::{Result, anyhow};
 use onlyne_layout::RoleWorkspace;
@@ -18,7 +18,7 @@ use onlyne_net::is_permanent;
 use onlyne_proto::{
     AckArgs, ClientOp, Delivery, EventTier, Frame, PullArgs, PullReply, Subscribe, Welcome,
 };
-use onlyne_session::default_backend;
+use onlyne_session::{WorktreePolicy, default_backend};
 use onlyne_store::ClientStore;
 use std::path::PathBuf;
 use std::sync::{
@@ -26,6 +26,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
@@ -43,6 +44,9 @@ pub const PULL_HOLD_MS: u64 = 1_000;
 pub const PULL_LIMIT: u32 = 32;
 /// Poll interval for the readiness watcher.
 pub const READINESS_POLL_MS: u64 = 250;
+/// Bound on the session sweep the SIGTERM/SIGINT handler runs, under the
+/// 10-second wait `onlyne-client stop` allows the process to leave.
+pub const SHUTDOWN_CLOSE_BUDGET: Duration = Duration::from_secs(8);
 /// Key holding the durable event cursor in `config_cache`.
 pub const EVENT_CURSOR_KEY: &str = "event_seq";
 /// Retry delay for a request that the transport answered `NotReady`.
@@ -68,6 +72,9 @@ pub struct ClientInit {
     pub server: String,
     pub key_path: PathBuf,
     pub cert_pin: String,
+    /// The workspace config's `[orca] worktree` value: `auto`, `inherit`, or a
+    /// literal Orca worktree selector. Only an Orca session backend reads it.
+    pub orca_worktree: String,
 }
 
 impl ClientInit {
@@ -84,7 +91,14 @@ impl ClientInit {
             server: server.into(),
             key_path: key_path.into(),
             cert_pin: cert_pin.into(),
+            orca_worktree: "auto".to_string(),
         }
+    }
+
+    /// Adopt the `[orca] worktree` policy the workspace config carries.
+    pub fn with_orca_worktree(mut self, worktree: impl Into<String>) -> Self {
+        self.orca_worktree = worktree.into();
+        self
     }
 }
 
@@ -99,7 +113,7 @@ pub struct RunState {
 
 impl RunState {
     pub fn new(init: &ClientInit, store: ClientStore) -> Result<Self> {
-        let backend = default_backend()?;
+        let backend = default_backend(WorktreePolicy::from_config(&init.orca_worktree))?;
         let dispatch = DispatchState::new(
             init.role.clone(),
             init.workspace.clone(),
@@ -171,6 +185,7 @@ pub async fn run(init: ClientInit) -> Result<()> {
     let store = ClientStore::open(workspace.client_db_path())?;
     let state = RunState::new(&init, store)?;
     let acceptor = tokio::spawn(acceptor(init.clone(), state.clone()));
+    let closing = tokio::spawn(close_on_signal(state.dispatch.clone()));
     let mut backoff = reconnect_backoff();
     let accept_new = state.dispatch.accept_new();
     let outcome = loop {
@@ -198,7 +213,43 @@ pub async fn run(init: ClientInit) -> Result<()> {
         sleep(delay).await;
     };
     acceptor.abort();
+    closing.abort();
     outcome
+}
+
+/// Close live sessions when the operator stops the client.
+///
+/// `onlyne-client stop` sends SIGTERM, and the default disposition would kill
+/// the process with every tab it opened still running: the resources would
+/// outlive the only thing that can address them. Each session closes with
+/// [`onlyne_session::CloseReason::Shutdown`] first, so the backend record and
+/// the plugin-facing tab map end truthfully; the exit code stays 0, which is
+/// what `stop` reads as a clean stop.
+async fn close_on_signal(dispatch: DispatchState) {
+    let mut terminate = match signal(SignalKind::terminate()) {
+        Ok(stream) => stream,
+        Err(error) => {
+            tracing::warn!(error = %error, "SIGTERM handler was not installed");
+            return;
+        }
+    };
+    let mut interrupt = match signal(SignalKind::interrupt()) {
+        Ok(stream) => stream,
+        Err(error) => {
+            tracing::warn!(error = %error, "SIGINT handler was not installed");
+            return;
+        }
+    };
+    tokio::select! {
+        _ = terminate.recv() => tracing::info!("SIGTERM: closing live sessions"),
+        _ = interrupt.recv() => tracing::info!("SIGINT: closing live sessions"),
+    }
+    dispatch::close_all(
+        &dispatch,
+        onlyne_session::CloseReason::Shutdown,
+        SHUTDOWN_CLOSE_BUDGET,
+    );
+    std::process::exit(0);
 }
 
 /// Serve the adapter socket for the life of the process.

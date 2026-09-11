@@ -18,6 +18,17 @@
       "description": "Path to this role's private key file.",
       "type": "string"
     },
+    "orca": {
+      "description": "Orca session backend settings.",
+      "default": {
+        "worktree": "auto"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/OrcaSection"
+        }
+      ]
+    },
     "plugins": {
       "description": "Local plugin list.",
       "default": [],
@@ -41,6 +52,18 @@
   },
   "additionalProperties": false,
   "definitions": {
+    "OrcaSection": {
+      "description": "`[orca]` — settings for the Orca session backend.",
+      "type": "object",
+      "properties": {
+        "worktree": {
+          "description": "Where a spawned terminal lands: `auto` (the default) registers the role workspace as an Orca folder on first use, `inherit` leaves the choice to Orca's active worktree, and any other value is used verbatim as an Orca worktree selector (`path:<abs>`, `id:<…>`, `name:<…>`, `branch:<…>`).",
+          "default": "auto",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
     "ServerEndpoint": {
       "description": "Server host and port pair used by the client.",
       "type": "object",

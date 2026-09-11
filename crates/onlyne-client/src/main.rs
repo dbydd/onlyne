@@ -119,17 +119,20 @@ async fn main() {
         Command::Run { workspace } => {
             let path = onlyne_layout::RoleWorkspace::resolve(&workspace);
             match onlyne_config::ClientConfig::load(path.config_path()) {
-                Ok(config) => match onlyne_client::run(ClientInit::new(
-                    workspace,
-                    config.role,
-                    format!("{}:{}", config.server.host, config.server.port),
-                    // A generated workspace stores `key_path` relative to
-                    // `.onlyne` so the tree stays valid wherever it is moved
-                    // (plan §11 line 391). `init` writes an absolute path, which
-                    // reaches the same file unchanged.
-                    path.resolve_key_path(&config.key_path),
-                    config.cert_pin,
-                ))
+                Ok(config) => match onlyne_client::run(
+                    ClientInit::new(
+                        workspace,
+                        config.role,
+                        format!("{}:{}", config.server.host, config.server.port),
+                        // A generated workspace stores `key_path` relative to
+                        // `.onlyne` so the tree stays valid wherever it is moved
+                        // (plan §11 line 391). `init` writes an absolute path, which
+                        // reaches the same file unchanged.
+                        path.resolve_key_path(&config.key_path),
+                        config.cert_pin,
+                    )
+                    .with_orca_worktree(config.orca.worktree),
+                )
                 .await
                 {
                     Ok(()) => 0,

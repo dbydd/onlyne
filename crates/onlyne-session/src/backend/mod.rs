@@ -9,6 +9,8 @@ pub mod fake;
 pub mod orca;
 pub mod zellij;
 
+pub use orca::WorktreePolicy;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     pub spawn: bool,
@@ -147,6 +149,123 @@ pub(crate) fn run_checked(
     Ok(output)
 }
 
+/// A backend command failure decoded from the CLI's JSON error body.
+///
+/// Orca exits 1 with an empty stderr and `{"ok":false,"error":{"code":…}}` on
+/// stdout, so an exit-code-only message names neither the cause nor the
+/// command. [`run_json`] keeps both, and `code` is the machine-readable value
+/// backends branch on (`terminal_handle_stale`, `selector_not_found`, …).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandFailure {
+    command: String,
+    status: i32,
+    code: Option<String>,
+    message: Option<String>,
+}
+
+impl CommandFailure {
+    /// Build a failure for a command the backend describes itself.
+    pub(crate) fn new(
+        command: impl Into<String>,
+        status: i32,
+        code: Option<String>,
+        message: Option<String>,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            status,
+            code,
+            message,
+        }
+    }
+
+    /// The CLI's machine-readable error code, when the body carried one.
+    pub fn code(&self) -> Option<&str> {
+        self.code.as_deref()
+    }
+}
+
+impl std::fmt::Display for CommandFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "runtime command failed: {} (status {}",
+            self.command, self.status
+        )?;
+        if let Some(code) = &self.code {
+            write!(f, ", {code}")?;
+        }
+        write!(f, ")")?;
+        if let Some(message) = &self.message {
+            write!(f, ": {message}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for CommandFailure {}
+
+/// Run one backend command whose protocol is JSON on stdout, and return its
+/// `result` object — or the whole document when it has no `result`.
+///
+/// Failure detail comes from the body first and the stderr second, so a
+/// backend that reports errors inside the payload still produces a message
+/// that names the cause. Callers branch on the code through
+/// [`CommandFailure::code`] after a `downcast_ref`.
+pub(crate) fn run_json(
+    runner: &dyn Runner,
+    program: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    env: &BTreeMap<String, String>,
+) -> Result<Value> {
+    let output = runner.run(program, args, cwd, env)?;
+    let body = serde_json::from_slice::<Value>(&output.stdout).ok();
+    let command = format!("{program} {}", args.join(" "));
+    if output.status == 0 {
+        let Some(value) = body else {
+            return Err(command_failure(&command, &output, None).into());
+        };
+        if value.get("ok").and_then(Value::as_bool) == Some(false) {
+            return Err(command_failure(&command, &output, Some(&value)).into());
+        }
+        return Ok(match value.get("result") {
+            Some(result) => result.clone(),
+            None => value,
+        });
+    }
+    Err(command_failure(&command, &output, body.as_ref()).into())
+}
+
+/// The structured failure for one refused (or body-less) CLI answer.
+fn command_failure(command: &str, output: &CommandOutput, body: Option<&Value>) -> CommandFailure {
+    let error = body.and_then(|body| body.get("error"));
+    let text = |key: &str| {
+        error
+            .and_then(|error| error.get(key))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let message = text("message").or_else(|| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            body.map(Value::to_string)
+        } else {
+            Some(stderr.to_string())
+        }
+    });
+    CommandFailure::new(command, output.status, text("code"), message)
+}
+
+/// The JSON error code of a backend CLI failure, when it carried one.
+pub(crate) fn failure_code(error: &anyhow::Error) -> Option<&str> {
+    error
+        .downcast_ref::<CommandFailure>()
+        .and_then(CommandFailure::code)
+}
+
 pub(crate) fn unsupported(backend: &str, operation: &str, detail: &str) -> anyhow::Error {
     anyhow::anyhow!("runtime backend {backend} does not support {operation}: {detail}")
 }
@@ -155,10 +274,13 @@ pub(crate) fn unsupported(backend: &str, operation: &str, detail: &str) -> anyho
 /// always available, so `auto` resolves on any machine; explicit names still
 /// select one backend only. Reached through `ONLYNE_BACKEND=auto`, or directly
 /// by callers that want capability discovery.
-pub fn select_backend(runner: Arc<dyn Runner>) -> Result<Box<dyn SessionBackend>> {
+pub fn select_backend(
+    runner: Arc<dyn Runner>,
+    policy: WorktreePolicy,
+) -> Result<Box<dyn SessionBackend>> {
     let backends: [Box<dyn SessionBackend>; 3] = [
         Box::new(zellij::ZellijBackend::new(runner.clone())),
-        Box::new(orca::OrcaBackend::new(runner)),
+        Box::new(orca::OrcaBackend::with_policy(runner, policy)),
         Box::new(fake::FakeBackend::new()),
     ];
     for backend in backends {
@@ -170,9 +292,14 @@ pub fn select_backend(runner: Arc<dyn Runner>) -> Result<Box<dyn SessionBackend>
         "no usable session backend available (tried zellij, orca, fake)"
     ))
 }
-pub fn backend_by_name(name: &str, runner: Arc<dyn Runner>) -> Result<Box<dyn SessionBackend>> {
+
+pub fn backend_by_name(
+    name: &str,
+    runner: Arc<dyn Runner>,
+    policy: WorktreePolicy,
+) -> Result<Box<dyn SessionBackend>> {
     match name {
-        "orca" => Ok(Box::new(orca::OrcaBackend::new(runner))),
+        "orca" => Ok(Box::new(orca::OrcaBackend::with_policy(runner, policy))),
         "zellij" => Ok(Box::new(zellij::ZellijBackend::new(runner))),
         "fake" => Ok(Box::new(fake::FakeBackend::new())),
         other => Err(anyhow::anyhow!("unknown session backend: {other}")),
@@ -181,17 +308,21 @@ pub fn backend_by_name(name: &str, runner: Arc<dyn Runner>) -> Result<Box<dyn Se
 
 /// Resolve a backend name to a concrete backend. `auto` probes capability.
 /// Empty or unknown names fall back to `"zellij"` with the reason logged.
-pub fn backend_for(requested: &str, runner: Arc<dyn Runner>) -> Result<Box<dyn SessionBackend>> {
+pub fn backend_for(
+    requested: &str,
+    runner: Arc<dyn Runner>,
+    policy: WorktreePolicy,
+) -> Result<Box<dyn SessionBackend>> {
     let name = requested.trim();
     if name.eq_ignore_ascii_case("auto") {
-        return select_backend(runner);
+        return select_backend(runner, policy);
     }
     let name = if name.is_empty() { "zellij" } else { name };
-    match backend_by_name(name, runner.clone()) {
+    match backend_by_name(name, runner.clone(), policy.clone()) {
         Ok(b) => Ok(b),
         Err(e) => {
             tracing::warn!("ONLYNE_BACKEND={requested} unusable ({e}); falling back to zellij");
-            backend_by_name("zellij", runner)
+            backend_by_name("zellij", runner, policy)
         }
     }
 }
@@ -200,20 +331,42 @@ pub fn backend_for(requested: &str, runner: Arc<dyn Runner>) -> Result<Box<dyn S
 /// (`auto` | `zellij` | `orca` | `fake`), defaulting to `zellij`.
 /// Capability discovery is available through the explicit `auto` value, so an
 /// installed backend only joins selection when the operator asks for it.
-pub fn default_backend() -> Result<Box<dyn SessionBackend>> {
+///
+/// `worktree` is the workspace config's `[orca] worktree` policy; only the
+/// Orca backend reads it, zellij and fake ignore it.
+pub fn default_backend(worktree: WorktreePolicy) -> Result<Box<dyn SessionBackend>> {
     backend_for(
         &std::env::var("ONLYNE_BACKEND").unwrap_or_default(),
         Arc::new(ProcessRunner),
+        worktree,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
+    use std::collections::VecDeque;
 
+    /// Answers one scripted `(status, stdout)` per call; a call with no answer
+    /// fails the way an absent CLI does.
     #[derive(Default)]
-    struct ProbeRunner(Mutex<Vec<(String, Vec<String>)>>);
+    struct ProbeRunner {
+        calls: Mutex<Vec<(String, Vec<String>)>>,
+        script: Mutex<VecDeque<(i32, String)>>,
+    }
+
+    impl ProbeRunner {
+        fn reply(self, status: i32, body: &str) -> Self {
+            self.script.lock().push_back((status, body.to_string()));
+            self
+        }
+
+        fn calls(&self) -> Vec<(String, Vec<String>)> {
+            self.calls.lock().clone()
+        }
+    }
+
     impl Runner for ProbeRunner {
         fn run(
             &self,
@@ -222,14 +375,16 @@ mod tests {
             _: Option<&Path>,
             _: &BTreeMap<String, String>,
         ) -> Result<CommandOutput> {
-            self.0
+            self.calls.lock().push((program.to_owned(), args.to_vec()));
+            let (status, stdout) = self
+                .script
                 .lock()
-                .unwrap()
-                .push((program.to_owned(), args.to_vec()));
+                .pop_front()
+                .unwrap_or_else(|| (1, String::new()));
             Ok(CommandOutput {
-                status: 1,
-                stdout: vec![],
-                stderr: b"missing".to_vec(),
+                status,
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
             })
         }
     }
@@ -250,9 +405,9 @@ mod tests {
     #[test]
     fn selection_falls_back_to_fake_when_nothing_else_answers() {
         let runner = Arc::new(ProbeRunner::default());
-        let backend = select_backend(runner.clone()).unwrap();
+        let backend = select_backend(runner.clone(), WorktreePolicy::AutoRegister).unwrap();
         assert_eq!(backend.name(), "fake");
-        assert_eq!(runner.0.lock().unwrap()[0].0, "zellij");
+        assert_eq!(runner.calls()[0].0, "zellij");
     }
 
     #[test]
@@ -269,7 +424,7 @@ mod tests {
                 _: Option<&Path>,
                 _: &BTreeMap<String, String>,
             ) -> Result<CommandOutput> {
-                self.calls.lock().unwrap().push(program.to_owned());
+                self.calls.lock().push(program.to_owned());
                 let zellij = program == "zellij";
                 Ok(CommandOutput {
                     status: if zellij { 0 } else { 1 },
@@ -283,28 +438,72 @@ mod tests {
             }
         }
         let runner = Arc::new(AutoRunner::default());
-        let backend = backend_for("AUTO", runner.clone()).unwrap();
+        let backend = backend_for("AUTO", runner.clone(), WorktreePolicy::AutoRegister).unwrap();
         assert_eq!(backend.name(), "zellij");
-        assert_eq!(
-            runner.calls.lock().unwrap().as_slice(),
-            &["zellij".to_string()]
-        );
+        assert_eq!(runner.calls.lock().as_slice(), &["zellij".to_string()]);
     }
 
     #[test]
     fn scheduler_default_uses_zellij_unless_auto_is_requested() {
         let runner = Arc::new(ProbeRunner::default());
-        assert_eq!(backend_for("", runner.clone()).unwrap().name(), "zellij");
         assert_eq!(
-            backend_for("zellij", runner.clone()).unwrap().name(),
+            backend_for("", runner.clone(), WorktreePolicy::AutoRegister)
+                .unwrap()
+                .name(),
             "zellij"
         );
-        assert_eq!(backend_for("fake", runner.clone()).unwrap().name(), "fake");
         assert_eq!(
-            backend_for("nope", runner.clone()).unwrap().name(),
+            backend_for("zellij", runner.clone(), WorktreePolicy::AutoRegister)
+                .unwrap()
+                .name(),
+            "zellij"
+        );
+        assert_eq!(
+            backend_for("fake", runner.clone(), WorktreePolicy::AutoRegister)
+                .unwrap()
+                .name(),
+            "fake"
+        );
+        assert_eq!(
+            backend_for("nope", runner.clone(), WorktreePolicy::AutoRegister)
+                .unwrap()
+                .name(),
             "zellij"
         );
         // Empty and named modes resolve deterministically without probing.
-        assert!(runner.0.lock().unwrap().is_empty());
+        assert!(runner.calls().is_empty());
+    }
+
+    /// Orca is the only backend that reads the policy, and the JSON error body
+    /// is where its CLI puts the reason for a refusal.
+    #[test]
+    fn run_json_unwraps_result_and_names_a_refusal() {
+        let cli = Arc::new(
+            ProbeRunner::default()
+                .reply(0, r#"{"ok":true,"result":{"terminal":{"handle":"term_1"}}}"#)
+                .reply(
+                    1,
+                    r#"{"ok":false,"error":{"code":"terminal_handle_stale","message":"handle is stale"}}"#,
+                )
+                .reply(1, r#"{"ok":false,"error":{"code":"selector_not_found"}}"#),
+        );
+        let args = ["terminal".to_string(), "show".to_string()];
+        let value = run_json(cli.as_ref(), "orca", &args, None, &BTreeMap::new()).unwrap();
+        assert_eq!(value.pointer("/terminal/handle").unwrap(), "term_1");
+
+        let error = run_json(cli.as_ref(), "orca", &args, None, &BTreeMap::new()).unwrap_err();
+        let failure = error.downcast_ref::<CommandFailure>().unwrap();
+        assert_eq!(failure.code(), Some("terminal_handle_stale"));
+        assert_eq!(
+            error.to_string(),
+            "runtime command failed: orca terminal show (status 1, terminal_handle_stale): handle is stale"
+        );
+
+        // A body without a message still names the code it failed on.
+        let error = run_json(cli.as_ref(), "orca", &args, None, &BTreeMap::new()).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CommandFailure>().unwrap().code(),
+            Some("selector_not_found")
+        );
     }
 }

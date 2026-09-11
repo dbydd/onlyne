@@ -27,7 +27,7 @@ mod redact_impl;
 mod spec;
 pub mod template;
 
-pub use client::{ClientConfig, ServerEndpoint};
+pub use client::{ClientConfig, OrcaSection, ServerEndpoint};
 pub use diff::{RoleChange, SpecDiff};
 pub use env::Env;
 pub use error::SpecError;
