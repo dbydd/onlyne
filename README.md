@@ -1,111 +1,136 @@
 # Onlyne
 
-Onlyne is a local channel and routing layer for agents: `onlyne-server` routes messages and holds the ledger, `onlyne-client` runs one role's sessions per workspace, `onlyne-gateway` translates one chat platform, and coding-agent plugins attach over one adapter protocol.
+**Message plumbing for coding-agent teams, running local.**
 
-中文说明见 [README.zh-CN.md](README.zh-CN.md).
+Onlyne turns one machine into a small agent cluster: a **server** routes every message between agent roles and keeps a durable ledger of each delivery, a **client** per workspace runs that role's coding-agent sessions, and **gateway** processes translate Telegram / Feishu / QQ / WeChat chats into the same message model. Your agents keep their own runtimes; Onlyne gives them hands that reach each other, and a paper trail you can audit.
 
-## Process picture
+![version](https://img.shields.io/badge/version-v1.0.0--beta.1-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux-supported-lightgrey)
+
+## See it run
+
+```bash
+cargo build --workspace
+cd examples/supervisor && ./run.py up
+```
+
+Five real [pi](https://github.com/badlogic/pi-mono) coding agents take the ring roles `a → b → c → d → e` in Orca tabs. A supervisor agent mounted on the cluster takes your chat, dispatches the ring, and watches the record file. Each hop appends one line; ten lines close the circuit:
+
+```text
+$ onlyne --server-root /tmp/onlyne-sup ledger --task <root-task>
+{"kind":"completion","from":"e","to":"_supervisor","state":"queued",
+ "out_head":"1:a 2:b 3:c 4:d 5:e 6:a 7:b 8:c 9:d 10:e"}
+```
+
+The TUI draws the same picture live — page 1 is the role network, page 2 the swarm ledger:
+
+```text
+ ╭── a ──╮    ╭── b ──╮    ╭── c ──╮
+ │ pi ●1 │───▶│ pi    │───▶│ pi  ◐ │        ● busy   ◐ hop in flight
+ ╰───────╯    ╰───────╯    ╰───────╯
+      ▲                          │
+ ╭────┴──╮    ╭── d ──╮          ▼
+ │ pi    │◀───│ pi    │◀─────────┘
+ ╰── e ──╯    ╰───────╯
+```
+
+`hjkl` walks the edges, `l` follows one, arrows pan, `e` reveals the supervisor's dispatch edges, `a` toggles the active-only view. One task per round, one finished tab per session — tabs reclaim themselves when their agent exits.
+
+## The pieces
+
+| Binary | Job |
+|---|---|
+| `onlyne-server` | Routing, ledger, delivery queue, faults, admin socket, workspace generation. One per cluster. |
+| `onlyne-client` | One role's runtime per workspace: session lifecycle, process backend, durable intents, agent adapter socket. |
+| `onlyne-gateway` | One chat platform per process: telegram · feishu · qqbot · weixin, feature-gated at compile time. |
+| `onlyne` | Thin human entry: forwards to the daemons, speaks the sockets, prints JSON. |
+| `onlyne-tui` | Two-page observation board over the admin socket. |
+| `onlyne-agent-fake` | Scripted agent for the twelve e2e proofs under `crates/onlyne-testkit/e2e/`. |
 
 ```mermaid
 graph LR
-  P[Pi host + onlyne-agent-pi] -->|adapter protocol| C[onlyne-client role workspace]
-  D[dsh host + onlyne-agent-dsh] -->|adapter protocol| C
-  C -->|TLS frame| S[onlyne-server]
-  S -->|adapter protocol| G[onlyne-gateway telegram feishu qqbot weixin]
+  P[pi host + onlyne-agent-pi] -->|adapter protocol| C[onlyne-client · role workspace]
+  S1[other agent hosts] -->|adapter protocol| C
+  C -->|TLS frame| SRV[onlyne-server]
+  SRV -->|adapter protocol| G[onlyne-gateway · telegram feishu qqbot weixin]
   G --> H[human IM]
-  C2[onlyne-client supervisor role] -->|aggregate role link| SP[parent onlyne-server]
-  S --- SADM[admin.sock local]
+  C2[onlyne-client · supervisor role] -->|aggregate role link| SP[parent onlyne-server]
+  SRV --- A[admin.sock · local trust root]
 ```
 
-## Binaries
+## What you get
 
-- `onlyne-server`: server-root daemon for spec loading, routing, ledger state, faults, admin socket, gateway hosting, and workspace generation.
-- `onlyne-client`: workspace daemon for one role, session lifecycle, process backend, local intents, and agent adapter socket.
-- `onlyne-gateway`: platform process for one IM gateway, run as `onlyne-gateway --platform telegram|feishu|qqbot|weixin --server-root <dir>`.
-- `onlyne`: thin human entrypoint for daemon execs, socket commands, message verbs, status, watch, repair, generate, and completions.
-- `onlyne-tui`: ratatui observation TUI over the admin socket, with a live role network graph and a swarm-style history and per-task detail page.
-- `onlyne-agent-fake`: testkit artifact used by e2e verification.
-- v1.0.0 refuses legacy workspace layouts, unsupported schemas, and old wire formats with hard errors. No migration tool ships.
+**Delivery you can audit.** Control-plane messages (task, completion, control) travel at-least-once with an `op_id` idempotency key; the ledger keeps every row, and `onlyne server ledger` reads like a bank statement. Observation (heartbeats, events) runs at-most-once with cursor resync, so a slow watcher never slows a worker.
 
-## Quickstart
+**Sessions that own their lives.** Each role spawns its coding agent through a screen backend — Orca tabs, zellij sessions, headless exec, or the fake used in tests — and discovery follows the screen you are actually in. A session's lifecycle is a proven reducer: 21 events over five state axes, table-tested, feeding both the ledger mirror and the TUI stars.
+
+**Truth under disconnect.** A client that loses the server keeps running its sessions to their final state, writes every outbound message to a durable intent queue, and flushes in order on reconnect. Nothing silently drops; a stuck intent ends as a named fault.
+
+**ACL the server enforces.** Each role registers an ed25519 key; the spec declares who may message whom. A role without an edge gets `acl_denied` before any ledger row exists. Task receipts are the one built-in exception: a completion always reaches the origin recorded in the durable ledger, so reporting upward needs zero standing edges.
+
+**Clusters all the way up.** A supervisor's own client connects to a parent server as a plain aggregate role. Tasks flow in, completions flow out, and the parent ledger never sees a child role name. The wire protocol contains zero federation code.
+
+**One protocol, two mounts.** The adapter protocol that pi speaks is the protocol the Telegram gateway speaks: `hello` handshake, capability bits, `report` observations, `assign` payloads. Bring a new coding agent or a new chat platform by implementing the same small surface (`crates/onlyne-adapter/PROTOCOL.md`).
+
+## Concepts in one table
+
+| Kind | Purpose | Delivery |
+|---|---|---|
+| `task` | Deliver work to a role; spawns or reuses a session | at-least-once, queued while offline |
+| `completion` | Terminal receipt for a task; carries the result summary | at-least-once, queued while offline |
+| `note` | Free chat between humans and agents | fire and forget, refused while offline |
+| `control` | `recycle · probe · snapshot · cancel` on a task | admin or task owner only |
+
+A message body is text plus at most one inline image; media pipelines live beside Onlyne, inside your agents.
+
+## The supervisor doctrine
+
+Dispatch flows downhill: the supervisor sends tasks to roles, and roles answer by completing them. A role's completion lands in the ledger; the supervisor polls the ledger, so reports arrive with proof attached. A role messaging its supervisor directly is the flat queue you already have elsewhere — the demo ACLs refuse it, and each role's `allowed_targets` stays inside the working ring. When a role genuinely needs to reach the operator mid-task, the supervisor grants a route for that one task and the grant dies with it.
 
 ```bash
-set -euo pipefail
-cargo build --workspace
+onlyne --server-root <root> send --from _supervisor --to a --text "RING=a,b,c,d,e K=10"
+onlyne --server-root <root> ledger --task <id>      # the receipts queue up here
+onlyne --server-root <root> sessions --task <id>    # lifecycle, per hop
+```
+
+Root receipts addressed to `_supervisor` queue by design: attach the supervisor's own client and the backlog lands in its inbox. That queue is the operator's pull-inbox; `ledger` reads it, delivery settles it.
+
+## Quickstart, the manual way
+
+```bash
 SRC=$(pwd); tmp=$(mktemp -d)
-"$SRC/target/debug/onlyne-server" init --root "$tmp/server" \
-  --listen 127.0.0.1:7899
-"$SRC/target/debug/onlyne-server" run --root "$tmp/server" &
-"$SRC/target/debug/onlyne" --server-root "$tmp/server" wait-ready
-"$SRC/target/debug/onlyne-client" init --workspace "$tmp/planner" --role planner \
-  --server-root "$tmp/server" > "$tmp/planner.spec.toml"
-cat "$tmp/planner.spec.toml" >> "$tmp/server/.onlyne/spec.toml"
-"$SRC/target/debug/onlyne" --server-root "$tmp/server" reload
-"$SRC/target/debug/onlyne-client" run --workspace "$tmp/planner" &
-"$SRC/target/debug/onlyne-agent-fake" --workspace "$tmp/planner" --script \
-  "$SRC/crates/onlyne-testkit/scripts/echo-complete.json" &
-"$SRC/target/debug/onlyne" --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
+target/debug/onlyne-server init --root "$tmp/server" --listen 127.0.0.1:7899
+target/debug/onlyne-server run --root "$tmp/server" &
+target/debug/onlyne --server-root "$tmp/server" wait-ready
+target/debug/onlyne-client init --workspace "$tmp/planner" --role planner \
+    --server-root "$tmp/server" >> "$tmp/server/.onlyne/spec.toml"   # prints a ready fragment
+target/debug/onlyne --server-root "$tmp/server" reload
+target/debug/onlyne-client run --workspace "$tmp/planner" &
+target/debug/onlyne-agent-fake --workspace "$tmp/planner" --script \
+    crates/onlyne-testkit/scripts/echo-complete.json &
+target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-Expected result of plan verification case 1: `send` prints one JSON response with `ok = true`, a UUID task, and `data.state = "in_flight"`; the ledger for that task reaches `acked`, and the session projection reaches `public_lifecycle = "exited"` with `outcome = "done"`. The landed `crates/onlyne-testkit/e2e/local-task.sh` drives that sequence against server, client, fake agent, `ledger`, and `sessions`.
+One JSON line answers with `data.state = "in_flight"`; the task's ledger row settles to `acked` and its session projects to `exited` with `outcome = "done"`. The same sequence ships as an executable proof: `crates/onlyne-testkit/e2e/local-task.sh`, joined by eleven siblings covering ACL rejects, idempotency, reconnect requeue, gateway mount, relocation, and two-cluster federation.
 
-## Directory layout
-
-Server root selected by `onlyne-server run --root <dir>`:
+## Where things live
 
 ```text
-<server-root>/.onlyne/
-  spec.toml                 # single central source of truth
-  state.db                  # server ledger in SQLite WAL mode
-  run/s                     # admin unix socket, 0600
-  run/server.pid
-  logs/server.log
-  keys/server.key           # ed25519 and TLS private key, PEM, 0600
-  templates/<topology>/<role>/
-  ws/<topology>/<role>/     # default generate output, relocatable as a directory
-  cache/                    # gateway render scratch space
+<server-root>/.onlyne/          spec.toml · state.db · run/s (admin) · keys/ · templates/ · logs/
+<workspace>/.onlyne/            config.toml · client.db · run/s (adapter) · keys/ · logs/ · agent/
 ```
 
-Role workspace selected by `onlyne-client run --workspace <dir>`:
+Every workspace is self-contained and portable: `onlyne server generate` lays role work out from templates, a generated tree carries no absolute paths, and `mv` followed by `onlyne client run` reconnects from anywhere. Legacy layouts and old databases exit 2 at the door; v1.0.0 speaks one wire, one schema, one layout.
 
-```text
-<workspace>/.onlyne/
-  config.toml               # role identity, server endpoint, local plugins
-  client.db                 # sessions, intents, out_head and prose caches, local events
-  run/s                     # client unix socket for adapter plugins and CLI
-  run/client.pid
-  logs/client.log
-  keys/role.key             # private key for the role registered in spec.toml
-  agent/<pkg>/              # vendored coding-agent plugin package from generate
-```
+## Status
 
-A legacy workspace layout exits 2 with `onlyne: legacy workspace layout; v1.0.0 does not migrate`. An unsupported schema exits through the hard schema gate with `onlyne: unsupported schema; v1.0.0 does not migrate`.
+`v1.0.0-beta.1` on branch `v1.0.0-dev-super-redesign`. The full e2e suite, the ring TUI, the supervisor demo, and the pi adapter plugin run green on macOS; the four IM gateways ship feature-gated crates awaiting live-platform soak. `cargo build --workspace` needs Rust 1.85 and nothing heavier.
 
-## Configuration
+## Reading
 
-`<server-root>/.onlyne/spec.toml` is the single source of truth for role names, public keys, ACLs, prose, session concurrency, timeouts, routes, gateways, and `session_command`.
+- `docs/v1-PLAN.md` — the authoritative design and its nine verification cases.
+- `docs/v1-ARCHITECTURE.md` — crate map, sockets, ledger, lifecycle, generation, federation.
+- `crates/onlyne-adapter/PROTOCOL.md` — the adapter surface for agents and gateways.
+- `examples/supervisor/README.md` — the live ring demo, operator voice included.
+- `.agents/skills/onlyne/SKILL.md` — the field manual an agent uses to drive a cluster.
 
-`onlyne-server run` fully parses `spec.toml` at startup. Unknown keys and type errors refuse startup with `spec.toml:<line>: <message>`. `onlyne reload` and `SIGHUP` parse into a temporary config, validate it, then replace the live spec, the ACL table, and the role rows, and announce `spec_reloaded`. A failed reload records `fault{kind:"spec_reload_failed"}`, keeps the active config, and answers with `invalid`.
-
-Role registration flows through a TOML fragment. `onlyne-client init --workspace W --role R --server-root S` creates `W/.onlyne/keys/role.key`, writes `W/.onlyne/config.toml`, and prints a fragment whose first line is `[[client]]` with `role` and `key = "ed25519/<base64>"`. The operator appends that fragment to `spec.toml` and runs `onlyne reload`.
-
-Socket resolution is fixed: `--socket <path>` wins, `--server-root <dir>` maps to `<dir>/.onlyne/run/s`, and `--workspace <dir>` or upward discovery maps to `<workspace>/.onlyne/run/s`. A missing socket exits 3 with `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`.
-
-## What changed in 1.0.0
-
-- Removed FIFO channel I/O → length-prefixed JSON frames over sockets and the shared adapter protocol.
-- Removed `loopback` → self-addressed `note` delivery through `onlyne send --to <own-role> --note`.
-- Removed `---swarm` body headers → `Envelope`, `MsgKind`, `Causality`, and `ControlOp` fields.
-- Removed adapter start/stop ops → supervisor-managed `onlyne-gateway` processes.
-- Removed the four-platform factory inside the daemon → feature-gated gateway plugin crates loaded by `onlyne-gateway`.
-- Removed offline delivery mesh → server-ledger queuing for control-plane messages and `recipient_offline` for offline `note`.
-- Removed automatic retry and recovery tasks → durable client intents plus explicit supervisor/admin repair verbs.
-- Removed the web/admin surface → local admin unix socket with `status`, `ledger`, `watch`, `repair_*`, `reload`, and `spec_diff`.
-- Removed `harness/` submodules → adapter SDK, protocol schemas, conformance fixtures, and external plugin packages.
-
-## Pointers
-
-- `docs/v1-PLAN.md`: authoritative v1.0.0 design and verification cases.
-- `docs/v1-CONTRACT.md`: work split, crate ownership, socket resolution, and exit codes.
-- `docs/v1-ARCHITECTURE.md`: engineer onboarding map for crates, sockets, ledger, lifecycle, generation, and federation.
-- `crates/onlyne-adapter/PROTOCOL.md`: adapter protocol for coding-agent plugins and IM gateways.
+MIT © dbydd

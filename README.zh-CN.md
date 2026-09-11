@@ -1,111 +1,136 @@
 # Onlyne
 
-Onlyne 是 agent 的本地 channel 与 routing 层：`onlyne-server` 路由消息并持有 ledger，`onlyne-client` 在每个工作区运行一个 role 的 session，`onlyne-gateway` 翻译一个聊天平台，coding-agent 插件通过同一份 adapter protocol 接入。
+**给 coding-agent 团队用的本地消息骨干。**
 
-English README: [README.md](README.md).
+Onlyne 把一台机器变成一个小集群：**server** 在各 agent 角色之间路由消息并持久记账（ledger）；每个工作区各跑一个 **client**，负责本角色全部 coding-agent 会话；**gateway** 进程把 Telegram / 飞书 / QQ / 微信的聊天翻译成同一套消息模型。agent 的运行时保持原样，Onlyne 负责让它们的手互相够得着，并且每一步都留有可审计的凭证。
 
-## Process picture
+![version](https://img.shields.io/badge/version-v1.0.0--beta.1-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux-supported-lightgrey)
+
+## 先看它跑起来
+
+```bash
+cargo build --workspace
+cd examples/supervisor && ./run.py up
+```
+
+五个真实的 [pi](https://github.com/badlogic/pi-mono) coding agent 在 Orca 标签页里扮演环上的 `a → b → c → d → e`；挂在集群上的 supervisor agent 接收你的聊天、向环派活、盯记录文件。每一跳给 `lights.txt` 添一行，十行即整圈闭合：
+
+```text
+$ onlyne --server-root /tmp/onlyne-sup ledger --task <根任务id>
+{"kind":"completion","from":"e","to":"_supervisor","state":"queued",
+ "out_head":"1:a 2:b 3:c 4:d 5:e 6:a 7:b 8:c 9:d 10:e"}
+```
+
+TUI 把同一件事画成活图——第 1 页是角色网络，第 2 页是集群账本：
+
+```text
+ ╭── a ──╮    ╭── b ──╮    ╭── c ──╮
+ │ pi ●1 │───▶│ pi    │───▶│ pi  ◐ │        ● 忙碌   ◐ 在飞一跳
+ ╰───────╯    ╰───────╯    ╰───────╯
+      ▲                          │
+ ╭────┴──╮    ╭── d ──╮          ▼
+ │ pi    │◀───│ pi    │◀─────────┘
+ ╰── e ──╯    ╰───────╯
+```
+
+`hjkl` 沿边走、`l` 跟随一跳、方向键平移镜头、`e` 显出 supervisor 的派发辐条、`a` 切换只看活跃。一轮一个任务，会话结束标签页自己收——agent 退出，tab 随之回收。
+
+## 部件清单
+
+| 二进制 | 职责 |
+|---|---|
+| `onlyne-server` | 路由、账本、投递队列、fault、admin socket、工作区生成。每集群一个。 |
+| `onlyne-client` | 每工作区一个角色的运行时：session 生命周期、进程后端、持久 intent、插件 adapter socket。 |
+| `onlyne-gateway` | 每进程一个聊天平台：telegram · feishu · qqbot · weixin，编译期 feature 门控。 |
+| `onlyne` | 人机薄入口：转发守护进程、直连 socket、输出 JSON。 |
+| `onlyne-tui` | 两页观测面板，走 admin socket。 |
+| `onlyne-agent-fake` | 脚本化假 agent，喂给 `crates/onlyne-testkit/e2e/` 下的十二份端到端证明。 |
 
 ```mermaid
 graph LR
-  P[Pi host + onlyne-agent-pi] -->|adapter protocol| C[onlyne-client role workspace]
-  D[dsh host + onlyne-agent-dsh] -->|adapter protocol| C
-  C -->|TLS frame| S[onlyne-server]
-  S -->|adapter protocol| G[onlyne-gateway telegram feishu qqbot weixin]
-  G --> H[human IM]
-  C2[onlyne-client supervisor role] -->|aggregate role link| SP[parent onlyne-server]
-  S --- SADM[admin.sock local]
+  P[pi 宿主 + onlyne-agent-pi] -->|adapter 协议| C[onlyne-client · 角色工作区]
+  S1[其他 agent 宿主] -->|adapter 协议| C
+  C -->|TLS 帧| SRV[onlyne-server]
+  SRV -->|adapter 协议| G[onlyne-gateway · telegram feishu qqbot weixin]
+  G --> H[人类 IM]
+  C2[onlyne-client · supervisor 角色] -->|aggregate role 链路| SP[父 onlyne-server]
+  SRV --- A[admin.sock · 本机信任根]
 ```
 
-## Binaries
+## 你拿到什么
 
-- `onlyne-server`：server-root daemon，负责 spec 加载、路由、ledger、fault、admin socket、gateway host、workspace generate。
-- `onlyne-client`：workspace daemon，负责一个 role 的 session lifecycle、process backend、本地 intent、agent adapter socket。
-- `onlyne-gateway`：单个平台 gateway 进程，运行形式为 `onlyne-gateway --platform telegram|feishu|qqbot|weixin --server-root <dir>`。
-- `onlyne`：瘦人机入口，负责 daemon exec、socket 命令、消息动词、status、watch、repair、generate、completions。
-- `onlyne-tui`：admin socket 上的 ratatui 观测 TUI，含实时 role 网络图与 swarm 风格的 history、按 task 详情页。
-- `onlyne-agent-fake`：testkit 产物，用于 e2e verification。
-- v1.0.0 以硬错误拒绝 legacy workspace layout、unsupported schema、old wire format。发行包无 migration tool。
+**可审计的投递。** 控制面消息（task、completion、control）以 at-least-once 送达并带 `op_id` 幂等键；每笔投递都在账本里留行，`onlyne server ledger` 读起来像银行流水。观测面（心跳、事件）at-most-once 加游标追补，慢观察者拖不慢干活的人。
 
-## Quickstart
+**有自己生命周期的会话。** 角色通过屏幕后端拉起 coding agent——Orca 标签页、zellij 会话、无头 exec、测试用 fake——自动发现跟随你实际所在的屏幕。会话生命周期是一张证明过的状态机：五条状态轴、21 种事件、全表测试，同时喂给账本镜像和 TUI 的星号。
+
+**断线有真相。** client 与 server 断链后，在跑的会话继续走到终态；出向消息先落持久 intent 队列，重连后按序补发。一切失败都有名有姓：耗尽的 intent 记成 fault。
+
+**server 硬执的 ACL。** 每个角色登记一把 ed25519 公钥，spec 声明谁能给谁发。无边角色收到的第一帧就是 `acl_denied`，账本一行不写。任务回执是唯一内建豁免：completion 永远送达账本记录的派单人，汇报上行零常驻边。
+
+**集群可以套集群。** supervisor 自己的 client 以普通 aggregate role 身份连父 server。任务进来、回执出去，父层账本里查不到任何子层角色名。协议里为零联邦代码。
+
+**一份协议，两侧挂载。** pi 说的 adapter 协议就是 Telegram gateway 说的同一份：`hello` 握手、能力协商、`report` 观测、`assign` 载荷。接入新 coding agent 或新聊天平台，实现的是同一个小面（`crates/onlyne-adapter/PROTOCOL.md`）。
+
+## 四个消息种类
+
+| Kind | 用途 | 投递语义 |
+|---|---|---|
+| `task` | 向角色派活；按需拉起或复用会话 | at-least-once，目标离线持久排队 |
+| `completion` | 任务的终态回执，携带结果摘要 | at-least-once，目标离线持久排队 |
+| `note` | 人和 agent 的自由聊天 | 即发即忘，目标离线直接拒收 |
+| `control` | 对任务执行 `recycle · probe · snapshot · cancel` | 仅 admin 或该任务属主 |
+
+消息体是文本加至多一张内联图片；媒体管线住在你的 agent 那边，归 Onlyne 管的一直只有"送达与记账"。
+
+## supervisor 教义
+
+派发顺流而下：supervisor 向角色发 task，角色以完成 task 作答。回执落在账本里，supervisor 拉账本读报告，汇报自带凭证。角色直接给 supervisor 发消息的形态等于把编排压平成队列——demo 的 ACL 把这条路关着，环上每个角色的 `allowed_targets` 只留环内邻居。某个任务确实需要中途够到操作者时，supervisor 为这一个任务开一条上行路，任务完结路即收回。
 
 ```bash
-set -euo pipefail
-cargo build --workspace
+onlyne --server-root <root> send --from _supervisor --to a --text "RING=a,b,c,d,e K=10"
+onlyne --server-root <root> ledger --task <id>      # 根回执在这里排队
+onlyne --server-root <root> sessions --task <id>   # 每一跳的生命周期
+```
+
+寄给 `_supervisor` 的根回执按设计排队：挂上 supervisor 自己的 client，积压即落进它的收件箱。这条队列就是操作者的拉取信箱，`ledger` 负责读，投递负责清。
+
+## 手动起步
+
+```bash
 SRC=$(pwd); tmp=$(mktemp -d)
-"$SRC/target/debug/onlyne-server" init --root "$tmp/server" \
-  --listen 127.0.0.1:7899
-"$SRC/target/debug/onlyne-server" run --root "$tmp/server" &
-"$SRC/target/debug/onlyne" --server-root "$tmp/server" wait-ready
-"$SRC/target/debug/onlyne-client" init --workspace "$tmp/planner" --role planner \
-  --server-root "$tmp/server" > "$tmp/planner.spec.toml"
-cat "$tmp/planner.spec.toml" >> "$tmp/server/.onlyne/spec.toml"
-"$SRC/target/debug/onlyne" --server-root "$tmp/server" reload
-"$SRC/target/debug/onlyne-client" run --workspace "$tmp/planner" &
-"$SRC/target/debug/onlyne-agent-fake" --workspace "$tmp/planner" --script \
-  "$SRC/crates/onlyne-testkit/scripts/echo-complete.json" &
-"$SRC/target/debug/onlyne" --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
+target/debug/onlyne-server init --root "$tmp/server" --listen 127.0.0.1:7899
+target/debug/onlyne-server run --root "$tmp/server" &
+target/debug/onlyne --server-root "$tmp/server" wait-ready
+target/debug/onlyne-client init --workspace "$tmp/planner" --role planner \
+    --server-root "$tmp/server" >> "$tmp/server/.onlyne/spec.toml"   # init 直接打印可粘片段
+target/debug/onlyne --server-root "$tmp/server" reload
+target/debug/onlyne-client run --workspace "$tmp/planner" &
+target/debug/onlyne-agent-fake --workspace "$tmp/planner" --script \
+    crates/onlyne-testkit/scripts/echo-complete.json &
+target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-Plan verification case 1 的期望结果：`send` 输出一行 JSON，`ok = true`，任务为 UUID，`data.state = "in_flight"`；该任务的 ledger 达到 `acked`，session projection 达到 `public_lifecycle = "exited"` 与 `outcome = "done"`。已落地的 `crates/onlyne-testkit/e2e/local-task.sh` 按该顺序驱动 server、client、fake agent、`ledger` 与 `sessions`。
+一行 JSON 回以 `data.state = "in_flight"`；随后该任务的账本行落到 `acked`，会话投影走到 `exited` 且 `outcome = "done"`。同一序列有可执行证明：`crates/onlyne-testkit/e2e/local-task.sh`，另有十一份姊妹脚本覆盖 ACL 拒收、幂等、断连补投、gateway 挂载、目录搬迁、双集群联邦。
 
-## Directory layout
-
-由 `onlyne-server run --root <dir>` 选择的 server root：
+## 数据在哪
 
 ```text
-<server-root>/.onlyne/
-  spec.toml                 # 单一中央真相
-  state.db                  # server ledger，SQLite WAL
-  run/s                     # admin unix socket，0600
-  run/server.pid
-  logs/server.log
-  keys/server.key           # ed25519 与 TLS 私钥，PEM，0600
-  templates/<topology>/<role>/
-  ws/<topology>/<role>/     # generate 默认输出，整个目录可搬迁
-  cache/                    # gateway render 临时空间
+<server-root>/.onlyne/          spec.toml · state.db · run/s（admin） · keys/ · templates/ · logs/
+<workspace>/.onlyne/            config.toml · client.db · run/s（adapter） · keys/ · logs/ · agent/
 ```
 
-由 `onlyne-client run --workspace <dir>` 选择的 role workspace：
+每个工作区自包含、可整搬：`onlyne server generate` 按模板生成角色工作区，产物内零绝对路径，`mv` 之后 `onlyne client run` 在哪都能接上。旧布局与旧数据库在门口 exit 2——v1.0.0 只认一套线格式、一张 schema、一种目录。
 
-```text
-<workspace>/.onlyne/
-  config.toml               # role 身份、server endpoint、本地 plugins
-  client.db                 # sessions、intents、out_head 与 prose caches、本地 events
-  run/s                     # client unix socket，供 adapter plugins 与 CLI 使用
-  run/client.pid
-  logs/client.log
-  keys/role.key             # spec.toml 中登记 role 的私钥
-  agent/<pkg>/              # generate vendor 的 coding-agent plugin package
-```
+## 状态
 
-Legacy workspace layout 以 exit 2 结束，并输出 `onlyne: legacy workspace layout; v1.0.0 does not migrate`。Unsupported schema 通过 schema gate 硬拒，并输出 `onlyne: unsupported schema; v1.0.0 does not migrate`。
+`v1.0.0-beta.1`，分支 `v1.0.0-dev-super-redesign`。全量 e2e、环图 TUI、supervisor demo、pi adapter 插件在 macOS 全绿；四个 IM gateway 以 feature-gated crate 交付，等待真平台浸泡。`cargo build --workspace` 需要 Rust 1.85，再无更重的依赖。
 
-## Configuration
+## 阅读
 
-`<server-root>/.onlyne/spec.toml` 是 role 名、公钥、ACL、prose、session concurrency、timeouts、routes、gateways、`session_command` 的单一真相。
+- `docs/v1-PLAN.md` — 权威设计与九个验收用例。
+- `docs/v1-ARCHITECTURE.md` — crate 地图、socket、账本、生命周期、生成、联邦。
+- `crates/onlyne-adapter/PROTOCOL.md` — agent 与 gateway 共用的 adapter 面。
+- `examples/supervisor/README.md` — 活环 demo，含操作者口吻的使用记录。
+- `.agents/skills/onlyne/SKILL.md` — agent 驾驶集群的现场手册。
 
-`onlyne-server run` 在启动时完整解析 `spec.toml`。任何未知键或类型错误会拒绝启动，并输出 `spec.toml:<line>: <message>`。`onlyne reload` 与 `SIGHUP` 会解析到临时 config，校验通过后替换 live spec、ACL 表与 role 行，并广播 `spec_reloaded`。校验失败会保留 active config、记录 `fault{kind:"spec_reload_failed"}`，并以 `invalid` 答复。
-
-Role registration 使用 TOML fragment。`onlyne-client init --workspace W --role R --server-root S` 创建 `W/.onlyne/keys/role.key`，写入 `W/.onlyne/config.toml`，并打印首行为 `[[client]]` 的 fragment，包含 `role` 与 `key = "ed25519/<base64>"`。操作员追加 fragment 到 `spec.toml` 后运行 `onlyne reload`。
-
-Socket resolution 固定为：`--socket <path>` 优先，`--server-root <dir>` 映射到 `<dir>/.onlyne/run/s`，`--workspace <dir>` 或向上发现映射到 `<workspace>/.onlyne/run/s`。缺少 socket 时 exit 3，并输出 `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`。
-
-## What changed in 1.0.0
-
-- 移除 FIFO channel I/O → socket 上的 length-prefixed JSON frames 与 shared adapter protocol。
-- 移除 `loopback` → 通过 `onlyne send --to <own-role> --note` 向自身 role 投递 `note`。
-- 移除 `---swarm` body headers → `Envelope`、`MsgKind`、`Causality`、`ControlOp` 字段。
-- 移除 adapter start/stop ops → supervisor 管理 `onlyne-gateway` 进程。
-- 移除 daemon 内的四平台 factory → `onlyne-gateway` 加载 feature-gated gateway plugin crates。
-- 移除 offline delivery mesh → server-ledger 为 control-plane messages 排队，offline `note` 返回 `recipient_offline`。
-- 移除 automatic retry 与 recovery tasks → durable client intents 加 explicit supervisor/admin repair verbs。
-- 移除 web/admin surface → local admin unix socket 提供 `status`、`ledger`、`watch`、`repair_*`、`reload`、`spec_diff`。
-- 移除 `harness/` submodules → adapter SDK、protocol schemas、conformance fixtures、external plugin packages。
-
-## Pointers
-
-- `docs/v1-PLAN.md`：权威 v1.0.0 design 与 verification cases。
-- `docs/v1-CONTRACT.md`：work split、crate ownership、socket resolution、exit codes。
-- `docs/v1-ARCHITECTURE.md`：crates、sockets、ledger、lifecycle、generation、federation 的 engineer onboarding map。
-- `crates/onlyne-adapter/PROTOCOL.md`：coding-agent plugins 与 IM gateways 共用的 adapter protocol。
+MIT © dbydd
