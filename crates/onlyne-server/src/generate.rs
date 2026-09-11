@@ -390,6 +390,10 @@ fn certificate_pin(root: &ServerRoot, spec: &Spec) -> Result<String, GenerateErr
     Ok(cert.spki_pin)
 }
 
+/// The derived half of a role's `config.toml`. Identity and endpoint keys only:
+/// `plugins` is a local-choice list owned by the template overlay, so it is
+/// deliberately absent from the derived table (the merge is derived-wins and a
+/// derived `plugins = []` would shadow every template's list).
 fn client_config_value(role: &ClientEntry, spec: &Spec, pin: &str) -> toml::Value {
     let (host, port) = spec
         .server
@@ -412,7 +416,6 @@ fn client_config_value(role: &ClientEntry, spec: &Spec, pin: &str) -> toml::Valu
         "key_path".to_string(),
         toml::Value::String("keys/role.key".to_string()),
     );
-    table.insert("plugins".to_string(), toml::Value::Array(Vec::new()));
     table.insert("server".to_string(), toml::Value::Table(server));
     toml::Value::Table(table)
 }

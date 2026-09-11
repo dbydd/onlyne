@@ -164,13 +164,13 @@ export default function onlyne(pi: ExtensionAPI) {
         name: "onlyne_complete",
         label: "Onlyne complete",
         description:
-          "End this onlyne task with an explicit outcome. Call it once, when the assigned work is finished (outcome=done) or provably impossible (outcome=failed). Without this call the session still completes on its own: done, or failed when the turn errored.",
+          "End this onlyne task with an explicit outcome. Call it once, when the assigned work is finished (outcome=done), provably impossible (outcome=failed), or withdrawn (outcome=cancelled). Without this call the session still completes on its own: done, or failed when the turn errored.",
         promptSnippet: "Finish the current onlyne task with an outcome and a one-line summary",
         promptGuidelines: [
           "Use onlyne_complete at the end of an onlyne task, naming the outcome and the result in one line; the summary becomes the ledger head.",
         ],
         parameters: Type.Object({
-          outcome: Type.Optional(Type.String({ description: '"done" (default) or "failed"' })),
+          outcome: Type.Optional(Type.String({ description: '"done" (default), "failed", or "cancelled"' })),
           text: Type.Optional(Type.String({ description: "one-line result summary" })),
         }),
         async execute(_toolCallId, params) {
