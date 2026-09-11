@@ -1292,7 +1292,6 @@ mod tests {
         assert_eq!(ledger.events().len(), event_count);
     }
 
-
     fn pane_host(pane_key: &str) -> crate::host::HostRef {
         crate::host::HostRef {
             orca: Some(crate::host::OrcaPane {
@@ -1309,7 +1308,8 @@ mod tests {
         let ledger = MemoryLedger::new();
         let (bridge, version) = tracked(&ledger, "host-1");
         let row = ledger.get_session("host-1").unwrap().unwrap();
-        let body = stored_observation(&ledger, Some(&row)).with_host(Some(pane_host("tab-1:leaf-1")));
+        let body =
+            stored_observation(&ledger, Some(&row)).with_host(Some(pane_host("tab-1:leaf-1")));
         let verdict = apply_persist(
             &bridge,
             &ledger,

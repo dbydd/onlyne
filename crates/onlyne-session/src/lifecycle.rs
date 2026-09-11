@@ -1022,7 +1022,10 @@ mod tests {
             LifecycleEvent::Ready { v },
             LifecycleEvent::TurnStarted { v },
             LifecycleEvent::TurnEnded { v },
-            LifecycleEvent::Heartbeat { v, body: body.clone() },
+            LifecycleEvent::Heartbeat {
+                v,
+                body: body.clone(),
+            },
             LifecycleEvent::Complete { v },
             LifecycleEvent::IntentPending { v },
             LifecycleEvent::IntentRetry { v },
@@ -1494,7 +1497,10 @@ mod tests {
         );
 
         let encoded = serde_json::to_string(&body).unwrap();
-        assert!(encoded.contains(r#""host":{"orca":{"pane_key":"tab-1:leaf-1""#), "{encoded}");
+        assert!(
+            encoded.contains(r#""host":{"orca":{"pane_key":"tab-1:leaf-1""#),
+            "{encoded}"
+        );
         assert_eq!(serde_json::from_str::<Observation>(&encoded).unwrap(), body);
 
         // A body that carries no host keeps the bytes it always had.
@@ -1545,7 +1551,10 @@ mod tests {
                 body: obs,
             },
         );
-        assert_eq!(dropped.expect_applied("a heartbeat with no host").host, None);
+        assert_eq!(
+            dropped.expect_applied("a heartbeat with no host").host,
+            None
+        );
     }
 
     impl Verdict {

@@ -694,7 +694,9 @@ fn a_heartbeat_is_stored_flat_with_the_pane_binding_inside_it() {
         Some("tab-1:leaf-1")
     );
     assert_eq!(
-        stored.get("cluster_ref").and_then(|cluster| cluster.as_str()),
+        stored
+            .get("cluster_ref")
+            .and_then(|cluster| cluster.as_str()),
         Some("cluster-b")
     );
 }
@@ -737,7 +739,10 @@ fn a_completion_keeps_the_pane_the_session_ran_in() {
     let stored = row.projection.observed.as_ref().expect("an observation");
     // The terminal tuple is the completion's, and it still says where the
     // process ran: a supervisor can look at the pane a finished session used.
-    assert_eq!(stored.get("head").and_then(|head| head.as_str()), Some("finished"));
+    assert_eq!(
+        stored.get("head").and_then(|head| head.as_str()),
+        Some("finished")
+    );
     assert_eq!(
         stored
             .pointer("/host/orca/pane_key")
