@@ -15,9 +15,13 @@ axes into one board:
 
 - **pluginApi v1** (Orca 1.4.198+); the API is still marked EXPERIMENTAL.
 - **Zero npm dependencies** — Node built-ins only.
-- **Read-only discipline**: it never creates, closes or renames a tab, never writes any onlyne
-  file, and never writes inside its own install directory. Its only mutation is
-  `orca terminal switch`, run solely while you invoke the focus command.
+- **Read-only discipline**: it never creates, closes or renames a tab and never writes any onlyne
+  file. Its only Orca mutation is `orca terminal switch`, run solely while you invoke the focus
+  command; its only file write is `panel.html` inside a dev-installed tree, which *is* the panel's
+  data channel (§3). A content-addressed install is never written to.
+- **The panel is the board** in a dev install (Settings → Plugins → Development), refreshed by the
+  same 2 s debounce / 5 s cadence the notifications use. A packaged install shows the snapshot it
+  was installed with and keeps the live board in notifications + the plugin log.
 
 **Where authority lives.** Session identity belongs to the onlyne adapter / pi plugin protocol.
 This board is a supervisor convenience: it mirrors what a server root's admin surface reports and
@@ -32,20 +36,26 @@ worktree's list and the only session source is the admin surface.
 
 ## 1. Install (manual — there is no CLI install surface for plugins)
 
-1. **Settings → Plugins → Install plugin**, choose the **Local path** tab, enter the absolute
-   path to this directory (for example `<repo>/integrations/orca-plugin`), install.
-   - Orca copies the tree to `<userData>/plugins/onlyne.onlyne-sessions/<content-hash>/` and
-     writes the `current` pointer, lock entry and provenance. The content hash of that tree is
-     re-verified on every plugin refresh, so **never edit files inside the install directory** —
-     change the source directory and re-install instead.
-   - Alternatively add the source directory under the **Development** section (hot reload, still
-     requires permission review).
+1. **Add the plugin**, picking one of the two surfaces (the first is what makes the
+   panel live):
+
+   - **Development (recommended)** — Settings → Plugins → Development → add the absolute path to
+     this directory (for example `<repo>/integrations/orca-plugin`). Hot reload is the panel's data
+     channel: this worker writes the board into `panel.html` in that tree, the dev watcher notices,
+     and the panel reloads (see §3, *The panel is the board*).
+   - **Install plugin (degraded)** — Settings → Plugins → Install plugin → *Local path* → the same
+     directory. Orca copies the tree to `<userData>/plugins/onlyne.onlyne-sessions/<content-hash>/`
+     and writes the `current` pointer, lock entry and provenance; that tree is content-addressed and
+     re-hashed on every panel load, so the worker **must not and does not** write inside it. The
+     panel then shows the snapshot the plugin was installed with, and the live board lives in
+     notifications and the plugin log. To move a packaged install forward, re-install; never edit
+     the install tree.
+
 2. **Enable** the plugin in the list.
-3. **Consent** — this plugin asks for three capabilities only:
+3. **Consent** — this plugin asks for two capabilities only:
 
    | capability | Orca's own wording | used for |
    | --- | --- | --- |
-   | `workspace:read` | Read the name, branch, and terminal list of your focused worktree | the panel's "read current workspace" button (the worker itself never calls it) |
    | `notifications:show` | Show desktop notifications labeled with the plugin name | board pushes, focus results, context triple |
    | `events:subscribe` | Get notified when worktrees are created or removed and when agent status changes | event-driven rescans (2s debounce) |
 
@@ -60,6 +70,7 @@ worktree's list and the only session source is the admin surface.
    ```json
    {
      "serverRoots": ["/abs/path/to/server-root", "/abs/path/to/second-cluster"],
+     "piWorkspaces": ["/abs/path/to/role-workspace", "/abs/path/to/another-role-workspace"],
      "orcaBin": "/opt/homebrew/bin/orca",
      "onlyneBin": "/path/to/v1.0.0/onlyne"
    }
@@ -69,6 +80,11 @@ worktree's list and the only session source is the admin surface.
      `onlyne --server-root <S> …` (`<S>/.onlyne/run/s` is that root's admin socket).
      **Absent or empty is a valid state** — the board then renders the flat tab list only and
      never calls `onlyne` at all. Entries are trimmed and de-duplicated.
+  - `piWorkspaces` is the swarm-membership authority (§2 axis A): one entry per role workspace
+    whose pi adapter may publish a pane claim at `<workspace>/.onlyne/cache/pi-pane.json`. It is
+    **not** the same list as `serverRoots` — a workspace is where `onlyne client run` runs, and the
+    board cannot derive it from a server root. Absent or empty is a valid state: the tab axis then
+    falls back to the worktree heuristic. Same trimming and de-duplication.
    - Why the binaries may need pinning: the plugin worker environment is scrubbed to a 16-variable
      allowlist (`PATH`, `HOME`, …), and an Orca launched from the Dock often has no homebrew
      `PATH`. The plugin resolves binaries via `PATH → /opt/homebrew/bin → /usr/local/bin →
@@ -83,8 +99,9 @@ worktree's list and the only session source is the admin surface.
 
 | command | effect | argument |
 | --- | --- | --- |
-| `onlyne-sessions.board` | push the board now (notification + plugin log) | — |
 | `onlyne-sessions.refresh` | rescan, then push | — |
+| `onlyne-sessions.board` | push the board now (notification + plugin log) | — |
+| `onlyne-sessions.debug-board` | write the board JSON the panel embeds to `/tmp/onlyne-board.json`, then notify a one-line summary | `args.path`: destination, default `/tmp/onlyne-board.json` |
 | `onlyne-sessions.focus` | `orca terminal switch` on a unique match | `args.task`: task id or pane prefix |
 | `onlyne-sessions.copy-agent-context` | emit the `pane_key` / `handle` / `orca selector` triple | `args.task`: task id or pane prefix |
 
@@ -144,28 +161,49 @@ row the tab axis does not list, `未 join 的 tab` is the stray-tab section.)
 - empty state, one sentence: **no `serverRoots` and no Orca tab** — how to add `serverRoots` to the
   config file.
 
-It surfaces in three places:
+It surfaces in four places:
 
-1. **Desktop notifications** on structural change (roots, roles, tasks, tab liveness, a root going
+1. **The panel** (`Onlyne Sessions` in the right sidebar) — the live board in a dev install, see
+   below. Rows carry `✕` when a session ended badly (`outcome=fault/cancelled`), and a snapshot
+   older than the cadence dims its ages;
+2. **Desktop notifications** on structural change (roots, roles, tasks, tab liveness, a root going
    down or coming back), with a 30s cooldown;
-2. **Settings → Plugins → this plugin's logs**: one summary line per change, and the whole board
-   for the `board` command;
-3. **Command results**: RPC callers get the structured board (the palette discards return values).
+3. **Settings → Plugins → this plugin's logs**: one summary line per change, the whole board for
+   the `board` command, and the panel-write outcome;
+4. **Command results**: RPC callers get the structured board (the palette discards return values).
 
-### The panel is a static document (important)
+### The panel is the board (and how data gets in)
 
 An Orca 1.4.198 plugin panel is a sandboxed `srcdoc` document: CSP
 `default-src 'none'; connect-src 'none'` (no fetch), and it may call exactly three host methods
-(`workspace.readContext`, `terminal.sendText`, `notifications.show`). It cannot read worker
-state, cannot invoke plugin commands, and the host never pushes plugin data into it
-(`PLUGIN_PANEL_ACTIONS` in `plugin-host-api.ts`, the schema refine in `plugin-panel-bridge.ts:42`,
-and the capability gate). The entry HTML is re-read only on mount and on plugin refresh events,
-and it is an immutable hash-addressed file.
+(`workspace.readContext`, `terminal.sendText`, `notifications.show`) — `PLUGIN_PANEL_ACTIONS` in
+`src/shared/plugins/plugin-host-api.ts:263`, enforced again by the schema refine in
+`plugin-panel-bridge.ts:42` and the capability gate. The host posts nothing into the frame but
+watchdog pings and action results. **There is no worker→panel channel**, in either direction of
+the bridge, and none is planned in v1.
 
-So this plugin's panel is a **static dashboard**: legend, install/consent checklist, boundaries,
-one live “current workspace” read button, and four buttons that notify you which palette command
-to run. **The live board is delivered through notifications and the plugin log**, which is a
-pluginApi v1 boundary rather than a shortcut — and the panel says so on its face.
+So the board reaches the panel the only way available: **the document itself**. The worker renders
+the snapshot into the panel entry file, and Orca reads that file from the plugin root every time it
+opens or refreshes the panel (`src/main/plugins/plugin-panel-controller.ts:142-148`). Two Orca
+behaviours turn a file write into a live panel:
+
+- **dev install (primary path)** — the dev watcher watches the configured plugin paths and a change
+  schedules the 300 ms debounced refresh (`plugin-dev-watcher.ts:106-114`); the renderer re-reads
+  the entry and remounts the frame when the HTML changed (`PluginPanel.tsx:143-147`). Writing is
+  explicitly allowed here: `verifyHashAddressedPluginContent` returns ok when `contentHash === null`
+  — *“Dev trees are intentionally mutable; installed hash-addressed trees are not”*
+  (`plugin-content-integrity.ts`).
+- **packaged install (degraded)** — the tree is content-addressed (`<plugins>/<key>/<sha256>/`) and
+  re-hashed per panel load, so the worker never writes there. The installed document is whatever
+  `panel.html` was when the plugin was installed; this repository commits the **placeholder**
+  version, and the live board stays in notifications + the plugin log.
+
+The worker rewrites the document only when the board's *structure* or a session's state changes
+(see `panelFingerprint`), never on a timer: ages are `data-ts` attributes ticked by the document's
+own script, and a rewrite remounts the panel. Past ~15 s without a new scan the document marks itself
+stale and dims its ages — the numbers stay exact (`now - data-ts`), the dimming is the signal that
+the scan loop stopped. Rewriting `panel.html` inside
+a dev tree is a normal working-tree modification — that file *is* the panel's data channel.
 
 ## 4. Data contract as implemented
 
@@ -181,6 +219,33 @@ worktree, and the plugin never walks worktrees. Per row the plugin keeps `handle
   `${tabId}:${leafId}` (newer builds may carry it; it wins when present).
 - `worktreeId` is the only selector the plugin keeps — it is what `orca terminal list --worktree`
   would need, and it is what `copy-agent-context` emits.
+
+#### Scoping the tab axis to one swarm: pi claims first, worktree second
+
+An Orca worktree can hold tabs that are not onlyne sessions, so the tab axis is filtered by, in order:
+
+1. **Adapter claims — authoritative.** The pi adapter inherits `ORCA_PANE_KEY`,
+   `ORCA_TAB_ID`, `ORCA_TERMINAL_HANDLE` and `ORCA_WORKTREE_ID` from the pane it was spawned in
+   (**measured 2026-09-11, Orca 1.4.198**: `orca terminal create --command …` exports all four into
+   the command's process), so it is the one component that knows, from the inside, which pane is an
+   onlyne session. It publishes that binding to `<workspace>/.onlyne/cache/pi-pane.json`, where
+   `<workspace>` is where the operator runs `onlyne client run` — the client spawns its plugin with
+   `cwd` = workspace, and one client runs per workspace, so the file belongs to exactly one pane. A
+   tab is in scope iff its `paneKey` is claimed; a claim whose pane Orca no longer lists hides the
+   rest of the axis, so a stale claim never resurrects a tab.
+2. **Worktree heuristic — fallback.** While no claim is published anywhere, a tab is in scope iff a
+   configured root lives inside that tab's own `worktreePath` (both sides `realpath`-resolved). A
+   root that resolves into no tab's worktree leaves the axis unscoped, and the note says so.
+
+The plugin can compute neither path on its own: a workspace is where the *client* lives, the board's
+session axis is configured by *server root*, and the `welcome.server` triple carries no path — so
+claims are read from the workspaces listed in `piWorkspaces` (step 4 above), independent of
+`serverRoots`. Empty is a normal state: no claims, worktree heuristic only.
+
+`board.scope` records which decided: `{ derived, source: "adapter" | "worktree" | "none",
+worktrees, hidden, claimed? }`, alongside `summary.hiddenTabs`. A missing, unreadable or malformed
+claim file is a normal state, never an error: it only means that workspace has published nothing,
+and a workspace whose `pi-pane.json` is malformed contributes no claim rather than a failure.
 
 ### Axis B — sessions (one call per root per verb)
 
@@ -245,9 +310,10 @@ that matches nothing renders in the stray-tab section. Nothing more is inferred.
 - **Workers get reaped**: the 5s fallback cadence runs only while the worker lives; the next
   event or command restarts it, so event-driven refresh is not a hard real-time guarantee.
 - **No lifecycle**: spawn/close/rename belong to the onlyne backend (no dual owner).
-- **No file writes at all** — neither the plugin's own install directory (hash-checked) nor any
-  onlyne file, cache or socket-side state. The only file the plugin reads is its own optional
-  config.
+- **Writes**: in a dev install, the worker rewrites exactly one file — its own `panel.html` (the
+  panel's data channel; §3). In a content-addressed install it writes nothing at all. It never
+  touches an onlyne file, cache or socket-side state; the only other file it reads is its own
+  optional config, and `debug-board` writes only to the path you name.
 - **Cost per scan**: one `orca` call plus two `onlyne` calls per configured root. Roots are
   queried independently, so one dead root costs its own two failures, never the board.
 
@@ -266,15 +332,17 @@ that matches nothing renders in the stray-tab section. Nothing more is inferred.
 ```
 integrations/orca-plugin/
   orca-plugin.json     manifest (pluginApi 1)
-  main.mjs             worker entry: activate/deactivate, four commands, three events
-  panel.html           static panel (sandboxed document)
+  main.mjs             worker entry: activate/deactivate, five commands, three events
+  panel.html           panel document: the committed placeholder (a dev install replaces it)
   src/
     runner.mjs         injectable exec, CLI JSON parsing (errors arrive on stdout), config
     orca-cli.mjs       terminal list (flat) / terminal switch / status
     onlyne-cli.mjs     --server-root <S> sessions|roles, normalized rows + failures
     board.mjs          the two axes, the weak title join, the board model
+    claims.mjs         the pi adapter's pane claims (swarm membership authority)
     render.mjs         text rendering shared by notifications and logs
-    commands.mjs       refresh / board / focus / copy-agent-context
+    panel-document.mjs the panel document: snapshot render, fingerprint, dev-only publisher
+    commands.mjs       refresh / board / debug-board / focus / copy-agent-context
     board-state.mjs    debounce, 5s fallback, structural fingerprint, notify cooldown
     *.test.mjs         node:test suites (zero dependencies)
   tools/smoke.mjs      read-only smoke run against the live desktop (mutation guard)
@@ -284,12 +352,19 @@ integrations/orca-plugin/
 node --test                     # the package's own test command
 BIN_DIR=target/debug node tools/smoke.mjs
                                 # live, read-only: orca status / flat tab list / board per root /
-                                # join demo (synthetic sessions, nothing written)
+                                # join demo (synthetic sessions) / panel document in a temp root
 ```
 
 The smoke runner intercepts any `terminal switch|create|close|rename|send` or
 `worktree create|rm` call and exits 1 — so running the smoke run is itself evidence that nothing
-touched your tabs.
+touched your tabs. It generates the panel document into a temp root, so a smoke run never rewrites
+the plugin tree it is testing.
+
+**Verifying the panel without the UI**: run `onlyne-sessions.debug-board` (palette or
+`plugins.invokeCommand`) — it writes the very payload the panel document embeds to
+`/tmp/onlyne-board.json` and notifies a one-line summary, so a JSON dump and the panel can be
+compared directly. A dev-installed panel updates within the watcher's 300 ms debounce plus one
+scan (≤5 s with no events).
 
 ## 8. Contract notes for the onlyne backend
 
@@ -303,8 +378,10 @@ Implemented against the surfaces as measured; these are the points the implement
 2. **The plugin reads no backend file.** Sessions come from `sessions` and roles from `roles`,
    nothing else. Anything a supervisor needs must be answerable through those two verbs.
 3. **`sessions` must stay answerable without a role workspace.** With no per-role worktree
-   registration, a role's tab is indistinguishable from any other tab on the Orca side, so
-   `task_id` ↔ tab binding cannot be recovered from Orca.
+   registration, a role's tab is indistinguishable from any other tab on the Orca side, so the
+   `task_id` ↔ tab binding is recovered from the pi adapter instead (`pi-pane.json`, §2 axis A):
+   the adapter inherits `ORCA_PANE_KEY` from the pane it runs in, so the binding measured on the
+   wire is the backend's own `pane_key` for spawned sessions.
 4. **Session keys used**: `task_id` (identity), `session_id` (display), `role` (section),
    `public_lifecycle` / `projection.lifecycle`, `projection.agent`, `projection.outcome`,
    `updated_at`, `seq`. Anything else is ignored.

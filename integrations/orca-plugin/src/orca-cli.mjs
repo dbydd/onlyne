@@ -35,6 +35,9 @@ export function normalizeTerminalRow(row) {
     writable: row.writable === true,
     lastOutputAt: typeof row.lastOutputAt === "number" ? row.lastOutputAt : null,
     worktreeId: typeof row.worktreeId === "string" ? row.worktreeId : null,
+    // The absolute worktree directory: the only field that says which swarm a
+    // tab belongs to, since every session tab of one swarm shares a worktree.
+    worktreePath: typeof row.worktreePath === "string" ? row.worktreePath : null,
   };
 }
 

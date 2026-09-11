@@ -200,24 +200,35 @@ export function readPluginConfig({
   }
 }
 
-/**
- * `serverRoots` names the onlyne server roots the board mirrors (one admin
- * socket `<root>/.onlyne/run/s` each). Absent, empty or malformed is a normal
- * state: the board then has no session axis and renders flat Orca tabs only.
- */
-export function normalizeServerRoots(value) {
+/** Trim, drop blanks and dedupe a config path list; anything else is empty. */
+export function normalizePathList(value) {
   if (!Array.isArray(value)) return [];
-  const roots = [];
+  const paths = [];
   for (const entry of value) {
     if (typeof entry !== "string") continue;
-    const root = entry.trim();
-    if (!root || roots.includes(root)) continue;
-    roots.push(root);
+    const path = entry.trim();
+    if (!path || paths.includes(path)) continue;
+    paths.push(path);
   }
-  return roots;
+  return paths;
 }
 
-/** Resolve the CLIs and the configured server roots from one config read. */
+/**
+ * `piWorkspaces` names the onlyne workspaces whose pi adapters may publish a
+ * pane claim (`<workspace>/.onlyne/cache/pi-pane.json`, §2 axis A). It is a
+ * separate list from `serverRoots` because the two are different directories:
+ * a workspace is where the operator runs `onlyne client run` (and where Orca
+ * hosts the pane), and it is the client — not the server root — that owns that
+ * path. Absent or empty is a normal state: the board then scopes its tab axis
+ * by the worktree heuristic alone.
+ */
+export const normalizePiWorkspaces = normalizePathList;
+
+/** `serverRoots` names the onlyne server roots the board mirrors (one admin
+ * socket `<root>/.onlyne/run/s` each). Absent, empty or malformed is a normal
+ * state: the board then has no session axis and renders flat Orca tabs only. */
+export const normalizeServerRoots = normalizePathList;
+
 export function resolveBinaries({
   home = homedir(),
   exists = existsSync,
@@ -250,6 +261,7 @@ export function resolveBinaries({
     onlyneBin,
     binDir,
     serverRoots: normalizeServerRoots(config.serverRoots),
+    piWorkspaces: normalizePiWorkspaces(config.piWorkspaces),
     configPath: path,
     configLoaded: loaded,
     configError: error ?? null,

@@ -16,21 +16,31 @@
 // Boundaries this plugin deliberately keeps:
 //   * it never creates, closes, or renames a tab — lifecycle belongs to the
 //     onlyne backend;
-//   * it never writes any onlyne file, and never writes inside its own
-//     hash-addressed install directory (Orca verifies that tree per refresh);
-//   * the only mutating call it ever makes is `orca terminal switch`, and only
-//     while the user runs the focus command.
+//   * it never writes an onlyne file, and never writes a content-addressed
+//     install; in a dev tree it rewrites exactly one file of its own, panel.html,
+//     because that document is the only channel into the panel
+//     (src/panel-document.mjs);
+//   * the only mutating Orca call it ever makes is `orca terminal switch`, and
+//     only while the user runs the focus command.
 
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createRunner, resolveBinaries } from "./src/runner.mjs";
 import { createOrcaCli } from "./src/orca-cli.mjs";
 import { createOnlyneCli } from "./src/onlyne-cli.mjs";
 import { collectBoard } from "./src/board.mjs";
 import { createBoardState } from "./src/board-state.mjs";
 import { createCommands } from "./src/commands.mjs";
+import { createPanelPublisher } from "./src/panel-document.mjs";
+import { createClaimReader } from "./src/claims.mjs";
+
+/** The plugin root: this file's own directory, in a dev tree and an install. */
+export const PLUGIN_ROOT = dirname(fileURLToPath(import.meta.url));
 
 export const COMMAND_IDS = [
   "onlyne-sessions.refresh",
   "onlyne-sessions.board",
+  "onlyne-sessions.debug-board",
   "onlyne-sessions.focus",
   "onlyne-sessions.copy-agent-context",
 ];
@@ -45,6 +55,7 @@ export function createPlugin({
   orca,
   runner = createRunner(),
   binaries = resolveBinaries(),
+  pluginRoot = PLUGIN_ROOT,
 } = {}) {
   const granted = new Set(orca?.grantedCapabilities ?? []);
   const log = (message) => {
@@ -75,10 +86,38 @@ export function createPlugin({
   const onlyneCli = createOnlyneCli({ runner, binary: binaries.onlyneBin });
   const serverRoots = binaries.serverRoots ?? [];
 
+  // The panel reads this file, not this worker: see src/panel-document.mjs for
+  // the measured Orca surfaces behind that statement.
+  // Pane claims come from the configured pi workspaces — a different list from
+  // `serverRoots`, because the client, not the server root, owns that path
+  // (src/claims.mjs). No workspace configured means no claims, and the board
+  // scopes by the worktree heuristic instead.
+  const claimReader = createClaimReader();
+  const readClaims = () => claimReader(binaries.piWorkspaces);
+  const panel = createPanelPublisher({ rootDir: pluginRoot, log });
+  let installedTreeLogged = false;
+
   const boardState = createBoardState({
-    collect: (options) => collectBoard({ orca: orcaCli, onlyne: onlyneCli, serverRoots, ...options }),
+    // `readClaims` is the pi adapter's pane authority; without it the board
+    // falls back to the worktree heuristic (src/claims.mjs).
+    collect: (options) =>
+      collectBoard({ orca: orcaCli, onlyne: onlyneCli, serverRoots, readClaims, ...options }),
     notify,
     log,
+  });
+  boardState.onBoard((board) => {
+    const result = panel.publish(board);
+    if (result.written) {
+      log(`panel document updated (${result.reason}, ${result.bytes} B) → ${result.path}`);
+      return;
+    }
+    if (result.reason === "installed-tree" && !installedTreeLogged) {
+      installedTreeLogged = true;
+      log(
+        "content-addressed install: the panel document is not regenerated, so the panel keeps the " +
+          "snapshot it was installed with; the board still goes to notifications and this log"
+      );
+    }
   });
 
   const commands = createCommands({
@@ -87,10 +126,12 @@ export function createPlugin({
     orca: orcaCli,
     notify,
     log,
+    panelInfo: () => ({ target: panel.target }),
   });
 
   orca.commands.register("onlyne-sessions.refresh", (args) => commands.refresh(args ?? {}));
   orca.commands.register("onlyne-sessions.board", (args) => commands.board(args ?? {}));
+  orca.commands.register("onlyne-sessions.debug-board", (args) => commands.debugBoard(args ?? {}));
   orca.commands.register("onlyne-sessions.focus", (args) => commands.focus(args ?? {}));
   orca.commands.register("onlyne-sessions.copy-agent-context", (args) =>
     commands.copyAgentContext(args ?? {})
@@ -118,11 +159,12 @@ export function createPlugin({
   log(
     `onlyne-sessions active · orca=${binaries.orcaBin} · onlyne=${binaries.onlyneBin}` +
       ` · roots=${serverRoots.length}` +
+      ` · panel=${panel.target ?? "(content-addressed install: not regenerated)"}` +
       (binaries.configLoaded ? ` · config=${binaries.configPath}` : "")
   );
   if (binaries.configError) log(`config ignored: ${binaries.configError}`);
 
-  return { boardState, commands, notify, subscribed };
+  return { boardState, commands, notify, subscribed, panel };
 }
 
 let active = null;

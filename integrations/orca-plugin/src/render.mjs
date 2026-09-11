@@ -12,19 +12,38 @@ export function summaryLine(board) {
     roots: 0,
     roles: 0,
     tabs: 0,
+    hiddenTabs: 0,
     liveTabs: 0,
     sessions: 0,
     sessionsWorking: 0,
   };
+  const hidden = summary.hiddenTabs ? ` · ${summary.hiddenTabs} hidden` : "";
   return (
     `Onlyne sessions · ${summary.roots} roots · ${summary.roles} roles · ` +
-    `${summary.tabs} tabs (${summary.liveTabs} live) · ` +
+    `${summary.tabs} tabs (${summary.liveTabs} live)${hidden} · ` +
     `${summary.sessions} sessions (${summary.sessionsWorking} working)`
   );
 }
 
+/** Epoch ms, epoch seconds (the admin rows' string `updated_at`), or RFC3339. */
+export function toEpochMs(value) {
+  if (typeof value === "number") return value < 1e11 ? value * 1000 : value;
+  const text = String(value ?? "").trim();
+  if (/^\d+$/.test(text)) {
+    const seconds = Number(text);
+    return seconds < 1e11 ? seconds * 1000 : seconds;
+  }
+  return Date.parse(text);
+}
+
+/**
+ * `12s` / `3m` / `5h` / `2d` since a timestamp. Measured on 2026-09-11: a
+ * `terminal list` row carries epoch milliseconds in `lastOutputAt`, while the
+ * admin `sessions` row carries epoch *seconds* as a string in `updated_at`
+ * (`"1789093578"`), and `Date.parse` reads that as NaN.
+ */
 export function relativeTime(value, now = Date.now()) {
-  const ms = typeof value === "number" ? value : Date.parse(String(value ?? ""));
+  const ms = toEpochMs(value);
   if (!Number.isFinite(ms)) return "—";
   const delta = Math.max(0, now - ms);
   const seconds = Math.floor(delta / 1000);
@@ -53,8 +72,15 @@ function shortId(value) {
   return typeof value === "string" && value ? value.slice(0, 8) : "—";
 }
 
+/** A session that ended badly reads as `✕`, whatever its tab says. */
+export function isBadOutcome(row) {
+  const outcome = row?.session?.outcome;
+  return outcome === "fault" || outcome === "cancelled" || outcome === "failed";
+}
+
 /** Liveness is the tab's own `connected` flag; nothing else is consulted. */
 export function rowGlyph(row) {
+  if (isBadOutcome(row)) return "✕";
   return row.live ? "●" : "○";
 }
 

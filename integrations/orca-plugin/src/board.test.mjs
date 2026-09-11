@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { UNKNOWN_ROLE, collectBoard, indexTabsByTask, isWorking, taskIdFromTitle } from "./board.mjs";
+import {
+  UNKNOWN_ROLE,
+  collectBoard,
+  indexTabsByTask,
+  isWorking,
+  scopeTabs,
+  taskIdFromTitle,
+} from "./board.mjs";
 import { fakeOnlyne, fakeOrca, roleRow, sessionRow, tabRow } from "./testing.mjs";
 
 const ROOT_A = "/srv/onlyne-a";
@@ -43,6 +50,7 @@ test("a tab whose trimmed title is onlyne:<task_id> joins that task's row", asyn
     rootsFailed: 0,
     roles: 1,
     tabs: 1,
+    hiddenTabs: 0,
     liveTabs: 1,
     sessions: 1,
     sessionsWorking: 1,
@@ -185,6 +193,7 @@ test("zero serverRoots is valid: flat tabs, no error, no onlyne call", async () 
     rootsFailed: 0,
     roles: 0,
     tabs: 2,
+    hiddenTabs: 0,
     liveTabs: 2,
     sessions: 0,
     sessionsWorking: 0,
@@ -279,4 +288,94 @@ test("isWorking follows the session lifecycle, then the agent", () => {
   assert.equal(isWorking({ session: { lifecycle: "idle", agent: "running" } }), true);
   assert.equal(isWorking({ session: { lifecycle: "exited", agent: "gone" } }), false);
   assert.equal(isWorking({ session: null }), false);
+});
+
+const SWARM_WORKTREE = "/repo/onlyne-swarm";
+const SWARM_ROOT = `${SWARM_WORKTREE}/cluster`;
+
+test("the tab axis is scoped to the worktree a configured server root lives in", async () => {
+  // One worktree per server: the swarm's tab is in the root's worktree, the
+  // operator's unrelated pi tab is in another one and must not be listed.
+  const board = await collectBoard({
+    orca: fakeOrca({
+      tabs: [
+        tabRow({ worktreePath: SWARM_WORKTREE }),
+        tabRow({
+          handle: "term_other",
+          title: "π - review something else",
+          worktreePath: "/Users/somebody/other-repo",
+        }),
+      ],
+    }),
+    onlyne: fakeOnlyne({ sessions: { [SWARM_ROOT]: [sessionRow()] }, roles: { [SWARM_ROOT]: [roleRow()] } }),
+    serverRoots: [SWARM_ROOT],
+  });
+
+  assert.deepEqual(board.scope, {
+    derived: true,
+    source: "worktree",
+    worktrees: [SWARM_WORKTREE],
+    hidden: 1,
+  });
+  assert.deepEqual(board.tabs.map((tab) => tab.handle), ["term_11111111-1111-4111-8111-111111111111"]);
+  assert.deepEqual(board.strayTabs, [], "a hidden tab is counted, never listed");
+  assert.equal(board.totalTabs, 2);
+  assert.equal(board.summary.tabs, 1);
+  assert.equal(board.summary.hiddenTabs, 1);
+  assert.equal(taskRowOf(board).joined, true);
+});
+test("only the worktree holding the server root is in scope", () => {
+  const tabs = [
+    tabRow({ worktreePath: "/repo/swarm" }),
+    tabRow({ handle: "term_sibling", worktreePath: "/repo/swarm-2" }),
+    // A worktree nested *inside* the root is not the swarm's worktree: session
+    // tabs land in the supervisor's worktree, which holds the root.
+    tabRow({ handle: "term_nested", worktreePath: "/repo/swarm/nested" }),
+    tabRow({ handle: "term_none", worktreePath: null }),
+  ];
+  const { tabs: kept, scope } = scopeTabs(tabs, ["/repo/swarm"]);
+
+  assert.deepEqual(
+    kept.map((tab) => tab.handle),
+    ["term_11111111-1111-4111-8111-111111111111"]
+  );
+  assert.equal(scope.derived, true);
+  assert.equal(scope.hidden, 3);
+});
+
+test("a root in a subdirectory of the worktree still scopes that worktree", () => {
+  const tabs = [tabRow({ worktreePath: "/repo/swarm" }), tabRow({ handle: "term_x", worktreePath: "/repo/x" })];
+  const { tabs: kept, scope } = scopeTabs(tabs, ["/repo/swarm/cluster"]);
+
+  assert.equal(scope.derived, true);
+  assert.deepEqual(
+    kept.map((tab) => tab.handle),
+    ["term_11111111-1111-4111-8111-111111111111"]
+  );
+  assert.equal(scope.hidden, 1);
+});
+
+test("a scope that cannot be derived keeps every tab instead of blanking the board", () => {
+  const tabs = [tabRow({ worktreePath: "/repo/a" }), tabRow({ handle: "term_b", worktreePath: "/repo/b" })];
+  // Server root outside every Orca worktree (the e2e harness' temp cluster).
+  const outside = scopeTabs(tabs, ["/private/tmp/cluster"]);
+  assert.equal(outside.scope.derived, false);
+  assert.deepEqual(outside.scope.worktrees, []);
+  assert.equal(outside.scope.hidden, 0);
+  assert.deepEqual(outside.tabs, tabs);
+
+  // No configured root at all: the tab axis is simply unscoped.
+  const unscoped = scopeTabs(tabs, []);
+  assert.equal(unscoped.scope.derived, false);
+  assert.deepEqual(unscoped.tabs, tabs);
+});
+
+test("scoping resolves a symlinked server root against Orca's canonical worktree path", () => {
+  const tabs = [tabRow({ worktreePath: "/private/repo/swarm" })];
+  const { tabs: kept, scope } = scopeTabs(tabs, ["/tmp/link/cluster"], {
+    realpath: (path) => (path.startsWith("/tmp/link") ? "/private/repo/swarm/cluster" : path),
+  });
+
+  assert.equal(scope.derived, true);
+  assert.equal(kept.length, 1);
 });

@@ -1,232 +1,83 @@
 <!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <style>
-      :root { color-scheme: light dark; }
-      body {
-        margin: 0;
-        padding: 14px 14px 24px;
-        background: var(--background, #1b1b1f);
-        color: var(--foreground, #e6e6e9);
-        font: 12px/1.55 ui-sans-serif, -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
-      }
-      h1 { margin: 0 0 2px; font-size: 14px; font-weight: 600; }
-      h2 { margin: 16px 0 6px; font-size: 12px; font-weight: 600; color: var(--muted-foreground, #9a9aa2); text-transform: uppercase; letter-spacing: 0.04em; }
-      p { margin: 0 0 8px; }
-      .meta { color: var(--muted-foreground, #9a9aa2); }
-      .card {
-        margin: 10px 0;
-        padding: 10px 12px;
-        border: 1px solid var(--border, #33333a);
-        border-radius: var(--radius, 8px);
-        background: var(--card, #232329);
-      }
-      .warn { border-color: var(--destructive, #b4443c); }
-      code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; }
-      .row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
-      button {
-        font: inherit;
-        padding: 5px 9px;
-        color: var(--foreground, #e6e6e9);
-        background: var(--secondary, #2c2c33);
-        border: 1px solid var(--border, #33333a);
-        border-radius: var(--radius, 8px);
-        cursor: pointer;
-      }
-      button:hover { background: var(--accent, #33333a); }
-      .legend { display: grid; grid-template-columns: 1.2em 1fr; gap: 2px 6px; }
-      .live { color: #3fb950; }
-      .dead { color: var(--muted-foreground, #9a9aa2); }
-      ul { margin: 4px 0 0; padding-left: 18px; }
-      li { margin: 2px 0; }
-      .error { color: #f85149; white-space: pre-wrap; }
-      .ok { color: #3fb950; }
-      .kv { display: grid; grid-template-columns: 7.5em 1fr; gap: 2px 8px; }
-      .kv span:first-child { color: var(--muted-foreground, #9a9aa2); }
-    </style>
-  </head>
-  <body>
-    <h1>Onlyne Sessions</h1>
-    <p class="meta">只读 supervisor 看板 · pluginApi v1（EXPERIMENTAL）</p>
-
-    <div class="card warn">
-      <p><strong>这块面板是静态沙箱文档。</strong>Orca 只允许面板调用三个 host 方法
-        （<code>workspace.readContext</code> / <code>terminal.sendText</code> /
-        <code>notifications.show</code>），面板不能读插件 worker 的状态、不能调用插件命令、
-        不能 fetch 任何本地文件。</p>
-      <p>所以实时看板不在面板里，而在<strong>桌面通知</strong>与
-        <strong>设置 → Plugins → 该插件的日志</strong>里：看板结构变化时插件会推一条通知。</p>
-    </div>
-
-    <h2>当前工作区（面板唯一能读到的实时信息）</h2>
-    <div class="card">
-      <div class="kv" id="workspace">
-        <span>工作区</span><span class="mono">—</span>
-      </div>
-      <div class="row">
-        <button id="read-context">读取当前工作区</button>
-      </div>
-    </div>
-
-    <h2>看板怎么看</h2>
-    <div class="card">
-      <div class="kv">
-        <span>tab 轴</span><span class="mono">一次 <code>orca terminal list --json</code>：所有 worktree 的所有 tab，平铺</span>
-        <span>session 轴</span><span class="mono">每个配置的 server root 一次 <code>onlyne --server-root &lt;S&gt; sessions --json</code>（外加 <code>roles</code>）</span>
-      </div>
-      <div class="legend" style="margin-top:8px">
-        <span class="live">●</span><span>活 tab：该 tab 的 <code>connected=true</code></span>
-        <span class="dead">○</span><span>没连上的 tab，或 session 轴有、tab 轴没列出的行</span>
-      </div>
-      <p style="margin-top:8px">join 只看标题：tab 标题（去掉首尾空白）正好等于
-        <code>onlyne:&lt;task_id&gt;</code> 时，才标注到那一个 task 行；对不上任何 session 的 tab
-        落在「未 join 的 tab」一节。<strong>这个链接是弱的</strong>——面板里的进程可以用 OSC
-        改标题把它抢走；权威身份在 adapter/pi 插件协议里，看板只是 supervisor 的方便视图。</p>
-      <p>行内四段：<code>task</code> · <code>lifecycle/agent</code> · <code>lastOutputAt</code>
-        相对时间 · <code>pane_key</code> 短形（<code>tab8:leaf8</code>）。顶部一行是 summary：
-        <code>N roots · N roles · N tabs (M live) · N sessions (K working)</code>。
-        没配 <code>serverRoots</code> 也成立：看板就只剩 tab 轴。</p>
-    </div>
-
-    <h2>命令</h2>
-    <div class="card">
-      <p class="meta">面板不能直接触发插件命令；点按钮会把该跑的命令名发成一条通知，去命令面板执行即可。</p>
-      <div class="row">
-        <button data-hint="Onlyne Sessions: 推送看板">推送看板</button>
-        <button data-hint="Onlyne Sessions: 重新扫描">重新扫描</button>
-        <button data-hint="Onlyne Sessions: 跳到 tab（args.task 前缀，唯一命中才切）">跳转 tab</button>
-        <button data-hint="Onlyne Sessions: 取 agent 上下文（pane_key/handle/selector）">取 agent 上下文</button>
-      </div>
-      <p class="meta" style="margin-top:8px">跳转认两种前缀：task id，或 <code>&lt;tabId&gt;:&lt;leafId&gt;</code>
-        面板短形（<code>tab8:leaf8</code> 也接受）。命令面板传不了参数，所以「跳转 tab」在没有参数时只在
-        <em>恰有一个活 tab</em>的情况下生效，否则会通知候选清单。需要带前缀调用时用
-        <code>plugins.invokeCommand</code>：
-        <code>{"pluginKey":"onlyne.onlyne-sessions","commandId":"onlyne-sessions.focus","args":{"task":"task8"}}</code></p>
-      <p class="meta">跳转会切前台焦点（<code>orca terminal switch</code>），只在你自己触发时发生。</p>
-    </div>
-
-    <h2>权限（consent）</h2>
-    <div class="card">
-      <ul>
-        <li><code>workspace:read</code> —— 读当前焦点工作区的名字/分支/tab 数（本面板的读取按钮）</li>
-        <li><code>notifications:show</code> —— 推送看板与错误</li>
-        <li><code>events:subscribe</code> —— worktree 创建/移除、agent 状态变化后 2s 防抖重扫</li>
-      </ul>
-      <p class="meta" id="capability-note">面板自己的调用失败时会显示错误码（例如 <code>consent_required</code>：去 Settings → Plugins 里补授权）。</p>
-    </div>
-
-    <h2>已知边界</h2>
-    <div class="card">
-      <ul>
-        <li>生命周期只属于 onlyne backend：插件绝不建/关/改名 tab，也不写任何 onlyne 文件。</li>
-        <li>会话状态只从配置的 server root 的 admin socket（<code>&lt;S&gt;/.onlyne/run/s</code>）读；某个 root 连不上只影响它自己那一节，其他 root 与 tab 轴照常渲染。</li>
-        <li>join 用的标题是弱信号，可能被 OSC 偷走；权威身份在 adapter/pi 插件协议里。</li>
-        <li>5s 兜底重扫只在 worker 活着时跑；worker 被回收后，下一个事件或命令会重新拉起它。</li>
-        <li>pluginApi v1 仍是 EXPERIMENTAL：Orca 升级后请先跑一次「重新扫描」确认 JOIN 还成立。</li>
-      </ul>
-    </div>
-
-    <p class="error" id="error"></p>
-    <p class="ok" id="status"></p>
-
-    <script>
-      'use strict'
-      var CALL_TIMEOUT_MS = 6000
-
-      function el(id) { return document.getElementById(id) }
-
-      function setError(text) {
-        el('error').textContent = text || ''
-      }
-
-      function setStatus(text) {
-        el('status').textContent = text || ''
-      }
-
-      function call(action, params, timeoutMs) {
-        return new Promise(function (resolve) {
-          var requestId = 'onlyne-' + Date.now() + '-' + Math.floor(Math.random() * 1e6)
-          var settled = false
-          function done(result) {
-            if (settled) return
-            settled = true
-            window.removeEventListener('message', onMessage)
-            resolve(result)
-          }
-          function onMessage(event) {
-            var data = event.data
-            if (!data || data.type !== 'orca-panel-action-result' || data.requestId !== requestId) return
-            done(data)
-          }
-          window.addEventListener('message', onMessage)
-          window.parent.postMessage(
-            { type: 'orca-panel-action', requestId: requestId, action: action, params: params || {} },
-            '*'
-          )
-          setTimeout(function () {
-            done({ ok: false, errorCode: 'timeout', error: 'host did not answer within ' + (timeoutMs || CALL_TIMEOUT_MS) + 'ms' })
-          }, timeoutMs || CALL_TIMEOUT_MS)
-        })
-      }
-
-      function readContext() {
-        setError('')
-        setStatus('读取中…')
-        call('workspace.readContext', {}).then(function (result) {
-          if (!result.ok) {
-            setStatus('')
-            setError('workspace.readContext 失败：' + (result.errorCode || result.error || 'unknown'))
-            return
-          }
-          var value = result.value
-          if (!value) {
-            setStatus('')
-            el('workspace').innerHTML = '<span>工作区</span><span class="mono">没有焦点工作区</span>'
-            return
-          }
-          var rows = ''
-          rows += '<span>工作区</span><span class="mono">' + escapeHtml(value.displayName || '—') + '</span>'
-          rows += '<span>分支</span><span class="mono">' + escapeHtml(value.branch || '—') + '</span>'
-          rows += '<span>tab 数</span><span class="mono">' + ((value.terminals && value.terminals.length) || 0) + '</span>'
-          el('workspace').innerHTML = rows
-          setStatus('已读取 ' + new Date().toLocaleTimeString())
-        })
-      }
-
-      function escapeHtml(text) {
-        return String(text).replace(/[&<>"']/g, function (ch) {
-          return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
-        })
-      }
-
-      function runHint(commandTitle) {
-        setError('')
-        setStatus('发送提示通知…')
-        call('notifications.show', {
-          title: 'Onlyne Sessions',
-          body: '请到命令面板执行：' + commandTitle
-        }).then(function (result) {
-          if (!result.ok) {
-            setStatus('')
-            setError('notifications.show 失败：' + (result.errorCode || result.error || 'unknown'))
-            return
-          }
-          setStatus('已发送：' + commandTitle)
-        })
-      }
-
-      el('read-context').addEventListener('click', readContext)
-      var hints = document.querySelectorAll('button[data-hint]')
-      for (var i = 0; i < hints.length; i++) {
-        ;(function (button) {
-          button.addEventListener('click', function () {
-            runHint(button.getAttribute('data-hint'))
-          })
-        })(hints[i])
-      }
-
-      readContext()
-    </script>
-  </body>
+<head>
+<meta charset="utf-8" />
+<title>Onlyne Sessions</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0;
+    padding: 12px 14px 22px;
+    background: var(--background, #1b1b1f);
+    color: var(--foreground, #e6e6e9);
+    font: 12px/1.55 ui-sans-serif, -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
+  }
+  h1 { margin: 0 0 2px; font-size: 14px; font-weight: 600; }
+  h2 {
+    margin: 16px 0 6px; font-size: 11px; font-weight: 600; color: var(--muted-foreground, #9a9aa2);
+    letter-spacing: 0.04em; word-break: break-all;
+  }
+  p { margin: 0 0 6px; }
+  .dim { color: var(--muted-foreground, #9a9aa2); }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; }
+  .card {
+    margin: 10px 0; padding: 9px 11px;
+    border: 1px solid var(--border, #33333a); border-radius: var(--radius, 8px);
+    background: var(--card, #232329);
+  }
+  .counts { font-weight: 600; }
+  .legend { display: grid; grid-template-columns: 1.2em auto; gap: 1px 6px; margin-top: 6px; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 2px 6px 2px 0; vertical-align: top; }
+  td.glyph { width: 1.1em; }
+  td.age-cell { text-align: right; white-space: nowrap; }
+  .group { margin: 0 0 10px; }
+  .group-head { display: flex; gap: 8px; align-items: baseline; margin: 6px 0 2px; }
+  .role { font-weight: 600; }
+  .live { color: #3fb950; }
+  .bad { color: #f85149; }
+  .dead { color: var(--muted-foreground, #9a9aa2); }
+  .error { color: #f85149; word-break: break-word; }
+  body.stale .age { color: var(--muted-foreground, #9a9aa2); }
+  .stamp { margin-top: 14px; }
+</style>
+</head>
+<body>
+<!-- onlyne-sessions panel placeholder -->
+<h1>Onlyne Sessions</h1>
+<p class="dim">只读 supervisor 看板 · pluginApi v1（EXPERIMENTAL）</p>
+<div class="card"><p>还没有 serverRoots，也没有 Orca tab：在 ~/.config/onlyne-sessions/config.json 里加 serverRoots。</p><p class="dim">这份文档还没有快照：dev 安装时 worker 每次结构变化都会重写它；正式安装的树是内容寻址且每次刷新都校验哈希，worker 不写那里。</p></div>
+<p class="dim stamp">join 只看标题 <code>onlyne:&lt;task_id&gt;</code>（弱信号，权威在 adapter/pi 插件协议）</p>
+<script type="application/json" id="board-snapshot">{"schema":"onlyne-sessions/board@1","generatedAt":null,"panel":null,"summary":null,"errors":[],"roots":[],"strayTabs":[],"rows":[]}</script>
+<script>(function () {
+  'use strict'
+  var STALE_AFTER_MS = 15000
+  var nodes = null
+  function format(ms) {
+    if (!isFinite(ms) || ms < 0) return '—'
+    var seconds = Math.floor(ms / 1000)
+    if (seconds < 60) return seconds + 's'
+    var minutes = Math.floor(seconds / 60)
+    if (minutes < 60) return minutes + 'm'
+    var hours = Math.floor(minutes / 60)
+    if (hours < 24) return hours + 'h'
+    return Math.floor(hours / 24) + 'd'
+  }
+  function tick() {
+    if (!nodes) nodes = Array.prototype.slice.call(document.querySelectorAll('[data-ago]'))
+    var stamp = document.getElementById('stamp')
+    var generatedAt = stamp ? Number(stamp.getAttribute('data-ts')) : NaN
+    var now = Date.now()
+    var stale = isFinite(generatedAt) && now - generatedAt > STALE_AFTER_MS
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i]
+      var text = format(now - Number(node.getAttribute('data-ts')))
+      if (node.textContent !== text) node.textContent = text
+    }
+    if (stamp && stale) document.body.className = 'stale'
+  }
+  tick()
+  setInterval(tick, 1000)
+})()</script>
+</body>
 </html>

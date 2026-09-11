@@ -179,6 +179,13 @@ completion 在 client 重启时也不丢：如果决定 outcome 时 socket 已�
   `reason: "duplicate"` 的 ack，不重复注入。当今 client 每个任务都是新 uuid，所以这条只在真
   正的重投上生效。
 
+- **pane 申报（Orca tab）。** 在 Orca pane 里，握手完成时插件会写
+  `<workspace>/.onlyne/cache/pi-pane.json`，`assign` 时刷新，`bye`、断开与退出时删除。它不是
+  协议的一部分：`integrations/orca-plugin` 靠它判断哪些 Orca tab 属于同一个 swarm——pane 会把
+  `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_TERMINAL_HANDLE` / `ORCA_WORKTREE_ID` 导出给 client
+  拉起的进程（2026-09-11 实测，Orca 1.4.198），而 pi 之后没有任何环节能恢复这个绑定。不在 pane
+  里、或缓存目录不可写时，写入是静默 no-op：申报永远不会让 session 失败。
+
 ## 6. 配置项
 
 | 环境变量 | 必需 | 作用 |

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -72,12 +73,17 @@ function fakeBinaries(record) {
 function activateWith(orca, { serverRoots = [] } = {}) {
   const calls = [];
   const runner = createRunner({ exec: fakeBinaries(calls) });
+  // The worker regenerates the panel document on every scan; a suite must never
+  // write into the plugin tree it is testing (the committed panel.html is the
+  // placeholder a content-addressed install keeps).
+  const panelRoot = mkdtempSync(join(tmpdir(), "onlyne-plugin-test-"));
   const plugin = createPlugin({
     orca,
     runner,
     binaries: { orcaBin: "orca", onlyneBin: "onlyne", serverRoots, configLoaded: false, configPath: null },
+    pluginRoot: panelRoot,
   });
-  return { plugin, calls };
+  return { plugin, calls, panelRoot };
 }
 
 test("the manifest is a legal pluginApi v1 manifest", () => {
@@ -104,16 +110,19 @@ test("the manifest is a legal pluginApi v1 manifest", () => {
   assert.equal(manifest.contributes.keybindings, undefined, "the plugin must not claim default keys");
 });
 
-test("the panel entry exists and asks for no browsing context", () => {
+test("the committed panel entry is the placeholder, and asks for no browsing context", () => {
   const [panel] = manifest.contributes.panels;
   assert.equal(panel.id, "board");
   const entry = join(pluginRoot, panel.entry);
   assert.ok(existsSync(entry));
   const html = readFileSync(entry, "utf8");
-  assert.match(html, /orca-panel-action/);
+  // Committed as the placeholder: a dev install replaces it with the live
+  // snapshot (src/panel-document.mjs), and this file is what a content-addressed
+  // install keeps, because there the worker may not write.
+  assert.match(html, /onlyne-sessions panel placeholder/);
+  assert.equal(/onlyne-sessions panel snapshot/.test(html), false);
   assert.equal(/<iframe|<img[^>]+src="https?:/.test(html), false);
-  assert.equal(/fetch\(|XMLHttpRequest|localStorage/.test(html), false);
-  assert.equal(/workspace\.readContext|notifications\.show/.test(html), true);
+  assert.equal(/fetch\(|XMLHttpRequest|localStorage|postMessage|WebSocket/.test(html), false);
 });
 
 test("activation registers exactly the declared commands and events", async () => {
@@ -216,6 +225,28 @@ test("an event rescan is debounced instead of scanning per event", async () => {
     await created.handler({ path: "/tmp/x", worktreeId: "wt" });
     await created.handler({ path: "/tmp/x", worktreeId: "wt" });
     assert.equal(calls.length, before, "events must not scan synchronously");
+  } finally {
+    plugin.boardState.stop();
+  }
+});
+
+test("a scan regenerates the panel document the panel reads", async () => {
+  const orca = fakeOrcaApi({ capabilities: ["notifications:show"] });
+  const { plugin, panelRoot } = activateWith(orca, { serverRoots: ["/srv/a"] });
+  try {
+    await plugin.boardState.refresh({ reason: "test" });
+
+    const document = readFileSync(join(panelRoot, "panel.html"), "utf8");
+    assert.match(document, /onlyne-sessions panel snapshot/);
+    assert.match(document, /board-snapshot/);
+    assert.deepEqual(readdirSync(panelRoot), ["panel.html"], "the atomic write leaves no temp file");
+
+    // The second scan with the same board must not rewrite (a rewrite remounts
+    // the panel), and the debug command writes the very payload the document
+    // embeds.
+    const first = statSync(join(panelRoot, "panel.html")).mtimeMs;
+    await plugin.boardState.refresh({ reason: "test" });
+    assert.equal(statSync(join(panelRoot, "panel.html")).mtimeMs, first);
   } finally {
     plugin.boardState.stop();
   }

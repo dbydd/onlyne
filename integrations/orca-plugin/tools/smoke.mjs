@@ -8,17 +8,25 @@
 //
 // What it proves: the real `orca` CLI answers, the flat tab list is clean (no
 // worktree is scanned individually any more), every configured server root
-// answers or degrades with its own code, and the join renders real live tabs —
-// the last one by feeding synthetic session rows for the task ids the real tab
-// titles carry, so nothing is written anywhere and no onlyne state is touched.
+// answers or degrades with its own code, the join renders real live tabs, and
+// the panel document this worker would publish is generated and validated —
+// into a temp root, so the run never touches the plugin tree it is testing.
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { createRunner, resolveBinaries } from "../src/runner.mjs";
 import { createOrcaCli, paneKeyOf } from "../src/orca-cli.mjs";
 import { createOnlyneCli, normalizeRoleRow, normalizeSessionRow } from "../src/onlyne-cli.mjs";
 import { collectBoard, taskIdFromTitle } from "../src/board.mjs";
+import {
+  JSON_BLOCK_ID,
+  createPanelPublisher,
+  panelFingerprint,
+  panelWriteTarget
+} from "../src/panel-document.mjs";
 import { formatBoard } from "../src/render.mjs";
 
 const MUTATING = /terminal (switch|create|close|rename|send|kill)|worktree (create|rm|remove|delete)/;
@@ -167,6 +175,37 @@ export async function runSmoke({ write = (line) => process.stdout.write(`${line}
   }
   const version = await runner.run(binaries.onlyneBin, ["--version"]);
   write(`onlyne --version -> ${version.ok ? version.stdout.trim() : `${version.code}: ${version.message}`}`);
+  section("panel document (generated into a temp root, never the plugin tree)");
+  {
+    const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const liveTarget = panelWriteTarget({ rootDir: pluginRoot });
+    write(
+      liveTarget
+        ? `this tree is mutable → the worker rewrites ${liveTarget} (the panel reloads on the dev watcher)`
+        : "content-addressed install → the worker never writes there; the panel keeps its installed document"
+    );
+    report.steps.panelTarget = liveTarget ? { kind: "dev-tree", path: liveTarget } : { kind: "install" };
+    const panelRoot = mkdtempSync(join(tmpdir(), "onlyne-panel-smoke-"));
+    const publisher = createPanelPublisher({ rootDir: panelRoot });
+    const first = publisher.publish(board);
+    const second = publisher.publish(board);
+    const document = readFileSync(join(panelRoot, "panel.html"), "utf8");
+    const payload = JSON.parse(
+      document.match(new RegExp(`id="${JSON_BLOCK_ID}">([\\s\\S]*?)</script>`))[1].replace(/\\u003c/g, "<")
+    );
+    report.steps.panel = {
+      written: first.written,
+      bytes: first.bytes,
+      secondWrite: second.written,
+      fingerprint: panelFingerprint(board).length,
+      payloadRows: payload.rows.length,
+    };
+    write(
+      `wrote=${first.written} bytes=${first.bytes} rewrite-on-unchanged=${second.written} ` +
+        `size-on-disk=${statSync(join(panelRoot, "panel.html")).size} ` +
+        `rows-in-embedded-snapshot=${payload.rows.length}`
+    );
+  }
 
   section("mutation guard");
   write(forbidden.length ? `VIOLATIONS: ${forbidden.join(" | ")}` : "no mutating orca verb was invoked");

@@ -161,6 +161,7 @@ async function startAgent({ surface = fakeSurface(), capabilities, options = {},
     settleFallbackMs: options.settleFallbackMs ?? 30_000,
     heartbeatMs: options.heartbeatMs ?? 60_000,
     ...(capabilities ? { capabilities } : {}),
+    ...(options.claimStore ? { claimStore: options.claimStore } : {}),
   });
   cleanups.push(async () => {
     agent.stop("test");
@@ -190,6 +191,77 @@ const assignArgs = () => (ASSIGN_FRAME ? ASSIGN_FRAME.args : {
   prose: "Read the incoming task",
   task_id: TASK_ID,
   generation: 1,
+});
+
+/**
+ * Run `body` with exactly the ORCA_* environment an Orca pane exports, so the
+ * result does not depend on the shell the tests happen to run in, then restore
+ * whatever was there.
+ */
+async function inOrcaPane(env, body) {
+  const touched = new Set([...Object.keys(env), ...Object.keys(process.env).filter((key) => key.startsWith("ORCA_"))]);
+  const saved = new Map([...touched].map((key) => [key, process.env[key]]));
+  for (const key of touched) delete process.env[key];
+  Object.assign(process.env, env);
+  try {
+    return await body();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test("the pane claim follows the session: mount, assign, bye, stop", async () => {
+  const published = [];
+  const claimStore = { publish: (claim) => published.push(claim) };
+  const { agent, host } = await startAgent({ options: { claimStore } });
+  const paneKey = "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560";
+
+  await inOrcaPane({ ORCA_PANE_KEY: paneKey, ORCA_TERMINAL_HANDLE: "term_1" }, async () => {
+    agent.start();
+    // Mount: the pane binding is stated as soon as the welcome is adopted.
+    const [mounted] = await waitFor(() => (published.length === 1 ? published : null));
+    assert.deepEqual(mounted, {
+      pane_key: paneKey,
+      tab_id: "45e603f7-0772-48aa-bcf6-832272747713",
+      leaf_id: "b6d067b6-9255-4f5c-a13f-24f194ea0560",
+      handle: "term_1",
+      worktree_id: null,
+      role: "planner",
+      task_id: TASK_ID,
+    });
+
+    // A task named after the mount refreshes the claim rather than leaving a
+    // stale task id in it.
+    host.notify("assign", { ...assignArgs(), task_id: "22222222-2222-4222-8222-222222222222" });
+    await waitFor(() => (published.length === 2 ? true : null));
+    assert.equal(published[1].task_id, "22222222-2222-4222-8222-222222222222");
+    assert.equal(published[1].pane_key, paneKey, "the pane is what the claim is for");
+
+    // The host ended the session while pi stays up: the claim goes with it.
+    host.notify("bye", { reason: "session ended" });
+    await waitFor(() => (published.length === 3 ? true : null));
+    assert.equal(published[2], null);
+
+    agent.stop("test");
+    assert.equal(published.at(-1), null);
+  });
+});
+
+test("outside an Orca pane no claim is ever published", async () => {
+  const published = [];
+  const { agent } = await startAgent({ options: { claimStore: { publish: (claim) => published.push(claim) } } });
+  const saved = process.env.ORCA_PANE_KEY;
+  delete process.env.ORCA_PANE_KEY;
+  try {
+    agent.start();
+    await waitFor(() => (published.length === 1 ? true : null));
+    assert.deepEqual(published, [null], "a plain pi session claims nothing");
+  } finally {
+    if (saved !== undefined) process.env.ORCA_PANE_KEY = saved;
+  }
 });
 
 test("a fresh agent opens with hello, registers and reports ready", async () => {

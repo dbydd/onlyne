@@ -2,7 +2,18 @@
 // command (`plugins.invokeCommand` can), so every handler accepts an optional
 // `args.task` prefix and otherwise falls back to the unique-match rule.
 
-import { NOTIFICATION_BODY_LIMIT, formatAgentContext, formatBoard, shortPaneKey } from "./render.mjs";
+import { writeFileSync } from "node:fs";
+import { boardPayload } from "./panel-document.mjs";
+import {
+  NOTIFICATION_BODY_LIMIT,
+  formatAgentContext,
+  formatBoard,
+  shortPaneKey,
+  summaryLine,
+} from "./render.mjs";
+
+/** Where `onlyne-sessions.debug-board` drops the board the panel renders. */
+export const DEBUG_BOARD_PATH = "/tmp/onlyne-board.json";
 
 export const AMBIGUOUS_EXAMPLE_LIMIT = 5;
 
@@ -59,7 +70,16 @@ function candidateList(matches, limit = AMBIGUOUS_EXAMPLE_LIMIT) {
  * @param {Function} [options.log]
  * @param {Function} [options.now]
  */
-export function createCommands({ getBoard, refreshBoard, orca, notify, log = () => {}, now = () => Date.now() }) {
+export function createCommands({
+  getBoard,
+  refreshBoard,
+  orca,
+  notify,
+  log = () => {},
+  now = () => Date.now(),
+  panelInfo = () => null,
+  writeFile = writeFileSync,
+}) {
   async function currentBoard({ force = false } = {}) {
     const board = getBoard();
     if (board && !force) return board;
@@ -139,5 +159,28 @@ export function createCommands({ getBoard, refreshBoard, orca, notify, log = () 
     return { ok: true, context: text, taskId: row.taskId, paneKey: row.paneKey, handle: row.handle, selector: row.selector };
   }
 
-  return { refresh, board, focus, copyAgentContext };
+  /**
+   * Drop the board the panel renders onto disk, for eyeballing or diffing from
+   * a shell. The payload is `boardPayload` — the very object embedded in the
+   * panel document — so the file and the panel cannot disagree.
+   */
+  async function debugBoard(args = {}) {
+    const current = await currentBoard({ force: args?.force === true });
+    const path =
+      typeof args?.path === "string" && args.path.trim() ? args.path.trim() : DEBUG_BOARD_PATH;
+    const payload = boardPayload(current, { generatedAt: now(), panel: panelInfo() });
+    try {
+      writeFile(path, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    } catch (error) {
+      const why = `写 ${path} 失败：${error?.message ?? error}`;
+      await notify("Onlyne sessions: debug board 失败", why);
+      return { ok: false, code: "write_failed", message: why };
+    }
+    const line = summaryLine(current);
+    log(`debug board → ${path} · ${line}`);
+    await notify("Onlyne sessions: debug board", `${path}\n${line}`);
+    return { ok: true, path, summary: current?.summary ?? null, generatedAt: payload.generatedAt };
+  }
+
+  return { refresh, board, debugBoard, focus, copyAgentContext };
 }

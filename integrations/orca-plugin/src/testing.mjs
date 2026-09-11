@@ -5,7 +5,12 @@
 import { normalizeRoleRow, normalizeSessionRow } from "./onlyne-cli.mjs";
 import { normalizeTerminalRow } from "./orca-cli.mjs";
 
-/** One `orca terminal list` row as Orca 1.4.198 prints it. */
+/**
+ * One `orca terminal list` row as Orca 1.4.198 prints it. `worktreePath` is the
+ * absolute worktree directory, which is what the scope filter matches against:
+ * it deliberately sits outside the `/srv/...` roots the board fixtures use, so
+ * a suite that does not care about scoping keeps the unscoped list.
+ */
 export function tabRow(overrides = {}) {
   return {
     handle: "term_11111111-1111-4111-8111-111111111111",
@@ -16,6 +21,7 @@ export function tabRow(overrides = {}) {
     writable: true,
     lastOutputAt: 1_789_000_000_000,
     worktreeId: "2ea2fe23-829c-4a8f-bcac-4129eb78a164",
+    worktreePath: "/repo/other-swarm",
     ...overrides,
   };
 }

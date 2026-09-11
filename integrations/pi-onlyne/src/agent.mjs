@@ -30,6 +30,7 @@ import {
   stdinTaskText,
   welcomeFrom,
 } from "./protocol.mjs";
+import { paneClaim, publishPaneClaim } from "./attribution.mjs";
 
 /** Reconnect ladder in milliseconds, capped like the client's own. */
 export const RECONNECT_LADDER_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
@@ -99,6 +100,11 @@ export class OnlyneAgent {
     this.helloTimeoutMs = options.helloTimeoutMs ?? HELLO_TIMEOUT_MS;
     this.settleFallbackMs = options.settleFallbackMs ?? SETTLE_FALLBACK_MS;
     this.createConnection = options.createConnection ?? ((path) => createConnection(path));
+    // Where this pane's binding goes (attribution.mjs). Injected by the tests,
+    // which must not touch the workspace they run in.
+    this.claimStore = options.claimStore ?? {
+      publish: (claim) => publishPaneClaim({ workspace: options.cwd, claim }),
+    };
     this.timer = options.timer ?? {
       set: (fn, ms) => setTimeout(fn, ms),
       clear: (handle) => clearTimeout(handle),
@@ -144,6 +150,7 @@ export class OnlyneAgent {
   stop(reason = "quit") {
     if (this.closed) return;
     this.closed = true;
+    this.clearClaim();
     this.clearTimers();
     const socket = this.socket;
     if (this.connected && socket && !socket.destroyed) {
@@ -157,6 +164,20 @@ export class OnlyneAgent {
     this.connected = false;
     this.socket = null;
     this.surface.status?.("onlyne: detached");
+  }
+
+  /**
+   * Publish this pane's binding so the supervisor board can attribute the tab
+   * (`integrations/orca-plugin/src/board.mjs`). A no-op outside an Orca pane,
+   * and never fatal.
+   */
+  publishClaim(taskId = this.envTaskId) {
+    this.claimStore.publish(paneClaim(process.env, { role: this.role, taskId }));
+  }
+
+  /** Drop the claim: this pane is no longer working on a task. */
+  clearClaim() {
+    this.claimStore.publish(null);
   }
 
   /** One line for `/onlyne status`. */
@@ -279,6 +300,7 @@ export class OnlyneAgent {
     this.surface.status?.(`onlyne: ${welcome.role}`);
     this.log(`welcome role=${welcome.role} generation=${welcome.generation} capabilities=${welcome.hostCapabilities.join(",")}`);
     this.surface.welcome?.(welcome);
+    this.publishClaim();
     const prose = welcome.prose.trim();
     if (prose && !this.deliveredProse.has(prose)) {
       this.deliveredProse.add(prose);
@@ -384,6 +406,9 @@ export class OnlyneAgent {
     else if (op === "config_get") void this.onConfigGet(args);
     else if (op === "bye") {
       this.log(`host bye: ${args.reason ?? "unspecified"}`);
+      // The session ended, but pi may live on to be handed another task, so the
+      // claim goes with the session rather than with the socket.
+      this.clearClaim();
       this.dropSocket();
     } else if (op) this.log(`ignoring host op ${op}`);
   }
@@ -506,6 +531,7 @@ export class OnlyneAgent {
     }
     this.injectedTasks.add(taskId);
     this.stats.assigns += 1;
+    this.publishClaim(taskId);
     if (typeof args.generation === "number") this.generation = args.generation;
 
     const attachments = this.writeAttachments(taskId, envelope);

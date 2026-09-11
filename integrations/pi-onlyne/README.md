@@ -201,6 +201,15 @@ of the shipped client.
   life of the connection. The client today mints a fresh uuid per task, so this only ever
   fires on a genuine redelivery.
 
+- **Pane claim (Orca tabs).** Inside an Orca pane the plugin writes
+  `<workspace>/.onlyne/cache/pi-pane.json` when the handshake completes, refreshes it on
+  `assign`, and removes it on `bye`, on disconnect and on shutdown. It is not protocol: it is
+  how `integrations/orca-plugin` knows which Orca tab belongs to a swarm, since the pane
+  exports `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_TERMINAL_HANDLE` / `ORCA_WORKTREE_ID` into
+  the process the client spawns (measured 2026-09-11, Orca 1.4.198) and nothing downstream of
+  pi can recover that binding. Outside a pane, and with an unwritable cache directory, the
+  write is a silent no-op: a claim never fails a session.
+
 ## 6. Configuration reference
 
 | env var | required | effect |

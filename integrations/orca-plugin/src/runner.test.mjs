@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   createRunner,
+  normalizePiWorkspaces,
   normalizeServerRoots,
   parseCliJson,
   readPluginConfig,
@@ -113,26 +114,34 @@ test("an operator config outranks BIN_DIR", () => {
   assert.equal(resolved.orcaBin, "/custom/orca");
 });
 
-test("serverRoots keeps the configured roots, trimmed and deduped", () => {
+test("configured path lists keep entries trimmed and deduped", () => {
   assert.deepEqual(normalizeServerRoots(["/srv/a", "  /srv/b  ", "/srv/a", 42, "", "   "]), [
     "/srv/a",
     "/srv/b",
   ]);
   assert.deepEqual(normalizeServerRoots(undefined), []);
   assert.deepEqual(normalizeServerRoots(" /srv/a "), []);
+  assert.deepEqual(normalizePiWorkspaces(["/ws/a", "/ws/a", null]), ["/ws/a"]);
 });
 
-test("the operator config supplies serverRoots beside the binaries", () => {
+test("the operator config supplies serverRoots and piWorkspaces beside the binaries", () => {
   const resolved = resolveBinaries({
     home: "/home/tester",
-    readFile: () => JSON.stringify({ serverRoots: ["/srv/a"], orcaBin: "/custom/orca" }),
+    readFile: () =>
+      JSON.stringify({
+        serverRoots: ["/srv/a"],
+        piWorkspaces: ["/ws/planner"],
+        orcaBin: "/custom/orca",
+      }),
     env: {},
     exists: () => true,
   });
   assert.deepEqual(resolved.serverRoots, ["/srv/a"]);
+  // The two lists are independent: a workspace is not a server root.
+  assert.deepEqual(resolved.piWorkspaces, ["/ws/planner"]);
   assert.equal(resolved.orcaBin, "/custom/orca");
-  assert.deepEqual(
-    resolveBinaries({ home: "/home/tester", readFile: () => "{}", env: {}, exists: () => true }).serverRoots,
-    []
-  );
+
+  const bare = resolveBinaries({ home: "/home/tester", readFile: () => "{}", env: {}, exists: () => true });
+  assert.deepEqual(bare.serverRoots, []);
+  assert.deepEqual(bare.piWorkspaces, []);
 });
