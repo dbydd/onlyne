@@ -24,7 +24,7 @@ import {
   panelWriteTarget,
   renderPanelDocument
 } from "./panel-document.mjs";
-import { fakeOnlyne, fakeOrca, roleRow, sessionRow, tabRow } from "./testing.mjs";
+import { committedText, fakeOnlyne, fakeOrca, roleRow, sessionRow, tabRow } from "./testing.mjs";
 
 const ROOT = "/srv/cluster";
 
@@ -365,9 +365,19 @@ test("a document with no snapshot stamp does not throw", () => {
 });
 
 test("the committed placeholder is the packaged-install degradation", () => {
-  const html = readFileSync(new URL("../panel.html", import.meta.url), "utf8");
+  // A vendored copy that is not a git checkout keeps the shipped file, so it is
+  // asserted from there; in the repository the answer comes from git, because a
+  // dev install rewrites the working copy by design (this whole module).
+  const committed = committedText("integrations/orca-plugin/panel.html");
+  const html = committed ?? readFileSync(new URL("../panel.html", import.meta.url), "utf8");
 
   assert.match(html, new RegExp(PANEL_PLACEHOLDER_MARKER));
   assert.equal(html.includes(PANEL_GENERATED_MARKER), false);
   assert.equal(/data-ts="/.test(html), false, "the placeholder shows no ages");
+  if (committed !== null) {
+    // Byte-for-byte the placeholder renderer's output, so the committed file
+    // cannot drift from it and a live snapshot — carrying the developer's own
+    // paths and ages — can never reach an install through git.
+    assert.equal(committed, renderPanelDocument(null, { generatedAt: null, placeholder: true }));
+  }
 });

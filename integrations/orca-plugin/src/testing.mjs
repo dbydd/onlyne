@@ -4,6 +4,32 @@
 
 import { normalizeRoleRow, normalizeSessionRow } from "./onlyne-cli.mjs";
 import { normalizeTerminalRow } from "./orca-cli.mjs";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+/** Repository root, from this file's own location (src/ -> package -> root). */
+const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
+
+/**
+ * The text of a file as the repository has it committed, or null when this copy
+ * is not a git checkout at all (a package vendored into `<ws>/.onlyne/agent/`).
+ *
+ * `panel.html` is committed as a placeholder and legitimately rewritten in the
+ * working tree by a dev install — that is the whole point of the phase-3 design
+ * (`src/panel-document.mjs`) — so the working copy cannot answer the question
+ * "what does a content-addressed install keep?". Git can.
+ */
+export function committedText(relativePath, { exec = execFileSync } = {}) {
+  try {
+    return exec("git", ["show", `HEAD:${relativePath}`], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return null;
+  }
+}
 
 /**
  * One `orca terminal list` row as Orca 1.4.198 prints it. `worktreePath` is the

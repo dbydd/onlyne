@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { createPlugin } from "../main.mjs";
 import { createRunner } from "./runner.mjs";
+import { committedText } from "./testing.mjs";
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(readFileSync(join(pluginRoot, "orca-plugin.json"), "utf8"));
@@ -25,7 +26,9 @@ const EVENT_NAMES = new Set(["worktree.created", "worktree.removed", "agent.stat
 const MUTATING = /terminal (switch|create|close|rename|send)|worktree /;
 
 function fakeOrcaApi({
-  capabilities = ["workspace:read", "notifications:show", "events:subscribe"],
+  // Exactly what the manifest asks for: the plugin reads no workspace context,
+  // so a fake granting `workspace:read` would grant a capability it never uses.
+  capabilities = ["notifications:show", "events:subscribe"],
 } = {}) {
   const registered = new Map();
   const subscriptions = [];
@@ -115,10 +118,11 @@ test("the committed panel entry is the placeholder, and asks for no browsing con
   assert.equal(panel.id, "board");
   const entry = join(pluginRoot, panel.entry);
   assert.ok(existsSync(entry));
-  const html = readFileSync(entry, "utf8");
-  // Committed as the placeholder: a dev install replaces it with the live
-  // snapshot (src/panel-document.mjs), and this file is what a content-addressed
-  // install keeps, because there the worker may not write.
+  // Asserted from git, not from the working copy: a dev install rewrites this
+  // file by design (src/panel-document.mjs), which is exactly why the working
+  // copy cannot answer what a content-addressed install keeps. A vendored copy
+  // that is not a git checkout keeps the shipped file, so it reads that.
+  const html = committedText("integrations/orca-plugin/panel.html") ?? readFileSync(entry, "utf8");
   assert.match(html, /onlyne-sessions panel placeholder/);
   assert.equal(/onlyne-sessions panel snapshot/.test(html), false);
   assert.equal(/<iframe|<img[^>]+src="https?:/.test(html), false);
