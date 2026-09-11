@@ -2,9 +2,10 @@
 
 **给 coding-agent 团队用的本地消息骨干。**
 
-Onlyne 把一台机器变成一个小集群：**server** 在各 agent 角色之间路由消息并持久记账（ledger）；每个工作区各跑一个 **client**，负责本角色全部 coding-agent 会话；**gateway** 进程把 Telegram / 飞书 / QQ / 微信的聊天翻译成同一套消息模型。agent 的运行时保持原样，Onlyne 负责让它们的手互相够得着，并且每一步都留有可审计的凭证。
+Onlyne 把一群 agent 编成一个工作集群：**server** 在各 agent 角色之间路由消息并持久记账（ledger）；每个工作区各跑一个 **client**，负责本角色全部 coding-agent 会话；**gateway** 进程把 Telegram / 飞书 / QQ / 微信的聊天翻译成同一套消息模型。agent 的运行时保持原样，Onlyne 负责让它们的手互相够得着，并且每一步都留有可审计的凭证。集群可以跨机器运转：client 经 TLS 从任意位置连回 server，生成好的工作区 `mv` 一步即可异地安家，集群之间还能嵌套成更大的集群。
 
 ![version](https://img.shields.io/badge/version-v1.0.0--beta.1-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux-supported-lightgrey)
+![Onlyne — supervisor 向五个 pi agent 派十跳环任务，账本逐跳结清](assets/promo/onlyne-hero.png)
 
 ## 先看它跑起来
 

@@ -2,9 +2,10 @@
 
 **Message plumbing for coding-agent teams, running local.**
 
-Onlyne turns one machine into a small agent cluster: a **server** routes every message between agent roles and keeps a durable ledger of each delivery, a **client** per workspace runs that role's coding-agent sessions, and **gateway** processes translate Telegram / Feishu / QQ / WeChat chats into the same message model. Your agents keep their own runtimes; Onlyne gives them hands that reach each other, and a paper trail you can audit.
+Onlyne binds a fleet of coding agents into one working cluster: a **server** routes every message between agent roles and keeps a durable ledger of each delivery, a **client** per workspace runs that role's coding-agent sessions, and **gateway** processes translate Telegram / Feishu / QQ / WeChat chats into the same message model. Your agents keep their own runtimes; Onlyne gives them hands that reach each other, and a paper trail you can audit. The cluster spans machines: clients reach the server over TLS from anywhere, a generated workspace relocates with a plain `mv`, and clusters nest into larger clusters.
 
 ![version](https://img.shields.io/badge/version-v1.0.0--beta.1-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux-supported-lightgrey)
+![Onlyne — a supervisor dispatches a ten-hop ring task to five pi agents; ledger receipts settle every hop](assets/promo/onlyne-hero.png)
 
 ## See it run
 
