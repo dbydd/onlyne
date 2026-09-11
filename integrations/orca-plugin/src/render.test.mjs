@@ -22,8 +22,8 @@ function idleSession(overrides = {}) {
     task_id: "task-beta",
     role: "builder",
     session_id: "sess-beta",
-    public_lifecycle: "idle",
-    projection: { lifecycle: "idle", agent: "gone" },
+    lifecycle: "idle",
+    agent: "gone",
     ...overrides,
   });
 }
@@ -60,23 +60,81 @@ test("a populated board renders the root, its role sections, and the stray tabs"
       ],
     }),
     onlyne: fakeOnlyne({
-      sessions: { [ROOT_A]: [sessionRow(), idleSession()] },
+      // Every tab is on the axis because a session reports its pane — which is
+      // also why the disconnected `zsh` tab still shows: its pi reported from
+      // inside it before the tab went down.
+      sessions: {
+        [ROOT_A]: [
+          sessionRow(),
+          idleSession({ paneKey: "470e41ba-86b3-43b4-86c3-46c634619a07:31f6d4b1-7192-4e59-b90b-2e8962d72353" }),
+          sessionRow({
+            task_id: "task-gamma",
+            session_id: "sess-gamma",
+            lifecycle: "idle",
+            agent: "gone",
+            paneKey: "tab-3:leaf-3",
+          }),
+        ],
+      },
       roles: { [ROOT_A]: [roleRow(), roleRow({ name: "builder", state: "draining" })] },
     }),
     serverRoots: [ROOT_A],
   });
 
   const lines = formatBoard(board, { now: NOW }).split("\n");
-  assert.match(lines[0], /1 roots · 2 roles · 3 tabs \(2 live\) · 2 sessions \(1 working\)/);
-  assert.equal(lines[1], "/srv/onlyne-a  (2 roles · 2 sessions · 1 working)");
+  assert.match(lines[0], /1 roots · 2 roles · 3 tabs \(2 live\) · 3 sessions \(1 working\)/);
+  assert.equal(lines[1], "/srv/onlyne-a  (2 roles · 3 sessions · 1 working)");
   assert.equal(lines[2], "  builder  (draining · 1 tasks · 0 live)");
   assert.equal(lines[3], "    ○ task-bet · idle/gone · 无 tab · 9m · —");
-  assert.equal(lines[4], "  planner  (online · 1 tasks · 1 live)");
+  assert.equal(lines[4], "  planner  (online · 2 tasks · 1 live)");
   assert.equal(lines[5], "    ● task-alp · working/running · 12s · 45e603f7:b6d067b6");
-  assert.equal(lines[6], "未 join 的 tab (2)");
-  assert.equal(lines[7], "  ● tab · title=Pi ready · 5s · 470e41ba:31f6d4b1 · wt 53e59790");
-  assert.equal(lines[8], "  ○ tab · title=zsh · 3m · tab-3:leaf-3 · wt 2ea2fe23");
+  assert.equal(lines[6], "    ○ task-gam · idle/gone · 无 tab · 9m · —");
+  assert.equal(lines[7], "未 join 的 tab (2)");
+  assert.equal(lines[8], "  ● tab · title=Pi ready · 5s · 470e41ba:31f6d4b1 · wt 53e59790");
+  assert.equal(lines[9], "  ○ tab · title=zsh · 3m · tab-3:leaf-3 · wt 2ea2fe23");
   assert.ok(lines.every((line) => line.length <= BOARD_TEXT_LIMIT));
+});
+
+test("a cut tab axis is explained in its own line, and the dropped tab is not rendered", async () => {
+  const board = await collectBoard({
+    orca: fakeOrca({
+      tabs: [tabRow(), tabRow({ handle: "term_other", tabId: "tab-other", leafId: "leaf-other", title: "zsh" })],
+    }),
+    onlyne: fakeOnlyne({ sessions: { [ROOT_A]: [sessionRow()] } }),
+    serverRoots: [ROOT_A],
+  });
+  const text = formatBoard(board, { now: NOW });
+  const lines = text.split("\n");
+
+  assert.match(lines[0], /1 tabs \(1 live\) · 1 hidden/);
+  assert.equal(
+    lines[1],
+    "tab 轴：只列 1 个连着 adapter 的 pi pane（session 上报的 host.orca.pane_key），其余 1 个 tab 不计入"
+  );
+  assert.equal(lines[2], "/srv/onlyne-a  (1 roles · 1 sessions · 1 working)");
+  assert.equal(/zsh/.test(text), false, "a hidden tab is counted, never rendered");
+});
+
+test("a board with tabs but no reported pane explains the cut instead of denying the tabs", async () => {
+  // The live case the smoke run walks into: Orca lists tabs, no session has
+  // reported a pane yet, and no root is configured. The board must not claim
+  // there is no Orca tab — there plainly are three.
+  const board = await collectBoard({
+    orca: fakeOrca({
+      tabs: [
+        tabRow({ title: "zsh" }),
+        tabRow({ handle: "term_2", tabId: "tab-2", leafId: "leaf-2", title: "zsh" }),
+        tabRow({ handle: "term_3", tabId: "tab-3", leafId: "leaf-3", title: "zsh" }),
+      ],
+    }),
+    onlyne: fakeOnlyne(),
+    serverRoots: [],
+  });
+  const text = formatBoard(board, { now: NOW });
+
+  assert.equal(text.includes(EMPTY_BOARD_NOTE), false);
+  assert.match(text, /0 tabs \(0 live\) · 3 hidden/);
+  assert.match(text, /等 pi-onlyne 连上/);
 });
 
 test("an unreachable root renders its own failure without blanking the board", async () => {

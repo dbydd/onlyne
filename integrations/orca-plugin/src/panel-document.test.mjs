@@ -28,21 +28,11 @@ import { committedText, fakeOnlyne, fakeOrca, roleRow, sessionRow, tabRow } from
 
 const ROOT = "/srv/cluster";
 
-async function boardFixture({
-  tabs = [tabRow()],
-  sessions = [sessionRow()],
-  roles = [roleRow()],
-  failures = {},
-  roots = [ROOT],
-  tabFailure = null,
-  claims = null,
-  unpublished = []
-} = {}) {
+async function boardFixture({ tabs = [tabRow()], sessions = [sessionRow()], roles = [roleRow()], failures = {}, roots = [ROOT], tabFailure = null } = {}) {
   return collectBoard({
     orca: fakeOrca({ tabs, tabFailure }),
     onlyne: fakeOnlyne({ sessions: { [ROOT]: sessions }, roles: { [ROOT]: roles }, failures }),
     serverRoots: roots,
-    readClaims: claims || unpublished.length ? () => ({ claims: claims ?? [], unpublished }) : undefined
   });
 }
 
@@ -56,12 +46,18 @@ function embeddedPayload(html) {
 
 test("the document shows the summary, the role groups and the stray tabs", async () => {
   const board = await boardFixture({
-    tabs: [tabRow(), tabRow({ handle: "term_orphan", title: "Pi ready", connected: false })],
+    tabs: [
+      tabRow(),
+      tabRow({ handle: "term_orphan", tabId: "tab-orphan", leafId: "leaf-orphan", title: "Pi ready", connected: false }),
+    ],
     sessions: [
       sessionRow({ task_id: "task-alpha", updated_at: "1789093578" }),
-      sessionRow({ task_id: "task-orphan", public_lifecycle: "exited", projection: {} })
+      // A session that runs in the second tab but carries a title that does not
+      // name its task: the tab is on the axis (its pane is reported) and, having
+      // joined nothing, renders as a stray.
+      sessionRow({ task_id: "task-orphan", session_id: "sess-orphan", lifecycle: "idle", agent: "gone", paneKey: "tab-orphan:leaf-orphan" }),
     ],
-    roles: [roleRow({ name: "planner" }), roleRow({ name: "reviewer", state: "offline", sessions: 0 })]
+    roles: [roleRow({ name: "planner" }), roleRow({ name: "reviewer", state: "offline", sessions: 0 })],
   });
   const html = renderPanelDocument(board, { generatedAt: 1_789_000_000_000 });
 
@@ -82,57 +78,24 @@ test("the document shows the summary, the role groups and the stray tabs", async
 
 test("the document says what the tab axis was scoped to", async () => {
   const board = await boardFixture({
-    tabs: [tabRow(), tabRow({ handle: "term_other", worktreePath: "/repo/elsewhere" })],
+    tabs: [tabRow(), tabRow({ handle: "term_other", tabId: "tab-other", leafId: "leaf-other" })],
     roles: [roleRow()],
     sessions: [sessionRow()],
-    // The fixture's tabs live in `/repo/other-swarm`, so a root inside it scopes
-    // the axis; the second tab stays outside and is only counted.
-    roots: ["/repo/other-swarm/cluster"]
   });
   const html = renderPanelDocument(board, { generatedAt: 1 });
 
   assert.match(html, /1 hidden/);
-  assert.match(html, /只列 <code>\/repo\/other-swarm<\/code> 里的 tab/);
+  assert.match(html, /只列 1 个连着 adapter 的 pi pane/);
   assert.match(html, /其余 1 个 tab 不计入/);
 
-  // A root outside every worktree cannot scope anything; the board says so and
-  // lists everything rather than rendering empty. (`hiddenTabs` stays in the
-  // payload, so assert on the rendered summary, not on the whole document.)
-  const outside = await boardFixture({ roots: ["/srv/elsewhere"] });
-  const unscoped = renderPanelDocument(outside, { generatedAt: 1 });
-  assert.match(unscoped, /pi 插件还没申报 pane/);
-  assert.equal(summaryLine(outside).includes("hidden"), false);
-  assert.equal(outside.summary.hiddenTabs, 0);
-});
-
-test("a configured workspace that published nothing is named in the note", async () => {
-  const PANE = "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560";
-
-  // A claim arrived from one workspace, and another was configured but silent:
-  // the board keeps working and names the silent one, so a typo in a
-  // hand-written `piWorkspaces` list cannot hide as a swarm that has not booted.
-  const partial = await boardFixture({
-    tabs: [tabRow({ paneKey: PANE, worktreePath: "/repo/other-swarm" })],
-    roots: ["/repo/other-swarm/cluster"],
-    claims: [{ paneKey: PANE, workspace: "/srv/swarm/planner" }],
-    unpublished: ["/srv/swarm/builder"]
-  });
-  const scoped = renderPanelDocument(partial, { generatedAt: 1 });
-  assert.match(scoped, /只列 pi 插件申报的 1 个 pane/);
-  assert.match(scoped, /另有 1 个 workspace 没读到 pane 申报：<code>\/srv\/swarm\/builder<\/code>/);
-
-  // Nothing published at all, and no worktree to fall back on: the note is the
-  // only thing standing between the operator and "the filter is broken".
-  const silent = await boardFixture({ roots: ["/srv/elsewhere"], unpublished: ["/srv/swarm/planner"] });
-  const unscoped = renderPanelDocument(silent, { generatedAt: 1 });
-  assert.match(unscoped, /配置的 1 个 workspace 都没读到 pane 申报（<code>\/srv\/swarm\/planner<\/code>）/);
-  assert.match(unscoped, /列出全部 tab/);
-
-  // Publishing is a change the panel must show even when no count moves: the
-  // note mentions the workspace, so the fingerprint has to follow it.
-  const before = await boardFixture({ roots: ["/srv/elsewhere"] });
-  assert.equal(summaryLine(before), summaryLine(silent), "the counts are identical");
-  assert.notEqual(panelFingerprint(before), panelFingerprint(silent));
+  // Nothing has reported a pane: the axis is empty and the document names what
+  // it is waiting for, instead of looking like a filter that broke.
+  const silent = await boardFixture({ sessions: [sessionRow({ paneKey: null })] });
+  const waiting = renderPanelDocument(silent, { generatedAt: 1 });
+  assert.match(waiting, /等 pi-onlyne 连上/);
+  assert.match(waiting, /1 个 tab 全部不计入/);
+  assert.equal(summaryLine(silent).includes("hidden"), true);
+  assert.equal(silent.summary.hiddenTabs, 1);
 });
 
 test("the session age uses the epoch seconds the admin rows carry", async () => {
@@ -203,23 +166,13 @@ test("the fingerprint follows structure and state, not the clock", async () => {
   assert.notEqual(panelFingerprint(board), panelFingerprint(appeared));
 
   const working = await boardFixture();
-  const exited = await boardFixture({
-    sessions: [sessionRow({ public_lifecycle: "exited", projection: { lifecycle: "exited", outcome: "done" } })]
-  });
+  const exited = await boardFixture({ sessions: [sessionRow({ lifecycle: "exited", agent: "gone" })] });
   assert.notEqual(panelFingerprint(working), panelFingerprint(exited));
 
   const broken = await boardFixture({
     failures: { [ROOT]: { ok: false, code: "cli_error", message: "no socket" } }
   });
   assert.notEqual(panelFingerprint(board), panelFingerprint(broken));
-
-  // A scope that changes source re-renders the note even when the counts and
-  // the rows it filters to are identical, so the fingerprint must follow it.
-  const unclaimed = await boardFixture();
-  const claimed = await boardFixture({ claims: [{ paneKey: unclaimed.tabs[0].paneKey }] });
-  assert.equal(claimed.scope.source, "adapter");
-  assert.deepEqual(claimed.summary, unclaimed.summary, "the two boards render the same counts");
-  assert.notEqual(panelFingerprint(unclaimed), panelFingerprint(claimed));
 });
 
 test("only a mutable dev tree is a write target", () => {

@@ -213,18 +213,6 @@ export function normalizePathList(value) {
   return paths;
 }
 
-/**
- * `piWorkspaces` names the onlyne workspaces whose pi adapters may publish a
- * pane claim under `<workspace>/.onlyne/cache/pi-panes/` (one file per pane,
- * §2 axis A). It is a separate list from `serverRoots` because the two are
- * different directories:
- * a workspace is where the operator runs `onlyne client run` (and where Orca
- * hosts the pane), and it is the client — not the server root — that owns that
- * path. Absent or empty is a normal state: the board then scopes its tab axis
- * by the worktree heuristic alone.
- */
-export const normalizePiWorkspaces = normalizePathList;
-
 /** `serverRoots` names the onlyne server roots the board mirrors (one admin
  * socket `<root>/.onlyne/run/s` each). Absent, empty or malformed is a normal
  * state: the board then has no session axis and renders flat Orca tabs only. */
@@ -262,7 +250,6 @@ export function resolveBinaries({
     onlyneBin,
     binDir,
     serverRoots: normalizeServerRoots(config.serverRoots),
-    piWorkspaces: normalizePiWorkspaces(config.piWorkspaces),
     configPath: path,
     configLoaded: loaded,
     configError: error ?? null,

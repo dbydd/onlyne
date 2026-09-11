@@ -18,6 +18,26 @@
 //     reported as `cli_surface_mismatch` so the caller can name the binary.
 // `--json` is accepted for legibility; every verb already prints JSON.
 
+/**
+ * The Orca pane a session's own process reported, or null when it said nothing.
+ *
+ * The binding rides the session's observation (`crates/onlyne-session/src/host.rs`)
+ * and reaches this surface inside `projection.observed`, so a row carrying
+ * `host.orca.pane_key` is a row whose process stated, from the inside, where it
+ * runs. A row without one names no pane: the board lists no tab for it.
+ */
+export function hostOf(observed) {
+  const orca = observed && typeof observed === "object" ? observed.host?.orca : null;
+  const paneKey = typeof orca?.pane_key === "string" && orca.pane_key ? orca.pane_key : null;
+  if (!paneKey) return null;
+  return {
+    paneKey,
+    tabId: typeof orca.tab_id === "string" ? orca.tab_id : null,
+    leafId: typeof orca.leaf_id === "string" ? orca.leaf_id : null,
+    handle: typeof orca.handle === "string" ? orca.handle : null,
+  };
+}
+
 export function normalizeSessionRow(row) {
   if (!row || typeof row !== "object") return null;
   const taskId = typeof row.task_id === "string" && row.task_id ? row.task_id : null;
@@ -40,6 +60,7 @@ export function normalizeSessionRow(row) {
       typeof row.outcome === "string" ? row.outcome : typeof projection.outcome === "string" ? projection.outcome : null,
     updatedAt: typeof row.updated_at === "string" ? row.updated_at : null,
     seq: typeof row.seq === "number" ? row.seq : null,
+    host: hostOf(projection.observed),
   };
 }
 

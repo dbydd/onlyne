@@ -1,11 +1,13 @@
 // The supervisor board: two independent axes, joined only where a title says so.
 //
-// Axis A — Orca tabs. One flat `orca terminal list --json` call, then scoped to
-// the swarm: in the Orca scenario one worktree holds one onlyne server, so a tab
-// belongs to this board only when its `worktreePath` contains one of the
-// configured server roots. Everything else in Orca — other repositories, other
-// agents, an unrelated pi in another worktree — is somebody else's tab and is
-// counted, not listed.
+// Axis A — Orca tabs. One flat `orca terminal list --json` call, then cut down
+// to the panes a connected session says it runs in. A session's own process
+// reports the pane it was spawned in over the adapter protocol
+// (`observed.host.orca.pane_key`, `crates/onlyne-session/src/host.rs`), and that
+// report is the whole authority: this board reads no cache file and derives no
+// scope from a worktree, so a tab of another worktree, another tool or another
+// agent can never be listed. Nothing connected means an empty tab axis, never a
+// permissive one.
 //
 // Axis B — onlyne admin. For each configured server root, `sessions` supplies
 // the task rows and `roles` the role skeleton. Authority for session identity
@@ -20,178 +22,57 @@
 // a standalone tab row; a task with no tab stays an unjoined task row.
 //
 // Every absence degrades instead of failing: a failed tab list, an unreachable
-// root, a CLI that does not know the verb, and a scope that cannot be derived
-// (a server root outside every Orca worktree keeps the unscoped list rather than
-// rendering an empty board). Nothing here throws and nothing here writes.
-
-import { realpathSync } from "node:fs";
-import { resolve, sep } from "node:path";
+// root, and a CLI that does not know the verb each report themselves, and a
+// session that reports no pane simply does not scope one. Nothing here throws
+// and nothing here writes.
 
 export const UNKNOWN_ROLE = "(unknown role)";
 export const TITLE_PREFIX = "onlyne:";
 
-/** Best-effort canonical path: Orca reports canonical worktree paths. */
-function canonical(path, realpath) {
-  try {
-    return realpath(path);
-  } catch {
-    return resolve(path);
-  }
-}
-
-/** Boundary-aware containment: `/a/b` is inside `/a`, never inside `/ab`. */
-function isInside(parent, child) {
-  if (parent === child) return true;
-  const prefix = parent.endsWith(sep) ? parent : `${parent}${sep}`;
-  return child.startsWith(prefix);
-}
-
 /**
- * Restrict the tab axis to the swarm.
+ * Restrict the tab axis to the connected pi panes.
  *
- * One worktree per server is the Orca assumption this rests on: a session tab
- * lands in the worktree its supervisor's tab runs in, so the tabs of a swarm
- * are exactly the tabs of the worktrees its server roots live in. A tab whose
- * worktree contains no configured server root is another swarm's (or another
- * tool's) tab and is hidden — listed only in the hidden count.
+ * A pane key is `<tab_id>:<leaf_id>` on both sides — Orca's own `terminal list`
+ * spelling and the key a session reports — so the cut is a set intersection and
+ * nothing else. Every tab left out is somebody else's: another worktree's pi,
+ * another tool's terminal, or a pane whose pi has not reported in.
  *
- * When no tab carries any configured root's worktree, the scope cannot be
- * derived (the server root may live outside Orca entirely, as in the e2e
- * harness), and hiding everything would read as a broken board: the unscoped
- * list is kept and `derived` says so.
+ * Nothing bound is a real answer, not a failure: the tab axis is then empty and
+ * `source: "none"` says the board is waiting for pi rather than misconfigured.
  *
- * @returns {{tabs: Array, scope: {derived: boolean, worktrees: string[], hidden: number}}}
+ * @param {Array} tabs rows from `orca terminal list`, normalized
+ * @param {Iterable<string>} boundPanes pane keys of live, reporting sessions
+ * @returns {{tabs: Array, scope: {source: "connected"|"none", panes: number, hidden: number}}}
  */
-export function scopeTabs(tabs, serverRoots, { realpath = realpathSync } = {}) {
-  const roots = (serverRoots ?? []).map((root) => canonical(String(root), realpath));
-  if (!roots.length) {
-    return { tabs, scope: { derived: false, source: "none", worktrees: [], hidden: 0 } };
-  }
-  const kept = [];
-  const worktrees = new Set();
-  for (const tab of tabs) {
-    const path = typeof tab.worktreePath === "string" && tab.worktreePath
-      ? canonical(tab.worktreePath, realpath)
-      : null;
-    const owner = path ? roots.find((root) => isInside(path, root)) : undefined;
-    if (!owner) continue;
-    worktrees.add(path);
-    kept.push(tab);
-  }
-  if (!kept.length) {
-    return { tabs, scope: { derived: false, source: "none", worktrees: [], hidden: 0 } };
-  }
+export function scopeTabs(tabs, boundPanes) {
+  const bound = new Set(boundPanes ?? []);
+  const kept = tabs.filter((tab) => tab.paneKey && bound.has(tab.paneKey));
   return {
     tabs: kept,
     scope: {
-      derived: true,
-      source: "worktree",
-      worktrees: [...worktrees].sort(),
+      source: kept.length ? "connected" : "none",
+      panes: kept.length,
       hidden: tabs.length - kept.length,
     },
   };
 }
 
 /**
- * Where the pi adapter publishes the pane it mounted in, inside its own
- * workspace: one file per pane under `<workspace>/.onlyne/cache/pi-panes/`. The
- * pi plugin inherits `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_TERMINAL_HANDLE` /
- * `ORCA_WORKTREE_ID` from the Orca tab it was spawned in (measured 2026-09-11 on
- * 1.4.198: an `orca terminal create --command …` pane exports all four), so it
- * is the one component that knows — from the inside — which Orca pane is an
- * onlyne session. That is the authority; the worktree heuristic in `scopeTabs`
- * is the fallback for a swarm whose pi processes have not published anything
- * yet.
+ * The Orca pane a live session says it runs in, or null.
  *
- * One file per pane, plural, because one workspace runs N of them: the client
- * admits one client per workspace
- * (`onlyne: client already running with pid {pid}`,
- * crates/onlyne-client/src/daemon.rs), but one role slot of it runs up to
- * `max_sessions` sessions, each in its own Orca pane and its own pi process
- * (crates/onlyne-client/src/dispatch.rs; the Orca backend issues one
- * `orca terminal create` per session). Each of those processes writes only its
- * own file, so a pane mounting late cannot erase a pane still running.
- */
-export const PANE_CLAIMS_RELATIVE_DIR = ".onlyne/cache/pi-panes";
-
-/**
- * The pre-v1 layout: one claim file for the whole workspace, the single pane
- * the workspace was assumed to have. The reader still folds it in, because a pi
- * process that was already running when the reader was upgraded keeps writing
- * it, and ignoring it would hide a live pane. Nothing writes it any more.
- */
-export const PANE_CLAIM_RELATIVE_PATH = ".onlyne/cache/pi-pane.json";
-
-/**
- * The pane identity a claim carries, or null for a malformed/closed claim.
+ * "Live" is the projection's own verdict — anything but `public_lifecycle:
+ * exited`, which the reducer derives from `agent: gone` and from a settled
+ * completion. It is deliberately the only liveness this board judges by: the
+ * client's reconcile loop is what turns a dead pane into `exited`
+ * (`crates/onlyne-session/src/reconcile.rs`), and a second opinion here would
+ * be a second source of truth about one fact.
  *
- * `updatedAt` orders two claims that name the same pane: the RFC 3339 stamp the
- * publisher wrote, or — for a claim written before the stamp existed — the
- * caller's file mtime, so a legacy file is still comparable. Null when neither
- * is available.
- *
- * @param {string} text
- * @param {{ mtime?: number | null }} [options] the file's own mtime, in ms
+ * @param {{lifecycle?: string|null, host?: {paneKey?: string|null}|null}} session
  */
-export function readPaneClaim(text, { mtime = null } = {}) {
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object") return null;
-  const paneKey = typeof parsed.pane_key === "string" && parsed.pane_key ? parsed.pane_key : null;
-  if (!paneKey) return null;
-  const stamped =
-    typeof parsed.updated_at === "string" && Number.isFinite(Date.parse(parsed.updated_at))
-      ? Date.parse(parsed.updated_at)
-      : null;
-  return {
-    paneKey,
-    tabId: typeof parsed.tab_id === "string" ? parsed.tab_id : null,
-    leafId: typeof parsed.leaf_id === "string" ? parsed.leaf_id : null,
-    handle: typeof parsed.handle === "string" ? parsed.handle : null,
-    worktreeId: typeof parsed.worktree_id === "string" ? parsed.worktree_id : null,
-    role: typeof parsed.role === "string" ? parsed.role : null,
-    taskId: typeof parsed.task_id === "string" ? parsed.task_id : null,
-    updatedAt: stamped ?? (typeof mtime === "number" ? mtime : null),
-  };
-}
-
-/**
- * How recent a claim is, as a comparable number. `-Infinity` for a claim that
- * carries no time at all: undated loses to dated, whichever order they arrive.
- */
-export function claimRecency(claim) {
-  return typeof claim?.updatedAt === "number" ? claim.updatedAt : -Infinity;
-}
-
-/**
- * Scope the tab axis by adapter claims when any exist, else by worktree.
- *
- * Authority order, and why: the pi adapter publishes the pane it lives in, so a
- * claimed pane is an onlyne session by construction. The worktree heuristic
- * cannot tell one swarm's pi from another process in the same worktree, so it
- * only applies while no claim has been published — a board that drops the whole
- * tab axis because a swarm is still booting would be worse than a permissive
- * one.
- */
-export function scopeByClaims(tabs, claims) {
-  if (!claims.length) return null;
-  const claimed = new Set(claims.map((claim) => claim.paneKey));
-  const kept = tabs.filter((tab) => tab.paneKey && claimed.has(tab.paneKey));
-  const worktrees = [...new Set(kept.map((tab) => tab.worktreePath).filter(Boolean))].sort();
-  return {
-    tabs: kept,
-    scope: {
-      derived: true,
-      source: "adapter",
-      worktrees,
-      hidden: tabs.length - kept.length,
-      claimed: claimed.size,
-    },
-  };
+export function livePaneOf(session) {
+  if (!session?.host?.paneKey) return null;
+  if (session.lifecycle === "exited") return null;
+  return session.host.paneKey;
 }
 
 /** `onlyne:<task_id>` -> `<task_id>`; any other title -> null. */
@@ -320,47 +201,35 @@ export function summarize({ roots, tabs, allTabs = tabs, rows, strayTabs }) {
 }
 
 /**
+ * Read both axes and return the board.
+ *
+ * Axis B runs first: the tab axis is scoped by what the sessions say, so the
+ * session axis has to be read before any tab can be kept or hidden.
+ *
  * @param {object} options
  * @param {object} options.orca    createOrcaCli()
  * @param {object} options.onlyne  createOnlyneCli()
  * @param {string[]} [options.serverRoots] configured roots, in config order
- * @param {Function} [options.readClaims] returns `{claims, unpublished}` — the
- *   pi adapters' pane claims and the configured workspaces that produced none
- *   (`claims.mjs`); absent means none at all, which leaves the worktree
- *   heuristic in charge of the tab axis
  * @param {Function} [options.now]
  * @returns {Promise<object>} the board; `ok` tracks the tab axis only, so an
  *   unreachable root still leaves `ok:true` with its own entry in `errors`.
  */
-export async function collectBoard({
-  orca,
-  onlyne,
-  serverRoots = [],
-  readClaims,
-  now = () => Date.now(),
-} = {}) {
+export async function collectBoard({ orca, onlyne, serverRoots = [], now = () => Date.now() } = {}) {
   const scannedAt = now();
   const errors = [];
 
-  // Axis A: every tab of every worktree, flat, in Orca's own order — then cut
-  // down to the panes the swarm's own adapters claim, or, with nothing claimed,
-  // to the worktrees this board's server roots live in.
+  // Axis A: every tab of every worktree, flat, in Orca's own order.
   const tabsScan = await orca.listTerminals();
   const allTabs = tabsScan.ok ? tabsScan.rows : [];
   if (!tabsScan.ok) {
     errors.push({ scope: "orca", axis: "tabs", code: tabsScan.code, message: tabsScan.message });
   }
-  const claimRead = (readClaims ?? (() => ({ claims: [], unpublished: [] })))();
-  const claims = claimRead.claims ?? [];
-  const { tabs, scope } = scopeByClaims(allTabs, claims) ?? scopeTabs(allTabs, serverRoots);
 
-  const tabsByTask = indexTabsByTask(tabs);
-  const claimed = new Set();
-  const roots = [];
-
+  // Axis B: one `sessions` + `roles` pair per root. The panes the live sessions
+  // report are the scope of the tab axis, so this read comes before the cut.
+  const bound = new Set();
+  const scans = [];
   for (const root of serverRoots) {
-    // Axis B for this root: independent calls, so one failing verb still
-    // reports what the other one answered.
     const [sessionsScan, rolesScan] = await Promise.all([
       onlyne.querySessions(root),
       onlyne.queryRoles(root),
@@ -375,41 +244,53 @@ export async function collectBoard({
       failures.push(failure);
       errors.push(failure);
     }
+    const sessions = sessionsScan.ok ? sessionsScan.sessions : [];
+    for (const session of sessions) {
+      const paneKey = livePaneOf(session);
+      if (paneKey) bound.add(paneKey);
+    }
+    scans.push({ root, sessionsScan, rolesScan, failures, sessions });
+  }
 
+  const { tabs, scope } = scopeTabs(allTabs, bound);
+
+  // The join: title -> task, over the tabs that survived the cut.
+  const tabsByTask = indexTabsByTask(tabs);
+  const claimed = new Set();
+  const roots = [];
+  for (const entry of scans) {
+    const roles = entry.rolesScan.ok ? entry.rolesScan.roles : [];
     const groups = new Map();
-    if (rolesScan.ok) {
-      for (const role of rolesScan.roles) {
-        groups.set(role.role, { role: role.role, presence: role, rows: [] });
-      }
+    for (const role of roles) {
+      groups.set(role.role, { role: role.role, presence: role, rows: [] });
     }
     let sessionsWorking = 0;
-    if (sessionsScan.ok) {
-      for (const session of sessionsScan.sessions) {
-        const role = session.role ?? UNKNOWN_ROLE;
-        let group = groups.get(role);
-        if (!group) {
-          group = { role, presence: null, rows: [] };
-          groups.set(role, group);
-        }
-        const row = taskRow({ root, role, session, tab: claimTab(tabsByTask, claimed, session.taskId) });
-        if (isWorking(row)) sessionsWorking += 1;
-        group.rows.push(row);
+    for (const session of entry.sessions) {
+      const role = session.role ?? UNKNOWN_ROLE;
+      let group = groups.get(role);
+      if (!group) {
+        group = { role, presence: null, rows: [] };
+        groups.set(role, group);
       }
+      const row = taskRow({
+        root: entry.root,
+        role,
+        session,
+        tab: claimTab(tabsByTask, claimed, session.taskId),
+      });
+      if (isWorking(row)) sessionsWorking += 1;
+      group.rows.push(row);
     }
 
     const sections = sortedGroups(groups);
     roots.push({
-      root,
-      sessionsScan: scanView(sessionsScan, "sessions"),
-      rolesScan: scanView(rolesScan, "roles"),
-      roles: rolesScan.ok ? rolesScan.roles : [],
-      failures,
+      root: entry.root,
+      sessionsScan: scanView(entry.sessionsScan, "sessions"),
+      rolesScan: scanView(entry.rolesScan, "roles"),
+      roles,
+      failures: entry.failures,
       groups: sections,
-      summary: {
-        roles: sections.length,
-        sessions: sessionsScan.ok ? sessionsScan.sessions.length : 0,
-        sessionsWorking,
-      },
+      summary: { roles: sections.length, sessions: entry.sessions.length, sessionsWorking },
     });
   }
 
@@ -420,7 +301,6 @@ export async function collectBoard({
   ];
 
   return {
-    claims: { published: claims.length, unpublished: claimRead.unpublished ?? [] },
     scannedAt,
     ok: tabsScan.ok,
     errors,

@@ -25,6 +25,26 @@ export function summaryLine(board) {
   );
 }
 
+/**
+ * One line saying what the tab axis was cut down to. Filtering is invisible
+ * otherwise, and a board that silently drops tabs is worse than a noisy one.
+ * The panel document renders this same sentence, so the text a supervisor reads
+ * in a notification and the text in the panel cannot disagree.
+ */
+export function scopeSummary(scope) {
+  const hidden = scope?.hidden ?? 0;
+  if (scope?.source !== "connected") {
+    return (
+      "tab 轴：等 pi-onlyne 连上——没有任何 live session 报告它所在的 Orca pane，" +
+      `${hidden} 个 tab 全部不计入`
+    );
+  }
+  return (
+    `tab 轴：只列 ${scope.panes ?? 0} 个连着 adapter 的 pi pane` +
+    `（session 上报的 host.orca.pane_key），其余 ${hidden} 个 tab 不计入`
+  );
+}
+
 /** Epoch ms, epoch seconds (the admin rows' string `updated_at`), or RFC3339. */
 export function toEpochMs(value) {
   if (typeof value === "number") return value < 1e11 ? value * 1000 : value;
@@ -125,6 +145,11 @@ function groupHeadline(group) {
  */
 export function formatBoard(board, { now = Date.now(), limit = BOARD_TEXT_LIMIT } = {}) {
   const lines = [summaryLine(board)];
+  // The scope line exists to make a cut visible; with nothing hidden there was
+  // no cut to explain, and the empty board's own note already says what is
+  // missing.
+  const scope = board?.scope;
+  if (scope && scope.hidden > 0) lines.push(scopeSummary(scope));
   const roots = board?.roots ?? [];
   const stray = board?.strayTabs ?? [];
 
@@ -142,7 +167,10 @@ export function formatBoard(board, { now = Date.now(), limit = BOARD_TEXT_LIMIT 
       for (const row of group.rows) lines.push(`    ${rowLine(row, now)}`);
     }
   }
-  if (!roots.length && !stray.length) lines.push(EMPTY_BOARD_NOTE);
+  // The note is for a board with nothing on either axis: no root and no tab
+  // Orca knows about. Tabs that exist but carry no session's pane are explained
+  // by the scope line instead — claiming "no Orca tab" there would be a lie.
+  if (!roots.length && !stray.length && !(board?.totalTabs ?? 0)) lines.push(EMPTY_BOARD_NOTE);
   if (stray.length) {
     lines.push(`未 join 的 tab (${stray.length})`);
     for (const row of stray) lines.push(`  ${rowLine(row, now)}`);

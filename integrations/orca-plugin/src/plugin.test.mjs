@@ -64,7 +64,19 @@ function fakeBinaries(record) {
       return { stdout: JSON.stringify({ id: "x", ok: true, result: { terminals } }), stderr: "" };
     }
     if (args.includes("sessions")) {
-      return { stdout: JSON.stringify({ ok: true, data: { sessions: [] } }), stderr: "" };
+      // The pane the tab row above really is: the board scopes its tab axis to
+      // what a session reports from inside, so an empty answer would leave the
+      // tab list empty rather than listing the tab.
+      const sessions = [
+        {
+          task_id: "task-1",
+          role: "planner",
+          session_id: "sess-1",
+          public_lifecycle: "working",
+          projection: { lifecycle: "working", agent: "running", observed: { host: { orca: { pane_key: "t1:l1" } } } },
+        },
+      ];
+      return { stdout: JSON.stringify({ ok: true, data: { sessions } }), stderr: "" };
     }
     if (args.includes("roles")) {
       return { stdout: JSON.stringify({ ok: true, data: { roles: [] } }), stderr: "" };

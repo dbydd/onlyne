@@ -2,16 +2,15 @@
 // explicit `terminal switch` the user triggers from a command).
 //
 //    orca terminal list --json                       -> {result:{terminals:[…]}}
-//    orca terminal switch --terminal <handle> --json -> focus that tab in the UI
-//    orca status --json                              -> app/runtime readiness
-//
+
 // Measured on Orca 1.4.198: `terminal list` without `--worktree` answers every
 // tab of every worktree in one flat list — handle, tabId, leafId, title,
 // connected, writable, lastOutputAt, worktreeId. The plugin never asks per
-// worktree: the backend no longer registers one worktree per role, so the
-// supervisor's own worktree list is the whole tab axis. A row carries no
-// `paneKey` on this build (newer builds may), so paneKey is derived as
-// `${tabId}:${leafId}` — the spelling the tooling elsewhere uses for a pane.
+// worktree: the backend no longer registers one worktree per role, so this one
+// call is the whole tab axis, and `board.mjs` cuts it down to the panes the
+// live sessions report. A row carries no `paneKey` on this build (newer builds
+// may), so paneKey is derived as `${tabId}:${leafId}` — the spelling the
+// tooling elsewhere uses for a pane.
 
 export function paneKeyOf(row) {
   if (!row || typeof row !== "object") return null;
@@ -35,9 +34,8 @@ export function normalizeTerminalRow(row) {
     writable: row.writable === true,
     lastOutputAt: typeof row.lastOutputAt === "number" ? row.lastOutputAt : null,
     worktreeId: typeof row.worktreeId === "string" ? row.worktreeId : null,
-    // The absolute worktree directory: the only field that says which swarm a
-    // tab belongs to, since every session tab of one swarm shares a worktree.
-    worktreePath: typeof row.worktreePath === "string" ? row.worktreePath : null,
+    // The absolute worktree directory. The board keeps it as addressing
+    // information for the supervisor; it is no longer what decides scope.
   };
 }
 

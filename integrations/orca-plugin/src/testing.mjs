@@ -31,17 +31,26 @@ export function committedText(relativePath, { exec = execFileSync } = {}) {
   }
 }
 
+const TAB_ID = "45e603f7-0772-48aa-bcf6-832272747713";
+const LEAF_ID = "b6d067b6-9255-4f5c-a13f-24f194ea0560";
+
 /**
- * One `orca terminal list` row as Orca 1.4.198 prints it. `worktreePath` is the
- * absolute worktree directory, which is what the scope filter matches against:
- * it deliberately sits outside the `/srv/...` roots the board fixtures use, so
- * a suite that does not care about scoping keeps the unscoped list.
+ * The pane key Orca reports for the default `tabRow()` — `<tabId>:<leafId>`.
+ * It is the same spelling a session reports over the protocol, which is what
+ * makes the two sides comparable as a plain set intersection.
+ */
+export const PANE_KEY = `${TAB_ID}:${LEAF_ID}`;
+
+/**
+ * One `orca terminal list` row as Orca 1.4.198 prints it. `worktreePath` is
+ * carried as information only: the tab axis is scoped by the pane a session
+ * reports, never by a worktree.
  */
 export function tabRow(overrides = {}) {
   return {
     handle: "term_11111111-1111-4111-8111-111111111111",
-    tabId: "45e603f7-0772-48aa-bcf6-832272747713",
-    leafId: "b6d067b6-9255-4f5c-a13f-24f194ea0560",
+    tabId: TAB_ID,
+    leafId: LEAF_ID,
     title: "onlyne:task-alpha",
     connected: true,
     writable: true,
@@ -52,14 +61,29 @@ export function tabRow(overrides = {}) {
   };
 }
 
-/** One `sessions` answer row (the shape crates/onlyne-proto defines). */
-export function sessionRow(overrides = {}) {
+/**
+ * One `sessions` answer row (the shape crates/onlyne-proto defines).
+ *
+ * `paneKey` is the Orca pane the session's own process reports over the
+ * protocol (`projection.observed.host.orca.pane_key`). It defaults to the
+ * default `tabRow()`'s pane, so a fixture that does not care about scoping
+ * keeps its tab on the board's tab axis; pass `paneKey: null` for a session
+ * that reported none, or another key for one that runs somewhere else.
+ */
+export function sessionRow({ paneKey = PANE_KEY, lifecycle = "working", agent = "running", ...overrides } = {}) {
+  const projection = {
+    lifecycle,
+    agent,
+    delivery: "accepted",
+    resource: "attached",
+    ...(paneKey ? { observed: { host: { orca: { pane_key: paneKey } } } } : {}),
+  };
   return {
     task_id: "task-alpha",
     role: "planner",
     session_id: "sess-alpha",
-    public_lifecycle: "working",
-    projection: { lifecycle: "working", agent: "running", delivery: "accepted", resource: "attached" },
+    public_lifecycle: lifecycle,
+    projection,
     updated_at: "2026-09-11T00:01:00Z",
     ...overrides,
   };

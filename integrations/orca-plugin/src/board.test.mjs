@@ -8,7 +8,8 @@ import {
   scopeTabs,
   taskIdFromTitle,
 } from "./board.mjs";
-import { fakeOnlyne, fakeOrca, roleRow, sessionRow, tabRow } from "./testing.mjs";
+import { normalizeTerminalRow } from "./orca-cli.mjs";
+import { PANE_KEY, fakeOnlyne, fakeOrca, roleRow, sessionRow, tabRow } from "./testing.mjs";
 
 const ROOT_A = "/srv/onlyne-a";
 const ROOT_B = "/srv/onlyne-b";
@@ -72,7 +73,9 @@ test("the title join is exact: an extra word steals nothing", async () => {
         }),
       ],
     }),
-    onlyne: fakeOnlyne({ sessions: { [ROOT_A]: [sessionRow()] } }),
+    onlyne: fakeOnlyne({
+      sessions: { [ROOT_A]: [sessionRow({ paneKey: "aaaa1111-1111-4111-8111-111111111111:bbbb2222-2222-4222-8222-222222222222" })] },
+    }),
     serverRoots: [ROOT_A],
   });
 
@@ -100,7 +103,16 @@ test("a tab that joins no session renders as its own row", async () => {
         }),
       ],
     }),
-    onlyne: fakeOnlyne({ sessions: { [ROOT_A]: [sessionRow({ task_id: "task-beta" })] } }),
+    onlyne: fakeOnlyne({
+      sessions: {
+        [ROOT_A]: [
+          sessionRow({
+            task_id: "task-beta",
+            paneKey: "470e41ba-86b3-43b4-86c3-46c634619a07:31f6d4b1-7192-4e59-b90b-2e8962d72353",
+          }),
+        ],
+      },
+    }),
     serverRoots: [ROOT_A],
   });
 
@@ -124,7 +136,11 @@ test("two tabs carrying one title: the first joins, the second stays standalone"
         tabRow({ handle: "term_22222222-2222-4222-8222-222222222222", tabId: "tab-2", leafId: "leaf-2" }),
       ],
     }),
-    onlyne: fakeOnlyne({ sessions: { [ROOT_A]: [sessionRow()] } }),
+    onlyne: fakeOnlyne({
+      sessions: {
+        [ROOT_A]: [sessionRow(), sessionRow({ task_id: "task-beta", session_id: "sess-beta", paneKey: "tab-2:leaf-2" })],
+      },
+    }),
     serverRoots: [ROOT_A],
   });
 
@@ -179,27 +195,32 @@ test("an unreachable root reports its own failure while the rest of the board re
   assert.equal(taskRowOf(board, 0).joined, true);
 });
 
-test("zero serverRoots is valid: flat tabs, no error, no onlyne call", async () => {
+test("zero serverRoots is valid: no onlyne call, and no pane to scope a tab to", async () => {
   const onlyne = fakeOnlyne();
   const board = await collectBoard({ orca: fakeOrca({ tabs: [tabRow(), tabRow({ handle: "term_2", tabId: "tab-2", leafId: "leaf-2", title: "zsh" })] }), onlyne, serverRoots: [] });
 
   assert.equal(board.ok, true);
   assert.deepEqual(board.errors, []);
   assert.deepEqual(board.roots, []);
-  assert.equal(board.strayTabs.length, 2);
   assert.deepEqual(onlyne.calls, []);
+  // With no root there is no session to report a pane, so nothing can be bound
+  // and the tab axis is empty — a board that would otherwise list every tab on
+  // the machine instead lists none of them.
+  assert.deepEqual(board.scope, { source: "none", panes: 0, hidden: 2 });
+  assert.deepEqual(board.tabs, []);
+  assert.deepEqual(board.strayTabs, []);
   assert.deepEqual(board.summary, {
     roots: 0,
     rootsFailed: 0,
     roles: 0,
-    tabs: 2,
-    hiddenTabs: 0,
-    liveTabs: 2,
+    tabs: 0,
+    hiddenTabs: 2,
+    liveTabs: 0,
     sessions: 0,
     sessionsWorking: 0,
     joined: 0,
-    strayTabs: 2,
-    rows: 2,
+    strayTabs: 0,
+    rows: 0,
   });
 });
 
@@ -290,33 +311,18 @@ test("isWorking follows the session lifecycle, then the agent", () => {
   assert.equal(isWorking({ session: null }), false);
 });
 
-const SWARM_WORKTREE = "/repo/onlyne-swarm";
-const SWARM_ROOT = `${SWARM_WORKTREE}/cluster`;
+const OTHER_TAB = tabRow({ handle: "term_other", tabId: "tab-other", leafId: "leaf-other" });
 
-test("the tab axis is scoped to the worktree a configured server root lives in", async () => {
-  // One worktree per server: the swarm's tab is in the root's worktree, the
-  // operator's unrelated pi tab is in another one and must not be listed.
+test("the tab axis is scoped to the panes the live sessions report", async () => {
+  // The session says it runs in the default tab's pane; the operator's other
+  // tab belongs to nobody and is counted, never listed.
   const board = await collectBoard({
-    orca: fakeOrca({
-      tabs: [
-        tabRow({ worktreePath: SWARM_WORKTREE }),
-        tabRow({
-          handle: "term_other",
-          title: "π - review something else",
-          worktreePath: "/Users/somebody/other-repo",
-        }),
-      ],
-    }),
-    onlyne: fakeOnlyne({ sessions: { [SWARM_ROOT]: [sessionRow()] }, roles: { [SWARM_ROOT]: [roleRow()] } }),
-    serverRoots: [SWARM_ROOT],
+    orca: fakeOrca({ tabs: [tabRow(), OTHER_TAB] }),
+    onlyne: fakeOnlyne({ sessions: { [ROOT_A]: [sessionRow()] }, roles: { [ROOT_A]: [roleRow()] } }),
+    serverRoots: [ROOT_A],
   });
 
-  assert.deepEqual(board.scope, {
-    derived: true,
-    source: "worktree",
-    worktrees: [SWARM_WORKTREE],
-    hidden: 1,
-  });
+  assert.deepEqual(board.scope, { source: "connected", panes: 1, hidden: 1 });
   assert.deepEqual(board.tabs.map((tab) => tab.handle), ["term_11111111-1111-4111-8111-111111111111"]);
   assert.deepEqual(board.strayTabs, [], "a hidden tab is counted, never listed");
   assert.equal(board.totalTabs, 2);
@@ -324,58 +330,46 @@ test("the tab axis is scoped to the worktree a configured server root lives in",
   assert.equal(board.summary.hiddenTabs, 1);
   assert.equal(taskRowOf(board).joined, true);
 });
-test("only the worktree holding the server root is in scope", () => {
-  const tabs = [
-    tabRow({ worktreePath: "/repo/swarm" }),
-    tabRow({ handle: "term_sibling", worktreePath: "/repo/swarm-2" }),
-    // A worktree nested *inside* the root is not the swarm's worktree: session
-    // tabs land in the supervisor's worktree, which holds the root.
-    tabRow({ handle: "term_nested", worktreePath: "/repo/swarm/nested" }),
-    tabRow({ handle: "term_none", worktreePath: null }),
-  ];
-  const { tabs: kept, scope } = scopeTabs(tabs, ["/repo/swarm"]);
 
-  assert.deepEqual(
-    kept.map((tab) => tab.handle),
-    ["term_11111111-1111-4111-8111-111111111111"]
-  );
-  assert.equal(scope.derived, true);
-  assert.equal(scope.hidden, 3);
-});
-
-test("a root in a subdirectory of the worktree still scopes that worktree", () => {
-  const tabs = [tabRow({ worktreePath: "/repo/swarm" }), tabRow({ handle: "term_x", worktreePath: "/repo/x" })];
-  const { tabs: kept, scope } = scopeTabs(tabs, ["/repo/swarm/cluster"]);
-
-  assert.equal(scope.derived, true);
-  assert.deepEqual(
-    kept.map((tab) => tab.handle),
-    ["term_11111111-1111-4111-8111-111111111111"]
-  );
-  assert.equal(scope.hidden, 1);
-});
-
-test("a scope that cannot be derived keeps every tab instead of blanking the board", () => {
-  const tabs = [tabRow({ worktreePath: "/repo/a" }), tabRow({ handle: "term_b", worktreePath: "/repo/b" })];
-  // Server root outside every Orca worktree (the e2e harness' temp cluster).
-  const outside = scopeTabs(tabs, ["/private/tmp/cluster"]);
-  assert.equal(outside.scope.derived, false);
-  assert.deepEqual(outside.scope.worktrees, []);
-  assert.equal(outside.scope.hidden, 0);
-  assert.deepEqual(outside.tabs, tabs);
-
-  // No configured root at all: the tab axis is simply unscoped.
-  const unscoped = scopeTabs(tabs, []);
-  assert.equal(unscoped.scope.derived, false);
-  assert.deepEqual(unscoped.tabs, tabs);
-});
-
-test("scoping resolves a symlinked server root against Orca's canonical worktree path", () => {
-  const tabs = [tabRow({ worktreePath: "/private/repo/swarm" })];
-  const { tabs: kept, scope } = scopeTabs(tabs, ["/tmp/link/cluster"], {
-    realpath: (path) => (path.startsWith("/tmp/link") ? "/private/repo/swarm/cluster" : path),
+test("a session that exited binds no pane", async () => {
+  // Liveness is the reducer's own verdict: a row that exited holds no pane, so
+  // its tab leaves the axis even though the report is still in the row.
+  const board = await collectBoard({
+    orca: fakeOrca({ tabs: [tabRow()] }),
+    onlyne: fakeOnlyne({ sessions: { [ROOT_A]: [sessionRow({ lifecycle: "exited", agent: "gone" })] } }),
+    serverRoots: [ROOT_A],
   });
 
-  assert.equal(scope.derived, true);
-  assert.equal(kept.length, 1);
+  assert.deepEqual(board.scope, { source: "none", panes: 0, hidden: 1 });
+  assert.deepEqual(board.tabs, []);
+  assert.equal(taskRowOf(board).joined, false);
+});
+
+test("scopeTabs keeps exactly the bound panes and counts the rest", () => {
+  const tabs = [tabRow(), OTHER_TAB].map(normalizeTerminalRow);
+  const { tabs: kept, scope } = scopeTabs(tabs, [PANE_KEY]);
+
+  assert.deepEqual(
+    kept.map((tab) => tab.handle),
+    ["term_11111111-1111-4111-8111-111111111111"]
+  );
+  assert.deepEqual(scope, { source: "connected", panes: 1, hidden: 1 });
+});
+
+test("nothing bound is an empty tab axis, not a permissive one", () => {
+  const tabs = [tabRow(), OTHER_TAB].map(normalizeTerminalRow);
+  const { tabs: kept, scope } = scopeTabs(tabs, []);
+
+  assert.deepEqual(kept, []);
+  assert.deepEqual(scope, { source: "none", panes: 0, hidden: 2 });
+});
+
+test("a session reporting a pane no tab carries binds nothing", () => {
+  // Another swarm's session, or one whose tab is long gone: the key matches no
+  // row, so the cut hides everything rather than falling back to a guess.
+  const tabs = [tabRow(), OTHER_TAB].map(normalizeTerminalRow);
+  const { tabs: kept, scope } = scopeTabs(tabs, ["ghost:leaf"]);
+
+  assert.deepEqual(kept, []);
+  assert.equal(scope.hidden, 2);
 });

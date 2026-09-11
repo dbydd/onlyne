@@ -124,7 +124,15 @@ export async function runSmoke({ write = (line) => process.stdout.write(`${line}
     write(formatBoard(demo));
     report.steps.join = { titled: 0, strayTabs: demo.summary.strayTabs };
   } else {
-    const taskIds = [...new Set(titled.map((row) => taskIdFromTitle(row.title)))].slice(0, 3);
+    // One synthetic session per titled tab, each reporting the pane of the real
+    // tab it stands in — the axis is scoped by that report, so a stub without
+    // one would scope its own tabs away and demo nothing.
+    const demoTabs = new Map();
+    for (const row of titled) {
+      const taskId = taskIdFromTitle(row.title);
+      if (!demoTabs.has(taskId)) demoTabs.set(taskId, row);
+    }
+    const taskIds = [...demoTabs.keys()].slice(0, 3);
     const stub = {
       querySessions: async () => ({
         ok: true,
@@ -134,7 +142,11 @@ export async function runSmoke({ write = (line) => process.stdout.write(`${line}
             role: "smoke",
             session_id: `smoke-${taskId}`,
             public_lifecycle: "working",
-            projection: { lifecycle: "working", agent: "running" },
+            projection: {
+              lifecycle: "working",
+              agent: "running",
+              observed: { host: { orca: { pane_key: paneKeyOf(demoTabs.get(taskId)) } } },
+            },
             updated_at: new Date().toISOString(),
           })
         ),

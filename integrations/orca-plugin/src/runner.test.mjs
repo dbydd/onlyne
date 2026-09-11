@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   createRunner,
-  normalizePiWorkspaces,
   normalizeServerRoots,
   parseCliJson,
   readPluginConfig,
@@ -121,15 +120,17 @@ test("configured path lists keep entries trimmed and deduped", () => {
   ]);
   assert.deepEqual(normalizeServerRoots(undefined), []);
   assert.deepEqual(normalizeServerRoots(" /srv/a "), []);
-  assert.deepEqual(normalizePiWorkspaces(["/ws/a", "/ws/a", null]), ["/ws/a"]);
+  assert.deepEqual(normalizeServerRoots(["/srv/a", "  /srv/b  ", "/srv/a", 42, "", "   "]), ["/srv/a", "/srv/b"]);
 });
 
-test("the operator config supplies serverRoots and piWorkspaces beside the binaries", () => {
+test("the operator config supplies serverRoots beside the binaries", () => {
   const resolved = resolveBinaries({
     home: "/home/tester",
     readFile: () =>
       JSON.stringify({
         serverRoots: ["/srv/a"],
+        // A leftover key from the pane-claim design: nothing reads it any more,
+        // and its presence must not change the resolved binaries.
         piWorkspaces: ["/ws/planner"],
         orcaBin: "/custom/orca",
       }),
@@ -137,11 +138,9 @@ test("the operator config supplies serverRoots and piWorkspaces beside the binar
     exists: () => true,
   });
   assert.deepEqual(resolved.serverRoots, ["/srv/a"]);
-  // The two lists are independent: a workspace is not a server root.
-  assert.deepEqual(resolved.piWorkspaces, ["/ws/planner"]);
   assert.equal(resolved.orcaBin, "/custom/orca");
+  assert.equal("piWorkspaces" in resolved, false, "the pane authority is the session report");
 
   const bare = resolveBinaries({ home: "/home/tester", readFile: () => "{}", env: {}, exists: () => true });
   assert.deepEqual(bare.serverRoots, []);
-  assert.deepEqual(bare.piWorkspaces, []);
 });

@@ -1,7 +1,7 @@
 // onlyne-sessions — Orca plugin worker (pluginApi v1, EXPERIMENTAL).
 //
 // Read-only supervisor board for Onlyne, built from two independent axes:
-//   tabs  — every Orca tab, from one flat `orca terminal list --json` call
+//   tabs  — the Orca tabs of the panes the connected sessions report running in
 //   roots — each configured onlyne server root's admin surface
 //           (`<root>/.onlyne/run/s`, queried through `sessions` + `roles`)
 // joined by the weak `onlyne:<task_id>` title convention, and exposed as a
@@ -11,7 +11,9 @@
 // Orca is the supervisor's management port only: the backend no longer
 // registers one worktree per role, so every session tab lands flat in the host
 // worktree's list, and session identity lives in the adapter/pi plugin
-// protocol — never in this board.
+// protocol — never in this board. A session's own process names its Orca pane
+// there (`observed.host.orca.pane_key`), which is the whole authority for the
+// tab axis: no pane reported, no tab listed.
 //
 // Boundaries this plugin deliberately keeps:
 //   * it never creates, closes, or renames a tab — lifecycle belongs to the
@@ -32,7 +34,7 @@ import { collectBoard } from "./src/board.mjs";
 import { createBoardState } from "./src/board-state.mjs";
 import { createCommands } from "./src/commands.mjs";
 import { createPanelPublisher } from "./src/panel-document.mjs";
-import { createClaimReader } from "./src/claims.mjs";
+
 
 /** The plugin root: this file's own directory, in a dev tree and an install. */
 export const PLUGIN_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -87,21 +89,12 @@ export function createPlugin({
   const serverRoots = binaries.serverRoots ?? [];
 
   // The panel reads this file, not this worker: see src/panel-document.mjs for
-  // the measured Orca surfaces behind that statement.
-  // Pane claims come from the configured pi workspaces — a different list from
-  // `serverRoots`, because the client, not the server root, owns that path
-  // (src/claims.mjs). No workspace configured means no claims, and the board
-  // scopes by the worktree heuristic instead.
-  const claimReader = createClaimReader();
-  const readClaims = () => claimReader(binaries.piWorkspaces);
+
   const panel = createPanelPublisher({ rootDir: pluginRoot, log });
   let installedTreeLogged = false;
 
   const boardState = createBoardState({
-    // `readClaims` is the pi adapter's pane authority; without it the board
-    // falls back to the worktree heuristic (src/claims.mjs).
-    collect: (options) =>
-      collectBoard({ orca: orcaCli, onlyne: onlyneCli, serverRoots, readClaims, ...options }),
+    collect: (options) => collectBoard({ orca: orcaCli, onlyne: onlyneCli, serverRoots, ...options }),
     notify,
     log,
   });
