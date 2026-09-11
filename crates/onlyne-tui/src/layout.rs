@@ -153,10 +153,13 @@ pub fn layout(nodes: &[LayoutNode], edges: &[LayoutEdge], w: u16, h: u16) -> Can
     let mut layers = assign_layers(&sorted_nodes, &dag_edges);
     order_layers(&mut layers, &dag_edges);
 
-    let max_cols = layers.iter().map(Vec::len).max().unwrap_or(1).max(1);
-    let node_w = width_for(&sorted_nodes, width, max_cols);
-    let node_h = 7usize.min(height.max(4));
+    // Boxes sit one per layer along x, so the width budget divides by the
+    // layer count. Dividing by the widest layer's row count instead let a
+    // six-layer ring ask for six 28-wide boxes and space them 18 apart, which
+    // drew each box over the one to its right.
     let layer_count = layers.len().max(1);
+    let node_w = width_for(&sorted_nodes, width, layer_count);
+    let node_h = 7usize.min(height.max(4));
     let x_step = if layer_count == 1 {
         0
     } else {
@@ -247,7 +250,7 @@ pub fn layout(nodes: &[LayoutNode], edges: &[LayoutEdge], w: u16, h: u16) -> Can
     canvas
 }
 
-fn width_for(nodes: &[LayoutNode], width: usize, max_cols: usize) -> usize {
+fn width_for(nodes: &[LayoutNode], width: usize, columns: usize) -> usize {
     let longest = nodes
         .iter()
         .flat_map(|node| {
@@ -265,10 +268,10 @@ fn width_for(nodes: &[LayoutNode], width: usize, max_cols: usize) -> usize {
         .max()
         .unwrap_or(8);
     let by_text = (longest + 4).clamp(14, 28);
-    let by_space = if max_cols <= 1 {
+    let by_space = if columns <= 1 {
         width.clamp(14, 28)
     } else {
-        ((width.saturating_sub((max_cols - 1) * 3)) / max_cols).clamp(14, 28)
+        ((width.saturating_sub((columns - 1) * 3)) / columns).clamp(14, 28)
     };
     by_text.min(by_space).min(width.max(1))
 }
