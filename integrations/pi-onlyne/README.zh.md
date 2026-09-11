@@ -179,20 +179,18 @@ completion 在 client 重启时也不丢：如果决定 outcome 时 socket 已�
   `reason: "duplicate"` 的 ack，不重复注入。当今 client 每个任务都是新 uuid，所以这条只在真
   正的重投上生效。
 
-- **pane 申报（Orca tab）。** 在 Orca pane 里，握手完成时插件会写
-  `<workspace>/.onlyne/cache/pi-panes/<pane_key>.json`（pane key 里的 `:` 拍平成 `-`），
-  `assign` 时刷新，`bye`、`/onlyne disconnect` 与退出时删除。**socket 断开时刻意不删**：pi 可能
-  继续活着并接到下一个任务，申报跟的是 session，不是 socket。一个 pane 一个文件，而不是一个
-  workspace 一个文件：client 确实一个 workspace 只跑一个，但其中一个 role slot 会按
-  `max_sessions` 跑起多个 session，各自占一个 pane、各自一个 pi 进程——共用一个文件就是
-  last-writer-wins，后挂载的 pane 会把还在跑的 pane 覆盖掉。它不是协议的一部分：
-  `integrations/orca-plugin` 靠它判断哪些 Orca tab 属于同一个 swarm——pane 会把 `ORCA_PANE_KEY` /
-  `ORCA_TAB_ID` / `ORCA_TERMINAL_HANDLE` / `ORCA_WORKTREE_ID` 导出给 client 拉起的进程
-  （2026-09-11 实测，Orca 1.4.198），而 pi 之后没有任何环节能恢复这个绑定。每条申报带
-  `updated_at`（RFC 3339、毫秒、`Z`），读方靠它区分同一个 pane 的两条申报。过渡期内看板仍会读
-  旧版的单文件 `<workspace>/.onlyne/cache/pi-pane.json`（已经在跑的 pi 还在写它），但已经没有人
-  再写这个文件了。不在 pane 里、或缓存目录不可写时，写入是静默 no-op：申报永远不会让 session
-  失败。
+- **pane 绑定（Orca tab）。** 在 Orca pane 里，插件在每个 heartbeat 上报自己跑在哪：报告
+  `Observation` 里的 `observed.host.orca.pane_key`（`crates/onlyne-session/src/host.rs`），环境
+  报得出时还带上 `tab_id` / `leaf_id` 和终端的 `handle`。这个绑定是**继承**来的，不是猜的：Orca
+  pane 会把自己那四个 `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_LEAF_ID` / `ORCA_TERMINAL_HANDLE`
+  导出给它启动的命令（2026-09-11 实测，Orca 1.4.198），而 client 会把自己的环境继续传给
+  session 命令——所以跑在 pane 里的那个进程，是唯一能从进程内部说出「这是哪个 pane」的组件，
+  pi 之后没有任何环节能恢复这个绑定。不在 pane 里时 `host` 键整个缺席：普通终端上的 pi 报的是
+  一条没有 host 字段的 observation，而不是一条 pane 为空的。
+- **为此不往 workspace 写任何东西。** 已经没有申报文件了——绑定搭在 client 本来就逐帧镜像的
+  那份 observation 上，所以不存在过期的申报（没有东西会创建它），workspace 的缓存目录也不会被碰。
+  这既让 `integrations/orca-plugin` 能不读任何路径就把 tab 轴收窄到真会话，也让 supervisor 在会话
+  *结束之后*仍然说得出它跑在哪：`report.complete` 会把 `host` 带过去。
 
 ## 6. 配置项
 
@@ -202,6 +200,9 @@ completion 在 client 重启时也不丢：如果决定 outcome 时 socket 已�
 | `ONLYNE_SESSION_ID` | 是 | 挂载的 session id；当前 client 中 session_id 等于 task_id |
 | `ONLYNE_TASK_ID` | 是 | 本进程服务的任务；驱动 `session_register` 与首条 `ready` |
 | `ONLYNE_SOCKET` | 否 | 覆盖 socket 路径（默认 `<cwd>/.onlyne/run/s`） |
+| `ORCA_PANE_KEY` | 否 | 本进程跑在哪（`<tab_id>:<leaf_id>`），每个 heartbeat 以 `observed.host.orca.pane_key` 上报；不在 Orca pane 里时未设置，这也是该字段缺席的原因 |
+| `ORCA_TAB_ID` / `ORCA_LEAF_ID` | 否 | pane 的两个 id；只设了 pane key 时插件会自己解析 |
+| `ORCA_TERMINAL_HANDLE` | 否 | 终端 handle，随 pane key 一起上报为 `host.orca.handle`，也是 `orca terminal switch` 要的那个值 |
 
 值得记住的常量：心跳 10 秒（`heartbeat_timeout_ms` 是 30 秒）、hello 预算 5 秒、请求超时
 30 秒、重连阶梯 1/2/4/8/16/30 秒。
@@ -220,6 +221,7 @@ completion 在 client 重启时也不丢：如果决定 outcome 时 socket 已�
 | `frame_too_large` | 正文超过 8 MiB | 只会由超限的出站图片触发；上限来自核心 |
 | 工具缺失 | 该 pi 版本没有 `pi.registerTool` | `/onlyne status`；对照上面的能力表 |
 | 会话在 `exited` 之后又回到 `idle` | completion 之后还落进了一条 heartbeat 快照，带着 `outcome: pending` | 看 session 日志里 `completion` 之后的 report 顺序；插件对已完成任务不再上报 |
+| supervisor 看板一个 tab 都不列 | 没有 live session 上报过 pane：适配器版本早于这条上报，或这个 pi 不在 Orca pane 里 | `onlyne --server-root … sessions --json` 看 `projection.observed.host.orca.pane_key`；在 pane 里跑 `env \| grep ORCA_` |
 
 `/onlyne status` 打印实时状态（`connected`、`socket`、`role`、`sessionId`、`generation`、
 `agentState`、`tasks`、`pendingCompletion`、`lastError` 与计数器）；`/onlyne connect` /

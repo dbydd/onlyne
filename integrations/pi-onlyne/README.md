@@ -201,23 +201,22 @@ of the shipped client.
   life of the connection. The client today mints a fresh uuid per task, so this only ever
   fires on a genuine redelivery.
 
-- **Pane claim (Orca tabs).** Inside an Orca pane the plugin writes
-  `<workspace>/.onlyne/cache/pi-panes/<pane_key>.json` — the pane key with its `:` flattened to
-  `-` — when the handshake completes, refreshes it on `assign`, and removes it on `bye`, on
-  `/onlyne disconnect` and on shutdown. Deliberately **not** when the socket drops: pi may live
-  on and be handed another task, so the claim follows the session, not the socket. One file per
-  pane, not one per workspace: the client admits one client per workspace, but one role slot of
-  it runs up to `max_sessions` sessions, each in its own pane and its own pi process — so a
-  workspace-wide file would be last-writer-wins, and a pane mounting late would erase a pane
-  still running. It is not protocol: it is how `integrations/orca-plugin` knows which Orca tab
-  belongs to a swarm, since the pane exports `ORCA_PANE_KEY` / `ORCA_TAB_ID` /
-  `ORCA_TERMINAL_HANDLE` / `ORCA_WORKTREE_ID` into the process the client spawns (measured
-  2026-09-11, Orca 1.4.198) and nothing downstream of pi can recover that binding. Each claim
-  carries an `updated_at` stamp (RFC 3339, milliseconds, `Z`) so a reader can tell two claims
-  for one pane apart. The pre-v1 single file `<workspace>/.onlyne/cache/pi-pane.json` is still
-  read by the board through the transition — an already-running pi keeps writing it — but
-  nothing writes it any more. Outside a pane, and with an unwritable cache directory, the write
-  is a silent no-op: a claim never fails a session.
+- **Pane binding (Orca tabs).** Inside an Orca pane the plugin reports the pane it runs in on every
+  heartbeat, as `observed.host.orca.pane_key` in the report's `Observation`
+  (`crates/onlyne-session/src/host.rs`), beside `tab_id` / `leaf_id` and the terminal `handle` when
+  the environment names them. The binding is *inherited*, never guessed: an Orca pane exports
+  `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_LEAF_ID` / `ORCA_TERMINAL_HANDLE` into the command it
+  starts (measured 2026-09-11, Orca 1.4.198), and the client passes its environment on to the
+  session command — so the process running inside a pane is the one component that can state, from
+  the inside, which pane an onlyne session is, and nothing downstream of pi can recover that.
+  Outside a pane the `host` key is absent altogether: a pi on a plain terminal reports an
+  observation with no host field, rather than one with an empty pane.
+- **Nothing is written to the workspace for this.** There is no claim file any more — the binding
+  rides the observation the client already mirrors, so a stale one cannot exist because nothing
+  creates one, and the workspace's cache directory is not touched. That is what lets
+  `integrations/orca-plugin` scope its tab axis to real sessions without reading any path, and what
+  lets a supervisor still say where a *finished* session ran: `report.complete` carries `host`
+  forward.
 
 ## 6. Configuration reference
 
@@ -227,6 +226,9 @@ of the shipped client.
 | `ONLYNE_SESSION_ID` | yes | mounted session id; `session_id` equals `task_id` in the shipped client |
 | `ONLYNE_TASK_ID` | yes | the task this process serves; drives `session_register` and the initial `ready` |
 | `ONLYNE_SOCKET` | no | overrides the socket path (default `<cwd>/.onlyne/run/s`) |
+| `ORCA_PANE_KEY` | no | where this process runs (`<tab_id>:<leaf_id>`), reported on every heartbeat as `observed.host.orca.pane_key`; unset outside an Orca pane, which is why the field is then absent |
+| `ORCA_TAB_ID` / `ORCA_LEAF_ID` | no | the pane ids separately; the pane key is parsed when only the key itself is set |
+| `ORCA_TERMINAL_HANDLE` | no | the terminal handle, reported beside the pane key as `host.orca.handle`, and the value `orca terminal switch` takes |
 
 Constants worth knowing: heartbeat every 10 s (`heartbeat_timeout_ms` is 30 s), 5 s hello
 budget, 30 s request timeout, reconnect ladder 1/2/4/8/16/30 s.
@@ -245,6 +247,7 @@ budget, 30 s request timeout, reconnect ladder 1/2/4/8/16/30 s.
 | `frame_too_large` | a body above 8 MiB | only reachable through an oversize outbound image; the ceiling is the core's |
 | tools missing | `pi.registerTool` is absent in that pi version | `/onlyne status`; the capability table above |
 | session reads `idle` again after `exited` | a heartbeat snapshot landed after the completion, carrying `outcome: pending` | the session log for the report order after `completion`; the plugin stops reporting for a completed task |
+| the supervisor board lists no tabs | no live session reported a pane: the adapter predates the report, or this pi is not inside an Orca pane | `onlyne --server-root … sessions --json` for `projection.observed.host.orca.pane_key`; `env \| grep ORCA_` inside the pane |
 
 `/onlyne status` prints the live state (`connected`, `socket`, `role`, `sessionId`,
 `generation`, `agentState`, `tasks`, `pendingCompletion`, `lastError`, counters), and

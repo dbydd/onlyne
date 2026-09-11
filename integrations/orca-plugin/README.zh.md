@@ -4,8 +4,8 @@ Orca 桌面里的**只读 supervisor 看板**。它把两条彼此独立的轴�
 
 ```
    orca terminal list --json                        ──┐   所有 worktree 的所有 tab，
-   （一次平铺调用，不带 --worktree）                    │   按 Orca 自己的顺序
-                                                      │
+   （一次平铺调用，不带 --worktree）                    │   收窄到 live session 自报所在的 pane
+                                                      │   （就是它自己的 pane_key）
    每个配置的 serverRoots[i]：                         ├─→  看板：root → role → task → tab
    onlyne --server-root <S> sessions --json           │   （标题正好等于 `onlyne:<task_id>` 的
    onlyne --server-root <S> roles    --json         ──┘    那个 tab 会标注到对应 task 行上）
@@ -24,7 +24,8 @@ Orca 桌面里的**只读 supervisor 看板**。它把两条彼此独立的轴�
 标注错了或没标注，都不构成关于会话的证据。
 
 插件不再发现 role 工作区，也不再读任何 backend 缓存文件：backend 已经不为每个 role 注册 Orca
-worktree，所有会话 tab 都平铺在宿主 worktree 的列表里，而唯一的会话来源是 admin 面。
+worktree，所有会话 tab 都平铺在宿主 worktree 的列表里，而唯一的会话来源是 admin 面。这些 tab 里
+哪些属于某个 swarm，也来自同一个地方——session 行本身，所以 tab 轴只有一个权威，不是两个（见 §4 轴 A）。
 
 ---
 
@@ -58,7 +59,6 @@ worktree，所有会话 tab 都平铺在宿主 worktree 的列表里，而唯一
    ```json
    {
      "serverRoots": ["/abs/path/to/server-root", "/abs/path/to/second-cluster"],
-     "piWorkspaces": ["/abs/path/to/role-workspace", "/abs/path/to/another-role-workspace"],
      "orcaBin": "/opt/homebrew/bin/orca",
      "onlyneBin": "/path/to/v1.0.0/onlyne"
    }
@@ -68,10 +68,8 @@ worktree，所有会话 tab 都平铺在宿主 worktree 的列表里，而唯一
      `onlyne --server-root <S> …`（`<S>/.onlyne/run/s` 是该 root 的 admin socket）。
      **缺失或空数组都是合法状态**——看板只渲染平铺的 tab 轴，完全不会调用 `onlyne`。
      条目会被 trim 并去重。
-   - `piWorkspaces` 是 swarm 归属的权威来源（§2 轴 A）：一项一个 role workspace，该 workspace 里的
-     pi 适配器可以在 `<workspace>/.onlyne/cache/pi-panes/` 下申报自己所在的 pane。它**不是**
-     `serverRoots`——workspace 是 `onlyne client run` 的运行目录，看板无法从 server root 推出来。
-     缺失或空数组都是合法状态：tab 轴退回 worktree 启发式。同样 trim 并去重。
+   - **没有别的什么东西给 tab 轴划范围。** 列哪些 tab 由 session 自己决定（见 §4 轴 A），所以没有
+     workspace 列表要配，也没有路径要解析。老配置文件里残留的 `piWorkspaces` 键会被忽略。
    - 为什么可能需要钉死二进制：plugin worker 的环境被 Orca 洗白（只保留 `PATH`/`HOME`/`LANG`
      等 16 项），从 Dock 启动的 Orca 常常没有 homebrew 的 PATH。插件按
      `PATH → /opt/homebrew/bin → /usr/local/bin → ~/.local/bin → ~/bin` 找二进制，
@@ -113,7 +111,8 @@ worktree，所有会话 tab 都平铺在宿主 worktree 的列表里，而唯一
 ## 3. 看板长什么样 / 去哪儿看
 
 ```
-Onlyne sessions · 2 roots · 3 roles · 7 tabs (4 live) · 9 sessions (2 working)
+Onlyne sessions · 2 roots · 3 roles · 7 tabs (4 live) · 3 hidden · 9 sessions (2 working)
+tab 轴：只列 7 个连着 adapter 的 pi pane（session 上报的 host.orca.pane_key），其余 3 个 tab 不计入
 /srv/onlyne-a  (3 roles · 9 sessions · 2 working)
   planner  (online · 2 tasks · 1 live)
     ● task8a1b · working/running · 12s · 45e603f7:b6d067b6
@@ -127,8 +126,12 @@ Onlyne sessions · 2 roots · 3 roles · 7 tabs (4 live) · 9 sessions (2 workin
   ○ tab · title=zsh · 3m · 794041dc:7c648f42 · wt 2ea2fe23
 ```
 
-- summary 行：`N roots · N roles · N tabs (M live) · N sessions (K working)`；
-  working = `public_lifecycle=working` 或 `agent=running`。
+- summary 行：`N roots · N roles · N tabs (M live) [· H hidden] · N sessions (K working)`；
+  `hidden` 只在确实丢了 tab 时出现；working = `public_lifecycle=working` 或 `agent=running`。
+- 范围行（只在切掉了东西时出现）：`tab 轴：只列 N 个连着 adapter 的 pi pane（session 上报的
+  host.orca.pane_key），其余 H 个 tab 不计入`。一个 pane 都没上报时改说
+  `tab 轴：等 pi-onlyne 连上——没有任何 live session 报告它所在的 Orca pane，H 个 tab 全部不计入`
+  ——看板在说自己等 session，而不是说自己配错了。
 - root 行：该 root 的 role 分节数、session 数与 working 数；某个 root 连不上时是 0 加上它自己的
   `!` 行，而不会把整块看板拖垮。
 - role 分节行：该 role 的 presence（`online`/`offline`/`draining`，只有 session 提到它时是
@@ -138,7 +141,8 @@ Onlyne sessions · 2 roots · 3 roles · 7 tabs (4 live) · 9 sessions (2 workin
   pane 位显示 `—`。
 - 未 join 的 tab 行：`tab · title=<原始标题> · lastOutputAt 相对时间 · pane_key 短形 · wt <worktree>`。
 - 图例：`●` 活（`connected=true`）· `○` 没连上，或 tab 轴没有列出的行。
-- 空态一句话：**既没有 `serverRoots` 也没有 Orca tab**——去配置文件里加 `serverRoots`。
+- 空态一句话：**既没有 `serverRoots`，也一个 Orca tab 都没有**——去配置文件里加 `serverRoots`。
+  有 tab 但没人上报 pane 时走的是范围行，不算空态：Orca 明明列着好几个 tab，说「没有 Orca tab」是假话。
 
 看板出现在四个地方：
 
@@ -186,47 +190,38 @@ watchdog ping 与 action 结果。**worker→panel 没有通道**，v1 也不打
 - 活体就是该行自己的 `connected`，不看别的字段。
 - 缺 `handle` 的行直接丢掉（寻址不了）。
 - **实测**：Orca 1.4.198 的行里没有 `paneKey` 字段，插件用 `${tabId}:${leafId}` 现拼
-  （新版本可能带上，带上时以它为准）。
-- `worktreeId` 是插件保留的唯一 selector：它既是 `orca terminal list --worktree` 需要的那个值，
-  也是 `copy-agent-context` 输出的 `orca selector`。
+  （新版本可能带上，带上时以它为准）。这个拼出来的 key 就是范围裁剪拿去和 session 上报的 pane
+  比对的那个值。
+- `worktreeId`（以及该行的 `worktreePath`）只当寻址信息保留：它是 `orca terminal list --worktree`
+  需要的值、也是 `copy-agent-context` 输出的 `orca selector`，从不参与范围判定。
 
-#### tab 轴只留一个 swarm：先看 pi 申报，再看 worktree
+#### tab 轴只留真会话：session 自报的那个 pane
 
-一个 Orca worktree 里会混着不属于 onlyne 的 tab，所以 tab 轴按下面的顺序过滤：
+一个 Orca worktree 里会混着不属于 onlyne 的 tab，所以 tab 轴只有一条过滤规则：**某个 live session
+上报了该 tab 的 pane，这个 tab 才在轴上。**
 
-1. **适配器申报 —— 权威来源。** pi 适配器从它被 spawn 的那个 pane 继承 `ORCA_PANE_KEY`、
-   `ORCA_TAB_ID`、`ORCA_TERMINAL_HANDLE`、`ORCA_WORKTREE_ID`（**2026-09-11 实测，Orca
-   1.4.198**：`orca terminal create --command …` 会把这四个都导出给命令进程），所以它是唯一
-   从进程内部就知道「哪个 pane 是 onlyne 会话」的组件。它把这个绑定写成一个 pane 一个文件：
-   `<workspace>/.onlyne/cache/pi-panes/<pane_key，':' 拍平成 '-'>.json`——`<workspace>` 就是
-   `onlyne client run` 的运行目录（client 以 `cwd` = workspace spawn 插件）。一个 pane 一个文件，
-   不是一 workspace 一个：client 确实一个 workspace 只跑一个，但其中一个 role slot 会按
-   `max_sessions` 跑起多个 session，各自一个 pane、各自一个 pi 进程——共用一份文件就是
-   last-writer-wins，后挂载的 pane 会让看板把还在跑的其余 pane 都隐藏掉。tab 的 `paneKey` 被申报了
-   才在范围内；若某条申报指向 Orca 已不再列出的 pane，结果是其余 tab 全被隐藏——过期申报不会把
-   tab 复活。死掉却没清掉的 pane 留下的申报同样无害：它对不上任何一行。
-2. **worktree 启发式 —— 兜底。** 任何地方都还没有申报时，tab 在自己 `worktreePath` 里含某个配置
-   root 才算在范围内（两侧都做 `realpath`）。root 推不到任何 tab 的 worktree 时，该轴不设范围，
-   并在说明里写清楚。
+session 自己的进程会在每个 heartbeat 上报自己跑在哪——adapter 协议里的
+`observed.host.orca.pane_key`（`crates/onlyne-session/src/host.rs`）。它能报，是因为它就被 spawn 在
+那个 pane 里，从那里继承了 `ORCA_PANE_KEY`（以及 `ORCA_TAB_ID`、`ORCA_LEAF_ID`、
+`ORCA_TERMINAL_HANDLE`）（**2026-09-11 实测，Orca 1.4.198**：`orca terminal create --command …` 会把
+这些导出给命令进程）。两边的 key 都是 `<tab_id>:<leaf_id>`，所以裁剪就是「这份上报」与「Orca 自己
+的平铺 tab 列表」求交集——一次纯比较，没有推导，也没有猜。
 
-两条路径插件都推不出来：workspace 属于 *client*，而 session 轴是按 *server root* 配的，
-`welcome.server` 也只有一个 `{connected, cluster, name}`、不含路径——所以申报只从配置里的
-**`piWorkspaces`**（见 §1 第 4 步）读，与 `serverRoots` 相互独立。为空是合法状态：没有申报，
-只用 worktree 启发式。
-
-`board.scope` 记录是哪一种决定的：`{ derived, source: "adapter" | "worktree" | "none",
-worktrees, hidden, claimed? }`，另有 `summary.hiddenTabs`。申报文件缺失、读不到或格式坏掉都是
-正常状态，不是错误——只说明那个 pane 还没申报过，坏掉的文件只丢掉自己那一条申报，不影响别的。
-workspace 有 `pi-panes/` 目录但里面没有一条能读的申报，也算「没申报过」。
-
-过渡期还会读旧版的单文件 `<workspace>/.onlyne/cache/pi-pane.json`：升级读方时已经在跑的 pi 进程
-还在写它，忽略它就会把那个活着的 pane 藏掉。它只是过渡读法，不是第二权威——同一个 pane key 取最新
-的那条申报（`updated_at`；旧文件没有这个字段时用它自己的 mtime，每条旧文件都走这条），所以过期的
-旧文件会输给新的分 pane 申报，并在下次重启时消失。已经没有任何东西再写它了。
-
-但它不是**无声**的：`board.claims` 给出 `{ published, unpublished }`，面板的范围说明会逐个点名
-「配置了但没读到申报」的 workspace——`piWorkspaces` 是手写的列表，写错了不能和「swarm 还没
-挂载」长得一模一样。
+- **没人上报 pane 就一个 tab 都不列。** 说不出 pane 的看板宁可列空，也不列全部；`scope.source:
+  "none"` 和范围行都在说看板在等 pi。这是「规则里不含猜」的代价：适配器版本早于这条上报的 swarm，
+  在升级前 tab 轴就是空的。
+- **活体判断用 projection 自己的结论**——`public_lifecycle` 不是 `exited` 就算还绑着这个 pane。
+  把死 pane 变成 `exited` 的是 client 的 reconcile 循环，看板不再对同一件事形成第二份意见。
+- **绑定活得比会话久。** `report.complete` 会把 `host` 带过去，所以结束了的 session 行仍然说得出
+  自己跑在哪；把它从轴上拿掉的是上面那条活体规则，不是绑定消失。
+- **对不上任何 tab 的 pane 什么都不绑。** 要么 tab 已经没了，要么这个 key 属于另一台机器的 Orca；
+  裁剪把那行隐藏，而不是退回某个猜测。
+- **为此看板不读任何文件，也不需要 workspace 列表。** 没有申报文件、没有缓存读取、没有
+  `piWorkspaces` 要配：权威就是看板本来就在读的那条 session 轴。`board.scope` 是
+  `{ source: "connected" | "none", panes, hidden }`，另有 `summary.hiddenTabs`。
+- **`worktreePath` 不参与判定。** 也判定不了：workspace 属于 *client*，而 session 轴是按 *server
+  root* 配的，`welcome.server` 也不含路径——所以这块看板原先那条 worktree 兜底解析的其实是另一
+  回事，它和旧版单文件申报的读法一起下线了。
 
 ### 轴 B —— session（每个 root、每个动词各一次）
 
@@ -238,9 +233,11 @@ onlyne --server-root <S> roles    --json   -> {ok:true, data:{roles:[…]}}
 ```
 
 - session 行归一化为 `task_id`、`role`、`session_id`、`public_lifecycle`（退化取
-  `projection.lifecycle`）、`projection.agent`/`delivery`/`resource`、`outcome`、`updated_at`、`seq`。
-  形状由仓库自己的 wire vector
-  `crates/onlyne-proto/tests/wire_vectors/res_session_row.json` 钉住。
+  `projection.lifecycle`）、`projection.agent`/`delivery`/`resource`、`outcome`、`updated_at`、`seq`，
+  以及从 `projection.observed.host.orca` 取出的上报 pane（`pane_key`、`tab_id`、`leaf_id`、`handle`
+  ——只有 `pane_key` 是必需的，环境没给的那几项就缺席）。基础形状由仓库自己的 wire vector
+  `crates/onlyne-proto/tests/wire_vectors/res_session_row.json` 钉住；pane 放在 projection 自己的
+  observation 里，因为那份 observation 正是 client 逐帧镜像的东西。
 - role 行归一化为 `name` → `role`、`admin`、`max_sessions` → `maxSessions`、`state` → `presence`
   （`online`/`offline`/`draining`）、`sessions`。由 `res_role_info.json` 钉住。
 - role 列表是分节骨架：一个 session 都没有的 role 也会渲染（离线 role 就是这么看出来的），
@@ -262,7 +259,7 @@ tab 落在「未 join 的 tab」一节。除此之外不推断任何东西。
   标题只活约一秒——操作者自己的登录 shell（zsh + 提示符）立刻把它抢走——而 session 行要等 agent 上报
   之后才出现在 server root 上。两者因此基本不会同时成立，实际看板大多就是把两条轴并排显示、标注为空。
   这是「supervisor 视图且不引入第二个发现轴」的既定代价；`joined` 是附赠，不是某一行存在的理由。
-- 认领是**一次性**的，按 `serverRoots` 配置顺序和 Orca 行顺序：两个 tab 同标题时第一个 join，
+- tab 只会被分走一次，按 `serverRoots` 配置顺序和 Orca 行顺序：两个 tab 同标题时第一个 join，
   其余进 stray；两个 root 有同一个 task id 时，配置里靠前的 root 拿走 tab，靠后的那个行保持
   未 join。这样 `live tabs` 不会把同一个物理 tab 数两次；而它真正属于哪个 root，这里无从得知。
 
@@ -271,7 +268,7 @@ tab 落在「未 join 的 tab」一节。除此之外不推断任何东西。
 | 情况 | 结果 |
 | --- | --- |
 | `serverRoots` 缺失/为空 | 合法：只剩 tab 轴，完全不调用 `onlyne` |
-| 某个 `piWorkspaces` 条目没有任何申报 | 不算错误：它会出现在 `board.claims.unpublished` 里，并被面板的范围说明点名；tab 轴退回 worktree 启发式 |
+| 没有任何 live session 上报 pane | 不算错误：tab 轴为空（`scope.source: "none"`），范围行说看板在等 pi，session 轴照常渲染 |
 | `orca terminal list` 失败（如 `missing_binary`） | `ok:false` + 错误码；session 轴照常渲染，只是全部未 join |
 | 某个 root 的 socket 不存在 | 该 root 报 `cli_error` 与那句 no-socket 提示；其他 root 与 tab 轴照常渲染 |
 | onlyne CLI 不认识 `--server-root`/`sessions`（如 0.6.0） | 该动词 `cli_surface_mismatch`；一个动词失败不会盖掉另一个 |
@@ -299,6 +296,11 @@ tab 落在「未 join 的 tab」一节。除此之外不推断任何东西。
 - **卸载**：Settings → Plugins 里卸载，Orca 会删掉 `<userData>/plugins/onlyne.onlyne-sessions`
   （hash 目录 + `current` 指针）。本插件没有在别处留状态（无 storage、无 secrets、无设置写入）。
 - **升级**：改源目录 → 重新 Install（新 hash 目录）→ 能力指纹变了才需要重新授权。
+- **从用申报文件的版本升级过来**（凡是早于「看板从 session 行读 pane」的版本）：本插件和 pi 适配器
+  都不再读 `<workspace>/.onlyne/cache/pi-panes/` 或旧版单文件
+  `<workspace>/.onlyne/cache/pi-pane.json`，两者都是死重量，方便时在各 workspace 里把目录和文件删掉即可。
+  老配置文件里残留的 `piWorkspaces` 键会被忽略。注意：在机器上的 pi 适配器也升级之前，那台机器的
+  tab 轴会一直是空的——旧适配器只写那个文件。
 
 ## 7. 开发与验证
 
@@ -312,7 +314,6 @@ integrations/orca-plugin/
     orca-cli.mjs       terminal list（平铺）/ terminal switch / status
     onlyne-cli.mjs     --server-root <S> sessions|roles，行归一化 + 失败归一化
     board.mjs          两条轴 + 弱标题 join + 看板模型
-    claims.mjs         pi 适配器的 pane 申报（swarm 归属的权威来源）
     render.mjs         文本渲染（通知/日志共用）
     panel-document.mjs 面板文档：快照渲染、指纹、仅 dev 生效的写回
     commands.mjs       refresh / board / debug-board / focus / copy-agent-context
@@ -336,17 +337,20 @@ BIN_DIR=target/debug node tools/smoke.mjs
 按实测到的面实现，以下是实现时才暴露出来、需要 backend 确认的点（不改契约，只报告）：
 
 1. **标题约定不是契约**。插件按 `onlyne:<task_id>` join，因为 tab 侧只有这一个线索；
-   但 OSC 写标题随时能把它换掉。如果 backend 开始依赖这个前缀，就必须另有一条途径公布
-   pane/handle 绑定——权威在 adapter / pi 插件协议，这块看板只是镜像。
+  但 OSC 写标题随时能把它换掉。如果 backend 开始依赖这个前缀，就必须另有一条途径公布
+  pane/handle 绑定——权威在 adapter / pi 插件协议，这块看板只是镜像。看板的**范围**已经不再依赖它：
+  范围来自 session 行（见 §4 轴 A）。
 2. **插件不读 backend 的任何文件**。session 只来自 `sessions`，role 只来自 `roles`，仅此而已。
    supervisor 需要的东西必须能通过这两个动词答出来。
-3. **`sessions` 必须在没有 role 工作区时也能答**。既然不再有 per-role worktree 注册，
-   某个 role 的 tab 在 Orca 侧与其他 tab 无从区分，`task_id` ↔ tab 的绑定改由 pi 适配器恢复
-   （`pi-panes/`，见 §2 轴 A）：适配器继承自己所处 pane 的 `ORCA_PANE_KEY`，所以线上量到的
-   `pane_key` 就是 backend 为被 spawn 会话记录的那个值。
+3. **`sessions` 必须继续上报 pane。** 既然不再有 per-role worktree 注册，某个 role 的 tab 在 Orca
+  侧与其他 tab 无从区分，所以 tab 轴由每个 session 上报的 pane 决定
+  （`observed.host.orca.pane_key`，`crates/onlyne-session/src/host.rs`），而不是由任何 workspace 路径
+  决定。有两条性质对这块看板要紧：绑定必须在 `report.complete` 之后仍然存在（结束了的会话也要说得
+  出自己跑在哪），并且它的 `pane_key` 必须与 Orca 自己 `terminal list` 用的 `<tab_id>:<leaf_id>`
+  拼法一致。一旦它在 observation 里改名或消失，tab 轴会变空，而不会变错。
 4. **用到的 session 字段**：`task_id`（身份）、`session_id`（展示）、`role`（分节）、
    `public_lifecycle`/`projection.lifecycle`、`projection.agent`、`projection.outcome`、
-   `updated_at`、`seq`。其余字段忽略。
+   `projection.observed.host.orca.pane_key`、`updated_at`、`seq`。其余字段忽略。
 5. **用到的 role 字段**：`name`、`admin`、`max_sessions`、`state`、`sessions`。presence 词表就是
    server 自己的（`online`/`offline`/`draining`），原样渲染。
 6. **按 root 失败是常态**。某个 root 没有活 server 对看板而言是正常状态；插件按动词报错并继续，

@@ -5,7 +5,8 @@ axes into one board:
 
 ```
    orca terminal list --json                        ──┐   every tab of every worktree,
-   (one flat call, no --worktree)                     │   in Orca's own order
+   (one flat call, no --worktree)                     │   cut to the panes a live session
+                                                      │   reports it runs in (its own pane_key)
                                                       │
    each configured serverRoots[i]:                    ├─→  board: root → role → task → tab
    onlyne --server-root <S> sessions --json           │   (a tab whose title is
@@ -30,7 +31,9 @@ missing annotation is never evidence about a session.
 
 The plugin no longer discovers role workspaces and no longer reads any backend cache file: the
 backend registers no per-role Orca worktree any more, so every session tab lands flat in the host
-worktree's list and the only session source is the admin surface.
+worktree's list and the only session source is the admin surface. Which of those tabs belong to a
+swarm comes from the same place — the session row — so the tab axis has one authority, not two
+(§4, *Axis A*).
 
 ---
 
@@ -70,7 +73,6 @@ worktree's list and the only session source is the admin surface.
    ```json
    {
      "serverRoots": ["/abs/path/to/server-root", "/abs/path/to/second-cluster"],
-     "piWorkspaces": ["/abs/path/to/role-workspace", "/abs/path/to/another-role-workspace"],
      "orcaBin": "/opt/homebrew/bin/orca",
      "onlyneBin": "/path/to/v1.0.0/onlyne"
    }
@@ -80,11 +82,9 @@ worktree's list and the only session source is the admin surface.
      `onlyne --server-root <S> …` (`<S>/.onlyne/run/s` is that root's admin socket).
      **Absent or empty is a valid state** — the board then renders the flat tab list only and
      never calls `onlyne` at all. Entries are trimmed and de-duplicated.
-  - `piWorkspaces` is the swarm-membership authority (§2 axis A): one entry per role workspace
-    whose pi adapter may publish a pane claim under `<workspace>/.onlyne/cache/pi-panes/`. It is
-    **not** the same list as `serverRoots` — a workspace is where `onlyne client run` runs, and the
-    board cannot derive it from a server root. Absent or empty is a valid state: the tab axis then
-    falls back to the worktree heuristic. Same trimming and de-duplication.
+   - **Nothing else scopes the tab axis.** Which tabs are listed is decided by the sessions
+     themselves (§4, *Axis A*), so there is no workspace list to configure and no path for the
+     board to resolve. A leftover `piWorkspaces` key in an existing config file is ignored.
    - Why the binaries may need pinning: the plugin worker environment is scrubbed to a 16-variable
      allowlist (`PATH`, `HOME`, …), and an Orca launched from the Dock often has no homebrew
      `PATH`. The plugin resolves binaries via `PATH → /opt/homebrew/bin → /usr/local/bin →
@@ -130,7 +130,8 @@ worktree's list and the only session source is the admin surface.
 ## 3. What the board looks like, and where it shows up
 
 ```
-Onlyne sessions · 2 roots · 3 roles · 7 tabs (4 live) · 9 sessions (2 working)
+Onlyne sessions · 2 roots · 3 roles · 7 tabs (4 live) · 3 hidden · 9 sessions (2 working)
+tab 轴：只列 7 个连着 adapter 的 pi pane（session 上报的 host.orca.pane_key），其余 3 个 tab 不计入
 /srv/onlyne-a  (3 roles · 9 sessions · 2 working)
   planner  (online · 2 tasks · 1 live)
     ● task8a1b · working/running · 12s · 45e603f7:b6d067b6
@@ -147,8 +148,13 @@ Onlyne sessions · 2 roots · 3 roles · 7 tabs (4 live) · 9 sessions (2 workin
 (the shipped board text is Chinese: `!` lines are that root's own failures, `无 tab` marks a task
 row the tab axis does not list, `未 join 的 tab` is the stray-tab section.)
 
-- summary: `N roots · N roles · N tabs (M live) · N sessions (K working)`; working means
-  `public_lifecycle=working` or `agent=running`.
+- summary: `N roots · N roles · N tabs (M live) [· H hidden] · N sessions (K working)`; `hidden`
+  appears only when something was dropped, and working means `public_lifecycle=working` or
+  `agent=running`.
+- scope line (present only when the cut hid something): `tab 轴：只列 N 个连着 adapter 的 pi
+  pane（session 上报的 host.orca.pane_key），其余 H 个 tab 不计入`. With no pane reported anywhere
+  it instead reads `tab 轴：等 pi-onlyne 连上——没有任何 live session 报告它所在的 Orca pane，H 个
+  tab 全部不计入` — the board saying it is waiting for a session, not that it is misconfigured.
 - root line: that root's role sections, session count and working count; a dead root shows zeros
   plus its own `!` lines instead of taking the board down.
 - role section: the role's presence (`online` / `offline` / `draining`, or `no role row` when only
@@ -158,8 +164,9 @@ row the tab axis does not list, `未 join 的 tab` is the stray-tab section.)
   adds `无 tab` and dashes the pane.
 - stray-tab row: `tab · title=<raw title> · relative lastOutputAt · short pane_key · wt <worktree>`.
 - legend: `●` live (`connected=true`) · `○` not connected, or a row the tab axis does not list.
-- empty state, one sentence: **no `serverRoots` and no Orca tab** — how to add `serverRoots` to the
-  config file.
+- empty state, one sentence: **no `serverRoots` and no Orca tab at all** — how to add `serverRoots`
+  to the config file. A board that has tabs but no reported pane shows the scope line instead;
+  claiming "no Orca tab" while Orca lists several would be false.
 
 It surfaces in four places:
 
@@ -216,49 +223,45 @@ worktree, and the plugin never walks worktrees. Per row the plugin keeps `handle
 - liveness is exactly the row's own `connected` flag; nothing else is consulted.
 - a row whose `handle` is missing is dropped (it cannot be addressed).
 - **measured**: Orca 1.4.198 rows carry no `paneKey` field, so the plugin derives
-  `${tabId}:${leafId}` (newer builds may carry it; it wins when present).
-- `worktreeId` is the only selector the plugin keeps — it is what `orca terminal list --worktree`
-  would need, and it is what `copy-agent-context` emits.
+  `${tabId}:${leafId}` (newer builds may carry it; it wins when present). That derived key is what
+  the scope cut compares against the pane a session reports.
+- `worktreeId` (and the row's `worktreePath`) is kept as addressing information — it is what
+  `orca terminal list --worktree` would need and what `copy-agent-context` emits, never what
+  decides scope.
 
-#### Scoping the tab axis to one swarm: pi claims first, worktree second
+#### Scoping the tab axis to real sessions: the pane the session reports
 
-An Orca worktree can hold tabs that are not onlyne sessions, so the tab axis is filtered by, in order:
+An Orca worktree can hold tabs that are not onlyne sessions, so the tab axis is filtered by exactly
+one rule: **a tab is on the axis iff a live session reports that tab's pane.**
 
-1. **Adapter claims — authoritative.** The pi adapter inherits `ORCA_PANE_KEY`,
-   `ORCA_TAB_ID`, `ORCA_TERMINAL_HANDLE` and `ORCA_WORKTREE_ID` from the pane it was spawned in
-   (**measured 2026-09-11, Orca 1.4.198**: `orca terminal create --command …` exports all four into
-   the command's process), so it is the one component that knows, from the inside, which pane is an
-   onlyne session. It publishes that binding as one file per pane —
-   `<workspace>/.onlyne/cache/pi-panes/<pane_key, ':' flattened to '-'>.json`, where `<workspace>`
-   is where the operator runs `onlyne client run` and the client spawns its plugin with `cwd` =
-   workspace. One file per pane, not per workspace: the client admits one client per workspace, but
-   one role slot of it runs up to `max_sessions` sessions, each in its own pane and its own pi
-   process — a single workspace-wide file would be last-writer-wins, and the board would hide every
-   pane but the one that mounted last. A tab is in scope iff its `paneKey` is claimed; a claim whose
-   pane Orca no longer lists hides the rest of the axis, so a stale claim never resurrects a tab. A
-   claim left behind by a pane that died without clearing is harmless in exactly the same way: it
-   matches no row.
-2. **Worktree heuristic — fallback.** While no claim is published anywhere, a tab is in scope iff a
-   configured root lives inside that tab's own `worktreePath` (both sides `realpath`-resolved). A
-   root that resolves into no tab's worktree leaves the axis unscoped, and the note says so.
+A session's own process states where it runs, on every heartbeat, as `observed.host.orca.pane_key`
+in the adapter protocol (`crates/onlyne-session/src/host.rs`) — it can, because it was spawned
+inside the pane and inherits `ORCA_PANE_KEY` (beside `ORCA_TAB_ID`, `ORCA_LEAF_ID` and
+`ORCA_TERMINAL_HANDLE`) from it (**measured 2026-09-11, Orca 1.4.198**: `orca terminal create
+--command …` exports them into the command's process). The key is `<tab_id>:<leaf_id>` on both
+sides, so the cut is the set intersection of that report with Orca's own flat tab list — a plain
+comparison, with nothing derived and nothing guessed.
 
-The plugin can compute neither path on its own: a workspace is where the *client* lives, the board's
-session axis is configured by *server root*, and the `welcome.server` triple carries no path — so
-claims are read from the workspaces listed in `piWorkspaces` (step 4 above), independent of
-`serverRoots`. Empty is a normal state: no claims, worktree heuristic only.
-
-`board.scope` records which decided: `{ derived, source: "adapter" | "worktree" | "none",
-worktrees, hidden, claimed? }`, alongside `summary.hiddenTabs`. A missing, unreadable or malformed
-claim file is a normal state, never an error: it means that pane has published nothing, and a
-malformed file costs its own claim and no other's. A workspace whose `pi-panes/` holds no readable
-claim has published nothing either, directory or not.
-
-The pre-v1 single file `<workspace>/.onlyne/cache/pi-pane.json` is read as well, through the
-transition: a pi process that was already running when this reader was upgraded keeps writing it
-while its pane is live, and ignoring it would hide that pane. It is a transition read, not a second
-authority — for one pane key the newest claim wins (`updated_at`, or the file's own mtime when the
-claim carries no stamp, which is the case for every legacy file), so a stale legacy file loses to a
-fresh per-pane claim and disappears on the next restart. Nothing writes it any more.
+- **No pane reported means no tab listed.** A board that cannot name a pane lists nothing rather
+  than everything; `scope.source: "none"` and the scope line both say the board is waiting for pi.
+  That is the deliberate cost of a rule with no guessing in it: a swarm whose adapter predates the
+  report shows an empty tab axis until that adapter is upgraded.
+- **Liveness is the projection's own verdict** — a session binds a pane while its
+  `public_lifecycle` is not `exited`. The client's reconcile loop is what turns a dead pane into
+  `exited`, so the board forms no second opinion about one fact.
+- **A binding survives the session that made it.** `report.complete` carries `host` forward, so a
+  finished session's row still says where it ran; the liveness rule above, not a vanished binding,
+  is what keeps its tab off the axis.
+- **A pane matching no tab binds nothing.** Either the tab is gone or the key belongs to another
+  machine's Orca; the cut hides the row instead of falling back to a guess.
+- **The board reads no file for this, and needs no workspace list.** There is no claim file, no
+  cache read and no `piWorkspaces` to configure: the authority is the session axis the board
+  already reads. `board.scope` is `{ source: "connected" | "none", panes, hidden }`, alongside
+  `summary.hiddenTabs`.
+- **`worktreePath` is not consulted.** It cannot be: a workspace is where the *client* lives while
+  the session axis is configured by *server root*, and the `welcome.server` triple carries no path
+  — so the worktree heuristic this board used to fall back on was resolving a different thing, and
+  it is gone along with the pre-v1 single-file claim read.
 
 ### Axis B — sessions (one call per root per verb)
 
@@ -271,8 +274,11 @@ onlyne --server-root <S> roles    --json   -> {ok:true, data:{roles:[…]}}
 
 - Session rows are normalized to `task_id`, `role`, `session_id`, `public_lifecycle` (falling back
   to `projection.lifecycle`), `projection.agent` / `delivery` / `resource`, `outcome`, `updated_at`,
-  `seq`. The shape is pinned by the repository's own wire vector
-  `crates/onlyne-proto/tests/wire_vectors/res_session_row.json`.
+  `seq`, and the reported pane out of `projection.observed.host.orca` (`pane_key`, `tab_id`,
+  `leaf_id`, `handle` — only `pane_key` is required; the rest are absent when the environment did
+  not name them). The base shape is pinned by the repository's own wire vector
+  `crates/onlyne-proto/tests/wire_vectors/res_session_row.json`; the pane rides inside the
+  projection's observation because the observation is exactly what the client mirrors.
 - Role rows are normalized to `name` → `role`, `admin`, `max_sessions` → `maxSessions`, `state` →
   `presence` (`online` / `offline` / `draining`), `sessions`. Pinned by `res_role_info.json`.
 - The role list is the section skeleton: a role with zero sessions still renders (that is how you
@@ -297,7 +303,7 @@ that matches nothing renders in the stray-tab section. Nothing more is inferred.
   agent reports. The two therefore rarely coincide, so in practice the board usually renders the
   two axes side by side and the annotation stays empty. That is the accepted cost of a supervisor
   view with no second discovery axis; `joined` is a bonus, never the reason a row exists.
-- Claims are consumed once, in config-root order and Orca row order: with two tabs carrying one
+- Tabs are consumed once, in config-root order and Orca row order: with two tabs carrying one
   title the first joins and the rest render stray, and with the same task id on two roots the
   earlier root in `serverRoots` takes the tab while the later row stays unjoined. That keeps
   `live tabs` from counting one physical tab twice; which root truly owns it is not knowable here.
@@ -307,7 +313,7 @@ that matches nothing renders in the stray-tab section. Nothing more is inferred.
 | situation | result |
 | --- | --- |
 | `serverRoots` absent/empty | valid: tab axis only, `onlyne` is never invoked |
-| a `piWorkspaces` entry publishes no claim | not an error: it is listed in `board.claims.unpublished` and named in the panel's scope note; the tab axis falls back to the worktree heuristic |
+| no live session reports a pane | not an error: the tab axis is empty (`scope.source: "none"`), the scope line says the board is waiting for pi, and the session axis renders normally |
 | `orca terminal list` fails (e.g. `missing_binary`) | `ok:false` + the error code; the session axis is still rendered, unjoined |
 | a root's socket is absent | that root reports `cli_error` with the canonical no-socket hint; other roots and the tab axis still render |
 | onlyne CLI without `--server-root`/`sessions` (e.g. 0.6.0) | `cli_surface_mismatch` on that verb; a failing verb never hides the other one |
@@ -340,6 +346,12 @@ that matches nothing renders in the stray-tab section. Nothing more is inferred.
   state elsewhere (no storage, no secrets, no settings writes).
 - **Upgrade**: edit the source directory, install again (new hash dir); consent only needs
   re-approval when the capability fingerprint changes.
+- **Upgrading from a build that used pane claims** (anything before the board read the pane from
+  the session row): nothing reads `<workspace>/.onlyne/cache/pi-panes/` or a legacy
+  `<workspace>/.onlyne/cache/pi-pane.json` any more, by this plugin or by the pi adapter, so both
+  are dead weight — delete the directory and the file from each workspace at your convenience. A
+  leftover `piWorkspaces` key in the config file is ignored. Until the pi adapters on a machine are
+  upgraded too, that machine's tab axis stays empty: the old adapters publish only the file.
 
 ## 7. Development and verification
 
@@ -353,7 +365,6 @@ integrations/orca-plugin/
     orca-cli.mjs       terminal list (flat) / terminal switch / status
     onlyne-cli.mjs     --server-root <S> sessions|roles, normalized rows + failures
     board.mjs          the two axes, the weak title join, the board model
-    claims.mjs         the pi adapter's pane claims (swarm membership authority)
     render.mjs         text rendering shared by notifications and logs
     panel-document.mjs the panel document: snapshot render, fingerprint, dev-only publisher
     commands.mjs       refresh / board / debug-board / focus / copy-agent-context
@@ -388,19 +399,21 @@ Implemented against the surfaces as measured; these are the points the implement
 1. **The title convention is not a contract.** The plugin joins on `onlyne:<task_id>` because that
    is the only tab-side hint available, but OSC title writes can replace it at any moment. If the
    backend starts depending on that prefix, it must also publish the pane/handle binding some other
-   way — the adapter / pi plugin protocol is the authority, and this board only mirrors it.
+   way — the adapter / pi plugin protocol is the authority, and this board only mirrors it. The
+   board's *scope* no longer depends on it: that comes from the session row (§2 axis A).
 2. **The plugin reads no backend file.** Sessions come from `sessions` and roles from `roles`,
    nothing else. Anything a supervisor needs must be answerable through those two verbs.
-3. **`sessions` must stay answerable without a role workspace.** With no per-role worktree
-   registration, a role's tab is indistinguishable from any other tab on the Orca side, so the
-  `task_id` ↔ tab binding is recovered from the pi adapter instead (`pi-panes/`, §2 axis A):
-   the adapter inherits `ORCA_PANE_KEY` from the pane it runs in, so the binding measured on the
-   wire is the backend's own `pane_key` for spawned sessions.
+3. **`sessions` must keep reporting the pane.** With no per-role worktree registration, a role's tab
+   is indistinguishable from any other tab on the Orca side, so the tab axis is scoped by the pane
+   each session reports (`observed.host.orca.pane_key`, `crates/onlyne-session/src/host.rs`) rather
+   than by any workspace path. Two properties matter to this board: the binding must survive
+   `report.complete` (so a finished session still says where it ran), and its `pane_key` must be the
+   same `<tab_id>:<leaf_id>` spelling Orca's own `terminal list` uses. If it is ever renamed or
+   dropped from the observation, the tab axis goes empty rather than wrong.
 4. **Session keys used**: `task_id` (identity), `session_id` (display), `role` (section),
    `public_lifecycle` / `projection.lifecycle`, `projection.agent`, `projection.outcome`,
-   `updated_at`, `seq`. Anything else is ignored.
+   `projection.observed.host.orca.pane_key`, `updated_at`, `seq`. Anything else is ignored.
 5. **Role row fields used**: `name`, `admin`, `max_sessions`, `state`, `sessions`. The presence
-   vocabulary is the server's own (`online` / `offline` / `draining`) and is rendered verbatim.
 6. **Per-root failures are expected.** A root with no live server is a normal state for the board;
    the plugin reports each failing verb with its own code and keeps going. It never merges roots:
    identical task ids on two roots stay two rows.

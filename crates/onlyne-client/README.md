@@ -35,8 +35,6 @@ One workspace, one role, one daemon. Many concurrent sessions inside the role.
 | `.onlyne/logs/client.log` | | stdout and stderr of the `start` child |
 | `.onlyne/agent/<id>/` | | installed plugin package with `plugin.toml` |
 | `.onlyne/cache/orca-tabs.jsonl` | | append-only Orca tab to session map: a supervisor/display side-channel, not the identity (the adapter protocol owns that) |
-| `.onlyne/cache/pi-panes/<pane_key, ':' → '-'>.json` | | the Orca pane one pi process runs in: one file per pane, published by the pi adapter (`integrations/pi-onlyne`); appears when pi mounts, rewritten per task, removed when its session ends |
-| `.onlyne/cache/pi-pane.json` | | the pre-v1 single-file claim layout: still read by the supervisor board through the transition, never written |
 
 `init` never writes `spec.toml`. A workspace holding the pre-v1 layout is
 refused before any write, with exit 2 and the byte-exact line
