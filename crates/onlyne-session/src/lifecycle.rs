@@ -32,6 +32,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::host::HostRef;
+
 /// Agent-side lifecycle fact observed from Pi/pi-onlyne.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -139,7 +141,7 @@ impl Version {
 /// `public` is always `project(...)` of the other fields; `is_legal` enforces
 /// that so a hand-written or replayed observation cannot smuggle a
 /// contradictory public view through.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Observation {
     /// Version of the event that produced this observation.
     pub version: Version,
@@ -159,6 +161,13 @@ pub struct Observation {
     pub outcome: Outcome,
     /// Derived public projection, stored for persistence and display.
     pub public: PublicLifecycle,
+    /// Where the reporting process runs, when its host can say (the Orca pane a
+    /// pi session lives in). Not a state dimension: `project` never reads it and
+    /// `is_legal` never constrains it, but it rides the comparison tuple, so a
+    /// binding-only heartbeat still advances the row instead of reading as a
+    /// no-op replay. Absent means the host said nothing, never "not submitted".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostRef>,
 }
 
 impl Observation {
@@ -205,12 +214,21 @@ impl Observation {
             recovery,
             outcome,
             public,
+            host: None,
         }
+    }
+
+    /// Same tuple with the reporting host of an earlier observation carried on.
+    /// The host is not part of any transition, so a tuple rebuilt from another
+    /// one (`settle_body`) keeps the binding it was reported with.
+    pub fn with_host(mut self, host: Option<HostRef>) -> Self {
+        self.host = host;
+        self
     }
 
     /// Same tuple with an advanced version watermark.
     fn advanced(&self, version: Version) -> Self {
-        let mut next = *self;
+        let mut next = self.clone();
         next.version = version;
         next
     }
@@ -225,7 +243,7 @@ impl Observation {
 
     /// Same tuple with a mutated mismatch counter.
     fn with_mismatch(&self, count: u32) -> Self {
-        let mut next = *self;
+        let mut next = self.clone();
         next.mismatch_count = count;
         next
     }
@@ -352,7 +370,7 @@ pub fn is_legal(obs: &Observation) -> bool {
 
 /// Lifecycle event. Each event carries the version that produced it; version
 /// gating happens centrally in `apply` before semantic rules run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleEvent {
     /// Generation-1 session created and bound to its task.
@@ -407,7 +425,7 @@ pub enum LifecycleEvent {
 }
 
 /// Reducer verdict. Every (observation, event) pair yields exactly one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     /// State advanced to the inner observation.
     Applied(Observation),
@@ -508,7 +526,7 @@ pub fn apply(obs: &Observation, event: &LifecycleEvent) -> Verdict {
             if v.generation != obs.version.generation {
                 return Verdict::Rejected(RejectReason::UnadoptedGeneration);
             }
-            let mut next = *body;
+            let mut next = body.clone();
             next.version = v;
             next.generation_live = obs.generation_live;
             finish(obs, next)
@@ -721,7 +739,7 @@ pub fn apply(obs: &Observation, event: &LifecycleEvent) -> Verdict {
             if !is_legal(body) {
                 return Verdict::Rejected(RejectReason::IllegalObservation);
             }
-            let mut next = *body;
+            let mut next = body.clone();
             next.version = v;
             next.generation_live = true;
             finish(obs, next)
@@ -760,7 +778,7 @@ pub fn event_version(event: &LifecycleEvent) -> Version {
 fn transition(obs: &Observation, agent: AgentState) -> Option<Observation> {
     let v = event_version(&LifecycleEvent::TurnStarted { v: obs.version });
     let _ = v;
-    let mut next = *obs;
+    let mut next = obs.clone();
     match agent {
         AgentState::Booting => {
             if obs.agent == AgentState::Booting {
@@ -855,8 +873,11 @@ fn finish(obs: &Observation, mut next: Observation) -> Verdict {
     Verdict::Applied(next)
 }
 
-/// The orthogonal dimension tuple, version- and policy-free, for comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The comparison tuple: the state dimensions plus the reported host, version-
+/// and policy-free. `host` is in it on purpose — a heartbeat that only now says
+/// where its process runs is news, and comparing the dimensions alone would
+/// read it as a no-op replay and drop the binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Tuple {
     agent: AgentState,
     delivery: DeliveryState,
@@ -864,6 +885,7 @@ struct Tuple {
     recovery: RecoveryState,
     outcome: Outcome,
     generation_live: bool,
+    host: Option<HostRef>,
 }
 
 impl Observation {
@@ -875,6 +897,7 @@ impl Observation {
             recovery: self.recovery,
             outcome: self.outcome,
             generation_live: self.generation_live,
+            host: self.host.clone(),
         }
     }
 }
@@ -890,6 +913,8 @@ fn body_is_no_op(obs: &Observation, body: &Observation) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::host::OrcaPane;
 
     // ------------------------------------------------------------------
     // exhaustive enumeration helpers
@@ -991,13 +1016,13 @@ mod tests {
         .into_iter()
         .filter(|o| is_legal(o))
         .collect();
-        let body = legal_bodies[0];
+        let body = legal_bodies[0].clone();
         let mut events = vec![
             LifecycleEvent::Created { v },
             LifecycleEvent::Ready { v },
             LifecycleEvent::TurnStarted { v },
             LifecycleEvent::TurnEnded { v },
-            LifecycleEvent::Heartbeat { v, body },
+            LifecycleEvent::Heartbeat { v, body: body.clone() },
             LifecycleEvent::Complete { v },
             LifecycleEvent::IntentPending { v },
             LifecycleEvent::IntentRetry { v },
@@ -1015,25 +1040,25 @@ mod tests {
             LifecycleEvent::Supersede {
                 v,
                 old_generation_dead: true,
-                body,
+                body: body.clone(),
             },
             LifecycleEvent::Supersede {
                 v,
                 old_generation_dead: false,
-                body,
+                body: body.clone(),
             },
             LifecycleEvent::Heartbeat {
                 v,
                 body: Observation {
                     public: PublicLifecycle::Idle,
-                    ..body
+                    ..body.clone()
                 },
             },
         ];
         for candidate in legal_bodies.iter().skip(1) {
             events.push(LifecycleEvent::Heartbeat {
                 v,
-                body: *candidate,
+                body: candidate.clone(),
             });
         }
         events
@@ -1251,7 +1276,7 @@ mod tests {
             &LifecycleEvent::Supersede {
                 v: Version::new(3, 0),
                 old_generation_dead: false,
-                body,
+                body: body.clone(),
             },
         );
         assert_eq!(refused, Verdict::Rejected(RejectReason::OldGenerationLive));
@@ -1437,6 +1462,92 @@ mod tests {
         )
     }
 
+    // ------------------------------------------------------------------
+    // reported host (the pane a session process runs in)
+    // ------------------------------------------------------------------
+
+    fn orca_host(pane_key: &str) -> HostRef {
+        HostRef {
+            orca: Some(OrcaPane {
+                pane_key: pane_key.to_string(),
+                tab_id: Some("tab-1".to_string()),
+                leaf_id: Some("leaf-1".to_string()),
+                handle: Some("term_1".to_string()),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_reported_host_round_trips_and_is_no_state_dimension() {
+        let body = live_working().with_host(Some(orca_host("tab-1:leaf-1")));
+        assert!(is_legal(&body), "a host never makes a tuple illegal");
+        assert_eq!(
+            body.public,
+            project(
+                body.agent,
+                body.delivery,
+                body.resource,
+                body.recovery,
+                body.outcome
+            ),
+            "the projection ignores the host"
+        );
+
+        let encoded = serde_json::to_string(&body).unwrap();
+        assert!(encoded.contains(r#""host":{"orca":{"pane_key":"tab-1:leaf-1""#), "{encoded}");
+        assert_eq!(serde_json::from_str::<Observation>(&encoded).unwrap(), body);
+
+        // A body that carries no host keeps the bytes it always had.
+        let bare = serde_json::to_string(&live_working()).unwrap();
+        assert!(!bare.contains("host"), "{bare}");
+        assert_eq!(
+            serde_json::from_str::<Observation>(&bare).unwrap(),
+            live_working()
+        );
+    }
+
+    #[test]
+    fn a_binding_only_heartbeat_advances_the_row() {
+        // The state is what the row already says; only the host is news, and the
+        // row must take it — otherwise a panel scoped by the binding would never
+        // learn the pane it belongs to.
+        let obs = live_working();
+        let bound = obs.clone().with_host(Some(orca_host("tab-1:leaf-1")));
+        let v = Version::new(1, 4);
+        let applied = apply(
+            &obs,
+            &LifecycleEvent::Heartbeat {
+                v,
+                body: bound.clone(),
+            },
+        );
+        let next = applied.expect_applied("a heartbeat that only names its pane");
+        assert_eq!(next.host, bound.host);
+        assert_eq!(next.agent, obs.agent);
+        assert_eq!(next.version, v);
+
+        // The same body again is the idempotent replay it is.
+        let replay = apply(
+            &next,
+            &LifecycleEvent::Heartbeat {
+                v: Version::new(1, 5),
+                body: bound,
+            },
+        );
+        assert_eq!(replay, Verdict::Ignored(IgnoredReason::NoOp));
+
+        // A body that drops the host is a change too: the process stopped saying
+        // where it runs, and the row must stop claiming it.
+        let dropped = apply(
+            &next,
+            &LifecycleEvent::Heartbeat {
+                v: Version::new(1, 6),
+                body: obs,
+            },
+        );
+        assert_eq!(dropped.expect_applied("a heartbeat with no host").host, None);
+    }
+
     impl Verdict {
         fn discriminant(&self) -> u8 {
             match self {
@@ -1447,7 +1558,7 @@ mod tests {
         }
         fn expect_applied(&self, what: &str) -> Observation {
             match self {
-                Verdict::Applied(o) => *o,
+                Verdict::Applied(o) => o.clone(),
                 other => panic!("expected applied for {what}, got {other:?}"),
             }
         }

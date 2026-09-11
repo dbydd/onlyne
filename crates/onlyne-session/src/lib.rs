@@ -1,6 +1,7 @@
 //! Session kernel: pure lifecycle reducer, process backends, ledger bridge.
 
 pub mod backend;
+pub mod host;
 pub mod lifecycle;
 pub mod reconcile;
 
@@ -9,6 +10,7 @@ pub use backend::{
     SessionRef, SpawnSpec, WorktreePolicy, backend_by_name, backend_for, default_backend,
     select_backend,
 };
+pub use host::{HostRef, OrcaPane};
 pub use lifecycle::{
     AgentState, DeliveryState, IgnoredReason, LifecycleEvent, Observation, Outcome,
     PublicLifecycle, RecoveryState, RejectReason, ResourceState, Verdict, Version, apply,

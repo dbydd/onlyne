@@ -557,7 +557,7 @@ pub fn apply_persist(
         row.as_ref(),
         event,
         &current,
-        verdict,
+        &verdict,
     )?;
     Ok(verdict)
 }
@@ -621,10 +621,10 @@ fn record_verdict(
     row: Option<&SessionRecord>,
     event: &LifecycleEvent,
     current: &Observation,
-    verdict: Verdict,
+    verdict: &Verdict,
 ) -> anyhow::Result<()> {
     match verdict {
-        Verdict::Applied(ref next) => {
+        Verdict::Applied(next) => {
             let backend_ref = backend_ref_json(bridge, task_id, row);
             let desired = serde_json::to_string(event)?;
             let stored = to_versioned(next, &backend_ref, &desired)?;
@@ -907,6 +907,8 @@ fn settle_body(obs: &Observation, outcome: Outcome) -> Observation {
     } else {
         RecoveryState::None
     };
+    // The host is not part of the settle: a completed turn still runs in the
+    // pane it was reported from, so the tuple keeps its binding.
     Observation::build(
         obs.version,
         obs.generation_live,
@@ -919,6 +921,7 @@ fn settle_body(obs: &Observation, outcome: Outcome) -> Observation {
         recovery,
         outcome,
     )
+    .with_host(obs.host.clone())
 }
 
 /// Record one divergence that survived a crash. Deduplicated on
@@ -1287,6 +1290,58 @@ mod tests {
         assert_eq!(after.observed_json, before.observed_json);
         assert_eq!((after.generation, after.seq), (1, 5));
         assert_eq!(ledger.events().len(), event_count);
+    }
+
+
+    fn pane_host(pane_key: &str) -> crate::host::HostRef {
+        crate::host::HostRef {
+            orca: Some(crate::host::OrcaPane {
+                pane_key: pane_key.to_string(),
+                tab_id: None,
+                leaf_id: None,
+                handle: Some("term_1".to_string()),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_heartbeats_reported_host_is_persisted_and_survives_a_settle() {
+        let ledger = MemoryLedger::new();
+        let (bridge, version) = tracked(&ledger, "host-1");
+        let row = ledger.get_session("host-1").unwrap().unwrap();
+        let body = stored_observation(&ledger, Some(&row)).with_host(Some(pane_host("tab-1:leaf-1")));
+        let verdict = apply_persist(
+            &bridge,
+            &ledger,
+            "host-1",
+            &LifecycleEvent::Heartbeat {
+                v: Version::new(version.generation, version.seq + 1),
+                body,
+            },
+        )
+        .unwrap();
+        assert!(matches!(verdict, Verdict::Applied(_)), "{verdict:?}");
+
+        // The row is what a client republishes and what the server mirrors, so
+        // the binding has to be readable back out of it.
+        let bound = ledger.get_session("host-1").unwrap().unwrap();
+        assert!(
+            bound.observed_json.contains(r#""pane_key":"tab-1:leaf-1""#),
+            "{}",
+            bound.observed_json
+        );
+        assert_eq!(
+            stored_observation(&ledger, Some(&bound)).host,
+            Some(pane_host("tab-1:leaf-1"))
+        );
+
+        // A completed turn still runs in the pane it was reported from.
+        settle(&bridge, &ledger, "host-1", Outcome::Done).unwrap();
+        let settled = ledger.get_session("host-1").unwrap().unwrap();
+        assert_eq!(
+            stored_observation(&ledger, Some(&settled)).host,
+            Some(pane_host("tab-1:leaf-1"))
+        );
     }
 
     #[test]

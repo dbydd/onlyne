@@ -68,7 +68,7 @@ pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<Proj
             observed,
             cluster_ref,
         } => {
-            let origin = cluster_ref.clone();
+            let observed = merged_observation(observed, cluster_ref.as_ref());
             let projection = SessionProjection {
                 lifecycle: Lifecycle::Working,
                 agent: AgentPhase::Running,
@@ -76,10 +76,7 @@ pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<Proj
                 resource: ResourcePhase::Attached,
                 recovery: RecoveryPhase::NoRecovery,
                 outcome: None,
-                observed: Some(serde_json::json!({
-                    "observed": observed,
-                    "cluster_ref": origin,
-                })),
+                observed: Some(observed.clone()),
             };
             write(
                 state,
@@ -89,7 +86,7 @@ pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<Proj
                 *generation,
                 *seq,
                 projection,
-                Some(observed.clone()),
+                Some(observed),
             )
         }
         Report::Complete {
@@ -166,6 +163,18 @@ pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<Proj
             Ok(ProjectionOutcome::skipped())
         }
     }
+}
+
+/// The reducer tuple a heartbeat carries, with the relayed cluster merged in as
+/// a sibling key. The tuple is stored *as* the row's observation rather than
+/// wrapped in one, so `sessions --json` — and with it every reader of
+/// `observed.host` — sees a single shape whichever client path wrote the row.
+fn merged_observation(observed: &Value, cluster_ref: Option<&String>) -> Value {
+    let mut value = observed.clone();
+    if let (Some(cluster), Some(object)) = (cluster_ref, value.as_object_mut()) {
+        object.insert("cluster_ref".into(), Value::String(cluster.clone()));
+    }
+    value
 }
 
 /// Apply one `session_sync` request to the session table.

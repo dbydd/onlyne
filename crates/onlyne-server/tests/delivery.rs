@@ -660,6 +660,46 @@ fn a_cluster_bearing_report_marks_its_projection() {
 }
 
 #[test]
+fn a_heartbeat_is_stored_flat_with_the_pane_binding_inside_it() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    let applied = projection::report(
+        &fixture.state,
+        "builder",
+        &Report::Heartbeat {
+            task_id: task_id.clone(),
+            generation: 1,
+            seq: 1,
+            observed: json!({
+                "lifecycle": "working",
+                "host": { "orca": { "pane_key": "tab-1:leaf-1" } },
+            }),
+            cluster_ref: Some("cluster-b".to_string()),
+        },
+    )
+    .expect("report");
+    assert!(applied.applied);
+
+    let row = projection::session_row(&fixture.state, &task_id)
+        .expect("row")
+        .expect("a row");
+    let stored = row.projection.observed.as_ref().expect("an observation");
+    // One shape, not two: the tuple the client sent *is* the observation, so the
+    // pane a scoped reader addresses sits at `observed.host`, not one level down.
+    assert_eq!(stored.get("observed"), None);
+    assert_eq!(
+        stored
+            .pointer("/host/orca/pane_key")
+            .and_then(|pane| pane.as_str()),
+        Some("tab-1:leaf-1")
+    );
+    assert_eq!(
+        stored.get("cluster_ref").and_then(|cluster| cluster.as_str()),
+        Some("cluster-b")
+    );
+}
+
+#[test]
 fn a_recorded_fault_is_queryable_and_acknowledgeable() {
     let fixture = fixture();
     let task_id = onlyne_proto::new_task_id();
