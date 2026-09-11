@@ -9,7 +9,7 @@ One workspace, one role, one daemon. Many concurrent sessions inside the role.
 | `run --workspace <dir>` | Foreground role runtime: connect, handshake, pull, dispatch, report. |
 | `start --workspace <dir>` | Spawn `run` detached, log to `.onlyne/logs/client.log`, record the pid, answer once the socket is bound. |
 | `stop --workspace <dir>` | Signal the recorded pid, wait for it to leave, remove the pid file and the socket. |
-| `status --workspace <dir>` | Print pid, uptime, socket path, and the recorded fault count. |
+| `status --workspace <dir>` | Print pid, uptime, socket path, recorded fault count, and whether the server link is up. |
 | `init --workspace <dir> --role <r> --server-root <dir>` | Build the minimal role workspace and print the `[[client]]` spec fragment. |
 | `roles --workspace <dir>` | Answer role prose from the local cache. |
 | `sessions --workspace <dir>` | Reserved for the live role runtime. |
@@ -17,8 +17,16 @@ One workspace, one role, one daemon. Many concurrent sessions inside the role.
 | `history --workspace <dir>` | Reserved for the live role runtime. |
 
 `start` prints `onlyne: client started pid <pid> socket <path>`.
-`status` prints `onlyne: client running pid <pid> uptime <n>s socket <path> faults <n>`.
+`status` prints `onlyne: client running pid <pid> uptime <n>s socket <path> faults <n>`,
+and adds `onlyne: client not connected` on stderr when the client holds no
+server link. The link state comes from an `admin` `hello` on the client socket,
+so the verb reads the fact from the running process.
 `stop` prints `onlyne: client stopped pid <pid>`.
+
+The printed `[[client]]` fragment is a complete role entry: it carries `role`,
+`key`, `admin`, `max_sessions`, the ACL lists, `prose`, `reuse`, and
+`session_command`. Pasting it into `spec.toml` and reloading yields a role whose
+sessions the client can spawn.
 
 ## Workspace layout
 
@@ -46,8 +54,12 @@ refused before any write, with exit 2 and the byte-exact line
 | --- | --- |
 | 0 | the verb finished |
 | 1 | the verb failed; the reason is one line on stderr |
-| 2 | `stop` or `status` found no running client, printed as `onlyne: client not running` |
+| 2 | `stop` found no running client, printed as `onlyne: client not running` |
+| 2 | `status` found no running client, or a client with no server link |
 | 2 | the workspace holds the legacy layout |
+
+`status` exits 0 only for a client that is up and connected to its server, which
+is what a script reads.
 
 ## Backends
 
@@ -80,6 +92,15 @@ where the agent runs. The role workspace therefore never has to exist in Orca
 reason a generated (non-git) role workspace works at all. Orca's public
 registration command accepts git checkouts only, so a `path:<workspace>`
 selector would fail for exactly the directories this client hands out.
+
+## Sessions
+
+`max_sessions` from the role's spec entry caps the sessions a role has running.
+A session whose stored lifecycle reads `exited` spends none of that cap: the
+rows of the sessions the role has ended stay in `client.db` as its history and
+stay queryable, and the client keeps pulling while fewer than `max_sessions`
+sessions have not exited. `reuse = true` keeps a settled session's slot for the
+role's next task; `reuse = false` gives the slot back when the task settles.
 
 ## Server link
 

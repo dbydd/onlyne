@@ -42,6 +42,9 @@ struct DispatchInner {
     pub outbox: Option<Arc<dyn Outbox>>,
     /// Flag the runloop and the dispatcher share while the link is down.
     pub accept_new: Arc<AtomicBool>,
+    /// Whether the role holds a ready server link. The runloop owns it, and the
+    /// adapter socket reports it to the `status` verb.
+    pub link_up: Arc<AtomicBool>,
     /// Aggregate name this role supervises, empty for a plain role.
     pub cluster_ref: String,
     /// The adapter connection serving each session of this role, keyed by the
@@ -121,6 +124,7 @@ impl DispatchState {
                 sessions: HashMap::new(),
                 outbox: None,
                 accept_new: Arc::new(AtomicBool::new(true)),
+                link_up: Arc::new(AtomicBool::new(false)),
                 cluster_ref: String::new(),
                 transports: HashMap::new(),
                 parked: None,
@@ -221,6 +225,16 @@ impl DispatchState {
     /// The flag the runloop and the dispatcher share.
     pub fn accept_new(&self) -> Arc<AtomicBool> {
         self.inner.lock().accept_new.clone()
+    }
+
+    /// Whether the role holds a ready server link.
+    pub fn link_up(&self) -> bool {
+        self.inner.lock().link_up.load(Ordering::SeqCst)
+    }
+
+    /// Record that the server link came up or went down.
+    pub fn set_link_up(&self, up: bool) {
+        self.inner.lock().link_up.store(up, Ordering::SeqCst);
     }
 
     /// Aggregate name this role supervises, empty for a plain role.
@@ -330,16 +344,16 @@ impl DispatchState {
             .map(|slot| slot.session.generation)
     }
 
-    /// Whether one more delivery fits the role's concurrency.
+    /// Whether a delivery has somewhere to run.
     ///
-    /// §5's `max_sessions` caps concurrent sessions, so a delivery that arrives
-    /// at the cap waits on the server rather than being refused: the row stays
-    /// in flight and the next pull offers it again once a session frees.
-    /// Whether a delivery has somewhere to run: a role below its limit, or an
-    /// idle session a finished task handed back (§5 `max_sessions`/`reuse`).
+    /// §5's `max_sessions` caps concurrency, so a delivery that arrives at the
+    /// cap waits on the server: the row stays in flight and the next pull
+    /// offers it again once a session frees. An idle session a finished task
+    /// handed back is free capacity (§5 `reuse`), and a session the reducer has
+    /// ended spends none of it.
     pub fn has_capacity(&self) -> bool {
         let inner = self.inner.lock();
-        inner.sessions.len() < inner.max_sessions as usize
+        live_sessions(&inner) < inner.max_sessions as usize
             || inner.sessions.values().any(|slot| slot.task_id.is_none())
     }
 
@@ -415,6 +429,37 @@ fn render_tokens(tokens: &[String], session: &str, task: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether the stored lifecycle of one session is the terminal `Exited`.
+///
+/// `client.db` holds the projection the reducer wrote under the
+/// `(generation, seq)` gate, and the row stays readable after the session ends.
+/// A session with no row yet is live: it exists as a spawned resource alone.
+fn session_exited(inner: &DispatchInner, task_id: &str) -> bool {
+    inner
+        .store
+        .get_session(task_id)
+        .ok()
+        .flatten()
+        .map(|row| phase(&row.public_lifecycle, Lifecycle::Created) == Lifecycle::Exited)
+        .unwrap_or(false)
+}
+
+/// Sessions that hold the role's concurrency: the staged slots whose stored
+/// lifecycle has not reached `Exited`.
+///
+/// §5's `max_sessions` caps concurrent sessions, and a session the reducer has
+/// ended answers no task, so it stops spending capacity the moment its row
+/// reads `exited`, whether the exit came from a completion report or from the
+/// settled observation a plugin sends as its last heartbeat. Exited rows stay
+/// in `client.db` and stay queryable.
+fn live_sessions(inner: &DispatchInner) -> usize {
+    inner
+        .sessions
+        .values()
+        .filter(|slot| !session_exited(inner, &slot.session.task_id))
+        .count()
+}
+
 pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef> {
     let task_id = envelope
         .task_id()
@@ -468,7 +513,7 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
             return Ok(session);
         }
     }
-    if inner.sessions.len() >= inner.max_sessions as usize {
+    if live_sessions(&inner) >= inner.max_sessions as usize {
         return Err(anyhow!("max_sessions reached"));
     }
     let session_id = task_id.clone();
@@ -712,8 +757,8 @@ pub fn on_recycled(
 
 /// Give one session's slot back, closing a live resource when the caller named a
 /// reason. A settled task calls this with no reason: §5's `reuse` keeps the slot
-/// for the next task of the role, and `max_sessions` counts what the map holds,
-/// so a role at its limit gets capacity back as its tasks end.
+/// for the next task of the role, and `max_sessions` counts the sessions that
+/// hold capacity, which a settle releases.
 fn release_locked(
     inner: &mut DispatchInner,
     task_id: &str,

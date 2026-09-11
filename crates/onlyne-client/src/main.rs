@@ -161,10 +161,13 @@ async fn main() {
             }
         },
         Command::Stop { workspace } => stop_client(&workspace),
-        Command::Status { workspace } => match daemon::status(&workspace) {
+        Command::Status { workspace } => match daemon::status(&workspace).await {
             Ok(Some(report)) => {
                 println!("{}", report.line());
-                0
+                if !report.connected {
+                    eprintln!("{}", daemon::NOT_CONNECTED);
+                }
+                report.exit_code()
             }
             Ok(None) => {
                 eprintln!("{}", daemon::NOT_RUNNING);

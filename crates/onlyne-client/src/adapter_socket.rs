@@ -3,10 +3,11 @@ use anyhow::{Context, Result};
 use onlyne_adapter::{AdapterIo, AdapterServer, ServerConnection};
 use onlyne_layout::apply_private_mode;
 use onlyne_proto::{
-    AdapterMsg, Capability, ErrorCode, HelloAck, HostOp, Mount, MountKind, PluginOp, Report,
-    ResBody, ServerInfo,
+    AdapterMsg, Capability, ErrorCode, HelloAck, HelloArgs, HostOp, Mount, MountKind,
+    PROTOCOL_VERSION, PluginOp, Report, ResBody, ServerInfo,
 };
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 
 #[derive(Clone)]
@@ -75,7 +76,10 @@ impl AdapterSocket {
     ///
     /// A message verb reports the server's verdict, which is the answer the
     /// operator asked for, and only a link that is down queues the envelope as
-    /// a durable intent (plan §6 line 289).
+    /// a durable intent (plan §6 line 289). A liveness probe is answered in
+    /// place: `onlyne ping --workspace <dir>` sends a bare `Frame::Ping` and
+    /// reads the pong, so the connection stays open for the exchange the caller
+    /// opened it for.
     async fn serve_local(&self, mut stream: UnixStream, first: serde_json::Value) -> Result<()> {
         let mut pending = Some(first);
         loop {
@@ -89,6 +93,13 @@ impl AdapterSocket {
             };
             let frame: onlyne_proto::Frame<onlyne_proto::ClientOp> =
                 serde_json::from_value(value).context("decode a client frame")?;
+            if let onlyne_proto::Frame::Ping { t } = frame {
+                let pong = onlyne_proto::Frame::<onlyne_proto::ClientOp>::Pong { t, server_seq: 0 };
+                onlyne_frame::write_frame(&mut stream, &pong)
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                continue;
+            }
             let onlyne_proto::Frame::Req { id, op } = frame else {
                 return Ok(());
             };
@@ -172,7 +183,7 @@ impl AdapterSocket {
                     generation: 1,
                     prose,
                     server: ServerInfo {
-                        connected: true,
+                        connected: dispatch.link_up(),
                         cluster,
                         name: server,
                     },
@@ -360,6 +371,42 @@ pub fn mount_allowed(mount: Option<&Mount>, kind: MountKind, role: &str) -> bool
 /// A `session_register` naming a terminated session ends the plugin connection.
 pub fn should_bye_on_register(session_id: &str) -> bool {
     session_id == "terminated"
+}
+
+/// Wait bound for the link probe's `hello` round trip.
+///
+/// The handshake runs over a local socket, and the bound matches the adapter
+/// protocol's own hello budget.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whether the client serving `socket` holds a ready server link.
+///
+/// The probe is an `admin` `hello` on the adapter surface (§7): it names no
+/// mount, binds nothing, and the host's `HelloAck` carries the link state. A
+/// socket that does not answer is a client that is not serving.
+pub async fn server_link_up(socket: &Path) -> bool {
+    let Ok(stream) = UnixStream::connect(socket).await else {
+        return false;
+    };
+    let io = AdapterIo::new(stream, PROBE_TIMEOUT, PROBE_TIMEOUT);
+    let hello = HelloArgs {
+        protocol: PROTOCOL_VERSION,
+        plugin: "onlyne-client".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        kind: MountKind::Admin,
+        capabilities: Vec::new(),
+        mount: None,
+    };
+    let Ok(body) = io.request(AdapterMsg::Plugin(PluginOp::Hello(hello))).await else {
+        return false;
+    };
+    if !body.ok {
+        return false;
+    }
+    let ack = body
+        .data
+        .and_then(|value| serde_json::from_value::<HostOp>(value).ok());
+    matches!(ack, Some(HostOp::Welcome(ack)) if ack.server.connected)
 }
 
 pub async fn stale_socket_removed(path: &Path) -> Result<()> {

@@ -193,11 +193,13 @@ pub async fn run(init: ClientInit) -> Result<()> {
             Ok(link) => {
                 backoff.reset();
                 state.dispatch.attach_outbox(Arc::new(link.clone()));
+                state.dispatch.set_link_up(true);
                 match run_link(&init, &link, &state).await {
                     Ok(()) => tracing::info!(role = %init.role, "server link ended"),
                     Err(error) => tracing::warn!(error = %error, "server link failed"),
                 }
                 state.dispatch.detach_outbox();
+                state.dispatch.set_link_up(false);
                 accept_new.store(false, Ordering::SeqCst);
                 if let Some(failure) = link.failure().await {
                     if is_permanent(&failure) {
@@ -326,6 +328,7 @@ async fn watch_readiness(link: ClientLink, state: RunState) -> Result<()> {
                     // the routed `hello` before any queued frame reaches it.
                     link.authenticate().await?;
                     state.accept_new.store(true, Ordering::SeqCst);
+                    state.dispatch.set_link_up(true);
                     flush_intents(&link, &state).await;
                     subscribe(&link, state.cursor()).await?;
                     tracing::info!("server link restored; intents flushed");
@@ -335,6 +338,7 @@ async fn watch_readiness(link: ClientLink, state: RunState) -> Result<()> {
                 if ready {
                     ready = false;
                     state.accept_new.store(false, Ordering::SeqCst);
+                    state.dispatch.set_link_up(false);
                     tracing::warn!("server link lost; sessions settle and intents keep queuing");
                 }
             }

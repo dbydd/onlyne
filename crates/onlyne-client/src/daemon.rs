@@ -4,7 +4,8 @@
 //! child's stdout and stderr to `.onlyne/logs/client.log`, records the pid in
 //! `.onlyne/run/client.pid` at `0600`, and returns once the adapter socket is
 //! bound. `stop` reads that file, signals the process, and waits for it to
-//! leave. `status` reports the same facts for an operator.
+//! leave. `status` reports the same facts for an operator, plus whether the
+//! process holds a ready server link.
 
 use anyhow::{Context, Result, anyhow};
 use onlyne_layout::{RoleWorkspace, apply_private_mode};
@@ -14,6 +15,8 @@ use std::time::{Duration, Instant};
 
 /// Byte-exact answer for every verb that needs a live client.
 pub const NOT_RUNNING: &str = "onlyne: client not running";
+/// Byte-exact answer for a live client whose server link is down.
+pub const NOT_CONNECTED: &str = "onlyne: client not connected";
 /// Signal and liveness probes go through `kill(1)`, present at this path on
 /// every POSIX host.
 const KILL_BIN: &str = "/bin/kill";
@@ -64,6 +67,8 @@ pub struct StatusReport {
     pub uptime: Duration,
     pub socket: PathBuf,
     pub faults: usize,
+    /// Whether the client holds a ready server link.
+    pub connected: bool,
 }
 
 impl StatusReport {
@@ -76,6 +81,12 @@ impl StatusReport {
             self.socket.display(),
             self.faults
         )
+    }
+
+    /// Process exit code for the `status` verb: zero for a client that is up
+    /// and connected to its server, and the refusal code otherwise.
+    pub fn exit_code(&self) -> i32 {
+        if self.connected { 0 } else { 2 }
     }
 }
 
@@ -251,8 +262,14 @@ pub fn stop(workspace: &Path) -> Result<StopOutcome> {
     Ok(StopOutcome::Stopped(pid))
 }
 
-/// Report a live client, and `None` when no recorded process is running.
-pub fn status(workspace: &Path) -> Result<Option<StatusReport>> {
+/// Report a live client and the state of its server link, and `None` when no
+/// recorded process is running.
+///
+/// The link state comes from the client itself: an `admin` `hello` over its
+/// adapter socket, which answers with the connection its runtime holds. A
+/// running process that answers nothing is a client that is not serving, and
+/// the verb reports that as a refusal.
+pub async fn status(workspace: &Path) -> Result<Option<StatusReport>> {
     let layout = RoleWorkspace::resolve(workspace);
     let pid_path = layout.pid_path();
     let Some(pid) = read_pid_file(&pid_path)? else {
@@ -266,11 +283,13 @@ pub fn status(workspace: &Path) -> Result<Option<StatusReport>> {
         .ok()
         .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
         .unwrap_or_default();
+    let socket = layout.socket_path();
     Ok(Some(StatusReport {
         pid,
         uptime,
-        socket: layout.socket_path(),
         faults: fault_count(&layout)?,
+        connected: crate::adapter_socket::server_link_up(&socket).await,
+        socket,
     }))
 }
 
@@ -340,13 +359,16 @@ mod tests {
         assert!(!path.exists());
     }
 
-    #[test]
-    fn running_status_reports_pid_socket_and_faults() {
+    #[tokio::test]
+    async fn running_status_reports_pid_socket_and_faults() {
         let dir = tempdir().unwrap();
         let layout = RoleWorkspace::resolve(dir.path());
         layout.bootstrap().unwrap();
         write_pid_file(&layout.pid_path(), std::process::id()).unwrap();
-        let report = status(dir.path()).unwrap().expect("live pid is running");
+        let report = status(dir.path())
+            .await
+            .unwrap()
+            .expect("live pid is running");
         assert_eq!(report.pid, std::process::id());
         assert_eq!(report.socket, layout.socket_path());
         assert_eq!(report.faults, 0);
@@ -356,12 +378,38 @@ mod tests {
                 .contains(&format!("pid {}", std::process::id()))
         );
         assert!(report.line().contains("faults 0"));
+        // Nothing serves this workspace socket, so the client is up without a
+        // server link and the verb refuses.
+        assert!(!report.connected);
+        assert_eq!(report.exit_code(), 2);
     }
 
-    #[test]
-    fn absent_pid_file_has_no_status() {
+    #[tokio::test]
+    async fn absent_pid_file_has_no_status() {
         let dir = tempdir().unwrap();
-        assert_eq!(status(dir.path()).unwrap(), None);
+        assert_eq!(status(dir.path()).await.unwrap(), None);
+    }
+
+    /// A script reads `status`'s exit code, so a client that is up without a
+    /// server link is a refusal: its work cannot reach the cluster.
+    #[test]
+    fn status_exit_code_follows_the_link() {
+        let connected = StatusReport {
+            pid: 1,
+            uptime: Duration::ZERO,
+            socket: PathBuf::from("/tmp/s"),
+            faults: 0,
+            connected: true,
+        };
+        assert_eq!(connected.exit_code(), 0);
+        assert_eq!(
+            StatusReport {
+                connected: false,
+                ..connected
+            }
+            .exit_code(),
+            2
+        );
     }
 
     #[test]

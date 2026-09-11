@@ -90,7 +90,7 @@ fn permissions_mode_600_for_role_key_and_socket() {
         .unwrap();
     assert!(fragment.starts_with("[[client]]\n"));
     let lines: Vec<&str> = fragment.lines().collect();
-    assert_eq!(lines.len(), 9, "fragment shape is fixed: {fragment:?}");
+    assert_eq!(lines.len(), 10, "fragment shape is fixed: {fragment:?}");
     assert_eq!(lines[0], "[[client]]");
     assert_eq!(lines[1], "role = \"planner\"");
     assert!(
@@ -107,9 +107,12 @@ fn permissions_mode_600_for_role_key_and_socket() {
             "allowed_targets = [\"planner\"]",
             "prose = \"v1 smoke prose\"",
             "reuse = true",
+            "session_command = [\"pi\", \"--session-id\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]",
         ]
     );
-    assert!(fragment.ends_with("reuse = true\n"));
+    assert!(fragment.ends_with(
+        "session_command = [\"pi\", \"--session-id\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]\n"
+    ));
     assert!(fragment.contains("key = \"ed25519/"));
 
     let key_path = ws_dir.path().join(".onlyne/keys/role.key");
@@ -156,6 +159,54 @@ fn permissions_mode_600_for_role_key_and_socket() {
     let sock_mode = std::fs::metadata(&sock_path).unwrap().permissions().mode() & 0o777;
     assert_eq!(sock_mode, 0o600);
     drop(listener);
+}
+
+/// The printed fragment is a complete role entry: pasting it into `spec.toml`
+/// and reloading yields a role whose `session_command` the client can spawn.
+///
+/// A fragment without that line parses and registers, and then leaves every
+/// delivery staged with no process behind it: the box the operator assembled by
+/// hand parks its tasks `in_flight` and no component says why. The seed is the
+/// one `examples/supervisor/run.py` writes into its own ring entries.
+#[test]
+fn init_fragment_is_a_pasteable_spawnable_role() {
+    let ws_dir = tempdir().unwrap();
+    let server_dir = tempdir().unwrap();
+    let server_spec = server_dir.path().join(".onlyne/spec.toml");
+    std::fs::create_dir_all(server_spec.parent().unwrap()).unwrap();
+    std::fs::write(&server_spec, "[server]\nname = \"srv\"\nlisten = \"127.0.0.1:7899\"\ncert_pin = \"sha256/0000000000000000000000000000000000000000000000000000000000000000\"\n").unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let fragment = rt
+        .block_on(init(InitArgs {
+            workspace: ws_dir.path().to_path_buf(),
+            role: "planner".into(),
+            server_root: server_dir.path().to_path_buf(),
+            prose: "v1 smoke prose".into(),
+        }))
+        .unwrap();
+
+    let spec = format!(
+        "[server]\nname = \"srv\"\nlisten = \"127.0.0.1:7899\"\ncert_pin = \"sha256/0000000000000000000000000000000000000000000000000000000000000000\"\n\n{fragment}"
+    );
+    let parsed = onlyne_config::Spec::parse_str(&spec).expect("the pasted fragment is a spec");
+    let planner = parsed
+        .client
+        .iter()
+        .find(|entry| entry.role == "planner")
+        .expect("the fragment registers the role");
+    assert_eq!(
+        planner.session_command,
+        vec![
+            "pi",
+            "--session-id",
+            "{session}",
+            "--session-dir",
+            ".pi/sessions",
+            "-ns"
+        ],
+        "a registered role carries the spawn command the client renders per task"
+    );
 }
 
 /// An admin `hello` reaches the host as `mount: null`, because the untagged
@@ -247,6 +298,111 @@ async fn an_admin_hello_survives_the_wire_and_is_admitted() {
         Some(ErrorCode::Forbidden)
     );
     host.abort();
+}
+
+/// `onlyne ping --workspace <dir>` opens the role socket, sends a bare
+/// `Frame::Ping`, and reads the pong. The host answers that probe in place, so
+/// the connection the caller opened survives the exchange and a later request
+/// on it still reaches the local vocabulary.
+#[tokio::test]
+async fn a_local_ping_is_answered_and_keeps_the_socket_open() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(FakeBackend::new());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        false,
+        backend,
+        store,
+    );
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+
+    write_frame(&mut stream, &Frame::<ClientOp>::Ping { t: 4_242 })
+        .await
+        .unwrap();
+    let answer: Frame<ClientOp> = read_frame(&mut stream)
+        .await
+        .unwrap()
+        .expect("the probe is answered before the socket closes");
+    assert_eq!(
+        answer,
+        Frame::<ClientOp>::Pong {
+            t: 4_242,
+            server_seq: 0
+        },
+        "the pong echoes the probe's clock"
+    );
+
+    // The same connection still serves the local surface, which is what the
+    // probe's caller reads after its pong.
+    write_frame(
+        &mut stream,
+        &Frame::<ClientOp>::req("r1", ClientOp::QueryRoles(QueryRolesArgs { role: None })),
+    )
+    .await
+    .unwrap();
+    let answer: Frame<ClientOp> = read_frame(&mut stream)
+        .await
+        .unwrap()
+        .expect("the connection is still open");
+    match answer {
+        Frame::Res { id, body } => {
+            assert_eq!(id, "r1");
+            assert!(body.ok, "the roles query answers: {body:?}");
+        }
+        other => panic!("expected a res frame, got {other:?}"),
+    }
+    host.abort();
+}
+
+/// `status` asks the running client whether its server link is up, and that
+/// answer is what its exit code reports.
+///
+/// The probe is an `admin` `hello` on the role socket: the client's own runtime
+/// owns the connection flag, so the verb reads the fact from the process that
+/// holds it instead of guessing from the pid file. A socket that answers
+/// nothing is a client that is not serving.
+#[tokio::test]
+async fn the_link_probe_follows_the_clients_connection() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(FakeBackend::new());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        false,
+        backend,
+        store,
+    );
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    assert!(
+        !onlyne_client::adapter_socket::server_link_up(&socket).await,
+        "a client that holds no link is not connected"
+    );
+    state.set_link_up(true);
+    assert!(
+        onlyne_client::adapter_socket::server_link_up(&socket).await,
+        "the probe reads the connection the runtime holds"
+    );
+    state.set_link_up(false);
+    assert!(
+        !onlyne_client::adapter_socket::server_link_up(&socket).await,
+        "a dropped link is reported as not connected"
+    );
+    host.abort();
+
+    let absent = dir.path().join(".onlyne/run/absent");
+    assert!(
+        !onlyne_client::adapter_socket::server_link_up(&absent).await,
+        "nothing listening is not connected"
+    );
 }
 
 #[test]
@@ -448,6 +604,107 @@ fn session_reuse_and_capacity_capping() {
     let err = dispatch(&state, &env4);
     assert!(err.is_err());
     assert_eq!(err.unwrap_err().to_string(), "max_sessions reached");
+}
+
+/// A settled session spends no concurrency.
+///
+/// §5's `max_sessions` caps the sessions a role has running, and the rows of
+/// the sessions it has ended stay in `client.db` as the role's own history.
+/// The live ring held six and seven exited rows per role against a cap of two,
+/// and a role whose count reached the cap stops pulling: every later task parks
+/// `in_flight` on the server with nothing on the client side saying why. Both
+/// exit routes reach that state — the completion report, and the settled
+/// observation the plugin sends as its last heartbeat — so neither holds
+/// capacity, and the exited rows stay queryable.
+#[tokio::test]
+async fn exited_sessions_do_not_hold_the_capacity_cap() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(FakeBackend::new());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        2,
+        false,
+        backend.clone(),
+        store.clone(),
+    );
+
+    // Task 1 ends through the completion report, which gives its slot back.
+    let first = deliver(&state, &task_delivery("task 1")).await;
+    on_plugin_report(
+        &state,
+        Report::Complete {
+            task_id: first.clone(),
+            outcome: Outcome::Done,
+            head: Some("done".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        store.get_session(&first).unwrap().unwrap().public_lifecycle,
+        "exited"
+    );
+
+    // Tasks 2 and 3 end through the plugin's settled observation, the last
+    // heartbeat of a session that finished: the row reads exited while the slot
+    // the client staged stays where it is.
+    for text in ["task 2", "task 3"] {
+        let task_id = deliver(&state, &task_delivery(text)).await;
+        let settled = onlyne_session::Observation::build(
+            onlyne_session::Version::new(1, 3),
+            true,
+            onlyne_session::DEFAULT_ISOLATE_AFTER,
+            onlyne_session::DEFAULT_TERMINATE_AFTER,
+            0,
+            onlyne_session::AgentState::Idle,
+            onlyne_session::DeliveryState::Accepted,
+            onlyne_session::ResourceState::Attached,
+            onlyne_session::RecoveryState::Draining,
+            onlyne_session::Outcome::Done,
+        );
+        on_plugin_report(
+            &state,
+            Report::Heartbeat {
+                task_id: task_id.clone(),
+                generation: 1,
+                seq: 3,
+                observed: serde_json::to_value(&settled).unwrap(),
+                cluster_ref: None,
+            },
+        )
+        .await
+        .unwrap();
+        let row = store
+            .get_session(&task_id)
+            .unwrap()
+            .expect("the row is kept");
+        assert_eq!(
+            row.public_lifecycle, "exited",
+            "{text} exits on its settled observation"
+        );
+    }
+
+    // The two slots whose settled observation arrived last are still staged,
+    // which is the role at its cap with every one of them exited.
+    assert_eq!(state.session_count(), 2);
+    assert!(state.has_capacity());
+    let fourth = deliver(&state, &task_delivery("task 4")).await;
+    assert_ne!(fourth, first);
+    assert_eq!(
+        backend.sessions().len(),
+        4,
+        "every task spawned its own resource"
+    );
+    // The rows behind the cap spend nothing and stay readable.
+    assert_eq!(
+        store.get_session(&first).unwrap().unwrap().public_lifecycle,
+        "exited"
+    );
 }
 
 #[test]

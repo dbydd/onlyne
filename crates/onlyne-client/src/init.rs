@@ -59,18 +59,27 @@ pub async fn init(args: InitArgs) -> Result<String> {
     Ok(fragment(&args.role, &key.public_str(), &args.prose))
 }
 
+/// The `session_command` seed the printed fragment ships.
+///
+/// The bytes match the seed `examples/supervisor/run.py` writes into its ring
+/// entries, so a pasted fragment spawns the same session the demo cluster runs.
+const SEED_SESSION_COMMAND: &str = "session_command = [\"pi\", \"--session-id\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]";
+
 /// The `[[client]]` slice `init` prints for `spec.toml`.
 ///
 /// The ACL lines make the role deliverable to itself, which is what the
 /// end-to-end script exercises with `send --from planner --to planner`.
 /// `public_key` arrives in the `ed25519/<base64>` form `KeyPair::public_str`
-/// produces, which is the same string the handshake verifies against.
+/// produces, which is the same string the handshake verifies against. The
+/// `session_command` line is what the client runs per task (§5, §6): a role
+/// entry without one leaves every delivery staged with no process behind it.
 pub fn fragment(role: &str, public_key: &str, prose: &str) -> String {
     let role = toml_string(role);
     let key = toml_string(public_key);
     let prose = toml_string(prose);
     format!(
-        "[[client]]\nrole = {role}\nkey = {key}\nadmin = false\nmax_sessions = 1\nallowed_senders = [\"*\", {role}]\nallowed_targets = [{role}]\nprose = {prose}\nreuse = true\n",
+        "[[client]]\nrole = {role}\nkey = {key}\nadmin = false\nmax_sessions = 1\nallowed_senders = [\"*\", {role}]\nallowed_targets = [{role}]\nprose = {prose}\nreuse = true\n{command}\n",
+        command = SEED_SESSION_COMMAND,
     )
 }
 
