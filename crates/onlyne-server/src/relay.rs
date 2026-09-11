@@ -193,6 +193,9 @@ pub struct AclRequest<'a> {
     pub admin: bool,
     /// Role that owns the task, when the envelope names one.
     pub owner: Option<&'a str>,
+    /// Role whose dispatch created `causality.task`, read from the task's
+    /// ledger row. `None` when the task left no row, as after a purge.
+    pub origin: Option<&'a str>,
 }
 
 /// The ACL gate. A denial writes no ledger row.
@@ -208,9 +211,18 @@ pub fn check_acl(
         kind,
         admin,
         owner,
+        origin,
     } = *request;
     match (from, to) {
         (Principal::Role { role, .. }, Principal::Role { .. }) => {
+            // A completion is the receipt for work the recipient dispatched, so
+            // the ledger row that created the task carries the recipient's
+            // claim to it and the receipt travels back up the chain the task
+            // came down. The edge table stays the gate for every other frame,
+            // a completion addressed to a third role included.
+            if kind == MsgKind::Completion && origin == Some(to_role) {
+                return Ok(());
+            }
             acl_allows(table, role, to_role, class_of(kind), owner).map_err(|deny| {
                 let code = match deny.reason {
                     onlyne_net::AclDenyReason::UnknownRole => ErrorCode::UnknownRole,
@@ -338,6 +350,16 @@ pub fn send(
         },
     };
     let envelope = &routed;
+    // A completion returns to the role that dispatched the task it names. The
+    // dispatch's own ledger row states that role, so nothing the envelope says
+    // about its recipient decides the exemption.
+    let origin = match envelope.kind {
+        MsgKind::Completion => envelope
+            .causality
+            .as_ref()
+            .and_then(|causality| task_origin(state, &causality.task)),
+        _ => None,
+    };
     let table = state.acl_table();
     if let Err(reject) = check_acl(
         &table,
@@ -349,6 +371,7 @@ pub fn send(
             kind: envelope.kind,
             admin,
             owner,
+            origin: origin.as_deref(),
         },
     ) {
         return Ok(RelayReply::Rejected(reject));
@@ -712,4 +735,30 @@ pub fn task_owner(state: &State, task_id: &str) -> Option<String> {
         .ok()
         .flatten()
         .map(|row| row.role)
+}
+
+/// How many of a task's ledger rows [`task_origin`] reads.
+///
+/// The dispatch row is the task's first row in ledger order, so the scan finds
+/// it at once. The bound keeps a long task family from turning one completion
+/// into an unbounded read.
+const TASK_ORIGIN_ROW_LIMIT: u32 = 256;
+
+/// The role whose dispatch created a task, read from the task's ledger row.
+///
+/// A `Task` row carrying `causality.task` records the sender that created the
+/// work, and that sender is the role a completion answers. The question is
+/// therefore settled by the server's durable record, which is what makes a
+/// completion receipt reach the role that dispatched the work even where no
+/// `allowed_targets` edge points back. A task with no row answers `None` — after
+/// a purge, or for an id nobody dispatched — and the ACL gate decides alone.
+pub fn task_origin(state: &State, task_id: &str) -> Option<String> {
+    let rows = state
+        .ledger
+        .ledger_task(task_id, TASK_ORIGIN_ROW_LIMIT)
+        .ok()?;
+    rows.iter()
+        .find(|row| row.kind == MsgKind::Task)
+        .and_then(|row| row.sender().ok())
+        .and_then(|sender| sender.role_name().map(str::to_string))
 }

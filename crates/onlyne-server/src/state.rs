@@ -6,6 +6,7 @@ use onlyne_proto::{Capability, ConversationInfo, Event, Frame, GatewayHealth};
 use onlyne_store::{RoleRow, ServerLedger};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{Notify, broadcast, mpsc};
 
@@ -172,6 +173,9 @@ pub struct Server {
     pub roles: RwLock<RoleRegistry>,
     pub gateways: RwLock<GatewayRegistry>,
     pub events: broadcast::Sender<Arc<Frame>>,
+    /// Newest event `seq` this process emitted, mirrored in memory so a
+    /// liveness probe answers without a ledger read.
+    pub event_seq: AtomicU64,
     pub start_at: DateTime<Utc>,
     pub root: PathBuf,
     pub acl: RwLock<Arc<AclTable>>,
@@ -193,6 +197,7 @@ impl Server {
         layout.bootstrap()?;
         let spec = Spec::load(layout.spec_path())?;
         let ledger = ServerLedger::open(layout.state_db_path(), spec.server.fault_history_days)?;
+        let head = ledger.event_head().unwrap_or(0).max(0) as u64;
         let (events, _) = broadcast::channel(256);
         let server = Arc::new(Self {
             acl: RwLock::new(Arc::new(acl_from_spec(&spec)?)),
@@ -202,6 +207,7 @@ impl Server {
             roles: RwLock::new(RoleRegistry::default()),
             gateways: RwLock::new(GatewayRegistry::default()),
             events,
+            event_seq: AtomicU64::new(head),
             start_at: Utc::now(),
             root: init.root.clone(),
             deliveries: RwLock::new(HashMap::new()),
@@ -283,12 +289,22 @@ impl Server {
         self.ledger.event_head().unwrap_or(0)
     }
 
+    /// The newest event `seq` this process emitted, read from memory.
+    ///
+    /// The admin liveness probe answers with this instead of
+    /// [`Server::event_head`] so a `ping` issues no query and appends nothing
+    /// (plan §8 line 341: the admin surface carries no policy).
+    pub fn event_cursor(&self) -> u64 {
+        self.event_seq.load(Ordering::SeqCst)
+    }
+
     pub fn emit(&self, event: Event) -> anyhow::Result<u64> {
         let seq = self
             .ledger
             .append_event(event.type_name(), &serde_json::to_value(&event)?)?
             as u64;
         let _ = self.events.send(Arc::new(Frame::event(seq, event)));
+        self.event_seq.fetch_max(seq, Ordering::SeqCst);
         Ok(seq)
     }
 

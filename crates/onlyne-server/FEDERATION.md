@@ -53,6 +53,8 @@ The plan states this rule as:
 
 The parent admits a delivery when the target exists in the parent spec, the target's `allowed_senders` accepts the sender, and the sender's `allowed_targets` names the target. Source: `crates/onlyne-net/src/acl.rs` lines 76-114; `check_acl` in `crates/onlyne-server/src/relay.rs` lines 163-246.
 
+One exception covers the return leg of a dispatch: a `Completion` addressed to the role whose own `Task` row created the task it names is admitted without that pair, because the ledger's dispatch row is the record that the recipient asked for the work. A completion addressed anywhere else still needs the pair. Source: `check_acl` and `task_origin` in `crates/onlyne-server/src/relay.rs`.
+
 A child role name placed in a parent row's `allowed_targets` resolves to nothing in the parent spec, so the parent refuses with `AclDenyReason::UnknownRole`, field `to.role`, and wire code `unknown_role`. Source: `crates/onlyne-net/src/acl.rs` lines 88-92; `crates/onlyne-server/src/relay.rs` lines 175-183.
 
 The server builds that table from the spec rows it loaded, keyed by role name, and rebuilds it on every successful reload. Source: `acl_from_spec` in `crates/onlyne-server/src/state.rs` lines 48-60; `reload` in `crates/onlyne-server/src/router.rs` lines 442-468.

@@ -92,6 +92,39 @@ fn fixture() -> Fixture {
     fixture_with(&spec_text())
 }
 
+/// The demo seed shape: `supervisor` reaches `builder`, and nothing reaches
+/// back. `reviewer` stands outside that pair.
+fn ring_spec() -> String {
+    format!(
+        r#"[server]
+name = "local"
+listen = "127.0.0.1:0"
+cert_pin = "{CERT_PIN}"
+note_queue = true
+heartbeat_timeout_ms = 1000
+
+[[client]]
+role = "supervisor"
+key = "{key}"
+allowed_senders = []
+allowed_targets = ["builder"]
+
+[[client]]
+role = "builder"
+key = "{key}"
+allowed_senders = ["supervisor"]
+allowed_targets = []
+
+[[client]]
+role = "reviewer"
+key = "{key}"
+allowed_senders = []
+allowed_targets = []
+"#,
+        key = key()
+    )
+}
+
 fn spec_of(fixture: &Fixture) -> Spec {
     fixture.state.spec_snapshot().expect("spec")
 }
@@ -116,6 +149,17 @@ fn task(from: &str, to: &str, text: &str) -> Envelope {
         Some(Causality::root(onlyne_proto::new_task_id())),
     )
     .expect("valid task")
+}
+
+fn completion(from: &str, to: &str, task_id: &str, text: &str) -> Envelope {
+    onlyne_proto::new_envelope(
+        MsgKind::Completion,
+        Principal::role(from),
+        Principal::role(to),
+        Body::text(text),
+        Some(Causality::root(task_id)),
+    )
+    .expect("valid completion")
 }
 
 fn hello_args(role: &str) -> HandshakeArgs {
@@ -208,6 +252,134 @@ fn acl_denial_names_the_field_and_writes_no_row() {
     // planner may reach builder, builder accepts any sender.
     accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
     assert_eq!(ledger_rows(&fixture.state).len(), 1);
+}
+
+#[test]
+fn a_completion_reaches_the_origin_role_without_an_acl_edge() {
+    let fixture = fixture_with(&ring_spec());
+    let dispatch = task("supervisor", "builder", "work");
+    let task_id = dispatch
+        .task_id()
+        .expect("the dispatch names its task")
+        .to_string();
+    accepted(relay::send(&fixture.state, &dispatch, false, None).expect("relay"));
+    assert_eq!(
+        relay::task_origin(&fixture.state, &task_id).as_deref(),
+        Some("supervisor"),
+        "the dispatch row names the role its receipt answers"
+    );
+
+    // The origin is offline, so the receipt waits in `queued` for its pull.
+    let receipt = completion("builder", "supervisor", &task_id, "work is done");
+    let outcome = accepted(relay::send(&fixture.state, &receipt, false, None).expect("relay"));
+    assert_eq!(outcome.receipt.state, LedgerState::Queued);
+    assert_eq!(outcome.receipt.task.as_deref(), Some(task_id.as_str()));
+
+    let rows = ledger_rows(&fixture.state);
+    assert_eq!(rows.len(), 2, "the dispatch and its receipt");
+    let row = rows
+        .iter()
+        .find(|row| row.msg_id == outcome.receipt.msg_id)
+        .expect("the receipt row");
+    assert_eq!(row.kind, MsgKind::Completion);
+    assert_eq!(row.state, LedgerState::Queued);
+    assert_eq!(row.sender().expect("sender"), Principal::role("builder"));
+    assert_eq!(
+        row.to_json,
+        serde_json::to_string(&Principal::role("supervisor")).expect("encode")
+    );
+    assert_eq!(row.task.as_deref(), Some(task_id.as_str()));
+    assert_eq!(row.out_head.as_deref(), Some("work is done"));
+    assert!(
+        fixture
+            .state
+            .ledger
+            .open_faults()
+            .expect("faults")
+            .is_empty(),
+        "the exempt receipt records no fault"
+    );
+
+    // A connected origin takes the next receipt as an in-flight delivery.
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    fixture.state.register_role(RoleConnection {
+        role: "supervisor".to_string(),
+        sender,
+        last_seq: 0,
+        connected_at: Utc::now(),
+        draining: false,
+    });
+    let second = task("supervisor", "builder", "more work");
+    let second_task = second.task_id().expect("task").to_string();
+    accepted(relay::send(&fixture.state, &second, false, None).expect("relay"));
+    let again = completion("builder", "supervisor", &second_task, "done again");
+    let delivered = accepted(relay::send(&fixture.state, &again, false, None).expect("relay"));
+    assert_eq!(delivered.receipt.state, LedgerState::InFlight);
+    let frame = receiver.try_recv().expect("a delivery notice frame");
+    assert!(matches!(frame, Frame::Ev { .. }));
+}
+
+#[test]
+fn a_note_from_the_worker_to_the_origin_still_needs_an_edge() {
+    let fixture = fixture_with(&ring_spec());
+    let dispatch = task("supervisor", "builder", "work");
+    let task_id = dispatch.task_id().expect("task").to_string();
+    accepted(relay::send(&fixture.state, &dispatch, false, None).expect("relay"));
+
+    let mut stray = note("builder", "supervisor", "unrelated text");
+    stray.causality = Some(Causality::root(task_id));
+    let reject = rejected(relay::send(&fixture.state, &stray, false, None).expect("relay"));
+    assert_eq!(reject.code, ErrorCode::AclDenied);
+    assert_eq!(reject.field.as_deref(), Some("to.role"));
+    assert_eq!(
+        ledger_rows(&fixture.state).len(),
+        1,
+        "the refusal writes no row for the note"
+    );
+}
+
+#[test]
+fn a_completion_to_a_third_role_still_needs_an_edge() {
+    let fixture = fixture_with(&ring_spec());
+    let dispatch = task("supervisor", "builder", "work");
+    let task_id = dispatch.task_id().expect("task").to_string();
+    accepted(relay::send(&fixture.state, &dispatch, false, None).expect("relay"));
+    assert_eq!(
+        relay::task_origin(&fixture.state, &task_id).as_deref(),
+        Some("supervisor")
+    );
+
+    let receipt = completion("builder", "reviewer", &task_id, "done");
+    let reject = rejected(relay::send(&fixture.state, &receipt, false, None).expect("relay"));
+    assert_eq!(reject.code, ErrorCode::AclDenied);
+    assert_eq!(reject.field.as_deref(), Some("to.role"));
+    assert_eq!(
+        ledger_rows(&fixture.state).len(),
+        1,
+        "only the dispatch row exists"
+    );
+}
+
+#[test]
+fn a_completion_for_a_task_with_no_ledger_row_falls_back_to_the_acl() {
+    let fixture = fixture_with(&ring_spec());
+    let dispatch = task("supervisor", "builder", "work");
+    let task_id = dispatch.task_id().expect("task").to_string();
+    accepted(relay::send(&fixture.state, &dispatch, false, None).expect("relay"));
+
+    // Retention and repair both remove rows, and the receipt then arrives with
+    // nothing to read: the ACL gate answers as it does for any other frame.
+    let conn = rusqlite::Connection::open(fixture.state.ledger.path()).expect("open the ledger");
+    conn.execute("DELETE FROM ledger WHERE task=?1", [task_id.as_str()])
+        .expect("purge the task rows");
+    drop(conn);
+    assert_eq!(relay::task_origin(&fixture.state, &task_id), None);
+
+    let receipt = completion("builder", "supervisor", &task_id, "done");
+    let reject = rejected(relay::send(&fixture.state, &receipt, false, None).expect("relay"));
+    assert_eq!(reject.code, ErrorCode::AclDenied);
+    assert_eq!(reject.field.as_deref(), Some("to.role"));
+    assert!(ledger_rows(&fixture.state).is_empty());
 }
 
 #[test]
