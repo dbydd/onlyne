@@ -1,0 +1,6 @@
+name = "grug-matic"
+version = "1.0.0"
+defaultTargets = ["GrugMatic"]
+
+[[lean_lib]]
+name = "GrugMatic"
