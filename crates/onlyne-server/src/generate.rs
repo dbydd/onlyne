@@ -144,18 +144,31 @@ pub fn generate(args: &GenerateArgs, spec: &Spec) -> Result<GenerateReport, Gene
                 source,
             }
         })?);
+        // `.pi/settings.json` resolves `packages` against the settings
+        // directory (`<ws>/.pi`), where pi 0.85.1 loads `../.onlyne/agent/<name>`
+        // and refuses `.onlyne/agent/<name>` (`docs/v1-CONTRACT.md`, the
+        // vendoring line). Every other generated file names the package from
+        // the workspace root, which is the form `{{agent_package}}` carries.
+        let settings_placeholders = Placeholders {
+            agent_package: placeholders
+                .agent_package
+                .as_ref()
+                .map(|name| format!("../{name}")),
+            ..placeholders.clone()
+        };
         let mut files = Vec::with_capacity(source_files.len());
         for (relative, bytes) in source_files {
             let path = template.role_dir.join(&relative);
-            let substituted = substitute_at(&bytes, &placeholders, path.display().to_string())?;
+            let substituted = if relative == ".pi/settings.json" {
+                substitute_at(&bytes, &settings_placeholders, path.display().to_string())?
+            } else {
+                substitute_at(&bytes, &placeholders, path.display().to_string())?
+            };
             if relative == ".pi/settings.json" {
-                // A project `packages` entry is resolved against the directory
-                // holding the settings file — `<ws>/.pi` — not against the
-                // workspace, which pi 0.85.1 proves by loading
-                // `../.onlyne/agent/<name>` and refusing `.onlyne/agent/<name>`
-                // (`docs/v1-CONTRACT.md`, the vendoring line). Everything else
-                // the generator writes names the package from the workspace
-                // root, which is where `{{agent_package}}` appears.
+                // A literal absolute package path written into a template
+                // settings file rewrites to the same `../` reference the
+                // placeholder form renders, so both template styles ship a
+                // loadable package.
                 if let Some(source) =
                     Some(spec.server.agent_package.as_str()).filter(|v| !v.is_empty())
                 {

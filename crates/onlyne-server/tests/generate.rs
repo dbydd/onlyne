@@ -383,6 +383,40 @@ fn agent_package_is_vendored_and_settings_point_at_the_copy() {
 }
 
 #[test]
+fn agent_package_placeholder_in_settings_renders_the_parent_relative_form() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("srv");
+    let out = tmp.path().join("ws");
+    let package = tmp.path().join("pkg-source/pi-onlyne");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"), "{\"name\":\"pi-onlyne\"}").unwrap();
+    fs::create_dir_all(&root).unwrap();
+    write_template(
+        &root,
+        "dev/planner",
+        &[
+            ("AGENTS.md", "plug {{agent_package}}"),
+            (".pi/settings.json", "{\"packages\":[\"{{agent_package}}\"]}"),
+        ],
+    );
+    let mut spec = spec_with_roles(&["planner"]);
+    spec.server.agent_package = package.display().to_string();
+    generate(&args(&root, &out), &spec).unwrap();
+    let ws = out.join("dev/planner");
+    assert!(ws.join(".onlyne/agent/pi-onlyne/package.json").is_file());
+    let settings = fs::read_to_string(ws.join(".pi/settings.json")).unwrap();
+    // The settings file carries the form pi resolves from `<ws>/.pi`.
+    assert!(
+        settings.contains("\"../.onlyne/agent/pi-onlyne\""),
+        "{settings}"
+    );
+    let agents = fs::read_to_string(ws.join("AGENTS.md")).unwrap();
+    // Everything else stays workspace-root-relative.
+    assert!(agents.contains("plug .onlyne/agent/pi-onlyne"));
+    assert!(!agents.contains("../.onlyne"));
+}
+
+#[test]
 fn manifest_shape_is_stable() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("srv");
