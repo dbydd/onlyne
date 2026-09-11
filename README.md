@@ -123,6 +123,11 @@ target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner
 
 One JSON line answers with `data.state = "in_flight"`; the task's ledger row settles to `acked` and its session projects to `exited` with `outcome = "done"`. The same sequence ships as an executable proof: `crates/onlyne-testkit/e2e/local-task.sh`, joined by eleven siblings covering ACL rejects, idempotency, reconnect requeue, gateway mount, relocation, and two-cluster federation.
 
+Installing the binaries onto `PATH` by copy needs one extra step on macOS: a
+copied binary whose code signature no longer matches its file is killed at
+exec, so ad-hoc re-sign after copying
+(`codesign --force --sign - ~/.cargo/bin/onlyne*`).
+
 ## Where things live
 
 ```text
@@ -134,7 +139,7 @@ Every workspace is self-contained and portable: `onlyne server generate` lays ro
 
 ## Status
 
-`v1.0.0-beta.1` on branch `v1.0.0-dev-super-redesign`. The full e2e suite, the ring TUI, the supervisor demo, and the pi adapter plugin run green on macOS; the four IM gateways ship feature-gated crates awaiting live-platform soak. `cargo build --workspace` needs Rust 1.85 and nothing heavier.
+`v1.0.0-beta.4` on branch `v1.0.0-dev-super-redesign`. The full e2e suite, the ring TUI, the supervisor demo, and the pi adapter plugin run green on macOS; the four IM gateways ship feature-gated crates awaiting live-platform soak. `cargo build --workspace` needs Rust 1.85 and nothing heavier.
 
 ## Reading
 
