@@ -209,8 +209,9 @@ def seed_entries() -> str:
         "successor in RING, wrapping around at the end; if K < TOTAL run the "
         "handoff command from your AGENTS.md to pass the same task text to that "
         "successor with K incremented by one; if K == TOTAL do not hand off, "
-        "read FILE and answer onlyne_complete carrying the lines of FILE. Answer "
-        "nothing else."
+        "read FILE and answer onlyne_complete carrying the lines of FILE. Report "
+        "upward by completing the task: the ledger is what the supervisor reads. "
+        "Answer nothing else."
     )
 
     def entry(role: str, prose: str, *, admin: bool, senders: list[str],
@@ -233,11 +234,16 @@ def seed_entries() -> str:
     for index, role in enumerate(RING):
         predecessor = RING[index - 1]
         successor = RING[(index + 1) % len(RING)]
-        # The pair is what makes an ACL edge: `acl_edges` emits
-        # sender -> target only when the receiver also names the sender.
-        neighbours = [successor, predecessor, SUPERVISOR]
+        # Dispatch runs one way: a ring member hands work to its peers and
+        # answers its sender, and `_supervisor` stays out of `allowed_targets`
+        # so operator traffic never joins the role's queue. The receipt for the
+        # root task is the one message that travels a -> _supervisor; the
+        # dispatcher's own `allowed_senders` admits it, and the ledger row is
+        # what the supervisor reads for the result.
+        neighbours = [successor, predecessor]
         rows.append(entry(role, ring_prose.format(role=role), admin=False,
-                          senders=neighbours, targets=neighbours, reuse=False))
+                          senders=neighbours + [SUPERVISOR], targets=neighbours,
+                          reuse=False))
     return "".join(rows)
 
 

@@ -144,4 +144,8 @@ onlyne --server-root /tmp/onlyne-sup sessions --json | jq '.data[0].observed'
 - 会话按任务生灭（`reuse = false`），pi 冷启动每单几秒，属于这套架构的固有成本。
 - `_supervisor` 的入口是管理员面（admin socket），这不是演示的例外：操作 agent
   本来就该拿本机 admin socket 的访问权。
+- 环首把根任务的完成回执发给 `_supervisor`，这是内置的上行通道：spec 里环成员的
+  `allowed_targets` 只含环内成员，回执不靠那条边，靠任务的出发角色。`_supervisor`
+  离线时回执在账本里排队（`state = queued`），这批排队行就是操作 agent 的收件箱：
+  接上客户端即被拉走并结算，操作者也可以先用 `ledger` 看清再决定收尾方式。
 - Windows 的适配是 daemon IPC 的事；run.py 本身没有 shell 依赖。

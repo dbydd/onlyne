@@ -58,6 +58,28 @@ onlyne --workspace "$WS" send --to reviewer --text "review this change"
 
 Use `--task <id>` to attach causality to an existing task family. Use `--note` for free text that creates no session. Offline `note` delivery returns `recipient_offline`, and the row settles `rejected`. `reply --to <envelope-id>` answers that ledger row and addresses its recipient.
 
+## Dispatch flows downhill
+
+The supervisor dispatches work to roles, and that edge runs one way. A role's results travel
+up as the completion receipt: the client reports the outcome, `onlyne_complete` supplies the
+summary, and the row's `out_head` and state are what the supervisor polls with `ledger --task <id>`.
+
+Keep a role's `allowed_targets` on the peers and workers it hands work to. A `_supervisor` name
+in that list turns the operator into a message target and lands operator traffic in the same
+queue the role's work drains. The supervisor entry keeps `admin = true`, which is what its own
+`send --from _supervisor` needs on the admin surface.
+
+When a task needs a live uplink, the supervisor hands that role a route for the duration of the
+work, through a note edge, a shared file, or a task in the family. Granting that route is the
+supervisor's decision, and `_supervisor` accepts notes on the admin surface for the lifetime of
+the cluster.
+
+The completion receipt for a dispatched task travels back to the role that dispatched it,
+which is how a supervisor reads results. When that role is offline the receipt queues
+(`state = queued`) instead of being refused, and those queued rows are the operator's
+pull inbox: attaching the role's client drains them, and an operator may read the ledger
+first and choose how to settle the task from there.
+
 ## Check a ledger row
 
 Read a task from the server ledger:

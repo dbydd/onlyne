@@ -39,6 +39,11 @@
 不要派活。先读 `<FILE>`，然后立刻调用 `onlyne_complete`，把文件每一行原样放进
 `text` 参数。不要在工具调用之外写任何解释。
 
+## 汇报
+
+往上汇报靠完成任务：结束本跳的 `onlyne_complete` 就是上报，账本是 supervisor 读
+的地方。不要给 supervisor 发消息，派活只朝环上的下一个字母。
+
 ## 约束
 
 对 `<FILE>` 的追加是唯一的写操作，`onlyne handoff` 是唯一的派活方式。不要编辑
