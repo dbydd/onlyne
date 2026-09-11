@@ -149,6 +149,13 @@ pub fn generate(args: &GenerateArgs, spec: &Spec) -> Result<GenerateReport, Gene
             let path = template.role_dir.join(&relative);
             let substituted = substitute_at(&bytes, &placeholders, path.display().to_string())?;
             if relative == ".pi/settings.json" {
+                // A project `packages` entry is resolved against the directory
+                // holding the settings file — `<ws>/.pi` — not against the
+                // workspace, which pi 0.85.1 proves by loading
+                // `../.onlyne/agent/<name>` and refusing `.onlyne/agent/<name>`
+                // (`docs/v1-CONTRACT.md`, the vendoring line). Everything else
+                // the generator writes names the package from the workspace
+                // root, which is where `{{agent_package}}` appears.
                 if let Some(source) =
                     Some(spec.server.agent_package.as_str()).filter(|v| !v.is_empty())
                 {
@@ -158,7 +165,7 @@ pub fn generate(args: &GenerateArgs, spec: &Spec) -> Result<GenerateReport, Gene
                             replace_bytes(
                                 &substituted,
                                 source.as_bytes(),
-                                format!(".onlyne/agent/{name}").as_bytes(),
+                                format!("../.onlyne/agent/{name}").as_bytes(),
                             ),
                         ));
                     } else {

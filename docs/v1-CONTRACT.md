@@ -45,6 +45,7 @@ Cargo workspace, `members = ["crates/*", "plugins/*"]`, 18 packages: 14 under `c
 - `onlyne-session` does not depend on `onlyne-proto`, `onlyne-store`, or `onlyne-net`. Persistence crosses the `SessionLedger` trait defined in `crates/onlyne-session/src/reconcile.rs`.
 - `onlyne-store` implements `onlyne-session::SessionLedger` for the client database, and exposes the server ledger API described in §10 of the plan.
 - JSON Schemas live beside their types: `crates/onlyne-proto/schema/{envelope,adapter}.schema.json`, `crates/onlyne-config/schema/{spec,config-client}.schema.json`. Each crate carries one schema tool, `gen-schema` in `onlyne-proto` and `config-schema` in `onlyne-config`, so the two binaries have their own names on disk.
+- `onlyne-server` `generate` writes the vendored plugin package at `<ws>/.onlyne/agent/<pkg-name>/` and its `.pi/settings.json` entry as `../.onlyne/agent/<pkg-name>`. Measured on pi 0.85.1: a project `packages` path resolves against the directory holding that settings file (`<ws>/.pi`), so the `../` form is the one that loads the extension, and every other generated file names the package from the workspace root.
 
 ## CLI vocabulary (`onlyne-cli`, output is JSON by default)
 

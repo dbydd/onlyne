@@ -370,7 +370,13 @@ fn agent_package_is_vendored_and_settings_point_at_the_copy() {
     assert!(!ws.join(".onlyne/agent/pi-onlyne/target").exists());
     assert!(!ws.join(".onlyne/agent/pi-onlyne/.git").exists());
     let settings = fs::read_to_string(ws.join(".pi/settings.json")).unwrap();
-    assert!(settings.contains(".onlyne/agent/pi-onlyne"));
+    // The settings entry is the one path pi resolves relative to the settings
+    // directory, so it carries the `../` its loader needs; nothing else in the
+    // generated workspace names the package that way.
+    assert!(
+        settings.contains("\"../.onlyne/agent/pi-onlyne\""),
+        "{settings}"
+    );
     assert!(!settings.contains(&package.display().to_string()));
     let agents = fs::read_to_string(ws.join("AGENTS.md")).unwrap();
     assert!(agents.contains("plug .onlyne/agent/pi-onlyne"));
