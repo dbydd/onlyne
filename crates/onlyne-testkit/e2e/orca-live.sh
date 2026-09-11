@@ -37,16 +37,10 @@ mapping=""
 host_tabs_before=""
 
 cleanup() {
-  local status=$?
-  if [ -n "$client_pid" ] && kill -0 "$client_pid" 2>/dev/null; then
-    kill -TERM "$client_pid" 2>/dev/null || true
-    for _ in $(seq 1 100); do
-      kill -0 "$client_pid" 2>/dev/null || break
-      sleep 0.1
-    done
-    kill -KILL "$client_pid" 2>/dev/null || true
-    wait "$client_pid" 2>/dev/null || true
-  fi
+  local status=$? residue
+  # The client's own SIGTERM drain is what closes the tabs it opened, so it gets
+  # a bounded window to leave before the case reports.
+  drain_pid "$client_pid"
   # A tab the drain did not reap still belongs to this case, and its handle is
   # the one this script read out of its own tab map. A close that does not take
   # is reported and fails the run: a leftover tab is real residue, and a
@@ -54,14 +48,9 @@ cleanup() {
   if [ -n "$handle" ] && [ -f "$tmp/host-tabs-now.json" ]; then
     if ! python3 "$tmp/orca_case.py" tab-gone "$tmp/host-tabs-now.json" "$pane_key" >/dev/null 2>&1; then
       printf 'cleanup: closing leftover tab %s\n' "$handle" >&2
-      if ! closed=$(orca terminal close --terminal "$handle" --json 2>&1); then
-        # The close may have raced the drain, so only a tab the list still
-        # carries after it counts as residue.
-        orca terminal list --worktree "$host_worktree" --json > "$tmp/host-tabs-now.json" 2>/dev/null || true
-        if ! python3 "$tmp/orca_case.py" tab-gone "$tmp/host-tabs-now.json" "$pane_key" >/dev/null 2>&1; then
-          printf 'cleanup: leftover tab %s survived its close: %s\n' "$handle" "$closed" >&2
-          status=1
-        fi
+      if ! residue=$(close_orca_tab "$handle" "$pane_key" 2>&1); then
+        printf 'cleanup: leftover tab %s survived its close: %s\n' "$handle" "$residue" >&2
+        status=1
       fi
     fi
   fi
@@ -329,7 +318,7 @@ if [ "$gone" != true ]; then
   # The fallback the contract allows: the case closes the one handle it read out
   # of its own map, then re-checks. Reaching it is a finding, not a crash.
   echo "NOTE: the drain left tab $handle behind; closing it with the script's own handle"
-  orca terminal close --terminal "$handle" --json > "$tmp/close.json" 2>&1 || true
+  close_orca_tab "$handle" "$pane_key" > "$tmp/close.json" 2>&1 || true
   for _ in $(seq 1 50); do
     orca terminal list --worktree "$host_worktree" --json > "$tmp/host-tabs-now.json" 2>/dev/null || true
     if python3 "$tmp/orca_case.py" tab-gone "$tmp/host-tabs-now.json" "$pane_key" 2>/dev/null; then

@@ -272,3 +272,62 @@ setup_cluster() {
   client_init "$ws_dir" "$role" "$server_dir" "$server_dir/.onlyne/spec.toml" "$tmp/$tag-spec.frag.toml" "$prose" "$acl"
   "$ONLYNE" --server-root "$server_dir" reload
 }
+
+# `drain_pid <pid> [ticks]` asks one process to leave and bounds how long it has:
+# SIGTERM, up to `ticks` tenths of a second, then SIGKILL, then reap. An empty or
+# already-gone pid is a no-op, so a cleanup can call it unconditionally. The
+# default window is the one `orca-live.sh` proved for a client's own drain.
+drain_pid() {
+  local pid=$1 ticks=${2:-100}
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 1 "$ticks"); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+# `close_orca_tab <handle> [pane_key]` closes one Orca tab and verifies it is
+# gone, returning non-zero while the tab is still listed.
+#
+# The flag is `--terminal` while the field `terminal list` reports is `handle`,
+# so `--handle` reads right and is refused (measured on 1.4.198: "Unknown flag
+# --handle for command: terminal close"). A cleanup that swallows that refusal
+# leaves the tab in place and says nothing, which is how one probe left sixteen
+# tabs behind. So the verdict here is the listing rather than the exit code,
+# which also makes a close that raced a drain read as success. Every case that
+# closes a tab goes through this, so the flag is spelled in one place only.
+close_orca_tab() {
+  local handle=$1 pane_key=${2:-} code=0
+  orca terminal close --terminal "$handle" --json >/dev/null 2>&1 || true
+  orca terminal list --json 2>/dev/null | python3 -c '
+import json, sys
+
+handle, pane_key = sys.argv[1], sys.argv[2]
+try:
+    rows = (json.load(sys.stdin).get("result") or {}).get("terminals") or []
+except ValueError:
+    sys.exit(2)
+
+
+def pane_of(row):
+    # Rows carry tabId/leafId but no paneKey on 1.4.198, so the key is the same
+    # `tabId:leafId` pair the session backend synthesizes.
+    return row.get("paneKey") or "%s:%s" % (row.get("tabId"), row.get("leafId"))
+
+
+for row in rows:
+    if row.get("handle") == handle or (pane_key and pane_of(row) == pane_key):
+        sys.exit(1)
+sys.exit(0)
+' "$handle" "$pane_key" || code=$?
+  case $code in
+    0) return 0 ;;
+    1) printf 'close_orca_tab: pane %s is still listed after closing %s\n' "${pane_key:-$handle}" "$handle" >&2 ;;
+    *) printf 'close_orca_tab: the tab listing could not be read while closing %s\n' "$handle" >&2 ;;
+  esac
+  return 1
+}
