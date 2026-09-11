@@ -26,7 +26,7 @@ Onlyne 今天是单 crate 工作区级 IM daemon（`onlyne` 0.6.0，`src/` 7688 
 | D12 | 编排 = 混合：server spec 声明 role 集合与允许边（ACL），投递动作本身创建任务，无中央 dispatch、无 `back_edges` 调度表 |
 | D13 | server 配置以文件为唯一真相，`onlyne server reload` / SIGHUP 生效，无运行期写 API |
 | D14 | 递归：子 cluster 向父 server 只暴露 aggregate role。aggregate role 就是一个普通 role 条目，其 client 由上层 supervisor 自己拉起 —— 协议里零联邦代码 |
-| D15 | supervisor 是普通 session/role，特殊处仅在于它能跑 `onlyne` CLI 与持有本机 admin socket 访问权；server 由 supervisor 拉起；supervisor 自己的 client 与它所管理的 server 无隶属关系 |
+| D15 | supervisor = 用户的集群操作 agent：与用户对话，代用户派活、查账、启停集群。它能跑 `onlyne` CLI 并持有本机 admin socket 访问权；server 由 supervisor 拉起；supervisor 的 pi 进程归用户与终端管，归零它自己启停的 server 的生命周期管辖。非联邦模式下它就是野生进程：spec 里的 `_supervisor` 条目是身份与 ACL 锚点（admin `send` 要求 `from` 已注册且 `admin = true`），它的 client 从不自启；联邦模式下它的 client 以 aggregate role 身份连父 server |
 | D16 | 一份 adapter 协议、两侧挂载：agent adapter 进程连 client，IM gateway 进程连 server。四平台 gateway 是本仓产物 |
 | D17 | 交付形态 = 恰好三个二进制：`onlyne-server`、`onlyne-client`、`onlyne-gateway`（每个平台一个独立进程）+ 一个瘦人机入口 `onlyne`（转发到本机对应守护进程）。二进制按职责拆分优先于单 bin 便利，规模可扩展性优先 |
 | D18 | 插件全部外置：本计划交付协议 + SDK + 一致性 fixture，pi-onlyne / dsh-onlyne 的重写不在本计划内 |

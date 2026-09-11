@@ -9,3 +9,5 @@ target*
 !**/templates/**/.onlyne/
 __pycache__/
 *.pyc
+# Runtime trees of the in-repo examples (server roots and generated workspaces).
+examples/*/cluster/
