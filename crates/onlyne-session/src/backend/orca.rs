@@ -536,6 +536,20 @@ fn shell_quote(value: &str) -> String {
 /// Orca is never told about. Environment entries travel through `env` so the
 /// terminal process receives the same spawn contract as zellij and other
 /// backends.
+///
+/// The line ends with `exit` because the tab's own shell is what runs it: Orca
+/// creates a shell and hands it this command, so the shell — not the session
+/// command — owns the tab. Without the tail the shell drops to a prompt when the
+/// command returns, and the tab outlives its session reading `running` forever
+/// (measured on Orca 1.4.198: a bare `sleep 3` leaves a prompt and the tab
+/// behind, while the same line ending in `exit` reclaims it). zellij takes no
+/// equivalent tail: its launch line is argv after `--`, with no wrapping shell.
+///
+/// The separator is `;`, not `&&`, so the tail runs on the failure path too. A
+/// crashed or misconfigured session command is exactly the case that must not
+/// leave a tab sitting at a prompt, and `&&` would skip the `exit` there and
+/// keep it. The command's own output is still in the pane's scrollback and its
+/// exit status rides through `exit`'s default.
 fn spawn_command(spec: &SpawnSpec) -> Result<String> {
     if spec.command.is_empty() {
         anyhow::bail!("orca spawn requires a command");
@@ -552,6 +566,7 @@ fn spawn_command(spec: &SpawnSpec) -> Result<String> {
         command.push(' ');
         command.push_str(&shell_quote(arg));
     }
+    command.push_str("; exit");
     Ok(command)
 }
 
@@ -868,8 +883,106 @@ mod tests {
         .unwrap();
         assert_eq!(
             command,
-            "cd '/tmp/work space' && env 'ONLYNE_TASK=task one' 'QUOTED=a'\\''b' 'pi' '--model' 'gpt 5'"
+            "cd '/tmp/work space' && env 'ONLYNE_TASK=task one' 'QUOTED=a'\\''b' 'pi' '--model' 'gpt 5'; exit"
         );
+    }
+
+    /// The line is evaluated by the tab's shell, so quoting and the trailing
+    /// `exit` have to survive a real one: run the generated line through `sh`
+    /// and read back an environment value and an argument that both carry
+    /// spaces, quotes and expansion characters.
+    #[test]
+    fn spawn_command_round_trips_awkward_env_and_args_through_a_shell() {
+        let mut env = BTreeMap::new();
+        env.insert("ONLYNE_MIX".into(), "a'b\"c$d".into());
+        let cwd = tempfile::tempdir().unwrap();
+        let command = spawn_command(&SpawnSpec {
+            cwd: cwd.path().to_path_buf(),
+            task_id: "task-1".into(),
+            command: vec![
+                "sh".into(),
+                "-c".into(),
+                "printf '%s|%s' \"$ONLYNE_MIX\" \"$1\"".into(),
+                "onlyne".into(),
+                "a b'c\"d;e && exit".into(),
+            ],
+            env,
+            focus: None,
+            rename: None,
+        })
+        .unwrap();
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "a'b\"c$d|a b'c\"d;e && exit"
+        );
+    }
+
+    /// Run one generated line the way the tab's shell does, with a sentinel
+    /// after it: the sentinel printing means the shell came back to a prompt
+    /// instead of exiting, which is the stuck tab this tail exists to prevent.
+    fn run_through_shell(line: &str) -> (std::process::ExitStatus, String) {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{line}\nprintf 'AFTER'"))
+            .output()
+            .unwrap();
+        (
+            output.status,
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    }
+
+    /// The tail reclaims the tab whatever the command does, which is why it is
+    /// `; exit` and not ` && exit`.
+    ///
+    /// Mirrors the three measured controls for the tab's lifetime — a command
+    /// that exits leaves no tab, and only a bare command does — as: the line
+    /// carries its shell out on success (A), it carries the shell out on a
+    /// failure too (B), and the same failing line without the tail returns to
+    /// the prompt (C), which is the tab that used to stay `running`. With `&&`
+    /// the failing case behaved as C: a crashed agent never reached the tail.
+    #[test]
+    fn spawn_command_line_exits_the_tab_shell_on_success_and_on_failure() {
+        let cwd = tempfile::tempdir().unwrap();
+        let line = |command: Vec<String>| {
+            spawn_command(&SpawnSpec {
+                cwd: cwd.path().to_path_buf(),
+                task_id: "task-1".into(),
+                command,
+                env: BTreeMap::new(),
+                focus: None,
+                rename: None,
+            })
+            .unwrap()
+        };
+
+        // A: the command succeeds and the shell still stops.
+        let (status, output) =
+            run_through_shell(&line(vec!["sh".into(), "-c".into(), "exit 0".into()]));
+        assert!(status.success(), "{status}");
+        assert_eq!(output, "");
+
+        // B: the command fails with 7, and its status survives the tail.
+        let failing = line(vec![
+            "sh".into(),
+            "-c".into(),
+            "printf '%s' \"$1\"; exit 7".into(),
+            "onlyne".into(),
+            "a b'c\"d".into(),
+        ]);
+        let (status, output) = run_through_shell(&failing);
+        assert_eq!(status.code(), Some(7), "{failing}");
+        assert_eq!(output, "a b'c\"d");
+
+        // C: the same failing line without the tail comes back to the prompt.
+        let (_, output) = run_through_shell(failing.strip_suffix("; exit").unwrap());
+        assert_eq!(output, "a b'c\"dAFTER");
     }
 
     #[test]
