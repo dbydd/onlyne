@@ -1,16 +1,16 @@
 # pi-onlyne — the onlyne agent adapter for pi
 
-A pi extension that makes one pi process serve one onlyne role session. It connects to
-`<role workspace>/.onlyne/run/s`, speaks the adapter protocol from
-`crates/onlyne-adapter/PROTOCOL.md`, and carries a session through
-`hello → welcome → assign → work → complete → detach`. No Rust code is involved: the
-protocol is reimplemented here over Node's `node:net` with a hand-written four-byte
-length-prefixed JSON codec, and there are no runtime npm dependencies.
+This pi extension makes one pi process serve one onlyne role session. It connects to
+`<role workspace>/.onlyne/run/s`, speaks the adapter protocol in
+`crates/onlyne-adapter/PROTOCOL.md`, and drives a session through
+`hello → welcome → assign → work → complete → detach`. No Rust code runs here: the
+protocol is reimplemented on Node's `node:net`, with a hand-written four-byte
+length-prefixed JSON codec, and the runtime has no npm dependencies.
 
-The extension is inert outside an onlyne session: the client injects
-`ONLYNE_ROLE`, `ONLYNE_SESSION_ID` and `ONLYNE_TASK_ID` into the process it spawns
-(`crates/onlyne-client/src/dispatch.rs`), and with any of the three missing this is an
-ordinary pi session where the plugin registers nothing and opens nothing.
+Outside an onlyne session the extension is inert. The client injects `ONLYNE_ROLE`,
+`ONLYNE_SESSION_ID` and `ONLYNE_TASK_ID` into every process it spawns
+(`crates/onlyne-client/src/dispatch.rs`). With any of the three missing, this is an
+ordinary pi session: the plugin registers nothing and opens nothing.
 
 ```
 pi session (spawned by onlyne-client)
@@ -40,15 +40,15 @@ so pi loads the TypeScript source directly (no build step).
 
 ### With a generated workspace (the normal path)
 
-`onlyne server generate` vendors `[server].agent_package` into
-`<ws>/.onlyne/agent/<pkg-name>/` and writes that package into `.pi/settings.json` as a
-path relative to the settings file itself, `../.onlyne/agent/<pkg-name>`
-(`crates/onlyne-server/src/generate.rs`). That spelling is the one pi 0.85.1 loads: a
-project `packages` path resolves against the directory holding the settings file
-(`<ws>/.pi`), so the `../` form reaches `<ws>/.onlyne/agent/<pkg-name>` while a bare
-`.onlyne/agent/<pkg-name>` entry would resolve to `<ws>/.pi/.onlyne/agent/<pkg-name>`
-and list the package without loading it. The generated workspace is what a supervisor
-starts, and the extension travels with it: nothing is installed globally.
+`onlyne server generate` copies `[server].agent_package` into
+`<ws>/.onlyne/agent/<pkg-name>/`, and writes that package into `.pi/settings.json` as a
+path relative to the settings file itself: `../.onlyne/agent/<pkg-name>`
+(`crates/onlyne-server/src/generate.rs`). pi 0.85.1 loads only that spelling. A project
+`packages` path resolves against the directory holding the settings file (`<ws>/.pi`), so
+the `../` form reaches `<ws>/.onlyne/agent/<pkg-name>`, while a bare
+`.onlyne/agent/<pkg-name>` entry would resolve to `<ws>/.pi/.onlyne/agent/<pkg-name>` and
+list the package without loading it. A supervisor starts the generated workspace, and the
+extension travels with it: nothing is installed globally.
 
 ```toml
 # spec.toml
@@ -66,8 +66,8 @@ The generated `.pi/settings.json` then carries:
 { "packages": ["../.onlyne/agent/pi-onlyne"] }
 ```
 
-`pi list` shows the entry under "Project packages". The load itself is verified by
-making the vendored `index.ts` throw and watching the failure surface.
+`pi list` shows the entry under "Project packages". To verify the load itself, make the
+copied `index.ts` throw and watch for the failure.
 
 ### Manual (no generator)
 
@@ -91,12 +91,13 @@ pi --session-id <id> -e /abs/path/to/integrations/pi-onlyne -ns -nc
 | `enabled` | `true` | `false` turns the extension off for this workspace |
 | `watch.autoStart` | `true` | `false` registers the tools but opens no socket until `/onlyne connect` |
 
-A missing file means both defaults. A malformed file warns on stderr and keeps both
-defaults — a typo must not silently disable a role. The client does not read this file
-(§11 of the plan downgraded the old readiness gates to generate-time template advice), so
-only this extension consumes it; the key shape stays the one the templates carry.
+A missing file means both defaults. A malformed file prints one warning on stderr and
+keeps both defaults: a typo must not silently disable a role. The client does not read
+this file (§11 of the plan downgraded the old readiness gates to generate-time template
+advice), so only this extension consumes it; the key shape stays the one the templates
+carry.
 
-Nothing else is needed: the workspace's `session_command` in `spec.toml` already spawns
+Nothing else is needed. The workspace's `session_command` in `spec.toml` already spawns
 `pi` per task (`["pi", "--session-id", "{session}"]`), and the client injects the
 environment this extension keys on.
 
@@ -111,7 +112,7 @@ The `hello` frame declares what this plugin actually implements:
 | `inject` | when `pi.sendUserMessage` exists | the payload arrives as `assign` and is injected as a pi user message |
 | `recycle` | always | `recycle` settles the task if it is unsettled, then stops the plugin and exits pi |
 
-Degradations, and what the host does with each:
+What happens when a pi API is missing, and what the host does then:
 
 | gap | detection | behaviour |
 | --- | --- | --- |
@@ -128,81 +129,82 @@ Registered only inside an onlyne session.
 
 ### `onlyne_send{to, text, kind?, image?}`
 
-Submits one envelope on the `send` frame. `kind: "note"` (default) is free text and
-carries no `op_id`; `kind: "task"` hands work to a role, so it carries an `o-<uuid>`
+Sends one envelope on the `send` frame. `kind: "note"` (the default) is free text and
+carries no `op_id`. `kind: "task"` hands work to a role, so it carries an `o-<uuid>`
 idempotency key and a fresh `causality.task`. `image` is an absolute path to a
-png/jpeg/gif/webp file; it is read, base64-encoded and attached as `body.image`, subject
-to the core's 2 MiB ceiling and its four accepted mime types.
+png/jpeg/gif/webp file: the plugin reads it, base64-encodes it and attaches it as
+`body.image`. The core caps that at 2 MiB and accepts four mime types.
 
 ### `onlyne_complete{outcome?, text?}`
 
-Ends the current task with an explicit outcome (`done` default, or `failed`). A non-empty
-`text` becomes the ledger `head` verbatim (whitespace-collapsed to one line, capped at 200
-characters); an absent or blank `text` carries no summary, so the completion falls back to
-the last assistant text. The call also ends the session's process: once the client has
-acknowledged the completion report (see §4), the plugin asks pi to shut down through
-`ctx.shutdown()`. pi 0.85.1 has no tool-result `terminate` handling.
+Ends the current task with an explicit outcome (`done` by default, or `failed`). A
+non-empty `text` becomes the ledger `head` verbatim: whitespace collapses to one line and
+the text stops at 200 characters. An absent or blank `text` carries no summary, so the
+completion falls back to the last assistant text. The call also ends the session's
+process: once the client has acknowledged the completion report (see §4), the plugin asks
+pi to shut down through `ctx.shutdown()`. pi 0.85.1 has no tool-result `terminate`
+handling.
 
 ## 4. Outcome rules
 
-One completion is sent per task, at the first of these events:
+The plugin sends one completion per task, at the first of these events:
 
-1. **`onlyne_complete`** — an explicit outcome from the model. It wins over everything
+1. **`onlyne_complete`** — the model gives an explicit outcome. It wins over everything
    else, and a later completion for the same task is refused (not re-reported). Its
    non-empty `text` is the head.
-2. **`agent_settled`** — pi will not continue on its own (no retry, compaction, or queued
-   continuation pending). The plugin reports:
+2. **`agent_settled`** — pi will not continue on its own: no retry, compaction or queued
+   continuation is pending. The plugin reports:
    - `failed` when the turn ended with a provider error (`stopReason: "error"`), with the
      error as the head;
    - `done` otherwise, with the last assistant text as the head;
-   - nothing at all when the task was assigned but no turn has run yet — the injected
-     message has not executed, and completing then would claim work that never happened.
-3. **`recycle{outcome}`** — the host is tearing the session down. An unsettled task is
-   settled with the host's outcome first, then the plugin stops and exits pi.
+   - nothing at all when the task was assigned but no turn has run yet. The injected
+     message has not executed, so completing now would claim work that never happened.
+3. **`recycle{outcome}`** — the host is tearing the session down. The plugin settles an
+   unsettled task with the host's outcome first, then stops and exits pi.
 
-`head` is a single line, capped at 200 characters, matching what the client puts in
-`out_head` and what the receipt carries. It has one source per task: the `text` of the
-explicit `onlyne_complete` call when that call carried one, and the last assistant text
-otherwise. The auto rule is that fallback path — it reports the text of the turn it
+`head` is a single line, capped at 200 characters; it matches what the client puts in
+`out_head` and what the receipt carries. Each task has one source for it: the `text` of
+the explicit `onlyne_complete` call when that call carried one, and the last assistant
+text otherwise. The auto rule is that fallback path: it reports the text of the turn it
 settles, and a sentence spoken after the call cannot replace what the call handed over.
 
 A reported completion ends the session's process. `report.complete` goes out as a request,
 and the client answers it only after it has settled the session row, acked the delivery
-and written the `Completion` envelope; the plugin asks pi to shut down at that answer.
-An outcome the socket could not carry is queued and flushed after the next `hello`, and
-that flush's answer is the handover that ends the process. A completion the host refused
-leaves the process running, so the task is never lost to an exit.
+and written the `Completion` envelope. The plugin asks pi to shut down at that answer. An
+outcome the socket could not carry is queued and flushed after the next `hello`, and that
+flush's answer is the handover that ends the process. A completion the host refused leaves
+the process running, so an exit never loses the task.
 
 The last report is one observation with `agent: "idle"` beside the settled outcome, sent
 after the completion is acknowledged and before the process leaves. The completion settles
-the row from the tuple the client holds, which still reads `running` when the finishing
-turn was the last heartbeat, and nothing observes the process afterwards — so without this
-report an exited session keeps saying `running`. It is skipped when the last beat was
-already idle, and a refused settled observation does not hold up the exit the completion
-earned.
+the row from the tuple the client holds, and that tuple still reads `running` when the
+finishing turn was the last heartbeat. Nothing observes the process afterwards, so without
+this report an exited session keeps saying `running`. The plugin skips it when the last
+beat was already idle, and a refused settled observation does not hold up the exit the
+completion earned.
 
 ## 5. Protocol notes and deviations
 
-Everything below is either a deliberate reading of `PROTOCOL.md` or a measured behaviour
-of the shipped client.
+Each item below is either a deliberate reading of `PROTOCOL.md` or a behaviour measured on
+the shipped client.
 
 - **Report sequence base.** The plugin's own `report` sequence starts at 1000, not 1. The
   client stamps its own dispatch events (`created`, resource attach, `ready`) into the
-  same `(generation, seq)` watermark and the reducer silently drops a report at or below
-  it (`crates/onlyne-session/src/reconcile.rs`), so a plugin sequence starting at 1 would
-  lose its first observations. Everything else about the versioning is per spec.
+  same `(generation, seq)` watermark, and the reducer silently drops any report at or
+  below it (`crates/onlyne-session/src/reconcile.rs`). A plugin sequence starting at 1
+  would lose its first observations. Everything else about the versioning is per spec.
 - **`observed` is a full `Observation`.** `report.heartbeat` carries the whole legal state
   tuple (`version`, `generation_live`, `isolate_after`, `terminate_after`,
   `mismatch_count`, `agent`, `delivery`, `resource`, `recovery`, `outcome`, `public`), not
   a `{"state": "running"}` shorthand: the host deserialises it and rejects anything
-  `is_legal` refuses. This plugin owns only the `agent` dimension (turn hooks); it leaves
+  `is_legal` refuses. This plugin owns only the `agent` dimension (turn hooks). It leaves
   `delivery` at `none` and `outcome` at `pending`, which is its own truth until it reports
-  a completion. `resource` is reported `attached` because the host's own dispatch path
+  a completion. It reports `resource` as `attached` because the host's own dispatch path
   already recorded the attach.
 - **`ready` is reported once per connection.** The host's own hand-off path
   (`crates/onlyne-client/src/dispatch.rs::hand_session`) already reports `ready` when the
-  client stages the session for a mounting plugin; a second report from the plugin is a
-  no-op at the host. It is sent anyway, because a plugin that mounts *before* any work
+  client stages the session for a mounting plugin, so a second report from the plugin is a
+  no-op at the host. The plugin sends it anyway: a plugin that mounts *before* any work
   exists is the case the ready barrier names, and it costs one frame.
 - **`cluster_ref` is never sent.** This plugin speaks for a local role, never for an
   aggregate; the field is `skip_serializing_if` absent on the Rust side for the same
@@ -211,28 +213,28 @@ of the shipped client.
   resource observations".
 - **`config_get` is read as a task body only when it starts with `stdin:`**, which is the
   overload `PROTOCOL.md` documents for plugins without `inject`. Any other key is logged
-  and ignored rather than misread.
+  and ignored, never misread.
 - **`frame_too_large` / `bad_frame`**: an oversize body is refused before any byte is
-  written, and a framing fault closes the connection and reconnects — framing cannot
+  written, and a framing fault closes the connection and reconnects. Framing cannot
   resynchronise after a corrupt body, which is the same conclusion
   `crates/onlyne-frame/src/lib.rs` reaches.
-- **Task ids here are single-use.** Duplicate `assign` deliveries for the same task are
-  acked (`reason: "duplicate"`) without a second injection; the id is remembered for the
-  life of the connection. The client today mints a fresh uuid per task, so this only ever
-  fires on a genuine redelivery.
+- **Task ids here are single-use.** The plugin acks duplicate `assign` deliveries for the
+  same task (`reason: "duplicate"`) without a second injection, and remembers the id for
+  the life of the connection. The client today mints a fresh uuid per task, so this only
+  ever fires on a genuine redelivery.
 
 - **Pane binding (Orca tabs).** Inside an Orca pane the plugin reports the pane it runs in on every
   heartbeat, as `observed.host.orca.pane_key` in the report's `Observation`
   (`crates/onlyne-session/src/host.rs`), beside `tab_id` / `leaf_id` and the terminal `handle` when
   the environment names them. The binding is *inherited*, never guessed: an Orca pane exports
   `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_LEAF_ID` / `ORCA_TERMINAL_HANDLE` into the command it
-  starts (measured 2026-09-11, Orca 1.4.198), and the client passes its environment on to the
-  session command — so the process running inside a pane is the one component that can state, from
-  the inside, which pane an onlyne session is, and nothing downstream of pi can recover that.
-  Outside a pane the `host` key is absent altogether: a pi on a plain terminal reports an
-  observation with no host field, rather than one with an empty pane.
-- **Nothing is written to the workspace for this.** There is no claim file any more — the binding
-  rides the observation the client already mirrors, so a stale one cannot exist because nothing
+  starts (measured 2026-09-11, Orca 1.4.198), and the client passes its own environment on to the
+  session command. So the process inside a pane is the only component that can state, from the
+  inside, which pane an onlyne session is; nothing downstream of pi can recover that. Outside a
+  pane the `host` key is absent altogether: a pi on a plain terminal reports an observation with no
+  host field, rather than one with an empty pane.
+- **Nothing is written to the workspace for this.** There is no claim file any more: the binding
+  rides the observation the client already mirrors. A stale one cannot exist, because nothing
   creates one, and the workspace's cache directory is not touched. That is what lets
   `integrations/orca-plugin` scope its tab axis to real sessions without reading any path, and what
   lets a supervisor still say where a *finished* session ran: `report.complete` carries `host`
@@ -250,8 +252,8 @@ of the shipped client.
 | `ORCA_TAB_ID` / `ORCA_LEAF_ID` | no | the pane ids separately; the pane key is parsed when only the key itself is set |
 | `ORCA_TERMINAL_HANDLE` | no | the terminal handle, reported beside the pane key as `host.orca.handle`, and the value `orca terminal switch` takes |
 
-Constants worth knowing: heartbeat every 10 s (`heartbeat_timeout_ms` is 30 s), 5 s hello
-budget, 30 s request timeout, reconnect ladder 1/2/4/8/16/30 s.
+Constants worth knowing: the plugin heartbeats every 10 s (`heartbeat_timeout_ms` is 30 s),
+allows 5 s for `hello` and 30 s per request, and reconnects on a 1/2/4/8/16/30 s ladder.
 
 ## 7. Troubleshooting
 
@@ -290,6 +292,6 @@ cd ../..
 ONLYNE_BACKEND=fake BIN_DIR=target/debug bash crates/onlyne-testkit/e2e/pi-live.sh
 ```
 
-The case exports `ONLYNE_BACKEND=exec` after sourcing the shared helpers, so the client
+After sourcing the shared helpers, the case exports `ONLYNE_BACKEND=exec`, so the client
 spawns pi itself with a stdin pipe it keeps open for the life of the session. The
 agent's own output lands in `<ws>/.onlyne/logs/session-<task>.log`.

@@ -1,7 +1,7 @@
 # Examples
 
-The legacy example set is deleted together with the pre-v1 daemon. The root `Cargo.toml` is a
-workspace manifest, so `cargo run --example <name>` has nothing to build from this directory.
+The pre-v1 daemon is gone, and its example set went with it. The root `Cargo.toml` is a workspace
+manifest, so `cargo run --example <name>` finds nothing to build here.
 
 ## End-to-end scripts
 
@@ -14,9 +14,9 @@ workspace manifest, so `cargo run --example <name>` has nothing to build from th
 | `crates/onlyne-testkit/e2e/legacy-layout.sh` | refusal of a pre-v1 workspace, exit code 2 |
 | `crates/onlyne-testkit/e2e/running-lights.sh` | a six-role ring: a token handed on with `onlyne handoff` twelve times, and two TUI frames of it moving |
 
-`crates/onlyne-testkit/e2e/lib.sh` holds the shared helpers; callers set `SRC` and `tmp` first. Every
-script runs with `ONLYNE_BACKEND=fake` and the `fake` gateway, and no real platform credential
-enters the run.
+`crates/onlyne-testkit/e2e/lib.sh` holds the shared helpers. Callers set `SRC` and `tmp` first. Every
+script runs with `ONLYNE_BACKEND=fake` and the `fake` gateway. No real platform credential enters
+the run.
 
 ```bash
 cargo build --workspace
@@ -26,8 +26,8 @@ bash local-task.sh
 
 ## Configuration example tree
 
-`.onlyne.example/` holds a comment-dense `spec.toml`, a `templates/dev/` tree for the planner,
-builder, and reviewer roles, and a README that maps every example file to its real path.
+`.onlyne.example/` holds three things: a comment-dense `spec.toml`, a `templates/dev/` tree for the
+planner, builder, and reviewer roles, and a README that maps every example file to its real path.
 
 ## CLI vocabulary
 

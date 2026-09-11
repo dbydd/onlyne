@@ -1,7 +1,8 @@
 <!--
 The coding-agent package vendored into this workspace is {{agent_package}}.
-docs/v1-PLAN.md §11 line 389: an empty [server].agent_package combined with a template that uses
-this placeholder exits 4 with `onlyne: agent_package not set in spec.toml [server]` on stderr.
+docs/v1-PLAN.md §11 line 389: when [server].agent_package is empty and a template uses this
+placeholder, the run exits 4 and puts `onlyne: agent_package not set in spec.toml [server]`
+on stderr.
 -->
 
 # reviewer workspace

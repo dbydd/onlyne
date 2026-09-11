@@ -1,6 +1,6 @@
 # Onlyne v1.0.0 example tree
 
-Two roots exist in v1.0.0.
+v1.0.0 has two roots.
 
 Server root, passed as `onlyne-server run --root <dir>`:
 
@@ -43,12 +43,18 @@ Role workspace, passed as `onlyne-client run --workspace <dir>`:
 
 ## Registration flow
 
-1. `onlyne-client init --workspace W --role R --server-root S` writes `W/.onlyne/keys/role.key` plus `W/.onlyne/config.toml`, then prints a paste-ready fragment whose first line is exactly `[[client]]`.
+1. `onlyne-client init --workspace W --role R --server-root S` writes `W/.onlyne/keys/role.key` and
+   `W/.onlyne/config.toml`, then prints a paste-ready fragment whose first line is exactly
+   `[[client]]`.
 2. Append that fragment to `S/.onlyne/spec.toml`.
-3. `onlyne --server-root S reload` re-parses the spec and swaps it atomically.
+3. `onlyne --server-root S reload` re-parses the spec, then swaps it atomically.
 
-`init` never writes `spec.toml`. A key that no spec entry lists receives `error{code:"unauthorized"}` on connect.
+`init` never writes `spec.toml`. A key that no spec entry lists gets `error{code:"unauthorized"}`
+on connect.
 
 ## Truth split
 
-`spec.toml` is the protocol truth: role names, public keys, ACL, prose, concurrency, timeouts, and `session_command`. The tree under `<server-root>/.onlyne/templates/` is the content truth: every role workspace file outside the runtime artifacts. A template may carry one `.onlyne/config.toml` as a local override fragment; generate merges it with derived values, and derived values win.
+`spec.toml` is the protocol truth: role names, public keys, ACL, prose, concurrency, timeouts, and
+`session_command`. The tree under `<server-root>/.onlyne/templates/` is the content truth: every
+role workspace file outside the runtime artifacts. A template may carry one `.onlyne/config.toml` as
+a local override fragment. Generate merges it with derived values, and derived values win.

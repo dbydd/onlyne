@@ -1,12 +1,12 @@
 # pi-onlyne —— pi 的 onlyne agent 适配器
 
-一个 pi 扩展，让一个 pi 进程承载一个 onlyne role session。它连接
-`<role workspace>/.onlyne/run/s`，按 `crates/onlyne-adapter/PROTOCOL.md` 说话，把 session 走完
-`hello → welcome → assign → 工作 → complete → detach`。全程无 Rust 代码：协议在 Node 的
-`node:net` 之上重写，四字节大端长度前缀 + UTF-8 JSON 的编解码是手写的，运行时零 npm 依赖。
+一个 pi 扩展：一个 pi 进程承载一个 onlyne role session。它连接
+`<role workspace>/.onlyne/run/s`，按 `crates/onlyne-adapter/PROTOCOL.md` 通信，带 session 走完
+`hello → welcome → assign → 工作 → complete → detach`。全程没有 Rust 代码：协议在 Node 的
+`node:net` 上重写，四字节大端长度前缀加 UTF-8 JSON 的编解码是手写的，运行时零 npm 依赖。
 
-扩展在 onlyne 之外完全静默：客户端在 spawn 时注入 `ONLYNE_ROLE`、`ONLYNE_SESSION_ID`、
-`ONLYNE_TASK_ID`（`crates/onlyne-client/src/dispatch.rs`），三者缺一即为普通 pi session，
+扩展在 onlyne 之外完全静默。客户端 spawn 进程时会注入 `ONLYNE_ROLE`、`ONLYNE_SESSION_ID`、
+`ONLYNE_TASK_ID`（`crates/onlyne-client/src/dispatch.rs`）；三者缺一，就是普通 pi session，
 插件不注册任何工具、不打开任何 socket。
 
 ```
@@ -32,18 +32,17 @@ hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{r
 ## 1. 安装
 
 这是一个 pi package：`package.json` 里声明 `pi.extensions: ["./src/index.ts"]`，pi 用 jiti
-直载 TypeScript，无需构建产物。
+直接加载 TypeScript，不需要构建产物。
 
 ### 配合生成的工作区（正规路径）
 
 `onlyne server generate` 会把 `[server].agent_package` 复制进
-`<ws>/.onlyne/agent/<pkg-name>/`，并把这条 package 以相对 settings 文件自身的路径
-`../.onlyne/agent/<pkg-name>` 写进 `.pi/settings.json`
-（`crates/onlyne-server/src/generate.rs`）。这个写法是 pi 0.85.1 真正加载的那一个：项目
-`packages` 里的路径以该 settings 文件所在目录（`<ws>/.pi`）为基准解析，于是 `../` 那份落到
-`<ws>/.onlyne/agent/<pkg-name>`，裸写的 `.onlyne/agent/<pkg-name>` 会解析成
-`<ws>/.pi/.onlyne/agent/<pkg-name>`——包被列出来却不加载。生成的工作区就是 supervisor 拉起
-的那份，插件随目录一起走，不装全局。
+`<ws>/.onlyne/agent/<pkg-name>/`，再把这条 package 写进 `.pi/settings.json`，路径相对
+settings 文件自身：`../.onlyne/agent/<pkg-name>`（`crates/onlyne-server/src/generate.rs`）。
+pi 0.85.1 只加载这个写法。项目 `packages` 里的路径以 settings 文件所在目录（`<ws>/.pi`）
+为基准解析，所以 `../` 那份落到 `<ws>/.onlyne/agent/<pkg-name>`；裸写的
+`.onlyne/agent/<pkg-name>` 会解析成 `<ws>/.pi/.onlyne/agent/<pkg-name>`，包被列出来却不
+加载。生成的工作区就是 supervisor 拉起的那份，插件随目录一起走，不装全局。
 
 ```toml
 # spec.toml
@@ -61,8 +60,8 @@ onlyne server generate --root <server-root> --out <dir>
 { "packages": ["../.onlyne/agent/pi-onlyne"] }
 ```
 
-`pi list` 会把这条列在 “Project packages” 下。是否真正加载的验证方式：让 vendored
-`index.ts` 抛错，观察报错是否出现。
+`pi list` 会把这条列在 “Project packages” 下。要验证真的加载了，就让复制进来的 `index.ts`
+抛错，看报错是否出现。
 
 ### 手工（不经过 generate）
 
@@ -86,11 +85,11 @@ pi --session-id <id> -e /abs/path/to/integrations/pi-onlyne -ns -nc
 | `enabled` | `true` | `false` 时该工作区禁用扩展 |
 | `watch.autoStart` | `true` | `false` 时注册工具但不建连接，需 `/onlyne connect` |
 
-文件缺失即两个默认值。文件格式错误时打印一行警告并保留默认值——一个笔误不该静默关掉一个
-role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 generate 期模板提示），所以它
-的唯一消费者是本扩展；键名沿用模板里既有的形状。
+文件缺失即两个默认值。文件格式错误时打印一行警告，并保留默认值：一个笔误不该静默关掉一个
+role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 generate 期模板提示），所以
+只有本扩展消费它；键名沿用模板里既有的形状。
 
-其余无需配置：工作区 `spec.toml` 的 `session_command` 已经按任务拉起 `pi`
+其余无需配置。工作区 `spec.toml` 的 `session_command` 已经按任务拉起 `pi`
 （`["pi", "--session-id", "{session}"]`），client 负责注入本扩展识别的环境变量。
 
 ## 2. 能力表
@@ -104,7 +103,7 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 | `inject` | `pi.sendUserMessage` 存在 | 载荷以 `assign` 到达，并作为 pi user message 注入 |
 | `recycle` | 始终 | 收到 `recycle` 先补终态，再停插件并让 pi 退出 |
 
-降级路径与宿主对应行为：
+缺了某个 pi API 时会怎样，宿主怎么应对：
 
 | 缺失项 | 探测时机 | 行为 |
 | --- | --- | --- |
@@ -121,85 +120,91 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 
 ### `onlyne_send{to, text, kind?, image?}`
 
-经 `send` 帧提交一个 envelope。`kind: "note"`（默认）是自由文本，不带 `op_id`；
+经 `send` 帧提交一个 envelope。`kind: "note"`（默认）是自由文本，不带 `op_id`。
 `kind: "task"` 是派人办事，因此带 `o-<uuid>` 幂等键和新生成的 `causality.task`。`image` 是
-png/jpeg/gif/webp 的绝对路径，读取后 base64 编码成 `body.image`，受核心 2 MiB 上限与四种
-mime 约束。
+png/jpeg/gif/webp 的绝对路径：插件读出内容，base64 编码后挂成 `body.image`。核心限 2 MiB，
+只收四种 mime。
 
 ### `onlyne_complete{outcome?, text?}`
 
 显式结束当前任务，`outcome` 缺省 `done`，也可 `failed`。`text` 非空时就是 ledger 的 `head`，
-原样写出（空白折叠成单行，截到 200 字符）；`text` 缺失或全空白时不带摘要，completion 退回
-最后一段 assistant 文本。这一调用同时结束所在 session 的进程：client 应答完 completion
+原样写出：空白折叠成单行，截到 200 字符。`text` 缺失或全空白时不带摘要，completion 退回
+最后一段 assistant 文本。这一调用同时结束所在 session 的进程。client 应答完 completion
 报告（见 §4）之后，插件通过 `ctx.shutdown()` 让 pi 退出。pi 0.85.1 没有 tool-result
 `terminate` 处理。
 
 ## 4. outcome 判定规则
 
-每个任务只发一次 completion，取以下三者的先到者：
+插件每个任务只发一次 completion，取以下三者的先到者：
 
 1. **`onlyne_complete`** —— 模型给显式 outcome，优先级最高；同一任务的第二次 completion 被
    拒（不重报）。`text` 非空时即 head，原样写出。
-2. **`agent_settled`** —— pi 不会自己继续（无重试、无压缩、无排队续跑）。此时：
+2. **`agent_settled`** —— pi 不会自己继续：没有待重试、待压缩或排队续跑。此时：
    - turn 以 provider 错误告终（`stopReason: "error"`）→ `failed`，错误信息当 head；
    - 其余 → `done`，最后一段 assistant 文本当 head；
-   - 任务已投递但还没跑过任何 turn → 不发 completion：注入的消息尚未执行，这时报终态就是撒谎。
-3. **`recycle{outcome}`** —— 宿主拆 session。先按宿主给的 outcome 结算未终态的任务，再停插件
-   并退出 pi。
+   - 任务已投递但还没跑过任何 turn → 不发 completion。注入的消息尚未执行，这时报终态就是撒谎。
+3. **`recycle{outcome}`** —— 宿主拆 session。插件先按宿主给的 outcome 结算未终态的任务，再停
+   插件并退出 pi。
 
 `head` 恒为单行、上限 200 字符，与 client 写入 `out_head` 和回执携带的内容一致。每个任务的
 head 只有一个来源：显式 `onlyne_complete` 带的 `text`（有则原样采用），否则是最后一段
-assistant 文本。自动规则就是那条退路——它报的是自己那一轮的文字；工具调用之后再说的话，顶不掉
+assistant 文本。自动规则就是那条退路：它报的是自己那一轮的文字，工具调用之后再说的话，顶不掉
 调用交出的内容。
 
 报出去的 completion 会结束所在 session 的进程。`report.complete` 以请求形式发出，client 只有
-在结算 session 行、ack 掉投递、并写好 `Completion` envelope 之后才应答；插件在这个应答处让 pi
-退出。socket 当时送不出去的 outcome 会被记住，并在下一次 `hello` 后补发，那次补发的应答就是
-结束进程的交接点。被宿主拒掉的 completion 不会让进程退出，任务不会因为退出而丢失。
+在结算 session 行、ack 掉投递、并写好 `Completion` envelope 之后才应答，插件就在这个应答处
+让 pi 退出。socket 当时送不出去的 outcome 会被记住，并在下一次 `hello` 后补发，那次补发的
+应答就是结束进程的交接点。被宿主拒掉的 completion 不会让进程退出，任务不会因为退出而丢失。
+
+最后一条上报是：在已结算的 outcome 旁边带一个 `agent: "idle"` 的观测，发在 completion 被
+ack 之后、进程退出之前。completion 是按 client 手里的元组结算 session 行的，而收尾那一轮
+就是最后一次 heartbeat 时，这个元组读到的仍是 `running`；此后没有任何东西再观测这个进程，
+所以缺了这条上报，已退出的 session 会一直说 `running`。最后一次心跳本来就是 idle 时，插件
+跳过这条；已结算的观测被拒，也不拖着 completion 挣来的那次退出不走。
 
 ## 5. 协议说明与偏差
 
-以下每条要么是对 `PROTOCOL.md` 的明确解读，要么是对实际 client 行为的实测。
+下面每条要么是对 `PROTOCOL.md` 的明确解读，要么是在实际 client 上实测到的行为。
 
 - **report 序号基址。** 插件自己的 `report` 序号从 1000 起，不是 1。client 把自身的派发事件
   （`created`、资源 attach、`ready`）写进同一个 `(generation, seq)` 水位，reducer 会静默丢弃
-  水位之下的报告（`crates/onlyne-session/src/reconcile.rs`），所以从 1 起会丢掉最初的观测。
+  水位及以下的报告（`crates/onlyne-session/src/reconcile.rs`），所以从 1 起会丢掉最初的观测。
   其余版本语义与规范一致。
 - **`observed` 是完整的 `Observation`。** `report.heartbeat` 携带整个合法状态元组
   （`version`、`generation_live`、`isolate_after`、`terminate_after`、`mismatch_count`、
   `agent`、`delivery`、`resource`、`recovery`、`outcome`、`public`），不是
-  `{"state": "running"}` 这种简写：宿主会反序列化它，`is_legal` 不接受的一律拒绝。本插件只
-  拥有 `agent` 这一维（turn hooks），`delivery` 保持 `none`、`outcome` 保持 `pending`——在它
-  报出 completion 之前这就是它的事实；`resource` 报 `attached`，因为宿主的派发路径已经记过
-  这次 attach。
+  `{"state": "running"}` 这种简写。宿主会反序列化它，`is_legal` 不接受的一律拒绝。本插件只管
+  `agent` 这一维（turn hooks），`delivery` 保持 `none`、`outcome` 保持 `pending`——在它报出
+  completion 之前这就是它的事实。`resource` 报 `attached`，因为宿主的派发路径已经记过这次
+  attach。
 - **`ready` 每连接报一次。** 宿主的 hand-off 路径
   （`crates/onlyne-client/src/dispatch.rs::hand_session`）在把 session 交给挂载的插件时已经报过
-  `ready`，插件再报一次在宿主侧是 no-op。仍然发送，因为「先挂载、后有活」正是 ready barrier
-  描述的情形，且只花一帧。
-- **从不发 `cluster_ref`。** 本插件代表本地 role 说话，从不代表 aggregate；Rust 侧对同一情形
-  也是 `skip_serializing_if` 缺省。
+  `ready`，所以插件再报一次在宿主侧是 no-op。插件仍然发送：先挂载、后有活正是 ready barrier
+  描述的情形，而且只花一帧。
+- **从不发 `cluster_ref`。** 本插件代表本地 role 说话，从不代表 aggregate；Rust 侧出于同样的
+  原因把该字段写成 `skip_serializing_if` 缺省。
 - **`probe` 用一条 heartbeat 应答**，对应 `PROTOCOL.md` 里 “`probe` declares fresh resource
   observations”。
 - **`config_get` 只有当键以 `stdin:` 开头时按任务正文处理**，这正是 `PROTOCOL.md` 为无
   `inject` 插件记录的重载。其他键记日志后忽略，绝不误读。
 - **`frame_too_large` / `bad_frame`**：超限正文在写出任何字节之前就被拒；帧错误关闭连接并重
-  连——帧一旦损坏无法重新同步，这与 `crates/onlyne-frame/src/lib.rs` 的结论一致。
-- **任务 id 在连接生命周期内一次性使用**：同一任务的重复 `assign` 只回
-  `reason: "duplicate"` 的 ack，不重复注入。当今 client 每个任务都是新 uuid，所以这条只在真
-  正的重投上生效。
+  连。帧一旦损坏无法重新同步，这与 `crates/onlyne-frame/src/lib.rs` 的结论一致。
+- **任务 id 在连接生命周期内一次性使用**：同一任务的重复 `assign` 插件只回
+  `reason: "duplicate"` 的 ack，不重复注入，并记住这个 id 直到连接结束。当今 client 每个任务
+  都是新 uuid，所以这条只在真正的重投上生效。
 
 - **pane 绑定（Orca tab）。** 在 Orca pane 里，插件在每个 heartbeat 上报自己跑在哪：报告
   `Observation` 里的 `observed.host.orca.pane_key`（`crates/onlyne-session/src/host.rs`），环境
   报得出时还带上 `tab_id` / `leaf_id` 和终端的 `handle`。这个绑定是**继承**来的，不是猜的：Orca
   pane 会把自己那四个 `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_LEAF_ID` / `ORCA_TERMINAL_HANDLE`
   导出给它启动的命令（2026-09-11 实测，Orca 1.4.198），而 client 会把自己的环境继续传给
-  session 命令——所以跑在 pane 里的那个进程，是唯一能从进程内部说出「这是哪个 pane」的组件，
-  pi 之后没有任何环节能恢复这个绑定。不在 pane 里时 `host` 键整个缺席：普通终端上的 pi 报的是
+  session 命令。所以跑在 pane 里的那个进程，是唯一能从内部说出「这是哪个 pane」的组件；pi
+  之后没有任何环节能恢复这个绑定。不在 pane 里时 `host` 键整个缺席：普通终端上的 pi 报的是
   一条没有 host 字段的 observation，而不是一条 pane 为空的。
-- **为此不往 workspace 写任何东西。** 已经没有申报文件了——绑定搭在 client 本来就逐帧镜像的
-  那份 observation 上，所以不存在过期的申报（没有东西会创建它），workspace 的缓存目录也不会被碰。
-  这既让 `integrations/orca-plugin` 能不读任何路径就把 tab 轴收窄到真会话，也让 supervisor 在会话
-  *结束之后*仍然说得出它跑在哪：`report.complete` 会把 `host` 带过去。
+- **为此不往 workspace 写任何东西。** 已经没有申报文件了：绑定搭在 client 本来就逐帧镜像的
+  那份 observation 上。没有东西会创建它，所以不存在过期的申报，workspace 的缓存目录也不会
+  被碰。这既让 `integrations/orca-plugin` 能不读任何路径就把 tab 轴收窄到真会话，也让
+  supervisor 在会话 *结束之后*仍然说得出它跑在哪：`report.complete` 会把 `host` 带过去。
 
 ## 6. 配置项
 
@@ -213,8 +218,8 @@ assistant 文本。自动规则就是那条退路——它报的是自己那一�
 | `ORCA_TAB_ID` / `ORCA_LEAF_ID` | 否 | pane 的两个 id；只设了 pane key 时插件会自己解析 |
 | `ORCA_TERMINAL_HANDLE` | 否 | 终端 handle，随 pane key 一起上报为 `host.orca.handle`，也是 `orca terminal switch` 要的那个值 |
 
-值得记住的常量：心跳 10 秒（`heartbeat_timeout_ms` 是 30 秒）、hello 预算 5 秒、请求超时
-30 秒、重连阶梯 1/2/4/8/16/30 秒。
+值得记住的常量：插件每 10 秒发一次心跳（`heartbeat_timeout_ms` 是 30 秒），`hello` 最多等
+5 秒，单次请求超时 30 秒，重连按 1/2/4/8/16/30 秒阶梯退避。
 
 ## 7. 故障排查
 
@@ -252,6 +257,6 @@ cd ../..
 ONLYNE_BACKEND=fake BIN_DIR=target/debug bash crates/onlyne-testkit/e2e/pi-live.sh
 ```
 
-用例在 source 公共 helper 之后自己导出 `ONLYNE_BACKEND=exec`，于是 pi 由 client 亲自 spawn，
+用例先 source 公共 helper，再自己导出 `ONLYNE_BACKEND=exec`，于是 pi 由 client 亲自 spawn，
 stdin 是一条 client 持住不关的管道。agent 自己的输出落在
 `<ws>/.onlyne/logs/session-<task>.log`。

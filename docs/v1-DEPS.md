@@ -1,6 +1,6 @@
 # v1 dependency inventory
 
-This inventory reads every `Cargo.toml` under `crates/` except `crates/onlyne-legacy/` and every plugin manifest under `plugins/`. Dependency rows include normal, development, and build dependencies. `workspace` records a requirement inherited from the root manifest. Feature lists report features written in the declaring manifest; `default-features=false` is shown explicitly.
+This inventory reads every `Cargo.toml` under `crates/` except `crates/onlyne-legacy/`, plus every plugin manifest under `plugins/`. Rows cover normal, development, and build dependencies. `workspace` means the requirement is inherited from the root manifest. Feature lists name the features written in the declaring manifest. `default-features=false` is shown explicitly.
 
 ## External dependencies
 
@@ -84,7 +84,7 @@ This inventory reads every `Cargo.toml` under `crates/` except `crates/onlyne-le
 | `wechat-ilink` | workspace | [] | onlyne-gateway-weixin |
 | `x509-parser` | `0.16.0` | [] | onlyne-net |
 
-A crate in parentheses declares the dependency in `[dev-dependencies]` or `[build-dependencies]`. A plain crate name declares it in `[dependencies]`.
+Parentheses mark a crate that declares the dependency in `[dev-dependencies]` or `[build-dependencies]`. A plain crate name declares it in `[dependencies]`.
 
 ## Internal edges
 
@@ -142,12 +142,12 @@ Firewall review against `docs/v1-PLAN.md` §1 lines 74–77:
 - `onlyne-proto` declares no `tokio` dependency (checked in its external row above).
 - `onlyne-session` edges: ; none names `onlyne-store`, `onlyne-net`, or `onlyne-proto`.
 - `onlyne-client` declares no `onlyne-server`; `onlyne-server` declares no `onlyne-client`.
-- Plugin internal edges are onlyne-adapter, onlyne-proto; no plugin declares a server-internal crate.
+- Plugin internal edges are `onlyne-adapter`, `onlyne-proto`; no plugin declares a server-internal crate.
 - No firewall violation appears in the manifests reviewed.
 
 ## Conflicts
 
-A conflict is any dependency with more than one manifest-level version requirement or feature/default-feature set. Workspace requirements are kept verbatim because this inventory is based on declaring manifests.
+A conflict is any dependency with more than one manifest-level version requirement, feature set, or default-feature setting. Workspace requirements stay verbatim here, because this inventory reads declaring manifests.
 
 | dependency | variant A | crates | variant B or additional variant | crates |
 |---|---|---|---|---|
@@ -232,7 +232,7 @@ Conflicting dependencies by name:
 
 ## Recommended workspace.dependencies
 
-This block satisfies the union of the feature sets declared by the crates on disk. Entries carry a comment naming the crate that forced a non-obvious requirement.
+This block satisfies the union of the feature sets declared by the crates on disk. A comment on an entry names the crate that forced a non-obvious requirement.
 
 ```toml
 [workspace.dependencies]
@@ -302,6 +302,6 @@ wechat-ilink = "0.5.0"
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 ```
 
-One correction to the consolidation brief, grounded in the manifests on disk: `reqwest` stays in the block because `plugins/onlyne-gateway-feishu/Cargo.toml:17` declares it with the `multipart` feature and `plugins/onlyne-gateway-feishu/src/lib.rs:762` holds a `reqwest::Client`, while `plugins/onlyne-gateway-qqbot/Cargo.toml:17` declares it for `plugins/onlyne-gateway-qqbot/src/lib.rs:21`. Dropping it breaks both plugins. `tokio` carries `signal` because `docs/v1-PLAN.md` §5 line 270 names `onlyne server reload` and `SIGHUP` as the reload triggers, and `crates/onlyne-server/Cargo.toml` requests the feature on its own `tokio` line.
+One correction to the consolidation brief, grounded in the manifests on disk. `reqwest` stays in the block: `plugins/onlyne-gateway-feishu/Cargo.toml:17` declares it with the `multipart` feature and `plugins/onlyne-gateway-feishu/src/lib.rs:762` holds a `reqwest::Client`, while `plugins/onlyne-gateway-qqbot/Cargo.toml:17` declares it for `plugins/onlyne-gateway-qqbot/src/lib.rs:21`. Dropping it breaks both plugins. `tokio` carries `signal` because `docs/v1-PLAN.md` §5 line 270 names `onlyne server reload` and `SIGHUP` as the reload triggers, and `crates/onlyne-server/Cargo.toml` requests the feature on its own `tokio` line.
 
-Entries removed as unused: `signature`, `tracing-appender`, `tracing-subscriber`, and `url` are declared by no crate on disk.
+Entries removed as unused: no crate on disk declares `signature`, `tracing-appender`, `tracing-subscriber`, or `url`.

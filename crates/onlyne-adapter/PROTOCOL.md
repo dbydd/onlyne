@@ -1,8 +1,8 @@
 # Onlyne adapter protocol
 
-This document is the normative socket contract for external TypeScript plugins. The transport is an 8-byte-free length-prefixed JSON frame from `onlyne-frame`: a four-byte big-endian `u32` body length followed by one UTF-8 JSON object. The examples below show the JSON body.
+This document is the contract for external TypeScript plugins that talk to a host over the socket. The transport is the length-prefixed JSON frame from `onlyne-frame`: a four-byte big-endian `u32` body length, then one UTF-8 JSON object. No other header sits in front of it. Every example below shows the JSON body.
 
-Each request has `id` and a response has `reply_to`. Request operation payloads use `{\"op\":...,\"args\":...}`. Host notifications omit `id`; plugin notifications omit `id` when no response is needed.
+A request carries `id`; its response carries `reply_to`. Operation payloads read `{\"op\":...,\"args\":...}`. A host notification drops `id`. A plugin drops `id` too when it wants no answer.
 
 ## Frame table
 
@@ -31,53 +31,62 @@ Each request has `id` and a response has `reply_to`. Request operation payloads 
 | either | response success | `{"reply_to":8,"ok":true,"data":{"msg_id":"..."}}` |
 | either | response error | `{"reply_to":8,"ok":false,"error":{"code":"invalid","message":"body requires text or image","field":"body"}}` |
 
-`AdapterMsg` also permits response objects without a `reply_to` for host-side dispatchers that use a fire-and-forget notification. Implementations should preserve request ids whenever they are supplied.
+`AdapterMsg` also allows a response with no `reply_to`, for host-side dispatchers that fire a notification and want no answer. Keep request ids whenever the caller supplies them.
 
 ## Mounts and capabilities
 
-Agent plugins use `kind: agent` with `mount.role` and an optional `mount.session`; gateways use `kind: gateway` with `mount.gateway` and `mount.platform`; a connection speaking for a sub-cluster carries `mount.cluster` and `mount.role`; admin tooling sends `kind: admin` with `mount` null. `kind` names the connection class, and the mount payload is flat and untagged, with `kind` as its sibling inside `hello.args` rather than a wrapper inside it: `{"role":"planner","session":"8b1c..."}` for an agent, `{"gateway":"gw1","platform":"telegram"}` for a gateway, `{"cluster":"cluster-b","role":"cluster-b"}` for a cluster. The host matches the payload's field set against the variants in declaration order — agent, gateway, cluster, admin — and every payload denies unknown fields, so an author who adds a field to one payload changes which variant answers and a new field belongs to the earliest variant that owns it. Agent connections may send `report`, `session_register`, `assign_ack`, `send`, and `detach`. Gateway connections may send `deliver`, `register_channel`, `health`, `typing`, and `detach`. A forbidden operation returns `forbidden` with an `op` field and a message naming the operation and mount kind.
+Pick the mount by `kind`. Agent plugins send `kind: agent` with `mount.role` and an optional `mount.session`. Gateways send `kind: gateway` with `mount.gateway` and `mount.platform`. A connection that speaks for a sub-cluster carries `mount.cluster` and `mount.role`. Admin tooling sends `kind: admin` with `mount` null.
 
-`register` binds the process to a task. `report` pushes lifecycle facts. `inject` declares support for `assign`. `recycle` declares that the plugin tears down its process when asked. `probe` declares fresh resource observations. `typing` and `conversations` describe gateway features.
+`kind` names the connection class. The mount payload is flat and untagged. `kind` sits beside it inside `hello.args`, not inside a wrapper: `{"role":"planner","session":"8b1c..."}` for an agent, `{"gateway":"gw1","platform":"telegram"}` for a gateway, `{"cluster":"cluster-b","role":"cluster-b"}` for a cluster.
 
-A missing `recycle` makes the host judge resource loss through `probe`. A missing `report` moves the affected session to `idle_fault` and records a fault. A missing `inject` sends the payload through process stdin or argv and determines terminal state from the exit code and last output line; on this socket that delivery is a `config_get` frame whose only key is `stdin:{task text}`, so a plugin without `inject` must read an unrecognised `config_get` key as a task body rather than a configuration read, because the plan lists `config_get{key}` host-to-plugin at §7 line 308 and names no frame for the stdin route at line 310, which is why the overload is written down here instead of becoming folklore.
+The host matches the payload's field set against the variants in declaration order — agent, gateway, cluster, admin. Every payload denies unknown fields. So adding a field to one payload changes which variant answers, and the new field belongs to the earliest variant that owns it.
+
+An agent connection may send `report`, `session_register`, `assign_ack`, `send`, and `detach`. A gateway connection may send `deliver`, `register_channel`, `health`, `typing`, and `detach`. A forbidden operation returns `forbidden` with an `op` field and a message naming the operation and the mount kind.
+
+`register` binds the process to a task. `report` pushes lifecycle facts. `inject` declares support for `assign`. `recycle` declares that the plugin tears down its process when asked. `probe` declares that the host may ask for fresh resource observations. `typing` and `conversations` describe gateway features.
+
+With no `recycle`, the host must judge resource loss through `probe`. With no `report`, the affected session moves to `idle_fault` and the host records a fault. With no `inject`, the host sends the payload through process stdin or argv, then reads the terminal state from the exit code and the last output line.
+
+On this socket that delivery is a `config_get` frame whose only key is `stdin:{task text}`. So a plugin without `inject` must read an unrecognised `config_get` key as a task body, not as a configuration read. The plan lists `config_get{key}` host-to-plugin at §7 line 308 and names no frame for the stdin route at line 310. This document writes the overload down for that reason, instead of leaving it as folklore.
 
 ## Handshake and errors
 
-The first frame must be `hello`. The server accepts it for exactly five seconds. Any other first frame receives `invalid`, the exact message `hello required first`, field `op`, and the connection closes. A hello that arrives after the window causes a silent close and a `tracing::warn!` entry; a local peer pid is included when available.
+The first frame must be `hello`, and the server waits exactly five seconds for it. Any other first frame gets `invalid` with the exact message `hello required first` and field `op`; then the connection closes. A `hello` that arrives after the window closes the connection silently and logs a `tracing::warn!`. The log carries the local peer pid when one is available.
 
-Platform-owned data stays on the gateway side. A gateway plugin receiving `RenderSendArgs` gets envelope plus rendered text and image only. An agent receiving `AssignArgs` gets envelope, prose, and intent only. Neither serialized payload carries `platform_metadata`, `raw`, or `channel_id`. The SDK documents this rule and the conformance suite inspects the delivered bytes. The wire types carry no raw metadata field, so a plugin cannot smuggle platform data into an agent payload through these frames.
+Platform-owned data stays on the gateway side. A gateway plugin that receives `RenderSendArgs` gets the envelope plus rendered text and image, nothing more. An agent that receives `AssignArgs` gets the envelope, the prose, and the intent, nothing more. Neither serialized payload carries `platform_metadata`, `raw`, or `channel_id`. The SDK states this rule, and the conformance suite inspects the delivered bytes. The wire types carry no raw metadata field at all, so a plugin cannot smuggle platform data into an agent payload through these frames.
 
 ## Report sequencing and the ready barrier
 
-Every `report` carries `(generation, seq)`, and the host reduces reports and its own lifecycle events for one session against a single watermark: a report whose `seq` is at or below the watermark for its generation is dropped as stale or duplicate. The host's own events for a session occupy the low single digits — `created` is 1, `resource_attach` 2, `ready` 3 — so a plugin starts its counter above that range and keeps it strictly increasing for the life of the generation. 1000 is the baseline this document recommends: it clears the host's range and leaves the host room to interleave its own events.
+Every `report` carries `(generation, seq)`. The host reduces reports and its own lifecycle events for one session against a single watermark. A report whose `seq` is at or below the watermark for its generation is dropped as stale or duplicate. The host's own events for a session take the low single digits: `created` is 1, `resource_attach` 2, `ready` 3. Start your counter above that range and keep it strictly increasing for the life of the generation. This document recommends 1000 as the baseline: it clears the host's range and leaves the host room to interleave its own events.
 
-Keep the counter monotonic across a reconnect inside one generation. A reconnect that restarts the count at the baseline places every later report below the watermark, and the host ignores all of them, completions included.
+Keep the counter monotonic across a reconnect inside one generation. A reconnect that restarts the count at the baseline puts every later report below the watermark, and the host ignores all of them, completions included.
 
-`report.ready` is the barrier the payload waits behind, and it passes through the same gate: a `report.heartbeat` carrying a lower `(generation, seq)` than an earlier report is dropped even when it is the frame that carries a state change.
+`report.ready` is the barrier the payload waits behind, and it passes the same gate. A `report.heartbeat` that carries a lower `(generation, seq)` than an earlier report is dropped, even when it is the frame that carries a state change.
 
-`observed` on `report.heartbeat` is a complete `Observation` tuple, and a status string such as `{"state":"running"}` is not valid input. The keys are `version{generation,seq}`, `generation_live`, `isolate_after`, `terminate_after`, `mismatch_count`, `agent`, `delivery`, `resource`, `recovery`, `outcome`, and `public`, with `public` projecting from the other dimensions. The host rejects an illegal tuple and keeps the previous state.
-`observed` may carry one key beside the tuple: `host`, where this process runs.
-It is placement, not a state dimension — `public` and the legality check never read it, and a lone `host` can never make an illegal tuple legal or decide a transition. Its shape is `{"orca": {"pane_key": "<tab_id>:<leaf_id>", "tab_id": …, "leaf_id": …, "handle": …}}`; only `pane_key` is required, the rest are omitted when the environment did not name them. A process outside an Orca pane omits `host` entirely rather than sending null, so absence means "not in a pane" and never "unknown". The host stores the tuple as the row's observation instead of wrapping it, so a reader of the admin surface finds the binding at `projection.observed.host` whichever client path wrote the row; the relay's own `cluster_ref` joins it as a sibling key under the same rule.
+`observed` on `report.heartbeat` is a complete `Observation` tuple. A status string such as `{"state":"running"}` is not valid input. The keys are `version{generation,seq}`, `generation_live`, `isolate_after`, `terminate_after`, `mismatch_count`, `agent`, `delivery`, `resource`, `recovery`, `outcome`, and `public`; `public` projects from the other dimensions. The host rejects an illegal tuple and keeps the previous state.
+`observed` may carry one key beside the tuple: `host`, where this process runs. `host` is placement, not a state dimension. `public` and the legality check never read it, and a lone `host` can never make an illegal tuple legal or decide a transition. Its shape is `{"orca": {"pane_key": "<tab_id>:<leaf_id>", "tab_id": …, "leaf_id": …, "handle": …}}`; only `pane_key` is required, and the rest are omitted when the environment did not name them. A process outside an Orca pane omits `host` entirely rather than sending null, so absence means "not in a pane" and never "unknown".
 
-Because the comparison tuple includes `host`, a heartbeat that changes only the binding is news rather than a no-op replay: it advances the watermark and is published as a new version. A process that learns its pane after `report.ready` therefore sends one heartbeat to state it, and a supervisor reading the session axis can scope its view of the panes from that point on.
+The host stores the tuple as the row's observation instead of wrapping it. A reader of the admin surface therefore finds the binding at `projection.observed.host`, whichever client path wrote the row. The relay's own `cluster_ref` joins it as a sibling key under the same rule.
 
-`report.complete` is terminal for one task, and the host answers it by writing the terminal tuple: `delivery: accepted` and `outcome: done|failed|cancelled` at the next version. A heartbeat for that task must not follow. `observed` replaces the whole snapshot, and a later one carrying `outcome: pending` is legal input, so it puts the session back to `working` or `idle` after the host has published `exited`. A plugin keeps its counter and stops reporting for the task once it has sent the completion; the host closes the resource on the completion receipt.
+The comparison tuple includes `host`, so a heartbeat that changes only the binding is news rather than a no-op replay: it advances the watermark and is published as a new version. A process that learns its pane after `report.ready` therefore sends one heartbeat to state it. From that point on, a supervisor reading the session axis can scope its view of the panes.
 
-Placement outlives the report that ends a run: `report.complete` replaces the snapshot but carries `host` forward from the row's last observation, so a finished session still says which pane it ran in and a supervisor can look at the output where it was produced. Nothing else of the earlier tuple survives the completion.
+`report.complete` is terminal for one task. The host answers it by writing the terminal tuple: `delivery: accepted` and `outcome: done|failed|cancelled` at the next version. No heartbeat for that task may follow. `observed` replaces the whole snapshot, and a later one carrying `outcome: pending` is legal input, so it puts the session back to `working` or `idle` after the host has published `exited`. A plugin keeps its counter and stops reporting for the task once it has sent the completion. The host closes the resource on the completion receipt.
+
+Placement outlives the report that ends a run. `report.complete` replaces the snapshot but carries `host` forward from the row's last observation, so a finished session still says which pane it ran in and a supervisor can look at the output where it was produced. Nothing else of the earlier tuple survives the completion.
 
 ## AgentSurface
 
-The optional external coding-agent face has these members. Every member returns `Result<(), SurfaceGap>` and defaults to `SurfaceGap::Unsupported(name)`:
+The optional external coding-agent face has these members. Each one returns `Result<(), SurfaceGap>` and defaults to `SurfaceGap::Unsupported(name)`:
 
 `config_path`, `register_tool`, `register_command`, `wake_user(WakeUser { text, deliver_as })`, `send_custom_entry`, `on_turn_lifecycle`, `exit`, `wrap_result`, `set_active_tools`, `set_status`, `set_title`, `set_model`, `set_thinking_level`.
 
-`wake_user` represents both `sendUserMessage(text, {deliverAs:"followUp"})` and `followup(createUserMessage(text))`. Hosts can collect `SurfaceGaps::report()` to log exactly one line for each unsupported member.
+`wake_user` represents both `sendUserMessage(text, {deliverAs:"followUp"})` and `followup(createUserMessage(text))`. A host can collect `SurfaceGaps::report()` to log exactly one line per unsupported member.
 
 ## In-process plugin trait
 
-Gateway binaries implement `GatewayPlugin` from `onlyne-adapter`. The trait keeps platform SDK dependencies at the plugin boundary. The plugin receives finished text plus optional PNG bytes through `Outbound`; rendering stays in the gateway binary. A plugin does not link `resvg`, `pulldown-cmark`, or the test kit.
-The internal host-side multiplexer buffers frames via `QueuedFrame`, while the plugin-side send payload carries `Outbound`.
-The gateway binary converts an inbound or outbound task into an `Outbound` envelope before handing it to a plugin.
+A gateway binary implements `GatewayPlugin` from `onlyne-adapter`. The trait keeps platform SDK dependencies at the plugin boundary. The plugin receives finished text plus optional PNG bytes through `Outbound`; rendering stays in the gateway binary. A plugin never links `resvg`, `pulldown-cmark`, or the test kit.
+The internal host-side multiplexer buffers frames through `QueuedFrame`. The plugin-side send payload carries `Outbound`.
+The gateway binary converts an inbound or outbound task into an `Outbound` envelope before it hands the task to a plugin.
 
 The fixed signatures are:
 

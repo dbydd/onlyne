@@ -1,6 +1,6 @@
 # Packaging
 
-Service definitions ship as examples for an operator or a package to install. The core binaries
+Service definitions ship as examples. An operator or a package installs them. The core binaries
 never install or launch themselves as a service.
 
 ## Files
@@ -13,25 +13,25 @@ never install or launch themselves as a service.
 
 ## Paths to edit
 
-Both shapes run one foreground command and name no supervisor logic of their own:
+Both shapes run one foreground command. Neither carries supervisor logic of its own:
 
 - server: `onlyne-server run --root <server-root>`, working directory `<server-root>`
 - client: `onlyne-client run --workspace <workspace>`, working directory `<workspace>`
 
 The units carry `/srv/onlyne` and `/srv/onlyne-ws/%i` as the two roots. Replace them with the real
-roots before loading. Create a root first with `onlyne-server init --root <dir>`, which also makes
-`.onlyne/logs/`, the directory the log files land in.
+roots before loading. Create a root first with `onlyne-server init --root <dir>`; that command also
+makes `.onlyne/logs/`, the directory the log files land in.
 
 ## Restart behavior
 
-`KeepAlive` with `SuccessfulExit=false` on macOS and `Restart=on-failure` on Linux both restart the
-daemon after an abnormal exit and leave a clean exit alone. `systemctl reload onlyne-server` sends
-SIGHUP, which re-parses `spec.toml` and swaps it atomically.
+On macOS, `KeepAlive` with `SuccessfulExit=false`; on Linux, `Restart=on-failure`. Both restart the
+daemon after an abnormal exit, and both leave a clean exit alone. `systemctl reload onlyne-server`
+sends SIGHUP. The daemon re-parses `spec.toml`, then swaps it atomically.
 
 ## Logs
 
-Daemon output goes to `.onlyne/logs/server.log` under the server root and `.onlyne/logs/client.log`
-under the role workspace.
+Daemon output goes to two places: `.onlyne/logs/server.log` under the server root, and
+`.onlyne/logs/client.log` under the role workspace.
 
 ## Client instances
 

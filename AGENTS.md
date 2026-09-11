@@ -1,19 +1,19 @@
 # Onlyne Codex Execution Contract
 
-This repository is for building a **small, Rust-based, workspace-local agent channel and routing layer**.
+This repository builds a **small, Rust-based channel and routing layer for agents, scoped to a workspace**.
 
 Read this file before changing anything.
 
 ## 0. Product boundary
 
 Onlyne v1.0.0 is:
-- a server that routes envelopes, holds the ledger, projects session state, records faults, and exposes admin operations with zero orchestration policy
-- a client that owns one role's session execution inside one workspace
+- a server that routes envelopes, keeps the ledger, projects session state, records faults, and exposes admin operations with zero orchestration policy
+- a client that runs one role's session execution inside one workspace
 - a gateway that owns chat-platform translation, rendering, auth, and platform-local correlation state
-- one adapter protocol mounted on two sides: agent plugins attach to the client, and IM gateway plugins attach to the server-side gateway path
+- one adapter protocol mounted on two sides: agent plugins attach to the client, IM gateway plugins attach to the server-side gateway path
 - a local channel layer for agents that need role-addressed messaging
 
-Onlyne v1.0.0 leaves outside:
+Onlyne v1.0.0 leaves out:
 - workspace file sync
 - agent work artifacts
 - large media transfer
@@ -22,7 +22,7 @@ Onlyne v1.0.0 leaves outside:
 - cron and workflow scheduling
 - web admin
 
-If you find yourself building outside that boundary, stop and cut scope back.
+If you catch yourself building outside that boundary, stop and cut scope back.
 
 ## 1. Core product requirements
 
@@ -32,17 +32,17 @@ The implementation must satisfy all of the following:
    - one `onlyne-server` serves one server root
    - one `onlyne-client` serves one role workspace
    - one `onlyne-gateway` process serves one selected platform
-   - multiple server roots and role workspaces may run simultaneously
+   - several server roots and role workspaces can run at the same time
 
 2. **Workspace-local model**
-   - the selected server root owns server config, ledger, events, faults, sockets, keys, logs, templates, generated workspaces
-   - the selected role workspace owns client config, sessions, intents, keys, socket, logs
+   - the server root you select owns server config, ledger, events, faults, sockets, keys, logs, templates, generated workspaces
+   - the role workspace you select owns client config, sessions, intents, keys, socket, logs
    - active data stays under the relevant `.onlyne/` tree
 
 3. **CLI-first launch model**
-   - primary entrypoint is CLI
-   - server, client, and gateway run in the foreground from CLI
-   - launchd/systemd wrappers stay outside core logic
+   - the CLI is the primary entrypoint
+   - server, client, and gateway run in the foreground from the CLI
+   - launchd and systemd wrappers stay outside core logic
 
 4. **Three socket surfaces**
    - role connections use TCP plus TLS 1.3 with certificate pinning and ed25519 admission
@@ -60,13 +60,13 @@ The implementation must satisfy all of the following:
    - `onlyne faults` reads recorded faults
 
 7. **Observation stream**
-   - local clients subscribe to update events with cursor resync
+   - local clients subscribe to update events and resync with a cursor
    - durable classes: `ledger_state`, `session_state`
    - advisory classes: `role_presence`, `fault`, `gateway_presence`, `spec_reloaded`
 
 8. **Agent integration out of scope**
    - do not implement model adapters, prompt orchestration, tool routing, coding-agent lifecycle management, or any runtime-specific coupling
-   - Onlyne solves the “agent has no messaging tool” problem only
+   - Onlyne solves one problem: the “agent has no messaging tool” problem
 
 ## 2. Technology choice
 
@@ -126,7 +126,7 @@ Do **not** copy its product boundary.
 Do **not** import its heavy session/runtime concepts.
 Do **not** rebuild its web UI/admin/provider stack.
 
-From the reference study, keep only what matters:
+When you study it, keep only what matters:
 - how each platform authenticates
 - how each platform receives inbound events
 - how each platform sends outbound messages
@@ -167,9 +167,9 @@ Role workspace, selected by `onlyne-client run --workspace <dir>`:
   cache/orca-tabs.jsonl
 ```
 
-`cache/orca-tabs.jsonl` is append-only and written by the Orca session backend: the tab to session map is a side-channel for supervisor scripts and displays. Session identity is owned by the adapter protocol, never by Orca.
+The Orca session backend writes `cache/orca-tabs.jsonl` append-only. The tab-to-session map is a side channel for supervisor scripts and displays. Session identity is owned by the adapter protocol, never by Orca.
 
-A legacy workspace layout is a hard refusal. If `.onlyne/state.db` contains `io_cursors` or `loopback_idempotency`, or `.onlyne/channels/` exists, the command prints `onlyne: legacy workspace layout; v1.0.0 does not migrate` and exits 2.
+A legacy workspace layout is refused outright. If `.onlyne/state.db` contains `io_cursors` or `loopback_idempotency`, or if `.onlyne/channels/` exists, the command prints `onlyne: legacy workspace layout; v1.0.0 does not migrate` and exits 2.
 
 Active workspace data stays local to the selected server root or role workspace. Runtime data must never default to global mutable state under `~/.config/onlyne`.
 
@@ -245,9 +245,9 @@ Process exit codes used by user-facing commands:
 - exit 3: socket resolution failure, with `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`
 - exit 4: template, generation, or operator input refusal, including `onlyne: refusing to overwrite <path>; pass --force`, `onlyne: template for role <r> is ambiguous: <p1>, <p2>`, `onlyne: no template directory named <r> under <template_root>`, `onlyne: no role matches the requested templates/roles`, `onlyne: generated workspace embeds absolute path <path>`, and `onlyne: agent_package not set in spec.toml [server]`
 
-Spec parse failures print `spec.toml:<line>: <message>`. Schema marker mismatch prints `onlyne: unsupported schema; v1.0.0 does not migrate`. Missing daemon binaries exit 127 with `onlyne: missing binary <path>; run cargo build --workspace`. Old wire format failures use `protocol_version` or `bad_frame`.
+Spec parse failures print `spec.toml:<line>: <message>`. A schema marker mismatch prints `onlyne: unsupported schema; v1.0.0 does not migrate`. A missing daemon binary exits 127 with `onlyne: missing binary <path>; run cargo build --workspace`. Old wire format failures use `protocol_version` or `bad_frame`.
 
-Event push model must be explicit. Clients should be able to subscribe and receive async updates with cursor resync.
+The event push model must be explicit. Clients should be able to subscribe and receive async updates with cursor resync.
 
 ## 7. Message model expectations
 
@@ -277,7 +277,7 @@ The public vocabulary lives in `onlyne-proto`:
 - HelloArgs
 - HelloAck
 
-Internal message model should preserve enough metadata to support:
+The internal message model should carry enough metadata to support:
 - reply threading where platform supports it
 - sender identity
 - timestamps
@@ -316,7 +316,7 @@ Persist at least:
 - outbound intents with `op_id`, attempt, state, next attempt time, receipt, and last error
 - event cursor/checkpoint state where protocol requires it
 
-Schema gates expect `('onlyne-server',1,1)` or `('onlyne-client',1,1)`. A mismatch, old table, or `swarm` prefix prints `onlyne: unsupported schema; v1.0.0 does not migrate`.
+Schema gates expect `('onlyne-server',1,1)` or `('onlyne-client',1,1)`. A mismatch, an old table, or a `swarm` prefix prints `onlyne: unsupported schema; v1.0.0 does not migrate`.
 
 Do not introduce Redis, Kafka, Postgres, Docker services, or anything similarly heavy.
 
@@ -338,14 +338,14 @@ Onlyne must run well in these modes:
 2. background-capable process wrapped by launchd
 3. background-capable process wrapped by systemd
 
-Do not tightly couple daemon logic to one supervisor.
-No assumptions that systemd is always present.
-No launchd-specific logic in core business code.
+Do not tie daemon logic tightly to one supervisor.
+Do not assume systemd is always present.
+Keep launchd-specific logic out of core business code.
 
 ## 11. Implementation style rules
 
 - Make surgical, bounded changes
-- Prefer boring, robust code over abstraction theatre
+- Prefer boring, robust code over abstraction for its own sake
 - Avoid framework addiction
 - Avoid giant generic trait hierarchies unless they clearly reduce complexity
 - Keep one adapter protocol with two mount kinds: agent on client and gateway on server
@@ -378,11 +378,11 @@ v1.0.0 delivery is complete when these are true:
 - verification case 8 proves formatting, linting, tests, and binary firewall checks
 - verification case 9 proves generate plus relocate
 
-When working in this repository, always respect the current task asked by the user. Avoid jumping ahead when the current ask is planning or scaffolding.
+When you work in this repository, always respect the task the user is asking for. When the current ask is planning or scaffolding, do not jump ahead.
 
 ## 13. What to study in cc-connect before coding
 
-Focus review on these files/directories first:
+Review these files and directories first:
 
 - `cmd/cc-connect/main.go`
 - `platform/telegram/telegram.go`
@@ -420,7 +420,7 @@ At minimum, add tests for:
 - event subscription lifecycle
 - adapter trait conformance where practical
 
-If implementing IPC framing, include regression tests for malformed messages and reconnect cases.
+If you implement IPC framing, add regression tests for malformed messages and reconnect cases.
 
 ## 15. Git/worktree hygiene
 
@@ -431,7 +431,7 @@ If implementing IPC framing, include regression tests for malformed messages and
 
 ## 16. Decision rule
 
-Whenever uncertain, choose the option that is:
+Whenever you are unsure, choose the option that is:
 1. more local
 2. thinner
 3. easier for an agent to call through a socket

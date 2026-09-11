@@ -4,8 +4,8 @@ Read this before touching code. The director owns commits, the root `Cargo.toml`
 
 ## Repo state
 
-Cargo workspace, `members = ["crates/*", "plugins/*"]`, 18 packages: 14 under `crates/` and the four gateway plugins. The pre-v1 daemon under `crates/onlyne-legacy/` and the `vendor/` snapshot of the orchestrator submodule are gone: the lifecycle and reconcile kernel they carried now lives in `crates/onlyne-session/`, and S12 removed the source trees.
-`docs/v1-PLAN.md` is the full design spec (527 lines, Chinese). Read the section your task names before writing code; it wins over a worker brief wherever they disagree, with file ownership as the exception.
+Cargo workspace, `members = ["crates/*", "plugins/*"]`, 18 packages: 14 under `crates/` and the four gateway plugins. The pre-v1 daemon under `crates/onlyne-legacy/` is gone, and so is the `vendor/` snapshot of the orchestrator submodule. The lifecycle and reconcile kernel those trees carried now lives in `crates/onlyne-session/`, and S12 removed the source trees.
+`docs/v1-PLAN.md` is the full design spec (527 lines, Chinese). Read the section your task names before writing code. The plan wins over a worker brief wherever they disagree; file ownership is the exception.
 
 ## Ownership
 
@@ -65,12 +65,12 @@ onlyne who|ping|version|completions <zsh|fish>
 ```
 
 Three daemons plus one entrypoint: `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne`. `onlyne <group> <verb>` execs the matching daemon binary; message verbs connect straight to a unix socket and print one JSON answer.
-The admin noun set resolves through the same socket rule and shares the message-verb exit-code table; `wait-ready` polls admin `status` at 200 ms intervals with a 10 s bound and prints `onlyne: server not ready after 10000ms` on failure; `generate` writes the `[[client]]` fragment to stdout and progress to stderr.
+The admin noun set resolves through the same socket rule and shares the message-verb exit-code table. `wait-ready` polls admin `status` at 200 ms intervals with a 10 s bound, and prints `onlyne: server not ready after 10000ms` on failure. `generate` writes the `[[client]]` fragment to stdout and progress to stderr.
 A missing daemon binary makes the CLI and the e2e script print exactly this to stderr and exit 127:
 `onlyne: missing binary <path>; run cargo build --workspace`
 `onlyne cluster export-prose` prints raw prose by default and takes `--json`. It issues the existing role query and adds no protocol op.
 
-Socket resolution, in this order: `--socket <path>` → `--server-root <dir>` as `<dir>/.onlyne/run/s` → `--workspace <dir>` or the current directory upward for `.onlyne/run/s`. A path that never resolves and a path that resolves to nothing on disk answer alike, and both write exactly this to stderr and exit 3, with stdout left empty so a script reads no answer body:
+Socket resolution runs in this order: `--socket <path>` → `--server-root <dir>` as `<dir>/.onlyne/run/s` → `--workspace <dir>` or the current directory upward for `.onlyne/run/s`. A path that never resolves answers the same way as a path that resolves to nothing on disk. Both write exactly this to stderr and exit 3, with stdout left empty so a script reads no answer body:
 
 ```
 onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace
@@ -85,7 +85,7 @@ onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace
 ## Process verbs versus admin queries
 
 `onlyne-server` owns the process verbs `init`, `run`, `start`, `stop`, `status`, `generate`, and `reload`; `reload --dry-run` prints `SpecDiff::render()`.
-`onlyne server roles|sessions|ledger|faults|watch|history|repair_*` stays in `onlyne-cli`, which resolves those verbs against the admin socket and formats the answers for a human, with no exec of `onlyne-server`.
+`onlyne server roles|sessions|ledger|faults|watch|history|repair_*` stays in `onlyne-cli`, which resolves those verbs against the admin socket and formats the answers for a human. It never execs `onlyne-server`.
 `onlyne-server status` answers the process question from its own tree: pid, socket path, uptime, spec hash, and store reachability.
 `onlyne status` on the CLI is the `AdminOp::Status` socket round-trip.
 The two answer different questions: one describes the local process, the other describes the live cluster.

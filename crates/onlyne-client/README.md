@@ -1,6 +1,6 @@
 # onlyne-client
 
-One workspace, one role, one daemon. Many concurrent sessions inside the role.
+One workspace, one role, one daemon. The role runs many sessions at once.
 
 ## Verbs
 
@@ -17,20 +17,14 @@ One workspace, one role, one daemon. Many concurrent sessions inside the role.
 | `history --workspace <dir>` | Reserved for the live role runtime. |
 
 `start` prints `onlyne: client started pid <pid> socket <path>`.
-`status` prints `onlyne: client running pid <pid> uptime <n>s socket <path> faults <n>`,
-and adds `onlyne: client not connected` on stderr when the client holds no
-server link. The link state comes from an `admin` `hello` on the client socket,
-so the verb reads the fact from the running process.
+`status` prints `onlyne: client running pid <pid> uptime <n>s socket <path> faults <n>`. When the client holds no server link it adds `onlyne: client not connected` on stderr. The link state comes from an `admin` `hello` on the client socket, so the verb reads the fact from the running process.
 `stop` prints `onlyne: client stopped pid <pid>`.
 
-The printed `[[client]]` fragment is a complete role entry: it carries `role`,
-`key`, `admin`, `max_sessions`, the ACL lists, `prose`, `reuse`, and
-`session_command`. Pasting it into `spec.toml` and reloading yields a role whose
-sessions the client can spawn.
+The printed `[[client]]` fragment is a complete role entry: it carries `role`, `key`, `admin`, `max_sessions`, the ACL lists, `prose`, `reuse`, and `session_command`. Paste it into `spec.toml` and reload; the client can then spawn sessions for that role.
 
 ## Workspace layout
 
-`init` and `run` create these paths under `--workspace`:
+Both `init` and `run` create these paths under `--workspace`:
 
 | path | mode | content |
 | --- | --- | --- |
@@ -44,9 +38,7 @@ sessions the client can spawn.
 | `.onlyne/agent/<id>/` | | installed plugin package with `plugin.toml` |
 | `.onlyne/cache/orca-tabs.jsonl` | | append-only Orca tab to session map: a supervisor/display side-channel, not the identity (the adapter protocol owns that) |
 
-`init` never writes `spec.toml`. A workspace holding the pre-v1 layout is
-refused before any write, with exit 2 and the byte-exact line
-`onlyne: legacy workspace layout; v1.0.0 does not migrate`.
+`init` never writes `spec.toml`. A workspace holding the pre-v1 layout is refused before any write: exit 2 and the byte-exact line `onlyne: legacy workspace layout; v1.0.0 does not migrate`.
 
 ## Exit codes
 
@@ -58,65 +50,33 @@ refused before any write, with exit 2 and the byte-exact line
 | 2 | `status` found no running client, or a client with no server link |
 | 2 | the workspace holds the legacy layout |
 
-`status` exits 0 only for a client that is up and connected to its server, which
-is what a script reads.
+`status` exits 0 only for a client that is up and connected to its server. That is the fact a script reads.
 
 ## Backends
 
-`ONLYNE_BACKEND` selects the session backend: `auto`, `zellij`, `orca`, `fake`,
-`exec`. An empty value discovers by capability — it probes `orca`, `zellij`,
-then `fake` and takes the first one that reports usable; `auto` means the same.
-`fake` runs sessions in process and needs no external tool, which is why the end-to-end scripts use it. `exec` spawns the
-role's `session_command` as a child of the client, with stdin held open and the
-child's output appended to `.onlyne/logs/session-<task>.log`; it is never
-reached through `auto`, because running an agent with no terminal around it is a
-deliberate choice for a headless host (`crates/onlyne-testkit/e2e/pi-live.sh`
-makes it), not a fallback to discover.
+`ONLYNE_BACKEND` picks the session backend: `auto`, `zellij`, `orca`, `fake`, `exec`. An empty value discovers by capability: the client probes `orca`, then `zellij`, then `fake`, and takes the first one that reports usable. `auto` behaves the same. `fake` runs sessions in process and needs no external tool, which is why the end-to-end scripts use it. `exec` spawns the role's `session_command` as a child of the client, holds stdin open, and appends the child's output to `.onlyne/logs/session-<task>.log`. It is never reached through `auto`: running an agent with no terminal around it is a deliberate choice for a headless host (`crates/onlyne-testkit/e2e/pi-live.sh` makes it), not a fallback to discover.
 
-`[orca] worktree` in `config.toml` says which Orca tab list a session tab
-joins. Three states:
+`[orca] worktree` in `config.toml` sets which Orca tab list a session tab joins. Three states:
 
-* `host` (the default) reads `ORCA_WORKTREE_ID`, the worktree id Orca exports
-  to the tab the supervisor started the client in and which the daemon
-  inherits. Every session tab lands flat in that worktree's tab list, beside
-  the supervisor's own tabs. Started outside an Orca tab the variable is
-  absent and the policy behaves like `inherit`.
-* `inherit` passes no selector, leaving the choice to Orca's active worktree.
-* Any other value is used verbatim as an Orca worktree selector
-  (`id:<…>`, `path:<abs>`, `name:<…>`, `branch:<…>`).
+* `host` (the default) reads `ORCA_WORKTREE_ID`, the worktree id Orca exports to the tab the supervisor started the client in and which the daemon inherits. Every session tab lands flat in that worktree's tab list, beside the supervisor's own tabs. Start the client outside an Orca tab and the variable is absent, so the policy behaves like `inherit`.
+* `inherit` passes no selector and leaves the choice to Orca's active worktree.
+* Any other value is used verbatim as an Orca worktree selector (`id:<…>`, `path:<abs>`, `name:<…>`, `branch:<…>`).
 
-Tab ownership and working directory are independent: the selector decides
-which tab list the tab joins, while the spawned command's own `cd` decides
-where the agent runs. The role workspace therefore never has to exist in Orca
-— it is not registered, not opened, and not cleaned up — which is the whole
-reason a generated (non-git) role workspace works at all. Orca's public
-registration command accepts git checkouts only, so a `path:<workspace>`
-selector would fail for exactly the directories this client hands out.
+Tab ownership and working directory are independent. The selector decides which tab list the tab joins; the spawned command's own `cd` decides where the agent runs. The role workspace therefore never has to exist in Orca: it is not registered, not opened, and not cleaned up. That is the whole reason a generated (non-git) role workspace works at all. Orca's public registration command accepts git checkouts only, so a `path:<workspace>` selector would fail for exactly the directories this client hands out.
 
 ## Sessions
 
-`max_sessions` from the role's spec entry caps the sessions a role has running.
-A session whose stored lifecycle reads `exited` spends none of that cap: the
-rows of the sessions the role has ended stay in `client.db` as its history and
-stay queryable, and the client keeps pulling while fewer than `max_sessions`
-sessions have not exited. `reuse = true` keeps a settled session's slot for the
-role's next task; `reuse = false` gives the slot back when the task settles.
+`max_sessions` from the role's spec entry caps how many sessions a role runs at once. A session whose stored lifecycle reads `exited` spends none of that cap: the rows of sessions the role has ended stay in `client.db` as its history and stay queryable. The client keeps pulling while fewer than `max_sessions` sessions have not exited. `reuse = true` keeps a settled session's slot for the role's next task; `reuse = false` gives the slot back when the task settles.
 
 ## Server link
 
-The client reconnects on a ladder of 1, 2, 4, 8, 16, 32, 60 seconds, and 60
-seconds repeats for every later attempt. After a reconnect the order is
-handshake, welcome, intent flush, pull resume.
+The client reconnects on a ladder of 1, 2, 4, 8, 16, 32, 60 seconds; 60 seconds repeats for every later attempt. After a reconnect the order is handshake, welcome, intent flush, pull resume.
 
-A failure on the link or a `bye` frame sets `accept_new = false`. Queued
-deliveries wait on the server, running sessions continue to their terminal
-state, and completions produced by those sessions enter the intent queue.
-`accept_new = false` blocks new session spawns and new pulls.
+A link failure or a `bye` frame sets `accept_new = false`. Queued deliveries wait on the server, running sessions continue to their terminal state, and the completions those sessions produce enter the intent queue. `accept_new = false` blocks new session spawns and new pulls.
 
 ## Intent queue
 
-Every outbound envelope lands in `client.db` `intents` before the first socket
-write, keyed by `op_id`.
+Every outbound envelope lands in `client.db` `intents` before the first socket write, keyed by `op_id`.
 
 | state | meaning | next state |
 | --- | --- | --- |
@@ -125,9 +85,7 @@ write, keyed by `op_id`.
 | `accepted` | receipt stored | terminal |
 | `exhausted` | attempt ceiling reached with a recorded fault | terminal |
 
-The attempt ceiling comes from the role spec `intent.attempts`, and the delay
-between attempts comes from `intent.backoff_ms`. The queue lives in the client
-database, so a restart resumes it.
+The role spec sets the attempt ceiling in `intent.attempts` and the delay between attempts in `intent.backoff_ms`. The queue lives in the client database, so a restart resumes it.
 
 | answer | rule |
 | --- | --- |
@@ -136,10 +94,8 @@ database, so a restart resumes it.
 | `acl_denied`, `invalid`, `conflict`, `forbidden`, `unknown_role`, `not_admin`, `bad_frame`, `frame_too_large`, `protocol_version` | drop the row without a retry |
 | `internal`, connection loss | count the attempt and retry after the ladder |
 
-The ceiling records fault kind `intent_exhausted` and sends `report{kind:"fault"}`
-once the server link exists. An exhausted row is never dropped silently.
+Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind:"fault"}` once the server link exists. An exhausted row is never dropped silently.
 
 ## Role prose
 
-`welcome.prose` is cached in `prose_cache` keyed by role with `spec_hash`.
-`roles` and the cluster prose export read that record.
+`welcome.prose` is cached in `prose_cache`, keyed by role with `spec_hash`. `roles` and the cluster prose export read that record.

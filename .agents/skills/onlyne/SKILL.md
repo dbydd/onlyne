@@ -11,7 +11,10 @@ working on the repo.
 
 ## Product boundary (AGENTS.md §0)
 
-Onlyne is transport: routing, ledger, queueing, ACL, session mechanics. Orchestration lives with supervisor sessions and the spec file; the core detects and records, leaving retries, recycling, and timeout decisions to the operator. A feature that starts deciding policy belongs in a supervisor session, the spec, or a plugin — pick those before adding
+Onlyne is transport: routing, ledger, queueing, ACL, session mechanics. Orchestration
+belongs to supervisor sessions and the spec file. The core detects and records; the
+operator decides retries, recycling, and timeouts. A feature that starts deciding policy
+belongs in a supervisor session, the spec, or a plugin — pick one of those before adding
 code here. Zero compatibility is a product rule: old configs, old databases, and old wire
 versions fail at the door (`exit 2`, verbatim strings). A change that "also reads the old
 shape" gets rejected.
@@ -32,38 +35,39 @@ plugins/onlyne-gateway-*         one platform per crate; depend on adapter+proto
 ```
 
 `onlyne-server` and `onlyne-client` never depend on each other. Platform SDKs
-(`teloxide`, `openlark`, `wechat-ilink`, `resvg`) must stay out of both binaries — prove it
-with `cargo tree -p onlyne-client | grep -E 'teloxide|openlark|resvg'` after any dependency
-edit. Gateways compile per feature; `--no-default-features --features telegram` must build.
+(`teloxide`, `openlark`, `wechat-ilink`, `resvg`) must stay out of both binaries. After any
+dependency edit, prove it with
+`cargo tree -p onlyne-client | grep -E 'teloxide|openlark|resvg'`. Gateways compile per
+feature; `--no-default-features --features telegram` must build.
 
 ## Change procedures
 
-**Wire or types** (`onlyne-proto`): edit the type, regenerate schemas
-(`cargo run -p onlyne-proto --bin gen-schema`), update every affected fixture under
-`crates/onlyne-proto/tests/wire_vectors/` (one JSON per reachable frame and error code),
-and restate the contract in `crates/onlyne-adapter/PROTOCOL.md`. Error codes are a closed
-set of fourteen; adding one means a fixture, a PROTOCOL.md row, and the CLI table below.
+**Wire or types** (`onlyne-proto`): edit the type, regenerate the schemas
+(`cargo run -p onlyne-proto --bin gen-schema`), then update every affected fixture under
+`crates/onlyne-proto/tests/wire_vectors/` (one JSON per reachable frame and error code).
+Restate the contract in `crates/onlyne-adapter/PROTOCOL.md`. Error codes are a closed set
+of fourteen. Add one and you owe a fixture, a PROTOCOL.md row, and the CLI table below.
 
 **Lifecycle** (`onlyne-session/src/lifecycle.rs`): `apply()` and `is_legal()` are a
 table-tested reducer — five state axes, 21 `LifecycleEvent` variants, versions
-`(generation, seq)`. New transitions need table rows in the same commit; assertion
-weakening during any migration is a red flag reviewers will halt on.
+`(generation, seq)`. A new transition needs its table rows in the same commit. Reviewers
+halt on weakened assertions during a migration.
 
 **Ledger/schema** (`onlyne-store`): `schema_marker(name, version, protocol_version)` is the
-gate; a field change bumps the marker and keeps the refuse-at-door string intact.
+gate. A field change bumps the marker and leaves the refuse-at-door string untouched.
 `acl_allows` runs before the ledger write, so a denied send leaves zero rows and zero
-sender-side intents. The built-in exemption covers completions addressed to the recorded
-task origin only; widening it needs a spec decision first.
+sender-side intents. The built-in exemption covers only completions addressed to the
+recorded task origin. Widening it needs a spec decision first.
 
-**CLI verb** (`onlyne-cli`): args in `verbs.rs`/`admin.rs`, one JSON line out, exit codes
-`0` answer ok, `1` failed daemon answer or `wait-ready` bound, `2` validation, `3` no
-socket, `4` generate refusal, `127` missing sibling. Socket resolution order stays
+**CLI verb** (`onlyne-cli`): args live in `verbs.rs`/`admin.rs`, out comes one JSON line.
+Exit codes: `0` answer ok, `1` failed daemon answer or `wait-ready` bound, `2` validation,
+`3` no socket, `4` generate refusal, `127` missing sibling. Socket resolution order stays
 `--socket` → `--server-root` (admin) → `--workspace`/cwd walk (client). `--from` belongs to
 the admin surface only; every message verb already prints JSON.
 
 **Backend** (`onlyne-session/src/backend/`): capabilities `{spawn,attach,probe,close,
-focus,rename}`; a missing capability degrades through faults, never panics. Discovery order
-`zellij → orca → fake` on an empty `ONLYNE_BACKEND`.
+focus,rename}`. A missing capability degrades through faults, never panics. Discovery order
+is `zellij → orca → fake` when `ONLYNE_BACKEND` is empty.
 
 ## Gates
 
@@ -78,13 +82,13 @@ The twelve scripts under `crates/onlyne-testkit/e2e/` each encode one verificati
 from `docs/v1-PLAN.md` (ACL rejects, idempotency, reconnect requeue, gateway mount,
 relocation, two-cluster federation, legacy refusal, frame bounds). A bug fix needs its
 reproduction as an e2e or a table test: red before the fix, green after. The live ring demo
-(`examples/supervisor/run.py`) needs Orca and real pi binaries; treat it as manual smoke.
+(`examples/supervisor/run.py`) needs Orca and real pi binaries. Treat it as manual smoke.
 
 ## Formal invariants
 
 `proofs/` (GrugMatic, core Lean 4.33.1, zero dependencies) carries one combinator lemma per
 design decision: D4 carrier bounds, D5 authority split, D6 content by reference, D11
 idempotence, D12 delivery-creates-task, D13 file truth, D15 single-source prose, one-shot
-sessions. When a change touches one of those invariants, read the lemma's docstring first;
-if the change breaks the lemma, update `proofs/` in the same commit and keep
+sessions. When a change touches one of those invariants, read the lemma's docstring first.
+If the change breaks the lemma, update `proofs/` in the same commit and keep
 `cd proofs && lake build` green with zero `sorry`.
