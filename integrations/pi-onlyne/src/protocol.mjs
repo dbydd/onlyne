@@ -127,6 +127,40 @@ export function heartbeatReport({ taskId, generation, seq, agent, host = null })
   };
 }
 
+/**
+ * The final observation of a settled session: `agent: idle` beside the outcome
+ * the completion just stated.
+ *
+ * A session that only ever reported `running` and then completed leaves the
+ * ledger's projection saying `running` forever, because nothing observes the
+ * exit. This body is the tuple the host's own settle produces
+ * (`onlyne-session/src/reconcile.rs::settle_body`) with the agent dimension
+ * moved to `idle`, so `is_legal` accepts it: `outcome: done` requires
+ * `delivery: accepted` and an idle agent requires `recovery: draining`, and any
+ * other outcome carries the delivery unchanged.
+ */
+export function settledReport({ taskId, outcome, generation, seq, host = null }) {
+  const normalized = normalizeOutcome(outcome);
+  const done = normalized === "done";
+  const observed = {
+    version: { generation, seq },
+    generation_live: true,
+    isolate_after: 1,
+    terminate_after: 3,
+    mismatch_count: 0,
+    agent: "idle",
+    delivery: done ? "accepted" : "none",
+    resource: "attached",
+    recovery: done ? "draining" : "none",
+    outcome: normalized,
+    // `project(idle, accepted, …, done)` is `exited`; every other outcome keeps
+    // the session `working` until its resource closes.
+    public: done ? "exited" : "working",
+  };
+  if (host) observed.host = host;
+  return { kind: "heartbeat", data: { task_id: taskId, generation, seq, observed } };
+}
+
 /** `report.complete` — the terminal fact the ledger keeps. */
 export function completeReport({ taskId, outcome, head }) {
   const report = { kind: "complete", data: { task_id: taskId, outcome: normalizeOutcome(outcome) } };

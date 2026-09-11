@@ -595,6 +595,56 @@ test("an explicit tool outcome wins and a second completion is refused", async (
   assert.deepEqual(surface.calls.exits, ["failed"]);
 });
 
+// The completion body is what the tool call handed over. The sentence a turn
+// ends on is only the fallback for a task whose argument carries nothing, and
+// the auto rule reports exactly that fallback field — so an explicit argument
+// can never be displaced, in either call path.
+test("an explicit tool argument is the head over the last assistant text", async () => {
+  const { agent, host, surface } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+  agent.onTurnStart();
+  agent.onTurnEnd();
+  agent.noteAssistantText("Handed off to `a` with K=6.");
+
+  const payload = "K=10: 1:a 2:b 3:c 4:d 5:e 6:a 7:b 8:c 9:d 10:e";
+  const result = await agent.completeFromTool({ outcome: "done", text: payload });
+  assert.equal(result.head, payload, "the argument is the head, byte for byte");
+  const completes = host.of("report").filter((report) => report.kind === "complete");
+  assert.deepEqual(completes[0].data, { task_id: TASK_ID, outcome: "done", head: payload });
+
+  // The model keeps talking until the exit, so the sentence that follows the
+  // call must not take the head's place: the task is settled, and it is
+  // reported once.
+  agent.noteAssistantText("done");
+  agent.onSettled();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(host.of("report").filter((report) => report.kind === "complete").length, 1);
+});
+
+// An argument that carries nothing is no argument: the completion summary is
+// the last assistant text instead of an empty head. (An argument absent
+// altogether is the queued-completion case above.)
+test("an empty tool argument falls back to the last assistant text", async () => {
+  for (const text of ["", "   "]) {
+    const { agent, host, surface } = await startAgent();
+    agent.start();
+    await waitFor(() => host.of("report").length >= 1);
+    host.notify("assign", assignArgs());
+    await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+    agent.onTurnStart();
+    agent.onTurnEnd();
+    agent.noteAssistantText("appended 10:e and handed the token back");
+
+    const result = await agent.completeFromTool({ outcome: "done", text });
+    assert.equal(result.head, "appended 10:e and handed the token back", `text=${JSON.stringify(text)}`);
+    const complete = host.of("report").find((report) => report.kind === "complete");
+    assert.equal(complete.data.head, "appended 10:e and handed the token back");
+  }
+});
+
 // The exit is a consequence of the client's acknowledgement, not of the
 // completion call: the client answers a `report` only after it has settled the
 // session row and written the `Completion` envelope, so a report still in
@@ -624,6 +674,90 @@ test("the exit waits for the client's acknowledgement of the completion report",
   host.releaseReports();
   await completion;
   assert.deepEqual(surface.calls.exits, ["done"]);
+});
+
+// A session that only ever reported `running` and then completed leaves the
+// ledger saying `running` forever: the client settles the row from the
+// completion report and hears nothing more. One final observation, sent after
+// the completion is acknowledged and before the process leaves, is what makes
+// an exited session read idle.
+test("a completion after a running beat publishes the settled observation before the exit", async () => {
+  const { agent, host, surface } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+  agent.onTurnStart();
+  await waitFor(() =>
+    host.of("report").find((report) => report.data?.observed?.agent === "running"),
+  );
+  agent.noteAssistantText("OK");
+
+  await agent.complete(TASK_ID, "done", "OK");
+  const reports = host.of("report").filter((report) => report.kind !== "ready");
+  const kinds = reports.map((report) => report.kind);
+  assert.deepEqual(
+    kinds.slice(-2),
+    ["complete", "heartbeat"],
+    "the settled observation follows the completion: " + JSON.stringify(kinds),
+  );
+  const settled = reports.at(-1).data.observed;
+  assert.equal(settled.agent, "idle");
+  assert.equal(settled.outcome, "done");
+  assert.equal(settled.delivery, "accepted");
+  assert.equal(settled.recovery, "draining");
+  assert.equal(settled.public, "exited");
+  assert.deepEqual(surface.calls.exits, ["done"]);
+});
+
+test("a session whose last beat was idle publishes no extra observation", async () => {
+  const { agent, host, surface } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+  agent.onTurnStart();
+  agent.onTurnEnd();
+  await waitFor(() => host.of("report").find((report) => report.data?.observed?.agent === "idle"));
+  agent.noteAssistantText("OK");
+  const before = host.of("report").filter((report) => report.kind === "heartbeat").length;
+
+  await agent.complete(TASK_ID, "done", "OK");
+  assert.equal(
+    host.of("report").filter((report) => report.kind === "heartbeat").length,
+    before,
+    "an already-idle session needs no second idle observation",
+  );
+  assert.deepEqual(surface.calls.exits, ["done"]);
+});
+
+test("a queued completion and its settled observation flush in order after reconnect", async () => {
+  const { agent, host, surface } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+  agent.onTurnStart();
+  agent.onTurnEnd();
+  agent.noteAssistantText("done offline");
+
+  for (const socket of [...host.sockets]) socket.destroy();
+  await waitFor(() => (agent.status().connected === false ? true : null));
+  await agent.completeFromTool({ outcome: "done" });
+  assert.deepEqual(surface.calls.exits, [], "nothing exits before the report lands");
+
+  await waitFor(() => (host.connections >= 2 ? true : null));
+  await waitFor(() => (surface.calls.exits.length === 1 ? true : null));
+  const reports = host.of("report").filter((report) => report.kind !== "ready");
+  assert.deepEqual(
+    reports.slice(-2).map((report) => [report.kind, report.data.observed?.agent ?? null]),
+    [
+      ["complete", null],
+      ["heartbeat", "idle"],
+    ],
+    "the settled observation rides after the flushed completion: " + JSON.stringify(reports),
+  );
+  assert.equal(reports.at(-1).data.observed.outcome, "done");
 });
 
 test("an inbound image is written under the workspace and handed to pi", async () => {

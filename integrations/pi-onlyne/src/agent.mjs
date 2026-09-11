@@ -28,6 +28,7 @@ import {
   sendEnvelope,
   sessionRegisterArgs,
   SEQ_BASE,
+  settledReport,
   stdinTaskText,
   welcomeFrom,
 } from "./protocol.mjs";
@@ -134,6 +135,8 @@ export class OnlyneAgent {
     this.lastError = null;
     /** Whether pi has already been asked to end this process (`exitSession`). */
     this.exitRequested = false;
+    /** Agent phase of the last heartbeat this connection sent, if any. */
+    this.lastPhase = null;
     this.stats = { assigns: 0, duplicates: 0, injections: 0, completions: 0, reports: 0, reconnects: 0, recycles: 0 };
   }
 
@@ -280,9 +283,9 @@ export class OnlyneAgent {
       return;
     }
     this.welcome = welcome;
-    this.generation = welcome.generation;
-    this.seq = SEQ_BASE;
     this.connected = true;
+    // A fresh connection has reported nothing: the next beat is news.
+    this.lastPhase = null;
     this.agentState = this.tasks.size > 0 ? "idle" : "ready";
     this.surface.status?.(`onlyne: ${welcome.role}`);
     this.log(`welcome role=${welcome.role} generation=${welcome.generation} capabilities=${welcome.hostCapabilities.join(",")}`);
@@ -456,6 +459,7 @@ export class OnlyneAgent {
       host: this.host,
     }));
     this.stats.reports += 1;
+    this.lastPhase = agent;
   }
 
   /** Tasks still owing a completion; a finished task keeps its record. */
@@ -640,7 +644,15 @@ export class OnlyneAgent {
     this.trySettle();
   }
 
-  /** The last assistant text seen, kept as the completion summary. */
+  /**
+   * The last assistant text seen, kept as the completion summary for a task the
+   * model never handed an explicit argument over for.
+   *
+   * This is the fallback, never the deliverable: `onlyne_complete`'s `text` is
+   * reported byte for byte by `completeFromTool` and is never written back
+   * here, so the sentence a turn happened to end on cannot stand in for a
+   * payload the tool call carried.
+   */
   noteAssistantText(text) {
     const flat = headOf(text);
     if (!flat) return;
@@ -667,8 +679,10 @@ export class OnlyneAgent {
   /**
    * The auto outcome rule: every active task whose turn produced output ends
    * `done` (or `failed` when the turn errored), with the last assistant text as
-   * its head. A task assigned but not yet turned is left alone: the injected
-   * message has not run yet, and completing now would lie.
+   * its head. That fallback is the only head this path may report — an explicit
+   * `onlyne_complete` argument is the tool path's, and this rule runs after it,
+   * for the tasks it left unsettled. A task assigned but not yet turned is left
+   * alone: the injected message has not run yet, and completing now would lie.
    */
   async settleNow() {
     for (const task of [...this.tasks.values()]) {
@@ -683,13 +697,20 @@ export class OnlyneAgent {
   /**
    * `onlyne_complete`: an explicit outcome from the model, which wins over the
    * auto rule.
+   *
+   * A non-empty `text` is the completion body: it is what the model handed
+   * over, reported verbatim as the ledger's one-line `head`, so the last
+   * assistant text never stands in for it. An absent or blank `text` carries no
+   * deliverable at all and falls back to that assistant text.
+   *
    * @param {{ outcome?: string, text?: string }} input
    */
   async completeFromTool(input = {}) {
     const task = [...this.tasks.values()].find((item) => !item.completed);
     const taskId = task?.taskId ?? this.envTaskId;
     if (!taskId) throw new Error("onlyne: no task is assigned to this session");
-    return this.complete(taskId, normalizeOutcome(input.outcome), input.text ?? task?.head ?? "");
+    const explicit = headOf(input.text);
+    return this.complete(taskId, normalizeOutcome(input.outcome), explicit || task?.head || "");
   }
 
   /**
@@ -728,6 +749,11 @@ export class OnlyneAgent {
     this.surface.customEntry?.("onlyne-complete", { taskId, outcome: normalized, head: summary });
     this.log(`completion ${taskId} ${normalized} head=${JSON.stringify(summary.slice(0, 60))}`);
     if (this.activeTasks().length === 0) {
+      if (exitProcess) {
+        await this.reportSettled(taskId, normalized).catch((error) =>
+          this.log(`settled observation refused: ${error.message}`),
+        );
+      }
       this.stopHeartbeat();
       if (exitProcess) this.exitSession(normalized);
     }
@@ -749,6 +775,34 @@ export class OnlyneAgent {
     this.surface.exit?.(reason);
   }
 
+  /**
+   * One last observation before the process leaves: the tuple the host settled
+   * plus `agent: idle`.
+   *
+   * The completion settles the row from the tuple the client holds, which still
+   * says `running` when the turn that finished was the last report sent, and
+   * nothing observes the process afterwards. This report is what makes an
+   * exited session read idle. It is skipped when the last beat was already
+   * idle — the settled tuple is then already right — and it is a request for
+   * the same reason the completion is: the answer is the handover, and a
+   * failure here must not stop the exit that the durable completion earned.
+   */
+  async reportSettled(taskId, outcome) {
+    if (!this.connected || this.lastPhase === "idle") return false;
+    this.seq += 1;
+    await this.request("report", settledReport({
+      taskId,
+      outcome,
+      generation: this.generation,
+      seq: this.seq,
+      host: this.host,
+    }));
+    this.stats.reports += 1;
+    this.lastPhase = "idle";
+    this.log(`settled observation for ${taskId}: agent idle, outcome ${outcome}`);
+    return true;
+  }
+
   async flushPendingCompletion() {
     const pending = this.pendingCompletion;
     if (!pending || !this.connected) return;
@@ -758,6 +812,9 @@ export class OnlyneAgent {
       this.stats.completions += 1;
       this.log(`queued completion for ${pending.taskId} flushed after reconnect`);
       if (pending.exitProcess && this.activeTasks().length === 0) {
+        await this.reportSettled(pending.taskId, pending.outcome).catch((error) =>
+          this.log(`settled observation refused: ${error.message}`),
+        );
         this.exitSession(pending.outcome);
       }
     } catch (error) {

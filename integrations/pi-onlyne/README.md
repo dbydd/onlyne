@@ -26,7 +26,8 @@ hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{r
   ├─ assign_ack{accepted:true}
   ├─ report.heartbeat{running|idle} — per turn, and every 10s while a task is live
   ├─ report.complete{outcome, head} — the ledger's terminal fact
-  │    └─ the client's answer is the handover: pi is asked to shut down, then detaches
+  │    └─ then one report.heartbeat{agent:"idle"} carrying the settled tuple
+  │       └─ the client's answer is the handover: pi is asked to shut down, then detaches
   ├─ probe ──► one heartbeat
   ◀── recycle ──► complete (if unsettled) → stop → pi exits
   └─ detach{reason} when pi shuts down
@@ -135,18 +136,20 @@ to the core's 2 MiB ceiling and its four accepted mime types.
 
 ### `onlyne_complete{outcome?, text?}`
 
-Ends the current task with an explicit outcome (`done` default, or `failed`). The `text`
-becomes the ledger `head` (whitespace-collapsed, capped at 200 characters). The call also
-ends the session's process: once the client has acknowledged the completion report (see
-§4), the plugin asks pi to shut down through `ctx.shutdown()`. pi 0.85.1 has no
-tool-result `terminate` handling.
+Ends the current task with an explicit outcome (`done` default, or `failed`). A non-empty
+`text` becomes the ledger `head` verbatim (whitespace-collapsed to one line, capped at 200
+characters); an absent or blank `text` carries no summary, so the completion falls back to
+the last assistant text. The call also ends the session's process: once the client has
+acknowledged the completion report (see §4), the plugin asks pi to shut down through
+`ctx.shutdown()`. pi 0.85.1 has no tool-result `terminate` handling.
 
 ## 4. Outcome rules
 
 One completion is sent per task, at the first of these events:
 
 1. **`onlyne_complete`** — an explicit outcome from the model. It wins over everything
-   else, and a later completion for the same task is refused (not re-reported).
+   else, and a later completion for the same task is refused (not re-reported). Its
+   non-empty `text` is the head.
 2. **`agent_settled`** — pi will not continue on its own (no retry, compaction, or queued
    continuation pending). The plugin reports:
    - `failed` when the turn ended with a provider error (`stopReason: "error"`), with the
@@ -158,7 +161,10 @@ One completion is sent per task, at the first of these events:
    settled with the host's outcome first, then the plugin stops and exits pi.
 
 `head` is a single line, capped at 200 characters, matching what the client puts in
-`out_head` and what the receipt carries.
+`out_head` and what the receipt carries. It has one source per task: the `text` of the
+explicit `onlyne_complete` call when that call carried one, and the last assistant text
+otherwise. The auto rule is that fallback path — it reports the text of the turn it
+settles, and a sentence spoken after the call cannot replace what the call handed over.
 
 A reported completion ends the session's process. `report.complete` goes out as a request,
 and the client answers it only after it has settled the session row, acked the delivery
@@ -166,6 +172,14 @@ and written the `Completion` envelope; the plugin asks pi to shut down at that a
 An outcome the socket could not carry is queued and flushed after the next `hello`, and
 that flush's answer is the handover that ends the process. A completion the host refused
 leaves the process running, so the task is never lost to an exit.
+
+The last report is one observation with `agent: "idle"` beside the settled outcome, sent
+after the completion is acknowledged and before the process leaves. The completion settles
+the row from the tuple the client holds, which still reads `running` when the finishing
+turn was the last heartbeat, and nothing observes the process afterwards — so without this
+report an exited session keeps saying `running`. It is skipped when the last beat was
+already idle, and a refused settled observation does not hold up the exit the completion
+earned.
 
 ## 5. Protocol notes and deviations
 

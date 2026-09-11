@@ -128,8 +128,9 @@ mime 约束。
 
 ### `onlyne_complete{outcome?, text?}`
 
-显式结束当前任务，`outcome` 缺省 `done`，也可 `failed`。`text` 成为 ledger 的 `head`
-（空白折叠，截到 200 字符）。这一调用同时结束所在 session 的进程：client 应答完 completion
+显式结束当前任务，`outcome` 缺省 `done`，也可 `failed`。`text` 非空时就是 ledger 的 `head`，
+原样写出（空白折叠成单行，截到 200 字符）；`text` 缺失或全空白时不带摘要，completion 退回
+最后一段 assistant 文本。这一调用同时结束所在 session 的进程：client 应答完 completion
 报告（见 §4）之后，插件通过 `ctx.shutdown()` 让 pi 退出。pi 0.85.1 没有 tool-result
 `terminate` 处理。
 
@@ -138,7 +139,7 @@ mime 约束。
 每个任务只发一次 completion，取以下三者的先到者：
 
 1. **`onlyne_complete`** —— 模型给显式 outcome，优先级最高；同一任务的第二次 completion 被
-   拒（不重报）。
+   拒（不重报）。`text` 非空时即 head，原样写出。
 2. **`agent_settled`** —— pi 不会自己继续（无重试、无压缩、无排队续跑）。此时：
    - turn 以 provider 错误告终（`stopReason: "error"`）→ `failed`，错误信息当 head；
    - 其余 → `done`，最后一段 assistant 文本当 head；
@@ -146,7 +147,10 @@ mime 约束。
 3. **`recycle{outcome}`** —— 宿主拆 session。先按宿主给的 outcome 结算未终态的任务，再停插件
    并退出 pi。
 
-`head` 恒为单行、上限 200 字符，与 client 写入 `out_head` 和回执携带的内容一致。
+`head` 恒为单行、上限 200 字符，与 client 写入 `out_head` 和回执携带的内容一致。每个任务的
+head 只有一个来源：显式 `onlyne_complete` 带的 `text`（有则原样采用），否则是最后一段
+assistant 文本。自动规则就是那条退路——它报的是自己那一轮的文字；工具调用之后再说的话，顶不掉
+调用交出的内容。
 
 报出去的 completion 会结束所在 session 的进程。`report.complete` 以请求形式发出，client 只有
 在结算 session 行、ack 掉投递、并写好 `Completion` envelope 之后才应答；插件在这个应答处让 pi
