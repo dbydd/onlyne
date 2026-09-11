@@ -94,6 +94,14 @@ ws="$tmp/planner"
 mkdir -p "$ws/.pi"
 printf '{"enabled":true,"watch":{"autoStart":true}}\n' > "$ws/.pi/onlyne.json"
 
+# The case stands in for Orca here: a real pane exports the ids of the pane it
+# started the command in (measured 2026-09-11 on Orca 1.4.198), the client
+# passes its environment to the session command, and the plugin reads them from
+# there. Step 2b asserts the pane that comes back out of the session axis.
+ORCA_PANE_KEY="45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560"
+ORCA_TERMINAL_HANDLE="term_e2e_pi_live"
+export ORCA_PANE_KEY ORCA_TERMINAL_HANDLE
+
 "$CLIENT" run --workspace "$ws" >"$tmp/client.log" 2>&1 &
 client_pid=$!
 
@@ -158,6 +166,16 @@ rows_any "$tmp/sessions.json" public_lifecycle exited || fail "sessions public_l
   "sessions=$sessions_out client=$(cat "$tmp/client.log" 2>/dev/null)"
 [ "$(row_value "$tmp/sessions.json" outcome)" = "done" ] || fail "sessions outcome must be done" "$sessions_out"
 printf 'PASS pi-live session projection: exited/done\n'
+
+# 2b. The session row states where the process ran. The pane travels from the
+#     environment the process inherited, through the heartbeat, to the session
+#     axis a supervisor reads — no file in the workspace is consulted, which is
+#     what lets the board scope its tab list to real panes.
+pane=$(json_field "$tmp/sessions.json" '.data.sessions[0].projection.observed.host.orca.pane_key' \
+  'json.load(sys.stdin)["data"]["sessions"][0]["projection"]["observed"]["host"]["orca"]["pane_key"]' 2>/dev/null) \
+  || fail "the session row must carry the pane its process reported" "$sessions_out"
+[ "$pane" = "$ORCA_PANE_KEY" ] || fail "the reported pane must be the inherited ORCA_PANE_KEY (got '$pane')" "$sessions_out"
+printf 'PASS pi-live host binding: %s\n' "$pane"
 
 # 3. The assign really reached pi's context, and the plugin's own completion
 #    entry was recorded. pi's session file records both, so the two claims are
