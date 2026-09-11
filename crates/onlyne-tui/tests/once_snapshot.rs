@@ -159,6 +159,18 @@ async fn once_prints_the_role_network_and_the_busy_star() {
         "the running session shows its glyph\n{text}"
     );
     assert!(text.contains("server online"), "{text}");
+    assert!(
+        text.contains("page 1/2 roles"),
+        "the footer names the page it prints\n{text}"
+    );
+    assert!(
+        text.contains("planner edges hidden · e shows them"),
+        "the map states which spokes it holds back\n{text}"
+    );
+    assert!(
+        text.contains("acl peers"),
+        "the page-1 panel follows the selected role\n{text}"
+    );
     let map_row = text
         .lines()
         .find(|line| line.contains("╭─⬡planner"))
@@ -171,6 +183,7 @@ async fn once_prints_the_role_network_and_the_busy_star() {
     let swarm = once(&root, Some("2"));
     assert!(swarm.contains("graph [focus]"), "{swarm}");
     assert!(swarm.contains("history"), "{swarm}");
+    assert!(swarm.contains("page 2/2 swarm"), "{swarm}");
     assert!(
         swarm.contains("planner→builder"),
         "the graph pane names the in-flight hop\n{swarm}"

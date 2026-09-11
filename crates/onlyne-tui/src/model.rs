@@ -3,9 +3,9 @@ use crate::layout::{
 };
 use chrono::{DateTime, Utc};
 use onlyne_proto::{
-    AdminFrame, AdminOp, AgentPhase, EventRow, FaultEvent, Frame, LedgerEntry, LedgerQuery,
-    LedgerState, Lifecycle, MsgKind, Presence, Principal, QueryFaultsArgs, QueryRolesArgs,
-    QuerySessionsArgs, ResBody, RoleInfo, SessionRow, new_id,
+    AdminFrame, AdminOp, EventRow, FaultEvent, Frame, LedgerEntry, LedgerQuery, LedgerState,
+    Lifecycle, MsgKind, Presence, Principal, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs,
+    ResBody, RoleInfo, SessionRow, new_id,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -119,6 +119,9 @@ pub enum Page {
 }
 
 impl Page {
+    /// How many pages the footer counts.
+    pub const COUNT: u8 = 2;
+
     pub fn toggle(self) -> Self {
         match self {
             Page::RoleMap => Page::Swarm,
@@ -130,6 +133,27 @@ impl Page {
         match self {
             Page::RoleMap => "roles",
             Page::Swarm => "swarm",
+        }
+    }
+
+    /// The page's position in the footer's count.
+    pub fn number(self) -> u8 {
+        match self {
+            Page::RoleMap => 1,
+            Page::Swarm => 2,
+        }
+    }
+
+    /// The keys this page answers to. Each page lists only its own keys, so
+    /// the legend never advertises a key that does nothing here.
+    pub fn keys(self) -> &'static str {
+        match self {
+            Page::RoleMap => {
+                "1/2·Tab switch  hjkl navigate  ←→↑↓ pan  Enter detail  e edges  a all/active  r refresh  q quit"
+            }
+            Page::Swarm => {
+                "1/2·Tab switch  g/h focus  ↑↓ select  Enter detail  / search  f state  t window  o role  e edge  a all/active  PgUp/PgDn page  r refresh  q quit"
+            }
         }
     }
 }
@@ -264,8 +288,25 @@ pub struct UiState {
     pub graph_cursor: usize,
     pub history_cursor: usize,
     pub filter: HistoryFilter,
-    pub detail_task_id: Option<String>,
-    pub detail: Option<TaskDetail>,
+    /// The page-1 pick, held by name so a refresh cannot move the cursor under
+    /// the operator's feet.
+    pub role_selected: Option<String>,
+    /// Which of the selected role's out-edges `j`/`k` stands on.
+    pub role_edge: Option<usize>,
+    /// The roles the cursor walked through, oldest first: `h` pops one.
+    pub role_trail: Vec<String>,
+    /// The page-1 camera, in world cells. Clamped to the map extent.
+    pub role_pan: (usize, usize),
+    /// Whether the views list only the sessions still holding a slot. `a`
+    /// flips it, and the history views keep their own state filter.
+    pub active_only: bool,
+    /// Whether control-plane out-edges are drawn. They crowd the ring, so the
+    /// page hides them until `e`.
+    pub show_control_edges: bool,
+    /// The pane's subject: page 1 holds a role, page 2 a task.
+    pub detail: Option<Detail>,
+    /// The subject the loaded detail belongs to.
+    pub detail_key: Option<String>,
     pub detail_scroll: u16,
     pub search: Option<String>,
     pub message: String,
@@ -279,13 +320,26 @@ impl Default for UiState {
             graph_cursor: 0,
             history_cursor: 0,
             filter: HistoryFilter::default(),
-            detail_task_id: None,
+            role_selected: None,
+            role_edge: None,
+            role_trail: Vec::new(),
+            role_pan: (0, 0),
+            active_only: true,
+            show_control_edges: false,
             detail: None,
+            detail_key: None,
             detail_scroll: 0,
             search: None,
             message: String::new(),
         }
     }
+}
+
+/// The detail pane's subject.
+#[derive(Clone, Debug)]
+pub enum Detail {
+    Task(TaskDetail),
+    Role(RoleDetail),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -294,6 +348,29 @@ pub struct TaskDetail {
     pub ledger: Vec<LedgerEntry>,
     pub sessions: Vec<SessionRow>,
     pub faults: Vec<FaultEvent>,
+}
+
+/// Everything the page-1 panel says about one role: its registry row, the
+/// sessions the server projects onto it, and its faults.
+#[derive(Clone, Debug)]
+pub struct RoleDetail {
+    pub role: String,
+    pub state: Presence,
+    pub session_count: u32,
+    pub max_sessions: u32,
+    pub admin: bool,
+    pub aggregate: Option<String>,
+    /// The role's `allowed_targets` verbatim.
+    pub peers: Vec<String>,
+    pub faults: Vec<FaultEvent>,
+    pub sessions: Vec<SessionRow>,
+}
+
+/// What the page-1 map knows about one role's place in the topology.
+impl RoleView {
+    pub fn control(&self) -> bool {
+        control_role(&self.name, self.aggregate.as_deref())
+    }
 }
 
 pub async fn pull(socket: &Path, filter: &HistoryFilter, page_size: usize) -> Snapshot {
@@ -443,6 +520,62 @@ pub async fn detail(socket: &Path, task_id: &str) -> anyhow::Result<TaskDetail> 
             .unwrap_or_default(),
     })
 }
+/// Everything the page-1 panel shows for one role.
+pub async fn role_detail(socket: &Path, role: &str) -> anyhow::Result<RoleDetail> {
+    let roles = request_data(
+        socket,
+        AdminOp::Roles(QueryRolesArgs {
+            role: Some(role.to_string()),
+        }),
+    )
+    .await?;
+    let row = roles
+        .get("roles")
+        .and_then(Value::as_array)
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row.get("name").and_then(Value::as_str) == Some(role))
+        })
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("the server does not register role {role}"))?;
+    let view = RoleView::try_from(row)?;
+    let sessions = request_data(
+        socket,
+        AdminOp::Sessions(QuerySessionsArgs {
+            role: Some(role.to_string()),
+            limit: 50,
+            ..QuerySessionsArgs::default()
+        }),
+    )
+    .await?;
+    let faults = request_data(
+        socket,
+        AdminOp::Faults(QueryFaultsArgs {
+            role: Some(role.to_string()),
+            limit: 50,
+            ..QueryFaultsArgs::default()
+        }),
+    )
+    .await?;
+    Ok(RoleDetail {
+        role: view.name,
+        state: view.state,
+        session_count: view.session_count,
+        max_sessions: view.max_sessions,
+        admin: view.admin,
+        aggregate: view.aggregate,
+        peers: view.edges,
+        faults: serde_json::from_value(faults.get("faults").cloned().unwrap_or_else(|| json!([])))
+            .unwrap_or_default(),
+        sessions: serde_json::from_value(
+            sessions
+                .get("sessions")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        )
+        .unwrap_or_default(),
+    })
+}
 
 async fn request_data(socket: &Path, op: AdminOp) -> anyhow::Result<Value> {
     let mut stream = timeout(Duration::from_millis(1500), UnixStream::connect(socket)).await??;
@@ -511,12 +644,10 @@ fn event_matches_state(row: &EventRow, state: &str) -> bool {
             onlyne_proto::Event::LedgerState(event) => {
                 matches!(event.state, LedgerState::Queued | LedgerState::InFlight)
             }
+            // Exit ends the session, whatever the projection's agent phase
+            // last reported.
             onlyne_proto::Event::SessionState(event) => {
                 !matches!(event.projection.lifecycle, Lifecycle::Exited)
-                    || matches!(
-                        event.projection.agent,
-                        AgentPhase::Ready | AgentPhase::Running
-                    )
             }
             onlyne_proto::Event::Fault(event) => event.state.as_deref() != Some("acked"),
             _ => false,
@@ -568,9 +699,9 @@ pub fn role_name(principal: &Principal) -> Option<&str> {
     }
 }
 
-pub fn layout_nodes(snapshot: &Snapshot) -> Vec<LayoutNode> {
+pub fn layout_nodes(snapshot: &Snapshot, active_only: bool) -> Vec<LayoutNode> {
     let mut sessions_by_role: BTreeMap<String, Vec<&SessionRow>> = BTreeMap::new();
-    for session in &snapshot.sessions {
+    for session in visible_sessions(snapshot, active_only) {
         if let Some(role) = &session.role {
             sessions_by_role
                 .entry(role.clone())
@@ -651,20 +782,306 @@ pub fn layout_edges(snapshot: &Snapshot) -> Vec<LayoutEdge> {
         .collect()
 }
 
+/// Whether the session still holds its role's slot. Lifecycle owns this: an
+/// exited session is done even when the row's last projection still says the
+/// agent was running, because the projection's agent phase stops at the last
+/// heartbeat and the exit lands after it. The agent phase stays a display
+/// column in the swarm table and the detail panes.
 pub fn session_busy(session: &SessionRow) -> bool {
     !matches!(session.public_lifecycle, Lifecycle::Exited)
-        || matches!(
-            session.projection.agent,
-            AgentPhase::Ready | AgentPhase::Running
-        )
 }
 
 pub fn active_sessions(snapshot: &Snapshot) -> Vec<&SessionRow> {
+    visible_sessions(snapshot, true)
+}
+
+/// The sessions a view lists: every row, or only the ones still holding a
+/// slot while `active_only`.
+pub fn visible_sessions(snapshot: &Snapshot, active_only: bool) -> Vec<&SessionRow> {
     snapshot
         .sessions
         .iter()
-        .filter(|session| session_busy(session))
+        .filter(|session| !active_only || session_busy(session))
         .collect()
+}
+/// A control-plane role: the supervisor and every aggregate role. Its box
+/// leaves the ring, and its spoke edges stay off the map until `e`.
+pub fn control_role(name: &str, aggregate: Option<&str>) -> bool {
+    name.starts_with('_') || aggregate.is_some()
+}
+
+/// One role waiting for a place in the page-1 map.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoleSlot {
+    pub name: String,
+    pub control: bool,
+}
+
+/// The top-left corner a role's box takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RolePlace {
+    pub x: usize,
+    pub y: usize,
+}
+
+/// Whether any two of these box corners touch, given a `w`x`h` box.
+pub fn boxes_overlap(places: &[RolePlace], w: usize, h: usize) -> bool {
+    places.iter().enumerate().any(|(index, a)| {
+        places[index + 1..]
+            .iter()
+            .any(|b| a.x < b.x + w && b.x < a.x + w && a.y < b.y + h && b.y < a.y + h)
+    })
+}
+
+/// The gap one box leaves its neighbour.
+const PLACE_GAP: usize = 2;
+
+/// Where each slot's box goes inside a `w`x`h` world of `node_w`x`node_h`
+/// boxes.
+///
+/// The ring is the placement the map wants; the serpentine grid is what a
+/// world that cannot hold one gets, wrapping onto more rows instead of
+/// overlapping. Pure: equal inputs give equal corners.
+pub fn role_positions(
+    slots: &[RoleSlot],
+    w: usize,
+    h: usize,
+    node_w: usize,
+    node_h: usize,
+) -> Vec<(String, RolePlace)> {
+    if let Some(ring) = ring_places(slots, w, h, node_w, node_h) {
+        return ring;
+    }
+    let points = grid_points(slots.len(), w, h, node_w, node_h);
+    slots
+        .iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            let place = points
+                .get(index)
+                .copied()
+                .unwrap_or(RolePlace { x: 0, y: 0 });
+            (slot.name.clone(), place)
+        })
+        .collect()
+}
+
+/// The ring placement, or `None` when the world cannot hold one: fewer than
+/// three cycle roles, under three node rows, or an ellipse whose boxes would
+/// touch after rounding.
+///
+/// Cycle roles read clockwise from the top of the inscribed ellipse, so their
+/// boxes trace the ring the ACL forms. Control roles take the free middle,
+/// then the top or bottom edge, then the first free corner.
+pub fn ring_places(
+    slots: &[RoleSlot],
+    w: usize,
+    h: usize,
+    node_w: usize,
+    node_h: usize,
+) -> Option<Vec<(String, RolePlace)>> {
+    if slots.is_empty() || node_w == 0 || node_h == 0 {
+        return None;
+    }
+    let cycle: Vec<usize> = slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| !slot.control)
+        .map(|(index, _)| index)
+        .collect();
+    let control: Vec<usize> = slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.control)
+        .map(|(index, _)| index)
+        .collect();
+    if cycle.len() < 3 || h < node_h.saturating_mul(3) {
+        return None;
+    }
+    let points = ring_points(cycle.len(), w, h, node_w, node_h);
+    if boxes_overlap(&points, node_w, node_h) {
+        return None;
+    }
+    let mut placed: Vec<Option<RolePlace>> = vec![None; slots.len()];
+    for (index, point) in cycle.iter().zip(points.iter()) {
+        placed[*index] = Some(*point);
+    }
+    for (order, index) in control.iter().enumerate() {
+        let anchor = control_anchor(&placed, w, h, node_w, node_h);
+        if order == 0 && anchor.is_none() {
+            // The ring covers every anchor; a wider world can pull one free.
+            return None;
+        }
+        let place = anchor.or_else(|| free_place(&placed, w, h, node_w, node_h))?;
+        placed[*index] = Some(place);
+    }
+    Some(
+        slots
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                let place = placed[index].unwrap_or(RolePlace { x: 0, y: 0 });
+                (slot.name.clone(), place)
+            })
+            .collect(),
+    )
+}
+
+/// Corners on the inscribed ellipse, clockwise from the top.
+fn ring_points(count: usize, w: usize, h: usize, node_w: usize, node_h: usize) -> Vec<RolePlace> {
+    let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+    let rx = w.saturating_sub(node_w) as f64 / 2.0;
+    let ry = h.saturating_sub(node_h) as f64 / 2.0;
+    (0..count)
+        .map(|index| {
+            let angle =
+                -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * index as f64 / count as f64;
+            RolePlace {
+                x: corner(cx + rx * angle.cos() - node_w as f64 / 2.0, w, node_w),
+                y: corner(cy + ry * angle.sin() - node_h as f64 / 2.0, h, node_h),
+            }
+        })
+        .collect()
+}
+
+fn corner(value: f64, extent: usize, size: usize) -> usize {
+    (value.round().max(0.0) as usize).min(extent.saturating_sub(size))
+}
+
+/// Row-major corners that snake left to right, then right to left, wrapping
+/// onto the next row once the row is full.
+fn grid_points(count: usize, w: usize, h: usize, node_w: usize, node_h: usize) -> Vec<RolePlace> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let per_row = ((w + PLACE_GAP) / (node_w + PLACE_GAP)).max(1);
+    let rows = count.div_ceil(per_row);
+    let column_step = if per_row > 1 {
+        w.saturating_sub(node_w) / (per_row - 1)
+    } else {
+        0
+    };
+    let row_step = if rows > 1 {
+        h.saturating_sub(node_h) / (rows - 1)
+    } else {
+        0
+    };
+    (0..count)
+        .map(|index| {
+            let row = index / per_row;
+            let column = index % per_row;
+            let column = if row % 2 == 1 {
+                per_row - 1 - column
+            } else {
+                column
+            };
+            RolePlace {
+                x: (column * column_step).min(w.saturating_sub(node_w)),
+                y: (row * row_step).min(h.saturating_sub(node_h)),
+            }
+        })
+        .collect()
+}
+
+/// The middle when the ring leaves it free, then the top or bottom edge: the
+/// anchors a control role reads best from. `None` means the ring covers all
+/// three, which a wider world can undo.
+fn control_anchor(
+    placed: &[Option<RolePlace>],
+    w: usize,
+    h: usize,
+    node_w: usize,
+    node_h: usize,
+) -> Option<RolePlace> {
+    let taken: Vec<RolePlace> = placed.iter().flatten().copied().collect();
+    let mid_x = w.saturating_sub(node_w) / 2;
+    let anchors = [
+        RolePlace {
+            x: mid_x,
+            y: h.saturating_sub(node_h) / 2,
+        },
+        RolePlace { x: mid_x, y: 0 },
+        RolePlace {
+            x: mid_x,
+            y: h.saturating_sub(node_h),
+        },
+    ];
+    anchors
+        .into_iter()
+        .find(|place| is_free(*place, &taken, node_w, node_h))
+}
+
+/// The first free cell of the world, reading order.
+fn free_place(
+    placed: &[Option<RolePlace>],
+    w: usize,
+    h: usize,
+    node_w: usize,
+    node_h: usize,
+) -> Option<RolePlace> {
+    let taken: Vec<RolePlace> = placed.iter().flatten().copied().collect();
+    for y in 0..=h.saturating_sub(node_h) {
+        for x in 0..=w.saturating_sub(node_w) {
+            let place = RolePlace { x, y };
+            if is_free(place, &taken, node_w, node_h) {
+                return Some(place);
+            }
+        }
+    }
+    None
+}
+
+fn is_free(place: RolePlace, taken: &[RolePlace], node_w: usize, node_h: usize) -> bool {
+    !taken.iter().any(|other| {
+        place.x < other.x + node_w
+            && other.x < place.x + node_w
+            && place.y < other.y + node_h
+            && other.y < place.y + node_h
+    })
+}
+
+/// The edges the map draws: every ACL target, minus the control-plane spokes
+/// while they are hidden.
+pub fn visible_edges(snapshot: &Snapshot, show_control_edges: bool) -> Vec<LayoutEdge> {
+    layout_edges(snapshot)
+        .into_iter()
+        .filter(|edge| show_control_edges || !source_is_control(snapshot, &edge.from))
+        .collect()
+}
+
+fn source_is_control(snapshot: &Snapshot, name: &str) -> bool {
+    snapshot
+        .roles
+        .iter()
+        .any(|role| role.name == name && role.control())
+}
+
+/// The role the page-1 cursor sits on: the operator's pick while it is still
+/// registered, else the first role with an out-edge to walk, else the first
+/// role.
+pub fn selected_role(snapshot: &Snapshot, state: &UiState) -> Option<String> {
+    if let Some(name) = &state.role_selected {
+        if snapshot.roles.iter().any(|role| &role.name == name) {
+            return Some(name.clone());
+        }
+    }
+    let edges = visible_edges(snapshot, state.show_control_edges);
+    snapshot
+        .roles
+        .iter()
+        .find(|role| edges.iter().any(|edge| edge.from == role.name))
+        .or_else(|| snapshot.roles.first())
+        .map(|role| role.name.clone())
+}
+
+/// The out-edges `j`/`k` walks for one role, in map order.
+pub fn role_edges(snapshot: &Snapshot, state: &UiState, role: &str) -> Vec<LayoutEdge> {
+    let mut edges: Vec<LayoutEdge> = visible_edges(snapshot, state.show_control_edges)
+        .into_iter()
+        .filter(|edge| edge.from == role)
+        .collect();
+    edges.sort_by(|a, b| a.to.cmp(&b.to));
+    edges
 }
 
 pub fn cycle_state(filter: &mut HistoryFilter) {
@@ -724,8 +1141,8 @@ pub fn page_history(delta: isize, filter: &mut HistoryFilter, total: usize, page
     }
 }
 
-pub fn selected_graph_task(snapshot: &Snapshot, index: usize) -> Option<String> {
-    active_sessions(snapshot)
+pub fn selected_graph_task(snapshot: &Snapshot, index: usize, active_only: bool) -> Option<String> {
+    visible_sessions(snapshot, active_only)
         .get(index)
         .map(|session| session.task_id.clone())
 }
@@ -811,6 +1228,7 @@ pub fn ledger_state_label(entry: &LedgerEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use onlyne_proto::{AgentPhase, SessionProjection};
 
     #[test]
     fn role_view_tolerates_missing_future_fields() {
@@ -873,5 +1291,225 @@ mod tests {
         assert!(rows[0].text.contains("intent_exhausted") && rows[0].text.contains("builder"));
         assert_eq!(rows[1].kind, AlertKind::Notice);
         assert_eq!(rows[1].text, "spec reloaded");
+    }
+
+    fn state_session(lifecycle: Lifecycle, agent: AgentPhase) -> SessionRow {
+        SessionRow {
+            task_id: "t1".into(),
+            role: Some("builder".into()),
+            session_id: "s1".into(),
+            generation: 1,
+            seq: 1,
+            public_lifecycle: lifecycle,
+            projection: SessionProjection {
+                lifecycle,
+                agent,
+                ..SessionProjection::default()
+            },
+            outcome: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn an_exited_session_is_not_busy_though_its_projection_says_running() {
+        let exited = state_session(Lifecycle::Exited, AgentPhase::Running);
+        assert!(!session_busy(&exited));
+        let working = state_session(Lifecycle::Working, AgentPhase::Running);
+        assert!(session_busy(&working));
+    }
+
+    #[test]
+    fn the_active_only_view_keeps_the_exited_rows_out() {
+        let snapshot = Snapshot {
+            sessions: vec![
+                state_session(Lifecycle::Exited, AgentPhase::Running),
+                state_session(Lifecycle::Working, AgentPhase::Running),
+            ],
+            roles: vec![role_view("builder")],
+            ..Snapshot::default()
+        };
+        assert_eq!(visible_sessions(&snapshot, true).len(), 1);
+        assert_eq!(visible_sessions(&snapshot, false).len(), 2);
+        assert_eq!(layout_nodes(&snapshot, true)[0].sessions.len(), 1);
+        assert_eq!(layout_nodes(&snapshot, false)[0].sessions.len(), 2);
+    }
+
+    #[test]
+    fn active_sessions_leaves_the_exited_row_out() {
+        let snapshot = Snapshot {
+            sessions: vec![
+                state_session(Lifecycle::Exited, AgentPhase::Running),
+                state_session(Lifecycle::Working, AgentPhase::Running),
+            ],
+            ..Snapshot::default()
+        };
+        let active = active_sessions(&snapshot);
+        assert_eq!(active.len(), 1, "{active:?}");
+        assert_eq!(active[0].public_lifecycle, Lifecycle::Working);
+    }
+
+    fn slots(names: &[(&str, bool)]) -> Vec<RoleSlot> {
+        names
+            .iter()
+            .map(|(name, control)| RoleSlot {
+                name: (*name).to_string(),
+                control: *control,
+            })
+            .collect()
+    }
+
+    fn centres(places: &[RolePlace], w: usize, h: usize) -> Vec<(f64, f64)> {
+        places
+            .iter()
+            .map(|place| {
+                (
+                    place.x as f64 + w as f64 / 2.0,
+                    place.y as f64 + h as f64 / 2.0,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cycle_roles_trace_a_ring_with_their_neighbours_nearest() {
+        let ring = slots(&[
+            ("a", false),
+            ("b", false),
+            ("c", false),
+            ("d", false),
+            ("e", false),
+        ]);
+        let placed = role_positions(&ring, 42, 29, 14, 7);
+        assert_eq!(placed.len(), 5);
+        let points: Vec<RolePlace> = placed.iter().map(|(_, place)| *place).collect();
+        assert!(!boxes_overlap(&points, 14, 7), "{points:?}");
+        let distinct: std::collections::BTreeSet<(usize, usize)> =
+            points.iter().map(|place| (place.x, place.y)).collect();
+        assert_eq!(distinct.len(), 5, "{points:?}");
+        let centres = centres(&points, 14, 7);
+        for (index, centre) in centres.iter().enumerate() {
+            let nearest = centres
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .min_by(|(_, a), (_, b)| {
+                    distance(*centre, **a)
+                        .partial_cmp(&distance(*centre, **b))
+                        .expect("finite distances")
+                })
+                .map(|(other, _)| other)
+                .expect("another box");
+            let neighbours = [(index + 1) % 5, (index + 4) % 5];
+            assert!(
+                neighbours.contains(&nearest),
+                "box {index} sits nearest to {nearest}, not a ring neighbour\n{points:?}"
+            );
+        }
+    }
+
+    fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
+        ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn a_world_too_shallow_for_a_ring_wraps_onto_more_rows() {
+        let ring = slots(&[
+            ("a", false),
+            ("b", false),
+            ("c", false),
+            ("d", false),
+            ("e", false),
+        ]);
+        let placed = role_positions(&ring, 60, 14, 14, 7);
+        let points: Vec<RolePlace> = placed.iter().map(|(_, place)| *place).collect();
+        assert!(!boxes_overlap(&points, 14, 7), "{points:?}");
+        let rows: std::collections::BTreeSet<usize> = points.iter().map(|place| place.y).collect();
+        assert!(
+            rows.len() > 1,
+            "the grid wraps instead of stretching\n{points:?}"
+        );
+        let columns = points.iter().filter(|place| place.y == 0).count();
+        assert!(columns < 5, "no single unwrapped row\n{points:?}");
+    }
+
+    #[test]
+    fn the_control_role_takes_the_free_middle() {
+        let all = slots(&[
+            ("a", false),
+            ("b", false),
+            ("c", false),
+            ("d", false),
+            ("e", false),
+            ("_supervisor", true),
+        ]);
+        let placed = role_positions(&all, 44, 25, 14, 7);
+        let points: Vec<RolePlace> = placed.iter().map(|(_, place)| *place).collect();
+        assert!(!boxes_overlap(&points, 14, 7), "{points:?}");
+        let supervisor = placed
+            .iter()
+            .find(|(name, _)| name == "_supervisor")
+            .map(|(_, place)| *place)
+            .expect("the control slot");
+        assert_eq!(supervisor, RolePlace { x: 15, y: 9 }, "{points:?}");
+        // A world that leaves the ring no middle still keeps the boxes apart.
+        let tight: Vec<RolePlace> = role_positions(&all, 42, 29, 14, 7)
+            .into_iter()
+            .map(|(_, place)| place)
+            .collect();
+        assert!(!boxes_overlap(&tight, 14, 7), "{tight:?}");
+    }
+
+    #[test]
+    fn placements_are_deterministic() {
+        let all = slots(&[
+            ("a", false),
+            ("b", false),
+            ("c", false),
+            ("_supervisor", true),
+        ]);
+        assert_eq!(
+            role_positions(&all, 60, 25, 14, 7),
+            role_positions(&all, 60, 25, 14, 7)
+        );
+    }
+
+    #[test]
+    fn control_edges_stay_off_the_map_until_told() {
+        let snapshot = Snapshot {
+            roles: vec![
+                RoleView {
+                    name: "_supervisor".into(),
+                    aggregate: None,
+                    edges: vec!["builder".into()],
+                    ..role_view("_supervisor")
+                },
+                RoleView {
+                    edges: vec!["_supervisor".into()],
+                    ..role_view("builder")
+                },
+            ],
+            ..Snapshot::default()
+        };
+        let hidden = visible_edges(&snapshot, false);
+        assert_eq!(hidden.len(), 1, "{hidden:?}");
+        assert_eq!(hidden[0].from, "builder");
+        let shown = visible_edges(&snapshot, true);
+        assert_eq!(shown.len(), 2, "{shown:?}");
+    }
+
+    fn role_view(name: &str) -> RoleView {
+        RoleView {
+            name: name.into(),
+            admin: false,
+            max_sessions: 1,
+            spec_hash: "a".into(),
+            prose: None,
+            state: Presence::Online,
+            session_count: 0,
+            detail: None,
+            edges: Vec::new(),
+            aggregate: None,
+        }
     }
 }

@@ -1,15 +1,18 @@
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use onlyne_tui::model::{
-    Focus, Page, Snapshot, UiState, cycle_edge, cycle_role, cycle_state, detail, pull,
+    Detail, Focus, Page, Snapshot, UiState, cycle_edge, cycle_role, cycle_state, detail, pull,
+    role_detail, role_edges, selected_role,
 };
 use onlyne_tui::socket::{NO_SOCKET_MESSAGE, SocketArgs, resolve_socket};
 use onlyne_tui::ui::{
-    apply_page_history, clamp_cursor, graph_len, history_len, history_page_size, move_cursor,
-    render, render_once_text, selected_task,
+    apply_page_history, clamp_cursor, follow_role_edge, graph_len, history_len, history_page_size,
+    map_view_size, move_cursor, move_role_edge, pan_role_view, render, render_once_text,
+    reveal_role, role_back, selected_task,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use std::io::stdout;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -139,6 +142,7 @@ fn run_loop(
             KeyCode::Char('1') => {
                 state.page = Page::RoleMap;
                 state.detail_scroll = 0;
+                sync_selection_and_detail(runtime, socket, snapshot, state);
             }
             KeyCode::Char('2') => {
                 state.page = Page::Swarm;
@@ -150,6 +154,56 @@ fn run_loop(
                 state.detail_scroll = 0;
                 sync_selection_and_detail(runtime, socket, snapshot, state);
             }
+            KeyCode::Enter => sync_selection_and_detail(runtime, socket, snapshot, state),
+            KeyCode::Char('J') => state.detail_scroll = state.detail_scroll.saturating_add(1),
+            KeyCode::Char('K') => state.detail_scroll = state.detail_scroll.saturating_sub(1),
+            KeyCode::Char('r') => {
+                refresh_now(runtime, socket, terminal, snapshot, state, &mut refreshed)
+            }
+            // Page 1: `hjkl` walks the ring, the arrows move the camera, and
+            // `e` shows the control-plane spokes the map holds back.
+            KeyCode::Char('e') if state.page == Page::RoleMap => {
+                state.show_control_edges = !state.show_control_edges;
+            }
+            KeyCode::Char('j') if state.page == Page::RoleMap => move_role_edge(1, snapshot, state),
+            KeyCode::Char('k') if state.page == Page::RoleMap => {
+                move_role_edge(-1, snapshot, state)
+            }
+            KeyCode::Char('l') if state.page == Page::RoleMap => {
+                if follow_role_edge(snapshot, state) {
+                    reveal_role(snapshot, state, map_view(terminal));
+                    sync_selection_and_detail(runtime, socket, snapshot, state);
+                }
+            }
+            KeyCode::Char('h') if state.page == Page::RoleMap => {
+                if role_back(state) {
+                    reveal_role(snapshot, state, map_view(terminal));
+                    sync_selection_and_detail(runtime, socket, snapshot, state);
+                }
+            }
+            // `a` flips the session views between the rows still holding a
+            // slot and everything.
+            KeyCode::Char('a') => {
+                state.active_only = !state.active_only;
+                clamp_cursor(
+                    &mut state.graph_cursor,
+                    graph_len(snapshot, state.active_only),
+                );
+                sync_selection_and_detail(runtime, socket, snapshot, state);
+            }
+            KeyCode::Up if state.page == Page::RoleMap => {
+                pan_role_view((0, -1), snapshot, state, map_view(terminal))
+            }
+            KeyCode::Down if state.page == Page::RoleMap => {
+                pan_role_view((0, 1), snapshot, state, map_view(terminal))
+            }
+            KeyCode::Left if state.page == Page::RoleMap => {
+                pan_role_view((-1, 0), snapshot, state, map_view(terminal))
+            }
+            KeyCode::Right if state.page == Page::RoleMap => {
+                pan_role_view((1, 0), snapshot, state, map_view(terminal))
+            }
+            // Page 2 keeps its own keys.
             KeyCode::Char('g') if state.page == Page::Swarm => state.focus = Focus::Graph,
             KeyCode::Char('h') if state.page == Page::Swarm => state.focus = Focus::History,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -168,42 +222,38 @@ fn run_loop(
                 }
                 sync_selection_and_detail(runtime, socket, snapshot, state);
             }
-            KeyCode::Char('J') => state.detail_scroll = state.detail_scroll.saturating_add(1),
-            KeyCode::Char('K') => state.detail_scroll = state.detail_scroll.saturating_sub(1),
-            KeyCode::Char('/') => state.search = Some(state.filter.text.clone()),
-            KeyCode::Char('r') => {
-                refresh_now(runtime, socket, terminal, snapshot, state, &mut refreshed)
+            KeyCode::Char('/') if state.page == Page::Swarm => {
+                state.search = Some(state.filter.text.clone())
             }
-            KeyCode::Char('f') => {
+            KeyCode::Char('f') if state.page == Page::Swarm => {
                 cycle_state(&mut state.filter);
                 refresh_now(runtime, socket, terminal, snapshot, state, &mut refreshed);
             }
-            KeyCode::Char('t') => {
+            KeyCode::Char('t') if state.page == Page::Swarm => {
                 state.filter.window = state.filter.window.next();
                 state.filter.reset_page();
                 refresh_now(runtime, socket, terminal, snapshot, state, &mut refreshed);
             }
-            KeyCode::Char('o') => {
+            KeyCode::Char('o') if state.page == Page::Swarm => {
                 cycle_role(&snapshot.roles, &mut state.filter);
                 refresh_now(runtime, socket, terminal, snapshot, state, &mut refreshed);
             }
-            KeyCode::Char('e') => {
+            KeyCode::Char('e') if state.page == Page::Swarm => {
                 cycle_edge(snapshot, &mut state.filter);
                 refresh_now(runtime, socket, terminal, snapshot, state, &mut refreshed);
             }
-            KeyCode::PageDown if state.focus == Focus::History => {
+            KeyCode::PageDown if state.page == Page::Swarm && state.focus == Focus::History => {
                 let page_size = history_page_size(terminal.size()?.height);
                 apply_page_history(1, snapshot, state, page_size);
                 refresh_now(runtime, socket, terminal, snapshot, state, &mut refreshed);
             }
-            KeyCode::PageUp if state.focus == Focus::History => {
+            KeyCode::PageUp if state.page == Page::Swarm && state.focus == Focus::History => {
                 let page_size = history_page_size(terminal.size()?.height);
                 apply_page_history(-1, snapshot, state, page_size);
                 refresh_now(runtime, socket, terminal, snapshot, state, &mut refreshed);
             }
             KeyCode::PageDown => state.detail_scroll = state.detail_scroll.saturating_add(8),
             KeyCode::PageUp => state.detail_scroll = state.detail_scroll.saturating_sub(8),
-            KeyCode::Enter => sync_selection_and_detail(runtime, socket, snapshot, state),
             _ => {}
         }
     }
@@ -259,7 +309,10 @@ fn refresh_now(
             ..previous
         }
     };
-    clamp_cursor(&mut state.graph_cursor, graph_len(snapshot));
+    clamp_cursor(
+        &mut state.graph_cursor,
+        graph_len(snapshot, state.active_only),
+    );
     clamp_cursor(&mut state.history_cursor, history_len(snapshot));
     sync_selection_and_detail(runtime, socket, snapshot, state);
     *refreshed = Instant::now();
@@ -271,17 +324,39 @@ fn sync_selection_and_detail(
     snapshot: &Snapshot,
     state: &mut UiState,
 ) {
-    let selected = selected_task(snapshot, state);
-    if selected == state.detail_task_id {
+    let key = match state.page {
+        Page::RoleMap => {
+            let role = selected_role(snapshot, state);
+            let len = role
+                .as_deref()
+                .map(|role| role_edges(snapshot, state, role).len())
+                .unwrap_or(0);
+            state.role_edge = state.role_edge.filter(|index| *index < len);
+            role
+        }
+        Page::Swarm => selected_task(snapshot, state),
+    };
+    // The subject is tagged with its page, so switching pages always reloads
+    // even when a role name and a task id happen to read the same.
+    let tagged = key
+        .as_ref()
+        .map(|key| format!("{}:{key}", state.page.number()));
+    if tagged == state.detail_key {
         return;
     }
-    state.detail_task_id = selected.clone();
+    state.detail_key = tagged;
     state.detail_scroll = 0;
-    let Some(task_id) = selected else {
+    let Some(key) = key else {
         state.detail = None;
         return;
     };
-    match runtime.block_on(detail(socket, &task_id)) {
+    let loaded = match state.page {
+        Page::RoleMap => runtime
+            .block_on(role_detail(socket, &key))
+            .map(Detail::Role),
+        Page::Swarm => runtime.block_on(detail(socket, &key)).map(Detail::Task),
+    };
+    match loaded {
         Ok(detail) => state.detail = Some(detail),
         Err(error) => state.message = format!("detail failed: {error}"),
     }
@@ -289,7 +364,17 @@ fn sync_selection_and_detail(
 
 fn focus_len(snapshot: &Snapshot, state: &UiState) -> usize {
     match state.focus {
-        Focus::Graph => graph_len(snapshot),
+        Focus::Graph => graph_len(snapshot, state.active_only),
         Focus::History => history_len(snapshot),
     }
+}
+
+/// The cells the role map pane draws in, so the camera clamps to the room the
+/// pane really has.
+fn map_view(terminal: &Terminal<CrosstermBackend<std::io::Stdout>>) -> (usize, usize) {
+    let size = terminal.size().unwrap_or(ratatui::layout::Size {
+        width: 120,
+        height: 36,
+    });
+    map_view_size(Rect::new(0, 0, size.width, size.height))
 }

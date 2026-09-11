@@ -1,4 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use crate::model::{RoleSlot, control_role, ring_places, role_positions};
+use std::collections::BTreeMap;
+
+/// The widest a role box draws. A box's own text only asks for what it needs,
+/// so this is the ceiling the world size starts from.
+const NODE_W: usize = 28;
+/// The narrowest box that still shows a title and a session line.
+const NODE_MIN_W: usize = 14;
+/// Box height.
+const NODE_H: usize = 7;
+/// The gap the grid leaves between two boxes.
+const GRID_GAP: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayoutNode {
@@ -83,7 +94,7 @@ pub struct Cell {
 }
 
 impl Cell {
-    fn blank() -> Self {
+    pub fn blank() -> Self {
         Self {
             ch: ' ',
             kind: CellKind::Plain,
@@ -97,15 +108,22 @@ pub struct Canvas {
     pub height: usize,
     pub cells: Vec<Vec<Cell>>,
     pub node_boxes: Vec<NodeBox>,
+    /// The cells each routed hop drew, keyed by `(from, to)`. The map paints
+    /// the hop `j`/`k` highlights from these coordinates.
+    pub edge_paths: BTreeMap<(String, String), Vec<(usize, usize)>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeBox {
     pub name: String,
     pub x: usize,
     pub y: usize,
     pub w: usize,
     pub h: usize,
+    /// The text drawn on the box's title row and the column it starts at. The
+    /// placement never fills them; the drawing pass does.
+    pub label: String,
+    pub label_x: usize,
 }
 
 impl Canvas {
@@ -115,7 +133,21 @@ impl Canvas {
             height,
             cells: vec![vec![Cell::blank(); width]; height],
             node_boxes: Vec::new(),
+            edge_paths: BTreeMap::new(),
         }
+    }
+
+    /// The cell at a world coordinate. Anything outside the drawn area reads
+    /// as blank, so the pane can crop the world wherever the camera sits.
+    pub fn at(&self, x: isize, y: isize) -> Cell {
+        if x < 0 || y < 0 {
+            return Cell::blank();
+        }
+        self.cells
+            .get(y as usize)
+            .and_then(|row| row.get(x as usize))
+            .copied()
+            .unwrap_or_else(Cell::blank)
     }
 
     pub fn lines(&self) -> Vec<String> {
@@ -134,6 +166,103 @@ impl Canvas {
     }
 }
 
+/// The box size every role draws at: the longest line a role shows, held
+/// between the width that still reads and the width the ring has room for.
+pub fn box_width(nodes: &[LayoutNode]) -> usize {
+    let longest = nodes.iter().map(longest_line).max().unwrap_or(8);
+    (longest + 4).clamp(NODE_MIN_W, NODE_W)
+}
+
+fn longest_line(node: &LayoutNode) -> usize {
+    let mut longest =
+        node.title.chars().count() + usize::from(node.aggregate.is_some()) + usize::from(node.busy);
+    for session in node.sessions.iter().take(4) {
+        longest =
+            longest.max(session.task.chars().count().min(8) + session.age.chars().count() + 4);
+    }
+    if node.sessions.len() > 4 {
+        longest = longest.max(3);
+    }
+    longest
+}
+
+fn slots_of(nodes: &[LayoutNode]) -> Vec<RoleSlot> {
+    nodes
+        .iter()
+        .map(|node| RoleSlot {
+            name: node.name.clone(),
+            control: control_role(&node.name, node.aggregate.as_deref()),
+        })
+        .collect()
+}
+
+/// The smallest world that holds the map without two boxes touching, and
+/// without the control plane landing on top of the ring.
+///
+/// A cycle keeps its ring: the map asks for the smallest world the ellipse and
+/// its anchor fit in, and only a map that cannot draw one falls back to the
+/// serpentine grid.
+pub fn world_size(nodes: &[LayoutNode]) -> (usize, usize) {
+    let slots = slots_of(nodes);
+    let node_w = box_width(nodes);
+    let cycle = slots.iter().filter(|slot| !slot.control).count();
+    if cycle >= 3 {
+        if let Some(world) = ring_world(&slots, node_w) {
+            return world;
+        }
+    }
+    grid_world(slots.len(), node_w)
+}
+
+/// The world the ring reads from: the smallest area the ellipse fits in with a
+/// free anchor, then the narrowest of those.
+fn ring_world(slots: &[RoleSlot], node_w: usize) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize)> = None;
+    let mut width = node_w * 3;
+    while width <= node_w * 4 + 8 {
+        let mut height = NODE_H * 3 + 4;
+        while height <= NODE_H * 6 {
+            if ring_places(slots, width, height, node_w, NODE_H).is_some() {
+                let area = width * height;
+                let current = best.map(|(w, h)| w * h);
+                if current.map(|current| area < current).unwrap_or(true)
+                    || current == Some(area) && best.map(|(w, _)| width < w).unwrap_or(false)
+                {
+                    best = Some((width, height));
+                }
+            }
+            height += 2;
+        }
+        width += 2;
+    }
+    best
+}
+
+/// The serpentine grid world: `per_row` boxes to a row, wrapped as needed.
+fn grid_world(count: usize, node_w: usize) -> (usize, usize) {
+    if count == 0 {
+        return (node_w, NODE_H);
+    }
+    let per_row = count_columns(count);
+    let rows = count.div_ceil(per_row).max(1);
+    (
+        node_w * per_row + GRID_GAP * (per_row - 1),
+        NODE_H * rows + GRID_GAP * (rows - 1),
+    )
+}
+
+/// The columns a grid world uses: enough to keep the boxes from stacking into
+/// one tall column.
+fn count_columns(count: usize) -> usize {
+    let mut columns = 1;
+    while columns * columns < count {
+        columns += 1;
+    }
+    columns
+}
+
+/// Draw the role map: the ring the ACL forms, one box per role, one segment
+/// per hop.
 pub fn layout(nodes: &[LayoutNode], edges: &[LayoutEdge], w: u16, h: u16) -> Canvas {
     let width = w as usize;
     let height = h as usize;
@@ -142,293 +271,188 @@ pub fn layout(nodes: &[LayoutNode], edges: &[LayoutEdge], w: u16, h: u16) -> Can
         draw_text(&mut canvas, 0, 0, "(no roles)", CellKind::Plain);
         return canvas;
     }
-
-    let mut sorted_nodes = nodes.to_vec();
-    sorted_nodes.sort_by(|a, b| a.name.cmp(&b.name));
-    let names = sorted_nodes
-        .iter()
-        .map(|node| node.name.clone())
-        .collect::<BTreeSet<_>>();
-    let dag_edges = break_cycles(edges, &names);
-    let mut layers = assign_layers(&sorted_nodes, &dag_edges);
-    order_layers(&mut layers, &dag_edges);
-
-    // Boxes sit one per layer along x, so the width budget divides by the
-    // layer count. Dividing by the widest layer's row count instead let a
-    // six-layer ring ask for six 28-wide boxes and space them 18 apart, which
-    // drew each box over the one to its right.
-    let layer_count = layers.len().max(1);
-    let node_w = width_for(&sorted_nodes, width, layer_count);
-    let node_h = 7usize.min(height.max(4));
-    let x_step = if layer_count == 1 {
-        0
-    } else {
-        width.saturating_sub(node_w) / (layer_count - 1).max(1)
-    };
-    let y_gap = 2usize;
+    let node_w = box_width(nodes);
+    let node_h = NODE_H.min(height.max(4));
+    let slots = slots_of(nodes);
     let mut boxes = BTreeMap::new();
-    for (layer_index, layer) in layers.iter().enumerate() {
-        let layer_height = layer.len() * node_h + layer.len().saturating_sub(1) * y_gap;
-        let start_y = height.saturating_sub(layer_height) / 2;
-        let x = if layer_count == 1 {
-            width.saturating_sub(node_w) / 2
-        } else {
-            (layer_index * x_step).min(width.saturating_sub(node_w))
-        };
-        for (row_index, name) in layer.iter().enumerate() {
-            let y = (start_y + row_index * (node_h + y_gap)).min(height.saturating_sub(node_h));
-            boxes.insert(
-                name.clone(),
-                NodeBox {
-                    name: name.clone(),
-                    x,
-                    y,
-                    w: node_w,
-                    h: node_h,
-                },
-            );
-        }
+    for (name, place) in role_positions(&slots, width, height, node_w, node_h) {
+        boxes.insert(
+            name.clone(),
+            NodeBox {
+                name,
+                x: place.x,
+                y: place.y,
+                w: node_w,
+                h: node_h,
+                ..NodeBox::default()
+            },
+        );
     }
-
-    let layer_of = layers
-        .iter()
-        .enumerate()
-        .flat_map(|(index, layer)| layer.iter().map(move |name| (name.clone(), index)))
-        .collect::<BTreeMap<_, _>>();
-    let mut routed = dag_edges
-        .iter()
-        .filter(|edge| boxes.contains_key(&edge.from) && boxes.contains_key(&edge.to))
-        .cloned()
-        .collect::<Vec<_>>();
-    routed.sort_by_cached_key(|edge| edge_key(edge, &boxes));
-
-    // A hop that crosses a layer would run through the boxes between its ends,
-    // so those hops take a channel above (or below) the band. One row per hop
-    // keeps the runs parallel and the picture deterministic. Each node's hops
-    // also take their own interior row, so two arrows never share a cell.
-    let long_hops = routed
-        .iter()
-        .filter(|edge| layer_gap(edge, &layer_of) >= 2)
-        .count();
-    let channel = channel_rows(&boxes, long_hops, height);
-    let mut exit_seen = BTreeMap::<String, usize>::new();
-    let mut enter_seen = BTreeMap::<String, usize>::new();
-    let mut lane = 0usize;
-    for edge in &routed {
-        let (Some(from), Some(to)) = (boxes.get(&edge.from), boxes.get(&edge.to)) else {
-            continue;
-        };
-        let exit_y = {
-            let index = exit_seen.entry(edge.from.clone()).or_default();
-            let row = hop_row(from, *index);
-            *index += 1;
-            row
-        };
-        let enter_y = {
-            let index = enter_seen.entry(edge.to.clone()).or_default();
-            let row = hop_row(to, *index);
-            *index += 1;
-            row
-        };
-        let row = if layer_gap(edge, &layer_of) >= 2 {
-            let row = channel.map(|base| base.for_lane(lane));
-            lane += 1;
-            row
-        } else {
-            None
-        };
-        route_edge(&mut canvas, from, to, edge.in_flight, row, exit_y, enter_y);
+    // Hops first, so a box border stays on top of every line that reaches it.
+    for edge in edges {
+        draw_edge(&mut canvas, &boxes, edge);
     }
-
-    for node in &sorted_nodes {
+    for node in nodes {
         if let Some(rect) = boxes.get(&node.name) {
-            draw_node(&mut canvas, node, rect);
-            canvas.node_boxes.push(rect.clone());
+            let (label, label_x) = draw_node(&mut canvas, node, rect);
+            canvas.node_boxes.push(NodeBox {
+                label,
+                label_x,
+                ..rect.clone()
+            });
         }
     }
     canvas.node_boxes.sort_by(|a, b| a.name.cmp(&b.name));
     canvas
 }
 
-fn width_for(nodes: &[LayoutNode], width: usize, columns: usize) -> usize {
-    let longest = nodes
-        .iter()
-        .flat_map(|node| {
-            let mut rows = vec![
-                node.title.len() + usize::from(node.aggregate.is_some()) + usize::from(node.busy),
-            ];
-            rows.extend(
-                node.sessions
-                    .iter()
-                    .take(4)
-                    .map(|s| s.task.len() + s.age.len() + 4),
-            );
-            rows
+/// The rect the map draws one role's box at inside `world`.
+pub fn role_box(nodes: &[LayoutNode], name: &str, world: (usize, usize)) -> Option<NodeBox> {
+    let slots = slots_of(nodes);
+    let node_w = box_width(nodes);
+    let node_h = NODE_H.min(world.1.max(4));
+    role_positions(&slots, world.0, world.1, node_w, node_h)
+        .into_iter()
+        .find(|(slot, _)| slot == name)
+        .map(|(_, place)| NodeBox {
+            name: name.to_string(),
+            x: place.x,
+            y: place.y,
+            w: node_w,
+            h: node_h,
+            ..NodeBox::default()
         })
-        .max()
-        .unwrap_or(8);
-    let by_text = (longest + 4).clamp(14, 28);
-    let by_space = if columns <= 1 {
-        width.clamp(14, 28)
+}
+
+/// One hop: a straight segment between the two boxes' facing borders, with an
+/// arrowhead on the target end.
+fn draw_edge(canvas: &mut Canvas, boxes: &BTreeMap<String, NodeBox>, edge: &LayoutEdge) {
+    let (Some(from), Some(to)) = (boxes.get(&edge.from), boxes.get(&edge.to)) else {
+        return;
+    };
+    let kind = if edge.in_flight {
+        CellKind::ActiveEdge
     } else {
-        ((width.saturating_sub((columns - 1) * 3)) / columns).clamp(14, 28)
+        CellKind::Edge
     };
-    by_text.min(by_space).min(width.max(1))
+    let start = anchor(from, center(to));
+    let end = anchor(to, center(from));
+    let mut path = Vec::new();
+    stroke(canvas, boxes, start, end, kind, &mut path);
+    if let Some(tip) = path.last().copied() {
+        put(canvas, tip.0, tip.1, '▶', kind);
+    }
+    canvas
+        .edge_paths
+        .insert((edge.from.clone(), edge.to.clone()), path);
 }
 
-fn break_cycles(edges: &[LayoutEdge], names: &BTreeSet<String>) -> Vec<LayoutEdge> {
-    let mut ordered = edges
-        .iter()
-        .filter(|edge| {
-            edge.from != edge.to && names.contains(&edge.from) && names.contains(&edge.to)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    ordered.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
-    let mut kept = Vec::new();
-    let mut adjacency: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for edge in ordered {
-        if reaches(&adjacency, &edge.to, &edge.from) {
+/// The middle of a box.
+fn center(rect: &NodeBox) -> (i64, i64) {
+    ((rect.x + rect.w / 2) as i64, (rect.y + rect.h / 2) as i64)
+}
+
+/// The border cell a line from the box's middle toward `toward` leaves by.
+fn anchor(rect: &NodeBox, toward: (i64, i64)) -> (usize, usize) {
+    let centre = center(rect);
+    let dx = (toward.0 - centre.0) as f64;
+    let dy = (toward.1 - centre.1) as f64;
+    let tx = if dx.abs() > f64::EPSILON {
+        (rect.w as f64 / 2.0) / dx.abs()
+    } else {
+        f64::INFINITY
+    };
+    let ty = if dy.abs() > f64::EPSILON {
+        (rect.h as f64 / 2.0) / dy.abs()
+    } else {
+        f64::INFINITY
+    };
+    let t = tx.min(ty);
+    let x = (centre.0 as f64 + dx * t).round() as i64;
+    let y = (centre.1 as f64 + dy * t).round() as i64;
+    (
+        x.clamp(rect.x as i64, (rect.x + rect.w - 1) as i64) as usize,
+        y.clamp(rect.y as i64, (rect.y + rect.h - 1) as i64) as usize,
+    )
+}
+
+/// Stroke a segment, skipping the inside of every box so no hop writes over a
+/// border or a title.
+fn stroke(
+    canvas: &mut Canvas,
+    boxes: &BTreeMap<String, NodeBox>,
+    start: (usize, usize),
+    end: (usize, usize),
+    kind: CellKind,
+    path: &mut Vec<(usize, usize)>,
+) {
+    let mut previous: Option<(usize, usize)> = None;
+    for cell in line(start, end) {
+        if inside_any_box(boxes, cell) {
+            previous = None;
             continue;
         }
-        adjacency
-            .entry(edge.from.clone())
-            .or_default()
-            .insert(edge.to.clone());
-        kept.push(edge);
-    }
-    kept
-}
-
-fn reaches(adjacency: &BTreeMap<String, BTreeSet<String>>, start: &str, target: &str) -> bool {
-    let mut seen = BTreeSet::new();
-    let mut queue = VecDeque::from([start.to_string()]);
-    while let Some(name) = queue.pop_front() {
-        if name == target {
-            return true;
-        }
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-        if let Some(next) = adjacency.get(&name) {
-            for child in next {
-                queue.push_back(child.clone());
-            }
-        }
-    }
-    false
-}
-
-fn assign_layers(nodes: &[LayoutNode], edges: &[LayoutEdge]) -> Vec<Vec<String>> {
-    let mut layer_by_name = nodes
-        .iter()
-        .map(|node| (node.name.clone(), 0usize))
-        .collect::<BTreeMap<_, _>>();
-    let mut incoming = nodes
-        .iter()
-        .map(|node| (node.name.clone(), 0usize))
-        .collect::<BTreeMap<_, _>>();
-    let mut outgoing: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for edge in edges {
-        *incoming.entry(edge.to.clone()).or_default() += 1;
-        outgoing
-            .entry(edge.from.clone())
-            .or_default()
-            .push(edge.to.clone());
-    }
-    for targets in outgoing.values_mut() {
-        targets.sort();
-    }
-    let mut queue = incoming
-        .iter()
-        .filter(|(_, count)| **count == 0)
-        .map(|(name, _)| name.clone())
-        .collect::<VecDeque<_>>();
-    let mut visited = BTreeSet::new();
-    while let Some(name) = queue.pop_front() {
-        visited.insert(name.clone());
-        let source_layer = layer_by_name.get(&name).copied().unwrap_or(0);
-        if let Some(children) = outgoing.get(&name) {
-            for child in children {
-                let target_layer = layer_by_name.entry(child.clone()).or_default();
-                *target_layer = (*target_layer).max(source_layer + 1);
-                if let Some(count) = incoming.get_mut(child) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        queue.push_back(child.clone());
-                    }
-                }
-            }
-        }
-    }
-    for node in nodes {
-        if !visited.contains(&node.name) {
-            layer_by_name.entry(node.name.clone()).or_insert(0);
-        }
-    }
-    let max_layer = layer_by_name.values().copied().max().unwrap_or(0);
-    let mut layers = vec![Vec::new(); max_layer + 1];
-    for (name, layer) in layer_by_name {
-        layers[layer].push(name);
-    }
-    for layer in &mut layers {
-        layer.sort();
-    }
-    layers
-}
-
-fn order_layers(layers: &mut [Vec<String>], edges: &[LayoutEdge]) {
-    let mut incoming: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for edge in edges {
-        incoming
-            .entry(edge.to.clone())
-            .or_default()
-            .push(edge.from.clone());
-    }
-    for source in incoming.values_mut() {
-        source.sort();
-    }
-    for idx in 1..layers.len() {
-        let prev_pos = layers[idx - 1]
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i as u32))
-            .collect::<BTreeMap<_, _>>();
-        layers[idx].sort_by(|a, b| {
-            let ac = centroid(a, &incoming, &prev_pos);
-            let bc = centroid(b, &incoming, &prev_pos);
-            ac.cmp(&bc).then_with(|| a.cmp(b))
-        });
+        let ch = stroke_char(previous.unwrap_or(start), cell);
+        put(canvas, cell.0, cell.1, ch, kind);
+        path.push(cell);
+        previous = Some(cell);
     }
 }
 
-fn centroid(
-    name: &str,
-    incoming: &BTreeMap<String, Vec<String>>,
-    prev_pos: &BTreeMap<String, u32>,
-) -> u32 {
-    let Some(sources) = incoming.get(name) else {
-        return u32::MAX;
-    };
-    let mut sum = 0;
-    let mut count = 0;
-    for source in sources {
-        if let Some(pos) = prev_pos.get(source) {
-            sum += *pos;
-            count += 1;
-        }
+/// The line char one step of `to - from` draws.
+fn stroke_char(from: (usize, usize), to: (usize, usize)) -> char {
+    let dx = to.0 as isize - from.0 as isize;
+    let dy = to.1 as isize - from.1 as isize;
+    match (dx.signum(), dy.signum()) {
+        (0, _) => '│',
+        (_, 0) => '─',
+        (1, -1) | (-1, 1) => '╱',
+        _ => '╲',
     }
-    sum.checked_div(count).unwrap_or(u32::MAX)
 }
 
-fn draw_node(canvas: &mut Canvas, node: &LayoutNode, rect: &NodeBox) {
+fn inside_any_box(boxes: &BTreeMap<String, NodeBox>, cell: (usize, usize)) -> bool {
+    boxes.values().any(|rect| {
+        cell.0 >= rect.x && cell.0 < rect.x + rect.w && cell.1 >= rect.y && cell.1 < rect.y + rect.h
+    })
+}
+
+/// Every cell on the segment, start and end included.
+fn line(start: (usize, usize), end: (usize, usize)) -> Vec<(usize, usize)> {
+    let (x1, y1) = (end.0 as isize, end.1 as isize);
+    let (mut x, mut y) = (start.0 as isize, start.1 as isize);
+    let (dx, dy) = ((x1 - x).abs(), -(y1 - y).abs());
+    let (sx, sy) = (if x < x1 { 1 } else { -1 }, if y < y1 { 1 } else { -1 });
+    let mut error = dx + dy;
+    let mut cells = Vec::new();
+    loop {
+        cells.push((x.max(0) as usize, y.max(0) as usize));
+        if x == x1 && y == y1 {
+            break;
+        }
+        let twice = 2 * error;
+        if twice >= dy {
+            error += dy;
+            x += sx;
+        }
+        if twice <= dx {
+            error += dx;
+            y += sy;
+        }
+    }
+    cells
+}
+
+/// Draw one role's box and report the title it wrote and where it starts, so
+/// the pane can reverse the cursor's label on top.
+fn draw_node(canvas: &mut Canvas, node: &LayoutNode, rect: &NodeBox) -> (String, usize) {
     let border = match node.presence {
         Presence::Online => CellKind::Online,
         Presence::Offline => CellKind::Offline,
         Presence::Draining => CellKind::Draining,
     };
     if rect.w < 2 || rect.h < 2 {
-        return;
+        return (String::new(), rect.x);
     }
     for y in rect.y + 1..rect.y + rect.h - 1 {
         for x in rect.x + 1..rect.x + rect.w - 1 {
@@ -463,10 +487,11 @@ fn draw_node(canvas: &mut Canvas, node: &LayoutNode, rect: &NodeBox) {
     title.push_str(&node.title);
     let available = rect.w.saturating_sub(4);
     let title = truncate(&title, available.saturating_sub(usize::from(node.busy)));
+    let label_x = rect.x + 2;
     draw_text(
         canvas,
         rect.y,
-        rect.x + 2,
+        label_x,
         &title,
         if node.aggregate.is_some() {
             CellKind::Aggregate
@@ -475,7 +500,7 @@ fn draw_node(canvas: &mut Canvas, node: &LayoutNode, rect: &NodeBox) {
         },
     );
     if node.busy {
-        let star_x = rect.x + 2 + char_len(&title);
+        let star_x = label_x + char_len(&title);
         if star_x < rect.x + rect.w - 1 {
             put(canvas, star_x, rect.y, '*', CellKind::Busy);
         }
@@ -492,213 +517,16 @@ fn draw_node(canvas: &mut Canvas, node: &LayoutNode, rect: &NodeBox) {
         draw_text(
             canvas,
             rect.y + 1 + idx,
-            rect.x + 2,
+            label_x,
             &truncate(&text, rect.w.saturating_sub(4)),
             CellKind::Plain,
         );
     }
     if node.sessions.len() > 4 && rect.h > 6 {
         let text = format!("+{}", node.sessions.len() - 4);
-        draw_text(canvas, rect.y + 5, rect.x + 2, &text, CellKind::Plain);
+        draw_text(canvas, rect.y + 5, label_x, &text, CellKind::Plain);
     }
-}
-
-/// The rows reserved for hops that cross a layer.
-///
-/// Lanes grow away from the box band, so `first` is the row nearest it and
-/// `step` walks outward.
-#[derive(Clone, Copy, Debug)]
-struct ChannelRows {
-    first: usize,
-    step: isize,
-}
-
-impl ChannelRows {
-    fn for_lane(self, lane: usize) -> usize {
-        (self.first as isize + self.step * lane as isize).max(0) as usize
-    }
-}
-
-fn channel_rows(
-    boxes: &BTreeMap<String, NodeBox>,
-    lanes: usize,
-    height: usize,
-) -> Option<ChannelRows> {
-    if lanes == 0 {
-        return None;
-    }
-    let top = boxes.values().map(|rect| rect.y).min()?;
-    let bottom = boxes.values().map(|rect| rect.y + rect.h).max()?;
-    if top >= lanes {
-        Some(ChannelRows {
-            first: top - 1,
-            step: -1,
-        })
-    } else if height.saturating_sub(bottom) >= lanes {
-        Some(ChannelRows {
-            first: bottom,
-            step: 1,
-        })
-    } else {
-        None
-    }
-}
-
-/// One interior row of a box, so a node's hops never share an exit or entry
-/// cell; a node with more hops than rows wraps, which keeps the pass total.
-fn hop_row(rect: &NodeBox, index: usize) -> usize {
-    let rows = rect.h.saturating_sub(2).max(1);
-    rect.y + 1 + index % rows
-}
-
-fn edge_key(
-    edge: &LayoutEdge,
-    boxes: &BTreeMap<String, NodeBox>,
-) -> (usize, usize, usize, usize, String, String) {
-    let from = boxes.get(&edge.from);
-    let to = boxes.get(&edge.to);
-    (
-        from.map(|rect| rect.x).unwrap_or(0),
-        from.map(|rect| rect.y).unwrap_or(0),
-        to.map(|rect| rect.x).unwrap_or(0),
-        to.map(|rect| rect.y).unwrap_or(0),
-        edge.from.clone(),
-        edge.to.clone(),
-    )
-}
-
-fn layer_gap(edge: &LayoutEdge, layer_of: &BTreeMap<String, usize>) -> usize {
-    let from = layer_of.get(&edge.from).copied().unwrap_or(0);
-    let to = layer_of.get(&edge.to).copied().unwrap_or(0);
-    to.saturating_sub(from)
-}
-
-/// The corner of a cell the path enters from the left and leaves vertically
-/// upward; the other three shapes follow from the same two directions.
-fn elbow(from_left: bool, up: bool) -> char {
-    match (from_left, up) {
-        (true, true) => '╝',
-        (true, false) => '╗',
-        (false, true) => '╚',
-        (false, false) => '╔',
-    }
-}
-
-fn route_edge(
-    canvas: &mut Canvas,
-    from: &NodeBox,
-    to: &NodeBox,
-    active: bool,
-    channel: Option<usize>,
-    fy: usize,
-    ty: usize,
-) {
-    let kind = if active {
-        CellKind::ActiveEdge
-    } else {
-        CellKind::Edge
-    };
-    let x1 = from.x + from.w;
-    let x2 = to.x.saturating_sub(1);
-    if let Some(row) = channel {
-        if x1 <= x2 && row < canvas.height {
-            put(canvas, x1, fy, elbow(true, row < fy), kind);
-            vline(
-                canvas,
-                x1,
-                fy.min(row) + 1,
-                fy.max(row).saturating_sub(1),
-                kind,
-            );
-            put(canvas, x1, row, elbow(false, fy < row), kind);
-            hline(canvas, x1, x2, row, kind);
-            put(canvas, x2, row, elbow(true, ty < row), kind);
-            vline(
-                canvas,
-                x2,
-                row.min(ty) + 1,
-                row.max(ty).saturating_sub(1),
-                kind,
-            );
-            put(canvas, x2, ty, '▶', kind);
-            return;
-        }
-    }
-    let fx = from.x + from.w.saturating_sub(1);
-    let tx = to.x;
-    if tx > fx + 1 {
-        let mid_x = (fx + tx) / 2;
-        hline(canvas, fx + 1, mid_x, fy, kind);
-        if fy != ty {
-            put(canvas, mid_x, fy, if ty > fy { '╗' } else { '╝' }, kind);
-            vline(
-                canvas,
-                mid_x,
-                fy.min(ty) + 1,
-                fy.max(ty).saturating_sub(1),
-                kind,
-            );
-            put(canvas, mid_x, ty, if ty > fy { '╚' } else { '╔' }, kind);
-        }
-        if mid_x + 1 < tx {
-            hline(canvas, mid_x + 1, tx.saturating_sub(1), ty, kind);
-        }
-        put(canvas, tx.saturating_sub(1), ty, '▶', kind);
-    } else {
-        let right = from.x.max(to.x) + from.w.min(canvas.width.saturating_sub(1));
-        let detour = right.min(canvas.width.saturating_sub(2));
-        hline(canvas, fx + 1, detour, fy, kind);
-        if fy != ty {
-            put(canvas, detour, fy, if ty > fy { '╗' } else { '╝' }, kind);
-            vline(
-                canvas,
-                detour,
-                fy.min(ty) + 1,
-                fy.max(ty).saturating_sub(1),
-                kind,
-            );
-            put(canvas, detour, ty, if ty > fy { '╚' } else { '╔' }, kind);
-        }
-        if tx > 0 && tx.saturating_sub(1) <= detour {
-            hline(
-                canvas,
-                tx.saturating_sub(1),
-                detour.saturating_sub(1),
-                ty,
-                kind,
-            );
-            put(canvas, tx.saturating_sub(1), ty, '▶', kind);
-        }
-    }
-}
-
-fn hline(canvas: &mut Canvas, x1: usize, x2: usize, y: usize, kind: CellKind) {
-    if y >= canvas.height || x1 > x2 {
-        return;
-    }
-    for x in x1..=x2.min(canvas.width.saturating_sub(1)) {
-        let ch = match canvas.cells[y][x].ch {
-            '║' => '╣',
-            '╠' | '╣' => '╬',
-            '╔' | '╚' | '╗' | '╝' | '▶' => canvas.cells[y][x].ch,
-            _ => '═',
-        };
-        put(canvas, x, y, ch, kind);
-    }
-}
-
-fn vline(canvas: &mut Canvas, x: usize, y1: usize, y2: usize, kind: CellKind) {
-    if x >= canvas.width || y1 > y2 {
-        return;
-    }
-    for y in y1..=y2.min(canvas.height.saturating_sub(1)) {
-        let ch = match canvas.cells[y][x].ch {
-            '═' => '╬',
-            '╔' | '╚' | '╗' | '╝' | '▶' => canvas.cells[y][x].ch,
-            _ => '║',
-        };
-        put(canvas, x, y, ch, kind);
-    }
+    (title.into_owned(), label_x)
 }
 
 fn draw_text(canvas: &mut Canvas, y: usize, x: usize, text: &str, kind: CellKind) {
@@ -717,16 +545,19 @@ fn short(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
-fn truncate(value: &str, max: usize) -> String {
+fn truncate(value: &str, max: usize) -> std::borrow::Cow<'_, str> {
     if char_len(value) <= max {
-        return value.to_string();
+        return std::borrow::Cow::Borrowed(value);
     }
     if max == 0 {
-        String::new()
+        std::borrow::Cow::Borrowed("")
     } else if max == 1 {
-        "…".to_string()
+        std::borrow::Cow::Borrowed("…")
     } else {
-        format!("{}…", value.chars().take(max - 1).collect::<String>())
+        std::borrow::Cow::Owned(format!(
+            "{}…",
+            value.chars().take(max - 1).collect::<String>()
+        ))
     }
 }
 
@@ -739,68 +570,17 @@ mod tests {
     use super::*;
 
     fn node(name: &str) -> LayoutNode {
-        LayoutNode {
-            name: name.to_string(),
-            title: name.to_string(),
-            presence: Presence::Online,
-            sessions: Vec::new(),
-            aggregate: None,
-            busy: false,
+        let mut node = LayoutNode::new(name);
+        node.presence = Presence::Online;
+        node
+    }
+
+    fn hop(from: &str, to: &str, in_flight: bool) -> LayoutEdge {
+        LayoutEdge {
+            from: from.into(),
+            to: to.into(),
+            in_flight,
         }
-    }
-
-    #[test]
-    fn breaks_cycles_and_layers_left_to_right() {
-        let nodes = vec![node("a"), node("b"), node("c")];
-        let edges = vec![
-            LayoutEdge {
-                from: "a".into(),
-                to: "b".into(),
-                in_flight: false,
-            },
-            LayoutEdge {
-                from: "b".into(),
-                to: "c".into(),
-                in_flight: false,
-            },
-            LayoutEdge {
-                from: "c".into(),
-                to: "a".into(),
-                in_flight: false,
-            },
-        ];
-        let canvas = layout(&nodes, &edges, 80, 20);
-        let a = canvas.node_boxes.iter().find(|b| b.name == "a").unwrap();
-        let b = canvas.node_boxes.iter().find(|b| b.name == "b").unwrap();
-        let c = canvas.node_boxes.iter().find(|b| b.name == "c").unwrap();
-        assert!(a.x < b.x && b.x < c.x, "{a:?} {b:?} {c:?}");
-        assert_eq!(canvas.text().matches('▶').count(), 2);
-    }
-
-    #[test]
-    fn deterministic_order_and_barycenter() {
-        let nodes = vec![node("a"), node("b"), node("c"), node("d")];
-        let edges = vec![
-            LayoutEdge {
-                from: "a".into(),
-                to: "d".into(),
-                in_flight: false,
-            },
-            LayoutEdge {
-                from: "b".into(),
-                to: "c".into(),
-                in_flight: false,
-            },
-        ];
-        let first = layout(&nodes, &edges, 90, 24).text();
-        let second = layout(&nodes, &edges, 90, 24).text();
-        assert_eq!(first, second);
-        let c = first.find("╭─c").unwrap();
-        let d = first.find("╭─d").unwrap();
-        assert!(
-            d < c,
-            "d follows source a and sorts before c by centroid\n{first}"
-        );
     }
 
     #[test]
@@ -816,75 +596,114 @@ mod tests {
         let canvas = layout(&[agg], &[], 40, 10);
         let text = canvas.text();
         assert!(text.contains("⬡supervisor*"), "{text}");
-        assert!(text.contains("abcdefg"));
-        assert!(text.contains('◐'));
+        assert!(text.contains("abcdefg"), "{text}");
+        assert!(text.contains('◐'), "{text}");
     }
 
     #[test]
-    fn active_edges_are_marked_on_cells() {
+    fn the_ring_draws_every_box_without_overlap() {
+        let names = ["a", "b", "c", "d", "e", "_supervisor"];
+        let nodes: Vec<LayoutNode> = names.iter().map(|name| node(name)).collect();
+        let world = world_size(&nodes);
+        let canvas = layout(&nodes, &[], world.0 as u16, world.1 as u16);
+        assert_eq!(canvas.node_boxes.len(), names.len(), "{world:?}");
+        for (index, rect) in canvas.node_boxes.iter().enumerate() {
+            assert!(
+                rect.x + rect.w <= world.0 && rect.y + rect.h <= world.1,
+                "{rect:?} leaves {world:?}"
+            );
+            for other in &canvas.node_boxes[index + 1..] {
+                assert!(
+                    rect.x + rect.w <= other.x
+                        || other.x + other.w <= rect.x
+                        || rect.y + rect.h <= other.y
+                        || other.y + other.h <= rect.y,
+                    "{rect:?} sits on {other:?}"
+                );
+            }
+        }
+        let text = canvas.text();
+        for name in names {
+            assert!(text.contains(&format!("╭─{name}")), "{text}");
+        }
+        let rows: std::collections::BTreeSet<usize> = canvas
+            .node_boxes
+            .iter()
+            .filter(|rect| rect.name != "_supervisor")
+            .map(|rect| rect.y)
+            .collect();
+        assert!(rows.len() >= 3, "the ring spreads over rows\n{text}");
+    }
+
+    #[test]
+    fn an_in_flight_hop_is_stroked_active_and_points_at_its_target() {
         let nodes = vec![node("a"), node("b")];
-        let edges = vec![LayoutEdge {
-            from: "a".into(),
-            to: "b".into(),
-            in_flight: true,
-        }];
-        let canvas = layout(&nodes, &edges, 60, 10);
+        let edges = vec![hop("a", "b", true)];
+        let world = world_size(&nodes);
+        let canvas = layout(&nodes, &edges, world.0 as u16, world.1 as u16);
+        let text = canvas.text();
         assert!(
             canvas
                 .cells
                 .iter()
                 .flatten()
-                .any(|cell| cell.kind == CellKind::ActiveEdge && cell.ch == '═')
+                .any(|cell| cell.kind == CellKind::ActiveEdge),
+            "{text}"
         );
-        assert!(canvas.text().contains('▶'));
+        assert!(text.contains('▶'), "{text}");
+        assert!(
+            canvas
+                .edge_paths
+                .contains_key(&("a".to_string(), "b".to_string())),
+            "{text}"
+        );
     }
 
     #[test]
-    fn a_hop_across_a_layer_takes_the_channel_above_the_band() {
-        let nodes = vec![node("a"), node("b"), node("c")];
-        let edges = vec![
-            LayoutEdge {
-                from: "a".into(),
-                to: "b".into(),
-                in_flight: false,
-            },
-            LayoutEdge {
-                from: "b".into(),
-                to: "c".into(),
-                in_flight: false,
-            },
-            LayoutEdge {
-                from: "a".into(),
-                to: "c".into(),
-                in_flight: true,
-            },
-        ];
-        let canvas = layout(&nodes, &edges, 96, 24);
-        let b = canvas
-            .node_boxes
-            .iter()
-            .find(|rect| rect.name == "b")
-            .expect("the middle box");
-        for y in b.y + 1..b.y + b.h - 1 {
-            for x in b.x + 1..b.x + b.w - 1 {
-                assert_eq!(
-                    canvas.cells[y][x].ch,
-                    ' ',
-                    "the crossing hop leaves the middle box clear\n{}",
+    fn a_hop_never_enters_a_box() {
+        let nodes = vec![node("a"), node("b")];
+        let edges = vec![hop("a", "b", true)];
+        let world = world_size(&nodes);
+        let canvas = layout(&nodes, &edges, world.0 as u16, world.1 as u16);
+        for rect in &canvas.node_boxes {
+            for cell in canvas.edge_paths.values().flatten() {
+                assert!(
+                    cell.0 < rect.x
+                        || cell.0 >= rect.x + rect.w
+                        || cell.1 < rect.y
+                        || cell.1 >= rect.y + rect.h,
+                    "a hop enters {rect:?} at {cell:?}\n{}",
                     canvas.text()
                 );
             }
         }
-        let top = canvas.node_boxes.iter().map(|rect| rect.y).min().unwrap();
-        assert!(
-            canvas.cells[..top]
-                .iter()
-                .flatten()
-                .any(|cell| cell.kind == CellKind::ActiveEdge && cell.ch == '═'),
-            "the crossing hop runs above the band and keeps its highlight\n{}",
-            canvas.text()
+    }
+
+    #[test]
+    fn the_same_input_draws_the_same_map() {
+        let nodes = vec![node("a"), node("b"), node("c")];
+        let edges = vec![hop("a", "b", false), hop("b", "c", false)];
+        let world = world_size(&nodes);
+        let first = layout(&nodes, &edges, world.0 as u16, world.1 as u16);
+        let second = layout(&nodes, &edges, world.0 as u16, world.1 as u16);
+        assert_eq!(first.text(), second.text());
+        assert_eq!(first.node_boxes, second.node_boxes);
+    }
+
+    #[test]
+    fn role_box_finds_the_corner_the_map_drew() {
+        let nodes = vec![node("a"), node("b")];
+        let world = world_size(&nodes);
+        let canvas = layout(&nodes, &[], world.0 as u16, world.1 as u16);
+        let drawn = canvas
+            .node_boxes
+            .iter()
+            .find(|rect| rect.name == "b")
+            .expect("the box");
+        let placed = role_box(&nodes, "b", world).expect("the same box");
+        assert_eq!(
+            (placed.x, placed.y, placed.w, placed.h),
+            (drawn.x, drawn.y, drawn.w, drawn.h)
         );
-        let text = canvas.text();
-        assert_eq!(text.matches('▶').count(), 3, "{text}");
     }
 }
