@@ -1,11 +1,17 @@
 // onlyne-sessions — Orca plugin worker (pluginApi v1, EXPERIMENTAL).
 //
-// Role session manager for Onlyne: it joins, read-only,
-//   Orca worktrees  →  <workspace>/.onlyne/cache/orca-tabs.jsonl  →  live tabs
-//                   →  the workspace-local onlyne client socket (session state)
-// and exposes the result as a board (notifications + plugin log pane + command
-// results) plus four commands: push the board, rescan, focus a tab, and read
-// the agent context of a tab.
+// Read-only supervisor board for Onlyne, built from two independent axes:
+//   tabs  — every Orca tab, from one flat `orca terminal list --json` call
+//   roots — each configured onlyne server root's admin surface
+//           (`<root>/.onlyne/run/s`, queried through `sessions` + `roles`)
+// joined by the weak `onlyne:<task_id>` title convention, and exposed as a
+// board (notifications + plugin log pane + command results) plus four commands:
+// push the board, rescan, focus a tab, and read the agent context of a tab.
+//
+// Orca is the supervisor's management port only: the backend no longer
+// registers one worktree per role, so every session tab lands flat in the host
+// worktree's list, and session identity lives in the adapter/pi plugin
+// protocol — never in this board.
 //
 // Boundaries this plugin deliberately keeps:
 //   * it never creates, closes, or renames a tab — lifecycle belongs to the
@@ -18,8 +24,7 @@
 import { createRunner, resolveBinaries } from "./src/runner.mjs";
 import { createOrcaCli } from "./src/orca-cli.mjs";
 import { createOnlyneCli } from "./src/onlyne-cli.mjs";
-import { readMapping } from "./src/mapping.mjs";
-import { collectBoard } from "./src/discover.mjs";
+import { collectBoard } from "./src/board.mjs";
 import { createBoardState } from "./src/board-state.mjs";
 import { createCommands } from "./src/commands.mjs";
 
@@ -68,10 +73,10 @@ export function createPlugin({
 
   const orcaCli = createOrcaCli({ runner, binary: binaries.orcaBin });
   const onlyneCli = createOnlyneCli({ runner, binary: binaries.onlyneBin });
+  const serverRoots = binaries.serverRoots ?? [];
 
   const boardState = createBoardState({
-    collect: (options) =>
-      collectBoard({ orca: orcaCli, onlyne: onlyneCli, readMapping, ...options }),
+    collect: (options) => collectBoard({ orca: orcaCli, onlyne: onlyneCli, serverRoots, ...options }),
     notify,
     log,
   });
@@ -99,7 +104,6 @@ export function createPlugin({
     });
     orca.events.on("worktree.removed", (payload) => {
       log(`worktree removed: ${payload?.path ?? payload?.worktreeId ?? "unknown"}`);
-      boardState.markRemoved(payload?.path);
       boardState.scheduleRefresh({ reason: "worktree.removed" });
     });
     orca.events.on("agent.status.changed", (payload) => {
@@ -113,6 +117,7 @@ export function createPlugin({
   boardState.start();
   log(
     `onlyne-sessions active · orca=${binaries.orcaBin} · onlyne=${binaries.onlyneBin}` +
+      ` · roots=${serverRoots.length}` +
       (binaries.configLoaded ? ` · config=${binaries.configPath}` : "")
   );
   if (binaries.configError) log(`config ignored: ${binaries.configError}`);

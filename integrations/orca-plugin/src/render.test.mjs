@@ -1,96 +1,126 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { collectBoard } from "./board.mjs";
 import {
   BOARD_TEXT_LIMIT,
   EMPTY_BOARD_NOTE,
   formatAgentContext,
   formatBoard,
   relativeTime,
+  rowLine,
   shortPaneKey,
   summaryLine,
 } from "./render.mjs";
+import { fakeOnlyne, fakeOrca, roleRow, sessionRow, tabRow } from "./testing.mjs";
 
+const ROOT_A = "/srv/onlyne-a";
+const ROOT_B = "/srv/onlyne-b";
 const NOW = Date.parse("2026-09-11T00:10:00Z");
 
-function row(overrides = {}) {
-  return {
-    role: "planner",
-    taskId: "task-alpha",
-    paneKey: "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560",
-    handle: "term_x",
-    selector: "path:/tmp/planner",
-    mappingState: "spawned",
-    removed: false,
-    live: true,
-    terminal: { connected: true, lastOutputAt: NOW - 12_000 },
-    session: { lifecycle: "working", agent: "running" },
+function idleSession(overrides = {}) {
+  return sessionRow({
+    task_id: "task-beta",
+    role: "builder",
+    session_id: "sess-beta",
+    public_lifecycle: "idle",
+    projection: { lifecycle: "idle", agent: "gone" },
     ...overrides,
-  };
+  });
 }
 
-function board(rows) {
-  const groups = new Map();
-  for (const item of rows) {
-    const bucket = groups.get(item.role) ?? { role: item.role, rows: [] };
-    bucket.rows.push(item);
-    groups.set(item.role, bucket);
-  }
-  const list = [...groups.values()].map((group) => ({
-    ...group,
-    liveTabs: group.rows.filter((item) => item.live).length,
-    removed: group.rows.every((item) => item.removed),
-  }));
-  return {
-    scannedAt: NOW,
-    rows,
-    groups: list,
-    summary: {
-      roles: list.length,
-      liveTabs: rows.filter((item) => item.live).length,
-      sessionsWorking: rows.filter((item) => item.session?.lifecycle === "working").length,
-      removed: rows.filter((item) => item.removed).length,
-      rows: rows.length,
-    },
-  };
-}
-
-test("the empty board states the wait-for-supervisor case in one line", () => {
-  const text = formatBoard(board([]), { now: NOW });
+test("the empty board states what is missing in one line", async () => {
+  const board = await collectBoard({ orca: fakeOrca(), onlyne: fakeOnlyne(), serverRoots: [] });
+  const text = formatBoard(board, { now: NOW });
   assert.equal(text.split("\n").length, 2);
-  assert.match(text, /0 roles · 0 live tabs · 0 working/);
+  assert.match(text, /0 roots · 0 roles · 0 tabs \(0 live\) · 0 sessions \(0 working\)/);
   assert.ok(text.includes(EMPTY_BOARD_NOTE));
 });
 
-test("a populated board groups rows by role and marks liveness", () => {
-  const text = formatBoard(
-    board([
-      row(),
-      row({
-        taskId: "task-beta",
-        paneKey: "abcdef01-2345-6789-abcd-ef0123456789:12345678-9999-9999-9999-999999999999",
-        live: false,
-        terminal: null,
-        session: null,
-        mappingState: "spawned",
-      }),
-      row({ role: "builder", taskId: "task-gamma", removed: true, live: false, terminal: null }),
-    ]),
-    { now: NOW }
-  );
-  const lines = text.split("\n");
-  assert.match(lines[0], /2 roles · 1 live tabs · 2 working/);
-  assert.ok(lines.some((line) => line.startsWith("builder")));
-  assert.ok(lines.some((line) => line.includes("● task-alp") && line.includes("working/running") && line.includes("12s")));
-  assert.ok(lines.some((line) => line.includes("○ task-bet")));
-  assert.ok(lines.some((line) => line.includes("✕ task-gam") && line.includes("worktree 已移除")));
+test("a populated board renders the root, its role sections, and the stray tabs", async () => {
+  const board = await collectBoard({
+    orca: fakeOrca({
+      tabs: [
+        tabRow({ lastOutputAt: NOW - 12_000 }),
+        tabRow({
+          handle: "term_22222222-2222-4222-8222-222222222222",
+          tabId: "470e41ba-86b3-43b4-86c3-46c634619a07",
+          leafId: "31f6d4b1-7192-4e59-b90b-2e8962d72353",
+          title: "Pi ready",
+          worktreeId: "53e59790-a6b1-4f50-b424-d5c19b36428a",
+          lastOutputAt: NOW - 5_000,
+        }),
+        tabRow({
+          handle: "term_3",
+          tabId: "tab-3",
+          leafId: "leaf-3",
+          title: "zsh",
+          connected: false,
+          lastOutputAt: NOW - 3 * 60_000,
+        }),
+      ],
+    }),
+    onlyne: fakeOnlyne({
+      sessions: { [ROOT_A]: [sessionRow(), idleSession()] },
+      roles: { [ROOT_A]: [roleRow(), roleRow({ name: "builder", state: "draining" })] },
+    }),
+    serverRoots: [ROOT_A],
+  });
+
+  const lines = formatBoard(board, { now: NOW }).split("\n");
+  assert.match(lines[0], /1 roots · 2 roles · 3 tabs \(2 live\) · 2 sessions \(1 working\)/);
+  assert.equal(lines[1], "/srv/onlyne-a  (2 roles · 2 sessions · 1 working)");
+  assert.equal(lines[2], "  builder  (draining · 1 tasks · 0 live)");
+  assert.equal(lines[3], "    ○ task-bet · idle/gone · 无 tab · 9m · —");
+  assert.equal(lines[4], "  planner  (online · 1 tasks · 1 live)");
+  assert.equal(lines[5], "    ● task-alp · working/running · 12s · 45e603f7:b6d067b6");
+  assert.equal(lines[6], "未 join 的 tab (2)");
+  assert.equal(lines[7], "  ● tab · title=Pi ready · 5s · 470e41ba:31f6d4b1 · wt 53e59790");
+  assert.equal(lines[8], "  ○ tab · title=zsh · 3m · tab-3:leaf-3 · wt 2ea2fe23");
   assert.ok(lines.every((line) => line.length <= BOARD_TEXT_LIMIT));
 });
 
-test("a long board is truncated with a remainder marker instead of overflowing", () => {
-  const rows = Array.from({ length: 60 }, (_, index) =>
-    row({ taskId: `task-${String(index).padStart(3, "0")}`, paneKey: `pane-${index}` })
+test("an unreachable root renders its own failure without blanking the board", async () => {
+  const board = await collectBoard({
+    orca: fakeOrca({ tabs: [tabRow({ lastOutputAt: NOW - 12_000 })] }),
+    onlyne: fakeOnlyne({
+      sessions: { [ROOT_A]: [sessionRow()] },
+      roles: { [ROOT_A]: [roleRow()] },
+      failures: {
+        [ROOT_B]: { ok: false, code: "cli_error", message: "onlyne: no onlyne socket found" },
+      },
+    }),
+    serverRoots: [ROOT_A, ROOT_B],
+  });
+
+  const text = formatBoard(board, { now: NOW });
+  assert.match(text, /● task-alp/);
+  assert.match(text, /^\/srv\/onlyne-b {2}\(0 roles · 0 sessions · 0 working\)$/m);
+  assert.match(text, /^ {2}! sessions: cli_error — onlyne: no onlyne socket found$/m);
+  assert.match(text, /^ {2}! roles: cli_error — onlyne: no onlyne socket found$/m);
+});
+
+test("a failed tab axis renders its own single error line", async () => {
+  const board = await collectBoard({
+    orca: fakeOrca({ tabFailure: { ok: false, code: "missing_binary", message: "binary not found on PATH" } }),
+    onlyne: fakeOnlyne({ sessions: { [ROOT_A]: [sessionRow()] } }),
+    serverRoots: [ROOT_A],
+  });
+
+  const lines = formatBoard(board, { now: NOW }).split("\n");
+  assert.equal(lines[1], "! tabs: missing_binary — binary not found on PATH");
+  assert.match(lines[2], /^\/srv\/onlyne-a {2}\(1 roles · 1 sessions · 1 working\)$/);
+});
+
+test("a long board is truncated with a remainder marker instead of overflowing", async () => {
+  const sessions = Array.from({ length: 60 }, (_, index) =>
+    sessionRow({ task_id: `task-${String(index).padStart(3, "0")}` })
   );
-  const text = formatBoard(board(rows), { now: NOW });
+  const board = await collectBoard({
+    orca: fakeOrca(),
+    onlyne: fakeOnlyne({ sessions: { [ROOT_A]: sessions } }),
+    serverRoots: [ROOT_A],
+  });
+  const text = formatBoard(board, { now: NOW });
   assert.ok(text.length <= BOARD_TEXT_LIMIT);
   assert.match(text, /…\(\+\d+ 行\)/);
 });
@@ -110,16 +140,44 @@ test("pane keys render in a short, stable form", () => {
   assert.equal(shortPaneKey(null), "—");
 });
 
+test("a task row without a tab keeps the state column and dashes the pane", () => {
+  const line = rowLine(
+    {
+      kind: "task",
+      taskId: "task-alpha",
+      joined: false,
+      live: false,
+      paneKey: null,
+      lastOutputAt: null,
+      session: { lifecycle: "idle", agent: "gone", updatedAt: "2026-09-11T00:05:00Z" },
+    },
+    NOW
+  );
+  assert.equal(line, "○ task-alp · idle/gone · 无 tab · 5m · —");
+});
+
 test("summaryLine is a single compact line", () => {
   assert.equal(
-    summaryLine({ summary: { roles: 2, liveTabs: 3, sessionsWorking: 1 } }),
-    "Onlyne sessions · 2 roles · 3 live tabs · 1 working"
+    summaryLine({ summary: { roots: 2, roles: 3, tabs: 9, liveTabs: 4, sessions: 7, sessionsWorking: 1 } }),
+    "Onlyne sessions · 2 roots · 3 roles · 9 tabs (4 live) · 7 sessions (1 working)"
   );
 });
 
-test("agent context text carries the three addressing strings", () => {
-  const text = formatAgentContext(row());
-  assert.match(text, /pane_key: 45e603f7/);
-  assert.match(text, /handle: term_x/);
-  assert.match(text, /orca selector: path:\/tmp\/planner/);
+test("agent context carries the triple and omits what a row does not have", () => {
+  const joined = formatAgentContext({
+    taskId: "task-alpha",
+    paneKey: "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560",
+    handle: "term_x",
+    selector: "2ea2fe23-829c-4a8f-bcac-4129eb78a164",
+  });
+  assert.deepEqual(joined.split("\n"), [
+    "task: task-alpha",
+    "pane_key: 45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560",
+    "handle: term_x",
+    "orca selector: 2ea2fe23-829c-4a8f-bcac-4129eb78a164",
+  ]);
+  assert.equal(
+    formatAgentContext({ taskId: null, paneKey: null, handle: "term_y", selector: null }),
+    "pane_key: —\nhandle: term_y"
+  );
 });

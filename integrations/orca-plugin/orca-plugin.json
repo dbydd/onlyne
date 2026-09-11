@@ -4,7 +4,7 @@
   "publisher": "onlyne",
   "name": "Onlyne Sessions",
   "version": "0.1.0",
-  "description": "只读 role 会话管理器：把 Orca worktree、onlyne tab 映射文件、活体 tab 与会话状态合成一块看板，并提供跳转/复制命令。Read-only role session manager for Onlyne.",
+  "description": "只读 supervisor 看板：把平铺的 Orca tab 列表与每个 server root 的 onlyne sessions/roles 合成一块看板，并提供跳转/复制命令。Read-only supervisor board for Onlyne.",
   "engines": {
     "orca": ">=1.4.0"
   },
@@ -22,15 +22,15 @@
     "commands": [
       {
         "id": "onlyne-sessions.refresh",
-        "title": "Onlyne Sessions: 重新扫描 role 会话"
+        "title": "Onlyne Sessions: 重新扫描（tab 轴 + server roots）"
       },
       {
         "id": "onlyne-sessions.board",
-        "title": "Onlyne Sessions: 推送映射看板"
+        "title": "Onlyne Sessions: 推送看板"
       },
       {
         "id": "onlyne-sessions.focus",
-        "title": "Onlyne Sessions: 跳到 role tab（args.task 前缀，唯一命中才切）"
+        "title": "Onlyne Sessions: 跳到 tab（args.task 前缀，唯一命中才切）"
       },
       {
         "id": "onlyne-sessions.copy-agent-context",

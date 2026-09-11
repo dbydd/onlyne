@@ -2,37 +2,49 @@
 // command (`plugins.invokeCommand` can), so every handler accepts an optional
 // `args.task` prefix and otherwise falls back to the unique-match rule.
 
-import { NOTIFICATION_BODY_LIMIT, formatAgentContext, formatBoard } from "./render.mjs";
+import { NOTIFICATION_BODY_LIMIT, formatAgentContext, formatBoard, shortPaneKey } from "./render.mjs";
 
 export const AMBIGUOUS_EXAMPLE_LIMIT = 5;
 
-/** @returns {{status: 'unique'|'none'|'ambiguous', matches: Array, prefix: string}} */
-export function matchRowsByTaskPrefix(rows, prefix) {
+/**
+ * Match rows on the two prefixes an operator can copy off the board: a task id,
+ * or a pane prefix `<tabId>:<leafId>` (the shortened `tab8:leaf8` form the board
+ * prints is accepted too). Without a prefix the pool narrows to live rows, so
+ * the palette's argument-less invocation acts only when exactly one qualifies.
+ *
+ * @returns {{status: 'unique'|'none'|'ambiguous', matches: Array, prefix: string}}
+ */
+export function matchRowsByPrefix(rows, prefix) {
   const needle = String(prefix ?? "").trim().toLowerCase();
   const pool = rows.filter((row) => !row.removed);
   if (!needle) {
     const live = pool.filter((row) => row.live);
-    return {
-      status: live.length === 1 ? "unique" : live.length === 0 ? "none" : "ambiguous",
-      matches: live,
-      prefix: "",
-    };
+    if (!live.length) return { status: "none", matches: [], prefix: needle };
+    return live.length === 1
+      ? { status: "unique", matches: live, prefix: needle }
+      : { status: "ambiguous", matches: live, prefix: needle };
   }
-  const matches = pool.filter(
-    (row) => typeof row.taskId === "string" && row.taskId.toLowerCase().startsWith(needle)
-  );
-  return {
-    status: matches.length === 1 ? "unique" : matches.length === 0 ? "none" : "ambiguous",
-    matches,
-    prefix: needle,
-  };
+  const matches = pool.filter((row) => matchesPrefix(row, needle));
+  if (!matches.length) return { status: "none", matches, prefix: needle };
+  return matches.length === 1
+    ? { status: "unique", matches, prefix: needle }
+    : { status: "ambiguous", matches, prefix: needle };
+}
+
+function matchesPrefix(row, needle) {
+  if (typeof row.taskId === "string" && row.taskId.toLowerCase().startsWith(needle)) return true;
+  if (typeof row.paneKey !== "string" || !row.paneKey) return false;
+  if (row.paneKey.toLowerCase().startsWith(needle)) return true;
+  return shortPaneKey(row.paneKey).toLowerCase().startsWith(needle);
 }
 
 function candidateList(matches, limit = AMBIGUOUS_EXAMPLE_LIMIT) {
   const lines = matches.slice(0, limit).map((row) => {
-    const task = row.taskId ? row.taskId.slice(0, 12) : "(no task)";
-    const state = row.live ? "live" : row.mappingState ?? "unknown";
-    return `  ${task} · ${state} · ${row.paneKey ?? "—"}`;
+    const label = row.taskId ?? shortPaneKey(row.paneKey);
+    const parts = [`  ${label}`];
+    if (row.role) parts.push(`(${row.role})`);
+    if (row.root) parts.push(`@${row.root}`);
+    return parts.join(" ");
   });
   if (matches.length > limit) lines.push(`  …(+${matches.length - limit})`);
   return lines.join("\n");
@@ -75,22 +87,22 @@ export function createCommands({ getBoard, refreshBoard, orca, notify, log = () 
 
   async function focus(args = {}) {
     const current = await currentBoard();
-    const match = matchRowsByTaskPrefix(current?.rows ?? [], args?.task);
+    const match = matchRowsByPrefix(current?.rows ?? [], args?.task);
     if (match.status === "none") {
       const why = match.prefix
-        ? `没有 task 以 "${match.prefix}" 开头的活 tab。`
-        : "没有唯一的活 tab——给一个 task 前缀。";
+        ? `没有行的 task 或 pane_key 以 "${match.prefix}" 开头。`
+        : "没有唯一的活 tab——给一个 task 或 pane 前缀。";
       await notify("Onlyne sessions: 跳转失败", `${why}\n看板：跑 onlyne-sessions.board`);
       return { ok: false, code: "no_match", message: why };
     }
     if (match.status === "ambiguous") {
-      const why = `${match.matches.length} 个 tab 命中${match.prefix ? ` 前缀 "${match.prefix}"` : ""}，给更长的前缀：`;
+      const why = `${match.matches.length} 行命中${match.prefix ? ` 前缀 "${match.prefix}"` : ""}，给更长的前缀：`;
       await notify("Onlyne sessions: 跳转失败", `${why}\n${candidateList(match.matches)}`);
       return { ok: false, code: "ambiguous", message: why, matches: match.matches.length };
     }
     const row = match.matches[0];
     if (!row.handle) {
-      const why = "该行没有 handle（mapping 里缺字段），无法切换。";
+      const why = "该行没有 handle（tab 轴没列出这个 pane），无法切换。";
       await notify("Onlyne sessions: 跳转失败", why);
       return { ok: false, code: "no_handle", message: why };
     }
@@ -100,20 +112,20 @@ export function createCommands({ getBoard, refreshBoard, orca, notify, log = () 
       await notify("Onlyne sessions: 跳转失败", why);
       return { ok: false, code: switched.code, message: why };
     }
-    await notify("Onlyne sessions", `已切到 ${row.taskId ?? row.paneKey}（${row.role ?? "role"}）`);
+    await notify("Onlyne sessions", `已切到 ${row.taskId ?? shortPaneKey(row.paneKey)}（${row.role ?? "tab"}）`);
     return { ok: true, taskId: row.taskId, handle: row.handle, paneKey: row.paneKey, selector: row.selector };
   }
 
   async function copyAgentContext(args = {}) {
     const current = await currentBoard();
-    const match = matchRowsByTaskPrefix(current?.rows ?? [], args?.task);
+    const match = matchRowsByPrefix(current?.rows ?? [], args?.task);
     if (match.status === "none") {
-      const why = "没有匹配的 tab——给一个 task 前缀。";
+      const why = "没有匹配的 tab——给一个 task 或 pane 前缀。";
       await notify("Onlyne sessions: 复制上下文失败", why);
       return { ok: false, code: "no_match", message: why };
     }
     if (match.status === "ambiguous") {
-      const why = `${match.matches.length} 个 tab 命中，给更长的前缀：`;
+      const why = `${match.matches.length} 行命中，给更长的前缀：`;
       await notify("Onlyne sessions: 复制上下文失败", `${why}\n${candidateList(match.matches)}`);
       return { ok: false, code: "ambiguous", message: why, matches: match.matches.length };
     }

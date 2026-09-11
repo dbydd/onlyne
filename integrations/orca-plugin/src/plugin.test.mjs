@@ -21,6 +21,7 @@ const CAPABILITY_KINDS = new Set([
   "settings:own",
 ]);
 const EVENT_NAMES = new Set(["worktree.created", "worktree.removed", "agent.status.changed"]);
+const MUTATING = /terminal (switch|create|close|rename|send)|worktree /;
 
 function fakeOrcaApi({
   capabilities = ["workspace:read", "notifications:show", "events:subscribe"],
@@ -47,23 +48,34 @@ function fakeOrcaApi({
   };
 }
 
+/** Answers the two CLI surfaces the worker touches, and nothing else. */
 function fakeBinaries(record) {
   return async (binary, args) => {
     record.push([binary, ...args].join(" "));
-    if (args[0] === "worktree" && args[1] === "list") {
-      return { stdout: JSON.stringify({ id: "x", ok: true, result: { worktrees: [] } }), stderr: "" };
+    const verb = args.join(" ");
+    if (verb === "terminal list --json") {
+      const terminals = [
+        { handle: "term_1", tabId: "t1", leafId: "l1", title: "zsh", connected: true, worktreeId: "wt1" },
+      ];
+      return { stdout: JSON.stringify({ id: "x", ok: true, result: { terminals } }), stderr: "" };
+    }
+    if (args.includes("sessions")) {
+      return { stdout: JSON.stringify({ ok: true, data: { sessions: [] } }), stderr: "" };
+    }
+    if (args.includes("roles")) {
+      return { stdout: JSON.stringify({ ok: true, data: { roles: [] } }), stderr: "" };
     }
     return { stdout: JSON.stringify({ id: "x", ok: true, result: {} }), stderr: "" };
   };
 }
 
-function activateWith(orca) {
+function activateWith(orca, { serverRoots = [] } = {}) {
   const calls = [];
   const runner = createRunner({ exec: fakeBinaries(calls) });
   const plugin = createPlugin({
     orca,
     runner,
-    binaries: { orcaBin: "orca", onlyneBin: "onlyne", configLoaded: false, configPath: null },
+    binaries: { orcaBin: "orca", onlyneBin: "onlyne", serverRoots, configLoaded: false, configPath: null },
   });
   return { plugin, calls };
 }
@@ -104,10 +116,11 @@ test("the panel entry exists and asks for no browsing context", () => {
   assert.equal(/workspace\.readContext|notifications\.show/.test(html), true);
 });
 
-test("activation registers exactly the declared commands and events", () => {
+test("activation registers exactly the declared commands and events", async () => {
   const orca = fakeOrcaApi();
   const { plugin, calls } = activateWith(orca);
   try {
+    await plugin.boardState.refresh({ reason: "test" });
     assert.deepEqual(
       [...orca.registered.keys()].sort(),
       manifest.contributes.commands.map((command) => command.id).sort()
@@ -118,8 +131,29 @@ test("activation registers exactly the declared commands and events", () => {
     );
     assert.equal(plugin.subscribed, true);
     // Read-only discipline: activation only ever lists.
-    assert.ok(calls.length > 0);
-    assert.equal(calls.every((line) => line.includes("list")), true, calls.join(" | "));
+    assert.deepEqual(calls, ["orca terminal list --json"]);
+  } finally {
+    plugin.boardState.stop();
+  }
+});
+
+test("with serverRoots configured the worker queries each root's admin surface", async () => {
+  const orca = fakeOrcaApi();
+  const { plugin, calls } = activateWith(orca, { serverRoots: ["/srv/a", "/srv/b"] });
+  try {
+    await plugin.boardState.refresh({ reason: "test" });
+    assert.deepEqual(calls, [
+      "orca terminal list --json",
+      "onlyne --server-root /srv/a sessions --json",
+      "onlyne --server-root /srv/a roles --json",
+      "onlyne --server-root /srv/b sessions --json",
+      "onlyne --server-root /srv/b roles --json",
+    ]);
+    const board = plugin.boardState.getBoard();
+    assert.equal(board.summary.roots, 2);
+    assert.equal(board.summary.tabs, 1);
+    assert.equal(board.summary.strayTabs, 1);
+    assert.deepEqual(board.errors, []);
   } finally {
     plugin.boardState.stop();
   }
@@ -150,15 +184,11 @@ test("without notifications:show nothing is pushed to the desktop", async () => 
 
 test("activation and commands never switch, create, close or rename a tab", async () => {
   const orca = fakeOrcaApi();
-  const { plugin, calls } = activateWith(orca);
+  const { plugin, calls } = activateWith(orca, { serverRoots: ["/srv/a"] });
   try {
     await plugin.commands.board({});
     await plugin.commands.refresh({});
-    assert.equal(
-      calls.some((line) => /terminal (switch|create|close|rename|send)/.test(line)),
-      false,
-      calls.join(" | ")
-    );
+    assert.equal(calls.some((line) => MUTATING.test(line)), false, calls.join(" | "));
     assert.equal(orca.hostCalls.some((call) => call.method === "terminal.sendText"), false);
     assert.equal(orca.hostCalls.every((call) => call.method === "notifications.show"), true);
   } finally {

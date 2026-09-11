@@ -138,11 +138,11 @@ test("hint buttons post a notification naming the command to run", async () => {
   panel.reply({ ok: true, value: { displayName: "w", branch: "b", terminals: [] } });
   await flush();
   assert.ok(panel.hints.length >= 4);
-  const button = panel.hints.find((element) => element.attributes["data-hint"].includes("推送映射看板"));
+  const button = panel.hints.find((element) => element.attributes["data-hint"].includes("推送看板"));
   button.click();
   const request = panel.lastRequest();
   assert.equal(request.action, "notifications.show");
-  assert.match(request.params.body, /Onlyne Sessions: 推送映射看板/);
+  assert.match(request.params.body, /Onlyne Sessions: 推送看板/);
   assert.ok(request.params.body.length <= 1000);
   assert.ok(request.params.title.length <= 120);
   panel.reply({ ok: true, value: { delivered: true } });

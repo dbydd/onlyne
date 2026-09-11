@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   createRunner,
+  normalizeServerRoots,
   parseCliJson,
   readPluginConfig,
   resolveBinary,
@@ -110,4 +111,28 @@ test("an operator config outranks BIN_DIR", () => {
   });
   assert.equal(resolved.onlyneBin, "/custom/onlyne");
   assert.equal(resolved.orcaBin, "/custom/orca");
+});
+
+test("serverRoots keeps the configured roots, trimmed and deduped", () => {
+  assert.deepEqual(normalizeServerRoots(["/srv/a", "  /srv/b  ", "/srv/a", 42, "", "   "]), [
+    "/srv/a",
+    "/srv/b",
+  ]);
+  assert.deepEqual(normalizeServerRoots(undefined), []);
+  assert.deepEqual(normalizeServerRoots(" /srv/a "), []);
+});
+
+test("the operator config supplies serverRoots beside the binaries", () => {
+  const resolved = resolveBinaries({
+    home: "/home/tester",
+    readFile: () => JSON.stringify({ serverRoots: ["/srv/a"], orcaBin: "/custom/orca" }),
+    env: {},
+    exists: () => true,
+  });
+  assert.deepEqual(resolved.serverRoots, ["/srv/a"]);
+  assert.equal(resolved.orcaBin, "/custom/orca");
+  assert.deepEqual(
+    resolveBinaries({ home: "/home/tester", readFile: () => "{}", env: {}, exists: () => true }).serverRoots,
+    []
+  );
 });

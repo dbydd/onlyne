@@ -1,29 +1,22 @@
-// Session state comes from the role workspace's own client socket only:
+// Session state comes from the onlyne admin surface of a configured server root:
 //
-//    onlyne --socket <workspace>/.onlyne/run/s --as client sessions --json
+//    onlyne --server-root <S> sessions --json -> {ok:true,data:{sessions:[…]}}
+//    onlyne --server-root <S> roles    --json -> {ok:true,data:{roles:[…]}}
 //
-// `<workspace>/.onlyne/run/s` is served by the workspace-local onlyne-client,
-// which forwards `query_sessions` to the server. The surface flag is required:
-// `--as auto` infers the admin surface from the canonical `.onlyne/run/s`
-// suffix, and an admin frame sent to a client socket is closed without an
-// answer ("socket closed before an answer arrived"). Measured against the
-// workspace binary on 2026-09-11, with a live client link:
-//   * `--socket <ws>/.onlyne/run/s sessions --json`            -> exit 1, closed
-//   * `--socket <ws>/.onlyne/run/s --as client sessions --json` -> exit 0, rows
-//   * `--workspace <ws> sessions --json`                        -> exit 0, rows
-// Answers are always JSON; a dead link answers
-// `{"ok":false,"error":{"code":"internal","message":"the connection is not
-// ready"}}`, and a missing socket, or a CLI that does not know the verb, come
-// back as a normalized failure so the caller can degrade to the mapping file's
-// own `state`.
-
-import { join } from "node:path";
-
-export const CLIENT_SOCKET_RELATIVE_PATH = ".onlyne/run/s";
-
-export function clientSocketPath(workspacePath) {
-  return join(workspacePath, CLIENT_SOCKET_RELATIVE_PATH);
-}
+// `<S>/.onlyne/run/s` is that root's local admin socket. The plugin names the
+// root and never a role workspace socket: session identity lives in the
+// adapter/pi plugin protocol, and the backend no longer registers one workspace
+// per role, so there is nothing to probe per workspace.
+//
+// Measured on 2026-09-11 against target/debug/onlyne (v1.0.0):
+//   * a root whose socket is absent -> exit 3 with the canonical
+//     "onlyne: no onlyne socket found; pass --socket, --server-root, or
+//     --workspace" on stderr and nothing on stdout, which the runner reports as
+//     `cli_error` — the board degrades that root, it does not fail.
+//   * a live admin socket -> exit 0 and `{ok:true,data:{sessions:[…]}}`.
+//   * a legacy CLI that does not know the verb -> usage text on stderr,
+//     reported as `cli_surface_mismatch` so the caller can name the binary.
+// `--json` is accepted for legibility; every verb already prints JSON.
 
 export function normalizeSessionRow(row) {
   if (!row || typeof row !== "object") return null;
@@ -50,10 +43,25 @@ export function normalizeSessionRow(row) {
   };
 }
 
-function sessionsOf(value) {
-  const direct = value?.sessions;
+/** One `roles` row: the registry record plus live presence. */
+export function normalizeRoleRow(row) {
+  if (!row || typeof row !== "object") return null;
+  const role = typeof row.name === "string" && row.name ? row.name : null;
+  if (!role) return null;
+  return {
+    role,
+    admin: row.admin === true,
+    maxSessions: typeof row.max_sessions === "number" ? row.max_sessions : null,
+    presence: typeof row.state === "string" ? row.state : null,
+    sessions: typeof row.sessions === "number" ? row.sessions : null,
+  };
+}
+
+/** Both verbs answer `{ok:true,data:{<verb>:[…]}}`; `--quiet` drops the body. */
+function rowsOf(value, key) {
+  const direct = value?.[key];
   if (Array.isArray(direct)) return direct;
-  const nested = value?.data?.sessions;
+  const nested = value?.data?.[key];
   return Array.isArray(nested) ? nested : null;
 }
 
@@ -66,14 +74,8 @@ function surfaceMismatch(message) {
 }
 
 export function createOnlyneCli({ runner, binary = "onlyne" }) {
-  /**
-   * @returns {{ok: true, sessions: Array} |
-   *           {ok: false, code: string, message: string}}
-   */
-  async function querySessions(socketPath, { role = null, timeout = 6000 } = {}) {
-    const args = ["--socket", socketPath, "--as", "client", "sessions", "--json"];
-    if (role) args.push("--role", role);
-    const result = await runner.runJson(binary, args, { timeout });
+  async function query(serverRoot, verb) {
+    const result = await runner.runJson(binary, ["--server-root", serverRoot, verb, "--json"]);
     if (!result.ok) {
       const code =
         result.code === "cli_error" && surfaceMismatch(result.message)
@@ -81,16 +83,30 @@ export function createOnlyneCli({ runner, binary = "onlyne" }) {
           : result.code;
       return { ok: false, code, message: result.message };
     }
-    const rows = sessionsOf(result.value);
+    const rows = rowsOf(result.value, verb);
     if (!rows) {
       return {
         ok: false,
         code: "unexpected_shape",
-        message: "sessions answer carried no session rows",
+        message: `${verb} answer carried no ${verb} rows`,
       };
     }
-    return { ok: true, sessions: rows.map(normalizeSessionRow).filter(Boolean) };
+    return { ok: true, rows };
   }
 
-  return { querySessions };
+  /** @returns {{ok:true, sessions:Array} | {ok:false, code, message}} */
+  async function querySessions(serverRoot) {
+    const result = await query(serverRoot, "sessions");
+    if (!result.ok) return result;
+    return { ok: true, sessions: result.rows.map(normalizeSessionRow).filter(Boolean) };
+  }
+
+  /** @returns {{ok:true, roles:Array} | {ok:false, code, message}} */
+  async function queryRoles(serverRoot) {
+    const result = await query(serverRoot, "roles");
+    if (!result.ok) return result;
+    return { ok: true, roles: result.rows.map(normalizeRoleRow).filter(Boolean) };
+  }
+
+  return { querySessions, queryRoles };
 }

@@ -1,68 +1,26 @@
 // Shared fixtures for the node:test suites (not a *.test.mjs file, so
-// `node --test src/*.test.mjs` never runs it directly).
+// `node --test` never runs it as a suite). Every fixture is a plain object:
+// the plugin reads no file of its own, so the suites need no temp directory.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { MAPPING_RELATIVE_PATH } from "./mapping.mjs";
-import { CLIENT_SOCKET_RELATIVE_PATH, normalizeSessionRow } from "./onlyne-cli.mjs";
+import { normalizeRoleRow, normalizeSessionRow } from "./onlyne-cli.mjs";
 import { normalizeTerminalRow } from "./orca-cli.mjs";
 
-const created = [];
-
-/** Creates a real role workspace directory under the system temp dir. */
-export function makeWorkspace({ name = "role-ws", lines = [], socket = false } = {}) {
-  const root = mkdtempSync(join(tmpdir(), `onlyne-plugin-${name}-`));
-  created.push(root);
-  const mapping = join(root, MAPPING_RELATIVE_PATH);
-  mkdirSync(join(root, ".onlyne/cache"), { recursive: true });
-  writeFileSync(mapping, lines.map((line) => `${JSON.stringify(line)}\n`).join(""));
-  if (socket) {
-    mkdirSync(join(root, ".onlyne/run"), { recursive: true });
-    writeFileSync(join(root, CLIENT_SOCKET_RELATIVE_PATH), "");
-  }
-  return root;
-}
-
-export function makeDir({ name = "plain" } = {}) {
-  const root = mkdtempSync(join(tmpdir(), `onlyne-plugin-${name}-`));
-  created.push(root);
-  return root;
-}
-
-export function cleanupAll() {
-  for (const path of created.splice(0)) rmSync(path, { recursive: true, force: true });
-}
-
-export function mappingRow(overrides = {}) {
-  return {
-    pane_key: "tab-1:leaf-1",
-    handle: "term_11111111-1111-4111-8111-111111111111",
-    task_id: "task-alpha",
-    session_id: "sess-alpha",
-    role: "planner",
-    worktree_selector: "path:/tmp/role",
-    title: "onlyne:task-alpha",
-    state: "spawned",
-    updated_at: "2026-09-11T00:00:00Z",
-    ...overrides,
-  };
-}
-
-export function terminalRow(overrides = {}) {
+/** One `orca terminal list` row as Orca 1.4.198 prints it. */
+export function tabRow(overrides = {}) {
   return {
     handle: "term_11111111-1111-4111-8111-111111111111",
-    tabId: "tab-1",
-    leafId: "leaf-1",
+    tabId: "45e603f7-0772-48aa-bcf6-832272747713",
+    leafId: "b6d067b6-9255-4f5c-a13f-24f194ea0560",
     title: "onlyne:task-alpha",
     connected: true,
     writable: true,
     lastOutputAt: 1_789_000_000_000,
-    agentIdentity: "omp",
+    worktreeId: "2ea2fe23-829c-4a8f-bcac-4129eb78a164",
     ...overrides,
   };
 }
 
+/** One `sessions` answer row (the shape crates/onlyne-proto defines). */
 export function sessionRow(overrides = {}) {
   return {
     task_id: "task-alpha",
@@ -75,28 +33,28 @@ export function sessionRow(overrides = {}) {
   };
 }
 
-/** Fake `orca` CLI with the same call surface as src/orca-cli.mjs. */
-export function fakeOrca({
-  worktrees = [],
-  terminalsByPath = {},
-  worktreeListFailure = null,
-  terminalFailure = null,
-  switchFailure = null,
-} = {}) {
-  const calls = { listWorktrees: 0, listTerminals: [], switchTerminal: [] };
+/** One `roles` answer row, as `res_role_info.json` carries it. */
+export function roleRow(overrides = {}) {
+  return {
+    name: "planner",
+    admin: false,
+    max_sessions: 3,
+    spec_hash: "abc123",
+    state: "online",
+    sessions: 1,
+    ...overrides,
+  };
+}
+
+/** Fake `orca` CLI with the call surface of src/orca-cli.mjs. */
+export function fakeOrca({ tabs = [], tabFailure = null, switchFailure = null } = {}) {
+  const calls = { listTerminals: 0, switchTerminal: [] };
   return {
     calls,
-    async listWorktrees() {
-      calls.listWorktrees += 1;
-      if (worktreeListFailure) return worktreeListFailure;
-      return { ok: true, rows: worktrees };
-    },
-    async listTerminals(selector) {
-      calls.listTerminals.push(selector);
-      if (terminalFailure) return terminalFailure;
-      const path = selector.replace(/^path:/, "");
-      const rows = (terminalsByPath[path] ?? []).map(normalizeTerminalRow).filter(Boolean);
-      return { ok: true, rows };
+    async listTerminals() {
+      calls.listTerminals += 1;
+      if (tabFailure) return tabFailure;
+      return { ok: true, rows: tabs.map((row) => normalizeTerminalRow(row)).filter(Boolean) };
     },
     async switchTerminal(handle) {
       calls.switchTerminal.push(handle);
@@ -106,15 +64,32 @@ export function fakeOrca({
   };
 }
 
-export function fakeOnlyne({ sessionsBySocket = {}, failure = null, calls = [] } = {}) {
+/**
+ * Fake onlyne admin surface, with the call surface of src/onlyne-cli.mjs.
+ *
+ * `sessions` / `roles` map a server root to raw rows; a root with no entry
+ * answers zero rows. `failures` maps either a root (both verbs) or
+ * `"<verb> <root>"` (one verb) to a normalized failure object, which is how an
+ * unreachable root and a half-broken one are both expressible.
+ */
+export function fakeOnlyne({ sessions = {}, roles = {}, failures = {} } = {}) {
+  const calls = [];
+  const answer = (verb, root) => {
+    calls.push(`${verb} ${root}`);
+    const failure = failures[`${verb} ${root}`] ?? failures[root];
+    if (failure) return failure;
+    const rows = (verb === "sessions" ? sessions : roles)[root] ?? [];
+    return verb === "sessions"
+      ? { ok: true, sessions: rows.map(normalizeSessionRow).filter(Boolean) }
+      : { ok: true, roles: rows.map(normalizeRoleRow).filter(Boolean) };
+  };
   return {
     calls,
-    async querySessions(socketPath) {
-      calls.push(socketPath);
-      if (failure) return failure;
-      const rows = sessionsBySocket[socketPath];
-      if (!rows) return { ok: false, code: "cli_surface_mismatch", message: "no such socket" };
-      return { ok: true, sessions: rows.map(normalizeSessionRow).filter(Boolean) };
+    async querySessions(root) {
+      return answer("sessions", root);
+    },
+    async queryRoles(root) {
+      return answer("roles", root);
     },
   };
 }

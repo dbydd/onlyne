@@ -6,22 +6,23 @@
 // never posts a notification: the guarded runner below fails the run if the
 // plugin ever asks for a mutating verb.
 //
-// What it proves: the real `orca` CLI answers, discovery over the machine's real
-// worktree list is clean (no role workspace yet is the expected result), and the
-// join renders real live tabs when a mapping file exists — the last one by
-// feeding synthetic mapping rows for one real worktree, so no file is written
-// anywhere near onlyne's state.
+// What it proves: the real `orca` CLI answers, the flat tab list is clean (no
+// worktree is scanned individually any more), every configured server root
+// answers or degrades with its own code, and the join renders real live tabs —
+// the last one by feeding synthetic session rows for the task ids the real tab
+// titles carry, so nothing is written anywhere and no onlyne state is touched.
 
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { createRunner, resolveBinaries } from "../src/runner.mjs";
-import { createOrcaCli, paneKeyOf, worktreeSelector } from "../src/orca-cli.mjs";
-import { clientSocketPath, createOnlyneCli } from "../src/onlyne-cli.mjs";
-import { collectBoard } from "../src/discover.mjs";
+import { createOrcaCli, paneKeyOf } from "../src/orca-cli.mjs";
+import { createOnlyneCli, normalizeRoleRow, normalizeSessionRow } from "../src/onlyne-cli.mjs";
+import { collectBoard, taskIdFromTitle } from "../src/board.mjs";
 import { formatBoard } from "../src/render.mjs";
-import { readMapping } from "../src/mapping.mjs";
 
 const MUTATING = /terminal (switch|create|close|rename|send|kill)|worktree (create|rm|remove|delete)/;
+const SOCKET_RELATIVE = join(".onlyne", "run", "s");
 const forbidden = [];
 
 function execFileAsync(binary, args, options) {
@@ -54,107 +55,116 @@ export async function runSmoke({ write = (line) => process.stdout.write(`${line}
   section("binaries");
   write(`orca   : ${binaries.orcaBin}`);
   write(`onlyne : ${binaries.onlyneBin}${binaries.configLoaded ? ` (config ${binaries.configPath})` : " (zero-config)"}`);
+  write(`serverRoots: ${binaries.serverRoots.length ? binaries.serverRoots.join(", ") : "(none — tab axis only)"}`);
 
   section("orca status");
   const status = await orca.status();
   report.steps.status = status.ok
-    ? { ok: true, app: status.value?.result?.app?.running ?? status.value?.app?.running, version: status.value?.result?.runtime?.appVersion ?? status.value?.runtime?.appVersion }
+    ? {
+        ok: true,
+        app: status.value?.result?.app?.running ?? status.value?.app?.running,
+        version: status.value?.result?.runtime?.appVersion ?? status.value?.runtime?.appVersion,
+      }
     : status;
   write(JSON.stringify(report.steps.status));
 
-  section("orca worktree list");
-  const worktrees = await orca.listWorktrees();
-  if (!worktrees.ok) {
-    write(`FAILED ${worktrees.code}: ${worktrees.message}`);
+  section("orca terminal list (flat: every worktree, one call)");
+  const tabs = await orca.listTerminals();
+  if (!tabs.ok) {
+    write(`FAILED ${tabs.code}: ${tabs.message}`);
     return { ...report, forbidden };
   }
-  const unique = new Set(worktrees.rows.map((row) => row.path));
-  write(`rows=${worktrees.rows.length} unique paths=${unique.size}`);
-  for (const row of worktrees.rows.slice(0, 4)) {
-    write(`  ${row.path}  (${row.displayName ?? "?"})`);
+  const worktrees = new Set(tabs.rows.map((row) => row.worktreeId ?? "(none)"));
+  write(`rows=${tabs.rows.length} worktrees=${worktrees.size}`);
+  for (const row of tabs.rows.slice(0, 5)) {
+    write(`  ${paneKeyOf(row) ?? "(no pane)"}  ${row.connected ? "live" : "down"}  ${row.title ?? ""}`);
   }
-  report.steps.worktrees = { rows: worktrees.rows.length, uniquePaths: unique.size };
+  report.steps.tabs = { rows: tabs.rows.length, worktrees: worktrees.size };
 
-  section("discovery over the real machine");
-  const board = await collectBoard({ orca, onlyne, readMapping });
-  report.steps.discovery = { workspaces: board.workspaces.length, rows: board.rows.length, summary: board.summary };
-  write(`role workspaces=${board.workspaces.length} rows=${board.rows.length}`);
+  section("board over the configured server roots");
+  const board = await collectBoard({ orca, onlyne, serverRoots: binaries.serverRoots });
+  report.steps.board = {
+    ok: board.ok,
+    roots: board.summary.roots,
+    rootsFailed: board.summary.rootsFailed,
+    tabs: board.summary.tabs,
+    joined: board.summary.joined,
+    strayTabs: board.summary.strayTabs,
+    sessions: board.summary.sessions,
+    errors: board.errors,
+  };
+  write(
+    `roots=${board.summary.roots} (failed ${board.summary.rootsFailed}) tabs=${board.summary.tabs} ` +
+      `joined=${board.summary.joined} stray=${board.summary.strayTabs} sessions=${board.summary.sessions}`
+  );
   write(formatBoard(board));
-  for (const error of board.errors.slice(0, 5)) write(`  note: ${error.scope} ${error.code} ${error.message}`);
-
-  section("join demo: real tabs + synthetic mapping rows (no file written)");
-  const allTerminals = await orca.listTerminals(null);
-  const byPath = new Map();
-  for (const row of allTerminals.ok ? allTerminals.rows : []) {
-    if (!row.worktreePath) continue;
-    const bucket = byPath.get(row.worktreePath) ?? [];
-    bucket.push(row);
-    byPath.set(row.worktreePath, bucket);
+  if (!binaries.serverRoots.length) {
+    write("no serverRoots configured; add them to ~/.config/onlyne-sessions/config.json:");
+    write('  { "serverRoots": ["/abs/path/to/server-root"] }');
   }
-  const targetPath = worktrees.rows.map((row) => row.path).find((path) => byPath.has(path));
-  const target = worktrees.rows.find((row) => row.path === targetPath);
-  if (!target) {
-    write("no worktree currently owns a live terminal");
+
+  section("join demo: real tab titles, synthetic sessions (nothing written)");
+  const titled = tabs.rows.filter((row) => taskIdFromTitle(row.title));
+  const syntheticRoot = "(synthetic) smoke-root";
+  if (!titled.length) {
+    write("no live tab carries a title of the form onlyne:<task_id>; the join has nothing to annotate");
+    const demo = await collectBoard({
+      orca,
+      onlyne: { querySessions: async () => ({ ok: true, sessions: [] }), queryRoles: async () => ({ ok: true, roles: [] }) },
+      serverRoots: [syntheticRoot],
+    });
+    write(formatBoard(demo));
+    report.steps.join = { titled: 0, strayTabs: demo.summary.strayTabs };
   } else {
-    const terminals = await orca.listTerminals(worktreeSelector(target.path));
-    if (!terminals.ok) {
-      write(`terminal list --worktree failed: ${terminals.code} ${terminals.message}`);
-    } else {
-      const first = terminals.rows[0];
-      const rows = [
-        {
-          paneKey: paneKeyOf(first) ?? first.handle,
-          handle: first.handle,
-          taskId: "smoke-task-live",
-          sessionId: "smoke-session-live",
-          role: "smoke-role",
-          worktreeSelector: worktreeSelector(target.path),
-          title: "onlyne:smoke-task-live",
-          state: "spawned",
-          updatedAt: new Date().toISOString(),
-          closed: false,
-        },
-        {
-          paneKey: "00000000-0000-4000-8000-000000000000:11111111-1111-4111-8111-111111111111",
-          handle: "term_00000000-0000-4000-8000-000000000000",
-          taskId: "smoke-task-gone",
-          sessionId: "smoke-session-gone",
-          role: "smoke-role",
-          worktreeSelector: worktreeSelector(target.path),
-          title: "onlyne:smoke-task-gone",
-          state: "spawned",
-          updatedAt: new Date().toISOString(),
-          closed: false,
-        },
-      ];
-      const missing = { ok: false, missing: true, path: "(synthetic)", rows: [], tombstones: [], malformed: 0 };
-      const demo = await collectBoard({
-        orca,
-        onlyne,
-        readMapping: (path) =>
-          path === target.path
-            ? { ok: true, missing: false, path: "(synthetic)", rows, tombstones: [], malformed: 0 }
-            : missing,
-      });
-      report.steps.join = {
-        path: target.path,
-        terminals: terminals.rows.length,
-        rows: demo.rows.length,
-        live: demo.summary.liveTabs,
-      };
-      write(`real terminals for ${target.path}: ${terminals.rows.length}; joined rows=${demo.rows.length} live=${demo.summary.liveTabs}`);
-      write(formatBoard(demo));
-    }
+    const taskIds = [...new Set(titled.map((row) => taskIdFromTitle(row.title)))].slice(0, 3);
+    const stub = {
+      querySessions: async () => ({
+        ok: true,
+        sessions: taskIds.map((taskId) =>
+          normalizeSessionRow({
+            task_id: taskId,
+            role: "smoke",
+            session_id: `smoke-${taskId}`,
+            public_lifecycle: "working",
+            projection: { lifecycle: "working", agent: "running" },
+            updated_at: new Date().toISOString(),
+          })
+        ),
+      }),
+      queryRoles: async () => ({
+        ok: true,
+        roles: [normalizeRoleRow({ name: "smoke", state: "online", sessions: taskIds.length })],
+      }),
+    };
+    const demo = await collectBoard({ orca, onlyne: stub, serverRoots: [syntheticRoot] });
+    report.steps.join = {
+      titled: titled.length,
+      taskIds,
+      joined: demo.summary.joined,
+      strayTabs: demo.summary.strayTabs,
+    };
+    write(`titled tabs=${titled.length} task ids=${taskIds.join(", ")}`);
+    write(formatBoard(demo));
   }
 
-  section("onlyne session probe (degrade path)");
-  const socket = clientSocketPath(target?.path ?? "/tmp");
-  write(`client socket ${socket} exists=${existsSync(socket)}`);
-  const probe = await onlyne.querySessions(socket);
-  report.steps.onlyne = probe.ok
-    ? { ok: true, sessions: probe.sessions.length }
-    : { ok: false, code: probe.code, message: probe.message };
-  write(JSON.stringify(report.steps.onlyne));
+  section("onlyne admin probe (per configured root)");
+  report.steps.roots = [];
+  if (!binaries.serverRoots.length) {
+    write("no configured server root to probe");
+  }
+  for (const root of binaries.serverRoots) {
+    const socket = join(root, SOCKET_RELATIVE);
+    const sessions = await onlyne.querySessions(root);
+    const roles = await onlyne.queryRoles(root);
+    const row = {
+      root,
+      socketExists: existsSync(socket),
+      sessions: sessions.ok ? { ok: true, rows: sessions.sessions.length } : { ok: false, code: sessions.code, message: sessions.message },
+      roles: roles.ok ? { ok: true, rows: roles.roles.length } : { ok: false, code: roles.code, message: roles.message },
+    };
+    report.steps.roots.push(row);
+    write(`${root}  socket=${row.socketExists}  sessions=${JSON.stringify(row.sessions)}  roles=${JSON.stringify(row.roles)}`);
+  }
   const version = await runner.run(binaries.onlyneBin, ["--version"]);
   write(`onlyne --version -> ${version.ok ? version.stdout.trim() : `${version.code}: ${version.message}`}`);
 

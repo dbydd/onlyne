@@ -7,19 +7,25 @@
 // is delivered through notifications + the plugin log pane instead.
 
 import { formatBoard } from "./render.mjs";
-import { markRemoved as markRemovedEntry } from "./discover.mjs";
 
 export const EVENT_DEBOUNCE_MS = 2000;
 export const FALLBACK_CADENCE_MS = 5000;
 export const NOTIFY_COOLDOWN_MS = 30000;
 
-/** Structure only: task/live/removed shape, not session churn. */
+/**
+ * Structure only: which rows exist where (root/role/task/pane/liveness) plus
+ * which axis is down. Session churn inside one row is deliberately invisible.
+ */
 export function structuralFingerprint(board) {
   if (!board) return "none";
   const rows = [...board.rows]
-    .map((row) => `${row.role ?? "?"}|${row.taskId ?? "?"}|${row.paneKey ?? "?"}|${row.live ? 1 : 0}|${row.removed ? 1 : 0}`)
+    .map(
+      (row) =>
+        `${row.kind}|${row.root ?? "?"}|${row.role ?? "?"}|${row.taskId ?? "?"}|${row.paneKey ?? "?"}|${row.live ? 1 : 0}`
+    )
     .sort();
-  return JSON.stringify([board.summary.roles, board.summary.liveTabs, rows]);
+  const errors = [...board.errors].map((error) => `${error.scope}|${error.axis}|${error.code}`).sort();
+  return JSON.stringify([board.summary.roots, board.summary.roles, errors, rows]);
 }
 
 export function createBoardState({
@@ -37,7 +43,6 @@ export function createBoardState({
   const setIntervalFn = timers.setInterval ?? setInterval;
   const clearIntervalFn = timers.clearInterval ?? clearInterval;
 
-  const graveyard = new Map();
   const listeners = new Set();
   let board = null;
   let inFlight = null;
@@ -51,7 +56,7 @@ export function createBoardState({
     if (inFlight) return inFlight;
     inFlight = (async () => {
       try {
-        board = await collect({ graveyard, now });
+        board = await collect({ now });
         await publish(reason);
         return board;
       } catch (error) {
@@ -70,7 +75,10 @@ export function createBoardState({
     fingerprint = next;
     for (const listener of listeners) listener(board, { reason, changed });
     if (!changed) return;
-    log(`board changed (${reason}): ${board.summary.roles} roles · ${board.summary.liveTabs} live tabs · ${board.summary.sessionsWorking} working`);
+    log(
+      `board changed (${reason}): ${board.summary.roots} roots · ${board.summary.roles} roles · ` +
+        `${board.summary.tabs} tabs (${board.summary.liveTabs} live)`
+    );
     if (now() - lastNotifiedAt < notifyCooldownMs) return;
     lastNotifiedAt = now();
     try {
@@ -88,11 +96,6 @@ export function createBoardState({
       void scan({ reason });
     }, delay);
     if (typeof debounceTimer?.unref === "function") debounceTimer.unref();
-  }
-
-  function markRemoved(path) {
-    const entry = markRemovedEntry(board, path, { now });
-    if (entry) graveyard.set(path, entry);
   }
 
   function start() {
@@ -118,12 +121,10 @@ export function createBoardState({
     stop,
     refresh: (options = {}) => scan({ reason: options.reason ?? "manual" }),
     scheduleRefresh,
-    markRemoved,
     getBoard: () => board,
     onBoard: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    graveyard,
   };
 }

@@ -5,32 +5,69 @@ import { collectNotifications } from "./testing.mjs";
 
 const NOW = 1_789_000_000_000;
 
-function board(rows) {
-  const groups = new Map();
-  for (const item of rows) {
-    const bucket = groups.get(item.role) ?? { role: item.role, rows: [] };
-    bucket.rows.push(item);
-    groups.set(item.role, bucket);
-  }
+function row(overrides = {}) {
   return {
-    scannedAt: NOW,
-    ok: true,
-    errors: [],
-    workspaces: [],
-    rows,
-    groups: [...groups.values()],
-    summary: {
-      roles: groups.size,
-      liveTabs: rows.filter((item) => item.live).length,
-      sessionsWorking: 0,
-      removed: 0,
-      rows: rows.length,
-    },
+    kind: "task",
+    root: "/srv/a",
+    role: "planner",
+    taskId: "task-alpha",
+    sessionId: "sess-alpha",
+    paneKey: "pane-1",
+    handle: "term_1",
+    joined: true,
+    live: true,
+    removed: false,
+    session: { lifecycle: "idle", agent: "gone", updatedAt: "2026-09-11T00:01:00Z" },
+    ...overrides,
   };
 }
 
-function row(overrides = {}) {
-  return { role: "planner", taskId: "task-alpha", paneKey: "pane-1", live: true, removed: false, ...overrides };
+/** A minimal renderable board: task rows under one root, stray tabs after it. */
+function board(rows, { errors = [] } = {}) {
+  const tasks = rows.filter((item) => item.kind !== "tab");
+  const stray = rows.filter((item) => item.kind === "tab");
+  const roots = tasks.length
+    ? [
+        {
+          root: "/srv/a",
+          sessionsScan: { ok: true, count: tasks.length },
+          rolesScan: { ok: true, count: 1 },
+          roles: [],
+          failures: [],
+          groups: [
+            {
+              role: "planner",
+              presence: { role: "planner", presence: "online" },
+              rows: tasks,
+              live: tasks.filter((item) => item.live).length,
+              working: 0,
+            },
+          ],
+          summary: { roles: 1, sessions: tasks.length, sessionsWorking: 0 },
+        },
+      ]
+    : [];
+  return {
+    scannedAt: NOW,
+    ok: true,
+    errors,
+    tabs: [],
+    roots,
+    strayTabs: stray,
+    rows,
+    summary: {
+      roots: roots.length,
+      rootsFailed: 0,
+      roles: roots.length,
+      tabs: rows.length,
+      liveTabs: rows.filter((item) => item.live).length,
+      sessions: tasks.length,
+      sessionsWorking: 0,
+      joined: tasks.filter((item) => item.joined).length,
+      strayTabs: stray.length,
+      rows: rows.length,
+    },
+  };
 }
 
 function fakeTimers() {
@@ -87,14 +124,24 @@ test("the first scan is quiet and only structural changes notify", async () => {
 
 test("session churn alone does not notify, structure does", async () => {
   const withSession = (lifecycle) => {
-    const item = row();
-    item.session = { lifecycle, agent: "running" };
+    const item = row({ session: { lifecycle, agent: "running", updatedAt: "2026-09-11T00:01:00Z" } });
     return board([item]);
   };
   const { state, sent } = setup({ boards: [withSession("idle"), withSession("working"), withSession("working")] });
   await state.refresh({ reason: "activate" });
   await state.refresh({ reason: "cadence" });
   assert.deepEqual(sent, [], "a lifecycle flip inside one row is not a structural change");
+  state.stop();
+});
+
+test("a root going down is a structural change", async () => {
+  const failure = { scope: "/srv/b", axis: "sessions", code: "cli_error", message: "no onlyne socket found" };
+  const { state, sent } = setup({ boards: [board([row()]), board([row()]), board([row()], { errors: [failure] })] });
+  await state.refresh({ reason: "activate" });
+  await state.refresh({ reason: "cadence" });
+  assert.deepEqual(sent, []);
+  await state.refresh({ reason: "cadence" });
+  assert.equal(sent.length, 1);
   state.stop();
 });
 

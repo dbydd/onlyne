@@ -178,8 +178,9 @@ export function defaultOnlyneCandidates() {
 }
 
 /**
- * Read the optional operator config. Absent or malformed config is a normal
- * state: discovery stays zero-config, the override only pins binary paths.
+ * Read the optional operator config. Absent or malformed is a normal state:
+ * the config pins binary paths and names the server roots, and without it the
+ * board still runs on PATH discovery and the tab axis alone.
  */
 export function readPluginConfig({
   home = homedir(),
@@ -199,6 +200,24 @@ export function readPluginConfig({
   }
 }
 
+/**
+ * `serverRoots` names the onlyne server roots the board mirrors (one admin
+ * socket `<root>/.onlyne/run/s` each). Absent, empty or malformed is a normal
+ * state: the board then has no session axis and renders flat Orca tabs only.
+ */
+export function normalizeServerRoots(value) {
+  if (!Array.isArray(value)) return [];
+  const roots = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const root = entry.trim();
+    if (!root || roots.includes(root)) continue;
+    roots.push(root);
+  }
+  return roots;
+}
+
+/** Resolve the CLIs and the configured server roots from one config read. */
 export function resolveBinaries({
   home = homedir(),
   exists = existsSync,
@@ -230,6 +249,7 @@ export function resolveBinaries({
     orcaBin,
     onlyneBin,
     binDir,
+    serverRoots: normalizeServerRoots(config.serverRoots),
     configPath: path,
     configLoaded: loaded,
     configError: error ?? null,
