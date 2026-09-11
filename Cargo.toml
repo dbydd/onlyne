@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "plugins/*"]
+# `plugins/*` is a glob for the Rust gateway crates only; `onlyne-agent-pi` is a
+# pure-Node package with no Cargo.toml, so the pattern must not reach it.
+members = ["crates/*", "plugins/onlyne-gateway-*"]
 default-members = [
   "crates/onlyne-frame",
   "crates/onlyne-proto",
