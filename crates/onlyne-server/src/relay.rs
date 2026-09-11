@@ -563,7 +563,7 @@ pub fn delivery_from(row: &LedgerRow) -> anyhow::Result<Delivery> {
         task: task.clone(),
         parent_task: row.parent_task.clone(),
         reply_to: None,
-        hop: 0,
+        hop: row.hop.max(0) as u32,
         attempt: row.attempt.max(0) as u32,
     });
     Ok(Delivery {
@@ -663,6 +663,7 @@ pub fn entry_from_row(row: &LedgerRow) -> onlyne_proto::LedgerEntry {
         to: serde_json::from_str(&row.to_json).unwrap_or_else(|_| Principal::role("unknown")),
         task: row.task.clone(),
         parent_task: row.parent_task.clone(),
+        hop: row.hop.max(0) as u32,
         attempt: row.attempt.max(0) as u32,
         state: row.state,
         out_head: row.out_head.clone(),

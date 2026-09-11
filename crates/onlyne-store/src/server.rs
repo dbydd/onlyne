@@ -16,7 +16,12 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::error::{StoreError, StoreResult};
 use crate::transition_allowed;
 
-const SCHEMA_VERSION: i64 = 1;
+/// Server store schema revision. Bumped to 2 by the `hop` column below: the
+/// ledger keeps the hop count of `Causality`, which `onlyne handoff` reads back
+/// to extend a chain, and a file written before that column existed has no way
+/// to answer for it. `ensure_schema` refuses such a file rather than migrating.
+/// The client store keeps its own revision, since its DDL did not move.
+const SERVER_SCHEMA_VERSION: i64 = 2;
 const PROTOCOL_VERSION: i64 = 1;
 const SERVER_MARKER: &str = "onlyne-server";
 const DEFAULT_LIMIT: i64 = 100;
@@ -65,7 +70,11 @@ CREATE TABLE IF NOT EXISTS ledger(
   enqueued_at TEXT NOT NULL,
   acked_at TEXT,
   -- docs/v1-PLAN.md:358 declares body_json TEXT NOT NULL while line 360 retains the body until acked plus retention_days and then sets NULL, so the document argues with itself and the code keeps the retention rule.
-  body_json TEXT
+  body_json TEXT,
+  -- Causality's hop count from the root task. `parent_task` alone gives the
+  -- chain's shape, not its depth; `onlyne handoff` reads both back to extend
+  -- the chain, so the row stores the counter beside the link.
+  hop INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ledger_state_enqueued_idx ON ledger(state,enqueued_at);
 CREATE INDEX IF NOT EXISTS ledger_task_idx ON ledger(task);
@@ -153,6 +162,9 @@ pub struct LedgerRow {
     pub enqueued_at: String,
     pub acked_at: Option<String>,
     pub body_json: Option<String>,
+    /// Causality's hop count from the root task, which is what turns the
+    /// `parent_task` links into a measurable depth.
+    pub hop: i64,
 }
 
 impl LedgerRow {
@@ -169,6 +181,7 @@ impl LedgerRow {
             task: causality.map(|c| c.task.clone()),
             parent_task: causality.and_then(|c| c.parent_task.clone()),
             attempt: causality.map(|c| i64::from(c.attempt)).unwrap_or(0),
+            hop: causality.map(|c| i64::from(c.hop)).unwrap_or(0),
             state: LedgerState::Queued,
             out_head: Some(body_head(envelope, &body_json)),
             reason: None,
@@ -270,7 +283,7 @@ pub struct ServerLedger {
 impl ServerLedger {
     pub fn open(path: impl AsRef<Path>, retention_days: u32) -> StoreResult<Self> {
         let path = path.as_ref().to_path_buf();
-        let conn = open_connection(&path, SERVER_MARKER, SERVER_DDL)?;
+        let conn = open_connection(&path, SERVER_MARKER, SERVER_DDL, SERVER_SCHEMA_VERSION)?;
         Ok(Self {
             path,
             retention_days: i64::from(retention_days).max(1),
@@ -758,18 +771,31 @@ impl ServerLedger {
     }
 }
 
-pub(crate) fn open_connection(path: &Path, marker: &str, ddl: &str) -> StoreResult<Connection> {
+/// The DDL revision travels beside the marker: the two databases evolve apart,
+/// so the server store states its own number instead of sharing one constant
+/// that a change to either DDL would invalidate for both.
+pub(crate) fn open_connection(
+    path: &Path,
+    marker: &str,
+    ddl: &str,
+    schema_version: i64,
+) -> StoreResult<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| StoreError::Sqlite(e.to_string()))?;
     }
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_millis(5000))?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-    ensure_schema(&conn, marker, ddl)?;
+    ensure_schema(&conn, marker, ddl, schema_version)?;
     Ok(conn)
 }
 
-fn ensure_schema(conn: &Connection, marker: &str, ddl: &str) -> StoreResult<()> {
+fn ensure_schema(
+    conn: &Connection,
+    marker: &str,
+    ddl: &str,
+    schema_version: i64,
+) -> StoreResult<()> {
     let tables = user_tables(conn)?;
     if tables.iter().any(|name| is_legacy_table(name)) {
         return Err(StoreError::unsupported_schema());
@@ -783,7 +809,7 @@ fn ensure_schema(conn: &Connection, marker: &str, ddl: &str) -> StoreResult<()> 
         )
         .optional()?;
     match marker_row {
-        Some((SCHEMA_VERSION, PROTOCOL_VERSION)) => {}
+        Some((version, PROTOCOL_VERSION)) if version == schema_version => {}
         Some(_) => return Err(StoreError::unsupported_schema()),
         None => {
             let marker_count: i64 =
@@ -793,7 +819,7 @@ fn ensure_schema(conn: &Connection, marker: &str, ddl: &str) -> StoreResult<()> 
             }
             conn.execute(
                 "INSERT INTO schema_marker(name,version,protocol_version) VALUES(?,?,?)",
-                params![marker, SCHEMA_VERSION, PROTOCOL_VERSION],
+                params![marker, schema_version, PROTOCOL_VERSION],
             )?;
         }
     }
@@ -878,7 +904,7 @@ fn ensure_transition_allowed(from: LedgerState, to: LedgerState) -> StoreResult<
 
 fn insert_ledger_row(conn: &Connection, row: &LedgerRow) -> StoreResult<()> {
     conn.execute(
-        "INSERT INTO ledger(msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ledger(msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,hop,state,out_head,reason,enqueued_at,acked_at,body_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         params![
             row.msg_id,
             row.op_id,
@@ -889,6 +915,7 @@ fn insert_ledger_row(conn: &Connection, row: &LedgerRow) -> StoreResult<()> {
             row.task,
             row.parent_task,
             row.attempt,
+            row.hop,
             row.state.as_str(),
             row.out_head,
             row.reason,
@@ -910,7 +937,7 @@ fn ledger_by_op_id(conn: &Connection, op_id: &str) -> StoreResult<Option<LedgerR
         .optional()?)
 }
 
-const LEDGER_COLUMNS: &str = "msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json";
+const LEDGER_COLUMNS: &str = "msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json,hop";
 const FAULT_COLUMNS: &str = "id,task_id,role,session_id,generation,seq,desired_json,observed_json,intent,attempt,backend_ref,kind,reason,state,created_at";
 
 fn ledger_row(r: &Row<'_>) -> rusqlite::Result<LedgerRow> {
@@ -934,6 +961,7 @@ fn ledger_row(r: &Row<'_>) -> rusqlite::Result<LedgerRow> {
         enqueued_at: r.get(12)?,
         acked_at: r.get(13)?,
         body_json: r.get(14)?,
+        hop: r.get(15)?,
     })
 }
 

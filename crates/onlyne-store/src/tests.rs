@@ -83,7 +83,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-server".to_string(), 1, 1));
+        assert_eq!(marker, ("onlyne-server".to_string(), 2, 1));
 
         let (_dir, client_path) = temp_db("client.db");
         ClientStore::open(&client_path).unwrap();
@@ -112,7 +112,7 @@ mod ledger_gates {
         let conn = Connection::open(&marker_path).unwrap();
         conn.execute("CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL)", []).unwrap();
         conn.execute(
-            "INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',2,1)",
+            "INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',3,1)",
             [],
         )
         .unwrap();

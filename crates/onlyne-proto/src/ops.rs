@@ -320,6 +320,10 @@ pub struct LedgerEntry {
     pub task: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_task: Option<String>,
+    /// Hop count from the root task, read off the stored envelope's causality.
+    /// `parent_task` names the parent link; this is the depth it sits at, which
+    /// is what `onlyne handoff` extends and what `onlyne ledger` shows.
+    pub hop: u32,
     pub attempt: u32,
     pub state: LedgerState,
     #[serde(default, skip_serializing_if = "Option::is_none")]

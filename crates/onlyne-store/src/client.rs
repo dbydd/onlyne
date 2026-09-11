@@ -14,6 +14,8 @@ use crate::server::{
 };
 
 const CLIENT_MARKER: &str = "onlyne-client";
+/// The client DDL's own revision; the server store carries a separate one.
+const CLIENT_SCHEMA_VERSION: i64 = 1;
 const DEFAULT_LIMIT: i64 = 100;
 
 pub const CLIENT_DDL: &str = r#"CREATE TABLE IF NOT EXISTS sessions(
@@ -115,7 +117,7 @@ pub struct ClientStore {
 impl ClientStore {
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
         let path = path.as_ref().to_path_buf();
-        let conn = open_connection(&path, CLIENT_MARKER, CLIENT_DDL)?;
+        let conn = open_connection(&path, CLIENT_MARKER, CLIENT_DDL, CLIENT_SCHEMA_VERSION)?;
         Ok(Self {
             path,
             inner: Arc::new(Mutex::new(conn)),
