@@ -34,7 +34,7 @@ One workspace, one role, one daemon. Many concurrent sessions inside the role.
 | `.onlyne/run/client.pid` | `0600` | pid written by `start`, removed by `stop` |
 | `.onlyne/logs/client.log` | | stdout and stderr of the `start` child |
 | `.onlyne/agent/<id>/` | | installed plugin package with `plugin.toml` |
-| `.onlyne/cache/orca-tabs.jsonl` | | append-only Orca tab to session map, written by the Orca backend for plugins |
+| `.onlyne/cache/orca-tabs.jsonl` | | append-only Orca tab to session map: a supervisor/display side-channel, not the identity (the adapter protocol owns that) |
 
 `init` never writes `spec.toml`. A workspace holding the pre-v1 layout is
 refused before any write, with exit 2 and the byte-exact line
@@ -56,24 +56,25 @@ The default is `zellij`. `auto` probes zellij, orca, then fake and takes the
 first one that reports usable. `fake` runs sessions in process and needs no
 external tool, which is why the end-to-end scripts use it.
 
-`[orca] worktree` in `config.toml` says where an Orca tab lands: `auto` (the
-default) addresses `path:<canonical workspace>`, registering the workspace with
-`orca repo add` the first time; `inherit` passes no selector and leaves the
-choice to Orca's active worktree; any other value is used verbatim as an Orca
-worktree selector (`path:<abs>`, `id:<…>`, `name:<…>`).
+`[orca] worktree` in `config.toml` says which Orca tab list a session tab
+joins. Three states:
 
-Two rules measured against Orca 1.4.198 shape `auto`:
+* `host` (the default) reads `ORCA_WORKTREE_ID`, the worktree id Orca exports
+  to the tab the supervisor started the client in and which the daemon
+  inherits. Every session tab lands flat in that worktree's tab list, beside
+  the supervisor's own tabs. Started outside an Orca tab the variable is
+  absent and the policy behaves like `inherit`.
+* `inherit` passes no selector, leaving the choice to Orca's active worktree.
+* Any other value is used verbatim as an Orca worktree selector
+  (`id:<…>`, `path:<abs>`, `name:<…>`, `branch:<…>`).
 
-* `path:` selectors match Orca's worktree rows by exact path, so the selector
-  carries the canonical path (`pwd -P`): `/tmp/x` does not resolve where
-  `/private/tmp/x` does.
-* `orca repo add` accepts git checkouts only — the runtime RPC behind it takes a
-  `kind`, the CLI exposes no flag for it, and no other public command registers
-  a folder. A generated (non-git) role workspace therefore fails `auto` with that
-  remedy in the message: add the directory as an Orca project once (desktop:
-  *Add project → from folder*), then `auto` resolves it, or point
-  `[orca] worktree` at a selector that already resolves. It never falls back to
-  Orca's active worktree.
+Tab ownership and working directory are independent: the selector decides
+which tab list the tab joins, while the spawned command's own `cd` decides
+where the agent runs. The role workspace therefore never has to exist in Orca
+— it is not registered, not opened, and not cleaned up — which is the whole
+reason a generated (non-git) role workspace works at all. Orca's public
+registration command accepts git checkouts only, so a `path:<workspace>`
+selector would fail for exactly the directories this client hands out.
 
 ## Server link
 

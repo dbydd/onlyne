@@ -9,27 +9,30 @@ use std::sync::Arc;
 
 /// Where `terminal create` puts the new tab.
 ///
-/// Without `--worktree` Orca silently falls back to the renderer's active
-/// worktree, which a background daemon cannot predict, so the backend resolves
-/// a selector itself unless the operator asks to inherit.
+/// Session identity belongs to the adapter protocol: the pi plugin owns the
+/// task, and Orca is only the supervisor's management port. So a session tab
+/// lands in the worktree the supervisor's own tab lives in, flat beside every
+/// other tab the supervisor has, and the role workspace never appears in Orca.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreePolicy {
+    /// Address the worktree the supervisor's tab exported as
+    /// `ORCA_WORKTREE_ID`. A daemon started outside an Orca tab has no such
+    /// value and behaves like [`WorktreePolicy::Inherit`]. The client default.
+    Host,
     /// Pass no selector: the tab lands in Orca's active worktree.
     Inherit,
-    /// Use one Orca worktree selector verbatim (`path:<abs>`, `id:<…>`,
+    /// Use one Orca worktree selector verbatim (`id:<…>`, `path:<abs>`,
     /// `name:<…>`, `branch:<…>`).
     Selector(String),
-    /// Address `path:<cwd>`, registering the directory with `orca repo add`
-    /// the first time Orca does not know it. The client default.
-    AutoRegister,
 }
 
 impl WorktreePolicy {
-    /// Read the `[orca] worktree` config value: `auto` (also the empty
-    /// value), `inherit`, or a literal Orca selector.
+    /// Read the `[orca] worktree` config value: `host` (also the empty value
+    /// and the retired `auto` spelling), `inherit`, or a literal Orca
+    /// selector.
     pub fn from_config(value: &str) -> Self {
         match value.trim() {
-            "" | "auto" => Self::AutoRegister,
+            "" | "auto" | "host" => Self::Host,
             "inherit" => Self::Inherit,
             selector => Self::Selector(selector.to_string()),
         }
@@ -56,26 +59,10 @@ fn is_gone(error: &anyhow::Error) -> bool {
     is_stale(error) || failure_code(error) == Some("terminal_not_found")
 }
 
-/// Whether the CLI cannot resolve a worktree selector, the answer for a
-/// directory Orca was never told about.
+/// Whether the CLI cannot resolve a worktree selector: the answer for a
+/// selector Orca dropped since the tab was created.
 fn is_selector_not_found(error: &anyhow::Error) -> bool {
     failure_code(error) == Some("selector_not_found")
-}
-
-/// The error for a workspace Orca cannot address.
-///
-/// `path:` selectors resolve only against Orca's registered worktrees, and the
-/// one public registration command (`orca repo add`) accepts git checkouts
-/// only, so a plain generated role workspace cannot be registered from the
-/// CLI at all. The message carries the remedy the operator actually has.
-fn unregistered_workspace(path: &Path, cause: &anyhow::Error) -> anyhow::Error {
-    anyhow::anyhow!(
-        "orca cannot address the role workspace {} ({cause}): Orca resolves a `path:` selector only for \
-         registered worktrees, and `orca repo add` accepts git repositories only — no public command \
-         registers a folder. Add the directory as an Orca project (desktop: Add project → from folder) \
-         and leave `[orca] worktree = \"auto\"`, or set `[orca] worktree` to a selector that resolves",
-        path.display()
-    )
 }
 
 /// The stable per-tab keys Orca repeats in `terminal create` responses and
@@ -162,18 +149,18 @@ fn ref_str(session: &SessionRef, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// `path:<abs>`, the selector form that names a workspace directory.
-fn path_selector(path: &Path) -> String {
-    format!("path:{}", path.display())
-}
-
-/// The directory a `path:` selector names.
+/// The directory a worktree selector names, when it names one: `path:<abs>`
+/// or the `<worktree-id>::<abs>` shape `ORCA_WORKTREE_ID` carries.
 fn selector_path(selector: &str) -> Option<PathBuf> {
-    selector.strip_prefix("path:").map(PathBuf::from)
+    let path = selector
+        .strip_prefix("path:")
+        .or_else(|| selector.split_once("::").map(|(_, path)| path))?;
+    let path = PathBuf::from(path);
+    path.is_absolute().then_some(path)
 }
 
-/// The cwd as an absolute, symlink-free path: Orca matches selectors against
-/// the path its runtime recorded, which is canonical.
+/// The cwd as an absolute, symlink-free path, so a workspace reached through a
+/// symlink (`/tmp` on macOS) still files its tab map under one stable root.
 fn absolute(path: &Path) -> PathBuf {
     if let Ok(canonical) = std::fs::canonicalize(path) {
         return canonical;
@@ -197,12 +184,13 @@ struct TabMemo {
     title: String,
 }
 
-/// One line of `.onlyne/cache/orca-tabs.jsonl`: the tab⇄session mapping the
-/// plugin side folds by `pane_key` (last line wins).
+/// One line of `.onlyne/cache/orca-tabs.jsonl`: the tab⇄session mapping a
+/// supervisor script can tail, and the display hook beside `client sessions`
+/// (the board itself does not read it).
 ///
 /// The file is append-only and never read back by this backend, because
 /// `backend_ref` in `client.db` stays the authoritative record. Field order is
-/// part of the contract the plugin side reads.
+/// part of the contract the readers rely on.
 #[derive(Debug, Clone, Serialize)]
 struct TabLine<'a> {
     pane_key: &'a str,
@@ -230,31 +218,52 @@ fn append_tab_line(root: &Path, line: &TabLine<'_>) -> std::io::Result<()> {
         .write_all(text.as_bytes())
 }
 
+/// `ORCA_WORKTREE_ID` as the daemon inherited it, `None` when the shell Orca
+/// exported it from is not a tab.
+fn host_worktree_env() -> Option<String> {
+    std::env::var("ORCA_WORKTREE_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 pub struct OrcaBackend {
     runner: Arc<dyn Runner>,
     command: String,
     policy: WorktreePolicy,
-    /// Selector this daemon already proved Orca resolves, so auto
-    /// registration probes once per process.
-    registered: Mutex<Option<String>>,
+    /// `ORCA_WORKTREE_ID` as the daemon inherited it: the worktree the
+    /// supervisor's own tab lives in.
+    host_worktree: Option<String>,
     /// Spawn-time facts keyed by `pane_key`.
     tabs: Mutex<BTreeMap<String, TabMemo>>,
 }
 
 impl OrcaBackend {
-    /// Orca backend with the client default policy: register the role
-    /// workspace as an Orca folder on first use.
+    /// Orca backend with the client default policy: tabs land flat in the
+    /// worktree the supervisor's tab lives in.
     pub fn new(runner: Arc<dyn Runner>) -> Self {
-        Self::with_policy(runner, WorktreePolicy::AutoRegister)
+        Self::with_policy(runner, WorktreePolicy::Host)
     }
 
-    /// Orca backend with an explicit worktree policy.
+    /// Orca backend with an explicit worktree policy, reading the host
+    /// worktree from the process environment.
     pub fn with_policy(runner: Arc<dyn Runner>, policy: WorktreePolicy) -> Self {
+        Self::with_host_worktree(runner, policy, host_worktree_env())
+    }
+
+    /// Orca backend that addresses `host_worktree` instead of the environment's
+    /// `ORCA_WORKTREE_ID`. Tests inject it; production reads the inherited
+    /// value through [`OrcaBackend::with_policy`].
+    pub fn with_host_worktree(
+        runner: Arc<dyn Runner>,
+        policy: WorktreePolicy,
+        host_worktree: Option<String>,
+    ) -> Self {
         Self {
             runner,
             command: std::env::var("ORCA_CLI_COMMAND").unwrap_or_else(|_| "orca".into()),
             policy,
-            registered: Mutex::new(None),
+            host_worktree,
             tabs: Mutex::new(BTreeMap::new()),
         }
     }
@@ -274,63 +283,18 @@ impl OrcaBackend {
             .ok_or_else(|| anyhow::anyhow!("orca session ref missing string handle"))
     }
 
-    /// The `--worktree` selector for a spawn, or `None` when the policy
-    /// inherits Orca's active worktree.
-    fn selector_for(&self, cwd: &Path) -> Result<Option<String>> {
-        match &self.policy {
-            WorktreePolicy::Inherit => Ok(None),
-            WorktreePolicy::Selector(selector) => Ok(Some(selector.clone())),
-            WorktreePolicy::AutoRegister => self.auto_selector(cwd).map(Some),
-        }
-    }
-
-    /// `path:<cwd>`, registered with `orca repo add` when Orca does not know
-    /// the directory yet.
+    /// The `--worktree` selector for a spawn, or `None` when the tab follows
+    /// Orca's active worktree.
     ///
-    /// Two measured rules decide this shape (Orca 1.4.198, 2026-09-11):
-    /// `path:` selectors match Orca's worktree rows by exact path, so the
-    /// selector must carry the canonical path (`/tmp/x` does not resolve where
-    /// `/private/tmp/x` does); and `orca repo add` — the only public
-    /// registration command — refuses anything that is not a git checkout,
-    /// because the runtime RPC behind it takes a `kind` the CLI never passes.
-    fn auto_selector(&self, cwd: &Path) -> Result<String> {
-        if let Some(cached) = self.registered.lock().clone() {
-            return Ok(cached);
+    /// `Host` passes the raw `ORCA_WORKTREE_ID` value — `<worktree-id>::<abs
+    /// path>`, the spelling `orca`'s own CLI resolves a tab's worktree with —
+    /// and degrades to `Inherit` when the daemon started outside an Orca tab.
+    fn selector_for(&self) -> Option<String> {
+        match &self.policy {
+            WorktreePolicy::Host => self.host_worktree.clone(),
+            WorktreePolicy::Inherit => None,
+            WorktreePolicy::Selector(selector) => Some(selector.clone()),
         }
-        let cwd = absolute(cwd);
-        let selector = path_selector(&cwd);
-        if let Err(error) = self.known_selector(&selector) {
-            if !is_selector_not_found(&error) {
-                return Err(error);
-            }
-            let registered = self
-                .json(vec![
-                    "repo".into(),
-                    "add".into(),
-                    "--path".into(),
-                    cwd.display().to_string(),
-                    "--json".into(),
-                ])
-                .and_then(|_| self.known_selector(&selector));
-            if let Err(cause) = registered {
-                return Err(unregistered_workspace(&cwd, &cause));
-            }
-        }
-        *self.registered.lock() = Some(selector.clone());
-        Ok(selector)
-    }
-
-    /// Whether Orca resolves one worktree selector: `terminal list` answers
-    /// `selector_not_found` for a directory it was never told about.
-    fn known_selector(&self, selector: &str) -> Result<()> {
-        self.json(vec![
-            "terminal".into(),
-            "list".into(),
-            "--worktree".into(),
-            selector.into(),
-            "--json".into(),
-        ])
-        .map(|_| ())
     }
 
     /// `terminal show` for one handle.
@@ -446,7 +410,7 @@ impl OrcaBackend {
             return;
         };
         let memo = self.tabs.lock().get(pane_key).cloned();
-        let selector = ref_str(session, "selector").or_else(|| self.registered.lock().clone());
+        let selector = ref_str(session, "selector");
         let root = memo
             .as_ref()
             .map(|memo| memo.root.clone())
@@ -495,12 +459,13 @@ fn shell_quote(value: &str) -> String {
 
 /// Build the command executed inside the Orca terminal.
 ///
-/// Orca keeps the visible terminal under the operator's worktree. The spawned
-/// shell must enter the client-owned workspace before starting the agent, since a
-/// generated workspace directory is a workspace-local instance and is not
-/// necessarily an Orca-registered worktree. Environment entries travel through
-/// `env` so the terminal process receives the same spawn contract as zellij and
-/// other backends.
+/// Tab ownership and working directory are independent: `--worktree` decides
+/// which tab list the tab joins, while this command's `cd` decides what the
+/// agent sees. So the tab lives flat among the supervisor's tabs (the
+/// supervisor's worktree) while the process runs in the role workspace, which
+/// Orca is never told about. Environment entries travel through `env` so the
+/// terminal process receives the same spawn contract as zellij and other
+/// backends.
 fn spawn_command(spec: &SpawnSpec) -> Result<String> {
     if spec.command.is_empty() {
         anyhow::bail!("orca spawn requires a command");
@@ -518,96 +483,6 @@ fn spawn_command(spec: &SpawnSpec) -> Result<String> {
         command.push_str(&shell_quote(arg));
     }
     Ok(command)
-}
-
-/// Result of checking one Orca folder record against the filesystem.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FolderRecordState {
-    Live,
-    Pruned,
-    LeftAlone,
-}
-
-/// Prune one stale Orca folder record.
-///
-/// Orca keeps folder-kind nodes as Orca-side metadata with no directory
-/// backlink. A node whose workspace path no longer exists is a ghost
-/// pointing at nothing and gets removed. Anything else stays untouched.
-fn prune_folder_record(runner: &dyn Runner, command: &str, path: &Path) -> FolderRecordState {
-    if path.exists() {
-        return FolderRecordState::Live;
-    }
-    let Some(_node_id) = folder_record_id(runner, command, path) else {
-        return FolderRecordState::Pruned;
-    };
-    match folder_record_setup_id(runner, command, path) {
-        Some(setup_id) => {
-            let deleted = run_json(
-                runner,
-                command,
-                &[
-                    "project".into(),
-                    "setup-delete".into(),
-                    "--setup".into(),
-                    setup_id,
-                    "--json".into(),
-                ],
-                None,
-                &BTreeMap::new(),
-            )
-            .is_ok();
-            if deleted {
-                FolderRecordState::Pruned
-            } else {
-                FolderRecordState::LeftAlone
-            }
-        }
-        None => FolderRecordState::LeftAlone,
-    }
-}
-
-/// Look up the Orca folder node id for a workspace path.
-fn folder_record_id(runner: &dyn Runner, command: &str, path: &Path) -> Option<String> {
-    let canon = absolute(path);
-    let value = run_json(
-        runner,
-        command,
-        &[
-            "worktree".into(),
-            "show".into(),
-            "--worktree".into(),
-            path_selector(&canon),
-            "--json".into(),
-        ],
-        None,
-        &BTreeMap::new(),
-    )
-    .ok()?;
-    value
-        .pointer("/worktree/id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-}
-
-/// Look up the Orca project setup id whose path matches a workspace path.
-fn folder_record_setup_id(runner: &dyn Runner, command: &str, path: &Path) -> Option<String> {
-    let canon = absolute(path);
-    let value = run_json(
-        runner,
-        command,
-        &["project".into(), "setups".into(), "--json".into()],
-        None,
-        &BTreeMap::new(),
-    )
-    .ok()?;
-    let setups = value.pointer("/setups")?.as_array()?;
-    for setup in setups {
-        let candidate = setup.get("path")?.as_str()?;
-        if absolute(Path::new(candidate)) == canon {
-            return setup.get("id")?.as_str().map(str::to_owned);
-        }
-    }
-    None
 }
 
 impl SessionBackend for OrcaBackend {
@@ -630,12 +505,11 @@ impl SessionBackend for OrcaBackend {
             .is_ok())
     }
     fn spawn(&self, spec: SpawnSpec) -> Result<SessionRef> {
-        let _ = prune_folder_record(self.runner.as_ref(), &self.command, &spec.cwd);
         let title = spec
             .rename
             .clone()
             .unwrap_or_else(|| format!("onlyne:{}", spec.task_id));
-        let selector = self.selector_for(&spec.cwd)?;
+        let selector = self.selector_for();
         let shell = spawn_command(&spec)?;
         let mut args = vec!["terminal".into(), "create".into()];
         if let Some(selector) = &selector {
@@ -945,16 +819,16 @@ mod tests {
         assert!(error.to_string().contains("requires a command"));
     }
 
+    /// The worktree id Orca exports to a tab, in its measured 1.4.198 shape:
+    /// `<worktree-id>::<abs workspace path>`.
+    const HOST_WORKTREE: &str = "2ea2fe23-829c-4a8f-bcac-4129eb78a164::/tmp/host-ws";
+
     #[test]
     fn the_config_value_selects_the_policy() {
-        assert_eq!(
-            WorktreePolicy::from_config(""),
-            WorktreePolicy::AutoRegister
-        );
-        assert_eq!(
-            WorktreePolicy::from_config(" auto "),
-            WorktreePolicy::AutoRegister
-        );
+        assert_eq!(WorktreePolicy::from_config(""), WorktreePolicy::Host);
+        assert_eq!(WorktreePolicy::from_config(" host "), WorktreePolicy::Host);
+        // The spelling `auto` used to mean the default, so it still does.
+        assert_eq!(WorktreePolicy::from_config("auto"), WorktreePolicy::Host);
         assert_eq!(
             WorktreePolicy::from_config("inherit"),
             WorktreePolicy::Inherit
@@ -966,157 +840,41 @@ mod tests {
     }
 
     #[test]
-    fn spawn_registers_an_unknown_workspace_then_passes_the_selector() {
+    fn spawn_lands_in_the_host_worktree_as_a_flat_tab() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let selector = format!("path:{}", root.display());
-        let cli = Arc::new(
-            OrcaCli::default()
-                .reply("terminal list --worktree", 1, refusal("selector_not_found"))
-                .reply(
-                    "repo add --path",
-                    0,
-                    envelope(serde_json::json!({"repo": {"id": "folder-1"}})),
-                )
-                .reply(
-                    "terminal list --worktree",
-                    0,
-                    envelope(serde_json::json!({"terminals": []})),
-                )
-                .reply("terminal create", 0, envelope(created_row())),
+        let cli = Arc::new(OrcaCli::default().reply("terminal create", 0, envelope(created_row())));
+        let backend = OrcaBackend::with_host_worktree(
+            cli.clone(),
+            WorktreePolicy::Host,
+            Some(HOST_WORKTREE.into()),
         );
-        let backend = OrcaBackend::with_policy(cli.clone(), WorktreePolicy::AutoRegister);
         let spawned = backend.spawn(spawn_spec(&root)).unwrap();
 
+        assert_eq!(spawned.backend_ref["selector"], HOST_WORKTREE);
         assert_eq!(spawned.backend_ref["handle"], "term_one");
-        assert_eq!(spawned.backend_ref["selector"], selector.as_str());
         assert_eq!(spawned.backend_ref["pane_key"], "tab-1:leaf-2");
         assert_eq!(spawned.backend_ref["worktree_id"], "inst::/tmp/ws");
         assert_eq!(spawned.generation, 1);
-        let calls = cli.calls();
-        assert_eq!(
-            calls[..3],
-            [
-                format!("orca terminal list --worktree {selector} --json"),
-                format!("orca repo add --path {} --json", root.display()),
-                format!("orca terminal list --worktree {selector} --json"),
-            ]
-        );
+        // One call, nothing else: no registration and no selector probe, even
+        // though the role workspace is a directory Orca has never seen.
         let shell = spawn_command(&spawn_spec(&root)).unwrap();
         assert_eq!(
-            calls[3],
-            format!(
-                "orca terminal create --worktree {selector} --title onlyne:task-1 \
+            cli.calls(),
+            [format!(
+                "orca terminal create --worktree {HOST_WORKTREE} --title onlyne:task-1 \
                  --command {shell} --json"
-            )
+            )]
         );
+        assert_eq!(mapping_lines(&root)[0]["worktree_selector"], HOST_WORKTREE);
     }
 
     #[test]
-    fn a_workspace_orca_cannot_register_fails_with_the_remedy() {
-        // The measured 1.4.198 answer for a directory that is not a git
-        // checkout: `repo add` refuses, so `path:` never resolves and the
-        // spawn must not fall back to Orca's active worktree.
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let cli = Arc::new(
-            OrcaCli::default()
-                .reply("terminal list --worktree", 1, refusal("selector_not_found"))
-                .reply(
-                    "repo add --path",
-                    1,
-                    serde_json::json!({
-                        "ok": false,
-                        "error": {
-                            "code": "runtime_error",
-                            "message": format!("Not a valid git repository: {}", root.display())
-                        }
-                    })
-                    .to_string(),
-                ),
-        );
-        let backend = OrcaBackend::with_policy(cli.clone(), WorktreePolicy::AutoRegister);
-        let error = backend.spawn(spawn_spec(&root)).unwrap_err().to_string();
-
-        assert!(error.contains("Not a valid git repository"), "{error}");
-        assert!(error.contains("Add project → from folder"), "{error}");
-        assert_eq!(cli.called("terminal create"), 0);
-    }
-
-    #[test]
-    fn a_symlinked_workspace_is_addressed_through_its_canonical_path() {
-        // `path:` selectors match by exact path, so the selector must be the
-        // canonical one: `/tmp/x` does not resolve where `/private/tmp/x` does.
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let link = std::env::temp_dir().join(format!("onlyne-orca-link-{}", std::process::id()));
-        let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink(&root, &link).unwrap();
-        let selector = format!("path:{}", root.display());
-        let cli = Arc::new(
-            OrcaCli::default()
-                .reply(
-                    "terminal list --worktree",
-                    0,
-                    envelope(serde_json::json!({"terminals": []})),
-                )
-                .reply("terminal create", 0, envelope(created_row())),
-        );
-        let backend = OrcaBackend::with_policy(cli.clone(), WorktreePolicy::AutoRegister);
-        let spawned = backend.spawn(spawn_spec(&link)).unwrap();
-        std::fs::remove_file(&link).unwrap();
-
-        assert_eq!(spawned.backend_ref["selector"], selector.as_str());
-        assert!(cli.calls()[0].contains(&selector), "{:?}", cli.calls());
-        assert!(cli.calls()[1].contains(&selector));
-    }
-
-    #[test]
-    fn a_registered_selector_is_probed_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let cli = Arc::new(
-            OrcaCli::default()
-                .reply(
-                    "terminal list --worktree",
-                    0,
-                    envelope(serde_json::json!({"terminals": []})),
-                )
-                .reply("terminal create", 0, envelope(created_row()))
-                .reply("terminal create", 0, envelope(created_row())),
-        );
-        let backend = OrcaBackend::with_policy(cli.clone(), WorktreePolicy::AutoRegister);
-        backend.spawn(spawn_spec(&root)).unwrap();
-        backend.spawn(spawn_spec(&root)).unwrap();
-
-        assert_eq!(cli.called("terminal list --worktree"), 1);
-        assert_eq!(cli.called("repo add"), 0);
-        assert_eq!(cli.called("terminal create"), 2);
-    }
-
-    #[test]
-    fn an_explicit_selector_skips_registration() {
+    fn spawn_outside_an_orca_tab_lets_orca_pick_the_worktree() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let cli = Arc::new(OrcaCli::default().reply("terminal create", 0, envelope(created_row())));
-        let backend = OrcaBackend::with_policy(
-            cli.clone(),
-            WorktreePolicy::Selector("id:folder:abc".into()),
-        );
-        let spawned = backend.spawn(spawn_spec(&root)).unwrap();
-
-        assert_eq!(spawned.backend_ref["selector"], "id:folder:abc");
-        assert_eq!(cli.called("terminal list"), 0);
-        assert_eq!(cli.called("repo add"), 0);
-        assert!(cli.calls()[0].contains("--worktree id:folder:abc"));
-    }
-
-    #[test]
-    fn inherit_lets_orca_pick_the_worktree() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let cli = Arc::new(OrcaCli::default().reply("terminal create", 0, envelope(created_row())));
-        let backend = OrcaBackend::with_policy(cli.clone(), WorktreePolicy::Inherit);
+        let backend = OrcaBackend::with_host_worktree(cli.clone(), WorktreePolicy::Host, None);
         let spawned = backend.spawn(spawn_spec(&root)).unwrap();
 
         assert!(!cli.calls()[0].contains("--worktree"));
@@ -1125,33 +883,85 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_selector_overrides_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let cli = Arc::new(OrcaCli::default().reply("terminal create", 0, envelope(created_row())));
+        let backend = OrcaBackend::with_host_worktree(
+            cli.clone(),
+            WorktreePolicy::Selector("id:folder:abc".into()),
+            Some(HOST_WORKTREE.into()),
+        );
+        let spawned = backend.spawn(spawn_spec(&root)).unwrap();
+
+        assert_eq!(spawned.backend_ref["selector"], "id:folder:abc");
+        assert_eq!(
+            cli.called("terminal create --worktree id:folder:abc"),
+            1,
+            "{:?}",
+            cli.calls()
+        );
+    }
+
+    #[test]
+    fn inherit_lets_orca_pick_the_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let cli = Arc::new(OrcaCli::default().reply("terminal create", 0, envelope(created_row())));
+        let backend = OrcaBackend::with_host_worktree(
+            cli.clone(),
+            WorktreePolicy::Inherit,
+            Some(HOST_WORKTREE.into()),
+        );
+        let spawned = backend.spawn(spawn_spec(&root)).unwrap();
+
+        assert!(!cli.calls()[0].contains("--worktree"));
+        assert!(spawned.backend_ref.get("selector").is_none());
+        assert_eq!(mapping_lines(&root)[0]["worktree_selector"], "");
+    }
+
+    #[test]
+    fn spawn_writes_the_tab_map_under_the_canonical_workspace() {
+        // The map is a workspace file and the workspace may be reached through
+        // a symlink (`/tmp` on macOS), so the line has to land under the
+        // canonical root the supervisor script reads.
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let link = std::env::temp_dir().join(format!("onlyne-orca-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let cli = Arc::new(OrcaCli::default().reply("terminal create", 0, envelope(created_row())));
+        let backend = OrcaBackend::with_host_worktree(
+            cli.clone(),
+            WorktreePolicy::Host,
+            Some(HOST_WORKTREE.into()),
+        );
+        backend.spawn(spawn_spec(&link)).unwrap();
+        std::fs::remove_file(&link).unwrap();
+
+        assert!(root.join(".onlyne/cache/orca-tabs.jsonl").exists());
+    }
+
+    #[test]
     fn spawn_records_the_plugin_mapping_line() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let selector = format!("path:{}", root.display());
-        let cli = Arc::new(
-            OrcaCli::default()
-                .reply(
-                    "terminal list --worktree",
-                    0,
-                    envelope(serde_json::json!({"terminals": []})),
-                )
-                .reply("terminal create", 0, envelope(created_row())),
-        );
-        let backend = OrcaBackend::with_policy(cli, WorktreePolicy::AutoRegister);
+        let cli = Arc::new(OrcaCli::default().reply("terminal create", 0, envelope(created_row())));
+        let backend =
+            OrcaBackend::with_host_worktree(cli, WorktreePolicy::Host, Some(HOST_WORKTREE.into()));
         backend.spawn(spawn_spec(&root)).unwrap();
 
         let text = std::fs::read_to_string(root.join(".onlyne/cache/orca-tabs.jsonl")).unwrap();
         let lines = text.lines().collect::<Vec<_>>();
         assert_eq!(lines.len(), 1, "{text}");
-        // The field order is the contract the plugin side folds on.
+        // The field order is the contract the supervisor script folds on.
         assert!(lines[0].starts_with(r#"{"pane_key":"tab-1:leaf-2","handle":"term_one""#));
         let line = &mapping_lines(&root)[0];
         assert_eq!(line.as_object().unwrap().len(), 9);
         assert_eq!(line["task_id"], "task-1");
         assert_eq!(line["session_id"], "session-1");
         assert_eq!(line["role"], "planner");
-        assert_eq!(line["worktree_selector"], selector.as_str());
+        assert_eq!(line["worktree_selector"], HOST_WORKTREE);
         assert_eq!(line["title"], "onlyne:task-1");
         assert_eq!(line["state"], "spawned");
         assert!(line["updated_at"].as_str().unwrap().ends_with('Z'));
@@ -1163,16 +973,9 @@ mod tests {
         let root = std::fs::canonicalize(dir.path()).unwrap();
         // A file where the `.onlyne` directory belongs makes the append fail.
         std::fs::write(root.join(".onlyne"), b"not a directory").unwrap();
-        let cli = Arc::new(
-            OrcaCli::default()
-                .reply(
-                    "terminal list --worktree",
-                    0,
-                    envelope(serde_json::json!({"terminals": []})),
-                )
-                .reply("terminal create", 0, envelope(created_row())),
-        );
-        let backend = OrcaBackend::with_policy(cli, WorktreePolicy::AutoRegister);
+        let cli = Arc::new(OrcaCli::default().reply("terminal create", 0, envelope(created_row())));
+        let backend =
+            OrcaBackend::with_host_worktree(cli, WorktreePolicy::Host, Some(HOST_WORKTREE.into()));
 
         let spawned = backend.spawn(spawn_spec(&root)).unwrap();
         assert_eq!(spawned.backend_ref["handle"], "term_one");
@@ -1410,14 +1213,9 @@ mod tests {
     fn close_remints_a_stale_handle_and_records_the_tombstone() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let selector = format!("path:{}", root.display());
+        let selector = HOST_WORKTREE;
         let cli = Arc::new(
             OrcaCli::default()
-                .reply(
-                    "terminal list --worktree",
-                    0,
-                    envelope(serde_json::json!({"terminals": []})),
-                )
                 .reply("terminal create", 0, envelope(created_row()))
                 .reply(
                     "terminal show --terminal term_one",
@@ -1440,7 +1238,11 @@ mod tests {
                     envelope(serde_json::json!({"closed": true})),
                 ),
         );
-        let backend = OrcaBackend::with_policy(cli.clone(), WorktreePolicy::AutoRegister);
+        let backend = OrcaBackend::with_host_worktree(
+            cli.clone(),
+            WorktreePolicy::Host,
+            Some(HOST_WORKTREE.into()),
+        );
         let spawned = backend.spawn(spawn_spec(&root)).unwrap();
         backend
             .close(&spawned, CloseReason::Completed, false)
@@ -1459,7 +1261,7 @@ mod tests {
         assert_eq!(tombstone["state"], "closed");
         assert_eq!(tombstone["handle"], "term_two");
         assert_eq!(tombstone["pane_key"], "tab-1:leaf-2");
-        assert_eq!(tombstone["worktree_selector"], selector.as_str());
+        assert_eq!(tombstone["worktree_selector"], selector);
         assert_eq!(tombstone["role"], "planner");
         assert_eq!(tombstone["session_id"], "session-1");
         assert_eq!(tombstone["title"], "onlyne:task-1");
@@ -1486,95 +1288,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(cli.called("terminal close"), 0);
-    }
-
-    #[test]
-    fn missing_workspace_prunes_the_folder_record() {
-        struct ScriptRunner {
-            calls: Mutex<Vec<Vec<String>>>,
-        }
-        impl Runner for ScriptRunner {
-            fn run(
-                &self,
-                _program: &str,
-                args: &[String],
-                _cwd: Option<&Path>,
-                _env: &BTreeMap<String, String>,
-            ) -> Result<CommandOutput> {
-                self.calls.lock().push(args.to_vec());
-                let text = args
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let body = if text.contains("setup-delete") {
-                    serde_json::json!({"ok": true}).to_string()
-                } else if text.contains("setups") {
-                    serde_json::json!({
-                        "ok": true,
-                        "result": {
-                            "setups": [
-                                {"id": "setup-ghost", "path": "/tmp/onlyne-ghost-missing"}
-                            ]
-                        }
-                    })
-                    .to_string()
-                } else {
-                    serde_json::json!({
-                        "ok": true,
-                        "result": {"worktree": {"id": "node-ghost"}}
-                    })
-                    .to_string()
-                };
-                Ok(CommandOutput {
-                    status: 0,
-                    stdout: body.into_bytes(),
-                    stderr: Vec::new(),
-                })
-            }
-        }
-        let runner = ScriptRunner {
-            calls: Mutex::new(Vec::new()),
-        };
-        let missing = Path::new("/tmp/onlyne-ghost-missing");
-        assert!(!missing.exists());
-        let state = prune_folder_record(&runner, "orca", missing);
-        assert_eq!(state, FolderRecordState::Pruned);
-        let calls = runner.calls.lock();
-        assert!(
-            calls
-                .iter()
-                .any(|args| args.contains(&"setup-delete".to_string()))
-        );
-    }
-
-    #[test]
-    fn existing_workspace_leaves_the_folder_record_alone() {
-        struct SilentRunner {
-            calls: Mutex<usize>,
-        }
-        impl Runner for SilentRunner {
-            fn run(
-                &self,
-                _program: &str,
-                _args: &[String],
-                _cwd: Option<&Path>,
-                _env: &BTreeMap<String, String>,
-            ) -> Result<CommandOutput> {
-                *self.calls.lock() += 1;
-                Ok(CommandOutput {
-                    status: 0,
-                    stdout: b"{}".to_vec(),
-                    stderr: Vec::new(),
-                })
-            }
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let runner = SilentRunner {
-            calls: Mutex::new(0),
-        };
-        let state = prune_folder_record(&runner, "orca", dir.path());
-        assert_eq!(state, FolderRecordState::Live);
-        assert_eq!(*runner.calls.lock(), 0);
     }
 }

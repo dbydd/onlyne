@@ -72,7 +72,7 @@ pub struct ClientInit {
     pub server: String,
     pub key_path: PathBuf,
     pub cert_pin: String,
-    /// The workspace config's `[orca] worktree` value: `auto`, `inherit`, or a
+    /// The workspace config's `[orca] worktree` value: `host`, `inherit`, or a
     /// literal Orca worktree selector. Only an Orca session backend reads it.
     pub orca_worktree: String,
 }
@@ -91,7 +91,7 @@ impl ClientInit {
             server: server.into(),
             key_path: key_path.into(),
             cert_pin: cert_pin.into(),
-            orca_worktree: "auto".to_string(),
+            orca_worktree: "host".to_string(),
         }
     }
 

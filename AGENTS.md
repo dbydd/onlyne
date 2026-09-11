@@ -167,6 +167,8 @@ Role workspace, selected by `onlyne-client run --workspace <dir>`:
   cache/orca-tabs.jsonl
 ```
 
+`cache/orca-tabs.jsonl` is append-only and written by the Orca session backend: the tab to session map is a side-channel for supervisor scripts and displays. Session identity is owned by the adapter protocol, never by Orca.
+
 A legacy workspace layout is a hard refusal. If `.onlyne/state.db` contains `io_cursors` or `loopback_idempotency`, or `.onlyne/channels/` exists, the command prints `onlyne: legacy workspace layout; v1.0.0 does not migrate` and exits 2.
 
 Active workspace data stays local to the selected server root or role workspace. Runtime data must never default to global mutable state under `~/.config/onlyne`.

@@ -27,11 +27,15 @@ pub struct ClientConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OrcaSection {
-    /// Where a spawned terminal lands: `auto` (the default) registers the
-    /// role workspace as an Orca folder on first use, `inherit` leaves the
-    /// choice to Orca's active worktree, and any other value is used verbatim
-    /// as an Orca worktree selector (`path:<abs>`, `id:<…>`, `name:<…>`,
-    /// `branch:<…>`).
+    /// Where a spawned terminal's tab lands: `host` (the default) uses the
+    /// worktree the spawning supervisor's own Orca tab runs in
+    /// (`ORCA_WORKTREE_ID`, inherited by the daemon), `inherit` passes no
+    /// selector and leaves the choice to Orca's active worktree, and any other
+    /// value is used verbatim as an Orca worktree selector (`id:<…>`,
+    /// `path:<abs>`, `name:<…>`, `branch:<…>`).
+    ///
+    /// Only the tab's home is decided here; the agent still runs in the role
+    /// workspace (`cd` in the spawned command), which Orca never has to know.
     #[serde(default = "default_orca_worktree")]
     pub worktree: String,
 }
@@ -45,7 +49,7 @@ impl Default for OrcaSection {
 }
 
 fn default_orca_worktree() -> String {
-    "auto".to_string()
+    "host".to_string()
 }
 
 impl ClientConfig {

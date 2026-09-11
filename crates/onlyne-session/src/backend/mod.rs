@@ -405,7 +405,7 @@ mod tests {
     #[test]
     fn selection_falls_back_to_fake_when_nothing_else_answers() {
         let runner = Arc::new(ProbeRunner::default());
-        let backend = select_backend(runner.clone(), WorktreePolicy::AutoRegister).unwrap();
+        let backend = select_backend(runner.clone(), WorktreePolicy::Host).unwrap();
         assert_eq!(backend.name(), "fake");
         assert_eq!(runner.calls()[0].0, "zellij");
     }
@@ -438,7 +438,7 @@ mod tests {
             }
         }
         let runner = Arc::new(AutoRunner::default());
-        let backend = backend_for("AUTO", runner.clone(), WorktreePolicy::AutoRegister).unwrap();
+        let backend = backend_for("AUTO", runner.clone(), WorktreePolicy::Host).unwrap();
         assert_eq!(backend.name(), "zellij");
         assert_eq!(runner.calls.lock().as_slice(), &["zellij".to_string()]);
     }
@@ -447,25 +447,25 @@ mod tests {
     fn scheduler_default_uses_zellij_unless_auto_is_requested() {
         let runner = Arc::new(ProbeRunner::default());
         assert_eq!(
-            backend_for("", runner.clone(), WorktreePolicy::AutoRegister)
+            backend_for("", runner.clone(), WorktreePolicy::Host)
                 .unwrap()
                 .name(),
             "zellij"
         );
         assert_eq!(
-            backend_for("zellij", runner.clone(), WorktreePolicy::AutoRegister)
+            backend_for("zellij", runner.clone(), WorktreePolicy::Host)
                 .unwrap()
                 .name(),
             "zellij"
         );
         assert_eq!(
-            backend_for("fake", runner.clone(), WorktreePolicy::AutoRegister)
+            backend_for("fake", runner.clone(), WorktreePolicy::Host)
                 .unwrap()
                 .name(),
             "fake"
         );
         assert_eq!(
-            backend_for("nope", runner.clone(), WorktreePolicy::AutoRegister)
+            backend_for("nope", runner.clone(), WorktreePolicy::Host)
                 .unwrap()
                 .name(),
             "zellij"
