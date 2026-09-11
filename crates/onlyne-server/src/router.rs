@@ -468,6 +468,8 @@ pub fn roles(state: &Arc<State>, query: &QueryRolesArgs) -> anyhow::Result<Vec<R
             state: presence,
             sessions,
             detail,
+            edges: entry.allowed_targets.clone(),
+            aggregate: (!entry.aggregate.is_empty()).then(|| entry.aggregate.clone()),
         });
     }
     Ok(rows)

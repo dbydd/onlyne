@@ -347,6 +347,13 @@ pub struct RoleInfo {
     pub sessions: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// The entry's `allowed_targets` verbatim: a `*` stays unexpanded and a
+    /// name with no registered role still appears.
+    #[serde(default)]
+    pub edges: Vec<String>,
+    /// The entry's `aggregate` label; a plain role carries no key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate: Option<String>,
 }
 
 /// `query_roles` filter.

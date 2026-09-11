@@ -1599,6 +1599,44 @@ async fn a_plain_role_welcome_omits_the_key() {
     );
 }
 
+#[test]
+fn roles_rows_carry_the_entry_edges_verbatim_and_the_aggregate_label() {
+    let text = spec_text()
+        .replace(
+            "role = \"planner\"\n",
+            "role = \"planner\"\naggregate = \"cluster-b\"\n",
+        )
+        .replace(
+            "allowed_targets = [\"planner\", \"builder\"]\n\n[[client]]\nrole = \"builder\"",
+            "allowed_targets = [\"*\", \"planner\", \"ghost\"]\n\n[[client]]\nrole = \"builder\"",
+        );
+    let labelled = fixture_with(&text);
+    let rows = router::roles(&labelled.state, &QueryRolesArgs::default()).expect("roles");
+    assert_eq!(rows.len(), 2, "one row per registered role");
+    let planner = rows
+        .iter()
+        .find(|row| row.name == "planner")
+        .expect("the planner row");
+    assert_eq!(
+        planner.edges,
+        vec!["*", "planner", "ghost"],
+        "edges stays verbatim: no wildcard expansion, no unregistered-name filter"
+    );
+    assert_eq!(planner.aggregate.as_deref(), Some("cluster-b"));
+
+    let plain_rows = router::roles(&fixture().state, &QueryRolesArgs::default()).expect("roles");
+    assert_eq!(
+        plain_rows[0].edges,
+        vec!["planner", "builder"],
+        "the entry's own targets"
+    );
+    let encoded = serde_json::to_string(&plain_rows).expect("encode the rows");
+    assert!(
+        !encoded.contains("\"aggregate\""),
+        "a plain role's row omits the aggregate key: {encoded}"
+    );
+}
+
 #[tokio::test]
 async fn shutdown_unlinks_the_admin_socket() {
     let fixture = fixture();
