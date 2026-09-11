@@ -11,7 +11,7 @@ Each request has `id` and a response has `reply_to`. Request operation payloads 
 | plugin → host | `hello` | `{"id":1,"op":"hello","args":{"protocol":1,"plugin":"onlyne-agent-pi","version":"1.0.0","kind":"agent","capabilities":["register","report","inject","recycle"],"mount":{"role":"planner","session":"8b1c..."}}}` |
 | host → plugin | `welcome` | `{"reply_to":1,"op":"welcome","args":{"protocol":1,"role":"planner","session_id":"s1","generation":1,"prose":"Read the incoming task","server":{"connected":true,"cluster":"local","name":"server"},"host_capabilities":["inject"]}}` |
 | plugin → host | `report.ready` | `{"id":2,"op":"report","args":{"kind":"ready","data":{"task_id":"task-1","session_id":"s1","generation":1,"seq":1}}}` |
-| plugin → host | `report.heartbeat` | `{"id":3,"op":"report","args":{"kind":"heartbeat","data":{"task_id":"task-1","generation":1,"seq":2,"observed":{"state":"running"}}}}` |
+| plugin → host | `report.heartbeat` | `{"id":3,"op":"report","args":{"kind":"heartbeat","data":{"task_id":"task-1","generation":1,"seq":1002,"observed":{"version":{"generation":1,"seq":1002},"generation_live":true,"isolate_after":1,"terminate_after":3,"mismatch_count":0,"agent":"running","delivery":"none","resource":"attached","recovery":"none","outcome":"pending","public":"working"}}}}` |
 | plugin → host | `report.complete` | `{"id":4,"op":"report","args":{"kind":"complete","data":{"task_id":"task-1","outcome":"done","head":"finished"}}}` |
 | plugin → host | `report.fault` | `{"id":5,"op":"report","args":{"kind":"fault","data":{"task_id":"task-1","session_id":"s1","generation":1,"seq":3,"kind":"runtime","reason":"failed","desired":null,"observed":null}}}` |
 | plugin → host | `session_register` | `{"id":6,"op":"session_register","args":{"session_id":"s1","pid":4212,"generation":1,"title":"swarm:planner:s1","task_id":"task-1"}}` |
@@ -46,6 +46,17 @@ A missing `recycle` makes the host judge resource loss through `probe`. A missin
 The first frame must be `hello`. The server accepts it for exactly five seconds. Any other first frame receives `invalid`, the exact message `hello required first`, field `op`, and the connection closes. A hello that arrives after the window causes a silent close and a `tracing::warn!` entry; a local peer pid is included when available.
 
 Platform-owned data stays on the gateway side. A gateway plugin receiving `RenderSendArgs` gets envelope plus rendered text and image only. An agent receiving `AssignArgs` gets envelope, prose, and intent only. Neither serialized payload carries `platform_metadata`, `raw`, or `channel_id`. The SDK documents this rule and the conformance suite inspects the delivered bytes. The wire types carry no raw metadata field, so a plugin cannot smuggle platform data into an agent payload through these frames.
+
+## Report sequencing and the ready barrier
+
+Every `report` carries `(generation, seq)`, and the host reduces reports and its own lifecycle events for one session against a single watermark: a report whose `seq` is at or below the watermark for its generation is dropped as stale or duplicate. The host's own events for a session occupy the low single digits — `created` is 1, `resource_attach` 2, `ready` 3 — so a plugin starts its counter above that range and keeps it strictly increasing for the life of the generation. 1000 is the baseline this document recommends: it clears the host's range and leaves the host room to interleave its own events.
+
+Keep the counter monotonic across a reconnect inside one generation. A reconnect that restarts the count at the baseline places every later report below the watermark, and the host ignores all of them, completions included.
+
+`report.ready` is the barrier the payload waits behind, and it passes through the same gate: a `report.heartbeat` carrying a lower `(generation, seq)` than an earlier report is dropped even when it is the frame that carries a state change.
+
+`observed` on `report.heartbeat` is a complete `Observation` tuple, and a status string such as `{"state":"running"}` is not valid input. The keys are `version{generation,seq}`, `generation_live`, `isolate_after`, `terminate_after`, `mismatch_count`, `agent`, `delivery`, `resource`, `recovery`, `outcome`, and `public`, with `public` projecting from the other dimensions. The host rejects an illegal tuple and keeps the previous state.
+`report.complete` is terminal for one task, and the host answers it by writing the terminal tuple: `delivery: accepted` and `outcome: done|failed|cancelled` at the next version. A heartbeat for that task must not follow. `observed` replaces the whole snapshot, and a later one carrying `outcome: pending` is legal input, so it puts the session back to `working` or `idle` after the host has published `exited`. A plugin keeps its counter and stops reporting for the task once it has sent the completion; the host closes the resource on the completion receipt.
 
 ## AgentSurface
 
