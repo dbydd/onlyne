@@ -60,7 +60,10 @@ Keep the counter monotonic across a reconnect inside one generation. A reconnect
 It is placement, not a state dimension — `public` and the legality check never read it, and a lone `host` can never make an illegal tuple legal or decide a transition. Its shape is `{"orca": {"pane_key": "<tab_id>:<leaf_id>", "tab_id": …, "leaf_id": …, "handle": …}}`; only `pane_key` is required, the rest are omitted when the environment did not name them. A process outside an Orca pane omits `host` entirely rather than sending null, so absence means "not in a pane" and never "unknown". The host stores the tuple as the row's observation instead of wrapping it, so a reader of the admin surface finds the binding at `projection.observed.host` whichever client path wrote the row; the relay's own `cluster_ref` joins it as a sibling key under the same rule.
 
 Because the comparison tuple includes `host`, a heartbeat that changes only the binding is news rather than a no-op replay: it advances the watermark and is published as a new version. A process that learns its pane after `report.ready` therefore sends one heartbeat to state it, and a supervisor reading the session axis can scope its view of the panes from that point on.
+
 `report.complete` is terminal for one task, and the host answers it by writing the terminal tuple: `delivery: accepted` and `outcome: done|failed|cancelled` at the next version. A heartbeat for that task must not follow. `observed` replaces the whole snapshot, and a later one carrying `outcome: pending` is legal input, so it puts the session back to `working` or `idle` after the host has published `exited`. A plugin keeps its counter and stops reporting for the task once it has sent the completion; the host closes the resource on the completion receipt.
+
+Placement outlives the report that ends a run: `report.complete` replaces the snapshot but carries `host` forward from the row's last observation, so a finished session still says which pane it ran in and a supervisor can look at the output where it was produced. Nothing else of the earlier tuple survives the completion.
 
 ## AgentSurface
 

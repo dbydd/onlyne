@@ -700,6 +700,54 @@ fn a_heartbeat_is_stored_flat_with_the_pane_binding_inside_it() {
 }
 
 #[test]
+fn a_completion_keeps_the_pane_the_session_ran_in() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    projection::report(
+        &fixture.state,
+        "builder",
+        &Report::Heartbeat {
+            task_id: task_id.clone(),
+            generation: 1,
+            seq: 1,
+            observed: json!({
+                "lifecycle": "working",
+                "host": { "orca": { "pane_key": "tab-1:leaf-1", "handle": "term_1" } },
+            }),
+            cluster_ref: None,
+        },
+    )
+    .expect("heartbeat");
+    projection::report(
+        &fixture.state,
+        "builder",
+        &Report::Complete {
+            task_id: task_id.clone(),
+            outcome: Outcome::Done,
+            head: Some("finished".to_string()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .expect("complete");
+
+    let row = projection::session_row(&fixture.state, &task_id)
+        .expect("row")
+        .expect("a row");
+    let stored = row.projection.observed.as_ref().expect("an observation");
+    // The terminal tuple is the completion's, and it still says where the
+    // process ran: a supervisor can look at the pane a finished session used.
+    assert_eq!(stored.get("head").and_then(|head| head.as_str()), Some("finished"));
+    assert_eq!(
+        stored
+            .pointer("/host/orca/pane_key")
+            .and_then(|pane| pane.as_str()),
+        Some("tab-1:leaf-1")
+    );
+    assert_eq!(row.public_lifecycle, onlyne_proto::Lifecycle::Exited);
+}
+
+#[test]
 fn a_recorded_fault_is_queryable_and_acknowledgeable() {
     let fixture = fixture();
     let task_id = onlyne_proto::new_task_id();

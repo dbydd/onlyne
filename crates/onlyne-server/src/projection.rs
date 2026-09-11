@@ -97,6 +97,23 @@ pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<Proj
             cluster_ref,
         } => {
             let origin = cluster_ref.clone();
+            let stored = state.ledger.get_session_row(task_id)?;
+            let mut observation = serde_json::json!({
+                "head": head,
+                "reply_to": reply_to,
+                "cluster_ref": origin,
+            });
+            // A completion replaces the snapshot, but placement is a property of
+            // the process rather than of the event that ends its run: erasing the
+            // pane here would leave a supervisor unable to say where a finished
+            // session ran.
+            if let Some(host) = stored
+                .as_ref()
+                .and_then(|row| serde_json::from_str::<Value>(&row.observed_json).ok())
+                .and_then(|projection| projection.pointer("/observed/host").cloned())
+            {
+                observation["host"] = host;
+            }
             let projection = SessionProjection {
                 lifecycle: Lifecycle::Exited,
                 agent: AgentPhase::Gone,
@@ -104,13 +121,8 @@ pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<Proj
                 resource: ResourcePhase::Closed,
                 recovery: RecoveryPhase::NoRecovery,
                 outcome: Some(*outcome),
-                observed: Some(serde_json::json!({
-                    "head": head,
-                    "reply_to": reply_to,
-                    "cluster_ref": origin,
-                })),
+                observed: Some(observation),
             };
-            let stored = state.ledger.get_session_row(task_id)?;
             let (generation, seq) = match &stored {
                 Some(row) => (row.generation.max(0) as u64, row.seq.max(0) as u64 + 1),
                 None => (1, 1),
