@@ -94,18 +94,46 @@ export function scopeTabs(tabs, serverRoots, { realpath = realpathSync } = {}) {
 
 /**
  * Where the pi adapter publishes the pane it mounted in, inside its own
- * workspace: `<workspace>/.onlyne/cache/pi-pane.json`. The pi plugin inherits
- * `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_TERMINAL_HANDLE` / `ORCA_WORKTREE_ID`
- * from the Orca tab it was spawned in (measured 2026-09-11 on 1.4.198: an
- * `orca terminal create --command …` pane exports all four), so it is the one
- * component that knows — from the inside — which Orca pane is an onlyne session.
- * That is the authority; the worktree heuristic in `scopeTabs` is the fallback
- * for a swarm whose pi processes have not published anything yet.
+ * workspace: one file per pane under `<workspace>/.onlyne/cache/pi-panes/`. The
+ * pi plugin inherits `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_TERMINAL_HANDLE` /
+ * `ORCA_WORKTREE_ID` from the Orca tab it was spawned in (measured 2026-09-11 on
+ * 1.4.198: an `orca terminal create --command …` pane exports all four), so it
+ * is the one component that knows — from the inside — which Orca pane is an
+ * onlyne session. That is the authority; the worktree heuristic in `scopeTabs`
+ * is the fallback for a swarm whose pi processes have not published anything
+ * yet.
+ *
+ * One file per pane, plural, because one workspace runs N of them: the client
+ * admits one client per workspace
+ * (`onlyne: client already running with pid {pid}`,
+ * crates/onlyne-client/src/daemon.rs), but one role slot of it runs up to
+ * `max_sessions` sessions, each in its own Orca pane and its own pi process
+ * (crates/onlyne-client/src/dispatch.rs; the Orca backend issues one
+ * `orca terminal create` per session). Each of those processes writes only its
+ * own file, so a pane mounting late cannot erase a pane still running.
+ */
+export const PANE_CLAIMS_RELATIVE_DIR = ".onlyne/cache/pi-panes";
+
+/**
+ * The pre-v1 layout: one claim file for the whole workspace, the single pane
+ * the workspace was assumed to have. The reader still folds it in, because a pi
+ * process that was already running when the reader was upgraded keeps writing
+ * it, and ignoring it would hide a live pane. Nothing writes it any more.
  */
 export const PANE_CLAIM_RELATIVE_PATH = ".onlyne/cache/pi-pane.json";
 
-/** The pane identity a claim carries, or null for a malformed/closed claim. */
-export function readPaneClaim(text) {
+/**
+ * The pane identity a claim carries, or null for a malformed/closed claim.
+ *
+ * `updatedAt` orders two claims that name the same pane: the RFC 3339 stamp the
+ * publisher wrote, or — for a claim written before the stamp existed — the
+ * caller's file mtime, so a legacy file is still comparable. Null when neither
+ * is available.
+ *
+ * @param {string} text
+ * @param {{ mtime?: number | null }} [options] the file's own mtime, in ms
+ */
+export function readPaneClaim(text, { mtime = null } = {}) {
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -115,6 +143,10 @@ export function readPaneClaim(text) {
   if (!parsed || typeof parsed !== "object") return null;
   const paneKey = typeof parsed.pane_key === "string" && parsed.pane_key ? parsed.pane_key : null;
   if (!paneKey) return null;
+  const stamped =
+    typeof parsed.updated_at === "string" && Number.isFinite(Date.parse(parsed.updated_at))
+      ? Date.parse(parsed.updated_at)
+      : null;
   return {
     paneKey,
     tabId: typeof parsed.tab_id === "string" ? parsed.tab_id : null,
@@ -123,7 +155,16 @@ export function readPaneClaim(text) {
     worktreeId: typeof parsed.worktree_id === "string" ? parsed.worktree_id : null,
     role: typeof parsed.role === "string" ? parsed.role : null,
     taskId: typeof parsed.task_id === "string" ? parsed.task_id : null,
+    updatedAt: stamped ?? (typeof mtime === "number" ? mtime : null),
   };
+}
+
+/**
+ * How recent a claim is, as a comparable number. `-Infinity` for a claim that
+ * carries no time at all: undated loses to dated, whichever order they arrive.
+ */
+export function claimRecency(claim) {
+  return typeof claim?.updatedAt === "number" ? claim.updatedAt : -Infinity;
 }
 
 /**

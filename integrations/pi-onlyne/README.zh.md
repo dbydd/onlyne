@@ -180,11 +180,19 @@ completion 在 client 重启时也不丢：如果决定 outcome 时 socket 已�
   正的重投上生效。
 
 - **pane 申报（Orca tab）。** 在 Orca pane 里，握手完成时插件会写
-  `<workspace>/.onlyne/cache/pi-pane.json`，`assign` 时刷新，`bye`、断开与退出时删除。它不是
-  协议的一部分：`integrations/orca-plugin` 靠它判断哪些 Orca tab 属于同一个 swarm——pane 会把
-  `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_TERMINAL_HANDLE` / `ORCA_WORKTREE_ID` 导出给 client
-  拉起的进程（2026-09-11 实测，Orca 1.4.198），而 pi 之后没有任何环节能恢复这个绑定。不在 pane
-  里、或缓存目录不可写时，写入是静默 no-op：申报永远不会让 session 失败。
+  `<workspace>/.onlyne/cache/pi-panes/<pane_key>.json`（pane key 里的 `:` 拍平成 `-`），
+  `assign` 时刷新，`bye`、`/onlyne disconnect` 与退出时删除。**socket 断开时刻意不删**：pi 可能
+  继续活着并接到下一个任务，申报跟的是 session，不是 socket。一个 pane 一个文件，而不是一个
+  workspace 一个文件：client 确实一个 workspace 只跑一个，但其中一个 role slot 会按
+  `max_sessions` 跑起多个 session，各自占一个 pane、各自一个 pi 进程——共用一个文件就是
+  last-writer-wins，后挂载的 pane 会把还在跑的 pane 覆盖掉。它不是协议的一部分：
+  `integrations/orca-plugin` 靠它判断哪些 Orca tab 属于同一个 swarm——pane 会把 `ORCA_PANE_KEY` /
+  `ORCA_TAB_ID` / `ORCA_TERMINAL_HANDLE` / `ORCA_WORKTREE_ID` 导出给 client 拉起的进程
+  （2026-09-11 实测，Orca 1.4.198），而 pi 之后没有任何环节能恢复这个绑定。每条申报带
+  `updated_at`（RFC 3339、毫秒、`Z`），读方靠它区分同一个 pane 的两条申报。过渡期内看板仍会读
+  旧版的单文件 `<workspace>/.onlyne/cache/pi-pane.json`（已经在跑的 pi 还在写它），但已经没有人
+  再写这个文件了。不在 pane 里、或缓存目录不可写时，写入是静默 no-op：申报永远不会让 session
+  失败。
 
 ## 6. 配置项
 

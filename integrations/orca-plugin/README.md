@@ -81,7 +81,7 @@ worktree's list and the only session source is the admin surface.
      **Absent or empty is a valid state** — the board then renders the flat tab list only and
      never calls `onlyne` at all. Entries are trimmed and de-duplicated.
   - `piWorkspaces` is the swarm-membership authority (§2 axis A): one entry per role workspace
-    whose pi adapter may publish a pane claim at `<workspace>/.onlyne/cache/pi-pane.json`. It is
+    whose pi adapter may publish a pane claim under `<workspace>/.onlyne/cache/pi-panes/`. It is
     **not** the same list as `serverRoots` — a workspace is where `onlyne client run` runs, and the
     board cannot derive it from a server root. Absent or empty is a valid state: the tab axis then
     falls back to the worktree heuristic. Same trimming and de-duplication.
@@ -228,11 +228,16 @@ An Orca worktree can hold tabs that are not onlyne sessions, so the tab axis is 
    `ORCA_TAB_ID`, `ORCA_TERMINAL_HANDLE` and `ORCA_WORKTREE_ID` from the pane it was spawned in
    (**measured 2026-09-11, Orca 1.4.198**: `orca terminal create --command …` exports all four into
    the command's process), so it is the one component that knows, from the inside, which pane is an
-   onlyne session. It publishes that binding to `<workspace>/.onlyne/cache/pi-pane.json`, where
-   `<workspace>` is where the operator runs `onlyne client run` — the client spawns its plugin with
-   `cwd` = workspace, and one client runs per workspace, so the file belongs to exactly one pane. A
-   tab is in scope iff its `paneKey` is claimed; a claim whose pane Orca no longer lists hides the
-   rest of the axis, so a stale claim never resurrects a tab.
+   onlyne session. It publishes that binding as one file per pane —
+   `<workspace>/.onlyne/cache/pi-panes/<pane_key, ':' flattened to '-'>.json`, where `<workspace>`
+   is where the operator runs `onlyne client run` and the client spawns its plugin with `cwd` =
+   workspace. One file per pane, not per workspace: the client admits one client per workspace, but
+   one role slot of it runs up to `max_sessions` sessions, each in its own pane and its own pi
+   process — a single workspace-wide file would be last-writer-wins, and the board would hide every
+   pane but the one that mounted last. A tab is in scope iff its `paneKey` is claimed; a claim whose
+   pane Orca no longer lists hides the rest of the axis, so a stale claim never resurrects a tab. A
+   claim left behind by a pane that died without clearing is harmless in exactly the same way: it
+   matches no row.
 2. **Worktree heuristic — fallback.** While no claim is published anywhere, a tab is in scope iff a
    configured root lives inside that tab's own `worktreePath` (both sides `realpath`-resolved). A
    root that resolves into no tab's worktree leaves the axis unscoped, and the note says so.
@@ -244,13 +249,16 @@ claims are read from the workspaces listed in `piWorkspaces` (step 4 above), ind
 
 `board.scope` records which decided: `{ derived, source: "adapter" | "worktree" | "none",
 worktrees, hidden, claimed? }`, alongside `summary.hiddenTabs`. A missing, unreadable or malformed
-claim file is a normal state, never an error: it only means that workspace has published nothing,
-and a workspace whose `pi-pane.json` is malformed contributes no claim rather than a failure.
+claim file is a normal state, never an error: it means that pane has published nothing, and a
+malformed file costs its own claim and no other's. A workspace whose `pi-panes/` holds no readable
+claim has published nothing either, directory or not.
 
-It is not *silent*, though. `board.claims` reports `{ published, unpublished }`, and the panel's
-scope note names every configured workspace that produced no claim — because `piWorkspaces` is a
-hand-written list, and a typo in it would otherwise be indistinguishable from a swarm that has not
-mounted yet.
+The pre-v1 single file `<workspace>/.onlyne/cache/pi-pane.json` is read as well, through the
+transition: a pi process that was already running when this reader was upgraded keeps writing it
+while its pane is live, and ignoring it would hide that pane. It is a transition read, not a second
+authority — for one pane key the newest claim wins (`updated_at`, or the file's own mtime when the
+claim carries no stamp, which is the case for every legacy file), so a stale legacy file loses to a
+fresh per-pane claim and disappears on the next restart. Nothing writes it any more.
 
 ### Axis B — sessions (one call per root per verb)
 
@@ -385,7 +393,7 @@ Implemented against the surfaces as measured; these are the points the implement
    nothing else. Anything a supervisor needs must be answerable through those two verbs.
 3. **`sessions` must stay answerable without a role workspace.** With no per-role worktree
    registration, a role's tab is indistinguishable from any other tab on the Orca side, so the
-   `task_id` ↔ tab binding is recovered from the pi adapter instead (`pi-pane.json`, §2 axis A):
+  `task_id` ↔ tab binding is recovered from the pi adapter instead (`pi-panes/`, §2 axis A):
    the adapter inherits `ORCA_PANE_KEY` from the pane it runs in, so the binding measured on the
    wire is the backend's own `pane_key` for spawned sessions.
 4. **Session keys used**: `task_id` (identity), `session_id` (display), `role` (section),

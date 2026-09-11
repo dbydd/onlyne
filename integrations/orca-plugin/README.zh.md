@@ -69,7 +69,7 @@ worktree，所有会话 tab 都平铺在宿主 worktree 的列表里，而唯一
      **缺失或空数组都是合法状态**——看板只渲染平铺的 tab 轴，完全不会调用 `onlyne`。
      条目会被 trim 并去重。
    - `piWorkspaces` 是 swarm 归属的权威来源（§2 轴 A）：一项一个 role workspace，该 workspace 里的
-     pi 适配器可以在 `<workspace>/.onlyne/cache/pi-pane.json` 申报自己所在的 pane。它**不是**
+     pi 适配器可以在 `<workspace>/.onlyne/cache/pi-panes/` 下申报自己所在的 pane。它**不是**
      `serverRoots`——workspace 是 `onlyne client run` 的运行目录，看板无法从 server root 推出来。
      缺失或空数组都是合法状态：tab 轴退回 worktree 启发式。同样 trim 并去重。
    - 为什么可能需要钉死二进制：plugin worker 的环境被 Orca 洗白（只保留 `PATH`/`HOME`/`LANG`
@@ -197,11 +197,14 @@ watchdog ping 与 action 结果。**worker→panel 没有通道**，v1 也不打
 1. **适配器申报 —— 权威来源。** pi 适配器从它被 spawn 的那个 pane 继承 `ORCA_PANE_KEY`、
    `ORCA_TAB_ID`、`ORCA_TERMINAL_HANDLE`、`ORCA_WORKTREE_ID`（**2026-09-11 实测，Orca
    1.4.198**：`orca terminal create --command …` 会把这四个都导出给命令进程），所以它是唯一
-   从进程内部就知道「哪个 pane 是 onlyne 会话」的组件。它把这个绑定写到
-   `<workspace>/.onlyne/cache/pi-pane.json`：`<workspace>` 就是 `onlyne client run` 的运行
-   目录（client 以 `cwd` = workspace spawn 插件，且一个 workspace 只跑一个 client），所以这个
-   文件必然只属于一个 pane。tab 的 `paneKey` 被申报了才在范围内；若某条申报指向 Orca 已不再
-   列出的 pane，结果是其余 tab 全被隐藏——过期申报不会把 tab 复活。
+   从进程内部就知道「哪个 pane 是 onlyne 会话」的组件。它把这个绑定写成一个 pane 一个文件：
+   `<workspace>/.onlyne/cache/pi-panes/<pane_key，':' 拍平成 '-'>.json`——`<workspace>` 就是
+   `onlyne client run` 的运行目录（client 以 `cwd` = workspace spawn 插件）。一个 pane 一个文件，
+   不是一 workspace 一个：client 确实一个 workspace 只跑一个，但其中一个 role slot 会按
+   `max_sessions` 跑起多个 session，各自一个 pane、各自一个 pi 进程——共用一份文件就是
+   last-writer-wins，后挂载的 pane 会让看板把还在跑的其余 pane 都隐藏掉。tab 的 `paneKey` 被申报了
+   才在范围内；若某条申报指向 Orca 已不再列出的 pane，结果是其余 tab 全被隐藏——过期申报不会把
+   tab 复活。死掉却没清掉的 pane 留下的申报同样无害：它对不上任何一行。
 2. **worktree 启发式 —— 兜底。** 任何地方都还没有申报时，tab 在自己 `worktreePath` 里含某个配置
    root 才算在范围内（两侧都做 `realpath`）。root 推不到任何 tab 的 worktree 时，该轴不设范围，
    并在说明里写清楚。
@@ -213,7 +216,13 @@ watchdog ping 与 action 结果。**worker→panel 没有通道**，v1 也不打
 
 `board.scope` 记录是哪一种决定的：`{ derived, source: "adapter" | "worktree" | "none",
 worktrees, hidden, claimed? }`，另有 `summary.hiddenTabs`。申报文件缺失、读不到或格式坏掉都是
-正常状态，不是错误——只说明那个 workspace 还没申报过，坏掉的文件贡献 0 条申报而不是一次失败。
+正常状态，不是错误——只说明那个 pane 还没申报过，坏掉的文件只丢掉自己那一条申报，不影响别的。
+workspace 有 `pi-panes/` 目录但里面没有一条能读的申报，也算「没申报过」。
+
+过渡期还会读旧版的单文件 `<workspace>/.onlyne/cache/pi-pane.json`：升级读方时已经在跑的 pi 进程
+还在写它，忽略它就会把那个活着的 pane 藏掉。它只是过渡读法，不是第二权威——同一个 pane key 取最新
+的那条申报（`updated_at`；旧文件没有这个字段时用它自己的 mtime，每条旧文件都走这条），所以过期的
+旧文件会输给新的分 pane 申报，并在下次重启时消失。已经没有任何东西再写它了。
 
 但它不是**无声**的：`board.claims` 给出 `{ published, unpublished }`，面板的范围说明会逐个点名
 「配置了但没读到申报」的 workspace——`piWorkspaces` 是手写的列表，写错了不能和「swarm 还没
@@ -333,7 +342,7 @@ BIN_DIR=target/debug node tools/smoke.mjs
    supervisor 需要的东西必须能通过这两个动词答出来。
 3. **`sessions` 必须在没有 role 工作区时也能答**。既然不再有 per-role worktree 注册，
    某个 role 的 tab 在 Orca 侧与其他 tab 无从区分，`task_id` ↔ tab 的绑定改由 pi 适配器恢复
-   （`pi-pane.json`，见 §2 轴 A）：适配器继承自己所处 pane 的 `ORCA_PANE_KEY`，所以线上量到的
+   （`pi-panes/`，见 §2 轴 A）：适配器继承自己所处 pane 的 `ORCA_PANE_KEY`，所以线上量到的
    `pane_key` 就是 backend 为被 spawn 会话记录的那个值。
 4. **用到的 session 字段**：`task_id`（身份）、`session_id`（展示）、`role`（分节）、
    `public_lifecycle`/`projection.lifecycle`、`projection.agent`、`projection.outcome`、

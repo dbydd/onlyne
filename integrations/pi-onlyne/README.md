@@ -202,13 +202,22 @@ of the shipped client.
   fires on a genuine redelivery.
 
 - **Pane claim (Orca tabs).** Inside an Orca pane the plugin writes
-  `<workspace>/.onlyne/cache/pi-pane.json` when the handshake completes, refreshes it on
-  `assign`, and removes it on `bye`, on disconnect and on shutdown. It is not protocol: it is
-  how `integrations/orca-plugin` knows which Orca tab belongs to a swarm, since the pane
-  exports `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_TERMINAL_HANDLE` / `ORCA_WORKTREE_ID` into
-  the process the client spawns (measured 2026-09-11, Orca 1.4.198) and nothing downstream of
-  pi can recover that binding. Outside a pane, and with an unwritable cache directory, the
-  write is a silent no-op: a claim never fails a session.
+  `<workspace>/.onlyne/cache/pi-panes/<pane_key>.json` — the pane key with its `:` flattened to
+  `-` — when the handshake completes, refreshes it on `assign`, and removes it on `bye`, on
+  `/onlyne disconnect` and on shutdown. Deliberately **not** when the socket drops: pi may live
+  on and be handed another task, so the claim follows the session, not the socket. One file per
+  pane, not one per workspace: the client admits one client per workspace, but one role slot of
+  it runs up to `max_sessions` sessions, each in its own pane and its own pi process — so a
+  workspace-wide file would be last-writer-wins, and a pane mounting late would erase a pane
+  still running. It is not protocol: it is how `integrations/orca-plugin` knows which Orca tab
+  belongs to a swarm, since the pane exports `ORCA_PANE_KEY` / `ORCA_TAB_ID` /
+  `ORCA_TERMINAL_HANDLE` / `ORCA_WORKTREE_ID` into the process the client spawns (measured
+  2026-09-11, Orca 1.4.198) and nothing downstream of pi can recover that binding. Each claim
+  carries an `updated_at` stamp (RFC 3339, milliseconds, `Z`) so a reader can tell two claims
+  for one pane apart. The pre-v1 single file `<workspace>/.onlyne/cache/pi-pane.json` is still
+  read by the board through the transition — an already-running pi keeps writing it — but
+  nothing writes it any more. Outside a pane, and with an unwritable cache directory, the write
+  is a silent no-op: a claim never fails a session.
 
 ## 6. Configuration reference
 

@@ -30,7 +30,7 @@ import {
   stdinTaskText,
   welcomeFrom,
 } from "./protocol.mjs";
-import { paneClaim, publishPaneClaim } from "./attribution.mjs";
+import { paneClaim, paneKeyFrom, publishPaneClaim } from "./attribution.mjs";
 
 /** Reconnect ladder in milliseconds, capped like the client's own. */
 export const RECONNECT_LADDER_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
@@ -100,10 +100,12 @@ export class OnlyneAgent {
     this.helloTimeoutMs = options.helloTimeoutMs ?? HELLO_TIMEOUT_MS;
     this.settleFallbackMs = options.settleFallbackMs ?? SETTLE_FALLBACK_MS;
     this.createConnection = options.createConnection ?? ((path) => createConnection(path));
-    // Where this pane's binding goes (attribution.mjs). Injected by the tests,
-    // which must not touch the workspace they run in.
+    // Where this pane's binding goes (attribution.mjs): its own file under the
+    // workspace's `pi-panes/`, so a sibling pi in the same workspace is never
+    // overwritten. Injected by the tests, which must not touch the workspace
+    // they run in.
     this.claimStore = options.claimStore ?? {
-      publish: (claim) => publishPaneClaim({ workspace: options.cwd, claim }),
+      publish: (claim, paneKey) => publishPaneClaim({ workspace: options.cwd, claim, paneKey }),
     };
     this.timer = options.timer ?? {
       set: (fn, ms) => setTimeout(fn, ms),
@@ -172,12 +174,17 @@ export class OnlyneAgent {
    * and never fatal.
    */
   publishClaim(taskId = this.envTaskId) {
-    this.claimStore.publish(paneClaim(process.env, { role: this.role, taskId }));
+    const claim = paneClaim(process.env, { role: this.role, taskId });
+    this.claimStore.publish(claim, claim?.pane_key ?? null);
   }
 
-  /** Drop the claim: this pane is no longer working on a task. */
+  /**
+   * Drop this pane's claim: the session ended, or this process is leaving. The
+   * pane key is the process's own, so a clear can only ever remove the file
+   * this process published — never a sibling pane's.
+   */
   clearClaim() {
-    this.claimStore.publish(null);
+    this.claimStore.publish(null, paneKeyFrom(process.env));
   }
 
   /** One line for `/onlyne status`. */

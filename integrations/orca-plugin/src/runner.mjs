@@ -215,8 +215,9 @@ export function normalizePathList(value) {
 
 /**
  * `piWorkspaces` names the onlyne workspaces whose pi adapters may publish a
- * pane claim (`<workspace>/.onlyne/cache/pi-pane.json`, §2 axis A). It is a
- * separate list from `serverRoots` because the two are different directories:
+ * pane claim under `<workspace>/.onlyne/cache/pi-panes/` (one file per pane,
+ * §2 axis A). It is a separate list from `serverRoots` because the two are
+ * different directories:
  * a workspace is where the operator runs `onlyne client run` (and where Orca
  * hosts the pane), and it is the client — not the server root — that owns that
  * path. Absent or empty is a normal state: the board then scopes its tab axis

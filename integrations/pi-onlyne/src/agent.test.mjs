@@ -3,13 +3,14 @@
 // wire vector, so the input side is byte-identical to what the client sends.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 
+import { PANE_CLAIMS_RELATIVE_DIR, paneClaimFileName } from "./attribution.mjs";
 import { OnlyneAgent } from "./agent.mjs";
 import { createFrameDecoder, encodeFrame } from "./frame.mjs";
 import { SEQ_BASE, readyReport } from "./protocol.mjs";
@@ -247,6 +248,50 @@ test("the pane claim follows the session: mount, assign, bye, stop", async () =>
 
     agent.stop("test");
     assert.equal(published.at(-1), null);
+  });
+});
+
+test("the claim lands in this pane's own file, and a dropped socket keeps it", async () => {
+  const { agent, host, dir } = await startAgent();
+  const paneKey = "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560";
+  const claimPath = join(dir, PANE_CLAIMS_RELATIVE_DIR, paneClaimFileName(paneKey));
+
+  await inOrcaPane({ ORCA_PANE_KEY: paneKey, ORCA_TERMINAL_HANDLE: "term_1" }, async () => {
+    agent.start();
+    // Mount: the claim is a file of its own, named after this pane.
+    await waitFor(() => (existsSync(claimPath) ? true : null));
+    const mounted = JSON.parse(readFileSync(claimPath, "utf8"));
+    assert.equal(mounted.pane_key, paneKey);
+    assert.equal(mounted.handle, "term_1");
+    assert.equal(mounted.role, "planner");
+    assert.match(mounted.updated_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+
+    // An assignment refreshes the claim in place: still one file for the pane.
+    const reassigned = "22222222-2222-4222-8222-222222222222";
+    host.notify("assign", { ...assignArgs(), task_id: reassigned });
+    await waitFor(() => (JSON.parse(readFileSync(claimPath, "utf8")).task_id === reassigned ? true : null));
+    assert.deepEqual(readdirSync(join(dir, PANE_CLAIMS_RELATIVE_DIR)), [paneClaimFileName(paneKey)]);
+
+    // The socket dying is not the session ending: pi stays up and may be handed
+    // another task, so the claim stays. The host is gone for good here, so
+    // nothing can put the file back and the assertion is a real one.
+    await host.close();
+    await waitFor(() => (agent.connected === false ? true : null));
+    assert.equal(existsSync(claimPath), true, "a dropped socket does not clear the claim");
+  });
+});
+
+test("stop removes this pane's claim file", async () => {
+  const { agent, host, dir } = await startAgent();
+  const paneKey = "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560";
+  const claimPath = join(dir, PANE_CLAIMS_RELATIVE_DIR, paneClaimFileName(paneKey));
+
+  await inOrcaPane({ ORCA_PANE_KEY: paneKey }, async () => {
+    agent.start();
+    await waitFor(() => (existsSync(claimPath) ? true : null));
+
+    agent.stop("test");
+    assert.equal(existsSync(claimPath), false, "the plugin left, so its claim went with it");
   });
 });
 
