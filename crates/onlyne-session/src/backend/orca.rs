@@ -373,6 +373,76 @@ impl OrcaBackend {
         })
     }
 
+    /// `terminal close` for one handle.
+    fn close_handle(&self, handle: &str) -> Result<()> {
+        self.json(vec![
+            "terminal".into(),
+            "close".into(),
+            "--terminal".into(),
+            handle.into(),
+            "--json".into(),
+        ])
+        .map(|_| ())
+    }
+
+    /// Where the tab a `terminal create` just made is, when its response named
+    /// no handle.
+    ///
+    /// The coordinates the response did carry are an exact hook: `terminal list`
+    /// repeats `paneKey`, or the `tabId:leafId` pair it is built from, beside the
+    /// handle of the pane's current PTY. A response with no coordinates leaves
+    /// the create-time title, which Orca's login shell replaces within seconds,
+    /// so the newest row carrying that exact title wins. Position alone never
+    /// picks a tab: closing one this backend cannot identify is worse than
+    /// leaving it for the operator.
+    fn find_created(&self, keys: &TabKeys, title: &str) -> Option<String> {
+        let rows = self.rows(self.selector_for().as_deref()).ok()?;
+        if let Some(wanted) = keys.pane_key.as_deref() {
+            let named = rows
+                .iter()
+                .find(|row| TabKeys::read(row).pane_key.as_deref() == Some(wanted));
+            if let Some(row) = named {
+                return TabKeys::read(row).handle;
+            }
+        }
+        rows.iter()
+            .filter(|row| row.get("title").and_then(Value::as_str) == Some(title))
+            .max_by_key(|row| row.get("lastOutputAt").and_then(Value::as_i64).unwrap_or(0))
+            .and_then(|row| TabKeys::read(row).handle)
+    }
+
+    /// The error for a `terminal create` whose response named no handle, with
+    /// the tab it made rolled back first.
+    ///
+    /// The tab exists by the time this runs, so it is the one way a failed spawn
+    /// can leak a resource: the handle is recovered from the coordinates the
+    /// response did carry and the tab is closed. A tab that cannot be located is
+    /// named by those coordinates in the error instead, so an operator can
+    /// finish the job, and no other tab is touched.
+    fn roll_back_create(&self, keys: &TabKeys, title: &str, value: &Value) -> anyhow::Error {
+        let coordinates = format!(
+            "title {title:?}, tab_id {:?}, leaf_id {:?}, pane_key {:?}",
+            keys.tab_id, keys.leaf_id, keys.pane_key
+        );
+        match self.find_created(keys, title) {
+            Some(handle) => match self.close_handle(&handle) {
+                Ok(()) => anyhow::anyhow!(
+                    "orca terminal create returned no handle; the tab it made ({coordinates}, \
+                     handle {handle}) was closed: {value}"
+                ),
+                Err(error) => anyhow::anyhow!(
+                    "orca terminal create returned no handle and the tab it made ({coordinates}, \
+                     handle {handle}) was not closed: {error}; close it by hand. create \
+                     answered: {value}"
+                ),
+            },
+            None => anyhow::anyhow!(
+                "orca terminal create returned no handle and the tab it made ({coordinates}) \
+                 could not be located to close; close it by hand. create answered: {value}"
+            ),
+        }
+    }
+
     /// The freshest `terminal show` payload for a session, re-resolving the
     /// stored handle once when Orca answers that it went stale.
     ///
@@ -527,7 +597,10 @@ impl SessionBackend for OrcaBackend {
         let value = self.json(args)?;
         let keys = TabKeys::read(&value);
         if keys.handle.is_none() {
-            anyhow::bail!("orca terminal create returned no handle: {value}");
+            // `create` made a tab but named no handle, so the session cannot be
+            // addressed: left alone it would leak a tab that no session ref and
+            // no tab map line records. Roll it back before giving up.
+            return Err(self.roll_back_create(&keys, &title, &value));
         }
         let mut backend_ref = keys.to_ref();
         if let Some(selector) = &selector {
@@ -617,13 +690,7 @@ impl SessionBackend for OrcaBackend {
             }
             Err(error) => return Err(error),
         };
-        self.json(vec![
-            "terminal".into(),
-            "close".into(),
-            "--terminal".into(),
-            Self::ref_handle(&current)?,
-            "--json".into(),
-        ])?;
+        self.close_handle(&Self::ref_handle(&current)?)?;
         self.note(&current, "closed");
         if let Some(pane_key) = ref_str(&current, "pane_key") {
             self.tabs.lock().remove(&pane_key);
@@ -918,6 +985,140 @@ mod tests {
         assert!(!cli.calls()[0].contains("--worktree"));
         assert!(spawned.backend_ref.get("selector").is_none());
         assert_eq!(mapping_lines(&root)[0]["worktree_selector"], "");
+    }
+
+    #[test]
+    fn a_handleless_create_closes_the_tab_it_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        // `create` made a tab but named no handle. The pane key it did carry is
+        // the hook the rollback addresses it by, through `terminal list`.
+        let cli = Arc::new(
+            OrcaCli::default()
+                .reply(
+                    "terminal create",
+                    0,
+                    envelope(serde_json::json!({
+                        "terminal": {"tabId": "tab-1", "leafId": "leaf-2"}
+                    })),
+                )
+                .reply(
+                    "terminal list",
+                    0,
+                    envelope(serde_json::json!({"terminals": [relisted_row()]})),
+                )
+                .reply(
+                    "terminal close",
+                    0,
+                    envelope(serde_json::json!({"closed": true})),
+                ),
+        );
+        let backend = OrcaBackend::with_host_worktree(
+            cli.clone(),
+            WorktreePolicy::Host,
+            Some(HOST_WORKTREE.into()),
+        );
+
+        let error = backend.spawn(spawn_spec(&root)).unwrap_err();
+
+        assert_eq!(cli.called("terminal close --terminal term_two"), 1);
+        assert!(error.to_string().contains("term_two"), "{error}");
+        assert!(error.to_string().contains("tab-1:leaf-2"), "{error}");
+        // The spawn never handed a session out, so the tab map has no line and
+        // the rollback is the only record of the tab.
+        assert!(!root.join(".onlyne/cache/orca-tabs.jsonl").exists());
+    }
+
+    #[test]
+    fn a_handleless_create_falls_back_to_its_title_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        // No coordinates at all, so the create-time title is the only hook left.
+        // Two rows carry it, and the newest one is the tab `create` just made.
+        let row = |handle: &str, last: i64| {
+            serde_json::json!({
+                "handle": handle,
+                "paneKey": format!("tab-{handle}:leaf-1"),
+                "title": "onlyne:task-1",
+                "lastOutputAt": last
+            })
+        };
+        let cli = Arc::new(
+            OrcaCli::default()
+                .reply(
+                    "terminal create",
+                    0,
+                    envelope(serde_json::json!({"terminal": {}})),
+                )
+                .reply(
+                    "terminal list",
+                    0,
+                    envelope(serde_json::json!({
+                        "terminals": [row("term_old", 5), row("term_new", 9)]
+                    })),
+                )
+                .reply(
+                    "terminal close",
+                    0,
+                    envelope(serde_json::json!({"closed": true})),
+                ),
+        );
+        let backend = OrcaBackend::with_host_worktree(
+            cli.clone(),
+            WorktreePolicy::Host,
+            Some(HOST_WORKTREE.into()),
+        );
+
+        let error = backend.spawn(spawn_spec(&root)).unwrap_err();
+
+        assert_eq!(cli.called("terminal close --terminal term_new"), 1);
+        assert_eq!(cli.called("terminal close --terminal term_old"), 0);
+        assert!(error.to_string().contains("term_new"), "{error}");
+    }
+
+    #[test]
+    fn a_create_with_no_coordinates_is_reported_never_guessed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        // The response named neither a handle nor a pane, and the listing holds
+        // only the operator's own tab: nothing identifies the tab `create` made,
+        // so the rollback closes nothing and says so. No close call is scripted
+        // and the double panics on an unscripted call, so a rollback that
+        // guessed would fail this test by touching a tab it does not own.
+        let cli = Arc::new(
+            OrcaCli::default()
+                .reply(
+                    "terminal create",
+                    0,
+                    envelope(serde_json::json!({"terminal": {}})),
+                )
+                .reply(
+                    "terminal list",
+                    0,
+                    envelope(serde_json::json!({
+                        "terminals": [{
+                            "handle": "term_operator",
+                            "paneKey": "tab-9:leaf-9",
+                            "tabId": "tab-9",
+                            "leafId": "leaf-9",
+                            "title": "dbydd@workstation: ~/work",
+                            "lastOutputAt": 11
+                        }]
+                    })),
+                ),
+        );
+        let backend = OrcaBackend::with_host_worktree(
+            cli.clone(),
+            WorktreePolicy::Host,
+            Some(HOST_WORKTREE.into()),
+        );
+
+        let error = backend.spawn(spawn_spec(&root)).unwrap_err();
+
+        assert_eq!(cli.called("terminal close"), 0);
+        assert!(error.to_string().contains("close it by hand"), "{error}");
+        // The coordinates that let an operator finish the job are in the error.
+        assert!(error.to_string().contains("onlyne:task-1"), "{error}");
     }
 
     #[test]
