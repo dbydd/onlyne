@@ -1,9 +1,9 @@
-//! The message verbs: send, reply, complete, handoff, control, who, ping.
+//! The message verbs: send, reply, complete, handoff, ack, reject, control, who, ping.
 
 use onlyne_proto::{
-    AdminControl, AdminOp, AdminSend, Body, Causality, ClientOp, ControlArgs, ControlOp, Envelope,
-    ErrorCode, Frame, ImagePart, LedgerQuery, MsgKind, Outcome, Principal, QueryRolesArgs, Report,
-    new_envelope, new_id, new_task_id,
+    AckArgs as ProtoAckArgs, AdminControl, AdminOp, AdminSend, Body, Causality, ClientOp,
+    ControlArgs, ControlOp, Envelope, ErrorCode, Frame, ImagePart, LedgerQuery, MsgKind, Outcome,
+    Principal, QueryRolesArgs, Report, new_envelope, new_id, new_task_id,
 };
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -699,6 +699,38 @@ async fn control_inner(
     run_one(flags, target, &request).await
 }
 
+pub fn ack(flags: &GlobalFlags, args: AckArgs) -> i32 {
+    ack_decision(flags, args, true, "ack")
+}
+
+pub fn reject(flags: &GlobalFlags, args: AckArgs) -> i32 {
+    ack_decision(flags, args, false, "reject")
+}
+
+fn ack_decision(flags: &GlobalFlags, args: AckArgs, accepted: bool, verb: &str) -> i32 {
+    if flags.request.is_some() {
+        return runtime::usage_error(format!("onlyne: --request is not supported by {verb}"));
+    }
+    let Some(target) = runtime::target(flags) else {
+        return EXIT_NO_SOCKET;
+    };
+    if target.surface != Surface::Client {
+        return runtime::usage_error(format!(
+            "onlyne: {verb} requires a role workspace or client socket"
+        ));
+    }
+    let request = Outbound::client(
+        new_id(),
+        ClientOp::Ack(ProtoAckArgs {
+            msg_id: args.msg_id,
+            op_id: args.op_id,
+            accepted,
+            reason: Some(args.reason),
+        }),
+    );
+    runtime::block_on(async { run_one(flags, &target, &request).await })
+}
+
 pub fn who(flags: &GlobalFlags) -> i32 {
     let Some(target) = runtime::target(flags) else {
         return EXIT_NO_SOCKET;
@@ -827,6 +859,19 @@ pub struct HandoffArgs {
     /// Handoff text.
     #[arg(long)]
     pub text: String,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct AckArgs {
+    /// Delivered envelope id being settled.
+    #[arg(long)]
+    pub msg_id: String,
+    /// Operation id the envelope carried, when present.
+    #[arg(long)]
+    pub op_id: Option<String>,
+    /// Reason recorded with the decision.
+    #[arg(long)]
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]

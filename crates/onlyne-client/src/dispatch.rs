@@ -173,6 +173,36 @@ impl DispatchState {
             slot.msg_id = Some(msg_id.to_string());
         }
     }
+    /// Queue a delivery ack when the plugin refuses an assignment.
+    ///
+    /// An accepted assignment is not terminal for the server row: the normal
+    /// completion path still settles that delivery. A refused assignment is a
+    /// terminal local decision, so it uses the same durable ack queue as every
+    /// other delivery settlement.
+    pub fn push_assign_ack(&self, ack: onlyne_proto::AssignAckArgs) -> bool {
+        if ack.accepted {
+            return false;
+        }
+        let mut inner = self.inner.lock();
+        let msg_id = inner
+            .sessions
+            .values_mut()
+            .find(|slot| slot.task_id.as_deref() == Some(ack.task_id.as_str()))
+            .and_then(|slot| slot.msg_id.take());
+        let Some(msg_id) = msg_id else {
+            return false;
+        };
+        store_ack(
+            &inner,
+            AckArgs {
+                msg_id,
+                op_id: None,
+                accepted: false,
+                reason: ack.reason.or_else(|| Some("assign rejected".to_string())),
+            },
+        );
+        true
+    }
 
     /// Queue an ack the client owes the server.
     ///
@@ -184,6 +214,32 @@ impl DispatchState {
     /// sender.
     pub fn push_settled(&self, ack: AckArgs) {
         store_ack(&self.inner.lock(), ack);
+    }
+
+    /// Adopt the role slice the server sent with `welcome`.
+    pub fn role_slice(&self) -> crate::slice::RoleSlice {
+        let inner = self.inner.lock();
+        crate::slice::RoleSlice {
+            command: inner.command.clone(),
+            max_sessions: inner.max_sessions,
+            reuse: inner.reuse,
+        }
+    }
+
+    /// Task ids currently occupying a live slot.
+    pub fn live_task_ids(&self) -> std::collections::HashSet<String> {
+        let inner = self.inner.lock();
+        inner
+            .sessions
+            .values()
+            .filter_map(|slot| slot.task_id.clone())
+            .collect()
+    }
+
+    /// Whether any adapter is currently mounted (named or parked).
+    pub fn has_mounted_adapter(&self) -> bool {
+        let inner = self.inner.lock();
+        !inner.transports.is_empty() || inner.parked.is_some()
     }
 
     /// Adopt the role slice the server sent with `welcome`.

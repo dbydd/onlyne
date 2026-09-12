@@ -2209,6 +2209,7 @@ dependencies = [
  "chrono",
  "clap",
  "onlyne-adapter",
+ "onlyne-client",
  "onlyne-config",
  "onlyne-frame",
  "onlyne-layout",

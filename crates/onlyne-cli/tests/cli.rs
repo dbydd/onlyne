@@ -691,9 +691,9 @@ fn request_is_refused_on_control() {
             "control",
             "--task",
             "22222222-2222-4222-8222-222222222222",
+            "recycle",
             "--reason",
             "rotate",
-            "recycle",
         ])
         .output()
         .unwrap();
@@ -705,6 +705,309 @@ fn request_is_refused_on_control() {
     assert!(
         output.stdout.is_empty(),
         "a refused flag prints a hint, not an answer"
+    );
+}
+
+const ACK_MSG_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+/// `ack` and `reject` require an explicit reason, so a half-written terminal
+/// decision is refused by clap before any socket is consulted.
+#[test]
+fn ack_and_reject_require_reason() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for verb in ["ack", "reject"] {
+        let output = Command::new(bin())
+            .current_dir(dir.path())
+            .args([verb, "--msg-id", ACK_MSG_ID])
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+        let stderr = stderr_of(&output);
+        assert!(
+            stderr.contains(verb),
+            "missing reason must name {verb}: {stderr}"
+        );
+        assert!(
+            stderr.contains("--reason"),
+            "missing reason must name the flag: {stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "a clap refusal prints a hint, not an answer"
+        );
+    }
+}
+
+/// `ack` and `reject` carry `AckArgs` directly, not an envelope, so `--request`
+/// is refused like `control` instead of being silently ignored.
+#[test]
+fn request_is_refused_on_ack_and_reject() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for verb in ["ack", "reject"] {
+        let output = Command::new(bin())
+            .current_dir(dir.path())
+            .args([
+                "--request",
+                "{}",
+                verb,
+                "--msg-id",
+                ACK_MSG_ID,
+                "--reason",
+                "operator decision",
+            ])
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+        assert_eq!(
+            stderr_of(&output),
+            format!("onlyne: --request is not supported by {verb}\n")
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "a refused flag prints a hint, not an answer"
+        );
+    }
+}
+
+/// The role-surface verbs both serialize as `ClientOp::Ack`; only the subcommand
+/// chooses `accepted`, and the daemon's ledger-event payload is printed intact.
+#[test]
+fn ack_and_reject_write_client_ack_decisions() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for (verb, accepted, state) in [("ack", true, "accepted"), ("reject", false, "rejected")] {
+        let workspace = dir.path().join(verb);
+        let listener = role_listener(&workspace);
+        let server = serve_once(
+            listener,
+            serde_json::json!({
+                "f": "res",
+                "id": "r1",
+                "ok": true,
+                "data": {
+                    "ledger_event": {
+                        "msg_id": ACK_MSG_ID,
+                        "state": state,
+                        "reason": "operator decision"
+                    }
+                }
+            }),
+        );
+
+        let output = Command::new(bin())
+            .current_dir(dir.path())
+            .args([
+                "--workspace",
+                workspace.to_str().unwrap(),
+                verb,
+                "--msg-id",
+                ACK_MSG_ID,
+                "--op-id",
+                VALID_OP_ID,
+                "--reason",
+                "operator decision",
+            ])
+            .output()
+            .unwrap();
+        let request = server
+            .join()
+            .unwrap()
+            .expect("the CLI must reach the role socket");
+
+        assert_eq!(output.status.code(), Some(EXIT_OK));
+        assert_eq!(request["op"], "ack");
+        assert_eq!(request["args"]["msg_id"], ACK_MSG_ID);
+        assert_eq!(request["args"]["op_id"], VALID_OP_ID);
+        assert_eq!(request["args"]["accepted"], accepted);
+        assert_eq!(request["args"]["reason"], "operator decision");
+
+        let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["data"]["ledger_event"]["msg_id"], ACK_MSG_ID);
+        assert_eq!(body["data"]["ledger_event"]["state"], state);
+        assert_eq!(body["data"]["ledger_event"]["reason"], "operator decision");
+    }
+}
+
+/// A server refusal is printed as the daemon sent it, preserving its code and
+/// human reason while returning the answer-failed exit code.
+#[test]
+fn reject_passes_server_error_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("role");
+    let listener = role_listener(&workspace);
+    let server = serve_once(
+        listener,
+        serde_json::json!({
+            "f": "res",
+            "id": "r1",
+            "ok": false,
+            "error": {
+                "code": "forbidden",
+                "message": "not this role's delivery",
+                "field": "msg_id"
+            }
+        }),
+    );
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "reject",
+            "--msg-id",
+            ACK_MSG_ID,
+            "--reason",
+            "not mine",
+        ])
+        .output()
+        .unwrap();
+    server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the role socket");
+
+    assert_eq!(output.status.code(), Some(EXIT_ANSWER_FAILED));
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"]["code"], "forbidden");
+    assert_eq!(body["error"]["message"], "not this role's delivery");
+    assert_eq!(body["error"]["field"], "msg_id");
+}
+
+const CONTROL_TASK: &str = "22222222-2222-4222-8222-222222222222";
+
+/// `control cancel` without `--reason` is a clap refusal that names the verb.
+#[test]
+fn control_cancel_without_reason_names_the_verb() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args(["control", "--task", CONTROL_TASK, "cancel"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("cancel"),
+        "missing --reason must name cancel: {stderr}"
+    );
+    assert!(
+        stderr.contains("--reason"),
+        "missing --reason must name the flag: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a clap refusal prints a hint, not an answer"
+    );
+}
+
+/// `control recycle` without `--reason` is a clap refusal that names the verb.
+#[test]
+fn control_recycle_without_reason_names_the_verb() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args(["control", "--task", CONTROL_TASK, "recycle"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("recycle"),
+        "missing --reason must name recycle: {stderr}"
+    );
+    assert!(
+        stderr.contains("--reason"),
+        "missing --reason must name the flag: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a clap refusal prints a hint, not an answer"
+    );
+}
+
+/// `--reason` on `cancel` and `recycle` passes clap and reaches socket resolution.
+#[test]
+fn control_reason_passes_clap_on_cancel_and_recycle() {
+    let dir = tempfile::tempdir().unwrap();
+    for verb in ["cancel", "recycle"] {
+        let output = Command::new(bin())
+            .current_dir(dir.path())
+            .args([
+                "control",
+                "--task",
+                CONTROL_TASK,
+                verb,
+                "--reason",
+                "rotate",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(EXIT_NO_SOCKET),
+            "{verb} with --reason must pass clap: {}",
+            stderr_of(&output)
+        );
+        assert_eq!(stderr_of(&output), format!("{NO_SOCKET_MESSAGE}\n"));
+        assert!(
+            output.stdout.is_empty(),
+            "a local resolution failure must not print an answer"
+        );
+    }
+}
+
+/// `control probe` does not take `--reason` and still passes clap.
+#[test]
+fn control_probe_does_not_require_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args(["control", "--task", CONTROL_TASK, "probe"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_NO_SOCKET),
+        "probe without --reason must pass clap: {}",
+        stderr_of(&output)
+    );
+}
+
+/// `control cancel --help` and `control recycle --help` list `--reason`.
+/// `control probe --help` does not.
+#[test]
+fn control_subcommand_help_lists_reason_only_where_required() {
+    let dir = tempfile::tempdir().unwrap();
+    for verb in ["cancel", "recycle"] {
+        let output = Command::new(bin())
+            .current_dir(dir.path())
+            .args(["control", verb, "--help"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(EXIT_OK));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("--reason"),
+            "{verb} --help must list --reason: {stdout}"
+        );
+    }
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args(["control", "probe", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(EXIT_OK));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("--reason"),
+        "probe --help must not list --reason: {stdout}"
     );
 }
 
@@ -737,6 +1040,14 @@ fn pinned_send(op_id: Option<&str>) -> onlyne_proto::AdminSend {
 /// The admin socket path `--server-root` resolves, bound and ready to answer.
 fn admin_listener(root: &Path) -> UnixListener {
     let socket = root.join(".onlyne").join("run").join("s");
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let _ = std::fs::remove_file(&socket);
+    UnixListener::bind(&socket).unwrap()
+}
+
+/// The role socket path `--workspace` resolves, bound and ready to answer.
+fn role_listener(workspace: &Path) -> UnixListener {
+    let socket = workspace.join(".onlyne").join("run").join("s");
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     let _ = std::fs::remove_file(&socket);
     UnixListener::bind(&socket).unwrap()

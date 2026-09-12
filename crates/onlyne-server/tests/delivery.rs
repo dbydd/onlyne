@@ -12,7 +12,7 @@ use onlyne_proto::{
     Subscribe,
 };
 use onlyne_server::state::{ChannelBinding, DeliveryTicket, RoleConnection, Server, ServerInit};
-use onlyne_server::{events, faults, gateway_host, projection, relay, router};
+use onlyne_server::{events, faults, gateway_host, projection, relay, router, stale};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -308,6 +308,7 @@ fn a_completion_reaches_the_origin_role_without_an_acl_edge() {
         last_seq: 0,
         connected_at: Utc::now(),
         draining: false,
+        generation: 0,
     });
     let second = task("supervisor", "builder", "more work");
     let second_task = second.task_id().expect("task").to_string();
@@ -435,6 +436,7 @@ fn an_offline_role_keeps_the_row_queued_and_an_online_role_is_notified() {
         last_seq: 0,
         connected_at: Utc::now(),
         draining: false,
+        generation: 0,
     });
     let envelope = task("planner", "builder", "do it again");
     let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
@@ -590,6 +592,7 @@ fn a_note_to_an_offline_role_is_refused_before_the_ledger_row_exists() {
         last_seq: 0,
         connected_at: Utc::now(),
         draining: false,
+        generation: 0,
     });
     let outcome = accepted(relay::send(&quiet.state, &envelope, false, None).expect("relay"));
     let rows = ledger_rows(&quiet.state);
@@ -614,6 +617,200 @@ fn a_requeue_publishes_exactly_one_ledger_state_event() {
     let before = ledger_state_events(&fixture.state).len();
     relay::disconnect(&fixture.state, "builder").expect("disconnect");
     assert_eq!(ledger_state_events(&fixture.state).len(), before + 1);
+}
+
+#[test]
+fn replacement_session_reoffer_is_single_and_ack_closes_the_ticket() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let first = relay::pull(
+        &fixture.state,
+        "builder",
+        Some("old-session"),
+        &PullArgs::default(),
+    )
+    .expect("first pull");
+    assert_eq!(first.deliveries.len(), 1);
+    assert!(
+        fixture
+            .state
+            .open_delivery("builder", Some("old-session"))
+            .is_some()
+    );
+
+    let second = relay::pull(
+        &fixture.state,
+        "builder",
+        Some("new-session"),
+        &PullArgs::default(),
+    )
+    .expect("replacement pull");
+    assert_eq!(
+        second.deliveries.len(),
+        1,
+        "the replacement gets one re-offer"
+    );
+    assert_eq!(second.deliveries[0].msg_id, outcome.receipt.msg_id);
+    assert!(
+        fixture
+            .state
+            .open_delivery("builder", Some("new-session"))
+            .is_some()
+    );
+
+    let event = relay::ack(
+        &fixture.state,
+        &AckArgs {
+            msg_id: outcome.receipt.msg_id.clone(),
+            op_id: None,
+            accepted: true,
+            reason: Some("already injected".into()),
+        },
+    )
+    .expect("ack")
+    .expect("acked");
+    assert_eq!(event.state, LedgerState::Acked);
+    assert!(
+        fixture
+            .state
+            .open_delivery("builder", Some("new-session"))
+            .is_none()
+    );
+    let third = relay::pull(
+        &fixture.state,
+        "builder",
+        Some("new-session"),
+        &PullArgs::default(),
+    )
+    .expect("post-ack pull");
+    assert!(third.deliveries.is_empty(), "ack closes the re-offer loop");
+}
+
+#[test]
+fn ack_idempotence_keeps_the_settled_shape() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    let args = AckArgs {
+        msg_id: outcome.receipt.msg_id.clone(),
+        op_id: None,
+        accepted: true,
+        reason: None,
+    };
+    let first = relay::ack(&fixture.state, &args)
+        .expect("first ack")
+        .expect("acked");
+    let second = relay::ack(&fixture.state, &args)
+        .expect("second ack")
+        .expect("idempotent ack");
+    assert_eq!(first.state, LedgerState::Acked);
+    assert_eq!(second.state, LedgerState::Acked);
+    assert_eq!(second.msg_id, first.msg_id);
+    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Acked);
+}
+
+#[test]
+fn admin_control_bypasses_role_control_admin_edge() {
+    let fixture = fixture_with(&format!(
+        r#"[server]
+name = "local"
+listen = "127.0.0.1:0"
+cert_pin = "{CERT_PIN}"
+
+[[client]]
+role = "supervisor"
+key = "{key}"
+allowed_targets = ["builder"]
+
+[[client]]
+role = "builder"
+key = "{key}"
+allowed_senders = ["supervisor"]
+"#,
+        key = key()
+    ));
+    let task_id = onlyne_proto::new_task_id();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let admin = rt.block_on(router::dispatch_admin(
+        &fixture.state,
+        &mut router::Session::default(),
+        AdminOp::Control(AdminControl {
+            from: "supervisor".into(),
+            to: Some("builder".into()),
+            op: ControlOp::Cancel {
+                task_id: task_id.clone(),
+                reason: "operator cancel".into(),
+            },
+        }),
+    ));
+    assert!(admin.ok, "admin socket is the root of trust: {admin:?}");
+
+    let mut role_session =
+        router::Session::with_sender(tokio::sync::mpsc::channel(1).0, "supervisor");
+    let hello = rt.block_on(router::dispatch_client(
+        &fixture.state,
+        &mut role_session,
+        ClientOp::Hello(hello_args("supervisor")),
+    ));
+    assert!(hello.ok, "role hello should pass: {hello:?}");
+    let role = rt.block_on(router::dispatch_client(
+        &fixture.state,
+        &mut role_session,
+        ClientOp::Control(ControlArgs {
+            to: Some("builder".into()),
+            op: ControlOp::Cancel {
+                task_id,
+                reason: "role cancel".into(),
+            },
+        }),
+    ));
+    assert!(!role.ok);
+    assert_eq!(role.error.unwrap().code, ErrorCode::Forbidden);
+}
+
+#[test]
+fn repair_retry_requeue_is_immediately_visible_to_online_pull() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "retry me");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    let task_id = outcome.receipt.task.clone().expect("task id");
+    let body = faults::repair(
+        &fixture.state,
+        &AdminOp::RepairRetry(RepairTarget {
+            task_id: task_id.clone(),
+            reason: Some("try again".into()),
+        }),
+    )
+    .expect("repair retry")
+    .expect("repair accepted");
+    assert_eq!(body["requeued"], 1);
+    let redelivered = relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull after repair retry");
+    assert_eq!(redelivered.deliveries.len(), 1);
+    assert_eq!(
+        redelivered.deliveries[0].envelope.task_id(),
+        Some(task_id.as_str())
+    );
 }
 
 #[test]
@@ -654,6 +851,54 @@ fn gap_notice_counts_the_dropped_events() {
     assert_eq!(notice.requested, 10);
     assert_eq!(notice.head, 900);
     assert_eq!(notice.kind, events::RESYNC_LAG_KIND);
+}
+
+#[test]
+fn stale_working_observer_records_fault_without_mutating_session() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    projection::report(
+        &fixture.state,
+        "builder",
+        &Report::Ready {
+            task_id: task_id.clone(),
+            session_id: "sess-stale".into(),
+            generation: 1,
+            seq: 1,
+            cluster_ref: None,
+        },
+    )
+    .expect("ready report");
+    let old = (Utc::now() - chrono::Duration::seconds((stale::STALE_WATCH_GRACE_SECS + 5) as i64))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let conn = rusqlite::Connection::open(fixture.state.ledger.path()).expect("open ledger");
+    conn.execute(
+        "UPDATE sessions SET updated_at=?1 WHERE task_id=?2",
+        rusqlite::params![old, task_id],
+    )
+    .expect("age session");
+    drop(conn);
+
+    let recorded = stale::observe_once(&fixture.state, Utc::now()).expect("observe stale");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].kind, stale::KIND_STALE_WORKING);
+    assert_eq!(recorded[0].task_id.as_deref(), Some(task_id.as_str()));
+    assert_eq!(recorded[0].role.as_deref(), Some("builder"));
+    assert!(
+        fixture
+            .state
+            .ledger
+            .get_session_row(&task_id)
+            .expect("session row")
+            .is_some_and(|row| row.public_lifecycle == "working"),
+        "observer records a fault but never changes lifecycle"
+    );
+    assert!(
+        stale::observe_once(&fixture.state, Utc::now())
+            .expect("observe twice")
+            .is_empty(),
+        "the open stale_working fault makes the scan idempotent"
+    );
 }
 
 #[test]

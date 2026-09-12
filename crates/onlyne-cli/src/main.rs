@@ -8,9 +8,9 @@
 //! `onlyne gateway run|list|auth` exec their sibling, `onlyne gateway status`
 //! queries here, and the admin nouns (`roles`, `sessions`, `ledger`, `faults`,
 //! `watch`, `history`, `spec_diff`, `wait-ready`, `repair`) plus the message
-//! verbs (`send`, `reply`, `complete`, `handoff`, `control`, `who`, `ping`)
-//! share one path in this process: resolve a socket, write one frame, print one
-//! JSON line, return one exit code.
+//! verbs (`send`, `reply`, `complete`, `handoff`, `ack`, `reject`, `control`,
+//! `who`, `ping`) share one path in this process: resolve a socket, write one
+//! frame, print one JSON line, return one exit code.
 
 mod admin;
 mod flags;
@@ -61,6 +61,10 @@ enum Verb {
     Complete(CompleteCmd),
     /// Hand a task to another role.
     Handoff(HandoffCmd),
+    /// Accept a delivered envelope by its msg id.
+    Ack(verbs::AckArgs),
+    /// Reject a delivered envelope by its msg id.
+    Reject(verbs::AckArgs),
     /// Drive a control op against a task.
     Control(ControlCmd),
     /// Query the roles the server knows.
@@ -214,24 +218,28 @@ struct ControlCmd {
     /// Role the control op targets; omitted means the role that owns the task.
     #[arg(long)]
     to: Option<String>,
-    /// Reason, required for recycle and cancel.
-    #[arg(long)]
-    reason: Option<String>,
     /// The control op to drive.
     #[command(subcommand)]
     verb: ControlVerb,
 }
 
+#[derive(clap::Args, Debug, Clone)]
+struct ControlReasonArgs {
+    /// Reason the control op records.
+    #[arg(long)]
+    reason: String,
+}
+
 #[derive(Subcommand, Debug, Clone)]
 enum ControlVerb {
     /// Stop the task and let a fresh session pick it up.
-    Recycle,
+    Recycle(ControlReasonArgs),
     /// Ask the session whether the task is still alive.
     Probe,
     /// Snapshot the task's state.
     Snapshot,
     /// Cancel the task.
-    Cancel,
+    Cancel(ControlReasonArgs),
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -338,14 +346,16 @@ fn run() -> i32 {
         Verb::Reply(cmd) => verbs::reply(flags, &cmd.sender, cmd.args),
         Verb::Complete(cmd) => verbs::complete(flags, &cmd.sender, cmd.args),
         Verb::Handoff(cmd) => verbs::handoff(flags, &cmd.sender, cmd.args),
+        Verb::Ack(args) => verbs::ack(flags, args),
+        Verb::Reject(args) => verbs::reject(flags, args),
         Verb::Control(cmd) => {
-            let name = match cmd.verb {
-                ControlVerb::Recycle => "recycle",
-                ControlVerb::Probe => "probe",
-                ControlVerb::Snapshot => "snapshot",
-                ControlVerb::Cancel => "cancel",
+            let (name, reason) = match cmd.verb {
+                ControlVerb::Recycle(args) => ("recycle", Some(args.reason)),
+                ControlVerb::Probe => ("probe", None),
+                ControlVerb::Snapshot => ("snapshot", None),
+                ControlVerb::Cancel(args) => ("cancel", Some(args.reason)),
             };
-            let op = match verbs::build_control_op(name, cmd.task, cmd.reason.clone()) {
+            let op = match verbs::build_control_op(name, cmd.task, reason.clone()) {
                 Ok(op) => op,
                 Err(message) => return runtime::usage_error(message),
             };
@@ -354,7 +364,7 @@ fn run() -> i32 {
                 &cmd.sender,
                 verbs::ControlVerbArgs {
                     to: cmd.to,
-                    reason: cmd.reason,
+                    reason,
                     op,
                 },
             )

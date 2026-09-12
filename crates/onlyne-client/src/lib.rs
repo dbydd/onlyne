@@ -8,6 +8,8 @@ pub mod init;
 pub mod intent;
 pub mod local_cli;
 pub mod runloop;
+pub mod slice;
+pub mod stale;
 
 pub use runloop::ClientInit;
 

@@ -267,7 +267,8 @@ impl AdapterSocket {
                         .map_err(|e| anyhow::anyhow!(e))?;
                     }
                 }
-                AdapterMsg::Plugin(PluginOp::AssignAck(_)) => {
+                AdapterMsg::Plugin(PluginOp::AssignAck(args)) => {
+                    self.dispatch.push_assign_ack(args);
                     if frame.id.is_some() {
                         io.respond(id, ResBody::ok(serde_json::Value::Null))
                             .await

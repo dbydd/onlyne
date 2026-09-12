@@ -22,9 +22,10 @@ use onlyne_net::{
     table_from,
 };
 use onlyne_proto::{
-    AdapterMsg, AgentMount, Capability, ClientOp, Delivery, DetachArgs, Envelope, ErrorCode, Frame,
-    HelloArgs, HostOp, Lifecycle, Mount, MountKind, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp,
-    QueryRolesArgs, Receipt, Report, ResBody, Welcome, new_envelope, new_task_id,
+    AdapterMsg, AgentMount, AssignAckArgs, Capability, ClientOp, Delivery, DetachArgs, Envelope,
+    ErrorCode, Frame, HelloArgs, HostOp, Lifecycle, Mount, MountKind, MsgKind, Outcome,
+    PROTOCOL_VERSION, PluginOp, QueryRolesArgs, Receipt, Report, ResBody, Welcome, new_envelope,
+    new_task_id,
 };
 use onlyne_session::SessionLedger;
 use onlyne_session::backend::fake::FakeBackend;
@@ -855,6 +856,51 @@ fn intent_survives_a_frame_refused_before_the_routed_hello() {
     assert_eq!(store.pending_intent_count().unwrap(), 1);
     let kept = store.flush_order().unwrap();
     assert_eq!(kept[0].attempt, rows[0].attempt);
+}
+
+#[test]
+fn assign_ack_rejection_queues_a_rejected_delivery_ack() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        false,
+        Arc::new(FakeBackend::new()),
+        store.clone(),
+    );
+    let env = sample_envelope("planner", "reject me");
+    let task_id = env.task_id().unwrap().to_string();
+    dispatch(&state, &env).unwrap();
+    state.attach_msg_id(&task_id, "msg-reject");
+
+    assert!(state.push_assign_ack(AssignAckArgs {
+        task_id: task_id.clone(),
+        accepted: false,
+        reason: Some("already injected conflict".into()),
+    }));
+    let rows = store.flush_order().unwrap();
+    assert_eq!(rows.len(), 1);
+    let op = op_for_intent(&rows[0]).unwrap();
+    let ClientOp::Ack(ack) = op else {
+        panic!("assign rejection must queue a delivery ack, got {op:?}");
+    };
+    assert_eq!(ack.msg_id, "msg-reject");
+    assert!(!ack.accepted);
+    assert_eq!(ack.reason.as_deref(), Some("already injected conflict"));
+
+    assert!(!state.push_assign_ack(AssignAckArgs {
+        task_id,
+        accepted: true,
+        reason: None,
+    }));
+    assert_eq!(
+        store.flush_order().unwrap().len(),
+        1,
+        "accepted assign_ack is still non-terminal"
+    );
 }
 
 #[tokio::test]

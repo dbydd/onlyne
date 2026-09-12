@@ -27,7 +27,7 @@ mod redact_impl;
 mod spec;
 pub mod template;
 
-pub use client::{ClientConfig, OrcaSection, ServerEndpoint};
+pub use client::{ClientConfig, DEFAULT_STALE_GRACE_SECS, OrcaSection, ServerEndpoint};
 pub use diff::{RoleChange, SpecDiff};
 pub use env::Env;
 pub use error::SpecError;
@@ -37,9 +37,9 @@ pub use spec::{
     ACL_EDGE_KINDS, ALLOWED_PLACEHOLDERS, AclEdge, ClientEntry, DEFAULT_AGENT_PACKAGE,
     DEFAULT_BACKOFF_MS, DEFAULT_CERT_PIN_PREFIX, DEFAULT_FAULT_HISTORY_DAYS,
     DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_INTENT_ATTEMPTS, DEFAULT_KEY_PREFIX,
-    DEFAULT_MAX_SESSIONS, DEFAULT_NOTE_QUEUE, DEFAULT_RESYNC_LAG, DEFAULT_TEMPLATE_ROOT,
-    GatewayEntry, IntentPolicy, KEY_BYTE_LEN, MsgKindClass, RouteEntry, RouteTarget, ServerSection,
-    Spec, Timeouts,
+    DEFAULT_MAX_SESSIONS, DEFAULT_NOTE_QUEUE, DEFAULT_RESYNC_LAG, DEFAULT_STALE_WATCH_SECS,
+    DEFAULT_TEMPLATE_ROOT, GatewayEntry, IntentPolicy, KEY_BYTE_LEN, MsgKindClass, RouteEntry,
+    RouteTarget, ServerSection, Spec, Timeouts,
 };
 pub use template::{
     Placeholders, Template, TemplateError, discover, load_tree, local_override, merge_fragment,

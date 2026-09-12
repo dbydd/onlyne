@@ -16,7 +16,8 @@ use onlyne_net::backoff::Backoff;
 use onlyne_net::conn::ConnReadiness;
 use onlyne_net::is_permanent;
 use onlyne_proto::{
-    AckArgs, ClientOp, Delivery, EventTier, Frame, PullArgs, PullReply, Subscribe, Welcome,
+    AckArgs, ClientOp, Delivery, EventTier, Frame, LedgerEntry, LedgerQuery, LedgerState, MsgKind,
+    PullArgs, PullReply, QueryRolesArgs, RoleInfo, Subscribe, Welcome,
 };
 use onlyne_session::{WorktreePolicy, default_backend};
 use onlyne_store::ClientStore;
@@ -75,6 +76,8 @@ pub struct ClientInit {
     /// The workspace config's `[orca] worktree` value: `host`, `inherit`, or a
     /// literal Orca worktree selector. Only an Orca session backend reads it.
     pub orca_worktree: String,
+    /// Seconds a residual working row may age before this client reports it dead.
+    pub stale_grace_secs: u64,
 }
 
 impl ClientInit {
@@ -92,12 +95,17 @@ impl ClientInit {
             key_path: key_path.into(),
             cert_pin: cert_pin.into(),
             orca_worktree: "host".to_string(),
+            stale_grace_secs: onlyne_config::DEFAULT_STALE_GRACE_SECS,
         }
     }
 
     /// Adopt the `[orca] worktree` policy the workspace config carries.
     pub fn with_orca_worktree(mut self, worktree: impl Into<String>) -> Self {
         self.orca_worktree = worktree.into();
+        self
+    }
+    pub fn with_stale_grace_secs(mut self, secs: u64) -> Self {
+        self.stale_grace_secs = secs;
         self
     }
 }
@@ -297,6 +305,7 @@ async fn run_link(init: &ClientInit, link: &ClientLink, state: &RunState) -> Res
     flush_intents(link, state).await;
     subscribe(link, state.cursor()).await?;
     state.accept_new.store(true, Ordering::SeqCst);
+    reconcile_residuals(init, link, state).await?;
     let mut pull = tokio::spawn(pull_ack_loop(init.clone(), link.clone(), state.clone()));
     let mut flusher = tokio::spawn(flush_loop(link.clone(), state.clone()));
     let mut reader = tokio::spawn(read_events(link.clone(), state.clone()));
@@ -559,6 +568,8 @@ async fn read_events(link: ClientLink, state: RunState) -> Result<()> {
                 }
                 match frame {
                     Frame::Ev { seq, event } => {
+                        let spec_reloaded =
+                            matches!(event.as_ref(), onlyne_proto::Event::SpecReloaded(_));
                         let body = serde_json::to_value(&event)?;
                         let kind = body
                             .get("type")
@@ -566,6 +577,9 @@ async fn read_events(link: ClientLink, state: RunState) -> Result<()> {
                             .unwrap_or("event");
                         state.store.append_event(kind, &body)?;
                         state.set_cursor(seq);
+                        if spec_reloaded {
+                            refresh_role_slice(&link, &state).await?;
+                        }
                     }
                     Frame::Pong { server_seq, .. } => {
                         state.set_cursor(server_seq.max(state.cursor()))
@@ -582,10 +596,209 @@ async fn read_events(link: ClientLink, state: RunState) -> Result<()> {
     }
 }
 
+async fn reconcile_residuals(init: &ClientInit, link: &ClientLink, state: &RunState) -> Result<()> {
+    let reply = link
+        .request(ClientOp::QueryLedger(LedgerQuery {
+            role: Some(init.role.clone()),
+            state: Some(LedgerState::Acked),
+            kind: Some(MsgKind::Task),
+            limit: 500,
+            ..LedgerQuery::default()
+        }))
+        .await?;
+    if !reply.ok {
+        tracing::warn!(error = ?reply.error, "residual reconcile ledger query refused");
+        return Ok(());
+    }
+    let entries: Vec<LedgerEntry> = reply
+        .data
+        .as_ref()
+        .and_then(|value| value.get("ledger"))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    let mut rows: Vec<_> = entries
+        .iter()
+        .filter_map(crate::stale::WorkingRow::from_entry)
+        .collect();
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let pending_ops = pending_intent_ops(state)?;
+    rows.retain(|row| !crate::stale::pending_terminal_for(&row.task_id, &pending_ops));
+    if rows.is_empty() {
+        return Ok(());
+    }
+    wait_for_mount_or_grace(state, init.stale_grace_secs).await;
+    let convergences = crate::stale::reconcile(
+        &rows,
+        &state.dispatch.live_task_ids(),
+        chrono::Utc::now(),
+        init.stale_grace_secs,
+        &init.role,
+    );
+    for convergence in convergences {
+        dispatch::send_frame(&state.dispatch, ClientOp::Report(convergence.report())).await?;
+    }
+    Ok(())
+}
+
+fn pending_intent_ops(state: &RunState) -> Result<Vec<ClientOp>> {
+    let rows = state.intents.lock().pending()?;
+    rows.iter().map(op_for_intent).collect()
+}
+
+async fn wait_for_mount_or_grace(state: &RunState, grace_secs: u64) {
+    if state.dispatch.has_mounted_adapter() || grace_secs == 0 {
+        return;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(grace_secs);
+    while std::time::Instant::now() < deadline {
+        if state.dispatch.has_mounted_adapter() {
+            return;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn refresh_role_slice(link: &ClientLink, state: &RunState) -> Result<()> {
+    let role = state.dispatch.role();
+    let reply = link
+        .request(ClientOp::QueryRoles(QueryRolesArgs { role: Some(role) }))
+        .await?;
+    if !reply.ok {
+        tracing::warn!(error = ?reply.error, "role slice refresh query refused");
+        return Ok(());
+    }
+    let rows: Vec<RoleInfo> = reply
+        .data
+        .as_ref()
+        .and_then(|value| value.get("roles"))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(info) = rows.first() {
+        apply_role_info(state, info);
+    }
+    Ok(())
+}
+
+fn apply_role_info(state: &RunState, info: &RoleInfo) -> Vec<&'static str> {
+    let current = state.dispatch.role_slice();
+    let next = crate::slice::RoleSlice::from_role_info(info, &current);
+    let Some((applied, fields)) = crate::slice::apply_if_changed(&current, next) else {
+        return Vec::new();
+    };
+    state
+        .dispatch
+        .reconfigure(applied.command, applied.max_sessions, applied.reuse);
+    fields
+}
+
 /// The local accept path for the current role slice.
 pub fn accept_path(state: &RunState) -> Result<AcceptPath> {
     Ok(AcceptPath::new(
         state.dispatch.clone(),
         state.dispatch.role_prose(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onlyne_proto::{Outcome, Presence, Report};
+    use onlyne_session::backend::fake::FakeBackend;
+    use tempfile::tempdir;
+
+    fn test_state(max_sessions: u32, reuse: bool, command: Vec<String>) -> (RunState, ClientStore) {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("client.db");
+        let store = ClientStore::open(path).expect("client store");
+        let dispatch = DispatchState::new(
+            "planner",
+            dir.path(),
+            command,
+            max_sessions,
+            reuse,
+            Arc::new(FakeBackend::new()),
+            store.clone(),
+        );
+        let intents = IntentMachine::new(
+            store.clone(),
+            DEFAULT_INTENT_ATTEMPTS,
+            default_intent_backoff(),
+        );
+        let state = RunState {
+            accept_new: dispatch.accept_new(),
+            store: store.clone(),
+            intents: Arc::new(parking_lot::Mutex::new(intents)),
+            dispatch,
+            welcome: Arc::new(Mutex::new(None)),
+        };
+        (state, store)
+    }
+
+    fn role_info(max_sessions: u32, reuse: bool, command: Vec<String>) -> RoleInfo {
+        RoleInfo {
+            name: "planner".into(),
+            admin: false,
+            max_sessions,
+            reuse,
+            session_command: command,
+            spec_hash: "hash".into(),
+            prose: None,
+            state: Presence::Online,
+            sessions: 0,
+            detail: None,
+            edges: Vec::new(),
+            aggregate: None,
+        }
+    }
+
+    #[test]
+    fn spec_reloaded_role_slice_change_updates_dispatch_gate() {
+        let (state, _store) = test_state(1, false, vec!["old".into()]);
+        let changed = apply_role_info(&state, &role_info(2, true, vec!["new".into()]));
+        assert_eq!(changed, vec!["session_command", "max_sessions", "reuse"]);
+        let applied = state.dispatch.role_slice();
+        assert_eq!(applied.max_sessions, 2);
+        assert!(applied.reuse);
+        assert_eq!(applied.command, vec!["new"]);
+    }
+
+    #[test]
+    fn spec_reloaded_identical_role_slice_is_noop() {
+        let (state, _store) = test_state(2, true, vec!["pi".into()]);
+        let changed = apply_role_info(&state, &role_info(2, true, vec!["pi".into()]));
+        assert!(changed.is_empty());
+        assert_eq!(state.dispatch.role_slice().max_sessions, 2);
+    }
+
+    #[tokio::test]
+    async fn startup_residual_report_uses_durable_report_path() {
+        let (state, store) = test_state(1, false, Vec::new());
+        let convergence = crate::stale::Convergence {
+            task_id: "task-dead".into(),
+        };
+        dispatch::send_frame(&state.dispatch, ClientOp::Report(convergence.report()))
+            .await
+            .expect("report queues without a link");
+        let rows = store.flush_order().expect("pending intents");
+        let ops = rows
+            .iter()
+            .map(op_for_intent)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert!(ops.iter().any(|op| matches!(
+            op,
+            ClientOp::Report(Report::Complete {
+                task_id,
+                outcome: Outcome::Failed,
+                head: Some(reason),
+                ..
+            }) if task_id == "task-dead" && reason == crate::stale::SESSION_DEAD
+        )));
+    }
 }

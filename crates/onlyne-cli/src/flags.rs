@@ -60,7 +60,7 @@ pub struct GlobalFlags {
     /// Replace the constructed args body verbatim with this JSON object.
     /// `send`, `reply`, `complete`, and `handoff` consume it, and each one
     /// validates the envelope the object carries before opening the socket.
-    /// `ping` and `control` refuse it, since `ControlArgs` and `AdminControl`
+    /// `ping`, `control`, `ack`, and `reject` refuse it, since those frames
     /// carry no envelope to override, and every other verb ignores it.
     #[arg(long, global = true)]
     pub request: Option<String>,

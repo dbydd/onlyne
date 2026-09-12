@@ -223,6 +223,9 @@ pub fn check_acl(
             if kind == MsgKind::Completion && origin == Some(to_role) {
                 return Ok(());
             }
+            if kind == MsgKind::Control && admin {
+                return Ok(());
+            }
             acl_allows(table, role, to_role, class_of(kind), owner).map_err(|deny| {
                 let code = match deny.reason {
                     onlyne_net::AclDenyReason::UnknownRole => ErrorCode::UnknownRole,

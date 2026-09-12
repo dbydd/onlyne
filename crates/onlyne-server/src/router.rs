@@ -318,12 +318,13 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
     };
     session.welcome(&authorised, entry.admin);
     if let Some(sender) = session.sender.clone() {
-        state.register_role(crate::state::RoleConnection {
+        session.generation = state.register_role(crate::state::RoleConnection {
             role: entry.role.clone(),
             sender,
             last_seq: state.event_head().max(0) as u64,
             connected_at: Utc::now(),
             draining: false,
+            generation: 0,
         });
         let _ = state.emit(Event::RolePresence(RolePresence {
             role: entry.role.clone(),
@@ -459,6 +460,8 @@ pub fn roles(state: &Arc<State>, query: &QueryRolesArgs) -> anyhow::Result<Vec<R
             name: entry.role.clone(),
             admin: entry.admin,
             max_sessions: entry.max_sessions,
+            reuse: entry.reuse,
+            session_command: entry.session_command.clone(),
             spec_hash: stored
                 .iter()
                 .find(|row| row.name == entry.role)

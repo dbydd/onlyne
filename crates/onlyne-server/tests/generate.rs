@@ -396,7 +396,10 @@ fn agent_package_placeholder_in_settings_renders_the_parent_relative_form() {
         "dev/planner",
         &[
             ("AGENTS.md", "plug {{agent_package}}"),
-            (".pi/settings.json", "{\"packages\":[\"{{agent_package}}\"]}"),
+            (
+                ".pi/settings.json",
+                "{\"packages\":[\"{{agent_package}}\"]}",
+            ),
         ],
     );
     let mut spec = spec_with_roles(&["planner"]);

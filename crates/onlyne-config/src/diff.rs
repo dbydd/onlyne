@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, HashSet};
 /// is sorted by name so `--dry-run` output compares deterministically.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SpecDiff {
+    /// Top-level `[server]` fields that changed.
+    pub changed_server_fields: Vec<String>,
     /// Roles present in the new spec only.
     pub added_roles: Vec<String>,
     /// Roles present in the old spec only.
@@ -34,6 +36,7 @@ impl SpecDiff {
     /// Diff two specs. Roles are keyed by `role`; routes are keyed by
     /// `gateway/channel/conversation/to.role/to.session` in document order.
     pub fn between(before: &Spec, after: &Spec) -> Self {
+        let changed_server_fields = changed_server_fields(before, after);
         let before_roles = role_map(&before.client);
         let after_roles = role_map(&after.client);
         let before_names: HashSet<&str> = before_roles.keys().copied().collect();
@@ -77,8 +80,8 @@ impl SpecDiff {
             .map(|key| (*key).clone())
             .collect();
         removed_routes.sort();
-
         Self {
+            changed_server_fields,
             added_roles,
             removed_roles,
             changed_roles,
@@ -89,7 +92,8 @@ impl SpecDiff {
 
     /// Empty when no role or route rows changed.
     pub fn is_empty(&self) -> bool {
-        self.added_roles.is_empty()
+        self.changed_server_fields.is_empty()
+            && self.added_roles.is_empty()
             && self.removed_roles.is_empty()
             && self.changed_roles.is_empty()
             && self.added_routes.is_empty()
@@ -102,6 +106,11 @@ impl SpecDiff {
             return "spec: no changes".to_string();
         }
         let mut lines = Vec::new();
+        if !self.changed_server_fields.is_empty() {
+            let mut fields = self.changed_server_fields.clone();
+            fields.sort();
+            lines.push(format!("change server: {}", fields.join(", ")));
+        }
         for role in &self.added_roles {
             lines.push(format!("add role {role}"));
         }
@@ -146,6 +155,41 @@ fn route_keys(spec: &Spec) -> Vec<String> {
             )
         })
         .collect()
+}
+
+fn changed_server_fields(before: &Spec, after: &Spec) -> Vec<String> {
+    let mut fields = Vec::new();
+    if before.server.name != after.server.name {
+        fields.push("name".to_string());
+    }
+    if before.server.listen != after.server.listen {
+        fields.push("listen".to_string());
+    }
+    if before.server.cert_pin != after.server.cert_pin {
+        fields.push("cert_pin".to_string());
+    }
+    if before.server.note_queue != after.server.note_queue {
+        fields.push("note_queue".to_string());
+    }
+    if before.server.fault_history_days != after.server.fault_history_days {
+        fields.push("fault_history_days".to_string());
+    }
+    if before.server.resync_lag != after.server.resync_lag {
+        fields.push("resync_lag".to_string());
+    }
+    if before.server.heartbeat_timeout_ms != after.server.heartbeat_timeout_ms {
+        fields.push("heartbeat_timeout_ms".to_string());
+    }
+    if before.server.stale_watch_secs != after.server.stale_watch_secs {
+        fields.push("stale_watch_secs".to_string());
+    }
+    if before.server.agent_package != after.server.agent_package {
+        fields.push("agent_package".to_string());
+    }
+    if before.server.template_root != after.server.template_root {
+        fields.push("template_root".to_string());
+    }
+    fields
 }
 
 fn changed_client_fields(before: &ClientEntry, after: &ClientEntry) -> Vec<String> {

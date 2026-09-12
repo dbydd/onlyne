@@ -306,6 +306,7 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
                 match row.state {
                     onlyne_proto::LedgerState::InFlight => {
                         state.ledger.requeue_one(&row.msg_id)?;
+                        state.take_delivery(&row.msg_id);
                         requeued += 1;
                     }
                     onlyne_proto::LedgerState::Queued => {}

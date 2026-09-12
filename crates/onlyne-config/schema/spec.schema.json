@@ -264,6 +264,12 @@
           "format": "uint32",
           "minimum": 0.0
         },
+        "stale_watch_secs": {
+          "default": 60,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "template_root": {
           "default": ".onlyne/templates",
           "type": "string"

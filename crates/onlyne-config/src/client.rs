@@ -21,6 +21,9 @@ pub struct ClientConfig {
     /// Orca session backend settings.
     #[serde(default)]
     pub orca: OrcaSection,
+    /// Seconds a startup reconcile waits before declaring an orphaned in-flight task stale.
+    #[serde(default = "default_stale_grace_secs")]
+    pub stale_grace_secs: u64,
 }
 
 /// `[orca]` — settings for the Orca session backend.
@@ -50,6 +53,11 @@ impl Default for OrcaSection {
 
 fn default_orca_worktree() -> String {
     "host".to_string()
+}
+pub const DEFAULT_STALE_GRACE_SECS: u64 = 300;
+
+fn default_stale_grace_secs() -> u64 {
+    DEFAULT_STALE_GRACE_SECS
 }
 
 impl ClientConfig {
@@ -122,6 +130,7 @@ impl ClientConfig {
             cert_pin: resolve_field(&self.cert_pin, "cert_pin", env)?,
             key_path: resolve_field(&self.key_path, "key_path", env)?,
             plugins: self.plugins.clone(),
+            stale_grace_secs: self.stale_grace_secs,
         })
     }
 }
@@ -207,6 +216,8 @@ pub struct ResolvedClientConfig {
     pub key_path: String,
     /// Plugin list.
     pub plugins: Vec<String>,
+    /// Startup reconcile grace in seconds.
+    pub stale_grace_secs: u64,
 }
 
 /// Resolved server endpoint.

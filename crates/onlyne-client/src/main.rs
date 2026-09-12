@@ -131,7 +131,8 @@ async fn main() {
                         path.resolve_key_path(&config.key_path),
                         config.cert_pin,
                     )
-                    .with_orca_worktree(config.orca.worktree),
+                    .with_orca_worktree(config.orca.worktree)
+                    .with_stale_grace_secs(config.stale_grace_secs),
                 )
                 .await
                 {

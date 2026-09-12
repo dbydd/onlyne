@@ -13,6 +13,7 @@ pub mod generate;
 pub mod projection;
 pub mod relay;
 pub mod router;
+pub mod stale;
 pub mod state;
 
 use anyhow::Context;
@@ -48,6 +49,7 @@ pub async fn serve(state: Arc<crate::state::State>) -> anyhow::Result<()> {
         }
     });
     let sweep_task = spawn_expiry_sweep(state.clone());
+    let stale_task = spawn_stale_working_watch(state.clone());
     let role_state = state.clone();
     let role_task = tokio::spawn(async move {
         if let Err(error) = role_listener(role_state, listener, tls_config).await {
@@ -60,6 +62,9 @@ pub async fn serve(state: Arc<crate::state::State>) -> anyhow::Result<()> {
     socket_task.abort();
     role_task.abort();
     sweep_task.abort();
+    if let Some(task) = stale_task {
+        task.abort();
+    }
     if let Some(task) = signal_task {
         task.abort();
     }
@@ -93,6 +98,33 @@ pub fn spawn_expiry_sweep(state: Arc<crate::state::State>) -> tokio::task::JoinH
             }
         }
     })
+}
+
+/// Observe offline-owned working sessions and record advisory faults.
+pub fn spawn_stale_working_watch(
+    state: Arc<crate::state::State>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let seconds = state
+        .spec_snapshot()
+        .map(|spec| spec.server.stale_watch_secs)
+        .unwrap_or(onlyne_config::DEFAULT_STALE_WATCH_SECS);
+    if seconds == 0 {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(seconds));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match stale::observe_once(&state, chrono::Utc::now()) {
+                Ok(recorded) if !recorded.is_empty() => {
+                    tracing::warn!(count = recorded.len(), "stale working sessions observed");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(error = %error, "the stale working watch failed"),
+            }
+        }
+    }))
 }
 
 /// Serve SIGTERM and SIGINT as the graceful stop an operator asks for.
@@ -226,7 +258,14 @@ pub async fn role_connection(
         }
     }
     if let Some(bound) = session.role.clone() {
-        let _ = relay::disconnect(&state, &bound);
+        let current = state
+            .roles
+            .read()
+            .ok()
+            .and_then(|roles| roles.current_generation(&bound));
+        if current == Some(session.generation) {
+            let _ = relay::disconnect(&state, &bound);
+        }
     }
     Ok(())
 }

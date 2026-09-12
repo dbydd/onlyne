@@ -48,6 +48,13 @@
           "$ref": "#/definitions/ServerEndpoint"
         }
       ]
+    },
+    "stale_grace_secs": {
+      "description": "Seconds a startup reconcile waits before declaring an orphaned in-flight task stale.",
+      "default": 300,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
     }
   },
   "additionalProperties": false,

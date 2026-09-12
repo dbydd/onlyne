@@ -84,6 +84,11 @@ pub struct RoleConnection {
     pub last_seq: u64,
     pub connected_at: DateTime<Utc>,
     pub draining: bool,
+    /// Incremented whenever the role's client connection is replaced.
+    ///
+    /// Disconnect cleanup compares this against the still-live registry entry so
+    /// a half-open prior link cannot unregister the replacement link.
+    pub generation: u64,
 }
 
 /// One live gateway process and the transport it speaks.
@@ -104,11 +109,19 @@ pub struct GatewayConnection {
 #[derive(Debug, Default)]
 pub struct RoleRegistry {
     pub entries: HashMap<String, RoleConnection>,
+    /// Registry generation, monotonically increasing on each connection insert.
+    generation: u64,
 }
 
 impl RoleRegistry {
-    pub fn insert(&mut self, conn: RoleConnection) {
+    pub fn insert(&mut self, mut conn: RoleConnection) {
+        self.generation = self.generation.saturating_add(1);
+        conn.generation = self.generation;
         self.entries.insert(conn.role.clone(), conn);
+    }
+
+    pub fn current_generation(&self, role: &str) -> Option<u64> {
+        self.entries.get(role).map(|conn| conn.generation)
     }
 
     pub fn remove(&mut self, role: &str) -> Option<RoleConnection> {
@@ -265,10 +278,12 @@ impl Server {
             .map(|conn| conn.sender.clone())
     }
 
-    pub fn register_role(&self, conn: RoleConnection) {
-        if let Ok(mut table) = self.roles.write() {
-            table.insert(conn);
-        }
+    pub fn register_role(&self, conn: RoleConnection) -> u64 {
+        let Ok(mut table) = self.roles.write() else {
+            return 0;
+        };
+        table.insert(conn);
+        table.generation
     }
 
     pub fn unregister_role(&self, role: &str) -> Option<RoleConnection> {
@@ -352,6 +367,14 @@ impl Server {
         let before = table.len();
         table.retain(|_, ticket| ticket.role != role);
         before - table.len()
+    }
+    /// Whether the supplied connection still owns the live registry entry.
+    pub fn is_current_role_connection(&self, conn: &RoleConnection) -> bool {
+        self.roles
+            .read()
+            .ok()
+            .and_then(|table| table.current_generation(&conn.role))
+            .is_some_and(|generation| generation == conn.generation)
     }
 
     /// Arm the expiry deadline of one queued note.
