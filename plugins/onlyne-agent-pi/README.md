@@ -53,7 +53,7 @@ extension travels with it: nothing is installed globally.
 ```toml
 # spec.toml
 [server]
-agent_package = "/abs/path/to/integrations/pi-onlyne"   # read once, at generate time
+agent_package = "/abs/path/to/plugins/onlyne-agent-pi"   # read once, at generate time
 ```
 
 ```bash
@@ -72,14 +72,14 @@ copied `index.ts` throw and watch for the failure.
 ### Manual (no generator)
 
 ```bash
-cp -R integrations/pi-onlyne <ws>/.onlyne/agent/pi-onlyne
+cp -R plugins/onlyne-agent-pi <ws>/.onlyne/agent/pi-onlyne
 printf '{"packages":["../.onlyne/agent/pi-onlyne"]}\n' > <ws>/.pi/settings.json
 ```
 
 ### One-off / testing
 
 ```bash
-pi --session-id <id> -e /abs/path/to/integrations/pi-onlyne -ns -nc
+pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 ```
 
 ### The switch file
@@ -348,7 +348,7 @@ client injected none, §5).
 ## 9. Development
 
 ```bash
-cd integrations/pi-onlyne
+cd plugins/onlyne-agent-pi
 node --test src/*.test.mjs        # framing, protocol, agent state machine, config, relay guard
 ```
 

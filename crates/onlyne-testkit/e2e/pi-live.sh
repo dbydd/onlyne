@@ -2,7 +2,7 @@
 set -euo pipefail
 # Verification case 11: the pi agent plugin against a real role client.
 #
-# The plugin lives outside this repository's Rust tree (integrations/pi-onlyne)
+# The plugin lives outside this repository's Rust tree (plugins/onlyne-agent-pi)
 # and speaks the adapter protocol from `crates/onlyne-adapter/PROTOCOL.md`. This
 # case is the one end-to-end proof that a real pi process, spawned as a role
 # session by `onlyne-client`, reaches `acked` through its own completion exit:
@@ -42,7 +42,7 @@ trap cleanup EXIT
 # and appends the child's stdout and stderr to `.onlyne/logs/`.
 export ONLYNE_BACKEND=exec
 
-PLUGIN_DIR="$SRC/integrations/pi-onlyne"
+PLUGIN_DIR="$SRC/plugins/onlyne-agent-pi"
 
 if ! command -v pi >/dev/null 2>&1; then
   echo "SKIP pi-live: pi is not on PATH"

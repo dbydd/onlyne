@@ -278,7 +278,7 @@ def write_seed_entries() -> None:
                 if line.startswith("[[client]]")), len(lines))
     header = "".join(lines[:cut]).rstrip() + "\n"
     header = header.replace('agent_package = ""',
-                            f'agent_package = "{ROOT / "integrations" / "pi-onlyne"}"')
+                            f'agent_package = "{ROOT / "plugins" / "onlyne-agent-pi"}"')
     SPEC.write_text(header + "\n" + seed_entries())
 
 

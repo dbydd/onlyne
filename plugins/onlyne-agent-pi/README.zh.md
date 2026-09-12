@@ -47,7 +47,7 @@ pi 0.85.1 只加载这个写法。项目 `packages` 里的路径以 settings 文
 ```toml
 # spec.toml
 [server]
-agent_package = "/abs/path/to/integrations/pi-onlyne"   # 只在 generate 时读一次
+agent_package = "/abs/path/to/plugins/onlyne-agent-pi"   # 只在 generate 时读一次
 ```
 
 ```bash
@@ -66,14 +66,14 @@ onlyne server generate --root <server-root> --out <dir>
 ### 手工（不经过 generate）
 
 ```bash
-cp -R integrations/pi-onlyne <ws>/.onlyne/agent/pi-onlyne
+cp -R plugins/onlyne-agent-pi <ws>/.onlyne/agent/pi-onlyne
 printf '{"packages":["../.onlyne/agent/pi-onlyne"]}\n' > <ws>/.pi/settings.json
 ```
 
 ### 一次性 / 测试
 
 ```bash
-pi --session-id <id> -e /abs/path/to/integrations/pi-onlyne -ns -nc
+pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 ```
 
 ### 开关文件
@@ -304,7 +304,7 @@ stderr 告警并忽略，把机会让回文件。
 ## 9. 开发与验证
 
 ```bash
-cd integrations/pi-onlyne
+cd plugins/onlyne-agent-pi
 node --test src/*.test.mjs        # 帧编解码、协议词汇、agent 状态机、配置、接力守卫
 ```
 
