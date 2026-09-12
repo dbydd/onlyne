@@ -1,9 +1,10 @@
 //! `onlyne` — one socket, one protocol, three sibling binaries.
 //!
 //! `onlyne server <verb>` execs the server binary for the process verbs
-//! (`init`, `run`, `start`, `stop`, `generate`, `reload`), and `onlyne status`,
-//! `onlyne reload`, and `onlyne server status` are in-process admin-socket
-//! queries with no exec, because keeping `status` working while the daemon runs
+//! (`init`, `run`, `start`, `stop`, `generate`), and `onlyne status`,
+//! `onlyne reload`, `onlyne server status`, and `onlyne server reload` are
+//! in-process admin-socket queries with no exec, because keeping `status`
+//! working while the daemon runs
 //! and its binary is absent is worth the rule; `onlyne client <verb>` and
 //! `onlyne gateway run|list|auth` exec their sibling, `onlyne gateway status`
 //! queries here, and the admin nouns (`roles`, `sessions`, `ledger`, `faults`,
@@ -460,7 +461,16 @@ fn server(flags: &GlobalFlags, cmd: ServerCmd) -> i32 {
         ServerVerb::Stop(rest) => sibling_exec("onlyne-server", "stop", &rest),
         ServerVerb::Status => admin::status(flags),
         ServerVerb::Generate(rest) => sibling_exec("onlyne-server", "generate", &rest),
-        ServerVerb::Reload(rest) => sibling_exec("onlyne-server", "reload", &rest),
+        ServerVerb::Reload(rest) => {
+            if rest.args.is_empty() {
+                admin::reload(flags)
+            } else {
+                runtime::usage_error(
+                    "onlyne: server reload takes no arguments; the reload runs against the admin socket"
+                        .to_string(),
+                )
+            }
+        }
         ServerVerb::Roles(cmd) => admin::roles(flags, cmd.args),
         ServerVerb::Sessions(cmd) => admin::sessions(flags, cmd.args),
         ServerVerb::Ledger(cmd) => admin::ledger(flags, cmd.args),

@@ -302,8 +302,9 @@ fn missing_sibling_binary_reports_the_exact_line_and_exit_127() {
 }
 
 /// The two status meanings stay distinct, and the admin-socket query wins:
-/// `onlyne status`, `onlyne reload`, and `onlyne server status` reach the
-/// socket with no `onlyne-server` binary on `PATH` anywhere.
+/// `onlyne status`, `onlyne reload`, `onlyne server status`, and
+/// `onlyne server reload` reach the socket with no `onlyne-server` binary on
+/// `PATH` anywhere.
 #[test]
 fn status_and_reload_never_exec() {
     let dir = tempfile::tempdir().unwrap();
@@ -316,6 +317,7 @@ fn status_and_reload_never_exec() {
         (vec!["status"], "status"),
         (vec!["reload"], "reload"),
         (vec!["server", "status"], "status"),
+        (vec!["server", "reload"], "reload"),
     ];
     for (args, op) in cases {
         let listener = admin_listener(&root);
