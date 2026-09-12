@@ -1,10 +1,23 @@
 {
   "name": "pi-onlyne",
   "version": "1.0.0",
-  "private": true,
   "description": "Onlyne agent adapter for pi: the session lifecycle an onlyne role client expects from a pi host.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dbydd/onlyne.git",
+    "directory": "plugins/onlyne-agent-pi"
+  },
+  "bugs": {
+    "url": "https://github.com/dbydd/onlyne/issues"
+  },
+  "homepage": "https://github.com/dbydd/onlyne/tree/main/plugins/onlyne-agent-pi#readme",
+  "files": [
+    "src",
+    "onlyne.json.example",
+    "relay.toml.example"
+  ],
   "keywords": [
     "pi-package",
     "pi",

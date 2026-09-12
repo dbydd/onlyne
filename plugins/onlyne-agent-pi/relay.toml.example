@@ -1,0 +1,18 @@
+# Manual-installation escape hatch for the relay guard.
+#
+# A generated workspace gets its guard policy from spec.toml ([[client]] rows
+# `relay_required = ["writer"]`, `relay_count = 2` — `relay_required_count` is
+# accepted as the guard file's own spelling), which the client injects into
+# every session it spawns. This file is for installations that manage their
+# own workspace: drop it beside package.json and the guard reads it when the
+# environment carries no policy. Environment wins over this file; no policy in
+# either place leaves the guard off.
+#
+# relay_required wins over relay_count when both are present.
+
+# Downstream roles one of this role's sessions must have handed work to before
+# it may report a terminal outcome:
+#   relay_required = ["writer", "auditor"]
+
+# ... or this many distinct downstream roles:
+#   relay_required_count = 2
