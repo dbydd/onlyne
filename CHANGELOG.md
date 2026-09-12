@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.0.1] - 2026-09-13
+
+### Fixed
+
+- tui: box corners match their arms, `join()` stopped treating mirrored travel
+  orders as equal, and start ticks leave in their own direction (`df78916`).
+- This release also carries every fix in the "Fixed after the tag" list under
+  `[1.0.0]` below (cli reload socket arm, spec alias matching, tui island
+  pruning, plugin manifest pin) into the published crates.
+
+### Changed
+
+- client (**BREAKING**): `onlyne-client start` and `onlyne-client stop` are gone.
+  `run` is the only launch verb and it stays in the foreground; backgrounding
+  belongs to the operator (a visible terminal tab, `launchd`, `nohup`). The
+  client writes no `.onlyne/run/client.pid`, nothing signals it by number, and
+  `onlyne client` in `onlyne-cli` forwards no `start`/`stop`.
+- client: `status` probes the workspace adapter socket instead of a pid file. A
+  client counts as running when that socket answers the admin `hello`, the
+  reported uptime is the socket file's mtime age, and the operator line drops
+  `pid`: `onlyne: client running uptime <n>s socket <path> faults <n>`. A socket
+  file an unclean exit left behind answers nothing, so it reads as not running
+  instead of as a live client. `StatusReport` loses `pid` and
+  `RoleWorkspace::pid_path` goes with its last consumer.
+- docs: the role workspace tree, the client README, the CLI contract, and the
+  plan drop `run/client.pid`; `examples/supervisor/run.py` backgrounds
+  `onlyne-client run` itself (own session, workspace log, driver-owned pid file)
+  and SIGTERMs those pids on `stop`.
+
 ## [1.0.0] — tag 396d63f, published to crates.io and npm
 
 Release channel: `cargo install onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui`
@@ -20,7 +49,7 @@ Pi adapter: `pi install npm:pi-onlyne` (1.0.0 speaks wire protocol 1).
 - repo: the stale `integrations/pi-onlyne` twin (pre-relay-guard code) is deleted;
   `plugins/onlyne-agent-pi` is the one canonical plugin source.
 
-## [Unreleased] — 1.0.1 candidates
+## [Unreleased] — 1.0.2 candidates
 
 - client: record the adapter socket peer pid (kernel `LOCAL_PEERCRED`, not the
   self-reported `mount.pid`) at `hello`, and make `recycle`/`cancel` teardown

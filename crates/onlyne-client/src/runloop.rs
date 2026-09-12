@@ -45,8 +45,8 @@ pub const PULL_HOLD_MS: u64 = 1_000;
 pub const PULL_LIMIT: u32 = 32;
 /// Poll interval for the readiness watcher.
 pub const READINESS_POLL_MS: u64 = 250;
-/// Bound on the session sweep the SIGTERM/SIGINT handler runs, under the
-/// 10-second wait `onlyne-client stop` allows the process to leave.
+/// Bound on the session sweep the SIGTERM/SIGINT handler runs, short enough
+/// that an operator's own grace period still sees the process leave.
 pub const SHUTDOWN_CLOSE_BUDGET: Duration = Duration::from_secs(8);
 /// Key holding the durable event cursor in `config_cache`.
 pub const EVENT_CURSOR_KEY: &str = "event_seq";
@@ -226,12 +226,11 @@ pub async fn run(init: ClientInit) -> Result<()> {
 
 /// Close live sessions when the operator stops the client.
 ///
-/// `onlyne-client stop` sends SIGTERM, and the default disposition would kill
-/// the process with every tab it opened still running: the resources would
-/// outlive the only thing that can address them. Each session closes with
+/// `SIGTERM` ends the foreground client, and the default disposition would
+/// kill the process with every tab it opened still running: the resources
+/// would outlive the only thing that can address them. Each session closes with
 /// [`onlyne_session::CloseReason::Shutdown`] first, so the backend record and
-/// the plugin-facing tab map end truthfully; the exit code stays 0, which is
-/// what `stop` reads as a clean stop.
+/// the plugin-facing tab map end truthfully.
 async fn close_on_signal(dispatch: DispatchState) {
     let mut terminate = match signal(SignalKind::terminate()) {
         Ok(stream) => stream,

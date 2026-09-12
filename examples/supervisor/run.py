@@ -27,6 +27,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -104,7 +105,7 @@ def call_ok(args: list[str | Path]) -> bool:
 
 
 def client_env() -> dict[str, str]:
-    """Environment for `onlyne client start`, which the daemon inherits.
+    """Environment for `onlyne-client run`, which the client inherits.
 
     `onlyne-client` resolves `ONLYNE_BACKEND` in `backend_for`
     (`crates/onlyne-session/src/backend/mod.rs`); an empty value falls back to
@@ -195,8 +196,9 @@ def seed_entries() -> str:
         f"{','.join(RING)} and their record file is {LIGHTS}. With --server-root "
         f"{CLUSTER}: send --from _supervisor --to <role> --text <text> dispatches "
         "work and answers with data.task; roles, sessions, ledger --task <id>, "
-        "faults and watch inspect state; client start or stop --workspace <dir> "
-        "and server status, reload and stop operate the cluster. On a user "
+        "faults and watch inspect state; server status, reload and stop operate "
+        "the cluster, and the ring's client processes belong to the driver that "
+        "launched them. On a user "
         "request: dispatch, follow the work through the record file and the "
         "ledger, report the evidence in the language the user writes, and propose "
         "the next move. Delegation is your craft; the deliverable belongs to the "
@@ -331,17 +333,53 @@ def start_server() -> None:
     run([ONLYNE, "--server-root", CLUSTER, "wait-ready"])
 
 
+def client_pid_file(workspace: Path) -> Path:
+    """Driver-owned pid file for the `run` process this script backgrounded."""
+    return CLUSTER / "client-pids" / f"{workspace.name}.pid"
+
+
 def start_clients() -> None:
+    """Background one `onlyne-client run` per ring role.
+
+    `run` is the only launch verb and it stays in the foreground, so the driver
+    owns the backgrounding: it starts the client in its own session, sends its
+    output to the workspace log, and records the pid for `stop_client`.
+    """
     for role in RING:
         workspace = WS / role
         if client_running(workspace):
             say(f"client already running for {role}")
             continue
-        sock = workspace / ".onlyne" / "run" / "s"
-        if sock.exists():
-            sock.unlink()
-        run([ONLYNE, "client", "start", "--workspace", workspace],
-            env=client_env())
+        log = workspace / ".onlyne" / "logs" / "client.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a") as out:
+            child = subprocess.Popen(
+                [str(BIN / "onlyne-client"), "run", "--workspace", str(workspace)],
+                cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=out,
+                stderr=subprocess.STDOUT, start_new_session=True,
+                env={**os.environ, **client_env()})
+        pid_file = client_pid_file(workspace)
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(f"{child.pid}\n")
+
+
+def stop_client(workspace: Path) -> None:
+    """SIGTERM the backgrounded `run` this driver started, and wait it out."""
+    pid_file = client_pid_file(workspace)
+    if not pid_file.is_file():
+        return
+    pid = int(pid_file.read_text().strip())
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    pid_file.unlink(missing_ok=True)
 
 
 def wait_online(seconds: float = 60.0) -> None:
@@ -504,7 +542,7 @@ def stop_all() -> None:
     if closed:
         say(f"closed {len(closed)} session tab(s)")
     for role in RING:
-        call_ok([ONLYNE, "client", "stop", "--workspace", WS / role])
+        stop_client(WS / role)
     call_ok([ONLYNE, "server", "stop", "--root", CLUSTER])
     say("stopped")
 

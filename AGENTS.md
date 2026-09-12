@@ -160,7 +160,6 @@ Role workspace, selected by `onlyne-client run --workspace <dir>`:
   config.toml
   client.db
   run/s
-  run/client.pid
   logs/client.log
   keys/role.key
   agent/<pkg>/

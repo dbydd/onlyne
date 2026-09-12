@@ -15,7 +15,7 @@ use tokio::net::UnixStream;
 pub const CLIENT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Line an operator sees when a plugin change needs a client restart.
 pub const RESTART_HINT: &str =
-    "onlyne: no running client; run `onlyne client restart` to mount this plugin";
+    "onlyne: no running client; restart `onlyne-client run` to mount this plugin";
 
 /// Local CLI handlers share the intent queue with plugin-originated sends.
 #[derive(Clone)]

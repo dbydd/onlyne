@@ -16,10 +16,10 @@
 //!   child's stdin stays owned by the `Child` this backend keeps, so the write
 //!   end lives until [`SessionBackend::close`] takes the child out.
 //! * **stdout and stderr go to `<workspace>/.onlyne/logs/session-<task>.log`**
-//!   (both streams into one append handle, the shape `onlyne client start` uses
-//!   for its own log). The agent's own diagnostics are what an operator reads
-//!   when a session misbehaves, so they must not disappear into the client's
-//!   stdio.
+//!   (both streams into one append handle, the shape an operator gives
+//!   `onlyne-client run` for its own log). The agent's own diagnostics are what
+//!   an operator reads when a session misbehaves, so they must not disappear
+//!   into the client's stdio.
 //! * **the child gets its own process group** (unix), so a signal aimed at the
 //!   client's group — the operator's terminal, a supervisor's `kill` — does not
 //!   reach the agent behind the drain: only [`SessionBackend::close`] ends a
@@ -35,8 +35,8 @@ use std::time::{Duration, Instant};
 
 use super::*;
 
-/// How long `SIGTERM` gets before `SIGKILL`, inside the ten-second exit budget
-/// `onlyne-client stop` allows the draining client.
+/// How long `SIGTERM` gets before `SIGKILL`, inside the shutdown budget the
+/// client allows its own teardown.
 const TERMINATE_GRACE: Duration = Duration::from_secs(5);
 /// Poll interval while waiting for a signalled child to leave.
 const REAP_POLL: Duration = Duration::from_millis(25);

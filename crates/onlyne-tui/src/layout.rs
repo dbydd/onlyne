@@ -1280,10 +1280,7 @@ mod tests {
             ("critic", "model"),
             ("critic", "scout"),
         ];
-        let edges = hops
-            .iter()
-            .map(|(from, to)| hop(from, to, false))
-            .collect();
+        let edges = hops.iter().map(|(from, to)| hop(from, to, false)).collect();
         (nodes, edges)
     }
 
@@ -1296,14 +1293,7 @@ mod tests {
         let (nodes, edges) = aris_graph();
         let map = map_of(&nodes, &edges);
         let anchor = map.anchor(None);
-        let canvas = canvas(
-            &map,
-            &nodes,
-            &edges,
-            &Camera::default(),
-            anchor,
-            (120, 40),
-        );
+        let canvas = canvas(&map, &nodes, &edges, &Camera::default(), anchor, (120, 40));
         let in_box = |cell: (isize, isize)| {
             canvas.node_boxes.iter().any(|b| {
                 Rect {
@@ -1321,7 +1311,10 @@ mod tests {
                 return true;
             }
             let glyph = canvas.at(next.0, next.1).ch;
-            matches!(glyph, '╭' | '╮' | '╯' | '╰' | '─' | '│' | '▸' | '◂' | '▴' | '▾')
+            matches!(
+                glyph,
+                '╭' | '╮' | '╯' | '╰' | '─' | '│' | '▸' | '◂' | '▴' | '▾'
+            )
         };
         for y in 0..canvas.height {
             for x in 0..canvas.width {
@@ -1345,12 +1338,12 @@ mod tests {
                     continue;
                 }
                 let expected = match arms {
-                    0b1010 => '╭', // east + south
-                    0b1001 => '╮', // west + south
-                    0b0101 => '╯', // west + north
-                    0b0110 => '╰', // east + north
-                    0b0011 => '─', // west + east
-                    0b1100 => '│', // north + south
+                    0b1010 => '╭',          // east + south
+                    0b1001 => '╮',          // west + south
+                    0b0101 => '╯',          // west + north
+                    0b0110 => '╰',          // east + north
+                    0b0011 => '─',          // west + east
+                    0b1100 => '│',          // north + south
                     0b0001 | 0b0010 => '─', // single horizontal tick
                     0b0100 | 0b1000 => '│', // single vertical tick
                     _ => '╳',               // three-arm: never a legal corner
@@ -1359,7 +1352,8 @@ mod tests {
                     continue;
                 }
                 assert_eq!(
-                    glyph, expected,
+                    glyph,
+                    expected,
                     "cell {cell:?} has arms w={west} e={east} n={north} s={south}, glyph {glyph:?}, expected {expected:?}\n{}",
                     canvas.text()
                 );

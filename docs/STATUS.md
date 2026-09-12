@@ -22,7 +22,7 @@ Counts come from `cargo test --workspace` on 2026-09-11 (511 passed, 0 failed), 
 - [x] `onlyne-net` green with TLS, handshake, ACL, and backoff: 25.
 - [x] `onlyne-adapter` green with SDK and protocol schema: 5 unit + 3 conformance + 1 protocol doc.
 - [x] `onlyne-server` green with router, relay, projection, faults, admin, and generate: 48 delivery + 26 generate.
-- [x] `onlyne-client` green with runloop, intents, adapter socket, and dispatch: 15 unit + 21 scenarios.
+- [x] `onlyne-client` green with runloop, intents, adapter socket, and dispatch: 24 unit + 28 scenarios.
 - [x] `onlyne-tui` green with the role network graph and the swarm monitor: 15.
 - [x] `onlyne-gateway` green with shared kit: 47.
 - [x] `onlyne-cli` green with entrypoint and socket resolution: 21.

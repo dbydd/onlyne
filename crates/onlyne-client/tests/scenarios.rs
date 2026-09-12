@@ -365,8 +365,8 @@ async fn a_local_ping_is_answered_and_keeps_the_socket_open() {
 ///
 /// The probe is an `admin` `hello` on the role socket: the client's own runtime
 /// owns the connection flag, so the verb reads the fact from the process that
-/// holds it instead of guessing from the pid file. A socket that answers
-/// nothing is a client that is not serving.
+/// holds it. A socket that answers carries the link state; a socket nobody
+/// answers is not a running client at all.
 #[tokio::test]
 async fn the_link_probe_follows_the_clients_connection() {
     let dir = tempdir().unwrap();
@@ -383,26 +383,30 @@ async fn the_link_probe_follows_the_clients_connection() {
     );
     let (socket, host) = serve_role_socket(&state, dir.path()).await;
 
-    assert!(
-        !onlyne_client::adapter_socket::server_link_up(&socket).await,
-        "a client that holds no link is not connected"
+    assert_eq!(
+        onlyne_client::adapter_socket::server_link_state(&socket).await,
+        Some(false),
+        "a client that holds no link answers without one"
     );
     state.set_link_up(true);
-    assert!(
-        onlyne_client::adapter_socket::server_link_up(&socket).await,
+    assert_eq!(
+        onlyne_client::adapter_socket::server_link_state(&socket).await,
+        Some(true),
         "the probe reads the connection the runtime holds"
     );
     state.set_link_up(false);
-    assert!(
-        !onlyne_client::adapter_socket::server_link_up(&socket).await,
+    assert_eq!(
+        onlyne_client::adapter_socket::server_link_state(&socket).await,
+        Some(false),
         "a dropped link is reported as not connected"
     );
     host.abort();
 
     let absent = dir.path().join(".onlyne/run/absent");
-    assert!(
-        !onlyne_client::adapter_socket::server_link_up(&absent).await,
-        "nothing listening is not connected"
+    assert_eq!(
+        onlyne_client::adapter_socket::server_link_state(&absent).await,
+        None,
+        "nothing answers a path that holds no socket"
     );
 }
 

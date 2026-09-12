@@ -380,15 +380,16 @@ pub fn should_bye_on_register(session_id: &str) -> bool {
 /// protocol's own hello budget.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Whether the client serving `socket` holds a ready server link.
+/// The link state of the client serving `socket`, and `None` when no client
+/// answers the probe.
 ///
 /// The probe is an `admin` `hello` on the adapter surface (§7): it names no
 /// mount, binds nothing, and the host's `HelloAck` carries the link state. A
-/// socket that does not answer is a client that is not serving.
-pub async fn server_link_up(socket: &Path) -> bool {
-    let Ok(stream) = UnixStream::connect(socket).await else {
-        return false;
-    };
+/// socket nobody answers is a client that is not serving — `status` reads that
+/// as not running — while a client that answers with a down link is running
+/// and disconnected.
+pub async fn server_link_state(socket: &Path) -> Option<bool> {
+    let stream = UnixStream::connect(socket).await.ok()?;
     let io = AdapterIo::new(stream, PROBE_TIMEOUT, PROBE_TIMEOUT);
     let hello = HelloArgs {
         protocol: PROTOCOL_VERSION,
@@ -398,16 +399,20 @@ pub async fn server_link_up(socket: &Path) -> bool {
         capabilities: Vec::new(),
         mount: None,
     };
-    let Ok(body) = io.request(AdapterMsg::Plugin(PluginOp::Hello(hello))).await else {
-        return false;
-    };
+    let body = io
+        .request(AdapterMsg::Plugin(PluginOp::Hello(hello)))
+        .await
+        .ok()?;
     if !body.ok {
-        return false;
+        return Some(false);
     }
     let ack = body
         .data
         .and_then(|value| serde_json::from_value::<HostOp>(value).ok());
-    matches!(ack, Some(HostOp::Welcome(ack)) if ack.server.connected)
+    Some(matches!(
+        ack,
+        Some(HostOp::Welcome(ack)) if ack.server.connected
+    ))
 }
 
 pub async fn stale_socket_removed(path: &Path) -> Result<()> {

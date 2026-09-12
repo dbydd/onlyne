@@ -24,7 +24,6 @@ Role workspace, passed as `onlyne-client run --workspace <dir>`:
   config.toml            # role identity, server endpoint, local plugin list
   client.db              # session state, intents, inbox cursor
   run/s                  # local client socket
-  run/client.pid
   logs/client.log
   keys/role.key          # this role private key
   agent/<pkg>/           # vendored coding-agent package copy (§11)

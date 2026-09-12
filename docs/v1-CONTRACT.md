@@ -51,7 +51,7 @@ Cargo workspace, `members = ["crates/*", "plugins/*"]`, 18 packages: 14 under `c
 
 ```
 onlyne server start|stop|run|init|generate|status|roles|sessions|ledger|faults|watch|history|repair ...   # execs onlyne-server
-onlyne client run|start|stop|status|init|roles|sessions|watch|history                                            # execs onlyne-client
+onlyne client run|status|init|roles|sessions|watch|history                                                # execs onlyne-client
 onlyne status|roles|sessions|ledger|faults|watch|history|spec_diff|reload|generate|wait-ready|repair ...          # admin surface, one frame per call
 onlyne cluster export-prose
 onlyne send --to <role> [--task <id>] [--text ...|--file -] [--image f.png] [--note]
@@ -92,5 +92,5 @@ onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace
 `onlyne-server status` answers the process question from its own tree: pid, socket path, uptime, spec hash, and store reachability.
 `onlyne status` on the CLI is the `AdminOp::Status` socket round-trip.
 The two answer different questions: one describes the local process, the other describes the live cluster.
-`onlyne client` and `onlyne gateway` follow the same split: each daemon binary owns `run`, `start`, `stop`, and its own `status`, and `onlyne-cli` resolves every query verb against that daemon's socket.
+`onlyne client` and `onlyne gateway` follow the same split: each daemon binary owns `run` and its own `status` — the client never detaches itself, so it carries no `start`/`stop` — and `onlyne-cli` resolves every query verb against that daemon's socket.
 Prose keeps direct additive sentences; contrastive rhetoric stays banned.

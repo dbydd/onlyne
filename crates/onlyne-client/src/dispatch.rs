@@ -941,9 +941,9 @@ pub fn session_alive(state: &DispatchState, task_id: &str) -> bool {
 /// This is the shutdown path: a stopped client must not leave resources behind
 /// that only it can address, and each backend's own record of the resource —
 /// the Orca tab map included — ends with the session. `budget` bounds the whole
-/// sweep, because `onlyne-client stop` waits 10 seconds for the process to
-/// leave and a slow backend CLI must not turn a stop into a hang; whatever the
-/// budget cuts off is reported and dropped anyway.
+/// sweep, because an operator's SIGTERM must not turn into a hang while a slow
+/// backend CLI exits; whatever the budget cuts off is reported and dropped
+/// anyway.
 pub fn close_all(state: &DispatchState, reason: onlyne_session::CloseReason, budget: Duration) {
     let started = Instant::now();
     let mut inner = state.inner.lock();
@@ -1368,7 +1368,8 @@ mod tests {
         assert_eq!(plain["ONLYNE_TASK_ID"], "t-1");
         assert_eq!(plain["ONLYNE_ROLE"], "planner");
         assert!(
-            !plain.contains_key("ONLYNE_RELAY_REQUIRED") && !plain.contains_key("ONLYNE_RELAY_COUNT"),
+            !plain.contains_key("ONLYNE_RELAY_REQUIRED")
+                && !plain.contains_key("ONLYNE_RELAY_COUNT"),
             "no policy injects no key at all: {plain:?}"
         );
 

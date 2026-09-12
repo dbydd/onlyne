@@ -6,19 +6,16 @@ One workspace, one role, one daemon. The role runs many sessions at once.
 
 | verb | one line |
 | --- | --- |
-| `run --workspace <dir>` | Foreground role runtime: connect, handshake, pull, dispatch, report. |
-| `start --workspace <dir>` | Spawn `run` detached, log to `.onlyne/logs/client.log`, record the pid, answer once the socket is bound. |
-| `stop --workspace <dir>` | Signal the recorded pid, wait for it to leave, remove the pid file and the socket. |
-| `status --workspace <dir>` | Print pid, uptime, socket path, recorded fault count, and whether the server link is up. |
+| `run --workspace <dir>` | Foreground role runtime: connect, handshake, pull, dispatch, report. Backgrounding is the operator's job, never the client's. |
+| `status --workspace <dir>` | Print uptime, socket path, recorded fault count, and whether the server link is up. |
 | `init --workspace <dir> --role <r> --server-root <dir>` | Build the minimal role workspace and print the `[[client]]` spec fragment. |
 | `roles --workspace <dir>` | Answer role prose from the local cache. |
 | `sessions --workspace <dir>` | Reserved for the live role runtime. |
 | `watch --workspace <dir>` | Reserved for the live role runtime. |
 | `history --workspace <dir>` | Reserved for the live role runtime. |
 
-`start` prints `onlyne: client started pid <pid> socket <path>`.
-`status` prints `onlyne: client running pid <pid> uptime <n>s socket <path> faults <n>`. When the client holds no server link it adds `onlyne: client not connected` on stderr. The link state comes from an `admin` `hello` on the client socket, so the verb reads the fact from the running process.
-`stop` prints `onlyne: client stopped pid <pid>`.
+`run` is the only launch verb, and it stays in the foreground. A supervisor that wants it in the background owns that decision — a visible terminal tab, `launchd`, `nohup` — so the client never detaches, writes no pid file, and nothing signals it by number.
+`status` prints `onlyne: client running uptime <n>s socket <path> faults <n>`. The uptime is the age of the socket file, and a client counts as running only when that socket answers an `admin` `hello`, so a socket file an unclean exit left behind reads as not running. When the answering client holds no server link it adds `onlyne: client not connected` on stderr.
 
 The printed `[[client]]` fragment is a complete role entry: it carries `role`, `key`, `admin`, `max_sessions`, the ACL lists, `prose`, `reuse`, and `session_command`. Paste it into `spec.toml` and reload; the client can then spawn sessions for that role.
 
@@ -33,8 +30,7 @@ Both `init` and `run` create these paths under `--workspace`:
 | `.onlyne/keys/role.key` | `0600` | 32 raw ed25519 bytes, generated once |
 | `.onlyne/run/` | `0700` | runtime directory |
 | `.onlyne/run/s` | `0600` | adapter socket, bound by `run` |
-| `.onlyne/run/client.pid` | `0600` | pid written by `start`, removed by `stop` |
-| `.onlyne/logs/client.log` | | stdout and stderr of the `start` child |
+| `.onlyne/logs/client.log` | | stdout and stderr, when the operator starts `run` under a shell that redirects them |
 | `.onlyne/agent/<id>/` | | installed plugin package with `plugin.toml` |
 | `.onlyne/cache/orca-tabs.jsonl` | | append-only Orca tab to session map: a supervisor/display side-channel, not the identity (the adapter protocol owns that) |
 
@@ -46,8 +42,8 @@ Both `init` and `run` create these paths under `--workspace`:
 | --- | --- |
 | 0 | the verb finished |
 | 1 | the verb failed; the reason is one line on stderr |
-| 2 | `stop` found no running client, printed as `onlyne: client not running` |
-| 2 | `status` found no running client, or a client with no server link |
+| 2 | `status` found no client answering its socket, printed as `onlyne: client not running` |
+| 2 | `status` found a client with no server link, printed as `onlyne: client not connected` |
 | 2 | the workspace holds the legacy layout |
 
 `status` exits 0 only for a client that is up and connected to its server. That is the fact a script reads.

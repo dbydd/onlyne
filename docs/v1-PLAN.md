@@ -99,7 +99,7 @@ role 工作区（client 根）：
   config.toml            # role 身份、server endpoint、本地 plugin 列表
   client.db              # session 执行态、intent、inbox 游标
   run/s                  # 本机 client socket（adapter 插件 + onlyne CLI 入口）
-  run/client.pid
+  run/                   # 只放 socket；1.0.1 起 client 前台运行，不写 pid 文件
   logs/client.log
   keys/role.key          # 本 role 私钥，对应 spec 中登记的公钥
   agent/<pkg>/           # generate 时 vendor 进来的外置 coding-agent 插件包副本（§11）
@@ -327,7 +327,7 @@ gateway ↔ server：`hello`、`register_channel`、`deliver`（入站）、`ren
 
 ```
 onlyne server start|stop|status|run|generate|roles|sessions|ledger|faults|watch|history|repair ...
-onlyne client run|start|stop|status|init|roles|sessions|watch|history
+onlyne client run|status|init|roles|sessions|watch|history
 onlyne send --to <role> [--task <id>] [--text ...|--file -] [--image f.png] [--note]
 onlyne reply --to <envelope-id> --text ...
 onlyne complete --task <id> [--outcome done|failed|cancelled] --text ...
@@ -392,11 +392,11 @@ onlyne server generate --root <server-root> [--template <相对路径>]... [--ro
 
 **prose 单点**：生成目录里不写 prose 副本。prose 只在 `welcome` 时下发，由 client 缓存进 `client.db` 的 `prose_cache`（§5、§10）。
 
-**输出回执**：stdout 打两段。第一段是可直接粘贴的 TOML `[[client]]` 片段（首行恰为 `[[client]]`，含 `role` 与 `key = "ed25519/<base64>"`）。第二段是 `<out>/.onlyne-generation.json`：`{"generated_at":"<rfc3339>","server_root":"<绝对路径仅此文件内>","roles":[{"role":"planner","dir":"dev/planner","key":"ed25519/...","template":"dev/planner"}]}`。`dir` 是相对 `--out` 的路径，supervisor 拿它逐条 `onlyne client start --workspace <out>/<dir>` 拉起。generate 从不写 `spec.toml`（D13）；追加条目与 `onlyne reload` 由 supervisor/user 完成。
+**输出回执**：stdout 打两段。第一段是可直接粘贴的 TOML `[[client]]` 片段（首行恰为 `[[client]]`，含 `role` 与 `key = "ed25519/<base64>"`）。第二段是 `<out>/.onlyne-generation.json`：`{"generated_at":"<rfc3339>","server_root":"<绝对路径仅此文件内>","roles":[{"role":"planner","dir":"dev/planner","key":"ed25519/...","template":"dev/planner"}]}`。`dir` 是相对 `--out` 的路径，supervisor 拿它逐条 `onlyne client run --workspace <out>/<dir>` 拉起。generate 从不写 `spec.toml`（D13）；追加条目与 `onlyne reload` 由 supervisor/user 完成。
 
 **与 `onlyne-client init` 的分工**：`init` 造最小 role 工作区（只有 `.onlyne/{config.toml,keys/role.key}`），给 supervisor 自身工作区和手工场景用。`generate` = `init` 的产物 + 模板内容 + 拓扑放置。两者的产物布局逐字段相同，`client run` 分不出来源。
 
-**替代的旧机制**：`crates/onlyne-config/src/template.rs` 复用 `harness/onlyne-swarm/src/template.rs` 的层级深合并（`merge_into` 102-121、`load_tree` 126-211 的目录走查与点目录剪枝 230-232）和 `sync.rs::bootstrap_child`（165-217）的路径改写思路，删掉 `WorkspaceTemplate.back_edges`/`model`（22-34）、`normalize_edge`（73-100）、`validate_edges`（240-254）、`.onlyne/swarm.workspace.jsonc` 快照及其读取链（模型三元组改由 spec 的 `session_command` 与 `env` 承载）。`daemon.rs::ensure_all`（给每个工作区 spawn 一个 onlyne daemon，89 行整文件）删除，改由 supervisor 起 `onlyne client start`。`hierarchy.rs`（Orca folder ghost 清理）并入 `crates/onlyne-session/src/backend/orca.rs`。`swarm_ready_gaps`（`sync.rs:75-129`）的 readiness 三门（`[swarm]enabled`、`.pi/onlyne.json` 的 `watch.autoStart`、`.pi/settings.json` 含 pi-onlyne）降级为 generate 期的模板校验提示，client 运行期不再检查。
+**替代的旧机制**：`crates/onlyne-config/src/template.rs` 复用 `harness/onlyne-swarm/src/template.rs` 的层级深合并（`merge_into` 102-121、`load_tree` 126-211 的目录走查与点目录剪枝 230-232）和 `sync.rs::bootstrap_child`（165-217）的路径改写思路，删掉 `WorkspaceTemplate.back_edges`/`model`（22-34）、`normalize_edge`（73-100）、`validate_edges`（240-254）、`.onlyne/swarm.workspace.jsonc` 快照及其读取链（模型三元组改由 spec 的 `session_command` 与 `env` 承载）。`daemon.rs::ensure_all`（给每个工作区 spawn 一个 onlyne daemon，89 行整文件）删除，改由 supervisor 起 `onlyne client run`。`hierarchy.rs`（Orca folder ghost 清理）并入 `crates/onlyne-session/src/backend/orca.rs`。`swarm_ready_gaps`（`sync.rs:75-129`）的 readiness 三门（`[swarm]enabled`、`.pi/onlyne.json` 的 `watch.autoStart`、`.pi/settings.json` 含 pi-onlyne）降级为 generate 期的模板校验提示，client 运行期不再检查。
 
 ## Approach
 

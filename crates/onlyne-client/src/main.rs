@@ -32,14 +32,6 @@ enum Command {
         )]
         prose: String,
     },
-    Start {
-        #[arg(long)]
-        workspace: PathBuf,
-    },
-    Stop {
-        #[arg(long)]
-        workspace: PathBuf,
-    },
     Status {
         #[arg(long)]
         workspace: PathBuf,
@@ -148,20 +140,6 @@ async fn main() {
                 }
             }
         }
-        Command::Start { workspace } => match daemon::start(&workspace) {
-            Ok(pid) => {
-                println!(
-                    "{}",
-                    daemon::start_line(pid, &daemon::socket_file(&workspace))
-                );
-                0
-            }
-            Err(error) => {
-                eprintln!("onlyne-client: {error:#}");
-                1
-            }
-        },
-        Command::Stop { workspace } => stop_client(&workspace),
         Command::Status { workspace } => match daemon::status(&workspace).await {
             Ok(Some(report)) => {
                 println!("{}", report.line());
@@ -203,7 +181,7 @@ async fn main() {
     std::process::exit(code);
 }
 
-/// Route `tracing` output to stderr, which `start` redirects into
+/// Route `tracing` output to stderr, which the operator redirects into
 /// `.onlyne/logs/client.log` (plan §2).
 ///
 /// A process that already installed a subscriber keeps it, so a test harness
@@ -232,25 +210,6 @@ fn plugin_verb(result: anyhow::Result<local_cli::PluginAction>) -> i32 {
         Err(error) => {
             eprintln!("{error}");
             local_cli::plugin_exit_code(&error)
-        }
-    }
-}
-
-/// Stop the recorded client and answer with the verb's exit code.
-fn stop_client(workspace: &Path) -> i32 {
-    match daemon::stop(workspace) {
-        Ok(outcome) => {
-            if let Some(line) = outcome.line() {
-                println!("{line}");
-            }
-            if outcome.is_refusal() {
-                eprintln!("{}", daemon::NOT_RUNNING);
-            }
-            outcome.exit_code()
-        }
-        Err(error) => {
-            eprintln!("onlyne-client: {error:#}");
-            1
         }
     }
 }

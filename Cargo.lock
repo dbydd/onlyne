@@ -1984,7 +1984,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onlyne-adapter"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2000,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-cli"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "base64",
  "clap",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-client"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -2048,7 +2048,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-config"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "base64",
  "schemars 0.8.22",
@@ -2061,7 +2061,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-frame"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-gateway"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-gateway-feishu"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2116,7 +2116,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-gateway-qqbot"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2131,7 +2131,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-gateway-telegram"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-gateway-weixin"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2158,14 +2158,14 @@ dependencies = [
 
 [[package]]
 name = "onlyne-layout"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "onlyne-net"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -2188,7 +2188,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-proto"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "base64",
  "chrono",
@@ -2201,7 +2201,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-server"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2231,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-session"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2244,7 +2244,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-store"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-testkit"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2283,7 +2283,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-tui"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "chrono",

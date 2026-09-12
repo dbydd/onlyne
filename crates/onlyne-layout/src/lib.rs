@@ -308,10 +308,6 @@ impl RoleWorkspace {
         self.run_dir().join("s")
     }
 
-    pub fn pid_path(&self) -> PathBuf {
-        self.run_dir().join("client.pid")
-    }
-
     pub fn logs_dir(&self) -> PathBuf {
         self.onlyne.join("logs")
     }
@@ -529,7 +525,6 @@ mod tests {
         assert_eq!(layout.config_path(), root.join(".onlyne/config.toml"));
         assert_eq!(layout.client_db_path(), root.join(".onlyne/client.db"));
         assert_eq!(layout.socket_path(), root.join(".onlyne/run/s"));
-        assert_eq!(layout.pid_path(), root.join(".onlyne/run/client.pid"));
         assert_eq!(layout.log_path(), root.join(".onlyne/logs/client.log"));
         assert_eq!(layout.key_path(), root.join(".onlyne/keys/role.key"));
         // Both spellings a config can carry reach the one file `generate` and

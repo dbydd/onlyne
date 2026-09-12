@@ -12,8 +12,9 @@
   `data.task` 是这单的 task id。
 - 看账：`ledger --task <task id>`、`ledger`、`roles --json`、`sessions --json`、
   `faults`、`watch --follow`。
-- 运维：`client start|stop --workspace <root>/ws/demo/<角色>`、`server status`、
-  `server reload`、`server stop`。
+- 运维：`server status`、`server reload`、`server stop`。环上的 client 进程由 driver
+  前台拉起（`onlyne-client run --workspace <角色 workspace>`，日志在
+  `<角色 workspace>/.onlyne/logs/`），你不开关它们。
 
 ## 一轮流水灯
 

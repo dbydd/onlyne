@@ -1049,7 +1049,8 @@ mod tests {
             "intent_backoff_ms": [1000, 2000, 4000],
             "seq": 41,
         });
-        let old: Welcome = serde_json::from_value(frame.clone()).expect("the pre-relay frame lands");
+        let old: Welcome =
+            serde_json::from_value(frame.clone()).expect("the pre-relay frame lands");
         assert_eq!(old.relay_required, None);
         assert_eq!(old.relay_count, None);
         let encoded = serde_json::to_value(&old).expect("encode the welcome");

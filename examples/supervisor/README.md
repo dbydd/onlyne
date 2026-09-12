@@ -1,7 +1,7 @@
 # supervisor-demo — 最小版集群操作 agent 与流水灯环
 
 整套东西只用 Onlyne 自己的产品面：spec 里的 prose、`generate` 出的工作区、
-`client start` 拉起的会话、`send` 派活、ledger 收尾。演示没有发明新机制。
+`onlyne-client run` 拉起的会话、`send` 派活、ledger 收尾。演示没有发明新机制。
 
 集群里有一个操作 agent `_supervisor`，外加一条五元环 `a,b,c,d,e`。`_supervisor`
 是用户的集群操作 agent，它的 pi 进程跑在用户自己的终端里（在 Orca 里就是一个
@@ -58,8 +58,8 @@ python3 examples/supervisor/run.py stop            # 收摊
    `/tmp/onlyne-sup/ws/demo/{_supervisor,a,b,c,d,e}` 六个工作区（含真实密钥与模板
    内容）。脚本用打印出的 `[[client]]` 片段**替换**掉占位条目。密钥进 spec 这一步，
    是脚本照 e2e case 9 的先例替操作者做的；真实部署里这由人决定。
-4. `onlyne server start` + `client start` ×5（每个角色一个后台进程，日志在
-   `<ws>/.onlyne/logs/`）。
+4. `onlyne server start` + `onlyne-client run` ×5：脚本自己把前台 client 放到后台
+   （自己的 session，日志在 `<ws>/.onlyne/logs/client.log`），并记下 pid 供 `stop` 用。
 5. 等环上五个角色上线，把 `_supervisor` 的 pi 开成一个标签页（`orca terminal
    create`），第一句话就是 `up` 的参数。**脚本不等环跑完**：派活由 supervisor 自己
    发，`up` 打完提示就退出。
@@ -106,7 +106,8 @@ K 加一；`b` 追加 `2:b` 交给 `c`……`e` 到了 K=10 不再转发，它�
    "没有客户端"，它这个进程活在 Orca 标签页里。第 2 页是逐任务的 swarm 视图，
    十行按 hop 排开，状态跟着 ack 往前走。按键看 TUI 自己的帮助行。
 4. **收摊**：`run.py stop` 关掉它开的 supervisor 标签页（关完会再查一遍，没关掉就
-   报错），清掉留在 Orca 里的会话标签页，再停掉五个客户端和服务器。
+   报错），清掉留在 Orca 里的会话标签页，再 SIGTERM 掉脚本自己拉起的五个 client
+   和服务器。
 
 两种会话载体是同一个协议的两种摆法。默认（Orca 机器上）是 TUI：标签页给人看，
 初始会话由适配器注入任务正文。无头场合（CI、没有 Orca）用 `export ONLYNE_BACKEND=exec`，

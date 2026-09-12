@@ -103,7 +103,11 @@ pub struct ClientEntry {
     /// precedence the guard's own `relay.toml` already had. The spec also
     /// accepts the guard file's own spelling `relay_required_count`, so the
     /// two surfaces of one policy do not trade typos.
-    #[serde(default, alias = "relay_required_count", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "relay_required_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub relay_count: Option<u32>,
 }
 

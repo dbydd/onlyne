@@ -667,20 +667,25 @@ fn generated_schemas_parse_as_json() {
 /// parser accepts.
 #[test]
 fn the_published_spec_schema_carries_the_relay_keys() {
-    let schema: serde_json::Value =
-        serde_json::from_str(onlyne_config::spec_schema()).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(onlyne_config::spec_schema()).unwrap();
     let entry = &schema["definitions"]["ClientEntry"];
     assert_eq!(
         entry["required"],
         serde_json::json!(["key", "role"]),
         "the relay keys stay optional: an old spec that omits them is still valid"
     );
-    assert_eq!(entry["properties"]["relay_required"]["type"], serde_json::json!(["array", "null"]));
+    assert_eq!(
+        entry["properties"]["relay_required"]["type"],
+        serde_json::json!(["array", "null"])
+    );
     assert_eq!(
         entry["properties"]["relay_required"]["items"]["type"],
         "string"
     );
-    assert_eq!(entry["properties"]["relay_count"]["type"], serde_json::json!(["integer", "null"]));
+    assert_eq!(
+        entry["properties"]["relay_count"]["type"],
+        serde_json::json!(["integer", "null"])
+    );
     assert_eq!(entry["properties"]["relay_count"]["format"], "uint32");
 }
 
