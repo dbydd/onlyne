@@ -8,10 +8,10 @@
 # Loading semantics (docs/v1-PLAN.md §5 line 270):
 # 1. `onlyne-server run` parses the whole file at startup. Unknown keys and type errors refuse the
 #    start and print `spec.toml:<line>: <message>`.
-# 2. `onlyne server reload` and SIGHUP reparse the file into a temporary structure, validate it,
-#    then swap atomically. A failed validation keeps the running spec and records
-#    fault{kind:"spec_reload_failed"}. `onlyne-server reload --dry-run` prints the pending change
-#    through SpecDiff::render.
+# 2. `onlyne reload` (spelled `onlyne server reload` in the server group) and SIGHUP reparse the file
+#    into a temporary structure, validate it, then swap atomically. A failed validation keeps the
+#    running spec and records fault{kind:"spec_reload_failed"}. The reload answer carries the applied
+#    change through SpecDiff::render.
 # 3. No runtime op writes this file. `onlyne-client init` and `onlyne server generate` print a
 #    `[[client]]` fragment on stdout for an operator to append, then `onlyne reload` applies it.
 

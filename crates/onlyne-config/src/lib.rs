@@ -9,7 +9,7 @@
 //! * [`spec`] — the document types and the strict loader
 //! * [`client`] — `<workspace>/.onlyne/config.toml` with `$NAME` env-indirect values
 //! * [`env`] — the read-time environment resolver
-//! * [`diff`] — [`SpecDiff`] for `onlyne server reload --dry-run`
+//! * [`diff`] — [`SpecDiff`] for the reload answer
 //! * [`redact`] — debug strings with secret material masked
 //! * [`hash`] — [`spec_hash`] and [`canonical_bytes`] for cache keys
 //!
