@@ -1088,9 +1088,9 @@ fn turn(route: &[(isize, isize)], index: usize) -> char {
 fn erase_islands(canvas: &mut Canvas, boxes: &[Rect]) {
     let mut visited = vec![vec![false; canvas.width]; canvas.height];
     let mut queue: Vec<(usize, usize)> = Vec::new();
-    for y in 0..canvas.height {
-        for x in 0..canvas.width {
-            if is_stroke(canvas.cells[y][x]) && touches_box(boxes, (x as isize, y as isize)) {
+    for (y, row) in canvas.cells.iter().enumerate() {
+        for (x, cell) in row.iter().enumerate() {
+            if is_stroke(*cell) && touches_box(boxes, (x as isize, y as isize)) {
                 visited[y][x] = true;
                 queue.push((x, y));
             }
@@ -1113,10 +1113,10 @@ fn erase_islands(canvas: &mut Canvas, boxes: &[Rect]) {
             }
         }
     }
-    for y in 0..canvas.height {
-        for x in 0..canvas.width {
-            if is_stroke(canvas.cells[y][x]) && !visited[y][x] {
-                canvas.cells[y][x] = Cell::blank();
+    for (row_cells, row_seen) in canvas.cells.iter_mut().zip(visited.iter_mut()) {
+        for (cell, seen) in row_cells.iter_mut().zip(row_seen.iter_mut()) {
+            if is_stroke(*cell) && !*seen {
+                *cell = Cell::blank();
             }
         }
     }
