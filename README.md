@@ -7,6 +7,20 @@ Onlyne ties a fleet of coding agents into one working cluster. A **server** rout
 ![version](https://img.shields.io/badge/version-v1.0.0--beta.4-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux-supported-lightgrey)
 ![Onlyne — a supervisor dispatches a ten-hop ring task to five pi agents; ledger receipts settle every hop](assets/promo/onlyne-hero.png)
 
+## Install
+
+Everything ships to [crates.io](https://crates.io): one command places the entrypoint and all four daemons in your cargo bin directory, and `onlyne` finds its siblings there.
+
+```bash
+cargo install onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui
+```
+
+`onlyne` is the thin forwarder (`server`/`client`/`gateway`/`admin` verbs); the TUI runs separately as `onlyne-tui`. For a pi agent role, the adapter plugin lives on npm:
+
+```bash
+pi install npm:pi-onlyne
+```
+
 ## See it run
 
 ```bash
