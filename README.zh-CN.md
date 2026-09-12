@@ -33,6 +33,10 @@ TUI 把同一件事画成活图——第 1 页是角色网络，第 2 页是集�
 
 `hjkl` 沿边走，`l` 跟随一跳，方向键平移镜头，`+`/`-` 放宽和收紧图距，`e` 显出 supervisor 的派发辐条，`a` 切换只看活跃。一轮一个任务，一个会话结束就收一个标签页：agent 退出，tab 自己回收。
 
+## 实战案例：research-flywheel
+
+[research-flywheel](https://github.com/dbydd/research-flywheel) 是跑在 Onlyne 上的真实 agent 环。clone 模板树，对会话说「帮我看看这棵树」，开场协议问四个问题——主题、角色拓扑、单机或多机、算力边界——过完九项装配检查就给环通电。五个角色各持一条 Onlyne 会话、各占一个工作区；交接受 relay guard 约束，每条 verdict 都落账本。全流程细则写在它的 `BOOTSTRAP.md`。
+
 ## 部件清单
 
 | 二进制 | 职责 |
@@ -135,7 +139,7 @@ target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner
 
 ## 状态
 
-最新 tag 是 `v1.0.0-beta.4`，分支 `v1.0.0-dev-super-redesign`。全量 e2e、环图 TUI、supervisor demo、pi adapter 插件在 macOS 全绿；四个 IM gateway 以 feature-gated crate 交付，等待真平台浸泡。`cargo build --workspace` 需要 Rust 1.85，再无更重的依赖。
+最新 tag 是 `v1.0.0`，分支 `main`。全量 e2e、环图 TUI、supervisor demo、pi adapter 插件在 macOS 全绿；四个 IM gateway 以 feature-gated crate 交付，等待真平台浸泡。`cargo build --workspace` 需要 Rust 1.85，再无更重的依赖。
 
 ## 阅读
 

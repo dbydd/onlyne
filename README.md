@@ -33,6 +33,10 @@ The TUI draws the same picture live — page 1 is the role network, page 2 the s
 
 `hjkl` walks the edges, `l` follows one, the arrow keys pan, `+`/`-` widen and tighten the map, `e` reveals the supervisor's dispatch edges, and `a` toggles the active-only view. One task per round, one finished tab per session: tabs reclaim themselves when their agent exits.
 
+## Showcase: research-flywheel
+
+[research-flywheel](https://github.com/dbydd/research-flywheel) is a live agent ring built on Onlyne. Clone the template tree, tell your agent 「帮我看看这棵树」, and the opening protocol asks four questions — topic, role topology, single machine or distributed, compute budget — then runs the nine-point assembly check and powers the ring. Five roles, each one Onlyne session with its own workspace; handoffs are relay-guarded, and every verdict lands on the ledger. The full procedure lives in its `BOOTSTRAP.md`.
+
 ## The pieces
 
 | Binary | Job |
@@ -137,7 +141,7 @@ Every workspace is self-contained and portable. `onlyne server generate` lays a 
 
 ## Status
 
-Release `v1.0.0-beta.4`, on branch `v1.0.0-dev-super-redesign`. The full e2e suite, the ring TUI, the supervisor demo, and the pi adapter plugin run green on macOS; the four IM gateways ship as feature-gated crates awaiting live-platform soak. `cargo build --workspace` needs Rust 1.85 and nothing heavier.
+Release `v1.0.0`, on branch `main`. The full e2e suite, the ring TUI, the supervisor demo, and the pi adapter plugin run green on macOS; the four IM gateways ship as feature-gated crates awaiting live-platform soak. `cargo build --workspace` needs Rust 1.85 and nothing heavier.
 
 ## Reading
 
