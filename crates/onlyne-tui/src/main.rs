@@ -4,13 +4,15 @@ use crossterm::event::{
 };
 use onlyne_tui::model::{
     Detail, Focus, MAX_SPACING, MIN_SPACING, Page, Snapshot, UiState, cycle_edge, cycle_role,
-    cycle_state, detail, pull, role_detail, role_edges, selected_role,
+    cycle_state, detail, location, nav_after, nav_step, pull, role_detail, role_edges,
+    selected_role,
 };
 use onlyne_tui::socket::{NO_SOCKET_MESSAGE, SocketArgs, resolve_socket};
 use onlyne_tui::ui::{
-    apply_page_history, clamp_cursor, drag_role_view, follow_role_edge, graph_len, history_len,
-    history_page_size, map_view_size, move_cursor, move_role_edge, pan_role_view, render,
-    render_once_text, role_back, selected_task, sync_map, zoom_role_view,
+    apply_page_history, clamp_cursor, clamp_detail_scroll, detail_pane_size, drag_role_view,
+    follow_role_edge, graph_len, history_len, history_page_size, map_view_size, move_cursor,
+    move_role_edge, pan_role_view, render, render_once_text, role_back, selected_task, sync_map,
+    zoom_role_view,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -176,6 +178,11 @@ fn handle_key(
     refreshed: &mut Instant,
 ) -> anyhow::Result<bool> {
     let view = map_view(terminal);
+    let panel = detail_view(terminal);
+    let was_swarm = state.page == Page::Swarm;
+    let before = location(state);
+    let history_walk = modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(code, KeyCode::Char('p') | KeyCode::Char('n'));
     match code {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
@@ -196,8 +203,14 @@ fn handle_key(
             sync_selection_and_detail(runtime, socket, snapshot, state);
         }
         KeyCode::Enter => sync_selection_and_detail(runtime, socket, snapshot, state),
-        KeyCode::Char('J') => state.detail_scroll = state.detail_scroll.saturating_add(1),
-        KeyCode::Char('K') => state.detail_scroll = state.detail_scroll.saturating_sub(1),
+        KeyCode::Char('J') => {
+            state.detail_scroll = state.detail_scroll.saturating_add(1);
+            clamp_detail_scroll(state, panel);
+        }
+        KeyCode::Char('K') => {
+            state.detail_scroll = state.detail_scroll.saturating_sub(1);
+            clamp_detail_scroll(state, panel);
+        }
         KeyCode::Char('r') => refresh_now(runtime, socket, terminal, snapshot, state, refreshed),
         // Page 1: `hjkl` walks the ring, the arrows and the mouse move the
         // camera, `+`/`-` set the repulsion, `0` recentres, and `e` shows the
@@ -236,7 +249,13 @@ fn handle_key(
         KeyCode::Right if state.page == Page::RoleMap => {
             pan_role_view((1, 0), snapshot, state, view)
         }
-        // Page 2 keeps its own keys.
+        // Page 2 keeps its own keys, plus the browser-style history walk.
+        KeyCode::Char('p') if history_walk && was_swarm => {
+            walk_history(-1, runtime, socket, snapshot, state);
+        }
+        KeyCode::Char('n') if history_walk && was_swarm => {
+            walk_history(1, runtime, socket, snapshot, state);
+        }
         KeyCode::Char('g') if state.page == Page::Swarm => state.focus = Focus::Graph,
         KeyCode::Char('h') if state.page == Page::Swarm => state.focus = Focus::History,
         KeyCode::Up | KeyCode::Char('k') => {
@@ -295,11 +314,42 @@ fn handle_key(
             );
             sync_selection_and_detail(runtime, socket, snapshot, state);
         }
-        KeyCode::PageDown => state.detail_scroll = state.detail_scroll.saturating_add(8),
-        KeyCode::PageUp => state.detail_scroll = state.detail_scroll.saturating_sub(8),
+        KeyCode::PageDown => {
+            state.detail_scroll = state.detail_scroll.saturating_add(8);
+            clamp_detail_scroll(state, panel);
+        }
+        KeyCode::PageUp => {
+            state.detail_scroll = state.detail_scroll.saturating_sub(8);
+            clamp_detail_scroll(state, panel);
+        }
         _ => {}
     }
+    // Every page-2 move that lands somewhere new is a step the history
+    // remembers; a walk through the history itself is not.
+    if was_swarm && state.page == Page::Swarm && !history_walk {
+        nav_after(state, before);
+    }
     Ok(false)
+}
+
+/// `^p`/`^n`: walk the page-2 history and reload the detail pane for wherever
+/// the cursor lands.
+fn walk_history(
+    delta: isize,
+    runtime: &tokio::runtime::Runtime,
+    socket: &std::path::Path,
+    snapshot: &Snapshot,
+    state: &mut UiState,
+) {
+    if !nav_step(state, delta) {
+        return;
+    }
+    clamp_cursor(
+        &mut state.graph_cursor,
+        graph_len(snapshot, state.active_only),
+    );
+    clamp_cursor(&mut state.history_cursor, history_len(snapshot));
+    sync_selection_and_detail(runtime, socket, snapshot, state);
 }
 
 /// Re-settle the page-1 map after the repulsion knob moved, then bring the
@@ -464,4 +514,9 @@ fn terminal_size(terminal: &Terminal<CrosstermBackend<std::io::Stdout>>) -> (u16
 fn map_view(terminal: &Terminal<CrosstermBackend<std::io::Stdout>>) -> (usize, usize) {
     let (width, height) = terminal_size(terminal);
     map_view_size(Rect::new(0, 0, width, height))
+}
+
+/// The page-2 detail panel, so `J`/`K` stop scrolling where the text does.
+fn detail_view(terminal: &Terminal<CrosstermBackend<std::io::Stdout>>) -> Rect {
+    detail_pane_size(terminal_size(terminal))
 }

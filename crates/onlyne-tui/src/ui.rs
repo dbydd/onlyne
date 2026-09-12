@@ -2,9 +2,9 @@ use crate::force::Vec2;
 use crate::layout::{self, Camera, CellKind, LayoutEdge, LayoutNode, RoleMap};
 use crate::model::{
     Alert, AlertKind, Detail, Focus, Page, RoleDetail, Snapshot, TaskDetail, UiState, alerts,
-    event_task, layout_edges, layout_nodes, ledger_state_label, page_history, principal_label,
-    role_edges, selected_graph_task, selected_history_task, selected_role, visible_edges,
-    visible_sessions,
+    event_task, layout_edges, layout_nodes, ledger_state_label, live_sessions, page_history,
+    principal_label, role_edges, selected_graph_task, selected_history_task, selected_role,
+    visible_edges, visible_sessions,
 };
 use chrono::{DateTime, Local};
 use onlyne_proto::{Event, EventRow, FaultEvent, LedgerState, Lifecycle, SessionRow};
@@ -295,7 +295,9 @@ fn style_for_cell(kind: CellKind) -> Style {
     }
 }
 
-fn render_swarm(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &UiState) {
+/// Page 2's panes: the graph and its alert strip on the left, the history and
+/// the detail panel on the right.
+fn swarm_areas(area: Rect) -> (Rect, Rect, Rect) {
     let main = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -304,18 +306,30 @@ fn render_swarm(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &UiSt
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(main[1]);
+    (main[0], right[0], right[1])
+}
+
+/// The page-2 detail panel for a terminal of `size`, so the key handler can
+/// clamp the scroll against the room the panel really has.
+pub fn detail_pane_size(size: (u16, u16)) -> Rect {
+    let (_, middle, _) = frame_areas(Rect::new(0, 0, size.0, size.1));
+    swarm_areas(middle).2
+}
+
+fn render_swarm(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &UiState) {
+    let (left, history, detail) = swarm_areas(area);
     let alerts = alerts(snapshot);
     let shown = alerts.len().min(2) as u16;
-    let left = Layout::default()
+    let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(4), Constraint::Length(shown)])
-        .split(main[0]);
-    render_swarm_graph(frame, left[0], snapshot, state);
+        .split(left);
+    render_swarm_graph(frame, rows[0], snapshot, state);
     if shown > 0 {
-        render_alerts(frame, left[1], &alerts[..shown as usize]);
+        render_alerts(frame, rows[1], &alerts[..shown as usize]);
     }
-    render_history(frame, right[0], snapshot, state);
-    render_detail(frame, right[1], state);
+    render_history(frame, history, snapshot, state);
+    render_detail(frame, detail, state);
 }
 
 /// The alert strip the old swarm pane kept under its graph: open faults first,
@@ -474,17 +488,109 @@ fn history_style(row: &EventRow, idx: usize, state: &UiState) -> Style {
 }
 
 fn render_detail(frame: &mut Frame, area: Rect, state: &UiState) {
-    let (title, body) = match &state.detail {
-        Some(detail) => detail_text(detail),
-        None => ("detail".to_string(), placeholder(state.page).to_string()),
+    let title = detail_title(state);
+    let body = detail_body(state);
+    let extent = detail_extent(&body, area);
+    let scroll = (state.detail_scroll as usize).min(extent.max);
+    let title = if extent.max == 0 {
+        title
+    } else {
+        // Where the panel stands in its text: an operator can see there is
+        // more above or below.
+        format!(
+            "{title}  {}-{}/{} ▲▼",
+            scroll + 1,
+            (scroll + extent.view).min(extent.lines),
+            extent.lines
+        )
     };
     frame.render_widget(
         Paragraph::new(body)
             .wrap(Wrap { trim: false })
-            .scroll((state.detail_scroll, 0))
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
             .block(Block::default().title(title).borders(Borders::ALL)),
         area,
     );
+}
+
+/// The detail panel's heading: its subject, or the pane's name when nothing is
+/// selected.
+fn detail_title(state: &UiState) -> String {
+    match &state.detail {
+        Some(Detail::Role(detail)) => format!("role {}", detail.role),
+        Some(Detail::Task(detail)) => format!("task {}", short(&detail.task_id)),
+        None => "detail".to_string(),
+    }
+}
+
+/// The detail panel's body: the subject's text, or what the page expects you
+/// to pick.
+pub fn detail_body(state: &UiState) -> String {
+    match &state.detail {
+        Some(detail) => detail_text(detail).1,
+        None => placeholder(state.page).to_string(),
+    }
+}
+
+/// How far the detail panel's text runs, how much of it shows, and the last
+/// scroll offset that still has text on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DetailExtent {
+    pub lines: usize,
+    pub view: usize,
+    pub max: usize,
+}
+
+/// The wrapped height of `body` in the panel `area`, and the scroll it allows.
+pub fn detail_extent(body: &str, area: Rect) -> DetailExtent {
+    let view = area.height.saturating_sub(2) as usize;
+    let width = area.width.saturating_sub(2).max(1) as usize;
+    let lines = body.split('\n').map(|line| wrapped_rows(line, width)).sum();
+    DetailExtent {
+        lines,
+        view,
+        max: lines.saturating_sub(view),
+    }
+}
+
+/// Stop a detail scroll where the text does, so `J` at the end of the pane does
+/// nothing rather than scrolling into blankness.
+pub fn clamp_detail_scroll(state: &mut UiState, pane: Rect) {
+    let body = detail_body(state);
+    let max = detail_extent(&body, pane).max;
+    state.detail_scroll = state
+        .detail_scroll
+        .min(u16::try_from(max).unwrap_or(u16::MAX));
+}
+
+/// The rows one line of the panel needs once wrapped to `width` columns, the
+/// way the panel wraps it: on spaces where it can, mid-word where it must.
+fn wrapped_rows(line: &str, width: usize) -> usize {
+    if line.is_empty() {
+        return 1;
+    }
+    let mut rows = 1;
+    let mut used = 0usize;
+    for word in line.split(' ') {
+        let len = word.chars().count();
+        if used == 0 {
+            used = len;
+            while used > width {
+                rows += 1;
+                used -= width;
+            }
+        } else if used + 1 + len <= width {
+            used += 1 + len;
+        } else {
+            rows += 1;
+            used = len;
+            while used > width {
+                rows += 1;
+                used -= width;
+            }
+        }
+    }
+    rows
 }
 
 fn placeholder(page: Page) -> &'static str {
@@ -765,7 +871,7 @@ fn task_detail_text(detail: &TaskDetail) -> (String, String) {
         ));
     }
     out.push_str("\nsessions\n");
-    write_sessions(&mut out, &detail.sessions);
+    write_sessions(&mut out, detail.sessions.iter());
     out.push_str("\nfaults\n");
     write_faults(&mut out, &detail.faults);
     (format!("task {}", short(&detail.task_id)), out)
@@ -795,18 +901,21 @@ fn role_detail_text(detail: &RoleDetail) -> (String, String) {
     }
     out.push('\n');
     out.push_str("\nsessions\n");
-    write_sessions(&mut out, &detail.sessions);
+    // Page 1 lists the sessions still holding a slot: the same "live" test the
+    // snapshot views apply, so an exited session does not read as a running one
+    // here.
+    write_sessions(&mut out, live_sessions(&detail.sessions));
     out.push_str("\nfaults\n");
     write_faults(&mut out, &detail.faults);
     (format!("role {}", detail.role), out)
 }
 
-fn write_sessions(out: &mut String, sessions: &[SessionRow]) {
-    if sessions.is_empty() {
-        out.push_str("  (none)\n");
-        return;
-    }
+/// The session rows one panel lists, one per line; an empty list still says
+/// `(none)`.
+fn write_sessions<'a>(out: &mut String, sessions: impl IntoIterator<Item = &'a SessionRow>) {
+    let mut any = false;
     for session in sessions {
+        any = true;
         out.push_str(&format!(
             "  {} role={} life={} agent={:?} gen={} seq={} outcome={} updated={}\n",
             session.session_id,
@@ -821,6 +930,9 @@ fn write_sessions(out: &mut String, sessions: &[SessionRow]) {
                 .unwrap_or_else(|| "-".into()),
             session.updated_at.as_deref().unwrap_or("-")
         ));
+    }
+    if !any {
+        out.push_str("  (none)\n");
     }
 }
 
@@ -1310,6 +1422,92 @@ mod tests {
         assert_eq!(state.role_cam.pan, (3, -1), "{:?}", state.role_cam);
         state.role_cam.reset();
         assert_eq!(state.role_cam, Camera::default());
+    }
+
+    /// A role whose panel is far taller than any pane, so the scroll has
+    /// somewhere to go.
+    fn long_role_detail() -> RoleDetail {
+        RoleDetail {
+            role: "builder".into(),
+            state: Presence::Online,
+            session_count: 40,
+            max_sessions: 4,
+            admin: false,
+            aggregate: None,
+            peers: vec!["planner".into()],
+            faults: Vec::new(),
+            sessions: (0..40)
+                .map(|i| session(&format!("s{i:02}"), Lifecycle::Working, AgentPhase::Running))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn the_detail_panel_wraps_the_way_its_extent_says() {
+        assert_eq!(wrapped_rows("", 20), 1);
+        assert_eq!(wrapped_rows("short", 20), 1);
+        assert_eq!(wrapped_rows("abcdefghijklm", 10), 2);
+        assert_eq!(wrapped_rows("aaaa bbbb", 9), 1);
+        assert_eq!(wrapped_rows("aaaa bbbb", 8), 2);
+    }
+
+    #[test]
+    fn page_two_scrolls_the_detail_panel_only_as_far_as_its_text() {
+        let pane = Rect::new(0, 0, 60, 12);
+        let mut state = UiState {
+            page: Page::Swarm,
+            detail: Some(Detail::Role(long_role_detail())),
+            ..UiState::default()
+        };
+        let extent = detail_extent(&detail_body(&state), pane);
+        assert!(extent.lines > extent.view, "{extent:?}");
+
+        state.detail_scroll = u16::MAX;
+        clamp_detail_scroll(&mut state, pane);
+        assert_eq!(
+            state.detail_scroll as usize, extent.max,
+            "the scroll stops on the last page of text"
+        );
+
+        // A panel with nothing more to show does not scroll at all.
+        let mut short = UiState {
+            page: Page::Swarm,
+            ..UiState::default()
+        };
+        short.detail_scroll = 5;
+        clamp_detail_scroll(&mut short, pane);
+        assert_eq!(short.detail_scroll, 0);
+    }
+
+    #[test]
+    fn a_scrollable_detail_panel_reports_where_it_stands() {
+        let state = UiState {
+            page: Page::Swarm,
+            detail: Some(Detail::Role(long_role_detail())),
+            ..UiState::default()
+        };
+        let text = render_once_text(&linked_snapshot(), &state, 120, 30);
+        assert!(
+            text.contains("▲▼"),
+            "the panel says there is more text below\n{text}"
+        );
+        assert!(text.contains("role builder  1-"), "{text}");
+    }
+
+    #[test]
+    fn the_role_panel_leaves_the_exited_sessions_out() {
+        let mut detail = long_role_detail();
+        detail.sessions = vec![
+            session("live", Lifecycle::Working, AgentPhase::Running),
+            session("gone", Lifecycle::Exited, AgentPhase::Running),
+        ];
+        let (title, body) = detail_text(&Detail::Role(detail));
+        assert_eq!(title, "role builder");
+        assert!(body.contains("life=working"), "{body}");
+        assert!(
+            !body.contains("life=exited"),
+            "an exited session is history, not a live slot\n{body}"
+        );
     }
 
     #[test]

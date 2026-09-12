@@ -154,7 +154,7 @@ impl Page {
                 "1/2·Tab switch  hjkl navigate  ←→↑↓ pan  +/- repel  0 recentre  wheel zoom  drag pan  Enter detail  e edges  a all/active  r refresh  q quit"
             }
             Page::Swarm => {
-                "1/2·Tab switch  g/h focus  ↑↓ select  Enter detail  / search  f state  t window  o role  e edge  a all/active  PgUp/PgDn page  r refresh  q quit"
+                "1/2·Tab switch  g/h focus  ↑↓ select  ^p/^n back/forward  Enter detail  J/K scroll  / search  f state  t window  o role  e edge  a all/active  PgUp/PgDn page  r refresh  q quit"
             }
         }
     }
@@ -305,6 +305,8 @@ pub struct UiState {
     pub map: RoleMap,
     /// Role-map repulsion. Higher values push the boxes further apart.
     pub spacing: usize,
+    /// Page 2's browser-style navigation history: where `^p`/`^n` go.
+    pub nav: NavStack,
     /// The page-1 camera drag in flight, as the cell the mouse last held.
     pub drag: Option<(u16, u16)>,
     /// Whether the views list only the sessions still holding a slot. `a`
@@ -336,6 +338,7 @@ impl Default for UiState {
             role_cam: Camera::default(),
             map: RoleMap::default(),
             spacing: DEFAULT_SPACING,
+            nav: NavStack::default(),
             drag: None,
             active_only: true,
             show_control_edges: false,
@@ -818,6 +821,15 @@ pub fn visible_sessions(snapshot: &Snapshot, active_only: bool) -> Vec<&SessionR
         .collect()
 }
 
+/// The sessions one role's panel lists: the same "still holds its slot" test
+/// [`visible_sessions`] applies for `active_only`, so page 1's panel and page
+/// 2's session views never disagree about what is live.
+pub fn live_sessions(rows: &[SessionRow]) -> Vec<&SessionRow> {
+    rows.iter()
+        .filter(|session| session_busy(session))
+        .collect()
+}
+
 /// A control-plane role: the supervisor and every aggregate role. Its box
 /// takes a row of its own below the chain, and its spoke edges stay off the
 /// map until `e`.
@@ -833,6 +845,98 @@ pub const DEFAULT_SPACING: usize = 2;
 
 pub fn clamp_spacing(spacing: usize) -> usize {
     spacing.clamp(MIN_SPACING, MAX_SPACING)
+}
+
+/// Where one page-2 view stands: which list holds the cursor, and where in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Location {
+    pub focus: Focus,
+    pub graph_cursor: usize,
+    pub history_cursor: usize,
+}
+
+/// How many places back the history remembers.
+const NAV_MAX: usize = 64;
+
+/// The page-2 navigation history: a browser's back and forward stacks over
+/// [`Location`]s. Moving somewhere new drops the forward stack, exactly as a
+/// browser does.
+#[derive(Clone, Debug, Default)]
+pub struct NavStack {
+    back: Vec<Location>,
+    forward: Vec<Location>,
+}
+
+impl NavStack {
+    /// Going somewhere new: the place left behind joins the back stack.
+    pub fn push(&mut self, from: Location) {
+        if self.back.last() == Some(&from) {
+            return;
+        }
+        self.back.push(from);
+        if self.back.len() > NAV_MAX {
+            self.back.remove(0);
+        }
+        self.forward.clear();
+    }
+
+    /// Step back from `current`; the place handed over is where `forward`
+    /// returns to.
+    pub fn back(&mut self, current: Location) -> Option<Location> {
+        let previous = self.back.pop()?;
+        self.forward.push(current);
+        Some(previous)
+    }
+
+    /// Step forward again, undoing a [`NavStack::back`].
+    pub fn forward(&mut self, current: Location) -> Option<Location> {
+        let next = self.forward.pop()?;
+        self.back.push(current);
+        Some(next)
+    }
+
+    pub fn back_len(&self) -> usize {
+        self.back.len()
+    }
+
+    pub fn forward_len(&self) -> usize {
+        self.forward.len()
+    }
+}
+
+/// Where the page-2 cursor stands now.
+pub fn location(state: &UiState) -> Location {
+    Location {
+        focus: state.focus,
+        graph_cursor: state.graph_cursor,
+        history_cursor: state.history_cursor,
+    }
+}
+
+/// Record a page-2 move: the place the cursor left behind goes on the back
+/// stack.
+pub fn nav_after(state: &mut UiState, from: Location) {
+    if location(state) != from {
+        state.nav.push(from);
+    }
+}
+
+/// Walk the page-2 history: `-1` goes back, `1` forward. Returns whether the
+/// cursor moved; the caller re-clamps and reloads the detail pane.
+pub fn nav_step(state: &mut UiState, delta: isize) -> bool {
+    let here = location(state);
+    let landed = if delta < 0 {
+        state.nav.back(here)
+    } else {
+        state.nav.forward(here)
+    };
+    let Some(landed) = landed else {
+        return false;
+    };
+    state.focus = landed.focus;
+    state.graph_cursor = landed.graph_cursor;
+    state.history_cursor = landed.history_cursor;
+    true
 }
 
 /// The edges the map draws: every ACL target, minus the control-plane spokes
@@ -1166,6 +1270,80 @@ mod tests {
         assert_eq!(hidden[0].from, "builder");
         let shown = visible_edges(&snapshot, true);
         assert_eq!(shown.len(), 2, "{shown:?}");
+    }
+
+    fn place(focus: Focus, graph: usize, history: usize) -> Location {
+        Location {
+            focus,
+            graph_cursor: graph,
+            history_cursor: history,
+        }
+    }
+
+    #[test]
+    fn the_nav_stack_walks_back_and_forward_over_the_places_it_visited() {
+        let mut nav = NavStack::default();
+        let first = place(Focus::Graph, 0, 0);
+        let second = place(Focus::Graph, 3, 0);
+        let third = place(Focus::History, 3, 1);
+        nav.push(first);
+        nav.push(second);
+
+        assert_eq!(nav.back(third), Some(second));
+        assert_eq!(nav.back(second), Some(first));
+        assert_eq!(nav.back(first), None, "the start of the history");
+        assert_eq!(nav.back_len(), 0);
+        assert_eq!(nav.forward_len(), 2, "both steps can be retaken");
+
+        assert_eq!(nav.forward(first), Some(second));
+        assert_eq!(nav.forward(second), Some(third));
+        assert_eq!(nav.forward(third), None);
+        assert_eq!(nav.back_len(), 2);
+    }
+
+    #[test]
+    fn a_new_move_drops_the_forward_stack() {
+        let mut nav = NavStack::default();
+        nav.push(place(Focus::Graph, 0, 0));
+        assert_eq!(
+            nav.back(place(Focus::Graph, 1, 0)),
+            Some(place(Focus::Graph, 0, 0))
+        );
+        assert_eq!(nav.forward_len(), 1);
+        nav.push(place(Focus::Graph, 2, 0));
+        assert_eq!(nav.forward_len(), 0, "browsing forward is off the table");
+    }
+
+    #[test]
+    fn the_nav_stack_forgets_its_oldest_steps_once_full() {
+        let mut nav = NavStack::default();
+        for step in 0..(NAV_MAX * 2) {
+            nav.push(place(Focus::Graph, step, 0));
+        }
+        assert_eq!(nav.back_len(), NAV_MAX);
+        assert_eq!(
+            nav.back(place(Focus::History, 0, 0)),
+            Some(place(Focus::Graph, NAV_MAX * 2 - 1, 0)),
+            "the newest step is the first one back"
+        );
+
+        // The place already under the cursor never doubles up.
+        let mut nav = NavStack::default();
+        let here = place(Focus::Graph, 4, 2);
+        nav.push(here);
+        nav.push(here);
+        assert_eq!(nav.back_len(), 1);
+    }
+
+    #[test]
+    fn a_roles_panel_lists_only_the_sessions_still_holding_a_slot() {
+        let rows = vec![
+            state_session(Lifecycle::Exited, AgentPhase::Running),
+            state_session(Lifecycle::Working, AgentPhase::Running),
+        ];
+        let live = live_sessions(&rows);
+        assert_eq!(live.len(), 1, "the exited row is gone");
+        assert_eq!(live[0].public_lifecycle, Lifecycle::Working);
     }
 
     fn role_view(name: &str) -> RoleView {
