@@ -1,4 +1,6 @@
-use crate::model::{GRID_GAP, PLACE_MARGIN, ROW_GAP, RoleSlot, control_role, role_positions};
+use crate::model::{
+    PLACE_MARGIN, RoleSlot, clamp_spacing, control_role, role_positions, spacing_gap,
+};
 use std::collections::BTreeMap;
 
 /// The widest a role box draws. A box's own text only asks for what it needs,
@@ -194,37 +196,49 @@ fn slots_of(nodes: &[LayoutNode]) -> Vec<RoleSlot> {
         .collect()
 }
 
-/// The world the map draws in: the serpentine grid's own extent, with the
-/// gutters every hop routes along.
-pub fn world_size(nodes: &[LayoutNode]) -> (usize, usize) {
+fn rank_from_x(x: usize, node_w: usize, gap: usize) -> usize {
+    x.saturating_sub(PLACE_MARGIN) / (node_w + gap).max(1)
+}
+
+fn rank_of(rect: &NodeBox, spacing: usize) -> usize {
+    rank_from_x(rect.x, rect.w, spacing_gap(spacing))
+}
+
+/// The world the layered map draws in, plus an outer gutter for return edges.
+pub fn world_size(nodes: &[LayoutNode], edges: &[LayoutEdge], spacing: usize) -> (usize, usize) {
     let slots = slots_of(nodes);
     let node_w = box_width(nodes);
-    let cycle = slots.iter().filter(|slot| !slot.control).count();
-    let control = slots.iter().filter(|slot| slot.control).count();
-    let per_row = columns_for_world(cycle.max(1));
-    let rows = cycle.div_ceil(per_row.max(1)).max(1) + usize::from(control > 0);
+    let gap = spacing_gap(spacing);
+    if slots.is_empty() {
+        return (2 * PLACE_MARGIN + node_w + gap, NODE_H + gap);
+    }
+    let places = role_positions(&slots, edges, usize::MAX, node_w, NODE_H, spacing);
+    let mut rows_by_rank = BTreeMap::<usize, usize>::new();
+    let mut max_rank = 0;
+    for (_, place) in places {
+        let rank = rank_from_x(place.x, node_w, gap);
+        max_rank = max_rank.max(rank);
+        *rows_by_rank.entry(rank).or_default() += 1;
+    }
+    let columns = max_rank + 1;
+    let rows = rows_by_rank.values().copied().max().unwrap_or(1).max(1);
     (
-        2 * PLACE_MARGIN + node_w * per_row + GRID_GAP * (per_row - 1),
-        // One gutter row under the last row: hops that dip below the band need
-        // a row to run along, and the map's own extent never supplies one.
-        NODE_H * rows + ROW_GAP * rows,
+        2 * PLACE_MARGIN + columns * node_w + columns * gap,
+        rows * (NODE_H + gap),
     )
 }
 
-/// The columns a grid world uses: enough to keep the chain from stacking into
-/// one tall column.
-fn columns_for_world(count: usize) -> usize {
-    let mut columns = 1;
-    while columns * columns < count {
-        columns += 1;
-    }
-    columns
-}
-/// Draw the role map: the serpentine grid of boxes, one orthogonal hop per ACL
-/// target.
-pub fn layout(nodes: &[LayoutNode], edges: &[LayoutEdge], w: u16, h: u16) -> Canvas {
+/// Draw the role map: rank columns left to right, with routed ACL hops.
+pub fn layout(
+    nodes: &[LayoutNode],
+    edges: &[LayoutEdge],
+    w: u16,
+    h: u16,
+    spacing: usize,
+) -> Canvas {
     let width = w as usize;
     let height = h as usize;
+    let spacing = clamp_spacing(spacing);
     let mut canvas = Canvas::new(width, height);
     if width < 12 || height < 4 || nodes.is_empty() {
         draw_text(&mut canvas, 0, 0, "(no roles)", CellKind::Plain);
@@ -234,7 +248,7 @@ pub fn layout(nodes: &[LayoutNode], edges: &[LayoutEdge], w: u16, h: u16) -> Can
     let node_h = NODE_H.min(height.max(4));
     let slots = slots_of(nodes);
     let mut boxes = BTreeMap::new();
-    for (name, place) in role_positions(&slots, width, height, node_w, node_h) {
+    for (name, place) in role_positions(&slots, edges, width, node_w, node_h, spacing) {
         boxes.insert(
             name.clone(),
             NodeBox {
@@ -251,8 +265,23 @@ pub fn layout(nodes: &[LayoutNode], edges: &[LayoutEdge], w: u16, h: u16) -> Can
     // their arrowheads last, so two hops sharing a gutter cannot erase the
     // other's direction.
     let mut tips = Vec::new();
+    let mut lanes = BTreeMap::new();
+    let bottom_y = boxes
+        .values()
+        .map(|rect| rect.y + rect.h)
+        .max()
+        .unwrap_or(0)
+        .min(height.saturating_sub(1));
     for edge in edges {
-        draw_edge(&mut canvas, &boxes, edge, &mut tips);
+        draw_edge(
+            &mut canvas,
+            &boxes,
+            edge,
+            spacing,
+            bottom_y,
+            &mut lanes,
+            &mut tips,
+        );
     }
     for (cell, ch, kind) in tips {
         put(&mut canvas, cell.0, cell.1, ch, kind);
@@ -273,11 +302,17 @@ pub fn layout(nodes: &[LayoutNode], edges: &[LayoutEdge], w: u16, h: u16) -> Can
 }
 
 /// The rect the map draws one role's box at inside `world`.
-pub fn role_box(nodes: &[LayoutNode], name: &str, world: (usize, usize)) -> Option<NodeBox> {
+pub fn role_box(
+    nodes: &[LayoutNode],
+    edges: &[LayoutEdge],
+    name: &str,
+    world: (usize, usize),
+    spacing: usize,
+) -> Option<NodeBox> {
     let slots = slots_of(nodes);
     let node_w = box_width(nodes);
     let node_h = NODE_H.min(world.1.max(4));
-    role_positions(&slots, world.0, world.1, node_w, node_h)
+    role_positions(&slots, edges, world.0, node_w, node_h, spacing)
         .into_iter()
         .find(|(slot, _)| slot == name)
         .map(|(_, place)| NodeBox {
@@ -290,14 +325,15 @@ pub fn role_box(nodes: &[LayoutNode], name: &str, world: (usize, usize)) -> Opti
         })
 }
 
-/// One hop: an orthogonal route that leaves a box border, runs along the
-/// world's gutters, and ends on the cell against the target's border with the
-/// arrowhead pointing into it. No cell ever sits inside a box or floats away
-/// from a border or gutter.
+/// One hop: an orthogonal route leaves a box's right border, runs in gutters,
+/// and enters the target from its left border. No path cell enters a box.
 fn draw_edge(
     canvas: &mut Canvas,
     boxes: &BTreeMap<String, NodeBox>,
     edge: &LayoutEdge,
+    spacing: usize,
+    bottom_y: usize,
+    lanes: &mut BTreeMap<usize, usize>,
     tips: &mut Vec<((usize, usize), char, CellKind)>,
 ) {
     let (Some(from), Some(to)) = (boxes.get(&edge.from), boxes.get(&edge.to)) else {
@@ -308,7 +344,22 @@ fn draw_edge(
     } else {
         CellKind::Edge
     };
-    let route = route(from, to, canvas.width, canvas.height);
+    let back = rank_of(to, spacing) <= rank_of(from, spacing);
+    let lane_key = if back {
+        usize::MAX
+    } else {
+        rank_of(from, spacing)
+    };
+    let next_lane = lanes.entry(lane_key).or_default();
+    let gap = spacing_gap(spacing).max(1);
+    let geo = Geo {
+        world_w: canvas.width,
+        world_h: canvas.height,
+        gap,
+        lane: *next_lane % gap,
+    };
+    *next_lane += 1;
+    let route = route(from, to, &geo, bottom_y, back);
     let mut path = Vec::new();
     for (index, cell) in route.iter().enumerate() {
         if inside_any_box(boxes, *cell) {
@@ -329,77 +380,90 @@ fn draw_edge(
         .edge_paths
         .insert((edge.from.clone(), edge.to.clone()), path);
 }
-/// The box's row and column in the grid, read back off its corner.
-fn grid_of(rect: &NodeBox) -> (usize, usize) {
-    (
-        rect.y / (rect.h + ROW_GAP).max(1),
-        (rect.x.saturating_sub(PLACE_MARGIN)) / (rect.w + GRID_GAP).max(1),
-    )
+
+/// The canvas geometry one hop routes against: world size plus the lane this
+/// edge runs in inside the gap. Built once per draw_edge call.
+#[derive(Clone, Copy)]
+struct Geo {
+    world_w: usize,
+    world_h: usize,
+    gap: usize,
+    lane: usize,
 }
 
-/// The cells a hop's path takes, from the cell against the source's border to
-/// the cell against the target's.
-fn route(from: &NodeBox, to: &NodeBox, world_w: usize, world_h: usize) -> Vec<(usize, usize)> {
-    let (fr, fc) = grid_of(from);
-    let (tr, tc) = grid_of(to);
-    let fmid = from.x + from.w / 2;
-    let tmid = to.x + to.w / 2;
-    let mid_y = from.y + from.h / 2;
-    // Neighbours on one row: one run straight through the gutter between them.
-    if fr == tr && fc.abs_diff(tc) == 1 {
-        return if tc > fc {
-            hline(from.x + from.w, to.x.saturating_sub(1), mid_y)
-        } else {
-            hline(to.x + to.w, from.x.saturating_sub(1), mid_y)
-                .into_iter()
-                .rev()
-                .collect()
-        };
+/// The cells a hop's path takes, from the source's right gutter to the
+/// target's left gutter. Back edges use the bottom corridor.
+fn route(
+    from: &NodeBox,
+    to: &NodeBox,
+    geo: &Geo,
+    bottom_y: usize,
+    back: bool,
+) -> Vec<(usize, usize)> {
+    if geo.world_w == 0 || geo.world_h == 0 {
+        return Vec::new();
     }
-    // Neighbours on one column: one run through the gutter between the rows.
-    if fc == tc && fr.abs_diff(tr) == 1 {
-        let cells = vline(fmid, from.y + from.h, to.y.saturating_sub(1));
-        return if tr > fr {
-            cells
-        } else {
-            cells.into_iter().rev().collect()
-        };
-    }
-    let mut points;
-    if fr == tr {
-        // Same row, further apart: dip under the row, run across, come up.
-        let gutter = (from.y + from.h).min(world_h.saturating_sub(1));
-        points = vec![(fmid, gutter), (tmid, gutter), (tmid, to.y + to.h)];
-    } else if tr.abs_diff(fr) == 1 {
-        // Neighbouring rows: the single gutter between them carries the run.
-        let (gutter, entry) = if tr > fr {
-            (from.y + from.h, to.y.saturating_sub(1))
-        } else {
-            (from.y.saturating_sub(1), to.y + to.h)
-        };
-        points = vec![(fmid, gutter), (tmid, gutter), (tmid, entry)];
+    let start = (
+        (from.x + from.w).min(geo.world_w.saturating_sub(1)),
+        (from.y + from.h / 2).min(geo.world_h.saturating_sub(1)),
+    );
+    let tip = (
+        to.x.saturating_sub(1).min(geo.world_w.saturating_sub(1)),
+        (to.y + to.h / 2).min(geo.world_h.saturating_sub(1)),
+    );
+    if back {
+        route_back(from, start, tip, geo, bottom_y)
     } else {
-        // Distant rows: leave the band along an outer gutter column, travel
-        // beside it, and come back in on the target's own gutter row.
-        let (start, channel, entry) = if tr > fr {
-            (
-                from.y + from.h,
-                world_w.saturating_sub(1),
-                to.y.saturating_sub(1),
-            )
-        } else {
-            (from.y.saturating_sub(1), 0, to.y + to.h)
-        };
-        let channel_x = if tc >= fc {
-            channel
-        } else if channel == 0 {
-            world_w.saturating_sub(1)
-        } else {
-            0
-        };
-        points = vec![(fmid, start), (channel_x, start), (channel_x, entry)];
-        push(&mut points, (tmid, entry));
+        route_forward(from, to, start, tip, geo)
     }
+}
+
+fn route_forward(
+    from: &NodeBox,
+    to: &NodeBox,
+    start: (usize, usize),
+    tip: (usize, usize),
+    geo: &Geo,
+) -> Vec<(usize, usize)> {
+    let source_lane_x = (from.x + from.w + geo.lane).min(geo.world_w.saturating_sub(1));
+    let corridor_y = (from.y + from.h)
+        .max(to.y + to.h)
+        .saturating_add(geo.lane.min(geo.gap.saturating_sub(1)))
+        .min(geo.world_h.saturating_sub(1));
+    let mut points = vec![start];
+    push(&mut points, (source_lane_x, start.1));
+    push(&mut points, (source_lane_x, corridor_y));
+    push(&mut points, (tip.0, corridor_y));
+    push(&mut points, tip);
+    expand(&points)
+}
+
+fn route_back(
+    from: &NodeBox,
+    start: (usize, usize),
+    tip: (usize, usize),
+    geo: &Geo,
+    bottom_y: usize,
+) -> Vec<(usize, usize)> {
+    let source_lane_x = (from.x + from.w + geo.lane).min(geo.world_w.saturating_sub(1));
+    let source_corridor_y = (from.y + from.h)
+        .saturating_add(geo.lane.min(geo.gap.saturating_sub(1)))
+        .min(geo.world_h.saturating_sub(1));
+    let outer_x = geo
+        .world_w
+        .saturating_sub(PLACE_MARGIN + geo.gap)
+        .saturating_add(geo.lane)
+        .min(geo.world_w.saturating_sub(1));
+    let bottom_y = bottom_y
+        .saturating_add(geo.lane.min(geo.gap.saturating_sub(1)))
+        .min(geo.world_h.saturating_sub(1));
+    let mut points = vec![start];
+    push(&mut points, (source_lane_x, start.1));
+    push(&mut points, (source_lane_x, source_corridor_y));
+    push(&mut points, (outer_x, source_corridor_y));
+    push(&mut points, (outer_x, bottom_y));
+    push(&mut points, (tip.0, bottom_y));
+    push(&mut points, tip);
     expand(&points)
 }
 
@@ -450,14 +514,6 @@ fn push_cell(cells: &mut Vec<(usize, usize)>, cell: (usize, usize)) {
     if cells.last().copied() != Some(cell) {
         cells.push(cell);
     }
-}
-
-fn hline(x1: usize, x2: usize, y: usize) -> Vec<(usize, usize)> {
-    (x1.min(x2)..=x1.max(x2)).map(|x| (x, y)).collect()
-}
-
-fn vline(x: usize, y1: usize, y2: usize) -> Vec<(usize, usize)> {
-    (y1.min(y2)..=y1.max(y2)).map(|y| (x, y)).collect()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -716,7 +772,7 @@ mod tests {
             state: SessionState::Working,
             age: "9s".into(),
         });
-        let canvas = layout(&[agg], &[], 40, 10);
+        let canvas = layout(&[agg], &[], 40, 10, 2);
         let text = canvas.text();
         assert!(text.contains("⬡supervisor*"), "{text}");
         assert!(text.contains("abcdefg"), "{text}");
@@ -724,11 +780,12 @@ mod tests {
     }
 
     #[test]
-    fn the_grid_draws_every_box_without_overlap() {
+    fn layered_map_draws_every_box_without_overlap() {
         let names = ["a", "b", "c", "d", "e", "_supervisor"];
         let nodes: Vec<LayoutNode> = names.iter().map(|name| node(name)).collect();
-        let world = world_size(&nodes);
-        let canvas = layout(&nodes, &[], world.0 as u16, world.1 as u16);
+        let edges = Vec::new();
+        let world = world_size(&nodes, &edges, 2);
+        let canvas = layout(&nodes, &edges, world.0 as u16, world.1 as u16, 2);
         assert_eq!(canvas.node_boxes.len(), names.len(), "{world:?}");
         for (index, rect) in canvas.node_boxes.iter().enumerate() {
             assert!(
@@ -749,22 +806,19 @@ mod tests {
         for name in names {
             assert!(text.contains(&format!("╭─{name}")), "{text}");
         }
-        let row_of = |name: &str| {
+        let at = |name: &str| {
             canvas
                 .node_boxes
                 .iter()
                 .find(|rect| rect.name == name)
-                .map(|rect| rect.y)
                 .unwrap_or_else(|| panic!("no {name}"))
         };
-        assert_eq!(row_of("a"), row_of("b"));
-        assert_eq!(row_of("b"), row_of("c"));
-        assert!(row_of("d") > row_of("c"), "{text}");
-        assert_eq!(row_of("d"), row_of("e"));
-        assert!(
-            row_of("_supervisor") > row_of("e"),
-            "the control role keeps its own row\n{text}"
-        );
+        assert_eq!(at("_supervisor").x, PLACE_MARGIN, "{text}");
+        for name in ["a", "b", "c", "d", "e"] {
+            assert!(at(name).x > at("_supervisor").x, "{text}");
+        }
+        assert_eq!(at("a").x, at("e").x, "{text}");
+        assert!(at("e").y > at("a").y, "{text}");
     }
 
     /// Every hop is a run of horizontal or vertical steps, and its arrowhead
@@ -782,8 +836,8 @@ mod tests {
             hop("_supervisor", "c", false),
             hop("a", "d", true),
         ];
-        let world = world_size(&nodes);
-        let canvas = layout(&nodes, &edges, world.0 as u16, world.1 as u16);
+        let world = world_size(&nodes, &edges, 2);
+        let canvas = layout(&nodes, &edges, world.0 as u16, world.1 as u16, 2);
         let text = canvas.text();
         assert_eq!(canvas.edge_paths.len(), edges.len(), "{text}");
         for edge in &edges {
@@ -819,12 +873,10 @@ mod tests {
                 canvas.cells[tip.1][tip.0].ch
             );
             assert!(
-                tip.0 + 1 == target.x
-                    || tip.0 == target.x + target.w
-                    || tip.1 + 1 == target.y
-                    || tip.1 == target.y + target.h,
-                "{}→{} ends at {tip:?}, away from {target:?}\n{text}",
+                tip.0 + 1 == target.x,
+                "{}→{} ends at {tip:?}, not in {}'s left gutter {target:?}\n{text}",
                 edge.from,
+                edge.to,
                 edge.to
             );
         }
@@ -834,8 +886,8 @@ mod tests {
     fn an_in_flight_hop_is_stroked_active_and_points_at_its_target() {
         let nodes = vec![node("a"), node("b")];
         let edges = vec![hop("a", "b", true)];
-        let world = world_size(&nodes);
-        let canvas = layout(&nodes, &edges, world.0 as u16, world.1 as u16);
+        let world = world_size(&nodes, &edges, 2);
+        let canvas = layout(&nodes, &edges, world.0 as u16, world.1 as u16, 2);
         let text = canvas.text();
         assert!(
             canvas
@@ -858,8 +910,8 @@ mod tests {
     fn a_hop_never_enters_a_box() {
         let nodes = vec![node("a"), node("b")];
         let edges = vec![hop("a", "b", true)];
-        let world = world_size(&nodes);
-        let canvas = layout(&nodes, &edges, world.0 as u16, world.1 as u16);
+        let world = world_size(&nodes, &edges, 2);
+        let canvas = layout(&nodes, &edges, world.0 as u16, world.1 as u16, 2);
         for rect in &canvas.node_boxes {
             for cell in canvas.edge_paths.values().flatten() {
                 assert!(
@@ -875,12 +927,51 @@ mod tests {
     }
 
     #[test]
+    fn back_edge_uses_bottom_corridor_without_crossing_boxes() {
+        let nodes = vec![node("a"), node("b"), node("c")];
+        let edges = vec![
+            hop("a", "b", false),
+            hop("b", "c", false),
+            hop("c", "a", false),
+        ];
+        let world = world_size(&nodes, &edges, 2);
+        let canvas = layout(&nodes, &edges, world.0 as u16, world.1 as u16, 2);
+        let path = canvas
+            .edge_paths
+            .get(&("c".to_string(), "a".to_string()))
+            .unwrap_or_else(|| panic!("no c→a path\n{}", canvas.text()));
+        let max_box_bottom = canvas
+            .node_boxes
+            .iter()
+            .map(|rect| rect.y + rect.h)
+            .max()
+            .expect("boxes");
+        assert!(
+            path.iter().any(|(_, y)| *y >= max_box_bottom),
+            "back edge never reaches the bottom corridor\n{}",
+            canvas.text()
+        );
+        for rect in &canvas.node_boxes {
+            for cell in path {
+                assert!(
+                    cell.0 < rect.x
+                        || cell.0 >= rect.x + rect.w
+                        || cell.1 < rect.y
+                        || cell.1 >= rect.y + rect.h,
+                    "back edge enters {rect:?} at {cell:?}\n{}",
+                    canvas.text()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_same_input_draws_the_same_map() {
         let nodes = vec![node("a"), node("b"), node("c")];
         let edges = vec![hop("a", "b", false), hop("b", "c", false)];
-        let world = world_size(&nodes);
-        let first = layout(&nodes, &edges, world.0 as u16, world.1 as u16);
-        let second = layout(&nodes, &edges, world.0 as u16, world.1 as u16);
+        let world = world_size(&nodes, &edges, 2);
+        let first = layout(&nodes, &edges, world.0 as u16, world.1 as u16, 2);
+        let second = layout(&nodes, &edges, world.0 as u16, world.1 as u16, 2);
         assert_eq!(first.text(), second.text());
         assert_eq!(first.node_boxes, second.node_boxes);
     }
@@ -888,14 +979,15 @@ mod tests {
     #[test]
     fn role_box_finds_the_corner_the_map_drew() {
         let nodes = vec![node("a"), node("b")];
-        let world = world_size(&nodes);
-        let canvas = layout(&nodes, &[], world.0 as u16, world.1 as u16);
+        let edges = Vec::new();
+        let world = world_size(&nodes, &edges, 2);
+        let canvas = layout(&nodes, &edges, world.0 as u16, world.1 as u16, 2);
         let drawn = canvas
             .node_boxes
             .iter()
             .find(|rect| rect.name == "b")
             .expect("the box");
-        let placed = role_box(&nodes, "b", world).expect("the same box");
+        let placed = role_box(&nodes, &edges, "b", world, 2).expect("the same box");
         assert_eq!(
             (placed.x, placed.y, placed.w, placed.h),
             (drawn.x, drawn.y, drawn.w, drawn.h)

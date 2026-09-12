@@ -25,16 +25,13 @@ $ onlyne --server-root /tmp/onlyne-sup ledger --task <根任务id>
 TUI 把同一件事画成活图——第 1 页是角色网络，第 2 页是集群账本：
 
 ```text
- ╭── a ──╮    ╭── b ──╮    ╭── c ──╮
- │ pi ●1 │───▶│ pi    │───▶│ pi  ◐ │        ● 忙碌   ◐ 在飞一跳
- ╰───────╯    ╰───────╯    ╰───────╯
-      ▲                          │
- ╭────┴──╮    ╭── d ──╮          ▼
- │ pi    │◀───│ pi    │◀─────────┘
- ╰── e ──╯    ╰───────╯
+ ╭── a ──╮    ╭── b ──╮    ╭── c ──╮    ╭── d ──╮    ╭── e ──╮
+▶│ pi ●1 │───▶│ pi    │───▶│ pi  ◐ │───▶│ pi    │───▶│ pi    │   ● 忙碌   ◐ 在飞一跳
+ ╰───────╯    ╰───────╯    ╰───────╯    ╰───────╯    ╰───────╯
+└─────────────────────────────────────────────────────────────┘
 ```
 
-`hjkl` 沿边走，`l` 跟随一跳，方向键平移镜头，`e` 显出 supervisor 的派发辐条，`a` 切换只看活跃。一轮一个任务，一个会话结束就收一个标签页：agent 退出，tab 自己回收。
+`hjkl` 沿边走，`l` 跟随一跳，方向键平移镜头，`+`/`-` 放宽和收紧图距，`e` 显出 supervisor 的派发辐条，`a` 切换只看活跃。一轮一个任务，一个会话结束就收一个标签页：agent 退出，tab 自己回收。
 
 ## 部件清单
 
@@ -92,6 +89,8 @@ graph LR
 | `control` | 对任务执行 `recycle · probe · snapshot · cancel` | 仅 admin 或该任务属主 |
 
 消息体是文本加至多一张内联图片。媒体管线住在你的 agent 那边；Onlyne 只管送达和记账。
+
+投递按 msg id 结清：`onlyne ack --msg-id <id> --reason <text>` 收下，`onlyne reject --msg-id <id> --reason <text>` 拒收。两者都可选带 `--op-id`，`onlyne control --task <id> recycle|cancel --reason <text>` 的 reason 同样是必填。
 
 ## supervisor 教义
 

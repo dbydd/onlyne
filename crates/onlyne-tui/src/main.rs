@@ -1,8 +1,8 @@
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use onlyne_tui::model::{
-    Detail, Focus, Page, Snapshot, UiState, cycle_edge, cycle_role, cycle_state, detail, pull,
-    role_detail, role_edges, selected_role,
+    Detail, Focus, MAX_SPACING, MIN_SPACING, Page, Snapshot, UiState, cycle_edge, cycle_role,
+    cycle_state, detail, pull, role_detail, role_edges, selected_role,
 };
 use onlyne_tui::socket::{NO_SOCKET_MESSAGE, SocketArgs, resolve_socket};
 use onlyne_tui::ui::{
@@ -39,6 +39,9 @@ struct Cli {
     /// Page `--once` renders: 1 is the role network, 2 is the swarm view.
     #[arg(long, value_parser = clap::value_parser!(u8).range(1..=2), default_value_t = 1)]
     page: u8,
+    /// Role-map spacing/repulsion: 1 is compact, 4 is widest.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=4), default_value_t = 2)]
+    spacing: u8,
 }
 
 fn main() {
@@ -72,6 +75,7 @@ fn run() -> anyhow::Result<i32> {
     if cli.page == 2 {
         state.page = Page::Swarm;
     }
+    state.spacing = cli.spacing as usize;
     let mut snapshot = runtime.block_on(pull(&socket, &state.filter, 30));
     if cli.once {
         sync_selection_and_detail(&runtime, &socket, &snapshot, &mut state);
@@ -164,6 +168,14 @@ fn run_loop(
             // `e` shows the control-plane spokes the map holds back.
             KeyCode::Char('e') if state.page == Page::RoleMap => {
                 state.show_control_edges = !state.show_control_edges;
+            }
+            KeyCode::Char(c) if state.page == Page::RoleMap && (c == '+' || c == '=') => {
+                state.spacing = (state.spacing + 1).min(MAX_SPACING);
+                pan_role_view((0, 0), snapshot, state, map_view(terminal));
+            }
+            KeyCode::Char('-') if state.page == Page::RoleMap => {
+                state.spacing = state.spacing.saturating_sub(1).max(MIN_SPACING);
+                pan_role_view((0, 0), snapshot, state, map_view(terminal));
             }
             KeyCode::Char('j') if state.page == Page::RoleMap => move_role_edge(1, snapshot, state),
             KeyCode::Char('k') if state.page == Page::RoleMap => {

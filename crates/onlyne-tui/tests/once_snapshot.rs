@@ -79,6 +79,22 @@ fn once(root: &std::path::Path, page: Option<&str>) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+#[test]
+fn help_lists_role_map_spacing() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_onlyne-tui"))
+        .arg("--help")
+        .output()
+        .expect("run onlyne-tui --help");
+    assert!(
+        output.status.success(),
+        "exit {} with stderr {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--spacing <SPACING>"), "{stdout}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn once_prints_the_role_network_and_the_busy_star() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -102,6 +118,7 @@ async fn once_prints_the_role_network_and_the_busy_star() {
         last_seq: 0,
         connected_at: Utc::now(),
         draining: false,
+        generation: 0,
     });
     let settled = accepted(relay::send(&state, &task("first"), false, None).expect("relay"));
     let acked = relay::ack(
@@ -171,6 +188,10 @@ async fn once_prints_the_role_network_and_the_busy_star() {
     assert!(
         text.contains("planner edges hidden · e shows them"),
         "the map states which spokes it holds back\n{text}"
+    );
+    assert!(
+        text.contains("+/- repel"),
+        "the footer advertises spacing controls\n{text}"
     );
     assert!(
         text.contains("acl peers"),

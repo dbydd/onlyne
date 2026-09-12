@@ -25,16 +25,13 @@ $ onlyne --server-root /tmp/onlyne-sup ledger --task <root-task>
 The TUI draws the same picture live — page 1 is the role network, page 2 the swarm ledger:
 
 ```text
- ╭── a ──╮    ╭── b ──╮    ╭── c ──╮
- │ pi ●1 │───▶│ pi    │───▶│ pi  ◐ │        ● busy   ◐ hop in flight
- ╰───────╯    ╰───────╯    ╰───────╯
-      ▲                          │
- ╭────┴──╮    ╭── d ──╮          ▼
- │ pi    │◀───│ pi    │◀─────────┘
- ╰── e ──╯    ╰───────╯
+ ╭── a ──╮    ╭── b ──╮    ╭── c ──╮    ╭── d ──╮    ╭── e ──╮
+▶│ pi ●1 │───▶│ pi    │───▶│ pi  ◐ │───▶│ pi    │───▶│ pi    │   ● busy   ◐ hop in flight
+ ╰───────╯    ╰───────╯    ╰───────╯    ╰───────╯    ╰───────╯
+└─────────────────────────────────────────────────────────────┘
 ```
 
-`hjkl` walks the edges, `l` follows one, the arrow keys pan, `e` reveals the supervisor's dispatch edges, and `a` toggles the active-only view. One task per round, one finished tab per session: tabs reclaim themselves when their agent exits.
+`hjkl` walks the edges, `l` follows one, the arrow keys pan, `+`/`-` widen and tighten the map, `e` reveals the supervisor's dispatch edges, and `a` toggles the active-only view. One task per round, one finished tab per session: tabs reclaim themselves when their agent exits.
 
 ## The pieces
 
@@ -93,6 +90,8 @@ The second commitment has machine-checked backing. `proofs/` is a core Lean 4 de
 
 A message body is text plus at most one inline image. Media pipelines live beside Onlyne, inside your agents; what Onlyne owns is delivery and accounting.
 
+A delivery settles by msg id: `onlyne ack --msg-id <id> --reason <text>` accepts it, and `onlyne reject --msg-id <id> --reason <text>` refuses it. Both take an optional `--op-id`, and `onlyne control --task <id> recycle|cancel --reason <text>` carries the same required reason.
+
 ## The supervisor doctrine
 
 Dispatch flows downhill. The supervisor sends tasks to roles, and roles answer by completing them. A role's completion lands in the ledger, and the supervisor polls the ledger, so reports arrive with proof attached. A role messaging its supervisor directly is the flat queue you already have elsewhere — the demo ACLs refuse it, and each role's `allowed_targets` stays inside the working ring. When a role genuinely needs to reach the operator mid-task, the supervisor grants a route for that one task, and the grant dies with the task.
@@ -144,6 +143,7 @@ Release `v1.0.0-beta.4`, on branch `v1.0.0-dev-super-redesign`. The full e2e sui
 
 - `docs/v1-PLAN.md` — the authoritative design and its nine verification cases.
 - `docs/v1-ARCHITECTURE.md` — crate map, sockets, ledger, lifecycle, generation, federation.
+- `docs/operations.md` — operator entries, the repair family, and session-shadow ownership rules.
 - `crates/onlyne-adapter/PROTOCOL.md` — the adapter surface both agents and gateways implement.
 - `examples/supervisor/README.md` — the live ring demo, told in the operator's voice.
 - `skills/onlyne-supervisor/SKILL.md` — the operating manual for a cluster supervisor agent.

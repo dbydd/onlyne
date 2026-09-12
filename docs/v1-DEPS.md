@@ -302,6 +302,6 @@ wechat-ilink = "0.5.0"
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 ```
 
-One correction to the consolidation brief, grounded in the manifests on disk. `reqwest` stays in the block: `plugins/onlyne-gateway-feishu/Cargo.toml:17` declares it with the `multipart` feature and `plugins/onlyne-gateway-feishu/src/lib.rs:762` holds a `reqwest::Client`, while `plugins/onlyne-gateway-qqbot/Cargo.toml:17` declares it for `plugins/onlyne-gateway-qqbot/src/lib.rs:21`. Dropping it breaks both plugins. `tokio` carries `signal` because `docs/v1-PLAN.md` §5 line 270 names `onlyne server reload` and `SIGHUP` as the reload triggers, and `crates/onlyne-server/Cargo.toml` requests the feature on its own `tokio` line.
+One correction to the consolidation brief, grounded in the manifests on disk. `reqwest` stays in the block: `plugins/onlyne-gateway-feishu/Cargo.toml:17` declares it with the `multipart` feature and `plugins/onlyne-gateway-feishu/src/lib.rs:762` holds a `reqwest::Client`, while `plugins/onlyne-gateway-qqbot/Cargo.toml:17` declares it for `plugins/onlyne-gateway-qqbot/src/lib.rs:21`. Dropping it breaks both plugins. `tokio` carries `signal` because `docs/v1-PLAN.md` §5 line 270 names `onlyne reload` and `SIGHUP` as the reload triggers, and `crates/onlyne-server/Cargo.toml` requests the feature on its own `tokio` line.
 
 Entries removed as unused: no crate on disk declares `signature`, `tracing-appender`, `tracing-subscriber`, or `url`.

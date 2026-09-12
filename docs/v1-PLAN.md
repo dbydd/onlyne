@@ -24,7 +24,7 @@ Onlyne 现在是单 crate 的工作区级 IM daemon（`onlyne` 0.6.0，`src/` 76
 | D10 | 寻址 = 逻辑 role 名，server 解标。目标离线时控制面消息持久排队，`note` 类直接拒收 |
 | D11 | 投递语义分级：控制面（task/completion/control）at-least-once + `op_id` 幂等；观测面（report/event）at-most-once + 游标 resync |
 | D12 | 编排 = 混合：server spec 声明 role 集合与允许边（ACL），投递动作本身创建任务，无中央 dispatch、无 `back_edges` 调度表 |
-| D13 | server 配置以文件为唯一真相，`onlyne server reload` / SIGHUP 生效，无运行期写 API |
+| D13 | server 配置以文件为唯一真相，`onlyne reload` / SIGHUP 生效，无运行期写 API |
 | D14 | 递归：子 cluster 向父 server 只暴露 aggregate role。aggregate role 就是一个普通 role 条目，其 client 由上层 supervisor 自己拉起 —— 协议里零联邦代码 |
 | D15 | supervisor = 用户的集群操作 agent：与用户对话，代用户派活、查账、启停集群。它能跑 `onlyne` CLI 并持有本机 admin socket 访问权；server 由 supervisor 拉起；supervisor 的 pi 进程归用户与终端管，归零它自己启停的 server 的生命周期管辖。非联邦模式下它就是野生进程：spec 里的 `_supervisor` 条目是身份与 ACL 锚点（admin `send` 要求 `from` 已注册且 `admin = true`），它的 client 从不自启；联邦模式下它的 client 以 aggregate role 身份连父 server |
 | D16 | 一份 adapter 协议、两侧挂载：agent adapter 进程连 client，IM gateway 进程连 server。四平台 gateway 是本仓产物 |
@@ -215,7 +215,7 @@ pub async fn read_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(r: &mut R) ->
 
 ### 5. server spec（唯一真相）
 
-字段全在 `<server-root>/.onlyne/spec.toml`，实现者不得增删：
+字段全在 `<server-root>/.onlyne/spec.toml`，实现者不得增删；`[server].stale_watch_secs` 控制残账观察器的扫描周期，默认 60，0 关闭观察器：
 
 ```toml
 [server]
@@ -267,7 +267,7 @@ channel = "telegram"
 to = { role = "_fallback" }      # 无 conversation 精确匹配时的兜底；顺序 = 文件顺序，first match wins
 ```
 
-加载语义：`onlyne-server run` 启动时全量解析。遇到未知键或类型错就拒绝启动，并打印 `spec.toml:<line>: <message>`。`onlyne server reload` 或 `SIGHUP` 会重新解析到临时结构体；校验通过就原子替换，`--dry-run` 只输出 diff。校验失败则保留旧配置，记 `fault{kind:"spec_reload_failed"}`。运行期没有任何写 spec 的 op（D13）。
+加载语义：`onlyne-server run` 启动时全量解析。遇到未知键或类型错就拒绝启动，并打印 `spec.toml:<line>: <message>`。`onlyne reload` 或 `SIGHUP` 会重新解析到临时结构体；校验通过就原子替换，`onlyne spec_diff` 只输出 diff。校验失败则保留旧配置，记 `fault{kind:"spec_reload_failed"}`。运行期没有任何写 spec 的 op（D13）。
 
 `prose` 是 role 提示词的唯一中央来源。client 连接时随 `welcome` 拉取，缓存到 `client.db`。prose 变了不会迁移正在跑的 session。各 role 自己写的 `AGENTS.md` 之类本地约定文件与本机制无关。
 
@@ -317,7 +317,7 @@ agent 侧 SDK 至少要覆盖这些抽象，清单来自两个现有插件的实
 
 client ↔ server（`op` 封闭集，`onlyne-server/src/router.rs` 一处 `match`）：`hello`、`send`、`pull`、`ack`、`report`、`session_sync`、`subscribe`、`query_ledger`、`query_sessions`、`query_roles`、`query_faults`、`control`、`bye`。
 
-admin（本机 socket，`<server-root>/.onlyne/run/s`，权限 0600，是集群的信任根）：只读 `status`、`roles`、`sessions`、`ledger`、`faults`、`watch`、`history`、`spec_diff`；运维动作 `reload`、`send`、`control`、`repair_{inspect,adopt,rebind,retry,fail,close,ack}`。admin 面的 `send`/`control` 用 `--from <role>` 指定发信 role，落 ledger 时记 `admin = true`，但仍要过 §5 的 `acl_allows` 判定（`from` 必须已在 spec 注册）。这一面零策略：不带任何自动重投、自动回收、超时判定逻辑，修不修由 supervisor session 决定。
+admin（本机 socket，`<server-root>/.onlyne/run/s`，权限 0600，是集群的信任根）：只读 `status`、`roles`、`sessions`、`ledger`、`faults`、`watch`、`history`、`spec_diff`；运维动作 `reload`、`send`、`control`、`repair_{inspect,adopt,rebind,retry,fail,close,ack}`。admin 面的 `send`/`control` 用 `--from <role>` 指定发信 role，落 ledger 时记 `admin = true`。`send` 仍要过 §5 的 `acl_allows` 判定（`from` 必须已在 spec 注册）。`control` 走 admin 身份时免 role 边表判定；role 面的 `control` 判定保留：属主身份或 `admin = true` 的边。这一面零策略：不带任何自动重投、自动回收、超时判定逻辑，修不修由 supervisor session 决定。
 
 gateway ↔ server：`hello`、`register_channel`、`deliver`（入站）、`render_send`（出站）、`health`、`typing`（可选能力）、`bye`。
 
@@ -326,20 +326,20 @@ gateway ↔ server：`hello`、`register_channel`、`deliver`（入站）、`ren
 ### 9. CLI 词表（`onlyne-cli`，输出恒为 JSON，`--json` 是默认）
 
 ```
-onlyne server start|stop|status|run|reload|generate|roles|sessions|ledger|faults|watch|history|repair ...
+onlyne server start|stop|status|run|generate|roles|sessions|ledger|faults|watch|history|repair ...
 onlyne client run|start|stop|status|init|roles|sessions|watch|history
 onlyne send --to <role> [--task <id>] [--text ...|--file -] [--image f.png] [--note]
 onlyne reply --to <envelope-id> --text ...
 onlyne complete --task <id> [--outcome done|failed|cancelled] --text ...
 onlyne handoff --to <role> --task <id> --text ...
-onlyne control recycle|probe|snapshot|cancel --task <id> [--reason ...]
+onlyne control --task <id> probe|snapshot   # recycle 与 cancel 同形，并带必填 --reason <text>
 onlyne gateway run <telegram|feishu|qqbot|weixin> --server-root <dir> [--token ...]
 onlyne gateway list|status|auth <platform> [...]      # auth = 原 onlyne auth 的 QR onboarding
 onlyne who|ping|version|completions <zsh|fish>
 # fake agent 不经 onlyne 转发：e2e 直接执行 onlyne-testkit 编出的 onlyne-agent-fake
 ```
 
-转发规则（`onlyne` 自身没有业务逻辑）：`onlyne server <verb>` → exec `onlyne-server <verb>`；`onlyne client <verb>` → exec `onlyne-client <verb>`；`onlyne gateway <verb>` → exec `onlyne-gateway <verb>`。消息类动词（`send`/`reply`/`complete`/`handoff`/`control`/`who`/`ping`）不 exec 守护进程，而是按下面的 socket 解析规则直连对应 unix socket，发一帧后打印响应。三个守护进程二进制各自独立可执行，`onlyne` 只是薄入口。
+转发规则（`onlyne` 自身没有业务逻辑）：`onlyne server <verb>` → exec `onlyne-server <verb>`；`onlyne client <verb>` → exec `onlyne-client <verb>`；`onlyne gateway <verb>` → exec `onlyne-gateway <verb>`。消息类动词（`send`/`reply`/`complete`/`handoff`/`ack`/`reject`/`control`/`who`/`ping`）不 exec 守护进程，而是按下面的 socket 解析规则直连对应 unix socket，发一帧后打印响应。三个守护进程二进制各自独立可执行，`onlyne` 只是薄入口。
 
 socket 解析规则（唯一写法）：`--socket <path>` 显式覆盖 → `--server-root <dir>` 解析为 `<dir>/.onlyne/run/s`（admin 面）→ `--workspace <dir>` 或当前目录向上发现的 `.onlyne/run/s`（client 面）。三者都不存在 → stderr 逐字 `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`，退出码 3。
 
@@ -392,7 +392,7 @@ onlyne server generate --root <server-root> [--template <相对路径>]... [--ro
 
 **prose 单点**：生成目录里不写 prose 副本。prose 只在 `welcome` 时下发，由 client 缓存进 `client.db` 的 `prose_cache`（§5、§10）。
 
-**输出回执**：stdout 打两段。第一段是可直接粘贴的 TOML `[[client]]` 片段（首行恰为 `[[client]]`，含 `role` 与 `key = "ed25519/<base64>"`）。第二段是 `<out>/.onlyne-generation.json`：`{"generated_at":"<rfc3339>","server_root":"<绝对路径仅此文件内>","roles":[{"role":"planner","dir":"dev/planner","key":"ed25519/...","template":"dev/planner"}]}`。`dir` 是相对 `--out` 的路径，supervisor 拿它逐条 `onlyne client start --workspace <out>/<dir>` 拉起。generate 从不写 `spec.toml`（D13）；追加条目与 `onlyne server reload` 由 supervisor/user 完成。
+**输出回执**：stdout 打两段。第一段是可直接粘贴的 TOML `[[client]]` 片段（首行恰为 `[[client]]`，含 `role` 与 `key = "ed25519/<base64>"`）。第二段是 `<out>/.onlyne-generation.json`：`{"generated_at":"<rfc3339>","server_root":"<绝对路径仅此文件内>","roles":[{"role":"planner","dir":"dev/planner","key":"ed25519/...","template":"dev/planner"}]}`。`dir` 是相对 `--out` 的路径，supervisor 拿它逐条 `onlyne client start --workspace <out>/<dir>` 拉起。generate 从不写 `spec.toml`（D13）；追加条目与 `onlyne reload` 由 supervisor/user 完成。
 
 **与 `onlyne-client init` 的分工**：`init` 造最小 role 工作区（只有 `.onlyne/{config.toml,keys/role.key}`），给 supervisor 自身工作区和手工场景用。`generate` = `init` 的产物 + 模板内容 + 拓扑放置。两者的产物布局逐字段相同，`client run` 分不出来源。
 

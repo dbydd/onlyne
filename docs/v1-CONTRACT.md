@@ -50,7 +50,7 @@ Cargo workspace, `members = ["crates/*", "plugins/*"]`, 18 packages: 14 under `c
 ## CLI vocabulary (`onlyne-cli`, output is JSON by default)
 
 ```
-onlyne server start|stop|run|init|reload|generate|status|roles|sessions|ledger|faults|watch|history|repair ...   # execs onlyne-server
+onlyne server start|stop|run|init|generate|status|roles|sessions|ledger|faults|watch|history|repair ...   # execs onlyne-server
 onlyne client run|start|stop|status|init|roles|sessions|watch|history                                            # execs onlyne-client
 onlyne status|roles|sessions|ledger|faults|watch|history|spec_diff|reload|generate|wait-ready|repair ...          # admin surface, one frame per call
 onlyne cluster export-prose
@@ -58,7 +58,10 @@ onlyne send --to <role> [--task <id>] [--text ...|--file -] [--image f.png] [--n
 onlyne reply --to <envelope-id> --text ...
 onlyne complete --task <id> [--outcome done|failed|cancelled] --text ...
 onlyne handoff --to <role> --task <id> --text ...
-onlyne control recycle|probe|snapshot|cancel --task <id> [--reason ...]
+onlyne ack --msg-id <id> [--op-id <id>] --reason <text>            # role surface only
+onlyne reject --msg-id <id> [--op-id <id>] --reason <text>         # role surface only
+onlyne control --task <id> probe|snapshot
+onlyne control --task <id> recycle|cancel --reason <text>
 onlyne gateway run <telegram|feishu|qqbot|weixin> --server-root <dir> [--token ...]
 onlyne gateway list|status|auth <platform> [...]
 onlyne who|ping|version|completions <zsh|fish>
@@ -84,7 +87,7 @@ onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace
 
 ## Process verbs versus admin queries
 
-`onlyne-server` owns the process verbs `init`, `run`, `start`, `stop`, `status`, `generate`, and `reload`; `reload --dry-run` prints `SpecDiff::render()`.
+`onlyne-server` owns the process verbs `init`, `run`, `start`, `stop`, `status`, and `generate`; `onlyne spec_diff` prints `SpecDiff::render()`.
 `onlyne server roles|sessions|ledger|faults|watch|history|repair_*` stays in `onlyne-cli`, which resolves those verbs against the admin socket and formats the answers for a human. It never execs `onlyne-server`.
 `onlyne-server status` answers the process question from its own tree: pid, socket path, uptime, spec hash, and store reachability.
 `onlyne status` on the CLI is the `AdminOp::Status` socket round-trip.

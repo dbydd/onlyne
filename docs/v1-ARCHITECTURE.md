@@ -71,8 +71,9 @@ graph TD
 | Boundary | Rule | Source |
 |---|---|---|
 | Protocol crate | `onlyne-proto` has zero tokio dependency and owns the public API names. | Plan §1 line 74; Contract line 37-38 |
+| Protocol crate deps | `onlyne-proto` depends on `schemars` for the `JsonSchema` derive and schema export. That subtree carries serde, serde_json, and the derive macro, with no tokio, no TLS, and no database crate. | `crates/onlyne-proto/Cargo.toml`; `cargo tree -p onlyne-proto -e normal` |
 | Session crate | `onlyne-session` stays pure and exposes `SessionBackend`; store/proto/net stay outside the reducer crate. | Plan §1 line 74; Contract line 40 |
-| Server and client | `onlyne-server` and `onlyne-client` share proto, frame, net, store, config, and layout, with no direct dependency between the two binaries. | Plan §1 line 74 |
+| Server and client | `onlyne-server` and `onlyne-client` share proto, frame, net, store, config, and layout, with no normal dependency between the two binaries; `onlyne-server` lists `onlyne-client` under `[dev-dependencies]` for its integration tests. | Plan §1 line 74; `crates/onlyne-server/Cargo.toml` |
 | Plugins | `plugins/*` depend on `onlyne-adapter` and `onlyne-proto`; server internals stay outside plugin crates. | Plan §1 line 74 |
 | Server binary | `onlyne-server` excludes platform SDKs plus `resvg` and `pulldown-cmark`. | Plan §1 line 76 |
 | Gateway binary | `onlyne-gateway` excludes ledger, router, and TLS server internals. | Plan §1 line 76 |
@@ -115,7 +116,7 @@ One connection carries every top-level frame variant: `req`, `res`, `ev`, `ack`,
 
 During `hello` the server listener picks the mounted surface: `agent`, `gateway`, or `admin`. `hello` times out after 5 s. Any application frame sent before `hello` returns `error{code:"invalid",message:"hello required first"}` and closes the connection. Source: Plan §7 lines 293 and 310.
 
-CLI socket discovery is fixed. `--socket <path>` wins first, `--server-root <dir>` maps to `<dir>/.onlyne/run/s`, and `--workspace <dir>` or upward discovery maps to `.onlyne/run/s`. When nothing resolves, the CLI exits 3 and prints `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`. Source: Plan §9 line 344; Contract lines 65-69.
+CLI socket discovery is fixed. `--socket <path>` wins first, `--server-root <dir>` maps to `<dir>/.onlyne/run/s`, and `--workspace <dir>` or upward discovery maps to `.onlyne/run/s`. When nothing resolves, the CLI exits 3 and prints `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`. Source: Plan §9 line 344; Contract CLI vocabulary.
 
 ## Operation vocabulary
 
@@ -209,7 +210,7 @@ Relocation guarantee: generated workspaces derive runtime paths from their own `
 
 ## Federation
 
-`onlyne cluster export-prose` names the aggregate role whose outward prose the parent consumes. It prints one role's prose, raw by default and wrapped under `--json`. The command issues the existing role query and adds no protocol op. Source: Plan S11 line 461; Contract line 65; `export_prose` in `crates/onlyne-cli/src/admin.rs`.
+`onlyne cluster export-prose` names the aggregate role whose outward prose the parent consumes. It prints one role's prose, raw by default and wrapped under `--json`. The command issues the existing role query and adds no protocol op. Source: Plan S11 line 461; Contract CLI vocabulary; `export_prose` in `crates/onlyne-cli/src/admin.rs`.
 
 The parent consumes that prose when it composes its own role directive. Federation adds zero protocol ops. Source: Plan S11 lines 460-461; decision D14 at Plan line 28.
 

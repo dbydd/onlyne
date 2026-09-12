@@ -8,7 +8,7 @@ use onlyne_proto::{
     ResBody, RoleInfo, SessionRow, new_id,
 };
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::time::SystemTime;
 use tokio::net::UnixStream;
@@ -59,8 +59,10 @@ impl From<RoleInfo> for RoleView {
     }
 }
 
-/// Decode one `roles` row. A row from a server that predates `edges` or
-/// `aggregate` still lands: both default, and the page then draws no arrow.
+/// Decode one `roles` row. A row from a server that predates `edges`,
+/// `aggregate`, `reuse`, or `session_command` still lands: `edges` and
+/// `aggregate` default and the page then draws no arrow, `reuse` defaults to
+/// `true`, and `session_command` defaults to an empty token list.
 impl TryFrom<Value> for RoleView {
     type Error = serde_json::Error;
 
@@ -149,7 +151,7 @@ impl Page {
     pub fn keys(self) -> &'static str {
         match self {
             Page::RoleMap => {
-                "1/2·Tab switch  hjkl navigate  ←→↑↓ pan  Enter detail  e edges  a all/active  r refresh  q quit"
+                "1/2·Tab switch  hjkl navigate  ←→↑↓ pan  +/- repel  Enter detail  e edges  a all/active  r refresh  q quit"
             }
             Page::Swarm => {
                 "1/2·Tab switch  g/h focus  ↑↓ select  Enter detail  / search  f state  t window  o role  e edge  a all/active  PgUp/PgDn page  r refresh  q quit"
@@ -297,6 +299,8 @@ pub struct UiState {
     pub role_trail: Vec<String>,
     /// The page-1 camera, in world cells. Clamped to the map extent.
     pub role_pan: (usize, usize),
+    /// Role-map repulsion. Higher values widen gutters and row channels.
+    pub spacing: usize,
     /// Whether the views list only the sessions still holding a slot. `a`
     /// flips it, and the history views keep their own state filter.
     pub active_only: bool,
@@ -324,6 +328,7 @@ impl Default for UiState {
             role_edge: None,
             role_trail: Vec::new(),
             role_pan: (0, 0),
+            spacing: DEFAULT_SPACING,
             active_only: true,
             show_control_edges: false,
             detail: None,
@@ -834,90 +839,318 @@ pub fn boxes_overlap(places: &[RolePlace], w: usize, h: usize) -> bool {
     })
 }
 
-/// The gutter the placement keeps between two columns and two rows of boxes,
-/// and the outer gutter it keeps at the world's left and right edges. Hops
-/// route along these, so no stroke ever crosses a box.
-pub const GRID_GAP: usize = 2;
-pub const ROW_GAP: usize = 2;
+/// Fixed margin around the layered role map.
 pub const PLACE_MARGIN: usize = 1;
+pub const MIN_SPACING: usize = 1;
+pub const MAX_SPACING: usize = 4;
+pub const DEFAULT_SPACING: usize = 2;
 
-/// How many boxes a world of `width` fits on one row. `world_size` sizes the
-/// world from this same count, so the two always agree.
-pub fn columns_for(width: usize, node_w: usize) -> usize {
-    ((width.saturating_sub(2 * PLACE_MARGIN) + GRID_GAP) / (node_w + GRID_GAP)).max(1)
+pub fn clamp_spacing(spacing: usize) -> usize {
+    spacing.clamp(MIN_SPACING, MAX_SPACING)
 }
 
-/// Where each slot's box goes inside a `w`x`h` world of `node_w`x`node_h`
-/// boxes.
+/// The gap between role columns and between row bands.
+pub fn spacing_gap(spacing: usize) -> usize {
+    2 * clamp_spacing(spacing)
+}
+
+/// Where each slot's box goes in a left-to-right layered role graph.
 ///
-/// Cycle roles fill the world's rows in order, snaking left to right and then
-/// right to left so the chain reads straight down the page. Control roles take
-/// a row of their own below them. Pure: equal inputs give equal corners.
+/// Visible edges define ranks; control roles stay in rank 0, and isolated
+/// non-control roles stack in the column after the rightmost connected rank.
 pub fn role_positions(
     slots: &[RoleSlot],
-    w: usize,
-    _h: usize,
+    edges: &[LayoutEdge],
+    _w: usize,
     node_w: usize,
     node_h: usize,
+    spacing: usize,
 ) -> Vec<(String, RolePlace)> {
     if slots.is_empty() || node_w == 0 || node_h == 0 {
         return Vec::new();
     }
-    let cycle: Vec<usize> = slots
-        .iter()
-        .enumerate()
-        .filter(|(_, slot)| !slot.control)
-        .map(|(index, _)| index)
-        .collect();
-    let control: Vec<usize> = slots
-        .iter()
-        .enumerate()
-        .filter(|(_, slot)| slot.control)
-        .map(|(index, _)| index)
-        .collect();
-    let mut placed: Vec<Option<RolePlace>> = vec![None; slots.len()];
-    let per_row = columns_for(w, node_w).max(1);
-    let rows = cycle.len().div_ceil(per_row).max(1);
-    for (order, index) in cycle.iter().enumerate() {
-        let (row, column) = serpentine(order, per_row);
-        placed[*index] = Some(cell(row, column, node_w, node_h));
+    let LayerPlan {
+        ranks,
+        back_edges: _back_edges,
+    } = layer_plan(slots, edges);
+    let mut by_rank = BTreeMap::<usize, Vec<String>>::new();
+    for slot in slots {
+        let rank = ranks.get(&slot.name).copied().unwrap_or(0);
+        by_rank.entry(rank).or_default().push(slot.name.clone());
     }
-    let control_row = if cycle.is_empty() { 0 } else { rows };
-    for (order, index) in control.iter().enumerate() {
-        let allowed = columns_for(w, node_w);
-        let row = control_row + order / allowed;
-        let column = order % allowed;
-        placed[*index] = Some(cell(row, column, node_w, node_h));
+    for names in by_rank.values_mut() {
+        names.sort();
     }
-
+    let mut by_name = BTreeMap::new();
+    for (rank, names) in by_rank {
+        for (row, name) in names.into_iter().enumerate() {
+            by_name.insert(name, cell(row, rank, node_w, node_h, spacing));
+        }
+    }
     slots
         .iter()
-        .enumerate()
-        .map(|(index, slot)| {
-            let place = placed[index].unwrap_or(RolePlace { x: 0, y: 0 });
-            (slot.name.clone(), place)
+        .map(|slot| {
+            (
+                slot.name.clone(),
+                by_name
+                    .get(&slot.name)
+                    .copied()
+                    .unwrap_or(RolePlace { x: 0, y: 0 }),
+            )
         })
         .collect()
 }
 
-/// One chain index on the serpentine: even rows run left to right, odd rows
-/// right to left.
-fn serpentine(order: usize, per_row: usize) -> (usize, usize) {
-    let row = order / per_row;
-    let column = order % per_row;
-    let column = if row % 2 == 1 {
-        per_row - 1 - column
-    } else {
-        column
-    };
-    (row, column)
+#[derive(Clone, Debug, Default)]
+struct LayerPlan {
+    ranks: BTreeMap<String, usize>,
+    back_edges: BTreeSet<(String, String)>,
 }
 
-/// The top-left corner of the box at a grid row and column.
-fn cell(row: usize, column: usize, node_w: usize, node_h: usize) -> RolePlace {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Visit {
+    Visiting,
+    Done,
+}
+
+fn layer_plan(slots: &[RoleSlot], edges: &[LayoutEdge]) -> LayerPlan {
+    let slot_names = slots
+        .iter()
+        .map(|slot| slot.name.clone())
+        .collect::<BTreeSet<_>>();
+    let controls = slots
+        .iter()
+        .filter(|slot| slot.control)
+        .map(|slot| slot.name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut adjacency = slot_names
+        .iter()
+        .map(|name| (name.clone(), BTreeSet::<String>::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut incoming = adjacency.clone();
+    let mut weak = adjacency.clone();
+    let mut incident = BTreeSet::new();
+    for edge in edges {
+        if edge.from == edge.to
+            || !slot_names.contains(&edge.from)
+            || !slot_names.contains(&edge.to)
+        {
+            continue;
+        }
+        adjacency
+            .entry(edge.from.clone())
+            .or_default()
+            .insert(edge.to.clone());
+        incoming
+            .entry(edge.to.clone())
+            .or_default()
+            .insert(edge.from.clone());
+        weak.entry(edge.from.clone())
+            .or_default()
+            .insert(edge.to.clone());
+        weak.entry(edge.to.clone())
+            .or_default()
+            .insert(edge.from.clone());
+        incident.insert(edge.from.clone());
+        incident.insert(edge.to.clone());
+    }
+
+    let graph_nodes = slot_names
+        .iter()
+        .filter(|name| controls.contains(*name) || incident.contains(*name))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let isolated = slot_names
+        .iter()
+        .filter(|name| !controls.contains(*name) && !incident.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let components = weak_components(&graph_nodes, &weak);
+    let mut ranks = BTreeMap::new();
+    let mut back_edges = BTreeSet::new();
+    for component in components {
+        let roots = component_roots(&component, &incoming, &controls);
+        mark_component_back_edges(&component, &roots, &adjacency, &controls, &mut back_edges);
+        rank_component(&component, &adjacency, &controls, &back_edges, &mut ranks);
+    }
+
+    let isolated_rank = ranks.values().max().map(|rank| rank + 1).unwrap_or(0);
+    for name in isolated {
+        ranks.insert(name, isolated_rank);
+    }
+
+    LayerPlan { ranks, back_edges }
+}
+
+fn weak_components(
+    nodes: &BTreeSet<String>,
+    weak: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<BTreeSet<String>> {
+    let mut unseen = nodes.clone();
+    let mut components = Vec::new();
+    while let Some(root) = unseen.iter().next().cloned() {
+        unseen.remove(&root);
+        let mut component = BTreeSet::new();
+        let mut queue = VecDeque::from([root]);
+        while let Some(name) = queue.pop_front() {
+            if !component.insert(name.clone()) {
+                continue;
+            }
+            if let Some(neighbours) = weak.get(&name) {
+                for neighbour in neighbours {
+                    if unseen.remove(neighbour) {
+                        queue.push_back(neighbour.clone());
+                    }
+                }
+            }
+        }
+        components.push(component);
+    }
+    components
+}
+
+fn component_roots(
+    component: &BTreeSet<String>,
+    incoming: &BTreeMap<String, BTreeSet<String>>,
+    controls: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut roots = component
+        .iter()
+        .filter(|name| {
+            controls.contains(*name)
+                || incoming
+                    .get(*name)
+                    .map(|from| from.iter().all(|source| !component.contains(source)))
+                    .unwrap_or(true)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        if let Some(name) = component.iter().next() {
+            roots.push(name.clone());
+        }
+    }
+    roots.sort();
+    roots
+}
+
+fn mark_component_back_edges(
+    component: &BTreeSet<String>,
+    roots: &[String],
+    adjacency: &BTreeMap<String, BTreeSet<String>>,
+    controls: &BTreeSet<String>,
+    back_edges: &mut BTreeSet<(String, String)>,
+) {
+    let mut state = BTreeMap::new();
+    for root in roots {
+        dfs_back_edges(root, component, adjacency, controls, &mut state, back_edges);
+    }
+    for name in component {
+        if !state.contains_key(name) {
+            dfs_back_edges(name, component, adjacency, controls, &mut state, back_edges);
+        }
+    }
+}
+
+fn dfs_back_edges(
+    name: &str,
+    component: &BTreeSet<String>,
+    adjacency: &BTreeMap<String, BTreeSet<String>>,
+    controls: &BTreeSet<String>,
+    state: &mut BTreeMap<String, Visit>,
+    back_edges: &mut BTreeSet<(String, String)>,
+) {
+    if state.get(name) == Some(&Visit::Done) {
+        return;
+    }
+    state.insert(name.to_string(), Visit::Visiting);
+    if let Some(targets) = adjacency.get(name) {
+        for target in targets {
+            if !component.contains(target) {
+                continue;
+            }
+            if controls.contains(target) {
+                back_edges.insert((name.to_string(), target.clone()));
+                continue;
+            }
+            match state.get(target) {
+                Some(Visit::Visiting) => {
+                    back_edges.insert((name.to_string(), target.clone()));
+                }
+                Some(Visit::Done) => {}
+                None => dfs_back_edges(target, component, adjacency, controls, state, back_edges),
+            }
+        }
+    }
+    state.insert(name.to_string(), Visit::Done);
+}
+
+fn rank_component(
+    component: &BTreeSet<String>,
+    adjacency: &BTreeMap<String, BTreeSet<String>>,
+    controls: &BTreeSet<String>,
+    back_edges: &BTreeSet<(String, String)>,
+    ranks: &mut BTreeMap<String, usize>,
+) {
+    let mut indegree = component
+        .iter()
+        .map(|name| (name.clone(), 0usize))
+        .collect::<BTreeMap<_, _>>();
+    for from in component {
+        for target in adjacency.get(from).into_iter().flatten() {
+            if component.contains(target)
+                && !controls.contains(target)
+                && !back_edges.contains(&(from.clone(), target.clone()))
+            {
+                *indegree.entry(target.clone()).or_default() += 1;
+            }
+        }
+    }
+    let mut ready = indegree
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(name, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    for control in controls.iter().filter(|name| component.contains(*name)) {
+        ranks.insert(control.clone(), 0);
+        ready.insert(control.clone());
+    }
+
+    while let Some(name) = ready.pop_first() {
+        let rank = *ranks.entry(name.clone()).or_insert(0);
+        for target in adjacency.get(&name).into_iter().flatten() {
+            if !component.contains(target)
+                || controls.contains(target)
+                || back_edges.contains(&(name.clone(), target.clone()))
+            {
+                continue;
+            }
+            let candidate = rank + 1;
+            ranks
+                .entry(target.clone())
+                .and_modify(|rank| *rank = (*rank).max(candidate))
+                .or_insert(candidate);
+            if let Some(count) = indegree.get_mut(target) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    ready.insert(target.clone());
+                }
+            }
+        }
+    }
+
+    for name in component {
+        ranks.entry(name.clone()).or_insert(0);
+    }
+}
+
+/// The top-left corner of the box at a rank and vertical slot.
+fn cell(row: usize, rank: usize, node_w: usize, node_h: usize, spacing: usize) -> RolePlace {
+    let gap = spacing_gap(spacing);
     RolePlace {
-        x: PLACE_MARGIN + column * (node_w + GRID_GAP),
-        y: row * (node_h + ROW_GAP),
+        x: PLACE_MARGIN + rank * (node_w + gap),
+        y: row * (node_h + gap),
     }
 }
 
@@ -1240,87 +1473,145 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn cycle_roles_fill_the_rows_in_chain_order() {
-        let ring = slots(&[
-            ("a", false),
-            ("b", false),
-            ("c", false),
-            ("d", false),
-            ("e", false),
-        ]);
-        let placed = role_positions(&ring, 50, 20, 14, 7);
-        let at = |name: &str| {
-            placed
-                .iter()
-                .find(|(slot, _)| slot == name)
-                .map(|(_, place)| *place)
-                .unwrap_or_else(|| panic!("no {name}"))
-        };
-        let points: Vec<RolePlace> = placed.iter().map(|(_, place)| *place).collect();
-        assert!(!boxes_overlap(&points, 14, 7), "{points:?}");
-        // a, b, c read left to right; d drops under c and e follows it back.
-        assert_eq!(at("a").y, at("b").y);
-        assert_eq!(at("b").y, at("c").y);
-        assert!(at("a").x < at("b").x && at("b").x < at("c").x, "{points:?}");
-        assert_eq!(at("d").x, at("c").x, "{points:?}");
-        assert_eq!(at("e").x, at("b").x, "{points:?}");
-        assert!(at("d").y > at("c").y, "{points:?}");
+    fn edge(from: &str, to: &str) -> LayoutEdge {
+        LayoutEdge {
+            from: from.into(),
+            to: to.into(),
+            in_flight: false,
+        }
+    }
+
+    fn placed_at(placed: &[(String, RolePlace)], name: &str) -> RolePlace {
+        placed
+            .iter()
+            .find(|(slot, _)| slot == name)
+            .map(|(_, place)| *place)
+            .unwrap_or_else(|| panic!("no {name}"))
     }
 
     #[test]
-    fn the_grid_wraps_the_chain_onto_more_rows() {
-        let ring = slots(&[
+    fn chain_roles_rank_left_to_right() {
+        let chain = slots(&[
             ("a", false),
             ("b", false),
             ("c", false),
             ("d", false),
             ("e", false),
         ]);
-        let placed = role_positions(&ring, 60, 14, 14, 7);
+        let edges = vec![
+            edge("a", "b"),
+            edge("b", "c"),
+            edge("c", "d"),
+            edge("d", "e"),
+        ];
+        let placed = role_positions(&chain, &edges, 120, 14, 7, DEFAULT_SPACING);
         let points: Vec<RolePlace> = placed.iter().map(|(_, place)| *place).collect();
         assert!(!boxes_overlap(&points, 14, 7), "{points:?}");
-        let rows: std::collections::BTreeSet<usize> = points.iter().map(|place| place.y).collect();
-        assert!(
-            rows.len() > 1,
-            "the grid wraps instead of stretching\n{points:?}"
+        let xs = ["a", "b", "c", "d", "e"].map(|name| placed_at(&placed, name).x);
+        assert!(xs.windows(2).all(|pair| pair[0] < pair[1]), "{xs:?}");
+        let step = 14 + spacing_gap(DEFAULT_SPACING);
+        assert_eq!(
+            xs,
+            [
+                PLACE_MARGIN,
+                PLACE_MARGIN + step,
+                PLACE_MARGIN + 2 * step,
+                PLACE_MARGIN + 3 * step,
+                PLACE_MARGIN + 4 * step
+            ]
         );
-        let columns = points.iter().filter(|place| place.y == 0).count();
-        assert!(columns < 5, "no single unwrapped row\n{points:?}");
     }
 
     #[test]
-    fn the_control_role_gets_a_row_of_its_own() {
-        let all = slots(&[
-            ("a", false),
-            ("b", false),
-            ("c", false),
-            ("d", false),
-            ("e", false),
-            ("_supervisor", true),
-        ]);
-        let placed = role_positions(&all, 44, 40, 14, 7);
-        let points: Vec<RolePlace> = placed.iter().map(|(_, place)| *place).collect();
-        assert!(!boxes_overlap(&points, 14, 7), "{points:?}");
-        let supervisor = placed
-            .iter()
-            .find(|(name, _)| name == "_supervisor")
-            .map(|(_, place)| *place)
-            .expect("the control slot");
-        let cycle: Vec<RolePlace> = placed
-            .iter()
-            .filter(|(name, _)| name != "_supervisor")
-            .map(|(_, place)| *place)
-            .collect();
+    fn cycle_keeps_one_back_edge_and_forward_ranks_monotonic() {
+        let ring = slots(&[("a", false), ("b", false), ("c", false)]);
+        let edges = vec![edge("a", "b"), edge("b", "c"), edge("c", "a")];
+        let plan = layer_plan(&ring, &edges);
+        assert_eq!(plan.back_edges.len(), 1, "{:?}", plan.back_edges);
         assert!(
-            cycle.iter().all(|place| place.y < supervisor.y),
-            "the control role sits below the chain\n{points:?}"
+            plan.back_edges
+                .contains(&("c".to_string(), "a".to_string())),
+            "{:?}",
+            plan.back_edges
+        );
+
+        let placed = role_positions(&ring, &edges, 120, 14, 7, DEFAULT_SPACING);
+        let ax = placed_at(&placed, "a").x;
+        let bx = placed_at(&placed, "b").x;
+        let cx = placed_at(&placed, "c").x;
+        assert!(ax < bx && bx < cx, "{placed:?}");
+    }
+
+    #[test]
+    fn diamond_branches_share_the_middle_rank() {
+        let diamond = slots(&[("a", false), ("b", false), ("c", false), ("d", false)]);
+        let edges = vec![
+            edge("a", "b"),
+            edge("a", "c"),
+            edge("b", "d"),
+            edge("c", "d"),
+        ];
+        let placed = role_positions(&diamond, &edges, 120, 14, 7, DEFAULT_SPACING);
+        let b = placed_at(&placed, "b");
+        let c = placed_at(&placed, "c");
+        assert_eq!(b.x, c.x, "{placed:?}");
+        assert_ne!(b.y, c.y, "branches stack instead of colliding\n{placed:?}");
+        assert!(placed_at(&placed, "a").x < b.x, "{placed:?}");
+        assert!(b.x < placed_at(&placed, "d").x, "{placed:?}");
+    }
+
+    #[test]
+    fn spacing_expands_columns_and_rows_without_overlap() {
+        let graph = slots(&[("a", false), ("b", false), ("c", false)]);
+        let edges = vec![edge("a", "c"), edge("b", "c")];
+        let compact = role_positions(&graph, &edges, 120, 14, 7, 1);
+        let wide = role_positions(&graph, &edges, 120, 14, 7, 4);
+        let compact_points: Vec<RolePlace> = compact.iter().map(|(_, place)| *place).collect();
+        let wide_points: Vec<RolePlace> = wide.iter().map(|(_, place)| *place).collect();
+        assert!(!boxes_overlap(&compact_points, 14, 7), "{compact_points:?}");
+        assert!(!boxes_overlap(&wide_points, 14, 7), "{wide_points:?}");
+        assert_eq!(
+            placed_at(&compact, "c").x - placed_at(&compact, "a").x,
+            14 + spacing_gap(1)
         );
         assert_eq!(
-            cycle.iter().filter(|place| place.y == supervisor.y).count(),
-            0,
-            "{points:?}"
+            placed_at(&wide, "c").x - placed_at(&wide, "a").x,
+            14 + spacing_gap(4)
         );
+        assert_eq!(
+            placed_at(&compact, "b").y - placed_at(&compact, "a").y,
+            7 + spacing_gap(1)
+        );
+        assert_eq!(
+            placed_at(&wide, "b").y - placed_at(&wide, "a").y,
+            7 + spacing_gap(4)
+        );
+    }
+
+    #[test]
+    fn isolated_roles_stack_in_the_far_right_column() {
+        let graph = slots(&[("a", false), ("b", false), ("z", false)]);
+        let edges = vec![edge("a", "b")];
+        let placed = role_positions(&graph, &edges, 120, 14, 7, DEFAULT_SPACING);
+        assert!(
+            placed_at(&placed, "z").x > placed_at(&placed, "b").x,
+            "{placed:?}"
+        );
+        assert_eq!(placed_at(&placed, "z").y, 0, "{placed:?}");
+    }
+
+    #[test]
+    fn control_roles_hold_rank_zero_even_with_incoming_edges() {
+        let graph = slots(&[("a", false), ("b", false), ("_supervisor", true)]);
+        let edges = vec![edge("a", "b"), edge("b", "_supervisor")];
+        let placed = role_positions(&graph, &edges, 120, 14, 7, DEFAULT_SPACING);
+        assert_eq!(placed_at(&placed, "a").x, PLACE_MARGIN, "{placed:?}");
+        assert_eq!(
+            placed_at(&placed, "_supervisor").x,
+            PLACE_MARGIN,
+            "{placed:?}"
+        );
+        assert!(placed_at(&placed, "b").x > PLACE_MARGIN, "{placed:?}");
     }
 
     #[test]
@@ -1331,9 +1622,10 @@ mod tests {
             ("c", false),
             ("_supervisor", true),
         ]);
+        let edges = vec![edge("a", "b"), edge("b", "c"), edge("c", "a")];
         assert_eq!(
-            role_positions(&all, 60, 25, 14, 7),
-            role_positions(&all, 60, 25, 14, 7)
+            role_positions(&all, &edges, 120, 14, 7, DEFAULT_SPACING),
+            role_positions(&all, &edges, 120, 14, 7, DEFAULT_SPACING)
         );
     }
 

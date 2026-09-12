@@ -141,8 +141,14 @@ fn render_role_map(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &U
 fn render_map(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &UiState) {
     let nodes = layout_nodes(snapshot, state.active_only);
     let edges = visible_edges(snapshot, state.show_control_edges);
-    let world = layout::world_size(&nodes);
-    let canvas = layout::layout(&nodes, &edges, world.0 as u16, world.1 as u16);
+    let world = layout::world_size(&nodes, &edges, state.spacing);
+    let canvas = layout::layout(
+        &nodes,
+        &edges,
+        world.0 as u16,
+        world.1 as u16,
+        state.spacing,
+    );
     let block = Block::default().title("role network").borders(Borders::ALL);
     let view = block.inner(area);
     let (view_w, view_h) = (view.width as usize, view.height as usize);
@@ -582,8 +588,15 @@ pub fn apply_page_history(
     state.history_cursor = 0;
 }
 /// The world the role map draws in: as wide and tall as its boxes need.
-pub fn role_map_world(snapshot: &Snapshot, active_only: bool) -> (usize, usize) {
-    layout::world_size(&layout_nodes(snapshot, active_only))
+pub fn role_map_world(
+    snapshot: &Snapshot,
+    active_only: bool,
+    show_control_edges: bool,
+    spacing: usize,
+) -> (usize, usize) {
+    let nodes = layout_nodes(snapshot, active_only);
+    let edges = visible_edges(snapshot, show_control_edges);
+    layout::world_size(&nodes, &edges, spacing)
 }
 
 /// The hop `l` would walk: the selected role's highlighted out-edge.
@@ -662,7 +675,12 @@ pub fn pan_role_view(
     state: &mut UiState,
     view: (usize, usize),
 ) {
-    let world = role_map_world(snapshot, state.active_only);
+    let world = role_map_world(
+        snapshot,
+        state.active_only,
+        state.show_control_edges,
+        state.spacing,
+    );
     let pan = (
         (state.role_pan.0 as isize + delta.0).max(0) as usize,
         (state.role_pan.1 as isize + delta.1).max(0) as usize,
@@ -675,9 +693,15 @@ pub fn reveal_role(snapshot: &Snapshot, state: &mut UiState, view: (usize, usize
     let Some(name) = selected_role(snapshot, state) else {
         return;
     };
-    let world = role_map_world(snapshot, state.active_only);
+    let world = role_map_world(
+        snapshot,
+        state.active_only,
+        state.show_control_edges,
+        state.spacing,
+    );
     let nodes = layout_nodes(snapshot, state.active_only);
-    let Some(rect) = layout::role_box(&nodes, &name, world) else {
+    let edges = visible_edges(snapshot, state.show_control_edges);
+    let Some(rect) = layout::role_box(&nodes, &edges, &name, world, state.spacing) else {
         return;
     };
     let mut pan = clamp_pan(state.role_pan, world, view);
@@ -967,6 +991,22 @@ mod tests {
         }
     }
 
+    fn five_node_ring_snapshot() -> Snapshot {
+        Snapshot {
+            status: serde_json::json!({"cluster": "local"}),
+            roles: vec![
+                role("a", &["b"]),
+                role("b", &["c"]),
+                role("c", &["d"]),
+                role("d", &["e"]),
+                role("e", &["a"]),
+            ],
+            server_online: true,
+            refreshed_at: Some(SystemTime::now()),
+            ..Snapshot::default()
+        }
+    }
+
     fn render_once_buffer(
         snapshot: &Snapshot,
         state: &UiState,
@@ -1086,6 +1126,55 @@ mod tests {
     }
 
     #[test]
+    fn render_once_text_expands_the_five_node_ring_spacing() {
+        let snapshot = five_node_ring_snapshot();
+        let compact = UiState {
+            spacing: 1,
+            ..UiState::default()
+        };
+        let wide = UiState {
+            spacing: 4,
+            ..UiState::default()
+        };
+        let compact_world = role_map_world(
+            &snapshot,
+            compact.active_only,
+            compact.show_control_edges,
+            compact.spacing,
+        );
+        let wide_world = role_map_world(
+            &snapshot,
+            wide.active_only,
+            wide.show_control_edges,
+            wide.spacing,
+        );
+        assert!(
+            wide_world.0 > compact_world.0,
+            "{compact_world:?} {wide_world:?}"
+        );
+
+        let text = render_once_text(&snapshot, &wide, 220, 40);
+        for name in ["a", "b", "c", "d", "e"] {
+            assert!(text.contains(&format!("╭─{name}")), "{text}");
+        }
+        let column_of = |needle: &str| {
+            text.lines()
+                .find(|line| line.contains(needle))
+                .and_then(|line| line.find(needle))
+                .unwrap_or_else(|| panic!("no {needle}\n{text}"))
+        };
+        let columns = ["╭─a", "╭─b", "╭─c", "╭─d", "╭─e"].map(column_of);
+        assert!(
+            columns.windows(2).all(|pair| pair[0] < pair[1]),
+            "{columns:?}\n{text}"
+        );
+        assert!(
+            text.contains('▶'),
+            "every target should be entered from its left\n{text}"
+        );
+    }
+
+    #[test]
     fn page_one_highlights_the_cursor_and_follows_a_walk() {
         let snapshot = linked_snapshot();
         let mut state = UiState::default();
@@ -1186,7 +1275,12 @@ mod tests {
             "the camera leaves the cursor alone"
         );
         pan_role_view((100, 100), &snapshot, &mut state, view);
-        let world = role_map_world(&snapshot, state.active_only);
+        let world = role_map_world(
+            &snapshot,
+            state.active_only,
+            state.show_control_edges,
+            state.spacing,
+        );
         assert_eq!(
             state.role_pan,
             (world.0 - view.0, world.1 - view.1),
