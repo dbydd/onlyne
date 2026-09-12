@@ -171,10 +171,22 @@ async fn once_prints_the_role_network_and_the_busy_star() {
         "the aggregate role carries its marker\n{text}"
     );
     assert!(
-        ['▶', '◀', '▲', '▼']
+        ['▸', '◂', '▴', '▾']
             .iter()
             .any(|arrow| text.contains(*arrow)),
-        "an arrow reaches the target\n{text}"
+        "a hop lands on its target with an arrowhead\n{text}"
+    );
+    // The map is drawn as boxes joined by orthogonal runs: no diagonal stroke
+    // reaches the terminal. (Slash characters inside panel text such as
+    // `sessions 0/1` are text, not strokes; the map's own canvas is checked
+    // cell by cell in the unit tests.)
+    for banned in ['╱', '╲', '╳'] {
+        assert!(!text.contains(banned), "{banned:?} in the role map\n{text}");
+    }
+    assert_eq!(
+        text,
+        once(&root, None),
+        "the same topology draws the same map"
     );
     assert!(
         text.contains('◐'),
@@ -196,25 +208,6 @@ async fn once_prints_the_role_network_and_the_busy_star() {
     assert!(
         text.contains("acl peers"),
         "the page-1 panel follows the selected role\n{text}"
-    );
-    let line_of = |needle: &str| {
-        text.lines()
-            .position(|line| line.contains(needle))
-            .unwrap_or_else(|| panic!("no {needle} box\n{text}"))
-    };
-    let column_of = |needle: &str| {
-        text.lines()
-            .find(|line| line.contains(needle))
-            .and_then(|line| line.find(needle))
-    };
-    assert!(
-        line_of("╭─builder") < line_of("╭─⬡planner"),
-        "the grid sets the boxes out in rows, not one list\n{text}"
-    );
-    assert_eq!(
-        column_of("╭─builder"),
-        column_of("╭─⬡planner"),
-        "the hop between them is a straight vertical run\n{text}"
     );
 
     let swarm = once(&root, Some("2"));

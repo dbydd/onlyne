@@ -1,8 +1,10 @@
-use crate::layout::{self, CellKind, LayoutEdge};
+use crate::force::Vec2;
+use crate::layout::{self, Camera, CellKind, LayoutEdge, LayoutNode, RoleMap};
 use crate::model::{
     Alert, AlertKind, Detail, Focus, Page, RoleDetail, Snapshot, TaskDetail, UiState, alerts,
-    event_task, layout_nodes, ledger_state_label, page_history, principal_label, role_edges,
-    selected_graph_task, selected_history_task, selected_role, visible_edges, visible_sessions,
+    event_task, layout_edges, layout_nodes, ledger_state_label, page_history, principal_label,
+    role_edges, selected_graph_task, selected_history_task, selected_role, visible_edges,
+    visible_sessions,
 };
 use chrono::{DateTime, Local};
 use onlyne_proto::{Event, EventRow, FaultEvent, LedgerState, Lifecycle, SessionRow};
@@ -127,8 +129,8 @@ fn render_top(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &UiStat
 }
 
 fn render_role_map(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &UiState) {
-    let (map, note, detail) = role_map_areas(area);
-    render_map(frame, map, snapshot, state);
+    let (map_area, note, detail) = role_map_areas(area);
+    render_map(frame, map_area, snapshot, state);
     frame.render_widget(
         Paragraph::new(role_note(snapshot, state)).style(Style::default().fg(Color::DarkGray)),
         note,
@@ -136,36 +138,79 @@ fn render_role_map(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &U
     render_detail(frame, detail, state);
 }
 
-/// The role map: the world cropped to the pane, with the cursor's box and the
-/// hop it stands on reversed.
-fn render_map(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &UiState) {
+/// The page-1 pane's subject: the layout synced from the snapshot, the camera
+/// that centres the cursor's role in the pane, and the point it centres on.
+pub struct RoleScene {
+    pub nodes: Vec<LayoutNode>,
+    pub edges: Vec<LayoutEdge>,
+    pub map: RoleMap,
+    pub camera: Camera,
+    pub anchor: Vec2,
+}
+
+/// Build the page-1 scene for a pane of `view` cells. The layout is settled
+/// lazily on a topology change, so this is cheap while the graph holds still.
+pub fn role_scene(snapshot: &Snapshot, state: &UiState, view: (usize, usize)) -> RoleScene {
     let nodes = layout_nodes(snapshot, state.active_only);
     let edges = visible_edges(snapshot, state.show_control_edges);
-    let world = layout::world_size(&nodes, &edges, state.spacing);
-    let canvas = layout::layout(
-        &nodes,
-        &edges,
-        world.0 as u16,
-        world.1 as u16,
-        state.spacing,
-    );
+    let mut map = state.map.clone();
+    map.sync(&nodes, &layout_edges(snapshot), state.spacing);
+    // The map is framed on its own middle: the layout already puts the focus
+    // at the centre of the rings, and the cursor only marks a role.
+    let anchor = map.centre(&nodes);
+    let mut camera = state.role_cam;
+    if let Some(bounds) = map.extent(&nodes) {
+        camera.clamp_pan(bounds, anchor, view);
+    }
+    RoleScene {
+        nodes,
+        edges,
+        map,
+        camera,
+        anchor,
+    }
+}
+
+/// Bring the cached page-1 layout in line with the snapshot. The renderer syncs
+/// its own copy too; doing it here keeps the incremental seed warm across
+/// refreshes.
+pub fn sync_map(state: &mut UiState, snapshot: &Snapshot) {
+    let nodes = layout_nodes(snapshot, state.active_only);
+    state
+        .map
+        .sync(&nodes, &layout_edges(snapshot), state.spacing);
+}
+
+/// The role map: the egocentric force layout projected into the pane, with the
+/// cursor's box and the hop it stands on reversed.
+fn render_map(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &UiState) {
     let block = Block::default().title("role network").borders(Borders::ALL);
     let view = block.inner(area);
     let (view_w, view_h) = (view.width as usize, view.height as usize);
-    let pan = clamp_pan(state.role_pan, world, (view_w, view_h));
-    let offset = centered_offset(world, (view_w, view_h));
+    let scene = role_scene(snapshot, state, (view_w, view_h));
+    let canvas = layout::canvas(
+        &scene.map,
+        &scene.nodes,
+        &scene.edges,
+        &scene.camera,
+        scene.anchor,
+        (view_w, view_h),
+    );
+    let title = format!(
+        "role network · zoom {:.1}x · {} · repel {:.1}x",
+        scene.camera.zoom,
+        layout::tier_label(scene.map.radius(scene.camera.zoom)),
+        scene.map.repulsion(),
+    );
     let highlight = highlight_cells(&canvas, snapshot, state);
-    let lines = (0..view_h)
+    let lines = (0..canvas.height)
         .map(|row| {
             Line::from(
-                (0..view_w)
+                (0..canvas.width)
                     .map(|column| {
-                        let x = column as isize + pan.0 as isize - offset.0;
-                        let y = row as isize + pan.1 as isize - offset.1;
-                        let cell = canvas.at(x, y);
+                        let cell = canvas.cells[row][column];
                         let style = style_for_cell(cell.kind);
-                        let marked =
-                            x >= 0 && y >= 0 && highlight.contains(&(x as usize, y as usize));
+                        let marked = highlight.contains(&(column as isize, row as isize));
                         Span::styled(
                             cell.ch.to_string(),
                             if marked {
@@ -179,7 +224,10 @@ fn render_map(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &UiStat
             )
         })
         .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).block(block.title(title)),
+        area,
+    );
 }
 
 /// The cells the cursor reverses: the selected role's label and, when `j`/`k`
@@ -188,12 +236,12 @@ fn highlight_cells(
     canvas: &layout::Canvas,
     snapshot: &Snapshot,
     state: &UiState,
-) -> BTreeSet<(usize, usize)> {
+) -> BTreeSet<(isize, isize)> {
     let mut cells = BTreeSet::new();
     if let Some(name) = selected_role(snapshot, state) {
         if let Some(rect) = canvas.node_boxes.iter().find(|rect| rect.name == name) {
             for offset in 0..rect.label.chars().count() {
-                cells.insert((rect.label_x + offset, rect.y));
+                cells.insert((rect.label_x + offset as isize, rect.y));
             }
         }
     }
@@ -226,26 +274,6 @@ fn role_note(snapshot: &Snapshot, state: &UiState) -> String {
         parts.push(format!("→ {} · l walks it", edge.to));
     }
     parts.join(" · ")
-}
-
-/// Where the world sits in a pane wider than it: centred, never negative.
-fn centered_offset(world: (usize, usize), view: (usize, usize)) -> (isize, isize) {
-    (
-        ((view.0 as isize - world.0 as isize) / 2).max(0),
-        ((view.1 as isize - world.1 as isize) / 2).max(0),
-    )
-}
-
-/// Keep the camera inside the world.
-pub fn clamp_pan(
-    pan: (usize, usize),
-    world: (usize, usize),
-    view: (usize, usize),
-) -> (usize, usize) {
-    (
-        pan.0.min(world.0.saturating_sub(view.0)),
-        pan.1.min(world.1.saturating_sub(view.1)),
-    )
 }
 
 fn style_for_cell(kind: CellKind) -> Style {
@@ -587,18 +615,6 @@ pub fn apply_page_history(
     page_history(delta, &mut state.filter, snapshot.history_total, page_size);
     state.history_cursor = 0;
 }
-/// The world the role map draws in: as wide and tall as its boxes need.
-pub fn role_map_world(
-    snapshot: &Snapshot,
-    active_only: bool,
-    show_control_edges: bool,
-    spacing: usize,
-) -> (usize, usize) {
-    let nodes = layout_nodes(snapshot, active_only);
-    let edges = visible_edges(snapshot, show_control_edges);
-    layout::world_size(&nodes, &edges, spacing)
-}
-
 /// The hop `l` would walk: the selected role's highlighted out-edge.
 pub fn highlighted_edge(snapshot: &Snapshot, state: &UiState) -> Option<LayoutEdge> {
     let role = selected_role(snapshot, state)?;
@@ -667,7 +683,7 @@ pub fn role_back(state: &mut UiState) -> bool {
     true
 }
 
-/// `←→↑↓`: move the camera over the map, clamped to its extent. The selection
+/// `←→↑↓`: pan the camera over the map, clamped to its extent. The selection
 /// stays where it was.
 pub fn pan_role_view(
     delta: (isize, isize),
@@ -675,51 +691,53 @@ pub fn pan_role_view(
     state: &mut UiState,
     view: (usize, usize),
 ) {
-    let world = role_map_world(
-        snapshot,
-        state.active_only,
-        state.show_control_edges,
-        state.spacing,
-    );
-    let pan = (
-        (state.role_pan.0 as isize + delta.0).max(0) as usize,
-        (state.role_pan.1 as isize + delta.1).max(0) as usize,
-    );
-    state.role_pan = clamp_pan(pan, world, view);
+    let scene = role_scene(snapshot, state, view);
+    let mut camera = state.role_cam;
+    camera.pan = (camera.pan.0 + delta.0, camera.pan.1 + delta.1);
+    if let Some(bounds) = scene.map.extent(&scene.nodes) {
+        camera.clamp_pan(bounds, scene.anchor, view);
+    }
+    state.role_cam = camera;
 }
 
-/// Bring the cursor's box back into view after a walk.
-pub fn reveal_role(snapshot: &Snapshot, state: &mut UiState, view: (usize, usize)) {
-    let Some(name) = selected_role(snapshot, state) else {
-        return;
-    };
-    let world = role_map_world(
-        snapshot,
-        state.active_only,
-        state.show_control_edges,
-        state.spacing,
-    );
-    let nodes = layout_nodes(snapshot, state.active_only);
-    let edges = visible_edges(snapshot, state.show_control_edges);
-    let Some(rect) = layout::role_box(&nodes, &edges, &name, world, state.spacing) else {
-        return;
-    };
-    let mut pan = clamp_pan(state.role_pan, world, view);
-    if view.0 > 0 && view.1 > 0 {
-        if rect.x < pan.0 {
-            pan.0 = rect.x;
-        }
-        if rect.x + rect.w > pan.0 + view.0 {
-            pan.0 = (rect.x + rect.w).saturating_sub(view.0);
-        }
-        if rect.y < pan.1 {
-            pan.1 = rect.y;
-        }
-        if rect.y + rect.h > pan.1 + view.1 {
-            pan.1 = (rect.y + rect.h).saturating_sub(view.1);
-        }
+/// The mouse wheel: zoom one step, clamped to the camera's own range, and keep
+/// the pane over the map.
+pub fn zoom_role_view(
+    delta: isize,
+    snapshot: &Snapshot,
+    state: &mut UiState,
+    view: (usize, usize),
+) {
+    let scene = role_scene(snapshot, state, view);
+    let mut camera = state.role_cam;
+    if delta < 0 {
+        camera.zoom_in();
+    } else {
+        camera.zoom_out();
     }
-    state.role_pan = clamp_pan(pan, world, view);
+    if let Some(bounds) = scene.map.extent(&scene.nodes) {
+        camera.clamp_pan(bounds, scene.anchor, view);
+    }
+    state.role_cam = camera;
+}
+
+/// The mouse dragging the map: pan by the cells the pointer travelled.
+pub fn drag_role_view(
+    from: (u16, u16),
+    to: (u16, u16),
+    snapshot: &Snapshot,
+    state: &mut UiState,
+    view: (usize, usize),
+) {
+    pan_role_view(
+        (
+            to.0 as isize - from.0 as isize,
+            to.1 as isize - from.1 as isize,
+        ),
+        snapshot,
+        state,
+        view,
+    );
 }
 
 pub fn detail_text(detail: &Detail) -> (String, String) {
@@ -1105,7 +1123,7 @@ mod tests {
         assert!(text.matches('╭').count() >= 2, "{text}");
         assert!(text.contains("⬡planner*"), "{text}");
         assert!(
-            ['▶', '◀', '▲', '▼']
+            ['▸', '◂', '▴', '▾']
                 .iter()
                 .any(|arrow| text.contains(*arrow)),
             "the hop carries an arrowhead into its target\n{text}"
@@ -1126,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn render_once_text_expands_the_five_node_ring_spacing() {
+    fn a_wider_repulsion_spreads_the_ring_further_apart() {
         let snapshot = five_node_ring_snapshot();
         let compact = UiState {
             spacing: 1,
@@ -1136,41 +1154,31 @@ mod tests {
             spacing: 4,
             ..UiState::default()
         };
-        let compact_world = role_map_world(
-            &snapshot,
-            compact.active_only,
-            compact.show_control_edges,
-            compact.spacing,
-        );
-        let wide_world = role_map_world(
-            &snapshot,
-            wide.active_only,
-            wide.show_control_edges,
-            wide.spacing,
-        );
+        let spread = |state: &UiState| {
+            let scene = role_scene(&snapshot, state, (220, 40));
+            let (low, high) = scene.map.extent(&scene.nodes).expect("a map");
+            (high.x - low.x) as usize
+        };
         assert!(
-            wide_world.0 > compact_world.0,
-            "{compact_world:?} {wide_world:?}"
+            spread(&wide) > spread(&compact),
+            "compact {} wide {}",
+            spread(&compact),
+            spread(&wide)
         );
 
         let text = render_once_text(&snapshot, &wide, 220, 40);
         for name in ["a", "b", "c", "d", "e"] {
             assert!(text.contains(&format!("╭─{name}")), "{text}");
         }
-        let column_of = |needle: &str| {
-            text.lines()
-                .find(|line| line.contains(needle))
-                .and_then(|line| line.find(needle))
-                .unwrap_or_else(|| panic!("no {needle}\n{text}"))
-        };
-        let columns = ["╭─a", "╭─b", "╭─c", "╭─d", "╭─e"].map(column_of);
         assert!(
-            columns.windows(2).all(|pair| pair[0] < pair[1]),
-            "{columns:?}\n{text}"
+            ['▸', '◂', '▴', '▾']
+                .iter()
+                .any(|arrow| text.contains(*arrow)),
+            "every hop lands on an arrowhead\n{text}"
         );
         assert!(
-            text.contains('▶'),
-            "every target should be entered from its left\n{text}"
+            text.contains("zoom 1.0x · overview"),
+            "the pane names its zoom tier\n{text}"
         );
     }
 
@@ -1225,9 +1233,8 @@ mod tests {
     fn j_k_wrap_the_candidate_hop_without_moving_the_camera() {
         let snapshot = fan_snapshot();
         let mut state = UiState::default();
-        let view = (10, 7);
-        pan_role_view((3, 0), &snapshot, &mut state, view);
-        let pan = state.role_pan;
+        state.role_cam.pan = (3, 0);
+        let pan = state.role_cam.pan;
         move_role_edge(1, &snapshot, &mut state);
         assert_eq!(
             highlighted_edge(&snapshot, &state).map(|edge| edge.to),
@@ -1250,7 +1257,7 @@ mod tests {
             Some("c".to_string()),
             "k steps back"
         );
-        assert_eq!(state.role_pan, pan, "the keys never move the camera");
+        assert_eq!(state.role_cam.pan, pan, "the keys never move the camera");
 
         select_role(&snapshot, &mut state, "c".into());
         move_role_edge(1, &snapshot, &mut state);
@@ -1258,36 +1265,51 @@ mod tests {
             state.role_edge, None,
             "a role without out-edges has no candidate"
         );
-        assert_eq!(state.role_pan, pan);
+        assert_eq!(state.role_cam.pan, pan);
     }
 
     #[test]
-    fn arrows_move_the_camera_not_the_selection() {
+    fn the_arrows_and_the_mouse_move_the_camera_not_the_selection() {
         let snapshot = fan_snapshot();
         let mut state = UiState::default();
         let selected = selected_role(&snapshot, &state);
-        let view = (10, 7);
+        let view = (60, 20);
         pan_role_view((1, 1), &snapshot, &mut state, view);
-        assert_eq!(state.role_pan, (1, 1));
+        assert_eq!(state.role_cam.pan, (1, 1));
         assert_eq!(
             selected_role(&snapshot, &state),
             selected,
             "the camera leaves the cursor alone"
         );
-        pan_role_view((100, 100), &snapshot, &mut state, view);
-        let world = role_map_world(
-            &snapshot,
-            state.active_only,
-            state.show_control_edges,
-            state.spacing,
+
+        pan_role_view((10_000, 10_000), &snapshot, &mut state, view);
+        let edge = state.role_cam.pan;
+        assert!(
+            edge.0 < 10_000 && edge.1 < 10_000,
+            "the camera stops at the map's edge: {edge:?}"
         );
-        assert_eq!(
-            state.role_pan,
-            (world.0 - view.0, world.1 - view.1),
-            "the camera stops at the world's edge"
+        pan_role_view((-10_000, -10_000), &snapshot, &mut state, view);
+        assert!(
+            state.role_cam.pan.0 < 0 && state.role_cam.pan.1 < 0,
+            "the map can be looked around from side to side: {:?}",
+            state.role_cam.pan
         );
-        pan_role_view((-100, -100), &snapshot, &mut state, view);
-        assert_eq!(state.role_pan, (0, 0));
+
+        // The wheel zooms in and out; a drag pans by the cells the pointer
+        // travelled, and `0` puts the camera back.
+        zoom_role_view(-1, &snapshot, &mut state, view);
+        assert!(state.role_cam.zoom > 1.0, "{:?}", state.role_cam);
+        zoom_role_view(1, &snapshot, &mut state, view);
+        assert!(
+            (state.role_cam.zoom - 1.0).abs() < 1e-6,
+            "{:?}",
+            state.role_cam
+        );
+        state.role_cam.pan = (0, 0);
+        drag_role_view((10, 5), (13, 4), &snapshot, &mut state, view);
+        assert_eq!(state.role_cam.pan, (3, -1), "{:?}", state.role_cam);
+        state.role_cam.reset();
+        assert_eq!(state.role_cam, Camera::default());
     }
 
     #[test]
