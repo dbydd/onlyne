@@ -704,7 +704,6 @@ pub fn canvas(
             .edge_paths
             .insert((edge.from.clone(), edge.to.clone()), path);
     }
-    erase_strays(&mut canvas);
     for (node, rect) in &placed {
         let (label, label_x) = draw_node(&mut canvas, node, *rect);
         canvas.node_boxes.push(NodeBox {
@@ -722,6 +721,7 @@ pub fn canvas(
             put_at(&mut canvas, cell, ch, kind);
         }
     }
+    erase_islands(&mut canvas, &obstacles);
     canvas
 }
 
@@ -1080,33 +1080,55 @@ fn turn(route: &[(isize, isize)], index: usize) -> char {
     }
 }
 
-/// A stroke cell with nothing beside it would float free of every box and
-/// lane; drop it, so each drawn cell either touches a border or lies on a run.
-/// Arrowheads stay: they are the point of the drawing.
-fn erase_strays(canvas: &mut Canvas) {
-    let mut stray = Vec::new();
+/// A stroke has to reach a border: when a candidate route dips through a box,
+/// its cells inside are skipped and the pieces on the far side can form a
+/// connected island that floats free of everything it was meant to join. Keep
+/// only strokes whose connected component touches a box border — an arrowhead
+/// does by construction — and blank the rest.
+fn erase_islands(canvas: &mut Canvas, boxes: &[Rect]) {
+    let mut visited = vec![vec![false; canvas.width]; canvas.height];
+    let mut queue: Vec<(usize, usize)> = Vec::new();
     for y in 0..canvas.height {
         for x in 0..canvas.width {
-            if !is_stroke(canvas.cells[y][x]) {
-                continue;
-            }
-            let linked = [
-                (x as isize - 1, y as isize),
-                (x as isize + 1, y as isize),
-                (x as isize, y as isize - 1),
-                (x as isize, y as isize + 1),
-            ]
-            .into_iter()
-            .any(|(nx, ny)| is_stroke(canvas.at(nx, ny)));
-            let arrow = matches!(canvas.cells[y][x].ch, '▸' | '◂' | '▴' | '▾');
-            if !linked && !arrow {
-                stray.push((x, y));
+            if is_stroke(canvas.cells[y][x]) && touches_box(boxes, (x as isize, y as isize)) {
+                visited[y][x] = true;
+                queue.push((x, y));
             }
         }
     }
-    for (x, y) in stray {
-        canvas.cells[y][x] = Cell::blank();
+    while let Some((x, y)) = queue.pop() {
+        for (nx, ny) in [
+            (x as isize - 1, y as isize),
+            (x as isize + 1, y as isize),
+            (x as isize, y as isize - 1),
+            (x as isize, y as isize + 1),
+        ] {
+            if !canvas.holds((nx, ny)) {
+                continue;
+            }
+            let (nx, ny) = (nx as usize, ny as usize);
+            if !visited[ny][nx] && is_stroke(canvas.cells[ny][nx]) {
+                visited[ny][nx] = true;
+                queue.push((nx, ny));
+            }
+        }
     }
+    for y in 0..canvas.height {
+        for x in 0..canvas.width {
+            if is_stroke(canvas.cells[y][x]) && !visited[y][x] {
+                canvas.cells[y][x] = Cell::blank();
+            }
+        }
+    }
+}
+
+/// Whether a cell sits beside a box: one of its four neighbours lies inside.
+fn touches_box(boxes: &[Rect], cell: (isize, isize)) -> bool {
+    let (x, y) = cell;
+    let around = [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)];
+    boxes
+        .iter()
+        .any(|rect| around.iter().any(|point| rect.contains(*point)))
 }
 
 fn is_stroke(cell: Cell) -> bool {
@@ -1196,6 +1218,59 @@ mod tests {
     fn drawn(map: &RoleMap, nodes: &[LayoutNode], edges: &[LayoutEdge], camera: Camera) -> Canvas {
         let anchor = map.anchor(None);
         canvas(map, nodes, edges, &camera, anchor, (120, 40))
+    }
+
+    /// Every drawn stroke must reach a box border through neighbouring
+    /// strokes: a route lane hidden inside a box may not leave its exit
+    /// fragment floating on the map. The tight view forces overlaps, so the
+    /// pruning is exercised and not merely present.
+    #[test]
+    fn no_stroke_drifts_free_of_every_border() {
+        let (nodes, edges) = ring();
+        let map = map_of(&nodes, &edges);
+        let anchor = map.anchor(None);
+        for view in [(120usize, 40usize), (56, 18)] {
+            let canvas = canvas(&map, &nodes, &edges, &Camera::default(), anchor, view);
+            let boxes: Vec<Rect> = canvas
+                .node_boxes
+                .iter()
+                .map(|b| Rect {
+                    x: b.x,
+                    y: b.y,
+                    w: b.w,
+                    h: b.h,
+                })
+                .collect();
+            let mut stroke = Vec::new();
+            for y in 0..canvas.height {
+                for x in 0..canvas.width {
+                    if is_stroke(canvas.cells[y][x]) {
+                        stroke.push((x as isize, y as isize));
+                    }
+                }
+            }
+            let mut live: Vec<(isize, isize)> = stroke
+                .iter()
+                .copied()
+                .filter(|cell| touches_box(&boxes, *cell))
+                .collect();
+            let mut seen = live.clone();
+            while let Some((x, y)) = live.pop() {
+                for cell in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                    if stroke.contains(&cell) && !seen.contains(&cell) {
+                        seen.push(cell);
+                        live.push(cell);
+                    }
+                }
+            }
+            for cell in &stroke {
+                assert!(
+                    seen.contains(cell),
+                    "stroke at {cell:?} floats free of every border in view {view:?}\n{}",
+                    canvas.text()
+                );
+            }
+        }
     }
 
     #[test]
