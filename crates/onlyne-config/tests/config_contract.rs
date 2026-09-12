@@ -495,6 +495,11 @@ role = "reviewer"
 key = "{KEY_C}"
 relay_required = ["writer"]
 relay_count = 3
+
+[[client]]
+role = "sweeper"
+key = "{KEY_C}"
+relay_required_count = 4
 "#
     ))
     .unwrap();
@@ -515,6 +520,17 @@ relay_count = 3
         Some(vec!["writer".to_string()])
     );
     assert_eq!(spec.client[2].relay_count, Some(3));
+
+    // The guard file's spelling is an accepted alias, and it lands on the same
+    // field the canonical writers use: a round trip re-emits `relay_count`, so
+    // one policy keeps one hash across the two vocabularies.
+    assert_eq!(spec.client[3].relay_count, Some(4));
+    let round = toml::Value::try_from(&spec.client[3]).unwrap();
+    let round_text = toml::to_string(&round).unwrap();
+    assert!(
+        round_text.contains("relay_count = 4") && !round_text.contains("relay_required_count"),
+        "{round_text}"
+    );
 
     // Absence is the v1 shape. A spec that never names the guard serializes no
     // relay key at all, so its canonical bytes — and with them its hash — are

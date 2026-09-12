@@ -100,8 +100,10 @@ pub struct ClientEntry {
     pub relay_required: Option<Vec<String>>,
     /// The count form of [`Self::relay_required`]: this many distinct
     /// downstream roles. A non-empty list wins when both keys are present, the
-    /// precedence the guard's own `relay.toml` already had.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// precedence the guard's own `relay.toml` already had. The spec also
+    /// accepts the guard file's own spelling `relay_required_count`, so the
+    /// two surfaces of one policy do not trade typos.
+    #[serde(default, alias = "relay_required_count", skip_serializing_if = "Option::is_none")]
     pub relay_count: Option<u32>,
 }
 
