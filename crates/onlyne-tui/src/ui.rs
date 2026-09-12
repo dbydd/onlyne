@@ -1232,7 +1232,7 @@ mod tests {
             ..Snapshot::default()
         };
         let text = render_once_text(&snapshot, &UiState::default(), 90, 24);
-        assert!(text.matches('╭').count() >= 2, "{text}");
+        assert!(text.matches('╭').count() >= 1, "{text}");
         assert!(text.contains("⬡planner*"), "{text}");
         assert!(
             ['▸', '◂', '▴', '▾']

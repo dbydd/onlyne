@@ -1044,13 +1044,20 @@ fn direction(from: (isize, isize), to: (isize, isize)) -> Dir {
 }
 
 /// The corner glyph where two runs meet, drawn in the same rounded style as
-/// the boxes.
+/// the boxes. An entry direction and an exit direction are not interchangeable:
+/// entering left then leaving south (`(Left,Down)`) is the mirror of entering
+/// south then leaving east (`(Down,Right)`), so each of the eight turns names
+/// its own corner.
 fn join(into: Dir, out: Dir) -> char {
     match (into, out) {
-        (Dir::Right, Dir::Down) | (Dir::Down, Dir::Left) => '╮',
-        (Dir::Right, Dir::Up) | (Dir::Up, Dir::Left) => '╯',
-        (Dir::Left, Dir::Down) | (Dir::Down, Dir::Right) => '╭',
-        (Dir::Left, Dir::Up) | (Dir::Up, Dir::Right) => '╰',
+        // Leave east and south: top-left corner.
+        (Dir::Left, Dir::Down) | (Dir::Up, Dir::Right) => '╭',
+        // Leave west and south: top-right corner.
+        (Dir::Right, Dir::Down) | (Dir::Up, Dir::Left) => '╮',
+        // Leave west and north: bottom-right corner.
+        (Dir::Down, Dir::Left) | (Dir::Right, Dir::Up) => '╯',
+        // Leave east and north: bottom-left corner.
+        (Dir::Down, Dir::Right) | (Dir::Left, Dir::Up) => '╰',
         _ => {
             if matches!(into, Dir::Left | Dir::Right) {
                 '─'
@@ -1073,6 +1080,12 @@ fn turn(route: &[(isize, isize)], index: usize) -> char {
             join(direction(previous, here), direction(here, next))
         }
         (Some(previous), _) => match direction(previous, here) {
+            Dir::Up | Dir::Down => '│',
+            Dir::Left | Dir::Right => '─',
+        },
+        // The start cell has one neighbour: the tick runs the way the route
+        // leaves the border, vertical included.
+        (None, Some(next)) => match direction(here, next) {
             Dir::Up | Dir::Down => '│',
             Dir::Left | Dir::Right => '─',
         },
@@ -1218,6 +1231,140 @@ mod tests {
     fn drawn(map: &RoleMap, nodes: &[LayoutNode], edges: &[LayoutEdge], camera: Camera) -> Canvas {
         let anchor = map.anchor(None);
         canvas(map, nodes, edges, &camera, anchor, (120, 40))
+    }
+
+    /// Each of the eight turns names the corner its arms actually form:
+    /// travel order matters, `(Left,Down)` and `(Down,Left)` connect opposite
+    /// pairs and must not share a glyph.
+    #[test]
+    fn the_eight_turns_name_their_real_corners() {
+        assert_eq!(join(Dir::Left, Dir::Down), '╭');
+        assert_eq!(join(Dir::Up, Dir::Right), '╭');
+        assert_eq!(join(Dir::Right, Dir::Down), '╮');
+        assert_eq!(join(Dir::Up, Dir::Left), '╮');
+        assert_eq!(join(Dir::Right, Dir::Up), '╯');
+        assert_eq!(join(Dir::Down, Dir::Left), '╯');
+        assert_eq!(join(Dir::Left, Dir::Up), '╰');
+        assert_eq!(join(Dir::Down, Dir::Right), '╰');
+        assert_ne!(join(Dir::Left, Dir::Down), join(Dir::Down, Dir::Left));
+        assert_ne!(join(Dir::Up, Dir::Right), join(Dir::Right, Dir::Up));
+        assert_eq!(join(Dir::Right, Dir::Right), '─');
+        assert_eq!(join(Dir::Down, Dir::Down), '│');
+    }
+
+    #[test]
+    fn a_route_start_ticks_in_its_own_direction() {
+        let vertical = vec![(5, 5), (5, 6), (5, 7)];
+        assert_eq!(turn(&vertical, 0), '│');
+        let horizontal = vec![(5, 5), (6, 5), (7, 5)];
+        assert_eq!(turn(&horizontal, 0), '─');
+    }
+
+    /// The ARIS research flywheel's live graph: five roles, eleven directed
+    /// hops, dense crossing. Every drawn corner is checked against the arms
+    /// its neighbours actually form — the geometry, not the lookup table, is
+    /// the oracle, so a mirrored table cannot pass by self-agreement.
+    fn aris_graph() -> (Vec<LayoutNode>, Vec<LayoutEdge>) {
+        let names = ["scout", "model", "bench", "writer", "critic"];
+        let nodes = names.iter().map(|name| node(name)).collect();
+        let hops: [(&str, &str); 11] = [
+            ("scout", "model"),
+            ("model", "bench"),
+            ("model", "writer"),
+            ("model", "scout"),
+            ("bench", "writer"),
+            ("bench", "scout"),
+            ("writer", "critic"),
+            ("writer", "scout"),
+            ("critic", "writer"),
+            ("critic", "model"),
+            ("critic", "scout"),
+        ];
+        let edges = hops
+            .iter()
+            .map(|(from, to)| hop(from, to, false))
+            .collect();
+        (nodes, edges)
+    }
+
+    /// Each stroke cell's neighbours say which arms it connects; the glyph
+    /// must be the corner or straight that those arms name. Cells where two
+    /// routes share one crossing cell (four arms) are exempt: the last writer
+    /// wins there by design, and arrows are the run's own endpoints.
+    #[test]
+    fn every_corner_matches_the_arms_around_it() {
+        let (nodes, edges) = aris_graph();
+        let map = map_of(&nodes, &edges);
+        let anchor = map.anchor(None);
+        let canvas = canvas(
+            &map,
+            &nodes,
+            &edges,
+            &Camera::default(),
+            anchor,
+            (120, 40),
+        );
+        let in_box = |cell: (isize, isize)| {
+            canvas.node_boxes.iter().any(|b| {
+                Rect {
+                    x: b.x,
+                    y: b.y,
+                    w: b.w,
+                    h: b.h,
+                }
+                .contains(cell)
+            })
+        };
+        let arm_present = |cell: (isize, isize), delta: (isize, isize)| {
+            let next = (cell.0 + delta.0, cell.1 + delta.1);
+            if in_box(next) {
+                return true;
+            }
+            let glyph = canvas.at(next.0, next.1).ch;
+            matches!(glyph, '╭' | '╮' | '╯' | '╰' | '─' | '│' | '▸' | '◂' | '▴' | '▾')
+        };
+        for y in 0..canvas.height {
+            for x in 0..canvas.width {
+                let cell = (x as isize, y as isize);
+                let glyph = canvas.cells[y][x].ch;
+                if !matches!(glyph, '╭' | '╮' | '╯' | '╰' | '─' | '│') {
+                    continue;
+                }
+                if !is_stroke(canvas.cells[y][x]) || in_box(cell) {
+                    continue;
+                }
+                let west = arm_present(cell, (-1, 0));
+                let east = arm_present(cell, (1, 0));
+                let north = arm_present(cell, (0, -1));
+                let south = arm_present(cell, (0, 1));
+                let arms = u8::from(west)
+                    | u8::from(east) << 1
+                    | u8::from(north) << 2
+                    | u8::from(south) << 3;
+                if matches!(arms, 0b1111 | 0b0000) {
+                    continue;
+                }
+                let expected = match arms {
+                    0b1010 => '╭', // east + south
+                    0b1001 => '╮', // west + south
+                    0b0101 => '╯', // west + north
+                    0b0110 => '╰', // east + north
+                    0b0011 => '─', // west + east
+                    0b1100 => '│', // north + south
+                    0b0001 | 0b0010 => '─', // single horizontal tick
+                    0b0100 | 0b1000 => '│', // single vertical tick
+                    _ => '╳',               // three-arm: never a legal corner
+                };
+                if expected == '╳' {
+                    continue;
+                }
+                assert_eq!(
+                    glyph, expected,
+                    "cell {cell:?} has arms w={west} e={east} n={north} s={south}, glyph {glyph:?}, expected {expected:?}\n{}",
+                    canvas.text()
+                );
+            }
+        }
     }
 
     /// Every drawn stroke must reach a box border through neighbouring
