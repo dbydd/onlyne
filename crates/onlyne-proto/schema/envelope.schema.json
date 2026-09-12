@@ -1,0 +1,372 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Envelope",
+  "description": "The single message shape for the whole system.",
+  "type": "object",
+  "required": [
+    "admin",
+    "body",
+    "from",
+    "id",
+    "kind",
+    "protocol",
+    "to",
+    "ts"
+  ],
+  "properties": {
+    "admin": {
+      "description": "Set when the sender holds `admin = true` in the spec.",
+      "type": "boolean"
+    },
+    "body": {
+      "$ref": "#/definitions/Body"
+    },
+    "causality": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Causality"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "control": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ControlOp"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "from": {
+      "$ref": "#/definitions/Principal"
+    },
+    "id": {
+      "description": "Sender-minted uuid v4.",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/definitions/MsgKind"
+    },
+    "op_id": {
+      "description": "Idempotency key: mandatory for Task, Completion, Control.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "protocol": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "to": {
+      "$ref": "#/definitions/Principal"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ttl_ms": {
+      "description": "Notes expire; a queued note past its deadline is settled `expired`.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "Body": {
+      "description": "Envelope payload: text plus at most one inline image.",
+      "type": "object",
+      "properties": {
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ImagePart"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Causality": {
+      "description": "Causality chain over one task family.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "description": "Redelivery count for this envelope.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "hop": {
+          "description": "Hop count from the root task.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "parent_task": {
+          "description": "The task that caused this one, when downstream.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reply_to": {
+          "description": "Envelope id being replied to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "description": "Task family id, uuid v4, minted when the work is created.",
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "ControlOp": {
+      "description": "A command over an existing task.",
+      "oneOf": [
+        {
+          "description": "Tear the session down and release its slot.",
+          "type": "object",
+          "required": [
+            "op",
+            "reason",
+            "task_id"
+          ],
+          "properties": {
+            "op": {
+              "type": "string",
+              "enum": [
+                "recycle"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Ask the owning client for a fresh probe of the resource.",
+          "type": "object",
+          "required": [
+            "op",
+            "task_id"
+          ],
+          "properties": {
+            "op": {
+              "type": "string",
+              "enum": [
+                "probe"
+              ]
+            },
+            "task_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Ask for the full lifecycle projection right now.",
+          "type": "object",
+          "required": [
+            "op",
+            "task_id"
+          ],
+          "properties": {
+            "op": {
+              "type": "string",
+              "enum": [
+                "snapshot"
+              ]
+            },
+            "task_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Abandon the task and settle it as cancelled.",
+          "type": "object",
+          "required": [
+            "op",
+            "reason",
+            "task_id"
+          ],
+          "properties": {
+            "op": {
+              "type": "string",
+              "enum": [
+                "cancel"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "ImagePart": {
+      "description": "One inline image, carried base64 inside the envelope.",
+      "type": "object",
+      "properties": {
+        "data_base64": {
+          "default": "",
+          "type": "string"
+        },
+        "mime": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "MsgKind": {
+      "description": "Delivery intent and queueing class (decision D11, D10).",
+      "oneOf": [
+        {
+          "description": "Hand work to a role, creating or reusing a session.",
+          "type": "string",
+          "enum": [
+            "task"
+          ]
+        },
+        {
+          "description": "Terminal receipt for a task.",
+          "type": "string",
+          "enum": [
+            "completion"
+          ]
+        },
+        {
+          "description": "Free text. Never queued, never creates a session.",
+          "type": "string",
+          "enum": [
+            "note"
+          ]
+        },
+        {
+          "description": "Lifecycle command over a task: recycle, probe, snapshot, cancel.",
+          "type": "string",
+          "enum": [
+            "control"
+          ]
+        }
+      ]
+    },
+    "Principal": {
+      "description": "Process-local identity of a message sender.",
+      "oneOf": [
+        {
+          "description": "A role in the cluster, optionally narrowed to one of its sessions.",
+          "type": "object",
+          "required": [
+            "role"
+          ],
+          "properties": {
+            "role": {
+              "type": "object",
+              "required": [
+                "role"
+              ],
+              "properties": {
+                "role": {
+                  "type": "string"
+                },
+                "session": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "An external IM conversation reached through a gateway.",
+          "type": "object",
+          "required": [
+            "gateway"
+          ],
+          "properties": {
+            "gateway": {
+              "type": "object",
+              "required": [
+                "channel",
+                "gateway"
+              ],
+              "properties": {
+                "channel": {
+                  "type": "string"
+                },
+                "conversation": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "gateway": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "A subordinate cluster, used by admin and aggregate reporting only.",
+          "type": "object",
+          "required": [
+            "cluster"
+          ],
+          "properties": {
+            "cluster": {
+              "type": "object",
+              "required": [
+                "cluster"
+              ],
+              "properties": {
+                "cluster": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

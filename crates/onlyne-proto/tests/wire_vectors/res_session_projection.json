@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"res\",\"id\":\"r1\",\"ok\":true,\"data\":{\"agent\":\"gone\",\"delivery\":\"accepted\",\"lifecycle\":\"exited\",\"observed\":{\"state\":\"closed\"},\"outcome\":\"done\",\"recovery\":\"none\",\"resource\":\"closed\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "a finished session projects public_lifecycle exited with outcome done"
+}

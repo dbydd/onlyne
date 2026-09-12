@@ -1,0 +1,27 @@
+{
+  "name": "pi-onlyne",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Onlyne agent adapter for pi: the session lifecycle an onlyne role client expects from a pi host.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "onlyne",
+    "adapter",
+    "extension"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test src/*.test.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}

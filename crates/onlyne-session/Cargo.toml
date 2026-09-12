@@ -1,0 +1,19 @@
+[package]
+name = "onlyne-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onlyne v1 session kernel: lifecycle reducer, session backends, persistence bridge"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = { workspace = true }

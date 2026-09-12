@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"res\",\"id\":\"r1\",\"ok\":false,\"error\":{\"code\":\"bad_frame\",\"message\":\"refused\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "error code bad_frame spells exactly bad_frame on the wire; retryable=false"
+}

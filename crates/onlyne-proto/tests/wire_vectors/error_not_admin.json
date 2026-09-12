@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"res\",\"id\":\"r1\",\"ok\":false,\"error\":{\"code\":\"not_admin\",\"message\":\"refused\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "error code not_admin spells exactly not_admin on the wire; retryable=false"
+}

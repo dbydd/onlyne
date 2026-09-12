@@ -1,0 +1,39 @@
+[package]
+name = "onlyne-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onlyne v1 client: role runtime, dispatch, intent, adapter socket"
+
+[dependencies]
+onlyne-frame = { path = "../onlyne-frame" }
+onlyne-proto = { path = "../onlyne-proto" }
+onlyne-session = { path = "../onlyne-session" }
+onlyne-store = { path = "../onlyne-store" }
+onlyne-config = { path = "../onlyne-config" }
+onlyne-layout = { path = "../onlyne-layout" }
+onlyne-adapter = { path = "../onlyne-adapter" }
+onlyne-net = { path = "../onlyne-net" }
+anyhow = "1.0"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "rand_core"] }
+rand = "0.8"
+rusqlite = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "sync", "time", "process"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { workspace = true }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+parking_lot = "0.12"
+tar = "0.4"
+flate2 = "1.0"
+
+[dev-dependencies]
+onlyne-testkit = { path = "../onlyne-testkit" }
+tempfile = "3.0"

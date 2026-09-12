@@ -1,0 +1,1638 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AdapterMsg",
+  "description": "Anything crossing an adapter socket in either direction.\n\nRequests carry an `op`; replies carry `ok`. The variants are tried in this order and their `op` vocabularies are disjoint.",
+  "anyOf": [
+    {
+      "$ref": "#/definitions/PluginOp"
+    },
+    {
+      "$ref": "#/definitions/HostOp"
+    },
+    {
+      "$ref": "#/definitions/ResBody"
+    }
+  ],
+  "definitions": {
+    "AgentMount": {
+      "description": "Where an agent plugin attaches itself within the role.",
+      "type": "object",
+      "required": [
+        "role"
+      ],
+      "properties": {
+        "pid": {
+          "description": "Process id, used for probe cross-checks on the local machine.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "role": {
+          "type": "string"
+        },
+        "session": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "AssignAckArgs": {
+      "description": "`assign_ack`: whether the plugin took the payload.",
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "default": false,
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "AssignArgs": {
+      "description": "`assign` payload: the envelope plus the role prose that frames it.",
+      "type": "object",
+      "required": [
+        "envelope",
+        "generation",
+        "prose",
+        "task_id"
+      ],
+      "properties": {
+        "envelope": {
+          "$ref": "#/definitions/Envelope"
+        },
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "parent": {
+          "description": "Envelope of the task that caused this one, when downstream.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Envelope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prose": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        }
+      }
+    },
+    "Body": {
+      "description": "Envelope payload: text plus at most one inline image.",
+      "type": "object",
+      "properties": {
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ImagePart"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ByeNotice": {
+      "description": "`bye` from a host.",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "Capability": {
+      "description": "Optional plugin abilities. Absence of an entry is a declared gap: the host degrades and records a fault rather than assuming support.",
+      "oneOf": [
+        {
+          "description": "Bind a live process to a task via `session_register`.",
+          "type": "string",
+          "enum": [
+            "register"
+          ]
+        },
+        {
+          "description": "Push lifecycle `report` frames.",
+          "type": "string",
+          "enum": [
+            "report"
+          ]
+        },
+        {
+          "description": "Accept an injected payload through `assign`.",
+          "type": "string",
+          "enum": [
+            "inject"
+          ]
+        },
+        {
+          "description": "Honour `recycle` by tearing its own process down.",
+          "type": "string",
+          "enum": [
+            "recycle"
+          ]
+        },
+        {
+          "description": "Answer `probe` with a fresh observation.",
+          "type": "string",
+          "enum": [
+            "probe"
+          ]
+        },
+        {
+          "description": "Emit `typing` indicators on the platform.",
+          "type": "string",
+          "enum": [
+            "typing"
+          ]
+        },
+        {
+          "description": "Enumerate real conversations during `register_channel`.",
+          "type": "string",
+          "enum": [
+            "conversations"
+          ]
+        }
+      ]
+    },
+    "Causality": {
+      "description": "Causality chain over one task family.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "description": "Redelivery count for this envelope.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "hop": {
+          "description": "Hop count from the root task.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "parent_task": {
+          "description": "The task that caused this one, when downstream.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reply_to": {
+          "description": "Envelope id being replied to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "description": "Task family id, uuid v4, minted when the work is created.",
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "ClusterMount": {
+      "description": "Where a sub-cluster's supervisor claims it speaks for another cluster.",
+      "type": "object",
+      "required": [
+        "cluster",
+        "role"
+      ],
+      "properties": {
+        "cluster": {
+          "type": "string"
+        },
+        "role": {
+          "description": "The aggregate role name registered in the parent spec.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConfigGetArgs": {
+      "description": "`config_get`: dotted key into the role's local config.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "ControlOp": {
+      "description": "A command over an existing task.",
+      "oneOf": [
+        {
+          "description": "Tear the session down and release its slot.",
+          "type": "object",
+          "required": [
+            "op",
+            "reason",
+            "task_id"
+          ],
+          "properties": {
+            "op": {
+              "type": "string",
+              "enum": [
+                "recycle"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Ask the owning client for a fresh probe of the resource.",
+          "type": "object",
+          "required": [
+            "op",
+            "task_id"
+          ],
+          "properties": {
+            "op": {
+              "type": "string",
+              "enum": [
+                "probe"
+              ]
+            },
+            "task_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Ask for the full lifecycle projection right now.",
+          "type": "object",
+          "required": [
+            "op",
+            "task_id"
+          ],
+          "properties": {
+            "op": {
+              "type": "string",
+              "enum": [
+                "snapshot"
+              ]
+            },
+            "task_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Abandon the task and settle it as cancelled.",
+          "type": "object",
+          "required": [
+            "op",
+            "reason",
+            "task_id"
+          ],
+          "properties": {
+            "op": {
+              "type": "string",
+              "enum": [
+                "cancel"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "ConversationInfo": {
+      "description": "One externally addressable conversation.",
+      "type": "object",
+      "properties": {
+        "conversation": {
+          "default": "",
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Delivery": {
+      "description": "One delivered envelope plus its ledger handle.",
+      "type": "object",
+      "required": [
+        "envelope",
+        "msg_id"
+      ],
+      "properties": {
+        "envelope": {
+          "$ref": "#/definitions/Envelope"
+        },
+        "msg_id": {
+          "type": "string"
+        }
+      }
+    },
+    "DetachArgs": {
+      "description": "`detach`: the plugin leaves; the reason is recorded verbatim.",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "Envelope": {
+      "description": "The single message shape for the whole system.",
+      "type": "object",
+      "required": [
+        "admin",
+        "body",
+        "from",
+        "id",
+        "kind",
+        "protocol",
+        "to",
+        "ts"
+      ],
+      "properties": {
+        "admin": {
+          "description": "Set when the sender holds `admin = true` in the spec.",
+          "type": "boolean"
+        },
+        "body": {
+          "$ref": "#/definitions/Body"
+        },
+        "causality": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Causality"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "control": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ControlOp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "from": {
+          "$ref": "#/definitions/Principal"
+        },
+        "id": {
+          "description": "Sender-minted uuid v4.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/MsgKind"
+        },
+        "op_id": {
+          "description": "Idempotency key: mandatory for Task, Completion, Control.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocol": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "to": {
+          "$ref": "#/definitions/Principal"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ttl_ms": {
+          "description": "Notes expire; a queued note past its deadline is settled `expired`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ErrorCode": {
+      "description": "The complete set of wire error codes, all lowercase with underscores.",
+      "oneOf": [
+        {
+          "description": "A field or argument failed a protocol rule.",
+          "type": "string",
+          "enum": [
+            "invalid"
+          ]
+        },
+        {
+          "description": "The `op` name is unknown to this connection's vocabulary.",
+          "type": "string",
+          "enum": [
+            "unknown_op"
+          ]
+        },
+        {
+          "description": "The spec forbids this sender for this target and kind.",
+          "type": "string",
+          "enum": [
+            "acl_denied"
+          ]
+        },
+        {
+          "description": "No role by that name exists in the spec.",
+          "type": "string",
+          "enum": [
+            "unknown_role"
+          ]
+        },
+        {
+          "description": "The recipient's client is not connected and the kind cannot queue.",
+          "type": "string",
+          "enum": [
+            "recipient_offline"
+          ]
+        },
+        {
+          "description": "This `op_id` was already accepted with an identical fingerprint.",
+          "type": "string",
+          "enum": [
+            "duplicate"
+          ]
+        },
+        {
+          "description": "This `op_id` was already accepted with a different fingerprint.",
+          "type": "string",
+          "enum": [
+            "conflict"
+          ]
+        },
+        {
+          "description": "Handshake identity failed: unregistered key or bad signature.",
+          "type": "string",
+          "enum": [
+            "unauthorized"
+          ]
+        },
+        {
+          "description": "Connected and registered, yet forbidden from this action.",
+          "type": "string",
+          "enum": [
+            "forbidden"
+          ]
+        },
+        {
+          "description": "The action needs `admin = true` in the spec.",
+          "type": "string",
+          "enum": [
+            "not_admin"
+          ]
+        },
+        {
+          "description": "A frame exceeded the negotiated byte ceiling.",
+          "type": "string",
+          "enum": [
+            "frame_too_large"
+          ]
+        },
+        {
+          "description": "A frame failed to decode.",
+          "type": "string",
+          "enum": [
+            "bad_frame"
+          ]
+        },
+        {
+          "description": "Protocol revision outside the accepted range.",
+          "type": "string",
+          "enum": [
+            "protocol_version"
+          ]
+        },
+        {
+          "description": "Ledger or runtime failure inside the daemon.",
+          "type": "string",
+          "enum": [
+            "internal"
+          ]
+        }
+      ]
+    },
+    "ErrorPayload": {
+      "description": "A wire error: closed code, human message, optional offending field.",
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "field": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "GatewayMount": {
+      "description": "Gateway-side mount data carried in the same `hello` frame.",
+      "type": "object",
+      "required": [
+        "gateway",
+        "platform"
+      ],
+      "properties": {
+        "gateway": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "HealthArgs": {
+      "description": "Gateway health report.",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "`online`, `reconnecting`, `failed`.",
+          "default": "",
+          "type": "string"
+        },
+        "uptime_s": {
+          "description": "Seconds since the gateway process started.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "HelloAck": {
+      "description": "Everything the host answers a successful `hello` with (§5, §7).",
+      "type": "object",
+      "required": [
+        "generation",
+        "host_capabilities",
+        "prose",
+        "protocol",
+        "role",
+        "server"
+      ],
+      "properties": {
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "host_capabilities": {
+          "description": "Capabilities the host itself will exercise against this plugin.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Capability"
+          }
+        },
+        "prose": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "role": {
+          "description": "The role this connection is bound to.",
+          "type": "string"
+        },
+        "server": {
+          "$ref": "#/definitions/ServerInfo"
+        },
+        "session_id": {
+          "description": "Session id assigned or confirmed by the host.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "HelloArgs": {
+      "description": "`hello` arguments from any adapter connection.",
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Capability"
+          }
+        },
+        "kind": {
+          "default": "agent",
+          "allOf": [
+            {
+              "$ref": "#/definitions/MountKind"
+            }
+          ]
+        },
+        "mount": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Mount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plugin": {
+          "description": "Plugin or process name, e.g. `onlyne-agent-pi`.",
+          "default": "",
+          "type": "string"
+        },
+        "protocol": {
+          "default": 0,
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "version": {
+          "description": "Its own semver, recorded for fault triage.",
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "HostOp": {
+      "description": "Host frames, in the direction host to plugin.",
+      "oneOf": [
+        {
+          "description": "Answer to `hello`, carrying the role's spec slice.",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/HelloAck"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "welcome"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Hand this payload to the agent for the task.",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/AssignArgs"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "assign"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Render and send this envelope on the platform (gateway mounts).",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/RenderSendArgs"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "render_send"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Ask for a fresh observation right now.",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": true,
+            "op": {
+              "type": "string",
+              "enum": [
+                "probe"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Tear the session down and release its slot.",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/RecycleArgs"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "recycle"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Read one host config key.",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/ConfigGetArgs"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "config_get"
+              ]
+            }
+          }
+        },
+        {
+          "description": "The host is going away.",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/ByeNotice"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "bye"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ImagePart": {
+      "description": "One inline image, carried base64 inside the envelope.",
+      "type": "object",
+      "properties": {
+        "data_base64": {
+          "default": "",
+          "type": "string"
+        },
+        "mime": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Mount": {
+      "description": "Plugin and gateway mount data, discriminated by [`MountKind`].\n\nThe mount names the configured instance the connection serves, and that is the identity the ACL and the routing use: `gateway` holds a `[[gateway]]` id and `role` holds a spec role name, both taken from the server's spec, because one plugin crate can back several configured instances with their own credentials, channels, and `[[route]]` bindings.\n\nThe program name travels in its own field. `HelloArgs::plugin` on this surface and `HandshakeArgs::agent` on a role connection name the crate that connected, which is the thing a protocol or version mismatch is about. Deriving the instance from the program would collapse the several-instances case.\n\nThe enum is untagged, so the wire form is the plan's own `hello` example at §7 line 298 — `\"mount\":{\"role\":\"planner\",\"session\":\"8b1c...\"}` — with `kind` beside it in the same args object rather than nested under a tag.\n\nUntagged matching is first-match-wins, so the variant order below is the disambiguation rule: `Agent`, then `Gateway`, then `Cluster`, then `Admin`. Each payload denies unknown fields, and that guard is what makes the order safe to read rather than a silent mis-decode: `AgentMount` and `ClusterMount` both carry `role`, so without it a cluster mount would decode as an agent mount. A new field belongs to the earliest variant that owns it, and making one collide with an earlier variant's set is a wire change this list must be updated for.\n\nA bare `Admin` mount serializes as JSON `null`; the sibling `kind` field is what identifies it.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AgentMount"
+        },
+        {
+          "$ref": "#/definitions/GatewayMount"
+        },
+        {
+          "$ref": "#/definitions/ClusterMount"
+        },
+        {
+          "description": "Admin tooling needs no mount data.",
+          "type": "null"
+        }
+      ]
+    },
+    "MountKind": {
+      "description": "Which side of the split a process mounts on.",
+      "oneOf": [
+        {
+          "description": "Agent plugin on a role client socket.",
+          "type": "string",
+          "enum": [
+            "agent"
+          ]
+        },
+        {
+          "description": "Platform gateway on the server socket.",
+          "type": "string",
+          "enum": [
+            "gateway"
+          ]
+        },
+        {
+          "description": "Local operator tooling on the server socket.",
+          "type": "string",
+          "enum": [
+            "admin"
+          ]
+        }
+      ]
+    },
+    "MsgKind": {
+      "description": "Delivery intent and queueing class (decision D11, D10).",
+      "oneOf": [
+        {
+          "description": "Hand work to a role, creating or reusing a session.",
+          "type": "string",
+          "enum": [
+            "task"
+          ]
+        },
+        {
+          "description": "Terminal receipt for a task.",
+          "type": "string",
+          "enum": [
+            "completion"
+          ]
+        },
+        {
+          "description": "Free text. Never queued, never creates a session.",
+          "type": "string",
+          "enum": [
+            "note"
+          ]
+        },
+        {
+          "description": "Lifecycle command over a task: recycle, probe, snapshot, cancel.",
+          "type": "string",
+          "enum": [
+            "control"
+          ]
+        }
+      ]
+    },
+    "Outcome": {
+      "description": "Task result dimension.",
+      "type": "string",
+      "enum": [
+        "done",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "PluginOp": {
+      "description": "Plugin and gateway frames, in the direction plugin to host.",
+      "oneOf": [
+        {
+          "description": "First frame on the connection.",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/HelloArgs"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "hello"
+              ]
+            }
+          }
+        },
+        {
+          "description": "A lifecycle observation for the reducer (§6).",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/Report"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "report"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Bind this process to a task and session.",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/SessionRegisterArgs"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "session_register"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Answer to [`HostOp::Assign`].",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/AssignAckArgs"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "assign_ack"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Submit an envelope for routing.",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/Envelope"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "send"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Inbound platform event (gateway mounts only).",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/Delivery"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "deliver"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Channel and conversation declarations (gateway mounts only).",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/RegisterChannelArgs"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "register_channel"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Platform health (gateway mounts only).",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/HealthArgs"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "health"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Typing indicator for one conversation (gateway mounts only).",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/TypingArgs"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "typing"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Stop receiving work; the plugin is leaving while its session continues.",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/DetachArgs"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "detach"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Principal": {
+      "description": "Process-local identity of a message sender.",
+      "oneOf": [
+        {
+          "description": "A role in the cluster, optionally narrowed to one of its sessions.",
+          "type": "object",
+          "required": [
+            "role"
+          ],
+          "properties": {
+            "role": {
+              "type": "object",
+              "required": [
+                "role"
+              ],
+              "properties": {
+                "role": {
+                  "type": "string"
+                },
+                "session": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "An external IM conversation reached through a gateway.",
+          "type": "object",
+          "required": [
+            "gateway"
+          ],
+          "properties": {
+            "gateway": {
+              "type": "object",
+              "required": [
+                "channel",
+                "gateway"
+              ],
+              "properties": {
+                "channel": {
+                  "type": "string"
+                },
+                "conversation": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "gateway": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "A subordinate cluster, used by admin and aggregate reporting only.",
+          "type": "object",
+          "required": [
+            "cluster"
+          ],
+          "properties": {
+            "cluster": {
+              "type": "object",
+              "required": [
+                "cluster"
+              ],
+              "properties": {
+                "cluster": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "RecycleArgs": {
+      "description": "`recycle`: reason is mandatory so the ledger records the decision.",
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "description": "Settle the task with this outcome once the resource is gone.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Outcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "default": "",
+          "type": "string"
+        },
+        "task_id": {
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "RegisterChannelArgs": {
+      "description": "Channel declarations plus the optional conversation list.",
+      "type": "object",
+      "properties": {
+        "channel": {
+          "default": "",
+          "type": "string"
+        },
+        "conversations": {
+          "description": "Absent when the platform cannot enumerate conversations (§10.3).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/ConversationInfo"
+          }
+        },
+        "platform": {
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "RenderSendArgs": {
+      "description": "`render_send`: one envelope for the platform, plus the local correlation the gateway needs to answer it later.",
+      "type": "object",
+      "required": [
+        "conversation",
+        "envelope"
+      ],
+      "properties": {
+        "conversation": {
+          "description": "Platform target the gateway must address.",
+          "type": "string"
+        },
+        "envelope": {
+          "$ref": "#/definitions/Envelope"
+        },
+        "gateway_ref": {
+          "description": "Opaque handle stored in the gateway's own table (§10.3).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reply_to": {
+          "description": "Platform-side id of the message being replied to, opaque to the host and decoded by the plugin that minted it. §7 line 304 is the inbound `deliver` frame whose envelope's `causality.reply_to` is the only place the id can travel, and the host copies it out while rendering, so a plugin never parses an envelope to thread a reply. Pairs with [`Self::gateway_ref`], which names the conversation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Report": {
+      "description": "The report envelope kinds a client pushes (§6, §7).\n\n`cluster_ref` names the origin cluster on a relayed report, so a federated projection can say where it came from. Only the three state-carrying kinds hold it: `Fault` carries no projection, and a ninth optional field there would push `Report` and `ClientOp` from 192 to 224 bytes on the hot path.",
+      "oneOf": [
+        {
+          "description": "The ready barrier passed; the server may now deliver the payload.",
+          "type": "object",
+          "required": [
+            "data",
+            "kind"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "generation",
+                "seq",
+                "session_id",
+                "task_id"
+              ],
+              "properties": {
+                "cluster_ref": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "generation": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "seq": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "session_id": {
+                  "type": "string"
+                },
+                "task_id": {
+                  "type": "string"
+                }
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "ready"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Liveness plus the reducer's own view of the world.",
+          "type": "object",
+          "required": [
+            "data",
+            "kind"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "generation",
+                "observed",
+                "seq",
+                "task_id"
+              ],
+              "properties": {
+                "cluster_ref": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "generation": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "observed": true,
+                "seq": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "task_id": {
+                  "type": "string"
+                }
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "heartbeat"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Terminal result for a task; `head` is the summary the ledger keeps.",
+          "type": "object",
+          "required": [
+            "data",
+            "kind"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "outcome",
+                "task_id"
+              ],
+              "properties": {
+                "cluster_ref": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "head": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "outcome": {
+                  "$ref": "#/definitions/Outcome"
+                },
+                "reply_to": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "task_id": {
+                  "type": "string"
+                }
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "complete"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Something needs a supervisor decision. The server records and forwards.",
+          "type": "object",
+          "required": [
+            "data",
+            "kind"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "properties": {
+                "desired": true,
+                "generation": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "observed": true,
+                "reason": {
+                  "type": "string"
+                },
+                "seq": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
+                "session_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "task_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "fault"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ResBody": {
+      "description": "The response body carried by [`Frame::Res`].\n\n`ok = true` carries `data` and `ok = false` carries `error`, and neither may omit its own half. The one pair is the duplicate `op_id` replay: `ok = false` with an `error` naming `duplicate` and the replayed receipt in `data`, which is the shape `docs/v1-PLAN.md` case 3 at line 502 compares byte for byte.",
+      "type": "object",
+      "required": [
+        "ok"
+      ],
+      "properties": {
+        "data": true,
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ErrorPayload"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ServerInfo": {
+      "description": "Cluster identity handed out at handshake.",
+      "type": "object",
+      "properties": {
+        "cluster": {
+          "default": "",
+          "type": "string"
+        },
+        "connected": {
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "SessionRegisterArgs": {
+      "description": "`session_register`: bind a live process to a task.",
+      "type": "object",
+      "properties": {
+        "generation": {
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "pid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "session_id": {
+          "default": "",
+          "type": "string"
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "TypingArgs": {
+      "description": "`typing`: platform typing indicator for one conversation. `on` starts the indicator and `false` stops it, which is the pair a platform API exposes.",
+      "type": "object",
+      "properties": {
+        "conversation": {
+          "default": "",
+          "type": "string"
+        },
+        "on": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"ev\",\"seq\":41,\"type\":\"spec_reloaded\",\"data\":{\"spec_hash\":\"abc123\",\"roles\":3,\"gateways\":1,\"routes\":2}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "spec_reloaded reports the new spec hash and its counts"
+}

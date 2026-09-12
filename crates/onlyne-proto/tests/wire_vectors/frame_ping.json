@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"ping\",\"t\":1789000000}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "ping carries the sender clock so the peer can answer"
+}

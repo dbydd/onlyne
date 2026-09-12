@@ -1,0 +1,62 @@
+[package]
+name = "onlyne-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onlyne v1 gateway host: platform adapters, one process per platform"
+
+[features]
+default = ["telegram", "feishu", "qqbot", "weixin"]
+telegram = ["dep:onlyne-gateway-telegram"]
+feishu = ["dep:onlyne-gateway-feishu"]
+qqbot = ["dep:onlyne-gateway-qqbot"]
+weixin = ["dep:onlyne-gateway-weixin"]
+
+[dependencies]
+aes-gcm = "0.10"
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+onlyne-adapter = { path = "../onlyne-adapter", version = "1.0.0" }
+onlyne-config = { path = "../onlyne-config", version = "1.0.0" }
+onlyne-net = { path = "../onlyne-net", version = "1.0.0" }
+onlyne-proto = { path = "../onlyne-proto", version = "1.0.0" }
+pulldown-cmark = "0.12"
+qrcode = { version = "0.14", default-features = false }
+rusqlite = { version = "0.32", features = ["bundled"] }
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "macros", "net", "process", "rt-multi-thread", "time"] }
+unicode-display-width = "0.2"
+
+[dependencies.onlyne-gateway-telegram]
+package = "onlyne-gateway-telegram"
+path = "../../plugins/onlyne-gateway-telegram"
+version = "1.0.0"
+optional = true
+
+[dependencies.onlyne-gateway-feishu]
+package = "onlyne-gateway-feishu"
+path = "../../plugins/onlyne-gateway-feishu"
+version = "1.0.0"
+optional = true
+
+[dependencies.onlyne-gateway-qqbot]
+package = "onlyne-gateway-qqbot"
+path = "../../plugins/onlyne-gateway-qqbot"
+version = "1.0.0"
+optional = true
+
+[dependencies.onlyne-gateway-weixin]
+package = "onlyne-gateway-weixin"
+path = "../../plugins/onlyne-gateway-weixin"
+version = "1.0.0"
+optional = true
+
+[dev-dependencies]
+tempfile = "3"

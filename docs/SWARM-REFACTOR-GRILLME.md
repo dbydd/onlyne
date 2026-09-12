@@ -1,3 +1,5 @@
+This file documents the pre-plan design discussion. `docs/v1-PLAN.md` is the settled spec. The file stays for provenance.
+
 # Swarm 生命周期重构 Grillme 实施细则
 
 ## 1. 目标与边界

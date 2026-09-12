@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"res\",\"id\":\"r1\",\"ok\":false,\"error\":{\"code\":\"invalid\",\"message\":\"causality is required for kind control\",\"field\":\"causality\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "a control envelope with causality null is refused by Envelope::validate() with field causality and this exact line, which onlyne-proto/src/text.rs indexes"
+}

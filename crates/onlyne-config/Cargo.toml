@@ -1,0 +1,19 @@
+[package]
+name = "onlyne-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onlyne v1 cluster spec and client config: strict TOML parsing, validation, reload diffs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+toml = { version = "0.8" }
+schemars = { version = "0.8" }
+sha2 = { version = "0.10" }
+base64 = { version = "0.22" }
+
+[dev-dependencies]
+tempfile = { version = "3" }

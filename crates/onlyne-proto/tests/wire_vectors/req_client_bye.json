@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"bye\",\"args\":{\"reason\":\"shutdown\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "client bye announces an ordered shutdown with an optional drain window"
+}

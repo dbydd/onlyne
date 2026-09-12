@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"register_channel\",\"args\":{\"platform\":\"telegram\",\"channel\":\"telegram\",\"conversations\":[{\"conversation\":\"1234\",\"title\":\"ops\"}]}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "gateway register_channel declares platform channels and the conversations it can enumerate"
+}

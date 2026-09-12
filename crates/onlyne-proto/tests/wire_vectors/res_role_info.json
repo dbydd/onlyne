@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"res\",\"id\":\"r1\",\"ok\":true,\"data\":{\"admin\":false,\"detail\":\"draining one session\",\"edges\":[\"builder\"],\"max_sessions\":3,\"name\":\"planner\",\"prose\":\"Read the incoming task\",\"sessions\":2,\"spec_hash\":\"abc123\",\"state\":\"draining\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "roles answers one row per registered role carrying prose, spec_hash, the entry's allowed_targets verbatim as edges, and presence; a plain role carries no aggregate key"
+}

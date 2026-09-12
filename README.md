@@ -1,188 +1,153 @@
 # Onlyne
 
-Onlyne is a small Rust daemon for local IM channel brokering. It gives local agents a thin, workspace-local way to send, receive, subscribe to, and browse messages across chat platforms.
+**Message plumbing for coding-agent teams, running on your own machines.**
 
-中文说明见 [README.zh-CN.md](README.zh-CN.md).
+Onlyne ties a fleet of coding agents into one working cluster. A **server** routes every message between agent roles, and records each delivery in a durable ledger. A **client** per workspace runs that role's coding-agent sessions. **Gateway** processes turn Telegram / Feishu / QQ / WeChat chats into the same message model. Your agents keep their own runtimes; Onlyne gives them hands that reach each other, plus a paper trail you can audit. The cluster spans machines: a client reaches the server over TLS from anywhere, a generated workspace relocates with a plain `mv`, and clusters nest into larger clusters.
 
-## What it is
+![version](https://img.shields.io/badge/version-v1.0.0--beta.4-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux-supported-lightgrey)
+![Onlyne — a supervisor dispatches a ten-hop ring task to five pi agents; ledger receipts settle every hop](assets/promo/onlyne-hero.png)
 
-- Workspace-local: the active workspace is the nearest parent directory with `.onlyne/`; each workspace owns its own config, state, socket, logs, and cache.
-- CLI-first: run it in the foreground, wrap it with a supervisor, or use stdio mode from another process.
-- Local IPC: newline-delimited JSON over Unix socket or stdio.
-- Multi-channel: Telegram, Feishu/Lark, QQ Bot, and WeChat ilink adapters.
-- Lightweight history: local SQLite state and message history.
-- Event stream: local clients can subscribe to inbound/outbound and adapter events.
-
-Onlyne is not an agent runtime, model runner, scheduler, web dashboard, or prompt/memory system.
-
-## Install
-
-The `onlyne` binary is published on [crates.io](https://crates.io/crates/onlyne):
+## See it run
 
 ```bash
-cargo install onlyne
+cargo build --workspace
+cd examples/supervisor && ./run.py up
 ```
 
-Or build from source:
-
-```bash
-cargo build --release
-```
-
-Use the built binary at `target/release/onlyne`, or run from source with `cargo run --`.
-
-## Runtime requirements
-
-- macOS or Linux with Unix domain socket support
-- Rust 1.85 or newer for source builds
-- Network access for enabled adapters
-- Workspace credentials stored in `.onlyne/.env` or adapter-specific files
-- A supervisor such as launchd or systemd when running the daemon detached
-
-Onlyne bundles SQLite and Rust TLS support, so a separate database service and system TLS installation are unnecessary.
-
-## Release and source builds
-
-The published crate includes the daemon binary and its adapter implementations:
-
-```bash
-cargo install onlyne --locked
-onlyne --version
-```
-
-The repository build uses the same package metadata as crates.io:
-
-```bash
-cargo build --release
-cargo test
-cargo publish --dry-run
-```
-
-The `onlyne-swarm` scheduler is released as a separate crate from its [独立仓库](https://github.com/dbydd/onlyne-swarm). The Pi integration is released as the [`pi-onlyne`](https://www.npmjs.com/package/pi-onlyne) npm package.
-
-
-## Quick start
-
-```bash
-onlyne init
-# Optional: export/update an agent skill into this workspace
-onlyne export-skill
-onlyne run
-```
-
-In another terminal under the same workspace tree:
-
-```bash
-onlyne client '{"id":"1","op":"ping"}'
-onlyne client '{"id":"2","op":"status"}'
-onlyne client '{"id":"wake","op":"loopback","text":"background job needs attention","raw_text":true}'
-```
-
-`loopback` writes a local inbound message on channel `loopback`, so subscribed agents can wake themselves from background scripts without an external IM adapter.
-
-Stdio mode uses the same request schema:
-
-```bash
-echo '{"id":"1","op":"ping"}' | onlyne stdio
-```
-
-## Workspace layout
-
-By default, commands start at the current directory and walk upward until they find the nearest `.onlyne/`. If no `.onlyne/` exists, the current directory is used, so `onlyne init` initializes the directory where it is run. Use `--workspace <dir>` to explicitly choose a workspace root.
-
-`onlyne init` creates runtime files under the selected workspace root:
+Five real [pi](https://github.com/badlogic/pi-mono) coding agents take the ring roles `a → b → c → d → e` in Orca tabs. A supervisor agent mounted on the cluster takes your chat, dispatches the ring, and watches the record file `lights.txt`. Each hop appends one line; ten lines close the circuit:
 
 ```text
-.onlyne/
-  config.toml
-  .env
-  state.db
-  run/s
-  logs/daemon.log
-  cache/media/
-  adapters/
+$ onlyne --server-root /tmp/onlyne-sup ledger --task <root-task>
+{"kind":"completion","from":"e","to":"_supervisor","state":"queued",
+ "out_head":"1:a 2:b 3:c 4:d 5:e 6:a 7:b 8:c 9:d 10:e"}
 ```
 
-Workspace data intentionally does not default to global mutable state.
+The TUI draws the same picture live — page 1 is the role network, page 2 the swarm ledger:
 
-`onlyne export-skill` writes or updates a local agent skill at `.agents/skills/onlyne/SKILL.md` under the selected workspace root. This is intentionally workspace-local and does not touch `~/.agents/skills`.
+```text
+ ╭── a ──╮    ╭── b ──╮    ╭── c ──╮    ╭── d ──╮    ╭── e ──╮
+▶│ pi ●1 │───▶│ pi    │───▶│ pi  ◐ │───▶│ pi    │───▶│ pi    │   ● busy   ◐ hop in flight
+ ╰───────╯    ╰───────╯    ╰───────╯    ╰───────╯    ╰───────╯
+└─────────────────────────────────────────────────────────────┘
+```
 
-## Channels
+`hjkl` walks the edges, `l` follows one, the arrow keys pan, `+`/`-` widen and tighten the map, `e` reveals the supervisor's dispatch edges, and `a` toggles the active-only view. One task per round, one finished tab per session: tabs reclaim themselves when their agent exits.
 
-Each enabled channel is singleton-routed: configure one `bind_conversation_id`, or leave it empty and send `/handshake` from the desired conversation after the adapter connects. Agents send with only `channel_id` (`telegram`, `feishu`, `qqbot`, or `wechat`). Non-handshake messages to an unbound channel get prompted to send `/handshake`.
+## The pieces
 
-| Channel | Setup |
-| --- | --- |
-| Telegram | Put `TELEGRAM_BOT_TOKEN` in `.onlyne/.env`, enable `[adapters.telegram]`, then set `bind_conversation_id` or send `/handshake`. |
-| Feishu/Lark | Run `onlyne auth feishu`, enable `[adapters.feishu]`, then set `bind_conversation_id` or send `/handshake`. |
-| QQ Bot | Run `onlyne auth qqbot` to create/bind through qclaw QR, or pass `--app-id <id> --app-secret <secret>` manually; add `--sandbox` only for manual sandbox credentials; set `bind_conversation_id` or send `/handshake`. |
-| WeChat ilink | Run `onlyne auth wechat`, enable `[adapters.wechat]`, then set `bind_conversation_id` or send `/handshake`. |
+| Binary | Job |
+|---|---|
+| `onlyne-server` | Routing, ledger, delivery queue, faults, admin socket, workspace generation. One per cluster. |
+| `onlyne-client` | One role's runtime per workspace: session lifecycle, process backend, durable intents, agent adapter socket. |
+| `onlyne-gateway` | One chat platform per process: telegram · feishu · qqbot · weixin, feature-gated at compile time. |
+| `onlyne` | Thin human entry: forwards to the daemons, speaks the sockets, prints JSON. |
+| `onlyne-tui` | Two-page observation board over the admin socket. |
+| `onlyne-agent-fake` | Scripted agent for the twelve e2e proofs under `crates/onlyne-testkit/e2e/`. |
 
-Auth commands write only to the selected workspace `.onlyne/` directory.
+```mermaid
+graph LR
+  P[pi host + onlyne-agent-pi] -->|adapter protocol| C[onlyne-client · role workspace]
+  S1[other agent hosts] -->|adapter protocol| C
+  C -->|TLS frame| SRV[onlyne-server]
+  SRV -->|adapter protocol| G[onlyne-gateway · telegram feishu qqbot weixin]
+  G --> H[human IM]
+  C2[onlyne-client · supervisor role] -->|aggregate role link| SP[parent onlyne-server]
+  SRV --- A[admin.sock · local trust root]
+```
 
-Adapter SDKs: Feishu uses `openlark`, Telegram uses `teloxide`, and WeChat ilink uses `wechat-ilink`. QQ Bot uses qclaw QR binding plus a small direct official API/gateway adapter.
+## What you get
 
-## Common commands
+**Delivery you can audit.** Control-plane messages (task, completion, control) travel at-least-once, each carrying an `op_id` idempotency key. The ledger keeps every row, so `onlyne server ledger` reads like a bank statement. Observation (heartbeats, events) runs at-most-once with cursor resync, so a slow watcher never slows a worker.
+
+**Sessions that own their lives.** Each role spawns its coding agent through a screen backend: Orca tabs, zellij sessions, headless exec, or the fake used in tests. Discovery follows the screen you are actually in. A session's lifecycle is a proven reducer — 21 events over five state axes, table-tested — feeding both the ledger mirror and the TUI stars.
+
+**Truth under disconnect.** A client that loses the server keeps running its sessions to their final state, writes every outbound message to a durable intent queue, and flushes in order on reconnect. Nothing drops silently: a stuck intent ends as a named fault.
+
+**ACL the server enforces.** Each role registers an ed25519 key, and the spec declares who may message whom. A role without such an edge gets `acl_denied` before any ledger row exists. Task receipts are the one built-in exception: a completion always reaches the origin recorded in the durable ledger, so reporting upward needs zero standing edges.
+
+**Clusters all the way up.** A supervisor's own client connects to a parent server as a plain aggregate role. Tasks flow in, completions flow out, and the parent ledger never sees a child role name. The wire protocol contains zero federation code.
+
+**One protocol, two mounts.** pi and the Telegram gateway speak the same adapter protocol: `hello` handshake, capability bits, `report` observations, `assign` payloads. To add a coding agent or a chat platform, implement that same small surface (`crates/onlyne-adapter/PROTOCOL.md`).
+
+## Design notes
+
+Two commitments shape the codebase.
+
+**Transport, not runtime.** Onlyne owns routing, receipts, and recovery. Judgment stays with the agents on either side of a socket: the daemons carry no prompt logic, no scheduler, no model calls. Every feature decision answers one question first — does this belong to the message bus or to an agent? — and delivery truth alone enters the bus.
+
+**Context is a lossy channel, by design.** Anything that must survive lives in SQLite: the server ledger, the client intent queue, the durable outbox. Each hop's agent context receives only what that hop needs — text plus at most one image, one task per session, prose refetched from its single source. The lighter the carried context, the deeper the cluster can run.
+
+The second commitment has machine-checked backing. `proofs/` is a core Lean 4 development (toolchain 4.33.1, zero dependencies, `lake build` green, zero `sorry`). Three axioms state the rot: a context-carried fact's reliability decays monotonically with depth, and reaches zero on any deepening trace. Twelve theorems do the rest. An impossibility result covers every protocol that carries coordination state inside context, and a rescue theorem keeps a violation bound that depends only on transport steps. Each design decision gets one combinator lemma (carrier minimality, authority split, content by reference, idempotent redelivery, delivery creates the task, file-truth reload, single-source prose, one-shot sessions), and a closing theorem exhibits this repository's design as a model of the safe side. `proofs/BRIEF.md` is the contract the prover worked to.
+
+## Concepts in one table
+
+| Kind | Purpose | Delivery |
+|---|---|---|
+| `task` | Deliver work to a role; spawns or reuses a session | at-least-once, queued while offline |
+| `completion` | Terminal receipt for a task; carries the result summary | at-least-once, queued while offline |
+| `note` | Free chat between humans and agents | fire and forget, refused while offline |
+| `control` | `recycle · probe · snapshot · cancel` on a task | admin or task owner only |
+
+A message body is text plus at most one inline image. Media pipelines live beside Onlyne, inside your agents; what Onlyne owns is delivery and accounting.
+
+A delivery settles by msg id: `onlyne ack --msg-id <id> --reason <text>` accepts it, and `onlyne reject --msg-id <id> --reason <text>` refuses it. Both take an optional `--op-id`, and `onlyne control --task <id> recycle|cancel --reason <text>` carries the same required reason.
+
+## The supervisor doctrine
+
+Dispatch flows downhill. The supervisor sends tasks to roles, and roles answer by completing them. A role's completion lands in the ledger, and the supervisor polls the ledger, so reports arrive with proof attached. A role messaging its supervisor directly is the flat queue you already have elsewhere — the demo ACLs refuse it, and each role's `allowed_targets` stays inside the working ring. When a role genuinely needs to reach the operator mid-task, the supervisor grants a route for that one task, and the grant dies with the task.
 
 ```bash
-onlyne [--workspace <dir>] init
-onlyne [--workspace <dir>] export-skill
-onlyne [--workspace <dir>] run [--debug]
-onlyne [--workspace <dir>] stop
-onlyne [--workspace <dir>] restart [--debug]
-onlyne stdio
-onlyne client '<json-request>'
-onlyne config-check
-onlyne auth feishu [--app-id <id> --app-secret <secret>]
-onlyne auth qqbot [--app-id <id> --app-secret <secret> [--sandbox]]
-onlyne auth wechat [--token <token>]
-onlyne shell-completions zsh
-onlyne shell-completions fish
+onlyne --server-root <root> send --from _supervisor --to a --text "RING=a,b,c,d,e K=10"
+onlyne --server-root <root> ledger --task <id>      # the receipts queue up here
+onlyne --server-root <root> sessions --task <id>    # lifecycle, per hop
 ```
 
-`onlyne stop` asks the workspace-local daemon to exit. `onlyne restart` stops the current workspace daemon if present, then starts `run` in the foreground.
+Root receipts addressed to `_supervisor` queue by design. Attach the supervisor's own client, and the backlog lands in its inbox. That queue is the operator's pull-inbox: `ledger` reads it, delivery settles it.
 
-`onlyne run --debug` replies to inbound messages with redacted channel/conversation/thread metadata. Use it only while finding conversation IDs or platform thread fields.
+## Quickstart, the manual way
 
-## Examples
-
-- `examples/telegram/`
-- `examples/feishu/`
-- `examples/qqbot/`
-- `examples/wechat/`
-- `examples/broadcast/`
-- `examples/multicast/`
-- `examples/multi-channel/`
-- `examples/swarm/` — short-path live fixture for Onlyne + pi-onlyne + onlyne-swarm
-
-
-The examples are pure CLI workflows. Run `onlyne init` in `examples/` to share one ignored `examples/.onlyne/` workspace across child examples, or pass `--workspace <dir>` / `ONLYNE_WORKSPACE` for isolation.
-
-## IPC
-
-Onlyne accepts newline-delimited JSON requests. See [docs/IPC.md](docs/IPC.md) for operation details.
-
-Minimal request:
-
-```json
-{"id":"1","op":"ping"}
+```bash
+SRC=$(pwd); tmp=$(mktemp -d)
+target/debug/onlyne-server init --root "$tmp/server" --listen 127.0.0.1:7899
+target/debug/onlyne-server run --root "$tmp/server" &
+target/debug/onlyne --server-root "$tmp/server" wait-ready
+target/debug/onlyne-client init --workspace "$tmp/planner" --role planner \
+    --server-root "$tmp/server" >> "$tmp/server/.onlyne/spec.toml"   # prints a ready fragment
+target/debug/onlyne --server-root "$tmp/server" reload
+target/debug/onlyne-client run --workspace "$tmp/planner" &
+target/debug/onlyne-agent-fake --workspace "$tmp/planner" --script \
+    crates/onlyne-testkit/scripts/echo-complete.json &
+target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-Minimal response:
+One JSON line answers with `data.state = "in_flight"`. The task's ledger row then settles to `acked`, and its session projects to `exited` with `outcome = "done"`. The same sequence ships as an executable proof, `crates/onlyne-testkit/e2e/local-task.sh`, joined by eleven siblings covering ACL rejects, idempotency, reconnect requeue, gateway mount, relocation, and two-cluster federation.
 
-```json
-{"id":"1","ok":true,"data":{"pong":true}}
+Copying the binaries onto `PATH` takes one extra step on macOS: a copied binary
+whose code signature no longer matches its file is killed at exec, so re-sign it
+ad-hoc after copying (`codesign --force --sign - ~/.cargo/bin/onlyne*`).
+
+## Where things live
+
+```text
+<server-root>/.onlyne/          spec.toml · state.db · run/s (admin) · keys/ · templates/ · logs/
+<workspace>/.onlyne/            config.toml · client.db · run/s (adapter) · keys/ · logs/ · agent/
 ```
 
-## Agent harness integrations
+Every workspace is self-contained and portable. `onlyne server generate` lays a role's work out from templates, the generated tree carries no absolute paths, and after an `mv`, `onlyne client run` reconnects from anywhere. Legacy layouts and old databases exit 2 at the door: v1.0.0 speaks one wire, one schema, one layout.
 
-Onlyne speaks newline-delimited JSON over a Unix socket, so any local agent can bridge to IM channels. First-party harness plugins live as submodules under `harness/`:
+## Status
 
-- [`harness/pi-onlyne`](harness/pi-onlyne) — Pi extension (tools + inbox watch).
-- [`harness/dsh-onlyne`](harness/dsh-onlyne) — DeepSeek Harness plugin (tools + inbox watch).
+Release `v1.0.0-beta.4`, on branch `v1.0.0-dev-super-redesign`. The full e2e suite, the ring TUI, the supervisor demo, and the pi adapter plugin run green on macOS; the four IM gateways ship as feature-gated crates awaiting live-platform soak. `cargo build --workspace` needs Rust 1.85 and nothing heavier.
 
-Both share the per-project `.pi/onlyne.json` config, so one workspace can be bridged by either harness without reconfiguration.
+## Reading
 
-## Project status
+- `docs/v1-PLAN.md` — the authoritative design and its nine verification cases.
+- `docs/v1-ARCHITECTURE.md` — crate map, sockets, ledger, lifecycle, generation, federation.
+- `docs/operations.md` — operator entries, the repair family, and session-shadow ownership rules.
+- `crates/onlyne-adapter/PROTOCOL.md` — the adapter surface both agents and gateways implement.
+- `examples/supervisor/README.md` — the live ring demo, told in the operator's voice.
+- `skills/onlyne-supervisor/SKILL.md` — the operating manual for a cluster supervisor agent.
+- `skills/onlyne-role/SKILL.md` — the handbook for a role working its task.
+- `.agents/skills/onlyne/SKILL.md` — development guidance for this repository.
 
-See [docs/STATUS.md](docs/STATUS.md) for current implementation notes and verification evidence.
+MIT © dbydd

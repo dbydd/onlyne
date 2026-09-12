@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"hello\",\"args\":{\"protocol\":1,\"role\":\"planner\",\"key\":\"ed25519/AAA\",\"signature\":\"sig\",\"agent\":\"onlyne-client\",\"version\":\"1.0.0\",\"aggregate\":false}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "client hello carries the identity fields the server checks before any other op"
+}

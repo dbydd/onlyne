@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"faults\",\"args\":{\"open_only\":false,\"limit\":50}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "admin faults reads recorded fault rows"
+}

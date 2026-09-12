@@ -1,0 +1,64 @@
+{
+  "manifestVersion": 1,
+  "id": "onlyne-sessions",
+  "publisher": "onlyne",
+  "name": "Onlyne Sessions",
+  "version": "0.2.0",
+  "description": "只读 supervisor 看板：把平铺的 Orca tab 列表与每个 server root 的 onlyne sessions/roles 合成一块看板，在 dev 安装下实时渲染进面板，并提供跳转/复制/调试命令。Read-only supervisor board for Onlyne, rendered live into the panel of a dev install.",
+  "engines": {
+    "orca": ">=1.4.0"
+  },
+  "pluginApi": 1,
+  "main": "main.mjs",
+  "contributes": {
+    "panels": [
+      {
+        "id": "board",
+        "title": "Onlyne Sessions",
+        "icon": "layers",
+        "entry": "panel.html"
+      }
+    ],
+    "commands": [
+      {
+        "id": "onlyne-sessions.refresh",
+        "title": "Onlyne Sessions: 重新扫描（tab 轴 + server roots）"
+      },
+      {
+        "id": "onlyne-sessions.board",
+        "title": "Onlyne Sessions: 推送看板"
+      },
+      {
+        "id": "onlyne-sessions.debug-board",
+        "title": "Onlyne Sessions: 看板 JSON 落盘（/tmp/onlyne-board.json，与面板同源）"
+      },
+      {
+        "id": "onlyne-sessions.focus",
+        "title": "Onlyne Sessions: 跳到 tab（args.task 前缀，唯一命中才切）"
+      },
+      {
+        "id": "onlyne-sessions.copy-agent-context",
+        "title": "Onlyne Sessions: 取 agent 上下文（pane_key/handle/selector）"
+      }
+    ],
+    "events": [
+      {
+        "on": "worktree.created"
+      },
+      {
+        "on": "worktree.removed"
+      },
+      {
+        "on": "agent.status.changed"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "notifications:show"
+    },
+    {
+      "kind": "events:subscribe"
+    }
+  ]
+}

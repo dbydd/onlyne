@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"session_sync\",\"args\":{\"task_id\":\"11111111-1111-4111-8111-111111111111\",\"session_id\":\"8b1c\",\"generation\":1,\"seq\":4,\"projection\":{\"lifecycle\":\"exited\",\"agent\":\"gone\",\"delivery\":\"accepted\",\"resource\":\"closed\",\"recovery\":\"none\",\"outcome\":\"done\",\"observed\":{\"state\":\"closed\"}}}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "client session_sync publishes a full projection under a monotonic (generation, seq) pair"
+}

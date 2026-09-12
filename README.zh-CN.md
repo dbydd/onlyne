@@ -1,147 +1,150 @@
 # Onlyne
 
-Onlyne 是一个小型 Rust 本地 IM channel daemon / broker。它让本地 agent 可以通过 workspace-local 的方式收发消息、订阅事件、查看历史，并接入多个聊天平台。
+**给 coding-agent 团队用的消息管道，跑在你自己的机器上。**
 
-English README: [README.md](README.md).
+Onlyne 把一群 coding agent 编成一个工作集群。**server** 在 agent 角色之间路由消息，并把每次投递写进持久账本。每个工作区一个 **client**，负责本角色全部 coding-agent 会话。**gateway** 进程把 Telegram / 飞书 / QQ / 微信的聊天翻译成同一套消息模型。agent 的运行时保持原样，Onlyne 只是让它们的手互相够得着，并留下一条可审计的痕迹。集群能跨机器：client 用 TLS 从任何地方连回 server，生成好的工作区 `mv` 一下就能搬走，集群还能嵌套成更大的集群。
 
-## 它是什么
+![version](https://img.shields.io/badge/version-v1.0.0--beta.4-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux-supported-lightgrey)
+![Onlyne — supervisor 向五个 pi agent 派十跳环任务，账本逐跳结清](assets/promo/onlyne-hero.png)
 
-- 工作区本地：默认使用从当前目录向上找到的最近 `.onlyne/` 作为工作区；每个工作区都有自己的配置、状态、socket、日志和缓存。
-- CLI 优先：可以前台运行，也可以交给 systemd/launchd 等外部 supervisor 包装，还可以用 stdio 模式被其他进程拉起。
-- 本地 IPC：Unix socket 或 stdio 上的 newline-delimited JSON。
-- 多 channel：Telegram、飞书/Lark、QQ Bot、微信 ilink。
-- 轻量历史：用本地 SQLite 保存状态和消息历史。
-- 事件流：本地客户端可以订阅入站、出站和适配器状态事件。
-
-Onlyne 不是 agent runtime、模型运行器、调度器、Web 管理后台，也不是 prompt/memory 系统。
-
-## 安装
-
-`onlyne` 二进制已发布到 [crates.io](https://crates.io/crates/onlyne)：
+## 先看它跑起来
 
 ```bash
-cargo install onlyne
+cargo build --workspace
+cd examples/supervisor && ./run.py up
 ```
 
-或从源码构建：
-
-```bash
-cargo build --release
-```
-
-构建产物在 `target/release/onlyne`。开发时也可以使用 `cargo run --`。
-
-## 快速开始
-
-```bash
-onlyne init
-# 可选：把 Onlyne agent skill 导出/更新到当前工作区
-onlyne export-skill
-onlyne run
-```
-
-在同一个工作区树下的另一个终端运行：
-
-```bash
-onlyne client '{"id":"1","op":"ping"}'
-onlyne client '{"id":"2","op":"status"}'
-onlyne client '{"id":"wake","op":"loopback","text":"后台任务需要处理","raw_text":true}'
-```
-
-`loopback` 会写入本地 `loopback` channel 的入站消息，订阅中的 agent 可以用后台脚本唤醒自己，不需要外部 IM adapter。
-
-stdio 模式使用同一套请求格式：
-
-```bash
-echo '{"id":"1","op":"ping"}' | onlyne stdio
-```
-
-## 工作区目录
-
-默认情况下，Onlyne 会从当前目录开始向上查找最近的 `.onlyne/`，找到后把它所在目录作为工作区。如果没有找到 `.onlyne/`，则使用当前目录，因此 `onlyne init` 会初始化执行命令时所在的目录。也可以用 `--workspace <dir>` 显式指定工作区根目录。
-
-`onlyne init` 会在选定工作区下创建：
+五个真实的 [pi](https://github.com/badlogic/pi-mono) coding agent 在 Orca 标签页里扮演环上的 `a → b → c → d → e`。挂在集群上的 supervisor agent 接收你的聊天、向环派活、盯着记录文件 `lights.txt`。每一跳添一行，十行闭合成整圈：
 
 ```text
-.onlyne/
-  config.toml
-  .env
-  state.db
-  run/s
-  logs/daemon.log
-  cache/media/
-  adapters/
+$ onlyne --server-root /tmp/onlyne-sup ledger --task <根任务id>
+{"kind":"completion","from":"e","to":"_supervisor","state":"queued",
+ "out_head":"1:a 2:b 3:c 4:d 5:e 6:a 7:b 8:c 9:d 10:e"}
 ```
 
-Onlyne 的工作区数据不会默认写到全局可变目录。
+TUI 把同一件事画成活图——第 1 页是角色网络，第 2 页是集群账本：
 
-`onlyne export-skill` 会在选定工作区下写入或更新本地 agent skill：`.agents/skills/onlyne/SKILL.md`。这是工作区本地导出，不会写入 `~/.agents/skills`。
+```text
+ ╭── a ──╮    ╭── b ──╮    ╭── c ──╮    ╭── d ──╮    ╭── e ──╮
+▶│ pi ●1 │───▶│ pi    │───▶│ pi  ◐ │───▶│ pi    │───▶│ pi    │   ● 忙碌   ◐ 在飞一跳
+ ╰───────╯    ╰───────╯    ╰───────╯    ╰───────╯    ╰───────╯
+└─────────────────────────────────────────────────────────────┘
+```
 
-## Channel 配置
+`hjkl` 沿边走，`l` 跟随一跳，方向键平移镜头，`+`/`-` 放宽和收紧图距，`e` 显出 supervisor 的派发辐条，`a` 切换只看活跃。一轮一个任务，一个会话结束就收一个标签页：agent 退出，tab 自己回收。
 
-每个启用的 channel 都是单会话路由：可以配置一个 `bind_conversation_id`，也可以留空并在 adapter 连通后从目标会话发送 `/handshake` 自动绑定。agent 发送时只传 `channel_id`（`telegram`、`feishu`、`qqbot`、`wechat`）。未绑定 channel 收到非 `/handshake` 消息时会提示发送 `/handshake`。
+## 部件清单
 
-| Channel | 配置方式 |
-| --- | --- |
-| Telegram | 在 `.onlyne/.env` 写入 `TELEGRAM_BOT_TOKEN`，启用 `[adapters.telegram]`，然后设置 `bind_conversation_id` 或发送 `/handshake`。 |
-| 飞书/Lark | 运行 `onlyne auth feishu`，启用 `[adapters.feishu]`，然后设置 `bind_conversation_id` 或发送 `/handshake`。 |
-| QQ Bot | 运行 `onlyne auth qqbot` 通过 qclaw 扫码创建/绑定，或传 `--app-id <id> --app-secret <secret>` 手动配置；只有手动沙箱凭证才加 `--sandbox`；设置 `bind_conversation_id` 或发送 `/handshake`。 |
-| 微信 ilink | 运行 `onlyne auth wechat`，启用 `[adapters.wechat]`，然后设置 `bind_conversation_id` 或发送 `/handshake`。 |
+| 二进制 | 职责 |
+|---|---|
+| `onlyne-server` | 路由、账本、投递队列、fault、admin socket、工作区生成。每集群一个。 |
+| `onlyne-client` | 每工作区一个角色的运行时：session 生命周期、进程后端、持久 intent、插件 adapter socket。 |
+| `onlyne-gateway` | 每进程一个聊天平台：telegram · feishu · qqbot · weixin，编译期 feature 门控。 |
+| `onlyne` | 人机薄入口：转发守护进程、直连 socket、输出 JSON。 |
+| `onlyne-tui` | 两页观测面板，走 admin socket。 |
+| `onlyne-agent-fake` | 脚本化假 agent，喂给 `crates/onlyne-testkit/e2e/` 下的十二份端到端证明。 |
 
-认证命令只会写入选定工作区的 `.onlyne/`。
+```mermaid
+graph LR
+  P[pi 宿主 + onlyne-agent-pi] -->|adapter 协议| C[onlyne-client · 角色工作区]
+  S1[其他 agent 宿主] -->|adapter 协议| C
+  C -->|TLS 帧| SRV[onlyne-server]
+  SRV -->|adapter 协议| G[onlyne-gateway · telegram feishu qqbot weixin]
+  G --> H[人类 IM]
+  C2[onlyne-client · supervisor 角色] -->|aggregate role 链路| SP[父 onlyne-server]
+  SRV --- A[admin.sock · 本机信任根]
+```
 
-Adapter SDK：飞书使用 `openlark`，Telegram 使用 `teloxide`，微信 ilink 使用 `wechat-ilink`。QQ Bot 使用 qclaw 扫码绑定和轻量官方 API/gateway adapter。
+## 你拿到什么
 
-## 常用命令
+**可审计的投递。** 控制面消息（task、completion、control）按 at-least-once 送达，每条都带 `op_id` 幂等键。每笔投递都在账本里留行，`onlyne server ledger` 读起来像银行流水。观测面（心跳、事件）按 at-most-once 送达，落后了用游标追补，慢观察者拖不慢干活的人。
+
+**有自己生命周期的会话。** 角色通过屏幕后端拉起 coding agent：Orca 标签页、zellij 会话、无头 exec，或测试用的 fake。自动发现跟随你实际所在的屏幕。会话生命周期是一张证明过的状态机——21 种事件走五条状态轴，有全表测试——同时喂给账本镜像和 TUI 的星号。
+
+**断线有真相。** client 与 server 断链后，在跑的会话继续走到终态；出向消息先落持久 intent 队列，重连后按序补发。没有东西会悄悄丢：重试耗尽的 intent 记成一条有名字的 fault。
+
+**server 硬执的 ACL。** 每个角色登记一把 ed25519 公钥，spec 声明谁能给谁发。没有这条边的角色，收到的第一帧就是 `acl_denied`，账本一行不写。任务回执是唯一内建豁免：completion 永远送达账本记录的派单人，所以汇报上行不需要任何常驻边。
+
+**集群可以套集群。** supervisor 自己的 client 以普通 aggregate role 身份连父 server。任务进来，回执出去，父层账本里查不到任何子层角色名。协议里没有一行联邦代码。
+
+**一份协议，两侧挂载。** pi 和 Telegram gateway 说的是同一份 adapter 协议：`hello` 握手、能力协商、`report` 观测、`assign` 载荷。要接新 coding agent 或新聊天平台，实现的是同一个小面（`crates/onlyne-adapter/PROTOCOL.md`）。
+
+## 设计理念
+
+两条坚持塑造了这份代码。
+
+**传输层，不是运行时。** Onlyne 负责路由、凭证、恢复；判断留在 socket 两端的 agent 手里。守护进程里没有提示词逻辑、没有调度器、没有模型调用。每个特性决策先回答一个问题——这件事归消息总线还是归 agent——只有投递真相才进总线。
+
+**上下文按有损信道设计。** 需要存活的状态一律住 SQLite：server 账本、client intent 队列、持久 outbox。每一跳的 agent 上下文只拿当下需要的东西：文本加至多一张图、一个会话一个任务、提示词永远从单一来源现取。驮着的上下文越轻，集群能跑的深度越大。
+
+第二条坚持有机检背书。`proofs/` 是一份纯 core 的 Lean 4 形式化（toolchain 4.33.1、零依赖、`lake build` 全绿、零 `sorry`）。三条公理把腐烂写成前提：上下文内事实的可靠度随深度单调衰减，在任意加深轨迹上终归于零。十二枚定理完成余下的工作。对一切"协调状态驮在上下文里"的协议，给出不可能性结果；拯救定理给出外部账本模型，其风险界只依赖传输步数。每条设计决策各配一枚组合子引理（载体最小性、权威拆分、内容按引用、幂等重投、投递即建任务、文件真值重载、提示词单一来源、单任务会话），收尾定理把本仓库的设计构造为安全侧的模型。证明方的工作契约在 `proofs/BRIEF.md`。
+
+## 四个消息种类
+
+| Kind | 用途 | 投递语义 |
+|---|---|---|
+| `task` | 向角色派活；按需拉起或复用会话 | at-least-once，目标离线持久排队 |
+| `completion` | 任务的终态回执，携带结果摘要 | at-least-once，目标离线持久排队 |
+| `note` | 人和 agent 的自由聊天 | 即发即忘，目标离线直接拒收 |
+| `control` | 对任务执行 `recycle · probe · snapshot · cancel` | 仅 admin 或该任务属主 |
+
+消息体是文本加至多一张内联图片。媒体管线住在你的 agent 那边；Onlyne 只管送达和记账。
+
+投递按 msg id 结清：`onlyne ack --msg-id <id> --reason <text>` 收下，`onlyne reject --msg-id <id> --reason <text>` 拒收。两者都可选带 `--op-id`，`onlyne control --task <id> recycle|cancel --reason <text>` 的 reason 同样是必填。
+
+## supervisor 教义
+
+派发顺流而下：supervisor 向角色发 task，角色以完成 task 作答。回执落在账本里，supervisor 拉账本读报告，汇报自带凭证。角色直接给 supervisor 发消息的形态等于把编排压平成队列——demo 的 ACL 把这条路关着，环上每个角色的 `allowed_targets` 只留环内邻居。某个任务确实需要中途够到操作者时，supervisor 就为这一个任务开一条上行路，任务完结，路即收回。
 
 ```bash
-onlyne [--workspace <dir>] init
-onlyne [--workspace <dir>] export-skill
-onlyne [--workspace <dir>] run [--debug]
-onlyne [--workspace <dir>] stop
-onlyne [--workspace <dir>] restart [--debug]
-onlyne stdio
-onlyne client '<json-request>'
-onlyne config-check
-onlyne auth feishu [--app-id <id> --app-secret <secret>]
-onlyne auth qqbot [--app-id <id> --app-secret <secret> [--sandbox]]
-onlyne auth wechat [--token <token>]
-onlyne shell-completions zsh
-onlyne shell-completions fish
+onlyne --server-root <root> send --from _supervisor --to a --text "RING=a,b,c,d,e K=10"
+onlyne --server-root <root> ledger --task <id>      # 根回执在这里排队
+onlyne --server-root <root> sessions --task <id>   # 每一跳的生命周期
 ```
 
-`onlyne stop` 会请求当前工作区 daemon 退出。`onlyne restart` 会先停止当前工作区 daemon（如果存在），再以前台方式启动 `run`。
+寄给 `_supervisor` 的根回执按设计排队。挂上 supervisor 自己的 client，积压就落进它的收件箱。这条队列是操作者的拉取信箱：`ledger` 读它，投递清它。
 
-`onlyne run --debug` 会在收到入站消息后，向同平台同会话回复脱敏后的 channel/conversation/thread 元数据。它只适合用来查 conversation id 或平台 thread 字段。
+## 手动起步
 
-## 示例
-
-- `examples/telegram/`
-- `examples/feishu/`
-- `examples/qqbot/`
-- `examples/wechat/`
-- `examples/broadcast/`
-- `examples/multicast/`
-- `examples/multi-channel/`
-
-这些示例都是纯 CLI 工作流。建议在 `examples/` 下运行 `onlyne init`，让所有子目录共用被 git 忽略的 `examples/.onlyne/` 工作区；如果要隔离，也可以用 `--workspace <dir>` 或 `ONLYNE_WORKSPACE`。
-
-## IPC
-
-Onlyne 接收 newline-delimited JSON 请求。操作详情见 [docs/IPC.md](docs/IPC.md)。
-
-最小请求：
-
-```json
-{"id":"1","op":"ping"}
+```bash
+SRC=$(pwd); tmp=$(mktemp -d)
+target/debug/onlyne-server init --root "$tmp/server" --listen 127.0.0.1:7899
+target/debug/onlyne-server run --root "$tmp/server" &
+target/debug/onlyne --server-root "$tmp/server" wait-ready
+target/debug/onlyne-client init --workspace "$tmp/planner" --role planner \
+    --server-root "$tmp/server" >> "$tmp/server/.onlyne/spec.toml"   # init 直接打印可粘片段
+target/debug/onlyne --server-root "$tmp/server" reload
+target/debug/onlyne-client run --workspace "$tmp/planner" &
+target/debug/onlyne-agent-fake --workspace "$tmp/planner" --script \
+    crates/onlyne-testkit/scripts/echo-complete.json &
+target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-最小响应：
+一行 JSON 回以 `data.state = "in_flight"`。随后该任务的账本行落到 `acked`，会话投影走到 `exited` 且 `outcome = "done"`。同一序列有可执行证明：`crates/onlyne-testkit/e2e/local-task.sh`，另有十一份姊妹脚本覆盖 ACL 拒收、幂等、断连补投、gateway 挂载、目录搬迁、双集群联邦。
 
-```json
-{"id":"1","ok":true,"data":{"pong":true}}
+在 macOS 上把二进制拷进 `PATH` 要多做一步：拷出来的二进制如果代码签名和文件对不上，一 exec 就被杀，所以拷完要 ad-hoc 重签一下（`codesign --force --sign - ~/.cargo/bin/onlyne*`）。
+
+## 数据在哪
+
+```text
+<server-root>/.onlyne/          spec.toml · state.db · run/s（admin） · keys/ · templates/ · logs/
+<workspace>/.onlyne/            config.toml · client.db · run/s（adapter） · keys/ · logs/ · agent/
 ```
 
-## 项目状态
+每个工作区自包含、可整搬：`onlyne server generate` 按模板生成角色工作区，产物里没有绝对路径，`mv` 之后 `onlyne client run` 在哪都能接上。旧布局与旧数据库到门口就 exit 2——v1.0.0 只认一套线格式、一张 schema、一种目录。
 
-当前实现说明和验证记录见 [docs/STATUS.md](docs/STATUS.md)。
+## 状态
+
+最新 tag 是 `v1.0.0-beta.4`，分支 `v1.0.0-dev-super-redesign`。全量 e2e、环图 TUI、supervisor demo、pi adapter 插件在 macOS 全绿；四个 IM gateway 以 feature-gated crate 交付，等待真平台浸泡。`cargo build --workspace` 需要 Rust 1.85，再无更重的依赖。
+
+## 阅读
+
+- `docs/v1-PLAN.md` — 权威设计与九个验收用例。
+- `docs/v1-ARCHITECTURE.md` — crate 地图、socket、账本、生命周期、生成、联邦。
+- `crates/onlyne-adapter/PROTOCOL.md` — agent 与 gateway 共用的 adapter 面。
+- `examples/supervisor/README.md` — 活环 demo，用操作者的口吻写成。
+- `skills/onlyne-supervisor/SKILL.md` — 集群操作 agent 的驾驶手册。
+- `skills/onlyne-role/SKILL.md` — 环上角色干活的手册。
+- `.agents/skills/onlyne/SKILL.md` — 本仓库的开发指导。
+
+MIT © dbydd

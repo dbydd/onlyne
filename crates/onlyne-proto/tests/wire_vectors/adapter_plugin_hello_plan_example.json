@@ -1,0 +1,5 @@
+{
+  "frame": "{\"op\":\"hello\",\"args\":{\"protocol\":1,\"plugin\":\"onlyne-agent-pi\",\"version\":\"1.0.0\",\"kind\":\"agent\",\"capabilities\":[\"register\",\"report\",\"inject\",\"recycle\"],\"mount\":{\"role\":\"planner\",\"session\":\"8b1c...\"}}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "docs/v1-PLAN.md line 298 verbatim: the mount is a flat role/session object and kind is its sibling, never a tag inside the mount"
+}

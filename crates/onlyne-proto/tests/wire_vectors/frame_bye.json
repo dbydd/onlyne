@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"bye\",\"reason\":\"shutdown\"}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "bye closes the connection with one reason string"
+}

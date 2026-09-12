@@ -1,0 +1,96 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ClientConfig",
+  "description": "Client-side `<workspace>/.onlyne/config.toml`.",
+  "type": "object",
+  "required": [
+    "cert_pin",
+    "key_path",
+    "role",
+    "server"
+  ],
+  "properties": {
+    "cert_pin": {
+      "description": "Server certificate SPKI fingerprint.",
+      "type": "string"
+    },
+    "key_path": {
+      "description": "Path to this role's private key file.",
+      "type": "string"
+    },
+    "orca": {
+      "description": "Orca session backend settings.",
+      "default": {
+        "worktree": "host"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/OrcaSection"
+        }
+      ]
+    },
+    "plugins": {
+      "description": "Local plugin list.",
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "role": {
+      "description": "Role name used for this workspace.",
+      "type": "string"
+    },
+    "server": {
+      "description": "Server endpoint.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/ServerEndpoint"
+        }
+      ]
+    },
+    "stale_grace_secs": {
+      "description": "Seconds a startup reconcile waits before declaring an orphaned in-flight task stale.",
+      "default": 300,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "OrcaSection": {
+      "description": "`[orca]` — settings for the Orca session backend.",
+      "type": "object",
+      "properties": {
+        "worktree": {
+          "description": "Where a spawned terminal's tab lands: `host` (the default) uses the worktree the spawning supervisor's own Orca tab runs in (`ORCA_WORKTREE_ID`, inherited by the daemon), `inherit` passes no selector and leaves the choice to Orca's active worktree, and any other value is used verbatim as an Orca worktree selector (`id:<…>`, `path:<abs>`, `name:<…>`, `branch:<…>`).\n\nOnly the tab's home is decided here; the agent still runs in the role workspace (`cd` in the spawned command), which Orca never has to know.",
+          "default": "host",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ServerEndpoint": {
+      "description": "Server host and port pair used by the client.",
+      "type": "object",
+      "required": [
+        "host",
+        "port"
+      ],
+      "properties": {
+        "host": {
+          "description": "Hostname or address, possibly a `$NAME` env reference.",
+          "type": "string"
+        },
+        "port": {
+          "description": "TCP port.",
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

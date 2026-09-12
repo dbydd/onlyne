@@ -1,0 +1,23 @@
+[package]
+name = "onlyne-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onlyne v1 SQLite persistence"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+onlyne-proto = { path = "../onlyne-proto" }
+onlyne-session = { path = "../onlyne-session" }
+rusqlite = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+unicode-segmentation = "1"
+
+[dev-dependencies]
+onlyne-frame = { path = "../onlyne-frame" }
+tempfile = "3"

@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"ack\",\"seq\":41}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "ack confirms the peer settled one seq"
+}

@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"res\",\"id\":\"r1\",\"ok\":true,\"data\":{\"generation\":1,\"outcome\":\"done\",\"projection\":{\"agent\":\"gone\",\"delivery\":\"accepted\",\"lifecycle\":\"exited\",\"observed\":{\"state\":\"closed\"},\"outcome\":\"done\",\"recovery\":\"none\",\"resource\":\"closed\"},\"public_lifecycle\":\"exited\",\"role\":\"builder\",\"seq\":14,\"session_id\":\"8b1c\",\"task_id\":\"11111111-1111-4111-8111-111111111111\",\"updated_at\":\"2026-09-10T12:00:00Z\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "sessions answers public_lifecycle and outcome beside the stored projection"
+}

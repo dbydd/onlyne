@@ -1,0 +1,21 @@
+[package]
+name = "onlyne-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onlyne v1 wire protocol: envelopes, frames, events, ops, error codes, JSON Schema export"
+build = "build.rs"
+
+[dependencies]
+base64 = { workspace = true }
+chrono = { workspace = true }
+schemars = { workspace = true, features = ["chrono", "uuid1"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+default = []

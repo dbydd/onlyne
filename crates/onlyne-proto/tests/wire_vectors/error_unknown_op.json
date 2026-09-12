@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"res\",\"id\":\"r1\",\"ok\":false,\"error\":{\"code\":\"unknown_op\",\"message\":\"refused\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "error code unknown_op spells exactly unknown_op on the wire; retryable=false"
+}

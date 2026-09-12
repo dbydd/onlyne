@@ -1,0 +1,26 @@
+[package]
+name = "onlyne-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onlyne v1 adapter conformance test kit"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+onlyne-adapter = { path = "../onlyne-adapter" }
+onlyne-config = { path = "../onlyne-config" }
+onlyne-frame = { path = "../onlyne-frame" }
+onlyne-proto = { path = "../onlyne-proto" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "io-std", "net", "process", "rt-multi-thread", "macros", "sync", "time", "fs"] }
+tokio-stream = "0.1"
+tracing = "0.1"

@@ -1,0 +1,63 @@
+# ACL fixture for crates/onlyne-config/tests/acl_table.rs.
+#
+# Registered roles, in document order: planner, builder, reviewer, silent,
+# isolated, _supervisor, scout. Every ACL case in the test cites one of these.
+#
+# Expected table: 20 permitted pairs = 13 cross-role pairs + 7 unconditional
+# self pairs (one per role), and 60 rows = 20 pairs x 3 classes
+# (Any, Note, Control). The self pair is unconditional, so `planner` naming
+# itself in both lists adds no extra row.
+
+[server]
+name = "cluster-acl"
+listen = "0.0.0.0:7811"
+cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
+
+[[client]]
+role = "planner"
+key = "ed25519/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+admin = false
+max_sessions = 3
+reuse = true
+# Self-delivery names the role in both lists; `["*"]` covers every other role.
+allowed_senders = ["*", "planner"]
+allowed_targets = ["*", "planner"]
+
+[[client]]
+role = "builder"
+key = "ed25519/AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+# `["*"]` alone admits every other role, so builder cannot deliver to itself.
+allowed_senders = ["*"]
+allowed_targets = ["builder", "planner"]
+
+[[client]]
+role = "reviewer"
+key = "ed25519/AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+allowed_senders = ["planner"]
+allowed_targets = ["planner"]
+
+[[client]]
+role = "silent"
+key = "ed25519/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+allowed_senders = ["*"]
+# `allowed_targets` omitted: zero outbound edges.
+
+[[client]]
+role = "isolated"
+key = "ed25519/AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+# `allowed_senders` omitted: zero inbound edges.
+allowed_targets = ["*"]
+
+[[client]]
+role = "_supervisor"
+key = "ed25519/AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+admin = true
+aggregate = "cluster-b"
+allowed_senders = ["planner"]
+allowed_targets = ["planner"]
+
+[[client]]
+role = "scout"
+key = "ed25519/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+allowed_senders = ["*"]
+allowed_targets = ["ghost", "planner"]

@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"res\",\"id\":\"r1\",\"ok\":false,\"error\":{\"code\":\"frame_too_large\",\"message\":\"refused\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "error code frame_too_large spells exactly frame_too_large on the wire; retryable=false"
+}

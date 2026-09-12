@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"ev\",\"seq\":41,\"type\":\"gateway_presence\",\"data\":{\"gateway\":\"tg1\",\"platform\":\"telegram\",\"state\":\"reconnecting\",\"detail\":\"socket closed\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "gateway_presence reports one gateway process health change"
+}

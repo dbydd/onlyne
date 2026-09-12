@@ -1,0 +1,226 @@
+# Onlyne v1.0.0 example spec: the single central truth of one server root.
+# Copy this file to <server-root>/.onlyne/spec.toml.
+# Replace every ed25519/REPLACE_ME value with the output of `onlyne-client init` and every
+# sha256/REPLACE_ME value with the SPKI fingerprint printed by `onlyne-server init`.
+# The field set is closed. onlyne-config parses with deny_unknown_fields, so one unknown key
+# refuses the start with `spec.toml:<line>: <message>`.
+#
+# Loading semantics (docs/v1-PLAN.md §5 line 270):
+# 1. `onlyne-server run` parses the whole file at startup. Unknown keys and type errors refuse the
+#    start and print `spec.toml:<line>: <message>`.
+# 2. `onlyne server reload` and SIGHUP reparse the file into a temporary structure, validate it,
+#    then swap atomically. A failed validation keeps the running spec and records
+#    fault{kind:"spec_reload_failed"}. `onlyne-server reload --dry-run` prints the pending change
+#    through SpecDiff::render.
+# 3. No runtime op writes this file. `onlyne-client init` and `onlyne server generate` print a
+#    `[[client]]` fragment on stdout for an operator to append, then `onlyne reload` applies it.
+
+# docs/v1-PLAN.md §5 line 221
+[server]
+# name is the cluster's identity, the single key behind both placeholder spellings: {{cluster}} and {{server_name}} in a template both resolve from this value (crates/onlyne-config/src/template.rs Placeholders carries the two names). Read by onlyne-server at startup, in the handshake, and by the generate driver. Default: empty string, refused at startup.
+name = "cluster-a"
+# listen sets the server TCP bind address. Read by onlyne-server listeners and by the generate driver for {{listen}}. Default: empty string, refused at startup.
+listen = "127.0.0.1:7811"
+# cert_pin pins the server certificate SPKI SHA-256 fingerprint printed by `onlyne-server init`. Read by every role client during handshake verification. Default: empty string, refused at startup.
+cert_pin = "sha256/REPLACE_ME"
+# note_queue toggles queueing for a note addressed to an offline role. Read by the onlyne-server router before the ledger write. Default: false, which refuses the delivery.
+note_queue = false
+# fault_history_days sets fault record retention. Read by onlyne-server fault pruning. Default: 14.
+fault_history_days = 14
+# resync_lag sets the event lag that makes a client resubscribe. Read by the client runloop while it tracks server_seq. Default: 256.
+resync_lag = 256
+# heartbeat_timeout_ms sets the presence liveness timeout. Read by onlyne-server presence tracking. Default: 30000.
+heartbeat_timeout_ms = 30000
+# agent_package holds the absolute local path of an external coding-agent package. Read by the generate driver once, which vendors a copy and renders {{agent_package}} as `.onlyne/agent/<pkg-name>`. Default: empty string, and a template that uses {{agent_package}} then exits 4.
+agent_package = ""
+# template_root sets the template source root under the server root. Read by the generate driver during template discovery. Default: .onlyne/templates.
+template_root = ".onlyne/templates"
+
+# docs/v1-PLAN.md §5 line 232
+[[client]]
+# role names this role, the unit of addressing and ACL keying. Read by the server router, the ACL decision, and the generate driver. Default: empty string, refused per entry.
+role = "planner"
+# key holds the role ed25519 public key. Read by the handshake verifier. Default: empty string, refused per entry.
+key = "ed25519/REPLACE_ME"
+# prose holds the central role prompt, the single source for this role. Read by the role client through `welcome` and cached into client.db. Default: empty string.
+prose = """Read the incoming task, produce a concise completion reply, and hand the result back through the session command. Cite the task id in every message."""
+# admin marks admin privilege for this role. Read by the admin socket authorization path. Default: false.
+admin = true
+# max_sessions caps concurrent sessions for this role. Read by client dispatch and server projection. Default: 1.
+max_sessions = 3
+# reuse allows reusing one idle session with no unfinished task. Read by client dispatch. Default: false, and this entry turns it on.
+reuse = true
+# allowed_senders lists roles allowed to deliver to this role. Read by acl_allows before the ledger write. Default: empty list, which denies every sender. ["*"] admits every registered role.
+allowed_senders = ["*"]
+# allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role.
+allowed_targets = ["builder", "reviewer", "_supervisor"]
+# session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list.
+session_command = ["pi", "--session-id", "{session}"]
+# aggregate marks this role as the representative of an external cluster. Read by the server and the generate driver as an annotation. Default: empty string, which marks a local role.
+aggregate = ""
+
+# docs/v1-PLAN.md §5 line 242
+[client.timeout]
+# ready_ms bounds startup readiness for one session. Read by the client lifecycle timers. Default: 30000.
+ready_ms = 30000
+# running_ms bounds one running task. Read by the client lifecycle timers. Default: 120000.
+running_ms = 120000
+# idle_ms bounds one idle session. Read by the client lifecycle timers. Default: 60000.
+idle_ms = 60000
+
+# docs/v1-PLAN.md §5 line 243
+[client.intent]
+# attempts sets the retry count for one coding-agent response. Read by the client intent runner. Default: 3.
+attempts = 3
+# backoff_ms sets retry delays in order. Read by the client intent runner. Default: [1000, 2000, 4000].
+backoff_ms = [1000, 2000, 4000]
+
+# docs/v1-PLAN.md §5 line 232
+[[client]]
+# role names this role, the unit of addressing and ACL keying. Read by the server router, the ACL decision, and the generate driver. Default: empty string, refused per entry.
+role = "builder"
+# key holds the role ed25519 public key. Read by the handshake verifier. Default: empty string, refused per entry.
+key = "ed25519/REPLACE_ME"
+# prose holds the central role prompt, the single source for this role. Read by the role client through `welcome` and cached into client.db. Default: empty string.
+prose = """Read the assigned build task, edit the tree under your workspace, then report completion with the files you touched."""
+# admin marks admin privilege for this role. Read by the admin socket authorization path. Default: false.
+admin = false
+# max_sessions caps concurrent sessions for this role. Read by client dispatch and server projection. Default: 1.
+max_sessions = 2
+# reuse allows reusing one idle session with no unfinished task. Read by client dispatch. Default: false, and this entry omits the key toward showing private sessions.
+# allowed_senders lists roles allowed to deliver to this role. Read by acl_allows before the ledger write. Default: empty list, which denies every sender. ["*"] admits every registered role.
+allowed_senders = ["planner", "_supervisor"]
+# allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role.
+allowed_targets = ["planner", "reviewer"]
+# session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list.
+session_command = ["pi", "--session-id", "{session}"]
+# aggregate marks this role as the representative of an external cluster. Read by the server and the generate driver as an annotation. Default: empty string, which marks a local role.
+aggregate = ""
+
+# docs/v1-PLAN.md §5 line 242
+[client.timeout]
+# ready_ms bounds startup readiness for one session. Read by the client lifecycle timers. Default: 30000.
+ready_ms = 30000
+# running_ms bounds one running task. Read by the client lifecycle timers. Default: 120000.
+running_ms = 120000
+# idle_ms bounds one idle session. Read by the client lifecycle timers. Default: 60000.
+idle_ms = 60000
+
+# docs/v1-PLAN.md §5 line 243
+[client.intent]
+# attempts sets the retry count for one coding-agent response. Read by the client intent runner. Default: 3.
+attempts = 3
+# backoff_ms sets retry delays in order. Read by the client intent runner. Default: [1000, 2000, 4000].
+backoff_ms = [1000, 2000, 4000]
+
+# docs/v1-PLAN.md §5 line 232
+[[client]]
+# role names this role, the unit of addressing and ACL keying. Read by the server router, the ACL decision, and the generate driver. Default: empty string, refused per entry.
+role = "reviewer"
+# key holds the role ed25519 public key. Read by the handshake verifier. Default: empty string, refused per entry.
+key = "ed25519/REPLACE_ME"
+# prose holds the central role prompt, the single source for this role. Read by the role client through `welcome` and cached into client.db. Default: empty string.
+prose = """Read the submitted change, list findings in severity order, then record one verdict per task."""
+# admin marks admin privilege for this role. Read by the admin socket authorization path. Default: false.
+admin = false
+# max_sessions caps concurrent sessions for this role. Read by client dispatch and server projection. Default: 1.
+max_sessions = 1
+# reuse allows reusing one idle session with no unfinished task. Read by client dispatch. Default: false, stated here toward showing explicit private sessions.
+reuse = false
+# allowed_senders lists roles allowed to deliver to this role. Read by acl_allows before the ledger write. Default: empty list, which denies every sender. ["*"] admits every registered role.
+allowed_senders = ["planner", "builder"]
+# allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role.
+allowed_targets = ["planner"]
+# session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list.
+session_command = ["pi", "--session-id", "{session}"]
+# aggregate marks this role as the representative of an external cluster. Read by the server and the generate driver as an annotation. Default: empty string, which marks a local role.
+aggregate = ""
+
+# docs/v1-PLAN.md §5 line 242
+[client.timeout]
+# ready_ms bounds startup readiness for one session. Read by the client lifecycle timers. Default: 30000.
+ready_ms = 30000
+# running_ms bounds one running task. Read by the client lifecycle timers. Default: 120000.
+running_ms = 120000
+# idle_ms bounds one idle session. Read by the client lifecycle timers. Default: 60000.
+idle_ms = 60000
+
+# docs/v1-PLAN.md §5 line 243
+[client.intent]
+# attempts sets the retry count for one coding-agent response. Read by the client intent runner. Default: 3.
+attempts = 3
+# backoff_ms sets retry delays in order. Read by the client intent runner. Default: [1000, 2000, 4000].
+backoff_ms = [1000, 2000, 4000]
+
+# docs/v1-PLAN.md §5 line 245
+[[client]]
+# role names this role, the unit of addressing and ACL keying. Read by the server router, the ACL decision, and the generate driver. Default: empty string, refused per entry.
+role = "_supervisor"
+# key holds the role ed25519 public key of the upper cluster supervisor. Read by the handshake verifier. Default: empty string, refused per entry.
+key = "ed25519/REPLACE_ME"
+# prose holds the central role prompt, the single source for this role. Read by the role client through `welcome` and cached into client.db. Default: empty string.
+prose = """Accept one task per inbound batch from the parent cluster, forward it to a child role, then answer the parent with the child result."""
+# admin marks admin privilege for this role. Read by the admin socket authorization path. Default: false.
+admin = false
+# max_sessions caps concurrent sessions for this role. Read by client dispatch and server projection. Default: 1.
+max_sessions = 1
+# reuse allows reusing one idle session with no unfinished task. Read by client dispatch. Default: false.
+reuse = false
+# allowed_senders lists roles allowed to deliver to this role. Read by acl_allows before the ledger write. Default: empty list, which denies every sender. ["*"] admits every registered role.
+allowed_senders = ["*"]
+# allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role.
+allowed_targets = ["_supervisor", "builder"]
+# session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list.
+session_command = ["pi", "--session-id", "{session}"]
+# aggregate marks this role as the representative of an external cluster. Read by the server and the generate driver as an annotation. Default: empty string, which marks a local role. docs/v1-PLAN.md §5 line 248.
+aggregate = "cluster-b"
+
+# docs/v1-PLAN.md §5 line 242
+[client.timeout]
+# ready_ms bounds startup readiness for one session. Read by the client lifecycle timers. Default: 30000.
+ready_ms = 30000
+# running_ms bounds one running task. Read by the client lifecycle timers. Default: 120000.
+running_ms = 120000
+# idle_ms bounds one idle session. Read by the client lifecycle timers. Default: 60000.
+idle_ms = 60000
+
+# docs/v1-PLAN.md §5 line 243
+[client.intent]
+# attempts sets the retry count for one coding-agent response. Read by the client intent runner. Default: 3.
+attempts = 3
+# backoff_ms sets retry delays in order. Read by the client intent runner. Default: [1000, 2000, 4000].
+backoff_ms = [1000, 2000, 4000]
+
+# docs/v1-PLAN.md §5 line 252
+[[gateway]]
+# id names this gateway attachment. Read by gateway host registration and by route matching. Default: empty string, refused per entry.
+id = "tg1"
+# platform selects the platform plugin of the gateway host. Read by the gateway host at startup. Default: empty string, refused per entry.
+platform = "telegram"
+# key holds the gateway ed25519 public key. Read by the handshake verifier. Default: empty string, refused per entry.
+key = "ed25519/REPLACE_ME"
+# enabled toggles the attachment. Read by the gateway host at startup and by the server registry. Default: false.
+enabled = true
+
+# Routes are matched in file order against one inbound message, and the first match wins. The
+# exact conversation match below therefore sits above the fallback entry.
+# docs/v1-PLAN.md §5 line 258, and docs/v1-PLAN.md §5 line 267 for the first-match rule.
+[[route]]
+# gateway selects the inbound gateway id. Read by server inbound matching in file order. Default: empty string, refused per entry.
+gateway = "tg1"
+# channel selects the platform channel of the inbound message. Read by server inbound matching in file order. Default: empty string, refused per entry.
+channel = "telegram"
+# conversation selects one external conversation. Read by server inbound matching, where absent means every conversation of that gateway. Default: absent, which makes this entry the fallback.
+conversation = "1234"
+# to names the delivery target. to.role carries the role name, to.session pins one session, and absent to.session is the default. Read by server inbound matching.
+to = { role = "planner" }
+
+# docs/v1-PLAN.md §5 line 264
+[[route]]
+# gateway selects the inbound gateway id. Read by server inbound matching in file order. Default: empty string, refused per entry.
+gateway = "tg1"
+# channel selects the platform channel of the inbound message. Read by server inbound matching in file order. Default: empty string, refused per entry.
+channel = "telegram"
+# conversation is omitted here, so this entry catches every conversation of this gateway that no earlier entry claimed.
+# to names the delivery target. to.role carries the role name, to.session pins one session, and absent to.session is the default. Read by server inbound matching.
+to = { role = "_supervisor" }

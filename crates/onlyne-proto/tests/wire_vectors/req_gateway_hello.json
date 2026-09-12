@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"hello\",\"args\":{\"protocol\":1,\"role\":\"tg1\",\"key\":\"ed25519/BBB\",\"signature\":\"sig\",\"agent\":\"onlyne-gateway\",\"version\":\"1.0.0\",\"aggregate\":false}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "gateway hello reuses the client handshake shape on the server socket"
+}

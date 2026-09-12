@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"res\",\"id\":\"r1\",\"ok\":true,\"data\":{\"admin\":false,\"aggregate\":\"cluster-b\",\"allowed_senders\":[\"*\"],\"allowed_targets\":[\"builder\"],\"cluster\":\"cluster-a\",\"intent_attempts\":3,\"intent_backoff_ms\":[1000,2000,4000],\"max_sessions\":3,\"prose\":\"Read the incoming task\",\"reuse\":true,\"role\":\"_supervisor\",\"seq\":41,\"server\":\"srv\",\"session_command\":[\"pi\",\"--session-id\",\"{session}\"],\"spec_hash\":\"abc123\",\"timeout_idle_ms\":60000,\"timeout_ready_ms\":30000,\"timeout_running_ms\":120000}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "a supervisor's aggregate role is told the child cluster it represents; an absent key and a null both mean none, so a client may read either"
+}

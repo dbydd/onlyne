@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"bye\",\"args\":{\"reason\":\"shutdown\",\"drain_ms\":500}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "gateway bye closes the connection after an optional drain window"
+}

@@ -1,0 +1,24 @@
+[Unit]
+Description=Onlyne server daemon for one server root
+Documentation=file:/srv/onlyne/.onlyne/spec.toml
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/onlyne
+ExecStart=/usr/local/bin/onlyne-server run --root /srv/onlyne
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=20
+StandardOutput=append:/srv/onlyne/.onlyne/logs/server.log
+StandardError=append:/srv/onlyne/.onlyne/logs/server.log
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/onlyne
+
+[Install]
+WantedBy=multi-user.target

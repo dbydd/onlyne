@@ -1,123 +1,94 @@
 ---
 name: onlyne
-description: Use when an agent needs to send, receive, subscribe to, or inspect workspace-local IM channel messages through Onlyne.
+description: Use when developing the Onlyne repository itself — touching crates, the wire protocol, ledger schema, CLI verbs, e2e proofs, or the verification gates.
 ---
 
-# Onlyne
+# Onlyne Development
 
-## Overview
+Guidance for agents changing this codebase. Runtime operation lives in
+`skills/onlyne-supervisor/SKILL.md` and `skills/onlyne-role/SKILL.md`; this file covers
+working on the repo.
 
-Onlyne is a workspace-local IM channel broker. Use it only as a local messaging bridge: send messages, receive subscribed events, and inspect local history through the workspace `.onlyne/` daemon state.
+## Product boundary (AGENTS.md §0)
 
-## Rules
+Onlyne is transport: routing, ledger, queueing, ACL, session mechanics. Orchestration
+belongs to supervisor sessions and the spec file. The core detects and records; the
+operator decides retries, recycling, and timeouts. A feature that starts deciding policy
+belongs in a supervisor session, the spec, or a plugin — pick one of those before adding
+code here. Zero compatibility is a product rule: old configs, old databases, and old wire
+versions fail at the door (`exit 2`, verbatim strings). A change that "also reads the old
+shape" gets rejected.
 
-- Run commands inside the project tree, or pass `--workspace <dir>`.
-- Do not write credentials into global home directories. Secrets belong in the selected workspace `.onlyne/.env`.
-- Do not commit `.onlyne/`, logs, runtime databases, sockets, or channel tokens.
-- Do not treat Onlyne as an agent runtime, model runner, scheduler, or prompt system.
-- Use `onlyne run --debug` only while discovering channel/conversation/thread metadata; debug replies are for setup, not normal operation.
-- If pi-onlyne manages the daemon, do not shell out `nohup onlyne run`, `pkill -f 'onlyne run'`, or manual restart scripts. Use `/onlyne daemon start|stop|restart` or the `onlyne_daemon_start` / `onlyne_daemon_stop` / `onlyne_daemon_restart` tools instead.
-
-## Quick Reference
-
-| Need | Command |
-| --- | --- |
-| Initialize workspace | `onlyne init` |
-| Export/update local skill | `onlyne export-skill` |
-| Run daemon manually | `onlyne run` |
-| Run with metadata replies | `onlyne run --debug` |
-| Stop manual daemon | `onlyne stop` |
-| Restart manual daemon | `onlyne restart` |
-| Manage daemon from pi-onlyne | `/onlyne daemon start`, `/onlyne daemon stop`, `/onlyne daemon restart`, or `onlyne_daemon_*` tools |
-| Health check | `onlyne client '{"id":"ping","op":"ping"}'` |
-| Status/channels | `onlyne client '{"id":"status","op":"status"}'` |
-| Send Markdown | `onlyne client '{"id":"send","op":"send_message","channel_id":"qqbot","text":"# Report\\n\\n| A | B |\\n|---|---|\\n| 1 | 2 |"}'` |
-| Send literal text | `onlyne client '{"id":"send","op":"send_message","channel_id":"telegram","text":"# not a heading","raw_text":true}'` |
-| Wake local agent | `onlyne client '{"id":"wake","op":"loopback","text":"background job needs attention","raw_text":true}'` |
-| Reply text | `onlyne client '{"id":"reply","op":"reply_message","channel_id":"telegram","text":"hello","raw_text":true}'` |
-| Read channel history | `onlyne client '{"id":"hist","op":"fetch_channel_history","channel_id":"telegram","limit":20}'` |
-| Read merged history | `onlyne client '{"id":"all","op":"fetch_all_history","limit":50}'` |
-| FIFO send | `printf '# report\n' > .onlyne/channels/qqbot/in` |
-| FIFO receive | `cat .onlyne/channels/qqbot/out` |
-
-## File Descriptor IO
-
-When the daemon is running, each enabled channel plus `loopback` exposes FIFO files under `.onlyne/channels/<channel>/`:
+## Crate map and dependency law
 
 ```text
-.onlyne/channels/qqbot/in
-.onlyne/channels/qqbot/out
+onlyne-frame     4-byte BE length + JSON; zero business imports
+onlyne-proto     types + validation + error codes; no tokio
+onlyne-config    TOML spec/config parsing, env secrets
+onlyne-layout    workspace/server root discovery, legacy refusal
+onlyne-store     server ledger + client db; (generation,seq) monotonic gates
+onlyne-session   pure lifecycle reducer + SessionBackend (orca|zellij|exec|fake)
+onlyne-net       TLS 1.3 + pinning, ed25519 challenge, acl_allows, backoff
+onlyne-adapter   the one adapter protocol SDK (agent side and gateway side)
+onlyne-server/-client/-gateway   three bins; onlyne-cli the thin entry; onlyne-testkit fakes+e2e
+plugins/onlyne-gateway-*         one platform per crate; depend on adapter+proto only
 ```
 
-- Write one message to `in`; EOF ends the message.
-- Read one inbound message from `out`; it blocks until a message is available.
-- FIFO input format is configured with `in_format = "markdown" | "raw_text"`.
-- FIFO output behavior is configured with `out_content = "latest_only" | "with_history"` and `out_cursor = "retain" | "consume"`.
-- `loopback/in` wakes the local agent session through Onlyne loopback.
-- `examples/fifo/smoke-fifo-all-qq.sh` writes all channels via FIFO and reads QQ inbound through `.onlyne/channels/qqbot/out`.
+`onlyne-server` and `onlyne-client` never depend on each other. Platform SDKs
+(`teloxide`, `openlark`, `wechat-ilink`, `resvg`) must stay out of both binaries. After any
+dependency edit, prove it with
+`cargo tree -p onlyne-client | grep -E 'teloxide|openlark|resvg'`. Gateways compile per
+feature; `--no-default-features --features telegram` must build.
 
-## Config Schema
+## Change procedures
 
-Workspace config starts with Taplo's schema hint:
+**Wire or types** (`onlyne-proto`): edit the type, regenerate the schemas
+(`cargo run -p onlyne-proto --bin gen-schema`), then update every affected fixture under
+`crates/onlyne-proto/tests/wire_vectors/` (one JSON per reachable frame and error code).
+Restate the contract in `crates/onlyne-adapter/PROTOCOL.md`. Error codes are a closed set
+of fourteen. Add one and you owe a fixture, a PROTOCOL.md row, and the CLI table below.
 
-```toml
-#:schema ./onlyne-config.schema.json
-```
+**Lifecycle** (`onlyne-session/src/lifecycle.rs`): `apply()` and `is_legal()` are a
+table-tested reducer — five state axes, 21 `LifecycleEvent` variants, versions
+`(generation, seq)`. A new transition needs its table rows in the same commit. Reviewers
+halt on weakened assertions during a migration.
 
-Refresh the generated schema after changing Rust config types:
+**Ledger/schema** (`onlyne-store`): `schema_marker(name, version, protocol_version)` is the
+gate. A field change bumps the marker and leaves the refuse-at-door string untouched.
+`acl_allows` runs before the ledger write, so a denied send leaves zero rows and zero
+sender-side intents. The built-in exemption covers only completions addressed to the
+recorded task origin. Widening it needs a spec decision first.
+
+**CLI verb** (`onlyne-cli`): args live in `verbs.rs`/`admin.rs`, out comes one JSON line.
+Exit codes: `0` answer ok, `1` failed daemon answer or `wait-ready` bound, `2` validation,
+`3` no socket, `4` generate refusal, `127` missing sibling. Socket resolution order stays
+`--socket` → `--server-root` (admin) → `--workspace`/cwd walk (client). `--from` belongs to
+the admin surface only; every message verb already prints JSON.
+
+**Backend** (`onlyne-session/src/backend/`): capabilities `{spawn,attach,probe,close,
+focus,rename}`. A missing capability degrades through faults, never panics. Discovery order
+is `zellij → orca → fake` when `ONLYNE_BACKEND` is empty.
+
+## Gates
 
 ```bash
-cargo run --features schema --bin gen-schema > onlyne-config.schema.json
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                 # per-crate -p reruns suffice for isolated edits
+crates/onlyne-testkit/e2e/<case>.sh    # ONLYNE_BACKEND=fake, built target/debug, no real creds
 ```
 
-## Subscribe to Events
+The twelve scripts under `crates/onlyne-testkit/e2e/` each encode one verification case
+from `docs/v1-PLAN.md` (ACL rejects, idempotency, reconnect requeue, gateway mount,
+relocation, two-cluster federation, legacy refusal, frame bounds). A bug fix needs its
+reproduction as an e2e or a table test: red before the fix, green after. The live ring demo
+(`examples/supervisor/run.py`) needs Orca and real pi binaries. Treat it as manual smoke.
 
-`onlyne client` prints one response and exits, so long-lived subscriptions should keep the Unix socket open. The socket path is always workspace-local: `.onlyne/run/s`.
+## Formal invariants
 
-```bash
-python3 - <<'PY'
-import json, socket
-sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-sock.connect('.onlyne/run/s')
-sock.sendall(b'{"id":"sub","op":"subscribe_events"}\n')
-while True:
-    print(sock.recv(65536).decode(), end='')
-PY
-```
-
-Subscribed event lines have `event:true`; request responses have `ok:true` or `ok:false`.
-
-## Markdown Semantics
-
-External callers send one whole Markdown document in `text`; Markdown is the default. Do not split tables, formulas, or code blocks before sending. Set `raw_text:true` only for literal plain text.
-
-- QQ Bot receives the whole document as QQ extended Markdown (`msg_type=2`, `markdown.content`), including tables and formulas.
-- Telegram and WeChat may internally split Markdown tables into rendered image parts.
-- Feishu sends Markdown as an interactive card and keeps supported table content in-card.
-- The response/history may contain `platform_metadata.delivery_parts` when one logical send becomes multiple platform messages.
-
-If the host agent has Onlyne tools, prefer:
-
-```text
-onlyne_send({ channelId, text })
-onlyne_broadcast({ targets, text })
-onlyne_loopback({ text, rawText? })
-// raw literal text only:
-onlyne_send({ channelId, text, rawText: true })
-```
-
-Otherwise use the CLI/socket request shown above.
-
-## Discover Conversation IDs
-
-1. Start `onlyne run --debug` in the workspace.
-2. Send a normal message to the target platform bot/account.
-3. Read the platform reply; it contains redacted channel/conversation/thread metadata.
-4. Put the returned conversation value into that adapter's `bind_conversation_id`, then send with only `channel_id`.
-
-## Common Mistakes
-
-- If `connect onlyne socket` fails, start `onlyne run` in the same workspace or pass the same `--workspace <dir>` to both commands.
-- If history is empty, first verify the adapter is enabled and `status` shows the expected channel.
-- If sends go to the wrong place, rediscover the conversation with `--debug`; platform IDs are not interchangeable across Telegram, Feishu, QQ Bot, and WeChat.
-- If multiple examples should share config, initialize the parent directory once and run child commands under it so upward workspace discovery finds the same `.onlyne/`.
+`proofs/` (GrugMatic, core Lean 4.33.1, zero dependencies) carries one combinator lemma per
+design decision: D4 carrier bounds, D5 authority split, D6 content by reference, D11
+idempotence, D12 delivery-creates-task, D13 file truth, D15 single-source prose, one-shot
+sessions. When a change touches one of those invariants, read the lemma's docstring first.
+If the change breaks the lemma, update `proofs/` in the same commit and keep
+`cd proofs && lake build` green with zero `sorry`.

@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"ack\",\"args\":{\"msg_id\":\"3f2a1c4e-5b6d-4e7f-8a90-1b2c3d4e5f60\",\"op_id\":\"o-22222222-2222-4222-8222-222222222222\",\"accepted\":true}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "client ack settles one delivery by msg_id and omits reason when accepted"
+}
