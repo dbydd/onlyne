@@ -32,10 +32,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 base64 = "0.22"
-onlyne-client = { path = "../onlyne-client" }
-onlyne-frame = { path = "../onlyne-frame" }
+onlyne-client = { path = "../onlyne-client", version = "1.0.0" }
+onlyne-frame = { path = "../onlyne-frame", version = "1.0.0" }
 rusqlite = { version = "0.32", features = ["bundled"] }
-onlyne-net = { path = "../onlyne-net" }
+onlyne-net = { path = "../onlyne-net", version = "1.0.0" }
 tempfile = "3"
 
 onlyne-testkit = { path = "../onlyne-testkit", version = "1.0.0" }

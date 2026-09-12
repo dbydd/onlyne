@@ -36,17 +36,17 @@ publish = false
 
 [workspace.dependencies]
 # internal
-onlyne-frame = { path = "crates/onlyne-frame" }
-onlyne-proto = { path = "crates/onlyne-proto" }
-onlyne-config = { path = "crates/onlyne-config" }
-onlyne-layout = { path = "crates/onlyne-layout" }
-onlyne-store = { path = "crates/onlyne-store" }
-onlyne-session = { path = "crates/onlyne-session" }
-onlyne-net = { path = "crates/onlyne-net" }
-onlyne-adapter = { path = "crates/onlyne-adapter" }
-onlyne-server = { path = "crates/onlyne-server" }
-onlyne-client = { path = "crates/onlyne-client" }
-onlyne-testkit = { path = "crates/onlyne-testkit" }
+onlyne-frame = { path = "crates/onlyne-frame", version = "1.0.0" }
+onlyne-proto = { path = "crates/onlyne-proto", version = "1.0.0" }
+onlyne-config = { path = "crates/onlyne-config", version = "1.0.0" }
+onlyne-layout = { path = "crates/onlyne-layout", version = "1.0.0" }
+onlyne-store = { path = "crates/onlyne-store", version = "1.0.0" }
+onlyne-session = { path = "crates/onlyne-session", version = "1.0.0" }
+onlyne-net = { path = "crates/onlyne-net", version = "1.0.0" }
+onlyne-adapter = { path = "crates/onlyne-adapter", version = "1.0.0" }
+onlyne-server = { path = "crates/onlyne-server", version = "1.0.0" }
+onlyne-client = { path = "crates/onlyne-client", version = "1.0.0" }
+onlyne-testkit = { path = "crates/onlyne-testkit", version = "1.0.0" }
 
 # external
 anyhow = "1"

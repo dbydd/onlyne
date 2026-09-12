@@ -14,10 +14,10 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
-onlyne-adapter = { path = "../onlyne-adapter" }
-onlyne-config = { path = "../onlyne-config" }
-onlyne-frame = { path = "../onlyne-frame" }
-onlyne-proto = { path = "../onlyne-proto" }
+onlyne-adapter = { path = "../onlyne-adapter", version = "1.0.0" }
+onlyne-config = { path = "../onlyne-config", version = "1.0.0" }
+onlyne-frame = { path = "../onlyne-frame", version = "1.0.0" }
+onlyne-proto = { path = "../onlyne-proto", version = "1.0.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

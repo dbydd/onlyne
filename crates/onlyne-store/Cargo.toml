@@ -10,8 +10,8 @@ description = "Onlyne v1 SQLite persistence"
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
-onlyne-proto = { path = "../onlyne-proto" }
-onlyne-session = { path = "../onlyne-session" }
+onlyne-proto = { path = "../onlyne-proto", version = "1.0.0" }
+onlyne-session = { path = "../onlyne-session", version = "1.0.0" }
 rusqlite = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -19,5 +19,5 @@ tracing = "0.1"
 unicode-segmentation = "1"
 
 [dev-dependencies]
-onlyne-frame = { path = "../onlyne-frame" }
+onlyne-frame = { path = "../onlyne-frame", version = "1.0.0" }
 tempfile = "3"
