@@ -522,6 +522,149 @@ fn intent_exhaustion_drives_fault_after_ceiling() {
     assert_eq!(faults[0].kind, "intent_exhausted");
 }
 
+/// Build a note the way the pi plugin's `protocol.mjs` does: the conformance
+/// vector `adapter_plugin_send_note.json` pins an `op_id`-less note, so the
+/// envelope leaves the field unset rather than the envelope layer minting one.
+fn note_envelope(role: &str, text: &str) -> Envelope {
+    let mut envelope = new_envelope(
+        MsgKind::Note,
+        onlyne_proto::Principal::role("planner"),
+        onlyne_proto::Principal::role(role),
+        onlyne_proto::Body::text(text),
+        None,
+    )
+    .unwrap();
+    envelope.op_id = None;
+    envelope
+}
+
+/// Whether one id is the shape `new_op_id` mints: the proto prefix and a bare
+/// uuid v4, which is the `/^o-[0-9a-f-]{36}$/` the field report asked for.
+fn is_minted_op_id(op_id: &str) -> bool {
+    let Some(rest) = op_id.strip_prefix("o-") else {
+        return false;
+    };
+    rest.len() == 36
+        && rest
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch) || ch == '-')
+}
+
+#[test]
+fn a_note_without_a_key_gets_one_the_row_stores_and_replays() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        false,
+        Arc::new(FakeBackend::new()),
+        store.clone(),
+    );
+
+    let note = note_envelope("writer", "batch 12 finished");
+    let op_id = state.enqueue_outbound(&note).unwrap();
+    assert!(
+        is_minted_op_id(&op_id),
+        "a note without a key gets a minted one: {op_id}"
+    );
+    assert!(
+        note.op_id.is_none(),
+        "the plugin's own envelope is untouched"
+    );
+
+    let rows = store.flush_order().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].op_id, op_id);
+    assert_eq!(rows[0].env_json["op_id"].as_str(), Some(op_id.as_str()));
+
+    let ClientOp::Send(replayed) = op_for_intent(&rows[0]).unwrap() else {
+        panic!("a stored note replays as a send");
+    };
+    assert_eq!(replayed.op_id.as_deref(), Some(op_id.as_str()));
+    assert!(
+        replayed.validate().is_ok(),
+        "a note carrying a stamped key is a legal frame"
+    );
+}
+
+#[test]
+fn a_task_envelope_keeps_the_key_it_brought() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        false,
+        Arc::new(FakeBackend::new()),
+        store.clone(),
+    );
+
+    let task = sample_envelope("writer", "do the thing");
+    let brought = task.op_id.clone().expect("a task mints its own key");
+    assert_eq!(state.enqueue_outbound(&task).unwrap(), brought);
+    assert_eq!(store.flush_order().unwrap()[0].op_id, brought);
+}
+
+#[test]
+fn two_notes_queue_under_two_distinct_keys() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        false,
+        Arc::new(FakeBackend::new()),
+        store.clone(),
+    );
+
+    let first = state
+        .enqueue_outbound(&note_envelope("writer", "note one"))
+        .unwrap();
+    let second = state
+        .enqueue_outbound(&note_envelope("writer", "note two"))
+        .unwrap();
+    assert_ne!(first, second, "notes are never deduped");
+
+    let rows = store.flush_order().unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(
+            row.env_json["op_id"].as_str(),
+            Some(row.op_id.as_str()),
+            "every row is keyed by the id inside its stored envelope"
+        );
+    }
+    assert!(rows.iter().any(|row| row.op_id == first));
+    assert!(rows.iter().any(|row| row.op_id == second));
+}
+
+#[test]
+fn the_offline_reply_reports_the_key_the_row_stores() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let cli = LocalCli::with_role(IntentMachine::new(store.clone(), 3, vec![100]), "planner");
+
+    let note = note_envelope("writer", "note over the plugin socket");
+    let body = cli.offline_send(&note).unwrap();
+    let reported = body.data.unwrap()["op_id"]
+        .as_str()
+        .expect("the reply names the stored key")
+        .to_string();
+    assert!(is_minted_op_id(&reported), "reported: {reported}");
+    assert_eq!(store.flush_order().unwrap()[0].op_id, reported);
+    assert!(
+        note.op_id.is_none(),
+        "the plugin's own envelope is untouched"
+    );
+}
+
 #[test]
 fn session_reuse_and_capacity_capping() {
     let dir = tempdir().unwrap();

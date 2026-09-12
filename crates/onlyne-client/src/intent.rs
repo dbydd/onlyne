@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use onlyne_proto::{ClientOp, Envelope, ErrorCode, Receipt, Report, ResBody};
+use onlyne_proto::{ClientOp, Envelope, ErrorCode, Receipt, Report, ResBody, new_op_id};
 use onlyne_store::{ClientStore, IntentRow};
 use rusqlite::Connection;
 use serde_json::Value;
@@ -49,6 +49,23 @@ pub enum IntentResult {
     Exhausted,
 }
 
+/// Give one outbound envelope the `op_id` its intent row is keyed by.
+///
+/// The proto requires the key for every kind but `Note` (`Envelope::validate`
+/// in `onlyne-proto`), so a plugin's note legitimately arrives without one
+/// while the queue still keys every row by an id. Minting it here keeps the
+/// stamped envelope and the row's key one value: what the row replays is what
+/// it stored. A non-note envelope keeps the key it brought, which is what
+/// makes a re-delivered task dedup on its original id.
+pub fn stamp_op_id(envelope: &mut Envelope) -> String {
+    if let Some(op_id) = &envelope.op_id {
+        return op_id.clone();
+    }
+    let op_id = new_op_id();
+    envelope.op_id = Some(op_id.clone());
+    op_id
+}
+
 #[derive(Clone)]
 pub struct IntentMachine {
     pub store: ClientStore,
@@ -65,14 +82,17 @@ impl IntentMachine {
         }
     }
 
+    /// Queue one envelope under the id its row is keyed by.
+    ///
+    /// A kind that may arrive without a key (a note) gets a fresh one from
+    /// [`stamp_op_id`], and the stamped envelope is what the row stores and
+    /// replays, so the row's `op_id` and its `env_json` never disagree.
     pub fn enqueue(&self, envelope: &Envelope) -> Result<bool> {
-        let op_id = envelope
-            .op_id
-            .as_deref()
-            .context("intent envelope missing op_id")?;
+        let mut stamped = envelope.clone();
+        let op_id = stamp_op_id(&mut stamped);
         Ok(self
             .store
-            .enqueue_intent(op_id, &serde_json::to_value(envelope)?)?)
+            .enqueue_intent(&op_id, &serde_json::to_value(&stamped)?)?)
     }
 
     pub fn enqueue_value(&self, op_id: &str, envelope: &Value) -> Result<bool> {

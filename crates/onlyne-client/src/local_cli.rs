@@ -1,4 +1,4 @@
-use crate::intent::IntentMachine;
+use crate::intent::{IntentMachine, stamp_op_id};
 use anyhow::{Context, Result, anyhow};
 use onlyne_adapter::AdapterIo;
 use onlyne_layout::RoleWorkspace;
@@ -42,7 +42,13 @@ impl LocalCli {
         }
     }
 
-    pub fn send(&self, envelope: Envelope) -> Result<ClientOp> {
+    /// Queue one outbound send and answer the stamped envelope.
+    ///
+    /// The queue keys its row with an `op_id`; a note arrives without one, so
+    /// the stamp lands before the envelope becomes the `ClientOp` the caller
+    /// writes, and the frame on the wire carries the id the row stored.
+    pub fn send(&self, mut envelope: Envelope) -> Result<ClientOp> {
+        stamp_op_id(&mut envelope);
         self.intents.enqueue(&envelope)?;
         Ok(ClientOp::Send(Box::new(envelope)))
     }
@@ -107,10 +113,17 @@ impl LocalCli {
         }))
     }
 
+    /// Queue one plugin `send` and answer the key its intent row carries.
+    ///
+    /// A note arrives without an `op_id`, so the stamp happens before the
+    /// reply is built: the plugin reads the id the queue stored rather than
+    /// `null`, and the stored envelope is the one that replays.
     pub fn offline_send(&self, envelope: &Envelope) -> Result<ResBody> {
-        self.intents.enqueue(envelope)?;
+        let mut stamped = envelope.clone();
+        let op_id = stamp_op_id(&mut stamped);
+        self.intents.enqueue(&stamped)?;
         Ok(ResBody::ok(
-            serde_json::json!({"queued": true, "op_id": envelope.op_id}),
+            serde_json::json!({"queued": true, "op_id": op_id}),
         ))
     }
 

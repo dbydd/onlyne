@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.2] - 2026-09-13
+
+Scope: `onlyne-client` only. Every other crate stays at 1.0.1.
+
+### Fixed
+
+- client: a `kind = note` send died at both enqueue choke points with
+  `internal: outbound envelope missing op_id` (`dispatch::enqueue_outbound` and
+  `IntentMachine::enqueue`), even though the proto requires the idempotency key
+  only for the non-note kinds (`Envelope::validate`). The client now stamps a
+  fresh `op_id` (`onlyne_proto::new_op_id()`) when an outbound envelope carries
+  none, validates and queues that stamped copy, and reports its id back to the
+  adapter. Notes stay undeduped — every send is its own intent — while a task
+  envelope keeps the key it brought, so a re-delivered task still dedups on its
+  original id. Field reports: the pi plugin adapter (`protocol.mjs`) mints an
+  `op_id` for `task` only — the conformance vector `adapter_plugin_send_note.json`
+  pins the keyless note — and the ARIS run log died at 15:13Z on this error while
+  sending a note (completion `68222854`).
+
 ## [1.0.1] - 2026-09-13
 
 ### Fixed

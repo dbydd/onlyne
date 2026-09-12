@@ -1,3 +1,4 @@
+use crate::intent::stamp_op_id;
 use crate::runloop::ClientInit;
 use anyhow::{Context, Result, anyhow};
 use onlyne_adapter::AdapterIo;
@@ -276,18 +277,22 @@ impl DispatchState {
     }
 
     /// Queue an outbound envelope before its first write and answer its op_id.
+    ///
+    /// The queue keys every row by an `op_id`, and the proto requires that key
+    /// only for the non-note kinds, so a note that arrives without one gets a
+    /// fresh client-minted id here: the row is keyed and what it replays is the
+    /// whole stamped envelope. A non-note keeps the id it brought, so a
+    /// re-delivered task still dedups on its original one.
     pub fn enqueue_outbound(&self, envelope: &Envelope) -> Result<String> {
-        envelope
+        let mut stamped = envelope.clone();
+        let op_id = stamp_op_id(&mut stamped);
+        stamped
             .validate()
             .map_err(|error| anyhow!(error.to_string()))?;
-        let op_id = envelope
-            .op_id
-            .clone()
-            .context("outbound envelope missing op_id")?;
         self.inner
             .lock()
             .store
-            .enqueue_intent(&op_id, &serde_json::to_value(envelope)?)?;
+            .enqueue_intent(&op_id, &serde_json::to_value(&stamped)?)?;
         Ok(op_id)
     }
 
