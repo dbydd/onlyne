@@ -947,6 +947,8 @@ async fn pinned_tls_link_fetches_welcome_and_caches_prose() {
         timeout_idle_ms: None,
         intent_attempts: Some(4),
         intent_backoff_ms: Some(vec![10, 20]),
+        relay_required: None,
+        relay_count: None,
         seq: 10,
     };
 

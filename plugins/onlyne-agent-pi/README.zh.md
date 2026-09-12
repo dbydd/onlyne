@@ -179,9 +179,27 @@ relay_required_count = 2           # ……或至少这么多个不同的下游 
 
 两个键同时存在时以 `relay_required` 为准。
 
+策略属于 spec，不属于 vendor 目录。`onlyne generate --force` 会重写本插件被拷进去的那份副本，
+连带抹掉手写的 `relay.toml`；所以在 `[[client]]` 条目里写一次，client 就会把它注入到它拉起的
+每一个 session 进程：
+
+```toml
+[[client]]
+role = "planner"
+relay_required = ["writer"]        # 这些 role 必须收到过接力
+relay_count = 2                    # ……或至少这么多个不同的下游 role
+```
+
+来源优先级是 `环境变量 > relay.toml > 都没有`：`ONLYNE_RELAY_REQUIRED`（名单，逗号分隔）与
+`ONLYNE_RELAY_COUNT`（数量，十进制）就是 client 按上面的条目填进去的两个变量；只有环境变量
+一个都没给出策略时，才去读 `package.json` 旁边的 `relay.toml`；两者都没有 = 无守卫。spec 两个键
+都写时 client 两个变量都注入，仍然以名单为准。手写的 `relay.toml` 仍是手工安装的逃生门——服务
+那些 spec 里根本没写策略的机器——被环境变量盖住的文件则完全不参与。设了但解析不了的变量，会在
+stderr 告警并忽略，把机会让回文件。
+
 | | |
 | --- | --- |
-| 默认 | 没有文件 = 无守卫，completion 路径与守卫存在之前逐字节相同 |
+| 默认 | 两个来源都没给策略 = 无守卫，completion 路径与守卫存在之前逐字节相同 |
 | 判据材料 | 本会话自己成功 `onlyne_send` 触达过的 role，`note` 与 `task` 都算；被 client 拒掉的 envelope 不算 |
 | 拒绝 | `onlyne_complete` 抛 `onlyne: relay guard: missing handoff to: writer (…)`，点名缺哪条边、怎么解除 |
 | 拒绝之后 | 不上报、不排队、不 detach：session 仍然挂着，补上接力后同一次调用即可落地 |
@@ -250,6 +268,8 @@ relay_required_count = 2           # ……或至少这么多个不同的下游 
 | `ONLYNE_SESSION_ID` | 是 | 挂载的 session id；当前 client 中 session_id 等于 task_id |
 | `ONLYNE_TASK_ID` | 是 | 本进程服务的任务；驱动 `session_register` 与首条 `ready` |
 | `ONLYNE_SOCKET` | 否 | 覆盖 socket 路径（默认 `<cwd>/.onlyne/run/s`） |
+| `ONLYNE_RELAY_REQUIRED` | 否 | 该 role 在 spec 里的 `relay_required`，逗号分隔：守卫的名单模式（§5） |
+| `ONLYNE_RELAY_COUNT` | 否 | 该 role 在 spec 里的 `relay_count`：守卫的 count 模式，只在名单为空时起作用（§5） |
 | `ORCA_PANE_KEY` | 否 | 本进程跑在哪（`<tab_id>:<leaf_id>`），每个 heartbeat 以 `observed.host.orca.pane_key` 上报；不在 Orca pane 里时未设置，这也是该字段缺席的原因 |
 | `ORCA_TAB_ID` / `ORCA_LEAF_ID` | 否 | pane 的两个 id；只设了 pane key 时插件会自己解析 |
 | `ORCA_TERMINAL_HANDLE` | 否 | 终端 handle，随 pane key 一起上报为 `host.orca.handle`，也是 `orca terminal switch` 要的那个值 |
@@ -258,7 +278,7 @@ relay_required_count = 2           # ……或至少这么多个不同的下游 
 5 秒，单次请求超时 30 秒，重连按 1/2/4/8/16/30 秒阶梯退避。
 
 插件自己读两个文件：`<cwd>/.pi/onlyne.json`（开关，§1）与 `package.json` 旁边的
-`relay.toml`（接力策略，§5）。
+`relay.toml`（接力策略的兜底，只在 client 没注入策略时才读，§5）。
 
 ## 8. 故障排查
 
@@ -270,7 +290,7 @@ relay_required_count = 2           # ……或至少这么多个不同的下游 
 | `ready refused: internal: unknown session for …` | 插件为 client 从未暂存的任务报了 ready（手工起 pi 时的正常现象） | 让 client 拉起 pi，而不是手工起 |
 | `assign` 一直不来 | client 的 `session_command` 没能拉起 pi，或 `inject` 被降级 | client 日志里的 spawn 行；`/onlyne status` 看能力集 |
 | ledger 停在 `in_flight` | 没有 completion：没跑 turn，或 `agent_settled` 没触发 | pi session 文件里的 `onlyne-assign` / `onlyne-complete` 条目 |
-| `onlyne_complete` 回答 `relay guard: missing handoff to: …` | 工作区的 `relay.toml` 点名了一个本会话从未触达的 role | `cat <ws>/.onlyne/agent/pi-onlyne/relay.toml`；插件 stderr 的 `relay guard: missing handoff …` 会列出已投递集合 |
+| `onlyne_complete` 回答 `relay guard: missing handoff to: …` | 工作区的 spec（或顶替它的 `relay.toml`）点名了一个本会话从未触达的 role | 插件 stderr 的 `relay guard from …` 说明来源、`required=…` 说明策略；`relay guard: missing handoff …` 列出已投递集合 |
 | `hello` 后立刻 `forbidden` / 断连 | mount role 与 client 的 role 不一致 | `hello.args.mount.role` 对该工作区的 role |
 | `frame_too_large` | 正文超过 8 MiB | 只会由超限的出站图片触发；上限来自核心 |
 | 工具缺失 | 该 pi 版本没有 `pi.registerTool` | `/onlyne status`；对照上面的能力表 |

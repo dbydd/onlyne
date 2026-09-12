@@ -234,13 +234,15 @@ export default function onlyne(pi: ExtensionAPI) {
       return;
     }
     const socketPath = env.ONLYNE_SOCKET || `${ctx.cwd}/${SOCKET_RELATIVE_PATH}`;
-    // The relay guard's policy travels with the plugin package rather than in
-    // `.onlyne/config.toml`, which the client parses strictly (relay.mjs).
+    // The guard's policy comes from the spec through the client's environment;
+    // a hand-written `relay.toml` beside the package is the fallback a manual
+    // installation still has (relay.mjs).
     const relay = loadRelay();
     if (relay.warning) log(relay.warning);
     if (relayEnabled(relay)) {
+      const origin = relay.source === "env" ? "the client's environment" : relay.path;
       log(
-        `relay guard from ${relay.path}: required=${JSON.stringify(relay.required)} count=${relay.count ?? "-"}`,
+        `relay guard from ${origin}: required=${JSON.stringify(relay.required)} count=${relay.count ?? "-"}`,
       );
     }
     surface = createSurface({ pi, log, context: () => context });

@@ -191,7 +191,7 @@ fn every_vector_matches_its_published_type() {
         ("req_client", 13usize),
         ("req_gateway", 5),
         ("req_admin", 19),
-        ("res", 11),
+        ("res", 12),
         ("ev", 6),
         ("frame", 4),
         ("error", 14),
@@ -204,7 +204,7 @@ fn every_vector_matches_its_published_type() {
             "{family}: vector count"
         );
     }
-    assert_eq!(vectors.len(), 83, "total vector count");
+    assert_eq!(vectors.len(), 84, "total vector count");
 }
 
 #[test]

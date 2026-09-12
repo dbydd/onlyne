@@ -29,6 +29,16 @@
 //   relay_required_count = 2         # ... or this many distinct downstream roles
 //
 // `relay_required` wins when both are present.
+//
+// The file is the manual installation's escape hatch. A generated workspace
+// carries the same policy in its spec, and the client injects it into every
+// session process it spawns, so the environment comes first:
+//
+//   ONLYNE_RELAY_REQUIRED=writer,auditor   # the spec's `relay_required`
+//   ONLYNE_RELAY_COUNT=2                   # the spec's `relay_count`
+//
+// A variable that is set and unparsable is reported on stderr and ignored, and
+// with nothing usable in the environment the file is read as before.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -42,6 +52,10 @@ export const FORCED_PREFIX = "relay-guard-forced: ";
 
 /** No policy: an empty list and no count, both frozen together. */
 export const DEFAULT_RELAY = Object.freeze({ required: Object.freeze([]), count: null });
+
+/** The client's injected policy variables, filled from the spec's entry. */
+export const RELAY_ENV_REQUIRED = "ONLYNE_RELAY_REQUIRED";
+export const RELAY_ENV_COUNT = "ONLYNE_RELAY_COUNT";
 
 /**
  * The policy file this module reads by default: beside `package.json`, the way
@@ -113,19 +127,84 @@ export function parseRelay(text, name = RELAY_FILE) {
 }
 
 /**
- * Read the policy file.
+ * The policy the client injected from the spec, when it injected one.
  *
- * @param {{ readFile?: (path: string) => string, path?: string }} [options]
- * @returns {{ required: string[], count: number | null, path: string, present: boolean, warning: string | null }}
+ * The list is one comma-joined variable, in the order the spec wrote it; blank
+ * entries are dropped, so a stray comma is not a role name. A variable that is
+ * set but unparsable is reported and ignored rather than adopted, which keeps a
+ * typo from arming the guard with a rule nobody wrote — and `specified` then
+ * says the environment supplied nothing, so the file still gets its turn.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {{ required: string[], count: number | null, specified: boolean, warning: string | null }}
+ */
+export function envRelay(env = process.env) {
+  const warnings = [];
+  let required = null;
+  let count = null;
+
+  const rawRequired = env[RELAY_ENV_REQUIRED];
+  if (rawRequired !== undefined) {
+    const names = String(rawRequired)
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean);
+    if (names.length > 0) required = names;
+    else warnings.push(`${RELAY_ENV_REQUIRED}: no role names in ${JSON.stringify(rawRequired)}; ignored`);
+  }
+
+  const rawCount = env[RELAY_ENV_COUNT];
+  if (rawCount !== undefined) {
+    const text = String(rawCount).trim();
+    const parsed = /^[0-9]+$/.test(text) ? Number(text) : 0;
+    if (parsed > 0) count = parsed;
+    else warnings.push(`${RELAY_ENV_COUNT} must be a positive integer, got ${JSON.stringify(rawCount)}; ignored`);
+  }
+
+  return {
+    required: required ?? [],
+    count,
+    specified: required !== null || count !== null,
+    warning: warnings.length > 0 ? warnings.join("; ") : null,
+  };
+}
+
+/**
+ * Read the policy: what the client injected from the spec first, then the file
+ * beside `package.json`.
+ *
+ * `source` names the winner, and `present` answers the narrower question the
+ * file itself raises: the environment winning means the file was never read, so
+ * a stale `relay.toml` cannot outlive the spec entry that replaced it.
+ *
+ * @param {{ readFile?: (path: string) => string, path?: string, env?: Record<string, string | undefined> }} [options]
+ * @returns {{ required: string[], count: number | null, path: string, present: boolean, source: "env" | "file" | "none", warning: string | null }}
  */
 export function loadRelay(options = {}) {
   const readFile = options.readFile ?? ((path) => readFileSync(path, "utf8"));
   const path = options.path ?? relayPath();
+  const injected = envRelay(options.env ?? process.env);
+  if (injected.specified) {
+    return {
+      required: injected.required,
+      count: injected.count,
+      path,
+      present: false,
+      source: "env",
+      warning: injected.warning,
+    };
+  }
   let raw;
   try {
     raw = readFile(path);
   } catch {
-    return { ...DEFAULT_RELAY, path, present: false, warning: null };
+    return {
+      ...DEFAULT_RELAY,
+      path,
+      present: false,
+      source: "none",
+      warning: injected.warning,
+    };
   }
   const parsed = parseRelay(raw, path);
   return {
@@ -133,7 +212,8 @@ export function loadRelay(options = {}) {
     count: parsed.count,
     path,
     present: true,
-    warning: parsed.warning,
+    source: "file",
+    warning: [injected.warning, parsed.warning].filter(Boolean).join("; ") || null,
   };
 }
 

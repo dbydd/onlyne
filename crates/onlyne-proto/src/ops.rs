@@ -370,6 +370,14 @@ pub struct RoleInfo {
     /// The entry's `aggregate` label; a plain role carries no key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregate: Option<String>,
+    /// The entry's `relay_required`: the downstream handoffs a session of this
+    /// role owes before it may report a terminal outcome. A row from a server
+    /// that predates the field omits the key, which reads as no guard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_required: Option<Vec<String>>,
+    /// The entry's `relay_count`; a non-empty list wins when both are present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_count: Option<u32>,
 }
 
 /// `query_roles` filter.
@@ -550,6 +558,20 @@ pub struct Welcome {
     pub intent_attempts: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent_backoff_ms: Option<Vec<u64>>,
+    /// Downstream roles every session of this role must have handed work to
+    /// before it may report a terminal outcome: the entry's `relay_required`.
+    /// The client forwards the list into the environment of each session
+    /// process it spawns, which is what arms the guard off the spec instead of
+    /// off a file inside the vendor directory `onlyne generate` rewrites. A
+    /// server that predates the field omits the key, and a client reads that as
+    /// "no guard" — the behaviour every v1 role had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_required: Option<Vec<String>>,
+    /// The count form of [`Self::relay_required`]: this many distinct
+    /// downstream roles. A non-empty list wins when both are present, which is
+    /// the precedence the guard's own policy reader already had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_count: Option<u32>,
     /// Server event cursor at handshake time.
     pub seq: u64,
 }
@@ -1000,6 +1022,47 @@ mod tests {
         let projection: SessionProjection = serde_json::from_value(value).expect("decode alias");
         assert_eq!(projection.lifecycle, Lifecycle::Exited);
         assert_eq!(projection.outcome, Some(Outcome::Done));
+    }
+
+    /// The relay slice is additive, so a welcome a server wrote before the keys
+    /// existed still lands, with both keys absent — which is what "no guard"
+    /// means — and a welcome that carries them decodes as written.
+    #[test]
+    fn a_welcome_without_the_relay_keys_decodes_as_no_guard() {
+        let mut frame = serde_json::json!({
+            "cluster": "cluster-a",
+            "server": "srv",
+            "role": "planner",
+            "admin": false,
+            "max_sessions": 3,
+            "reuse": true,
+            "prose": "Read the incoming task",
+            "spec_hash": "abc123",
+            "aggregate": null,
+            "allowed_targets": ["builder"],
+            "allowed_senders": ["*"],
+            "session_command": ["pi", "--session-id", "{session}"],
+            "timeout_ready_ms": 30_000,
+            "timeout_running_ms": 120_000,
+            "timeout_idle_ms": 60_000,
+            "intent_attempts": 3,
+            "intent_backoff_ms": [1000, 2000, 4000],
+            "seq": 41,
+        });
+        let old: Welcome = serde_json::from_value(frame.clone()).expect("the pre-relay frame lands");
+        assert_eq!(old.relay_required, None);
+        assert_eq!(old.relay_count, None);
+        let encoded = serde_json::to_value(&old).expect("encode the welcome");
+        assert!(
+            encoded.get("relay_required").is_none() && encoded.get("relay_count").is_none(),
+            "an absent policy omits the keys rather than sending null: {encoded}"
+        );
+
+        frame["relay_required"] = serde_json::json!(["writer"]);
+        frame["relay_count"] = serde_json::json!(2);
+        let armed: Welcome = serde_json::from_value(frame).expect("the relay slice lands");
+        assert_eq!(armed.relay_required, Some(vec!["writer".to_string()]));
+        assert_eq!(armed.relay_count, Some(2));
     }
 
     #[test]

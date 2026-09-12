@@ -92,6 +92,25 @@
           "default": "",
           "type": "string"
         },
+        "relay_count": {
+          "description": "The count form of [`Self::relay_required`]: this many distinct downstream roles. A non-empty list wins when both keys are present, the precedence the guard's own `relay.toml` already had.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "relay_required": {
+          "description": "Downstream roles one of this role's sessions must have handed work to before it may report a terminal outcome. The client passes the list to every session process it spawns, which is what makes the guard a property of the spec rather than of a file inside the vendor directory `onlyne generate` rewrites. Absent (or empty) is the default: no guard.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
         "reuse": {
           "default": false,
           "type": "boolean"

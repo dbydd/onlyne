@@ -34,6 +34,12 @@ struct DispatchInner {
     pub command: Vec<String>,
     pub max_sessions: u32,
     pub reuse: bool,
+    /// Downstream roles a session of this role owes a handoff to, from the
+    /// server's spec slice (`relay_required`). Empty is the default and means
+    /// the guard is off.
+    pub relay_required: Vec<String>,
+    /// The count form of the same policy (`relay_count`).
+    pub relay_count: Option<u32>,
     pub backend: Arc<dyn SessionBackend>,
     pub store: ClientStore,
     pub bridge: Bridge,
@@ -118,6 +124,8 @@ impl DispatchState {
                 command,
                 max_sessions,
                 reuse,
+                relay_required: Vec::new(),
+                relay_count: None,
                 backend,
                 store,
                 bridge: Bridge::new(),
@@ -216,13 +224,15 @@ impl DispatchState {
         store_ack(&self.inner.lock(), ack);
     }
 
-    /// Adopt the role slice the server sent with `welcome`.
+    /// The role slice the dispatcher currently runs.
     pub fn role_slice(&self) -> crate::slice::RoleSlice {
         let inner = self.inner.lock();
         crate::slice::RoleSlice {
             command: inner.command.clone(),
             max_sessions: inner.max_sessions,
             reuse: inner.reuse,
+            relay_required: inner.relay_required.clone(),
+            relay_count: inner.relay_count,
         }
     }
 
@@ -242,12 +252,15 @@ impl DispatchState {
         !inner.transports.is_empty() || inner.parked.is_some()
     }
 
-    /// Adopt the role slice the server sent with `welcome`.
-    pub fn reconfigure(&self, command: Vec<String>, max_sessions: u32, reuse: bool) {
+    /// Adopt a role slice: the one `welcome` carried, or the one a reload's
+    /// role row carries.
+    pub fn reconfigure(&self, slice: crate::slice::RoleSlice) {
         let mut inner = self.inner.lock();
-        inner.command = command;
-        inner.max_sessions = max_sessions;
-        inner.reuse = reuse;
+        inner.command = slice.command;
+        inner.max_sessions = slice.max_sessions;
+        inner.reuse = slice.reuse;
+        inner.relay_required = slice.relay_required;
+        inner.relay_count = slice.relay_count;
     }
 
     /// Role prose last cached from `welcome`.
@@ -485,6 +498,33 @@ fn render_tokens(tokens: &[String], session: &str, task: &str) -> Vec<String> {
         .collect()
 }
 
+/// The environment one spawned session process carries.
+///
+/// The three `ONLYNE_` identity variables are what the plugin mounts with. The
+/// relay pair is the guard's policy as the spec wrote it: a list joined by
+/// commas, and the count in decimal. A policy the spec does not name injects no
+/// variable at all, which is what leaves a hand-written `relay.toml` in charge
+/// of a box that never put the policy in its spec.
+fn session_env(
+    role: &str,
+    session_id: &str,
+    task_id: &str,
+    relay_required: &[String],
+    relay_count: Option<u32>,
+) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    env.insert("ONLYNE_SESSION_ID".into(), session_id.to_string());
+    env.insert("ONLYNE_TASK_ID".into(), task_id.to_string());
+    env.insert("ONLYNE_ROLE".into(), role.to_string());
+    if !relay_required.is_empty() {
+        env.insert("ONLYNE_RELAY_REQUIRED".into(), relay_required.join(","));
+    }
+    if let Some(count) = relay_count {
+        env.insert("ONLYNE_RELAY_COUNT".into(), count.to_string());
+    }
+    env
+}
+
 /// Whether the stored lifecycle of one session is the terminal `Exited`.
 ///
 /// `client.db` holds the projection the reducer wrote under the
@@ -574,10 +614,13 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
     }
     let session_id = task_id.clone();
     let command = render_tokens(&inner.command, &session_id, &task_id);
-    let mut env = BTreeMap::new();
-    env.insert("ONLYNE_SESSION_ID".into(), session_id.clone());
-    env.insert("ONLYNE_TASK_ID".into(), task_id.clone());
-    env.insert("ONLYNE_ROLE".into(), inner.role.clone());
+    let env = session_env(
+        &inner.role,
+        &session_id,
+        &task_id,
+        &inner.relay_required,
+        inner.relay_count,
+    );
     let session = inner.backend.spawn(SpawnSpec {
         cwd: inner.workspace.clone(),
         task_id: task_id.clone(),
@@ -1307,5 +1350,46 @@ pub fn note_verdict(verdict: &Verdict, task_id: &str) -> Option<Version> {
             tracing::warn!(task = %task_id, ?reason, "lifecycle event rejected; the ledger kept its state");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_env;
+
+    /// The guard reads its policy from the environment before its own
+    /// `relay.toml`, so what the client injects is the whole contract between
+    /// the spec and a spawned session: the list comma-joined, the count in
+    /// decimal, and neither variable at all when the spec names no policy.
+    #[test]
+    fn the_spawn_environment_carries_the_relay_policy_it_has() {
+        let plain = session_env("planner", "s-1", "t-1", &[], None);
+        assert_eq!(plain["ONLYNE_SESSION_ID"], "s-1");
+        assert_eq!(plain["ONLYNE_TASK_ID"], "t-1");
+        assert_eq!(plain["ONLYNE_ROLE"], "planner");
+        assert!(
+            !plain.contains_key("ONLYNE_RELAY_REQUIRED") && !plain.contains_key("ONLYNE_RELAY_COUNT"),
+            "no policy injects no key at all: {plain:?}"
+        );
+
+        let listed = session_env(
+            "planner",
+            "s-1",
+            "t-1",
+            &["writer".to_string(), "auditor".to_string()],
+            None,
+        );
+        assert_eq!(listed["ONLYNE_RELAY_REQUIRED"], "writer,auditor");
+        assert!(!listed.contains_key("ONLYNE_RELAY_COUNT"));
+
+        let counted = session_env("planner", "s-1", "t-1", &[], Some(2));
+        assert_eq!(counted["ONLYNE_RELAY_COUNT"], "2");
+        assert!(!counted.contains_key("ONLYNE_RELAY_REQUIRED"));
+
+        // Both variables travel when the spec names both forms; the guard's own
+        // precedence is what makes the list win.
+        let both = session_env("planner", "s-1", "t-1", &["writer".to_string()], Some(2));
+        assert_eq!(both["ONLYNE_RELAY_REQUIRED"], "writer");
+        assert_eq!(both["ONLYNE_RELAY_COUNT"], "2");
     }
 }

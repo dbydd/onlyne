@@ -148,11 +148,8 @@ impl RunState {
 
     /// Adopt the role slice the server sent with `welcome`.
     async fn adopt(&self, welcome: &Welcome) {
-        self.dispatch.reconfigure(
-            welcome.session_command.clone().unwrap_or_default(),
-            welcome.max_sessions,
-            welcome.reuse,
-        );
+        self.dispatch
+            .reconfigure(crate::slice::RoleSlice::from_welcome(welcome));
         {
             let mut intents = self.intents.lock();
             if let Some(attempts) = welcome.intent_attempts {
@@ -691,9 +688,7 @@ fn apply_role_info(state: &RunState, info: &RoleInfo) -> Vec<&'static str> {
     let Some((applied, fields)) = crate::slice::apply_if_changed(&current, next) else {
         return Vec::new();
     };
-    state
-        .dispatch
-        .reconfigure(applied.command, applied.max_sessions, applied.reuse);
+    state.dispatch.reconfigure(applied);
     fields
 }
 
@@ -754,6 +749,8 @@ mod tests {
             detail: None,
             edges: Vec::new(),
             aggregate: None,
+            relay_required: None,
+            relay_count: None,
         }
     }
 
@@ -774,6 +771,29 @@ mod tests {
         let changed = apply_role_info(&state, &role_info(2, true, vec!["pi".into()]));
         assert!(changed.is_empty());
         assert_eq!(state.dispatch.role_slice().max_sessions, 2);
+    }
+
+    /// A reload that arms or disarms the guard has to reach a live connection,
+    /// which never sees a second `welcome`: the role row is the only carrier,
+    /// and the next spawn reads the policy off the dispatcher.
+    #[test]
+    fn a_relay_policy_from_the_role_row_is_adopted() {
+        let (state, _store) = test_state(2, true, vec!["pi".into()]);
+        let mut armed = role_info(2, true, vec!["pi".into()]);
+        armed.relay_required = Some(vec!["writer".into()]);
+        armed.relay_count = Some(2);
+        let changed = apply_role_info(&state, &armed);
+        assert_eq!(changed, vec!["relay_required", "relay_count"]);
+        let applied = state.dispatch.role_slice();
+        assert_eq!(applied.relay_required, vec!["writer".to_string()]);
+        assert_eq!(applied.relay_count, Some(2));
+
+        let disarmed = role_info(2, true, vec!["pi".into()]);
+        let changed = apply_role_info(&state, &disarmed);
+        assert_eq!(changed, vec!["relay_required", "relay_count"]);
+        let applied = state.dispatch.role_slice();
+        assert!(applied.relay_required.is_empty());
+        assert_eq!(applied.relay_count, None);
     }
 
     #[tokio::test]

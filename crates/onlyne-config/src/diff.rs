@@ -227,5 +227,11 @@ fn changed_client_fields(before: &ClientEntry, after: &ClientEntry) -> Vec<Strin
     if before.aggregate != after.aggregate {
         fields.push("aggregate".to_string());
     }
+    if before.relay_required != after.relay_required {
+        fields.push("relay_required".to_string());
+    }
+    if before.relay_count != after.relay_count {
+        fields.push("relay_count".to_string());
+    }
     fields
 }

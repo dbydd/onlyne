@@ -91,6 +91,18 @@ pub struct ClientEntry {
     pub intent: IntentPolicy,
     #[serde(default)]
     pub aggregate: String,
+    /// Downstream roles one of this role's sessions must have handed work to
+    /// before it may report a terminal outcome. The client passes the list to
+    /// every session process it spawns, which is what makes the guard a
+    /// property of the spec rather than of a file inside the vendor directory
+    /// `onlyne generate` rewrites. Absent (or empty) is the default: no guard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_required: Option<Vec<String>>,
+    /// The count form of [`Self::relay_required`]: this many distinct
+    /// downstream roles. A non-empty list wins when both keys are present, the
+    /// precedence the guard's own `relay.toml` already had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_count: Option<u32>,
 }
 
 /// `[[gateway]]` entry.

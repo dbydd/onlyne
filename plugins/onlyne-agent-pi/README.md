@@ -203,9 +203,31 @@ relay_required_count = 2           # ... or this many distinct downstream roles
 
 `relay_required` wins when both keys are present.
 
+The policy belongs in the spec, not in the vendor directory. `onlyne generate --force`
+rewrites the copy this package is vendored into and takes a hand-written `relay.toml`
+with it, so a `[[client]]` entry states the policy once and the client injects it into
+every session process it spawns:
+
+```toml
+[[client]]
+role = "planner"
+relay_required = ["writer"]        # these roles must have received a handoff
+relay_count = 2                    # ... or this many distinct downstream roles
+```
+
+The sources rank `environment > relay.toml > none`: `ONLYNE_RELAY_REQUIRED` (the list,
+comma-separated) and `ONLYNE_RELAY_COUNT` (the count, decimal) are the variables the
+client fills from the entry above; a `relay.toml` beside `package.json` is read only
+when the environment names no policy at all; and neither one means no guard. Both
+variables are injected when the spec names both, so the list still wins. A hand-written
+`relay.toml` remains the manual installation's escape hatch — for a box whose spec
+never states the policy — and a file shadowed by the environment is ignored outright. A
+variable that is set but unparsable is reported on stderr and ignored, which gives the
+file its turn.
+
 | | |
 | --- | --- |
-| default | no file: no guard, and the completion path is the one this plugin shipped before the guard existed |
+| default | neither source names a policy: no guard, and the completion path is the one this plugin shipped before the guard existed |
 | evidence | the roles this session's own successful `onlyne_send` calls reached, `note` and `task` alike; a refused envelope counts for nothing |
 | refusal | `onlyne_complete` throws `onlyne: relay guard: missing handoff to: writer (…)`, naming what is missing and how to clear it |
 | after a refusal | nothing is reported, queued or detached: the session stays mounted, and the same call lands once the handoff has gone out |
@@ -289,6 +311,8 @@ the shipped client.
 | `ONLYNE_SESSION_ID` | yes | mounted session id; `session_id` equals `task_id` in the shipped client |
 | `ONLYNE_TASK_ID` | yes | the task this process serves; drives `session_register` and the initial `ready` |
 | `ONLYNE_SOCKET` | no | overrides the socket path (default `<cwd>/.onlyne/run/s`) |
+| `ONLYNE_RELAY_REQUIRED` | no | the role's spec `relay_required`, comma-joined: the guard's list mode (§5) |
+| `ONLYNE_RELAY_COUNT` | no | the role's spec `relay_count`: the guard's count mode, which decides only when the list is empty (§5) |
 | `ORCA_PANE_KEY` | no | where this process runs (`<tab_id>:<leaf_id>`), reported on every heartbeat as `observed.host.orca.pane_key`; unset outside an Orca pane, which is why the field is then absent |
 | `ORCA_TAB_ID` / `ORCA_LEAF_ID` | no | the pane ids separately; the pane key is parsed when only the key itself is set |
 | `ORCA_TERMINAL_HANDLE` | no | the terminal handle, reported beside the pane key as `host.orca.handle`, and the value `orca terminal switch` takes |
@@ -297,7 +321,8 @@ Constants worth knowing: the plugin heartbeats every 10 s (`heartbeat_timeout_ms
 allows 5 s for `hello` and 30 s per request, and reconnects on a 1/2/4/8/16/30 s ladder.
 
 The plugin reads two files of its own: `<cwd>/.pi/onlyne.json` (the switch, §1) and
-`relay.toml` next to its `package.json` (the relay policy, §5).
+`relay.toml` next to its `package.json` (the relay policy's fallback, read only when the
+client injected none, §5).
 
 ## 8. Troubleshooting
 
@@ -309,7 +334,7 @@ The plugin reads two files of its own: `<cwd>/.pi/onlyne.json` (the switch, §1)
 | `ready refused: internal: unknown session for …` | the plugin mounted and reported for a task the client never staged (normal when pi is started by hand outside a task) | start pi under the client, not by hand |
 | `assign` never arrives | the client's `session_command` did not spawn pi, or `inject` was dropped | the client log for the spawn line; `/onlyne status` for the capability set |
 | ledger stays `in_flight` | no completion was reported: no turn ran, or `agent_settled` never fired | the pi session file for `onlyne-assign` / `onlyne-complete` entries |
-| `onlyne_complete` answers `relay guard: missing handoff to: …` | the workspace's `relay.toml` names a role this session never sent to | `cat <ws>/.onlyne/agent/pi-onlyne/relay.toml`; the plugin's stderr line `relay guard: missing handoff …` names the delivered set |
+| `onlyne_complete` answers `relay guard: missing handoff to: …` | the workspace's spec (or a `relay.toml` standing in for it) names a role this session never sent to | the plugin's stderr line `relay guard from …` names the source and `required=…` the policy; `relay guard: missing handoff …` names the delivered set |
 | `hello … forbidden` / connection closed right after `hello` | the mount role does not match the client's role | `hello.args.mount.role` vs the workspace's role |
 | `frame_too_large` | a body above 8 MiB | only reachable through an oversize outbound image; the ceiling is the core's |
 | tools missing | `pi.registerTool` is absent in that pi version | `/onlyne status`; the capability table above |

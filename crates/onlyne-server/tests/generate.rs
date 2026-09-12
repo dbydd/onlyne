@@ -28,6 +28,8 @@ fn client_entry(role: &str) -> ClientEntry {
             backoff_ms: vec![1000, 2000, 4000],
         },
         aggregate: String::new(),
+        relay_required: None,
+        relay_count: None,
     }
 }
 

@@ -3,7 +3,8 @@
 // The reader is the half that decides whether a workspace guards anything at
 // all: a missing file, a malformed line or an unknown key must leave the guard
 // off (or leave only the sound half of it on) instead of refusing completions
-// on a policy nobody wrote.
+// on a policy nobody wrote. The client's injected policy outranks the file, and
+// the file is the fallback a manual installation still has.
 
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -13,7 +14,10 @@ import { afterEach, test } from "node:test";
 
 import {
   DEFAULT_RELAY,
+  RELAY_ENV_COUNT,
+  RELAY_ENV_REQUIRED,
   RELAY_FILE,
+  envRelay,
   loadRelay,
   parseRelay,
   relayEnabled,
@@ -38,12 +42,13 @@ function workspace(body) {
 
 test("a missing policy file leaves the guard off", () => {
   const dir = workspace();
-  const relay = loadRelay({ path: join(dir, RELAY_FILE) });
+  const relay = loadRelay({ path: join(dir, RELAY_FILE), env: {} });
   assert.deepEqual(
     { required: relay.required, count: relay.count },
     { required: DEFAULT_RELAY.required, count: DEFAULT_RELAY.count },
   );
   assert.equal(relay.present, false);
+  assert.equal(relay.source, "none");
   assert.equal(relay.warning, null);
   assert.equal(relayEnabled(relay), false);
   assert.equal(relay.path, join(dir, RELAY_FILE));
@@ -95,11 +100,72 @@ test("a body outside the closed subset warns and keeps the default", () => {
 
 test("a policy file on disk reaches the caller with its warnings", () => {
   const dir = workspace('relay_required = ["writer"]\nnonsense\n');
-  const relay = loadRelay({ path: join(dir, RELAY_FILE) });
+  const relay = loadRelay({ path: join(dir, RELAY_FILE), env: {} });
   assert.equal(relay.present, true);
+  assert.equal(relay.source, "file");
   assert.deepEqual(relay.required, ["writer"]);
   assert.equal(relayEnabled(relay), true);
   assert.match(relay.warning, /relay\.toml:2:/);
+});
+
+test("an injected policy is the one in force, and the file is not consulted", () => {
+  const dir = workspace('relay_required = ["legacy"]\n');
+  const relay = loadRelay({
+    path: join(dir, RELAY_FILE),
+    env: { [RELAY_ENV_REQUIRED]: "writer, auditor", [RELAY_ENV_COUNT]: "2" },
+  });
+  assert.deepEqual(relay.required, ["writer", "auditor"]);
+  assert.equal(relay.count, 2);
+  assert.equal(relay.source, "env");
+  assert.equal(relay.present, false, "the file is not where this policy came from");
+  assert.equal(relay.path, join(dir, RELAY_FILE));
+  assert.equal(relay.warning, null);
+  assert.equal(relayEnabled(relay), true);
+  // Both forms travel when the spec names both, and the list still decides.
+  assert.match(relayRefusal(relay, ["builder", "auditor"]), /missing handoff to: writer/);
+});
+
+test("the environment spells the spec's two keys", () => {
+  const listed = envRelay({ [RELAY_ENV_REQUIRED]: "writer,, auditor ," });
+  assert.deepEqual(listed.required, ["writer", "auditor"]);
+  assert.equal(listed.count, null);
+  assert.equal(listed.specified, true);
+  assert.equal(listed.warning, null);
+
+  const counted = envRelay({ [RELAY_ENV_COUNT]: "2" });
+  assert.deepEqual(counted.required, []);
+  assert.equal(counted.count, 2);
+  assert.equal(counted.specified, true);
+
+  const nothing = envRelay({});
+  assert.deepEqual(nothing.required, []);
+  assert.equal(nothing.count, null);
+  assert.equal(nothing.specified, false, "an absent pair is not a policy");
+  assert.equal(nothing.warning, null);
+});
+
+test("an unparsable variable is reported and the file keeps its turn", () => {
+  const dir = workspace('relay_required = ["legacy"]\n');
+  const relay = loadRelay({
+    path: join(dir, RELAY_FILE),
+    env: { [RELAY_ENV_COUNT]: "two" },
+  });
+  assert.equal(relay.source, "file");
+  assert.equal(relay.present, true);
+  assert.deepEqual(relay.required, ["legacy"]);
+  assert.equal(relay.count, null);
+  assert.equal(relayEnabled(relay), true);
+  assert.match(relay.warning, /ONLYNE_RELAY_COUNT must be a positive integer, got "two"/);
+
+  // A variable that names no role is not a policy either; with no file behind
+  // it the guard stays off, and the reason it is off is reported.
+  const off = loadRelay({ path: join(workspace(), RELAY_FILE), env: { [RELAY_ENV_REQUIRED]: ", ," } });
+  assert.deepEqual(off.required, []);
+  assert.equal(off.count, null);
+  assert.equal(off.source, "none");
+  assert.equal(off.present, false);
+  assert.equal(relayEnabled(off), false);
+  assert.match(off.warning, /ONLYNE_RELAY_REQUIRED: no role names in ", ,"/);
 });
 
 test("the verdict names every missing edge, and the way out", () => {

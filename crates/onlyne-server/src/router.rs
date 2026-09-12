@@ -361,6 +361,13 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
         timeout_idle_ms: Some(entry.timeout.idle_ms),
         intent_attempts: Some(entry.intent.attempts),
         intent_backoff_ms: Some(entry.intent.backoff_ms.clone()),
+        // The guard's policy travels as the entry wrote it: a list, a count, or
+        // both with the list winning. The client hands it to each session it
+        // spawns, so a spec is enough to arm the guard again after
+        // `onlyne generate` has rewritten the vendor directory the hand-written
+        // `relay.toml` used to sit in.
+        relay_required: entry.relay_required.clone(),
+        relay_count: entry.relay_count,
         seq: state.event_head().max(0) as u64,
     };
     ResBody::ok(serde_json::to_value(welcome).unwrap_or_default())
@@ -473,6 +480,8 @@ pub fn roles(state: &Arc<State>, query: &QueryRolesArgs) -> anyhow::Result<Vec<R
             detail,
             edges: entry.allowed_targets.clone(),
             aggregate: (!entry.aggregate.is_empty()).then(|| entry.aggregate.clone()),
+            relay_required: entry.relay_required.clone(),
+            relay_count: entry.relay_count,
         });
     }
     Ok(rows)

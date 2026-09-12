@@ -2147,6 +2147,70 @@ fn roles_rows_carry_the_entry_edges_verbatim_and_the_aggregate_label() {
     );
 }
 
+/// The guard's policy travels with the role slice off the spec, so a generated
+/// workspace keeps its guard after the vendor directory is rewritten and the
+/// hand-written `relay.toml` is gone. Both surfaces the client reads carry it;
+/// neither invents a key for a role that never named one.
+#[tokio::test]
+async fn the_relay_policy_travels_from_the_entry_to_the_row_and_the_welcome() {
+    let text = spec_text().replace(
+        "role = \"planner\"\n",
+        "role = \"planner\"\nrelay_required = [\"writer\", \"auditor\"]\nrelay_count = 2\n",
+    );
+    let armed = fixture_with(&text);
+    let rows = router::roles(&armed.state, &QueryRolesArgs::default()).expect("roles");
+    let planner = rows
+        .iter()
+        .find(|row| row.name == "planner")
+        .expect("the planner row");
+    assert_eq!(
+        planner.relay_required,
+        Some(vec!["writer".to_string(), "auditor".to_string()])
+    );
+    assert_eq!(planner.relay_count, Some(2));
+    let other = rows
+        .iter()
+        .find(|row| row.name == "builder")
+        .expect("the builder row");
+    assert_eq!(other.relay_required, None);
+
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    let mut session = router::Session::with_sender(sender, "planner");
+    let body = router::dispatch_client(
+        &armed.state,
+        &mut session,
+        ClientOp::Hello(hello_args("planner")),
+    )
+    .await;
+    assert!(body.ok, "{body:?}");
+    let data = body.data.expect("welcome");
+    assert_eq!(data["relay_required"], json!(["writer", "auditor"]));
+    assert_eq!(data["relay_count"], json!(2));
+
+    // A role that never names the policy carries no key on either surface, and
+    // that absence is the whole of "the guard is off".
+    let plain = fixture();
+    let plain_rows = router::roles(&plain.state, &QueryRolesArgs::default()).expect("roles");
+    let encoded = serde_json::to_string(&plain_rows).expect("encode the rows");
+    assert!(
+        !encoded.contains("relay"),
+        "a plain role's row omits the relay keys: {encoded}"
+    );
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    let mut session = router::Session::with_sender(sender, "planner");
+    let body = router::dispatch_client(
+        &plain.state,
+        &mut session,
+        ClientOp::Hello(hello_args("planner")),
+    )
+    .await;
+    let welcome = serde_json::to_string(&body.data.expect("welcome")).expect("encode the welcome");
+    assert!(
+        !welcome.contains("relay"),
+        "a plain role's welcome omits the relay keys: {welcome}"
+    );
+}
+
 #[tokio::test]
 async fn shutdown_unlinks_the_admin_socket() {
     let fixture = fixture();

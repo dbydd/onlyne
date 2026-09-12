@@ -746,6 +746,8 @@ mod tests {
             timeout_idle_ms: Some(60_000),
             intent_attempts: Some(3),
             intent_backoff_ms: Some(vec![1000, 2000, 4000]),
+            relay_required: Some(vec!["writer".into()]),
+            relay_count: None,
             seq: 41,
         };
         assert_eq!(welcome.role, "planner");
