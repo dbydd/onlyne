@@ -56,7 +56,12 @@ Pi adapter: `pi install npm:pi-onlyne` (1.0.0 speaks wire protocol 1).
   close the backend resource AND kill that pid's group. Field report: a zombie
   `pi` process outlived its pane, reconnected to a fresh client, took a new
   assign, and relaunched its training batch by itself three times — pane dead
-  plus ledger settled does not mean the agent process is dead.
+  plus ledger settled does not mean the agent process is dead. Counter-case
+  (ARIS 2026-09-13): a `repair close` on a frozen projection row (seq 1222,
+  orca handle absent) settled the ledger while the process was alive the whole
+  time — it sent its handoff and an acked completion minutes after the close.
+  A dead projection plane and a dead process look identical from `sessions`;
+  only a kernel-known peer pid separates them.
 - client: a takeover `hello` (same task_id, different kernel peer pid) bumps
   the session generation; reports carrying a stale generation are rejected
   with `conflict`, so two bodies cannot both write one session's history.
