@@ -125,13 +125,14 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 png/jpeg/gif/webp 的绝对路径：插件读出内容，base64 编码后挂成 `body.image`。核心限 2 MiB，
 只收四种 mime。
 
-### `onlyne_complete{outcome?, text?}`
+### `onlyne_complete{outcome?, text?, force?, reason?}`
 
 显式结束当前任务，`outcome` 缺省 `done`，也可 `failed`。`text` 非空时就是 ledger 的 `head`，
 原样写出：空白折叠成单行，截到 200 字符。`text` 缺失或全空白时不带摘要，completion 退回
 最后一段 assistant 文本。这一调用同时结束所在 session 的进程。client 应答完 completion
 报告（见 §4）之后，插件通过 `ctx.shutdown()` 让 pi 退出。pi 0.85.1 没有 tool-result
-`terminate` 处理。
+`terminate` 处理。工作区带接力策略（§5）时，`force: true` 加非空 `reason` 是绕过一个仍欠着的
+接力的正规通道。
 
 ## 4. outcome 判定规则
 
@@ -162,7 +163,42 @@ ack 之后、进程退出之前。completion 是按 client 手里的元组结算
 所以缺了这条上报，已退出的 session 会一直说 `running`。最后一次心跳本来就是 idle 时，插件
 跳过这条；已结算的观测被拒，也不拖着 completion 挣来的那次退出不走。
 
-## 5. 协议说明与偏差
+## 5. 接力守卫
+
+会话可以一件活都没交出去，就把 `done` 报掉。守卫堵的就是这个事故：一个 bench 会话边叙述进度边
+调 `onlyne_complete`，四个 todo 一个没动，下游 writer 永远等一条从未发出的接力。判据只是投递
+事实——某个 role 有没有被触达——绝不看发出去的文本长什么样、写得好不好。
+
+策略文件放在插件自己的 `package.json` 旁边，因此随 generate 出的工作区一起被带进去：生成的工作
+区里是 `<ws>/.onlyne/agent/pi-onlyne/relay.toml`，手工安装则是插件目录下的 `relay.toml`。
+
+```toml
+relay_required = ["writer"]        # 这些 role 必须收到过接力
+relay_required_count = 2           # ……或至少这么多个不同的下游 role
+```
+
+两个键同时存在时以 `relay_required` 为准。
+
+| | |
+| --- | --- |
+| 默认 | 没有文件 = 无守卫，completion 路径与守卫存在之前逐字节相同 |
+| 判据材料 | 本会话自己成功 `onlyne_send` 触达过的 role，`note` 与 `task` 都算；被 client 拒掉的 envelope 不算 |
+| 拒绝 | `onlyne_complete` 抛 `onlyne: relay guard: missing handoff to: writer (…)`，点名缺哪条边、怎么解除 |
+| 拒绝之后 | 不上报、不排队、不 detach：session 仍然挂着，补上接力后同一次调用即可落地 |
+| 名单模式 | 名单里每个 role 都要字面出现在已投递集合里 |
+| count 模式 | 数不同的下游 role；发给本 role 自己、或回指派活的上游，都不算一个 |
+| 作用域 | 本会话自己的投递，仅进程内存：重连不丢，会话重启从空开始，不去猜上一个进程发过什么 |
+| 豁免 | `force: true` 加非空 `reason`；只在守卫拒绝时才起作用 |
+| 审计 | 被豁免的 completion，ledger head 以 `relay-guard-forced: <reason>` 开头；调用带了 `text` 时紧接其后 |
+| 不管的路 | 自动终态：`agent_settled` 与 `recycle{outcome}` 照旧结算欠着接力的任务 |
+
+`relay.toml` 是 TOML 的封闭子集：扁平的 `key = value` 行、上面两个键、单行双引号字符串数组、
+`#` 注释。子集之外一律 stderr 告警并忽略。它刻意不放 `.onlyne/config.toml`：client 以
+`deny_unknown_fields` 解析那个文件，插件往里加键会让 client 直接起不来。
+
+没有策略时，`force` 与 `reason` 两个参数是惰性的。
+
+## 6. 协议说明与偏差
 
 下面每条要么是对 `PROTOCOL.md` 的明确解读，要么是在实际 client 上实测到的行为。
 
@@ -206,7 +242,7 @@ ack 之后、进程退出之前。completion 是按 client 手里的元组结算
   被碰。这既让 `integrations/orca-plugin` 能不读任何路径就把 tab 轴收窄到真会话，也让
   supervisor 在会话 *结束之后*仍然说得出它跑在哪：`report.complete` 会把 `host` 带过去。
 
-## 6. 配置项
+## 7. 配置项
 
 | 环境变量 | 必需 | 作用 |
 | --- | --- | --- |
@@ -221,7 +257,10 @@ ack 之后、进程退出之前。completion 是按 client 手里的元组结算
 值得记住的常量：插件每 10 秒发一次心跳（`heartbeat_timeout_ms` 是 30 秒），`hello` 最多等
 5 秒，单次请求超时 30 秒，重连按 1/2/4/8/16/30 秒阶梯退避。
 
-## 7. 故障排查
+插件自己读两个文件：`<cwd>/.pi/onlyne.json`（开关，§1）与 `package.json` 旁边的
+`relay.toml`（接力策略，§5）。
+
+## 8. 故障排查
 
 | 现象 | 原因 | 检查 |
 | --- | --- | --- |
@@ -231,6 +270,7 @@ ack 之后、进程退出之前。completion 是按 client 手里的元组结算
 | `ready refused: internal: unknown session for …` | 插件为 client 从未暂存的任务报了 ready（手工起 pi 时的正常现象） | 让 client 拉起 pi，而不是手工起 |
 | `assign` 一直不来 | client 的 `session_command` 没能拉起 pi，或 `inject` 被降级 | client 日志里的 spawn 行；`/onlyne status` 看能力集 |
 | ledger 停在 `in_flight` | 没有 completion：没跑 turn，或 `agent_settled` 没触发 | pi session 文件里的 `onlyne-assign` / `onlyne-complete` 条目 |
+| `onlyne_complete` 回答 `relay guard: missing handoff to: …` | 工作区的 `relay.toml` 点名了一个本会话从未触达的 role | `cat <ws>/.onlyne/agent/pi-onlyne/relay.toml`；插件 stderr 的 `relay guard: missing handoff …` 会列出已投递集合 |
 | `hello` 后立刻 `forbidden` / 断连 | mount role 与 client 的 role 不一致 | `hello.args.mount.role` 对该工作区的 role |
 | `frame_too_large` | 正文超过 8 MiB | 只会由超限的出站图片触发；上限来自核心 |
 | 工具缺失 | 该 pi 版本没有 `pi.registerTool` | `/onlyne status`；对照上面的能力表 |
@@ -241,11 +281,11 @@ ack 之后、进程退出之前。completion 是按 client 手里的元组结算
 `agentState`、`tasks`、`pendingCompletion`、`lastError` 与计数器）；`/onlyne connect` /
 `/onlyne disconnect` 手工开合连接。
 
-## 8. 开发与验证
+## 9. 开发与验证
 
 ```bash
 cd integrations/pi-onlyne
-node --test src/*.test.mjs        # 帧编解码、协议词汇、agent 状态机、配置
+node --test src/*.test.mjs        # 帧编解码、协议词汇、agent 状态机、配置、接力守卫
 ```
 
 `src/agent.live.test.mjs` 只在 `target/debug/onlyne-client` 与 `onlyne-server` 存在时运行。

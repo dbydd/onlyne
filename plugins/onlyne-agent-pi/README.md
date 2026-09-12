@@ -135,7 +135,7 @@ idempotency key and a fresh `causality.task`. `image` is an absolute path to a
 png/jpeg/gif/webp file: the plugin reads it, base64-encodes it and attaches it as
 `body.image`. The core caps that at 2 MiB and accepts four mime types.
 
-### `onlyne_complete{outcome?, text?}`
+### `onlyne_complete{outcome?, text?, force?, reason?}`
 
 Ends the current task with an explicit outcome (`done` by default, or `failed`). A
 non-empty `text` becomes the ledger `head` verbatim: whitespace collapses to one line and
@@ -143,7 +143,8 @@ the text stops at 200 characters. An absent or blank `text` carries no summary, 
 completion falls back to the last assistant text. The call also ends the session's
 process: once the client has acknowledged the completion report (see §4), the plugin asks
 pi to shut down through `ctx.shutdown()`. pi 0.85.1 has no tool-result `terminate`
-handling.
+handling. When the workspace carries a relay policy (§5), `force: true` with a non-empty
+`reason` is the deliberate way past a handoff the session still owes.
 
 ## 4. Outcome rules
 
@@ -183,7 +184,47 @@ this report an exited session keeps saying `running`. The plugin skips it when t
 beat was already idle, and a refused settled observation does not hold up the exit the
 completion earned.
 
-## 5. Protocol notes and deviations
+## 5. Relay guard
+
+A session can hand no work over and still report `done`. That is the accident the guard
+closes: a bench session narrated its progress, called `onlyne_complete` with its todos
+untouched, and the downstream writer waited for a handoff that was never sent. The guard
+judges delivery facts only — whether a role was reached — and never the shape or quality
+of the text that was sent.
+
+The policy lives next to the plugin's `package.json`, so it travels inside the copy a
+generated workspace loads: `<ws>/.onlyne/agent/pi-onlyne/relay.toml` in a generated
+workspace, `relay.toml` in a manual installation.
+
+```toml
+relay_required = ["writer"]        # these roles must have received a handoff
+relay_required_count = 2           # ... or this many distinct downstream roles
+```
+
+`relay_required` wins when both keys are present.
+
+| | |
+| --- | --- |
+| default | no file: no guard, and the completion path is the one this plugin shipped before the guard existed |
+| evidence | the roles this session's own successful `onlyne_send` calls reached, `note` and `task` alike; a refused envelope counts for nothing |
+| refusal | `onlyne_complete` throws `onlyne: relay guard: missing handoff to: writer (…)`, naming what is missing and how to clear it |
+| after a refusal | nothing is reported, queued or detached: the session stays mounted, and the same call lands once the handoff has gone out |
+| list mode | every named role must be in the delivered set, literally |
+| count mode | distinct downstream roles; a send to this role itself or back to the role that assigned the task is not one |
+| scope | this session's own sends, in process memory: a reconnect keeps them, a restarted session starts empty rather than guessing at what an earlier process sent |
+| waiver | `force: true` with a non-empty `reason`; it only matters when the guard refuses |
+| audit | a waived completion's ledger head starts with `relay-guard-forced: <reason>`, followed by the model's `text` when the call carried one |
+| not guarded | the automatic outcomes: `agent_settled` and `recycle{outcome}` still complete a task that owes a handoff |
+
+`relay.toml` is a closed subset of TOML: flat `key = value` lines, the two keys above,
+one-line arrays of double-quoted strings, `#` comments. Anything outside that warns on
+stderr and is ignored. It is deliberately not `.onlyne/config.toml`: the client parses
+that file with `deny_unknown_fields`, so a plugin key there would stop the client from
+starting at all.
+
+`force` and `reason` are inert when no policy is in force.
+
+## 6. Protocol notes and deviations
 
 Each item below is either a deliberate reading of `PROTOCOL.md` or a behaviour measured on
 the shipped client.
@@ -240,7 +281,7 @@ the shipped client.
   lets a supervisor still say where a *finished* session ran: `report.complete` carries `host`
   forward.
 
-## 6. Configuration reference
+## 7. Configuration reference
 
 | env var | required | effect |
 | --- | --- | --- |
@@ -255,7 +296,10 @@ the shipped client.
 Constants worth knowing: the plugin heartbeats every 10 s (`heartbeat_timeout_ms` is 30 s),
 allows 5 s for `hello` and 30 s per request, and reconnects on a 1/2/4/8/16/30 s ladder.
 
-## 7. Troubleshooting
+The plugin reads two files of its own: `<cwd>/.pi/onlyne.json` (the switch, §1) and
+`relay.toml` next to its `package.json` (the relay policy, §5).
+
+## 8. Troubleshooting
 
 | symptom | cause | check |
 | --- | --- | --- |
@@ -265,6 +309,7 @@ allows 5 s for `hello` and 30 s per request, and reconnects on a 1/2/4/8/16/30 s
 | `ready refused: internal: unknown session for …` | the plugin mounted and reported for a task the client never staged (normal when pi is started by hand outside a task) | start pi under the client, not by hand |
 | `assign` never arrives | the client's `session_command` did not spawn pi, or `inject` was dropped | the client log for the spawn line; `/onlyne status` for the capability set |
 | ledger stays `in_flight` | no completion was reported: no turn ran, or `agent_settled` never fired | the pi session file for `onlyne-assign` / `onlyne-complete` entries |
+| `onlyne_complete` answers `relay guard: missing handoff to: …` | the workspace's `relay.toml` names a role this session never sent to | `cat <ws>/.onlyne/agent/pi-onlyne/relay.toml`; the plugin's stderr line `relay guard: missing handoff …` names the delivered set |
 | `hello … forbidden` / connection closed right after `hello` | the mount role does not match the client's role | `hello.args.mount.role` vs the workspace's role |
 | `frame_too_large` | a body above 8 MiB | only reachable through an oversize outbound image; the ceiling is the core's |
 | tools missing | `pi.registerTool` is absent in that pi version | `/onlyne status`; the capability table above |
@@ -275,11 +320,11 @@ allows 5 s for `hello` and 30 s per request, and reconnects on a 1/2/4/8/16/30 s
 `generation`, `agentState`, `tasks`, `pendingCompletion`, `lastError`, counters), and
 `/onlyne connect` / `/onlyne disconnect` open and close the socket by hand.
 
-## 8. Development
+## 9. Development
 
 ```bash
 cd integrations/pi-onlyne
-node --test src/*.test.mjs        # framing, protocol, agent state machine, config
+node --test src/*.test.mjs        # framing, protocol, agent state machine, config, relay guard
 ```
 
 `src/agent.live.test.mjs` skips itself unless `target/debug/onlyne-client` and

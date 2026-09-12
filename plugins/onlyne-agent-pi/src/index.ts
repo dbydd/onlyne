@@ -19,6 +19,7 @@ import { Type } from "typebox";
 
 import { OnlyneAgent } from "./agent.mjs";
 import { loadConfig, sessionIdentity } from "./config.mjs";
+import { loadRelay, relayEnabled } from "./relay.mjs";
 import { createSurface } from "./pi-surface.mjs";
 
 /**
@@ -164,21 +165,31 @@ export default function onlyne(pi: ExtensionAPI) {
         name: "onlyne_complete",
         label: "Onlyne complete",
         description:
-          "End this onlyne task with an explicit outcome. Call it once, when the assigned work is finished (outcome=done), provably impossible (outcome=failed), or withdrawn (outcome=cancelled). Without this call the session still completes on its own: done, or failed when the turn errored.",
+          "End this onlyne task with an explicit outcome. Call it once, when the assigned work is finished (outcome=done), provably impossible (outcome=failed), or withdrawn (outcome=cancelled). Without this call the session still completes on its own: done, or failed when the turn errored. In a workspace whose relay policy (relay.toml) names the handoffs this session owes, the call is refused until each one has gone out.",
         promptSnippet: "Finish the current onlyne task with an outcome and a one-line summary",
         promptGuidelines: [
           "Use onlyne_complete at the end of an onlyne task, naming the outcome and the result in one line; the summary becomes the ledger head.",
+          "If onlyne_complete answers 'relay guard', the session still owes a downstream handoff: make it with onlyne_send and call onlyne_complete again. Close the session anyway only when the handoff is genuinely impossible, with force: true and a reason.",
         ],
         parameters: Type.Object({
           outcome: Type.Optional(Type.String({ description: '"done" (default), "failed", or "cancelled"' })),
           text: Type.Optional(Type.String({ description: "one-line result summary" })),
+          force: Type.Optional(Type.Boolean({ description: "waive the relay guard; requires a non-empty reason" })),
+          reason: Type.Optional(Type.String({ description: "why the relay guard is waived; stamped into the ledger head after `relay-guard-forced: `" })),
         }),
         async execute(_toolCallId, params) {
           if (!agent) throw new Error("onlyne: session is not connected");
           // The exit is not a tool-result flag: pi 0.85.1 has no tool-result
           // `terminate` handling. `agent.complete` asks the surface to shut the
-          // process down once the client has acknowledged the report.
-          const result = await agent.completeFromTool({ outcome: params.outcome, text: params.text });
+          // process down once the client has acknowledged the report. A relay
+          // refusal throws out of here as a tool error, which leaves the session
+          // mounted for the handoff that clears it.
+          const result = await agent.completeFromTool({
+            outcome: params.outcome,
+            text: params.text,
+            force: params.force,
+            reason: params.reason,
+          });
           return textResult(`onlyne task ${result.taskId} -> ${result.outcome}`, result);
         },
       }));
@@ -223,6 +234,15 @@ export default function onlyne(pi: ExtensionAPI) {
       return;
     }
     const socketPath = env.ONLYNE_SOCKET || `${ctx.cwd}/${SOCKET_RELATIVE_PATH}`;
+    // The relay guard's policy travels with the plugin package rather than in
+    // `.onlyne/config.toml`, which the client parses strictly (relay.mjs).
+    const relay = loadRelay();
+    if (relay.warning) log(relay.warning);
+    if (relayEnabled(relay)) {
+      log(
+        `relay guard from ${relay.path}: required=${JSON.stringify(relay.required)} count=${relay.count ?? "-"}`,
+      );
+    }
     surface = createSurface({ pi, log, context: () => context });
     agent = new OnlyneAgent({
       socketPath,
@@ -231,6 +251,7 @@ export default function onlyne(pi: ExtensionAPI) {
       sessionId: identity.sessionId,
       taskId: identity.taskId,
       surface,
+      relay,
       log,
     });
     log(`session ${identity.sessionId} role=${identity.role} socket=${socketPath}`);

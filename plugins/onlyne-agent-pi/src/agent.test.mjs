@@ -57,17 +57,19 @@ async function waitFor(predicate, { timeoutMs = 2_000, stepMs = 5 } = {}) {
  * session does when both frames are ready at once. `holdCompletion` keeps
  * `report` requests carrying a `complete` unanswered until `releaseReports`,
  * which is the window a test needs to prove what the plugin does not do before
- * the client has acknowledged the outcome. The ready and heartbeat reports are
- * never held: the handshake waits on them.
+ * the client has acknowledged the outcome. `failSend` refuses every `send` the
+ * way a client with no route to the target would. The ready and heartbeat
+ * reports are never held: the handshake waits on them.
  */
 class FakeHost {
-  constructor({ coalesceAssign = null, holdCompletion = false } = {}) {
+  constructor({ coalesceAssign = null, holdCompletion = false, failSend = false } = {}) {
     this.server = createServer((socket) => this.onConnection(socket));
     this.frames = [];
     this.sockets = new Set();
     this.connections = 0;
     this.coalesceAssign = coalesceAssign;
     this.holdCompletion = holdCompletion;
+    this.failSend = failSend;
     this.held = [];
   }
 
@@ -111,6 +113,14 @@ class FakeHost {
     }
     if (this.holdCompletion && frame.op === "report" && frame.args?.kind === "complete") {
       this.held.push({ socket, id: frame.id });
+      return;
+    }
+    if (this.failSend && frame.op === "send") {
+      socket.write(encodeFrame({
+        reply_to: frame.id,
+        ok: false,
+        error: { code: "no_route", message: "no route to that role" },
+      }));
       return;
     }
     const reply = encodeFrame({ reply_to: frame.id, ...body });
@@ -184,10 +194,12 @@ async function startAgent({
   options = {},
   coalesceAssign = null,
   holdCompletion = false,
+  failSend = false,
+  relay = null,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "pi-onlyne-agent-"));
   const socketPath = join(dir, "s");
-  const host = new FakeHost({ coalesceAssign, holdCompletion });
+  const host = new FakeHost({ coalesceAssign, holdCompletion, failSend });
   await host.listen(socketPath);
   const logs = [];
   const agent = new OnlyneAgent({
@@ -204,6 +216,7 @@ async function startAgent({
     settleFallbackMs: options.settleFallbackMs ?? 30_000,
     heartbeatMs: options.heartbeatMs ?? 60_000,
     ...(capabilities ? { capabilities } : {}),
+    ...(relay ? { relay } : {}),
     ...(options.host !== undefined ? { host: options.host } : {}),
   });
   cleanups.push(async () => {
@@ -910,5 +923,157 @@ test("a host that never answers the hello is dropped and retried", async () => {
   await waitFor(() => (logs.some((line) => line.includes("reconnecting")) ? true : null));
   assert.equal(agent.status().connected, false);
   assert.match(agent.status().lastError, /hello timed out/);
+});
+
+// ---------------------------------------------------------------- relay guard
+
+// The relay guard is what stops a session from reporting a terminal outcome
+// while it still owes a downstream handoff. Its evidence is delivery only:
+// the roles this session's own successful `onlyne_send` calls reached.
+
+/** The exact `report.complete` args this plugin sent before the guard existed. */
+const COMPLETE_VECTOR =
+  '{"kind":"complete","data":{"task_id":"11111111-1111-4111-8111-111111111111","outcome":"done","head":"handed the token over"}}';
+
+/** Every `report.complete` the fake host received, in arrival order. */
+function completions(host) {
+  return host.of("report").filter((report) => report.kind === "complete");
+}
+
+/** The host's own assign frame, handed over by a role that is not this one. */
+function assignmentFrom(role) {
+  const args = assignArgs();
+  return { ...args, envelope: { ...args.envelope, from: { role: { role } } } };
+}
+
+test("with no relay policy the completion frame is unchanged, force and reason included", async () => {
+  const inputs = [
+    { outcome: "done", text: "handed the token over" },
+    { outcome: "done", text: "handed the token over", force: true, reason: "no policy is in force" },
+  ];
+  for (const input of inputs) {
+    const { agent, host } = await startAgent();
+    agent.start();
+    await waitFor(() => host.of("report").length >= 1);
+    await agent.completeFromTool(input);
+    assert.equal(JSON.stringify(completions(host)[0]), COMPLETE_VECTOR, JSON.stringify(input));
+  }
+});
+
+test("a relay list refuses a completion until every named role has a handoff", async () => {
+  const { agent, host, surface } = await startAgent({ relay: { required: ["writer"] } });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  await assert.rejects(
+    () => agent.completeFromTool({ outcome: "done", text: "wrote the notes" }),
+    (error) => {
+      assert.match(
+        error.message,
+        /^onlyne: relay guard: missing handoff to: writer \(this session delivered to: none\)/,
+      );
+      assert.match(error.message, /force:true and a non-empty reason/);
+      return true;
+    },
+  );
+  assert.deepEqual(completions(host), []);
+  assert.deepEqual(surface.calls.exits, []);
+
+  await agent.sendFromTool({ to: "writer", text: "here is the outline" });
+  const result = await agent.completeFromTool({ outcome: "done", text: "wrote the notes" });
+  assert.deepEqual(result, { taskId: TASK_ID, outcome: "done", head: "wrote the notes" });
+  assert.equal(completions(host).length, 1);
+  assert.deepEqual(surface.calls.exits, ["done"]);
+});
+
+test("a relay count wants distinct downstream roles and ignores echoes", async () => {
+  const { agent, host } = await startAgent({ relay: { required: [], count: 2 } });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  host.notify("assign", assignmentFrom("supervisor"));
+  await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
+
+  await agent.sendFromTool({ to: "supervisor", text: "status" }); // back upstream
+  await agent.sendFromTool({ to: "planner", text: "note to self" }); // this role
+  await agent.sendFromTool({ to: "builder", text: "build it" });
+  await assert.rejects(
+    () => agent.completeFromTool({ outcome: "done" }),
+    /missing handoff: 1 of 2 required distinct downstream roles/,
+  );
+
+  await agent.sendFromTool({ to: "writer", text: "document it" });
+  const result = await agent.completeFromTool({ outcome: "done" });
+  assert.equal(result.outcome, "done");
+  assert.equal(completions(host).length, 1);
+});
+
+test("force needs a reason, and the reason it takes is stamped into the head", async () => {
+  const { agent, host } = await startAgent({ relay: { required: ["writer"] } });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  await assert.rejects(
+    () =>
+      agent.completeFromTool({
+        outcome: "done",
+        text: "outline is done",
+        force: true,
+        reason: "   ",
+      }),
+    /missing handoff to: writer/,
+  );
+  assert.deepEqual(completions(host), []);
+
+  const result = await agent.completeFromTool({
+    outcome: "done",
+    text: "outline is done",
+    force: true,
+    reason: "writer is offline for the day",
+  });
+  assert.equal(result.head, "relay-guard-forced: writer is offline for the day | outline is done");
+  assert.equal(completions(host)[0].data.head, result.head);
+});
+
+test("a refusal detaches nothing, and the same call lands once the handoff is out", async () => {
+  const { agent, host, surface } = await startAgent({ relay: { required: ["writer"] } });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  await assert.rejects(() => agent.completeFromTool({ outcome: "done", text: "half done" }), /relay guard/);
+  assert.equal(agent.status().connected, true);
+  assert.equal(agent.status().stats.completions, 0);
+  assert.deepEqual(surface.calls.exits, []);
+  assert.deepEqual(host.of("detach"), []);
+  assert.deepEqual(completions(host), []);
+
+  await agent.sendFromTool({ to: "writer", text: "the outline so far" });
+  await agent.completeFromTool({ outcome: "done", text: "half done" });
+  assert.equal(agent.status().stats.completions, 1);
+  assert.deepEqual(surface.calls.exits, ["done"]);
+});
+
+test("a send the client refused is not a handoff", async () => {
+  const { agent, host } = await startAgent({ relay: { required: ["writer"] }, failSend: true });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  await assert.rejects(() => agent.sendFromTool({ to: "writer", text: "outline" }), /no_route/);
+  await assert.rejects(() => agent.completeFromTool({ outcome: "done" }), /missing handoff to: writer/);
+});
+
+test("the handoff ledger belongs to the session, not to one task", async () => {
+  const { agent, host } = await startAgent({ relay: { required: ["writer"] } });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  // A note sent before the assignment arrived is still this session reaching
+  // the role the policy names.
+  await agent.sendFromTool({ to: "writer", text: "preamble" });
+  host.notify("assign", assignArgs());
+  await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
+
+  const result = await agent.completeFromTool({ outcome: "done", text: "wrote the notes" });
+  assert.equal(result.outcome, "done");
+  assert.equal(completions(host).length, 1);
 });
 

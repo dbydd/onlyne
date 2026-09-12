@@ -32,6 +32,7 @@ import {
   stdinTaskText,
   welcomeFrom,
 } from "./protocol.mjs";
+import { DEFAULT_RELAY, FORCED_PREFIX, relayEnabled, relayRefusal } from "./relay.mjs";
 
 /** Reconnect ladder in milliseconds, capped like the client's own. */
 export const RECONNECT_LADDER_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
@@ -76,6 +77,7 @@ export class OnlyneAgent {
    *   taskId: string,
    *   surface: any,
    *   log?: (line: string, data?: unknown) => void,
+   *   relay?: { required?: string[], count?: number | null },
    *   capabilities?: string[],
    *   heartbeatMs?: number,
    *   ladder?: number[],
@@ -94,6 +96,8 @@ export class OnlyneAgent {
     this.envTaskId = options.taskId;
     this.surface = options.surface;
     this.log = options.log ?? (() => {});
+    /** The relay guard's policy; the default guards nothing (`relay.mjs`). */
+    this.relay = options.relay ?? DEFAULT_RELAY;
     this.capabilities = options.capabilities ?? CAPABILITIES;
     this.heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
     this.ladder = options.ladder ?? RECONNECT_LADDER_MS;
@@ -126,6 +130,16 @@ export class OnlyneAgent {
     this.settleHandle = null;
     /** @type {Map<string, any>} */
     this.tasks = new Map();
+    /**
+     * Every role this session handed something to through a `send` the client
+     * accepted: the relay guard's only evidence (`relay.mjs`).
+     *
+     * Process memory, scoped to this session because the agent is: a reconnect
+     * keeps it (the same process re-dials the same client), and a session that
+     * starts fresh starts empty rather than guessing at what an earlier process
+     * sent — the guard judges this session's own deliveries, not history.
+     */
+    this.deliveredTo = new Set();
     this.injectedTasks = new Set();
     this.deliveredProse = new Set();
     /** Pushes that arrived before the handshake finished; see `onFrame`. */
@@ -530,6 +544,9 @@ export class OnlyneAgent {
     this.tasks.set(taskId, {
       taskId,
       envelopeId: envelope.id ?? null,
+      // Who handed this task over: the relay guard's count mode does not count
+      // a send straight back to it (`relay.mjs`).
+      upstream: envelope.from?.role?.role ?? null,
       turnsSinceAssign: 0,
       turns: 0,
       errored: false,
@@ -703,14 +720,39 @@ export class OnlyneAgent {
    * assistant text never stands in for it. An absent or blank `text` carries no
    * deliverable at all and falls back to that assistant text.
    *
-   * @param {{ outcome?: string, text?: string }} input
+   * The relay guard runs first, for every outcome, when the workspace's
+   * `relay.toml` names a minimum downstream handoff: a session that still owes
+   * one cannot report a terminal fact. A refusal throws before anything is
+   * written, queued or detached — no completion report, no exit, no state on
+   * the task — so the session stays live and the same call lands once the
+   * handoff has gone out. `force: true` with a non-empty `reason` waives the
+   * guard and stamps the head with `relay-guard-forced: <reason>`, which is the
+   * ledger's audit trail for a completion that skipped the guard.
+   *
+   * @param {{ outcome?: string, text?: string, force?: boolean, reason?: string }} input
    */
   async completeFromTool(input = {}) {
     const task = [...this.tasks.values()].find((item) => !item.completed);
     const taskId = task?.taskId ?? this.envTaskId;
     if (!taskId) throw new Error("onlyne: no task is assigned to this session");
     const explicit = headOf(input.text);
-    return this.complete(taskId, normalizeOutcome(input.outcome), explicit || task?.head || "");
+    let head = explicit || task?.head || "";
+    if (relayEnabled(this.relay)) {
+      const refusal = relayRefusal(this.relay, this.deliveredTo, {
+        role: this.role,
+        upstream: task?.upstream ?? null,
+      });
+      if (refusal) {
+        const reason = headOf(input.reason);
+        if (input.force !== true || !reason) {
+          this.log(refusal);
+          throw new Error(`onlyne: ${refusal}`);
+        }
+        head = headOf(`${FORCED_PREFIX}${reason}${explicit ? ` | ${explicit}` : ""}`);
+        this.log(`relay guard waived for ${taskId}: ${reason}`);
+      }
+    }
+    return this.complete(taskId, normalizeOutcome(input.outcome), head);
   }
 
   /**
@@ -837,6 +879,10 @@ export class OnlyneAgent {
     }
     const envelope = sendEnvelope({ from: this.role, to: input.to, kind, text: input.text ?? "", image });
     const data = await this.request("send", envelope);
+    // Recorded only after the client answered the `send`: a refused envelope was
+    // never a handoff, and the relay guard must not read one as delivered. Any
+    // kind counts — `note` and `task` are both the session reaching that role.
+    this.deliveredTo.add(String(input.to));
     return { queued: true, op_id: envelope.op_id ?? null, kind, to: input.to, data };
   }
 
