@@ -15,7 +15,7 @@ Everything ships to [crates.io](https://crates.io): one command places the entry
 cargo install onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui
 ```
 
-`onlyne` is the thin forwarder (`server`/`client`/`gateway`/`admin` verbs); the TUI runs separately as `onlyne-tui`. For a pi agent role, the adapter plugin lives on npm:
+Only one crate renames on the way down: `onlyne-cli` installs the binary `onlyne`. `onlyne` is the thin forwarder (`server`/`client`/`gateway`/`admin` verbs); the TUI runs separately as `onlyne-tui`. For a pi agent role, the adapter plugin lives on npm:
 
 ```bash
 pi install npm:pi-onlyne
