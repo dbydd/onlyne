@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased] — carried by the next bump
+
+### Fixed
+
+- server: a role-level `pull` re-offered the same in-flight row on every poll,
+  forever. The ticket that is supposed to stop that is keyed by the puller's
+  session; `relay::pull` armed it with the session row's id when the pull named
+  none, so a role-level connection — the ordinary case for a client on TCP —
+  could never name its own ticket again and its guard never fired. A row now
+  stays handed to the pull that took it, and a session that replaces a dead one
+  can still claim it (`State::delivery_ticket`). Live case: one task re-offered
+  888 times into the same pi session in three minutes, each round acked `accepted`
+  and nothing settling.
+- plugin (pi-onlyne 1.1.1): the injection guard keys the delivery, not the task.
+  A second envelope for a running task — a follow-up, a redirect, a bounce back
+  through a relay — is a delivery of its own and reaches the model, while the
+  work record it lands on keeps its counters and its delivered set. Keyed by the
+  task, that guard swallowed the follow-up and answered `duplicate`, which is
+  what kept the loop above alive: an accepted-but-never-completed ack settles
+  nothing.
+
 ## [pi-onlyne 1.1.0] - 2026-09-13
 
 Scope: `plugins/onlyne-agent-pi` only, published to npm. Every crate stays at 1.0.2.

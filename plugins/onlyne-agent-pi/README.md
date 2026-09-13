@@ -298,10 +298,12 @@ the shipped client.
   written, and a framing fault closes the connection and reconnects. Framing cannot
   resynchronise after a corrupt body, which is the same conclusion
   `crates/onlyne-frame/src/lib.rs` reaches.
-- **Task ids here are single-use.** The plugin acks duplicate `assign` deliveries for the
-  same task (`reason: "duplicate"`) without a second injection, and remembers the id for
-  the life of the connection. The client today mints a fresh uuid per task, so this only
-  ever fires on a genuine redelivery.
+- **Deliveries are idempotent; tasks are not.** The dedup key is the envelope id. The
+  same delivery twice gets one injection and an ack with `reason: "duplicate"`, and a
+  new envelope for a task that is already running reaches that session as another
+  message — the work record keeps its counters and its relay ledger, and only its
+  "turns since this instruction" watchdog restarts. The client mints a fresh uuid per
+  envelope, so `duplicate` fires on a genuine re-offer and on nothing else.
 
 - **Pane binding (Orca tabs).** Inside an Orca pane the plugin reports the pane it runs in on every
   heartbeat, as `observed.host.orca.pane_key` in the report's `Observation`

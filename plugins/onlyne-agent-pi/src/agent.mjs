@@ -152,7 +152,13 @@ export class OnlyneAgent {
      * sent — the guard judges this session's own deliveries, not history.
      */
     this.deliveredTo = new Set();
-    this.injectedTasks = new Set();
+    /**
+     * The deliveries this process has already handed to the model, keyed by
+     * envelope id (a delivery's own identity). Keying it by task id would swallow
+     * every later envelope for a live task — the follow-up that never arrives —
+     * and the guard below answers a true re-delivery with `duplicate`.
+     */
+    this.injectedDeliveries = new Set();
     this.deliveredProse = new Set();
     /** Pushes that arrived before the handshake finished; see `onFrame`. */
     this.handshaking = false;
@@ -564,13 +570,16 @@ export class OnlyneAgent {
       this.log("assign carried no task id; ignored");
       return;
     }
-    if (this.injectedTasks.has(taskId)) {
+    // The delivery's own identity, so a re-offer of the same message is caught
+    // and a genuinely new message for a running task gets through.
+    const deliveryId = envelope.id ?? `task:${taskId}`;
+    if (this.injectedDeliveries.has(deliveryId)) {
       this.stats.duplicates += 1;
-      this.notice("dup", `task ${taskId.slice(0, 8)} already injected`);
+      this.notice("dup", `~~ task ${taskId.slice(0, 8)} re-delivered, already injected`);
       await this.ack(taskId, true, "duplicate");
       return;
     }
-    this.injectedTasks.add(taskId);
+    this.injectedDeliveries.add(deliveryId);
     this.stats.assigns += 1;
     if (typeof args.generation === "number") this.generation = args.generation;
 
@@ -580,18 +589,32 @@ export class OnlyneAgent {
     if (proseIsNew) this.deliveredProse.add(prose);
     const text = injectionText({ assign: { ...args, task_id: taskId }, proseIsNew, attachmentPaths: attachments.map((item) => item.path) });
 
-    this.tasks.set(taskId, {
-      taskId,
-      envelopeId: envelope.id ?? null,
-      // Who handed this task over: the relay guard's count mode does not count
-      // a send straight back to it (`relay.mjs`).
-      upstream: envelope.from?.role?.role ?? null,
-      turnsSinceAssign: 0,
-      turns: 0,
-      errored: false,
-      head: "",
-      failed: false,
-    });
+    const held = this.tasks.get(taskId);
+    // A completed record is not a live one: a new envelope for a task that
+    // already settled is fresh work under an old id, so it gets a fresh record.
+    if (held && !held.completed) {
+      // A new envelope for a task this session already holds — a follow-up, a
+      // redirect, a bounce back through a relay. The work record stays where it
+      // is: its delivered set keeps the relay guard's count, and its completion
+      // state still settles the task. Only the "since this instruction" counter
+      // moves, so the settled-without-completing watchdog measures the newest one.
+      held.turnsSinceAssign = 0;
+      held.envelopeId = envelope.id ?? held.envelopeId;
+      if (held.failed) held.failed = false;
+    } else {
+      this.tasks.set(taskId, {
+        taskId,
+        envelopeId: envelope.id ?? null,
+        // Who handed this task over: the relay guard's count mode does not count
+        // a send straight back to it (`relay.mjs`).
+        upstream: envelope.from?.role?.role ?? null,
+        turnsSinceAssign: 0,
+        turns: 0,
+        errored: false,
+        head: "",
+        failed: false,
+      });
+    }
     this.agentState = "running";
     this.surface.wakeUser?.(text, attachments.map((item) => item.part));
     this.surface.customEntry?.("onlyne-assign", {

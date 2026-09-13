@@ -350,6 +350,11 @@ impl Server {
         self.deliveries.write().ok()?.remove(msg_id)
     }
 
+    /// The ticket one message holds while it is handed out and unacknowledged.
+    pub fn delivery_ticket(&self, msg_id: &str) -> Option<DeliveryTicket> {
+        self.deliveries.read().ok()?.get(msg_id).cloned()
+    }
+
     /// The unacknowledged delivery of one session, when it holds one.
     pub fn open_delivery(&self, role: &str, session_id: Option<&str>) -> Option<DeliveryTicket> {
         let table = self.deliveries.read().ok()?;

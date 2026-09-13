@@ -496,6 +496,79 @@ fn pull_hands_one_row_per_session_and_records_its_ticket() {
 }
 
 #[test]
+fn a_role_level_pull_rehands_nothing_while_its_ticket_is_open() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "carry on");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    // The task owns a session row. That is what armed a session-keyed ticket for
+    // a pull that named no session, so the puller could never find its own
+    // ticket again and the same row came back every 200 ms, forever.
+    projection::session_sync(
+        &fixture.state,
+        "builder",
+        &SessionSyncArgs {
+            task_id: outcome.receipt.task.clone().expect("task"),
+            session_id: "sess-1".to_string(),
+            generation: 1,
+            seq: 1,
+            projection: SessionProjection::default_working(),
+        },
+    )
+    .expect("sync");
+
+    let first = relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+    assert_eq!(first.deliveries.len(), 1);
+    let ticket = fixture
+        .state
+        .delivery_ticket(&outcome.receipt.msg_id)
+        .expect("a ticket for the row just handed");
+    assert_eq!(
+        ticket.session_id, None,
+        "the ticket is keyed by the pull that armed it"
+    );
+
+    for round in 1..=3 {
+        let again =
+            relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+        assert!(
+            again.deliveries.is_empty(),
+            "round {round}: an open ticket keeps the row handed out"
+        );
+    }
+
+    // One open ticket does not starve the role: its next row still lands.
+    let follow = accepted(
+        relay::send(
+            &fixture.state,
+            &task("planner", "builder", "the following one"),
+            false,
+            None,
+        )
+        .expect("relay"),
+    );
+    let later = relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+    assert_eq!(later.deliveries.len(), 1);
+    assert_eq!(later.deliveries[0].msg_id, follow.receipt.msg_id);
+
+    relay::ack(
+        &fixture.state,
+        &AckArgs {
+            msg_id: outcome.receipt.msg_id.clone(),
+            op_id: None,
+            accepted: true,
+            reason: Some("already injected".into()),
+        },
+    )
+    .expect("ack")
+    .expect("acked");
+    let after = relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+    assert!(
+        after.deliveries.is_empty(),
+        "the settled row is gone and the second row still holds its ticket"
+    );
+}
+
+#[test]
 fn ack_settles_the_row_and_emits_every_observable() {
     let fixture = fixture();
     let envelope = task("planner", "builder", "work");

@@ -458,6 +458,50 @@ test("an assign is injected once, acked, and a redelivery changes nothing", asyn
   assert.deepEqual(second[1], { task_id: TASK_ID, accepted: true, reason: "duplicate" });
 });
 
+// A follow-up arrives as its own envelope under the task id the session is
+// already running. Keying the injection guard on the task swallowed it: the
+// panel said `already injected`, nothing reached the model, and the row the
+// server kept re-offering never settled.
+test("a new envelope for a running task reaches the model and keeps its record", async () => {
+  const { agent, host, surface } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+  const record = agent.tasks.get(TASK_ID);
+  // Turns already run under this task, without driving the turn hooks: a real
+  // turn end also arms the settle fallback, which would complete the task.
+  record.turns = 3;
+  record.turnsSinceAssign = 2;
+
+  const base = assignArgs();
+  const follow = {
+    ...base,
+    envelope: {
+      ...base.envelope,
+      id: "4a3b2c1d-6e7f-4a90-8b1c-2d3e4f506172",
+      body: { text: "actually, use the q8 variant" },
+    },
+  };
+  host.notify("assign", follow);
+  await waitFor(() => (surface.calls.wakeUser.length === 2 ? true : null));
+  assert.match(surface.calls.wakeUser[1].text, /q8 variant/);
+  const acks = await waitFor(() => (host.of("assign_ack").length === 2 ? host.of("assign_ack") : null));
+  assert.deepEqual(acks[1], { task_id: TASK_ID, accepted: true });
+
+  assert.equal(agent.tasks.get(TASK_ID), record, "the running work record survives");
+  assert.equal(record.turns, 3, "what the session already did under this task is not erased");
+  assert.equal(record.turnsSinceAssign, 0, "the watchdog counts from the newest instruction");
+  assert.equal(record.envelopeId, "4a3b2c1d-6e7f-4a90-8b1c-2d3e4f506172");
+
+  // The same envelope again is the true duplicate, and it changes nothing.
+  host.notify("assign", follow);
+  const third = await waitFor(() => (host.of("assign_ack").length === 3 ? host.of("assign_ack") : null));
+  assert.equal(surface.calls.wakeUser.length, 2);
+  assert.deepEqual(third[2], { task_id: TASK_ID, accepted: true, reason: "duplicate" });
+});
+
 // The live case in crates/onlyne-testkit/e2e/pi-live.sh found this: the client
 // hands over a staged session by writing the hello reply and the first assign
 // together, so both frames arrive in one read. The assignment must not be

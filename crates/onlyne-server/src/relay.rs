@@ -467,7 +467,11 @@ pub fn pull(
     args: &PullArgs,
 ) -> anyhow::Result<PullReply> {
     let head = state.event_head().max(0) as u64;
-    if state.open_delivery(role, session_id).is_some() {
+    // A named session holds at most one unacknowledged row. A role-level pull
+    // names no session, so it is gated per row by the ticket check below: the
+    // row it already handed stays handed until it settles, and the role's other
+    // rows still reach this connection.
+    if session_id.is_some() && state.open_delivery(role, session_id).is_some() {
         return Ok(PullReply {
             deliveries: Vec::new(),
             seq: head,
@@ -483,7 +487,14 @@ pub fn pull(
         .filter(|row| row.kind != MsgKind::Note)
         .collect();
     for row in state.ledger.in_flight_for(role)? {
-        if state.open_delivery(role, session_id).is_none() && candidates.is_empty() {
+        // A row stays handed to the pull that took it. Another session may still
+        // claim it, which is how a replacement session inherits work its
+        // predecessor died without acknowledging.
+        if state
+            .delivery_ticket(&row.msg_id)
+            .is_none_or(|ticket| ticket.session_id.as_deref() != session_id)
+            && candidates.is_empty()
+        {
             candidates.push(row);
             break;
         }
@@ -507,9 +518,11 @@ pub fn pull(
     let ticket = DeliveryTicket {
         msg_id: row.msg_id.clone(),
         role: role.to_string(),
-        session_id: session_id
-            .map(str::to_string)
-            .or_else(|| session_row.as_ref().map(|row| row.session_id.clone())),
+        // The key is the puller's own, because the guard above asks with it: a
+        // ticket armed by a role-level pull carries `None` so that pull finds it
+        // again. The session row behind the task still answers for the
+        // generation, and the puller's `session_id` is what names it.
+        session_id: session_id.map(str::to_string),
         generation: session_row
             .as_ref()
             .map(|row| row.generation.max(0) as u64)

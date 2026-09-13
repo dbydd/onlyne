@@ -259,9 +259,10 @@ stderr 告警并忽略，把机会让回文件。
   `inject` 插件记录的重载。其他键记日志后忽略，绝不误读。
 - **`frame_too_large` / `bad_frame`**：超限正文在写出任何字节之前就被拒；帧错误关闭连接并重
   连。帧一旦损坏无法重新同步，这与 `crates/onlyne-frame/src/lib.rs` 的结论一致。
-- **任务 id 在连接生命周期内一次性使用**：同一任务的重复 `assign` 插件只回
-  `reason: "duplicate"` 的 ack，不重复注入，并记住这个 id 直到连接结束。当今 client 每个任务
-  都是新 uuid，所以这条只在真正的重投上生效。
+- **投递按 envelope id 幂等，任务不按 id 一次性使用**：去重键是 envelope id。同一条投递重复
+  到达只注入一次，ack 带 `reason: "duplicate"`；正在运行的任务收到新 envelope，会作为新消息
+  注入同一个会话，工作记录保留自己的计数与转发账本，只把"自这条指令以来的轮数"看门狗归零。
+  client 每条 envelope 都发新 uuid，所以 `duplicate` 只在真正的重投上生效。
 
 - **pane 绑定（Orca tab）。** 在 Orca pane 里，插件在每个 heartbeat 上报自己跑在哪：报告
   `Observation` 里的 `observed.host.orca.pane_key`（`crates/onlyne-session/src/host.rs`），环境
