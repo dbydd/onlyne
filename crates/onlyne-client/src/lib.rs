@@ -4,6 +4,7 @@ pub mod accept;
 pub mod adapter_socket;
 pub mod daemon;
 pub mod dispatch;
+pub mod host;
 pub mod init;
 pub mod intent;
 pub mod local_cli;

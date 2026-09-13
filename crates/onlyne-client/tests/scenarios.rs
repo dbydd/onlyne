@@ -1504,6 +1504,49 @@ impl onlyne_session::SessionBackend for ReasonBackend {
     }
 }
 
+/// Captures each spawn spec the dispatcher handed the backend.
+#[derive(Clone, Default)]
+struct RecordingSpawnBackend {
+    inner: FakeBackend,
+    specs: Arc<parking_lot::Mutex<Vec<onlyne_session::SpawnSpec>>>,
+}
+
+impl onlyne_session::SessionBackend for RecordingSpawnBackend {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+    fn capabilities(&self) -> onlyne_session::Capabilities {
+        self.inner.capabilities()
+    }
+    fn available(&self) -> anyhow::Result<bool> {
+        self.inner.available()
+    }
+    fn spawn(&self, spec: onlyne_session::SpawnSpec) -> anyhow::Result<onlyne_session::SessionRef> {
+        self.specs.lock().push(spec.clone());
+        self.inner.spawn(spec)
+    }
+    fn attach(
+        &self,
+        session: &onlyne_session::SessionRef,
+    ) -> anyhow::Result<onlyne_session::SessionRef> {
+        self.inner.attach(session)
+    }
+    fn probe(
+        &self,
+        session: &onlyne_session::SessionRef,
+    ) -> anyhow::Result<onlyne_session::ResourceProbe> {
+        self.inner.probe(session)
+    }
+    fn close(
+        &self,
+        session: &onlyne_session::SessionRef,
+        reason: onlyne_session::CloseReason,
+        force: bool,
+    ) -> anyhow::Result<()> {
+        self.inner.close(session, reason, force)
+    }
+}
+
 #[test]
 fn cancelled_settle_closes_with_the_real_reason() {
     let dir = tempdir().unwrap();
@@ -1580,6 +1623,42 @@ fn detached_tuple_sees_no_close_call() {
         "a detached tuple has no resource to close"
     );
     assert_eq!(state.session_count(), 0);
+}
+
+#[test]
+fn the_live_dispatch_leaves_pane_placement_to_the_backend() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(RecordingSpawnBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        false,
+        backend.clone(),
+        store,
+    );
+
+    let envelope = sample_envelope("planner", "task 1");
+    let task_id = envelope.task_id().unwrap().to_string();
+    dispatch(&state, &envelope).unwrap();
+
+    let specs = backend.specs.lock();
+    assert_eq!(specs.len(), 1, "dispatch spawns once for a fresh task");
+    assert_eq!(specs[0].placement, None);
+    assert_eq!(
+        specs[0].env.get("ONLYNE_ROLE").map(String::as_str),
+        Some("planner")
+    );
+    assert_eq!(
+        specs[0].env.get("ONLYNE_TASK_ID").map(String::as_str),
+        Some(task_id.as_str())
+    );
+    assert_eq!(
+        specs[0].env.get("ONLYNE_SESSION_ID").map(String::as_str),
+        Some(task_id.as_str())
+    );
 }
 
 #[test]
@@ -2050,6 +2129,122 @@ async fn an_idle_session_whose_plugin_left_is_not_reused() {
     host.abort();
 }
 
+/// An always-running agent carries every task a reused session is given.
+///
+/// The plugin that mounts naming no session is the only connection this role has
+/// for the session staged next, so the claim that hands it the first task also
+/// has to record the socket it arrived on. A claim that takes the connection and
+/// binds nothing hands out one assignment and then forgets the path: the second
+/// task of the session sits `in_flight` on the server, the plugin waits on
+/// `assign` forever, and nothing on the client side says why. `reuse = true` with
+/// `max_sessions = 1` is the running ring's own shape.
+#[tokio::test]
+async fn a_parked_agent_carries_every_later_task_of_its_reused_session() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(FakeBackend::new());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        true,
+        backend.clone(),
+        store.clone(),
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    // The agent is up before any work exists, naming no session.
+    let (_io, mut assigns) = mount_plugin(&socket, None).await;
+
+    let first_task = deliver(&state, &task_delivery("task A")).await;
+    let assigned = tokio::time::timeout(Duration::from_secs(2), assigns.recv())
+        .await
+        .expect("the staged session reaches the waiting agent")
+        .expect("the plugin connection is open");
+    assert_eq!(assigned, first_task);
+
+    on_plugin_report(
+        &state,
+        Report::Complete {
+            task_id: first_task.clone(),
+            outcome: Outcome::Done,
+            head: Some("A done".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state.session_count(),
+        1,
+        "reuse keeps the idle session for the role's next task"
+    );
+
+    let second_task = deliver(&state, &task_delivery("task B")).await;
+    let assigned = tokio::time::timeout(Duration::from_secs(2), assigns.recv())
+        .await
+        .expect("the second task reaches the connection that serves its session")
+        .expect("the plugin connection is open");
+    assert_eq!(
+        assigned, second_task,
+        "the second assign names the second task"
+    );
+    assert_eq!(
+        backend.sessions().len(),
+        1,
+        "one reused resource carries both tasks"
+    );
+    host.abort();
+}
+
+/// A task that arrives ahead of its always-running agent waits for the mount.
+///
+/// Staging the session finds no connection, and the mount that parks is that
+/// connection: the hand-off runs from the mount as well as from the delivery, so
+/// the wait ends when the agent arrives.
+#[tokio::test]
+async fn a_session_staged_before_its_agent_mounts_is_handed_its_payload() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(FakeBackend::new());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        true,
+        backend.clone(),
+        store.clone(),
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    let task = deliver(&state, &task_delivery("task A")).await;
+    assert!(
+        state.hand_staged(&task).await.is_ok(),
+        "a staged session with no connection is a wait, not an error"
+    );
+    assert!(
+        state.staged_without_transport().is_some(),
+        "the payload is held until the agent mounts"
+    );
+
+    let (_io, mut assigns) = mount_plugin(&socket, None).await;
+    let assigned = tokio::time::timeout(Duration::from_secs(2), assigns.recv())
+        .await
+        .expect("the mount hands over the session it was waiting for")
+        .expect("the plugin connection is open");
+    assert_eq!(assigned, task);
+    assert!(
+        state.staged_without_transport().is_none(),
+        "the hand-off consumed the wait"
+    );
+    host.abort();
+}
+
 /// Whether one pid still names a process this test can signal.
 fn pid_alive(pid: u32) -> bool {
     std::process::Command::new("kill")
@@ -2134,4 +2329,36 @@ async fn a_cancel_for_an_unknown_task_creates_no_session() {
     .expect("a command with no subject is applied, not refused");
     assert!(!held, "this role holds no such task");
     assert_eq!(state.session_count(), 0, "a command spawns no session");
+}
+
+/// A focus command for a task with no live session still settles. The control
+/// plane answers the row instead of panicking or leaving it in flight.
+#[tokio::test]
+async fn a_focus_for_an_unknown_task_still_settles() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["sleep".into(), "120".into()],
+        1,
+        false,
+        Arc::new(onlyne_session::backend::exec::ExecBackend::new()),
+        store,
+    );
+
+    let held = on_control(
+        &state,
+        &ControlOp::Focus {
+            task_id: new_task_id(),
+        },
+    )
+    .await
+    .expect("a focus with no live session is applied, not refused");
+    assert!(!held, "this role holds no such task");
+    assert_eq!(
+        state.session_count(),
+        0,
+        "a focus command spawns no session"
+    );
 }

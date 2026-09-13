@@ -261,6 +261,16 @@ impl AdapterIo {
         self.write_timeout
     }
 
+    /// Whether two handles drive one connection.
+    ///
+    /// A handle is cheap to clone, and every clone writes to the same channel. A
+    /// host that bound a session to a connection needs this test to drop exactly
+    /// those bindings when the connection ends, leaving a later connection's
+    /// bindings in place.
+    pub fn same_connection(&self, other: &Self) -> bool {
+        self.tx.same_channel(&other.tx)
+    }
+
     pub async fn notify(&self, msg: AdapterMsg) -> Result<()> {
         self.tx
             .send(QueuedFrame {

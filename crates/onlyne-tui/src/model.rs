@@ -2,10 +2,11 @@ use crate::layout::{
     Camera, LayoutEdge, LayoutNode, Presence as LayoutPresence, RoleMap, SessionLine, SessionState,
 };
 use chrono::{DateTime, Utc};
+use crossterm::event::{KeyCode, KeyModifiers};
 use onlyne_proto::{
-    AdminFrame, AdminOp, EventRow, FaultEvent, Frame, LedgerEntry, LedgerQuery, LedgerState,
-    Lifecycle, MsgKind, Presence, Principal, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs,
-    ResBody, RoleInfo, SessionRow, new_id,
+    AdminFrame, AdminOp, ErrorPayload, EventRow, FaultEvent, Frame, LedgerEntry, LedgerQuery,
+    LedgerState, Lifecycle, MsgKind, NO_SOCKET_MESSAGE, Presence, Principal, QueryFaultsArgs,
+    QueryRolesArgs, QuerySessionsArgs, ResBody, RoleInfo, SessionRow, new_id,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -151,10 +152,10 @@ impl Page {
     pub fn keys(self) -> &'static str {
         match self {
             Page::RoleMap => {
-                "1/2·Tab switch  hjkl navigate  ←→↑↓ pan  +/- repel  0 recentre  wheel zoom  drag pan  Enter detail  e edges  a all/active  r refresh  q quit"
+                "1/2·Tab switch  hjkl navigate  ←→↑↓ pan  +/- repel  0 recentre  wheel zoom  drag pan  Enter detail  e edges  F session  a all/active  r refresh  q quit"
             }
             Page::Swarm => {
-                "1/2·Tab switch  g/h focus  ↑↓ select  ^p/^n back/forward  Enter detail  J/K scroll  / search  f state  t window  o role  e edge  a all/active  PgUp/PgDn page  r refresh  q quit"
+                "1/2·Tab switch  g/h focus  ↑↓ select  ^p/^n back/forward  Enter detail  J/K scroll  / search  f state  F session  t window  o role  e edge  a all/active  PgUp/PgDn page  r refresh  q quit"
             }
         }
     }
@@ -349,6 +350,18 @@ impl Default for UiState {
             message: String::new(),
         }
     }
+}
+
+/// Control op body for admin `control`, matching `ControlOp` on the wire
+/// (`crates/onlyne-cli/src/verbs.rs` lines 689-696, `req_admin_control.json`).
+///
+/// The sibling proto crate owns `ControlOp::Focus`. This function writes the
+/// `"focus"` name string until that variant lands.
+pub fn focus_request(task_id: &str) -> Value {
+    json!({
+        "op": "focus",
+        "task_id": task_id,
+    })
 }
 
 /// The detail pane's subject.
@@ -594,22 +607,49 @@ pub async fn role_detail(socket: &Path, role: &str) -> anyhow::Result<RoleDetail
 }
 
 async fn request_data(socket: &Path, op: AdminOp) -> anyhow::Result<Value> {
-    let mut stream = timeout(Duration::from_millis(1500), UnixStream::connect(socket)).await??;
     let request: AdminFrame = Frame::Req { id: new_id(), op };
+    match request_body(socket, &request).await {
+        Ok(body) => data_or_error(body),
+        Err(RequestFail::NoSocket) => anyhow::bail!("{NO_SOCKET_MESSAGE}"),
+        Err(RequestFail::Other(error)) => Err(error),
+    }
+}
+
+enum RequestFail {
+    NoSocket,
+    Other(anyhow::Error),
+}
+
+async fn request_body(
+    socket: &Path,
+    request: &impl serde::Serialize,
+) -> Result<ResBody, RequestFail> {
+    let mut stream = match timeout(Duration::from_millis(1500), UnixStream::connect(socket)).await {
+        Ok(Ok(stream)) => stream,
+        _ => return Err(RequestFail::NoSocket),
+    };
     timeout(
         Duration::from_millis(1500),
-        onlyne_frame::write_frame(&mut stream, &request),
+        onlyne_frame::write_frame(&mut stream, request),
     )
-    .await??;
-    let frame = timeout(
+    .await
+    .map_err(|_| RequestFail::NoSocket)?
+    .map_err(|_| RequestFail::NoSocket)?;
+    let frame = match timeout(
         Duration::from_millis(1500),
         onlyne_frame::read_frame::<_, AdminFrame>(&mut stream),
     )
-    .await??
-    .ok_or_else(|| anyhow::anyhow!("server closed the connection"))?;
+    .await
+    {
+        Ok(Ok(Some(frame))) => frame,
+        _ => return Err(RequestFail::NoSocket),
+    };
     match frame {
-        Frame::Res { body, .. } => data_or_error(body),
-        other => anyhow::bail!("expected res frame, got {:?}", other),
+        Frame::Res { body, .. } => Ok(body),
+        other => Err(RequestFail::Other(anyhow::anyhow!(
+            "expected res frame, got {:?}",
+            other
+        ))),
     }
 }
 
@@ -1124,6 +1164,179 @@ pub fn ledger_state_label(entry: &LedgerEntry) -> String {
     }
 }
 
+/// Admin `control` args for a focus op, matching `AdminControl`
+/// (`crates/onlyne-cli/src/verbs.rs` lines 688-696). `to` is omitted when unset.
+pub fn admin_focus_args(from: &str, task_id: &str) -> Value {
+    json!({
+        "from": from,
+        "op": focus_request(task_id),
+    })
+}
+
+/// One classified key press. The IO layer in `main` executes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyCmd {
+    Quit,
+    SetPage(Page),
+    TogglePage,
+    Enter,
+    DetailScroll(i16),
+    Refresh,
+    ToggleControlEdges,
+    Spacing(i8),
+    Recentre,
+    RoleEdge(isize),
+    FollowEdge,
+    RoleBack,
+    Pan { dx: isize, dy: isize },
+    HistoryWalk(isize),
+    SetListFocus(Focus),
+    MoveCursor(isize),
+    StartSearch,
+    CycleState,
+    CycleWindow,
+    CycleRole,
+    CycleEdge,
+    HistoryPage(isize),
+    ToggleActive,
+    SessionFocus,
+    Ignore,
+}
+
+/// Map one key press onto a [`KeyCmd`]. `page` and `list_focus` select the
+/// page-local bindings.
+pub fn interpret_key(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    page: Page,
+    list_focus: Focus,
+) -> KeyCmd {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('q') => KeyCmd::Quit,
+        KeyCode::Char('c') if ctrl => KeyCmd::Quit,
+        KeyCode::Esc => KeyCmd::Quit,
+        KeyCode::Char('1') => KeyCmd::SetPage(Page::RoleMap),
+        KeyCode::Char('2') => KeyCmd::SetPage(Page::Swarm),
+        KeyCode::Tab => KeyCmd::TogglePage,
+        KeyCode::Enter => KeyCmd::Enter,
+        KeyCode::Char('J') => KeyCmd::DetailScroll(1),
+        KeyCode::Char('K') => KeyCmd::DetailScroll(-1),
+        KeyCode::Char('r') => KeyCmd::Refresh,
+        KeyCode::Char('F') => KeyCmd::SessionFocus,
+        KeyCode::Char('e') if page == Page::RoleMap => KeyCmd::ToggleControlEdges,
+        KeyCode::Char(c) if page == Page::RoleMap && (c == '+' || c == '=') => KeyCmd::Spacing(1),
+        KeyCode::Char('-') if page == Page::RoleMap => KeyCmd::Spacing(-1),
+        KeyCode::Char('0') if page == Page::RoleMap => KeyCmd::Recentre,
+        KeyCode::Char('j') if page == Page::RoleMap => KeyCmd::RoleEdge(1),
+        KeyCode::Char('k') if page == Page::RoleMap => KeyCmd::RoleEdge(-1),
+        KeyCode::Char('l') if page == Page::RoleMap => KeyCmd::FollowEdge,
+        KeyCode::Char('h') if page == Page::RoleMap => KeyCmd::RoleBack,
+        KeyCode::Up if page == Page::RoleMap => KeyCmd::Pan { dx: 0, dy: -1 },
+        KeyCode::Down if page == Page::RoleMap => KeyCmd::Pan { dx: 0, dy: 1 },
+        KeyCode::Left if page == Page::RoleMap => KeyCmd::Pan { dx: -1, dy: 0 },
+        KeyCode::Right if page == Page::RoleMap => KeyCmd::Pan { dx: 1, dy: 0 },
+        KeyCode::Char('p') if ctrl && page == Page::Swarm => KeyCmd::HistoryWalk(-1),
+        KeyCode::Char('n') if ctrl && page == Page::Swarm => KeyCmd::HistoryWalk(1),
+        KeyCode::Char('g') if page == Page::Swarm => KeyCmd::SetListFocus(Focus::Graph),
+        KeyCode::Char('h') if page == Page::Swarm => KeyCmd::SetListFocus(Focus::History),
+        KeyCode::Up | KeyCode::Char('k') => KeyCmd::MoveCursor(-1),
+        KeyCode::Down | KeyCode::Char('j') => KeyCmd::MoveCursor(1),
+        KeyCode::Char('/') if page == Page::Swarm => KeyCmd::StartSearch,
+        KeyCode::Char('f') if page == Page::Swarm => KeyCmd::CycleState,
+        KeyCode::Char('t') if page == Page::Swarm => KeyCmd::CycleWindow,
+        KeyCode::Char('o') if page == Page::Swarm => KeyCmd::CycleRole,
+        KeyCode::Char('e') if page == Page::Swarm => KeyCmd::CycleEdge,
+        KeyCode::PageDown if page == Page::Swarm && list_focus == Focus::History => {
+            KeyCmd::HistoryPage(1)
+        }
+        KeyCode::PageUp if page == Page::Swarm && list_focus == Focus::History => {
+            KeyCmd::HistoryPage(-1)
+        }
+        KeyCode::Char('a') => KeyCmd::ToggleActive,
+        KeyCode::PageDown => KeyCmd::DetailScroll(8),
+        KeyCode::PageUp => KeyCmd::DetailScroll(-8),
+        _ => KeyCmd::Ignore,
+    }
+}
+
+/// Result of a session-focus control request, for the footer line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FocusOutcome {
+    Settled { task_id: String },
+    Denied { code: String, message: String },
+    NoSocket,
+    NoSession,
+}
+
+/// Footer line for a [`FocusOutcome`].
+pub fn focus_message(outcome: &FocusOutcome) -> String {
+    match outcome {
+        FocusOutcome::Settled { task_id } => format!("focus settled {task_id}"),
+        FocusOutcome::Denied { code, message } => format!("focus {code} {message}"),
+        FocusOutcome::NoSocket => "focus: no socket".to_string(),
+        FocusOutcome::NoSession => "focus: no session selected".to_string(),
+    }
+}
+
+/// Map an admin `control` reply onto a [`FocusOutcome`]. An `ok` body is a
+/// settled control row; the host backend's `focus refused` warn stays on the
+/// client.
+pub fn focus_outcome_from_body(task_id: &str, body: &ResBody) -> FocusOutcome {
+    if body.ok {
+        FocusOutcome::Settled {
+            task_id: task_id.to_string(),
+        }
+    } else {
+        match &body.error {
+            Some(ErrorPayload { code, message, .. }) => FocusOutcome::Denied {
+                code: code.as_str().to_string(),
+                message: message.clone(),
+            },
+            None => FocusOutcome::Denied {
+                code: "error".to_string(),
+                message: "admin request failed".to_string(),
+            },
+        }
+    }
+}
+
+/// Role the admin surface sends as `from`: an `admin` role, else the session's
+/// own role.
+pub fn focus_from(snapshot: &Snapshot, task_id: &str) -> Option<String> {
+    snapshot
+        .roles
+        .iter()
+        .find(|role| role.admin)
+        .map(|role| role.name.clone())
+        .or_else(|| {
+            snapshot
+                .sessions
+                .iter()
+                .find(|session| session.task_id == task_id)
+                .and_then(|session| session.role.clone())
+        })
+}
+
+/// Send a focus control op on the admin socket. The frame shape matches
+/// `Outbound::admin` + `AdminOp::Control` in `verbs.rs` 684-696.
+pub async fn send_focus(socket: &Path, from: &str, task_id: &str) -> FocusOutcome {
+    let request = json!({
+        "f": "req",
+        "id": new_id(),
+        "op": "control",
+        "args": admin_focus_args(from, task_id),
+    });
+    match request_body(socket, &request).await {
+        Ok(body) => focus_outcome_from_body(task_id, &body),
+        Err(RequestFail::NoSocket) => FocusOutcome::NoSocket,
+        Err(RequestFail::Other(error)) => FocusOutcome::Denied {
+            code: "internal".to_string(),
+            message: error.to_string(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1359,5 +1572,142 @@ mod tests {
             edges: Vec::new(),
             aggregate: None,
         }
+    }
+
+    #[test]
+    fn focus_request_names_the_op_and_task_and_omits_reason() {
+        let value = focus_request("task-1");
+        assert_eq!(value.get("op").and_then(Value::as_str), Some("focus"));
+        assert_eq!(value.get("task_id").and_then(Value::as_str), Some("task-1"));
+        assert!(value.get("reason").is_none(), "{value}");
+        let keys: Vec<&str> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, vec!["op", "task_id"]);
+    }
+
+    #[test]
+    fn admin_focus_args_wrap_the_op_and_omit_to() {
+        let value = admin_focus_args("planner", "task-1");
+        assert_eq!(value.get("from").and_then(Value::as_str), Some("planner"));
+        assert_eq!(
+            value.get("op").and_then(Value::as_object).map(|op| {
+                (
+                    op.get("op").and_then(Value::as_str),
+                    op.get("task_id").and_then(Value::as_str),
+                    op.get("reason").is_none(),
+                )
+            }),
+            Some((Some("focus"), Some("task-1"), true))
+        );
+        assert!(value.get("to").is_none(), "{value}");
+    }
+
+    #[test]
+    fn interpret_key_maps_shift_f_to_session_focus() {
+        assert_eq!(
+            interpret_key(
+                KeyCode::Char('F'),
+                KeyModifiers::SHIFT,
+                Page::Swarm,
+                Focus::Graph
+            ),
+            KeyCmd::SessionFocus
+        );
+        assert_eq!(
+            interpret_key(
+                KeyCode::Char('F'),
+                KeyModifiers::NONE,
+                Page::RoleMap,
+                Focus::Graph
+            ),
+            KeyCmd::SessionFocus
+        );
+        assert_eq!(
+            interpret_key(
+                KeyCode::Char('f'),
+                KeyModifiers::NONE,
+                Page::Swarm,
+                Focus::Graph
+            ),
+            KeyCmd::CycleState
+        );
+    }
+
+    #[test]
+    fn focus_message_names_a_missing_socket() {
+        assert_eq!(focus_message(&FocusOutcome::NoSocket), "focus: no socket");
+    }
+
+    #[test]
+    fn focus_message_names_acl_denied_and_forbidden() {
+        assert_eq!(
+            focus_message(&FocusOutcome::Denied {
+                code: "acl_denied".into(),
+                message: "owner only".into(),
+            }),
+            "focus acl_denied owner only"
+        );
+        assert_eq!(
+            focus_message(&FocusOutcome::Denied {
+                code: "forbidden".into(),
+                message: "not admin".into(),
+            }),
+            "focus forbidden not admin"
+        );
+    }
+
+    #[test]
+    fn focus_outcome_treats_ok_reply_as_settled() {
+        let body = ResBody::ok(json!({"state": "acked"}));
+        assert_eq!(
+            focus_outcome_from_body("task-9", &body),
+            FocusOutcome::Settled {
+                task_id: "task-9".into()
+            }
+        );
+        assert_eq!(
+            focus_message(&focus_outcome_from_body("task-9", &body)),
+            "focus settled task-9"
+        );
+    }
+
+    #[test]
+    fn focus_outcome_reads_denied_code_and_message() {
+        let denied = ResBody::err(onlyne_proto::ErrorCode::AclDenied, "owner only", None);
+        assert_eq!(
+            focus_outcome_from_body("task-9", &denied),
+            FocusOutcome::Denied {
+                code: "acl_denied".into(),
+                message: "owner only".into(),
+            }
+        );
+        let forbidden = ResBody::err(onlyne_proto::ErrorCode::Forbidden, "not admin", None);
+        assert_eq!(
+            focus_outcome_from_body("task-9", &forbidden),
+            FocusOutcome::Denied {
+                code: "forbidden".into(),
+                message: "not admin".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn send_focus_on_a_missing_socket_is_no_socket() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let outcome = runtime.block_on(send_focus(
+            std::path::Path::new("/tmp/onlyne-tui-missing-socket"),
+            "planner",
+            "task-1",
+        ));
+        assert_eq!(outcome, FocusOutcome::NoSocket);
+        assert_eq!(focus_message(&outcome), "focus: no socket");
     }
 }

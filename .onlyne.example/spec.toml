@@ -23,7 +23,7 @@ name = "cluster-a"
 listen = "127.0.0.1:7811"
 # cert_pin pins the server certificate SPKI SHA-256 fingerprint printed by `onlyne-server init`. Read by every role client during handshake verification. Default: empty string, refused at startup.
 cert_pin = "sha256/REPLACE_ME"
-# note_queue toggles queueing for a note addressed to an offline role. Read by the onlyne-server router before the ledger write. Default: false, which refuses the delivery.
+# note_queue toggles queueing for a note its role cannot take now: offline, or online with no session running. Read by the onlyne-server router before the ledger write. Default: false, which refuses the delivery.
 note_queue = false
 # fault_history_days sets fault record retention. Read by onlyne-server fault pruning. Default: 14.
 fault_history_days = 14

@@ -102,6 +102,7 @@ pub fn build_control_op(
             task_id: task,
             reason: reason.unwrap_or_default(),
         }),
+        "focus" => Ok(ControlOp::Focus { task_id: task }),
         other => Err(format!("onlyne: unknown control verb {other}")),
     }
 }

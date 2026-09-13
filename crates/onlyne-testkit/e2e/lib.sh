@@ -203,10 +203,11 @@ print(rows[0].get(field, "") if rows else "")
 #
 # `prose` travels through init's `--prose` flag, so the printed entry carries the
 # text the fake agent checks against its `assign.prose`. `acl` carries the role's
-# two ACL lines as they appear in `spec.toml`, so one grep over the suite shows
-# every pair, e.g. 'allowed_senders = ["*", "planner"]
-# allowed_targets = ["planner"]'. init prints the rule's default self pair, and a
-# caller passing its own lines has the fragment's two ACL lines dropped first.
+# override lines as they appear in `spec.toml`, e.g. 'allowed_senders = ["*",
+# "planner"]
+# allowed_targets = ["planner"]'. init prints its own defaults for those keys, so
+# the names the caller restates are dropped from the fragment first and the spec
+# keeps one line per key.
 client_init() {
   local ws=$1 role=$2 server_dir=$3 spec=$4 fragment=$5 prose=${6:-} acl=${7:-}
   if [ -n "$prose" ]; then
@@ -220,12 +221,16 @@ client_init() {
   grep -q 'key = "ed25519/' "$fragment" || fail "init fragment must contain key = \"ed25519/" "$(cat "$fragment")"
   if [ -n "$acl" ]; then
     # The override restates the lines it carries, so init's own copies of those
-    # lines are dropped first and the spec keeps one key each.
-    local strip='^(allowed_senders|allowed_targets) = '
-    case "$acl" in
-      *max_sessions*) strip='^(allowed_senders|allowed_targets|max_sessions) = ' ;;
-    esac
-    grep -v -E "$strip" "$fragment" >> "$spec"
+    # lines are dropped first and the spec keeps one key each. The key names come
+    # out of the caller's own lines, which keeps a newly defaulted init line from
+    # breaking every case that overrides it.
+    local keys
+    keys=$(printf '%s\n' "$acl" | sed -n 's/^\([a-z_]\{1,\}\) *=.*/\1/p' | sort -u | paste -sd'|' -)
+    if [ -n "$keys" ]; then
+      grep -v -E "^($keys) = " "$fragment" >> "$spec"
+    else
+      cat "$fragment" >> "$spec"
+    fi
     printf '%s\n' "$acl" >> "$spec"
   else
     cat "$fragment" >> "$spec"

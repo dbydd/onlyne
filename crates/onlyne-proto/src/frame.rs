@@ -480,12 +480,31 @@ mod tests {
                 role: None,
                 limit: 16,
                 hold_ms: Some(500),
+                control_only: Some(true),
             }),
         );
         let back: Frame =
             serde_json::from_value(serde_json::to_value(&frame).expect("e")).expect("decode");
         assert_eq!(back, frame);
         assert_eq!(back.id(), Some("r9"));
+        // An absent `control_only` decodes to none, so a client predating the
+        // filter keeps its wire shape.
+        let plain = serde_json::json!({"f": "req", "id": "r9", "op": "pull",
+            "args": {"limit": 16, "hold_ms": 500}});
+        let decoded: Frame = serde_json::from_value(plain).expect("plain pull");
+        let Frame::Req { op, .. } = decoded else {
+            panic!("a pull frame decoded as {decoded:?}");
+        };
+        assert_eq!(
+            op,
+            ClientOp::Pull(PullArgs {
+                role: None,
+                limit: 16,
+                hold_ms: Some(500),
+                control_only: None,
+            }),
+            "a pull frame written before the filter still decodes"
+        );
     }
 
     #[test]
@@ -525,6 +544,7 @@ mod tests {
                 role: None,
                 limit: 32,
                 hold_ms: Some(250),
+                control_only: None,
             }),
             ClientOp::Ack(AckArgs {
                 msg_id: "m1".into(),

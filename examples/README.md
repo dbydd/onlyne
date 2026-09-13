@@ -13,10 +13,13 @@ manifest, so `cargo run --example <name>` finds nothing to build here.
 | `crates/onlyne-testkit/e2e/idempotency.sh` | duplicate and conflict answers for one repeated `op_id` |
 | `crates/onlyne-testkit/e2e/legacy-layout.sh` | refusal of a pre-v1 workspace, exit code 2 |
 | `crates/onlyne-testkit/e2e/running-lights.sh` | a six-role ring: a token handed on with `onlyne handoff` twelve times, and two TUI frames of it moving |
+| `crates/onlyne-testkit/e2e/herdr-live.sh` | the herdr backend against a live herdr session: workspace per server root, role tab, split pane, `control focus`, drain |
 
 `crates/onlyne-testkit/e2e/lib.sh` holds the shared helpers. Callers set `SRC` and `tmp` first. Every
-script runs with `ONLYNE_BACKEND=fake` and the `fake` gateway. No real platform credential enters
-the run.
+script in the table above except `herdr-live.sh` runs with `ONLYNE_BACKEND=fake` and the `fake`
+gateway; `orca-live.sh` and `pi-live.sh` pick their own host the same way `herdr-live.sh` does.
+`herdr-live.sh` needs a sacrificial herdr session and takes `HERDR_SESSION` (default `onlyne-test`).
+No real platform credential enters the run.
 
 ```bash
 cargo build --workspace

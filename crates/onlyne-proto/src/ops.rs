@@ -212,6 +212,17 @@ pub struct PullArgs {
     /// Server-side long-poll window in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_ms: Option<u64>,
+    /// Hand back control rows only.
+    ///
+    /// A role at `max_sessions` stops pulling work it has nowhere to run, and a
+    /// control command is exactly what its operator wants to send at that moment
+    /// (`recycle` to free a slot, `focus` to look at the session that filled it).
+    /// Without this filter the capacity gate and the control plane share one
+    /// queue, so a saturated role becomes unreachable for its own recovery.
+    /// Absent or false keeps the whole vocabulary, which is what a role with free
+    /// capacity asks for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_only: Option<bool>,
 }
 
 /// One delivered envelope plus its ledger handle.
@@ -857,6 +868,7 @@ mod tests {
                     role: None,
                     limit: 32,
                     hold_ms: Some(250),
+                    control_only: None,
                 }),
                 "pull",
             ),

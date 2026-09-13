@@ -155,6 +155,8 @@ pub enum ControlOp {
     Snapshot { task_id: String },
     /// Abandon the task and settle it as cancelled.
     Cancel { task_id: String, reason: String },
+    /// Bring the task's live session to the front of its host.
+    Focus { task_id: String },
 }
 
 impl ControlOp {
@@ -163,17 +165,23 @@ impl ControlOp {
             ControlOp::Recycle { task_id, .. }
             | ControlOp::Probe { task_id }
             | ControlOp::Snapshot { task_id }
-            | ControlOp::Cancel { task_id, .. } => task_id,
+            | ControlOp::Cancel { task_id, .. }
+            | ControlOp::Focus { task_id } => task_id,
         }
     }
 
-    pub fn name(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             ControlOp::Recycle { .. } => "recycle",
             ControlOp::Probe { .. } => "probe",
             ControlOp::Snapshot { .. } => "snapshot",
             ControlOp::Cancel { .. } => "cancel",
+            ControlOp::Focus { .. } => "focus",
         }
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.as_str()
     }
 }
 
@@ -647,6 +655,23 @@ mod tests {
             task_id: env.causality.as_ref().unwrap().task.clone(),
         });
         env.validate().expect("control with op");
+    }
+
+    #[test]
+    fn focus_control_op_round_trips_and_names_itself() {
+        let task_id = new_task_id();
+        let op = ControlOp::Focus {
+            task_id: task_id.clone(),
+        };
+        assert_eq!(op.as_str(), "focus");
+        assert_eq!(op.name(), "focus");
+        assert_eq!(op.task_id(), task_id.as_str());
+        let json = serde_json::to_value(&op).expect("encode");
+        assert_eq!(json["op"], "focus");
+        assert_eq!(json["task_id"], task_id);
+        assert!(json.get("reason").is_none());
+        let back: ControlOp = serde_json::from_value(json).expect("decode");
+        assert_eq!(back, op);
     }
 
     #[test]

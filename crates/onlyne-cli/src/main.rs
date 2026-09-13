@@ -245,6 +245,8 @@ enum ControlVerb {
     Snapshot,
     /// Cancel the task.
     Cancel(ControlReasonArgs),
+    /// Bring the task's live session to the front of its host.
+    Focus,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -359,6 +361,7 @@ fn run() -> i32 {
                 ControlVerb::Probe => ("probe", None),
                 ControlVerb::Snapshot => ("snapshot", None),
                 ControlVerb::Cancel(args) => ("cancel", Some(args.reason)),
+                ControlVerb::Focus => ("focus", None),
             };
             let Some(task) = cmd.task else {
                 return runtime::usage_error("onlyne: control needs --task <id>");

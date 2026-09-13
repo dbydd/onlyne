@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 pub mod exec;
 pub mod fake;
+pub mod herdr;
 pub mod orca;
 pub mod zellij;
 
@@ -22,7 +23,7 @@ pub struct Capabilities {
     pub rename: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpawnSpec {
     pub cwd: PathBuf,
     pub task_id: String,
@@ -32,7 +33,214 @@ pub struct SpawnSpec {
     #[serde(default)]
     pub focus: Option<bool>,
     #[serde(default)]
+    pub placement: Option<PanePlacement>,
+    #[serde(default)]
     pub rename: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitDirection {
+    Right,
+    Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PanePlacement {
+    pub direction: SplitDirection,
+    pub ratio: f64,
+}
+
+impl SplitDirection {
+    pub fn as_herdr(self) -> &'static str {
+        match self {
+            Self::Right => "right",
+            Self::Down => "down",
+        }
+    }
+}
+
+impl PanePlacement {
+    /// A split that brings the pane count to a power of two goes right.
+    /// Every other split goes down. Ratio is always 0.5.
+    pub fn from_pane_count(pane_count: usize) -> Self {
+        let direction = if (pane_count + 1).is_power_of_two() {
+            SplitDirection::Right
+        } else {
+            SplitDirection::Down
+        };
+        Self {
+            direction,
+            ratio: 0.5,
+        }
+    }
+}
+
+/// Stderr line and [`NoSupportedHost`] display when no host is selected.
+pub const NO_SUPPORTED_HOST: &str =
+    "onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendName {
+    Herdr,
+    Orca,
+    Zellij,
+    Exec,
+    Fake,
+}
+
+impl BackendName {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Herdr => "herdr",
+            Self::Orca => "orca",
+            Self::Zellij => "zellij",
+            Self::Exec => "exec",
+            Self::Fake => "fake",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "herdr" => Some(Self::Herdr),
+            "orca" => Some(Self::Orca),
+            "zellij" => Some(Self::Zellij),
+            "exec" => Some(Self::Exec),
+            "fake" => Some(Self::Fake),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionSource {
+    Explicit,
+    Env,
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostDetection {
+    pub backend: Option<BackendName>,
+    pub source: SelectionSource,
+    pub explicit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoSupportedHost;
+
+impl std::fmt::Display for NoSupportedHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(NO_SUPPORTED_HOST)
+    }
+}
+
+impl std::error::Error for NoSupportedHost {}
+
+pub fn process_env() -> BTreeMap<String, String> {
+    std::env::vars().collect()
+}
+
+fn env_nonempty(env: &BTreeMap<String, String>, key: &str) -> bool {
+    env.get(key).is_some_and(|value| !value.is_empty())
+}
+
+pub(crate) fn herdr_host_present(env: &BTreeMap<String, String>) -> bool {
+    env.get("HERDR_ENV").is_some_and(|value| value == "1")
+        && (env_nonempty(env, "HERDR_SOCKET_PATH")
+            || env_nonempty(env, "HERDR_SESSION")
+            || env_nonempty(env, "HERDR_WORKSPACE_ID"))
+}
+
+fn orca_host_present(env: &BTreeMap<String, String>) -> bool {
+    env_nonempty(env, "ORCA_PANE_KEY")
+        || env_nonempty(env, "ORCA_TERMINAL_HANDLE")
+        || env_nonempty(env, "ORCA_WORKTREE_ID")
+}
+
+fn zellij_host_present(env: &BTreeMap<String, String>) -> bool {
+    env.contains_key("ZELLIJ")
+}
+
+/// Map process environment to a backend choice.
+pub fn detect_host(env: &BTreeMap<String, String>) -> HostDetection {
+    let explicit = env
+        .get("ONLYNE_BACKEND")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(name) = &explicit {
+        if !name.eq_ignore_ascii_case("auto") {
+            return HostDetection {
+                backend: BackendName::parse(name),
+                source: SelectionSource::Explicit,
+                explicit: Some(name.clone()),
+            };
+        }
+    }
+    let backend = if herdr_host_present(env) {
+        Some(BackendName::Herdr)
+    } else if orca_host_present(env) {
+        Some(BackendName::Orca)
+    } else if zellij_host_present(env) {
+        Some(BackendName::Zellij)
+    } else {
+        None
+    };
+    HostDetection {
+        source: if backend.is_some() {
+            SelectionSource::Env
+        } else {
+            SelectionSource::None
+        },
+        backend,
+        explicit,
+    }
+}
+
+pub fn doctor_report(env: &BTreeMap<String, String>) -> Value {
+    let detected = detect_host(env);
+    let host = detected.backend.map(|name| name.as_str());
+    let backend_selection = match detected.source {
+        SelectionSource::Explicit => "explicit",
+        SelectionSource::Env => "env",
+        SelectionSource::None => "none",
+    };
+    let binary = match detected.backend {
+        Some(BackendName::Herdr) => Some(
+            env.get("HERDR_BIN_PATH")
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "herdr".into()),
+        ),
+        Some(BackendName::Orca) => Some(
+            env.get("ORCA_CLI_COMMAND")
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "orca".into()),
+        ),
+        Some(BackendName::Zellij) => Some(
+            env.get("ZELLIJ_COMMAND")
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "zellij".into()),
+        ),
+        Some(BackendName::Exec) | Some(BackendName::Fake) => None,
+        None => None,
+    };
+    let mut report = serde_json::json!({
+        "host": host,
+        "binary": binary,
+        "session": env.get("HERDR_SESSION").filter(|value| !value.is_empty()),
+        "workspace_id": env.get("HERDR_WORKSPACE_ID").filter(|value| !value.is_empty()),
+        "tab_id": env.get("HERDR_TAB_ID").filter(|value| !value.is_empty()),
+        "pane_id": env.get("HERDR_PANE_ID").filter(|value| !value.is_empty()),
+        "backend_selection": backend_selection,
+        "explicit": detected.explicit,
+    });
+    if detected.backend.is_none() {
+        report["refusal"] = Value::String(NO_SUPPORTED_HOST.into());
+    }
+    report
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -239,8 +447,23 @@ pub(crate) fn run_json(
 }
 
 /// The structured failure for one refused (or body-less) CLI answer.
+///
+/// Herdr writes its error document to stderr with an empty stdout, Orca writes
+/// `{"ok":false,…}` to stdout. Both shapes are decoded so
+/// [`CommandFailure::code`] carries the machine-readable code either way.
 fn command_failure(command: &str, output: &CommandOutput, body: Option<&Value>) -> CommandFailure {
-    let error = body.and_then(|body| body.get("error"));
+    let stderr_body = || -> Option<Value> {
+        let text = String::from_utf8_lossy(&output.stderr);
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        serde_json::from_str::<Value>(text).ok()
+    };
+    let fallback = stderr_body();
+    let error = body
+        .and_then(|body| body.get("error"))
+        .or_else(|| fallback.as_ref().and_then(|value| value.get("error")));
     let text = |key: &str| {
         error
             .and_then(|error| error.get(key))
@@ -271,30 +494,42 @@ pub(crate) fn unsupported(backend: &str, operation: &str, detail: &str) -> anyho
     anyhow::anyhow!("runtime backend {backend} does not support {operation}: {detail}")
 }
 
-/// Probe order: orca, then zellij, then fake as the last resort. The Orca
-/// probe answers only while the Orca runtime is reachable from this process,
-/// so a session lands on the screen the operator is actually driving; an
-/// installed zellij CLI counts as live infrastructure second, and `fake` is
-/// always available, so `auto` resolves on any machine. Explicit names still
-/// select one backend only. Reached through `ONLYNE_BACKEND=auto`, or
-/// directly by callers that want capability discovery.
+/// Build a backend from an environment map. `ONLYNE_BACKEND` wins when it
+/// names `herdr`, `orca`, `zellij`, `exec`, or `fake`. An empty or `auto`
+/// value probes herdr, then orca, then zellij. `exec` and `fake` are never
+/// discovered. No match returns [`NoSupportedHost`].
+pub fn select_backend_from_env(
+    env: &BTreeMap<String, String>,
+    runner: Arc<dyn Runner>,
+    policy: WorktreePolicy,
+) -> Result<Box<dyn SessionBackend>> {
+    let detected = detect_host(env);
+    match detected.backend {
+        Some(name) => backend_by_name(name.as_str(), runner, policy),
+        None if detected
+            .explicit
+            .as_deref()
+            .is_some_and(|name| !name.eq_ignore_ascii_case("auto")) =>
+        {
+            Err(anyhow::anyhow!(
+                "unknown session backend: {}",
+                detected.explicit.unwrap_or_default()
+            ))
+        }
+        None => Err(NoSupportedHost.into()),
+    }
+}
+
+/// Probe the process environment. Live `HERDR_*` / `ORCA_*` / `ZELLIJ` values
+/// on the developer machine affect this path; tests use
+/// [`select_backend_from_env`].
 pub fn select_backend(
     runner: Arc<dyn Runner>,
     policy: WorktreePolicy,
 ) -> Result<Box<dyn SessionBackend>> {
-    let backends: [Box<dyn SessionBackend>; 3] = [
-        Box::new(orca::OrcaBackend::with_policy(runner.clone(), policy)),
-        Box::new(zellij::ZellijBackend::new(runner.clone())),
-        Box::new(fake::FakeBackend::new()),
-    ];
-    for backend in backends {
-        if backend.available()? && backend.capabilities().spawn && backend.capabilities().probe {
-            return Ok(backend);
-        }
-    }
-    Err(anyhow::anyhow!(
-        "no usable session backend available (tried orca, zellij, fake)"
-    ))
+    let mut env = process_env();
+    env.remove("ONLYNE_BACKEND");
+    select_backend_from_env(&env, runner, policy)
 }
 
 pub fn backend_by_name(
@@ -303,6 +538,7 @@ pub fn backend_by_name(
     policy: WorktreePolicy,
 ) -> Result<Box<dyn SessionBackend>> {
     match name {
+        "herdr" => Ok(Box::new(herdr::HerdrBackend::new(runner))),
         "orca" => Ok(Box::new(orca::OrcaBackend::with_policy(runner, policy))),
         "zellij" => Ok(Box::new(zellij::ZellijBackend::new(runner))),
         "fake" => Ok(Box::new(fake::FakeBackend::new())),
@@ -311,43 +547,43 @@ pub fn backend_by_name(
     }
 }
 
-/// Resolve a backend name to a concrete backend. `auto` probes capability.
-/// Empty and unknown names enter capability discovery too, the reason logged,
-/// so the default follows the live environment rather than one binary's
-/// presence.
+/// Resolve a backend name to a concrete backend. `auto` and empty probe the
+/// supplied runner's process environment through [`select_backend`]. Named
+/// values stay exact: unknown names error with the existing spelling.
 pub fn backend_for(
     requested: &str,
     runner: Arc<dyn Runner>,
     policy: WorktreePolicy,
 ) -> Result<Box<dyn SessionBackend>> {
+    backend_for_env(requested, &process_env(), runner, policy)
+}
+
+pub fn backend_for_env(
+    requested: &str,
+    env: &BTreeMap<String, String>,
+    runner: Arc<dyn Runner>,
+    policy: WorktreePolicy,
+) -> Result<Box<dyn SessionBackend>> {
     let name = requested.trim();
     if name.eq_ignore_ascii_case("auto") || name.is_empty() {
-        return select_backend(runner, policy);
+        let mut probe = env.clone();
+        probe.remove("ONLYNE_BACKEND");
+        return select_backend_from_env(&probe, runner, policy);
     }
-    match backend_by_name(name, runner.clone(), policy.clone()) {
-        Ok(b) => Ok(b),
-        Err(e) => {
-            tracing::warn!("ONLYNE_BACKEND={requested} unusable ({e}); discovering by capability");
-            select_backend(runner, policy)
-        }
-    }
+    backend_by_name(name, runner, policy)
 }
 
 /// Client default backend: driven by `ONLYNE_BACKEND`
-/// (`auto` | `zellij` | `orca` | `fake` | `exec`). An empty value discovers
-/// capabilities in order `orca → zellij → fake`, so the default follows the
-/// screen the process can actually see; the explicit `auto` value means the
-/// same.
-///
-/// `exec` is never part of `auto`: it spawns the session command as a child of
-/// this process with no terminal around it, which is a deliberate choice a case
-/// or a headless host makes (see `backend::exec`), not a fallback to discover.
+/// (`herdr` | `orca` | `zellij` | `exec` | `fake` | `auto`). An empty value
+/// probes herdr, then orca, then zellij. `exec` and `fake` stay opt-in.
 ///
 /// `worktree` is the workspace config's `[orca] worktree` policy; only the
-/// Orca backend reads it, the other three ignore it.
+/// Orca backend reads it.
 pub fn default_backend(worktree: WorktreePolicy) -> Result<Box<dyn SessionBackend>> {
-    backend_for(
-        &std::env::var("ONLYNE_BACKEND").unwrap_or_default(),
+    let env = process_env();
+    backend_for_env(
+        env.get("ONLYNE_BACKEND").map(String::as_str).unwrap_or(""),
+        &env,
         Arc::new(ProcessRunner),
         worktree,
     )
@@ -413,102 +649,151 @@ mod tests {
         assert_eq!(decoded, value);
     }
 
-    #[test]
-    fn selection_falls_back_to_fake_when_nothing_else_answers() {
-        let runner = Arc::new(ProbeRunner::default());
-        let backend = select_backend(runner.clone(), WorktreePolicy::Host).unwrap();
-        assert_eq!(backend.name(), "fake");
-        assert_eq!(runner.calls()[0].0, "orca");
+    fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
     }
 
     #[test]
-    fn auto_selection_takes_orca_while_the_runtime_answers() {
-        #[derive(Default)]
-        struct AutoRunner {
-            calls: Mutex<Vec<String>>,
+    fn detect_host_table_covers_explicit_env_and_none() {
+        let cases = [
+            (
+                env(&[("ONLYNE_BACKEND", "herdr")]),
+                Some(BackendName::Herdr),
+                SelectionSource::Explicit,
+            ),
+            (
+                env(&[("ONLYNE_BACKEND", "fake")]),
+                Some(BackendName::Fake),
+                SelectionSource::Explicit,
+            ),
+            (
+                env(&[
+                    ("HERDR_ENV", "1"),
+                    ("HERDR_SESSION", "onlyne-test"),
+                    ("ORCA_PANE_KEY", "tab:leaf"),
+                ]),
+                Some(BackendName::Herdr),
+                SelectionSource::Env,
+            ),
+            (
+                env(&[("ORCA_WORKTREE_ID", "wt-1")]),
+                Some(BackendName::Orca),
+                SelectionSource::Env,
+            ),
+            (
+                env(&[("ZELLIJ", "0")]),
+                Some(BackendName::Zellij),
+                SelectionSource::Env,
+            ),
+            (env(&[]), None, SelectionSource::None),
+            (env(&[("HERDR_ENV", "1")]), None, SelectionSource::None),
+            (
+                env(&[("ONLYNE_BACKEND", "auto"), ("ZELLIJ", "1")]),
+                Some(BackendName::Zellij),
+                SelectionSource::Env,
+            ),
+        ];
+        for (input, backend, source) in cases {
+            let detected = detect_host(&input);
+            assert_eq!(detected.backend, backend, "{input:?}");
+            assert_eq!(detected.source, source, "{input:?}");
         }
-        impl Runner for AutoRunner {
-            fn run(
-                &self,
-                program: &str,
-                _: &[String],
-                _: Option<&Path>,
-                _: &BTreeMap<String, String>,
-            ) -> Result<CommandOutput> {
-                self.calls.lock().push(program.to_owned());
-                let orca = program == "orca";
-                Ok(CommandOutput {
-                    status: if orca { 0 } else { 1 },
-                    stdout: if orca {
-                        br#"{"ok":true,"result":{"terminals":[]}}"#.to_vec()
-                    } else {
-                        vec![]
-                    },
-                    stderr: b"missing".to_vec(),
-                })
-            }
-        }
-        let runner = Arc::new(AutoRunner::default());
-        let backend = backend_for("AUTO", runner.clone(), WorktreePolicy::Host).unwrap();
-        assert_eq!(backend.name(), "orca");
-        assert_eq!(runner.calls.lock().as_slice(), &["orca".to_string()]);
-    }
-
-    /// An installed zellij CLI with no reachable Orca runtime still lands on
-    /// zellij: the Orca probe fails its one call and discovery moves on.
-    #[test]
-    fn auto_selection_takes_zellij_when_the_orca_runtime_is_out_of_reach() {
-        let runner = Arc::new(ProbeRunner::default().reply(1, "").reply(0, "bg\n"));
-        let backend = select_backend(runner.clone(), WorktreePolicy::Host).unwrap();
-        assert_eq!(backend.name(), "zellij");
-        let calls = runner.calls();
-        assert_eq!(
-            (calls[0].0.as_str(), calls[1].0.as_str()),
-            ("orca", "zellij")
-        );
     }
 
     #[test]
-    fn the_empty_name_discovers_and_named_backends_stay_exact() {
+    fn empty_env_refuses_with_no_supported_host() {
         let runner = Arc::new(ProbeRunner::default());
-        // An empty request probes; the scripted runner answers nothing, so
-        // fake takes it after orca and zellij each fail their one probe.
+        let error = select_backend_from_env(&BTreeMap::new(), runner, WorktreePolicy::Host)
+            .err()
+            .expect("empty env must refuse");
+        assert!(error.downcast_ref::<NoSupportedHost>().is_some());
+        assert_eq!(error.to_string(), NO_SUPPORTED_HOST);
+    }
+
+    #[test]
+    fn named_backends_stay_exact_and_unknown_names_error() {
+        let runner = Arc::new(ProbeRunner::default());
         assert_eq!(
-            backend_for("", runner.clone(), WorktreePolicy::Host)
+            backend_by_name("herdr", runner.clone(), WorktreePolicy::Host)
                 .unwrap()
                 .name(),
-            "fake"
+            "herdr"
         );
-        assert_eq!(runner.calls().len(), 2);
         assert_eq!(
-            backend_for("zellij", runner.clone(), WorktreePolicy::Host)
-                .unwrap()
-                .name(),
+            backend_for_env(
+                "zellij",
+                &BTreeMap::new(),
+                runner.clone(),
+                WorktreePolicy::Host
+            )
+            .unwrap()
+            .name(),
             "zellij"
         );
         assert_eq!(
-            backend_for("fake", runner.clone(), WorktreePolicy::Host)
-                .unwrap()
-                .name(),
+            backend_for_env(
+                "fake",
+                &BTreeMap::new(),
+                runner.clone(),
+                WorktreePolicy::Host
+            )
+            .unwrap()
+            .name(),
             "fake"
         );
-        // `exec` is opt-in only: naming it selects it, discovery never reaches it.
         assert_eq!(
-            backend_for("exec", runner.clone(), WorktreePolicy::Host)
-                .unwrap()
-                .name(),
+            backend_for_env(
+                "exec",
+                &BTreeMap::new(),
+                runner.clone(),
+                WorktreePolicy::Host
+            )
+            .unwrap()
+            .name(),
             "exec"
         );
-        // Named selections never probe.
-        assert_eq!(runner.calls().len(), 2);
-        // An unknown name logs its reason and discovers as well.
-        assert_eq!(
-            backend_for("nope", runner.clone(), WorktreePolicy::Host)
-                .unwrap()
-                .name(),
-            "fake"
-        );
-        assert_eq!(runner.calls().len(), 4);
+        assert_eq!(runner.calls().len(), 0);
+        let error = backend_for_env("nope", &BTreeMap::new(), runner, WorktreePolicy::Host)
+            .err()
+            .expect("unknown name must error");
+        assert_eq!(error.to_string(), "unknown session backend: nope");
+    }
+
+    #[test]
+    fn env_probe_picks_herdr_before_orca() {
+        let runner = Arc::new(ProbeRunner::default());
+        let backend = select_backend_from_env(
+            &env(&[
+                ("HERDR_ENV", "1"),
+                ("HERDR_SOCKET_PATH", "/tmp/herdr.sock"),
+                ("ORCA_PANE_KEY", "tab:leaf"),
+                ("ZELLIJ", "0"),
+            ]),
+            runner,
+            WorktreePolicy::Host,
+        )
+        .unwrap();
+        assert_eq!(backend.name(), "herdr");
+    }
+
+    #[test]
+    fn placement_from_pane_count_matches_required_inputs() {
+        let expected = [
+            (0, SplitDirection::Right),
+            (1, SplitDirection::Right),
+            (2, SplitDirection::Down),
+            (3, SplitDirection::Right),
+            (4, SplitDirection::Down),
+            (5, SplitDirection::Down),
+        ];
+        for (count, direction) in expected {
+            let placement = PanePlacement::from_pane_count(count);
+            assert_eq!(placement.direction, direction, "count {count}");
+            assert_eq!(placement.ratio, 0.5);
+        }
     }
 
     /// Orca is the only backend that reads the policy, and the JSON error body
@@ -541,6 +826,40 @@ mod tests {
         assert_eq!(
             error.downcast_ref::<CommandFailure>().unwrap().code(),
             Some("selector_not_found")
+        );
+    }
+
+    /// Herdr answers a refusal with a JSON document on stderr and an empty
+    /// stdout, so the code the backends branch on has to come from there.
+    #[test]
+    fn command_failure_reads_a_code_from_the_stderr_document() {
+        let output = CommandOutput {
+            status: 1,
+            stdout: Vec::new(),
+            stderr: br#"{"error":{"code":"agent_not_found","message":"agent target wF:p2 not found"},"id":"cli:agent:focus"}"#.to_vec(),
+        };
+        let failure = command_failure("herdr agent focus wF:p2", &output, None);
+        assert_eq!(failure.code(), Some("agent_not_found"));
+        assert_eq!(
+            failure.to_string(),
+            "runtime command failed: herdr agent focus wF:p2 (status 1, agent_not_found): agent target wF:p2 not found"
+        );
+    }
+
+    /// A backend that answers in plain text keeps that text as the message, and
+    /// carries no code.
+    #[test]
+    fn command_failure_keeps_plain_stderr_text() {
+        let output = CommandOutput {
+            status: 2,
+            stdout: Vec::new(),
+            stderr: b"unknown option: --bogus".to_vec(),
+        };
+        let failure = command_failure("herdr pane split", &output, None);
+        assert_eq!(failure.code(), None);
+        assert_eq!(
+            failure.to_string(),
+            "runtime command failed: herdr pane split (status 2): unknown option: --bogus"
         );
     }
 }

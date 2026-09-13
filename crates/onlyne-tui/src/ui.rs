@@ -524,11 +524,16 @@ fn detail_title(state: &UiState) -> String {
 }
 
 /// The detail panel's body: the subject's text, or what the page expects you
-/// to pick.
+/// to pick. A pending operator notice (`state.message`) sits on the first line.
 pub fn detail_body(state: &UiState) -> String {
-    match &state.detail {
+    let body = match &state.detail {
         Some(detail) => detail_text(detail).1,
         None => placeholder(state.page).to_string(),
+    };
+    if state.message.is_empty() {
+        body
+    } else {
+        format!("{}\n{body}", state.message)
     }
 }
 
@@ -1553,8 +1558,82 @@ mod tests {
 
         state.page = Page::Swarm;
         assert!(footer_text(&state, None).starts_with("page 2/2 swarm"));
-        let page_two = render_once_text(&snapshot, &state, 120, 30);
+        let page_two = render_once_text(&snapshot, &state, 160, 30);
         assert!(page_two.contains("page 2/2 swarm"), "{page_two}");
+        assert!(
+            page_two.contains("F session"),
+            "page 2 advertises the session-focus key\n{page_two}"
+        );
+        assert!(
+            page_two.contains("f state"),
+            "page 2 keeps the state filter on lowercase f\n{page_two}"
+        );
+    }
+
+    #[test]
+    fn page_one_footer_advertises_session_focus_key() {
+        let snapshot = linked_snapshot();
+        let text = render_once_text(&snapshot, &UiState::default(), 160, 36);
+        assert!(
+            text.contains("F session"),
+            "page 1 advertises the session-focus key\n{text}"
+        );
+    }
+
+    #[test]
+    fn footer_shows_focus_no_socket() {
+        let snapshot = linked_snapshot();
+        let state = UiState {
+            page: Page::Swarm,
+            message: crate::model::focus_message(&crate::model::FocusOutcome::NoSocket),
+            ..UiState::default()
+        };
+        let text = render_once_text(&snapshot, &state, 160, 30);
+        assert!(text.contains("focus: no socket"), "{text}");
+    }
+
+    #[test]
+    fn footer_shows_focus_acl_denied() {
+        let snapshot = linked_snapshot();
+        let state = UiState {
+            page: Page::Swarm,
+            message: crate::model::focus_message(&crate::model::FocusOutcome::Denied {
+                code: "acl_denied".into(),
+                message: "owner only".into(),
+            }),
+            ..UiState::default()
+        };
+        let text = render_once_text(&snapshot, &state, 160, 30);
+        assert!(text.contains("focus acl_denied owner only"), "{text}");
+    }
+
+    #[test]
+    fn footer_shows_focus_forbidden() {
+        let snapshot = linked_snapshot();
+        let state = UiState {
+            page: Page::Swarm,
+            message: crate::model::focus_message(&crate::model::FocusOutcome::Denied {
+                code: "forbidden".into(),
+                message: "not admin".into(),
+            }),
+            ..UiState::default()
+        };
+        let text = render_once_text(&snapshot, &state, 160, 30);
+        assert!(text.contains("focus forbidden not admin"), "{text}");
+    }
+
+    #[test]
+    fn footer_shows_focus_settled_for_an_ok_reply() {
+        let snapshot = linked_snapshot();
+        let state = UiState {
+            page: Page::Swarm,
+            message: crate::model::focus_message(&crate::model::FocusOutcome::Settled {
+                task_id: "task-9".into(),
+            }),
+            ..UiState::default()
+        };
+        let text = render_once_text(&snapshot, &state, 160, 30);
+        assert!(text.contains("focus settled task-9"), "{text}");
     }
 
     #[test]

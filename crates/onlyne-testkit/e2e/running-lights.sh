@@ -127,39 +127,45 @@ printf '%s\n' "$send_out" > "$tmp/send.json"
 first_task=$(json_field "$tmp/send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
 
 # --- two frames of the moving light -----------------------------------------
-# `working_roles <frame>` names the roles whose node holds a session in the
-# working state — that glyph is the light. The star beside a role name cannot
-# carry it: a settled session stays warm for reuse, so every role that has
-# served a task keeps its star for the rest of the run.
+# The scripted frame the case reads is page 2: its graph is a table of
+# `role · task · life · agent · in-flight`, one row per live session, so a
+# sighting names the role holding the token, the lifecycle the TUI drew for it,
+# and the hop it travels on — in text a script can read row by row. Page 1 draws
+# the same fact inside a force layout, where whether a box shows its session rows
+# depends on the camera, so page 1 carries the picture and page 2 carries the
+# assertion.
 #
-# `inflight_edges <answer>` names the from>to pair of every in-flight row, the
-# row `onlyne-tui` colours as the active edge. A frame counts as a sighting only
-# when both agree on the role, so the case reads the picture and the ledger as
-# one fact rather than two.
-working_roles() {
+# `working_rows <frame>` prints `role life route` for every session row of the
+# graph table. `sighting <frame> <role>` is the narrow question: that role's row
+# reads `working` and its in-flight cell names the edge into it.
+# `inflight_edges <answer>` and `edge_seen <answer> <edge>` read the same edge
+# from the ledger, so the case takes the picture and the record as one fact
+# rather than two. The chain's earlier rows stay in flight until they are acked,
+# so the ledger is asked whether the edge is present among them.
+working_rows() {
   python3 - "$1" <<'PY'
 import re
 import sys
 
-lines = open(sys.argv[1]).read().splitlines()
-# Only a node's title row names roles, and its session rows start in the same
-# column, so the box a glyph sits in is the last title starting at or before it.
-titles = {}
-for line in lines:
-    for match in re.finditer(r"light[1-6]", line):
-        titles.setdefault(match.start(), match.group(0))
-working = set()
-for line in lines:
-    for match in re.finditer("\u25d0", line):
-        owner = None
-        for start in sorted(titles):
-            if start <= match.start():
-                owner = titles[start]
-        if owner:
-            working.add(owner)
-print(",".join(sorted(working)))
+for line in open(sys.argv[1]).read().splitlines():
+    cells = line.strip("\u2502\u250c\u2510\u2514\u2518").split()
+    if len(cells) < 5 or not re.fullmatch(r"light[1-6]", cells[0]):
+        continue
+    if cells[2] not in ("created", "working", "idle", "exited"):
+        continue
+    print("%s %s %s" % (cells[0], cells[2], cells[4].replace("\u2192", ">")))
 PY
 }
+
+working_roles() {
+  working_rows "$1" | awk '$2 == "working" { print $1 }' | sort -u | paste -sd, -
+}
+
+sighting() {
+  working_rows "$1" | awk -v want="$2" -v edge="$(light_edge "$2")" \
+    '$1 == want && $2 == "working" && $3 == edge { found = 1 } END { print found + 0 }'
+}
+
 inflight_edges() {
   python3 - "$1" <<'PY'
 import json, sys
@@ -172,14 +178,19 @@ print(",".join(sorted("%s>%s" % (role(r["from"]), role(r["to"])) for r in rows i
 PY
 }
 
+edge_seen() {
+  inflight_edges "$1" | awk -F, -v want="$2" \
+    '{ for (i = 1; i <= NF; i++) if ($i == want) found = 1 } END { print found + 0 }'
+}
+
 capture_light() {
-  local want=$1 frame=$2 ledger=$3 attempt found edge
+  local want=$1 frame=$2 ledger=$3 attempt seen edge
   for attempt in $(seq 1 300); do
     "$ONLYNE" --server-root "$tmp/server" ledger --state in_flight > "$ledger.cand" 2>/dev/null || true
-    "$TUI" --server-root "$tmp/server" --once > "$frame.cand" 2>/dev/null || true
-    found=$(working_roles "$frame.cand")
-    edge=$(inflight_edges "$ledger.cand")
-    if [ "$found" = "$want" ] && [ "$edge" = "$(light_edge "$want")" ]; then
+    "$TUI" --server-root "$tmp/server" --page 2 --once > "$frame.cand" 2>/dev/null || true
+    seen=$(sighting "$frame.cand" "$want")
+    edge=$(edge_seen "$ledger.cand" "$(light_edge "$want")")
+    if [ "$seen" = "1" ] && [ "$edge" = "1" ]; then
       mv "$ledger.cand" "$ledger"
       mv "$frame.cand" "$frame"
       return 0

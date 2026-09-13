@@ -54,6 +54,11 @@ struct DispatchInner {
     pub link_up: Arc<AtomicBool>,
     /// Aggregate name this role supervises, empty for a plain role.
     pub cluster_ref: String,
+    /// The server's topology name, read from `welcome.cluster` (the server's own
+    /// `spec.toml [server] name`). A host backend uses it as the address of the
+    /// tree it puts sessions into: herdr keeps one workspace per server root,
+    /// labelled after this name. Empty until the first welcome arrives.
+    pub topology: String,
     /// The adapter connection serving each session of this role, keyed by the
     /// session id the plugin mounted with (`ONLYNE_SESSION_ID`). A plugin the
     /// client spawned names the one session it was spawned for, so a task
@@ -135,6 +140,7 @@ impl DispatchState {
                 accept_new: Arc::new(AtomicBool::new(true)),
                 link_up: Arc::new(AtomicBool::new(false)),
                 cluster_ref: String::new(),
+                topology: String::new(),
                 transports: HashMap::new(),
                 parked: None,
             })),
@@ -316,6 +322,21 @@ impl DispatchState {
         self.inner.lock().cluster_ref.clone()
     }
 
+    /// Record the server's topology name, read from `welcome.cluster`.
+    ///
+    /// Each spawned session carries it as `ONLYNE_CLUSTER`, which is how a host
+    /// backend (herdr) addresses the tree it splits panes into. The runloop calls
+    /// this on every welcome, so a server that reloads under a new name is
+    /// followed by the sessions spawned after that point.
+    pub fn set_topology(&self, cluster: &str) {
+        self.inner.lock().topology = cluster.trim().to_string();
+    }
+
+    /// The topology name recorded from `welcome`, empty before the first welcome.
+    pub fn topology(&self) -> String {
+        self.inner.lock().topology.clone()
+    }
+
     /// Record the aggregate name once, so every report keeps the same value
     /// across a reconnect.
     pub fn set_cluster_ref(&self, aggregate: impl Into<String>) {
@@ -331,13 +352,21 @@ impl DispatchState {
         self.inner.lock().parked = Some((io, capabilities));
     }
 
-    /// Take the parked plugin connection, if a role agent is waiting.
+    /// Claim this role's waiting agent for one staged session.
     ///
-    /// The park is consumed rather than read: one parked agent takes one
-    /// staged session, so the task after it goes to that task's own
-    /// connection instead of riding this one a second time.
-    pub fn take_parked_transport(&self) -> Option<(AdapterIo, Vec<Capability>)> {
-        self.inner.lock().parked.take()
+    /// An always-running plugin mounts naming no session, so the park holds the
+    /// only connection that can serve the session staged next (plan §6 line 285).
+    /// The claim binds that connection to the session it takes, because the
+    /// later tasks a `reuse` role hands to the same session ride that connection
+    /// too. A claim left unbound strands those tasks: the session has a payload
+    /// and this client holds no record of the socket that serves it.
+    fn claim_parked_transport(&self, session_id: &str) -> Option<(AdapterIo, Vec<Capability>)> {
+        let mut inner = self.inner.lock();
+        let (io, capabilities) = inner.parked.take()?;
+        inner
+            .transports
+            .insert(session_id.to_string(), (io.clone(), capabilities.clone()));
+        Some((io, capabilities))
     }
 
     /// The connection that serves one session, when its plugin is attached.
@@ -413,22 +442,39 @@ impl DispatchState {
     /// An idle slot is exactly what `reuse` would hand the next task to, and it
     /// is only reusable while its agent is attached, so the slot goes: no task
     /// is ever routed to a session whose process left. A slot with work in
-    /// flight keeps its row — the lifecycle owns that state. A connection that
-    /// mounted no session was the parked agent, and nothing may be handed to it.
-    pub fn release_connection(&self, session_id: Option<&str>) {
+    /// flight keeps its row — the lifecycle owns that state. A mount that named
+    /// its session bound one transport. A mount that named nothing was claimed by
+    /// each session staged onto it, so the release walks every transport sharing
+    /// the connection that ended and leaves a later connection's bindings in
+    /// place.
+    pub fn release_connection(&self, session_id: Option<&str>, io: &AdapterIo) {
         let mut inner = self.inner.lock();
-        let Some(session_id) = session_id else {
+        if inner
+            .parked
+            .as_ref()
+            .is_some_and(|(parked, _)| parked.same_connection(io))
+        {
             inner.parked = None;
-            return;
+        }
+        let released: Vec<String> = match session_id {
+            Some(session_id) => vec![session_id.to_string()],
+            None => inner
+                .transports
+                .iter()
+                .filter(|(_, (transport, _))| transport.same_connection(io))
+                .map(|(session, _)| session.clone())
+                .collect(),
         };
-        inner.transports.remove(session_id);
-        let idle = inner
-            .sessions
-            .iter()
-            .find(|(key, slot)| names_session(key, slot, session_id) && slot.task_id.is_none())
-            .map(|(key, _)| key.clone());
-        if let Some(key) = idle {
-            inner.sessions.remove(&key);
+        for session in released {
+            inner.transports.remove(&session);
+            let idle = inner
+                .sessions
+                .iter()
+                .find(|(key, slot)| names_session(key, slot, &session) && slot.task_id.is_none())
+                .map(|(key, _)| key.clone());
+            if let Some(key) = idle {
+                inner.sessions.remove(&key);
+            }
         }
     }
 
@@ -481,6 +527,26 @@ impl DispatchState {
             || inner.sessions.values().any(|slot| slot.task_id.is_none())
     }
 
+    /// The task of one session that holds a payload with no connection bound.
+    ///
+    /// A work item that arrives before its always-running agent mounts waits in
+    /// exactly this state, and the mount ends the wait. A reused session answers
+    /// through the transport its first task claimed, so it stays served.
+    pub fn staged_without_transport(&self) -> Option<String> {
+        let inner = self.inner.lock();
+        inner
+            .sessions
+            .iter()
+            .find(|(_, slot)| slot.payload.is_some())
+            .filter(|(key, slot)| {
+                !inner
+                    .transports
+                    .keys()
+                    .any(|session| names_session(key, slot, session))
+            })
+            .and_then(|(_, slot)| slot.task_id.clone())
+    }
+
     /// Route one staged session to the connection that serves it.
     ///
     /// The session's own connection comes first: a plugin the client spawned
@@ -492,7 +558,7 @@ impl DispatchState {
     pub async fn hand_staged(&self, session_id: &str) -> Result<bool> {
         let transport = self
             .session_transport(session_id)
-            .or_else(|| self.take_parked_transport());
+            .or_else(|| self.claim_parked_transport(session_id));
         let Some((io, capabilities)) = transport else {
             return Ok(false);
         };
@@ -607,17 +673,25 @@ fn render_tokens(tokens: &[String], session: &str, task: &str) -> Vec<String> {
 /// commas, and the count in decimal. A policy the spec does not name injects no
 /// variable at all, which is what leaves a hand-written `relay.toml` in charge
 /// of a box that never put the policy in its spec.
+///
+/// `ONLYNE_CLUSTER` names the server's topology and is the address a host
+/// backend groups sessions under. No welcome yet means no variable, and herdr
+/// then keeps its own default-labelled workspace.
 fn session_env(
     role: &str,
     session_id: &str,
     task_id: &str,
     relay_required: &[String],
     relay_count: Option<u32>,
+    topology: &str,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("ONLYNE_SESSION_ID".into(), session_id.to_string());
     env.insert("ONLYNE_TASK_ID".into(), task_id.to_string());
     env.insert("ONLYNE_ROLE".into(), role.to_string());
+    if !topology.is_empty() {
+        env.insert("ONLYNE_CLUSTER".into(), topology.to_string());
+    }
     if !relay_required.is_empty() {
         env.insert("ONLYNE_RELAY_REQUIRED".into(), relay_required.join(","));
     }
@@ -722,6 +796,7 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
         &task_id,
         &inner.relay_required,
         inner.relay_count,
+        &inner.topology,
     );
     let session = inner.backend.spawn(SpawnSpec {
         cwd: inner.workspace.clone(),
@@ -729,6 +804,7 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
         command,
         env,
         focus: None,
+        placement: None,
         rename: None,
     })?;
     inner.bridge.track_live(session.clone());
@@ -963,7 +1039,8 @@ pub fn on_recycled(
 /// did: a session whose adapter is gone still loses its process, which is the
 /// half of §7's recovery ladder the operator drives by hand otherwise. `probe`
 /// asks the plugin for a fresh observation and republishes the projection the
-/// reducer already holds, and `snapshot` republishes alone.
+/// reducer already holds, `snapshot` republishes alone, and `focus` asks the
+/// backend to bring the live session to the front.
 ///
 /// Answers whether the command named a session this client holds. A `false` is
 /// the honest answer for a task this role does not own, and the caller still
@@ -988,6 +1065,48 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
             sync_session(state, task_id).await?;
         }
         ControlOp::Snapshot { .. } => sync_session(state, task_id).await?,
+        ControlOp::Focus { .. } => {
+            let (backend, session) = {
+                let inner = state.inner.lock();
+                let session = inner
+                    .sessions
+                    .values()
+                    .find(|slot| slot.task_id.as_deref() == Some(task_id))
+                    .map(|slot| slot.session.clone());
+                (inner.backend.clone(), session)
+            };
+            match session {
+                Some(session_ref) => {
+                    if let Err(error) = backend.focus(&session_ref) {
+                        tracing::warn!(error = %error, task = %task_id, "focus refused");
+                        if let Err(fault_error) = on_plugin_report(
+                            state,
+                            Report::Fault {
+                                task_id: Some(task_id.to_string()),
+                                session_id: None,
+                                generation: None,
+                                seq: None,
+                                kind: "focus".into(),
+                                reason: error.to_string(),
+                                desired: None,
+                                observed: None,
+                            },
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                error = %fault_error,
+                                task = %task_id,
+                                "focus refused"
+                            );
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(task = %task_id, "focus has no live session");
+                }
+            }
+        }
     }
     Ok(held)
 }
@@ -1501,10 +1620,12 @@ mod tests {
     /// decimal, and neither variable at all when the spec names no policy.
     #[test]
     fn the_spawn_environment_carries_the_relay_policy_it_has() {
-        let plain = session_env("planner", "s-1", "t-1", &[], None);
+        let plain = session_env("planner", "s-1", "t-1", &[], None, "cluster-a");
         assert_eq!(plain["ONLYNE_SESSION_ID"], "s-1");
         assert_eq!(plain["ONLYNE_TASK_ID"], "t-1");
         assert_eq!(plain["ONLYNE_ROLE"], "planner");
+        // The topology name is the address a host backend groups sessions under.
+        assert_eq!(plain["ONLYNE_CLUSTER"], "cluster-a");
         assert!(
             !plain.contains_key("ONLYNE_RELAY_REQUIRED")
                 && !plain.contains_key("ONLYNE_RELAY_COUNT"),
@@ -1517,17 +1638,28 @@ mod tests {
             "t-1",
             &["writer".to_string(), "auditor".to_string()],
             None,
+            "",
         );
         assert_eq!(listed["ONLYNE_RELAY_REQUIRED"], "writer,auditor");
         assert!(!listed.contains_key("ONLYNE_RELAY_COUNT"));
+        // No welcome yet, so no topology to name: the key stays out rather than
+        // arriving empty.
+        assert!(!listed.contains_key("ONLYNE_CLUSTER"));
 
-        let counted = session_env("planner", "s-1", "t-1", &[], Some(2));
+        let counted = session_env("planner", "s-1", "t-1", &[], Some(2), "");
         assert_eq!(counted["ONLYNE_RELAY_COUNT"], "2");
         assert!(!counted.contains_key("ONLYNE_RELAY_REQUIRED"));
 
         // Both variables travel when the spec names both forms; the guard's own
         // precedence is what makes the list win.
-        let both = session_env("planner", "s-1", "t-1", &["writer".to_string()], Some(2));
+        let both = session_env(
+            "planner",
+            "s-1",
+            "t-1",
+            &["writer".to_string()],
+            Some(2),
+            "",
+        );
         assert_eq!(both["ONLYNE_RELAY_REQUIRED"], "writer");
         assert_eq!(both["ONLYNE_RELAY_COUNT"], "2");
     }

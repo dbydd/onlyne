@@ -79,8 +79,10 @@ runs beside repair: `onlyne control recycle|probe|snapshot|cancel --task <id>`.
 ## Errors you will see
 
 `acl_denied` → the edge is missing from the spec. `unauthorized` → the key is not
-registered. `recipient_offline` → a `note` hit an offline role (notes never queue).
-`duplicate` → the same `op_id` again; its `data` is the original receipt, byte for byte.
+registered. `recipient_offline` → a `note` found nothing to wake: its role was
+offline, or online with no session running while `note_queue` stays off. The
+message says which. `duplicate` → the same `op_id` again; its `data` is the
+original receipt, byte for byte.
 `conflict` → same `op_id`, different body. `not_admin` → a non-admin role sent with
 `--from`. Every reject writes no ledger row and leaves no sender intent.
 

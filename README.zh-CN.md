@@ -46,7 +46,7 @@ TUI 把同一件事画成活图——第 1 页是角色网络，第 2 页是集�
 | `onlyne-gateway` | 每进程一个聊天平台：telegram · feishu · qqbot · weixin，编译期 feature 门控。 |
 | `onlyne` | 人机薄入口：转发守护进程、直连 socket、输出 JSON。 |
 | `onlyne-tui` | 两页观测面板，走 admin socket。 |
-| `onlyne-agent-fake` | 脚本化假 agent，喂给 `crates/onlyne-testkit/e2e/` 下的十二份端到端证明。 |
+| `onlyne-agent-fake` | 脚本化假 agent，喂给 `crates/onlyne-testkit/e2e/` 下的十三份端到端证明。 |
 
 ```mermaid
 graph LR
@@ -63,7 +63,17 @@ graph LR
 
 **可审计的投递。** 控制面消息（task、completion、control）按 at-least-once 送达，每条都带 `op_id` 幂等键。每笔投递都在账本里留行，`onlyne server ledger` 读起来像银行流水。观测面（心跳、事件）按 at-most-once 送达，落后了用游标追补，慢观察者拖不慢干活的人。
 
-**有自己生命周期的会话。** 角色通过屏幕后端拉起 coding agent：Orca 标签页、zellij 会话、无头 exec，或测试用的 fake。自动发现跟随你实际所在的屏幕。会话生命周期是一张证明过的状态机——21 种事件走五条状态轴，有全表测试——同时喂给账本镜像和 TUI 的星号。
+**有自己生命周期的会话。** 角色通过屏幕后端拉起 coding agent：herdr pane、Orca 标签页、zellij 会话、无头 exec，或测试用的 fake。`ONLYNE_BACKEND` 的取值是 `herdr | orca | zellij | exec | fake | auto`。写出 `herdr`、`orca`、`zellij`、`exec` 或 `fake` 即选用该后端。空值或 `auto` 按 herdr → orca → zellij 探测。`exec` 与 `fake` 只在 `ONLYNE_BACKEND` 写出其名时启用。全无匹配时 `onlyne-client run` 以退出码 5 退出，文案为 `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`。会话生命周期是一张证明过的状态机——21 种事件走五条状态轴，有全表测试——同时喂给账本镜像和 TUI 的星号。
+
+herdr 层级：herdr session 由 client 进程环境继承，pane 内的 pi 子进程继续继承；workspace = 一个 server root/topology（label 为 `onlyne:<cluster>`）；tab = role；pane = 一个 onlyne session。`<cluster>` 取 server 自己的 `[server] name`：client 从 `welcome.cluster` 读到它，再以 `ONLYNE_CLUSTER` 交给它创建的每一个 pane。首个 welcome 之前拉起的 pane 没有这个变量，herdr 就用自己那个默认 label 的 workspace。关闭命令是 `herdr pane close`。id 形状为 `wF` / `wF:t1` / `wF:p1`。`onlyne-test` 这类命名 session 取 client 环境里已有的 `HERDR_SESSION`。client 的 `sessions` 行把地址记在 `backend_ref`：`workspace_id`、`tab_id`、`pane_id`、`agent`、`workspace_label`，加上传下来的分屏记录（`base_pane`、`split_direction`）。
+
+spawn 双轨：`session_command` 首 token 命中已知 agent 名（`pi`、`omp` 以及 herdr `--kind` 表其余项）时执行 `herdr agent start <name> --kind <k> --pane <id> --timeout 25000`。首 token 不在该表里的命令执行 `herdr pane run <pane_id> '<一条 shell 行>'`。`pane run` 无 JSON 输出。命令经 `shell_quote` 拼成单个 argv token。分屏由 `PanePlacement::from_pane_count` 决定：`(count+1).is_power_of_two()` 映射为 `right`，其余 count 映射为 `down`，ratio 为 `0.5`。`count` 取自 `herdr tab list --workspace W` 的 `result.tabs[].pane_count`，缺字段按 0。生产 spawn 传入 `placement: None`。
+
+focus 链路：`herdr workspace focus <W>`，随后 `herdr tab focus <T>`（位置参数，恢复该 tab 上次聚焦的 pane）。managed agent 的 pane 再执行 `herdr agent focus <pane_id>`。`agent focus` 认 managed agent。`pane run` 拉起的 shell pane 会得到 `agent_not_found`。herdr 的 `pane focus` 形态是 `--pane <base_pane> --direction <split_direction>`，从该锚点走到邻居，所以分屏时记下的两个值就是把普通 shell pane 拿到的路径。`herdr pane get <pane_id>` 是确认那一步：`result.pane.focused` 要为 true，落在别的 pane 时报错并指名当前持焦的 pane。入口为 `onlyne control focus --task <id>` 与 TUI 的 `F` 键。`focus()` 失败记 `Report::Fault{kind:"focus"}`。
+
+命令达得到没有空闲 session 的 role。`pull` 带一个可选的 `control_only`，达到 `max_sessions` 的 client 用它发问，于是 `focus`、`recycle`、`cancel` 照样送达，任务队列那边的行保持 `queued`，ticket 一分不花。
+
+`onlyne-client doctor` 是只读子命令，打印一段 JSON（字段 `host`、`backend_selection`、`explicit`、`binary`、`session`、`workspace_id`、`tab_id`、`pane_id`、`refusal`），退出码 0。检测不到宿主时 `host` 为 `null` 并带 `refusal`。用途是部署前体检。
 
 **断线有真相。** client 与 server 断链后，在跑的会话继续走到终态；出向消息先落持久 intent 队列，重连后按序补发。没有东西会悄悄丢：重试耗尽的 intent 记成一条有名字的 fault。
 
@@ -89,7 +99,7 @@ graph LR
 |---|---|---|
 | `task` | 向角色派活；按需拉起或复用会话 | at-least-once，目标离线持久排队 |
 | `completion` | 任务的终态回执，携带结果摘要 | at-least-once，目标离线持久排队 |
-| `note` | 人和 agent 的自由聊天 | 即发即忘，目标离线直接拒收 |
+| `note` | 人和 agent 的自由聊天 | 即发即忘，需要目标 role 已有运行中的 session；打开 `note_queue` 才会排队等待 |
 | `control` | 对任务执行 `recycle · probe · snapshot · cancel` | 仅 admin 或该任务属主 |
 
 消息体是文本加至多一张内联图片。媒体管线住在你的 agent 那边；Onlyne 只管送达和记账。

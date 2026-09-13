@@ -150,6 +150,10 @@ impl RunState {
     async fn adopt(&self, welcome: &Welcome) {
         self.dispatch
             .reconfigure(crate::slice::RoleSlice::from_welcome(welcome));
+        // The topology name is the address the host backends group sessions
+        // under, so it is recorded with the rest of what the server says about
+        // this role. `welcome.cluster` is the server's own `[server] name`.
+        self.dispatch.set_topology(&welcome.cluster);
         {
             let mut intents = self.intents.lock();
             if let Some(attempts) = welcome.intent_attempts {
@@ -372,19 +376,18 @@ async fn pull_ack_loop(init: ClientInit, link: ClientLink, state: RunState) -> R
             sleep(Duration::from_millis(PULL_PAUSE_MS)).await;
             continue;
         }
-        if !state.dispatch.has_capacity() {
-            // A full role stops asking for work, so the server keeps the next
-            // row in `queued` and offers it when a session frees (plan §5
-            // `max_sessions`). Pulling anyway would leave a row in flight with
-            // nowhere to run.
-            sleep(Duration::from_millis(PULL_PAUSE_MS)).await;
-            continue;
-        }
+        // A role at `max_sessions` stops asking for work it has nowhere to run
+        // (plan §5), and the same pause must not stop it hearing the command that
+        // frees a slot: a full role is exactly the one whose operator wants to
+        // `recycle` or `focus`. Control rows still travel on the ordinary pull
+        // when the role has capacity.
+        let control_only = !state.dispatch.has_capacity();
         let reply = match link
             .request(ClientOp::Pull(PullArgs {
                 role: Some(init.role.clone()),
                 limit: PULL_LIMIT,
                 hold_ms: Some(PULL_HOLD_MS),
+                control_only: control_only.then_some(true),
             }))
             .await
         {

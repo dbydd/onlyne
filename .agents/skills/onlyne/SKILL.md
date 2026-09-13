@@ -27,7 +27,7 @@ onlyne-proto     types + validation + error codes; no tokio
 onlyne-config    TOML spec/config parsing, env secrets
 onlyne-layout    workspace/server root discovery, legacy refusal
 onlyne-store     server ledger + client db; (generation,seq) monotonic gates
-onlyne-session   pure lifecycle reducer + SessionBackend (orca|zellij|exec|fake)
+onlyne-session   pure lifecycle reducer + SessionBackend (herdr|orca|zellij|exec|fake)
 onlyne-net       TLS 1.3 + pinning, ed25519 challenge, acl_allows, backoff
 onlyne-adapter   the one adapter protocol SDK (agent side and gateway side)
 onlyne-server/-client/-gateway   three bins; onlyne-cli the thin entry; onlyne-testkit fakes+e2e
@@ -66,8 +66,19 @@ Exit codes: `0` answer ok, `1` failed daemon answer or `wait-ready` bound, `2` v
 the admin surface only; every message verb already prints JSON.
 
 **Backend** (`onlyne-session/src/backend/`): capabilities `{spawn,attach,probe,close,
-focus,rename}`. A missing capability degrades through faults, never panics. Discovery order
-is `zellij → orca → fake` when `ONLYNE_BACKEND` is empty.
+focus,rename}`. A missing capability degrades through faults, never panics.
+`ONLYNE_BACKEND` names `herdr | orca | zellij | exec | fake | auto`. An empty value
+or `auto` probes herdr, then orca, then zellij. `exec` and `fake` enable only when
+`ONLYNE_BACKEND` names them. No match is `NoSupportedHost`; `onlyne-client run`
+exits 5 with `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`.
+`onlyne-client doctor` prints host-detection JSON and exits 0.
+herdr maps session (inherited) → workspace `onlyne:<cluster>` → tab = role → pane = one onlyne session.
+`<cluster>` is the server's `[server] name`, read from `welcome.cluster` and injected into every pane as `ONLYNE_CLUSTER`.
+Spawn: known agent first token → `herdr agent start --kind`; remaining commands → `herdr pane run`.
+Split: `PanePlacement::from_pane_count`, `(count+1).is_power_of_two()` → `right`, remaining counts → `down`, ratio `0.5`.
+Focus: `workspace focus` → `tab focus` → `agent focus <pane_id>` for a managed agent, `pane focus --pane <base_pane> --direction <split_direction>` for a `pane run` shell pane, then `pane get <pane_id>` must report `result.pane.focused`.
+`backend_ref` stores `workspace_id`, `tab_id`, `pane_id`, `agent`, `workspace_label`, `base_pane`, `split_direction`.
+Control reaches a full role: a client at `max_sessions` pulls with `control_only`, so `focus`/`recycle`/`cancel` land on the session holding the last slot while task rows stay `queued`.
 
 ## Gates
 
@@ -78,7 +89,7 @@ cargo test --workspace                 # per-crate -p reruns suffice for isolate
 crates/onlyne-testkit/e2e/<case>.sh    # ONLYNE_BACKEND=fake, built target/debug, no real creds
 ```
 
-The twelve scripts under `crates/onlyne-testkit/e2e/` each encode one verification case
+The thirteen scripts under `crates/onlyne-testkit/e2e/` each encode one verification case
 from `docs/v1-PLAN.md` (ACL rejects, idempotency, reconnect requeue, gateway mount,
 relocation, two-cluster federation, legacy refusal, frame bounds). A bug fix needs its
 reproduction as an e2e or a table test: red before the fix, green after. The live ring demo

@@ -380,16 +380,25 @@ pub fn send(
         return Ok(RelayReply::Rejected(reject));
     }
     let online = state.is_connected(to_role.as_str());
+    // A note lands inside a session that is already running (§7): it opens no
+    // session of its own, and `pull` hands out no row for one, so the only
+    // target a note has is a role whose session is live. Presence on its own is
+    // not a target — a push to an idle role would come back as a refusal.
+    let note_wakeup = envelope.kind != MsgKind::Note || state.has_session_to_wake(&to_role);
     // A control row keeps its command in the body, because the ledger has no
     // column for `Envelope::control` and `pull` rebuilds the envelope from the
     // row alone. Normalizing before the fingerprint keeps the stored bytes and
     // the dedupe key describing the same envelope.
     let routed = encode_control_body(routed);
     let envelope = &routed;
-    if envelope.kind == MsgKind::Note && !spec.server.note_queue && !online {
+    if envelope.kind == MsgKind::Note && !spec.server.note_queue && !(online && note_wakeup) {
         return Ok(RelayReply::Rejected(RelayReject::new(
             ErrorCode::RecipientOffline,
-            format!("recipient role {to_role} is offline"),
+            if online {
+                format!("recipient role {to_role} has no working session to wake")
+            } else {
+                format!("recipient role {to_role} is offline")
+            },
             Some("to.role"),
         )));
     }
@@ -424,7 +433,7 @@ pub fn send(
                 let deadline = envelope.ts + chrono::Duration::milliseconds(ttl_ms as i64);
                 state.note_expiry(&row.msg_id, deadline);
             }
-            let deliverable = online && !to_gateway;
+            let deliverable = online && !to_gateway && note_wakeup;
             let delivered_state = if deliverable {
                 state.ledger.mark_in_flight(&row.msg_id)?;
                 LedgerState::InFlight
@@ -473,6 +482,11 @@ pub fn pull(
     args: &PullArgs,
 ) -> anyhow::Result<PullReply> {
     let head = state.event_head().max(0) as u64;
+    // A role with no free session asks for control rows only. A command is what
+    // frees a session, so the queue that holds work must not be the gate that
+    // holds the command.
+    let control_only = args.control_only.unwrap_or(false);
+    let wanted = |row: &LedgerRow| !control_only || row.kind == MsgKind::Control;
     // A named session holds at most one unacknowledged row. A role-level pull
     // names no session, so it is gated per row by the ticket check below: the
     // row it already handed stays handed until it settles, and the role's other
@@ -490,15 +504,16 @@ pub fn pull(
         .ledger
         .queued_for(role, 8)?
         .into_iter()
-        .filter(|row| row.kind != MsgKind::Note)
+        .filter(|row| row.kind != MsgKind::Note && wanted(row))
         .collect();
     for row in state.ledger.in_flight_for(role)? {
         // A row stays handed to the pull that took it. Another session may still
         // claim it, which is how a replacement session inherits work its
         // predecessor died without acknowledging.
-        if state
-            .delivery_ticket(&row.msg_id)
-            .is_none_or(|ticket| ticket.session_id.as_deref() != session_id)
+        if wanted(&row)
+            && state
+                .delivery_ticket(&row.msg_id)
+                .is_none_or(|ticket| ticket.session_id.as_deref() != session_id)
             && candidates.is_empty()
         {
             candidates.push(row);
@@ -674,6 +689,7 @@ fn control_from_row(kind: MsgKind, body: &Body, task: Option<&str>) -> Option<Co
             task_id,
             reason: String::new(),
         }),
+        "focus" => Some(ControlOp::Focus { task_id }),
         _ => None,
     }
 }
@@ -912,6 +928,7 @@ mod tests {
                     reason: String::new(),
                 },
             ),
+            ("focus", ControlOp::Focus { task_id: task() }),
         ] {
             let body = Body::text(name);
             assert_eq!(

@@ -56,6 +56,8 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Print host detection JSON. Needs no socket. Always exits 0.
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -129,6 +131,14 @@ async fn main() {
                 .await
                 {
                     Ok(()) => 0,
+                    Err(error)
+                        if error
+                            .downcast_ref::<onlyne_session::NoSupportedHost>()
+                            .is_some() =>
+                    {
+                        eprintln!("{error}");
+                        5
+                    }
                     Err(error) => {
                         eprintln!("onlyne-client: {error}");
                         1
@@ -177,6 +187,11 @@ async fn main() {
                 plugin_verb(local_cli::uninstall_verb(&workspace, &id).await)
             }
         },
+        Command::Doctor => {
+            let report = onlyne_client::host::doctor_report(&onlyne_session::process_env());
+            println!("{report}");
+            0
+        }
     };
     std::process::exit(code);
 }

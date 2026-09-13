@@ -117,12 +117,47 @@ note_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to review
 printf '%s\n' "$note_out" > "$tmp/note.json"
 [ "$(json_field "$tmp/note.json" '.error.code' 'json.load(sys.stdin)["error"]["code"]')" = "recipient_offline" ] || fail "note to offline role must be recipient_offline" "$note_out$(cat "$tmp/note.err")"
 
-# Send a note with a short ttl_ms and assert the ledger ends as expired.
-exp_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --note --ttl 100 --text "expire me" 2>"$tmp/exp.err") || true
+# A role that is online with nothing running gives a note no target either. §7's
+# note opens no session, so the refusal names the session that is missing, and it
+# arrives before any ledger row exists. The gateway delivery above settled, and the
+# client's own report is what moves planner's projection off `working`, so the case
+# waits for that fact first.
+for _ in $(seq 1 150); do
+  "$ONLYNE" --server-root "$tmp/server" sessions > "$tmp/sessions.json" 2>/dev/null || true
+  rows_any "$tmp/sessions.json" public_lifecycle working >/dev/null 2>&1 || break
+  sleep 0.1
+done
+rows_any "$tmp/sessions.json" public_lifecycle working >/dev/null 2>&1 \
+  && fail "the settled gateway session must leave the working state" "$(cat "$tmp/sessions.json")"
+idle_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --note --text "nothing to wake" 2>"$tmp/idle.err") || true
+printf '%s\n' "$idle_out" > "$tmp/idle.json"
+idle_code=$(json_field "$tmp/idle.json" '.error.code' 'json.load(sys.stdin)["error"]["code"]')
+[ "$idle_code" = "recipient_offline" ] || fail "a note to an idle role must be refused" "code=$idle_code out=$idle_out$(cat "$tmp/idle.err")"
+idle_message=$(json_field "$tmp/idle.json" '.error.message' 'json.load(sys.stdin)["error"]["message"]')
+printf '%s' "$idle_message" | grep -q "working session" \
+  || fail "the refusal must name the missing session" "message=$idle_message"
+
+# `note_queue = true` is the setting that lets a note wait instead of being
+# refused, and the armed `ttl_ms` is what decides its end: §7 drops an undelivered
+# note with `expired`, and `pull` hands out no row for a note, so the deadline is
+# the only exit. The wait is on the offline role, which makes the queue hold the
+# row on purpose rather than by a race against a live session.
+python3 - "$tmp/server/.onlyne/spec.toml" <<'PY'
+import pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+path.write_text(text.replace("note_queue = false", "note_queue = true"))
+PY
+"$ONLYNE" --server-root "$tmp/server" reload > "$tmp/reload.json" \
+  || fail "reload of the note_queue setting failed" "$(cat "$tmp/reload.json")"
+exp_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to reviewer --note --ttl 100 --text "expire me" 2>"$tmp/exp.err") || true
 printf '%s\n' "$exp_out" > "$tmp/exp.json"
+exp_state=$(json_field "$tmp/exp.json" '.data.state' 'json.load(sys.stdin)["data"]["state"]')
+[ "$exp_state" = "queued" ] || fail "a queued note must answer `queued`" "state=$exp_state out=$exp_out$(cat "$tmp/exp.err")"
 ledger_out=""
 for _ in $(seq 1 120); do
-  ledger_out=$("$ONLYNE" --server-root "$tmp/server" ledger --role planner 2>/dev/null) || ledger_out=''
+  ledger_out=$("$ONLYNE" --server-root "$tmp/server" ledger 2>/dev/null) || ledger_out=''
   printf '%s\n' "$ledger_out" > "$tmp/exp-ledger.json"
   if rows_any "$tmp/exp-ledger.json" state expired 2>/dev/null; then
     break

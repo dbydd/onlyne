@@ -320,7 +320,7 @@ impl AdapterSocket {
         if agent {
             // The connection is over: what it bound stops being reachable, so
             // no later task of this role is routed to it.
-            self.dispatch.release_connection(mounted.as_deref());
+            self.dispatch.release_connection(mounted.as_deref(), &io);
         }
         Ok(())
     }
@@ -341,6 +341,16 @@ impl AdapterSocket {
     ) {
         let Some(session_id) = session_id else {
             self.dispatch.park_transport(io, capabilities);
+            // Work that arrived ahead of this agent is staged with a payload and
+            // no connection. The park is that connection now, so the wait ends
+            // here, and the claim binds the session to it for the tasks a `reuse`
+            // role hands the same session later.
+            let Some(staged) = self.dispatch.staged_without_transport() else {
+                return;
+            };
+            if let Err(error) = self.dispatch.hand_staged(&staged).await {
+                tracing::warn!(error = %error, session = %staged, "staged hand-off refused");
+            }
             return;
         };
         self.dispatch

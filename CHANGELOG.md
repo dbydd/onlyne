@@ -1,5 +1,136 @@
 # Changelog
 
+## [1.0.6] - 2026-09-14
+
+Scope: the herdr backend, the focus chain, and the control plane's delivery path.
+Versions published by this release: `onlyne-proto` 1.0.1 → 1.0.2 and `onlyne-tui`
+1.0.1 → 1.0.2 ride the workspace version, `onlyne-session` 1.0.2 → 1.0.3,
+`onlyne-server` 1.0.5 → 1.0.6, `onlyne-client` 1.0.4 → 1.0.5, and `onlyne-cli`
+1.0.1 → 1.0.2, the version the last round set and this one publishes.
+`onlyne-adapter` and `onlyne-testkit` changed code and ride the workspace version
+to 1.0.2 beside them. The remaining crates reach 1.0.2 with their code unchanged.
+
+### Added
+
+- session: a herdr backend at `onlyne-session/src/backend/herdr.rs`, selected by
+  `ONLYNE_BACKEND=herdr`. Hierarchy: the herdr session is inherited from the
+  client process environment, one workspace labelled `onlyne:<cluster>` per
+  server root, one tab per role, one pane per onlyne session. `herdr pane close`
+  terminates the pane's process tree, so a session never outlives its pane.
+  Spawn runs two tracks: a `session_command` whose first token names a known
+  agent (`pi`, `omp`, the rest of herdr's `--kind` table) goes through
+  `herdr agent start --kind`, and a command herdr's table does not name goes
+  through `herdr pane run` as one `shell_quote`d line. Split placement is
+  `PanePlacement::from_pane_count`: `(count + 1).is_power_of_two()` maps to
+  `right`, remaining counts map to `down`, ratio `0.5`, where `count` is
+  `result.tabs[].pane_count` from `herdr tab list --workspace W` and a missing
+  field is `0`. Focus walks `herdr workspace focus <W>` → `herdr tab focus <T>`
+  → `herdr agent focus <pane_id>` for a managed pane, or
+  `herdr pane focus --pane <base_pane> --direction <split_direction>` for a shell
+  pane, and confirms with `herdr pane get <pane_id>`. Every host call is a JSON
+  argv call: the shell layer is gone, so no argument is ever re-parsed.
+- session: host detection at `onlyne-client/src/host.rs`. `ONLYNE_BACKEND` names
+  `herdr | orca | zellij | exec | fake | auto`; an empty value or `auto` probes
+  herdr, then orca, then zellij; `exec` and `fake` require their own name; no
+  match returns `NO_SUPPORTED_HOST` naming the three probed hosts.
+- client: `onlyne-client doctor`, a read-only verb printing one JSON object
+  (`host`, `backend_selection`, `explicit`, `binary`, `session`, `workspace_id`,
+  `tab_id`, `pane_id`, `refusal`) with exit 0 — a pre-deploy check for a host
+  that may not answer.
+- testkit: e2e case 13, `crates/onlyne-testkit/e2e/herdr-live.sh`: live herdr
+  session, `session_command = ["sleep", "600"]` on the `pane_run` track,
+  `max_sessions` 1. It asserts the workspace label derived from the generated
+  spec, the role tab, `pane_count` reaching 2 with both pane ids, the address in
+  `client.db` `sessions.backend_ref`, `onlyne control --from planner focus
+  --task` landing on the session pane (`pane get` reports `focused`), the drain
+  path keeping the tab's root pane, and a workspace list back to its pre-run
+  snapshot. `lib.sh` gains `stop_client_sync`, which waits for the client's
+  `run/s` socket to disappear so the next client can hold the role link. A
+  missing herdr binary or an unreachable `HERDR_SESSION` prints `SKIP herdr-live`
+  and exits 0.
+
+### Changed
+
+- client: `onlyne-client run` exits 5 when host detection finds no supported
+  host.
+- proto: `PullArgs` carries optional `control_only`, default false. Old frames
+  decode, and the JSON Schema under `crates/onlyne-proto/schema/` is regenerated.
+- server: `pull` honours `control_only` by handing rows whose kind is `control`
+  and leaving `task`, `relay`, and `notice` rows `queued` with their ticket
+  untouched, on the re-offer path too.
+- client: a role at `max_sessions` pulls with `control_only`. That is the path
+  `focus`, `recycle`, and `cancel` take to reach the session holding the last
+  free slot.
+- client: the herdr workspace label comes from `welcome.cluster`, the server's
+  own `[server] name`, passed to every pane the client creates as
+  `ONLYNE_CLUSTER`. A pane created before the first welcome uses herdr's default
+  workspace.
+- tui: `F` sends a focus control op for the selected session through the admin
+  socket (`control --from <role> focus --task <id>`), taking the sender from the
+  selected row's causality, and prints what the daemon answers. Key handling moved
+  into a table in `model.rs` (`interpret_key`), so every binding including `F` is
+  a pure function with table tests.
+
+### Fixed
+
+- client and server: a role at capacity never received control. `pull_ack_loop`
+  stopped pulling when its dispatch table filled, and control rows share that
+  queue, so `control focus`, `recycle`, and `cancel` sat on the server forever
+  for the session holding the last free slot. Field evidence: a `focus` row
+  `in_flight` at attempt 0 with no fault and nothing in the client log.
+- client: every onlyne-owned herdr workspace landed on `onlyne:default` because
+  nothing injected `ONLYNE_CLUSTER` into a spawned pane, so two server roots
+  shared one workspace. The label now carries the server's own name, and the
+  e2e case reads it from the spec it generated.
+- server: `control focus` answered `unknown_role` for a role the requester holds
+  a `send` edge to. The admin ACL now reads control the way `router::accept`
+  reads it at delivery: a role with a `send` edge to the target owns control of
+  that target's sessions, and `ControlOp::Broadcast` requires a global edge.
+- session: `close` refuses an id that a `backend_ref` was re-labelled with, which
+  keeps `onlyne:*` workspaces, role tabs, and foreign panes out of reach of a
+  forged reference; `focus` and `close` check the daemon answer and report a
+  refusal.
+- client: an always-running agent now carries every task of the session it takes.
+  A plugin that mounts naming no session is parked as the connection for the next
+  staged session, and the claim took that socket with nothing recording which
+  session it served. The second task a `reuse` role gives that session was left
+  with a payload and no transport: the assignment never left the client, the
+  plugin waited on `assign`, and the ledger held the envelope `in_flight` at
+  attempt 0. The claim binds the connection it takes to the session it hands
+  over; a mount arriving after a task hands that session over on the spot; and a
+  connection that named no session releases only the transports sharing its
+  socket (`same_connection` on `AdapterIo`). `crates/onlyne-client/src/dispatch.rs:355`,
+  `crates/onlyne-client/src/adapter_socket.rs:336`. Regression tests
+  `a_parked_agent_carries_every_later_task_of_its_reused_session` and
+  `a_session_staged_before_its_agent_mounts_is_handed_its_payload` in
+  `crates/onlyne-client/tests/scenarios.rs` both time out on the missing
+  assignment with the fix reverted. Field cost: `running-lights` hopped six of
+  eight lights on the released tree and stalled at hop 0 on the commit before —
+  one defect, whichever session the park happens to serve first.
+- server: a note aimed at a role with nothing to wake took a delivery the
+  recipient could only refuse. §7 gives a note no session of its own, and `pull`
+  hands out no row for one, so a role whose sessions have all settled has nowhere
+  to put it. The gate now reads that state beside presence: an online role with no
+  `working` session is refused before the ledger row exists, with a message naming
+  the missing session, and a row that `note_queue` does queue stays `queued` for
+  its `ttl_ms` deadline, which is the only exit a note has. Field evidence:
+  verification case 6's ttl note settled `rejected` with
+  `note has no live session to wake`, the receiving half of 1.0.5 answering a push
+  the sender could have been given straight away. `onlyne-server` 1.0.6,
+  `crates/onlyne-server/src/state.rs:273`, `crates/onlyne-server/src/relay.rs:382`.
+  Tests `a_note_needs_a_live_session_on_the_receiving_role` and
+  `a_queued_note_for_a_role_with_nothing_to_wake_expires_on_its_ttl`; case 6 now
+  proves the refusal against an idle online role and the queued path against the
+  offline one under `note_queue = true`.
+- testkit: `running-lights` sighted the light through a render choice. The
+  scripted frame is one `onlyne-tui --once` picture, and page 1 lays its nodes out
+  with a force simulation whose detail level follows the camera — at the fixed
+  `--once` zoom a node box carries a title alone, so most roles never drew the
+  `◐` the case looked for and a completed twelve-hop ring still failed its
+  sighting. The case reads page 2 now, where the graph is a table of
+  `role · task · life · agent · in-flight`, and asks for that role's `working` row
+  beside the same hop in the ledger. `crates/onlyne-testkit/e2e/running-lights.sh:145`.
+
 ## [1.0.5] - 2026-09-13
 
 Scope: the role link. `onlyne-server` 1.0.4 → 1.0.5, `onlyne-client` 1.0.3 →

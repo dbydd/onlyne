@@ -1420,6 +1420,7 @@ mod tests {
                 command: vec!["agent".into()],
                 env: BTreeMap::new(),
                 focus: None,
+                placement: None,
                 rename: None,
             })
             .unwrap();
@@ -1462,6 +1463,7 @@ mod tests {
                 command: vec!["agent".into()],
                 env: BTreeMap::new(),
                 focus: None,
+                placement: None,
                 rename: None,
             })
             .unwrap();
@@ -1547,6 +1549,7 @@ mod tests {
                 command: vec!["agent".into()],
                 env: BTreeMap::new(),
                 focus: None,
+                placement: None,
                 rename: None,
             })
             .unwrap();

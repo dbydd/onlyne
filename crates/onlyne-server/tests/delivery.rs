@@ -647,7 +647,7 @@ fn a_note_reaches_an_offline_role_when_note_queue_allows_it() {
 }
 
 #[test]
-fn a_note_to_an_offline_role_is_refused_before_the_ledger_row_exists() {
+fn a_note_needs_a_live_session_on_the_receiving_role() {
     let quiet = fixture_with(&spec_text().replace("note_queue = true", "note_queue = false"));
     let envelope = note("planner", "builder", "fyi");
     let reject = rejected(relay::send(&quiet.state, &envelope, false, None).expect("relay"));
@@ -658,6 +658,9 @@ fn a_note_to_an_offline_role_is_refused_before_the_ledger_row_exists() {
         "a refusal writes no ledger row and burns no op_id"
     );
 
+    // A link alone is no target. §7 gives a note no session of its own, so an
+    // online role with nothing running has nowhere for the line to land, and the
+    // refusal says that before any row exists.
     let (sender, _outbound) = tokio::sync::mpsc::channel(8);
     quiet.state.register_role(RoleConnection {
         role: "builder".to_string(),
@@ -667,12 +670,64 @@ fn a_note_to_an_offline_role_is_refused_before_the_ledger_row_exists() {
         draining: false,
         generation: 0,
     });
+    let idle = rejected(relay::send(&quiet.state, &envelope, false, None).expect("relay"));
+    assert_eq!(idle.code, ErrorCode::RecipientOffline);
+    assert!(
+        idle.message.contains("working session"),
+        "the refusal names the missing session: {}",
+        idle.message
+    );
+    assert!(
+        ledger_rows(&quiet.state).is_empty(),
+        "an idle role refuses the note the same way an offline one does"
+    );
+
+    // The target is a session already running on that role, which is what the
+    // client's own report projects.
+    projection::report(
+        &quiet.state,
+        "builder",
+        &Report::Ready {
+            task_id: onlyne_proto::new_task_id(),
+            session_id: "sess-1".to_string(),
+            generation: 1,
+            seq: 1,
+            cluster_ref: Some("cluster-a".to_string()),
+        },
+    )
+    .expect("report");
     let outcome = accepted(relay::send(&quiet.state, &envelope, false, None).expect("relay"));
     let rows = ledger_rows(&quiet.state);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].op_id.as_deref(), envelope.op_id.as_deref());
     assert_eq!(rows[0].msg_id, outcome.receipt.msg_id);
     assert_eq!(rows[0].state, LedgerState::InFlight);
+}
+
+#[test]
+fn a_queued_note_for_a_role_with_nothing_to_wake_expires_on_its_ttl() {
+    let fixture = fixture();
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    fixture.state.register_role(RoleConnection {
+        role: "builder".to_string(),
+        sender,
+        last_seq: 0,
+        connected_at: Utc::now(),
+        draining: false,
+        generation: 0,
+    });
+    let mut envelope = note("planner", "builder", "fyi");
+    envelope.ttl_ms = Some(10);
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    assert_eq!(
+        outcome.receipt.state,
+        LedgerState::Queued,
+        "a queued note for an idle role waits for its deadline"
+    );
+    let expired = relay::sweep_expired(&fixture.state, Utc::now() + chrono::Duration::seconds(5))
+        .expect("sweep");
+    assert_eq!(expired, vec![outcome.receipt.msg_id.clone()]);
+    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Expired);
 }
 
 #[test]
@@ -1491,6 +1546,89 @@ fn repair_close_files_a_cancel_its_owner_can_pull() {
     assert!(
         control.envelope.validate().is_ok(),
         "the rebuilt envelope is a control delivery a client can accept"
+    );
+}
+
+/// A saturated role still hears its operator.
+///
+/// The client stops pulling when the role holds no free session, so a work row
+/// would be handed out with nowhere to run. Control commands ride the same queue
+/// and are what frees a session, so a pull naming `control_only` must pass them
+/// while leaving the work row untouched: a role at `max_sessions` is exactly the
+/// role whose `recycle` or `focus` must still land.
+#[test]
+fn a_control_only_pull_hands_the_command_and_leaves_the_work_queued() {
+    let fixture = fixture();
+    let work = accepted(
+        relay::send(
+            &fixture.state,
+            &task("planner", "builder", "work"),
+            false,
+            None,
+        )
+        .expect("relay"),
+    );
+    let task_id = work.receipt.task.clone().expect("task");
+    let command = accepted(
+        relay::send(
+            &fixture.state,
+            // The admin surface is where `onlyne control` lands, which is the
+            // path an operator's command takes.
+            &router::control_envelope("planner", &ControlOp::Focus { task_id }, Some("builder")),
+            true,
+            None,
+        )
+        .expect("relay control"),
+    );
+
+    let pulled = relay::pull(
+        &fixture.state,
+        "builder",
+        None,
+        &PullArgs {
+            control_only: Some(true),
+            ..PullArgs::default()
+        },
+    )
+    .expect("control-only pull");
+    assert_eq!(pulled.deliveries.len(), 1, "one command reaches one pull");
+    let delivery = &pulled.deliveries[0];
+    assert_eq!(
+        delivery.envelope.kind,
+        MsgKind::Control,
+        "a control-only pull hands a command and nothing else"
+    );
+    assert_eq!(
+        delivery.msg_id, command.receipt.msg_id,
+        "the operator's command is what arrived"
+    );
+    assert_eq!(
+        delivery.envelope.control,
+        Some(ControlOp::Focus {
+            task_id: work.receipt.task.clone().expect("task"),
+        }),
+        "the command survives the ledger round trip"
+    );
+    let rows = ledger_rows(&fixture.state);
+    let work_row = rows
+        .iter()
+        .find(|row| row.msg_id == work.receipt.msg_id)
+        .expect("the work row");
+    assert_eq!(
+        work_row.state,
+        LedgerState::Queued,
+        "the pull that took the command spent nothing of the queued work"
+    );
+
+    let after = relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+    assert_eq!(after.deliveries.len(), 1);
+    assert_eq!(
+        after.deliveries[0].msg_id, work.receipt.msg_id,
+        "the work row is still offerable to the same role afterwards"
+    );
+    assert_eq!(
+        after.deliveries[0].envelope.control, None,
+        "a plain pull carries the work row, which names no command"
     );
 }
 

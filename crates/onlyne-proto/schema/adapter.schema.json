@@ -344,6 +344,25 @@
               "type": "string"
             }
           }
+        },
+        {
+          "description": "Bring the task's live session to the front of its host.",
+          "type": "object",
+          "required": [
+            "op",
+            "task_id"
+          ],
+          "properties": {
+            "op": {
+              "type": "string",
+              "enum": [
+                "focus"
+              ]
+            },
+            "task_id": {
+              "type": "string"
+            }
+          }
         }
       ]
     },

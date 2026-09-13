@@ -60,7 +60,7 @@ The TUI draws the same picture live — page 1 is the role network, page 2 the s
 | `onlyne-gateway` | One chat platform per process: telegram · feishu · qqbot · weixin, feature-gated at compile time. |
 | `onlyne` | Thin human entry: forwards to the daemons, speaks the sockets, prints JSON. |
 | `onlyne-tui` | Two-page observation board over the admin socket. |
-| `onlyne-agent-fake` | Scripted agent for the twelve e2e proofs under `crates/onlyne-testkit/e2e/`. |
+| `onlyne-agent-fake` | Scripted agent for the thirteen e2e proofs under `crates/onlyne-testkit/e2e/`. |
 
 ```mermaid
 graph LR
@@ -77,7 +77,17 @@ graph LR
 
 **Delivery you can audit.** Control-plane messages (task, completion, control) travel at-least-once, each carrying an `op_id` idempotency key. The ledger keeps every row, so `onlyne server ledger` reads like a bank statement. Observation (heartbeats, events) runs at-most-once with cursor resync, so a slow watcher never slows a worker.
 
-**Sessions that own their lives.** Each role spawns its coding agent through a screen backend: Orca tabs, zellij sessions, headless exec, or the fake used in tests. Discovery follows the screen you are actually in. A session's lifecycle is a proven reducer — 21 events over five state axes, table-tested — feeding both the ledger mirror and the TUI stars.
+**Sessions that own their lives.** Each role spawns its coding agent through a screen backend: herdr panes, Orca tabs, zellij sessions, headless exec, or the fake used in tests. `ONLYNE_BACKEND` takes `herdr | orca | zellij | exec | fake | auto`. A nonempty value that names `herdr`, `orca`, `zellij`, `exec`, or `fake` selects that backend. An empty value or `auto` probes herdr, then orca, then zellij. `exec` and `fake` enable only when `ONLYNE_BACKEND` names them. With no match, `onlyne-client run` exits 5 and prints `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`. A session's lifecycle is a proven reducer — 21 events over five state axes, table-tested — feeding both the ledger mirror and the TUI stars.
+
+The herdr map is: session inherited from the client environment (a pi child inherits it), workspace = one server root/topology labelled `onlyne:<cluster>`, tab = role, pane = one onlyne session. `<cluster>` is the server's own `[server] name`, which the client reads from `welcome.cluster` and hands each pane it creates as `ONLYNE_CLUSTER`; a pane spawned before the first welcome carries no such variable and herdr keeps its own default-labelled workspace. Close is `herdr pane close`. Ids look like `wF` / `wF:t1` / `wF:p1`. A named session such as `onlyne-test` is the `HERDR_SESSION` value already in the client environment. `backend_ref` on the client `sessions` row stores `workspace_id`, `tab_id`, `pane_id`, `agent`, `workspace_label`, and the recorded split (`base_pane`, `split_direction`).
+
+Spawn: the first token of `session_command` matching a known agent name (`pi`, `omp`, and the rest of herdr's `--kind` table) runs `herdr agent start <name> --kind <k> --pane <id> --timeout 25000`. Commands whose first token is absent from that table run `herdr pane run <pane_id> '<one shell line>'`. `pane run` emits no JSON. The command is `shell_quote`d into a single argv token. Split uses `PanePlacement::from_pane_count`: `(count+1).is_power_of_two()` maps to `right`; remaining counts map to `down`; ratio is `0.5`. `count` is `result.tabs[].pane_count` from `herdr tab list --workspace W`. A missing field is 0. Production spawn passes `placement: None`.
+
+Focus issues `herdr workspace focus <W>`, then `herdr tab focus <T>` (positional; the tab restores its last focused pane). A managed-agent pane then takes `herdr agent focus <pane_id>`. `agent focus` accepts a managed agent. A shell pane from `pane run` answers `agent_not_found`. Herdr's `pane focus` form is `--pane <base_pane> --direction <split_direction>` and moves to the neighbor of that anchor, so the two values the split recorded are what carry a plain shell pane. `herdr pane get <pane_id>` is the confirmation step: `result.pane.focused` must be true, and a hop that landed elsewhere answers with an error naming the pane that holds focus. Entries: `onlyne control focus --task <id>` and the TUI `F` key. A failed `focus()` records `Report::Fault{kind:"focus"}`.
+
+Commands reach a role that holds no free session. `pull` carries an optional `control_only`, and a client at `max_sessions` asks with it, so `focus`, `recycle`, and `cancel` arrive while the work queue keeps its rows `queued` with no ticket spent.
+
+`onlyne-client doctor` is a read-only verb. It prints one JSON object (`host`, `backend_selection`, `explicit`, `binary`, `session`, `workspace_id`, `tab_id`, `pane_id`, `refusal`) and exits 0. A missing host yields `host: null` with `refusal`. It is a pre-deploy check.
 
 **Truth under disconnect.** A client that loses the server keeps running its sessions to their final state, writes every outbound message to a durable intent queue, and flushes in order on reconnect. Nothing drops silently: a stuck intent ends as a named fault.
 
@@ -103,7 +113,7 @@ The second commitment has machine-checked backing. `proofs/` is a core Lean 4 de
 |---|---|---|
 | `task` | Deliver work to a role; spawns or reuses a session | at-least-once, queued while offline |
 | `completion` | Terminal receipt for a task; carries the result summary | at-least-once, queued while offline |
-| `note` | Free chat between humans and agents | fire and forget, refused while offline |
+| `note` | Free chat between humans and agents | fire and forget, needs a session already running on its role; `note_queue` holds one that waits |
 | `control` | `recycle · probe · snapshot · cancel` on a task | admin or task owner only |
 
 A message body is text plus at most one inline image. Media pipelines live beside Onlyne, inside your agents; what Onlyne owns is delivery and accounting.

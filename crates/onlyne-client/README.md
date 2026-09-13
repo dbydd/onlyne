@@ -8,6 +8,7 @@ One workspace, one role, one daemon. The role runs many sessions at once.
 | --- | --- |
 | `run --workspace <dir>` | Foreground role runtime: connect, handshake, pull, dispatch, report. Backgrounding is the operator's job, never the client's. |
 | `status --workspace <dir>` | Print uptime, socket path, recorded fault count, and whether the server link is up. |
+| `doctor` | Print host-detection JSON. No workspace, no socket. Exit 0. |
 | `init --workspace <dir> --role <r> --server-root <dir>` | Build the minimal role workspace and print the `[[client]]` spec fragment. |
 | `roles --workspace <dir>` | Answer role prose from the local cache. |
 | `sessions --workspace <dir>` | Reserved for the live role runtime. |
@@ -45,12 +46,54 @@ Both `init` and `run` create these paths under `--workspace`:
 | 2 | `status` found no client answering its socket, printed as `onlyne: client not running` |
 | 2 | `status` found a client with no server link, printed as `onlyne: client not connected` |
 | 2 | the workspace holds the legacy layout |
+| 5 | `run` selected no host; stderr is `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND` |
 
 `status` exits 0 only for a client that is up and connected to its server. That is the fact a script reads.
+`doctor` exits 0 for every host-detection result, including `host: null`.
 
 ## Backends
 
-`ONLYNE_BACKEND` picks the session backend: `auto`, `zellij`, `orca`, `fake`, `exec`. An empty value discovers by capability: the client probes `orca`, then `zellij`, then `fake`, and takes the first one that reports usable. `auto` behaves the same. `fake` runs sessions in process and needs no external tool, which is why the end-to-end scripts use it. `exec` spawns the role's `session_command` as a child of the client, holds stdin open, and appends the child's output to `.onlyne/logs/session-<task>.log`. It is never reached through `auto`: running an agent with no terminal around it is a deliberate choice for a headless host (`crates/onlyne-testkit/e2e/pi-live.sh` makes it), not a fallback to discover.
+`ONLYNE_BACKEND` selects the session backend. The name set is `herdr | orca | zellij | exec | fake | auto`. A nonempty value that names `herdr`, `orca`, `zellij`, `exec`, or `fake` selects that backend. An empty value or `auto` probes herdr, then orca, then zellij. `exec` and `fake` enable only when `ONLYNE_BACKEND` names them. With no match, `onlyne-client run` exits 5 and writes `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`.
+
+`fake` runs sessions in-process and needs no external tool; the end-to-end scripts set `ONLYNE_BACKEND=fake`. `exec` spawns the role's `session_command` as a child of the client, holds stdin open, and appends the child's output to `.onlyne/logs/session-<task>.log`. `crates/onlyne-testkit/e2e/pi-live.sh` sets `ONLYNE_BACKEND=exec` for a headless host.
+
+### herdr
+
+A herdr session is inherited from the client process environment; a pi child running in a pane inherits it too. One server root/topology maps to one herdr workspace labelled `onlyne:<cluster>`. `<cluster>` is the server's own `[server] name`, which the client reads from `welcome.cluster` and passes to every pane it creates as `ONLYNE_CLUSTER`. One role maps to one tab. One onlyne session maps to one pane. Close is `herdr pane close`. Ids look like `wF`, `wF:t1`, `wF:p1`. A named session such as `onlyne-test` is the `HERDR_SESSION` value already in the client environment.
+
+The client persists that address on the `sessions` row as `backend_ref`:
+
+```json
+{"herdr":{"workspace_id":"wF","tab_id":"wF:t1","pane_id":"wF:p1","agent":"onlyne-planner-abcd1234","workspace_label":"onlyne:lab","base_pane":"wF:p1","split_direction":"right"}}
+```
+
+Spawn uses two tracks. When the first token of `session_command` matches a known agent name (`pi`, `omp`, and the rest of herdr's `--kind` table), the backend runs `herdr agent start <name> --kind <k> --pane <id> --timeout 25000`. Commands whose first token is absent from that table run `herdr pane run <pane_id> '<one shell line>'`. `pane run` emits no JSON. The command is `shell_quote`d into a single argv token.
+
+Split direction is `PanePlacement::from_pane_count`. `(count + 1).is_power_of_two()` maps to `right`. Remaining counts map to `down`. Ratio is `0.5`. `count` is `result.tabs[].pane_count` from `herdr tab list --workspace W`. A missing field is `0`. The production spawn path passes `placement: None`, so the backend reads that live count.
+
+Focus issues `herdr workspace focus <workspace_id>`, then `herdr tab focus <tab_id>` (positional arguments; the tab restores its last focused pane). A managed-agent pane then takes `herdr agent focus <pane_id>`. `agent focus` accepts a managed agent. A shell pane from `pane run` answers `agent_not_found`, so that track walks `herdr pane focus --pane <base_pane> --direction <split_direction>`: the neighbour of the anchor the split recorded. `herdr pane get <pane_id>` is the confirmation step; `result.pane.focused` must be true, and a hop landing elsewhere reports the pane holding focus. The control plane is `ControlOp::Focus{task_id}`; a failed backend `focus()` records `Report::Fault{kind:"focus"}`. CLI: `onlyne control --from <role> focus --task <id>`. TUI: `F`.
+
+A role at `max_sessions` keeps pulling with `control_only`, which is the path that lets `focus`, `recycle`, and `cancel` reach the session occupying the last free slot.
+
+An agent that mounts naming no session — the always-running plugin — parks as the connection for the next staged session. The claim binds that socket to the session it takes, so every later task a `reuse` role hands the same session rides it, and a mount that arrives after a work item hands that item over on the spot. A connection that named no session releases only the transports sharing its socket.
+
+### doctor
+
+`onlyne-client doctor` is a read-only verb. It prints one JSON object and exits 0. Fields:
+
+| field | meaning |
+| --- | --- |
+| `host` | selected backend name, or `null` |
+| `backend_selection` | `explicit`, `env`, or `none` |
+| `explicit` | raw `ONLYNE_BACKEND` when nonempty |
+| `binary` | CLI path or name for herdr/orca/zellij; `null` for exec, fake, and no host |
+| `session` | `HERDR_SESSION` |
+| `workspace_id` | `HERDR_WORKSPACE_ID` |
+| `tab_id` | `HERDR_TAB_ID` |
+| `pane_id` | `HERDR_PANE_ID` |
+| `refusal` | the `NO_SUPPORTED_HOST` line, present when `host` is `null` |
+
+A missing host yields `host: null` plus `refusal` and exit 0. The verb is a pre-deploy check.
 
 `[orca] worktree` in `config.toml` sets which Orca tab list a session tab joins. Three states:
 

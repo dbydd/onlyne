@@ -107,6 +107,7 @@ mod tests {
             command: vec!["pi".into()],
             env: BTreeMap::new(),
             focus: None,
+            placement: None,
             rename: None,
         };
         let session = backend.spawn(spec).unwrap();
@@ -127,6 +128,7 @@ mod tests {
                 command: vec!["agent".into()],
                 env: BTreeMap::new(),
                 focus: None,
+                placement: None,
                 rename: None,
             })
             .unwrap();

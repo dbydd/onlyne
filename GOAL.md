@@ -17,7 +17,7 @@
 
 ## Out of scope
 
-- agent runtime、模型适配、prompt orchestration、web UI、cron、TUI。
+- agent runtime、模型适配、prompt orchestration、web UI、cron。
 - 旧布局迁移：v1.0.0 对 legacy `.onlyne/` 以 exit 2 拒绝，不提供迁移路径。
 - 真实平台凭据：四平台验证走 `FakeGateway` 与 `check()` dry-run。
 - 非本地 channel 的业务语义与远程监督服务。

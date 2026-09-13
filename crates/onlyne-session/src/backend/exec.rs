@@ -282,6 +282,7 @@ mod tests {
             command: command.into_iter().map(str::to_string).collect(),
             env: BTreeMap::new(),
             focus: None,
+            placement: None,
             rename: None,
         }
     }

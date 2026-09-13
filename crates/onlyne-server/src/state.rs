@@ -270,6 +270,24 @@ impl Server {
             .unwrap_or(false)
     }
 
+    /// Whether one role holds a session that a note can wake.
+    ///
+    /// §7's note rule gives a note no session of its own: it arrives as an extra
+    /// prompt inside a session that is already running, and `onlyne-client` has
+    /// no other place to put it. The mirrored session projections answer for that
+    /// state at this boundary, and the client keeps its own refusal for a session
+    /// that ends between the projection and the delivery.
+    pub fn has_session_to_wake(&self, role: &str) -> bool {
+        self.ledger
+            .list_sessions(onlyne_proto::QuerySessionsArgs {
+                role: Some(role.to_string()),
+                lifecycle: Some(onlyne_proto::Lifecycle::Working),
+                limit: 8,
+                ..onlyne_proto::QuerySessionsArgs::default()
+            })
+            .is_ok_and(|rows| !rows.is_empty())
+    }
+
     pub fn role_sender(&self, role: &str) -> Option<mpsc::Sender<Frame>> {
         self.roles
             .read()

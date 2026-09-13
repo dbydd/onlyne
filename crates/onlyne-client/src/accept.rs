@@ -1,10 +1,8 @@
 use crate::dispatch::{DispatchState, dispatch};
 use anyhow::{Context, Result, anyhow};
 use onlyne_proto::{Delivery, Envelope, Report};
-use onlyne_session::{SessionBackend, SessionRef, SpawnSpec};
+use onlyne_session::{SessionBackend, SessionRef};
 use onlyne_store::ClientStore;
-use std::collections::BTreeMap;
-use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -35,35 +33,6 @@ impl AcceptPath {
             .context("delivery missing causality.task")?;
         let _ = task_id;
         Ok(Some(dispatch(&self.dispatch, &delivery.envelope)?))
-    }
-
-    pub fn spawn_spec(
-        &self,
-        workspace: &Path,
-        role: &str,
-        session_command: &[String],
-        session_id: &str,
-        task_id: &str,
-        env: &BTreeMap<String, String>,
-    ) -> SpawnSpec {
-        let mut merged = env.clone();
-        merged.insert("ONLYNE_SESSION_ID".into(), session_id.into());
-        merged.insert("ONLYNE_TASK_ID".into(), task_id.into());
-        merged.insert("ONLYNE_ROLE".into(), role.into());
-        SpawnSpec {
-            cwd: workspace.to_path_buf(),
-            task_id: task_id.into(),
-            command: session_command
-                .iter()
-                .map(|item| {
-                    item.replace("{session}", session_id)
-                        .replace("{task}", task_id)
-                })
-                .collect(),
-            env: merged,
-            focus: None,
-            rename: None,
-        }
     }
 
     pub fn ready_report(

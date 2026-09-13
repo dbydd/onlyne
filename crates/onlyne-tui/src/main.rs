@@ -3,9 +3,9 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use onlyne_tui::model::{
-    Detail, Focus, MAX_SPACING, MIN_SPACING, Page, Snapshot, UiState, cycle_edge, cycle_role,
-    cycle_state, detail, location, nav_after, nav_step, pull, role_detail, role_edges,
-    selected_role,
+    Detail, Focus, FocusOutcome, KeyCmd, MAX_SPACING, MIN_SPACING, Page, Snapshot, UiState,
+    cycle_edge, cycle_role, cycle_state, detail, focus_from, focus_message, interpret_key,
+    location, nav_after, nav_step, pull, role_detail, role_edges, selected_role, send_focus,
 };
 use onlyne_tui::socket::{NO_SOCKET_MESSAGE, SocketArgs, resolve_socket};
 use onlyne_tui::ui::{
@@ -177,136 +177,91 @@ fn handle_key(
     state: &mut UiState,
     refreshed: &mut Instant,
 ) -> anyhow::Result<bool> {
+    let cmd = interpret_key(code, modifiers, state.page, state.focus);
     let view = map_view(terminal);
     let panel = detail_view(terminal);
     let was_swarm = state.page == Page::Swarm;
     let before = location(state);
-    let history_walk = modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(code, KeyCode::Char('p') | KeyCode::Char('n'));
-    match code {
-        KeyCode::Char('q') => return Ok(true),
-        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
-        KeyCode::Esc => return Ok(true),
-        KeyCode::Char('1') => {
-            state.page = Page::RoleMap;
+    match cmd {
+        KeyCmd::Quit => return Ok(true),
+        KeyCmd::SetPage(page) => {
+            state.page = page;
             state.detail_scroll = 0;
             sync_selection_and_detail(runtime, socket, snapshot, state);
         }
-        KeyCode::Char('2') => {
-            state.page = Page::Swarm;
-            state.detail_scroll = 0;
-            sync_selection_and_detail(runtime, socket, snapshot, state);
-        }
-        KeyCode::Tab => {
+        KeyCmd::TogglePage => {
             state.page = state.page.toggle();
             state.detail_scroll = 0;
             sync_selection_and_detail(runtime, socket, snapshot, state);
         }
-        KeyCode::Enter => sync_selection_and_detail(runtime, socket, snapshot, state),
-        KeyCode::Char('J') => {
-            state.detail_scroll = state.detail_scroll.saturating_add(1);
+        KeyCmd::Enter => sync_selection_and_detail(runtime, socket, snapshot, state),
+        KeyCmd::DetailScroll(delta) => {
+            if delta >= 0 {
+                state.detail_scroll = state.detail_scroll.saturating_add(delta as u16);
+            } else {
+                state.detail_scroll = state.detail_scroll.saturating_sub(delta.unsigned_abs());
+            }
             clamp_detail_scroll(state, panel);
         }
-        KeyCode::Char('K') => {
-            state.detail_scroll = state.detail_scroll.saturating_sub(1);
-            clamp_detail_scroll(state, panel);
-        }
-        KeyCode::Char('r') => refresh_now(runtime, socket, terminal, snapshot, state, refreshed),
-        // Page 1: `hjkl` walks the ring, the arrows and the mouse move the
-        // camera, `+`/`-` set the repulsion, `0` recentres, and `e` shows the
-        // control-plane spokes the map holds back.
-        KeyCode::Char('e') if state.page == Page::RoleMap => {
+        KeyCmd::Refresh => refresh_now(runtime, socket, terminal, snapshot, state, refreshed),
+        KeyCmd::ToggleControlEdges => {
             state.show_control_edges = !state.show_control_edges;
         }
-        KeyCode::Char(c) if state.page == Page::RoleMap && (c == '+' || c == '=') => {
-            state.spacing = (state.spacing + 1).min(MAX_SPACING);
+        KeyCmd::Spacing(delta) => {
+            if delta >= 0 {
+                state.spacing = (state.spacing + delta as usize).min(MAX_SPACING);
+            } else {
+                state.spacing = state.spacing.saturating_sub(1).max(MIN_SPACING);
+            }
             reflow_map(snapshot, state, view);
         }
-        KeyCode::Char('-') if state.page == Page::RoleMap => {
-            state.spacing = state.spacing.saturating_sub(1).max(MIN_SPACING);
-            reflow_map(snapshot, state, view);
-        }
-        KeyCode::Char('0') if state.page == Page::RoleMap => state.role_cam.reset(),
-        KeyCode::Char('j') if state.page == Page::RoleMap => move_role_edge(1, snapshot, state),
-        KeyCode::Char('k') if state.page == Page::RoleMap => move_role_edge(-1, snapshot, state),
-        KeyCode::Char('l') if state.page == Page::RoleMap => {
+        KeyCmd::Recentre => state.role_cam.reset(),
+        KeyCmd::RoleEdge(delta) => move_role_edge(delta, snapshot, state),
+        KeyCmd::FollowEdge => {
             if follow_role_edge(snapshot, state) {
                 sync_selection_and_detail(runtime, socket, snapshot, state);
             }
         }
-        KeyCode::Char('h') if state.page == Page::RoleMap => {
+        KeyCmd::RoleBack => {
             if role_back(state) {
                 sync_selection_and_detail(runtime, socket, snapshot, state);
             }
         }
-        KeyCode::Up if state.page == Page::RoleMap => pan_role_view((0, -1), snapshot, state, view),
-        KeyCode::Down if state.page == Page::RoleMap => {
-            pan_role_view((0, 1), snapshot, state, view)
-        }
-        KeyCode::Left if state.page == Page::RoleMap => {
-            pan_role_view((-1, 0), snapshot, state, view)
-        }
-        KeyCode::Right if state.page == Page::RoleMap => {
-            pan_role_view((1, 0), snapshot, state, view)
-        }
-        // Page 2 keeps its own keys, plus the browser-style history walk.
-        KeyCode::Char('p') if history_walk && was_swarm => {
-            walk_history(-1, runtime, socket, snapshot, state);
-        }
-        KeyCode::Char('n') if history_walk && was_swarm => {
-            walk_history(1, runtime, socket, snapshot, state);
-        }
-        KeyCode::Char('g') if state.page == Page::Swarm => state.focus = Focus::Graph,
-        KeyCode::Char('h') if state.page == Page::Swarm => state.focus = Focus::History,
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCmd::Pan { dx, dy } => pan_role_view((dx, dy), snapshot, state, view),
+        KeyCmd::HistoryWalk(delta) => walk_history(delta, runtime, socket, snapshot, state),
+        KeyCmd::SetListFocus(focus) => state.focus = focus,
+        KeyCmd::MoveCursor(delta) => {
             let len = focus_len(snapshot, state);
             match state.focus {
-                Focus::Graph => move_cursor(&mut state.graph_cursor, len, -1),
-                Focus::History => move_cursor(&mut state.history_cursor, len, -1),
+                Focus::Graph => move_cursor(&mut state.graph_cursor, len, delta),
+                Focus::History => move_cursor(&mut state.history_cursor, len, delta),
             }
             sync_selection_and_detail(runtime, socket, snapshot, state);
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            let len = focus_len(snapshot, state);
-            match state.focus {
-                Focus::Graph => move_cursor(&mut state.graph_cursor, len, 1),
-                Focus::History => move_cursor(&mut state.history_cursor, len, 1),
-            }
-            sync_selection_and_detail(runtime, socket, snapshot, state);
-        }
-        KeyCode::Char('/') if state.page == Page::Swarm => {
-            state.search = Some(state.filter.text.clone())
-        }
-        KeyCode::Char('f') if state.page == Page::Swarm => {
+        KeyCmd::StartSearch => state.search = Some(state.filter.text.clone()),
+        KeyCmd::CycleState => {
             cycle_state(&mut state.filter);
             refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
         }
-        KeyCode::Char('t') if state.page == Page::Swarm => {
+        KeyCmd::CycleWindow => {
             state.filter.window = state.filter.window.next();
             state.filter.reset_page();
             refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
         }
-        KeyCode::Char('o') if state.page == Page::Swarm => {
+        KeyCmd::CycleRole => {
             cycle_role(&snapshot.roles, &mut state.filter);
             refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
         }
-        KeyCode::Char('e') if state.page == Page::Swarm => {
+        KeyCmd::CycleEdge => {
             cycle_edge(snapshot, &mut state.filter);
             refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
         }
-        KeyCode::PageDown if state.page == Page::Swarm && state.focus == Focus::History => {
+        KeyCmd::HistoryPage(delta) => {
             let page_size = history_page_size(terminal_size(terminal).1);
-            apply_page_history(1, snapshot, state, page_size);
+            apply_page_history(delta, snapshot, state, page_size);
             refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
         }
-        KeyCode::PageUp if state.page == Page::Swarm && state.focus == Focus::History => {
-            let page_size = history_page_size(terminal_size(terminal).1);
-            apply_page_history(-1, snapshot, state, page_size);
-            refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
-        }
-        // `a` flips the session views between the rows still holding a slot
-        // and everything.
-        KeyCode::Char('a') => {
+        KeyCmd::ToggleActive => {
             state.active_only = !state.active_only;
             clamp_cursor(
                 &mut state.graph_cursor,
@@ -314,22 +269,35 @@ fn handle_key(
             );
             sync_selection_and_detail(runtime, socket, snapshot, state);
         }
-        KeyCode::PageDown => {
-            state.detail_scroll = state.detail_scroll.saturating_add(8);
-            clamp_detail_scroll(state, panel);
-        }
-        KeyCode::PageUp => {
-            state.detail_scroll = state.detail_scroll.saturating_sub(8);
-            clamp_detail_scroll(state, panel);
-        }
-        _ => {}
+        KeyCmd::SessionFocus => apply_session_focus(runtime, socket, snapshot, state),
+        KeyCmd::Ignore => {}
     }
-    // Every page-2 move that lands somewhere new is a step the history
-    // remembers; a walk through the history itself is not.
-    if was_swarm && state.page == Page::Swarm && !history_walk {
+    if was_swarm && state.page == Page::Swarm && !matches!(cmd, KeyCmd::HistoryWalk(_)) {
         nav_after(state, before);
     }
     Ok(false)
+}
+
+/// `F`: send a focus control op for the selected session on the admin socket.
+fn apply_session_focus(
+    runtime: &tokio::runtime::Runtime,
+    socket: &std::path::Path,
+    snapshot: &Snapshot,
+    state: &mut UiState,
+) {
+    let Some(task_id) = selected_task(snapshot, state) else {
+        state.message = focus_message(&FocusOutcome::NoSession);
+        return;
+    };
+    let Some(from) = focus_from(snapshot, &task_id) else {
+        state.message = focus_message(&FocusOutcome::Denied {
+            code: "unknown_role".into(),
+            message: "no role to send as".into(),
+        });
+        return;
+    };
+    let outcome = runtime.block_on(send_focus(socket, &from, &task_id));
+    state.message = focus_message(&outcome);
 }
 
 /// `^p`/`^n`: walk the page-2 history and reload the detail pane for wherever

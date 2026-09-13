@@ -982,6 +982,46 @@ fn control_probe_does_not_require_reason() {
     );
 }
 
+/// `control focus` carries no reason and sends a control request that names the
+/// op and the task.
+#[test]
+fn control_focus_sends_the_named_op() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("role");
+    let listener = role_listener(&workspace);
+    let server = serve_once(
+        listener,
+        serde_json::json!({"f": "res", "id": "r1", "ok": true, "data": {}}),
+    );
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "control",
+            "--task",
+            CONTROL_TASK,
+            "focus",
+        ])
+        .output()
+        .unwrap();
+    let request = server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the role socket");
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_OK),
+        "focus must pass clap: {}",
+        stderr_of(&output)
+    );
+    assert_eq!(request["op"], "control");
+    assert_eq!(request["args"]["op"]["op"], "focus");
+    assert_eq!(request["args"]["op"]["task_id"], CONTROL_TASK);
+}
+
 /// Operators type the task on the verb's tail: `control cancel --task X`. clap
 /// carries `--task` and `--from` as globals, so both readings parse.
 #[test]

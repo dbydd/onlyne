@@ -855,6 +855,7 @@ mod tests {
             command: vec!["pi".into()],
             env,
             focus: None,
+            placement: None,
             rename: None,
         }
     }
@@ -878,6 +879,7 @@ mod tests {
             command: vec!["pi".into(), "--model".into(), "gpt 5".into()],
             env,
             focus: None,
+            placement: None,
             rename: None,
         })
         .unwrap();
@@ -908,6 +910,7 @@ mod tests {
             ],
             env,
             focus: None,
+            placement: None,
             rename: None,
         })
         .unwrap();
@@ -957,6 +960,7 @@ mod tests {
                 command,
                 env: BTreeMap::new(),
                 focus: None,
+                placement: None,
                 rename: None,
             })
             .unwrap()
@@ -993,6 +997,7 @@ mod tests {
             command: vec![],
             env: BTreeMap::new(),
             focus: None,
+            placement: None,
             rename: None,
         })
         .unwrap_err();

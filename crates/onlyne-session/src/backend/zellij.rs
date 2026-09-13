@@ -362,6 +362,7 @@ mod tests {
             command: vec!["pi".into()],
             env: BTreeMap::new(),
             focus: None,
+            placement: None,
             rename: None,
         }
     }

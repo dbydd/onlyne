@@ -191,6 +191,11 @@ Client to server op vocabulary has thirteen closed verbs:
 - `control`
 - `bye`
 
+`pull` takes an optional `control_only`. When it is true the server hands rows whose `kind` is
+`control` and leaves `task`, `relay`, and `notice` rows `queued` with their ticket untouched, which
+is how a client at `max_sessions` keeps receiving commands for the sessions it already holds. An
+absent field means false, so a client from an earlier build pulls as before.
+
 Admin op vocabulary has nineteen closed verbs: eight reads plus `reload`, `send`, `control`, seven `repair_*` verbs with suffixes `inspect`, `adopt`, `rebind`, `retry`, `fail`, `close`, `ack`, plus `shutdown`:
 - `status`
 - `roles`
@@ -243,6 +248,7 @@ Process exit codes used by user-facing commands:
 - exit 2: legacy workspace layout, with `onlyne: legacy workspace layout; v1.0.0 does not migrate`
 - exit 3: socket resolution failure, with `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`
 - exit 4: template, generation, or operator input refusal, including `onlyne: refusing to overwrite <path>; pass --force`, `onlyne: template for role <r> is ambiguous: <p1>, <p2>`, `onlyne: no template directory named <r> under <template_root>`, `onlyne: no role matches the requested templates/roles`, `onlyne: generated workspace embeds absolute path <path>`, and `onlyne: agent_package not set in spec.toml [server]`
+- exit 5: no supported terminal host found, with `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`. `onlyne-client run` needs a host for the pane it puts each session in, so a role with no host and no explicit `ONLYNE_BACKEND` stops at startup.
 
 Spec parse failures print `spec.toml:<line>: <message>`. A schema marker mismatch prints `onlyne: unsupported schema; v1.0.0 does not migrate`. A missing daemon binary exits 127 with `onlyne: missing binary <path>; run cargo build --workspace`. Old wire format failures use `protocol_version` or `bad_frame`.
 
@@ -376,6 +382,10 @@ v1.0.0 delivery is complete when these are true:
 - verification case 7 proves legacy layout refusal at exit 2
 - verification case 8 proves formatting, linting, tests, and binary firewall checks
 - verification case 9 proves generate plus relocate
+- verification case 10 proves the Orca backend against the live app
+- verification case 11 proves the pi adapter plugin against a real client
+- verification case 12 proves a six-role ring handing one token twelve hops
+- verification case 13 proves the herdr backend on a live herdr session: workspace per server root, role tab, split pane, `control focus` reaching the session in the last slot, and drain keeping the tab's root pane
 
 When you work in this repository, always respect the task the user is asking for. When the current ask is planning or scaffolding, do not jump ahead.
 
