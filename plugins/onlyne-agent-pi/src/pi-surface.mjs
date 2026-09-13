@@ -6,10 +6,13 @@
 //   wakeUser      pi.sendUserMessage(content, { deliverAs: "followUp" })
 //   proseContext  pi.sendMessage({customType,...}, { deliverAs:"followUp", triggerTurn:false })
 //   customEntry   pi.appendEntry(customType, data)
+//   widget        ctx.ui.setWidget("onlyne", lines) / ctx.ui.setWidget("onlyne", undefined)
 //   status        ctx.ui.setStatus("onlyne", text)
 //   exit          ctx.shutdown()
 //   isIdle        ctx.isIdle()
 //   registerTool / registerCommand are probed by index.ts itself.
+
+import { WIDGET_KEY } from "./activity.mjs";
 
 /**
  * @param {{ pi: any, log: (line: string) => void, context: () => any }} options
@@ -28,11 +31,20 @@ export function createSurface({ pi, log, context }) {
     wakeUser: has(pi.sendUserMessage),
     proseContext: has(pi.sendMessage),
     customEntry: has(pi.appendEntry),
+    widget: has(ctx()?.ui?.setWidget),
     status: true,
     exit: true,
     isIdle: true,
     registerTool: has(pi.registerTool),
     registerCommand: has(pi.registerCommand),
+  };
+
+  const widget = (lines) => {
+    try {
+      ctx()?.ui?.setWidget?.(WIDGET_KEY, lines);
+    } catch {
+      /* widget is decoration; never let it break the protocol */
+    }
   };
 
   const status = (text) => {
@@ -113,6 +125,7 @@ export function createSurface({ pi, log, context }) {
     wakeUser,
     proseContext,
     customEntry,
+    widget,
     status,
     welcome(welcome) {
       status(`onlyne: ${welcome.role}`);

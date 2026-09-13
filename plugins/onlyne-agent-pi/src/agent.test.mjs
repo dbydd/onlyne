@@ -11,10 +11,13 @@ import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 
 import { OnlyneAgent } from "./agent.mjs";
+import { MAX_LINES, MAX_WIDTH } from "./activity.mjs";
 import { createFrameDecoder, encodeFrame } from "./frame.mjs";
 import { SEQ_BASE, readyReport } from "./protocol.mjs";
 
 const VECTOR_DIR = fileURLToPath(new URL("../../../crates/onlyne-proto/tests/wire_vectors/", import.meta.url));
+// The hello version is the manifest's, so a release bump travels here once.
+const PACKAGE_VERSION = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")).version;
 const ASSIGN_FRAME = existsSync(VECTOR_DIR)
   ? JSON.parse(JSON.parse(readFileSync(`${VECTOR_DIR}adapter_host_assign.json`, "utf8")).frame)
   : null;
@@ -155,13 +158,15 @@ class FakeHost {
 
 /** The effect surface the agent drives, recorded for assertions. */
 function fakeSurface(options = {}) {
-  const calls = { wakeUser: [], prose: [], entries: [], status: [], exits: [] };
+  const calls = { wakeUser: [], prose: [], entries: [], status: [], exits: [], widget: [] };
   return {
     calls,
     available: {
       wakeUser: true,
       proseContext: true,
       customEntry: true,
+      // Off by default: tests that do not opt into a panel keep the footer and log path.
+      widget: options.widget === true,
       status: true,
       exit: true,
       isIdle: true,
@@ -181,6 +186,8 @@ function fakeSurface(options = {}) {
       return true;
     },
     status: (text) => calls.status.push(text),
+    /** Every panel render, newest last; an `undefined` entry is a clear. */
+    widget: (lines) => calls.widget.push(lines),
     welcome: () => {},
     isIdle: () => (options.idle === undefined ? true : options.idle()),
     exit: (reason) => calls.exits.push(reason),
@@ -399,7 +406,7 @@ test("a fresh agent opens with hello, registers and reports ready", async () => 
   assert.deepEqual(hello, {
     protocol: 1,
     plugin: "pi-onlyne",
-    version: "1.0.0",
+    version: PACKAGE_VERSION,
     kind: "agent",
     capabilities: ["register", "report", "inject", "recycle"],
     mount: { role: "planner", session: SESSION_ID, task_id: TASK_ID, pid: process.pid },
@@ -1075,5 +1082,79 @@ test("the handoff ledger belongs to the session, not to one task", async () => {
   const result = await agent.completeFromTool({ outcome: "done", text: "wrote the notes" });
   assert.equal(result.outcome, "done");
   assert.equal(completions(host).length, 1);
+});
+
+// ---------------------------------------------------------------- the panel
+
+test("a pi with the widget gets the panel and keeps a quiet scrollback", async () => {
+  const surface = fakeSurface({ widget: true });
+  const { agent, host, logs } = await startAgent({ surface });
+  agent.start();
+  await waitFor(() => (host.of("report").length >= 1 ? true : null));
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+
+  const [render] = surface.calls.widget.slice(-1);
+  // Header first, then the newest event: the assignment the host just handed over.
+  assert.match(render[0], /^onlyne planner · connected · gen 1 · task 11111111 running$/);
+  assert.match(render[1], /^\d\d:\d\d:\d\d  <= task 11111111 from role:planner \(task\)/);
+  assert.equal(agent.status().activity[0].kind, "in");
+  // The point of the panel: a routine notice reaches the screen through it, once.
+  assert.deepEqual(logs, [], "nothing about a healthy session reaches stderr");
+});
+
+test("a repeating fault folds into one panel line with a count", () => {
+  const surface = fakeSurface({ widget: true });
+  const agent = new OnlyneAgent({
+    socketPath: join(tmpdir(), "pi-onlyne-unused-socket"),
+    cwd: tmpdir(),
+    role: "planner",
+    sessionId: SESSION_ID,
+    taskId: TASK_ID,
+    surface,
+    log: (line) => {
+      throw new Error(`a host with the panel writes no stderr line: ${line}`);
+    },
+  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    agent.notice("warn", "heartbeat refused: connection lost");
+  }
+  const [render] = surface.calls.widget.slice(-1);
+  assert.match(render[1], /!! heartbeat refused: connection lost x3$/);
+  assert.equal(surface.calls.widget.length, 3, "every event redraws the same panel");
+});
+
+test("the panel stays inside its line and width budget", () => {
+  const surface = fakeSurface({ widget: true });
+  const agent = new OnlyneAgent({
+    socketPath: join(tmpdir(), "pi-onlyne-unused-socket"),
+    cwd: tmpdir(),
+    role: "planner",
+    sessionId: SESSION_ID,
+    taskId: TASK_ID,
+    surface,
+    log: () => {},
+  });
+  for (let index = 0; index < 40; index += 1) {
+    agent.notice("in", `task ${index} from gateway:wechat:room ${"长".repeat(400)}`);
+  }
+  const [render] = surface.calls.widget.slice(-1);
+  assert.ok(render.length <= MAX_LINES, `panel grew to ${render.length} lines`);
+  for (const line of render) {
+    assert.ok(Array.from(line).length <= MAX_WIDTH, `line overruns its width: ${line}`);
+  }
+});
+
+test("a host without the widget keeps the footer line and the stderr line", async () => {
+  const surface = fakeSurface();
+  const { agent, host, logs } = await startAgent({ surface });
+  agent.start();
+  await waitFor(() => (host.of("report").length >= 1 ? true : null));
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+
+  assert.deepEqual(surface.calls.widget, [], "no panel to draw");
+  assert.match(surface.calls.status.at(-1), /^onlyne planner · connected · gen 1 · task 11111111 running$/);
+  assert.ok(logs.some((line) => line.startsWith("in: task 11111111")), logs.join(" | "));
 });
 

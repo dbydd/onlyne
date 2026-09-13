@@ -57,7 +57,7 @@ onlyne server generate --root <server-root> --out <dir>
 生成的 `.pi/settings.json` 形如：
 
 ```json
-{ "packages": ["../.onlyne/agent/pi-onlyne"] }
+{ "packages": ["../.onlyne/agent/onlyne-agent-pi"] }
 ```
 
 `pi list` 会把这条列在 “Project packages” 下。要验证真的加载了，就让复制进来的 `index.ts`
@@ -66,9 +66,20 @@ onlyne server generate --root <server-root> --out <dir>
 ### 手工（不经过 generate）
 
 ```bash
-cp -R plugins/onlyne-agent-pi <ws>/.onlyne/agent/pi-onlyne
-printf '{"packages":["../.onlyne/agent/pi-onlyne"]}\n' > <ws>/.pi/settings.json
+cp -R plugins/onlyne-agent-pi <ws>/.onlyne/agent/onlyne-agent-pi
+printf '{"packages":["../.onlyne/agent/onlyne-agent-pi"]}\n' > <ws>/.pi/settings.json
 ```
+
+### 从 npm 装
+
+```bash
+pi install npm:pi-onlyne          # 用户级：这台机器上每个 pi 进程都会加载
+```
+
+发布名是 npm 上的 `pi-onlyne`，`pi install npm:pi-onlyne@<version>` 钉住某一版。这条路径会覆盖
+普通交互会话，那里没有 `ONLYNE_ROLE`，扩展保持静默（见 §1 的身份门）。role workspace 想要面
+板，不必装到全局：上面那份文件级复制、或者 `onlyne server generate`，都把插件限定在服务这个
+role 的 workspace 里。
 
 ### 一次性 / 测试
 
@@ -112,7 +123,12 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 | `sendMessage` | `session_start` | `welcome` 的 role prose 不再作为上下文注入；任务本身照常到达 |
 | `appendEntry` | `session_start` | 不再写 `onlyne-assign` / `onlyne-complete` 会话条目 |
 | `ui.setStatus` | 调用点保护 | 跳过 footer 状态行 |
+| `ui.setWidget` | 调用点保护 | 日常通知继续走 footer 状态行与 `[pi-onlyne]` stderr 行 |
 | `ctx.shutdown` | 调用点保护 | `recycle` 与 completion 照常结算任务；进程留给操作者自己关闭 |
+
+### 活动面板
+
+宿主报告有 UI 时（`ctx.hasUI`：TUI 与 RPC 模式为 true，print 与 JSON 模式为 false）且 `ctx.ui.setWidget` 可用，日常 onlyne 通知显示在编辑器上方，widget key 为 `onlyne`。标题行显示 role、连接状态、generation、当前 task id 与阶段。其下最多六条事件，按最新在前排列：`<=` 入站，`=>` 出站，`!!` 警告，`..` 状态，`~~` 重复投递。连续相同事件折成一行并带 `xN`；面板最多八行，每行最多 96 个显示单元，`session_shutdown` 时清除。
 
 ## 3. 工具面
 
@@ -170,7 +186,7 @@ ack 之后、进程退出之前。completion 是按 client 手里的元组结算
 事实——某个 role 有没有被触达——绝不看发出去的文本长什么样、写得好不好。
 
 策略文件放在插件自己的 `package.json` 旁边，因此随 generate 出的工作区一起被带进去：生成的工作
-区里是 `<ws>/.onlyne/agent/pi-onlyne/relay.toml`，手工安装则是插件目录下的 `relay.toml`。
+区里是 `<ws>/.onlyne/agent/onlyne-agent-pi/relay.toml`，手工安装则是插件目录下的 `relay.toml`。
 
 ```toml
 relay_required = ["writer"]        # 这些 role 必须收到过接力
@@ -290,7 +306,7 @@ stderr 告警并忽略，把机会让回文件。
 | `ready refused: internal: unknown session for …` | 插件为 client 从未暂存的任务报了 ready（手工起 pi 时的正常现象） | 让 client 拉起 pi，而不是手工起 |
 | `assign` 一直不来 | client 的 `session_command` 没能拉起 pi，或 `inject` 被降级 | client 日志里的 spawn 行；`/onlyne status` 看能力集 |
 | ledger 停在 `in_flight` | 没有 completion：没跑 turn，或 `agent_settled` 没触发 | pi session 文件里的 `onlyne-assign` / `onlyne-complete` 条目 |
-| `onlyne_complete` 回答 `relay guard: missing handoff to: …` | 工作区的 spec（或顶替它的 `relay.toml`）点名了一个本会话从未触达的 role | 插件 stderr 的 `relay guard from …` 说明来源、`required=…` 说明策略；`relay guard: missing handoff …` 列出已投递集合 |
+| `onlyne_complete` 回答 `relay guard: missing handoff to: …` | 工作区的 spec（或顶替它的 `relay.toml`）点名了一个本会话从未触达的 role | 日常通知显示在 `onlyne` 面板；stderr 保留 `relay guard from …` 等拒绝、socket 错误、超时与帧错误；`required=…` 说明策略；`relay guard: missing handoff …` 列出已投递集合 |
 | `hello` 后立刻 `forbidden` / 断连 | mount role 与 client 的 role 不一致 | `hello.args.mount.role` 对该工作区的 role |
 | `frame_too_large` | 正文超过 8 MiB | 只会由超限的出站图片触发；上限来自核心 |
 | 工具缺失 | 该 pi 版本没有 `pi.registerTool` | `/onlyne status`；对照上面的能力表 |

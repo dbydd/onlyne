@@ -63,7 +63,7 @@ onlyne server generate --root <server-root> --out <dir>
 The generated `.pi/settings.json` then carries:
 
 ```json
-{ "packages": ["../.onlyne/agent/pi-onlyne"] }
+{ "packages": ["../.onlyne/agent/onlyne-agent-pi"] }
 ```
 
 `pi list` shows the entry under "Project packages". To verify the load itself, make the
@@ -72,9 +72,21 @@ copied `index.ts` throw and watch for the failure.
 ### Manual (no generator)
 
 ```bash
-cp -R plugins/onlyne-agent-pi <ws>/.onlyne/agent/pi-onlyne
-printf '{"packages":["../.onlyne/agent/pi-onlyne"]}\n' > <ws>/.pi/settings.json
+cp -R plugins/onlyne-agent-pi <ws>/.onlyne/agent/onlyne-agent-pi
+printf '{"packages":["../.onlyne/agent/onlyne-agent-pi"]}\n' > <ws>/.pi/settings.json
 ```
+
+### From npm
+
+```bash
+pi install npm:pi-onlyne          # user-level: every pi process on this box loads it
+```
+
+The published package is `pi-onlyne` on npm; `pi install npm:pi-onlyne@<version>` pins
+one. This route reaches ordinary interactive sessions too, and there the extension
+stays inert (no `ONLYNE_ROLE`, so no adapter). A role workspace needs no global
+install to get a panel: the file-level copy above, or `onlyne server generate`,
+scopes the plugin to the workspace that serves the role.
 
 ### One-off / testing
 
@@ -121,7 +133,12 @@ What happens when a pi API is missing, and what the host does then:
 | no `sendMessage` | probed | the role prose from `welcome` is not injected as context; the task itself still arrives |
 | no `appendEntry` | probed | no `onlyne-assign` / `onlyne-complete` session entries are recorded |
 | no `ui.setStatus` | guarded | the footer status line is skipped |
+| no `ui.setWidget` | guarded | routine notices continue through the footer status line and the `[pi-onlyne]` stderr line |
 | no `ctx.shutdown` | guarded | `recycle` and a completion still settle the task; the process stays up for the operator to close |
+
+### Activity panel
+
+When the host reports a UI (`ctx.hasUI`, true in the TUI and RPC modes, false in print and JSON modes) and `ctx.ui.setWidget` is available, routine onlyne notices draw in the panel above the editor with widget key `onlyne`. The header shows role, connection state, generation, the current task id, and phase. Below it, up to six newest-first events use `<=` for inbound frames, `=>` for outbound frames, `!!` for warnings, `..` for state changes, and `~~` for duplicate deliveries. Repeated identical events fold into one line with `xN`; the panel holds at most eight lines, each capped at 96 cells, and `session_shutdown` clears it.
 
 ## 3. Tools
 
@@ -193,7 +210,7 @@ judges delivery facts only — whether a role was reached — and never the shap
 of the text that was sent.
 
 The policy lives next to the plugin's `package.json`, so it travels inside the copy a
-generated workspace loads: `<ws>/.onlyne/agent/pi-onlyne/relay.toml` in a generated
+generated workspace loads: `<ws>/.onlyne/agent/onlyne-agent-pi/relay.toml` in a generated
 workspace, `relay.toml` in a manual installation.
 
 ```toml
@@ -334,7 +351,7 @@ client injected none, §5).
 | `ready refused: internal: unknown session for …` | the plugin mounted and reported for a task the client never staged (normal when pi is started by hand outside a task) | start pi under the client, not by hand |
 | `assign` never arrives | the client's `session_command` did not spawn pi, or `inject` was dropped | the client log for the spawn line; `/onlyne status` for the capability set |
 | ledger stays `in_flight` | no completion was reported: no turn ran, or `agent_settled` never fired | the pi session file for `onlyne-assign` / `onlyne-complete` entries |
-| `onlyne_complete` answers `relay guard: missing handoff to: …` | the workspace's spec (or a `relay.toml` standing in for it) names a role this session never sent to | the plugin's stderr line `relay guard from …` names the source and `required=…` the policy; `relay guard: missing handoff …` names the delivered set |
+| `onlyne_complete` answers `relay guard: missing handoff to: …` | the workspace's spec (or a `relay.toml` standing in for it) names a role this session never sent to | routine notices appear in the `onlyne` panel; stderr keeps refusals such as `relay guard from …`, socket errors, timeouts and framing faults; `required=…` names the policy; `relay guard: missing handoff …` names the delivered set |
 | `hello … forbidden` / connection closed right after `hello` | the mount role does not match the client's role | `hello.args.mount.role` vs the workspace's role |
 | `frame_too_large` | a body above 8 MiB | only reachable through an oversize outbound image; the ceiling is the core's |
 | tools missing | `pi.registerTool` is absent in that pi version | `/onlyne status`; the capability table above |

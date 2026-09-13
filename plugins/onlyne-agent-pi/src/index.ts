@@ -56,6 +56,7 @@ interface PiSurface {
     wakeUser: boolean;
     proseContext: boolean;
     customEntry: boolean;
+    widget: boolean;
     status: boolean;
     exit: boolean;
     isIdle: boolean;
@@ -65,6 +66,7 @@ interface PiSurface {
   wakeUser(text: string, parts?: ImagePartInput[]): boolean;
   proseContext(text: string, welcome: WelcomeLike): boolean;
   customEntry(customType: string, data: unknown): boolean;
+  widget(lines: string[] | undefined): void;
   status(text: string): void;
   welcome(welcome: WelcomeLike): void;
   isIdle(): boolean;
@@ -292,6 +294,7 @@ export default function onlyne(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (event) => {
     agent?.stop(`pi:${event.reason ?? "quit"}`);
+    surface?.widget?.(undefined);
     agent = null;
     surface = null;
     registered = false;

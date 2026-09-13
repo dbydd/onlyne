@@ -7,15 +7,23 @@
 // module decides *what* the protocol says and hands the *effects* to the
 // surface, which is why the whole state machine is testable against a plain
 // Node unix socket.
+//
+// What the human sees travels through one funnel, `notice` below: the pi widget
+// panel when the host has `ctx.ui.setWidget`, the footer status line plus a
+// `[pi-onlyne]` stderr line when it has not. `log` keeps the diagnostics — a
+// refused report, a socket error, a timeout, a framing fault — because those
+// matter to a host with no panel at all.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createFrameDecoder, encodeFrame } from "./frame.mjs";
+import { createActivity } from "./activity.mjs";
 import {
   DEFAULT_HEARTBEAT_MS,
   assignAckArgs,
   completeReport,
+  describePrincipal,
   detachArgs,
   heartbeatReport,
   helloArgs,
@@ -77,6 +85,7 @@ export class OnlyneAgent {
    *   taskId: string,
    *   surface: any,
    *   log?: (line: string, data?: unknown) => void,
+   *   activity?: { note: (kind: string, text: string) => any, set: (patch: any) => any, lines: () => string[], events: any[] },
    *   relay?: { required?: string[], count?: number | null },
    *   capabilities?: string[],
    *   heartbeatMs?: number,
@@ -95,6 +104,9 @@ export class OnlyneAgent {
     this.sessionId = options.sessionId;
     this.envTaskId = options.taskId;
     this.surface = options.surface;
+    /** The widget panel's model (`activity.mjs`); seeded with the local role. */
+    this.activity = options.activity ?? createActivity();
+    this.activity.set({ role: options.role });
     this.log = options.log ?? (() => {});
     /** The relay guard's policy; the default guards nothing (`relay.mjs`). */
     this.relay = options.relay ?? DEFAULT_RELAY;
@@ -181,7 +193,8 @@ export class OnlyneAgent {
     }
     this.connected = false;
     this.socket = null;
-    this.surface.status?.("onlyne: detached");
+    this.activity.set({ connection: "detached", taskId: null });
+    this.notice("state", `detached (${reason})`);
   }
 
   /** One line for `/onlyne status`. */
@@ -196,6 +209,7 @@ export class OnlyneAgent {
       tasks: this.activeTasks().map((task) => task.taskId),
       pendingCompletion: this.pendingCompletion?.taskId ?? null,
       lastError: this.lastError ? String(this.lastError.message ?? this.lastError) : null,
+      activity: this.activity.events.slice(0, 5),
       stats: { ...this.stats },
     };
   }
@@ -253,7 +267,8 @@ export class OnlyneAgent {
     this.deferredPushes = [];
     this.rejectAll("connection lost");
     this.stopHeartbeat();
-    this.surface.status?.(this.closed ? "onlyne: detached" : "onlyne: reconnecting");
+    this.activity.set({ connection: this.closed ? "detached" : "reconnecting" });
+    this.notice("state", this.closed ? "detached" : "reconnecting");
     if (socket && !socket.destroyed) socket.destroy();
     this.scheduleReconnect();
   }
@@ -263,7 +278,6 @@ export class OnlyneAgent {
     const delay = this.ladder[Math.min(this.attempt, this.ladder.length - 1)];
     this.attempt += 1;
     this.stats.reconnects += 1;
-    this.log(`reconnecting in ${delay}ms`);
     this.reconnectHandle = this.timer.set(() => {
       this.reconnectHandle = null;
       if (!this.closed) this.connect();
@@ -274,7 +288,6 @@ export class OnlyneAgent {
     this.attempt = 0;
     // From here until the welcome is adopted, pushes queue instead of running.
     this.handshaking = true;
-    this.log("connected; sending hello");
     const args = helloArgs({
       role: this.role,
       session: this.sessionId,
@@ -301,9 +314,16 @@ export class OnlyneAgent {
     // A fresh connection has reported nothing: the next beat is news.
     this.lastPhase = null;
     this.agentState = this.tasks.size > 0 ? "idle" : "ready";
-    this.surface.status?.(`onlyne: ${welcome.role}`);
-    this.log(`welcome role=${welcome.role} generation=${welcome.generation} capabilities=${welcome.hostCapabilities.join(",")}`);
-    this.surface.welcome?.(welcome);
+    this.activity.set({
+      role: welcome.role,
+      connection: "connected",
+      generation: welcome.generation,
+      // A reconnect inherits the task this process serves: the panel says so
+      // from the first beat, with the assignment still queued behind the hello.
+      taskId: this.activeTaskId() ?? null,
+      phase: this.agentState,
+    });
+    this.notice("state", `connected role=${welcome.role} gen=${welcome.generation} host=${welcome.hostCapabilities.join(",")}`);
     const prose = welcome.prose.trim();
     if (prose && !this.deliveredProse.has(prose)) {
       this.deliveredProse.add(prose);
@@ -408,7 +428,7 @@ export class OnlyneAgent {
     else if (op === "recycle") void this.onRecycle(args);
     else if (op === "config_get") void this.onConfigGet(args);
     else if (op === "bye") {
-      this.log(`host bye: ${args.reason ?? "unspecified"}`);
+      this.notice("state", `host bye: ${args.reason ?? "unspecified"}`);
       this.dropSocket();
     } else if (op) this.log(`ignoring host op ${op}`);
   }
@@ -426,6 +446,25 @@ export class OnlyneAgent {
     this.log(`socket error: ${error?.message ?? error}`);
   }
 
+  /**
+   * One human-facing event: record it, then draw the best host surface.
+   * Hosts with `ctx.ui.setWidget` redraw the panel. Other hosts keep a footer
+   * line and a `[pi-onlyne]` stderr line.
+   *
+   * @param {"in" | "dup" | "out" | "warn" | "state"} kind
+   * @param {string} text
+   */
+  notice(kind, text) {
+    this.activity.note(kind, text);
+    if (this.surface.available?.widget) {
+      this.surface.widget?.(this.activity.lines());
+      return;
+    }
+    // No panel: the footer carries the steady header line, stderr the event.
+    this.surface.status?.(this.activity.lines()[0]);
+    this.log(`${kind}: ${text}`);
+  }
+
   // --------------------------------------------------------------- reports
 
   async reportReady() {
@@ -440,7 +479,7 @@ export class OnlyneAgent {
         seq: this.seq,
       }));
       this.stats.reports += 1;
-      this.log(`ready reported for ${taskId}`);
+      this.notice("state", `ready ${taskId.slice(0, 8)}`);
     } catch (error) {
       this.log(`ready refused: ${error.message}`);
     }
@@ -527,7 +566,7 @@ export class OnlyneAgent {
     }
     if (this.injectedTasks.has(taskId)) {
       this.stats.duplicates += 1;
-      this.log(`assign for ${taskId} already injected; acking without a second injection`);
+      this.notice("dup", `task ${taskId.slice(0, 8)} already injected`);
       await this.ack(taskId, true, "duplicate");
       return;
     }
@@ -554,7 +593,6 @@ export class OnlyneAgent {
       failed: false,
     });
     this.agentState = "running";
-    this.log(`assign ${taskId} from ${JSON.stringify(envelope.from ?? null)}; injecting ${text.length} chars`);
     this.surface.wakeUser?.(text, attachments.map((item) => item.part));
     this.surface.customEntry?.("onlyne-assign", {
       taskId,
@@ -564,7 +602,8 @@ export class OnlyneAgent {
       prose,
       attachments: attachments.map((item) => item.path),
     });
-    this.surface.status?.(`onlyne: ${taskId.slice(0, 8)} running`);
+    this.activity.set({ taskId, phase: "running" });
+    this.notice("in", `task ${taskId.slice(0, 8)} from ${describePrincipal(envelope.from)} (${envelope.kind ?? "task"}): ${headOf(envelope.body?.text)}`);
     this.startHeartbeat();
     await this.ack(taskId, true, null);
   }
@@ -581,7 +620,7 @@ export class OnlyneAgent {
   async probe() {
     try {
       await this.heartbeat();
-      this.log("probe answered with a heartbeat");
+      this.notice("state", "probe answered with a heartbeat");
     } catch (error) {
       this.log(`probe heartbeat refused: ${error.message}`);
     }
@@ -591,7 +630,7 @@ export class OnlyneAgent {
     const task = stdinTaskText(args);
     if (task) {
       // The no-`inject` route: the host hands the payload over as a config key.
-      this.log("task body received through config_get/stdin");
+      this.notice("in", `stdin task: ${headOf(task.text)}`);
       this.surface.wakeUser?.(`[onlyne] task body (delivered as stdin):\n\n${task.text}`, []);
       return;
     }
@@ -601,7 +640,7 @@ export class OnlyneAgent {
   async onRecycle(args) {
     this.stats.recycles += 1;
     const taskId = args.task_id ?? this.activeTaskId();
-    this.log(`recycle task=${taskId ?? "?"} reason=${args.reason ?? "?"} outcome=${args.outcome ?? "-"}`);
+    this.notice("state", `recycled: ${args.reason ?? "operator"}`);
     if (taskId && args.outcome && this.tasks.get(taskId) && !this.tasks.get(taskId).completed) {
       await this.complete(taskId, args.outcome, `recycled: ${args.reason ?? "operator"}`, {
         exitProcess: false,
@@ -746,10 +785,11 @@ export class OnlyneAgent {
         const reason = headOf(input.reason);
         if (input.force !== true || !reason) {
           this.log(refusal);
+          this.notice("warn", refusal);
           throw new Error(`onlyne: ${refusal}`);
         }
         head = headOf(`${FORCED_PREFIX}${reason}${explicit ? ` | ${explicit}` : ""}`);
-        this.log(`relay guard waived for ${taskId}: ${reason}`);
+        this.notice("warn", `relay guard waived: ${reason}`);
       }
     }
     return this.complete(taskId, normalizeOutcome(input.outcome), head);
@@ -781,15 +821,15 @@ export class OnlyneAgent {
     const report = completeReport({ taskId, outcome: normalized, head: summary });
     if (!this.connected) {
       this.pendingCompletion = { taskId, report, outcome: normalized, exitProcess };
-      this.surface.status?.(`onlyne: ${taskId.slice(0, 8)} ${normalized} (queued)`);
-      this.log(`completion for ${taskId} queued: socket is down`);
+      this.activity.set({ taskId, phase: `${normalized} queued` });
+      this.notice("warn", `complete ${taskId.slice(0, 8)} ${normalized} queued: socket down`);
       return { taskId, outcome: normalized, head: summary, queued: true };
     }
     await this.request("report", report);
     this.stats.completions += 1;
-    this.surface.status?.(`onlyne: ${taskId.slice(0, 8)} ${normalized}`);
     this.surface.customEntry?.("onlyne-complete", { taskId, outcome: normalized, head: summary });
-    this.log(`completion ${taskId} ${normalized} head=${JSON.stringify(summary.slice(0, 60))}`);
+    this.activity.set({ taskId: this.activeTaskId() ?? null, phase: normalized });
+    this.notice("out", `complete ${taskId.slice(0, 8)} ${normalized}${summary ? `: ${summary}` : ""}`);
     if (this.activeTasks().length === 0) {
       if (exitProcess) {
         await this.reportSettled(taskId, normalized).catch((error) =>
@@ -841,7 +881,6 @@ export class OnlyneAgent {
     }));
     this.stats.reports += 1;
     this.lastPhase = "idle";
-    this.log(`settled observation for ${taskId}: agent idle, outcome ${outcome}`);
     return true;
   }
 
@@ -852,7 +891,8 @@ export class OnlyneAgent {
     try {
       await this.request("report", pending.report);
       this.stats.completions += 1;
-      this.log(`queued completion for ${pending.taskId} flushed after reconnect`);
+      this.activity.set({ taskId: this.activeTaskId() ?? null, phase: pending.outcome });
+      this.notice("out", `complete ${pending.taskId.slice(0, 8)} ${pending.outcome} flushed after reconnect`);
       if (pending.exitProcess && this.activeTasks().length === 0) {
         await this.reportSettled(pending.taskId, pending.outcome).catch((error) =>
           this.log(`settled observation refused: ${error.message}`),
@@ -903,7 +943,7 @@ export class OnlyneAgent {
       const bytes = Buffer.from(image.data_base64, "base64");
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       writeFileSync(path, bytes, { mode: 0o600 });
-      this.log(`attachment written to ${path} (${bytes.length} bytes)`);
+      this.notice("state", `attachment ${basename(path)}`);
       return [{ path, part: { type: "image", mime, data: image.data_base64, name } }];
     } catch (error) {
       this.log(`attachment write failed: ${error.message}`);

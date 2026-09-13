@@ -1,5 +1,40 @@
 # Changelog
 
+## [pi-onlyne 1.1.0] - 2026-09-13
+
+Scope: `plugins/onlyne-agent-pi` only, published to npm. Every crate stays at 1.0.2.
+
+### Added
+
+- plugin: an `onlyne` activity widget now carries the routine notices, so a role
+  session reads its own message traffic off one panel
+  (`src/activity.mjs`: panel key `onlyne`, eight lines capped at 96 columns, six
+  events shown of sixty-four kept). The header names role, connection state,
+  generation, and the active task with its phase; events are timestamped and
+  marked `<=` inbound, `=>` outbound, `!!` warning, `..` state, `~~` duplicate,
+  and a run of identical events folds to a trailing ` xN`. `OnlyneAgent.notice` is the single
+  funnel: with a widget on the surface it writes the panel, without one it keeps
+  the previous channel pair (footer status line plus a `[pi-onlyne]` stderr line).
+  `log` stays reserved for the things that need a reader outside the panel —
+  relay-guard refusals, socket errors, timeouts, framing faults — and
+  `wakeUser`, `proseContext` and the completion exit are untouched.
+  `available.widget` gates on `ctx.hasUI` and `ui.setWidget`, so print and JSON
+  modes keep the stderr channel.
+- plugin: `README` pairs document the panel and the npm install route
+  (`pi install npm:pi-onlyne`, `npm:pi-onlyne@<version>` to pin one), and the
+  vendored path in the install snippets now matches what `onlyne server generate`
+  actually writes — `.onlyne/agent/onlyne-agent-pi`, named from the `agent_package`
+  directory (`crates/onlyne-server/src/generate.rs`, `agent_name`).
+
+### Fixed
+
+- plugin: a reconnect names its task in the panel header from the first beat, from
+  the same `activeTaskId()` lookup the `assign`-skip decision uses, with the
+  assignment still queued behind the handshake.
+- tests: the `hello` assertion in `agent.test.mjs` reads the version out of the
+  package's own `package.json` (the convention `protocol.test.mjs` already used),
+  so a release bump travels once.
+
 ## [1.0.2] - 2026-09-13
 
 Scope: `onlyne-client` only. Every other crate stays at 1.0.1.
