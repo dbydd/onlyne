@@ -1322,7 +1322,15 @@ fn repair_fail_settles_the_task_and_publishes_a_fault_event() {
     .expect("repair")
     .expect("accepted");
     assert!(fixture.state.event_head() > head_before);
-    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Rejected);
+    let dispatched = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.kind == MsgKind::Task && row.task.as_deref() == Some(task_id.as_str()))
+        .expect("the task's dispatch row");
+    assert_eq!(
+        dispatched.state,
+        LedgerState::Rejected,
+        "the dispatch row settles as the repair verb records"
+    );
     let row = projection::session_row(&fixture.state, &task_id)
         .expect("row")
         .expect("a row");
@@ -1338,6 +1346,59 @@ fn repair_fail_settles_the_task_and_publishes_a_fault_event() {
     )
     .expect("query");
     assert!(open.is_empty());
+}
+
+/// A repair close settles the server's rows. The process doing the work lives
+/// on the client, so the close now also files the `cancel` the owner pulls: the
+/// difference between a settled ledger and a stopped agent.
+#[test]
+fn repair_close_files_a_cancel_its_owner_can_pull() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let task_id = outcome.receipt.task.clone().expect("task");
+    projection::session_sync(
+        &fixture.state,
+        "builder",
+        &SessionSyncArgs {
+            task_id: task_id.clone(),
+            session_id: "sess-1".to_string(),
+            generation: 1,
+            seq: 1,
+            projection: SessionProjection::default_working(),
+        },
+    )
+    .expect("sync");
+
+    let body = faults::repair(
+        &fixture.state,
+        &AdminOp::RepairClose(RepairTarget {
+            task_id: task_id.clone(),
+            reason: Some("operator close".into()),
+        }),
+    )
+    .expect("repair")
+    .expect("accepted");
+    assert_eq!(body["lifecycle"], "exited");
+
+    let pulled = relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+    let control = pulled
+        .deliveries
+        .iter()
+        .find(|delivery| delivery.envelope.kind == MsgKind::Control)
+        .expect("the retire command is queued for the role that owns the task");
+    assert_eq!(
+        control.envelope.control,
+        Some(ControlOp::Cancel {
+            task_id: task_id.clone(),
+            reason: "operator close".into(),
+        }),
+        "the pulled row carries the command and the reason the operator typed"
+    );
+    assert!(
+        control.envelope.validate().is_ok(),
+        "the rebuilt envelope is a control delivery a client can accept"
+    );
 }
 
 #[test]

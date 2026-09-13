@@ -213,11 +213,15 @@ struct HandoffCmd {
 struct ControlCmd {
     #[command(flatten)]
     sender: verbs::SenderArgs,
-    /// Task id the control op targets.
-    #[arg(long)]
-    task: String,
+    /// Task id the control op targets. Global so the command reads in either
+    /// order: `control --task X cancel` and `control cancel --task X`. clap
+    /// refuses a global argument that is also required — it panics the whole
+    /// parse in a debug build — so the "every control op names a task" rule (D12)
+    /// is checked at runtime, where a missing one still exits 2.
+    #[arg(long, global = true)]
+    task: Option<String>,
     /// Role the control op targets; omitted means the role that owns the task.
-    #[arg(long)]
+    #[arg(long, global = true)]
     to: Option<String>,
     /// The control op to drive.
     #[command(subcommand)]
@@ -356,7 +360,10 @@ fn run() -> i32 {
                 ControlVerb::Snapshot => ("snapshot", None),
                 ControlVerb::Cancel(args) => ("cancel", Some(args.reason)),
             };
-            let op = match verbs::build_control_op(name, cmd.task, reason.clone()) {
+            let Some(task) = cmd.task else {
+                return runtime::usage_error("onlyne: control needs --task <id>");
+            };
+            let op = match verbs::build_control_op(name, task, reason.clone()) {
                 Ok(op) => op,
                 Err(message) => return runtime::usage_error(message),
             };

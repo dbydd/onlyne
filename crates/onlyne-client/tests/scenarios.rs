@@ -8,8 +8,8 @@ use onlyne_client::{
     accept::AcceptPath,
     adapter_socket::AdapterSocket,
     dispatch::{
-        ClientLink, DispatchState, ReadyNotice, dispatch, missing_capability, on_plugin_report,
-        on_ready, on_recycled, plugin_gap, projection_of, session_alive,
+        ClientLink, DispatchState, ReadyNotice, dispatch, missing_capability, on_control,
+        on_plugin_report, on_ready, on_recycled, plugin_gap, projection_of, session_alive,
     },
     init::{InitArgs, init, legacy_error_code},
     intent::{IntentMachine, IntentResult, op_for_intent, permanent_error},
@@ -22,8 +22,8 @@ use onlyne_net::{
     table_from,
 };
 use onlyne_proto::{
-    AdapterMsg, AgentMount, AssignAckArgs, Capability, ClientOp, Delivery, DetachArgs, Envelope,
-    ErrorCode, Frame, HelloArgs, HostOp, Lifecycle, Mount, MountKind, MsgKind, Outcome,
+    AdapterMsg, AgentMount, AssignAckArgs, Capability, ClientOp, ControlOp, Delivery, DetachArgs,
+    Envelope, ErrorCode, Frame, HelloArgs, HostOp, Lifecycle, Mount, MountKind, MsgKind, Outcome,
     PROTOCOL_VERSION, PluginOp, QueryRolesArgs, Receipt, Report, ResBody, Welcome, new_envelope,
     new_task_id,
 };
@@ -2048,4 +2048,90 @@ async fn an_idle_session_whose_plugin_left_is_not_reused() {
     );
     let _second_io = mount_plugin(&socket, Some(&second_task)).await;
     host.abort();
+}
+
+/// Whether one pid still names a process this test can signal.
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// The control plane's reason to exist, in the shape the field reported it: an
+/// operator settles a task, and the process doing the work goes with it. A
+/// delivered `control` row used to reach no consumer at all, so the agent kept
+/// writing the shared surface minutes after `repair close` reported `exited`.
+#[tokio::test]
+async fn a_delivered_cancel_stops_the_session_process() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["sleep".into(), "120".into()],
+        1,
+        false,
+        Arc::new(onlyne_session::backend::exec::ExecBackend::new()),
+        store,
+    );
+
+    let envelope = sample_envelope("planner", "run the batch");
+    let task_id = envelope.task_id().unwrap().to_string();
+    let session = dispatch(&state, &envelope).unwrap();
+    let pid = session.backend_ref["pid"]
+        .as_u64()
+        .expect("the exec reference carries its pid") as u32;
+    assert!(pid_alive(pid), "the session process is running");
+
+    let held = on_control(
+        &state,
+        &ControlOp::Cancel {
+            task_id: task_id.clone(),
+            reason: "operator close".into(),
+        },
+    )
+    .await
+    .expect("the command is applied");
+    assert!(held, "the command names a session this client holds");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    while pid_alive(pid) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!pid_alive(pid), "pid {pid} outlived its cancelled task");
+    assert_eq!(state.session_count(), 0, "the slot came back");
+}
+
+/// A command for a task this role never held has nothing to act on. It settles
+/// as delivered rather than staying in flight: an operator's `control` reporting
+/// itself as undelivered forever is a worse answer than the true one.
+#[tokio::test]
+async fn a_cancel_for_an_unknown_task_creates_no_session() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["sleep".into(), "120".into()],
+        1,
+        false,
+        Arc::new(onlyne_session::backend::exec::ExecBackend::new()),
+        store,
+    );
+
+    let held = on_control(
+        &state,
+        &ControlOp::Recycle {
+            task_id: new_task_id(),
+            reason: "nothing to retire".into(),
+        },
+    )
+    .await
+    .expect("a command with no subject is applied, not refused");
+    assert!(!held, "this role holds no such task");
+    assert_eq!(state.session_count(), 0, "a command spawns no session");
 }

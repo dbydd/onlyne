@@ -13,9 +13,9 @@ use chrono::{DateTime, Utc};
 use onlyne_config::Spec;
 use onlyne_net::{MsgClass, acl_allows};
 use onlyne_proto::{
-    AckArgs, Body, Causality, Delivery, Envelope, ErrorCode, Event, LedgerQuery, LedgerState,
-    LedgerStateEvent, MsgKind, OP_ID_CONFLICT_MESSAGE, Outcome, PROTOCOL_VERSION, Presence,
-    Principal, PullArgs, PullReply, Receipt, ResBody, RolePresence,
+    AckArgs, Body, Causality, ControlOp, Delivery, Envelope, ErrorCode, Event, LedgerQuery,
+    LedgerState, LedgerStateEvent, MsgKind, OP_ID_CONFLICT_MESSAGE, Outcome, PROTOCOL_VERSION,
+    Presence, Principal, PullArgs, PullReply, Receipt, ResBody, RolePresence,
 };
 use onlyne_store::{Append, LedgerRow};
 use serde_json::Value;
@@ -380,6 +380,12 @@ pub fn send(
         return Ok(RelayReply::Rejected(reject));
     }
     let online = state.is_connected(to_role.as_str());
+    // A control row keeps its command in the body, because the ledger has no
+    // column for `Envelope::control` and `pull` rebuilds the envelope from the
+    // row alone. Normalizing before the fingerprint keeps the stored bytes and
+    // the dedupe key describing the same envelope.
+    let routed = encode_control_body(routed);
+    let envelope = &routed;
     if envelope.kind == MsgKind::Note && !spec.server.note_queue && !online {
         return Ok(RelayReply::Rejected(RelayReject::new(
             ErrorCode::RecipientOffline,
@@ -598,6 +604,7 @@ pub fn delivery_from(row: &LedgerRow) -> anyhow::Result<Delivery> {
         Some(text) => serde_json::from_str(text).context("decode ledger body")?,
         None => Body::default(),
     };
+    let control = control_from_row(row.kind, &body, row.task.as_deref());
     let causality = row.task.as_ref().map(|task| Causality {
         task: task.clone(),
         parent_task: row.parent_task.clone(),
@@ -614,7 +621,7 @@ pub fn delivery_from(row: &LedgerRow) -> anyhow::Result<Delivery> {
             kind: row.kind,
             from,
             to,
-            control: None,
+            control,
             causality,
             body,
             ts: parse_time(&row.enqueued_at),
@@ -622,6 +629,53 @@ pub fn delivery_from(row: &LedgerRow) -> anyhow::Result<Delivery> {
             admin: false,
         }),
     })
+}
+
+/// Store a control command's body as the serialized op.
+///
+/// The op is what the owning client acts on, and the ledger's columns carry the
+/// task id, not the command. Any other kind keeps the body the sender wrote.
+fn encode_control_body(mut envelope: Envelope) -> Envelope {
+    if envelope.kind != MsgKind::Control {
+        return envelope;
+    }
+    let Some(op) = envelope.control.clone() else {
+        return envelope;
+    };
+    let Ok(text) = serde_json::to_string(&op) else {
+        return envelope;
+    };
+    envelope.body = Body::text(text);
+    envelope
+}
+
+/// Recover the command one row carries, for the envelope `pull` hands over.
+///
+/// A row written by this server holds the serialized op. A row an older server
+/// wrote holds the op name alone, which still names the command; its reason is
+/// empty, and the task comes from the row. Anything else is not a control row.
+fn control_from_row(kind: MsgKind, body: &Body, task: Option<&str>) -> Option<ControlOp> {
+    if kind != MsgKind::Control {
+        return None;
+    }
+    let text = body.text.as_deref()?;
+    if let Ok(op) = serde_json::from_str::<ControlOp>(text) {
+        return Some(op);
+    }
+    let task_id = task?.to_string();
+    match text {
+        "probe" => Some(ControlOp::Probe { task_id }),
+        "snapshot" => Some(ControlOp::Snapshot { task_id }),
+        "recycle" => Some(ControlOp::Recycle {
+            task_id,
+            reason: String::new(),
+        }),
+        "cancel" => Some(ControlOp::Cancel {
+            task_id,
+            reason: String::new(),
+        }),
+        _ => None,
+    }
 }
 
 /// Re-queue a role's in-flight rows when its connection drops.
@@ -777,4 +831,98 @@ pub fn task_origin(state: &State, task_id: &str) -> Option<String> {
         .find(|row| row.kind == MsgKind::Task)
         .and_then(|row| row.sender().ok())
         .and_then(|sender| sender.role_name().map(str::to_string))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task() -> String {
+        "11111111-2222-4222-8222-000000000001".to_string()
+    }
+
+    fn control(body: &str, op: Option<ControlOp>) -> Envelope {
+        Envelope {
+            protocol: PROTOCOL_VERSION,
+            id: "m".into(),
+            op_id: Some("o".into()),
+            kind: MsgKind::Control,
+            from: Principal::role("supervisor"),
+            to: Principal::role("builder"),
+            control: op,
+            causality: Some(Causality::root(task())),
+            body: Body::text(body),
+            ts: Utc::now(),
+            ttl_ms: None,
+            admin: false,
+        }
+    }
+
+    /// The round trip one `pull` depends on: the row holds the command, and the
+    /// rebuilt envelope is a valid control delivery the client can act on.
+    #[test]
+    fn a_stored_control_row_carries_its_command_back_out() {
+        let op = ControlOp::Cancel {
+            task_id: task(),
+            reason: "operator close".into(),
+        };
+        let encoded = encode_control_body(control("cancel", Some(op.clone())));
+        let decoded = control_from_row(MsgKind::Control, &encoded.body, Some(task().as_str()));
+        assert_eq!(
+            decoded,
+            Some(op),
+            "the reason the operator typed survives the ledger"
+        );
+    }
+
+    /// A row an older server wrote names the command and nothing else. It still
+    /// reaches the client as a control envelope, with the empty reason the row is
+    /// all that can support.
+    #[test]
+    fn a_legacy_control_row_decodes_from_its_op_name() {
+        for (name, expected) in [
+            ("probe", ControlOp::Probe { task_id: task() }),
+            ("snapshot", ControlOp::Snapshot { task_id: task() }),
+            (
+                "recycle",
+                ControlOp::Recycle {
+                    task_id: task(),
+                    reason: String::new(),
+                },
+            ),
+            (
+                "cancel",
+                ControlOp::Cancel {
+                    task_id: task(),
+                    reason: String::new(),
+                },
+            ),
+        ] {
+            let body = Body::text(name);
+            assert_eq!(
+                control_from_row(MsgKind::Control, &body, Some(task().as_str())),
+                Some(expected),
+                "{name} names its command"
+            );
+        }
+        let body = Body::text("task");
+        assert_eq!(
+            control_from_row(MsgKind::Control, &body, Some(task().as_str())),
+            None,
+            "a word outside the control vocabulary decodes to nothing"
+        );
+    }
+
+    /// Any other kind keeps the body its sender wrote, untouched by the encode.
+    #[test]
+    fn a_task_row_keeps_the_body_its_sender_wrote() {
+        let mut envelope = control("real work", None);
+        envelope.kind = MsgKind::Task;
+        let encoded = encode_control_body(envelope.clone());
+        assert_eq!(encoded.body.text.as_deref(), Some("real work"));
+        assert_eq!(
+            control_from_row(MsgKind::Task, &envelope.body, Some(task().as_str())),
+            None
+        );
+    }
 }

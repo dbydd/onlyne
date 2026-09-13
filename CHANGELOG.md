@@ -1,5 +1,76 @@
 # Changelog
 
+## [1.0.4] - 2026-09-13
+
+Scope: the control plane. `onlyne-server` 1.0.3 → 1.0.4, `onlyne-client` 1.0.2 →
+1.0.3, `onlyne-session` 1.0.1 → 1.0.2, `onlyne-cli` 1.0.1 → 1.0.2, all published
+where the crate is on crates.io. `onlyne-proto` stays at 1.0.1: the wire types did
+not change, only what the ledger stores in a row it already had.
+
+### Fixed
+
+- server: a `control` row lost its command on the way to the client. The ledger
+  keeps no column for `Envelope::control`, so `relay::delivery_from` rebuilt every
+  pulled control delivery with `control: None`, and the client's own validation
+  refused it: `control kind requires a control op`. `onlyne control … cancel`,
+  `recycle`, `probe`, and `snapshot` settled `rejected` and stopped nothing. The
+  send path now stores the serialized op in the row body and the rebuild reads it
+  back; a row an older server wrote, whose body carries the op name alone, still
+  decodes, with the empty reason that row can support. Live case: two `snapshot`
+  commands against the same task, both `rejected`, both processes running.
+- client: a delivered control command had no consumer. `accept_delivery` staged a
+  `control` row exactly as it stages a task, so a cancel aimed at a full role could
+  spawn a session instead of freeing one. Control is now applied before the
+  `max_sessions` and `accept_new` gates: `recycle` and `cancel` tell the plugin
+  where it implements `recycle`, then close the backend resource with
+  `CloseReason::Operator` or `Cancelled`; `probe` asks the plugin for a heartbeat
+  and republishes the projection; `snapshot` republishes alone. The row settles
+  either way, including for a task this role does not hold, because a command no
+  client can act on must not stay in flight forever.
+- session: the `exec` backend stopped a session by signalling its leader pid
+  alone. Every exec session leads its own process group (`process_group(0)` at
+  spawn), and the work an agent starts runs inside that group, so a close killed
+  the agent and left its driver running under no owner. The close now sends `TERM`
+  to the group and, past the grace window, `KILL` to the group, with the single-pid
+  send as the fallback when no group answers. Regression: `close_stops_the_children
+  _the_session_started` fails against the old `stop` and passes against the new one.
+- server: `repair close` and `repair fail` settled the ledger while the work kept
+  running. Both now file the same `Cancel` an operator would send by hand, aimed at
+  the role that owns the task, through the admin path whose ACL bypass already
+  exists for control rows; a role that is offline applies it when its link returns.
+  The refusal is logged and never fails the repair: the settlement the operator
+  asked for already happened.
+- client: a `note` delivery created a session. A note carries no task, so it owns
+  none: §5's `note_queue` refuses one whose role is offline, and this is the
+  matching half on the receiving side — a note goes to the role's ready session as
+  a mid-task message, and a role with no running agent answers `rejected` with
+  `note has no live session to wake`. Reported as a three-way disagreement: the
+  server filtered queued notes from `pull`, the client rejected a note for naming no
+  task, and `onlyne send --note` started a session and made the text its first task.
+- cli: a verb that resolved its socket by walking upward chose the wrong
+  vocabulary. Both daemons name their socket `.onlyne/run/s`, the walk hardcoded
+  `Surface::Client`, and the `--socket` inference keyed on that same suffix, so
+  running `onlyne handoff` from inside a server root wrote `query_ledger` into the
+  admin socket and got back `unknown op query_ledger` — a verb that exists, on the
+  wrong surface. The surface now reads the daemon that owns the tree: `client.db`
+  beside the socket is a role workspace, `state.db` is a server root. Field cost:
+  the role-side handoff road was closed, and the ring ran on admin-issued
+  substitutes.
+- cli: `--from`, and `control`'s `--task`/`--to`, had to appear before the verb
+  they belong to, and the parse failure only suggested `--as`. They are global
+  flags now, so `onlyne control cancel --task X --from bench --reason r` reads the
+  way operators type it.
+
+### Known gaps this release leaves open
+
+- The group kill reaches a session's own group. A child that calls `setsid` joins
+  a new group and survives; that needs the recorded-peer-pid design below, not a
+  wider signal.
+- A plugin still does not report whether it consumed a `render_send`.
+- `ControlOp` has no message payload, and the client answers a control row with a
+  plain ack. A command that reports what it did would let the TUI's `C` key show
+  its result inline.
+
 ## [1.0.3] - 2026-09-13
 
 Scope: `onlyne-server` only, published to crates.io. `onlyne-client` stays at 1.0.2,
@@ -133,7 +204,7 @@ Pi adapter: `pi install npm:pi-onlyne` (1.0.0 speaks wire protocol 1).
 - repo: the stale `integrations/pi-onlyne` twin (pre-relay-guard code) is deleted;
   `plugins/onlyne-agent-pi` is the one canonical plugin source.
 
-## [Unreleased] — 1.0.2 candidates
+## [Unreleased] — next candidates
 
 - client: record the adapter socket peer pid (kernel `LOCAL_PEERCRED`, not the
   self-reported `mount.pid`) at `hello`, and make `recycle`/`cancel` teardown
@@ -149,9 +220,11 @@ Pi adapter: `pi install npm:pi-onlyne` (1.0.0 speaks wire protocol 1).
 - client: a takeover `hello` (same task_id, different kernel peer pid) bumps
   the session generation; reports carrying a stale generation are rejected
   with `conflict`, so two bodies cannot both write one session's history.
-- client: record the session process group and tear it down with a group kill,
-  so a `setsid`-detached subtree cannot outlive `recycle`/cancel (field report:
-  an ownerless `run_005_resume` stole eight minutes after a bypass cancel).
+- session: `exec` lands a `setsid`-detached subtree. 1.0.4 signals the group every
+  session leads at spawn, which covers the reported case (an agent's own driver
+  and training process); a child that calls `setsid` leaves the group and survives
+  the close (field report: an ownerless `run_005_resume` stole eight minutes after
+  a bypass cancel). Closing that needs a recorded subtree, not a wider signal.
 - client: inject `ONLYNE_WORKSPACE` (canonicalised) and base the template
   `session_command` on `cd "$ONLYNE_WORKSPACE"`, ending worktree-mismatch
   double scenes where a relative `cd` resolves in the wrong checkout.
@@ -164,10 +237,13 @@ Pi adapter: `pi install npm:pi-onlyne` (1.0.0 speaks wire protocol 1).
   `cancel`/`recycle` subcommands; `--from` is required on the admin surface
   and rejected on the client surface (`c243348` rule). Any future move of an
   option between top level and subcommand is a breaking change and lands here.
-- docs: the `repair_*` verbs settle ledger and fault rows only; they send no
-  signals. Killing a session's process goes through `control cancel|recycle`
-  so the backend close path (and its respawn policy) stays in the loop;
-  hand SIGTERMs on pane children invite terminal-level resurrection.
-- docs: on a control frame `to` is the executing role (which client carries
-  out the recycle/close), defaulting to the signer; a proxy cancel must pass
-  `--to <task owner>` explicitly, or the executing client rejects ownership.
+- docs: `repair close` and `repair fail` settle ledger and fault rows and then
+  file a `cancel` for the owning role (1.0.4), which is the path that closes the
+  resource; `repair adopt|rebind|retry|inspect|ack` still move rows and signal
+  nothing. Killing a pane's child by hand stays out of the contract: it skips the
+  backend close and its respawn policy, and a terminal-level resurrection follows.
+- docs: on a control frame `to` is the executing role (which client carries out
+  the recycle/close), defaulting to the signer; a proxy cancel must pass
+  `--to <task owner>` explicitly. 1.0.4 settles a command naming a task this role
+  does not hold as a delivered no-op, so the ownership *refusal* this line asks
+  for is still open, along with an answer that says what the command did.

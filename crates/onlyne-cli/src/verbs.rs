@@ -19,8 +19,9 @@ use crate::wire::{self, ExchangeError, Outbound};
 /// Sender flag shared by every verb that builds an `AdminSend` on the admin surface.
 #[derive(Debug, Clone, Default, clap::Args)]
 pub struct SenderArgs {
-    /// Sender role, required on the admin surface.
-    #[arg(long)]
+    /// Sender role, required on the admin surface. Global so it may follow the
+    /// verb it belongs to, which is where an operator reaches for it.
+    #[arg(long, global = true)]
     pub from: Option<String>,
 }
 

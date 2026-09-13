@@ -982,6 +982,51 @@ fn control_probe_does_not_require_reason() {
     );
 }
 
+/// Operators type the task on the verb's tail: `control cancel --task X`. clap
+/// carries `--task` and `--from` as globals, so both readings parse.
+#[test]
+fn control_flags_read_after_the_verb() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "control",
+            "cancel",
+            "--task",
+            CONTROL_TASK,
+            "--reason",
+            "rotate",
+            "--from",
+            "bench",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_NO_SOCKET),
+        "flags after the verb must pass clap: {}",
+        stderr_of(&output)
+    );
+}
+
+/// A control op names a task (D12). The check moved from clap to the verb, so it
+/// still exits 2 and still names the flag.
+#[test]
+fn control_without_task_names_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args(["control", "probe", "--from", "bench"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("--task"),
+        "a control op without a task names the flag: {stderr}"
+    );
+}
+
 /// `control cancel --help` and `control recycle --help` list `--reason`.
 /// `control probe --help` does not.
 #[test]

@@ -415,6 +415,13 @@ fn transient(error: &onlyne_net::NetError) -> bool {
 /// always-running agent takes: it attaches first and receives its assignment
 /// when a task arrives (plan §6 line 285).
 async fn accept_delivery(state: &RunState, delivery: &Delivery) {
+    // A control command acts on the work the role already holds, so it answers
+    // before the capacity gate and before the `accept_new` gate: a role at
+    // `max_sessions` is exactly the role whose operator wants to free.
+    if delivery.envelope.kind == onlyne_proto::MsgKind::Control {
+        settle_control(state, delivery).await;
+        return;
+    }
     if !state.dispatch.has_capacity() {
         // The row stays in flight on the server, which offers it again when a
         // session frees (plan §5 `max_sessions`).
@@ -429,6 +436,20 @@ async fn accept_delivery(state: &RunState, delivery: &Delivery) {
             op_id: None,
             accepted: true,
             reason: None,
+        });
+        return;
+    }
+    // A `Note` names no task, so it starts no session: it is the wake-up a role
+    // sends to a running agent (§3), and an agent that does not exist yet has
+    // nothing to wake. §5's `note_queue` keeps one out of the queue when its
+    // role is offline, and this is the matching half on the receiving side.
+    if delivery.envelope.kind == onlyne_proto::MsgKind::Note {
+        let injected = state.dispatch.inject_note(&delivery.envelope).await;
+        state.dispatch.push_settled(AckArgs {
+            msg_id: delivery.msg_id.clone(),
+            op_id: None,
+            accepted: injected,
+            reason: (!injected).then(|| "note has no live session to wake".to_string()),
         });
         return;
     }
@@ -460,6 +481,45 @@ async fn accept_delivery(state: &RunState, delivery: &Delivery) {
                 accepted: false,
                 reason: Some(error.to_string()),
             });
+        }
+    }
+}
+
+/// Apply one delivered control command and settle its row.
+///
+/// The row settles whether or not this role still holds the task it names. A
+/// command whose session already ended has nothing left to act on, and leaving
+/// the row in flight would report an operator's `control` as undelivered.
+async fn settle_control(state: &RunState, delivery: &Delivery) {
+    let ack = |accepted: bool, reason: Option<String>| AckArgs {
+        msg_id: delivery.msg_id.clone(),
+        op_id: None,
+        accepted,
+        reason,
+    };
+    let Some(op) = delivery.envelope.control.clone() else {
+        tracing::warn!(msg_id = %delivery.msg_id, "control delivery carried no command");
+        state.dispatch.push_settled(ack(
+            false,
+            Some("control delivery carried no control op".to_string()),
+        ));
+        return;
+    };
+    match dispatch::on_control(&state.dispatch, &op).await {
+        Ok(held) => {
+            tracing::info!(
+                op = op.name(),
+                task = %op.task_id(),
+                held,
+                "control command applied"
+            );
+            state.dispatch.push_settled(ack(true, None));
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, op = op.name(), "control command refused");
+            state
+                .dispatch
+                .push_settled(ack(false, Some(error.to_string())));
         }
     }
 }

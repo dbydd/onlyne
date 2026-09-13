@@ -5,10 +5,10 @@ use onlyne_adapter::AdapterIo;
 use onlyne_net::conn::{ClientConn, ConnReadiness, dial};
 use onlyne_net::{ConnSettings, KeyPair, NetError};
 use onlyne_proto::{
-    AckArgs, AdapterMsg, AgentPhase, AssignArgs, Body, Capability, Causality, ClientOp,
+    AckArgs, AdapterMsg, AgentPhase, AssignArgs, Body, Capability, Causality, ClientOp, ControlOp,
     DeliveryPhase, Envelope, Frame, HandshakeArgs, HostOp, Lifecycle, MsgKind, Outcome,
-    PROTOCOL_VERSION, Principal, RecoveryPhase, Report, ResBody, ResourcePhase, SessionProjection,
-    SessionSyncArgs, Welcome, new_envelope,
+    PROTOCOL_VERSION, Principal, RecoveryPhase, RecycleArgs, Report, ResBody, ResourcePhase,
+    SessionProjection, SessionSyncArgs, Welcome, new_envelope,
 };
 use onlyne_session::{
     Bridge, IgnoredReason, LifecycleEvent, Observation, SessionBackend, SessionLedger,
@@ -358,6 +358,56 @@ impl DispatchState {
         inner.transports.get(&key).cloned()
     }
 
+    /// Whether one task names a session this client holds, in memory or in its
+    /// durable session rows.
+    pub fn holds_task(&self, task_id: &str) -> bool {
+        let inner = self.inner.lock();
+        inner
+            .sessions
+            .values()
+            .any(|slot| slot.task_id.as_deref() == Some(task_id))
+            || inner.store.get_session(task_id).ok().flatten().is_some()
+    }
+
+    /// Tell the plugin serving one session to tear itself down, when that plugin
+    /// implements `recycle`. A plugin without the capability is skipped: the
+    /// caller's backend close stops the process either way.
+    pub async fn recycle_plugin(&self, task_id: &str, reason: &str, outcome: Option<Outcome>) {
+        let Some((io, capabilities)) = self.session_transport(task_id) else {
+            return;
+        };
+        if missing_capability(&capabilities, Capability::Recycle) {
+            tracing::debug!(
+                task = %task_id,
+                "plugin does not implement recycle; the host closes the resource"
+            );
+            return;
+        }
+        let args = RecycleArgs {
+            task_id: task_id.to_string(),
+            reason: reason.to_string(),
+            outcome,
+        };
+        if let Err(error) = io.notify(AdapterMsg::Host(HostOp::Recycle(args))).await {
+            tracing::warn!(error = %error, task = %task_id, "recycle frame did not reach the plugin");
+        }
+    }
+
+    /// Ask the plugin serving one session for a fresh observation.
+    ///
+    /// The plugin answers with a heartbeat report, which is the reducer's
+    /// evidence and the projection the operator reads. A session whose plugin is
+    /// gone gets no frame, and the republished projection is what says so.
+    pub async fn probe_plugin(&self, task_id: &str) {
+        let Some((io, _)) = self.session_transport(task_id) else {
+            return;
+        };
+        let request = serde_json::json!({"task_id": task_id});
+        if let Err(error) = io.notify(AdapterMsg::Host(HostOp::Probe(request))).await {
+            tracing::warn!(error = %error, task = %task_id, "probe frame did not reach the plugin");
+        }
+    }
+
     /// A plugin connection ended and stops serving whatever it bound.
     ///
     /// An idle slot is exactly what `reuse` would hand the next task to, and it
@@ -448,6 +498,53 @@ impl DispatchState {
         };
         self.hand_session(session_id, io, capabilities).await?;
         Ok(true)
+    }
+
+    /// Hand one note to the session already serving this role's work.
+    ///
+    /// A note carries no task, so it owns no session: §3's note is a message to
+    /// an agent that is already running, and the plan refuses one whose role is
+    /// offline (`note_queue` off). A role with no running agent has nothing to
+    /// answer it, which is what the caller reports. Answers whether an agent
+    /// took the note.
+    pub async fn inject_note(&self, envelope: &Envelope) -> bool {
+        let Some((task_id, session_id)) = self.ready_session() else {
+            return false;
+        };
+        let Some((io, capabilities)) = self.session_transport(&session_id) else {
+            return false;
+        };
+        if missing_capability(&capabilities, Capability::Inject) {
+            tracing::debug!(task = %task_id, "plugin takes no message mid-task");
+            return false;
+        }
+        let generation = self.session_generation(&task_id).unwrap_or(1);
+        let assign = AssignArgs {
+            envelope: Box::new(envelope.clone()),
+            prose: self.role_prose(),
+            task_id,
+            generation,
+            parent: None,
+        };
+        io.notify(AdapterMsg::Host(HostOp::Assign(assign)))
+            .await
+            .is_ok()
+    }
+
+    /// The session a mid-task message can join: a ready slot serving a task,
+    /// answered as (task, session key).
+    fn ready_session(&self) -> Option<(String, String)> {
+        let inner = self.inner.lock();
+        inner
+            .sessions
+            .iter()
+            .find(|(_, slot)| slot.ready && slot.task_id.is_some())
+            .map(|(key, slot)| {
+                (
+                    slot.task_id.clone().unwrap_or_else(|| key.clone()),
+                    key.clone(),
+                )
+            })
     }
 
     /// Ask the server one question over the live link.
@@ -857,6 +954,42 @@ pub fn on_recycled(
 ) -> Result<()> {
     let mut inner = state.inner.lock();
     release_locked(&mut inner, task_id, Some(reason))
+}
+
+/// Act on one control command that arrived as a delivery.
+///
+/// `recycle` and `cancel` reach the agent first, so it ends its own turn and
+/// sends its terminal report, and the backend close follows whatever the plugin
+/// did: a session whose adapter is gone still loses its process, which is the
+/// half of §7's recovery ladder the operator drives by hand otherwise. `probe`
+/// asks the plugin for a fresh observation and republishes the projection the
+/// reducer already holds, and `snapshot` republishes alone.
+///
+/// Answers whether the command named a session this client holds. A `false` is
+/// the honest answer for a task this role does not own, and the caller still
+/// settles the row: re-offering a command no client can act on spends the
+/// delivery forever.
+pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
+    let task_id = op.task_id();
+    let held = state.holds_task(task_id);
+    match op {
+        ControlOp::Recycle { reason, .. } => {
+            state.recycle_plugin(task_id, reason, None).await;
+            on_recycled(state, task_id, onlyne_session::CloseReason::Operator)?;
+        }
+        ControlOp::Cancel { reason, .. } => {
+            state
+                .recycle_plugin(task_id, reason, Some(Outcome::Cancelled))
+                .await;
+            on_recycled(state, task_id, onlyne_session::CloseReason::Cancelled)?;
+        }
+        ControlOp::Probe { .. } => {
+            state.probe_plugin(task_id).await;
+            sync_session(state, task_id).await?;
+        }
+        ControlOp::Snapshot { .. } => sync_session(state, task_id).await?,
+    }
+    Ok(held)
 }
 
 /// Give one session's slot back, closing a live resource when the caller named a

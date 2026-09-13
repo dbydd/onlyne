@@ -83,19 +83,25 @@ impl ExecBackend {
             .ok_or_else(|| anyhow::anyhow!("exec session ref missing pid"))
     }
 
-    /// `SIGTERM` then, past the grace window, `SIGKILL`.
+    /// `SIGTERM` then, past the grace window, `SIGKILL` — aimed at the group.
+    ///
+    /// Every session leads its own process group (`process_group(0)` at spawn),
+    /// and the work an agent starts runs in that group's children: the driver
+    /// script, the training process rewriting the measured surface. Signalling
+    /// the leader alone stops the agent and leaves its children running under no
+    /// owner, which is the one thing a recycle must not produce. A negative pid
+    /// is `/bin/kill`'s spelling for a process group, and the leader's pid is the
+    /// group id. When the group send finds no group, the leader pid gets the
+    /// signal on its own, which is what reaps a child that outlived its work.
     fn stop(child: &mut Child, force: bool) -> Result<()> {
         if let Ok(Some(_)) = child.try_wait() {
             return Ok(());
         }
         let pid = child.id();
         if !force {
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            if !signal_group(pid, "TERM") {
+                signal_pid(pid, "TERM");
+            }
             let deadline = Instant::now() + TERMINATE_GRACE;
             while Instant::now() < deadline {
                 if let Ok(Some(_)) = child.try_wait() {
@@ -104,12 +110,35 @@ impl ExecBackend {
                 std::thread::sleep(REAP_POLL);
             }
         }
-        // The grace window elapsed (or the caller asked for force): the child is
-        // killed and reaped, so the session leaves no process behind.
+        // The grace window elapsed (or the caller asked for force): the group is
+        // killed, the leader is reaped, and the session leaves no process behind.
+        signal_group(pid, "KILL");
         let _ = child.kill();
         let _ = child.wait();
         Ok(())
     }
+}
+
+/// Signal one session's whole process group, answering whether it worked.
+fn signal_group(pid: u32, signal: &str) -> bool {
+    Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(format!("-{pid}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Signal one process by pid.
+fn signal_pid(pid: u32, signal: &str) {
+    let _ = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 impl SessionBackend for ExecBackend {
@@ -367,6 +396,45 @@ mod tests {
             .close(&session, CloseReason::Shutdown, true)
             .unwrap();
         assert!(!backend.probe(&session).unwrap().alive);
+    }
+
+    /// The field shape this backend has to survive: an agent starts work of its
+    /// own, and closing the session stops that work too. Signalling the leader
+    /// pid alone leaves the `sleep` running under no owner — the reported case was
+    /// a driver script that kept rewriting the measured surface minutes after its
+    /// session was closed.
+    #[test]
+    fn close_stops_the_children_the_session_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("grandchild");
+        let backend = ExecBackend::new();
+        let script = format!(
+            "sleep 120 & printf '%s' \"$!\" > {}; wait",
+            marker.display()
+        );
+        let session = backend
+            .spawn(spec(dir.path(), "group", vec!["sh", "-c", &script]))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let grandchild = loop {
+            let reported = std::fs::read_to_string(&marker).unwrap_or_default();
+            if !reported.is_empty() {
+                break reported.trim().parse::<u32>().expect("a pid");
+            }
+            assert!(Instant::now() < deadline, "the child never reported");
+            std::thread::sleep(REAP_POLL);
+        };
+        backend
+            .close(&session, CloseReason::Operator, false)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ExecBackend::pid_alive(grandchild) && Instant::now() < deadline {
+            std::thread::sleep(REAP_POLL);
+        }
+        assert!(
+            !ExecBackend::pid_alive(grandchild),
+            "pid {grandchild} outlived the session that started it"
+        );
     }
 
     #[test]

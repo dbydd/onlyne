@@ -342,6 +342,7 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
                 &reason,
             )?;
             transition_task_faults(state, &fail.task_id, "failed", &reason)?;
+            retire_task_resource(state, &fail.task_id, &reason);
             Ok(Ok(json!({ "task_id": fail.task_id, "outcome": "failed" })))
         }
         AdminOp::RepairClose(target) => {
@@ -357,6 +358,7 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
                 &reason,
             )?;
             transition_task_faults(state, &target.task_id, "closed", &reason)?;
+            retire_task_resource(state, &target.task_id, &reason);
             Ok(Ok(
                 json!({ "task_id": target.task_id, "lifecycle": "exited" }),
             ))
@@ -395,6 +397,44 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
             "not a repair verb",
             Some("op"),
         ))),
+    }
+}
+
+/// Hand the owning client the command that stops what the operator settled.
+///
+/// A repair verb settles the server's rows, and the process doing the work lives
+/// on the client: without this the operator closes a task and the agent keeps
+/// writing to the shared surface. The row carries §7's `cancel` command, the same
+/// one `onlyne control` sends, so one client-side path serves both, and a role
+/// that is offline applies it when its link returns. A refusal here is reported,
+/// never fatal: the settlement the operator asked for already happened.
+fn retire_task_resource(state: &Arc<State>, task_id: &str, reason: &str) {
+    let Some(owner) = crate::relay::task_owner(state, task_id) else {
+        tracing::info!(task = %task_id, "no role owns the task, so no resource retires");
+        return;
+    };
+    let envelope = crate::router::control_envelope(
+        &owner,
+        &onlyne_proto::ControlOp::Cancel {
+            task_id: task_id.to_string(),
+            reason: reason.to_string(),
+        },
+        Some(&owner),
+    );
+    match crate::relay::send(state, &envelope, true, Some(owner.as_str())) {
+        Ok(reply) => {
+            let body = reply.body();
+            if !body.ok {
+                tracing::warn!(
+                    task = %task_id,
+                    error = ?body.error,
+                    "the retire command was not accepted"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, task = %task_id, "the retire command did not reach the ledger");
+        }
     }
 }
 
