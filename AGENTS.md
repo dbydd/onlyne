@@ -433,7 +433,7 @@ If you implement IPC framing, add regression tests for malformed messages and re
 
 ## 15. Git/worktree hygiene
 
-- work on `master`
+- work on `main`
 - do not leave temporary branches unless explicitly requested
 - do not leave random scratch files or benchmark junk behind
 - keep the repository clean
