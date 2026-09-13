@@ -1,6 +1,9 @@
 # Changelog
 
-## [Unreleased] — carried by the next bump
+## [1.0.3] - 2026-09-13
+
+Scope: `onlyne-server` only, published to crates.io. `onlyne-client` stays at 1.0.2,
+every other crate stays at 1.0.1.
 
 ### Fixed
 
@@ -13,13 +16,19 @@
   can still claim it (`State::delivery_ticket`). Live case: one task re-offered
   888 times into the same pi session in three minutes, each round acked `accepted`
   and nothing settling.
-- plugin (pi-onlyne 1.1.1): the injection guard keys the delivery, not the task.
-  A second envelope for a running task — a follow-up, a redirect, a bounce back
-  through a relay — is a delivery of its own and reaches the model, while the
-  work record it lands on keeps its counters and its delivered set. Keyed by the
-  task, that guard swallowed the follow-up and answered `duplicate`, which is
-  what kept the loop above alive: an accepted-but-never-completed ack settles
-  nothing.
+
+## [pi-onlyne 1.1.1] - 2026-09-13
+
+Scope: `plugins/onlyne-agent-pi` only, published to npm. Every crate stays where it is.
+
+### Fixed
+
+- plugin: the injection guard keys the delivery, not the task. A second envelope
+  for a running task — a follow-up, a redirect, a bounce back through a relay — is
+  a delivery of its own and reaches the model, while the work record it lands on
+  keeps its counters and its relay ledger. Keyed by the task, that guard swallowed
+  the follow-up and answered `duplicate`, which is what kept the loop above alive:
+  an accepted-but-never-completed ack settles nothing.
 
 ## [pi-onlyne 1.1.0] - 2026-09-13
 
