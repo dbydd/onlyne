@@ -301,11 +301,23 @@ async fn run_link(init: &ClientInit, link: &ClientLink, state: &RunState) -> Res
     flush_intents(link, state).await;
     subscribe(link, state.cursor()).await?;
     state.accept_new.store(true, Ordering::SeqCst);
-    reconcile_residuals(init, link, state).await?;
     let mut pull = tokio::spawn(pull_ack_loop(init.clone(), link.clone(), state.clone()));
     let mut flusher = tokio::spawn(flush_loop(link.clone(), state.clone()));
     let mut reader = tokio::spawn(read_events(link.clone(), state.clone()));
     let mut watcher = tokio::spawn(watch_readiness(link.clone(), state.clone()));
+    // The residual sweep can wait out `stale_grace_secs` for a plugin mount, so
+    // it sits behind the four loops: a restarted role pulls, flushes, and reads
+    // events from the moment its link is up. Its reports are advisory, so it
+    // runs detached and logs its own failure (field report: a client spawned at
+    // 13:46:51 logged `server link ready` at 13:51:51).
+    let sweep_init = init.clone();
+    let sweep_link = link.clone();
+    let sweep_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(error) = reconcile_residuals(&sweep_init, &sweep_link, &sweep_state).await {
+            tracing::warn!(error = %error, "residual reconcile ended with an error");
+        }
+    });
     tracing::info!(role = %init.role, "server link ready");
     tokio::select! {
         _ = &mut pull => {}

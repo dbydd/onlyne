@@ -692,6 +692,99 @@ fn a_requeue_publishes_exactly_one_ledger_state_event() {
     assert_eq!(ledger_state_events(&fixture.state).len(), before + 1);
 }
 
+/// Field case (server 1.0.5): a push at 13:48 landed while the departed client
+/// was dead and its replacement had not linked, so the row went `in_flight`
+/// behind a ticket the dead link had already skipped requeueing, and an operator
+/// SIGTERM of the new client was what returned it. The hello now owns that move.
+#[test]
+fn a_fresh_link_takes_over_rows_its_predecessor_never_delivered() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+    let task_id = outcome.receipt.task.clone().expect("task id");
+
+    // The departed link held the row: a role-level pull names no session, so it
+    // takes the queued row and arms the ticket the dead link never settled.
+    let handed = relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+    assert_eq!(handed.deliveries.len(), 1);
+    assert_eq!(handed.deliveries[0].msg_id, msg_id);
+    let rows = ledger_rows(&fixture.state);
+    let row = rows
+        .iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("the row the departed link held");
+    assert_eq!(row.state, LedgerState::InFlight);
+
+    let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
+    let mut session = router::Session::with_sender(sender, "builder");
+
+    let events_before = ledger_state_events(&fixture.state).len();
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let reply = runtime.block_on(router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(hello_args("builder")),
+    ));
+    assert!(reply.ok, "the hello should be accepted: {reply:?}");
+    assert_eq!(reply.data.expect("welcome")["role"], json!("builder"));
+
+    let registered = fixture
+        .state
+        .roles
+        .read()
+        .expect("roles read")
+        .current_generation("builder")
+        .expect("the hello keeps its registry entry");
+    assert_eq!(
+        registered, session.generation,
+        "the taking-over link stays the role's live link after the requeue"
+    );
+
+    let again = task("planner", "builder", "again");
+    let again_outcome = accepted(relay::send(&fixture.state, &again, false, None).expect("relay"));
+    let again_id = again_outcome.receipt.msg_id.clone();
+    let again_row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == again_id)
+        .expect("the second send wrote a row");
+    assert_eq!(
+        again_row.state,
+        LedgerState::InFlight,
+        "a row pushed to the new link is handed out because the link is still registered"
+    );
+
+    let rows = ledger_rows(&fixture.state);
+    let row = rows
+        .iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("the row survives the handoff");
+    assert_eq!(
+        row.state,
+        LedgerState::Queued,
+        "the new link's hello requeued the row its predecessor died holding"
+    );
+
+    // The dropped ticket is what makes the row claimable by the fresh session.
+    let pulled = relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-new"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    assert_eq!(pulled.deliveries.len(), 1);
+    assert_eq!(pulled.deliveries[0].msg_id, msg_id);
+    assert_eq!(
+        pulled.deliveries[0].envelope.task_id(),
+        Some(task_id.as_str())
+    );
+    assert!(
+        ledger_state_events(&fixture.state).len() > events_before,
+        "the handoff requeue reaches the observation plane"
+    );
+}
+
 #[test]
 fn replacement_session_reoffer_is_single_and_ack_closes_the_ticket() {
     let fixture = fixture();

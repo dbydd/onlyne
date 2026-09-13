@@ -678,13 +678,15 @@ fn control_from_row(kind: MsgKind, body: &Body, task: Option<&str>) -> Option<Co
     }
 }
 
-/// Re-queue a role's in-flight rows when its connection drops.
+/// Re-queue a role's in-flight rows and drop the tickets that hold them.
 ///
 /// `ServerLedger::requeue_one` moves one row and publishes its `ledger_state`
 /// event in the same transaction, so an operator watching the observation plane
-/// sees the requeue that follows a dropped link. A row that settled between the
-/// read and the move is left alone.
-pub fn disconnect(state: &State, role: &str) -> anyhow::Result<usize> {
+/// sees each requeue. A row that settled between the read and the move is left
+/// alone. The ticket drop is what makes a requeued row claimable: `pull` passes
+/// by a row whose ticket is still armed, so a row left holding a dead link's
+/// ticket is unreachable even though its state says it is in flight.
+pub fn requeue_role_rows(state: &State, role: &str) -> anyhow::Result<usize> {
     let mut requeued = 0usize;
     for row in state.ledger.in_flight_for(role)? {
         match state.ledger.requeue_one(&row.msg_id) {
@@ -694,6 +696,19 @@ pub fn disconnect(state: &State, role: &str) -> anyhow::Result<usize> {
         }
     }
     state.clear_deliveries(role);
+    Ok(requeued)
+}
+
+/// Re-queue a role's in-flight rows when its connection drops.
+///
+/// The row half is [`requeue_role_rows`]: `ServerLedger::requeue_one` moves one
+/// row and publishes its `ledger_state` event in the same transaction, so an
+/// operator watching the observation plane sees the requeue that follows a
+/// dropped link. A row that settled between the read and the move is left
+/// alone. The link half then unregisters the role and emits
+/// `Event::RolePresence { state: Presence::Offline }`.
+pub fn disconnect(state: &State, role: &str) -> anyhow::Result<usize> {
+    let requeued = requeue_role_rows(state, role)?;
     state.unregister_role(role);
     state.emit(Event::RolePresence(RolePresence {
         role: role.to_string(),

@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.0.5] - 2026-09-13
+
+Scope: the role link. `onlyne-server` 1.0.4 → 1.0.5, `onlyne-client` 1.0.3 →
+1.0.4, published to crates.io. `onlyne-session` stays at 1.0.2, `onlyne-cli` at
+1.0.2, every other crate unchanged.
+
+### Fixed
+
+- server: a row pushed into the gap between a role's death and its next `hello`
+  stayed in flight with no puller able to take it. A push marks its row
+  `in_flight` before the frame reaches a socket, the departed link's teardown
+  skips its requeue once the registry generation has moved past it, and a
+  role-level pull passes by a row whose ticket is still armed. The registry
+  keeps one link per role, so the `hello` that registers a link now requeues
+  that role's in-flight rows, which is the move a clean `bye` already makes:
+  row back to `queued`, ticket dropped, one `ledger_state` event per row. Field
+  report: a close-out ticket pushed at 13:48 landed in the window where the old
+  client was dead and the replacement had not linked, and an operator SIGTERM
+  of the new client was what returned the row to `queued`. A link flap now
+  re-delivers a role's unacknowledged rows at hello, where the client's `op_id`
+  dedup and its session-keyed slot keep that from running the work twice.
+- client: a restarted role took 300 seconds to start pulling. The residual
+  sweep waits out `stale_grace_secs` (300 by default) for a plugin mount when
+  the role holds residual acked working rows, and it ran inline ahead of the
+  pull, flush, event, and readiness loops, so a role came up with an
+  authenticated link and no delivery loop for five minutes (measured: spawn
+  13:46:51, `server link ready` 13:51:51). The sweep now runs detached once
+  those four loops are live, and it logs its own failure, leaving the link
+  serving.
+
 ## [1.0.4] - 2026-09-13
 
 Scope: the control plane. `onlyne-server` 1.0.3 → 1.0.4, `onlyne-client` 1.0.2 →
@@ -247,3 +277,15 @@ Pi adapter: `pi install npm:pi-onlyne` (1.0.0 speaks wire protocol 1).
   `--to <task owner>` explicitly. 1.0.4 settles a command naming a task this role
   does not hold as a delivered no-op, so the ownership *refusal* this line asks
   for is still open, along with an answer that says what the command did.
+- server: a push whose frame meets a dead socket learns about it from the next
+  `hello`. 1.0.5 requeues a role's in-flight rows when a new link registers,
+  which closes the reachability hole; the write that failed still leaves its
+  row in flight until a link arrives. A transport failure on the push path
+  could roll its own row back to `queued` at the point of failure, which
+  shortens the window to zero for a role that never reconnects. Field origin:
+  the 13:48 close-out ticket that needed an operator SIGTERM to surface.
+- client: one residual sweep per link. The sweep runs detached behind the four
+  link loops so a 300-second mount wait cannot stall delivery; a link that
+  drops mid-sweep leaves that sweep running until its grace window ends, and
+  the next link starts its own. Bounding it needs a cancellation token carried
+  by the sweep, and the reports it files stay advisory either way.

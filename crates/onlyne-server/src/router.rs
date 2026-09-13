@@ -326,6 +326,32 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
             draining: false,
             generation: 0,
         });
+        // The registry holds one link per role, so this hello says the link that
+        // carried any in-flight row of this role is gone. Requeue those rows and
+        // drop their tickets: a push marks its row `in_flight` before the frame
+        // reaches a socket, and a push issued while the role's death is still
+        // unprocessed leaves a row whose ticket names a connection that no longer
+        // exists. Nothing else reclaims it — the departed link's teardown skips
+        // its requeue once the registry generation has moved on, and `pull` passes
+        // by a row whose ticket is still armed. This is the row half of what a
+        // clean `bye` does; the link that is registering now keeps its registry
+        // entry and its `Online` presence below. A link flap therefore
+        // re-delivers the role's unacknowledged rows at hello, where the client's
+        // `op_id` dedup and its session-keyed slot are what keep that from running
+        // the work twice.
+        match relay::requeue_role_rows(state, &entry.role) {
+            Ok(requeued) if requeued > 0 => {
+                tracing::info!(
+                    role = %entry.role,
+                    requeued,
+                    "a new link took over rows its predecessor never delivered"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, role = %entry.role, "handoff requeue failed")
+            }
+        }
         let _ = state.emit(Event::RolePresence(RolePresence {
             role: entry.role.clone(),
             state: Presence::Online,
