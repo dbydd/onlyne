@@ -2,8 +2,16 @@
 
 ## [1.0.7] - 2026-09-14
 
-Scope: the queued note deadline. `onlyne-server` 1.0.6 → 1.0.7,
-`onlyne-store` 1.0.2 → 1.0.3. Every other crate stays where it is.
+Scope: the queued note deadline and the role link's write path. `onlyne-server`
+1.0.6 → 1.0.7, `onlyne-store` 1.0.2 → 1.0.3. Every other crate stays where it is.
+
+Both are on crates.io: `onlyne-store` 1.0.3 at 2026-09-14T01:35:17Z and
+`onlyne-server` 1.0.7 at 01:35:34Z, neither yanked. `publish` is a per-crate switch,
+so the workspace-level `publish = false` stays inert, and the two publishes ran as
+`cargo publish --allow-dirty --locked -p onlyne-store` then the same for
+`-p onlyne-server`. A fresh consumer project outside this workspace resolved
+`onlyne-server` 1.0.7 with `onlyne-store` 1.0.3 and `onlyne-proto` 1.0.2 from the
+registry and compiled them.
 
 ### Fixed
 
