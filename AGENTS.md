@@ -386,6 +386,7 @@ v1.0.0 delivery is complete when these are true:
 - verification case 11 proves the pi adapter plugin against a real client
 - verification case 12 proves a six-role ring handing one token twelve hops
 - verification case 13 proves the herdr backend on a live herdr session: workspace per server root, role tab, split pane, `control focus` reaching the session in the last slot, and drain keeping the tab's root pane
+- verification case 14 proves the server's heartbeat watch on real processes: a scripted session beats once and goes quiet while its role stays connected, and the server records `heartbeat_missing`, answers `heartbeat_stale` on the same row, and leaves the lifecycle `working` for the supervisor to settle
 
 When you work in this repository, always respect the task the user is asking for. When the current ask is planning or scaffolding, do not jump ahead.
 

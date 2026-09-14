@@ -25,6 +25,7 @@ pub const DEFAULT_CERT_PIN_PREFIX: &str = "sha256/";
 pub const DEFAULT_INTENT_ATTEMPTS: u32 = 3;
 pub const DEFAULT_BACKOFF_MS: [u64; 3] = [1_000, 2_000, 4_000];
 pub const DEFAULT_STALE_WATCH_SECS: u64 = 60;
+pub const DEFAULT_HEARTBEAT_GRACE_SECS: u64 = 90;
 pub const KEY_BYTE_LEN: usize = 32;
 pub const ALLOWED_PLACEHOLDERS: [&str; 2] = ["session", "task"];
 
@@ -58,6 +59,8 @@ pub struct ServerSection {
     pub heartbeat_timeout_ms: u64,
     #[serde(default = "default_stale_watch_secs")]
     pub stale_watch_secs: u64,
+    #[serde(default = "default_heartbeat_grace_secs")]
+    pub heartbeat_grace_secs: u64,
     #[serde(default)]
     pub agent_package: String,
     #[serde(default = "default_template_root")]
@@ -224,6 +227,7 @@ impl Default for ServerSection {
             resync_lag: default_resync_lag(),
             heartbeat_timeout_ms: default_heartbeat_timeout_ms(),
             stale_watch_secs: default_stale_watch_secs(),
+            heartbeat_grace_secs: default_heartbeat_grace_secs(),
             agent_package: String::new(),
             template_root: default_template_root(),
         }
@@ -486,6 +490,7 @@ fn locate_table_line(text: &str, field: &str) -> usize {
         "resync_lag",
         "heartbeat_timeout_ms",
         "stale_watch_secs",
+        "heartbeat_grace_secs",
         "agent_package",
         "template_root",
     ];
@@ -720,6 +725,10 @@ pub(crate) fn default_heartbeat_timeout_ms() -> u64 {
 }
 pub(crate) fn default_stale_watch_secs() -> u64 {
     DEFAULT_STALE_WATCH_SECS
+}
+
+pub(crate) fn default_heartbeat_grace_secs() -> u64 {
+    DEFAULT_HEARTBEAT_GRACE_SECS
 }
 
 pub(crate) fn default_template_root() -> String {

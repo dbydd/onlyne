@@ -4,10 +4,10 @@ use onlyne_config::{ClientEntry, MsgKindClass, Spec};
 use onlyne_net::{AclTable, MsgClass};
 use onlyne_proto::{Capability, ConversationInfo, Event, Frame, GatewayHealth};
 use onlyne_store::{RoleRow, ServerLedger};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{Notify, broadcast, mpsc};
 
 /// The shared runtime handle published by [`crate::serve`].
@@ -193,6 +193,8 @@ pub struct Server {
     pub root: PathBuf,
     pub acl: RwLock<Arc<AclTable>>,
     pub deliveries: RwLock<HashMap<String, DeliveryTicket>>,
+    /// Task ids that received an accepted session write since this process opened.
+    pub seen_sessions: Mutex<HashSet<String>>,
     pub expiries: RwLock<HashMap<String, DateTime<Utc>>>,
     pub channels: RwLock<HashMap<String, ChannelBinding>>,
     pub shutdown: Arc<Notify>,
@@ -224,6 +226,7 @@ impl Server {
             start_at: Utc::now(),
             root: init.root.clone(),
             deliveries: RwLock::new(HashMap::new()),
+            seen_sessions: Mutex::new(HashSet::new()),
             expiries: RwLock::new(HashMap::new()),
             channels: RwLock::new(HashMap::new()),
             shutdown: Arc::new(Notify::new()),
@@ -248,6 +251,31 @@ impl Server {
         }
         for (msg_id, deadline) in pending {
             server.note_expiry(&msg_id, deadline);
+        }
+        // Inherit the previous process's live working rows as seen. The heartbeat
+        // sweep trusts a row only after this process has reason to believe the
+        // session was live, and a row already `working` at open is exactly that
+        // reason: the pane that owns it ran under the last process. A live pane
+        // re-publishes inside one 10-second beat, so its `updated_at` turns fresh
+        // long before the grace elapses; a pane that died holding the row keeps
+        // its old `updated_at` and the sweep records `heartbeat_missing` once the
+        // owner reconnects. Without this seed, a row the operator was told about
+        // would survive a restart unflagged, because a dead session writes nothing.
+        let inherited = server
+            .ledger
+            .list_sessions(onlyne_proto::QuerySessionsArgs {
+                lifecycle: Some(onlyne_proto::Lifecycle::Working),
+                limit: 500,
+                ..onlyne_proto::QuerySessionsArgs::default()
+            })?;
+        for row in &inherited {
+            server.note_session_write(&row.task_id);
+        }
+        if !inherited.is_empty() {
+            tracing::info!(
+                working = inherited.len(),
+                "inherited working sessions are watched for heartbeats"
+            );
         }
         Ok(server)
     }
@@ -277,6 +305,21 @@ impl Server {
         self.roles
             .read()
             .map(|table| table.contains(role))
+            .unwrap_or(false)
+    }
+
+    /// Remember one task id after an accepted session write in this process.
+    pub fn note_session_write(&self, task_id: &str) {
+        if let Ok(mut seen) = self.seen_sessions.lock() {
+            seen.insert(task_id.to_string());
+        }
+    }
+
+    /// Whether this process has accepted a session write for `task_id`.
+    pub fn has_seen_session(&self, task_id: &str) -> bool {
+        self.seen_sessions
+            .lock()
+            .map(|seen| seen.contains(task_id))
             .unwrap_or(false)
     }
 

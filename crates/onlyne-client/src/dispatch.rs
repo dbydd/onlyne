@@ -1244,25 +1244,32 @@ pub async fn on_plugin_report(state: &DispatchState, report: Report) -> Result<(
             observed,
             ..
         } => {
+            // The beat itself is the liveness fact. The server times
+            // heartbeats. A quiet, alive session keeps landing fresh rows.
+            let inner = state.inner.lock();
             let verdict = match serde_json::from_value::<Observation>(observed) {
-                Ok(body) => {
-                    let inner = state.inner.lock();
-                    apply_persist(
-                        &inner.bridge,
-                        &inner.store,
-                        &task_id,
-                        &LifecycleEvent::Heartbeat {
-                            v: Version::new(generation, seq),
-                            body,
-                        },
-                    )?
-                }
+                Ok(body) => apply_persist(
+                    &inner.bridge,
+                    &inner.store,
+                    &task_id,
+                    &LifecycleEvent::Heartbeat {
+                        v: Version::new(generation, seq),
+                        body,
+                    },
+                )?,
                 Err(error) => {
                     tracing::warn!(task = %task_id, error = %error, "heartbeat carries no readable observation; liveness only");
                     Verdict::Ignored(IgnoredReason::NoOp)
                 }
             };
-            note_verdict(&verdict, &task_id).is_some()
+            note_verdict(&verdict, &task_id);
+            match &verdict {
+                Verdict::Applied(_) => true,
+                Verdict::Ignored(IgnoredReason::NoOp) => inner
+                    .store
+                    .bump_session_version(&task_id, generation, seq)?,
+                Verdict::Ignored(_) | Verdict::Rejected(_) => false,
+            }
         }
         Report::Complete {
             task_id,

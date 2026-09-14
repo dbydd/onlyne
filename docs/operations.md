@@ -132,6 +132,7 @@ client 死亡期间无人代该 role 判定 session 生命周期。
 |---|---|---|---|
 | `<workspace>/.onlyne/config.toml` | `stale_grace_secs` | 300 | client 开机自检宽限，单位秒 |
 | `<server-root>/.onlyne/spec.toml` 的 `[server]` | `stale_watch_secs` | 60 | server 观察器扫描周期，单位秒；0 关闭观察器 |
+| `<server-root>/.onlyne/spec.toml` 的 `[server]` | `heartbeat_grace_secs` | 90 | 属主在线时 `working` 行允许的心跳静默时长，单位秒 |
 
 宽限期内，自检等待 adapter 重挂。
 
@@ -143,15 +144,31 @@ client 死亡期间无人代该 role 判定 session 生命周期。
 
 超期残账的 reason 是 `session_dead`。
 
-server 侧观察器按 `[server].stale_watch_secs` 周期扫描。
+server 侧观察器按 `[server].stale_watch_secs` 周期扫描，一次扫描跑两个探测器。
 
-server 侧观察器扫描 `working` 且属主离线的行。
+探测器一扫描 `working` 且属主离线的行。
 
-server 侧观察器记录 kind 为 `stale_working` 的 fault。
+离线探测器超过 600 秒记录 kind 为 `stale_working` 的 fault。
 
-faults 表的 kind 字段保存 `stale_working` 文本。
+探测器二扫描 `working` 且属主在线的行，判据是心跳新鲜度。
 
-server 侧观察器推送 advisory `Event::Fault`。
+pi 插件每 10 秒发一个 heartbeat 包，client 每收到一拍就重发一次 `session_sync`，服务端行的 `updated_at` 随心跳前进。
+
+静默一拍即翻面的 no-op 心跳同样携带存活事实，client 对其抬升本地版本号并重发，健康会话的 `updated_at` 保持新鲜。
+
+属主在线、行龄超过 `[server].heartbeat_grace_secs`（默认 90 秒）、且本进程见过该行的写入时，探测器二记录 kind 为 `heartbeat_missing` 的 fault。
+
+`heartbeat_missing` 的行同时出现在 `sessions` 答案的 `heartbeat_stale` 字段上，TUI 呈现为 `working+stale`。
+
+同一任务已有未确认的同类 fault 时，探测器二不再重复记录。
+
+server 启动时把当时 `working` 的行全部登记为已见，上一进程遗留的静默行同样可被标记。
+
+completion 落定为 `exited` 之后同 generation 的 heartbeat 把行抬回 `working` 时，观察器记录 kind 为 `heartbeat_after_complete` 的 fault，投影照常应用。
+
+两个探测器都只记 fault 并推送 advisory `Event::Fault`。
+
+faults 表的 kind 字段保存 `stale_working`、`heartbeat_missing`、`heartbeat_after_complete` 文本。
 
 server 侧观察器不改 ledger 状态。
 
@@ -160,6 +177,8 @@ server 侧观察器不触发 retry。
 server 侧观察器不触发 fail。
 
 server 侧观察器遵守 §8 的零政策红线。
+
+存活判定的信源是 pi-onlyne 心跳包本身，pane 与宿主终端的存活状态不在服务端判定面内。
 
 恢复决定归人和 supervisor 角色。
 

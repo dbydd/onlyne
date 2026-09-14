@@ -31,6 +31,10 @@ fault_history_days = 14
 resync_lag = 256
 # heartbeat_timeout_ms sets the presence liveness timeout. Read by onlyne-server presence tracking. Default: 30000.
 heartbeat_timeout_ms = 30000
+# stale_watch_secs sets the server stale-watch scan interval. Read by onlyne-server at startup; 0 disables the watch. Default: 60.
+stale_watch_secs = 60
+# heartbeat_grace_secs sets how long a working session may go without a heartbeat while its role link stays online before the server records a heartbeat_missing fault. Read by the onlyne-server stale watch. Default: 90.
+heartbeat_grace_secs = 90
 # agent_package holds the absolute local path of an external coding-agent package. Read by the generate driver once, which vendors a copy and renders {{agent_package}} as `.onlyne/agent/<pkg-name>`. Default: empty string, and a template that uses {{agent_package}} then exits 4.
 agent_package = ""
 # template_root sets the template source root under the server root. Read by the generate driver during template discovery. Default: .onlyne/templates.

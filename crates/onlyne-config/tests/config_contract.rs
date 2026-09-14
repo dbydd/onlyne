@@ -1,8 +1,8 @@
 use onlyne_config::{
-    ClientConfig, DEFAULT_BACKOFF_MS, DEFAULT_FAULT_HISTORY_DAYS, DEFAULT_HEARTBEAT_TIMEOUT_MS,
-    DEFAULT_MAX_SESSIONS, DEFAULT_NOTE_QUEUE, DEFAULT_RESYNC_LAG, DEFAULT_STALE_GRACE_SECS,
-    DEFAULT_STALE_WATCH_SECS, DEFAULT_TEMPLATE_ROOT, Env, IntentPolicy, Spec, SpecDiff, Timeouts,
-    canonical_bytes, config_client_schema, redact, spec_hash,
+    ClientConfig, DEFAULT_BACKOFF_MS, DEFAULT_FAULT_HISTORY_DAYS, DEFAULT_HEARTBEAT_GRACE_SECS,
+    DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_SESSIONS, DEFAULT_NOTE_QUEUE, DEFAULT_RESYNC_LAG,
+    DEFAULT_STALE_GRACE_SECS, DEFAULT_STALE_WATCH_SECS, DEFAULT_TEMPLATE_ROOT, Env, IntentPolicy,
+    Spec, SpecDiff, Timeouts, canonical_bytes, config_client_schema, redact, spec_hash,
 };
 use std::fs;
 
@@ -20,6 +20,7 @@ fault_history_days = 14
 resync_lag = 256
 heartbeat_timeout_ms = 30000
 stale_watch_secs = 45
+heartbeat_grace_secs = 75
 agent_package = ""
 template_root = ".onlyne/templates"
 
@@ -75,6 +76,7 @@ fn sample_spec_parses_and_defaults_are_asserted() {
         DEFAULT_HEARTBEAT_TIMEOUT_MS
     );
     assert_eq!(spec.server.stale_watch_secs, 45);
+    assert_eq!(spec.server.heartbeat_grace_secs, 75);
     assert_eq!(spec.server.agent_package, "");
     assert_eq!(spec.server.template_root, DEFAULT_TEMPLATE_ROOT);
 
@@ -144,6 +146,10 @@ key = "{KEY_A}"
     assert_eq!(spec.server.resync_lag, 256);
     assert_eq!(spec.server.heartbeat_timeout_ms, 30_000);
     assert_eq!(spec.server.stale_watch_secs, DEFAULT_STALE_WATCH_SECS);
+    assert_eq!(
+        spec.server.heartbeat_grace_secs,
+        DEFAULT_HEARTBEAT_GRACE_SECS
+    );
     assert_eq!(spec.server.agent_package, "");
     assert_eq!(spec.server.template_root, ".onlyne/templates");
     assert!(!spec.client[0].admin);

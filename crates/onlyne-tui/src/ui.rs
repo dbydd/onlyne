@@ -359,6 +359,8 @@ fn render_swarm_graph(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state:
     for (idx, session) in active.iter().enumerate() {
         let style = if idx == selected {
             Style::default().add_modifier(Modifier::REVERSED)
+        } else if session.heartbeat_stale {
+            Style::default().fg(Color::Yellow)
         } else if session.outcome.is_some() {
             Style::default().fg(Color::DarkGray)
         } else {
@@ -368,7 +370,7 @@ fn render_swarm_graph(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state:
             Row::new(vec![
                 Cell::from(role_of(session)),
                 Cell::from(short(&session.task_id)),
-                Cell::from(lifecycle_label(session.public_lifecycle)),
+                Cell::from(state_label(session)),
                 Cell::from(agent_label(session)),
                 Cell::from(inflight_route(snapshot, &session.task_id)),
             ])
@@ -925,7 +927,7 @@ fn write_sessions<'a>(out: &mut String, sessions: impl IntoIterator<Item = &'a S
             "  {} role={} life={} agent={:?} gen={} seq={} outcome={} updated={}\n",
             session.session_id,
             session.role.as_deref().unwrap_or("?"),
-            lifecycle_label(session.public_lifecycle),
+            state_label(session),
             session.projection.agent,
             session.generation,
             session.seq,
@@ -960,6 +962,17 @@ fn write_faults(out: &mut String, faults: &[FaultEvent]) {
 
 fn role_of(session: &SessionRow) -> String {
     session.role.clone().unwrap_or_else(|| "?".to_string())
+}
+
+/// The lifecycle word, with `+stale` when the server timed the heartbeats out.
+/// The flag rides the answer, so the TUI renders the server's own verdict.
+fn state_label(session: &SessionRow) -> String {
+    let base = lifecycle_label(session.public_lifecycle);
+    if session.heartbeat_stale {
+        format!("{base}+stale")
+    } else {
+        base.to_string()
+    }
 }
 
 fn lifecycle_label(lifecycle: Lifecycle) -> &'static str {
@@ -1052,6 +1065,7 @@ mod tests {
             projection: projection(lifecycle, agent),
             outcome: None,
             updated_at: Some(Utc::now().timestamp().to_string()),
+            heartbeat_stale: false,
         }
     }
 
@@ -1512,6 +1526,19 @@ mod tests {
         assert!(
             !body.contains("life=exited"),
             "an exited session is history, not a live slot\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_stale_working_session_shows_the_stale_mark() {
+        let mut quiet = session("gone", Lifecycle::Working, AgentPhase::Idle);
+        quiet.heartbeat_stale = true;
+        let mut detail = long_role_detail();
+        detail.sessions = vec![quiet];
+        let (_, body) = detail_text(&Detail::Role(detail));
+        assert!(
+            body.contains("life=working+stale"),
+            "a row the server timed out carries the mark the on-call reads\n{body}"
         );
     }
 

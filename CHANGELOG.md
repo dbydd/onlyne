@@ -1,5 +1,69 @@
 # Changelog
 
+## [1.0.8] - 2026-09-15
+
+Scope: heartbeat liveness from the client's beats to the server's own sweep. The
+workspace version moves 1.0.2 → 1.0.3, so `onlyne-proto`, `onlyne-config`, and
+`onlyne-tui` ride it to 1.0.3 with their changed code and the remaining inherited
+crates move beside them. The pinned crates: `onlyne-client` 1.0.5 → 1.0.6,
+`onlyne-store` 1.0.3 → 1.0.4, and `onlyne-server` 1.0.7 → 1.0.8.
+
+The trigger came from a live swarm: an Orca pane whose process vanished left its
+session row `working` and `attached` forever while the role link stayed online.
+The row's age was invisible on the server, the stale watch skips online roles,
+and the lifecycle owner had nothing left to publish. The fix puts liveness on
+the wire the server already controls: the `pi-onlyne` heartbeat is the liveness
+fact, every beat re-publishes the session row, and the server times beats the
+same way it already times role presence.
+
+### Fixed
+
+- client and store: a heartbeat whose observed state matched the stored one
+  answered `Ignored(NoOp)`, the dispatch arm read that as "nothing changed", and
+  no `session_sync` followed. A healthy session that thinks quietly keeps the
+  same tuple, so its server row froze at the last state change: `onlyne sessions`
+  `updated_at` aged for hours while the agent beat every ten seconds. Every beat
+  now republishes. An applied verdict syncs as before. A no-op beat runs through
+  the new `ClientLedger::bump_session_version`, which moves the local
+  generation/seq under the same strictly-greater gate the server projection
+  uses, and the arm syncs when the bump lands. Rejected and stale-sequence beats
+  stay quiet, so a delayed duplicate cannot push the server's clock. Files:
+  `crates/onlyne-client/src/dispatch.rs`, `crates/onlyne-store/src/client.rs`.
+  Tests: `crates/onlyne-store/src/tests.rs` (bump gate), `crates/onlyne-client`
+  scenarios (two no-op beats produce two `session_sync` frames — red with zero
+  frames before the change, plus the sync content check).
+
+### Added
+
+- server, proto, config, and tui: the stale watch times heartbeats for
+  online-role rows. `[server].heartbeat_grace_secs` (default 90) is the silence
+  budget for a `working` row whose role link is up; past it the scan records a
+  `heartbeat_missing` fault once per task while the fault stays open, and the
+  row itself stays `working` — the flag belongs to the supervisor's desk. Rows
+  the sweep may flag are rows this process has seen a session write for, and
+  `Server::open` inherits the previous process's `working` rows into that set,
+  so a restart observes a stuck row within one grace window instead of waiting
+  for writes that a dead session never sends. A heartbeat that lands on an
+  `exited` row of the same generation lifts the row back to `working` and
+  records `heartbeat_after_complete` beside it. `SessionRow` answers carry
+  `heartbeat_stale` — absent while fresh, pinned by the sizes suite — across
+  `query_sessions`, `AdminOp::Sessions`, and the TUI, which renders the state as
+  `working+stale`. Files: `crates/onlyne-server/src/stale.rs`, `state.rs`,
+  `projection.rs`, `crates/onlyne-proto/src/ops.rs`, `crates/onlyne-config/src/spec.rs`,
+  `crates/onlyne-tui/src/ui.rs`. Tests: five stale units (grace, dedup, seen
+  gate, revival), six delivery tests including
+  `a_row_working_at_open_is_watchable_without_a_new_write` (a real reopen: the
+  inherited row answers `heartbeat_missing` with no new write) and
+  `a_stale_working_row_answers_heartbeat_stale_true_on_both_surfaces`, the
+  `heartbeat_after_complete` unit, the sizes pin, the config contract keys, and
+  the TUI mark. Verification case 14 `heartbeat-watch.sh` runs the whole chain
+  through real binaries: one scripted beat keeps the row fresh, the quiet that
+  follows produces the fault and the flag inside the grace window, and the row
+  never flips. A release-binary run replayed the incident: a server holding a
+  `working` row took `kill -9`, the reopened 1.0.8 process watched the role
+  reconnect, and the inherited row answered `heartbeat_missing` and
+  `heartbeat_stale` six seconds in while the row stayed `working`.
+
 ## [1.0.7] - 2026-09-14
 
 Scope: the queued note deadline and the role link's write path. `onlyne-server`

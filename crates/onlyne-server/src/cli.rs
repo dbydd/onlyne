@@ -273,6 +273,7 @@ fn spec_template(name: &str, listen: &str, cert_pin: &str) -> String {
          resync_lag = 256\n\
          heartbeat_timeout_ms = 30000\n\
          stale_watch_secs = 60\n\
+         heartbeat_grace_secs = 90\n\
          agent_package = \"\"\n\
          template_root = \".onlyne/templates\"\n\
          \n\

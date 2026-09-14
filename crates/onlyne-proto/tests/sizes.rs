@@ -4,7 +4,7 @@
 //! is the measured size rounded up to a power of two, so adding a large arm to a
 //! hot enum fails here instead of landing quietly.
 
-use onlyne_proto::{AdminOp, ClientOp, Frame, GatewayOp, HostOp, PluginOp};
+use onlyne_proto::{AdminOp, ClientOp, Frame, GatewayOp, HostOp, PluginOp, SessionRow};
 use std::mem::size_of;
 
 /// `(type, measured bytes, ceiling)`. The ceiling is the measurement rounded up
@@ -27,4 +27,13 @@ fn hot_enums_stay_under_their_size_ceilings() {
              box the dominant arm or raise the ceiling deliberately"
         );
     }
+}
+
+#[test]
+fn session_row_size_is_pinned() {
+    assert_eq!(
+        size_of::<SessionRow>(),
+        160,
+        "SessionRow layout changed; update the pin with the measured size"
+    );
 }

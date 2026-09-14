@@ -1260,6 +1260,21 @@ impl RecordingOutbox {
     async fn kinds(&self) -> Vec<&'static str> {
         self.frames().await.iter().map(|op| op.name()).collect()
     }
+
+    async fn clear(&self) {
+        self.frames.lock().await.clear();
+    }
+
+    async fn session_syncs(&self) -> Vec<onlyne_proto::SessionSyncArgs> {
+        self.frames()
+            .await
+            .into_iter()
+            .filter_map(|op| match op {
+                ClientOp::SessionSync(args) => Some(args),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 impl onlyne_client::dispatch::Outbox for RecordingOutbox {
@@ -1419,6 +1434,215 @@ async fn lifecycle_write_emits_session_sync() {
         store.get_session(&task_id).unwrap().unwrap().agent_state,
         "idle"
     );
+}
+
+#[tokio::test]
+async fn noop_heartbeats_republish_session_sync() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(FakeBackend::new());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        true,
+        backend,
+        store.clone(),
+    );
+    let outbox = Arc::new(RecordingOutbox::default());
+    state.attach_outbox(outbox.clone());
+    let (task_id, _assigns) = spawn_ready(&state, "task 1").await;
+    outbox.clear().await;
+
+    let row = store.get_session(&task_id).unwrap().unwrap();
+    let mut body: onlyne_session::Observation = serde_json::from_str(&row.observed_json).unwrap();
+    let generation = row.generation as u64;
+    let seq_one = row.seq as u64 + 1;
+    let seq_two = row.seq as u64 + 2;
+    body.version = onlyne_session::Version::new(generation, seq_one);
+    on_plugin_report(
+        &state,
+        onlyne_proto::Report::Heartbeat {
+            task_id: task_id.clone(),
+            generation,
+            seq: seq_one,
+            observed: serde_json::to_value(&body).unwrap(),
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+    body.version = onlyne_session::Version::new(generation, seq_two);
+    on_plugin_report(
+        &state,
+        onlyne_proto::Report::Heartbeat {
+            task_id: task_id.clone(),
+            generation,
+            seq: seq_two,
+            observed: serde_json::to_value(&body).unwrap(),
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let syncs = outbox.session_syncs().await;
+    assert_eq!(
+        syncs.len(),
+        2,
+        "each accepted no-op heartbeat publishes one session_sync: {syncs:?}"
+    );
+    assert_eq!((syncs[0].generation, syncs[0].seq), (generation, seq_one));
+    assert_eq!((syncs[1].generation, syncs[1].seq), (generation, seq_two));
+    assert_eq!(syncs[0].projection, syncs[1].projection);
+    let stored = store.get_session(&task_id).unwrap().unwrap();
+    assert_eq!(syncs[0].projection, projection_of(&stored));
+    assert_eq!(
+        (stored.generation as u64, stored.seq as u64),
+        (generation, seq_two)
+    );
+}
+
+#[tokio::test]
+async fn stale_heartbeat_does_not_republish() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(FakeBackend::new());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        true,
+        backend,
+        store.clone(),
+    );
+    let outbox = Arc::new(RecordingOutbox::default());
+    state.attach_outbox(outbox.clone());
+    let (task_id, _assigns) = spawn_ready(&state, "task 1").await;
+    outbox.clear().await;
+
+    let row = store.get_session(&task_id).unwrap().unwrap();
+    let mut body: onlyne_session::Observation = serde_json::from_str(&row.observed_json).unwrap();
+    let generation = row.generation as u64;
+    let seq = row.seq as u64 + 1;
+    body.version = onlyne_session::Version::new(generation, seq);
+    on_plugin_report(
+        &state,
+        onlyne_proto::Report::Heartbeat {
+            task_id: task_id.clone(),
+            generation,
+            seq,
+            observed: serde_json::to_value(&body).unwrap(),
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(outbox.session_syncs().await.len(), 1);
+
+    body.version = onlyne_session::Version::new(generation, seq);
+    on_plugin_report(
+        &state,
+        onlyne_proto::Report::Heartbeat {
+            task_id: task_id.clone(),
+            generation,
+            seq,
+            observed: serde_json::to_value(&body).unwrap(),
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+    body.version = onlyne_session::Version::new(generation, seq.saturating_sub(1));
+    on_plugin_report(
+        &state,
+        onlyne_proto::Report::Heartbeat {
+            task_id: task_id.clone(),
+            generation,
+            seq: seq.saturating_sub(1),
+            observed: serde_json::to_value(&body).unwrap(),
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outbox.session_syncs().await.len(),
+        1,
+        "a beat at or below the published watermark adds no frame"
+    );
+}
+
+#[tokio::test]
+async fn illegal_heartbeat_does_not_republish() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(FakeBackend::new());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        true,
+        backend,
+        store.clone(),
+    );
+    let outbox = Arc::new(RecordingOutbox::default());
+    state.attach_outbox(outbox.clone());
+    let (task_id, _assigns) = spawn_ready(&state, "task 1").await;
+    outbox.clear().await;
+
+    let row = store.get_session(&task_id).unwrap().unwrap();
+    let watermark = (row.generation, row.seq);
+    let mut illegal: onlyne_session::Observation =
+        serde_json::from_str(&row.observed_json).unwrap();
+    illegal.isolate_after = 0;
+    illegal.version = onlyne_session::Version::new(row.generation as u64, row.seq as u64 + 1);
+    on_plugin_report(
+        &state,
+        onlyne_proto::Report::Heartbeat {
+            task_id: task_id.clone(),
+            generation: row.generation as u64,
+            seq: row.seq as u64 + 1,
+            observed: serde_json::to_value(&illegal).unwrap(),
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        outbox.session_syncs().await.is_empty(),
+        "an illegal tuple publishes no session_sync"
+    );
+    let after_illegal = store.get_session(&task_id).unwrap().unwrap();
+    assert_eq!((after_illegal.generation, after_illegal.seq), watermark);
+
+    let mut legal: onlyne_session::Observation =
+        serde_json::from_str(&after_illegal.observed_json).unwrap();
+    let generation = after_illegal.generation as u64;
+    let seq = after_illegal.seq as u64 + 1;
+    legal.version = onlyne_session::Version::new(generation, seq);
+    on_plugin_report(
+        &state,
+        onlyne_proto::Report::Heartbeat {
+            task_id: task_id.clone(),
+            generation,
+            seq,
+            observed: serde_json::to_value(&legal).unwrap(),
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+    let syncs = outbox.session_syncs().await;
+    assert_eq!(
+        syncs.len(),
+        1,
+        "the next legal beat still publishes: {syncs:?}"
+    );
+    assert_eq!((syncs[0].generation, syncs[0].seq), (generation, seq));
 }
 
 #[tokio::test]

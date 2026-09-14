@@ -289,6 +289,12 @@
           "format": "uint64",
           "minimum": 0.0
         },
+        "heartbeat_grace_secs": {
+          "default": 90,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "template_root": {
           "default": ".onlyne/templates",
           "type": "string"

@@ -76,6 +76,15 @@ session, `rebind`/`adopt` point a task at a live pane, `fail` marks the row. Tas
 runs beside repair: `onlyne control recycle|probe|snapshot|cancel --task <id>`.
 `DeliveryState::Exhausted` is terminal — retry only after an explicit decision here.
 
+Heartbeat faults carry the liveness verdict, and the row keeps its state through them.
+`heartbeat_missing` says the pane's beats stopped while the role link stayed up: the row is
+`working`, `onlyne sessions` answers `heartbeat_stale` on it, and the TUI shows `working+stale`.
+Check the pane first. A dead process answers `control recycle`, and a live one resumes beating
+inside ten seconds and clears the flag on its own. `heartbeat_after_complete` says a session
+kept talking after its completion landed; recycle ends the straggler, and the row's own history
+keeps the settled completion either way. Both kinds open once per task and stay open until you
+`repair_ack` them, so the fault table doubles as your to-do list.
+
 ## Errors you will see
 
 `acl_denied` → the edge is missing from the spec. `unauthorized` → the key is not

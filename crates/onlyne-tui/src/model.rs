@@ -1420,6 +1420,7 @@ mod tests {
             },
             outcome: None,
             updated_at: None,
+            heartbeat_stale: false,
         }
     }
 

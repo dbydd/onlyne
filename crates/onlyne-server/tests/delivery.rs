@@ -6,10 +6,10 @@ use onlyne_config::Spec;
 use onlyne_proto::{
     AckArgs, AdminControl, AdminOp, AdminSend, Body, Causality, ClientOp, ControlArgs, ControlOp,
     Delivery, Envelope, ErrorCode, Event, Frame, GatewayOp, HandshakeArgs, HealthArgs, HistoryArgs,
-    LedgerQuery, LedgerState, MsgKind, OP_ID_CONFLICT_MESSAGE, Outcome, Principal, PullArgs,
-    QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, RepairAck, RepairAdopt, RepairFail,
-    RepairRebind, RepairTarget, Report, ResBody, SessionProjection, SessionSyncArgs, ShutdownArgs,
-    Subscribe,
+    LedgerQuery, LedgerState, Lifecycle, MsgKind, OP_ID_CONFLICT_MESSAGE, Outcome, Principal,
+    PullArgs, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, RepairAck, RepairAdopt,
+    RepairFail, RepairRebind, RepairTarget, Report, ResBody, SessionProjection, SessionSyncArgs,
+    ShutdownArgs, Subscribe,
 };
 use onlyne_server::state::{ChannelBinding, DeliveryTicket, RoleConnection, Server, ServerInit};
 use onlyne_server::{events, faults, gateway_host, projection, relay, router, stale};
@@ -1148,6 +1148,351 @@ fn stale_working_observer_records_fault_without_mutating_session() {
             .is_empty(),
         "the open stale_working fault makes the scan idempotent"
     );
+}
+
+fn age_session(state: &onlyne_server::State, task_id: &str, age_secs: i64) {
+    let old = (Utc::now() - chrono::Duration::seconds(age_secs))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let conn = rusqlite::Connection::open(state.ledger.path()).expect("open ledger");
+    conn.execute(
+        "UPDATE sessions SET updated_at=?1 WHERE task_id=?2",
+        rusqlite::params![old, task_id],
+    )
+    .expect("age session");
+}
+
+fn ready(state: &onlyne_server::State, role: &str, task_id: &str, seq: u64) {
+    projection::report(
+        state,
+        role,
+        &Report::Ready {
+            task_id: task_id.to_string(),
+            session_id: "sess-1".into(),
+            generation: 1,
+            seq,
+            cluster_ref: None,
+        },
+    )
+    .expect("ready")
+    .applied
+    .then_some(())
+    .expect("ready applied");
+}
+
+fn heartbeat_projection() -> SessionProjection {
+    SessionProjection {
+        lifecycle: Lifecycle::Working,
+        agent: onlyne_proto::AgentPhase::Running,
+        delivery: onlyne_proto::DeliveryPhase::Pending,
+        resource: onlyne_proto::ResourcePhase::Attached,
+        recovery: onlyne_proto::RecoveryPhase::NoRecovery,
+        outcome: None,
+        observed: None,
+    }
+}
+
+#[test]
+fn observe_once_records_heartbeat_missing_for_an_online_role() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    ready(&fixture.state, "builder", &task_id, 1);
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    fixture.state.register_role(RoleConnection {
+        role: "builder".to_string(),
+        sender,
+        last_seq: 0,
+        connected_at: Utc::now(),
+        draining: false,
+        generation: 0,
+    });
+    let grace = fixture
+        .state
+        .spec_snapshot()
+        .expect("spec")
+        .server
+        .heartbeat_grace_secs;
+    age_session(&fixture.state, &task_id, (grace as i64) + 5);
+
+    let recorded = stale::observe_once(&fixture.state, Utc::now()).expect("observe");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].kind, stale::KIND_HEARTBEAT_MISSING);
+    assert_eq!(recorded[0].task_id.as_deref(), Some(task_id.as_str()));
+    assert_eq!(recorded[0].role.as_deref(), Some("builder"));
+    assert!(
+        recorded[0].reason.contains("has sent no heartbeat for")
+            && recorded[0]
+                .reason
+                .contains("while role builder stays connected")
+    );
+    assert!(
+        stale::observe_once(&fixture.state, Utc::now())
+            .expect("observe twice")
+            .is_empty(),
+        "the open heartbeat_missing fault makes the scan idempotent"
+    );
+    let row = fixture
+        .state
+        .ledger
+        .get_session_row(&task_id)
+        .expect("row")
+        .expect("present");
+    assert_eq!(row.public_lifecycle, "working");
+}
+
+#[test]
+fn a_row_working_at_open_is_watchable_without_a_new_write() {
+    // The ARIS shape: a row stuck `working` when the 1.0.8 server boots. The dead
+    // session never writes again, so the only thing that can make it observable is
+    // the open-time inheritance of working rows into the seen set.
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    ready(&fixture.state, "builder", &task_id, 1);
+    let grace = fixture
+        .state
+        .spec_snapshot()
+        .expect("spec")
+        .server
+        .heartbeat_grace_secs;
+    age_session(&fixture.state, &task_id, (grace as i64) + 5);
+    let root = fixture.root.clone();
+    drop(fixture.state);
+
+    let reopened = Server::open(&ServerInit { root, listen: None }).expect("reopen the server");
+    assert!(
+        reopened.has_seen_session(&task_id),
+        "a working row at open is inherited as seen"
+    );
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    reopened.register_role(RoleConnection {
+        role: "builder".to_string(),
+        sender,
+        last_seq: 0,
+        connected_at: Utc::now(),
+        draining: false,
+        generation: 0,
+    });
+
+    let recorded = stale::observe_once(&reopened, Utc::now()).expect("observe after restart");
+    assert!(
+        recorded
+            .iter()
+            .any(|event| event.kind == stale::KIND_HEARTBEAT_MISSING
+                && event.task_id.as_deref() == Some(task_id.as_str())),
+        "the inherited row answers heartbeat_missing with no new write: {recorded:?}"
+    );
+    // The fixture's temp directory outlives the reopened state.
+    drop(reopened);
+}
+
+#[test]
+fn a_post_complete_heartbeat_records_heartbeat_after_complete_and_revives_the_row() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    ready(&fixture.state, "builder", &task_id, 1);
+    let done = projection::report(
+        &fixture.state,
+        "builder",
+        &Report::Complete {
+            task_id: task_id.clone(),
+            outcome: Outcome::Done,
+            head: Some("finished".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .expect("complete");
+    assert!(done.applied);
+    let exited = projection::session_row(&fixture.state, &task_id)
+        .expect("row")
+        .expect("present");
+    assert_eq!(exited.public_lifecycle, Lifecycle::Exited);
+
+    let revived = projection::session_sync(
+        &fixture.state,
+        "builder",
+        &SessionSyncArgs {
+            task_id: task_id.clone(),
+            session_id: "sess-1".into(),
+            generation: 1,
+            seq: exited.seq + 1,
+            projection: heartbeat_projection(),
+        },
+    )
+    .expect("sync");
+    assert!(revived.applied);
+    let row = projection::session_row(&fixture.state, &task_id)
+        .expect("row")
+        .expect("present");
+    assert_eq!(row.public_lifecycle, Lifecycle::Working);
+
+    let faults = fixture.state.ledger.open_faults().expect("faults");
+    let after = faults
+        .iter()
+        .filter(|fault| fault.kind == stale::KIND_HEARTBEAT_AFTER_COMPLETE)
+        .collect::<Vec<_>>();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].task_id.as_deref(), Some(task_id.as_str()));
+    assert_eq!(after[0].role.as_deref(), Some("builder"));
+    assert_eq!(
+        after[0].reason,
+        format!(
+            "session {task_id} moved from exited to working after a heartbeat while role builder stays connected"
+        )
+    );
+
+    projection::report(
+        &fixture.state,
+        "builder",
+        &Report::Complete {
+            task_id: task_id.clone(),
+            outcome: Outcome::Done,
+            head: Some("again".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .expect("complete again");
+    let exited_again = projection::session_row(&fixture.state, &task_id)
+        .expect("row")
+        .expect("present");
+    projection::session_sync(
+        &fixture.state,
+        "builder",
+        &SessionSyncArgs {
+            task_id: task_id.clone(),
+            session_id: "sess-1".into(),
+            generation: 1,
+            seq: exited_again.seq + 1,
+            projection: heartbeat_projection(),
+        },
+    )
+    .expect("second revival");
+    let after_again = fixture
+        .state
+        .ledger
+        .open_faults()
+        .expect("faults")
+        .into_iter()
+        .filter(|fault| fault.kind == stale::KIND_HEARTBEAT_AFTER_COMPLETE)
+        .count();
+    assert_eq!(after_again, 1);
+}
+
+#[test]
+fn a_fresh_working_row_answers_heartbeat_stale_false() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    ready(&fixture.state, "builder", &task_id, 1);
+    let rows = projection::sessions(
+        &fixture.state,
+        QuerySessionsArgs {
+            task_id: Some(task_id),
+            limit: 10,
+            ..QuerySessionsArgs::default()
+        },
+    )
+    .expect("sessions");
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].heartbeat_stale);
+}
+
+#[tokio::test]
+async fn a_stale_working_row_answers_heartbeat_stale_true_on_both_surfaces() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    ready(&fixture.state, "builder", &task_id, 1);
+    let grace = fixture
+        .state
+        .spec_snapshot()
+        .expect("spec")
+        .server
+        .heartbeat_grace_secs;
+    age_session(&fixture.state, &task_id, (grace as i64) + 5);
+
+    let rows = projection::sessions(
+        &fixture.state,
+        QuerySessionsArgs {
+            task_id: Some(task_id.clone()),
+            limit: 10,
+            ..QuerySessionsArgs::default()
+        },
+    )
+    .expect("sessions");
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].heartbeat_stale);
+
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    let mut session = router::Session::with_sender(sender, "builder");
+    let hello = router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(hello_args("builder")),
+    )
+    .await;
+    assert!(hello.ok, "{hello:?}");
+    let client = router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::QuerySessions(QuerySessionsArgs {
+            task_id: Some(task_id.clone()),
+            limit: 10,
+            ..QuerySessionsArgs::default()
+        }),
+    )
+    .await;
+    assert!(client.ok, "{client:?}");
+    assert_eq!(
+        client.data.expect("data")["sessions"][0]["heartbeat_stale"],
+        json!(true)
+    );
+
+    let admin = router::dispatch_admin(
+        &fixture.state,
+        &mut router::Session::default(),
+        AdminOp::Sessions(QuerySessionsArgs {
+            task_id: Some(task_id),
+            limit: 10,
+            ..QuerySessionsArgs::default()
+        }),
+    )
+    .await;
+    assert!(admin.ok, "{admin:?}");
+    assert_eq!(
+        admin.data.expect("data")["sessions"][0]["heartbeat_stale"],
+        json!(true)
+    );
+}
+
+#[test]
+fn an_exited_row_answers_heartbeat_stale_false_regardless_of_age() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    ready(&fixture.state, "builder", &task_id, 1);
+    projection::report(
+        &fixture.state,
+        "builder",
+        &Report::Complete {
+            task_id: task_id.clone(),
+            outcome: Outcome::Done,
+            head: Some("finished".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .expect("complete");
+    age_session(&fixture.state, &task_id, 10_000);
+    let rows = projection::sessions(
+        &fixture.state,
+        QuerySessionsArgs {
+            task_id: Some(task_id),
+            limit: 10,
+            ..QuerySessionsArgs::default()
+        },
+    )
+    .expect("sessions");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].public_lifecycle, Lifecycle::Exited);
+    assert!(!rows[0].heartbeat_stale);
 }
 
 #[test]

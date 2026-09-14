@@ -295,6 +295,33 @@ impl ClientStore {
             .optional()?)
     }
 
+    /// Write a heartbeat's (generation, seq) onto the stored row when that
+    /// pair is strictly newer. The observation tuple stays as stored. Returns
+    /// true when the row changed.
+    pub fn bump_session_version(
+        &self,
+        task_id: &str,
+        generation: u64,
+        seq: u64,
+    ) -> StoreResult<bool> {
+        let conn = self.conn()?;
+        let generation = generation as i64;
+        let seq = seq as i64;
+        let changed = conn.execute(
+            "UPDATE sessions SET generation=?,seq=?,updated_at=? WHERE task_id=? AND (? > generation OR (? = generation AND ? > seq))",
+            params![
+                generation,
+                seq,
+                rfc3339(Utc::now()),
+                task_id,
+                generation,
+                generation,
+                seq
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
     fn conn(&self) -> StoreResult<MutexGuard<'_, Connection>> {
         self.inner
             .lock()

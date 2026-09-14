@@ -4,14 +4,15 @@
 //! publishes one durable `session_state` event.
 
 use crate::faults::{self, FaultDraft};
+use crate::stale;
 use crate::state::State;
 use anyhow::Context;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use onlyne_proto::{
     AgentPhase, DeliveryPhase, Event, Lifecycle, Outcome, QuerySessionsArgs, RecoveryPhase, Report,
     ResourcePhase, SessionProjection, SessionRow, SessionStateEvent, SessionSyncArgs,
 };
-use onlyne_store::{ServerSessionRow, SessionWrite};
+use onlyne_store::{FaultQuery, ServerSessionRow, SessionWrite};
 use serde_json::Value;
 
 /// The result of one projection write.
@@ -226,6 +227,15 @@ pub fn write(
             return Ok(ProjectionOutcome::skipped());
         }
     }
+    let revival = stored.as_ref().is_some_and(|row| {
+        row.public_lifecycle == "exited"
+            && row.generation.max(0) as u64 == generation
+            && matches!(
+                projection.lifecycle,
+                Lifecycle::Working | Lifecycle::Created
+            )
+    });
+    let landing = lifecycle_name(projection.lifecycle);
     let session_id = if session_id.is_empty() {
         stored
             .as_ref()
@@ -254,6 +264,29 @@ pub fn write(
     if !applied {
         return Ok(ProjectionOutcome::skipped());
     }
+    state.note_session_write(task_id);
+    if revival {
+        let open = state.ledger.faults_query(FaultQuery {
+            task_id: Some(task_id.to_string()),
+            kind: Some(stale::KIND_HEARTBEAT_AFTER_COMPLETE.to_string()),
+            open_only: true,
+            limit: 1,
+            ..FaultQuery::default()
+        })?;
+        if open.is_empty() {
+            faults::record(
+                state,
+                FaultDraft::new(
+                    stale::KIND_HEARTBEAT_AFTER_COMPLETE,
+                    format!(
+                        "session {task_id} moved from exited to {landing} after a heartbeat while role {role} stays connected"
+                    ),
+                )
+                .with_role(role)
+                .with_task(task_id),
+            )?;
+        }
+    }
     state.emit(Event::SessionState(SessionStateEvent {
         task_id: write.task_id.clone(),
         role: write.role.clone(),
@@ -268,10 +301,30 @@ pub fn write(
     })
 }
 
+/// Derived answer flag: a working row this process has seen, older than grace.
+pub fn heartbeat_stale(
+    lifecycle: Lifecycle,
+    updated_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    grace_secs: u64,
+    seen_since_open: bool,
+) -> bool {
+    lifecycle == Lifecycle::Working
+        && seen_since_open
+        && now.signed_duration_since(updated_at) > chrono::Duration::seconds(grace_secs as i64)
+}
+
+fn heartbeat_grace_secs(state: &State) -> u64 {
+    state
+        .spec_snapshot()
+        .map(|spec| spec.server.heartbeat_grace_secs)
+        .unwrap_or(onlyne_config::DEFAULT_HEARTBEAT_GRACE_SECS)
+}
+
 /// Read the session table.
 pub fn sessions(state: &State, query: QuerySessionsArgs) -> anyhow::Result<Vec<SessionRow>> {
     let rows = state.ledger.list_sessions(query)?;
-    Ok(rows.iter().map(row_from_write).collect())
+    Ok(rows.iter().map(|row| answer_row(state, row)).collect())
 }
 
 /// Project one stored row onto the wire type.
@@ -287,7 +340,22 @@ pub fn row_from_write(row: &ServerSessionRow) -> SessionRow {
         outcome: projection.outcome,
         projection,
         updated_at: Some(row.updated_at.to_string()),
+        heartbeat_stale: false,
     }
+}
+
+fn answer_row(state: &State, row: &ServerSessionRow) -> SessionRow {
+    let mut out = row_from_write(row);
+    let now = Utc::now();
+    let updated_at = DateTime::from_timestamp(row.updated_at, 0).unwrap_or(now);
+    out.heartbeat_stale = heartbeat_stale(
+        out.public_lifecycle,
+        updated_at,
+        now,
+        heartbeat_grace_secs(state),
+        state.has_seen_session(&row.task_id),
+    );
+    out
 }
 
 /// Rebuild the published projection of one stored row.
@@ -320,7 +388,7 @@ pub fn session_row(state: &State, task_id: &str) -> anyhow::Result<Option<Sessio
         .ledger
         .get_session_row(task_id)?
         .as_ref()
-        .map(row_from_write))
+        .map(|row| answer_row(state, row)))
 }
 
 /// Parse a stored lifecycle name.

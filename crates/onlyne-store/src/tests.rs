@@ -228,6 +228,34 @@ mod ledger_gates {
     }
 
     #[test]
+    fn bump_session_version_follows_monotonic_gate() {
+        let (_dir, path) = temp_db("client.db");
+        let store = ClientStore::open(&path).unwrap();
+        assert!(
+            store
+                .upsert_session("task-1", &versioned(1, 5, "a"))
+                .unwrap()
+        );
+
+        assert!(store.bump_session_version("task-1", 1, 6).unwrap());
+        let row = store.get_session("task-1").unwrap().unwrap();
+        assert_eq!((row.generation, row.seq), (1, 6));
+        assert_eq!(row.agent_state, "agent-a");
+
+        assert!(!store.bump_session_version("task-1", 1, 6).unwrap());
+        assert!(!store.bump_session_version("task-1", 1, 4).unwrap());
+        let row = store.get_session("task-1").unwrap().unwrap();
+        assert_eq!((row.generation, row.seq), (1, 6));
+        assert_eq!(row.agent_state, "agent-a");
+
+        assert!(store.bump_session_version("task-1", 2, 0).unwrap());
+        let row = store.get_session("task-1").unwrap().unwrap();
+        assert_eq!((row.generation, row.seq), (2, 0));
+        assert_eq!(row.agent_state, "agent-a");
+        assert_eq!(row.desired_json, "{\"desired\":\"a\"}");
+    }
+
+    #[test]
     fn transition_matrix_and_mutation_guard() {
         let states = [
             LedgerState::Queued,

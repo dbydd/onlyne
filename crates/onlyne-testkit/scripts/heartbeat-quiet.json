@@ -1,0 +1,1 @@
+{"hello":{"capabilities":["register","report"]},"steps":[{"wait_assign":true},{"report":"ready"},{"report":"heartbeat"},{"sleep_ms":60000}]}

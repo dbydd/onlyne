@@ -316,6 +316,9 @@ pub struct SessionRow {
     pub outcome: Option<Outcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+    /// True when a working row the server has seen is silent past heartbeat grace.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub heartbeat_stale: bool,
 }
 /// One `query_ledger` answer row: the observable ledger projection for one send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
