@@ -16,11 +16,11 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::error::{StoreError, StoreResult};
 use crate::transition_allowed;
 
-/// Server store schema revision. Bumped to 2 by the `hop` column below: the
-/// ledger keeps the hop count of `Causality`, which `onlyne handoff` reads back
-/// to extend a chain, and a file written before that column existed has no way
-/// to answer for it. `ensure_schema` refuses such a file rather than migrating.
-/// The client store keeps its own revision, since its DDL did not move.
+/// Server store schema revision. The `hop` column set this to 2: the ledger
+/// keeps the hop count of `Causality`, which `onlyne handoff` reads back to
+/// extend a chain. The `expires_at` column is applied in place, so the marker
+/// stays 2 and an existing file keeps opening. The client store keeps its own
+/// revision, since its DDL did not move.
 const SERVER_SCHEMA_VERSION: i64 = 2;
 const PROTOCOL_VERSION: i64 = 1;
 const SERVER_MARKER: &str = "onlyne-server";
@@ -74,7 +74,10 @@ CREATE TABLE IF NOT EXISTS ledger(
   -- Causality's hop count from the root task. `parent_task` alone gives the
   -- chain's shape, not its depth; `onlyne handoff` reads both back to extend
   -- the chain, so the row stores the counter beside the link.
-  hop INTEGER NOT NULL DEFAULT 0
+  hop INTEGER NOT NULL DEFAULT 0,
+  -- Persisted expiry deadline of a ttl note, so a restarted server can re-arm
+  -- its sweep.
+  expires_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ledger_state_enqueued_idx ON ledger(state,enqueued_at);
 CREATE INDEX IF NOT EXISTS ledger_task_idx ON ledger(task);
@@ -165,12 +168,21 @@ pub struct LedgerRow {
     /// Causality's hop count from the root task, which is what turns the
     /// `parent_task` links into a measurable depth.
     pub hop: i64,
+    /// The persisted expiry deadline of a ttl note, so a restarted server can
+    /// re-arm its sweep.
+    pub expires_at: Option<String>,
 }
 
 impl LedgerRow {
     pub fn from_envelope(envelope: &Envelope, fingerprint: &str) -> StoreResult<Self> {
         let body_json = serde_json::to_string(&envelope.body)?;
         let causality = envelope.causality.as_ref();
+        let expires_at = match (envelope.kind, envelope.ttl_ms) {
+            (MsgKind::Note, Some(ttl)) => Some(rfc3339(
+                envelope.ts + chrono::Duration::milliseconds(ttl as i64),
+            )),
+            _ => None,
+        };
         Ok(Self {
             msg_id: envelope.id.clone(),
             op_id: envelope.op_id.clone(),
@@ -188,6 +200,7 @@ impl LedgerRow {
             enqueued_at: rfc3339(envelope.ts),
             acked_at: None,
             body_json: Some(body_json),
+            expires_at,
         })
     }
 }
@@ -456,6 +469,26 @@ impl ServerLedger {
 
     pub fn in_flight_for(&self, role: &str) -> StoreResult<Vec<LedgerRow>> {
         self.ledger_for_role(role, LedgerState::InFlight, 500)
+    }
+
+    /// `msg_id` plus parsed deadline for every queued or in-flight row whose
+    /// `expires_at` is set, oldest deadline first.
+    pub fn pending_expiries(&self) -> StoreResult<Vec<(String, DateTime<Utc>)>> {
+        let conn = self.conn()?;
+        let rows = conn
+            .prepare(
+                "SELECT msg_id, expires_at FROM ledger WHERE state IN ('queued','in_flight') AND expires_at IS NOT NULL ORDER BY expires_at,rowid",
+            )?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(msg_id, expires_at)| {
+                DateTime::parse_from_rfc3339(&expires_at)
+                    .ok()
+                    .map(|deadline| (msg_id, deadline.with_timezone(&Utc)))
+            })
+            .collect())
     }
 
     pub fn requeue_in_flight(&self, role: &str) -> StoreResult<usize> {
@@ -824,6 +857,21 @@ fn ensure_schema(
         }
     }
     conn.execute_batch(ddl)?;
+    ensure_ledger_expires_at(conn)?;
+    Ok(())
+}
+
+/// An existing database keeps its rows; the marker gate stays at version 2 so a
+/// live workspace keeps opening.
+fn ensure_ledger_expires_at(conn: &Connection) -> StoreResult<()> {
+    let columns = conn
+        .prepare("PRAGMA table_info(ledger)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns.is_empty() || columns.iter().any(|name| name == "expires_at") {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE ledger ADD COLUMN expires_at TEXT", [])?;
     Ok(())
 }
 
@@ -904,7 +952,7 @@ fn ensure_transition_allowed(from: LedgerState, to: LedgerState) -> StoreResult<
 
 fn insert_ledger_row(conn: &Connection, row: &LedgerRow) -> StoreResult<()> {
     conn.execute(
-        "INSERT INTO ledger(msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,hop,state,out_head,reason,enqueued_at,acked_at,body_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ledger(msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,hop,state,out_head,reason,enqueued_at,acked_at,body_json,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         params![
             row.msg_id,
             row.op_id,
@@ -921,7 +969,8 @@ fn insert_ledger_row(conn: &Connection, row: &LedgerRow) -> StoreResult<()> {
             row.reason,
             row.enqueued_at,
             row.acked_at,
-            row.body_json
+            row.body_json,
+            row.expires_at
         ],
     )?;
     Ok(())
@@ -937,7 +986,7 @@ fn ledger_by_op_id(conn: &Connection, op_id: &str) -> StoreResult<Option<LedgerR
         .optional()?)
 }
 
-const LEDGER_COLUMNS: &str = "msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json,hop";
+const LEDGER_COLUMNS: &str = "msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json,hop,expires_at";
 const FAULT_COLUMNS: &str = "id,task_id,role,session_id,generation,seq,desired_json,observed_json,intent,attempt,backend_ref,kind,reason,state,created_at";
 
 fn ledger_row(r: &Row<'_>) -> rusqlite::Result<LedgerRow> {
@@ -962,6 +1011,7 @@ fn ledger_row(r: &Row<'_>) -> rusqlite::Result<LedgerRow> {
         acked_at: r.get(13)?,
         body_json: r.get(14)?,
         hop: r.get(15)?,
+        expires_at: r.get(16)?,
     })
 }
 

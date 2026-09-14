@@ -1049,6 +1049,34 @@ fn sweep_expired_settles_a_queued_note_and_emits() {
 }
 
 #[test]
+fn a_restarted_server_rearms_queued_note_deadlines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("server");
+    std::fs::create_dir_all(root.join(".onlyne")).expect("create root");
+    std::fs::write(root.join(".onlyne/spec.toml"), spec_text()).expect("write spec");
+    let init = ServerInit {
+        root: root.clone(),
+        listen: None,
+    };
+    let msg_id = {
+        let state = Server::open(&init).expect("open");
+        let mut envelope = note("planner", "builder", "fyi");
+        envelope.ttl_ms = Some(10);
+        let outcome = accepted(relay::send(&state, &envelope, false, None).expect("relay"));
+        assert_eq!(outcome.receipt.state, LedgerState::Queued);
+        outcome.receipt.msg_id
+    };
+    let state = Server::open(&init).expect("reopen");
+    let past = Utc::now() + chrono::Duration::seconds(5);
+    let expired = relay::sweep_expired(&state, past).expect("sweep");
+    assert_eq!(expired, vec![msg_id.clone()]);
+    assert_eq!(ledger_rows(&state).len(), 1);
+    assert_eq!(ledger_rows(&state)[0].state, LedgerState::Expired);
+    let again = relay::sweep_expired(&state, past).expect("second sweep");
+    assert!(again.is_empty());
+}
+
+#[test]
 fn gap_notice_counts_the_dropped_events() {
     let rows = |seqs: &[u64]| -> Vec<onlyne_proto::EventRow> {
         seqs.iter()

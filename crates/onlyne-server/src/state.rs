@@ -239,6 +239,16 @@ impl Server {
                 updated_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             })?;
         }
+        let pending = server.ledger.pending_expiries()?;
+        if !pending.is_empty() {
+            tracing::info!(
+                deadlines = pending.len(),
+                "persisted note deadlines are armed"
+            );
+        }
+        for (msg_id, deadline) in pending {
+            server.note_expiry(&msg_id, deadline);
+        }
         Ok(server)
     }
 

@@ -429,9 +429,8 @@ pub fn send(
             }
         }
         Append::Accepted(row) => {
-            if let Some(ttl_ms) = envelope.ttl_ms {
-                let deadline = envelope.ts + chrono::Duration::milliseconds(ttl_ms as i64);
-                state.note_expiry(&row.msg_id, deadline);
+            if let Some(expires_at) = row.expires_at.as_deref() {
+                state.note_expiry(&row.msg_id, parse_time(expires_at));
             }
             let deliverable = online && !to_gateway && note_wakeup;
             let delivered_state = if deliverable {

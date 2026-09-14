@@ -11,17 +11,17 @@ v1.0.0 is the active state. `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONT
 
 ## Crate state
 
-Counts come from `cargo test --workspace` on 2026-09-14 (687 passed, 0 failed), one line per crate with its libraries and integration targets summed.
+Counts come from `cargo test --workspace` on 2026-09-14 (691 passed, 0 failed), one line per crate with its libraries and integration targets summed.
 
 - [x] `onlyne-proto` green with envelope, frame variants, ops, errors, and events: 59 unit + 5 wire vectors + 1 sizes.
 - [x] `onlyne-frame` green with length-prefixed codec: 9.
 - [x] `onlyne-config` green with spec parse and reload: 11 template + 19 config contract + 17 ACL table + 3 spec example.
 - [x] `onlyne-layout` green with legacy refusal exit 2: 15.
-- [x] `onlyne-store` green with ledger and local DB: 24 unit + 2 schema statements.
+- [x] `onlyne-store` green with ledger and local DB: 27 unit + 2 schema statements.
 - [x] `onlyne-session` green with the lifecycle port and the session backends (zellij, Orca, exec, fake, herdr): 95 unit + 13 herdr.
 - [x] `onlyne-net` green with TLS, handshake, ACL, and backoff: 25.
 - [x] `onlyne-adapter` green with SDK and protocol schema: 5 unit + 3 conformance + 1 protocol doc.
-- [x] `onlyne-server` green with router, relay, projection, faults, admin, and generate: 8 unit + 65 delivery + 27 generate.
+- [x] `onlyne-server` green with router, relay, projection, faults, admin, and generate: 8 unit + 66 delivery + 27 generate + 2 stale.
 - [x] `onlyne-client` green with runloop, intents, adapter socket, host detection, and dispatch: 24 unit + 38 scenarios.
 - [x] `onlyne-tui` green with the role network graph, the swarm monitor, and the key table: 69.
 - [x] `onlyne-gateway` green with shared kit: 47.
@@ -37,7 +37,7 @@ Counts come from `cargo test --workspace` on 2026-09-14 (687 passed, 0 failed), 
 
 ## Verification cases
 
-Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root. The directory holds thirteen scripts besides `lib.sh`. Nine fake-backend cases (1-7, 9, 12) exited 0 on 2026-09-14 in 27 seconds together, `running-lights` the long one at 14 seconds and `gateway-mount` at 2; those two then ran ten times each with no failure. Cases 10 and 11 are live and last exited 0 on 2026-09-11 (2 seconds and 9 seconds). Case 13 is live against herdr session `onlyne-test` and exited 0 on 2026-09-14 in 3 seconds, its workspace closed and the session's workspace list back to the single `~` entry it started with. Cases 10, 11, and 13 override the backend: case 10 needs a shell inside an Orca tab with the app answering, case 11 needs a `pi` that answers a credential probe, and case 13 needs a reachable herdr session `onlyne-test`. On a host without its requirement, a live case prints `SKIP` and exits 0, so a green line says "passed here" and a skip says "not exercised here".
+Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root. The directory holds thirteen scripts besides `lib.sh`. Nine fake-backend cases (1-7, 9, 12) exited 0 on 2026-09-14 in 28 seconds together, `running-lights` the long one at 14 seconds and `gateway-mount` at 1; those two then ran ten times each with no failure, and the nine ran again after the 1.0.7 deadline column. Cases 10 and 11 are live and last exited 0 on 2026-09-11 (2 seconds and 9 seconds). Case 13 is live against herdr session `onlyne-test` and exited 0 on 2026-09-14 in 3 seconds, its workspace closed and the session's workspace list back to the single `~` entry it started with. Cases 10, 11, and 13 override the backend: case 10 needs a shell inside an Orca tab with the app answering, case 11 needs a `pi` that answers a credential probe, and case 13 needs a reachable herdr session `onlyne-test`. On a host without its requirement, a live case prints `SKIP` and exits 0, so a green line says "passed here" and a skip says "not exercised here".
 
 - [x] Case 1 `local-task.sh`: single-machine fake-backend task reaches `acked`.
 - [x] Case 2 `acl-reject.sh`: ACL refusal emits `acl_denied`.

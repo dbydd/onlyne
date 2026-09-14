@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod ledger_gates {
-    use chrono::{Duration, TimeZone, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use onlyne_proto::{
         Body, Causality, Envelope, LedgerQuery, LedgerState, MsgKind, Principal, new_envelope,
     };
@@ -923,5 +923,197 @@ mod ledger_gates {
             ids.iter().rev().map(String::as_str).collect::<Vec<_>>(),
             "the general view stays newest first"
         );
+    }
+
+    #[test]
+    fn note_ttl_persists_expires_at_and_other_kinds_store_none() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+
+        let mut timed = envelope(MsgKind::Note, "ttl note", None);
+        timed.id = new_uuid(90);
+        timed.ttl_ms = Some(1500);
+        let row = LedgerRow::from_envelope(&timed, "fp-ttl").unwrap();
+        let expected = crate::rfc3339(timed.ts + Duration::milliseconds(1500));
+        assert_eq!(row.expires_at.as_deref(), Some(expected.as_str()));
+        store.append_ledger(&row).unwrap();
+        let stored = store
+            .ledger_query(LedgerQuery {
+                msg_id: Some(row.msg_id.clone()),
+                limit: 1,
+                ..LedgerQuery::default()
+            })
+            .unwrap();
+        assert_eq!(stored[0].expires_at.as_deref(), Some(expected.as_str()));
+
+        let mut plain = ledger(MsgKind::Note, "plain note", None, "fp-plain");
+        plain.msg_id = new_uuid(91);
+        assert_eq!(plain.expires_at, None);
+        store.append_ledger(&plain).unwrap();
+        let stored_plain = store
+            .ledger_query(LedgerQuery {
+                msg_id: Some(plain.msg_id.clone()),
+                limit: 1,
+                ..LedgerQuery::default()
+            })
+            .unwrap();
+        assert_eq!(stored_plain[0].expires_at, None);
+
+        let mut task_env = envelope(
+            MsgKind::Task,
+            "task ttl",
+            Some("o-99999999-9999-4999-8999-999999999999"),
+        );
+        task_env.id = new_uuid(92);
+        task_env.ttl_ms = Some(5000);
+        let task_row = LedgerRow::from_envelope(&task_env, "fp-task-ttl").unwrap();
+        assert_eq!(task_row.expires_at, None);
+        store.append_ledger(&task_row).unwrap();
+        let stored_task = store
+            .ledger_query(LedgerQuery {
+                msg_id: Some(task_row.msg_id.clone()),
+                limit: 1,
+                ..LedgerQuery::default()
+            })
+            .unwrap();
+        assert_eq!(stored_task[0].expires_at, None);
+    }
+
+    #[test]
+    fn pending_expiries_orders_armed_queued_and_in_flight_rows() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+
+        let mut later = envelope(MsgKind::Note, "later", None);
+        later.id = new_uuid(80);
+        later.ttl_ms = Some(3000);
+        let mut later_row = LedgerRow::from_envelope(&later, "fp-later").unwrap();
+        later_row.expires_at = Some("not-a-date".to_string());
+        store.append_ledger(&later_row).unwrap();
+
+        let mut middle = envelope(MsgKind::Note, "middle", None);
+        middle.id = new_uuid(81);
+        middle.ttl_ms = Some(2000);
+        let middle_row = LedgerRow::from_envelope(&middle, "fp-middle").unwrap();
+        store.append_ledger(&middle_row).unwrap();
+        store.mark_in_flight(&middle_row.msg_id).unwrap();
+
+        let mut early = envelope(MsgKind::Note, "early", None);
+        early.id = new_uuid(82);
+        early.ttl_ms = Some(1000);
+        let early_row = LedgerRow::from_envelope(&early, "fp-early").unwrap();
+        store.append_ledger(&early_row).unwrap();
+
+        let mut acked = envelope(MsgKind::Note, "acked", None);
+        acked.id = new_uuid(83);
+        acked.ttl_ms = Some(500);
+        let acked_row = LedgerRow::from_envelope(&acked, "fp-acked").unwrap();
+        store.append_ledger(&acked_row).unwrap();
+        store.mark_in_flight(&acked_row.msg_id).unwrap();
+        store.mark_acked(&acked_row.msg_id, fixed_time(1)).unwrap();
+
+        let mut expired = envelope(MsgKind::Note, "expired", None);
+        expired.id = new_uuid(84);
+        expired.ttl_ms = Some(400);
+        let expired_row = LedgerRow::from_envelope(&expired, "fp-expired").unwrap();
+        store.append_ledger(&expired_row).unwrap();
+        store.expire_one(&expired_row.msg_id, "expired").unwrap();
+
+        let mut rejected = envelope(MsgKind::Note, "rejected", None);
+        rejected.id = new_uuid(85);
+        rejected.ttl_ms = Some(300);
+        let rejected_row = LedgerRow::from_envelope(&rejected, "fp-rejected").unwrap();
+        store.append_ledger(&rejected_row).unwrap();
+        store.mark_rejected(&rejected_row.msg_id, "gate").unwrap();
+
+        let unarmed = ledger(MsgKind::Note, "unarmed", None, "fp-unarmed");
+        store.append_ledger(&unarmed).unwrap();
+
+        let pending = store.pending_expiries().unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|(msg_id, _)| msg_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![early_row.msg_id.as_str(), middle_row.msg_id.as_str()]
+        );
+        assert_eq!(
+            pending[0].1,
+            DateTime::parse_from_rfc3339(early_row.expires_at.as_deref().unwrap())
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(
+            pending[1].1,
+            DateTime::parse_from_rfc3339(middle_row.expires_at.as_deref().unwrap())
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn ensure_schema_adds_expires_at_in_place_on_a_version_2_file() {
+        let (_dir, path) = temp_db("server.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL);
+             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',2,1);
+             CREATE TABLE ledger(
+               msg_id TEXT PRIMARY KEY,
+               op_id TEXT UNIQUE,
+               fingerprint TEXT,
+               kind TEXT NOT NULL,
+               from_json TEXT NOT NULL,
+               to_json TEXT NOT NULL,
+               task TEXT,
+               parent_task TEXT,
+               attempt INTEGER NOT NULL,
+               state TEXT NOT NULL,
+               out_head TEXT,
+               reason TEXT,
+               enqueued_at TEXT NOT NULL,
+               acked_at TEXT,
+               body_json TEXT,
+               hop INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO ledger(msg_id,kind,from_json,to_json,attempt,state,enqueued_at,hop)
+             VALUES('msg-old','note','{\"role\":{\"role\":\"alice\"}}','{\"role\":{\"role\":\"worker\"}}',0,'queued','2026-09-10T12:00:00.000Z',0);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = ServerLedger::open(&path, 14).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let marker: (String, i64, i64) = conn
+            .query_row(
+                "SELECT name,version,protocol_version FROM schema_marker",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(marker, ("onlyne-server".to_string(), 2, 1));
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(ledger)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            columns.iter().any(|name| name == "expires_at"),
+            "expires_at is present after open: {columns:?}"
+        );
+        drop(conn);
+
+        let stored = store
+            .ledger_query(LedgerQuery {
+                msg_id: Some("msg-old".to_string()),
+                limit: 1,
+                ..LedgerQuery::default()
+            })
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].msg_id, "msg-old");
+        assert_eq!(stored[0].expires_at, None);
     }
 }

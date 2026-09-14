@@ -77,16 +77,19 @@ The parent's durable records are the ledger columns and the event rows, so the r
 ledger(msg_id TEXT PRIMARY KEY, op_id TEXT UNIQUE, fingerprint TEXT, kind TEXT,
        from_json TEXT NOT NULL, to_json TEXT NOT NULL, task TEXT, parent_task TEXT,
        attempt INTEGER NOT NULL, state TEXT NOT NULL, out_head TEXT, reason TEXT,
-       enqueued_at TEXT NOT NULL, acked_at TEXT, body_json TEXT)
+       enqueued_at TEXT NOT NULL, acked_at TEXT, body_json TEXT, hop INTEGER NOT NULL,
+       expires_at TEXT)
 events(seq INTEGER PRIMARY KEY, type TEXT NOT NULL, data_json TEXT NOT NULL,
        created_at TEXT NOT NULL)
 ```
 
-Source: `SERVER_DDL` in `crates/onlyne-store/src/server.rs` lines 44-69.
+Source: `SERVER_DDL` in `crates/onlyne-store/src/server.rs` lines 57-81.
 
-One row is written per accepted send. Its `from_json`, `to_json`, `body_json`, and `out_head` all come from the parent-side envelope. Source: `LedgerRow::from_envelope` in `crates/onlyne-store/src/server.rs` lines 148-170; `relay::send` in `crates/onlyne-server/src/relay.rs` lines 248-345.
+`hop` is a counter and `expires_at` is one RFC 3339 timestamp, so neither carries a name.
 
-The observables a reader sees for that row are rebuilt from the same columns. The event stream carries the same principals. Source: `entry_from_row` in `crates/onlyne-server/src/relay.rs` lines 596-615; `ledger_event` in `crates/onlyne-server/src/relay.rs` lines 576-593.
+One row is written per accepted send. Its `from_json`, `to_json`, `body_json`, and `out_head` all come from the parent-side envelope. Source: `LedgerRow::from_envelope` in `crates/onlyne-store/src/server.rs` lines 177-206; `relay::send` in `crates/onlyne-server/src/relay.rs` lines 303-465.
+
+The observables a reader sees for that row are rebuilt from the same columns. The event stream carries the same principals. Source: `entry_from_row` in `crates/onlyne-server/src/relay.rs` lines 780-801; `ledger_event` in `crates/onlyne-server/src/relay.rs` lines 760-777.
 
 A child role name inside `from_json`, `to_json`, `body_json`, `out_head`, or an event `data_json` breaks this rule. Source: `docs/v1-PLAN.md` line 463.
 

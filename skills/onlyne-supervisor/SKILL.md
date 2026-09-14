@@ -84,7 +84,10 @@ offline, or online with no session running while `note_queue` stays off. The
 message says which. `duplicate` → the same `op_id` again; its `data` is the
 original receipt, byte for byte.
 `conflict` → same `op_id`, different body. `not_admin` → a non-admin role sent with
-`--from`. Every reject writes no ledger row and leaves no sender intent.
+`--from`. Every reject writes no ledger row and leaves no sender intent. A queued
+note's `--ttl` deadline sits on its ledger row, so the sweep answers `expired` after
+a server restart too. A note that was already queued when the server was upgraded
+carries no deadline and stays `queued`; settle it with `repair_fail` or `repair_close`.
 
 ## Watching with the TUI
 

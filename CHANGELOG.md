@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.0.7] - 2026-09-14
+
+Scope: the queued note deadline. `onlyne-server` 1.0.6 → 1.0.7,
+`onlyne-store` 1.0.2 → 1.0.3. Every other crate stays where it is.
+
+### Fixed
+
+- server and store: a queued note's deadline lived in the process's memory, and
+  a restarted server left the row `queued` forever. The only arming site was
+  `relay::send`, and `sweep_expired` reads that map, so a deadline had no path back
+  into a fresh process. The deadline is now a ledger column (`expires_at`) armed again
+  when `State` opens, written for a `note` row whose envelope carries `ttl_ms` — the
+  pair `onlyne send --ttl --note` produces. The marker version stays 2 and the column
+  is added in place to existing databases, so a live workspace keeps its rows. Files:
+  `crates/onlyne-store/src/server.rs`, `crates/onlyne-server/src/state.rs`,
+  `crates/onlyne-server/src/relay.rs`. Tests: `crates/onlyne-store/src/tests.rs`
+  (persisted deadline, `pending_expiries` order, in-place column add) and
+  `crates/onlyne-server/tests/delivery.rs`
+  (`a_restarted_server_rearms_queued_note_deadlines`, which fails with an empty sweep
+  when the re-arm is lifted). A row queued by an older binary keeps `expires_at` null:
+  that binary wrote the deadline nowhere, so the sweep has nothing to arm and the row
+  stays `queued` for an operator's `repair_fail` or `repair_close` to settle. Both
+  halves were run through real processes against a database written by the installed
+  1.0.6 server: the pre-upgrade row stayed `queued`, and a note sent after the upgrade
+  stored its deadline and settled `expired` in a later server process.
+
 ## [1.0.6] - 2026-09-14
 
 Scope: the herdr backend, the focus chain, and the control plane's delivery path.
