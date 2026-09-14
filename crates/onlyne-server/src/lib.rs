@@ -216,10 +216,40 @@ pub async fn role_listener(
     }
 }
 
+/// Frame I/O for one role link.
+///
+/// A write failure must reach the teardown, and a duplex stream reaches it in a
+/// test while a TLS socket cannot be aimed at one. `run_session` in
+/// `onlyne-net` is generic over its stream for the same reason.
+#[allow(async_fn_in_trait)]
+pub trait RoleIo {
+    async fn send_frame(&mut self, frame: &Frame) -> Result<(), onlyne_net::NetError>;
+    async fn recv_frame(&mut self) -> Result<Option<Frame<ClientOp>>, onlyne_net::NetError>;
+}
+
+impl RoleIo for TlsConn {
+    async fn send_frame(&mut self, frame: &Frame) -> Result<(), onlyne_net::NetError> {
+        TlsConn::send_frame(self, frame).await
+    }
+
+    async fn recv_frame(&mut self) -> Result<Option<Frame<ClientOp>>, onlyne_net::NetError> {
+        TlsConn::recv_frame(self).await
+    }
+}
+
 /// Serve one authenticated role connection until it closes.
 pub async fn role_connection(
     state: Arc<crate::state::State>,
-    mut connection: TlsConn,
+    connection: TlsConn,
+    role: &str,
+) -> anyhow::Result<()> {
+    role_connection_with_io(state, connection, role).await
+}
+
+/// Serve one authenticated role connection over any [`RoleIo`].
+pub async fn role_connection_with_io<I: RoleIo + Send>(
+    state: Arc<crate::state::State>,
+    mut connection: I,
     role: &str,
 ) -> anyhow::Result<()> {
     let (sender, mut outbound) = mpsc::channel::<Frame>(256);
@@ -230,22 +260,44 @@ pub async fn role_connection(
                 let Some(frame) = outgoing else {
                     break;
                 };
-                connection.send_frame(&frame).await?;
+                if let Err(error) = connection.send_frame(&frame).await {
+                    tracing::debug!(
+                        error = %error,
+                        role,
+                        "role connection write failed; the link is ending"
+                    );
+                    break;
+                }
             }
-            incoming = connection.recv_frame::<Frame<ClientOp>>() => {
+            incoming = connection.recv_frame() => {
                 match incoming {
                     Ok(Some(Frame::Req { id, op })) => {
                         let body = router::dispatch_client(&state, &mut session, op).await;
-                        connection
+                        if let Err(error) = connection
                             .send_frame(&Frame::<ClientOp>::res(id, body))
-                            .await?;
+                            .await
+                        {
+                            tracing::debug!(
+                                error = %error,
+                                role,
+                                "role connection write failed; the link is ending"
+                            );
+                            break;
+                        }
                     }
                     Ok(Some(Frame::Ping { t })) => {
                         let pong: Frame = Frame::Pong {
                             t,
                             server_seq: state.event_head().max(0) as u64,
                         };
-                        connection.send_frame(&pong).await?;
+                        if let Err(error) = connection.send_frame(&pong).await {
+                            tracing::debug!(
+                                error = %error,
+                                role,
+                                "role connection write failed; the link is ending"
+                            );
+                            break;
+                        }
                     }
                     Ok(Some(_)) => {}
                     Ok(None) => break,

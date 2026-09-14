@@ -2694,3 +2694,110 @@ async fn a_wrong_gateway_mount_is_refused_at_hello() {
     assert_eq!(error.0, ErrorCode::Invalid);
     assert!(error.1.contains("telegram") && error.1.contains("feishu"));
 }
+
+/// A failed write on a live role link used to return from `role_connection`
+/// before the generation check and `relay::disconnect`. The role stayed
+/// registered, its in-flight rows kept a ticket naming the dead link, and
+/// the sender gate kept answering online until the next hello. The write
+/// failure now ends the loop through the same door as EOF.
+struct BrokenIo {
+    hello: Option<Frame>,
+    remaining_sends: usize,
+}
+
+impl BrokenIo {
+    fn new(remaining_sends: usize) -> Self {
+        Self {
+            hello: Some(Frame::req("h", ClientOp::Hello(hello_args("builder")))),
+            remaining_sends,
+        }
+    }
+}
+
+impl onlyne_server::RoleIo for BrokenIo {
+    async fn send_frame(&mut self, _frame: &Frame) -> Result<(), onlyne_net::NetError> {
+        if self.remaining_sends == 0 {
+            return Err(onlyne_net::NetError::Disconnected(
+                "test: the peer is gone".to_string(),
+            ));
+        }
+        self.remaining_sends -= 1;
+        Ok(())
+    }
+
+    async fn recv_frame(&mut self) -> Result<Option<Frame<ClientOp>>, onlyne_net::NetError> {
+        if let Some(frame) = self.hello.take() {
+            return Ok(Some(frame));
+        }
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn a_write_failure_requeues_in_flight_rows_and_marks_the_role_offline() {
+    let fixture = fixture_with(&spec_text().replace("note_queue = true", "note_queue = false"));
+    let handle = tokio::spawn(onlyne_server::role_connection_with_io(
+        fixture.state.clone(),
+        BrokenIo::new(1),
+        "builder",
+    ));
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if fixture.state.role_sender("builder").is_some() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "builder registers on hello"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    assert_eq!(outcome.receipt.state, LedgerState::InFlight);
+
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("the connection task ends after the failed write");
+    let _ = ended.expect("join");
+
+    let rows = ledger_rows(&fixture.state);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].msg_id, outcome.receipt.msg_id);
+    assert_eq!(
+        rows[0].state,
+        LedgerState::Queued,
+        "the failed write requeues the row its dead link held in flight"
+    );
+    assert!(
+        fixture.state.role_sender("builder").is_none(),
+        "the failed write removes the role from the registry"
+    );
+
+    let replay =
+        events::replay(&fixture.state, 0, &events::EventFilter::default(), 500).expect("replay");
+    assert!(
+        replay.rows.iter().any(|row| matches!(
+            &row.event,
+            Event::RolePresence(presence)
+                if presence.role == "builder"
+                    && presence.state == onlyne_proto::Presence::Offline
+        )),
+        "the failed write emits role_presence offline for builder: {:?}",
+        replay
+            .rows
+            .iter()
+            .map(|row| row.event.type_name())
+            .collect::<Vec<_>>()
+    );
+
+    let later = note("planner", "builder", "after");
+    let reject = rejected(relay::send(&fixture.state, &later, false, None).expect("relay"));
+    assert_eq!(reject.code, ErrorCode::RecipientOffline);
+    assert_eq!(
+        ledger_rows(&fixture.state).len(),
+        1,
+        "an offline note writes no ledger row"
+    );
+}

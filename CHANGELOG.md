@@ -25,6 +25,16 @@ Scope: the queued note deadline. `onlyne-server` 1.0.6 → 1.0.7,
   halves were run through real processes against a database written by the installed
   1.0.6 server: the pre-upgrade row stayed `queued`, and a note sent after the upgrade
   stored its deadline and settled `expired` in a later server process.
+- server: three write sites in `role_connection` answered a failed frame write with
+  `?`, which returned before the generation check and `relay::disconnect`. A role
+  whose link died mid-write stayed registered, online to the sender gate, holding
+  its rows `in_flight` with a ticket naming a dead connection until that role's next
+  `hello`. The write failure now ends the loop through the same door as EOF, so the
+  requeue, the registry removal, and the `offline` presence happen on the spot. The
+  `RoleIo` seam in `crates/onlyne-server/src/lib.rs` exists so a write failure
+  reaches that teardown, and a duplex stream reaches it in a test while a TLS socket
+  cannot be aimed at one. Test:
+  `a_write_failure_requeues_in_flight_rows_and_marks_the_role_offline`.
 
 ## [1.0.6] - 2026-09-14
 
