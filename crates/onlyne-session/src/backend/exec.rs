@@ -26,7 +26,9 @@
 //!   session, which is the contract a tab or a pane has too.
 //! * **close is graceful before it is lethal**: `SIGTERM`, then `SIGKILL` after
 //!   the grace window, and `force` skips the grace. The child is reaped either
-//!   way, so no zombie outlives its session.
+//!   way, so no zombie outlives its session. The group signal is `kill(2)` on
+//!   the recorded pgid only (`backend_ref.pgid`, equal to the leader pid after
+//!   `process_group(0)`). Close never matches cmdline text and refuses pid 0/`-1`.
 
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
@@ -72,14 +74,7 @@ impl ExecBackend {
     fn pid_alive(pid: u32) -> bool {
         #[cfg(unix)]
         {
-            Command::new("kill")
-                .arg("-0")
-                .arg(pid.to_string())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false)
+            pid_alive_unix(pid)
         }
         #[cfg(windows)]
         {
@@ -133,16 +128,20 @@ impl ExecBackend {
 }
 
 /// Signal one session's whole process group, answering whether it worked.
+///
+/// Uses `libc::kill(-pgid, sig)` so the target is the numeric group recorded
+/// at spawn — never a `kill(1)` argv, and never pid 0/`-1` (those mean "this
+/// process group" / "every process we can signal" and would sweep a CI runner
+/// whose cmdline happens to contain `onlyne`).
 #[cfg(unix)]
 fn signal_group(pid: u32, signal: &str) -> bool {
-    Command::new("kill")
-        .arg(format!("-{signal}"))
-        .arg(format!("-{pid}"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    let Some(pgid) = unix_pid(pid) else {
+        return false;
+    };
+    let Some(sig) = unix_sig(signal) else {
+        return false;
+    };
+    send_signal(-pgid, sig)
 }
 
 /// `CTRL_BREAK` is the group signal `CREATE_NEW_PROCESS_GROUP` accepts.
@@ -160,12 +159,45 @@ fn signal_group(pid: u32, signal: &str) -> bool {
 /// Signal one process by pid.
 #[cfg(unix)]
 fn signal_pid(pid: u32, signal: &str) {
-    let _ = Command::new("kill")
-        .arg(format!("-{signal}"))
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let Some(pid) = unix_pid(pid) else {
+        return;
+    };
+    let Some(sig) = unix_sig(signal) else {
+        return;
+    };
+    let _ = send_signal(pid, sig);
+}
+
+/// A pid/pgid that is safe to pass to `kill(2)`. 0 means "caller's group" and
+/// -1 / 1 would broadcast or punch init; none of those are a session child.
+#[cfg(unix)]
+fn unix_pid(pid: u32) -> Option<i32> {
+    i32::try_from(pid).ok().filter(|&pid| pid > 1)
+}
+
+#[cfg(unix)]
+fn unix_sig(signal: &str) -> Option<i32> {
+    match signal {
+        "TERM" => Some(libc::SIGTERM),
+        "KILL" => Some(libc::SIGKILL),
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+fn send_signal(pid: i32, sig: i32) -> bool {
+    if pid == 0 || pid == -1 {
+        return false;
+    }
+    unsafe { libc::kill(pid, sig) == 0 }
+}
+
+#[cfg(unix)]
+fn pid_alive_unix(pid: u32) -> bool {
+    let Some(pid) = unix_pid(pid) else {
+        return false;
+    };
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 #[cfg(windows)]
@@ -178,6 +210,10 @@ fn signal_pid(pid: u32, signal: &str) {
 #[cfg(windows)]
 fn generate_ctrl_break(pid: u32) -> bool {
     use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+    // dwProcessGroupId 0 broadcasts to every process sharing this console.
+    if pid == 0 {
+        return false;
+    }
     unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) != 0 }
 }
 
@@ -189,6 +225,9 @@ fn pid_alive_windows(pid: u32) -> bool {
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
+    if pid == 0 {
+        return false;
+    }
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
@@ -296,6 +335,7 @@ impl SessionBackend for ExecBackend {
             backend_ref: serde_json::json!({
                 "id": spec.task_id,
                 "pid": pid,
+                "pgid": pid,
                 "log": log_path.to_string_lossy(),
             }),
             generation: 1,
@@ -707,5 +747,39 @@ mod tests {
             !ExecBackend::pid_alive(pid),
             "GenerateConsoleCtrlEvent failure must fall through to child.kill"
         );
+    }
+
+    /// A sibling whose argv contains `onlyne` must outlive session close.
+    /// `kill(2)` on pid 0/`-1` or a cmdline glob would take it — and a GHA
+    /// runner whose argv contains `/home/runner/work/onlyne/onlyne`.
+    #[cfg(unix)]
+    #[test]
+    fn close_does_not_signal_an_unrelated_onlyne_named_process() {
+        let mut canary = Command::new("bash")
+            .args(["-c", "exec -a onlyne-canary sleep 120"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("canary");
+        let canary_pid = canary.id();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = ExecBackend::new();
+        let session = backend
+            .spawn(spec(dir.path(), "canary-session", vec!["sleep", "30"]))
+            .unwrap();
+        assert_eq!(
+            session.backend_ref["pgid"].as_u64().unwrap() as u32,
+            session.backend_ref["pid"].as_u64().unwrap() as u32
+        );
+        backend
+            .close(&session, CloseReason::Cancelled, false)
+            .unwrap();
+        assert!(
+            ExecBackend::pid_alive(canary_pid),
+            "pid {canary_pid} (argv onlyne-canary) must not die with the session"
+        );
+        let _ = canary.kill();
+        let _ = canary.wait();
     }
 }
