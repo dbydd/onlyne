@@ -1196,14 +1196,27 @@ async fn pinned_tls_link_fetches_welcome_and_caches_prose() {
     let client = tokio::spawn(onlyne_client::run(init));
 
     let mut cached = None;
-    for _ in 0..60 {
+    for _ in 0..200 {
         if let Some(prose) = store.prose("planner").unwrap() {
             cached = Some(prose);
             break;
         }
+        if client.is_finished() {
+            let outcome = client.await;
+            panic!("client exited before welcome prose cached: {outcome:?}");
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let (prose, hash) = cached.expect("welcome prose reached the cache");
+    if cached.is_none() {
+        if client.is_finished() {
+            panic!(
+                "client exited before welcome prose cached: {:?}",
+                client.await
+            );
+        }
+        panic!("welcome prose reached the cache");
+    }
+    let (prose, hash) = cached.unwrap();
     assert_eq!(prose, "cluster b exposes planner");
     assert_eq!(hash, "hash-spec-b");
 

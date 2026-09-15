@@ -19,7 +19,7 @@ fn is_executable_file(path: &Path) -> bool {
     }
     #[cfg(windows)]
     {
-        // Windows has no executable bit; `candidates_in` already probes `.exe`.
+        // Windows has no executable bit; `candidates_in` probes `.exe`/`.cmd`/`.bat`.
         true
     }
     #[cfg(not(any(unix, windows)))]
@@ -28,8 +28,14 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-fn candidates_in(dir: &Path, name: &str) -> [PathBuf; 2] {
-    [dir.join(name), dir.join(format!("{name}.exe"))]
+fn candidates_in(dir: &Path, name: &str) -> Vec<PathBuf> {
+    let mut names = vec![dir.join(name), dir.join(format!("{name}.exe"))];
+    if cfg!(windows) {
+        // Test stubs and operator wrappers ship as `.cmd`/`.bat`.
+        names.push(dir.join(format!("{name}.cmd")));
+        names.push(dir.join(format!("{name}.bat")));
+    }
+    names
 }
 
 /// Look for `name` next to this binary, then along `PATH`.

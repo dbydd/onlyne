@@ -437,7 +437,11 @@ fn manifest_shape_is_stable() {
     keys.sort();
     assert_eq!(keys, vec!["generated_at", "roles", "server_root"]);
     chrono::DateTime::parse_from_rfc3339(manifest["generated_at"].as_str().unwrap()).unwrap();
-    assert!(manifest["server_root"].as_str().unwrap().starts_with('/'));
+    assert!(
+        Path::new(manifest["server_root"].as_str().unwrap()).is_absolute(),
+        "server_root must be absolute, got {}",
+        manifest["server_root"]
+    );
     let role = &manifest["roles"][0];
     let mut role_keys: Vec<_> = role.as_object().unwrap().keys().cloned().collect();
     role_keys.sort();
@@ -503,7 +507,11 @@ fn absolute_path_scan_removes_this_run_and_exits_4() {
         err.to_string()
             .starts_with("onlyne: generated workspace embeds absolute path ")
     );
-    assert!(err.to_string().ends_with("dev/planner/AGENTS.md"));
+    let msg = err.to_string().replace('\\', "/");
+    assert!(
+        msg.ends_with("dev/planner/AGENTS.md"),
+        "scan must name the leaking file, got {msg}"
+    );
     assert!(!out.exists());
 }
 
@@ -654,7 +662,7 @@ fn init_writes_spec_prints_pin_and_refuses_second_run() {
         stderr.trim_end(),
         format!(
             "onlyne: workspace exists at {}; pass --force to overwrite",
-            root.join(".onlyne/spec.toml").display()
+            root.join(".onlyne").join("spec.toml").display()
         )
     );
 }
@@ -736,9 +744,15 @@ fn appended_fragments_parse_for_two_roles() {
 // ---------------------------------------------------------------------------
 
 fn dead_pid() -> u32 {
+    #[cfg(unix)]
     let mut child = std::process::Command::new("/bin/sh")
         .arg("-c")
         .arg("exit 0")
+        .spawn()
+        .unwrap();
+    #[cfg(windows)]
+    let mut child = std::process::Command::new("cmd")
+        .args(["/C", "exit", "0"])
         .spawn()
         .unwrap();
     let pid = child.id();
@@ -830,6 +844,7 @@ fn status_reports_a_stopped_server_as_json() {
         report["socket"]
             .as_str()
             .unwrap()
+            .replace('\\', "/")
             .ends_with(".onlyne/run/s")
     );
 }

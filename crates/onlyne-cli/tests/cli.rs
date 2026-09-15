@@ -2,15 +2,15 @@
 //! and a real `exec`, so the messages, exit codes and stream split stay pinned.
 
 use onlyne_layout::local_socket::prelude::SyncListener;
-use onlyne_layout::{bind_local_sync_poll, LocalListenerSync, LocalStreamSync};
-use onlyne_proto::{binary_not_found, NO_SOCKET_MESSAGE};
+use onlyne_layout::{LocalListenerSync, LocalStreamSync, bind_local_sync_poll};
+use onlyne_proto::{NO_SOCKET_MESSAGE, binary_not_found};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -249,19 +249,21 @@ fn wait_ready_reports_the_bound_when_the_server_never_answers() {
     let listener = bind_local_sync_poll(&socket).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let probe = stop.clone();
-    let thread = thread::spawn(move || loop {
-        if probe.load(Ordering::Relaxed) {
-            break;
-        }
-        match listener.accept() {
-            Ok(mut stream) => {
-                let mut buffer = [0u8; 4096];
-                let _ = stream.read(&mut buffer);
+    let thread = thread::spawn(move || {
+        loop {
+            if probe.load(Ordering::Relaxed) {
+                break;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => break,
+            match listener.accept() {
+                Ok(mut stream) => {
+                    let mut buffer = [0u8; 4096];
+                    let _ = stream.read(&mut buffer);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => break,
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
     });
 
     let output = Command::new(bin())
@@ -1300,7 +1302,7 @@ fn stub_binary(dir: &Path, name: &str, script: &str) -> PathBuf {
 #[cfg(windows)]
 fn unix_script_to_cmd(script: &str) -> String {
     if script.contains("exit 4") {
-        return "@echo off\r\nexit /b 4\r\n".into();
+        return "@echo off\r\nexit 4\r\n".into();
     }
     if let Some(marker) = script.lines().find_map(|line| {
         line.trim()
@@ -1311,7 +1313,19 @@ fn unix_script_to_cmd(script: &str) -> String {
     }
     let mut cmd = String::from("@echo off\r\n");
     if script.contains("ONLYNE_ARGV") {
-        cmd.push_str("for %%A in (%*) do echo %%A>>\"%ONLYNE_ARGV%\"\r\n");
+        // Shift-loop keeps paths with spaces as one argv line, matching
+        // unix `printf '%s\n' "$@"`.
+        cmd.push_str(
+            "if defined ONLYNE_ARGV (\r\n\
+             type nul > \"%ONLYNE_ARGV%\"\r\n\
+             :onlyne_argv_loop\r\n\
+             if \"%~1\"==\"\" goto onlyne_argv_done\r\n\
+             >>\"%ONLYNE_ARGV%\" echo %~1\r\n\
+             shift\r\n\
+             goto onlyne_argv_loop\r\n\
+             :onlyne_argv_done\r\n\
+             )\r\n",
+        );
     }
     if script.contains("rendering spec") {
         cmd.push_str("echo rendering spec 1>&2\r\n");

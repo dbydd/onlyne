@@ -175,11 +175,7 @@ pub fn generate(args: &GenerateArgs, spec: &Spec) -> Result<GenerateReport, Gene
                     if let Some(name) = agent_name(source)? {
                         files.push((
                             relative,
-                            replace_bytes(
-                                &substituted,
-                                source.as_bytes(),
-                                format!("../.onlyne/agent/{name}").as_bytes(),
-                            ),
+                            rewrite_agent_package_bytes(&substituted, source, &name),
                         ));
                     } else {
                         files.push((relative, substituted.into_owned()));
@@ -539,6 +535,24 @@ fn scan_prefixes(root: &Path, out: &Path) -> Vec<String> {
     prefixes.sort();
     prefixes.dedup();
     prefixes
+}
+
+/// Rewrite a literal `agent_package` path in `.pi/settings.json`.
+///
+/// JSON encodes `\` as `\\`, so a Windows source path written by
+/// `serde_json::to_string` does not match the raw `display()` bytes. The
+/// escaped form is tried second; on unix the two needles are identical and
+/// the second pass is a no-op.
+fn rewrite_agent_package_bytes(bytes: &[u8], source: &str, name: &str) -> Vec<u8> {
+    let replacement = format!("../.onlyne/agent/{name}");
+    let mut out = replace_bytes(bytes, source.as_bytes(), replacement.as_bytes());
+    if let Ok(json) = serde_json::to_string(source) {
+        let escaped = json.trim_matches('"');
+        if escaped != source {
+            out = replace_bytes(&out, escaped.as_bytes(), replacement.as_bytes());
+        }
+    }
+    out
 }
 
 fn replace_bytes(source: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
