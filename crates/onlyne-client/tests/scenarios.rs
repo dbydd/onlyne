@@ -2480,6 +2480,7 @@ async fn a_session_staged_before_its_agent_mounts_is_handed_its_payload() {
 }
 
 /// Whether one pid still names a process this test can signal.
+#[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
@@ -2494,6 +2495,7 @@ fn pid_alive(pid: u32) -> bool {
 /// operator settles a task, and the process doing the work goes with it. A
 /// delivered `control` row used to reach no consumer at all, so the agent kept
 /// writing the shared surface minutes after `repair close` reported `exited`.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_delivered_cancel_stops_the_session_process() {
     let dir = tempdir().unwrap();

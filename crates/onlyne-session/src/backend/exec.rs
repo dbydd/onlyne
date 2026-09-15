@@ -405,6 +405,7 @@ mod tests {
     /// child still alive with no `got=` line afterwards is a child whose stdin
     /// was not at EOF: `Stdio::null()` or a dropped write end would make `read`
     /// return at once, the script would print `got=` and exit.
+    #[cfg(unix)]
     #[test]
     fn a_spawned_child_does_not_see_stdin_eof() {
         let dir = tempfile::tempdir().unwrap();
@@ -435,6 +436,7 @@ mod tests {
 
     /// The child's own output is what an operator reads, so both streams land in
     /// the workspace log rather than in the client's stdio.
+    #[cfg(unix)]
     #[test]
     fn child_stdio_lands_in_the_workspace_log() {
         let dir = tempfile::tempdir().unwrap();
@@ -461,6 +463,7 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn probe_follows_the_child_until_close_reaps_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -486,6 +489,7 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn force_close_kills_a_child_that_ignores_term() {
         let dir = tempfile::tempdir().unwrap();
@@ -509,6 +513,7 @@ mod tests {
     /// pid alone leaves the `sleep` running under no owner — the reported case was
     /// a driver script that kept rewriting the measured surface minutes after its
     /// session was closed.
+    #[cfg(unix)]
     #[test]
     fn close_stops_the_children_the_session_started() {
         let dir = tempfile::tempdir().unwrap();

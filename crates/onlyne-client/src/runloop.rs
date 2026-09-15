@@ -297,13 +297,17 @@ async fn close_on_signal(dispatch: DispatchState) {
 /// close_all budget the unix SIGINT path uses.
 #[cfg(windows)]
 async fn close_on_signal(dispatch: DispatchState) {
-    match tokio::signal::windows::ctrl_c().await {
-        Ok(()) => tracing::info!("Ctrl-C: closing live sessions"),
+    // `ctrl_c()` installs synchronously and hands back the watch stream; the
+    // await belongs on `recv`, which yields once per console interrupt.
+    let mut interrupt = match tokio::signal::windows::ctrl_c() {
+        Ok(stream) => stream,
         Err(error) => {
             tracing::warn!(error = %error, "Ctrl-C handler was not installed");
             return;
         }
-    }
+    };
+    interrupt.recv().await;
+    tracing::info!("Ctrl-C: closing live sessions");
     dispatch::close_all(
         &dispatch,
         onlyne_session::CloseReason::Shutdown,
