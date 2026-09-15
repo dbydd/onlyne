@@ -392,6 +392,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn log_text(spec: &SpawnSpec) -> String {
         let path = spec
             .cwd

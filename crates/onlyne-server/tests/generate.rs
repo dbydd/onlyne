@@ -1,6 +1,7 @@
 use onlyne_config::{ClientEntry, IntentPolicy, ServerSection, Spec, Timeouts};
 use onlyne_server::generate::{GenerateArgs, generate};
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -115,6 +116,7 @@ fn first_run_creates_plan_tree() {
     assert!(config.contains("key_path = \"keys/role.key\""));
     assert!(config.contains("[server]"));
     let key = ws.join(".onlyne/keys/role.key");
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(&key).unwrap().permissions().mode() & 0o777,
         0o600
@@ -471,6 +473,7 @@ fn cert_pin_from_server_cert_reaches_every_config() {
             fs::read_to_string(out.join("dev").join(role).join(".onlyne/config.toml")).unwrap();
         assert!(config.contains(&cert.spki_pin), "pin missing for {role}");
     }
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(onlyne_layout::ServerRoot::resolve(&root).key_path())
             .unwrap()
@@ -629,11 +632,14 @@ fn init_writes_spec_prints_pin_and_refuses_second_run() {
     assert!(spec.contains(&format!("cert_pin = \"{}\"", lines[0])));
     assert!(spec.contains("name = \"server\""));
     onlyne_config::Spec::load(root.join(".onlyne/spec.toml")).unwrap();
-    let key = root.join(".onlyne/keys/server.key");
-    assert_eq!(
-        fs::metadata(&key).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    #[cfg(unix)]
+    {
+        let key = root.join(".onlyne/keys/server.key");
+        assert_eq!(
+            fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     let again = run_cli(&[
         "init",

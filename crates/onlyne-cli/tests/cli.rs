@@ -2,15 +2,17 @@
 //! and a real `exec`, so the messages, exit codes and stream split stay pinned.
 
 use onlyne_layout::local_socket::prelude::SyncListener;
-use onlyne_layout::{LocalListenerSync, LocalStreamSync, bind_local_sync_poll};
-use onlyne_proto::{NO_SOCKET_MESSAGE, binary_not_found};
+use onlyne_layout::{bind_local_sync_poll, LocalListenerSync, LocalStreamSync};
+use onlyne_proto::{binary_not_found, NO_SOCKET_MESSAGE};
 use std::ffi::OsString;
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 const EXIT_OK: i32 = 0;
 const EXIT_ANSWER_FAILED: i32 = 1;
@@ -22,8 +24,29 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_onlyne"))
 }
 
-fn stderr_of(output: &std::process::Output) -> String {
+fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// `fs::copy` can leave the destination busy on Linux (ETXTBSY / code 26).
+/// Retry a bounded number of times so a just-written binary can exec.
+fn spawn_output(cmd: &mut Command) -> Output {
+    const ATTEMPTS: u32 = 10;
+    let mut last = None;
+    for _ in 0..ATTEMPTS {
+        match cmd.output() {
+            Ok(out) => return out,
+            Err(err) if err.kind() == ErrorKind::ExecutableFileBusy => {
+                last = Some(err);
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(err) => panic!("failed to spawn CLI: {err}"),
+        }
+    }
+    panic!(
+        "failed to spawn CLI after {ATTEMPTS} ETXTBSY retries: {}",
+        last.expect("ExecutableFileBusy")
+    );
 }
 
 /// With no `--socket`, `--server-root` or `--workspace`, resolution fails with
@@ -176,24 +199,24 @@ fn generate_forwards_the_argv_to_onlyne_server() {
     let root = dir.path().join("srv");
     let out = dir.path().join("ws");
 
-    let output = Command::new(&cli)
-        .current_dir(dir.path())
-        .env("ONLYNE_ARGV", &argv_out)
-        .env("PATH", path_with(&bin_dir))
-        .args([
-            "generate",
-            "--server-root",
-            root.to_str().unwrap(),
-            "--template",
-            "spec/roles.yaml",
-            "--role",
-            "worker",
-            "--out",
-            out.to_str().unwrap(),
-            "--force",
-        ])
-        .output()
-        .unwrap();
+    let output = spawn_output(
+        Command::new(&cli)
+            .current_dir(dir.path())
+            .env("ONLYNE_ARGV", &argv_out)
+            .env("PATH", path_with(&bin_dir))
+            .args([
+                "generate",
+                "--server-root",
+                root.to_str().unwrap(),
+                "--template",
+                "spec/roles.yaml",
+                "--role",
+                "worker",
+                "--out",
+                out.to_str().unwrap(),
+                "--force",
+            ]),
+    );
 
     assert_eq!(output.status.code(), Some(EXIT_OK));
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -226,21 +249,19 @@ fn wait_ready_reports_the_bound_when_the_server_never_answers() {
     let listener = bind_local_sync_poll(&socket).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let probe = stop.clone();
-    let thread = thread::spawn(move || {
-        loop {
-            if probe.load(Ordering::Relaxed) {
-                break;
-            }
-            match listener.accept() {
-                Ok(mut stream) => {
-                    let mut buffer = [0u8; 4096];
-                    let _ = stream.read(&mut buffer);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => break,
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+    let thread = thread::spawn(move || loop {
+        if probe.load(Ordering::Relaxed) {
+            break;
         }
+        match listener.accept() {
+            Ok(mut stream) => {
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => break,
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     });
 
     let output = Command::new(bin())
@@ -282,12 +303,12 @@ fn missing_sibling_binary_reports_the_exact_line_and_exit_127() {
     std::fs::create_dir_all(&empty_bin).unwrap();
     let copy = onlyne_in(dir.path());
 
-    let output = Command::new(&copy)
-        .current_dir(dir.path())
-        .env("PATH", empty_bin.to_str().unwrap())
-        .args(["--server-root", root.to_str().unwrap(), "server", "run"])
-        .output()
-        .unwrap();
+    let output = spawn_output(
+        Command::new(&copy)
+            .current_dir(dir.path())
+            .env("PATH", empty_bin.to_str().unwrap())
+            .args(["--server-root", root.to_str().unwrap(), "server", "run"]),
+    );
     assert_eq!(output.status.code(), Some(EXIT_NO_SIBLING));
     assert_eq!(
         stderr_of(&output),
@@ -456,12 +477,12 @@ fn generate_propagates_the_child_exit_four() {
     let cli = onlyne_in(&bin_dir);
     let root = dir.path().join("srv");
 
-    let output = Command::new(&cli)
-        .current_dir(dir.path())
-        .env("PATH", path_with(&bin_dir))
-        .args(["generate", "--server-root", root.to_str().unwrap()])
-        .output()
-        .unwrap();
+    let output = spawn_output(
+        Command::new(&cli)
+            .current_dir(dir.path())
+            .env("PATH", path_with(&bin_dir))
+            .args(["generate", "--server-root", root.to_str().unwrap()]),
+    );
     assert_eq!(output.status.code(), Some(4));
 }
 
@@ -1235,7 +1256,16 @@ fn onlyne_in(dir: &Path) -> PathBuf {
     let copy = dir.join("onlyne");
     #[cfg(windows)]
     let copy = dir.join("onlyne.exe");
-    std::fs::copy(env!("CARGO_BIN_EXE_onlyne"), &copy).unwrap();
+    // Write via a temp name, sync, close, then rename so Linux does not
+    // ETXTBSY-exec a file whose write handle is still open.
+    let staging = copy.with_extension("copying");
+    {
+        let mut src = File::open(env!("CARGO_BIN_EXE_onlyne")).unwrap();
+        let mut dst = File::create(&staging).unwrap();
+        std::io::copy(&mut src, &mut dst).unwrap();
+        dst.sync_all().unwrap();
+    }
+    std::fs::rename(&staging, &copy).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1318,20 +1348,20 @@ fn server_lifecycle_verbs_forward_the_argv_verbatim() {
     let cli = onlyne_in(&bin_dir);
     let root = dir.path().join("srv");
 
-    let output = Command::new(&cli)
-        .current_dir(dir.path())
-        .env("ONLYNE_ARGV", &argv_out)
-        .env("PATH", path_with(&bin_dir))
-        .args([
-            "server",
-            "init",
-            "--root",
-            root.to_str().unwrap(),
-            "--listen",
-            "127.0.0.1:7899",
-        ])
-        .output()
-        .unwrap();
+    let output = spawn_output(
+        Command::new(&cli)
+            .current_dir(dir.path())
+            .env("ONLYNE_ARGV", &argv_out)
+            .env("PATH", path_with(&bin_dir))
+            .args([
+                "server",
+                "init",
+                "--root",
+                root.to_str().unwrap(),
+                "--listen",
+                "127.0.0.1:7899",
+            ]),
+    );
     assert_eq!(output.status.code(), Some(EXIT_OK));
     assert_eq!(
         std::fs::read_to_string(&argv_out).unwrap(),
@@ -1399,21 +1429,21 @@ fn gateway_run_forwards_to_onlyne_gateway() {
     let cli = onlyne_in(&bin_dir);
     let root = dir.path().join("srv");
 
-    let output = Command::new(&cli)
-        .current_dir(dir.path())
-        .env("ONLYNE_ARGV", &argv_out)
-        .env("PATH", path_with(&bin_dir))
-        .args([
-            "gateway",
-            "run",
-            "telegram",
-            "--server-root",
-            root.to_str().unwrap(),
-            "--token",
-            "t0ken",
-        ])
-        .output()
-        .unwrap();
+    let output = spawn_output(
+        Command::new(&cli)
+            .current_dir(dir.path())
+            .env("ONLYNE_ARGV", &argv_out)
+            .env("PATH", path_with(&bin_dir))
+            .args([
+                "gateway",
+                "run",
+                "telegram",
+                "--server-root",
+                root.to_str().unwrap(),
+                "--token",
+                "t0ken",
+            ]),
+    );
     assert_eq!(output.status.code(), Some(EXIT_OK));
     assert_eq!(
         std::fs::read_to_string(&argv_out).unwrap(),
