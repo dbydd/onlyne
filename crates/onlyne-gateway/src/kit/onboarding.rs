@@ -244,8 +244,10 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), KitError> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
+        // NTFS ACL on the user profile is inherited by a newly created file;
+        // that is the analogue of unix 0600 for a same-user daemon.
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)

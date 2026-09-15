@@ -12,11 +12,11 @@ use crate::router::{self, Session};
 use crate::state::State;
 use anyhow::Context;
 use onlyne_frame::{read_frame, write_frame};
-use onlyne_layout::{ServerRoot, apply_private_mode};
+use onlyne_layout::local_socket::prelude::TokioListener;
+use onlyne_layout::{LocalListener, LocalStream, ServerRoot, bind_tokio};
 use onlyne_proto::{AdminOp, ClientOp, ErrorCode, Frame, GatewayOp, ResBody};
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::net::{UnixListener, UnixStream};
 
 /// Serve a server started from CLI arguments.
 pub async fn run(init: ServerInit) -> anyhow::Result<()> {
@@ -24,18 +24,18 @@ pub async fn run(init: ServerInit) -> anyhow::Result<()> {
     crate::serve(state).await
 }
 
-/// Bind the run socket and apply `0600`.
-pub fn bind(state: &State) -> anyhow::Result<UnixListener> {
+/// Bind the run socket.
+///
+/// Privacy is applied inside [`bind_tokio`]: unix `mode(0o600)` on the bind
+/// options (fchmod before bind, no umask TOCTOU) and windows owner-only SDDL.
+pub fn bind(state: &State) -> anyhow::Result<LocalListener> {
     let layout = ServerRoot::resolve(&state.root);
     let path = layout.socket_path();
     if path.exists() {
         std::fs::remove_file(&path)
             .with_context(|| format!("remove the stale socket {}", path.display()))?;
     }
-    let listener = UnixListener::bind(&path)
-        .with_context(|| format!("bind the admin socket {}", path.display()))?;
-    apply_private_mode(&path).with_context(|| format!("apply 0600 to {}", path.display()))?;
-    Ok(listener)
+    bind_tokio(&path).with_context(|| format!("bind the admin socket {}", path.display()))
 }
 
 /// Remove the run socket this server bound.
@@ -57,9 +57,9 @@ pub fn unlink(state: &State) -> anyhow::Result<()> {
 }
 
 /// Accept connections on the run socket until it fails.
-pub async fn serve_socket(state: Arc<State>, listener: UnixListener) -> anyhow::Result<()> {
+pub async fn serve_socket(state: Arc<State>, listener: LocalListener) -> anyhow::Result<()> {
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream = listener.accept().await?;
         let connection_state = state.clone();
         tokio::spawn(async move {
             if let Err(error) = handle(connection_state, stream).await {
@@ -73,7 +73,7 @@ pub async fn serve_socket(state: Arc<State>, listener: UnixListener) -> anyhow::
 ///
 /// A gateway process opens with an adapter `hello`; the CLI opens with a request
 /// frame. The adapter `hello` is read here so `WireMessage` decides the surface.
-pub async fn handle(state: Arc<State>, mut stream: UnixStream) -> anyhow::Result<()> {
+pub async fn handle(state: Arc<State>, mut stream: LocalStream) -> anyhow::Result<()> {
     let Some(first) = read_frame::<_, Value>(&mut stream).await? else {
         return Ok(());
     };
@@ -88,7 +88,7 @@ pub async fn handle(state: Arc<State>, mut stream: UnixStream) -> anyhow::Result
 /// Serve request frames of the admin and gateway vocabularies.
 pub async fn frame_loop(
     state: Arc<State>,
-    mut stream: UnixStream,
+    mut stream: LocalStream,
     first: Option<Value>,
 ) -> anyhow::Result<()> {
     let mut pending = first;
@@ -244,7 +244,7 @@ allowed_targets = ["planner"]
             let _ = serve_socket(serving, listener).await;
         });
 
-        let mut stream = UnixStream::connect(&path).await.expect("connect");
+        let mut stream = onlyne_layout::connect_local(&path).await.expect("connect");
         let probe: Frame<ClientOp> = Frame::Ping { t: 1_699_600_000 };
         write_frame(&mut stream, &probe)
             .await

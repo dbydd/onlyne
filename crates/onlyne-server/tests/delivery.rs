@@ -3166,20 +3166,23 @@ async fn an_admin_send_records_the_admin_marker_and_still_passes_the_acl() {
 #[tokio::test]
 async fn the_run_socket_answers_a_status_frame_and_is_private() {
     use onlyne_frame::{read_frame, write_frame};
-    use tokio::net::UnixStream;
+    use onlyne_layout::connect_local;
 
     let fixture = fixture();
     let listener = onlyne_server::admin::bind(&fixture.state).expect("bind");
     let path = onlyne_layout::ServerRoot::resolve(&fixture.root).socket_path();
-    let mode = std::fs::metadata(&path).expect("metadata").permissions();
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(mode.mode() & 0o777, 0o600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).expect("metadata").permissions();
+        assert_eq!(mode.mode() & 0o777, 0o600);
+    }
 
     let state = fixture.state.clone();
     let task = tokio::spawn(async move {
         let _ = onlyne_server::admin::serve_socket(state, listener).await;
     });
-    let mut stream = UnixStream::connect(&path).await.expect("connect");
+    let mut stream = connect_local(&path).await.expect("connect");
     let request = Frame::<AdminOp>::req(
         "r1",
         AdminOp::Status(serde_json::Value::Object(Default::default())),
@@ -3203,7 +3206,7 @@ async fn the_run_socket_answers_a_status_frame_and_is_private() {
 #[tokio::test]
 async fn a_pre_hello_gateway_frame_is_refused_with_the_invalid_code() {
     use onlyne_frame::{read_frame, write_frame};
-    use tokio::net::UnixStream;
+    use onlyne_layout::connect_local;
 
     let fixture = fixture();
     let listener = onlyne_server::admin::bind(&fixture.state).expect("bind");
@@ -3212,7 +3215,7 @@ async fn a_pre_hello_gateway_frame_is_refused_with_the_invalid_code() {
     let task = tokio::spawn(async move {
         let _ = onlyne_server::admin::serve_socket(state, listener).await;
     });
-    let mut stream = UnixStream::connect(&path).await.expect("connect");
+    let mut stream = connect_local(&path).await.expect("connect");
     let request = Frame::<GatewayOp>::req(
         "r1",
         GatewayOp::Health(HealthArgs {
@@ -3445,9 +3448,15 @@ fn start_clears_a_stale_socket_from_a_dead_pid() {
     std::fs::create_dir_all(root.join(".onlyne/run")).expect("create the run dir");
     let layout = onlyne_layout::ServerRoot::resolve(&root);
     std::fs::write(layout.socket_path(), b"").expect("write a stale socket file");
+    #[cfg(unix)]
     let mut child = std::process::Command::new("true")
         .spawn()
         .expect("spawn true");
+    #[cfg(windows)]
+    let mut child = std::process::Command::new("cmd")
+        .args(["/C", "exit", "0"])
+        .spawn()
+        .expect("spawn cmd");
     let pid = child.id();
     child.wait().expect("reap the child");
     std::fs::write(layout.pid_path(), format!("{pid}\n")).expect("write the pid file");

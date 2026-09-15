@@ -309,12 +309,7 @@ impl HerdrBackend {
         if spec.command.is_empty() {
             anyhow::bail!("herdr spawn requires a command");
         }
-        let line = spec
-            .command
-            .iter()
-            .map(|arg| shell_quote(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let line = pane_run_line(&spec.command);
         self.run_line(vec!["pane".into(), "run".into(), pane_id.into(), line])
             .map(|_| ())
     }
@@ -603,8 +598,33 @@ impl HerdrRef {
     }
 }
 
-fn shell_quote(value: &str) -> String {
+#[cfg(any(test, unix))]
+fn posix_shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(any(test, windows))]
+fn cmd_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn shell_quote(value: &str) -> String {
+    #[cfg(unix)]
+    {
+        posix_shell_quote(value)
+    }
+    #[cfg(windows)]
+    {
+        cmd_quote(value)
+    }
+}
+
+fn pane_run_line(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn kind_of(command: &[String]) -> Option<String> {
@@ -967,6 +987,39 @@ mod tests {
     }
 
     #[test]
+    fn pane_run_line_quotes_for_posix_and_cmd() {
+        let cases: &[(&[&str], &str, &str)] = &[
+            (
+                &["echo", "hello world"],
+                "'echo' 'hello world'",
+                "\"echo\" \"hello world\"",
+            ),
+            (&["a'b"], "'a'\\''b'", "\"a'b\""),
+            (&["say", r#"x"y"#], "'say' 'x\"y'", "\"say\" \"x\"\"y\""),
+        ];
+        for (argv, posix, cmd) in cases {
+            let tokens: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
+            let posix_line = tokens
+                .iter()
+                .map(|arg| posix_shell_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let cmd_line = tokens
+                .iter()
+                .map(|arg| cmd_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(posix_line, *posix, "posix {argv:?}");
+            assert_eq!(cmd_line, *cmd, "cmd {argv:?}");
+        }
+        let live = pane_run_line(&["echo".into(), "hello world".into()]);
+        #[cfg(unix)]
+        assert_eq!(live, "'echo' 'hello world'");
+        #[cfg(windows)]
+        assert_eq!(live, "\"echo\" \"hello world\"");
+    }
+
+    #[test]
     fn spawn_falls_back_to_pane_run_for_unknown_kind() {
         let script = Script::default()
             .reply(
@@ -983,9 +1036,12 @@ mod tests {
         backend.spawn(spec(vec!["echo", "hello world"])).unwrap();
         let calls = script.calls();
         assert!(calls.iter().all(|call| !call.contains("agent start")));
-        assert!(calls.iter().any(|call| {
-            call.contains("pane run wF:p2") && call.contains("'echo' 'hello world'")
-        }));
+        let line = pane_run_line(&["echo".into(), "hello world".into()]);
+        assert!(
+            calls
+                .iter()
+                .any(|call| { call.contains("pane run wF:p2") && call.contains(&line) })
+        );
     }
 
     #[test]

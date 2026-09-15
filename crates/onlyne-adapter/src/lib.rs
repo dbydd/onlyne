@@ -53,7 +53,6 @@ use onlyne_proto::{
 pub use onlyne_proto::{Capability, HelloAck, HelloArgs, Mount, MountKind, PROTOCOL_VERSION};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf, split};
-use tokio::net::UnixStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::timeout;
 use tracing::warn;
@@ -410,8 +409,8 @@ async fn reader_loop<R>(
 pub struct AdapterClient;
 
 impl AdapterClient {
-    pub async fn connect_unix(path: impl AsRef<Path>) -> Result<AgentHandle> {
-        let stream = UnixStream::connect(path).await?;
+    pub async fn connect_local(path: impl AsRef<Path>) -> Result<AgentHandle> {
+        let stream = onlyne_layout::connect_local(path.as_ref()).await?;
         Ok(Self::connect(stream))
     }
 
@@ -457,13 +456,6 @@ impl AdapterClient {
 pub struct AdapterServer;
 
 impl AdapterServer {
-    pub async fn accept_unix<F>(stream: UnixStream, welcome: F) -> Result<ServerConnection>
-    where
-        F: FnOnce(&HelloArgs) -> std::result::Result<HelloAck, (ErrorCode, String)> + Send,
-    {
-        Self::accept(stream, welcome).await
-    }
-
     pub async fn accept<S, F>(stream: S, welcome: F) -> Result<ServerConnection>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -694,8 +686,8 @@ impl CapabilitySet {
 }
 
 impl AdapterClient {
-    pub async fn connect_gateway_unix(path: impl AsRef<Path>) -> Result<GatewayHandle> {
-        let stream = UnixStream::connect(path).await?;
+    pub async fn connect_gateway_local(path: impl AsRef<Path>) -> Result<GatewayHandle> {
+        let stream = onlyne_layout::connect_local(path.as_ref()).await?;
         Ok(Self::gateway(stream))
     }
 }

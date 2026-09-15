@@ -17,6 +17,7 @@ onlyne-adapter = { path = "../onlyne-adapter", version = "1.0.0" }
 onlyne-config = { path = "../onlyne-config", version = "1.0.4" }
 onlyne-frame = { path = "../onlyne-frame", version = "1.0.0" }
 onlyne-layout = { path = "../onlyne-layout", version = "1.0.0" }
+interprocess = { workspace = true }
 onlyne-net = { path = "../onlyne-net", version = "1.0.0" }
 onlyne-proto = { path = "../onlyne-proto", version = "1.0.4" }
 onlyne-store = { path = "../onlyne-store", version = "1.0.5" }
@@ -29,6 +30,12 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 base64 = "0.22"

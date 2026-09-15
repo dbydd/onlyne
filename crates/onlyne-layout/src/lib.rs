@@ -3,6 +3,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod local_socket;
+pub use local_socket::{
+    LocalListener, LocalListenerSync, LocalStream, LocalStreamSync, bind_local, bind_local_sync,
+    bind_local_sync_poll, bind_tokio, connect_local, connect_local_sync, is_verbatim_pipe_path,
+    pipe_name_for,
+};
+
 /// Exit code for binaries that refuse a legacy workspace layout.
 pub const LEGACY_WORKSPACE_EXIT_CODE: i32 = 2;
 
@@ -48,11 +55,12 @@ impl fmt::Display for LayoutError {
 
 impl std::error::Error for LayoutError {}
 
-/// Apply `0600` to an existing private file or bound socket path.
+/// Apply `0600` to an existing private file.
 ///
 /// Bootstrap creates `run/` and `keys/` with `0700`. Daemons call this helper
-/// immediately after `UnixListener::bind` and after writing key files. The
-/// directory mode plus this call protects sockets and keys at creation time.
+/// after writing key files. Socket privacy is applied at bind time by
+/// [`bind_local`] (unix `mode(0o600)`, windows owner-only SDDL), which removes
+/// the chmod TOCTOU a post-bind call here would have.
 pub fn apply_private_mode(path: &Path) -> Result<(), LayoutError> {
     set_file_mode(path, 0o600).map_err(|source| LayoutError::Io {
         path: path.to_path_buf(),

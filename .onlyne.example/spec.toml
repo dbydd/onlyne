@@ -62,7 +62,7 @@ reuse = true
 allowed_senders = ["*"]
 # allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role.
 allowed_targets = ["builder", "reviewer", "_supervisor"]
-# session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list.
+# session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list. Headless/exec runs this argv as a child of the client (`backend = "headless"` in workspace config.toml, or ONLYNE_BACKEND=exec).
 session_command = ["pi", "--session-id", "{session}"]
 # aggregate marks this role as the representative of an external cluster. Read by the server and the generate driver as an annotation. Default: empty string, which marks a local role.
 aggregate = ""

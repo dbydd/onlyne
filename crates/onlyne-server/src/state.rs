@@ -175,7 +175,7 @@ impl GatewayRegistry {
 #[derive(Debug, Default)]
 pub struct ListenerHandles {
     pub tcp: Option<tokio::net::TcpListener>,
-    pub admin: Option<tokio::net::UnixListener>,
+    pub admin: Option<onlyne_layout::LocalListener>,
 }
 
 #[derive(Debug)]

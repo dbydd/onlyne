@@ -794,6 +794,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
+
+[[package]]
 name = "dptree"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1569,6 +1575,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "interprocess"
+version = "2.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb02ffbf25e8ef0f4a95bff054eef75f6d1bf16919474cf2caa63b21997478a"
+dependencies = [
+ "doctest-file",
+ "futures-core",
+ "libc",
+ "recvmsg",
+ "tokio",
+ "widestring",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1990,7 +2011,9 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures-util",
+ "interprocess",
  "onlyne-frame",
+ "onlyne-layout",
  "onlyne-proto",
  "serde",
  "serde_json",
@@ -2005,7 +2028,9 @@ dependencies = [
  "base64",
  "clap",
  "clap_complete",
+ "interprocess",
  "onlyne-frame",
+ "onlyne-layout",
  "onlyne-proto",
  "serde",
  "serde_json",
@@ -2023,6 +2048,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "flate2",
+ "interprocess",
  "onlyne-adapter",
  "onlyne-config",
  "onlyne-frame",
@@ -2077,12 +2103,14 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "interprocess",
  "onlyne-adapter",
  "onlyne-config",
  "onlyne-gateway-feishu",
  "onlyne-gateway-qqbot",
  "onlyne-gateway-telegram",
  "onlyne-gateway-weixin",
+ "onlyne-layout",
  "onlyne-net",
  "onlyne-proto",
  "pulldown-cmark",
@@ -2160,7 +2188,11 @@ dependencies = [
 name = "onlyne-layout"
 version = "1.0.4"
 dependencies = [
+ "interprocess",
+ "sha2",
  "tempfile",
+ "tokio",
+ "widestring",
 ]
 
 [[package]]
@@ -2208,6 +2240,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "interprocess",
  "onlyne-adapter",
  "onlyne-client",
  "onlyne-config",
@@ -2227,6 +2260,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2240,6 +2274,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2272,6 +2307,7 @@ dependencies = [
  "onlyne-adapter",
  "onlyne-config",
  "onlyne-frame",
+ "onlyne-layout",
  "onlyne-proto",
  "serde",
  "serde_json",
@@ -2290,6 +2326,7 @@ dependencies = [
  "clap",
  "crossterm",
  "onlyne-frame",
+ "onlyne-layout",
  "onlyne-net",
  "onlyne-proto",
  "onlyne-server",
@@ -2911,6 +2948,12 @@ dependencies = [
  "time",
  "yasna",
 ]
+
+[[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
 
 [[package]]
 name = "redox_syscall"
@@ -4699,6 +4742,12 @@ dependencies = [
  "urlencoding",
  "uuid",
 ]
+
+[[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "winapi"

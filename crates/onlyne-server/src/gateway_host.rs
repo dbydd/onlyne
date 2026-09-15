@@ -624,7 +624,7 @@ impl Host for GatewayHostImpl {
 /// adapter host loop.
 pub async fn serve_adapter(
     state: Arc<State>,
-    stream: tokio::net::UnixStream,
+    stream: onlyne_layout::LocalStream,
     first: onlyne_adapter::WireMessage,
 ) -> anyhow::Result<()> {
     let hello = match first.msg {

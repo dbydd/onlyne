@@ -244,3 +244,24 @@ onlyne --server-root <server-root> repair fail --task <id> --reason session_dead
 第一条命令读取残账和 session 投影。
 
 第二条命令把任务收敛为失败并保留 `session_dead` 原因。
+
+## Headless（exec）会话
+
+`exec` 是无头后端的正名；`headless` 只是 parse 别名，投影与事件里的 backend 字符串仍是 `exec`。选择链是 env `ONLYNE_BACKEND`（非空）> 工作区 `config.toml` 的 `backend` > auto。`exec` / `headless` / `fake` 不会被宿主探测选中。
+
+会话子进程的 stdout/stderr 并进 `<workspace>/.onlyne/logs/session-<task>.log`。进程退出时，持柄 `probe` 把该文件尾部最多 200 行（先截约 16KiB 再按整行切）写入 `ResourceProbe.detail.output_tail`；log 缺失或读失败则省略该键，`exit` 码仍在。
+
+关闭阶梯：
+
+- unix：会话是独立进程组。`close` 先向组发 `SIGTERM`，宽限 5 秒后再 `SIGKILL`，最后 `child.kill` 收尸。组信号失败时退回到对 leader pid 的同名信号。
+- windows：spawn 带 `CREATE_NEW_PROCESS_GROUP`，停机先 `GenerateConsoleCtrlEvent(CTRL_BREAK)`，宽限后再 `child.kill()`（TerminateProcess）。客户端没有控制台时 CTRL_BREAK 失败，直接走终止。Windows 没有 SIGTERM；运维面的优雅停机用 `onlyne shutdown`。
+
+`pi --mode rpc` 是这条后端的典型 `session_command`：stdin 由 client 持开（EOF 对 rpc 意味着操作者离开），stdout 进 session log，消息面走 adapter socket，不走子进程的 stdio。
+
+```toml
+# <workspace>/.onlyne/config.toml
+backend = "headless"
+
+# <server-root>/.onlyne/spec.toml [[client]]
+session_command = ["pi", "--mode", "rpc", "--session-id", "{session}"]
+```

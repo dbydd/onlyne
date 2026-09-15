@@ -23,7 +23,7 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let handle = loop {
-        match AdapterClient::connect_gateway_unix(&args.socket).await {
+        match AdapterClient::connect_gateway_local(&args.socket).await {
             Ok(handle) => break handle,
             Err(err) => {
                 eprintln!(

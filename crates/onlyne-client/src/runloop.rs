@@ -19,7 +19,7 @@ use onlyne_proto::{
     AckArgs, ClientOp, Delivery, EventTier, Frame, LedgerEntry, LedgerQuery, LedgerState, MsgKind,
     PullArgs, PullReply, QueryRolesArgs, RoleInfo, Subscribe, Welcome,
 };
-use onlyne_session::{WorktreePolicy, default_backend};
+use onlyne_session::{ProcessRunner, WorktreePolicy, backend_for_env, process_env};
 use onlyne_store::ClientStore;
 use std::path::PathBuf;
 use std::sync::{
@@ -27,7 +27,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
@@ -81,6 +80,9 @@ pub struct ClientInit {
     /// Seconds a running session may sit without Applied progress before a stall
     /// fault is reported. Zero disables the report.
     pub stall_report_secs: u64,
+    /// Workspace `config.toml` `backend`. Empty means auto. `ONLYNE_BACKEND`
+    /// in the process environment takes precedence when it is nonempty.
+    pub backend: String,
 }
 
 impl ClientInit {
@@ -100,6 +102,7 @@ impl ClientInit {
             orca_worktree: "host".to_string(),
             stale_grace_secs: onlyne_config::DEFAULT_STALE_GRACE_SECS,
             stall_report_secs: onlyne_config::DEFAULT_STALL_REPORT_SECS,
+            backend: String::new(),
         }
     }
 
@@ -116,6 +119,10 @@ impl ClientInit {
         self.stall_report_secs = secs;
         self
     }
+    pub fn with_backend(mut self, backend: impl Into<String>) -> Self {
+        self.backend = backend.into();
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -130,7 +137,16 @@ pub struct RunState {
 
 impl RunState {
     pub fn new(init: &ClientInit, store: ClientStore) -> Result<Self> {
-        let backend = default_backend(WorktreePolicy::from_config(&init.orca_worktree))?;
+        let requested = std::env::var("ONLYNE_BACKEND")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| init.backend.clone());
+        let backend = backend_for_env(
+            &requested,
+            &process_env(),
+            Arc::new(ProcessRunner),
+            WorktreePolicy::from_config(&init.orca_worktree),
+        )?;
         let dispatch = DispatchState::new(
             init.role.clone(),
             init.workspace.clone(),
@@ -245,7 +261,9 @@ pub async fn run(init: ClientInit) -> Result<()> {
 /// would outlive the only thing that can address them. Each session closes with
 /// [`onlyne_session::CloseReason::Shutdown`] first, so the backend record and
 /// the plugin-facing tab map end truthfully.
+#[cfg(unix)]
 async fn close_on_signal(dispatch: DispatchState) {
+    use tokio::signal::unix::{SignalKind, signal};
     let mut terminate = match signal(SignalKind::terminate()) {
         Ok(stream) => stream,
         Err(error) => {
@@ -263,6 +281,28 @@ async fn close_on_signal(dispatch: DispatchState) {
     tokio::select! {
         _ = terminate.recv() => tracing::info!("SIGTERM: closing live sessions"),
         _ = interrupt.recv() => tracing::info!("SIGINT: closing live sessions"),
+    }
+    dispatch::close_all(
+        &dispatch,
+        onlyne_session::CloseReason::Shutdown,
+        SHUTDOWN_CLOSE_BUDGET,
+    );
+    std::process::exit(0);
+}
+
+/// Close live sessions when the operator stops the client.
+///
+/// Windows has no SIGTERM; operators use `onlyne shutdown` for a graceful
+/// daemon stop. Ctrl-C is the console interrupt, and it runs the same
+/// close_all budget the unix SIGINT path uses.
+#[cfg(windows)]
+async fn close_on_signal(dispatch: DispatchState) {
+    match tokio::signal::windows::ctrl_c().await {
+        Ok(()) => tracing::info!("Ctrl-C: closing live sessions"),
+        Err(error) => {
+            tracing::warn!(error = %error, "Ctrl-C handler was not installed");
+            return;
+        }
     }
     dispatch::close_all(
         &dispatch,

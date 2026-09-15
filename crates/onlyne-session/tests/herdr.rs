@@ -364,7 +364,10 @@ fn spawn_falls_back_to_pane_run_for_unknown_kind() {
         .unwrap();
     assert_eq!(run[0], "pane");
     assert_eq!(run[2], "wF:p2");
+    #[cfg(unix)]
     assert_eq!(run[3], "'echo' 'hello world'");
+    #[cfg(windows)]
+    assert_eq!(run[3], "\"echo\" \"hello world\"");
     assert_eq!(run.len(), 4);
 }
 

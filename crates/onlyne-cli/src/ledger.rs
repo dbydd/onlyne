@@ -4,9 +4,9 @@
 //! delivery counter and `causality.attempt` on an envelope is the sender's view
 //! through the transport, which reply and handoff never read back.
 
+use onlyne_layout::LocalStream;
 use onlyne_proto::{AdminOp, ClientOp, ErrorCode, LedgerQuery};
 use serde_json::Value;
-use tokio::net::UnixStream;
 
 use crate::socket::{SocketTarget, Surface};
 use crate::wire::{self, ExchangeError};
@@ -87,7 +87,7 @@ pub fn row_hop(row: &Value) -> Option<u32> {
 
 /// One `query_ledger` exchange against the chosen surface.
 pub async fn query(
-    stream: &mut UnixStream,
+    stream: &mut LocalStream,
     timeout_ms: u64,
     target: &SocketTarget,
     request_id: String,

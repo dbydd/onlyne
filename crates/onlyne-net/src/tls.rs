@@ -288,6 +288,12 @@ fn set_private_mode(path: &Path) -> Result<(), NetError> {
         permissions.set_mode(0o600);
         fs::set_permissions(path, permissions)?;
     }
+    #[cfg(windows)]
+    {
+        // Same-user processes can already read the key file. TLS private keys
+        // and certs live in the user profile directory and inherit its ACL.
+        let _ = path;
+    }
     Ok(())
 }
 

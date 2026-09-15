@@ -1,5 +1,4 @@
 use std::fs::{self, OpenOptions};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant, SystemTime};
@@ -390,15 +389,25 @@ async fn start_command(root: &Path, output: Output) -> i32 {
             return 1;
         }
     };
-    let child = ProcessCommand::new(executable)
+    let mut daemon = ProcessCommand::new(executable);
+    daemon
         .arg("run")
         .arg("--root")
         .arg(root)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_copy))
-        .process_group(0)
-        .spawn();
+        .stderr(Stdio::from(log_copy));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        daemon.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        daemon.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
+    }
+    let child = daemon.spawn();
     let child = match child {
         Ok(child) => child,
         Err(error) => {
@@ -435,10 +444,17 @@ async fn start_command(root: &Path, output: Output) -> i32 {
         "onlyne: server did not open {} within {START_READY_MS}ms",
         layout.socket_path().display()
     );
-    let _ = ProcessCommand::new("kill")
-        .arg("-KILL")
-        .arg(pid.to_string())
-        .status();
+    #[cfg(unix)]
+    {
+        let _ = ProcessCommand::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        terminate_pid(pid);
+    }
     let _ = fs::remove_file(&pid_path);
     1
 }
@@ -456,10 +472,17 @@ async fn stop_command(root: &Path, output: Output) -> i32 {
         eprintln!("onlyne: server not running");
         return 2;
     }
-    let _ = ProcessCommand::new("kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .status();
+    #[cfg(unix)]
+    {
+        let _ = ProcessCommand::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        terminate_pid(pid);
+    }
     let deadline = Instant::now() + Duration::from_millis(STOP_WAIT_MS);
     while Instant::now() < deadline {
         if !process_alive(pid) {
@@ -537,6 +560,7 @@ fn read_pid(path: &Path) -> Option<u32> {
     text.trim().parse().ok()
 }
 
+#[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
     ProcessCommand::new("kill")
         .arg("-0")
@@ -546,6 +570,37 @@ fn process_alive(pid: u32) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        ok != 0 && code == STILL_ACTIVE as u32
+    }
+}
+
+#[cfg(windows)]
+fn terminate_pid(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !handle.is_null() {
+            let _ = TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
 }
 
 fn pid_file_age_seconds(path: &Path) -> Option<u64> {

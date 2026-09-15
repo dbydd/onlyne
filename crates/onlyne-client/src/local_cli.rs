@@ -2,6 +2,7 @@ use crate::intent::{IntentMachine, stamp_op_id};
 use anyhow::{Context, Result, anyhow};
 use onlyne_adapter::AdapterIo;
 use onlyne_layout::RoleWorkspace;
+use onlyne_layout::connect_local;
 use onlyne_proto::{
     AdapterMsg, ClientOp, ControlArgs, Envelope, HelloArgs, HistoryArgs, LedgerQuery, MountKind,
     PROTOCOL_VERSION, PluginOp, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, ResBody,
@@ -9,7 +10,6 @@ use onlyne_proto::{
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::net::UnixStream;
 
 /// Wait bound for one handshake with a running client.
 pub const CLIENT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -312,7 +312,7 @@ pub fn plugin_exit_code(error: &anyhow::Error) -> i32 {
 /// client is listening on the workspace socket.
 pub async fn notify_client(workspace: &Path, plugin_id: &str) -> bool {
     let socket = RoleWorkspace::resolve(workspace).socket_path();
-    let Ok(stream) = UnixStream::connect(&socket).await else {
+    let Ok(stream) = connect_local(&socket).await else {
         return false;
     };
     let io = AdapterIo::new(stream, CLIENT_PROBE_TIMEOUT, CLIENT_PROBE_TIMEOUT);

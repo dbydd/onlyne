@@ -5,7 +5,8 @@
 //! `nohup`. So no pid file is written and nothing signals a process by number.
 //! `status` asks the workspace socket instead: a client is running when its
 //! adapter socket answers the admin `hello` probe, and the socket file's mtime
-//! dates that client.
+//! dates that client. On Windows the path is a marker file, which still carries
+//! an mtime, so uptime stays the age of the bound name.
 
 use anyhow::Result;
 use onlyne_layout::RoleWorkspace;

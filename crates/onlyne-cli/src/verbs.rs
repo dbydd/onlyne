@@ -275,7 +275,7 @@ fn missing_row(flags: &GlobalFlags, kind: &str, id: &str) -> i32 {
 
 /// Read the first ledger row back through `query_ledger`.
 async fn lookup_row(
-    stream: &mut tokio::net::UnixStream,
+    stream: &mut onlyne_layout::LocalStream,
     flags: &GlobalFlags,
     target: &SocketTarget,
     args: LedgerQuery,

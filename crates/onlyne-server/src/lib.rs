@@ -135,44 +135,64 @@ pub fn spawn_stale_working_watch(
 pub fn spawn_shutdown_signals(
     state: Arc<crate::state::State>,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let mut terminate =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok()?;
-    let mut interrupt =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok()?;
-    Some(tokio::spawn(async move {
-        tokio::select! {
-            _ = terminate.recv() => {}
-            _ = interrupt.recv() => {}
-        }
-        state.request_shutdown();
-    }))
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok()?;
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok()?;
+        Some(tokio::spawn(async move {
+            tokio::select! {
+                _ = terminate.recv() => {}
+                _ = interrupt.recv() => {}
+            }
+            state.request_shutdown();
+        }))
+    }
+    #[cfg(windows)]
+    {
+        Some(tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            state.request_shutdown();
+        }))
+    }
 }
 
 /// Serve SIGHUP as the second reload trigger (plan §5 line 270).
 ///
 /// The signal runs the same body as `AdminOp::Reload` and logs the diff text.
 pub fn spawn_reload_signal(state: Arc<crate::state::State>) -> Option<tokio::task::JoinHandle<()>> {
-    let mut hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
-        Ok(signal) => signal,
-        Err(error) => {
-            tracing::warn!(error = %error, "the SIGHUP listener is unavailable");
-            return None;
-        }
-    };
-    Some(tokio::spawn(async move {
-        while hangup.recv().await.is_some() {
-            match router::reload_spec(&state) {
-                Ok(outcome) => tracing::info!(
-                    spec_hash = %outcome.spec_hash,
-                    diff = %outcome.render,
-                    "spec reloaded on SIGHUP"
-                ),
-                Err(message) => {
-                    tracing::warn!(error = %message, "spec reload on SIGHUP failed");
+    #[cfg(windows)]
+    {
+        // SIGHUP has no Windows analogue; reload is the admin `reload` verb.
+        let _ = state;
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        let mut hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        {
+            Ok(signal) => signal,
+            Err(error) => {
+                tracing::warn!(error = %error, "the SIGHUP listener is unavailable");
+                return None;
+            }
+        };
+        Some(tokio::spawn(async move {
+            while hangup.recv().await.is_some() {
+                match router::reload_spec(&state) {
+                    Ok(outcome) => tracing::info!(
+                        spec_hash = %outcome.spec_hash,
+                        diff = %outcome.render,
+                        "spec reloaded on SIGHUP"
+                    ),
+                    Err(message) => {
+                        tracing::warn!(error = %message, "spec reload on SIGHUP failed");
+                    }
                 }
             }
-        }
-    }))
+        }))
+    }
 }
 
 /// Accept role connections, handshake each one, then serve its frames.

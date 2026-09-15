@@ -1,14 +1,14 @@
 use crate::dispatch::{DispatchState, ReadyNotice, on_plugin_report, on_ready};
 use anyhow::{Context, Result};
 use onlyne_adapter::{AdapterIo, AdapterServer, ServerConnection};
-use onlyne_layout::apply_private_mode;
+use onlyne_layout::local_socket::prelude::TokioListener;
+use onlyne_layout::{LocalListener, LocalStream, bind_tokio, connect_local};
 use onlyne_proto::{
     AdapterMsg, Capability, ErrorCode, HelloAck, HelloArgs, HostOp, Mount, MountKind,
     PROTOCOL_VERSION, PluginOp, Report, ResBody, ServerInfo,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::net::{UnixListener, UnixStream};
 
 #[derive(Clone)]
 pub struct AdapterSocket {
@@ -24,7 +24,7 @@ impl AdapterSocket {
         self.workspace.join(".onlyne/run/s")
     }
 
-    pub async fn bind(&self) -> Result<UnixListener> {
+    pub async fn bind(&self) -> Result<LocalListener> {
         let path = self.path();
         if path.exists() {
             tracing::info!(socket = %path.display(), "removing stale adapter socket");
@@ -35,16 +35,14 @@ impl AdapterSocket {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let listener =
-            UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?;
-        apply_private_mode(&path).map_err(|e| anyhow::anyhow!(e))?;
-        Ok(listener)
+        // mode(0o600) lives in bind_tokio; a post-bind chmod would TOCTOU.
+        bind_tokio(&path).with_context(|| format!("bind {}", path.display()))
     }
 
     pub async fn serve(self) -> Result<()> {
         let listener = self.bind().await?;
         loop {
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             let this = self.clone();
             tokio::spawn(async move {
                 if let Err(err) = this.connection(stream).await {
@@ -59,7 +57,7 @@ impl AdapterSocket {
     /// The workspace socket carries two vocabularies (plan §7 line 293): a
     /// plugin opens with an adapter `hello`, and the local CLI opens with a
     /// request frame. The first frame decides, so one path serves both.
-    async fn connection(&self, mut stream: UnixStream) -> Result<()> {
+    async fn connection(&self, mut stream: LocalStream) -> Result<()> {
         let first = onlyne_frame::read_frame::<_, serde_json::Value>(&mut stream)
             .await
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -80,7 +78,7 @@ impl AdapterSocket {
     /// place: `onlyne ping --workspace <dir>` sends a bare `Frame::Ping` and
     /// reads the pong, so the connection stays open for the exchange the caller
     /// opened it for.
-    async fn serve_local(&self, mut stream: UnixStream, first: serde_json::Value) -> Result<()> {
+    async fn serve_local(&self, mut stream: LocalStream, first: serde_json::Value) -> Result<()> {
         let mut pending = Some(first);
         loop {
             let value = match pending.take() {
@@ -152,7 +150,7 @@ impl AdapterSocket {
         }
     }
 
-    async fn serve_plugin(&self, stream: UnixStream, first: serde_json::Value) -> Result<()> {
+    async fn serve_plugin(&self, stream: LocalStream, first: serde_json::Value) -> Result<()> {
         let first: onlyne_adapter::WireMessage =
             serde_json::from_value(first).context("decode an adapter frame")?;
         let role = self.role.clone();
@@ -399,7 +397,7 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// as not running — while a client that answers with a down link is running
 /// and disconnected.
 pub async fn server_link_state(socket: &Path) -> Option<bool> {
-    let stream = UnixStream::connect(socket).await.ok()?;
+    let stream = connect_local(socket).await.ok()?;
     let io = AdapterIo::new(stream, PROBE_TIMEOUT, PROBE_TIMEOUT);
     let hello = HelloArgs {
         protocol: PROTOCOL_VERSION,

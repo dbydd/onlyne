@@ -1,4 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -118,8 +117,12 @@ fn permissions_mode_600_for_role_key_and_socket() {
 
     let key_path = ws_dir.path().join(".onlyne/keys/role.key");
     assert!(key_path.exists());
-    let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 
     // The fragment publishes the public half of the stored seed, and that
     // string is a curve point: a fragment carrying the seed instead publishes
@@ -157,8 +160,12 @@ fn permissions_mode_600_for_role_key_and_socket() {
     assert!(sock_path.exists());
 
     let listener = rt.block_on(adapter.bind()).unwrap();
-    let sock_mode = std::fs::metadata(&sock_path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(sock_mode, 0o600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let sock_mode = std::fs::metadata(&sock_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(sock_mode, 0o600);
+    }
     drop(listener);
 }
 
@@ -264,7 +271,7 @@ async fn an_admin_hello_survives_the_wire_and_is_admitted() {
     assert!(decoded.mount.is_none(), "null decodes as an absent mount");
     assert_eq!(decoded.kind, MountKind::Admin);
 
-    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let stream = onlyne_layout::connect_local(&socket).await.unwrap();
     let io = AdapterIo::new(stream, Duration::from_secs(2), Duration::from_secs(2));
     let body = io
         .request(AdapterMsg::Plugin(PluginOp::Hello(admin)))
@@ -287,7 +294,7 @@ async fn an_admin_hello_survives_the_wire_and_is_admitted() {
         mount: None,
         ..decoded
     };
-    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let stream = onlyne_layout::connect_local(&socket).await.unwrap();
     let io = AdapterIo::new(stream, Duration::from_secs(2), Duration::from_secs(2));
     let refused = io
         .request(AdapterMsg::Plugin(PluginOp::Hello(anonymous)))
@@ -320,7 +327,7 @@ async fn a_local_ping_is_answered_and_keeps_the_socket_open() {
         store,
     );
     let (socket, host) = serve_role_socket(&state, dir.path()).await;
-    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let mut stream = onlyne_layout::connect_local(&socket).await.unwrap();
 
     write_frame(&mut stream, &Frame::<ClientOp>::Ping { t: 4_242 })
         .await
@@ -2068,7 +2075,7 @@ async fn mount_plugin(
     socket: &Path,
     session: Option<&str>,
 ) -> (AdapterIo, tokio::sync::mpsc::UnboundedReceiver<String>) {
-    let stream = tokio::net::UnixStream::connect(socket)
+    let stream = onlyne_layout::connect_local(socket)
         .await
         .expect("the role socket accepts a plugin");
     let (io, mut inbound) =
@@ -2266,7 +2273,7 @@ async fn reuse_off_gives_the_second_task_its_own_session_and_connection() {
         capabilities: Vec::new(),
         mount: Some(Mount::Admin),
     };
-    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let stream = onlyne_layout::connect_local(&socket).await.unwrap();
     let io = AdapterIo::new(stream, Duration::from_secs(2), Duration::from_secs(2));
     let body = io
         .request(AdapterMsg::Plugin(PluginOp::Hello(admin)))

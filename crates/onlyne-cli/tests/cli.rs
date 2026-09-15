@@ -1,11 +1,11 @@
 //! End-to-end contracts of the `onlyne` binary, exercised through real sockets
 //! and a real `exec`, so the messages, exit codes and stream split stay pinned.
 
+use onlyne_layout::local_socket::prelude::SyncListener;
+use onlyne_layout::{LocalListenerSync, LocalStreamSync, bind_local_sync_poll};
 use onlyne_proto::{NO_SOCKET_MESSAGE, binary_not_found};
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -223,17 +223,16 @@ fn wait_ready_reports_the_bound_when_the_server_never_answers() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("run").join("s");
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let listener = bind_local_sync_poll(&socket).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let probe = stop.clone();
     let thread = thread::spawn(move || {
-        let _ = listener.set_nonblocking(true);
         loop {
             if probe.load(Ordering::Relaxed) {
                 break;
             }
             match listener.accept() {
-                Ok((mut stream, _)) => {
+                Ok(mut stream) => {
                     let mut buffer = [0u8; 4096];
                     let _ = stream.read(&mut buffer);
                 }
@@ -1125,19 +1124,19 @@ fn pinned_send(op_id: Option<&str>) -> onlyne_proto::AdminSend {
 }
 
 /// The admin socket path `--server-root` resolves, bound and ready to answer.
-fn admin_listener(root: &Path) -> UnixListener {
+fn admin_listener(root: &Path) -> LocalListenerSync {
     let socket = root.join(".onlyne").join("run").join("s");
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     let _ = std::fs::remove_file(&socket);
-    UnixListener::bind(&socket).unwrap()
+    bind_local_sync_poll(&socket).unwrap()
 }
 
 /// The role socket path `--workspace` resolves, bound and ready to answer.
-fn role_listener(workspace: &Path) -> UnixListener {
+fn role_listener(workspace: &Path) -> LocalListenerSync {
     let socket = workspace.join(".onlyne").join("run").join("s");
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     let _ = std::fs::remove_file(&socket);
-    UnixListener::bind(&socket).unwrap()
+    bind_local_sync_poll(&socket).unwrap()
 }
 
 /// Answer one request frame on `listener` and hand back the frame it carried.
@@ -1145,19 +1144,14 @@ fn role_listener(workspace: &Path) -> UnixListener {
 /// The accept loop gives up after ten seconds, so a CLI that never connects
 /// fails an assertion instead of hanging the suite.
 fn serve_once(
-    listener: UnixListener,
+    listener: LocalListenerSync,
     answer: serde_json::Value,
 ) -> thread::JoinHandle<Option<serde_json::Value>> {
     thread::spawn(move || {
-        listener.set_nonblocking(true).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             match listener.accept() {
-                Ok((stream, _)) => {
-                    // The listener polls, and macOS hands its non-blocking flag
-                    // to the accepted stream, so the frame read clears it.
-                    stream.set_nonblocking(false).unwrap();
-                    let mut stream = stream;
+                Ok(mut stream) => {
                     let request = read_frame(&mut stream);
                     let mut reply = answer.clone();
                     reply["id"] = request["id"].clone();
@@ -1177,25 +1171,59 @@ fn serve_once(
 }
 
 /// Read one length-prefixed JSON frame from a blocking stream.
-fn read_frame(stream: &mut std::os::unix::net::UnixStream) -> serde_json::Value {
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .unwrap();
+fn read_frame(stream: &mut LocalStreamSync) -> serde_json::Value {
     let mut header = [0u8; 4];
-    stream.read_exact(&mut header).unwrap();
+    read_exact_retry(stream, &mut header);
     let mut payload = vec![0u8; u32::from_be_bytes(header) as usize];
-    stream.read_exact(&mut payload).unwrap();
+    read_exact_retry(stream, &mut payload);
     serde_json::from_slice(&payload).unwrap()
 }
 
 /// Write one length-prefixed JSON frame to a blocking stream.
-fn write_frame(stream: &mut std::os::unix::net::UnixStream, value: &serde_json::Value) {
+fn write_frame(stream: &mut LocalStreamSync, value: &serde_json::Value) {
     let payload = serde_json::to_vec(value).unwrap();
-    stream
-        .write_all(&(payload.len() as u32).to_be_bytes())
-        .unwrap();
-    stream.write_all(&payload).unwrap();
-    stream.flush().unwrap();
+    write_all_retry(stream, &(payload.len() as u32).to_be_bytes());
+    write_all_retry(stream, &payload);
+    let _ = stream.flush();
+}
+
+/// `ListenerNonblockingMode::Accept` can leak WouldBlock onto the accepted
+/// stream (macOS UDS). Retry until the byte count is in, matching the old
+/// `set_nonblocking(false)` on `std::os::unix::net::UnixStream`.
+fn read_exact_retry(stream: &mut LocalStreamSync, buf: &mut [u8]) {
+    let mut filled = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while filled < buf.len() {
+        match stream.read(&mut buf[filled..]) {
+            Ok(0) => panic!("socket closed before a full frame arrived"),
+            Ok(n) => filled += n,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() > deadline {
+                    panic!("timed out reading a frame");
+                }
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
+fn write_all_retry(stream: &mut LocalStreamSync, buf: &[u8]) {
+    let mut written = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while written < buf.len() {
+        match stream.write(&buf[written..]) {
+            Ok(0) => panic!("socket closed before the frame was written"),
+            Ok(n) => written += n,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() > deadline {
+                    panic!("timed out writing a frame");
+                }
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
 }
 
 /// Copy the built CLI into `dir`, so `resolve_sibling`'s exe-adjacent probe
@@ -1203,28 +1231,73 @@ fn write_frame(stream: &mut std::os::unix::net::UnixStream, value: &serde_json::
 /// cannot shadow the stubs beside it.
 fn onlyne_in(dir: &Path) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
+    #[cfg(unix)]
     let copy = dir.join("onlyne");
+    #[cfg(windows)]
+    let copy = dir.join("onlyne.exe");
     std::fs::copy(env!("CARGO_BIN_EXE_onlyne"), &copy).unwrap();
-    let mut perms = std::fs::metadata(&copy).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&copy, perms).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&copy).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&copy, perms).unwrap();
+    }
     copy
 }
 
 /// Write an executable stub binary named `name` into `dir`.
 fn stub_binary(dir: &Path, name: &str, script: &str) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
-    let path = dir.join(name);
-    std::fs::write(&path, script).unwrap();
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+    #[cfg(windows)]
+    {
+        let path = dir.join(format!("{name}.cmd"));
+        std::fs::write(&path, unix_script_to_cmd(script)).unwrap();
+        path
+    }
+}
+
+#[cfg(windows)]
+fn unix_script_to_cmd(script: &str) -> String {
+    if script.contains("exit 4") {
+        return "@echo off\r\nexit /b 4\r\n".into();
+    }
+    if let Some(marker) = script.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("touch ")
+            .map(|rest| rest.trim_matches('\'').to_string())
+    }) {
+        return format!("@echo off\r\ntype nul > \"{marker}\"\r\n");
+    }
+    let mut cmd = String::from("@echo off\r\n");
+    if script.contains("ONLYNE_ARGV") {
+        cmd.push_str("for %%A in (%*) do echo %%A>>\"%ONLYNE_ARGV%\"\r\n");
+    }
+    if script.contains("rendering spec") {
+        cmd.push_str("echo rendering spec 1>&2\r\n");
+    }
+    if script.contains("[[client]]") {
+        cmd.push_str("echo [[client]] roles: worker\r\n");
+    }
+    cmd
 }
 
 /// `PATH` with `dir` in front, so a stub shadows any real sibling.
 fn path_with(dir: &Path) -> OsString {
     let mut value = OsString::from(dir.as_os_str());
+    #[cfg(windows)]
+    value.push(";");
+    #[cfg(not(windows))]
     value.push(":");
     value.push(std::env::var_os("PATH").unwrap_or_default());
     value

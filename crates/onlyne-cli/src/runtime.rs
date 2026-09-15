@@ -1,9 +1,9 @@
 //! Exit-code table, the socket-resolution entry point, and socket error mapping.
 
+use onlyne_layout::LocalStream;
 use onlyne_proto::{ErrorCode, ResBody};
 use std::future::Future;
 use std::io::ErrorKind;
-use tokio::net::UnixStream;
 
 use crate::flags::GlobalFlags;
 use crate::render;
@@ -51,7 +51,7 @@ pub fn request_error(message: String) -> i32 {
 }
 
 /// Open the socket for one verb, printing the local JSON answer on failure.
-pub async fn open(flags: &GlobalFlags, target: &SocketTarget) -> Result<UnixStream, i32> {
+pub async fn open(flags: &GlobalFlags, target: &SocketTarget) -> Result<LocalStream, i32> {
     match wire::connect(&target.path, flags.timeout_ms).await {
         Ok(stream) => Ok(stream),
         Err(error) => Err(connect_error(&error, flags.timeout_ms)),

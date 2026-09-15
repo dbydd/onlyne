@@ -28,6 +28,11 @@ pub struct ClientConfig {
     /// this client reports it stalled. Zero disables the report.
     #[serde(default = "default_stall_report_secs")]
     pub stall_report_secs: u64,
+    /// Requested session backend (`herdr` | `orca` | `zellij` | `exec` /
+    /// `headless` | `fake` | `auto`). Empty means auto-detect. The process
+    /// environment `ONLYNE_BACKEND` takes precedence when it is nonempty.
+    #[serde(default)]
+    pub backend: String,
 }
 
 /// `[orca]` — settings for the Orca session backend.

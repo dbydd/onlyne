@@ -40,6 +40,12 @@ use super::*;
 const TERMINATE_GRACE: Duration = Duration::from_secs(5);
 /// Poll interval while waiting for a signalled child to leave.
 const REAP_POLL: Duration = Duration::from_millis(25);
+/// Last N lines of the session log copied into `ResourceProbe.detail` when
+/// the held child is observed to have exited. Byte cap is applied first so a
+/// huge log cannot land in the projection.
+const OUTPUT_TAIL_LINES: usize = 200;
+/// Whole-line window used when reading [`OUTPUT_TAIL_LINES`].
+const OUTPUT_TAIL_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Default)]
 pub struct ExecBackend {
@@ -64,14 +70,21 @@ impl ExecBackend {
     /// client restart the session row outlives the handle, while the pid in
     /// `backend_ref` still identifies the agent.
     fn pid_alive(pid: u32) -> bool {
-        Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+        #[cfg(unix)]
+        {
+            Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        }
+        #[cfg(windows)]
+        {
+            pid_alive_windows(pid)
+        }
     }
 
     fn pid_of(session: &SessionRef) -> Result<u32> {
@@ -120,6 +133,7 @@ impl ExecBackend {
 }
 
 /// Signal one session's whole process group, answering whether it worked.
+#[cfg(unix)]
 fn signal_group(pid: u32, signal: &str) -> bool {
     Command::new("kill")
         .arg(format!("-{signal}"))
@@ -131,7 +145,20 @@ fn signal_group(pid: u32, signal: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// `CTRL_BREAK` is the group signal `CREATE_NEW_PROCESS_GROUP` accepts.
+/// Without a console the call fails and [`ExecBackend::stop`] falls through to
+/// `child.kill()`. `KILL` is never a console event: return false so the
+/// existing TerminateProcess path runs.
+#[cfg(windows)]
+fn signal_group(pid: u32, signal: &str) -> bool {
+    if signal != "TERM" {
+        return false;
+    }
+    generate_ctrl_break(pid)
+}
+
 /// Signal one process by pid.
+#[cfg(unix)]
 fn signal_pid(pid: u32, signal: &str) {
     let _ = Command::new("kill")
         .arg(format!("-{signal}"))
@@ -139,6 +166,66 @@ fn signal_pid(pid: u32, signal: &str) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+#[cfg(windows)]
+fn signal_pid(pid: u32, signal: &str) {
+    if signal == "TERM" {
+        let _ = generate_ctrl_break(pid);
+    }
+}
+
+#[cfg(windows)]
+fn generate_ctrl_break(pid: u32) -> bool {
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+    unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) != 0 }
+}
+
+#[cfg(windows)]
+fn pid_alive_windows(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, INVALID_HANDLE_VALUE, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code);
+        let err = GetLastError();
+        CloseHandle(handle);
+        if ok == 0 {
+            // ERROR_ALREADY_WAITING and any other query failure: the pid is gone.
+            let _ = err;
+            return false;
+        }
+        // A collected process still has a queryable handle; its code is not STILL_ACTIVE.
+        code == STILL_ACTIVE as u32
+    }
+}
+
+/// Last lines of the session log, or `None` when the file is missing or
+/// unreadable. A truncated byte window is snapped to a whole line so a
+/// mid-line cut never becomes the first "line" of the tail.
+fn read_output_tail(path: &str) -> Option<String> {
+    let data = std::fs::read(path).ok()?;
+    let start = data.len().saturating_sub(OUTPUT_TAIL_BYTES);
+    let slice = if start == 0 {
+        data.as_slice()
+    } else {
+        match data[start..].iter().position(|&b| b == b'\n') {
+            Some(offset) => &data[start + offset + 1..],
+            None => &data[start..],
+        }
+    };
+    let text = String::from_utf8_lossy(slice);
+    let lines: Vec<&str> = text.lines().collect();
+    let skip = lines.len().saturating_sub(OUTPUT_TAIL_LINES);
+    Some(lines[skip..].join("\n"))
 }
 
 impl SessionBackend for ExecBackend {
@@ -191,6 +278,12 @@ impl SessionBackend for ExecBackend {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NEW_PROCESS_GROUP: CTRL_BREAK reaches this group, CTRL_C does not.
+            command.creation_flags(0x0000_0200);
+        }
         let child = command
             .spawn()
             .map_err(|error| anyhow::anyhow!("spawn {}: {error}", spec.command.join(" ")))?;
@@ -200,7 +293,11 @@ impl SessionBackend for ExecBackend {
         Ok(SessionRef {
             task_id: spec.task_id.clone(),
             backend: self.name().into(),
-            backend_ref: serde_json::json!({"id": spec.task_id, "pid": pid}),
+            backend_ref: serde_json::json!({
+                "id": spec.task_id,
+                "pid": pid,
+                "log": log_path.to_string_lossy(),
+            }),
             generation: 1,
         })
     }
@@ -218,11 +315,19 @@ impl SessionBackend for ExecBackend {
             // `try_wait` is authoritative while the handle is held: it also reaps
             // a finished child, which is what keeps `alive` from tracking a zombie.
             return match child.try_wait() {
-                Ok(Some(status)) => Ok(ResourceProbe {
-                    alive: false,
-                    attached: false,
-                    detail: Some(serde_json::json!({"exit": status.code()})),
-                }),
+                Ok(Some(status)) => {
+                    let mut detail = serde_json::json!({"exit": status.code()});
+                    if let Some(path) = session.backend_ref.get("log").and_then(Value::as_str) {
+                        if let Some(tail) = read_output_tail(path) {
+                            detail["output_tail"] = Value::String(tail);
+                        }
+                    }
+                    Ok(ResourceProbe {
+                        alive: false,
+                        attached: false,
+                        detail: Some(detail),
+                    })
+                }
                 Ok(None) => Ok(ResourceProbe {
                     alive: true,
                     attached: true,
@@ -460,5 +565,141 @@ mod tests {
             ))
             .unwrap_err();
         assert!(error.to_string().contains("spawn"), "{error}");
+    }
+
+    fn spec_cmd(cwd: &Path, task: &str, command: Vec<String>) -> SpawnSpec {
+        SpawnSpec {
+            cwd: cwd.to_path_buf(),
+            task_id: task.into(),
+            command,
+            env: BTreeMap::new(),
+            focus: None,
+            placement: None,
+            rename: None,
+        }
+    }
+
+    fn echo_and_exit(message: &str, code: i32) -> Vec<String> {
+        #[cfg(unix)]
+        {
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("printf '%s\\n' '{message}'; exit {code}"),
+            ]
+        }
+        #[cfg(windows)]
+        {
+            vec![
+                "cmd".into(),
+                "/C".into(),
+                format!("echo {message}& exit {code}"),
+            ]
+        }
+    }
+
+    fn sleep_cmd() -> Vec<String> {
+        #[cfg(unix)]
+        {
+            vec!["sleep".into(), "30".into()]
+        }
+        #[cfg(windows)]
+        {
+            vec!["ping".into(), "-n".into(), "31".into(), "127.0.0.1".into()]
+        }
+    }
+
+    fn wait_until_exit(backend: &ExecBackend, session: &SessionRef) -> ResourceProbe {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let probe = backend.probe(session).unwrap();
+            if !probe.alive {
+                return probe;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the child never exited: {probe:?}"
+            );
+            std::thread::sleep(REAP_POLL);
+        }
+    }
+
+    #[test]
+    fn a_finished_child_reports_its_exit_code_and_log_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = ExecBackend::new();
+        let session = backend
+            .spawn(spec_cmd(
+                dir.path(),
+                "exit-code",
+                echo_and_exit("onlyne-exec-tail", 7),
+            ))
+            .unwrap();
+        assert_eq!(session.backend, "exec");
+        assert_eq!(session.backend_ref["id"], "exit-code");
+        assert!(
+            session
+                .backend_ref
+                .get("pid")
+                .and_then(Value::as_u64)
+                .is_some()
+        );
+        let log = session.backend_ref["log"].as_str().expect("log path");
+        assert!(
+            log.ends_with("session-exit-code.log"),
+            "log path must name the session file: {log}"
+        );
+
+        let probe = wait_until_exit(&backend, &session);
+        let detail = probe.detail.expect("exit detail");
+        assert_eq!(detail["exit"], 7, "{detail}");
+        let tail = detail["output_tail"].as_str().unwrap_or("");
+        assert!(
+            tail.contains("onlyne-exec-tail"),
+            "output_tail must carry the child's line: {tail:?}"
+        );
+        let meta = std::fs::metadata(log).expect("log file");
+        assert!(meta.len() > 0, "the session log must grow");
+        let again = backend.probe(&session).unwrap();
+        assert_eq!(again.detail.unwrap()["exit"], 7);
+    }
+
+    #[test]
+    fn close_reaps_a_sleeping_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = ExecBackend::new();
+        let session = backend
+            .spawn(spec_cmd(dir.path(), "sleeping", sleep_cmd()))
+            .unwrap();
+        let pid = session.backend_ref["pid"].as_u64().unwrap() as u32;
+        assert!(backend.probe(&session).unwrap().alive);
+        assert!(ExecBackend::pid_alive(pid));
+        backend
+            .close(&session, CloseReason::Cancelled, false)
+            .unwrap();
+        assert!(!backend.probe(&session).unwrap().alive);
+        assert!(
+            !ExecBackend::pid_alive(pid),
+            "the session must leave no process behind"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_close_reaps_when_ctrl_break_has_no_console() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = ExecBackend::new();
+        let session = backend
+            .spawn(spec_cmd(dir.path(), "win-kill", sleep_cmd()))
+            .unwrap();
+        let pid = session.backend_ref["pid"].as_u64().unwrap() as u32;
+        backend
+            .close(&session, CloseReason::Shutdown, false)
+            .unwrap();
+        assert!(!backend.probe(&session).unwrap().alive);
+        assert!(
+            !ExecBackend::pid_alive(pid),
+            "GenerateConsoleCtrlEvent failure must fall through to child.kill"
+        );
     }
 }

@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(default_agent_capabilities);
     let mut last_error = None;
     for _attempt in 0..20 {
-        match AdapterClient::connect_unix(&socket).await {
+        match AdapterClient::connect_local(&socket).await {
             Ok(handle) => {
                 let agent = FakeAgent::new(
                     role.clone(),

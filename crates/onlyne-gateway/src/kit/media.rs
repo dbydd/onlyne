@@ -213,6 +213,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn ffmpeg_nonzero_exit_becomes_a_kit_error() {
         use std::os::unix::fs::PermissionsExt;

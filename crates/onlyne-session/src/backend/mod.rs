@@ -105,7 +105,8 @@ impl BackendName {
             "herdr" => Some(Self::Herdr),
             "orca" => Some(Self::Orca),
             "zellij" => Some(Self::Zellij),
-            "exec" => Some(Self::Exec),
+            // `headless` is the operator-facing alias; projections keep `exec`.
+            "exec" | "headless" => Some(Self::Exec),
             "fake" => Some(Self::Fake),
             _ => None,
         }
@@ -495,9 +496,9 @@ pub(crate) fn unsupported(backend: &str, operation: &str, detail: &str) -> anyho
 }
 
 /// Build a backend from an environment map. `ONLYNE_BACKEND` wins when it
-/// names `herdr`, `orca`, `zellij`, `exec`, or `fake`. An empty or `auto`
-/// value probes herdr, then orca, then zellij. `exec` and `fake` are never
-/// discovered. No match returns [`NoSupportedHost`].
+/// names `herdr`, `orca`, `zellij`, `exec` (alias `headless`), or `fake`. An
+/// empty or `auto` value probes herdr, then orca, then zellij. `exec` and
+/// `fake` are never discovered. No match returns [`NoSupportedHost`].
 pub fn select_backend_from_env(
     env: &BTreeMap<String, String>,
     runner: Arc<dyn Runner>,
@@ -537,13 +538,13 @@ pub fn backend_by_name(
     runner: Arc<dyn Runner>,
     policy: WorktreePolicy,
 ) -> Result<Box<dyn SessionBackend>> {
-    match name {
-        "herdr" => Ok(Box::new(herdr::HerdrBackend::new(runner))),
-        "orca" => Ok(Box::new(orca::OrcaBackend::with_policy(runner, policy))),
-        "zellij" => Ok(Box::new(zellij::ZellijBackend::new(runner))),
-        "fake" => Ok(Box::new(fake::FakeBackend::new())),
-        "exec" => Ok(Box::new(exec::ExecBackend::new())),
-        other => Err(anyhow::anyhow!("unknown session backend: {other}")),
+    match BackendName::parse(name) {
+        Some(BackendName::Herdr) => Ok(Box::new(herdr::HerdrBackend::new(runner))),
+        Some(BackendName::Orca) => Ok(Box::new(orca::OrcaBackend::with_policy(runner, policy))),
+        Some(BackendName::Zellij) => Ok(Box::new(zellij::ZellijBackend::new(runner))),
+        Some(BackendName::Fake) => Ok(Box::new(fake::FakeBackend::new())),
+        Some(BackendName::Exec) => Ok(Box::new(exec::ExecBackend::new())),
+        None => Err(anyhow::anyhow!("unknown session backend: {name}")),
     }
 }
 
@@ -574,8 +575,10 @@ pub fn backend_for_env(
 }
 
 /// Client default backend: driven by `ONLYNE_BACKEND`
-/// (`herdr` | `orca` | `zellij` | `exec` | `fake` | `auto`). An empty value
-/// probes herdr, then orca, then zellij. `exec` and `fake` stay opt-in.
+/// (`herdr` | `orca` | `zellij` | `exec`/`headless` | `fake` | `auto`). An
+/// empty value probes herdr, then orca, then zellij. `exec` and `fake` stay
+/// opt-in. `headless` selects [`BackendName::Exec`]; [`BackendName::as_str`]
+/// still answers `exec`.
 ///
 /// `worktree` is the workspace config's `[orca] worktree` policy; only the
 /// Orca backend reads it.
@@ -756,6 +759,51 @@ mod tests {
             "exec"
         );
         assert_eq!(runner.calls().len(), 0);
+        let error = backend_for_env("nope", &BTreeMap::new(), runner, WorktreePolicy::Host)
+            .err()
+            .expect("unknown name must error");
+        assert_eq!(error.to_string(), "unknown session backend: nope");
+    }
+
+    #[test]
+    fn headless_is_the_exec_alias() {
+        assert_eq!(BackendName::parse("headless"), Some(BackendName::Exec));
+        assert_eq!(BackendName::parse("HEADLESS"), Some(BackendName::Exec));
+        assert_eq!(BackendName::parse("Headless"), Some(BackendName::Exec));
+        assert_eq!(BackendName::parse("exec"), Some(BackendName::Exec));
+        assert_eq!(BackendName::parse("EXEC"), Some(BackendName::Exec));
+        assert_eq!(BackendName::Exec.as_str(), "exec");
+        assert_eq!(BackendName::parse("nope"), None);
+
+        let detected = detect_host(&env(&[("ONLYNE_BACKEND", "headless")]));
+        assert_eq!(detected.backend, Some(BackendName::Exec));
+        assert_eq!(detected.source, SelectionSource::Explicit);
+        assert_eq!(detected.backend.unwrap().as_str(), "exec");
+
+        let runner = Arc::new(ProbeRunner::default());
+        assert_eq!(
+            backend_by_name("headless", runner.clone(), WorktreePolicy::Host)
+                .unwrap()
+                .name(),
+            "exec"
+        );
+        assert_eq!(
+            backend_by_name("HEADLESS", runner.clone(), WorktreePolicy::Host)
+                .unwrap()
+                .name(),
+            "exec"
+        );
+        assert_eq!(
+            backend_for_env(
+                "headless",
+                &BTreeMap::new(),
+                runner.clone(),
+                WorktreePolicy::Host
+            )
+            .unwrap()
+            .name(),
+            "exec"
+        );
         let error = backend_for_env("nope", &BTreeMap::new(), runner, WorktreePolicy::Host)
             .err()
             .expect("unknown name must error");

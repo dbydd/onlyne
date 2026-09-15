@@ -12,7 +12,6 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::SystemTime;
-use tokio::net::UnixStream;
 use tokio::time::{Duration, timeout};
 
 #[derive(Clone, Debug, Default)]
@@ -624,7 +623,12 @@ async fn request_body(
     socket: &Path,
     request: &impl serde::Serialize,
 ) -> Result<ResBody, RequestFail> {
-    let mut stream = match timeout(Duration::from_millis(1500), UnixStream::connect(socket)).await {
+    let mut stream = match timeout(
+        Duration::from_millis(1500),
+        onlyne_layout::connect_local(socket),
+    )
+    .await
+    {
         Ok(Ok(stream)) => stream,
         _ => return Err(RequestFail::NoSocket),
     };

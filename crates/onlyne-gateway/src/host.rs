@@ -1,4 +1,5 @@
 use onlyne_adapter::{AdapterError, GatewayHandle, GatewayHost};
+use onlyne_layout::connect_local;
 use onlyne_proto::{
     Delivery, Envelope, GatewayHealth, HealthArgs, RegisterChannelArgs, TypingArgs,
 };
@@ -6,7 +7,6 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
-use tokio::net::UnixStream;
 
 /// Server-facing gateway host for a platform plugin.
 ///
@@ -39,7 +39,7 @@ impl Host {
         platform: impl Into<String>,
         capabilities: Vec<onlyne_proto::Capability>,
     ) -> Result<Self, AdapterError> {
-        let stream = UnixStream::connect(socket).await?;
+        let stream = connect_local(socket).await?;
         let gateway = onlyne_adapter::AdapterClient::gateway(stream);
         let gateway_id = gateway_id.into();
         let platform = platform.into();

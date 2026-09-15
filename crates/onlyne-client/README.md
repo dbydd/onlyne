@@ -57,6 +57,8 @@ Both `init` and `run` create these paths under `--workspace`:
 
 `fake` runs sessions in-process and needs no external tool; the end-to-end scripts set `ONLYNE_BACKEND=fake`. `exec` spawns the role's `session_command` as a child of the client, holds stdin open, and appends the child's output to `.onlyne/logs/session-<task>.log`. `crates/onlyne-testkit/e2e/pi-live.sh` sets `ONLYNE_BACKEND=exec` for a headless host.
 
+`headless` is a parse alias for `exec`; projections and events still name the backend `exec`. Workspace `config.toml` may set `backend = "headless"` (or `"exec"`); a nonempty `ONLYNE_BACKEND` wins over that field.
+
 ### herdr
 
 A herdr session is inherited from the client process environment; a pi child running in a pane inherits it too. One server root/topology maps to one herdr workspace labelled `onlyne:<cluster>`. `<cluster>` is the server's own `[server] name`, which the client reads from `welcome.cluster` and passes to every pane it creates as `ONLYNE_CLUSTER`. One role maps to one tab. One onlyne session maps to one pane. Close is `herdr pane close`. Ids look like `wF`, `wF:t1`, `wF:p1`. A named session such as `onlyne-test` is the `HERDR_SESSION` value already in the client environment.

@@ -10,6 +10,11 @@
     "server"
   ],
   "properties": {
+    "backend": {
+      "description": "Requested session backend (`herdr` | `orca` | `zellij` | `exec` / `headless` | `fake` | `auto`). Empty means auto-detect. The process environment `ONLYNE_BACKEND` takes precedence when it is nonempty.",
+      "default": "",
+      "type": "string"
+    },
     "cert_pin": {
       "description": "Server certificate SPKI fingerprint.",
       "type": "string"
@@ -49,16 +54,16 @@
         }
       ]
     },
-    "stall_report_secs": {
-      "description": "Seconds a running session may sit without an Applied tuple change before this client reports it stalled. Zero disables the report.",
-      "default": 1800,
+    "stale_grace_secs": {
+      "description": "Seconds a startup reconcile waits before declaring an orphaned in-flight task stale.",
+      "default": 300,
       "type": "integer",
       "format": "uint64",
       "minimum": 0.0
     },
-    "stale_grace_secs": {
-      "description": "Seconds a startup reconcile waits before declaring an orphaned in-flight task stale.",
-      "default": 300,
+    "stall_report_secs": {
+      "description": "Seconds a running session may sit without an Applied tuple change before this client reports it stalled. Zero disables the report.",
+      "default": 1800,
       "type": "integer",
       "format": "uint64",
       "minimum": 0.0

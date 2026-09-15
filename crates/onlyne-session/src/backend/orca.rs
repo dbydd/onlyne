@@ -523,8 +523,14 @@ impl OrcaBackend {
     }
 }
 
+#[cfg(any(test, unix))]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(any(test, windows))]
+fn cmd_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 /// Build the command executed inside the Orca terminal.
@@ -550,7 +556,8 @@ fn shell_quote(value: &str) -> String {
 /// leave a tab sitting at a prompt, and `&&` would skip the `exit` there and
 /// keep it. The command's own output is still in the pane's scrollback and its
 /// exit status rides through `exit`'s default.
-fn spawn_command(spec: &SpawnSpec) -> Result<String> {
+#[cfg(any(test, unix))]
+fn spawn_command_posix(spec: &SpawnSpec) -> Result<String> {
     if spec.command.is_empty() {
         anyhow::bail!("orca spawn requires a command");
     }
@@ -568,6 +575,37 @@ fn spawn_command(spec: &SpawnSpec) -> Result<String> {
     }
     command.push_str("; exit");
     Ok(command)
+}
+
+/// cmd.exe spelling of [`spawn_command_posix`]: `cd /d`, `set "K=V"`, `& exit`.
+#[cfg(any(test, windows))]
+fn spawn_command_cmd(spec: &SpawnSpec) -> Result<String> {
+    if spec.command.is_empty() {
+        anyhow::bail!("orca spawn requires a command");
+    }
+    let mut command = format!("cd /d {} &&", cmd_quote(&spec.cwd.to_string_lossy()));
+    for (key, value) in &spec.env {
+        command.push_str(" set ");
+        command.push_str(&format!("\"{key}={}\"", value.replace('"', "\"\"")));
+        command.push_str(" &&");
+    }
+    for arg in &spec.command {
+        command.push(' ');
+        command.push_str(&cmd_quote(arg));
+    }
+    command.push_str(" & exit");
+    Ok(command)
+}
+
+fn spawn_command(spec: &SpawnSpec) -> Result<String> {
+    #[cfg(unix)]
+    {
+        spawn_command_posix(spec)
+    }
+    #[cfg(windows)]
+    {
+        spawn_command_cmd(spec)
+    }
 }
 
 impl SessionBackend for OrcaBackend {
@@ -873,7 +911,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("ONLYNE_TASK".into(), "task one".into());
         env.insert("QUOTED".into(), "a'b".into());
-        let command = spawn_command(&SpawnSpec {
+        let command = spawn_command_posix(&SpawnSpec {
             cwd: "/tmp/work space".into(),
             task_id: "task-1".into(),
             command: vec!["pi".into(), "--model".into(), "gpt 5".into()],
@@ -889,10 +927,49 @@ mod tests {
         );
     }
 
+    /// One `spawn_command_cmd` row: cwd, env pairs, argv, expected line.
+    type CmdCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str], &'a str);
+
+    #[test]
+    fn spawn_command_cmd_quotes_cwd_env_and_args() {
+        let cases: &[CmdCase<'_>] = &[
+            (
+                r"C:\work space",
+                &[("ONLYNE_TASK", "task one"), ("QUOTED", "a'b")],
+                &["pi", "--model", "gpt 5"],
+                r#"cd /d "C:\work space" && set "ONLYNE_TASK=task one" && set "QUOTED=a'b" && "pi" "--model" "gpt 5" & exit"#,
+            ),
+            (
+                r"C:\ws",
+                &[],
+                &["echo", r#"say "hi""#],
+                r#"cd /d "C:\ws" && "echo" "say ""hi""" & exit"#,
+            ),
+        ];
+        for (cwd, env, argv, expected) in cases {
+            let mut map = BTreeMap::new();
+            for (key, value) in *env {
+                map.insert((*key).into(), (*value).into());
+            }
+            let command = spawn_command_cmd(&SpawnSpec {
+                cwd: (*cwd).into(),
+                task_id: "task-1".into(),
+                command: argv.iter().map(|s| (*s).to_string()).collect(),
+                env: map,
+                focus: None,
+                placement: None,
+                rename: None,
+            })
+            .unwrap();
+            assert_eq!(command, *expected, "cwd={cwd}");
+        }
+    }
+
     /// The line is evaluated by the tab's shell, so quoting and the trailing
     /// `exit` have to survive a real one: run the generated line through `sh`
     /// and read back an environment value and an argument that both carry
     /// spaces, quotes and expansion characters.
+    #[cfg(unix)]
     #[test]
     fn spawn_command_round_trips_awkward_env_and_args_through_a_shell() {
         let mut env = BTreeMap::new();
@@ -929,6 +1006,7 @@ mod tests {
     /// Run one generated line the way the tab's shell does, with a sentinel
     /// after it: the sentinel printing means the shell came back to a prompt
     /// instead of exiting, which is the stuck tab this tail exists to prevent.
+    #[cfg(unix)]
     fn run_through_shell(line: &str) -> (std::process::ExitStatus, String) {
         let output = std::process::Command::new("sh")
             .arg("-c")
@@ -950,6 +1028,7 @@ mod tests {
     /// failure too (B), and the same failing line without the tail returns to
     /// the prompt (C), which is the tab that used to stay `running`. With `&&`
     /// the failing case behaved as C: a crashed agent never reached the tail.
+    #[cfg(unix)]
     #[test]
     fn spawn_command_line_exits_the_tab_shell_on_success_and_on_failure() {
         let cwd = tempfile::tempdir().unwrap();
@@ -1239,6 +1318,7 @@ mod tests {
         assert!(error.to_string().contains("onlyne:task-1"), "{error}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn spawn_writes_the_tab_map_under_the_canonical_workspace() {
         // The map is a workspace file and the workspace may be reached through

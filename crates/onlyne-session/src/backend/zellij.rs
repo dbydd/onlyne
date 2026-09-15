@@ -6,6 +6,7 @@
 //! zellij's socket path budget.
 
 use super::*;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -135,6 +136,110 @@ fn temp_dir_uid() -> u32 {
     0
 }
 
+enum SessionListing {
+    Missing,
+    Exited,
+    Live,
+}
+
+fn classify_session_listing(listing: &str, name: &str) -> SessionListing {
+    let Some(line) = listing.lines().find(|line| listing_line_names(line, name)) else {
+        return SessionListing::Missing;
+    };
+    if line.contains("EXITED") {
+        SessionListing::Exited
+    } else {
+        SessionListing::Live
+    }
+}
+
+fn listing_line_names(line: &str, name: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed == name
+        || trimmed.starts_with(&format!("{name} "))
+        || trimmed.starts_with(&format!("{name}\t"))
+        || trimmed.split_whitespace().any(|tok| tok == name)
+}
+
+fn parse_pane_token(pane: &str) -> Option<(u32, bool)> {
+    let pane = pane.trim();
+    if let Some(rest) = pane.strip_prefix("terminal_") {
+        rest.parse().ok().map(|id| (id, false))
+    } else if let Some(rest) = pane.strip_prefix("plugin_") {
+        rest.parse().ok().map(|id| (id, true))
+    } else {
+        pane.parse().ok().map(|id| (id, false))
+    }
+}
+
+fn collect_panes<'a>(value: &'a Value, out: &mut Vec<&'a Value>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_panes(item, out);
+            }
+        }
+        Value::Object(map) => {
+            if map.contains_key("id") {
+                out.push(value);
+            }
+            for nested in map.values() {
+                collect_panes(nested, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn probe_pane(rows: &Value, pane_ref: &str) -> ResourceProbe {
+    let Some((want_id, want_plugin)) = parse_pane_token(pane_ref) else {
+        return ResourceProbe {
+            alive: false,
+            attached: false,
+            detail: Some(serde_json::json!({"reason": "pane_missing"})),
+        };
+    };
+    let mut panes = Vec::new();
+    collect_panes(rows, &mut panes);
+    let Some(row) = panes.iter().copied().find(|row| {
+        let id = row
+            .get("id")
+            .and_then(Value::as_u64)
+            .map(|id| id as u32)
+            .or_else(|| {
+                row.get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| id.parse().ok())
+            });
+        let plugin = row
+            .get("is_plugin")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        id == Some(want_id) && plugin == want_plugin
+    }) else {
+        return ResourceProbe {
+            alive: false,
+            attached: false,
+            detail: Some(serde_json::json!({"reason": "pane_missing"})),
+        };
+    };
+    let exited = row.get("exited").and_then(Value::as_bool).unwrap_or(false);
+    let held = row.get("is_held").and_then(Value::as_bool).unwrap_or(false);
+    if exited || held {
+        let exit = row.get("exit_status").cloned().unwrap_or(Value::Null);
+        return ResourceProbe {
+            alive: false,
+            attached: false,
+            detail: Some(serde_json::json!({"exit": exit, "exited": true})),
+        };
+    }
+    ResourceProbe {
+        alive: true,
+        attached: true,
+        detail: None,
+    }
+}
+
 pub struct ZellijBackend {
     runner: Arc<dyn Runner>,
     command: String,
@@ -186,6 +291,48 @@ impl ZellijBackend {
             && String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .any(|line| line.trim() == name))
+    }
+
+    /// `list-sessions --no-formatting` keeps the EXITED marker `--short` strips.
+    fn session_listing(&self, name: &str) -> Result<SessionListing> {
+        let out = self.runner.run(
+            &self.command,
+            &["list-sessions".into(), "--no-formatting".into()],
+            None,
+            &BTreeMap::new(),
+        )?;
+        if out.status != 0 {
+            return Ok(SessionListing::Missing);
+        }
+        Ok(classify_session_listing(
+            &String::from_utf8_lossy(&out.stdout),
+            name,
+        ))
+    }
+
+    fn list_panes(&self, name: &str) -> Result<Value> {
+        let out = self.runner.run(
+            &self.command,
+            &[
+                "--session".into(),
+                name.into(),
+                "action".into(),
+                "list-panes".into(),
+                "--json".into(),
+                "--state".into(),
+                "--command".into(),
+            ],
+            None,
+            &BTreeMap::new(),
+        )?;
+        if out.status != 0 {
+            anyhow::bail!(
+                "zellij action list-panes {name} failed (status {})",
+                out.status
+            );
+        }
+        serde_json::from_slice(&out.stdout)
+            .map_err(|error| anyhow::anyhow!("zellij list-panes json: {error}"))
     }
 
     /// `kill-session` for an already-derived name.
@@ -293,12 +440,34 @@ impl SessionBackend for ZellijBackend {
         Ok(session.clone())
     }
     fn probe(&self, session: &SessionRef) -> Result<ResourceProbe> {
-        let attached = self.attach(session).is_ok();
-        Ok(ResourceProbe {
-            alive: attached,
-            attached,
-            detail: None,
-        })
+        let name = session_name(&session.task_id)?;
+        match self.session_listing(&name)? {
+            SessionListing::Missing => Ok(ResourceProbe {
+                alive: false,
+                attached: false,
+                detail: Some(serde_json::json!({"reason": "session_missing"})),
+            }),
+            SessionListing::Exited => Ok(ResourceProbe {
+                alive: false,
+                attached: false,
+                detail: Some(serde_json::json!({"reason": "session_exited"})),
+            }),
+            SessionListing::Live => {
+                let pane = session
+                    .backend_ref
+                    .get("pane")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                match self.list_panes(&name) {
+                    Ok(rows) => Ok(probe_pane(&rows, pane)),
+                    Err(_) => Ok(ResourceProbe {
+                        alive: false,
+                        attached: false,
+                        detail: Some(serde_json::json!({"reason": "pane_missing"})),
+                    }),
+                }
+            }
+        }
     }
     fn close(&self, session: &SessionRef, _reason: CloseReason, _force: bool) -> Result<()> {
         self.kill_session(&session_name(&session.task_id)?)
@@ -540,5 +709,123 @@ mod tests {
         let calls = runner.calls();
         assert_eq!(calls[0], argv(&["list-sessions", "--short"]));
         assert_eq!(calls[1], argv(&["kill-session", NAME]));
+    }
+
+    fn stored(pane: &str) -> SessionRef {
+        SessionRef {
+            task_id: TASK.into(),
+            backend: "zellij".into(),
+            backend_ref: serde_json::json!({"session": NAME, "pane": pane}),
+            generation: 1,
+        }
+    }
+
+    fn panes_argv() -> Vec<String> {
+        argv(&[
+            "--session",
+            NAME,
+            "action",
+            "list-panes",
+            "--json",
+            "--state",
+            "--command",
+        ])
+    }
+
+    #[test]
+    fn probe_maps_exited_pane_exit_status() {
+        let runner = Arc::new(
+            ScriptRunner::default()
+                .reply(0, "onlyne-550e8400e29b [Created 1s ago]\n")
+                .reply(
+                    0,
+                    r#"[{"id":3,"is_plugin":false,"exited":true,"exit_status":7,"is_held":false}]"#,
+                ),
+        );
+        let backend = ZellijBackend::new(runner.clone());
+        let probe = backend.probe(&stored("terminal_3")).unwrap();
+        assert!(!probe.alive);
+        assert!(!probe.attached);
+        let detail = probe.detail.unwrap();
+        assert_eq!(detail["exit"], 7);
+        assert_eq!(detail["exited"], true);
+        let calls = runner.calls();
+        assert_eq!(calls[0], argv(&["list-sessions", "--no-formatting"]));
+        assert_eq!(calls[1], panes_argv());
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.get(1).map(String::as_str) != Some("--short"))
+        );
+    }
+
+    #[test]
+    fn probe_maps_a_held_pane_without_inventing_an_exit_code() {
+        let runner = Arc::new(
+            ScriptRunner::default()
+                .reply(0, "onlyne-550e8400e29b [Created 1s ago]\n")
+                .reply(
+                    0,
+                    r#"[{"id":3,"is_plugin":false,"exited":false,"exit_status":null,"is_held":true}]"#,
+                ),
+        );
+        let backend = ZellijBackend::new(runner);
+        let probe = backend.probe(&stored("terminal_3")).unwrap();
+        assert!(!probe.alive);
+        let detail = probe.detail.unwrap();
+        assert!(detail["exit"].is_null(), "{detail}");
+        assert_eq!(detail["exited"], true);
+    }
+
+    #[test]
+    fn probe_reports_a_missing_pane_row() {
+        let runner = Arc::new(
+            ScriptRunner::default()
+                .reply(0, "onlyne-550e8400e29b [Created 1s ago]\n")
+                .reply(0, r#"[{"id":1,"is_plugin":false,"exited":false}]"#),
+        );
+        let backend = ZellijBackend::new(runner);
+        let probe = backend.probe(&stored("terminal_3")).unwrap();
+        assert!(!probe.alive);
+        assert_eq!(probe.detail.unwrap()["reason"], "pane_missing");
+    }
+
+    #[test]
+    fn probe_does_not_attach_an_exited_session() {
+        let runner = Arc::new(
+            ScriptRunner::default().reply(0, "onlyne-550e8400e29b [Created 2h ago] EXITED\n"),
+        );
+        let backend = ZellijBackend::new(runner.clone());
+        let probe = backend.probe(&stored("terminal_3")).unwrap();
+        assert!(!probe.alive);
+        assert_eq!(probe.detail.unwrap()["reason"], "session_exited");
+        assert_eq!(
+            runner.calls(),
+            vec![argv(&["list-sessions", "--no-formatting"])]
+        );
+    }
+
+    #[test]
+    fn probe_reports_a_missing_session_name() {
+        let runner = Arc::new(ScriptRunner::default().reply(0, "other\n"));
+        let backend = ZellijBackend::new(runner.clone());
+        let probe = backend.probe(&stored("terminal_3")).unwrap();
+        assert!(!probe.alive);
+        assert_eq!(probe.detail.unwrap()["reason"], "session_missing");
+        assert_eq!(
+            runner.calls(),
+            vec![argv(&["list-sessions", "--no-formatting"])]
+        );
+    }
+
+    #[test]
+    fn probe_accepts_a_bare_pane_id_and_a_plugin_token() {
+        assert_eq!(parse_pane_token("terminal_3"), Some((3, false)));
+        assert_eq!(parse_pane_token("3"), Some((3, false)));
+        assert_eq!(parse_pane_token("plugin_2"), Some((2, true)));
+        let rows = serde_json::json!([{"id":2,"is_plugin":true,"exited":true,"exit_status":9}]);
+        let probe = probe_pane(&rows, "plugin_2");
+        assert!(!probe.alive);
+        assert_eq!(probe.detail.unwrap()["exit"], 9);
     }
 }

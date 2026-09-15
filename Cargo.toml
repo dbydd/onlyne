@@ -71,6 +71,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 signature = "2"
+interprocess = { version = "2.4.4", features = ["tokio"] }
 tokio = { version = "1", features = [
   "rt-multi-thread",
   "macros",
