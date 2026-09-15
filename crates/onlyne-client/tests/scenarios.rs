@@ -1192,7 +1192,11 @@ async fn pinned_tls_link_fetches_welcome_and_caches_prose() {
         endpoint.clone(),
         key_path.clone(),
         certificate.spki_pin.clone(),
-    );
+    )
+    // CI (and `env -u` local runs) have no herdr/orca/zellij; `fake` is
+    // opt-in and is the session backend this test needs. Product exit 5
+    // when auto-detect finds nothing stays intact.
+    .with_backend("fake");
     let client = tokio::spawn(onlyne_client::run(init));
 
     let mut cached = None;

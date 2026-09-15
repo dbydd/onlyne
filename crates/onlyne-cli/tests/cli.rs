@@ -1313,26 +1313,26 @@ fn unix_script_to_cmd(script: &str) -> String {
     }
     let mut cmd = String::from("@echo off\r\n");
     if script.contains("ONLYNE_ARGV") {
-        // Shift-loop keeps paths with spaces as one argv line, matching
-        // unix `printf '%s\n' "$@"`.
+        // Labels inside `(...)` are a cmd.exe syntax error (exit 255).
+        // Keep goto/for at file scope. `for %%A in (%*)` matches unix
+        // `printf '%s\n' "$@"` for the space-free paths these tests use.
         cmd.push_str(
-            "if defined ONLYNE_ARGV (\r\n\
-             type nul > \"%ONLYNE_ARGV%\"\r\n\
-             :onlyne_argv_loop\r\n\
-             if \"%~1\"==\"\" goto onlyne_argv_done\r\n\
-             >>\"%ONLYNE_ARGV%\" echo %~1\r\n\
-             shift\r\n\
-             goto onlyne_argv_loop\r\n\
-             :onlyne_argv_done\r\n\
-             )\r\n",
+            "if not defined ONLYNE_ARGV goto onlyne_after_argv\r\n\
+             >\"%ONLYNE_ARGV%\" (\r\n\
+             for %%A in (%*) do @echo %%A\r\n\
+             )\r\n\
+             :onlyne_after_argv\r\n",
         );
     }
     if script.contains("rendering spec") {
         cmd.push_str("echo rendering spec 1>&2\r\n");
     }
     if script.contains("[[client]]") {
-        cmd.push_str("echo [[client]] roles: worker\r\n");
+        // `echo(` prints `[` literally; plain `echo [` can be parsed as a
+        // command grouping.
+        cmd.push_str("echo([[client]] roles: worker\r\n");
     }
+    cmd.push_str("exit /b 0\r\n");
     cmd
 }
 
