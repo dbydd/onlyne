@@ -230,7 +230,7 @@ fn generate_forwards_the_argv_to_onlyne_server() {
         "progress must stay on stderr, not on stdout:\n{stderr}"
     );
     assert_eq!(
-        std::fs::read_to_string(&argv_out).unwrap(),
+        read_stub_argv(&argv_out),
         format!(
             "generate\n--root\n{}\n--template\nspec/roles.yaml\n--role\nworker\n--out\n{}\n--force\n",
             root.display(),
@@ -1336,6 +1336,35 @@ fn unix_script_to_cmd(script: &str) -> String {
     cmd
 }
 
+/// cmd.exe `%*` / `echo %%A` is the stub's transport, not the argv the CLI
+/// forwarded: lines are CRLF, and tokens that contain `\` come back wrapped
+/// in double quotes. Unix `printf '%s\n'` is already LF + bare tokens.
+/// Only a fully quoted line is unwrapped (cmd's own quoting), never interior
+/// quotes.
+fn read_stub_argv(path: &Path) -> String {
+    let raw = std::fs::read_to_string(path).unwrap();
+    let unix = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out = String::new();
+    let mut lines = unix.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        if line.is_empty() && lines.peek().is_none() {
+            break;
+        }
+        out.push_str(unquote_cmd_echo_line(line));
+        out.push('\n');
+    }
+    out
+}
+
+fn unquote_cmd_echo_line(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    if bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' {
+        &line[1..line.len() - 1]
+    } else {
+        line
+    }
+}
+
 /// `PATH` with `dir` in front, so a stub shadows any real sibling.
 fn path_with(dir: &Path) -> OsString {
     let mut value = OsString::from(dir.as_os_str());
@@ -1378,7 +1407,7 @@ fn server_lifecycle_verbs_forward_the_argv_verbatim() {
     );
     assert_eq!(output.status.code(), Some(EXIT_OK));
     assert_eq!(
-        std::fs::read_to_string(&argv_out).unwrap(),
+        read_stub_argv(&argv_out),
         format!(
             "init\n--root\n{}\n--listen\n127.0.0.1:7899\n",
             root.display()
@@ -1460,7 +1489,7 @@ fn gateway_run_forwards_to_onlyne_gateway() {
     );
     assert_eq!(output.status.code(), Some(EXIT_OK));
     assert_eq!(
-        std::fs::read_to_string(&argv_out).unwrap(),
+        read_stub_argv(&argv_out),
         format!(
             "run\ntelegram\n--server-root\n{}\n--token\nt0ken\n",
             root.display()
