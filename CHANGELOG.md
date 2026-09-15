@@ -79,6 +79,18 @@ flip loud, and gives the automatic requeue a budget the operator can bound.
   delivery event, zero requeues, one working session, and a natural ack.
   Files: `crates/onlyne-testkit/e2e/requeue-claim.sh`.
 
+All six are on crates.io: `onlyne-proto` 1.0.4 at 2026-09-15T03:43:55Z,
+`onlyne-config` 1.0.4 at 03:45:08Z, `onlyne-store` 1.0.5 at 03:45:24Z,
+`onlyne-client` 1.0.7 at 03:45:50Z, `onlyne-tui` 1.0.4 at 03:46:13Z, and
+`onlyne-server` 1.0.9 at 03:46:29Z, none yanked. The publishes ran as
+`cargo publish --allow-dirty --locked -p onlyne-<crate>` in that dependency
+order through the network window that opened at 11:43 local after the 1.0.8
+binaries had already been copied to `~/.cargo/bin`. A fresh consumer project
+outside this workspace resolved the raised floors and compiled
+`onlyne-server` 1.0.9 with `onlyne-client` 1.0.7 and `onlyne-tui` 1.0.4 in 23
+seconds, so `cargo install` now carries the claim handshake to every host,
+the ARIS swarm included.
+
 ## [1.0.8] - 2026-09-15
 
 Scope: heartbeat liveness from the client's beats to the server's own sweep. The
