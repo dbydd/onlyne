@@ -53,11 +53,20 @@ Both `init` and `run` create these paths under `--workspace`:
 
 ## Backends
 
-`ONLYNE_BACKEND` selects the session backend. The name set is `herdr | orca | zellij | exec | fake | auto`. A nonempty value that names `herdr`, `orca`, `zellij`, `exec`, or `fake` selects that backend. An empty value or `auto` probes herdr, then orca, then zellij. `exec` and `fake` enable only when `ONLYNE_BACKEND` names them. With no match, `onlyne-client run` exits 5 and writes `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`.
+Selection is env `ONLYNE_BACKEND` (nonempty) > workspace `config.toml` `backend` > auto.
 
-`fake` runs sessions in-process and needs no external tool; the end-to-end scripts set `ONLYNE_BACKEND=fake`. `exec` spawns the role's `session_command` as a child of the client, holds stdin open, and appends the child's output to `.onlyne/logs/session-<task>.log`. `crates/onlyne-testkit/e2e/pi-live.sh` sets `ONLYNE_BACKEND=exec` for a headless host.
+| name | parse aliases | how it is chosen | notes |
+| --- | --- | --- | --- |
+| `herdr` | | env, config, or auto probe (first) | pane host |
+| `orca` | | env, config, or auto probe | tab host |
+| `zellij` | | env, config, or auto probe | pane host; probe maps EXITED / `exit_status` |
+| `exec` | `headless` | env or config only | projections still write `exec` |
+| `fake` | | env or config only | in-process, for tests |
+| `auto` | empty string | default when env and config are empty | probes herdr, then orca, then zellij |
 
-`headless` is a parse alias for `exec`; projections and events still name the backend `exec`. Workspace `config.toml` may set `backend = "headless"` (or `"exec"`); a nonempty `ONLYNE_BACKEND` wins over that field.
+A nonempty value that names `herdr`, `orca`, `zellij`, `exec`/`headless`, or `fake` selects that backend. `exec` and `fake` are never discovered by auto. With no match, `onlyne-client run` exits 5 and writes `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`.
+
+`fake` runs sessions in-process and needs no external tool; the end-to-end scripts set `ONLYNE_BACKEND=fake`. `exec` spawns the role's `session_command` as a child of the client, holds stdin open, and appends the child's output to `.onlyne/logs/session-<task>.log`. On child exit, `probe` may fill `detail.output_tail` (at most 200 lines / 16 KiB). `crates/onlyne-testkit/e2e/pi-live.sh` and `exec-headless.sh` set this path. Windows close uses `CREATE_NEW_PROCESS_GROUP` plus `CTRL_BREAK`, then `kill`; a process with no console terminates the child directly. Operator-facing graceful stop of the daemons is `onlyne shutdown`.
 
 ### herdr
 

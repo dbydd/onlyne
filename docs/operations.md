@@ -1,10 +1,10 @@
 # Operations
 
-Onlyne 运维以 server 账本、client 工作区、admin unix socket 为边界。
+Onlyne 运维以 server 账本、client 工作区、admin 本地 socket（`.onlyne/run/s`）为边界。
 
 ## 值守入口
 
-`onlyne status` 通过 admin socket 读取 server 状态。
+`onlyne status` 通过 admin 本地 socket 读取 server 状态。
 
 `onlyne roles` 读取 role 注册表和在线状态。
 
@@ -234,7 +234,7 @@ admin socket 上的 `onlyne control` 以 admin 身份执行。
 
 `control cancel` 返回 `forbidden` 是设计行为。
 
-此时恢复入口是 admin unix socket 的 repair 族。
+此时恢复入口是 admin 本地 socket 的 repair 族。
 
 ```bash
 onlyne --server-root <server-root> repair inspect --task <id>
@@ -265,3 +265,9 @@ backend = "headless"
 # <server-root>/.onlyne/spec.toml [[client]]
 session_command = ["pi", "--mode", "rpc", "--session-id", "{session}"]
 ```
+
+## Windows 关停
+
+Windows 没有 SIGTERM / SIGHUP。`tokio::signal::windows::ctrl_c` 接到现有 SIGINT 收尾路径。运维优雅关停走 `onlyne shutdown`；spec 热加载走 `onlyne reload`。exec 会话子进程的杀阶梯见上一节。
+
+`.onlyne/run/s` 在 Windows 是 marker 文件（内容 `v1:onlyne-<32hex>`），named pipe 名由路径的 lexical-absolute 小写 sha256 派生。`--socket \\.\pipe\` 原样透传。`ERROR_PIPE_BUSY` 在 CLI `--timeout` 内重试。Unix 上 AF_UNIX 仍是文件系统 UDS。

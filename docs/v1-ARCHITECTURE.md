@@ -111,12 +111,12 @@ One connection carries every top-level frame variant: `req`, `res`, `ev`, `ack`,
 | Surface | Endpoint | Security and handshake | Source |
 |---|---|---|---|
 | Client to server | TCP address from `[server].listen` | TLS 1.3 with rustls, server certificate SPKI pin, preregistered ed25519 role key, ACL before ledger write. | Plan D9 line 23; Plan §5 line 274; Plan S5 line 428 |
-| Adapter unix socket | Agent plugins connect to `<workspace>/.onlyne/run/s`; gateway processes connect to `<server-root>/.onlyne/run/s`. | Shared adapter SDK and frame codec; `hello.kind` selects `agent` or `gateway`; mount carries role/session or gateway identity. | Plan §7 lines 291-306 |
-| Admin unix socket | `<server-root>/.onlyne/run/s` with mode `0600` | Local trust root; `hello.kind = "admin"`; admin ops use ACL with `--from <role>` on send/control. | Plan §2 lines 83-87; Plan §8 line 320 |
+| Adapter local socket | Agent plugins connect to `<workspace>/.onlyne/run/s`; gateway processes connect to `<server-root>/.onlyne/run/s`. | Shared adapter SDK and frame codec; `hello.kind` selects `agent` or `gateway`; mount carries role/session or gateway identity. | Plan §7 lines 291-306 |
+| Admin local socket | `<server-root>/.onlyne/run/s` | Local trust root; `hello.kind = "admin"`; admin ops use ACL with `--from <role>` on send/control. Unix: filesystem UDS mode `0600`. Windows: marker file `v1:onlyne-<32hex>` plus an NPFS pipe whose leaf is `sha256` of the lexical-absolute lowercase path (16 bytes hex); bind SDDL `D:P(A;;GA;;;OW)(A;;GA;;;SY)`. | Plan §2 lines 83-87; Plan §8 line 320; `crates/onlyne-layout/src/local_socket.rs` |
 
 During `hello` the server listener picks the mounted surface: `agent`, `gateway`, or `admin`. `hello` times out after 5 s. Any application frame sent before `hello` returns `error{code:"invalid",message:"hello required first"}` and closes the connection. Source: Plan §7 lines 293 and 310.
 
-CLI socket discovery is fixed. `--socket <path>` wins first, `--server-root <dir>` maps to `<dir>/.onlyne/run/s`, and `--workspace <dir>` or upward discovery maps to `.onlyne/run/s`. When nothing resolves, the CLI exits 3 and prints `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`. Source: Plan §9 line 344; Contract CLI vocabulary.
+CLI socket discovery is fixed. `--socket <path>` wins first, `--server-root <dir>` maps to `<dir>/.onlyne/run/s`, and `--workspace <dir>` or upward discovery maps to `.onlyne/run/s`. A `--socket` value that starts with `\\.\pipe\` is an NPFS path and is not hashed. `ERROR_PIPE_BUSY` (231) is `WouldBlock` and retries inside `--timeout`. Tokio's `UnixStream` is `cfg(unix)` on stable 1.85, so Windows uses the named-pipe seam. When nothing resolves, the CLI exits 3 and prints `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`. Exit codes 2, 3, 4, and 5 stay. Source: Plan §9 line 344; Contract CLI vocabulary; `connect` in `crates/onlyne-cli/src/wire.rs`.
 
 ## Operation vocabulary
 
@@ -148,6 +148,8 @@ Idempotency keys on `op_id`. A repeated identical request returns the durable re
 ## Session lifecycle
 
 The client is the authority for execution state. The server stores projections. Source: Plan D5 line 19; Plan §6 lines 276-289.
+
+Backend selection is env `ONLYNE_BACKEND` > workspace `config.toml` `backend` > auto. `headless` parses as `exec`. zellij `probe` reads `list-sessions` (keeping the EXITED marker) then `action list-panes --json --state`, and maps `exited` / `exit_status` so an EXITED session is not alive. herdr and orca probes stay on host presence: those CLIs expose no integer pane/tab exit code.
 
 | Dimension | Values | Source |
 |---|---|---|
@@ -224,7 +226,7 @@ Top-level groups are `onlyne server <verb>`, `onlyne client <verb>`, and `onlyne
 
 Inside the `server` group, the lifecycle verbs (`init`, `run`, `start`, `stop`, `status`, `generate`, `reload`) exec `onlyne-server` with the remaining arguments verbatim, and the admin nouns (`roles`, `sessions`, `ledger`, `faults`, `watch`, `history`, `repair`) resolve against the admin socket inside the CLI process. `onlyne` has no intermediate `forward` verb. An unrecognized server verb is refused with exit 2.
 
-`spec_diff` is primary with the `spec-diff` alias. `--timeout` is primary with the `--timeout-ms` alias. `wait-ready` takes `--interval-ms` (default 200) with the global `--timeout` bound (default 10000). `--from` is a per-verb flag on `send`, `reply`, `complete`, `handoff`, and `control` for the admin surface only. `reply --to <envelope-id>` answers that ledger row and addresses its recipient. Exit codes: 0 success, 1 failed daemon answer or `wait-ready` bound hit, 2 local validation, 3 no socket, 127 missing sibling binary, 4 propagated generate-child failure. Source: `Verb` and `ServerVerb` in `crates/onlyne-cli/src/main.rs`; `forward::exec` in `crates/onlyne-cli/src/forward.rs`; `crates/onlyne-cli/tests/cli.rs`.
+`spec_diff` is primary with the `spec-diff` alias. `--timeout` is primary with the `--timeout-ms` alias. `wait-ready` takes `--interval-ms` (default 200) with the global `--timeout` bound (default 10000). `--from` is a per-verb flag on `send`, `reply`, `complete`, `handoff`, and `control` for the admin surface only. `reply --to <envelope-id>` answers that ledger row and addresses its recipient. Exit codes: 0 success, 1 failed daemon answer or `wait-ready` bound hit, 2 local validation, 3 no socket, 4 propagated generate-child failure, 5 no supported session host, 127 missing sibling binary. Source: `Verb` and `ServerVerb` in `crates/onlyne-cli/src/main.rs`; `forward::exec` in `crates/onlyne-cli/src/forward.rs`; `crates/onlyne-cli/tests/cli.rs`.
 
 ## Where the code lives
 
@@ -233,7 +235,7 @@ Inside the `server` group, the lifecycle verbs (`init`, `run`, `start`, `stop`, 
 | Frame encode/decode | `crates/onlyne-frame/` | Plan §4 |
 | Wire types and schemas | `crates/onlyne-proto/` | Plan §3; Contract line 38 |
 | Server TOML and client config | `crates/onlyne-config/` | Plan §5 |
-| Layout and legacy refusal | `crates/onlyne-layout/` | Plan §2 |
+| Layout, legacy refusal, local-socket seam | `crates/onlyne-layout/` (`local_socket.rs`) | Plan §2 |
 | Ledger and local databases | `crates/onlyne-store/` | Plan §10 |
 | Lifecycle reducer and backend trait | `crates/onlyne-session/` | Plan §6 |
 | TLS, ed25519, ACL, backoff | `crates/onlyne-net/` | Plan D9; Plan S5; Contract line 39 |

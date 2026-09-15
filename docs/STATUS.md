@@ -1,6 +1,6 @@
 # Onlyne Status
 
-v1.0.0 is the active state. `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONTRACT.md` owns the work split. Root README files are the user manual.
+v1.1.0 is the tree on `main` (pending 1.1.0 publish). `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONTRACT.md` owns the work split. Root README files are the user manual.
 
 ## Three-process shape
 
@@ -11,14 +11,14 @@ v1.0.0 is the active state. `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONT
 
 ## Crate state
 
-Counts come from `cargo test --workspace` on 2026-09-15 (738 passed, 0 failed), one line per crate with its libraries and integration targets summed.
+Counts come from `cargo test --workspace` on 2026-09-15 (756 passed, 0 failed, 1 ignored: `herdr_live_probe`), one line per crate with its libraries and integration targets summed.
 
 - [x] `onlyne-proto` green with envelope, frame variants, ops, errors, and events: 59 unit + 5 wire vectors + 2 sizes.
 - [x] `onlyne-frame` green with length-prefixed codec: 9.
-- [x] `onlyne-config` green with spec parse and reload: 11 template + 28 config contract + 17 ACL table + 3 spec example.
-- [x] `onlyne-layout` green with legacy refusal exit 2: 15.
+- [x] `onlyne-config` green with spec parse and reload: 11 template + 30 config contract + 17 ACL table + 3 spec example.
+- [x] `onlyne-layout` green with legacy refusal exit 2 and the local-socket seam: 20.
 - [x] `onlyne-store` green with ledger and local DB: 31 unit + 2 schema statements.
-- [x] `onlyne-session` green with the lifecycle port and the session backends (zellij, Orca, exec, fake, herdr): 95 unit + 13 herdr.
+- [x] `onlyne-session` green with the lifecycle port and the session backends (zellij, Orca, exec, fake, herdr): 106 unit + 13 herdr.
 - [x] `onlyne-net` green with TLS, handshake, ACL, and backoff: 25.
 - [x] `onlyne-adapter` green with SDK and protocol schema: 5 unit + 3 conformance + 1 protocol doc.
 - [x] `onlyne-server` green with router, relay, projection, faults, admin, and generate: 13 unit + 83 delivery + 27 generate + 2 stale.
@@ -37,7 +37,7 @@ Counts come from `cargo test --workspace` on 2026-09-15 (738 passed, 0 failed), 
 
 ## Verification cases
 
-Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root. The directory holds fifteen scripts besides `lib.sh`. Eleven fake-backend cases (1-7, 9, 12, 14, 15) exited 0 on 2026-09-15, `running-lights` the long one and `gateway-mount` the quick one; case 15 `requeue-claim` joined the set for 1.0.9. Cases 10 and 11 are live and last exited 0 on 2026-09-11 (2 seconds and 9 seconds). Case 13 is live against herdr session `onlyne-test` and exited 0 on 2026-09-14 in 3 seconds, its workspace closed and the session's workspace list back to the single `~` entry it started with. Cases 10, 11, and 13 override the backend: case 10 needs a shell inside an Orca tab with the app answering, case 11 needs a `pi` that answers a credential probe, and case 13 needs a reachable herdr session `onlyne-test`. On a host without its requirement, a live case prints `SKIP` and exits 0, so a green line says "passed here" and a skip says "not exercised here".
+Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root. The directory holds sixteen scripts besides `lib.sh`. Twelve fake-backend cases (1-7, 9, 12, 14, 15, 16) exited 0 on 2026-09-15, `running-lights` the long one and `gateway-mount` the quick one; case 16 `exec-headless` joined the set for 1.1.0. Cases 10 and 11 are live and last exited 0 on 2026-09-11 (2 seconds and 9 seconds). Case 13 is live against herdr session `onlyne-test` and exited 0 on 2026-09-14 in 3 seconds, its workspace closed and the session's workspace list back to the single `~` entry it started with. Cases 10, 11, and 13 override the backend: case 10 needs a shell inside an Orca tab with the app answering, case 11 needs a `pi` that answers a credential probe, and case 13 needs a reachable herdr session `onlyne-test`. On a host without its requirement, a live case prints `SKIP` and exits 0, so a green line says "passed here" and a skip says "not exercised here".
 
 - [x] Case 1 `local-task.sh`: single-machine fake-backend task reaches `acked`.
 - [x] Case 2 `acl-reject.sh`: ACL refusal emits `acl_denied`.
@@ -46,7 +46,7 @@ Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKE
 - [x] Case 5 `two-cluster.sh`: aggregate-role federation preserves the parent ledger boundary.
 - [x] Case 6 `gateway-mount.sh`: gateway mount delivers platform traffic.
 - [x] Case 7 `legacy-layout.sh`: legacy workspace exits 2.
-- [x] Case 8: formatting, lint, workspace tests, and binary firewall checks pass.
+- [x] Case 8: formatting, lint, workspace tests, and binary firewall checks pass. `.github/workflows/ci.yml` splits this across two jobs: linux fmt/clippy/`cargo test --workspace`; windows `cargo test` on the core crate subset. The windows-latest job's first run is in progress.
 - [x] Case 9 `generate-relocate.sh`: generate produces relocatable workspaces.
 - [x] Case 10 `orca-live.sh`: the Orca backend against the live app. The tab lands flat in the supervisor's own worktree under the `host` policy, probe inputs come in four parts, the tab map carries that identity, SIGTERM drains back to the tab count it started with, and no Orca registration is created.
 - [x] Case 11 `pi-live.sh`: the `plugins/onlyne-agent-pi` pi extension against a real `onlyne-client`. `ONLYNE_BACKEND=exec` spawns the workspace's `session_command` as a child of the client with stdin held open. pi loads the plugin, the task text reaches pi's context, the plugin's `report.complete` settles the ledger to `acked` with the model's answer in `out_head`, and the session projects `exited`/`done`. SKIP semantics: pi not on PATH, or a one-turn credential probe that does not answer, prints `SKIP pi-live` and exits 0. A host without a model must not read as a product failure. The plugin's own protocol path is covered without a model by `node --test` in `plugins/onlyne-agent-pi`: framing, protocol vocabulary, the agent state machine against a fake host, and a live handshake against a really-running `onlyne-client`.
@@ -54,3 +54,11 @@ Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKE
 - [x] Case 13 `herdr-live.sh`: the herdr backend against the live herdr session `onlyne-test`. `ONLYNE_BACKEND=herdr` with `HERDR_ENV=1` and `HERDR_SESSION` set, `session_command = ["sleep", "600"]` on the pane-run track, `max_sessions` left at the seed value `1` so the role is saturated by its own session. The case polls `herdr workspace list` `.result.workspaces[]` for the label built from the spec it generated (`onlyne:<[server] name>`, the value the client passes to each pane as `ONLYNE_CLUSTER`), then `herdr tab list --workspace W` `.result.tabs[]` for tab label `planner`, then that tab's `pane_count` reaching 2 with the two ids from `herdr pane list` `.result.panes[]`. The 1-pane moment is left unasserted: the split lands within a few hundred ms of the tab's creation, so the poller would race the product. `backend_ref` from `client.db` `sessions` names the workspace, the tab, and the session's pane; the pane in that tab beside it is the tab's root. Then `onlyne control --from planner focus --task` (the saturated-role delivery `pull{control_only}` is what carries it) and `herdr pane get` `.result.pane.focused` to true. SIGTERM drains the client until that pane id is gone with `pane get` rc 1 and `pane_not_found`, `pane_count` back to 1, and the surviving pane equal to the recorded root. `workspace close` returns the session's workspace list to the pre-run snapshot, and cleanup closes any workspace that appeared after that snapshot, so a failing assertion leaves nothing behind. SKIP: missing herdr binary or an unreachable `HERDR_SESSION` prints `SKIP herdr-live` and exits 0.
 - [x] Case 14 `heartbeat-watch.sh`: the server's own heartbeat watch against real processes. The spec's `[server]` carries `stale_watch_secs = 2` and `heartbeat_grace_secs = 4`, a scripted agent reports `ready`, lands one heartbeat, and then sleeps inside the assignment. The `sessions` answer reads `working` with `heartbeat_stale` absent while beats flow, the `faults` table gains `heartbeat_missing` for the task once the grace passes, and the same row keeps `working` all the way: the server flags, the supervisor decides.
 - [x] Case 15 `requeue-claim.sh`: the hello claim across a server restart on real processes. A task sits `in_flight` in a live client session when `kill -9` takes the server; the restarted server answers `wait-ready`, the client reconnects and declares its live slot at `hello`. The row keeps `in_flight` through adoption, the task's ledger arc counts one delivery event and zero requeues, the sessions axis still holds exactly one `working` row, and the scripted completion lands the same row `acked`.
+- [x] Case 16 `exec-headless.sh`: the exec backend with workspace `backend = "headless"` (parse alias) and env `ONLYNE_BACKEND=exec`. Fake agent as `session_command` writes a banner into `.onlyne/logs/session-<task>.log`, the ledger settles `acked`, the session projects `exited`/`done`, and `client.db` stores backend `exec`.
+
+## CI
+
+`.github/workflows/ci.yml` defines two jobs on `push` to `main`, pull requests, and `workflow_dispatch`.
+
+- `linux` (`ubuntu-latest`): `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+- `windows` (`windows-latest`): `cargo test --no-fail-fast` on `onlyne-proto`, `onlyne-frame`, `onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-cli`, `onlyne-tui`. First run in progress.

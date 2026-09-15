@@ -23,3 +23,7 @@ The three-way conformance fixture uses the testkit stub because `onlyne-testkit`
 ## Backend choice
 
 The three-way fixture uses the testkit stub backend because only the local crate may declare the `onlyne-session` dependency.
+
+## E2E
+
+Scripts live in `e2e/`. Fake-backend cases run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root and currently pass 12/12. Case 16 `exec-headless.sh` covers the exec backend: workspace `backend = "headless"`, env `ONLYNE_BACKEND=exec`, session log, and `client.db` backend byte `exec`.

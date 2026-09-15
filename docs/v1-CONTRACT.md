@@ -67,13 +67,13 @@ onlyne gateway list|status|auth <platform> [...]
 onlyne who|ping|version|completions <zsh|fish>
 ```
 
-Three daemons plus one entrypoint: `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne`. `onlyne <group> <verb>` execs the matching daemon binary; message verbs connect straight to a unix socket and print one JSON answer.
+Three daemons plus one entrypoint: `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne`. `onlyne <group> <verb>` execs the matching daemon binary; message verbs connect straight to the local socket (UDS on unix, named pipe on Windows) and print one JSON answer.
 The admin noun set resolves through the same socket rule and shares the message-verb exit-code table. `wait-ready` polls admin `status` at 200 ms intervals with a 10 s bound, and prints `onlyne: server not ready after 10000ms` on failure. `generate` writes the `[[client]]` fragment to stdout and progress to stderr.
 A missing daemon binary makes the CLI and the e2e script print exactly this to stderr and exit 127:
 `onlyne: missing binary <path>; run cargo build --workspace`
 `onlyne cluster export-prose` prints raw prose by default and takes `--json`. It issues the existing role query and adds no protocol op.
 
-Socket resolution runs in this order: `--socket <path>` → `--server-root <dir>` as `<dir>/.onlyne/run/s` → `--workspace <dir>` or the current directory upward for `.onlyne/run/s`. A path that never resolves answers the same way as a path that resolves to nothing on disk. Both write exactly this to stderr and exit 3, with stdout left empty so a script reads no answer body:
+Socket resolution runs in this order: `--socket <path>` → `--server-root <dir>` as `<dir>/.onlyne/run/s` → `--workspace <dir>` or the current directory upward for `.onlyne/run/s`. A `--socket` value that starts with `\\.\pipe\` is used as the NPFS name with no hashing. `ERROR_PIPE_BUSY` retries inside `--timeout`. Exit codes 2, 3, 4, and 5 stay. A path that never resolves answers the same way as a path that resolves to nothing on disk. Both write exactly this to stderr and exit 3, with stdout left empty so a script reads no answer body:
 
 ```
 onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace

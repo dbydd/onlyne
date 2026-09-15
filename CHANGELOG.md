@@ -1,5 +1,65 @@
 # Changelog
 
+## [1.1.0] - 2026-09-15
+
+Scope: the exec session backend as a first-class headless path, a Windows
+named-pipe local-socket seam, zellij probe mapping, and dual-job CI. Crate
+versions on crates.io stay at the 1.0.9 floor; the Release pass publishes
+1.1.0 and fills install paths (pending 1.1.0 publish).
+
+`cargo test --workspace` on 2026-09-15: 756 passed, 0 failed, 1 ignored
+(`herdr_live_probe`). Fake-backend e2e is 12/12, including
+`crates/onlyne-testkit/e2e/exec-headless.sh`.
+
+### Added
+
+- session: workspace `config.toml` carries optional `backend`.
+  Selection is env `ONLYNE_BACKEND` (nonempty) > that field > auto. Parse
+  accepts `headless` as an alias for `exec`; `BackendName::as_str` and every
+  projection still write `exec`. On process exit, `probe` copies the session
+  log tail into `ResourceProbe.detail.output_tail` (at most 200 lines, 16 KiB
+  byte window first). Windows spawn sets `CREATE_NEW_PROCESS_GROUP`; close
+  sends `CTRL_BREAK`, waits the grace window, then `child.kill()`. A client
+  with no console skips the console event and terminates the child. Files:
+  `crates/onlyne-config/src/client.rs`, `crates/onlyne-session/src/backend/exec.rs`,
+  `crates/onlyne-session/src/backend/mod.rs`, `crates/onlyne-client/src/runloop.rs`.
+- layout: `interprocess` 2.4.4 (`tokio`) is the local-socket seam. Unix keeps
+  a filesystem UDS at `.onlyne/run/s` (mode `0o600`). Windows stable 1.85 has
+  no tokio `UnixStream` (`cfg(unix)`), so `.onlyne/run/s` is a marker file
+  `v1:onlyne-<32hex>` and the NPFS leaf is `sha256` of the lexical-absolute
+  path (separators `/`, lowercased) truncated to 16 bytes hex. Bind uses
+  owner-only SDDL `D:P(A;;GA;;;OW)(A;;GA;;;SY)`. `--socket` values that start
+  with `\\.\pipe\` travel verbatim. `ERROR_PIPE_BUSY` maps to `WouldBlock` and
+  retries inside CLI `--timeout`. Exit codes 2/3/4/5 stay. Files:
+  `crates/onlyne-layout/src/local_socket.rs`, `crates/onlyne-cli/src/wire.rs`.
+- ci: `.github/workflows/ci.yml` runs two jobs. `linux` on `ubuntu-latest`
+  does `cargo fmt --all --check`, `clippy --workspace --all-targets -D warnings`,
+  and `cargo test --workspace`. `windows` on `windows-latest` tests the core
+  crate subset (`onlyne-proto` through `onlyne-tui`).
+- e2e: verification case 16 `exec-headless.sh` assigns through a workspace
+  `backend = "headless"` field, runs the fake agent as `session_command`,
+  asserts the session log, an `exec` backend string in `client.db`, and
+  `exited`/`done`. File: `crates/onlyne-testkit/e2e/exec-headless.sh`.
+- dependencies: workspace `interprocess` 2.4.4. Windows exec and server
+  process helpers declare `windows-sys` 0.61 (Console/Process/Threading).
+  `interprocess` 2.4.4 itself depends on `windows-sys` 0.61.2 on that target.
+
+### Changed
+
+- session: zellij `probe` lists sessions without `--short`, then on a live
+  session runs `action list-panes --json --state`. An `EXITED` listing reports
+  `alive: false` with `reason: session_exited`. A pane with `exited` or
+  `is_held` reports `alive: false` and the host `exit_status` when present.
+  herdr and orca probes stay: those hosts expose no integer exit code on the
+  pane/tab the client already queries. File:
+  `crates/onlyne-session/src/backend/zellij.rs`.
+
+### Fixed
+
+- session: zellij `probe` reads `list-sessions` with the EXITED marker intact.
+  `--short` stripped that marker and an EXITED session listed as a name was
+  reported alive.
+
 ## [1.0.9] - 2026-09-15
 
 Scope: delivery truth. The workspace version moves 1.0.3 → 1.0.4, so

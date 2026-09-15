@@ -26,6 +26,7 @@ This inventory reads every `Cargo.toml` under `crates/` except `crates/onlyne-le
 | `ed25519-dalek` | `2.1` | [`std`, `rand_core`]; default-features=false | onlyne-client |
 | `flate2` | `1.0` | [] | onlyne-client |
 | `futures-util` | `0.3` | [] | onlyne-adapter, onlyne-testkit |
+| `interprocess` | workspace | [`tokio`] | onlyne-adapter, onlyne-cli, onlyne-client, onlyne-gateway, onlyne-layout, onlyne-server |
 | `open_lark` | `0.17.0` | [`websocket`]; default-features=false | onlyne-gateway-feishu |
 | `parking_lot` | `0.12` | [] | onlyne-client |
 | `pulldown-cmark` | `0.12` | [] | onlyne-gateway |
@@ -54,7 +55,7 @@ This inventory reads every `Cargo.toml` under `crates/` except `crates/onlyne-le
 | `serde_json` | workspace | [] | onlyne-cli, onlyne-frame, onlyne-gateway-feishu, onlyne-gateway-feishu (dev-dependencies), onlyne-gateway-qqbot, onlyne-gateway-weixin, onlyne-proto, onlyne-session |
 | `sha2` | `0.10.9` | [] | onlyne-net |
 | `sha2` | `0.10` | [] | onlyne-config, onlyne-gateway |
-| `sha2` | workspace | [] | onlyne-proto |
+| `sha2` | workspace | [] | onlyne-layout, onlyne-proto |
 | `tar` | `0.4` | [] | onlyne-client |
 | `teloxide` | `0.17.0` | [`rustls`]; default-features=false | onlyne-gateway-telegram |
 | `tempfile` | `3.0` | [] | onlyne-client (dev-dependencies) |
@@ -82,6 +83,8 @@ This inventory reads every `Cargo.toml` under `crates/` except `crates/onlyne-le
 | `uuid` | `1` | [`v4`, `serde`] | onlyne-server |
 | `uuid` | workspace | [] | onlyne-proto |
 | `wechat-ilink` | workspace | [] | onlyne-gateway-weixin |
+| `widestring` | `1` | [] | onlyne-layout (`cfg(windows)`) |
+| `windows-sys` | `0.61` | [`Win32_Foundation`, `Win32_Security`, `Win32_System_Console`, …] | onlyne-session (`cfg(windows)`), onlyne-server (`cfg(windows)`) |
 | `x509-parser` | `0.16.0` | [] | onlyne-net |
 
 Parentheses mark a crate that declares the dependency in `[dev-dependencies]` or `[build-dependencies]`. A plain crate name declares it in `[dependencies]`.
@@ -172,7 +175,7 @@ A conflict is any dependency with more than one manifest-level version requireme
 | `serde_json` | `1` / [] | onlyne-adapter, onlyne-config, onlyne-gateway, onlyne-gateway-telegram, onlyne-server, onlyne-store, onlyne-testkit | `1.0` / [] | onlyne-client |
 | `serde_json` | `1` / [] | onlyne-adapter, onlyne-config, onlyne-gateway, onlyne-gateway-telegram, onlyne-server, onlyne-store, onlyne-testkit | `1.0.150` / [] | onlyne-net |
 | `sha2` | `0.10` / [] | onlyne-config, onlyne-gateway | `0.10.9` / [] | onlyne-net |
-| `sha2` | `0.10` / [] | onlyne-config, onlyne-gateway | workspace / [] | onlyne-proto |
+| `sha2` | `0.10` / [] | onlyne-config, onlyne-gateway | workspace / [] | onlyne-layout, onlyne-proto |
 | `tempfile` | workspace / [] | onlyne-cli (dev-dependencies), onlyne-session (dev-dependencies) | `3.0` / [] | onlyne-client (dev-dependencies) |
 | `tempfile` | workspace / [] | onlyne-cli (dev-dependencies), onlyne-session (dev-dependencies) | `3` / [] | onlyne-config (dev-dependencies), onlyne-gateway (dev-dependencies), onlyne-layout (dev-dependencies), onlyne-server (dev-dependencies), onlyne-store (dev-dependencies), onlyne-testkit |
 | `tempfile` | workspace / [] | onlyne-cli (dev-dependencies), onlyne-session (dev-dependencies) | `3.27.0` / [] | onlyne-net (dev-dependencies) |
@@ -256,6 +259,7 @@ async-trait = "0.1"                                     # every backend and plug
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }      # envelope timestamps serialize on the wire
 futures-util = "0.3"
+interprocess = { version = "2.4.4", features = ["tokio"] }  # local-socket seam: UDS on unix, named pipe on Windows
 parking_lot = "0.12"                                    # onlyne-client dispatch locks
 rand = "0.8"
 rusqlite = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }  # onlyne-store and onlyne-client bind chrono and JSON values

@@ -83,7 +83,7 @@ server 根（由 `onlyne-server run --root <dir>` 指定）：
 <root>/.onlyne/
   spec.toml              # 唯一中央真相（§5）
   state.db               # ledger，WAL 开启
-  run/s                  # admin unix socket，0600，仅本机本用户
+  run/s                  # admin 本地 socket：Unix 为 UDS 0600；Windows 为 marker 文件 v1:onlyne-<32hex>，pipe 名 sha256 派生，owner-only SDDL
   run/server.pid
   logs/server.log
   keys/server.key        # ed25519 + TLS 私钥（PEM，0600）
@@ -98,7 +98,7 @@ role 工作区（client 根）：
 <workspace>/.onlyne/
   config.toml            # role 身份、server endpoint、本地 plugin 列表
   client.db              # session 执行态、intent、inbox 游标
-  run/s                  # 本机 client socket（adapter 插件 + onlyne CLI 入口）
+  run/s                  # 本机 client 本地 socket（adapter 插件 + onlyne CLI 入口；Windows 同 admin 的 marker+named pipe）
   run/                   # 只放 socket；1.0.1 起 client 前台运行，不写 pid 文件
   logs/client.log
   keys/role.key          # 本 role 私钥，对应 spec 中登记的公钥
@@ -504,7 +504,7 @@ onlyne server generate --root <server-root> [--template <相对路径>]... [--ro
 5. 两 cluster 联邦（递归）：父 server + planner role，子 server + builder role，子 supervisor 以 aggregate role `cluster-b` 的身份连父。父层执行 `onlyne send --to cluster-b --text "P1 round trip"` → 期望子 supervisor 以 aggregate role 身份收到并 `ack`（父 ledger 出现 `state="acked"`，且 `from.role="cluster-b"`）。父层 `ledger` 只出现 aggregate role 行；子层的 role 名与 prose 一个字都不出现。
 6. gateway 挂载一致性：`FakeGateway` 注册后，`onlyne gateway status` 要报出该 `gateway` id 与 `capabilities`。一条 `Task` 投到 gateway 绑定的 conversation → `FakeGateway` 侧收到 `deliver` 帧。`note` 投给离线 role → `error.code = "recipient_offline"`；`ttl_ms` 过期 → `state = "expired"`。
 7. 旧布局拒绝：把 `origin/main`（`cf5cb8b`）的 `.onlyne/`（含 `state.db` 与 `channels/`）复制到临时目录，执行 `onlyne-client init --workspace <dir>` → 期望 exit code 2、stderr 逐字为 `onlyne: legacy workspace layout; v1.0.0 does not migrate`，且不写任何文件。
-8. 全量静态门：`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；`cargo tree -p onlyne-client | grep -E 'teloxide|openlark|wechat-ilink|resvg'` 期望无输出（gateway 代码未泄漏进 client 二进制）。
+8. 全量静态门：`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；`cargo tree -p onlyne-client | grep -E 'teloxide|openlark|wechat-ilink|resvg'` 期望无输出（gateway 代码未泄漏进 client 二进制）。CI 验收面：`.github/workflows/ci.yml` 双 job——`linux`（fmt/clippy/workspace test）与 `windows`（核心 crate 子集 `cargo test`）。windows-latest 首跑进行中（first run in progress）。
 9. 生成与搬迁（D20 主证）：
    ```
    "$SRC/target/debug/onlyne" --server-root "$tmp/server" generate --out "$tmp/gen" > "$tmp/spec-frag.toml"
@@ -516,6 +516,7 @@ onlyne server generate --root <server-root> [--template <相对路径>]... [--ro
    "$SRC/target/debug/onlyne" --server-root "$tmp/server" send --from planner --to builder --text "relocated"
    ```
    期望：`generate` 输出的首行恰为 `[[client]]`；`$tmp/gen/dev/builder/.onlyne/config.toml` 存在，且 `run/s` 不在生成期创建；`grep -rl "$tmp/gen" "$tmp/elsewhere/b1"` 无输出（搬迁后的目录里不含生成期绝对路径）；被搬走的 role 仍能连上并 `ack`，其 ledger 行 `state = "acked"`；`--force` 重跑不改动 `$tmp/elsewhere/b1/.onlyne/client.db` 的 mtime。
+16. headless e2e（1.1.0）：脚本 `crates/onlyne-testkit/e2e/exec-headless.sh`。工作区 `config.toml` 写 `backend = "headless"`（parse 别名），进程 env `ONLYNE_BACKEND=exec` 优先。`session_command` 跑 fake agent，stdout 横幅进 `.onlyne/logs/session-<task>.log`，ledger `acked`，session `exited`/`done`，`client.db` 的 backend 字节为 `exec`。case 4 与 case 15 零回归。
 
 ## Assumptions & contingencies
 
