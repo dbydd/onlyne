@@ -628,6 +628,59 @@ key = "{KEY_A}"
     assert!(!bytes.contains("relay"), "{bytes}");
 }
 
+fn dotted_relay_required_spec(extra: &str) -> String {
+    format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[client]]
+role = "planner"
+key = "{KEY_A}"
+relay_required = ["critic"]
+{extra}
+[client.timeout]
+ready_ms = 30000
+
+[client.intent]
+attempts = 3
+"#
+    )
+}
+
+/// Dotted `[client.timeout]` / `[client.intent]` tables sit beside
+/// `relay_required` in production specs. The parse, a TOML round-trip, and a
+/// second load all stay free of `relay_required_count`.
+#[test]
+fn dotted_client_tables_with_relay_required_round_trip_without_the_alias() {
+    let spec = Spec::parse_str(&dotted_relay_required_spec("")).unwrap();
+    assert_eq!(
+        spec.client[0].relay_required,
+        Some(vec!["critic".to_string()])
+    );
+    assert_eq!(spec.client[0].relay_count, None);
+    let value = toml::Value::try_from(&spec).unwrap();
+    let round_text = toml::to_string(&value).unwrap();
+    assert!(!round_text.contains("relay_required_count"), "{round_text}");
+    Spec::parse_str(&round_text).unwrap();
+}
+
+#[test]
+fn relay_required_count_beside_dotted_tables_fills_relay_count() {
+    let spec = Spec::parse_str(&dotted_relay_required_spec("relay_required_count = 2\n")).unwrap();
+    assert_eq!(spec.client[0].relay_count, Some(2));
+}
+
+#[test]
+fn canonical_relay_count_wins_when_the_alias_is_also_present() {
+    let spec = Spec::parse_str(&dotted_relay_required_spec(
+        "relay_count = 3\nrelay_required_count = 2\n",
+    ))
+    .unwrap();
+    assert_eq!(spec.client[0].relay_count, Some(3));
+}
+
 #[test]
 fn spec_diff_reports_a_changed_relay_policy() {
     let before = Spec::parse_str(&format!(

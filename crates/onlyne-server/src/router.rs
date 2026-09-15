@@ -12,7 +12,7 @@ use crate::projection;
 use crate::relay::{self, RelayReply};
 use crate::state::{self as server_state, State};
 use chrono::Utc;
-use onlyne_config::Spec;
+use onlyne_config::{Spec, SpecDiff};
 use onlyne_layout::ServerRoot;
 use onlyne_proto::{
     AdminOp, Body, Causality, ClientOp, ControlOp, ErrorCode, Event, Frame, GatewayOp,
@@ -546,14 +546,25 @@ pub fn reload_spec(state: &Arc<State>) -> Result<ReloadOutcome, String> {
     let Some(current) = state.spec_snapshot() else {
         return Err("the spec is unavailable".to_string());
     };
-    let diff = match current.load_validate(layout.spec_path()) {
-        Ok(diff) => diff,
-        Err(error) => return Err(reload_failure(state, &error.to_string())),
+    let path = layout.spec_path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(source) => {
+            return Err(reload_failure(
+                state,
+                &format!("{}: {source}", path.display()),
+            ));
+        }
     };
-    let next = match Spec::load(layout.spec_path()) {
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("spec.toml");
+    let next = match Spec::parse_named(&text, file) {
         Ok(next) => next,
         Err(error) => return Err(reload_failure(state, &error.to_string())),
     };
+    let diff = SpecDiff::between(&current, &next);
     let acl = match server_state::acl_from_spec(&next) {
         Ok(acl) => acl,
         Err(error) => return Err(reload_failure(state, &error.to_string())),

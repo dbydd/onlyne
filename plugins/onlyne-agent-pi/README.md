@@ -215,10 +215,10 @@ workspace, `relay.toml` in a manual installation.
 
 ```toml
 relay_required = ["writer"]        # these roles must have received a handoff
-relay_required_count = 2           # ... or this many distinct downstream roles
+relay_required_count = 2           # legacy alias of relay_count: this many distinct downstream roles
 ```
 
-`relay_required` wins when both keys are present.
+`relay_count` is the canonical count key. `relay_required_count` is its legacy alias, the spelling `relay.toml` itself uses. `relay_required` wins when both the list and the count keys are present.
 
 The policy belongs in the spec, not in the vendor directory. `onlyne generate --force`
 rewrites the copy this package is vendored into and takes a hand-written `relay.toml`
@@ -228,8 +228,8 @@ every session process it spawns:
 ```toml
 [[client]]
 role = "planner"
+relay_count = 2                    # this many distinct downstream roles
 relay_required = ["writer"]        # these roles must have received a handoff
-relay_count = 2                    # ... or this many distinct downstream roles
 ```
 
 The sources rank `environment > relay.toml > none`: `ONLYNE_RELAY_REQUIRED` (the list,

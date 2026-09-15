@@ -290,13 +290,14 @@ impl Spec {
 
     /// Parse a `spec.toml` string and set the display name used in errors.
     pub fn parse_named(text: &str, file: &str) -> Result<Self, SpecError> {
-        let parsed: toml::Value = text.parse::<toml::Value>().map_err(|err| {
+        let mut parsed: toml::Value = text.parse::<toml::Value>().map_err(|err| {
             SpecError::parse(
                 file,
                 line_from_span(text, err.span()),
                 err.message().to_string(),
             )
         })?;
+        rewrite_client_relay_count_alias(&mut parsed);
         let spec: Spec = parsed.clone().try_into().map_err(|err: toml::de::Error| {
             SpecError::parse(
                 file,
@@ -394,6 +395,30 @@ impl Spec {
     /// Registered role names in document order.
     pub fn role_names(&self) -> Vec<String> {
         self.client.iter().map(|entry| entry.role.clone()).collect()
+    }
+}
+
+/// Move each `[[client]]` `relay_required_count` onto `relay_count` before serde
+/// sees the table. A present `relay_count` keeps its value and the alias is
+/// dropped, so `deny_unknown_fields` never names the alias in an error.
+fn rewrite_client_relay_count_alias(value: &mut toml::Value) {
+    let Some(entries) = value
+        .as_table_mut()
+        .and_then(|table| table.get_mut("client"))
+        .and_then(toml::Value::as_array_mut)
+    else {
+        return;
+    };
+    for entry in entries {
+        let Some(table) = entry.as_table_mut() else {
+            continue;
+        };
+        let Some(alias) = table.remove("relay_required_count") else {
+            continue;
+        };
+        if !table.contains_key("relay_count") {
+            table.insert("relay_count".into(), alias);
+        }
     }
 }
 
