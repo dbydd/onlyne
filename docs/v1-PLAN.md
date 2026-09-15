@@ -504,7 +504,7 @@ onlyne server generate --root <server-root> [--template <相对路径>]... [--ro
 5. 两 cluster 联邦（递归）：父 server + planner role，子 server + builder role，子 supervisor 以 aggregate role `cluster-b` 的身份连父。父层执行 `onlyne send --to cluster-b --text "P1 round trip"` → 期望子 supervisor 以 aggregate role 身份收到并 `ack`（父 ledger 出现 `state="acked"`，且 `from.role="cluster-b"`）。父层 `ledger` 只出现 aggregate role 行；子层的 role 名与 prose 一个字都不出现。
 6. gateway 挂载一致性：`FakeGateway` 注册后，`onlyne gateway status` 要报出该 `gateway` id 与 `capabilities`。一条 `Task` 投到 gateway 绑定的 conversation → `FakeGateway` 侧收到 `deliver` 帧。`note` 投给离线 role → `error.code = "recipient_offline"`；`ttl_ms` 过期 → `state = "expired"`。
 7. 旧布局拒绝：把 `origin/main`（`cf5cb8b`）的 `.onlyne/`（含 `state.db` 与 `channels/`）复制到临时目录，执行 `onlyne-client init --workspace <dir>` → 期望 exit code 2、stderr 逐字为 `onlyne: legacy workspace layout; v1.0.0 does not migrate`，且不写任何文件。
-8. 全量静态门：`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；`cargo tree -p onlyne-client | grep -E 'teloxide|openlark|wechat-ilink|resvg'` 期望无输出（gateway 代码未泄漏进 client 二进制）。CI 验收面：`.github/workflows/ci.yml` 双 job——`linux`（fmt/clippy/workspace test）与 `windows`（核心 crate 子集 `cargo test`）。windows-latest 首跑进行中（first run in progress）。
+8. 全量静态门：`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`；`cargo tree -p onlyne-client | grep -E 'teloxide|openlark|wechat-ilink|resvg'` 期望无输出（gateway 代码未泄漏进 client 二进制）。CI 验收面：`.github/workflows/ci.yml` 双 job——`linux`（fmt/clippy/workspace test）与 `windows`（核心 crate 子集 `cargo test`）。双平台全绿（run 34977562567）。
 9. 生成与搬迁（D20 主证）：
    ```
    "$SRC/target/debug/onlyne" --server-root "$tmp/server" generate --out "$tmp/gen" > "$tmp/spec-frag.toml"

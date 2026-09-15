@@ -3,13 +3,12 @@
 ## [1.1.0] - 2026-09-15
 
 Scope: the exec session backend as a first-class headless path, a Windows
-named-pipe local-socket seam, zellij probe mapping, and dual-job CI. Crate
-versions on crates.io stay at the 1.0.9 floor; the Release pass publishes
-1.1.0 and fills install paths (pending 1.1.0 publish).
+named-pipe local-socket seam, zellij probe mapping, and dual-job CI. All
+eighteen crates move to 1.1.0.
 
-`cargo test --workspace` on 2026-09-15: 756 passed, 0 failed, 1 ignored
+`cargo test --workspace` on 2026-09-15: 760 passed, 0 failed, 1 ignored
 (`herdr_live_probe`). Fake-backend e2e is 12/12, including
-`crates/onlyne-testkit/e2e/exec-headless.sh`.
+`crates/onlyne-testkit/e2e/exec-headless.sh`. fmt and clippy are clean.
 
 ### Added
 
@@ -59,6 +58,19 @@ versions on crates.io stay at the 1.0.9 floor; the Release pass publishes
 - session: zellij `probe` reads `list-sessions` with the EXITED marker intact.
   `--short` stripped that marker and an EXITED session listed as a name was
   reported alive.
+
+All eighteen crates are on crates.io at 1.1.0, published 2026-09-15, none
+yanked: `onlyne-proto`, `onlyne-frame`, `onlyne-config`, `onlyne-layout`,
+`onlyne-store`, `onlyne-session`, `onlyne-net`, `onlyne-adapter`,
+`onlyne-testkit`, `onlyne-server`, `onlyne-client`, `onlyne-gateway`,
+`onlyne-gateway-telegram`, `onlyne-gateway-feishu`, `onlyne-gateway-qqbot`,
+`onlyne-gateway-weixin`, `onlyne-tui`, and `onlyne-cli`. Tag `v1.1.0` is
+`e2d0e15`. CI run 34977562567 is green on linux and windows. A consumer
+project resolved and compiled all five shipped binaries from the registry
+(`cargo add onlyne-cli onlyne-server onlyne-client onlyne-gateway
+onlyne-tui`, each pinned 1.1.0; `cargo check` finished with zero errors).
+macOS release binaries are ad-hoc codesigned into `~/.cargo/bin`;
+`onlyne --version` prints `1.1.0`.
 
 ## [1.0.9] - 2026-09-15
 

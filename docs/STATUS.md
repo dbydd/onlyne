@@ -1,6 +1,6 @@
 # Onlyne Status
 
-v1.1.0 is the tree on `main` (pending 1.1.0 publish). `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONTRACT.md` owns the work split. Root README files are the user manual.
+v1.1.0 is on crates.io and tagged `v1.1.0` (`e2d0e15`). `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONTRACT.md` owns the work split. Root README files are the user manual.
 
 ## Three-process shape
 
@@ -11,7 +11,7 @@ v1.1.0 is the tree on `main` (pending 1.1.0 publish). `docs/v1-PLAN.md` is the s
 
 ## Crate state
 
-Counts come from `cargo test --workspace` on 2026-09-15 (756 passed, 0 failed, 1 ignored: `herdr_live_probe`), one line per crate with its libraries and integration targets summed.
+Counts come from `cargo test --workspace` on 2026-09-15 (760 passed, 0 failed, 1 ignored: `herdr_live_probe`), one line per crate with its libraries and integration targets summed.
 
 - [x] `onlyne-proto` green with envelope, frame variants, ops, errors, and events: 59 unit + 5 wire vectors + 2 sizes.
 - [x] `onlyne-frame` green with length-prefixed codec: 9.
@@ -46,7 +46,7 @@ Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKE
 - [x] Case 5 `two-cluster.sh`: aggregate-role federation preserves the parent ledger boundary.
 - [x] Case 6 `gateway-mount.sh`: gateway mount delivers platform traffic.
 - [x] Case 7 `legacy-layout.sh`: legacy workspace exits 2.
-- [x] Case 8: formatting, lint, workspace tests, and binary firewall checks pass. `.github/workflows/ci.yml` splits this across two jobs: linux fmt/clippy/`cargo test --workspace`; windows `cargo test` on the core crate subset. The windows-latest job's first run is in progress.
+- [x] Case 8: formatting, lint, workspace tests, and binary firewall checks pass. `.github/workflows/ci.yml` splits this across two jobs: linux fmt/clippy/`cargo test --workspace`; windows `cargo test` on the core crate subset. Dual-platform CI is green (run 34977562567).
 - [x] Case 9 `generate-relocate.sh`: generate produces relocatable workspaces.
 - [x] Case 10 `orca-live.sh`: the Orca backend against the live app. The tab lands flat in the supervisor's own worktree under the `host` policy, probe inputs come in four parts, the tab map carries that identity, SIGTERM drains back to the tab count it started with, and no Orca registration is created.
 - [x] Case 11 `pi-live.sh`: the `plugins/onlyne-agent-pi` pi extension against a real `onlyne-client`. `ONLYNE_BACKEND=exec` spawns the workspace's `session_command` as a child of the client with stdin held open. pi loads the plugin, the task text reaches pi's context, the plugin's `report.complete` settles the ledger to `acked` with the model's answer in `out_head`, and the session projects `exited`/`done`. SKIP semantics: pi not on PATH, or a one-turn credential probe that does not answer, prints `SKIP pi-live` and exits 0. A host without a model must not read as a product failure. The plugin's own protocol path is covered without a model by `node --test` in `plugins/onlyne-agent-pi`: framing, protocol vocabulary, the agent state machine against a fake host, and a live handshake against a really-running `onlyne-client`.
@@ -61,4 +61,4 @@ Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKE
 `.github/workflows/ci.yml` defines two jobs on `push` to `main`, pull requests, and `workflow_dispatch`.
 
 - `linux` (`ubuntu-latest`): `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
-- `windows` (`windows-latest`): `cargo test --no-fail-fast` on `onlyne-proto`, `onlyne-frame`, `onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-cli`, `onlyne-tui`. First run in progress.
+- `windows` (`windows-latest`): `cargo test --no-fail-fast` on `onlyne-proto`, `onlyne-frame`, `onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-cli`, `onlyne-tui`. Dual-platform CI is green (run 34977562567 @ `e2d0e15`).

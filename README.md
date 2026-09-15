@@ -9,13 +9,14 @@ Onlyne ties a fleet of coding agents into one working cluster. A **server** rout
 
 ## Install
 
-Everything ships to [crates.io](https://crates.io): one command places the entrypoint and all four daemons in your cargo bin directory, and `onlyne` finds its siblings there.
+Everything ships to [crates.io](https://crates.io) at 1.1.0. The thin entry is `onlyne-cli` (binary `onlyne`); the four daemons install the same way and `onlyne` finds them in the cargo bin directory.
 
 ```bash
-cargo install onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui
+cargo install onlyne-cli --version 1.1.0
+cargo install onlyne-server onlyne-client onlyne-gateway onlyne-tui --version 1.1.0
 ```
 
-Only one crate renames on the way down: `onlyne-cli` installs the binary `onlyne`. `onlyne` is the thin forwarder (`server`/`client`/`gateway`/`admin` verbs); the TUI runs separately as `onlyne-tui`. For a pi agent role, the adapter plugin lives on npm:
+`onlyne` is the thin forwarder (`server`/`client`/`gateway`/`admin` verbs); the TUI runs separately as `onlyne-tui`. For a pi agent role, the adapter plugin lives on npm:
 
 ```bash
 pi install npm:pi-onlyne
@@ -170,7 +171,7 @@ Every workspace is self-contained and portable. `onlyne server generate` lays a 
 
 ## Status
 
-Release `v1.1.0` on branch `main` (pending 1.1.0 publish to crates.io). `cargo test --workspace` is 756 passed, 0 failed, 1 ignored (`herdr_live_probe`). Fake-backend e2e is 12/12. Dual-job CI lives in `.github/workflows/ci.yml` (linux fmt/clippy/workspace test; windows core-crate subset; windows job first run in progress). The ring TUI, the supervisor demo, and the pi adapter plugin run green on macOS. The four IM gateways ship as feature-gated crates awaiting live-platform soak. `cargo build --workspace` needs Rust 1.85.
+Release `v1.1.0` (tag `e2d0e15`) is on crates.io. `cargo test --workspace` is 760 passed, 0 failed, 1 ignored (`herdr_live_probe`). Fake-backend e2e is 12/12. Dual-platform CI is green (run 34977562567). macOS release binaries in `~/.cargo/bin` print `onlyne --version` `1.1.0`. The ring TUI, the supervisor demo, and the pi adapter plugin run green on macOS. The four IM gateways ship as feature-gated crates awaiting live-platform soak. `cargo build --workspace` needs Rust 1.85.
 
 ## Reading
 
