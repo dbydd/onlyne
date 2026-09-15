@@ -4,6 +4,7 @@
 //! publishes one durable `session_state` event.
 
 use crate::faults::{self, FaultDraft};
+use crate::relay;
 use crate::stale;
 use crate::state::State;
 use anyhow::Context;
@@ -196,7 +197,7 @@ pub fn session_sync(
     role: &str,
     args: &SessionSyncArgs,
 ) -> anyhow::Result<ProjectionOutcome> {
-    write(
+    let outcome = write(
         state,
         role,
         &args.task_id,
@@ -205,7 +206,14 @@ pub fn session_sync(
         args.seq,
         args.projection.clone(),
         None,
-    )
+    )?;
+    // An applied `exited` write is the pane dying while the link is still up.
+    // A claimed in-flight row for this session goes back on the queue so the
+    // next pull can open a replacement. An already-acked row is left alone.
+    if outcome.applied && args.projection.lifecycle == Lifecycle::Exited {
+        relay::release_exited_delivery(state, &args.task_id, &args.session_id)?;
+    }
+    Ok(outcome)
 }
 
 /// Write one projection behind the `(generation, seq)` gate.

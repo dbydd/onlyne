@@ -21,6 +21,7 @@ use onlyne_proto::{
 };
 use onlyne_store::RoleRow;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -327,19 +328,21 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
             generation: 0,
         });
         // The registry holds one link per role, so this hello says the link that
-        // carried any in-flight row of this role is gone. Requeue those rows and
-        // drop their tickets: a push marks its row `in_flight` before the frame
-        // reaches a socket, and a push issued while the role's death is still
-        // unprocessed leaves a row whose ticket names a connection that no longer
-        // exists. Nothing else reclaims it — the departed link's teardown skips
-        // its requeue once the registry generation has moved on, and `pull` passes
-        // by a row whose ticket is still armed. This is the row half of what a
-        // clean `bye` does; the link that is registering now keeps its registry
-        // entry and its `Online` presence below. A link flap therefore
-        // re-delivers the role's unacknowledged rows at hello, where the client's
-        // `op_id` dedup and its session-keyed slot are what keep that from running
-        // the work twice.
-        match relay::requeue_role_rows(state, &entry.role) {
+        // carried any in-flight row of this role is gone. `live_tasks` is the
+        // live pane's declaration: those in-flight rows stay in_flight and their
+        // tickets are rebound to this link's generation. A re-delivery of a live
+        // task would open a second session. Every other in-flight row is requeued
+        // and its ticket dropped. A push marks its row `in_flight` before the
+        // frame reaches a socket, and a push issued while the role's death is
+        // still unprocessed leaves a row whose ticket names a connection that no
+        // longer exists. The departed link's teardown skips its requeue once the
+        // registry generation has moved on, and `pull` passes by a row whose
+        // ticket is still armed. This is the row half of what a clean `bye`
+        // does; the link that is registering now keeps its registry entry and
+        // its `Online` presence below. An omitted `live_tasks` field is an empty
+        // list, which requeues every unacknowledged row the way 1.0.8 did.
+        let claimed: HashSet<String> = args.live_tasks.iter().cloned().collect();
+        match relay::requeue_role_rows(state, &entry.role, &claimed) {
             Ok(requeued) if requeued > 0 => {
                 tracing::info!(
                     role = %entry.role,

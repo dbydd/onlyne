@@ -67,6 +67,8 @@ struct DispatchInner {
     /// A plugin that mounted naming no session: an always-running agent
     /// waiting for this role's next assignment (plan §6 line 285).
     pub parked: Option<(AdapterIo, Vec<Capability>)>,
+    /// Zero-activity clock for running tasks. Applied persists refresh it.
+    pub stall: crate::stall::StallWatch,
 }
 
 #[derive(Clone)]
@@ -143,6 +145,7 @@ impl DispatchState {
                 topology: String::new(),
                 transports: HashMap::new(),
                 parked: None,
+                stall: crate::stall::StallWatch::new(),
             })),
         }
     }
@@ -251,6 +254,43 @@ impl DispatchState {
             .values()
             .filter_map(|slot| slot.task_id.clone())
             .collect()
+    }
+
+    /// Sorted live-slot task ids for a hello claim.
+    pub fn hello_live_tasks(&self) -> Vec<String> {
+        crate::claim::from_slots(self.live_task_ids())
+    }
+
+    /// Start the stall clock for a newly assigned task.
+    pub fn note_stall_assigned(&self, task_id: &str, now: Instant) {
+        self.inner.lock().stall.note_assigned(task_id, now);
+    }
+
+    /// Refresh the stall clock after an Applied persist.
+    pub fn note_stall_applied(&self, task_id: &str, now: Instant) {
+        self.inner.lock().stall.note_applied(task_id, now);
+    }
+
+    /// Task ids whose freeze exceeds `threshold_secs` in this episode.
+    pub fn stall_due(&self, now: Instant, threshold_secs: u64) -> Vec<String> {
+        self.inner.lock().stall.due(now, threshold_secs)
+    }
+
+    /// Remember that this freeze episode has been reported.
+    pub fn mark_stalled(&self, task_id: &str) {
+        self.inner.lock().stall.mark_reported(task_id);
+    }
+
+    /// Observation-only stall fault for `task_id`, carrying the stored watermark.
+    pub fn stall_report(&self, task_id: &str) -> Report {
+        let inner = self.inner.lock();
+        let row = inner.store.get_session(task_id).ok().flatten();
+        crate::stall::report(
+            task_id,
+            Some(task_id.to_string()),
+            row.as_ref().map(|row| row.generation as u64),
+            row.as_ref().map(|row| row.seq as u64),
+        )
     }
 
     /// Whether any adapter is currently mounted (named or parked).
@@ -739,15 +779,19 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
         .to_string();
     let family = family_of(envelope);
     let mut inner = state.inner.lock();
-    if let Some(slot) = inner
+    if let Some(session) = inner
         .sessions
         .values_mut()
         .find(|slot| slot.task_id.as_deref() == Some(task_id.as_str()))
+        .map(|slot| {
+            if slot.payload.is_none() {
+                slot.payload = Some(envelope.clone());
+            }
+            slot.session.clone()
+        })
     {
-        if slot.payload.is_none() {
-            slot.payload = Some(envelope.clone());
-        }
-        return Ok(slot.session.clone());
+        inner.stall.note_assigned(&task_id, Instant::now());
+        return Ok(session);
     }
     if inner.reuse {
         // An idle session with no bound task takes the next task, preferring
@@ -782,6 +826,7 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
             inner.bridge.track_live(session.clone());
             feed_created(&inner.bridge, &inner.store, &task_id)?;
             feed_dispatched(&inner.bridge, &inner.store, &task_id);
+            inner.stall.note_assigned(&task_id, Instant::now());
             return Ok(session);
         }
     }
@@ -815,13 +860,14 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
         SessionSlot {
             session: session.clone(),
             family,
-            task_id: Some(task_id),
+            task_id: Some(task_id.clone()),
             ready: false,
             payload: Some(envelope.clone()),
             msg_id: None,
             origin: Some(envelope.from.clone()),
         },
     );
+    inner.stall.note_assigned(&task_id, Instant::now());
     Ok(session)
 }
 
@@ -1147,6 +1193,7 @@ fn release_locked(
             inner.sessions.remove(&key);
         }
     }
+    inner.stall.forget(task_id);
     if reason.is_some() && resource == "detached" {
         inner
             .store
@@ -1246,7 +1293,7 @@ pub async fn on_plugin_report(state: &DispatchState, report: Report) -> Result<(
         } => {
             // The beat itself is the liveness fact. The server times
             // heartbeats. A quiet, alive session keeps landing fresh rows.
-            let inner = state.inner.lock();
+            let mut inner = state.inner.lock();
             let verdict = match serde_json::from_value::<Observation>(observed) {
                 Ok(body) => apply_persist(
                     &inner.bridge,
@@ -1264,7 +1311,10 @@ pub async fn on_plugin_report(state: &DispatchState, report: Report) -> Result<(
             };
             note_verdict(&verdict, &task_id);
             match &verdict {
-                Verdict::Applied(_) => true,
+                Verdict::Applied(_) => {
+                    inner.stall.note_applied(&task_id, Instant::now());
+                    true
+                }
                 Verdict::Ignored(IgnoredReason::NoOp) => inner
                     .store
                     .bump_session_version(&task_id, generation, seq)?,
@@ -1343,7 +1393,7 @@ pub struct ClientLink {
 impl ClientLink {
     /// Dial, verify the certificate pin, sign the server challenge, then read
     /// the role slice with `hello`.
-    pub async fn connect(init: &ClientInit) -> Result<Self, NetError> {
+    pub async fn connect(init: &ClientInit, live_tasks: Vec<String>) -> Result<Self, NetError> {
         let keypair = KeyPair::load(&init.key_path)?;
         let settings = ConnSettings {
             agent: AGENT.to_string(),
@@ -1360,10 +1410,14 @@ impl ClientLink {
             agent: AGENT.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             aggregate: false,
+            live_tasks: Vec::new(),
         };
         let body = handle
             .request(
-                Frame::req(String::new(), ClientOp::Hello(hello.clone())),
+                Frame::req(
+                    String::new(),
+                    ClientOp::Hello(hello_with_live_tasks(&hello, live_tasks)),
+                ),
                 REQUEST_TIMEOUT,
             )
             .await?;
@@ -1392,11 +1446,14 @@ impl ClientLink {
     /// The net layer redials on its own, and a fresh connection carries no role
     /// binding until this frame lands, so a caller replays it whenever readiness
     /// returns (plan §7 line 310).
-    pub async fn authenticate(&self) -> Result<(), NetError> {
+    pub async fn authenticate(&self, live_tasks: Vec<String>) -> Result<(), NetError> {
         let body = self
             .handle
             .request(
-                Frame::req(String::new(), ClientOp::Hello(self.hello.clone())),
+                Frame::req(
+                    String::new(),
+                    ClientOp::Hello(hello_with_live_tasks(&self.hello, live_tasks)),
+                ),
                 REQUEST_TIMEOUT,
             )
             .await?;
@@ -1446,6 +1503,20 @@ impl ClientLink {
     pub async fn failure(&self) -> Option<NetError> {
         self.handle.failure().await
     }
+}
+
+/// Stamp dispatch live-slot task ids onto a hello skeleton.
+///
+/// Slots exist from assign until release. A fresh process has none, so hello
+/// sends an empty list and the server requeues. A live client whose link
+/// flaps still holds its slots, so those rows stay in_flight.
+pub(crate) fn hello_with_live_tasks(
+    hello: &HandshakeArgs,
+    live_tasks: Vec<String>,
+) -> HandshakeArgs {
+    let mut hello = hello.clone();
+    hello.live_tasks = live_tasks;
+    hello
 }
 
 /// Wire code of a refusal, in the snake_case spelling both sides share.

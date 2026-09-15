@@ -26,7 +26,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
@@ -78,6 +78,9 @@ pub struct ClientInit {
     pub orca_worktree: String,
     /// Seconds a residual working row may age before this client reports it dead.
     pub stale_grace_secs: u64,
+    /// Seconds a running session may sit without Applied progress before a stall
+    /// fault is reported. Zero disables the report.
+    pub stall_report_secs: u64,
 }
 
 impl ClientInit {
@@ -96,6 +99,7 @@ impl ClientInit {
             cert_pin: cert_pin.into(),
             orca_worktree: "host".to_string(),
             stale_grace_secs: onlyne_config::DEFAULT_STALE_GRACE_SECS,
+            stall_report_secs: onlyne_config::DEFAULT_STALL_REPORT_SECS,
         }
     }
 
@@ -108,6 +112,10 @@ impl ClientInit {
         self.stale_grace_secs = secs;
         self
     }
+    pub fn with_stall_report_secs(mut self, secs: u64) -> Self {
+        self.stall_report_secs = secs;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -117,6 +125,7 @@ pub struct RunState {
     pub intents: Arc<parking_lot::Mutex<IntentMachine>>,
     pub dispatch: DispatchState,
     pub welcome: Arc<Mutex<Option<Welcome>>>,
+    pub stall_report_secs: u64,
 }
 
 impl RunState {
@@ -143,6 +152,7 @@ impl RunState {
             intents: Arc::new(parking_lot::Mutex::new(intents)),
             dispatch,
             welcome: Arc::new(Mutex::new(None)),
+            stall_report_secs: init.stall_report_secs,
         })
     }
 
@@ -198,7 +208,7 @@ pub async fn run(init: ClientInit) -> Result<()> {
     let mut backoff = reconnect_backoff();
     let accept_new = state.dispatch.accept_new();
     let outcome = loop {
-        match ClientLink::connect(&init).await {
+        match ClientLink::connect(&init, state.dispatch.hello_live_tasks()).await {
             Ok(link) => {
                 backoff.reset();
                 state.dispatch.attach_outbox(Arc::new(link.clone()));
@@ -341,13 +351,14 @@ async fn watch_readiness(link: ClientLink, state: RunState) -> Result<()> {
     let mut ready = true;
     loop {
         sleep(Duration::from_millis(READINESS_POLL_MS)).await;
+        scan_stalls(&state).await;
         match link.readiness() {
             ConnReadiness::Ready => {
                 if !ready {
                     ready = true;
                     // The link redials on its own, so its fresh connection needs
                     // the routed `hello` before any queued frame reaches it.
-                    link.authenticate().await?;
+                    link.authenticate(state.dispatch.hello_live_tasks()).await?;
                     state.accept_new.store(true, Ordering::SeqCst);
                     state.dispatch.set_link_up(true);
                     flush_intents(&link, &state).await;
@@ -720,6 +731,26 @@ fn pending_intent_ops(state: &RunState) -> Result<Vec<ClientOp>> {
     rows.iter().map(op_for_intent).collect()
 }
 
+/// Report running sessions whose Applied clock has exceeded the stall
+/// threshold. The fault is observation-only; the ledger row stays as stored.
+async fn scan_stalls(state: &RunState) {
+    if state.stall_report_secs == 0 {
+        return;
+    }
+    let due = state
+        .dispatch
+        .stall_due(Instant::now(), state.stall_report_secs);
+    for task_id in due {
+        let report = state.dispatch.stall_report(&task_id);
+        match dispatch::send_frame(&state.dispatch, ClientOp::Report(report)).await {
+            Ok(()) => state.dispatch.mark_stalled(&task_id),
+            Err(error) => {
+                tracing::warn!(error = %error, task = %task_id, "stall fault was not sent")
+            }
+        }
+    }
+}
+
 async fn wait_for_mount_or_grace(state: &RunState, grace_secs: u64) {
     if state.dispatch.has_mounted_adapter() || grace_secs == 0 {
         return;
@@ -805,6 +836,7 @@ mod tests {
             intents: Arc::new(parking_lot::Mutex::new(intents)),
             dispatch,
             welcome: Arc::new(Mutex::new(None)),
+            stall_report_secs: 1,
         };
         (state, store)
     }
@@ -894,5 +926,95 @@ mod tests {
                 ..
             }) if task_id == "task-dead" && reason == crate::stale::SESSION_DEAD
         )));
+    }
+
+    #[tokio::test]
+    async fn stall_scan_queues_one_fault_until_applied_resets() {
+        let (state, store) = test_state(1, false, Vec::new());
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("clock");
+        state.dispatch.note_stall_assigned("task-frozen", past);
+        scan_stalls(&state).await;
+        let ops = store
+            .flush_order()
+            .expect("pending intents")
+            .iter()
+            .map(op_for_intent)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let stalled = ops
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    ClientOp::Report(Report::Fault { task_id: Some(task), kind, .. })
+                        if task == "task-frozen" && kind == crate::stall::STALLED
+                )
+            })
+            .count();
+        assert_eq!(stalled, 1, "one freeze episode reports once: {ops:?}");
+
+        scan_stalls(&state).await;
+        let ops = store
+            .flush_order()
+            .expect("pending intents")
+            .iter()
+            .map(op_for_intent)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let stalled = ops
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    ClientOp::Report(Report::Fault { kind, .. }) if kind == crate::stall::STALLED
+                )
+            })
+            .count();
+        assert_eq!(stalled, 1, "the freeze is not re-reported: {ops:?}");
+
+        state
+            .dispatch
+            .note_stall_applied("task-frozen", Instant::now());
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("clock");
+        state.dispatch.note_stall_assigned("task-frozen", past);
+        // Applied cleared the episode bit; an already-elapsed clock reports again.
+        state.dispatch.note_stall_applied("task-frozen", past);
+        scan_stalls(&state).await;
+        let ops = store
+            .flush_order()
+            .expect("pending intents")
+            .iter()
+            .map(op_for_intent)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let stalled = ops
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    ClientOp::Report(Report::Fault { kind, .. }) if kind == crate::stall::STALLED
+                )
+            })
+            .count();
+        assert_eq!(stalled, 2, "Applied starts a new freeze episode: {ops:?}");
+    }
+
+    #[tokio::test]
+    async fn stall_scan_stays_quiet_when_disabled() {
+        let (mut state, store) = test_state(1, false, Vec::new());
+        state.stall_report_secs = 0;
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("clock");
+        state.dispatch.note_stall_assigned("task-frozen", past);
+        scan_stalls(&state).await;
+        assert!(
+            store.flush_order().expect("pending intents").is_empty(),
+            "zero disables stall reports"
+        );
     }
 }

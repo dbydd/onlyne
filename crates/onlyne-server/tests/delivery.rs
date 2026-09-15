@@ -92,6 +92,15 @@ fn fixture() -> Fixture {
     fixture_with(&spec_text())
 }
 
+fn spec_text_with_requeue(max_attempts: u32, ttl_secs: u64) -> String {
+    spec_text().replace(
+        "heartbeat_timeout_ms = 1000",
+        &format!(
+            "heartbeat_timeout_ms = 1000\nrequeue_max_attempts = {max_attempts}\nrequeue_ttl_secs = {ttl_secs}"
+        ),
+    )
+}
+
 /// The demo seed shape: `supervisor` reaches `builder`, and nothing reaches
 /// back. `reviewer` stands outside that pair.
 fn ring_spec() -> String {
@@ -171,7 +180,14 @@ fn hello_args(role: &str) -> HandshakeArgs {
         agent: "test".to_string(),
         version: "1.0.0".to_string(),
         aggregate: false,
+        live_tasks: Vec::new(),
     }
+}
+
+fn exited_projection() -> SessionProjection {
+    let mut projection = SessionProjection::default_working();
+    projection.lifecycle = Lifecycle::Exited;
+    projection
 }
 
 fn accepted(reply: relay::RelayReply) -> relay::SendOutcome {
@@ -838,6 +854,461 @@ fn a_fresh_link_takes_over_rows_its_predecessor_never_delivered() {
         ledger_state_events(&fixture.state).len() > events_before,
         "the handoff requeue reaches the observation plane"
     );
+}
+
+#[test]
+fn a_claimed_live_task_stays_in_flight_and_teardown_requeues_it() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+    let task_id = outcome.receipt.task.clone().expect("task id");
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-live"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    let prior = fixture
+        .state
+        .delivery_ticket(&msg_id)
+        .expect("the pull armed a ticket");
+    assert_eq!(prior.session_id.as_deref(), Some("sess-live"));
+
+    let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
+    let mut session = router::Session::with_sender(sender, "builder");
+    let mut args = hello_args("builder");
+    args.live_tasks = vec![task_id];
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let reply = runtime.block_on(router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(args),
+    ));
+    assert!(reply.ok, "the hello should be accepted: {reply:?}");
+
+    let row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("the claimed row survives");
+    assert_eq!(
+        row.state,
+        LedgerState::InFlight,
+        "a live pane's row stays in_flight across hello"
+    );
+    let ticket = fixture
+        .state
+        .delivery_ticket(&msg_id)
+        .expect("the claimed ticket stays armed");
+    assert_eq!(ticket.generation, session.generation);
+    assert_ne!(
+        ticket.generation, prior.generation,
+        "the ticket now names the successor link"
+    );
+    assert_eq!(ticket.session_id.as_deref(), Some("sess-live"));
+
+    let requeued = relay::disconnect(&fixture.state, "builder").expect("teardown");
+    assert_eq!(requeued, 1);
+    let row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("the row survives teardown");
+    assert_eq!(
+        row.state,
+        LedgerState::Queued,
+        "the successor link's teardown requeues the claimed row"
+    );
+}
+
+#[test]
+fn an_exited_sync_requeues_the_claimed_in_flight_row() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+    let task_id = outcome.receipt.task.clone().expect("task id");
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-live"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+
+    let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
+    let mut session = router::Session::with_sender(sender, "builder");
+    let mut args = hello_args("builder");
+    args.live_tasks = vec![task_id.clone()];
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let reply = runtime.block_on(router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(args),
+    ));
+    assert!(reply.ok, "the hello should be accepted: {reply:?}");
+    assert_eq!(
+        ledger_rows(&fixture.state)
+            .into_iter()
+            .find(|row| row.msg_id == msg_id)
+            .expect("row")
+            .state,
+        LedgerState::InFlight
+    );
+
+    let before = ledger_state_events(&fixture.state).len();
+    let applied = projection::session_sync(
+        &fixture.state,
+        "builder",
+        &SessionSyncArgs {
+            task_id: task_id.clone(),
+            session_id: "sess-live".to_string(),
+            generation: 1,
+            seq: 1,
+            projection: exited_projection(),
+        },
+    )
+    .expect("sync")
+    .applied;
+    assert!(applied);
+    let row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("row");
+    assert_eq!(row.state, LedgerState::Queued);
+    assert!(fixture.state.delivery_ticket(&msg_id).is_none());
+    assert_eq!(ledger_state_events(&fixture.state).len(), before + 1);
+    match &ledger_state_events(&fixture.state)
+        .last()
+        .expect("requeue event")
+        .event
+    {
+        Event::LedgerState(event) => {
+            assert_eq!(event.msg_id, msg_id);
+            assert_eq!(event.state, LedgerState::Queued);
+        }
+        other => panic!("expected ledger_state, got {other:?}"),
+    }
+
+    let pulled = relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-next"),
+        &PullArgs::default(),
+    )
+    .expect("redeliver");
+    assert_eq!(pulled.deliveries.len(), 1);
+    assert_eq!(pulled.deliveries[0].msg_id, msg_id);
+}
+
+#[test]
+fn an_exited_sync_leaves_an_acked_row_alone() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+    let task_id = outcome.receipt.task.clone().expect("task id");
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    relay::ack(
+        &fixture.state,
+        &AckArgs {
+            msg_id: msg_id.clone(),
+            op_id: None,
+            accepted: true,
+            reason: None,
+        },
+    )
+    .expect("ack")
+    .expect("acked");
+    let before = ledger_state_events(&fixture.state).len();
+    projection::session_sync(
+        &fixture.state,
+        "builder",
+        &SessionSyncArgs {
+            task_id,
+            session_id: "sess-1".to_string(),
+            generation: 1,
+            seq: 1,
+            projection: exited_projection(),
+        },
+    )
+    .expect("sync");
+    let row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("row");
+    assert_eq!(row.state, LedgerState::Acked);
+    assert_eq!(ledger_state_events(&fixture.state).len(), before);
+}
+
+#[test]
+fn an_exited_sync_does_not_move_another_session_ticket() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+    let task_id = outcome.receipt.task.clone().expect("task id");
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-a"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    projection::session_sync(
+        &fixture.state,
+        "builder",
+        &SessionSyncArgs {
+            task_id,
+            session_id: "sess-b".to_string(),
+            generation: 1,
+            seq: 1,
+            projection: exited_projection(),
+        },
+    )
+    .expect("sync");
+    let row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("row");
+    assert_eq!(row.state, LedgerState::InFlight);
+    let ticket = fixture
+        .state
+        .delivery_ticket(&msg_id)
+        .expect("the original ticket stays");
+    assert_eq!(ticket.session_id.as_deref(), Some("sess-a"));
+}
+
+#[test]
+fn an_old_hello_json_without_live_tasks_requeues_like_today() {
+    let raw = json!({
+        "protocol": onlyne_proto::PROTOCOL_VERSION,
+        "role": "builder",
+        "key": key(),
+        "signature": "",
+        "agent": "test",
+        "version": "1.0.0",
+        "aggregate": false,
+    });
+    let args: HandshakeArgs = serde_json::from_value(raw).expect("old hello json");
+    assert!(args.live_tasks.is_empty());
+
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+    relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+
+    let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
+    let mut session = router::Session::with_sender(sender, "builder");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let reply = runtime.block_on(router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(args),
+    ));
+    assert!(reply.ok, "the hello should be accepted: {reply:?}");
+    let row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("the row survives");
+    assert_eq!(row.state, LedgerState::Queued);
+    assert!(fixture.state.delivery_ticket(&msg_id).is_none());
+}
+
+#[test]
+fn pull_publishes_an_in_flight_ledger_state_event() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    assert_eq!(outcome.receipt.state, LedgerState::Queued);
+    let before = ledger_state_events(&fixture.state).len();
+    let pulled = relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    assert_eq!(pulled.deliveries.len(), 1);
+    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::InFlight);
+    let events = ledger_state_events(&fixture.state);
+    assert_eq!(events.len(), before + 1);
+    match &events.last().expect("the pull event").event {
+        Event::LedgerState(event) => {
+            assert_eq!(event.msg_id, outcome.receipt.msg_id);
+            assert_eq!(event.op_id, outcome.receipt.op_id);
+            assert_eq!(event.kind, MsgKind::Task);
+            assert_eq!(event.from, Principal::role("planner"));
+            assert_eq!(event.to, Principal::role("builder"));
+            assert_eq!(event.task, outcome.receipt.task);
+            assert_eq!(event.state, LedgerState::InFlight);
+            assert_eq!(event.outcome, None);
+            assert_eq!(event.reason, None);
+        }
+        other => panic!("expected ledger_state, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_third_automatic_requeue_rejects_when_the_budget_is_two() {
+    let fixture = fixture_with(&spec_text_with_requeue(2, 0));
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+
+    for _ in 0..2 {
+        relay::pull(
+            &fixture.state,
+            "builder",
+            Some("sess-1"),
+            &PullArgs::default(),
+        )
+        .expect("pull");
+        let requeued = relay::disconnect(&fixture.state, "builder").expect("requeue");
+        assert_eq!(requeued, 1);
+        let row = ledger_rows(&fixture.state)
+            .into_iter()
+            .find(|row| row.msg_id == msg_id)
+            .expect("row");
+        assert_eq!(row.state, LedgerState::Queued);
+    }
+    let row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("row");
+    assert_eq!(row.requeued, 2);
+
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    let before = ledger_state_events(&fixture.state).len();
+    let requeued = relay::disconnect(&fixture.state, "builder").expect("exhaust");
+    assert_eq!(requeued, 0);
+    let row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("row");
+    assert_eq!(row.state, LedgerState::Rejected);
+    assert_eq!(row.reason.as_deref(), Some("requeue_exhausted"));
+    let events = ledger_state_events(&fixture.state);
+    assert_eq!(events.len(), before + 1);
+    match &events.last().expect("exhaust event").event {
+        Event::LedgerState(event) => {
+            assert_eq!(event.msg_id, msg_id);
+            assert_eq!(event.state, LedgerState::Rejected);
+            assert_eq!(event.reason.as_deref(), Some("requeue_exhausted"));
+        }
+        other => panic!("expected ledger_state, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_over_age_automatic_requeue_expires_with_requeue_ttl() {
+    let fixture = fixture_with(&spec_text_with_requeue(0, 1));
+    let mut envelope = task("planner", "builder", "work");
+    envelope.ts = Utc::now() - chrono::Duration::seconds(5);
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    let before = ledger_state_events(&fixture.state).len();
+    let requeued = relay::disconnect(&fixture.state, "builder").expect("ttl");
+    assert_eq!(requeued, 0);
+    let row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("row");
+    assert_eq!(row.state, LedgerState::Expired);
+    assert_eq!(row.reason.as_deref(), Some("requeue_ttl"));
+    let events = ledger_state_events(&fixture.state);
+    assert_eq!(events.len(), before + 1);
+    match &events.last().expect("ttl event").event {
+        Event::LedgerState(event) => {
+            assert_eq!(event.msg_id, msg_id);
+            assert_eq!(event.state, LedgerState::Expired);
+            assert_eq!(event.reason.as_deref(), Some("requeue_ttl"));
+        }
+        other => panic!("expected ledger_state, got {other:?}"),
+    }
+}
+
+#[test]
+fn default_requeue_gates_stay_unlimited() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+    for _ in 0..3 {
+        relay::pull(
+            &fixture.state,
+            "builder",
+            Some("sess-1"),
+            &PullArgs::default(),
+        )
+        .expect("pull");
+        let requeued = relay::disconnect(&fixture.state, "builder").expect("requeue");
+        assert_eq!(requeued, 1);
+        let row = ledger_rows(&fixture.state)
+            .into_iter()
+            .find(|row| row.msg_id == msg_id)
+            .expect("row");
+        assert_eq!(row.state, LedgerState::Queued);
+    }
+}
+
+#[test]
+fn repair_retry_still_requeues_after_the_automatic_budget() {
+    let fixture = fixture_with(&spec_text_with_requeue(1, 0));
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+    let task_id = outcome.receipt.task.clone().expect("task");
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    relay::disconnect(&fixture.state, "builder").expect("first requeue");
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("second pull");
+    let body = faults::repair(
+        &fixture.state,
+        &AdminOp::RepairRetry(RepairTarget {
+            task_id,
+            reason: Some("operator retry".to_string()),
+        }),
+    )
+    .expect("repair accepted")
+    .expect("ok body");
+    assert_eq!(body["requeued"], 1);
+    let row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("row");
+    assert_eq!(row.state, LedgerState::Queued);
 }
 
 #[test]
@@ -2440,6 +2911,7 @@ async fn every_client_and_gateway_arm_answers_without_internal_failure() {
             agent: "onlyne-gateway-telegram".to_string(),
             version: "1.0.0".to_string(),
             aggregate: false,
+            live_tasks: Vec::new(),
         }),
         GatewayOp::RegisterChannel(onlyne_proto::RegisterChannelArgs {
             platform: "telegram".to_string(),

@@ -49,6 +49,13 @@
         }
       ]
     },
+    "stall_report_secs": {
+      "description": "Seconds a running session may sit without an Applied tuple change before this client reports it stalled. Zero disables the report.",
+      "default": 1800,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
     "stale_grace_secs": {
       "description": "Seconds a startup reconcile waits before declaring an orphaned in-flight task stale.",
       "default": 300,

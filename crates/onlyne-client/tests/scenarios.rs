@@ -1234,9 +1234,12 @@ async fn pinned_tls_link_fetches_welcome_and_caches_prose() {
     // A wrong pin must fail the dial inside the bound, which proves the pin is checked.
     let bad_pin = format!("sha256/{}", "0".repeat(64));
     let bad = ClientInit::new(dir.path(), "planner", endpoint, key_path, bad_pin);
-    let refusal = tokio::time::timeout(Duration::from_secs(3), ClientLink::connect(&bad))
-        .await
-        .expect("the wrong-pin dial must answer inside 3s");
+    let refusal = tokio::time::timeout(
+        Duration::from_secs(3),
+        ClientLink::connect(&bad, Vec::new()),
+    )
+    .await
+    .expect("the wrong-pin dial must answer inside 3s");
     assert!(
         matches!(refusal, Err(onlyne_net::NetError::PinMismatch { .. })),
         "a wrong pin is refused as a pin mismatch"

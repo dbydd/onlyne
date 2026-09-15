@@ -89,9 +89,10 @@ cargo test --workspace                 # per-crate -p reruns suffice for isolate
 crates/onlyne-testkit/e2e/<case>.sh    # ONLYNE_BACKEND=fake, built target/debug, no real creds
 ```
 
-The thirteen scripts under `crates/onlyne-testkit/e2e/` each encode one verification case
-from `docs/v1-PLAN.md` (ACL rejects, idempotency, reconnect requeue, gateway mount,
-relocation, two-cluster federation, legacy refusal, frame bounds). A bug fix needs its
+The fourteen scripts under `crates/onlyne-testkit/e2e/` each encode one verification case
+from `docs/v1-PLAN.md` (ACL rejects, idempotency, reconnect requeue, hello claim across a
+server restart, gateway mount, relocation, two-cluster federation, legacy refusal, frame
+bounds). A bug fix needs its
 reproduction as an e2e or a table test: red before the fix, green after. The live ring demo
 (`examples/supervisor/run.py`) needs Orca and real pi binaries. Treat it as manual smoke.
 

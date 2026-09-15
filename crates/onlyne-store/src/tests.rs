@@ -700,6 +700,7 @@ mod ledger_gates {
         store.mark_in_flight(&row.msg_id).unwrap();
         let updated = store.requeue_one(&row.msg_id).unwrap();
         assert_eq!(updated.state, LedgerState::Queued);
+        assert_eq!(updated.requeued, 1);
         assert_eq!(store.event_head().unwrap(), 1);
         let events = store.events_since(0, 10).unwrap();
         assert_eq!(events[0].kind, "ledger_state");
@@ -725,6 +726,8 @@ mod ledger_gates {
         assert_eq!(first.state, LedgerState::Queued);
         assert_eq!(second.state, LedgerState::Queued);
         assert_eq!(first.msg_id, second.msg_id);
+        assert_eq!(first.requeued, 0);
+        assert_eq!(second.requeued, 0);
         assert_eq!(store.event_head().unwrap(), 0);
     }
 
@@ -1143,5 +1146,129 @@ mod ledger_gates {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].msg_id, "msg-old");
         assert_eq!(stored[0].expires_at, None);
+        assert_eq!(stored[0].requeued, 0);
+        assert!(
+            columns.iter().any(|name| name == "requeued"),
+            "requeued is present after open: {columns:?}"
+        );
+    }
+
+    #[test]
+    fn ensure_schema_adds_requeued_in_place_on_a_version_2_file() {
+        let (_dir, path) = temp_db("server.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL);
+             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',2,1);
+             CREATE TABLE ledger(
+               msg_id TEXT PRIMARY KEY,
+               op_id TEXT UNIQUE,
+               fingerprint TEXT,
+               kind TEXT NOT NULL,
+               from_json TEXT NOT NULL,
+               to_json TEXT NOT NULL,
+               task TEXT,
+               parent_task TEXT,
+               attempt INTEGER NOT NULL,
+               state TEXT NOT NULL,
+               out_head TEXT,
+               reason TEXT,
+               enqueued_at TEXT NOT NULL,
+               acked_at TEXT,
+               body_json TEXT,
+               hop INTEGER NOT NULL DEFAULT 0,
+               expires_at TEXT
+             );
+             INSERT INTO ledger(msg_id,kind,from_json,to_json,attempt,state,enqueued_at,hop)
+             VALUES('msg-old','task','{\"role\":{\"role\":\"alice\"}}','{\"role\":{\"role\":\"worker\"}}',0,'in_flight','2026-09-10T12:00:00.000Z',0);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = ServerLedger::open(&path, 14).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let marker: (String, i64, i64) = conn
+            .query_row(
+                "SELECT name,version,protocol_version FROM schema_marker",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(marker, ("onlyne-server".to_string(), 2, 1));
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(ledger)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            columns.iter().any(|name| name == "requeued"),
+            "requeued is present after open: {columns:?}"
+        );
+        drop(conn);
+
+        let stored = store
+            .ledger_query(LedgerQuery {
+                msg_id: Some("msg-old".to_string()),
+                limit: 1,
+                ..LedgerQuery::default()
+            })
+            .unwrap();
+        assert_eq!(stored[0].requeued, 0);
+        let updated = store.requeue_one("msg-old").unwrap();
+        assert_eq!(updated.state, LedgerState::Queued);
+        assert_eq!(updated.requeued, 1);
+    }
+
+    #[test]
+    fn fail_one_rejects_in_flight_row_and_publishes_one_event() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+        let mut row = ledger(
+            MsgKind::Task,
+            "exhaust",
+            Some("o-ffffffff-ffff-4fff-8fff-ffffffffffff"),
+            "fp-f",
+        );
+        row.msg_id = new_uuid(66);
+        store.append_ledger(&row).unwrap();
+        store.mark_in_flight(&row.msg_id).unwrap();
+        let updated = store.fail_one(&row.msg_id, "requeue_exhausted").unwrap();
+        assert_eq!(updated.state, LedgerState::Rejected);
+        assert_eq!(updated.reason.as_deref(), Some("requeue_exhausted"));
+        let events = store.events_since(0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "ledger_state");
+        assert_eq!(events[0].data["data"]["state"], "rejected");
+        assert_eq!(events[0].data["data"]["reason"], "requeue_exhausted");
+    }
+
+    #[test]
+    fn fail_one_rolls_back_when_the_event_insert_fails() {
+        let (_dir, path) = temp_db("server.db");
+        let store = ServerLedger::open(&path, 14).unwrap();
+        let mut row = ledger(
+            MsgKind::Task,
+            "rollback fail",
+            Some("o-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            "fp-fail",
+        );
+        row.msg_id = new_uuid(67);
+        store.append_ledger(&row).unwrap();
+        store.mark_in_flight(&row.msg_id).unwrap();
+        block_event_type(&path, "ledger_state");
+        let result = store.fail_one(&row.msg_id, "requeue_exhausted");
+        unblock_event_type(&path);
+        assert!(result.is_err(), "blocked event insert must fail the call");
+        let stored = store
+            .ledger_query(LedgerQuery {
+                msg_id: Some(row.msg_id.clone()),
+                limit: 1,
+                ..LedgerQuery::default()
+            })
+            .unwrap();
+        assert_eq!(stored[0].state, LedgerState::InFlight);
+        assert_eq!(store.event_head().unwrap(), 0);
     }
 }

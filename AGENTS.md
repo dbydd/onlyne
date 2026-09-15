@@ -196,6 +196,11 @@ Client to server op vocabulary has thirteen closed verbs:
 is how a client at `max_sessions` keeps receiving commands for the sessions it already holds. An
 absent field means false, so a client from an earlier build pulls as before.
 
+`hello` takes an optional `live_tasks` list of task ids whose session slots the client still holds
+in memory. Adoption requeue leaves those rows `in_flight` with their tickets rehung on the new
+link, which is how a link flap stops handing a running task to a second session. An absent or empty
+list requeues every unacknowledged row, so a client from an earlier build behaves as before.
+
 Admin op vocabulary has nineteen closed verbs: eight reads plus `reload`, `send`, `control`, seven `repair_*` verbs with suffixes `inspect`, `adopt`, `rebind`, `retry`, `fail`, `close`, `ack`, plus `shutdown`:
 - `status`
 - `roles`
@@ -316,6 +321,7 @@ Client database persists:
 Persist at least:
 - server spec source hash per role
 - server ledger state and body JSON retention
+- the automatic requeue count per delivery row, bounded by `[server].requeue_max_attempts` and `requeue_ttl_secs` where the operator sets them
 - session projection mirror on the server
 - client-authoritative lifecycle rows
 - outbound intents with `op_id`, attempt, state, next attempt time, receipt, and last error

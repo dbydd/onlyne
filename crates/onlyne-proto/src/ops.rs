@@ -464,6 +464,14 @@ pub struct HandshakeArgs {
     pub version: String,
     /// True when the connection serves an aggregate role for a sub-cluster.
     pub aggregate: bool,
+    /// Task ids the client still runs on this role. A reconnecting client sends
+    /// this list at `hello`, and the adoption requeue leaves those rows
+    /// `in_flight` with their tickets rebound to the new link: the work is
+    /// alive in a pane the successor connection inherits, so a re-delivery
+    /// would hand the same task to a second session. An empty or absent list
+    /// keeps the pre-1.0.9 behavior of requeueing every unacknowledged row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_tasks: Vec<String>,
 }
 
 /// Client-to-server vocabulary (§8). One `match` in the server router.
@@ -862,6 +870,7 @@ mod tests {
                     agent: "onlyne-client".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
                     aggregate: false,
+                    live_tasks: Vec::new(),
                 }),
                 "hello",
             ),

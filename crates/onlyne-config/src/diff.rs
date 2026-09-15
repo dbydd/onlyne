@@ -192,6 +192,12 @@ fn changed_server_fields(before: &Spec, after: &Spec) -> Vec<String> {
     if before.server.template_root != after.server.template_root {
         fields.push("template_root".to_string());
     }
+    if before.server.requeue_max_attempts != after.server.requeue_max_attempts {
+        fields.push("requeue_max_attempts".to_string());
+    }
+    if before.server.requeue_ttl_secs != after.server.requeue_ttl_secs {
+        fields.push("requeue_ttl_secs".to_string());
+    }
     fields
 }
 

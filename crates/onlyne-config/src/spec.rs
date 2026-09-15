@@ -26,6 +26,8 @@ pub const DEFAULT_INTENT_ATTEMPTS: u32 = 3;
 pub const DEFAULT_BACKOFF_MS: [u64; 3] = [1_000, 2_000, 4_000];
 pub const DEFAULT_STALE_WATCH_SECS: u64 = 60;
 pub const DEFAULT_HEARTBEAT_GRACE_SECS: u64 = 90;
+pub const DEFAULT_REQUEUE_MAX_ATTEMPTS: u32 = 0;
+pub const DEFAULT_REQUEUE_TTL_SECS: u64 = 0;
 pub const KEY_BYTE_LEN: usize = 32;
 pub const ALLOWED_PLACEHOLDERS: [&str; 2] = ["session", "task"];
 
@@ -65,6 +67,15 @@ pub struct ServerSection {
     pub agent_package: String,
     #[serde(default = "default_template_root")]
     pub template_root: String,
+    /// Cap on automatic in-flight requeues. `0` is unlimited. Crossing it
+    /// settles the row as rejected with reason `requeue_exhausted`.
+    #[serde(default = "default_requeue_max_attempts")]
+    pub requeue_max_attempts: u32,
+    /// Age limit in seconds from `enqueued_at` for an automatic requeue. `0`
+    /// leaves the gate off. Crossing it settles the row as expired with reason
+    /// `requeue_ttl`.
+    #[serde(default = "default_requeue_ttl_secs")]
+    pub requeue_ttl_secs: u64,
 }
 
 /// `[[client]]` entry. Aggregate roles use the same struct and carry an
@@ -230,6 +241,8 @@ impl Default for ServerSection {
             heartbeat_grace_secs: default_heartbeat_grace_secs(),
             agent_package: String::new(),
             template_root: default_template_root(),
+            requeue_max_attempts: default_requeue_max_attempts(),
+            requeue_ttl_secs: default_requeue_ttl_secs(),
         }
     }
 }
@@ -493,6 +506,8 @@ fn locate_table_line(text: &str, field: &str) -> usize {
         "heartbeat_grace_secs",
         "agent_package",
         "template_root",
+        "requeue_max_attempts",
+        "requeue_ttl_secs",
     ];
     const CLIENT_FIELDS: &[&str] = &[
         "client",
@@ -733,6 +748,14 @@ pub(crate) fn default_heartbeat_grace_secs() -> u64 {
 
 pub(crate) fn default_template_root() -> String {
     DEFAULT_TEMPLATE_ROOT.to_string()
+}
+
+pub(crate) fn default_requeue_max_attempts() -> u32 {
+    DEFAULT_REQUEUE_MAX_ATTEMPTS
+}
+
+pub(crate) fn default_requeue_ttl_secs() -> u64 {
+    DEFAULT_REQUEUE_TTL_SECS
 }
 
 pub(crate) fn default_max_sessions() -> u32 {

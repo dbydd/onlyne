@@ -298,6 +298,20 @@
         "template_root": {
           "default": ".onlyne/templates",
           "type": "string"
+        },
+        "requeue_max_attempts": {
+          "description": "Cap on automatic in-flight requeues. `0` is unlimited. Crossing it settles the row as rejected with reason `requeue_exhausted`.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "requeue_ttl_secs": {
+          "description": "Age limit in seconds from `enqueued_at` for an automatic requeue. `0` leaves the gate off. Crossing it settles the row as expired with reason `requeue_ttl`.",
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
         }
       },
       "additionalProperties": false

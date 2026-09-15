@@ -94,6 +94,29 @@ repair 族走 `<server-root>/.onlyne/run/s` 的 admin 面。
 
 repair 族不经过 role 工作区的 adapter socket。
 
+## 投递与重投
+
+role link 死亡时，服务端把该 role 的 `in_flight` 投递行重投回 `queued`，等待下一次 pull 再交付。
+
+新 link 落地时的接管重投走同一条路。`hello` 的 `live_tasks` 字段申报该 client 内存里仍活着的会话任务；被申报的行保持 `in_flight`，其 delivery ticket 改挂新 link 的 generation，此后该 link 终止时照常被重投。
+
+旧版 client 的 `hello` 没有 `live_tasks` 字段，行为与 1.0.8 一致：全部重投。
+
+被申报的会话若在结清之前死亡，client 发布 `exited` 投影，服务端见到与该会话 ticket 同 `session_id` 的 `in_flight` 行时把该行重投回队列，同样经过下面的闸。
+
+自动重投受两个预算旋钮约束；手动 `onlyne repair retry` 不经过闸。
+
+| 配置文件 | 字段 | 默认 | 作用 |
+|---|---|---|---|
+| `<server-root>/.onlyne/spec.toml` 的 `[server]` | `requeue_max_attempts` | 0 | 一条行允许的自动重投次数上限，0 为不限；超限的行落 `rejected`，reason 为 `requeue_exhausted` |
+| `<server-root>/.onlyne/spec.toml` 的 `[server]` | `requeue_ttl_secs` | 0 | 自动重投允许的行龄上限，按入队时间计，0 为关闭；超龄的行落 `expired`，reason 为 `requeue_ttl` |
+
+先判 TTL，再判次数，两者都各发一条 `ledger_state` 事件。
+
+push 投递与 pull 投递的 `in_flight` 翻面都各有一条 `ledger_state` 事件；离线读账的 ledger 状态与会话投影在任何采样点互相对得上。
+
+完整链路（server 在活 link 下死亡、client 重连接管、单一会话自然结清）由 `crates/onlyne-testkit/e2e/requeue-claim.sh` 在真实进程上验证。
+
 ## 拒收面
 
 `onlyne ack --msg-id <id> --reason <text>` 把一条投递结为 `acked`。
@@ -126,11 +149,12 @@ client 死亡期间无人代该 role 判定 session 生命周期。
 
 旧 `working` 账由重启后的同 role client 开机自检收敛。
 
-残影判定有两个旋钮：
+残影判定与冻结上报有四个旋钮：
 
 | 配置文件 | 字段 | 默认 | 作用 |
 |---|---|---|---|
 | `<workspace>/.onlyne/config.toml` | `stale_grace_secs` | 300 | client 开机自检宽限，单位秒 |
+| `<workspace>/.onlyne/config.toml` | `stall_report_secs` | 1800 | 会话投影 tuple 冻结时长上限，client 据此上报 `stalled` fault，0 关闭，单位秒 |
 | `<server-root>/.onlyne/spec.toml` 的 `[server]` | `stale_watch_secs` | 60 | server 观察器扫描周期，单位秒；0 关闭观察器 |
 | `<server-root>/.onlyne/spec.toml` 的 `[server]` | `heartbeat_grace_secs` | 90 | 属主在线时 `working` 行允许的心跳静默时长，单位秒 |
 
@@ -168,7 +192,15 @@ completion 落定为 `exited` 之后同 generation 的 heartbeat 把行抬回 `w
 
 两个探测器都只记 fault 并推送 advisory `Event::Fault`。
 
-faults 表的 kind 字段保存 `stale_working`、`heartbeat_missing`、`heartbeat_after_complete` 文本。
+`stalled` 由 client 上报，走 role 的 `report` 面：会话的投影 tuple 连续超过 `stall_report_secs` 没有任何一次 `Applied` 变化时，client 发一条 kind 为 `stalled` 的 `Report::Fault`，带 task 与 session 身份。
+
+no-op 心跳抬存活水位，不抬进展水位；`stalled` 只看后者。
+
+同一冻结 episode 只报一次，下一次 `Applied` 解除去重。`stall_report_secs = 0` 关闭这条判定。
+
+行不翻面：`stalled` 只落 faults 表并推事件，恢复决策留给 supervisor 与 repair 族。
+
+faults 表的 kind 字段保存 `stale_working`、`heartbeat_missing`、`heartbeat_after_complete`、`stalled` 文本。
 
 server 侧观察器不改 ledger 状态。
 

@@ -24,6 +24,10 @@ pub struct ClientConfig {
     /// Seconds a startup reconcile waits before declaring an orphaned in-flight task stale.
     #[serde(default = "default_stale_grace_secs")]
     pub stale_grace_secs: u64,
+    /// Seconds a running session may sit without an Applied tuple change before
+    /// this client reports it stalled. Zero disables the report.
+    #[serde(default = "default_stall_report_secs")]
+    pub stall_report_secs: u64,
 }
 
 /// `[orca]` — settings for the Orca session backend.
@@ -55,9 +59,14 @@ fn default_orca_worktree() -> String {
     "host".to_string()
 }
 pub const DEFAULT_STALE_GRACE_SECS: u64 = 300;
+pub const DEFAULT_STALL_REPORT_SECS: u64 = 1800;
 
 fn default_stale_grace_secs() -> u64 {
     DEFAULT_STALE_GRACE_SECS
+}
+
+fn default_stall_report_secs() -> u64 {
+    DEFAULT_STALL_REPORT_SECS
 }
 
 impl ClientConfig {
@@ -131,6 +140,7 @@ impl ClientConfig {
             key_path: resolve_field(&self.key_path, "key_path", env)?,
             plugins: self.plugins.clone(),
             stale_grace_secs: self.stale_grace_secs,
+            stall_report_secs: self.stall_report_secs,
         })
     }
 }
@@ -218,6 +228,8 @@ pub struct ResolvedClientConfig {
     pub plugins: Vec<String>,
     /// Startup reconcile grace in seconds.
     pub stale_grace_secs: u64,
+    /// Stall report threshold in seconds. Zero disables the report.
+    pub stall_report_secs: u64,
 }
 
 /// Resolved server endpoint.

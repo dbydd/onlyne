@@ -18,9 +18,9 @@ use crate::transition_allowed;
 
 /// Server store schema revision. The `hop` column set this to 2: the ledger
 /// keeps the hop count of `Causality`, which `onlyne handoff` reads back to
-/// extend a chain. The `expires_at` column is applied in place, so the marker
-/// stays 2 and an existing file keeps opening. The client store keeps its own
-/// revision, since its DDL did not move.
+/// extend a chain. The `expires_at` and `requeued` columns are applied in
+/// place, so the marker stays 2 and an existing file keeps opening. The client
+/// store keeps its own revision, since its DDL did not move.
 const SERVER_SCHEMA_VERSION: i64 = 2;
 const PROTOCOL_VERSION: i64 = 1;
 const SERVER_MARKER: &str = "onlyne-server";
@@ -77,7 +77,10 @@ CREATE TABLE IF NOT EXISTS ledger(
   hop INTEGER NOT NULL DEFAULT 0,
   -- Persisted expiry deadline of a ttl note, so a restarted server can re-arm
   -- its sweep.
-  expires_at TEXT
+  expires_at TEXT,
+  -- Times this row has moved from in_flight back to queued. Applied in place
+  -- so the marker stays 2.
+  requeued INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ledger_state_enqueued_idx ON ledger(state,enqueued_at);
 CREATE INDEX IF NOT EXISTS ledger_task_idx ON ledger(task);
@@ -171,6 +174,9 @@ pub struct LedgerRow {
     /// The persisted expiry deadline of a ttl note, so a restarted server can
     /// re-arm its sweep.
     pub expires_at: Option<String>,
+    /// Times this row has moved from in_flight back to queued.
+    #[serde(default)]
+    pub requeued: i64,
 }
 
 impl LedgerRow {
@@ -201,6 +207,7 @@ impl LedgerRow {
             acked_at: None,
             body_json: Some(body_json),
             expires_at,
+            requeued: 0,
         })
     }
 }
@@ -513,7 +520,7 @@ impl ServerLedger {
         ensure_transition_allowed(current.state, LedgerState::Queued)?;
         let tx = conn.unchecked_transaction()?;
         tx.execute(
-            "UPDATE ledger SET state='queued' WHERE msg_id=?",
+            "UPDATE ledger SET state='queued',requeued=requeued+1 WHERE msg_id=?",
             params![msg_id],
         )?;
         let updated = ledger_by_msg_id(&tx, msg_id)?;
@@ -543,6 +550,25 @@ impl ServerLedger {
         )?;
         let updated = ledger_by_msg_id(&tx, msg_id)?;
         let event = ledger_state_event(&updated, LedgerState::Expired, Some(reason.to_string()))?;
+        append_event_conn(&tx, "ledger_state", &event)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    /// Move one row to `rejected` and publish its `ledger_state` event in the
+    /// same transaction. The automatic requeue gate uses this when the row has
+    /// used its requeue budget.
+    pub fn fail_one(&self, msg_id: &str, reason: &str) -> StoreResult<LedgerRow> {
+        let conn = self.conn()?;
+        let current = ledger_by_msg_id(&conn, msg_id)?;
+        ensure_transition_allowed(current.state, LedgerState::Rejected)?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE ledger SET state='rejected',reason=? WHERE msg_id=?",
+            params![reason, msg_id],
+        )?;
+        let updated = ledger_by_msg_id(&tx, msg_id)?;
+        let event = ledger_state_event(&updated, LedgerState::Rejected, Some(reason.to_string()))?;
         append_event_conn(&tx, "ledger_state", &event)?;
         tx.commit()?;
         Ok(updated)
@@ -858,6 +884,7 @@ fn ensure_schema(
     }
     conn.execute_batch(ddl)?;
     ensure_ledger_expires_at(conn)?;
+    ensure_ledger_requeued(conn)?;
     Ok(())
 }
 
@@ -872,6 +899,23 @@ fn ensure_ledger_expires_at(conn: &Connection) -> StoreResult<()> {
         return Ok(());
     }
     conn.execute("ALTER TABLE ledger ADD COLUMN expires_at TEXT", [])?;
+    Ok(())
+}
+
+/// An existing database keeps its rows; the marker gate stays at version 2 so a
+/// live workspace keeps opening.
+fn ensure_ledger_requeued(conn: &Connection) -> StoreResult<()> {
+    let columns = conn
+        .prepare("PRAGMA table_info(ledger)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns.is_empty() || columns.iter().any(|name| name == "requeued") {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE ledger ADD COLUMN requeued INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
     Ok(())
 }
 
@@ -952,7 +996,7 @@ fn ensure_transition_allowed(from: LedgerState, to: LedgerState) -> StoreResult<
 
 fn insert_ledger_row(conn: &Connection, row: &LedgerRow) -> StoreResult<()> {
     conn.execute(
-        "INSERT INTO ledger(msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,hop,state,out_head,reason,enqueued_at,acked_at,body_json,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ledger(msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,hop,state,out_head,reason,enqueued_at,acked_at,body_json,expires_at,requeued) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         params![
             row.msg_id,
             row.op_id,
@@ -970,7 +1014,8 @@ fn insert_ledger_row(conn: &Connection, row: &LedgerRow) -> StoreResult<()> {
             row.enqueued_at,
             row.acked_at,
             row.body_json,
-            row.expires_at
+            row.expires_at,
+            row.requeued
         ],
     )?;
     Ok(())
@@ -986,7 +1031,7 @@ fn ledger_by_op_id(conn: &Connection, op_id: &str) -> StoreResult<Option<LedgerR
         .optional()?)
 }
 
-const LEDGER_COLUMNS: &str = "msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json,hop,expires_at";
+const LEDGER_COLUMNS: &str = "msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json,hop,expires_at,requeued";
 const FAULT_COLUMNS: &str = "id,task_id,role,session_id,generation,seq,desired_json,observed_json,intent,attempt,backend_ref,kind,reason,state,created_at";
 
 fn ledger_row(r: &Row<'_>) -> rusqlite::Result<LedgerRow> {
@@ -1012,6 +1057,7 @@ fn ledger_row(r: &Row<'_>) -> rusqlite::Result<LedgerRow> {
         body_json: r.get(14)?,
         hop: r.get(15)?,
         expires_at: r.get(16)?,
+        requeued: r.get(17)?,
     })
 }
 

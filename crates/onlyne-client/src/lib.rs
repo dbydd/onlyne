@@ -2,6 +2,7 @@
 
 pub mod accept;
 pub mod adapter_socket;
+pub mod claim;
 pub mod daemon;
 pub mod dispatch;
 pub mod host;
@@ -11,6 +12,7 @@ pub mod local_cli;
 pub mod runloop;
 pub mod slice;
 pub mod stale;
+pub mod stall;
 
 pub use runloop::ClientInit;
 

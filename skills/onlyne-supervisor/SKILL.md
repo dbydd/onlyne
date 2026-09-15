@@ -85,6 +85,19 @@ kept talking after its completion landed; recycle ends the straggler, and the ro
 keeps the settled completion either way. Both kinds open once per task and stay open until you
 `repair_ack` them, so the fault table doubles as your to-do list.
 
+`stalled` is the client's own report: a session whose projection tuple froze for
+`stall_report_secs` (1800 default, 0 disables) faults once per episode. No-op beats keep the
+row beating; `stalled` is the progress verdict beside the liveness one. `control probe` first,
+then `recycle` or `repair retry` as the answer demands.
+
+Automatic re-delivery rides two spec gates: `[server].requeue_max_attempts` (0 unlimited) lands
+a starving row as `rejected` with reason `requeue_exhausted`, and `[server].requeue_ttl_secs`
+(0 off) lands it as `expired` with reason `requeue_ttl`. `repair retry` always rides outside
+the gates. A reconnecting client now also declares its live sessions at `hello`, so a link flap
+leaves a running task's row `in_flight` and un-duplicated; a claimed session that dies without
+completing gets its row requeued the moment the client reports it exited, and `repair inspect`
+keeps the whole trail either way.
+
 ## Errors you will see
 
 `acl_denied` → the edge is missing from the spec. `unauthorized` → the key is not

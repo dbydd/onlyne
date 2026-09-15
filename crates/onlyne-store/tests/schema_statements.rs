@@ -255,7 +255,7 @@ fn every_server_statement_runs_against_the_server_schema() {
         .describe("SELECT ... FROM ledger WHERE state='in_flight' AND json_extract");
     store
         .requeue_one(msg_id)
-        .describe("UPDATE ledger SET state='queued' WHERE msg_id=?");
+        .describe("UPDATE ledger SET state='queued',requeued=requeued+1 WHERE msg_id=?");
     store
         .queued_for("worker", 10)
         .describe("SELECT ... FROM ledger WHERE state='queued' AND json_extract");
@@ -286,6 +286,23 @@ fn every_server_statement_runs_against_the_server_schema() {
     store
         .expire_one(&expirable.msg_id, "ttl elapsed")
         .describe("UPDATE ledger SET state='expired',reason=? WHERE msg_id=?");
+    let mut failable = LedgerRow::from_envelope(
+        &envelope(
+            MsgKind::Task,
+            "exhaust",
+            "o-66666666-6666-4666-8666-666666666666",
+        ),
+        "fp-fail",
+    )
+    .unwrap();
+    failable.msg_id = "00000000-0000-4000-8000-0000000000fa".to_string();
+    store.append_ledger(&failable).unwrap();
+    store
+        .mark_in_flight(&failable.msg_id)
+        .describe("UPDATE ledger SET state='in_flight' WHERE msg_id=?");
+    store
+        .fail_one(&failable.msg_id, "requeue_exhausted")
+        .describe("UPDATE ledger SET state='rejected',reason=? WHERE msg_id=?");
     let mut sweepable = LedgerRow::from_envelope(
         &envelope(
             MsgKind::Note,

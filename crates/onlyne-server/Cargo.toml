@@ -1,6 +1,6 @@
 [package]
 name = "onlyne-server"
-version = "1.0.8"
+version = "1.0.9"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -14,12 +14,12 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 onlyne-adapter = { path = "../onlyne-adapter", version = "1.0.0" }
-onlyne-config = { path = "../onlyne-config", version = "1.0.0" }
+onlyne-config = { path = "../onlyne-config", version = "1.0.4" }
 onlyne-frame = { path = "../onlyne-frame", version = "1.0.0" }
 onlyne-layout = { path = "../onlyne-layout", version = "1.0.0" }
 onlyne-net = { path = "../onlyne-net", version = "1.0.0" }
-onlyne-proto = { path = "../onlyne-proto", version = "1.0.0" }
-onlyne-store = { path = "../onlyne-store", version = "1.0.0" }
+onlyne-proto = { path = "../onlyne-proto", version = "1.0.4" }
+onlyne-store = { path = "../onlyne-store", version = "1.0.5" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1", features = ["derive"] }

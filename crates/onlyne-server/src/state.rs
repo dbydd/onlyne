@@ -444,6 +444,26 @@ impl Server {
         table.retain(|_, ticket| ticket.role != role);
         before - table.len()
     }
+
+    /// Point one delivery ticket at the current link generation so this link's
+    /// teardown can still requeue the row.
+    pub fn rehang_delivery(&self, msg_id: &str, generation: u64) {
+        if let Ok(mut table) = self.deliveries.write() {
+            if let Some(ticket) = table.get_mut(msg_id) {
+                ticket.generation = generation;
+            }
+        }
+    }
+
+    /// Drop this role's tickets except the ones whose rows a live pane claimed.
+    pub fn keep_deliveries(&self, role: &str, keep: &HashSet<String>) -> usize {
+        let Ok(mut table) = self.deliveries.write() else {
+            return 0;
+        };
+        let before = table.len();
+        table.retain(|id, ticket| ticket.role != role || keep.contains(id));
+        before - table.len()
+    }
     /// Whether the supplied connection still owns the live registry entry.
     pub fn is_current_role_connection(&self, conn: &RoleConnection) -> bool {
         self.roles

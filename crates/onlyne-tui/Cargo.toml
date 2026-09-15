@@ -16,7 +16,7 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 onlyne-frame = { workspace = true }
-onlyne-proto = { workspace = true }
+onlyne-proto = { path = "../onlyne-proto", version = "1.0.4" }
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 crossterm = "0.28"
 serde = { workspace = true }

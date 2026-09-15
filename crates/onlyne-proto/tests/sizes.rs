@@ -12,7 +12,7 @@ use std::mem::size_of;
 const CEILINGS: [(&str, usize, usize); 6] = [
     ("ClientOp", size_of::<ClientOp>(), 256),
     ("AdminOp", size_of::<AdminOp>(), 256),
-    ("GatewayOp", size_of::<GatewayOp>(), 128),
+    ("GatewayOp", size_of::<GatewayOp>(), 256),
     ("PluginOp", size_of::<PluginOp>(), 256),
     ("HostOp", size_of::<HostOp>(), 256),
     ("Frame<ClientOp>", size_of::<Frame<ClientOp>>(), 256),

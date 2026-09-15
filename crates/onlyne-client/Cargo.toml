@@ -1,6 +1,6 @@
 [package]
 name = "onlyne-client"
-version = "1.0.6"
+version = "1.0.7"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,10 +9,10 @@ description = "Onlyne v1 client: role runtime, dispatch, intent, adapter socket"
 
 [dependencies]
 onlyne-frame = { path = "../onlyne-frame", version = "1.0.0" }
-onlyne-proto = { path = "../onlyne-proto", version = "1.0.0" }
+onlyne-proto = { path = "../onlyne-proto", version = "1.0.4" }
 onlyne-session = { path = "../onlyne-session", version = "1.0.0" }
 onlyne-store = { path = "../onlyne-store", version = "1.0.0" }
-onlyne-config = { path = "../onlyne-config", version = "1.0.0" }
+onlyne-config = { path = "../onlyne-config", version = "1.0.4" }
 onlyne-layout = { path = "../onlyne-layout", version = "1.0.0" }
 onlyne-adapter = { path = "../onlyne-adapter", version = "1.0.0" }
 onlyne-net = { path = "../onlyne-net", version = "1.0.0" }

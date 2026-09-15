@@ -1,5 +1,84 @@
 # Changelog
 
+## [1.0.9] - 2026-09-15
+
+Scope: delivery truth. The workspace version moves 1.0.3 → 1.0.4, so
+`onlyne-proto`, `onlyne-config`, and `onlyne-tui` ride it to 1.0.4. The pinned
+crates: `onlyne-client` 1.0.6 → 1.0.7, `onlyne-store` 1.0.4 → 1.0.5, and
+`onlyne-server` 1.0.8 → 1.0.9.
+
+The trigger was the ARIS takeover frame, read back through the full event log
+after the swarm stopped. One mechanism explained every symptom: a role link
+death requeues that role's `in_flight` rows at the next hello regardless of
+whether the client still runs the task, the re-delivery flip through `pull`
+wrote the ledger without publishing a `ledger_state` event, and the offline
+reader saw rows `queued` while the session axis said `working` for six hours.
+A client restart erases the in-memory dedup the design leaned on, so the
+scheduled morning boot would have opened a second session on each surviving
+pane. The fix moves the liveness fact onto the handshake, makes every delivery
+flip loud, and gives the automatic requeue a budget the operator can bound.
+
+### Fixed
+
+- protocol and server: `HandshakeArgs.live_tasks` carries the task ids whose
+  slots the client still holds in memory. Adoption requeue skips claimed rows
+  and rehangs their delivery tickets on the new link generation, so the next
+  teardown reclaims them normally and the running session is never handed a
+  second copy of its own task. An absent or empty list keeps the 1.0.8 behavior
+  for older clients. The claim reads the dispatch slots, not the store: a fresh
+  client process declares nothing, which is what keeps the restart-and-pull
+  recovery of verification case 4 intact. Files:
+  `crates/onlyne-proto/src/ops.rs`, `crates/onlyne-server/src/relay.rs`,
+  `crates/onlyne-server/src/router.rs`, `crates/onlyne-server/src/state.rs`,
+  `crates/onlyne-client/src/claim.rs`, `crates/onlyne-client/src/dispatch.rs`.
+- server: a claimed session that dies without completing releases its row.
+  The `session_sync` path calls `relay::release_exited_delivery` when an applied
+  write lands `Exited`: a matching `in_flight` row whose ticket names the same
+  `session_id` goes back through the automatic requeue and its ticket drops, so
+  the next pull re-delivers. A completion that already acked the row leaves
+  nothing for the hook to move. Files:
+  `crates/onlyne-server/src/projection.rs`, `crates/onlyne-server/src/relay.rs`.
+- server: the `pull` path published nothing when it flipped a queued row to
+  `in_flight`, which is the silent half of the contradiction above. The flip now
+  emits the same nine-observable `ledger_state` event the push path emits.
+  File: `crates/onlyne-server/src/relay.rs`.
+
+### Added
+
+- server and store: the automatic requeue honors two spec gates, evaluated at
+  the single funnel `relay::requeue_role_rows` and the exited-release hook: TTL
+  first (`requeue_ttl_secs`, expired row with reason `requeue_ttl`), then budget
+  (`requeue_max_attempts`, rejected row with reason `requeue_exhausted`). The
+  `ledger` gains a `requeued` column through the in-place `ensure_` ALTER,
+  incremented inside `requeue_one`; the schema marker stays `('onlyne-server',
+  1, 1)`. Both defaults keep today's unlimited loop; `repair retry` and the rest
+  of the repair family ride outside the gates by design. Files:
+  `crates/onlyne-config/src/spec.rs`, `crates/onlyne-store/src/server.rs`,
+  `crates/onlyne-server/src/relay.rs`.
+- client: `stall_report_secs` (config.toml, default 1800, 0 disables) reports
+  the progress freeze the heartbeat cannot see. The stall clock starts at
+  assignment and refreshes only on `Applied` persists; a no-op beat keeps the
+  row alive without counting as progress. A running session frozen past the
+  threshold sends one `Report::Fault{kind:"stalled"}` per episode over the
+  existing report path, re-armed by the next `Applied` change. The row keeps its
+  state; the fault table gets the observation. Files:
+  `crates/onlyne-client/src/stall.rs`, `crates/onlyne-client/src/dispatch.rs`,
+  `crates/onlyne-client/src/runloop.rs`, `crates/onlyne-config/src/client.rs`.
+
+### Changed
+
+- protocol: the `GatewayOp` size ceiling moves 128 → 256. The handshake Vec
+  grows the hello arm on both role and gateway vocabularies, and the ceiling
+  test records the raise deliberately. File:
+  `crates/onlyne-proto/tests/sizes.rs`.
+- dependency floors published with this release: `onlyne-server` requires
+  proto ≥ 1.0.4, config ≥ 1.0.4, store ≥ 1.0.5; `onlyne-client` requires
+  proto ≥ 1.0.4 and config ≥ 1.0.4; `onlyne-tui` requires proto ≥ 1.0.4.
+- e2e: verification case 15 `requeue-claim.sh` kills the server under a live
+  link, restarts it, and asserts the claimed row rides the restart with one
+  delivery event, zero requeues, one working session, and a natural ack.
+  Files: `crates/onlyne-testkit/e2e/requeue-claim.sh`.
+
 ## [1.0.8] - 2026-09-15
 
 Scope: heartbeat liveness from the client's beats to the server's own sweep. The

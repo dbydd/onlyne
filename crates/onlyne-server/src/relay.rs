@@ -19,6 +19,7 @@ use onlyne_proto::{
 };
 use onlyne_store::{Append, LedgerRow};
 use serde_json::Value;
+use std::collections::HashSet;
 
 /// How often [`spawn_expiry_sweep`] settles queued notes past their deadline.
 ///
@@ -528,6 +529,8 @@ pub fn pull(
     };
     if row.state == LedgerState::Queued {
         state.ledger.mark_in_flight(&row.msg_id)?;
+        let event = ledger_event(&row, LedgerState::InFlight, None, None);
+        events::publish(state, Event::LedgerState(event))?;
     }
     let session_row = row
         .task
@@ -693,25 +696,140 @@ fn control_from_row(kind: MsgKind, body: &Body, task: Option<&str>) -> Option<Co
     }
 }
 
+/// Reason stored when an automatic requeue has used its spec budget.
+pub const REQUEUE_EXHAUSTED_REASON: &str = "requeue_exhausted";
+/// Reason stored when an automatic requeue is past `requeue_ttl_secs`.
+pub const REQUEUE_TTL_REASON: &str = "requeue_ttl";
+
 /// Re-queue a role's in-flight rows and drop the tickets that hold them.
 ///
-/// `ServerLedger::requeue_one` moves one row and publishes its `ledger_state`
-/// event in the same transaction, so an operator watching the observation plane
-/// sees each requeue. A row that settled between the read and the move is left
-/// alone. The ticket drop is what makes a requeued row claimable: `pull` passes
-/// by a row whose ticket is still armed, so a row left holding a dead link's
-/// ticket is unreachable even though its state says it is in flight.
-pub fn requeue_role_rows(state: &State, role: &str) -> anyhow::Result<usize> {
+/// `claimed` is the set of task ids a successor hello declared as live panes.
+/// An in-flight row whose task is in that set stays `in_flight`, and its
+/// delivery ticket is rebound to the current link generation: a re-delivery
+/// would open a second session for the same task. Every other in-flight row
+/// is checked against the spec TTL and requeue budget, then moved by
+/// `ServerLedger::requeue_one`, which publishes its `ledger_state` event in
+/// the same transaction. A row that settled between the read and the move is
+/// left alone. The ticket drop is what makes a requeued row claimable: `pull`
+/// passes by a row whose ticket is still armed, so a row left holding a dead
+/// link's ticket is unreachable even though its state says it is in flight.
+pub fn requeue_role_rows(
+    state: &State,
+    role: &str,
+    claimed: &HashSet<String>,
+) -> anyhow::Result<usize> {
+    let link_generation = state
+        .roles
+        .read()
+        .ok()
+        .and_then(|roles| roles.current_generation(role))
+        .unwrap_or(0);
     let mut requeued = 0usize;
+    let mut keep = HashSet::new();
     for row in state.ledger.in_flight_for(role)? {
-        match state.ledger.requeue_one(&row.msg_id) {
-            Ok(_) => requeued += 1,
-            Err(onlyne_store::StoreError::InvalidState { .. }) => {}
+        if row
+            .task
+            .as_deref()
+            .is_some_and(|task| claimed.contains(task))
+        {
+            state.rehang_delivery(&row.msg_id, link_generation);
+            keep.insert(row.msg_id.clone());
+            continue;
+        }
+        if apply_automatic_requeue(state, &row)? {
+            requeued += 1;
+        }
+    }
+    state.keep_deliveries(role, &keep);
+    Ok(requeued)
+}
+
+/// Release an in-flight row whose live pane has just gone `exited`.
+///
+/// A claimed hello leaves the row `in_flight` for the pane that still holds
+/// it. When that pane dies while the link is up, this is the path that returns
+/// the row to the queue. The ticket's `session_id` has to match the sync that
+/// landed, so a write from another session of the same task does not move the
+/// row. TTL and budget run in the same order as [`requeue_role_rows`].
+pub fn release_exited_delivery(
+    state: &State,
+    task_id: &str,
+    session_id: &str,
+) -> anyhow::Result<usize> {
+    let rows = state.ledger.ledger_query(LedgerQuery {
+        task: Some(task_id.to_string()),
+        state: Some(LedgerState::InFlight),
+        limit: 32,
+        ..LedgerQuery::default()
+    })?;
+    let mut requeued = 0usize;
+    for row in rows {
+        let Some(ticket) = state.delivery_ticket(&row.msg_id) else {
+            continue;
+        };
+        if ticket.session_id.as_deref() != Some(session_id) {
+            continue;
+        }
+        if apply_automatic_requeue(state, &row)? {
+            requeued += 1;
+        }
+        state.take_delivery(&row.msg_id);
+    }
+    Ok(requeued)
+}
+
+fn requeue_spec(state: &State) -> (u32, u64) {
+    state
+        .spec_snapshot()
+        .map(|spec| {
+            (
+                spec.server.requeue_max_attempts,
+                spec.server.requeue_ttl_secs,
+            )
+        })
+        .unwrap_or((0, 0))
+}
+
+/// TTL, then budget, then `requeue_one`. True when the row moved to `queued`.
+fn apply_automatic_requeue(state: &State, row: &LedgerRow) -> anyhow::Result<bool> {
+    let (max_attempts, ttl_secs) = requeue_spec(state);
+    let now = Utc::now();
+    if ttl_secs > 0 {
+        if let Some(age) = row_age_secs(&row.enqueued_at, now) {
+            if age > ttl_secs {
+                match state.ledger.expire_one(&row.msg_id, REQUEUE_TTL_REASON) {
+                    Ok(_) => {
+                        state.forget_expiry(&row.msg_id);
+                        return Ok(false);
+                    }
+                    Err(onlyne_store::StoreError::InvalidState { .. }) => return Ok(false),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+    }
+    if max_attempts > 0 && row.requeued >= i64::from(max_attempts) {
+        match state.ledger.fail_one(&row.msg_id, REQUEUE_EXHAUSTED_REASON) {
+            Ok(_) => {
+                state.forget_expiry(&row.msg_id);
+                return Ok(false);
+            }
+            Err(onlyne_store::StoreError::InvalidState { .. }) => return Ok(false),
             Err(error) => return Err(error.into()),
         }
     }
-    state.clear_deliveries(role);
-    Ok(requeued)
+    match state.ledger.requeue_one(&row.msg_id) {
+        Ok(_) => Ok(true),
+        Err(onlyne_store::StoreError::InvalidState { .. }) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn row_age_secs(enqueued_at: &str, now: DateTime<Utc>) -> Option<u64> {
+    DateTime::parse_from_rfc3339(enqueued_at).ok().map(|ts| {
+        let enqueued = ts.with_timezone(&Utc);
+        u64::try_from(now.signed_duration_since(enqueued).num_seconds().max(0)).unwrap_or(0)
+    })
 }
 
 /// Re-queue a role's in-flight rows when its connection drops.
@@ -723,7 +841,7 @@ pub fn requeue_role_rows(state: &State, role: &str) -> anyhow::Result<usize> {
 /// alone. The link half then unregisters the role and emits
 /// `Event::RolePresence { state: Presence::Offline }`.
 pub fn disconnect(state: &State, role: &str) -> anyhow::Result<usize> {
-    let requeued = requeue_role_rows(state, role)?;
+    let requeued = requeue_role_rows(state, role, &HashSet::new())?;
     state.unregister_role(role);
     state.emit(Event::RolePresence(RolePresence {
         role: role.to_string(),

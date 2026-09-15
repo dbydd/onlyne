@@ -538,6 +538,7 @@ mod tests {
                 agent: "onlyne-client".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 aggregate: false,
+                live_tasks: Vec::new(),
             }),
             ClientOp::Send(Box::new(task())),
             ClientOp::Pull(PullArgs {
