@@ -141,16 +141,27 @@ impl HerdrBackend {
             "workspace".into(),
             "create".into(),
             "--label".into(),
-            label,
+            label.clone(),
             "--cwd".into(),
-            spec.cwd.to_string_lossy().into_owned(),
+            absolute_cwd(&spec.cwd),
             "--no-focus".into(),
         ])?;
-        created
+        let workspace_id = created
             .pointer("/workspace/workspace_id")
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| anyhow::anyhow!("herdr workspace create returned no workspace_id"))
+            .ok_or_else(|| anyhow::anyhow!("herdr workspace create returned no workspace_id"))?
+            .to_string();
+        // The lookup keys on the label alone, so a workspace holding this
+        // session's panes under another label reads as absent here and gains a
+        // labelled sibling. The warning names both ids and the rename that
+        // makes the next spawn find the operator's workspace.
+        tracing::warn!(
+            label = label.as_str(),
+            workspace_id = workspace_id.as_str(),
+            "herdr created a workspace for {label}; rename the workspace to use with \
+             `herdr workspace rename <WORKSPACE_ID> {label}` before spawning again"
+        );
+        Ok(workspace_id)
     }
 
     fn find_or_create_tab(
@@ -191,7 +202,7 @@ impl HerdrBackend {
             "--label".into(),
             role,
             "--cwd".into(),
-            spec.cwd.to_string_lossy().into_owned(),
+            absolute_cwd(&spec.cwd),
             "--no-focus".into(),
         ])?;
         let tab_id = created
@@ -253,7 +264,7 @@ impl HerdrBackend {
             "--ratio".into(),
             format!("{}", placement.ratio),
             "--cwd".into(),
-            spec.cwd.to_string_lossy().into_owned(),
+            absolute_cwd(&spec.cwd),
         ];
         for (key, value) in &spec.env {
             args.push("--env".into());
@@ -276,7 +287,7 @@ impl HerdrBackend {
     fn start_in_pane(&self, pane_id: &str, spec: &SpawnSpec, agent: &str) -> Result<bool> {
         match kind_of(&spec.command) {
             Some(kind) => {
-                let started = self.json(vec![
+                let mut args = vec![
                     "agent".into(),
                     "start".into(),
                     agent.into(),
@@ -286,7 +297,20 @@ impl HerdrBackend {
                     pane_id.into(),
                     "--timeout".into(),
                     AGENT_START_TIMEOUT_MS.into(),
-                ]);
+                ];
+                // herdr 0.9.0 spells the call
+                // `agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS]
+                // [-- [AGENT_ARG]...]`, and `--kind` already selects the
+                // executable named by command token 0. The remaining tokens are
+                // the agent's own arguments — a `session_command` carries
+                // `--session-id <task> --session-dir .pi/sessions` there — so
+                // they travel after the `--` separator. A pane started without
+                // them runs a bare agent that cannot name its client.
+                if spec.command.len() > 1 {
+                    args.push("--".into());
+                    args.extend(spec.command[1..].iter().cloned());
+                }
+                let started = self.json(args);
                 if started.is_ok() {
                     return Ok(true);
                 }
@@ -442,8 +466,27 @@ impl SessionBackend for HerdrBackend {
         // herdr pane close has no force flag; both close paths use the same command.
         tracing::debug!(task = %session.task_id, ?reason, force, "closing herdr pane");
         let reference = HerdrRef::from_session(session)?;
-        self.json(vec!["pane".into(), "close".into(), reference.pane_id])
-            .map(|_| ())
+        match self.json(vec![
+            "pane".into(),
+            "close".into(),
+            reference.pane_id.clone(),
+        ]) {
+            Ok(_) => Ok(()),
+            Err(error)
+                if error
+                    .downcast_ref::<CommandFailure>()
+                    .and_then(CommandFailure::code)
+                    == Some("pane_not_found") =>
+            {
+                tracing::debug!(
+                    task = %session.task_id,
+                    pane = %reference.pane_id,
+                    "herdr pane already closed"
+                );
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn rename(&self, session: &SessionRef, title: &str) -> Result<()> {
@@ -627,6 +670,21 @@ fn pane_run_line(command: &[String]) -> String {
         .join(" ")
 }
 
+/// The cwd in the spelling herdr needs: absolute.
+///
+/// herdr resolves a relative `--cwd` against its own working directory, which
+/// placed session panes in `$HOME` for a client started with a relative
+/// `--workspace`. `std::path::absolute` is lexical (Rust 1.79+) and gives a
+/// relative path the client's own current directory, so a path that is already
+/// absolute keeps its spelling. A refusal falls back to the literal, matching
+/// `pipe_name_for` in `onlyne-layout`.
+fn absolute_cwd(cwd: &Path) -> String {
+    std::path::absolute(cwd)
+        .unwrap_or_else(|_| cwd.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn kind_of(command: &[String]) -> Option<String> {
     let first = command.first()?;
     let name = std::path::Path::new(first)
@@ -738,13 +796,23 @@ mod tests {
         serde_json::json!({"id": "cli:test", "result": result}).to_string()
     }
 
+    /// The `session_command` shape a generated role workspace carries: the
+    /// agent binary plus the flags that tie the pane to its client's session.
+    fn session_command() -> Vec<&'static str> {
+        vec!["pi", "--session-id", "s-1", "--session-dir", ".pi/sessions"]
+    }
+
     fn spec(command: Vec<&str>) -> SpawnSpec {
+        spec_at(command, "/tmp/ws")
+    }
+
+    fn spec_at(command: Vec<&str>, cwd: &str) -> SpawnSpec {
         let mut env = BTreeMap::new();
         env.insert("ONLYNE_ROLE".into(), "planner".into());
         env.insert("ONLYNE_CLUSTER".into(), "lab".into());
         env.insert("ONLYNE_TASK_ID".into(), "abcd1234ffff".into());
         SpawnSpec {
-            cwd: PathBuf::from("/tmp/ws"),
+            cwd: PathBuf::from(cwd),
             task_id: "abcd1234-ffff-4000-8000-000000000001".into(),
             command: command.into_iter().map(str::to_string).collect(),
             env,
@@ -888,7 +956,7 @@ mod tests {
             .reply("pane split", 0, split_pane())
             .reply("agent start", 0, agent_started());
         let (backend, script) = backend(script);
-        let session = backend.spawn(spec(vec!["pi"])).unwrap();
+        let session = backend.spawn(spec(session_command())).unwrap();
         assert_eq!(session.backend, "herdr");
         assert_eq!(session.backend_ref["herdr"]["pane_id"], "wF:p2");
         assert_eq!(
@@ -899,14 +967,15 @@ mod tests {
             session.backend_ref["herdr"]["workspace_label"],
             "onlyne:lab"
         );
+        assert_eq!(session.backend_ref["herdr"]["workspace_id"], "wF");
+        let cwd = absolute_cwd(Path::new("/tmp/ws"));
         let calls = script.calls();
         assert!(calls.iter().any(|call| call.contains("workspace list")));
         assert!(calls.iter().any(|call| {
             call.contains("workspace create")
                 && call.contains("--label")
                 && call.contains("onlyne:lab")
-                && call.contains("--cwd")
-                && call.contains("/tmp/ws")
+                && call.contains(&format!("--cwd {cwd}"))
                 && call.contains("--no-focus")
         }));
         assert!(calls.iter().any(|call| {
@@ -915,6 +984,7 @@ mod tests {
                 && call.contains("wF")
                 && call.contains("--label")
                 && call.contains("planner")
+                && call.contains(&format!("--cwd {cwd}"))
                 && call.contains("--no-focus")
         }));
         let split = calls
@@ -924,16 +994,79 @@ mod tests {
         assert!(split.contains("--pane wF:p1"));
         assert!(split.contains("--direction right"));
         assert!(split.contains("--ratio 0.5"));
-        assert!(split.contains("--cwd /tmp/ws"));
+        assert!(split.contains(&format!("--cwd {cwd}")));
         assert!(split.contains("--env ONLYNE_CLUSTER=lab"));
         assert!(split.contains("--env ONLYNE_ROLE=planner"));
         assert!(split.contains("--no-focus"));
-        assert!(calls.iter().any(|call| {
-            call.contains("agent start onlyne-planner-abcd1234")
-                && call.contains("--kind pi")
-                && call.contains("--pane wF:p2")
-                && call.contains("--timeout 25000")
-        }));
+        // The record ends at the last agent argument, so the tail reaches the
+        // pane whole.
+        let started = calls
+            .iter()
+            .find(|call| call.contains("agent start"))
+            .unwrap();
+        assert!(
+            started.ends_with(
+                "--kind pi --pane wF:p2 --timeout 25000 -- --session-id s-1 --session-dir .pi/sessions"
+            ),
+            "{started}"
+        );
+    }
+
+    #[test]
+    fn spawn_sends_no_separator_for_a_bare_agent_command() {
+        // Token 0 is the whole command, so there is nothing for herdr to forward
+        // and an empty trailing argument list would reach the agent as noise.
+        let script = Script::default()
+            .reply(
+                "workspace list",
+                0,
+                envelope(serde_json::json!({"workspaces": []})),
+            )
+            .reply("workspace create", 0, create_workspace())
+            .reply("tab list", 0, envelope(serde_json::json!({"tabs": []})))
+            .reply("tab create", 0, create_tab())
+            .reply("pane split", 0, split_pane())
+            .reply("agent start", 0, agent_started());
+        let (backend, script) = backend(script);
+        backend.spawn(spec(vec!["pi"])).unwrap();
+        let started = script
+            .calls()
+            .into_iter()
+            .find(|call| call.contains("agent start"))
+            .unwrap();
+        assert_eq!(
+            started,
+            "herdr agent start onlyne-planner-abcd1234 --kind pi --pane wF:p2 --timeout 25000"
+        );
+    }
+
+    #[test]
+    fn spawn_sends_an_absolute_cwd_for_a_relative_workspace() {
+        // herdr resolves a relative `--cwd` against its own working directory,
+        // which is how session panes landed in `$HOME` during the first real
+        // run of a formal-research tree.
+        let script = Script::default()
+            .reply(
+                "workspace list",
+                0,
+                envelope(serde_json::json!({"workspaces": []})),
+            )
+            .reply("workspace create", 0, create_workspace())
+            .reply("tab list", 0, envelope(serde_json::json!({"tabs": []})))
+            .reply("tab create", 0, create_tab())
+            .reply("pane split", 0, split_pane())
+            .reply("agent start", 0, agent_started());
+        let (backend, script) = backend(script);
+        backend
+            .spawn(spec_at(session_command(), "ws/formal/research/planner"))
+            .unwrap();
+        let cwd = absolute_cwd(Path::new("ws/formal/research/planner"));
+        assert!(Path::new(&cwd).is_absolute(), "{cwd}");
+        let calls = script.calls();
+        for fragment in ["workspace create", "tab create", "pane split"] {
+            let call = calls.iter().find(|call| call.contains(fragment)).unwrap();
+            assert!(call.contains(&format!("--cwd {cwd}")), "{call}");
+        }
     }
 
     #[test]
@@ -1033,10 +1166,14 @@ mod tests {
             .reply("pane split", 0, split_pane())
             .reply("pane run", 0, String::new());
         let (backend, script) = backend(script);
-        backend.spawn(spec(vec!["echo", "hello world"])).unwrap();
+        // A tail that would qualify for `agent start` still travels as shell
+        // arguments, since herdr has no kind for the leading executable.
+        let command = vec!["echo", "hello world", "--session-id", "s-1"];
+        backend.spawn(spec(command.clone())).unwrap();
         let calls = script.calls();
         assert!(calls.iter().all(|call| !call.contains("agent start")));
-        let line = pane_run_line(&["echo".into(), "hello world".into()]);
+        let tokens: Vec<String> = command.into_iter().map(str::to_string).collect();
+        let line = pane_run_line(&tokens);
         assert!(
             calls
                 .iter()
@@ -1063,9 +1200,9 @@ mod tests {
             )
             .reply("pane run", 0, String::new());
         let (backend, script) = backend(script);
-        backend.spawn(spec(vec!["pi"])).unwrap();
+        backend.spawn(spec(session_command())).unwrap();
         let joined = script.calls().join("\n");
-        assert!(joined.contains("agent start"));
+        assert!(joined.contains("--timeout 25000 -- --session-id s-1"));
         assert!(joined.contains("pane run wF:p2"));
     }
 

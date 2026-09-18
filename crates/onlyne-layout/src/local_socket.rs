@@ -9,13 +9,19 @@
 //!
 //! `--socket` values that already start with `\\.\pipe\` skip derivation and
 //! travel as `GenericFilePath`. Frame I/O stays generic `AsyncRead`/`AsyncWrite`.
+//!
+//! [`bind_socket`] adds the owner-tree seam: it resolves a
+//! [`SocketEndpoint`], binds the path that fits
+//! `sun_path`, and publishes the choice in `run/socket` so every reader reaches
+//! one socket through one file.
 
+use crate::SocketEndpoint;
 use interprocess::local_socket::{
     GenericFilePath, ListenerNonblockingMode, ListenerOptions, ToFsName,
 };
 use sha2::{Digest, Sha256};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Tokio listener produced by [`bind_local`].
 pub type LocalListener = interprocess::local_socket::tokio::Listener;
@@ -45,23 +51,49 @@ pub fn is_verbatim_pipe_path(path: &Path) -> bool {
         .is_some_and(|s| starts_with_ignore_ascii_case(s, VERBATIM_PIPE_PREFIX))
 }
 
-/// NPFS leaf `onlyne-<32hex>` derived from `path` without touching the filesystem.
+/// Lexical absolute spelling of `path`.
 ///
-/// `std::path::absolute` is lexical (Rust 1.79+). Separators become `/` and the
-/// whole string is lowercased before the digest so `C:\Work` and `c:/work` agree.
-pub fn pipe_name_for(path: &Path) -> String {
-    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let normalized = absolute
+/// `std::path::absolute` (Rust 1.79+) never touches the filesystem, so a missing
+/// path still gets an answer.
+pub(crate) fn lexical_absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Lowercase hex of the first `bytes` of `sha256` over `path`.
+///
+/// Separators become `/` and the whole string is lowercased, so `C:\Work` and
+/// `c:/work` digest alike.
+fn digest_hex(path: &Path, bytes: usize) -> String {
+    let normalized = path
         .to_string_lossy()
         .replace('\\', "/")
         .to_ascii_lowercase();
     let digest = Sha256::digest(normalized.as_bytes());
-    let mut hex = String::with_capacity(32);
-    for byte in &digest[..16] {
+    let mut hex = String::with_capacity(bytes * 2);
+    for byte in &digest[..bytes] {
         hex.push(HEX[(*byte >> 4) as usize] as char);
         hex.push(HEX[(*byte & 0x0f) as usize] as char);
     }
-    format!("onlyne-{hex}")
+    hex
+}
+
+/// NPFS leaf `onlyne-<32hex>` derived from `path` without touching the filesystem.
+///
+/// `std::path::absolute` is lexical. Separators become `/` and the whole string
+/// is lowercased before the digest so `C:\Work` and `c:/work` agree.
+pub fn pipe_name_for(path: &Path) -> String {
+    format!("onlyne-{}", digest_hex(&lexical_absolute(path), 16))
+}
+
+/// `onlyne-<16hex>`-ready identity of one owner tree: the first 8 bytes of
+/// `sha256` over the same normalized spelling [`pipe_name_for`] uses.
+///
+/// The derived socket directory name has to stay short enough that
+/// `<temp>/onlyne-<hex>/s` fits [`UNIX_SOCKET_PATH_MAX`](crate::UNIX_SOCKET_PATH_MAX),
+/// which is why the leaf is 16 hex characters and the pipe leaf above carries 32.
+#[cfg(unix)]
+pub(crate) fn short_digest(absolute_root: &Path) -> String {
+    digest_hex(absolute_root, 8)
 }
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -84,6 +116,115 @@ pub fn bind_tokio(path: &Path) -> io::Result<LocalListener> {
         path,
         ListenerNonblockingMode::Neither,
         ListenerOptions::create_tokio,
+    )
+}
+
+/// Bind the owner tree's local socket, choosing the short path when the canonical
+/// spelling exceeds [`UNIX_SOCKET_PATH_MAX`](crate::UNIX_SOCKET_PATH_MAX), and
+/// publishing the choice in the marker.
+///
+/// `root` is the owner tree's root; `run_dir` is `<root>/.onlyne/run`. The
+/// derived directory under [`std::env::temp_dir`] is created `0700` and adopted
+/// only after it proves itself writable by this process alone, because a shared
+/// temporary root can already hold a foreign `onlyne-<digest>` directory, and
+/// binding a second socket inside it would put two daemons behind one name. A
+/// refusal names the directory, which is the answer an operator needs: the fix
+/// is to move or clear that directory.
+///
+/// The marker is written last, so a failed bind leaves the previously published
+/// path in place for a client that reads it.
+pub fn bind_socket(root: &Path, run_dir: &Path) -> io::Result<(LocalListener, SocketEndpoint)> {
+    let endpoint = SocketEndpoint::resolve(root, run_dir);
+    crate::create_dir(run_dir, Some(0o700))?;
+    #[cfg(unix)]
+    if endpoint.short() {
+        let fallback = endpoint.actual().to_path_buf();
+        let derived = endpoint.actual().parent().unwrap_or(fallback.as_path());
+        ensure_private_dir(derived)?;
+    }
+    #[cfg(unix)]
+    remove_stale_socket(endpoint.actual());
+    let listener = bind_tokio(endpoint.actual()).map_err(|error| bind_failure(&endpoint, error))?;
+    endpoint.publish()?;
+    Ok((listener, endpoint))
+}
+
+/// Unix: drop the name so a restarted daemon can take it again.
+///
+/// `reclaim_name(false)` leaves unlink to the owner, and a name left in place
+/// makes the bind below fail with both paths and both lengths in the message.
+#[cfg(unix)]
+fn remove_stale_socket(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+/// A bind failure the operator can act on: the path that was tried, the
+/// canonical spelling it stands for, and each length.
+fn bind_failure(endpoint: &SocketEndpoint, error: io::Error) -> io::Error {
+    let natural = endpoint.natural();
+    let actual = endpoint.actual();
+    let message = format!(
+        "bind {} ({} bytes) for natural {} ({} bytes): {error}",
+        actual.display(),
+        actual.as_os_str().len(),
+        natural.display(),
+        natural.as_os_str().len(),
+    );
+    io::Error::new(error.kind(), message)
+}
+
+/// Adopt a directory this process owns outright.
+///
+/// An existing directory keeps its mode: chmod'ing a foreign directory to `0700`
+/// would make the checks below pass on a path another owner is already using.
+#[cfg(unix)]
+fn ensure_private_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(path).map_err(|source| dir_failure(path, &source))?;
+            crate::set_dir_mode(path, 0o700).map_err(|source| dir_failure(path, &source))?;
+        }
+        Err(source) => return Err(dir_failure(path, &source)),
+    }
+    let metadata = std::fs::metadata(path).map_err(|source| dir_failure(path, &source))?;
+    if !metadata.is_dir() {
+        return Err(dir_refusal(path, "already held by a non-directory"));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(dir_refusal(path, "open to group or other access"));
+    }
+    // Mode `0700` is open to exactly one uid, and the file system owner can
+    // write anywhere, so the create-new probe is the decision this process
+    // actually makes.
+    let probe = path.join(format!("onlyne-probe-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(source) => Err(dir_failure(path, &source)),
+    }
+}
+
+#[cfg(unix)]
+fn dir_refusal(path: &Path, reason: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("refusing to use directory {}: {reason}", path.display()),
+    )
+}
+
+#[cfg(unix)]
+fn dir_failure(path: &Path, source: &io::Error) -> io::Error {
+    io::Error::new(
+        source.kind(),
+        format!("directory {}: {source}", path.display()),
     )
 }
 
@@ -255,6 +396,155 @@ fn connect_name(path: &Path) -> io::Result<interprocess::local_socket::Name<'sta
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_socket_on_a_deep_root_echoes_a_frame() {
+        use crate::{RoleWorkspace, ServerRoot, UNIX_SOCKET_PATH_MAX};
+        use prelude::*;
+        use std::fs;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("r".repeat(120));
+        let layout = RoleWorkspace::resolve(&root);
+        let run_dir = layout.run_dir();
+        let natural = layout.socket_path_natural();
+        let natural_len = natural.as_os_str().len();
+        assert!(
+            natural_len > UNIX_SOCKET_PATH_MAX,
+            "{} is {natural_len} bytes",
+            natural.display()
+        );
+        // The defect this seam exists for: the canonical spelling is a legal
+        // path the kernel refuses, so every client retrying it is stuck. The
+        // directory is created first, so the refusal below is the length.
+        fs::create_dir_all(&run_dir).unwrap();
+        let failure = bind_tokio(&natural).expect_err("the kernel refuses a path past `sun_path`");
+        assert_eq!(failure.kind(), io::ErrorKind::InvalidInput, "{failure}");
+
+        let (listener, endpoint) = bind_socket(&root, &run_dir).unwrap();
+        let derived_parent = endpoint.actual().parent().unwrap();
+        let derived = derived_parent.to_path_buf();
+        assert!(endpoint.short());
+        assert_eq!(endpoint.natural(), natural.as_path());
+        assert_eq!(endpoint.marker(), run_dir.join("socket"));
+        let marker_bytes = fs::read_to_string(endpoint.marker()).unwrap();
+        assert_eq!(marker_bytes, format!("{}\n", endpoint.actual().display()));
+        assert_eq!(mode(endpoint.marker()), 0o600);
+        assert_eq!(mode(endpoint.actual()), 0o600);
+        assert_eq!(mode(&run_dir), 0o700);
+        assert_eq!(mode(&derived), 0o700);
+        // Binder and reader reach one path: a freshly resolved layout, standing
+        // for another process, agrees with what was just bound, and a server
+        // view of the same root agrees too.
+        assert_eq!(
+            RoleWorkspace::resolve(&root).socket_path(),
+            endpoint.actual()
+        );
+        assert_eq!(ServerRoot::resolve(&root).socket_path(), endpoint.actual());
+
+        let server = tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            let mut buf = [0u8; 14];
+            stream.read_exact(&mut buf).await.unwrap();
+            stream.write_all(&buf).await.unwrap();
+        });
+        let mut client = connect_local(endpoint.actual()).await.unwrap();
+        client.write_all(b"onlyne frame!!").await.unwrap();
+        let mut buf = [0u8; 14];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"onlyne frame!!");
+        server.await.unwrap();
+
+        // A restart takes the same endpoint: the stale name is unlinked, the
+        // marker republished, and the derived directory reused.
+        let (second, restarted) = bind_socket(&root, &run_dir).unwrap();
+        assert_eq!(restarted, endpoint);
+        let client = connect_local(restarted.actual()).await.unwrap();
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), second.accept())
+            .await
+            .expect("the restarted listener accepts")
+            .unwrap();
+        drop((accepted, client));
+        fs::remove_dir_all(&derived).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_socket_refuses_a_foreign_derived_directory() {
+        use crate::RoleWorkspace;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("r".repeat(120));
+        let layout = RoleWorkspace::resolve(&root);
+        let run_dir = layout.run_dir();
+        // The tree is created before anything resolves, as `bootstrap` does, so
+        // the test and `bind_socket` digest the same canonical root.
+        fs::create_dir_all(&run_dir).unwrap();
+        let endpoint = layout.socket_endpoint();
+        assert!(endpoint.short());
+        let derived = endpoint.actual().parent().unwrap().to_path_buf();
+        let derived_label = derived.to_string_lossy().into_owned();
+
+        // A name in the way that is a non-directory is refused, by name.
+        fs::write(&derived, b"foreign").unwrap();
+        let error = bind_socket(&root, &run_dir).unwrap_err();
+        assert!(error.to_string().contains(&derived_label), "{error}");
+        assert!(!endpoint.marker().exists());
+        assert!(!endpoint.actual().exists());
+        fs::remove_file(&derived).unwrap();
+
+        // A mode `0500` directory is refused too: the create-new probe is the
+        // decision, and a process that ignores directory permissions has no
+        // such directory for the probe to fail in.
+        if write_probe_is_denied_in_a_private_directory() {
+            fs::create_dir_all(&derived).unwrap();
+            fs::set_permissions(&derived, fs::Permissions::from_mode(0o500)).unwrap();
+            let error = bind_socket(&root, &run_dir).unwrap_err();
+            assert!(error.to_string().contains(&derived_label), "{error}");
+            fs::set_permissions(&derived, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::remove_dir_all(&derived).unwrap();
+        }
+
+        // An open mode on an existing directory is refused, and the refusal
+        // leaves the foreign mode alone: tightening it in place would be a
+        // second owner claiming a directory another owner made.
+        fs::create_dir_all(&derived).unwrap();
+        fs::set_permissions(&derived, fs::Permissions::from_mode(0o777)).unwrap();
+        let error = bind_socket(&root, &run_dir).unwrap_err();
+        assert!(error.to_string().contains(&derived_label), "{error}");
+        assert_eq!(mode(&derived), 0o777);
+        fs::set_permissions(&derived, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&derived).unwrap();
+    }
+
+    /// `true` when this process is denied writes inside a `0500` directory,
+    /// which is the condition the create-new probe decides on.
+    #[cfg(unix)]
+    fn write_probe_is_denied_in_a_private_directory() -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("private");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let probe = dir.join("probe");
+        let denied = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .is_err();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        denied
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
 
     #[test]
     fn pipe_name_is_stable_across_separators_and_case() {

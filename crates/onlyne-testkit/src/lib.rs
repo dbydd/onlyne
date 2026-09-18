@@ -1110,8 +1110,15 @@ pub fn image_limit_message() -> String {
     format!("image exceeds {IMAGE_DATA_MAX_BYTES} bytes")
 }
 
+/// The socket a role workspace serves.
+///
+/// A workspace whose canonical spelling fits the Unix socket bound answers with
+/// `.onlyne/run/s`; a deeper one has its served path in the `.onlyne/run/socket`
+/// marker its daemon published at bind, with a short derived spelling available
+/// before any bind. An adapter fixture that joined `run/s` itself would dial a
+/// file nothing listens on.
 pub fn socket_from_workspace(workspace: &Path) -> PathBuf {
-    workspace.join(".onlyne").join("run").join("s")
+    onlyne_layout::RoleWorkspace::resolve(workspace).socket_path()
 }
 
 /// Role one workspace serves, read from its `.onlyne/config.toml`.

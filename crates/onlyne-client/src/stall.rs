@@ -30,11 +30,14 @@ impl StallWatch {
         self.last_progress.entry(task_id.into()).or_insert(now);
     }
 
-    /// An Applied persist is a real tuple change. It refreshes the clock and
-    /// clears the freeze report bit so a later freeze can be reported again.
+    /// An Applied persist refreshes the clock of an assigned task and clears
+    /// the freeze report bit so a later freeze can be reported again. Clock
+    /// creation belongs to [`Self::note_assigned`].
     pub fn note_applied(&mut self, task_id: &str, now: Instant) {
-        self.last_progress.insert(task_id.to_string(), now);
-        self.reported.remove(task_id);
+        if let Some(last_progress) = self.last_progress.get_mut(task_id) {
+            *last_progress = now;
+            self.reported.remove(task_id);
+        }
     }
 
     /// Drop a task that has left the live set.
@@ -119,6 +122,20 @@ mod tests {
         assert_eq!(
             watch.due(t_applied + Duration::from_secs(1801), 1800),
             vec!["t-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn applied_after_forget_does_not_recreate_a_progress_clock() {
+        let mut watch = StallWatch::new();
+        let t0 = Instant::now();
+        watch.note_assigned("retired", t0);
+        watch.forget("retired");
+        watch.note_applied("retired", t0 + Duration::from_secs(10));
+
+        assert!(
+            watch.due(t0 + Duration::from_secs(10_000), 1800).is_empty(),
+            "a retired task stays outside the stall watch"
         );
     }
 

@@ -2,6 +2,7 @@ use crate::intent::stamp_op_id;
 use crate::runloop::ClientInit;
 use anyhow::{Context, Result, anyhow};
 use onlyne_adapter::AdapterIo;
+use onlyne_layout::RoleWorkspace;
 use onlyne_net::conn::{ClientConn, ConnReadiness, dial};
 use onlyne_net::{ConnSettings, KeyPair, NetError};
 use onlyne_proto::{
@@ -18,7 +19,7 @@ use onlyne_session::{
 use onlyne_store::ClientStore;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -113,6 +114,13 @@ fn names_session(key: &str, slot: &SessionSlot, session_id: &str) -> bool {
     key == session_id
         || slot.session.task_id == session_id
         || slot.task_id.as_deref() == Some(session_id)
+}
+
+fn has_attached_transport(inner: &DispatchInner, key: &str, slot: &SessionSlot) -> bool {
+    inner
+        .transports
+        .keys()
+        .any(|session_id| names_session(key, slot, session_id))
 }
 
 impl DispatchState {
@@ -272,8 +280,19 @@ impl DispatchState {
     }
 
     /// Task ids whose freeze exceeds `threshold_secs` in this episode.
+    /// Exited projections retire their remaining progress clocks.
     pub fn stall_due(&self, now: Instant, threshold_secs: u64) -> Vec<String> {
-        self.inner.lock().stall.due(now, threshold_secs)
+        let mut inner = self.inner.lock();
+        let due = inner.stall.due(now, threshold_secs);
+        let mut active = Vec::with_capacity(due.len());
+        for task_id in due {
+            if session_exited(&inner, &task_id) {
+                inner.stall.forget(&task_id);
+            } else {
+                active.push(task_id);
+            }
+        }
+        active
     }
 
     /// Remember that this freeze episode has been reported.
@@ -281,16 +300,24 @@ impl DispatchState {
         self.inner.lock().stall.mark_reported(task_id);
     }
 
-    /// Observation-only stall fault for `task_id`, carrying the stored watermark.
-    pub fn stall_report(&self, task_id: &str) -> Report {
-        let inner = self.inner.lock();
+    /// Observation-only stall fault for an active task, carrying the stored
+    /// watermark. An Exited projection retires its progress clock before the
+    /// send boundary.
+    pub fn stall_report(&self, task_id: &str) -> Option<Report> {
+        let mut inner = self.inner.lock();
         let row = inner.store.get_session(task_id).ok().flatten();
-        crate::stall::report(
+        if row.as_ref().is_some_and(|row| {
+            phase(&row.public_lifecycle, Lifecycle::Created) == Lifecycle::Exited
+        }) {
+            inner.stall.forget(task_id);
+            return None;
+        }
+        Some(crate::stall::report(
             task_id,
             Some(task_id.to_string()),
             row.as_ref().map(|row| row.generation as u64),
             row.as_ref().map(|row| row.seq as u64),
-        )
+        ))
     }
 
     /// Whether any adapter is currently mounted (named or parked).
@@ -477,17 +504,20 @@ impl DispatchState {
         }
     }
 
-    /// A plugin connection ended and stops serving whatever it bound.
+    /// Release the bindings served by one plugin connection.
     ///
-    /// An idle slot is exactly what `reuse` would hand the next task to, and it
-    /// is only reusable while its agent is attached, so the slot goes: no task
-    /// is ever routed to a session whose process left. A slot with work in
-    /// flight keeps its row — the lifecycle owns that state. A mount that named
-    /// its session bound one transport. A mount that named nothing was claimed by
-    /// each session staged onto it, so the release walks every transport sharing
-    /// the connection that ended and leaves a later connection's bindings in
-    /// place.
-    pub fn release_connection(&self, session_id: Option<&str>, io: &AdapterIo) {
+    /// A graceful detach retires each idle session because the agent that could
+    /// reuse its resource has left. An attached transport preserves the idle
+    /// resource because reuse remains possible. A connection ending through
+    /// another path preserves the slot and resource for an agent reconnection.
+    /// Every released binding retires its task progress clock. A slot carrying
+    /// work remains under lifecycle ownership.
+    pub fn release_connection(
+        &self,
+        session_id: Option<&str>,
+        io: &AdapterIo,
+        graceful_detach: bool,
+    ) {
         let mut inner = self.inner.lock();
         if inner
             .parked
@@ -496,25 +526,82 @@ impl DispatchState {
         {
             inner.parked = None;
         }
-        let released: Vec<String> = match session_id {
-            Some(session_id) => vec![session_id.to_string()],
-            None => inner
-                .transports
+        let released: Vec<String> = inner
+            .transports
+            .iter()
+            .filter(|(session, (transport, _))| {
+                transport.same_connection(io)
+                    && session_id.is_none_or(|mounted| mounted == session.as_str())
+            })
+            .map(|(session, _)| session.clone())
+            .collect();
+        let served_tasks: Vec<String> = released
+            .iter()
+            .map(|session| {
+                inner
+                    .sessions
+                    .iter()
+                    .find(|(key, slot)| names_session(key, slot, session))
+                    .map(|(_, slot)| {
+                        slot.task_id
+                            .clone()
+                            .unwrap_or_else(|| slot.session.task_id.clone())
+                    })
+                    .unwrap_or_else(|| session.clone())
+            })
+            .collect();
+        for task_id in served_tasks {
+            inner.stall.forget(&task_id);
+        }
+        for session in &released {
+            inner.transports.remove(session);
+        }
+        if graceful_detach {
+            let idle: Vec<String> = released
                 .iter()
-                .filter(|(_, (transport, _))| transport.same_connection(io))
-                .map(|(session, _)| session.clone())
-                .collect(),
-        };
-        for session in released {
-            inner.transports.remove(&session);
-            let idle = inner
-                .sessions
-                .iter()
-                .find(|(key, slot)| names_session(key, slot, &session) && slot.task_id.is_none())
-                .map(|(key, _)| key.clone());
-            if let Some(key) = idle {
-                inner.sessions.remove(&key);
+                .filter_map(|session| {
+                    inner
+                        .sessions
+                        .iter()
+                        .find(|(key, slot)| {
+                            names_session(key, slot, session) && slot.task_id.is_none()
+                        })
+                        .map(|(key, _)| key.clone())
+                })
+                .collect();
+            for key in idle {
+                let reason = inner
+                    .sessions
+                    .get(&key)
+                    .and_then(|slot| stored_close_reason(&inner, &slot.session.task_id))
+                    .unwrap_or(onlyne_session::CloseReason::Completed);
+                retire_idle_locked(&mut inner, &key, reason);
             }
+        }
+    }
+
+    /// Retire tracked resources whose stored lifecycle has reached `Exited`.
+    ///
+    /// The periodic readiness tick calls this after completed work becomes an
+    /// idle slot. Task-free sessions with an attached transport retain reuse,
+    /// and task-free sessions whose agent has left release their host resource.
+    pub fn reclaim_exited_resources(&self) {
+        let mut inner = self.inner.lock();
+        let candidates: Vec<(String, onlyne_session::CloseReason)> = inner
+            .sessions
+            .iter()
+            .filter(|(key, slot)| {
+                slot.task_id.is_none()
+                    && session_exited(&inner, &slot.session.task_id)
+                    && !has_attached_transport(&inner, key, slot)
+            })
+            .filter_map(|(key, slot)| {
+                stored_close_reason(&inner, &slot.session.task_id)
+                    .map(|reason| (key.clone(), reason))
+            })
+            .collect();
+        for (key, reason) in candidates {
+            retire_idle_locked(&mut inner, &key, reason);
         }
     }
 
@@ -706,6 +793,15 @@ fn render_tokens(tokens: &[String], session: &str, task: &str) -> Vec<String> {
         .collect()
 }
 
+/// The socket a session spawned in `workspace` dials.
+///
+/// `dispatch` passes this to [`session_env`] and the same tree lands in
+/// `SpawnSpec.cwd`, so one resolve answers both halves of the spawn, and a
+/// workspace past the unix bound yields the short path the client bound.
+fn served_socket(workspace: &Path) -> PathBuf {
+    RoleWorkspace::resolve(workspace).socket_path()
+}
+
 /// The environment one spawned session process carries.
 ///
 /// The three `ONLYNE_` identity variables are what the plugin mounts with. The
@@ -717,6 +813,12 @@ fn render_tokens(tokens: &[String], session: &str, task: &str) -> Vec<String> {
 /// `ONLYNE_CLUSTER` names the server's topology and is the address a host
 /// backend groups sessions under. No welcome yet means no variable, and herdr
 /// then keeps its own default-labelled workspace.
+///
+/// `ONLYNE_SOCKET` is the path the client is serving: the same accessor the
+/// daemon bound, so a short endpoint reaches the session as the served path and
+/// the plugin needs no guess of its own. A hand-started pi keeps its own
+/// resolution as the fallback, which is the reason an empty path injects no key
+/// at all.
 fn session_env(
     role: &str,
     session_id: &str,
@@ -724,11 +826,18 @@ fn session_env(
     relay_required: &[String],
     relay_count: Option<u32>,
     topology: &str,
+    adapter_socket: &Path,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("ONLYNE_SESSION_ID".into(), session_id.to_string());
     env.insert("ONLYNE_TASK_ID".into(), task_id.to_string());
     env.insert("ONLYNE_ROLE".into(), role.to_string());
+    if !adapter_socket.as_os_str().is_empty() {
+        env.insert(
+            "ONLYNE_SOCKET".into(),
+            adapter_socket.to_string_lossy().into_owned(),
+        );
+    }
     if !topology.is_empty() {
         env.insert("ONLYNE_CLUSTER".into(), topology.to_string());
     }
@@ -842,6 +951,10 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
         &inner.relay_required,
         inner.relay_count,
         &inner.topology,
+        // One tree answers both halves of this spawn: the cwd below and the
+        // socket the plugin dials, so a session whose workspace resolves to a
+        // short endpoint is handed the served path directly.
+        &served_socket(&inner.workspace),
     );
     let session = inner.backend.spawn(SpawnSpec {
         cwd: inner.workspace.clone(),
@@ -1157,10 +1270,92 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
     Ok(held)
 }
 
-/// Give one session's slot back, closing a live resource when the caller named a
-/// reason. A settled task calls this with no reason: §5's `reuse` keeps the slot
-/// for the next task of the role, and `max_sessions` counts the sessions that
-/// hold capacity, which a settle releases.
+fn stored_close_reason(
+    inner: &DispatchInner,
+    task_id: &str,
+) -> Option<onlyne_session::CloseReason> {
+    let row = inner.store.get_session(task_id).ok().flatten()?;
+    match projection_of(&row).outcome? {
+        Outcome::Done => Some(onlyne_session::CloseReason::Completed),
+        Outcome::Failed => Some(onlyne_session::CloseReason::Fault),
+        Outcome::Cancelled => Some(onlyne_session::CloseReason::Cancelled),
+    }
+}
+
+/// Retire one task-free session after its transport set becomes empty.
+///
+/// The idle slot releases its backend resource because the agent able to reuse
+/// it has left. An attached transport keeps the resource because reuse remains
+/// possible. The dispatch lock serializes the final transport check, reference
+/// refresh, lifecycle projection, backend close, and slot removal with adapter
+/// binding.
+fn retire_idle_locked(
+    inner: &mut DispatchInner,
+    key: &str,
+    reason: onlyne_session::CloseReason,
+) -> bool {
+    let Some(slot) = inner.sessions.get(key) else {
+        return false;
+    };
+    if slot.task_id.is_some() || has_attached_transport(inner, key, slot) {
+        return false;
+    }
+
+    let original = slot.session.clone();
+    let task_id = original.task_id.clone();
+    let resource = inner
+        .store
+        .get_session(&task_id)
+        .ok()
+        .flatten()
+        .map(|row| row.resource_state)
+        .unwrap_or_else(|| "detached".to_string());
+    if resource != "detached" && resource != "closed" {
+        let session = match inner.backend.attach(&original) {
+            Ok(refreshed) => {
+                if refreshed != original {
+                    inner.bridge.track_live(refreshed.clone());
+                    if let Some(slot) = inner.sessions.get_mut(key) {
+                        slot.session = refreshed.clone();
+                    }
+                }
+                refreshed
+            }
+            Err(_) => original,
+        };
+        tracing::info!(
+            task = %task_id,
+            backend = %session.backend,
+            resource = %session.backend_ref,
+            ?reason,
+            "retiring idle session resource"
+        );
+        if let Err(error) = feed_resource_closed(&inner.bridge, &inner.store, &task_id) {
+            tracing::warn!(
+                task = %task_id,
+                backend = %session.backend,
+                resource = %session.backend_ref,
+                error = %error,
+                "session resource close projection failed"
+            );
+        }
+        if let Err(error) = inner.backend.close(&session, reason, false) {
+            tracing::warn!(
+                task = %task_id,
+                backend = %session.backend,
+                resource = %session.backend_ref,
+                error = %error,
+                "session resource retirement failed"
+            );
+        }
+    }
+    inner.bridge.untrack_live(&task_id);
+    inner.sessions.remove(key);
+    true
+}
+
+/// Give one session's task slot back. Settled tasks enter idle retirement, and
+/// explicit reasons drive the control-close path.
 fn release_locked(
     inner: &mut DispatchInner,
     task_id: &str,
@@ -1182,15 +1377,21 @@ fn release_locked(
                 feed_resource_closed(&inner.bridge, &inner.store, task_id)?;
                 inner.backend.close(&slot.session, reason, false)?;
             }
-        }
-        inner.bridge.untrack_live(task_id);
-        if inner.reuse {
-            if let Some(s) = inner.sessions.get_mut(&key) {
-                s.task_id = None;
-                s.ready = false;
+            inner.bridge.untrack_live(task_id);
+            if inner.reuse {
+                if let Some(session) = inner.sessions.get_mut(&key) {
+                    session.task_id = None;
+                    session.ready = false;
+                }
+            } else {
+                inner.sessions.remove(&key);
             }
         } else {
-            inner.sessions.remove(&key);
+            if let Some(session) = inner.sessions.get_mut(&key) {
+                session.task_id = None;
+                session.ready = false;
+            }
+            retire_idle_locked(inner, &key, onlyne_session::CloseReason::Completed);
         }
     }
     inner.stall.forget(task_id);
@@ -1690,7 +1891,9 @@ pub fn note_verdict(verdict: &Verdict, task_id: &str) -> Option<Version> {
 
 #[cfg(test)]
 mod tests {
-    use super::session_env;
+    use super::{Path, PathBuf, RoleWorkspace, SpawnSpec, served_socket, session_env};
+    use onlyne_layout::UNIX_SOCKET_PATH_MAX;
+    use tempfile::tempdir;
 
     /// The guard reads its policy from the environment before its own
     /// `relay.toml`, so what the client injects is the whole contract between
@@ -1698,7 +1901,15 @@ mod tests {
     /// decimal, and neither variable at all when the spec names no policy.
     #[test]
     fn the_spawn_environment_carries_the_relay_policy_it_has() {
-        let plain = session_env("planner", "s-1", "t-1", &[], None, "cluster-a");
+        let plain = session_env(
+            "planner",
+            "s-1",
+            "t-1",
+            &[],
+            None,
+            "cluster-a",
+            Path::new(""),
+        );
         assert_eq!(plain["ONLYNE_SESSION_ID"], "s-1");
         assert_eq!(plain["ONLYNE_TASK_ID"], "t-1");
         assert_eq!(plain["ONLYNE_ROLE"], "planner");
@@ -1709,6 +1920,9 @@ mod tests {
                 && !plain.contains_key("ONLYNE_RELAY_COUNT"),
             "no policy injects no key at all: {plain:?}"
         );
+        // A surface that answered nothing names nothing: the plugin keeps its own
+        // resolution for a hand-started session.
+        assert!(!plain.contains_key("ONLYNE_SOCKET"), "{plain:?}");
 
         let listed = session_env(
             "planner",
@@ -1717,6 +1931,7 @@ mod tests {
             &["writer".to_string(), "auditor".to_string()],
             None,
             "",
+            Path::new(""),
         );
         assert_eq!(listed["ONLYNE_RELAY_REQUIRED"], "writer,auditor");
         assert!(!listed.contains_key("ONLYNE_RELAY_COUNT"));
@@ -1724,7 +1939,7 @@ mod tests {
         // arriving empty.
         assert!(!listed.contains_key("ONLYNE_CLUSTER"));
 
-        let counted = session_env("planner", "s-1", "t-1", &[], Some(2), "");
+        let counted = session_env("planner", "s-1", "t-1", &[], Some(2), "", Path::new(""));
         assert_eq!(counted["ONLYNE_RELAY_COUNT"], "2");
         assert!(!counted.contains_key("ONLYNE_RELAY_REQUIRED"));
 
@@ -1737,8 +1952,95 @@ mod tests {
             &["writer".to_string()],
             Some(2),
             "",
+            Path::new(""),
         );
         assert_eq!(both["ONLYNE_RELAY_REQUIRED"], "writer");
         assert_eq!(both["ONLYNE_RELAY_COUNT"], "2");
+    }
+
+    /// The socket a session is handed is the path the workspace is serving.
+    ///
+    /// The bind publishes its choice in `<run>/socket` and the accessor reads
+    /// that marker, so the value the client injects and the listener the client
+    /// opened are one path even when the canonical spelling moved. This case
+    /// crosses a real bind, which is the only way the two halves agree by
+    /// evidence and by assertion alike.
+    #[tokio::test]
+    async fn the_spawn_environment_names_the_socket_the_workspace_serves() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let layout = RoleWorkspace::resolve(workspace);
+        let (listener, endpoint) =
+            onlyne_layout::bind_socket(layout.root(), &layout.run_dir()).unwrap();
+        let env = session_env(
+            "planner",
+            "s-1",
+            "t-1",
+            &[],
+            None,
+            "",
+            &served_socket(workspace),
+        );
+        assert_eq!(
+            env["ONLYNE_SOCKET"],
+            endpoint.actual().to_string_lossy().as_ref(),
+            "the plugin dials the path that was bound"
+        );
+        assert!(
+            endpoint.actual().exists(),
+            "the injected path is a live socket: {}",
+            endpoint.actual().display()
+        );
+        drop(listener);
+    }
+
+    /// A workspace whose canonical socket spelling overflows `sun_path` still
+    /// hands the session the short served path, and the directory the session
+    /// starts in answers that same socket.
+    ///
+    /// `SpawnSpec.cwd` is the workspace root and `ONLYNE_SOCKET` is the served
+    /// endpoint; both come out of one tree, so a plugin that resolves the socket
+    /// from its own cwd reaches the listener the client bound. Windows keeps the
+    /// canonical spelling as the bound spelling, so the premise lives on unix.
+    #[cfg(unix)]
+    #[test]
+    fn a_deep_workspace_hands_the_session_the_short_served_socket() {
+        let segment = "deep-workspace-segment-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join(segment).join(segment).join("leaf");
+        std::fs::create_dir_all(workspace.join(".onlyne/run")).unwrap();
+        let layout = RoleWorkspace::resolve(&workspace);
+        let natural = layout.socket_path_natural();
+        assert!(
+            natural.as_os_str().len() > UNIX_SOCKET_PATH_MAX,
+            "the premise: the canonical spelling is over the bound: {} bytes at {}",
+            natural.as_os_str().len(),
+            natural.display(),
+        );
+        let served = served_socket(&workspace);
+        assert!(
+            served.as_os_str().len() <= UNIX_SOCKET_PATH_MAX,
+            "the served spelling fits the bound: {} bytes at {}",
+            served.as_os_str().len(),
+            served.display(),
+        );
+        assert_ne!(served, natural, "the socket moved off the canonical path");
+
+        let env = session_env("planner", "s-1", "t-1", &[], None, "", &served);
+        assert_eq!(env["ONLYNE_SOCKET"], served.to_string_lossy().as_ref());
+        let spec = SpawnSpec {
+            cwd: workspace.clone(),
+            task_id: "t-1".into(),
+            command: vec!["pi".into()],
+            env,
+            focus: None,
+            placement: None,
+            rename: None,
+        };
+        assert_eq!(
+            RoleWorkspace::resolve(&spec.cwd).socket_path(),
+            PathBuf::from(&spec.env["ONLYNE_SOCKET"]),
+            "one tree answers both the cwd and the socket"
+        );
     }
 }

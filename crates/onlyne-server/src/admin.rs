@@ -1,4 +1,9 @@
-//! Admin and gateway socket at `<server-root>/.onlyne/run/s` (plan §7 line 293).
+//! Admin and gateway socket for a server root (plan §7 line 293).
+//!
+//! [`bind_socket`] picks the path: the canonical `<server-root>/.onlyne/run/s`
+//! while it fits the unix socket-name bound, and a short derived path past that
+//! bound. The path actually served is named in `<run>/socket`, so every reader
+//! reaches one socket through one file.
 //!
 //! One listener serves both surfaces: a connection that opens with an adapter
 //! `hello` is a gateway process, and a connection that opens with a request
@@ -13,7 +18,7 @@ use crate::state::State;
 use anyhow::Context;
 use onlyne_frame::{read_frame, write_frame};
 use onlyne_layout::local_socket::prelude::TokioListener;
-use onlyne_layout::{LocalListener, LocalStream, ServerRoot, bind_tokio};
+use onlyne_layout::{LocalListener, LocalStream, ServerRoot, bind_socket};
 use onlyne_proto::{AdminOp, ClientOp, ErrorCode, Frame, GatewayOp, ResBody};
 use serde_json::Value;
 use std::sync::Arc;
@@ -24,18 +29,34 @@ pub async fn run(init: ServerInit) -> anyhow::Result<()> {
     crate::serve(state).await
 }
 
-/// Bind the run socket.
+/// Bind the run socket and publish the served path.
 ///
-/// Privacy is applied inside [`bind_tokio`]: unix `mode(0o600)` on the bind
-/// options (fchmod before bind, no umask TOCTOU) and windows owner-only SDDL.
+/// [`bind_socket`] resolves the endpoint, creates `run/` with mode `0700`, drops
+/// a stale file at the served path, binds, and writes the served path into
+/// `<run>/socket`. Privacy is applied inside the bind: unix `mode(0o600)` on the
+/// bind options (fchmod before bind, no umask TOCTOU) and windows owner-only
+/// SDDL. A short endpoint logs both spellings with the canonical length, so the
+/// operator sees the tree the socket stands for.
 pub fn bind(state: &State) -> anyhow::Result<LocalListener> {
     let layout = ServerRoot::resolve(&state.root);
-    let path = layout.socket_path();
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("remove the stale socket {}", path.display()))?;
+    let (listener, endpoint) =
+        bind_socket(layout.root(), &layout.run_dir()).with_context(|| {
+            format!(
+                "bind the admin socket {}",
+                layout.socket_path_natural().display()
+            )
+        })?;
+    if endpoint.short() {
+        tracing::warn!(
+            served = %endpoint.actual().display(),
+            canonical = %endpoint.natural().display(),
+            canonical_bytes = endpoint.natural().as_os_str().len(),
+            "the run socket is served from a short path; the marker names it"
+        );
+    } else {
+        tracing::info!(socket = %endpoint.actual().display(), "the run socket is open");
     }
-    bind_tokio(&path).with_context(|| format!("bind the admin socket {}", path.display()))
+    Ok(listener)
 }
 
 /// Remove the run socket this server bound.
@@ -268,5 +289,82 @@ allowed_targets = ["planner"]
         assert_eq!(ledger_rows(&state), 0, "the probe left a ledger row");
 
         socket_task.abort();
+    }
+
+    /// The field shape that moves the socket: a server root whose canonical
+    /// spelling passes the unix bound, so the daemon serves a short derived path
+    /// and every reader reaches it through the published marker.
+    #[tokio::test]
+    async fn a_root_past_the_path_bound_serves_the_published_short_path() {
+        use onlyne_layout::UNIX_SOCKET_PATH_MAX;
+        use std::path::Path;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("server-root".repeat(8)).join("deep");
+        std::fs::create_dir_all(root.join(".onlyne")).expect("create the root");
+        std::fs::write(root.join(".onlyne/spec.toml"), spec_text()).expect("write the spec");
+        let state = Server::open(&ServerInit { root, listen: None }).expect("open the server");
+
+        let layout = ServerRoot::resolve(&state.root);
+        let natural = layout.socket_path_natural();
+        assert!(
+            natural.as_os_str().len() > UNIX_SOCKET_PATH_MAX,
+            "{} is {} bytes",
+            natural.display(),
+            natural.as_os_str().len()
+        );
+
+        let listener = bind(&state).expect("bind on a root past the bound");
+        let endpoint = layout.socket_endpoint();
+        assert!(endpoint.short(), "a deep root serves a short path");
+        assert!(
+            endpoint.actual().as_os_str().len() <= UNIX_SOCKET_PATH_MAX,
+            "{} is {} bytes",
+            endpoint.actual().display(),
+            endpoint.actual().as_os_str().len()
+        );
+        let published = std::fs::read_to_string(endpoint.marker()).expect("read the marker");
+        assert_eq!(Path::new(published.trim()), endpoint.actual());
+        assert_eq!(layout.socket_path(), endpoint.actual());
+
+        let serving = state.clone();
+        let socket_task = tokio::spawn(async move {
+            let _ = serve_socket(serving, listener).await;
+        });
+        let mut stream = onlyne_layout::connect_local(endpoint.actual())
+            .await
+            .expect("connect the served path");
+        let probe: Frame<ClientOp> = Frame::Ping { t: 1_700_000_000 };
+        write_frame(&mut stream, &probe)
+            .await
+            .expect("write the ping");
+        let answer: Frame<ClientOp> = read_frame(&mut stream)
+            .await
+            .expect("read the answer")
+            .expect("one answer frame");
+        assert!(
+            matches!(
+                answer,
+                Frame::Pong {
+                    t: 1_700_000_000,
+                    ..
+                }
+            ),
+            "the served path answers {answer:?}"
+        );
+        drop(stream);
+        socket_task.abort();
+
+        unlink(&state).expect("unlink the served path");
+        assert!(
+            !endpoint.actual().exists(),
+            "the served path survived unlink"
+        );
+        let _ = std::fs::remove_dir(
+            endpoint
+                .actual()
+                .parent()
+                .expect("the served path sits in its own directory"),
+        );
     }
 }

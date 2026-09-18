@@ -10,7 +10,7 @@ The test kit provides three fixtures for adapter protocol conformance: `HostSim`
 {"hello":{"capabilities":["register","report","inject","recycle"]},"steps":[{"wait_assign":true},{"assert_prose_equals":"<prose from the role spec entry>"},{"report":"ready"},{"complete":{"outcome":"done","head_from":"assign_body"}},{"echo_prose_to":"prose.log"}]}
 ```
 
-Supported steps are `wait_assign`, `report` (`ready` or `heartbeat`), `complete`, `fail`, `exit`, `sleep_ms`, `assert_prose_equals`, `assert_field`, and `echo_prose_to`. An unknown step fails with a message naming the step. `--capabilities` takes a comma-separated capability list and overrides the script hello list. `--workspace DIR` resolves the adapter socket `DIR/.onlyne/run/s` and the mount role from `DIR/.onlyne/config.toml`. `--socket PATH` overrides the socket, and `--role NAME` overrides the role. `--once` exits after the script completes.
+Supported steps are `wait_assign`, `report` (`ready` or `heartbeat`), `complete`, `fail`, `exit`, `sleep_ms`, `assert_prose_equals`, `assert_field`, and `echo_prose_to`. An unknown step fails with a message naming the step. `--capabilities` takes a comma-separated capability list and overrides the script hello list. `--workspace DIR` resolves the adapter socket through the owner tree — `DIR/.onlyne/run/s` for a workspace short enough to serve from the canonical path, and the short path recorded in `DIR/.onlyne/run/socket` for a deeper one — and the mount role from `DIR/.onlyne/config.toml`. `--socket PATH` overrides the socket, and `--role NAME` overrides the role. `--once` exits after the script completes.
 
 ## Fake gateway
 
@@ -26,4 +26,4 @@ The three-way fixture uses the testkit stub backend because only the local crate
 
 ## E2E
 
-Scripts live in `e2e/`. Fake-backend cases run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root and currently pass 12/12. Case 16 `exec-headless.sh` covers the exec backend: workspace `backend = "headless"`, env `ONLYNE_BACKEND=exec`, session log, and `client.db` backend byte `exec`.
+Scripts live in `e2e/`. Sixteen scripts sit beside `lib.sh`. Fake-backend cases run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root and currently pass 13/13 (cases 1-7, 9, 12, 14, 15, 16, 17). Case 16 `exec-headless.sh` covers the exec backend: workspace `backend = "headless"`, env `ONLYNE_BACKEND=exec`, session log, and `client.db` backend byte `exec`. Case 17 `socket-path-length.sh` covers the deep-workspace socket: a padded workspace past the 103-byte bound, the short served path published in `run/socket`, the canonical path left bare, and one task settled end to end through the marker.

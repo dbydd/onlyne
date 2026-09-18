@@ -2,7 +2,9 @@ use crate::dispatch::{DispatchState, ReadyNotice, on_plugin_report, on_ready};
 use anyhow::{Context, Result};
 use onlyne_adapter::{AdapterIo, AdapterServer, ServerConnection};
 use onlyne_layout::local_socket::prelude::TokioListener;
-use onlyne_layout::{LocalListener, LocalStream, bind_tokio, connect_local};
+use onlyne_layout::{
+    LocalListener, LocalStream, RoleWorkspace, SocketEndpoint, bind_socket, connect_local,
+};
 use onlyne_proto::{
     AdapterMsg, Capability, ErrorCode, HelloAck, HelloArgs, HostOp, Mount, MountKind,
     PROTOCOL_VERSION, PluginOp, Report, ResBody, ServerInfo,
@@ -20,36 +22,85 @@ pub struct AdapterSocket {
 }
 
 impl AdapterSocket {
+    /// The path this role's clients connect to, per
+    /// [`RoleWorkspace::socket_path`].
+    ///
+    /// One accessor answers for the whole tree, so a daemon that bound the short
+    /// path and a caller that derived it from the workspace root reach the same
+    /// socket through the marker in `<run>/socket`.
     pub fn path(&self) -> PathBuf {
-        self.workspace.join(".onlyne/run/s")
+        RoleWorkspace::resolve(&self.workspace).socket_path()
     }
 
-    pub async fn bind(&self) -> Result<LocalListener> {
-        let path = self.path();
-        if path.exists() {
-            tracing::info!(socket = %path.display(), "removing stale adapter socket");
-            tokio::fs::remove_file(&path)
-                .await
-                .with_context(|| format!("remove stale socket {}", path.display()))?;
+    /// Bind the workspace socket and report the endpoint that was served.
+    ///
+    /// [`bind_socket`] owns the whole sequence — resolve, create the run
+    /// directory, drop a stale name, bind, publish the marker — and its failure
+    /// message carries both spellings it tried with each length.
+    ///
+    /// A short endpoint means the socket moved off the canonical path, which an
+    /// operator reading a stale `s` would otherwise chase forever, so the log
+    /// line names the canonical path, its byte length, the served path, and the
+    /// marker that carries the answer.
+    #[allow(clippy::unused_async)]
+    pub async fn bind(&self) -> Result<(LocalListener, SocketEndpoint)> {
+        let layout = RoleWorkspace::resolve(&self.workspace);
+        let (listener, endpoint) =
+            bind_socket(layout.root(), &layout.run_dir()).with_context(|| {
+                format!(
+                    "bind the workspace socket {}",
+                    layout.socket_path_natural().display(),
+                )
+            })?;
+        if endpoint.short() {
+            let natural = endpoint.natural();
+            tracing::warn!(
+                canonical = %natural.display(),
+                canonical_bytes = natural.as_os_str().len(),
+                served = %endpoint.actual().display(),
+                marker = %endpoint.marker().display(),
+                "adapter socket moved to the short path"
+            );
+        } else {
+            tracing::info!(socket = %endpoint.actual().display(), "adapter socket serving");
         }
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        // mode(0o600) lives in bind_tokio; a post-bind chmod would TOCTOU.
-        bind_tokio(&path).with_context(|| format!("bind {}", path.display()))
+        Ok((listener, endpoint))
     }
 
-    pub async fn serve(self) -> Result<()> {
-        let listener = self.bind().await?;
+    /// Answer every connection on `listener` for the life of the process.
+    ///
+    /// The listener stays open across a failed `accept`: one bad handshake on one
+    /// socket is that client's problem, and every plugin already mounted would
+    /// lose its transport if the surface came down for it. The pause keeps a
+    /// persistent failure — a descriptor ceiling, a name pulled out from under
+    /// the listener — from spinning the loop at full speed.
+    pub async fn accept_loop(&self, listener: LocalListener) -> Result<()> {
         loop {
-            let stream = listener.accept().await?;
-            let this = self.clone();
-            tokio::spawn(async move {
-                if let Err(err) = this.connection(stream).await {
-                    tracing::debug!(error = %err, "adapter connection closed");
+            match listener.accept().await {
+                Ok(stream) => {
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = this.connection(stream).await {
+                            tracing::debug!(error = %err, "adapter connection closed");
+                        }
+                    });
                 }
-            });
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        kind = ?error.kind(),
+                        "adapter socket accept failed; retrying"
+                    );
+                    tokio::time::sleep(ACCEPT_RETRY_PAUSE).await;
+                }
+            }
         }
+    }
+
+    /// Bind and serve in one call, for a caller that owns no endpoint interest.
+    pub async fn serve(self) -> Result<()> {
+        let (listener, _) = self.bind().await?;
+        self.accept_loop(listener).await
     }
 
     /// Serve one accepted connection on whichever surface it opened.
@@ -211,6 +262,7 @@ impl AdapterSocket {
             self.hand_over(mounted.as_deref(), io.clone(), capabilities.clone())
                 .await;
         }
+        let mut graceful_detach = false;
         while let Some(frame) = connection.inbound.recv().await {
             let id = frame.id.unwrap_or_default();
             match frame.msg {
@@ -273,7 +325,10 @@ impl AdapterSocket {
                             .map_err(|e| anyhow::anyhow!(e))?;
                     }
                 }
-                AdapterMsg::Plugin(PluginOp::Detach(_)) => break,
+                AdapterMsg::Plugin(PluginOp::Detach(_)) => {
+                    graceful_detach = true;
+                    break;
+                }
                 AdapterMsg::Plugin(PluginOp::Hello(_)) => {
                     if frame.id.is_some() {
                         io.respond(
@@ -316,9 +371,10 @@ impl AdapterSocket {
             }
         }
         if agent {
-            // The connection is over: what it bound stops being reachable, so
-            // no later task of this role is routed to it.
-            self.dispatch.release_connection(mounted.as_deref(), &io);
+            // The ended connection releases its bindings. A detach frame also
+            // retires each idle resource served by this agent.
+            self.dispatch
+                .release_connection(mounted.as_deref(), &io, graceful_detach);
         }
         Ok(())
     }
@@ -388,6 +444,13 @@ pub fn should_bye_on_register(session_id: &str) -> bool {
 /// protocol's own hello budget.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Pause before the accept loop asks the listener for a connection again after
+/// an `accept` failure.
+///
+/// The value is short enough that a transient failure costs one plugin one
+/// keystroke and long enough that a persistent one stays off the CPU.
+pub const ACCEPT_RETRY_PAUSE: Duration = Duration::from_millis(100);
+
 /// The link state of the client serving `socket`, and `None` when no client
 /// answers the probe.
 ///
@@ -423,17 +486,111 @@ pub async fn server_link_state(socket: &Path) -> Option<bool> {
     ))
 }
 
+/// Remove a socket file a previous run left behind.
+///
+/// The leaf is absent in the common case, and `NotFound` is that answer. A name
+/// that holds a live listener answers `connect` and keeps the bind of a client
+/// restarting behind it, so the readiness path clears it first, and the log line
+/// is the record that a surface was cleared.
 pub async fn stale_socket_removed(path: &Path) -> Result<()> {
-    if path.exists() {
-        tracing::info!(socket = %path.display(), "removing stale adapter socket");
-        tokio::fs::remove_file(path).await?;
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {
+            tracing::info!(socket = %path.display(), "removed stale adapter socket");
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove stale socket {}", path.display())),
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use onlyne_session::backend::fake::FakeBackend;
+    #[cfg(unix)]
+    use onlyne_store::ClientStore;
+    #[cfg(unix)]
+    use tempfile::tempdir;
+
+    #[cfg(unix)]
+    fn dispatch_state(workspace: &Path) -> DispatchState {
+        let layout = RoleWorkspace::resolve(workspace);
+        layout.bootstrap().unwrap();
+        let store = ClientStore::open(layout.client_db_path()).unwrap();
+        DispatchState::new(
+            "planner",
+            workspace,
+            vec!["agent".into()],
+            1,
+            false,
+            std::sync::Arc::new(FakeBackend::new()),
+            store,
+        )
+    }
+
+    /// A workspace whose canonical socket spelling is over the unix bound binds
+    /// the short path, names it in the marker, and answers for it through the one
+    /// accessor the clients use.
+    ///
+    /// The hand-joined canonical leaf is the shape this case replaces: past the
+    /// bound it fails to bind, and the client keeps a server link while its local
+    /// surface stays shut. Windows keeps the canonical spelling as the bound
+    /// spelling, so the premise lives on unix.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_deep_workspace_serves_the_short_endpoint() {
+        use onlyne_layout::UNIX_SOCKET_PATH_MAX;
+        let segment = "deep-workspace-segment-aaaaaaaaaaaaaaaaaaaaaa";
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join(segment).join(segment).join("leaf");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let layout = RoleWorkspace::resolve(&workspace);
+        let adapter = AdapterSocket {
+            workspace: workspace.clone(),
+            role: "planner".into(),
+            cluster: "c".into(),
+            server: "s".into(),
+            dispatch: dispatch_state(&workspace),
+        };
+        assert!(
+            layout.socket_path_natural().as_os_str().len() > UNIX_SOCKET_PATH_MAX,
+            "the premise: {} bytes at {}",
+            layout.socket_path_natural().as_os_str().len(),
+            layout.socket_path_natural().display(),
+        );
+
+        let (listener, endpoint) = adapter.bind().await.unwrap();
+        assert!(
+            endpoint.short(),
+            "a canonical path over the bound moves the socket: {}",
+            endpoint.actual().display(),
+        );
+        assert!(
+            endpoint.actual().as_os_str().len() <= UNIX_SOCKET_PATH_MAX,
+            "the served path fits the bound: {} bytes at {}",
+            endpoint.actual().as_os_str().len(),
+            endpoint.actual().display(),
+        );
+        assert_eq!(
+            adapter.path(),
+            endpoint.actual().to_path_buf(),
+            "the accessor answers the path that was bound",
+        );
+        assert_eq!(
+            std::fs::read_to_string(endpoint.marker()).unwrap().trim(),
+            endpoint.actual().to_string_lossy().as_ref(),
+            "the marker names the served path",
+        );
+        assert!(
+            !endpoint.natural().exists(),
+            "the canonical leaf stays empty: {}",
+            endpoint.natural().display(),
+        );
+        drop(listener);
+        let _ = std::fs::remove_file(endpoint.actual());
+        let _ = std::fs::remove_dir(endpoint.actual().parent().unwrap());
+    }
 
     #[test]
     fn admin_probe_mounts_without_a_marker() {

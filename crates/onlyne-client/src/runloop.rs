@@ -214,22 +214,48 @@ impl RunState {
     }
 }
 
-/// Run the role runtime until a permanent handshake failure stops it.
+/// Run the role runtime until a permanent handshake failure or a dead local
+/// surface stops it.
+///
+/// The acceptor task owns the workspace socket bind, and its failure ends this
+/// run the same way a permanent link failure does: a client that keeps a TLS
+/// link while its socket is unbound reads as connected from the server while
+/// every verb the workspace issues fails, so the exit status and the message on
+/// stderr are the operator's only notice.
 pub async fn run(init: ClientInit) -> Result<()> {
     let workspace = RoleWorkspace::resolve(&init.workspace);
     let store = ClientStore::open(workspace.client_db_path())?;
     let state = RunState::new(&init, store)?;
-    let acceptor = tokio::spawn(acceptor(init.clone(), state.clone()));
+    let mut acceptor = tokio::spawn(acceptor(init.clone(), state.clone()));
     let closing = tokio::spawn(close_on_signal(state.dispatch.clone()));
+    let outcome = tokio::select! {
+        link = link_loop(&init, &state) => link,
+        served = &mut acceptor => match served {
+            Ok(Ok(())) => Err(anyhow!("the adapter surface stopped serving")),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(anyhow!("adapter acceptor task ended: {error}")),
+        },
+    };
+    acceptor.abort();
+    closing.abort();
+    outcome
+}
+
+/// Keep the server link up until a permanent failure ends the run.
+///
+/// Every pass from `Reconnecting` back to `Ready` runs the order the plan fixes
+/// for a reconnect inside [`run_link`], and the ladder caps at the last rung so
+/// a server that stays down costs one dial per minute.
+async fn link_loop(init: &ClientInit, state: &RunState) -> Result<()> {
     let mut backoff = reconnect_backoff();
     let accept_new = state.dispatch.accept_new();
-    let outcome = loop {
-        match ClientLink::connect(&init, state.dispatch.hello_live_tasks()).await {
+    loop {
+        match ClientLink::connect(init, state.dispatch.hello_live_tasks()).await {
             Ok(link) => {
                 backoff.reset();
                 state.dispatch.attach_outbox(Arc::new(link.clone()));
                 state.dispatch.set_link_up(true);
-                match run_link(&init, &link, &state).await {
+                match run_link(init, &link, state).await {
                     Ok(()) => tracing::info!(role = %init.role, "server link ended"),
                     Err(error) => tracing::warn!(error = %error, "server link failed"),
                 }
@@ -238,20 +264,17 @@ pub async fn run(init: ClientInit) -> Result<()> {
                 accept_new.store(false, Ordering::SeqCst);
                 if let Some(failure) = link.failure().await {
                     if is_permanent(&failure) {
-                        break Err(anyhow!("{failure}"));
+                        return Err(anyhow!("{failure}"));
                     }
                 }
             }
-            Err(error) if is_permanent(&error) => break Err(anyhow!("{error}")),
+            Err(error) if is_permanent(&error) => return Err(anyhow!("{error}")),
             Err(error) => tracing::warn!(error = %error, "connect failed"),
         }
         let delay = backoff.next();
         tracing::info!(seconds = delay.as_secs(), "reconnecting");
         sleep(delay).await;
-    };
-    acceptor.abort();
-    closing.abort();
-    outcome
+    }
 }
 
 /// Close live sessions when the operator stops the client.
@@ -316,29 +339,30 @@ async fn close_on_signal(dispatch: DispatchState) {
     std::process::exit(0);
 }
 
-/// Serve the adapter socket for the life of the process.
+/// Bind the adapter socket and serve it for the life of the process.
+///
+/// The bind is the first act, and its error leaves this task: a socket that
+/// never opened is a workspace whose plugins cannot mount, and only the exit
+/// status says so. Once the listener exists the surface stays up — a failed
+/// `accept` is logged and retried by [`AdapterSocket::accept_loop`] — so this
+/// task ends the run exactly when the local surface could not start.
 async fn acceptor(init: ClientInit, state: RunState) -> Result<()> {
-    loop {
-        let workspace = RoleWorkspace::resolve(&init.workspace);
-        let cluster = state
-            .store
-            .config("cluster")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let socket = AdapterSocket {
-            workspace: workspace.root().to_path_buf(),
-            role: init.role.clone(),
-            cluster,
-            server: init.server.clone(),
-            dispatch: state.dispatch.clone(),
-        };
-        match socket.serve().await {
-            Ok(()) => return Ok(()),
-            Err(error) => tracing::warn!(error = %error, "adapter socket restarting"),
-        }
-        sleep(Duration::from_millis(500)).await;
-    }
+    let workspace = RoleWorkspace::resolve(&init.workspace);
+    let cluster = state
+        .store
+        .config("cluster")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let socket = AdapterSocket {
+        workspace: workspace.root().to_path_buf(),
+        role: init.role.clone(),
+        cluster,
+        server: init.server.clone(),
+        dispatch: state.dispatch.clone(),
+    };
+    let (listener, _endpoint) = socket.bind().await?;
+    socket.accept_loop(listener).await
 }
 
 /// Drive one live link: welcome, flush, resume, then the four tasks.
@@ -395,6 +419,7 @@ async fn watch_readiness(link: ClientLink, state: RunState) -> Result<()> {
     let mut ready = true;
     loop {
         sleep(Duration::from_millis(READINESS_POLL_MS)).await;
+        state.dispatch.reclaim_exited_resources();
         scan_stalls(&state).await;
         match link.readiness() {
             ConnReadiness::Ready => {
@@ -785,7 +810,9 @@ async fn scan_stalls(state: &RunState) {
         .dispatch
         .stall_due(Instant::now(), state.stall_report_secs);
     for task_id in due {
-        let report = state.dispatch.stall_report(&task_id);
+        let Some(report) = state.dispatch.stall_report(&task_id) else {
+            continue;
+        };
         match dispatch::send_frame(&state.dispatch, ClientOp::Report(report)).await {
             Ok(()) => state.dispatch.mark_stalled(&task_id),
             Err(error) => {
@@ -854,6 +881,7 @@ mod tests {
     use super::*;
     use onlyne_proto::{Outcome, Presence, Report};
     use onlyne_session::backend::fake::FakeBackend;
+    use onlyne_session::{SessionLedger, VersionedSession};
     use tempfile::tempdir;
 
     fn test_state(max_sessions: u32, reuse: bool, command: Vec<String>) -> (RunState, ClientStore) {
@@ -902,6 +930,41 @@ mod tests {
             relay_required: None,
             relay_count: None,
         }
+    }
+
+    /// A workspace socket that cannot be bound ends the run with an error.
+    ///
+    /// The silent 0.5s restart this replaces kept a process alive that held a
+    /// server link while the local surface stayed shut, so `onlyne` verbs from the
+    /// workspace failed and the server still counted the role connected. The
+    /// message is the bind context naming the canonical spelling, and the cause
+    /// carries the served path with each length.
+    #[tokio::test]
+    async fn an_unbindable_socket_ends_the_run_with_an_error() {
+        let dir = tempdir().unwrap();
+        let workspace = RoleWorkspace::resolve(dir.path());
+        workspace.bootstrap().unwrap();
+        std::fs::write(
+            workspace.run_dir().join("socket"),
+            "/nonexistent-dir-onlyne-for-this-test/sock\n",
+        )
+        .unwrap();
+        let init = ClientInit::new(
+            dir.path(),
+            "planner",
+            "127.0.0.1:1",
+            workspace.key_path(),
+            "sha256/0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .with_backend("fake");
+        let outcome = tokio::time::timeout(Duration::from_secs(10), run(init))
+            .await
+            .expect("the bind failure ends the run well inside the timeout");
+        let error = outcome.expect_err("an unbindable socket is an error");
+        assert!(
+            error.to_string().contains("bind the workspace socket"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1045,6 +1108,47 @@ mod tests {
             })
             .count();
         assert_eq!(stalled, 2, "Applied starts a new freeze episode: {ops:?}");
+    }
+
+    #[tokio::test]
+    async fn exited_session_clock_is_forgotten_without_a_fault_frame() {
+        let (state, store) = test_state(1, false, Vec::new());
+        let task_id = "task-finished";
+        store
+            .upsert_session(
+                task_id,
+                &VersionedSession {
+                    agent_state: "idle".into(),
+                    delivery_state: "accepted".into(),
+                    resource_state: "attached".into(),
+                    public_lifecycle: "exited".into(),
+                    recovery_substate: "draining".into(),
+                    desired_json: "{}".into(),
+                    observed_json: serde_json::json!({"outcome": "done"}).to_string(),
+                    generation: 1,
+                    seq: 3,
+                    backend_ref: "{}".into(),
+                    mismatch_count: 0,
+                    updated_at: 0,
+                },
+            )
+            .unwrap();
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("clock");
+        state.dispatch.note_stall_assigned(task_id, past);
+
+        scan_stalls(&state).await;
+
+        assert!(
+            store.flush_order().expect("pending intents").is_empty(),
+            "an exited task emits no stalled fault"
+        );
+        state.dispatch.note_stall_applied(task_id, past);
+        assert!(
+            state.dispatch.stall_due(Instant::now(), 1).is_empty(),
+            "the exited task leaves the progress clock"
+        );
     }
 
     #[tokio::test]

@@ -111,6 +111,13 @@ async fn main() {
             }
         },
         Command::Run { workspace } => {
+            // The operator may name the workspace relatively. `absolute_path`
+            // canonicalizes what exists and falls back to a lexical absolute
+            // spelling, so the tree the client resolves, binds, and hands the
+            // session backends as `SpawnSpec.cwd` is one absolute answer. A
+            // relative cwd would be read against whatever directory a host
+            // surface happens to start its pane in.
+            let workspace = onlyne_layout::absolute_path(&workspace);
             let path = onlyne_layout::RoleWorkspace::resolve(&workspace);
             match onlyne_config::ClientConfig::load(path.config_path()) {
                 Ok(config) => match onlyne_client::run(
@@ -142,7 +149,10 @@ async fn main() {
                         5
                     }
                     Err(error) => {
-                        eprintln!("onlyne-client: {error}");
+                        // `:#` prints the whole chain, which is where a bind
+                        // failure keeps the path it tried, the spelling it stands
+                        // for, each length, and the OS reason.
+                        eprintln!("onlyne-client: {error:#}");
                         1
                     }
                 },

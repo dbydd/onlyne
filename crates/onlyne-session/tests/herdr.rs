@@ -76,12 +76,16 @@ fn envelope(result: Value) -> String {
 }
 
 fn spec(command: Vec<&str>, placement: Option<PanePlacement>) -> SpawnSpec {
+    spec_at(command, "/tmp/ws", placement)
+}
+
+fn spec_at(command: Vec<&str>, cwd: &str, placement: Option<PanePlacement>) -> SpawnSpec {
     let mut env = BTreeMap::new();
     env.insert("ONLYNE_ROLE".into(), "planner".into());
     env.insert("ONLYNE_CLUSTER".into(), "lab".into());
     env.insert("ONLYNE_TASK_ID".into(), "abcd1234ffff".into());
     SpawnSpec {
-        cwd: PathBuf::from("/tmp/ws"),
+        cwd: PathBuf::from(cwd),
         task_id: "abcd1234-ffff-4000-8000-000000000001".into(),
         command: command.into_iter().map(str::to_string).collect(),
         env,
@@ -89,6 +93,27 @@ fn spec(command: Vec<&str>, placement: Option<PanePlacement>) -> SpawnSpec {
         placement,
         rename: None,
     }
+}
+
+/// The `session_command` shape a generated role workspace carries: the agent
+/// binary plus the flags that tie the pane to its client's session.
+fn session_command() -> Vec<&'static str> {
+    vec!["pi", "--session-id", "s-1", "--session-dir", ".pi/sessions"]
+}
+
+/// The spelling of `cwd` the backend owes herdr: absolute, since herdr resolves
+/// a relative `--cwd` against its own working directory.
+fn absolute_cwd(cwd: &str) -> String {
+    let path = Path::new(cwd);
+    std::path::absolute(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The `--cwd <value>` pair, for an argv window check.
+fn cwd_arg(cwd: &str) -> Vec<String> {
+    vec!["--cwd".into(), absolute_cwd(cwd)]
 }
 
 fn session_ref(pane: &str) -> SessionRef {
@@ -190,7 +215,7 @@ fn spawn_creates_workspace_and_tab_then_splits() {
     let (backend, script) = backend(script);
     let session = backend
         .spawn(spec(
-            vec!["pi"],
+            session_command(),
             Some(PanePlacement {
                 direction: SplitDirection::Right,
                 ratio: 0.5,
@@ -217,7 +242,7 @@ fn spawn_creates_workspace_and_tab_then_splits() {
             "--label",
             "onlyne:lab",
             "--cwd",
-            "/tmp/ws",
+            absolute_cwd("/tmp/ws").as_str(),
             "--no-focus",
         ]
     );
@@ -232,7 +257,7 @@ fn spawn_creates_workspace_and_tab_then_splits() {
             "--label",
             "planner",
             "--cwd",
-            "/tmp/ws",
+            absolute_cwd("/tmp/ws").as_str(),
             "--no-focus",
         ]
     );
@@ -242,7 +267,7 @@ fn spawn_creates_workspace_and_tab_then_splits() {
     assert!(split.windows(2).any(|w| w == ["--pane", "wF:p1"]));
     assert!(split.windows(2).any(|w| w == ["--direction", "right"]));
     assert!(split.windows(2).any(|w| w == ["--ratio", "0.5"]));
-    assert!(split.windows(2).any(|w| w == ["--cwd", "/tmp/ws"]));
+    assert!(split.windows(2).any(|w| w == cwd_arg("/tmp/ws")));
     assert!(split.iter().any(|arg| arg == "--no-focus"));
     assert!(
         split
@@ -254,6 +279,9 @@ fn spawn_creates_workspace_and_tab_then_splits() {
             .windows(2)
             .any(|w| w[0] == "--env" && w[1] == "ONLYNE_ROLE=planner")
     );
+    // herdr's usage is `agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS]
+    // [-- [AGENT_ARG]...]`, and the agent arguments belong to the pane: the
+    // session id and session directory are how the agent finds its client.
     assert_eq!(
         argv[5],
         vec![
@@ -266,8 +294,93 @@ fn spawn_creates_workspace_and_tab_then_splits() {
             "wF:p2",
             "--timeout",
             "25000",
+            "--",
+            "--session-id",
+            "s-1",
+            "--session-dir",
+            ".pi/sessions",
         ]
     );
+}
+
+#[test]
+fn spawn_sends_no_separator_for_a_bare_agent_command() {
+    let script = Script::default()
+        .reply(0, envelope(serde_json::json!({"workspaces": []})))
+        .reply(0, create_workspace())
+        .reply(0, envelope(serde_json::json!({"tabs": []})))
+        .reply(0, create_tab())
+        .reply(0, split_pane())
+        .reply(0, agent_started());
+    let (backend, script) = backend(script);
+    backend
+        .spawn(spec(
+            vec!["pi"],
+            Some(PanePlacement {
+                direction: SplitDirection::Right,
+                ratio: 0.5,
+            }),
+        ))
+        .unwrap();
+    let started = script
+        .argv()
+        .into_iter()
+        .find(|args| args.first().map(String::as_str) == Some("agent"))
+        .unwrap();
+    assert_eq!(
+        started,
+        vec![
+            "agent",
+            "start",
+            "onlyne-planner-abcd1234",
+            "--kind",
+            "pi",
+            "--pane",
+            "wF:p2",
+            "--timeout",
+            "25000",
+        ]
+    );
+}
+
+#[test]
+fn spawn_sends_an_absolute_cwd_for_a_relative_workspace() {
+    // The first real run of a formal-research tree had `onlyne-client run
+    // --workspace ws/formal/...`, and herdr resolved that against its own
+    // working directory, so every session pane opened in `$HOME`.
+    let script = Script::default()
+        .reply(0, envelope(serde_json::json!({"workspaces": []})))
+        .reply(0, create_workspace())
+        .reply(0, envelope(serde_json::json!({"tabs": []})))
+        .reply(0, create_tab())
+        .reply(0, split_pane())
+        .reply(0, agent_started());
+    let (backend, script) = backend(script);
+    backend
+        .spawn(spec_at(
+            session_command(),
+            "ws/formal/research/planner",
+            None,
+        ))
+        .unwrap();
+    let cwd = absolute_cwd("ws/formal/research/planner");
+    assert!(Path::new(&cwd).is_absolute(), "{cwd}");
+    let argv = script.argv();
+    let pair = cwd_arg("ws/formal/research/planner");
+    for (group, verb) in [
+        ("workspace", "create"),
+        ("tab", "create"),
+        ("pane", "split"),
+    ] {
+        let args = argv
+            .iter()
+            .find(|args| {
+                args.first().map(String::as_str) == Some(group)
+                    && args.get(1).map(String::as_str) == Some(verb)
+            })
+            .unwrap_or_else(|| panic!("no `herdr {group} {verb}` in {argv:?}"));
+        assert!(args.windows(2).any(|w| w == pair), "{args:?}");
+    }
 }
 
 #[test]
@@ -340,7 +453,7 @@ fn spawn_falls_back_to_pane_run_for_unknown_kind() {
     let (backend, script) = backend(script);
     let session = backend
         .spawn(spec(
-            vec!["echo", "hello world"],
+            vec!["echo", "hello world", "--session-id", "s-1"],
             Some(PanePlacement {
                 direction: SplitDirection::Right,
                 ratio: 0.5,
@@ -365,9 +478,9 @@ fn spawn_falls_back_to_pane_run_for_unknown_kind() {
     assert_eq!(run[0], "pane");
     assert_eq!(run[2], "wF:p2");
     #[cfg(unix)]
-    assert_eq!(run[3], "'echo' 'hello world'");
+    assert_eq!(run[3], "'echo' 'hello world' '--session-id' 's-1'");
     #[cfg(windows)]
-    assert_eq!(run[3], "\"echo\" \"hello world\"");
+    assert_eq!(run[3], "\"echo\" \"hello world\" \"--session-id\" \"s-1\"");
     assert_eq!(run.len(), 4);
 }
 
@@ -387,7 +500,7 @@ fn spawn_falls_back_to_pane_run_when_agent_start_fails() {
     let (backend, script) = backend(script);
     backend
         .spawn(spec(
-            vec!["pi"],
+            session_command(),
             Some(PanePlacement {
                 direction: SplitDirection::Right,
                 ratio: 0.5,
@@ -395,9 +508,19 @@ fn spawn_falls_back_to_pane_run_when_agent_start_fails() {
         ))
         .unwrap();
     let argv = script.argv();
+    let started = argv
+        .iter()
+        .find(|args| args.get(1).map(String::as_str) == Some("start"))
+        .unwrap();
     assert!(
-        argv.iter()
-            .any(|args| args.get(1).map(String::as_str) == Some("start"))
+        started.ends_with(&[
+            "--".to_string(),
+            "--session-id".into(),
+            "s-1".into(),
+            "--session-dir".into(),
+            ".pi/sessions".into(),
+        ]),
+        "{started:?}"
     );
     let run = argv
         .iter()
@@ -405,6 +528,176 @@ fn spawn_falls_back_to_pane_run_when_agent_start_fails() {
         .unwrap();
     assert_eq!(run[0], "pane");
     assert_eq!(run[2], "wF:p2");
+    // The fallback shell line carries the same arguments, so a pane herdr
+    // refuses to manage still reaches its client.
+    #[cfg(unix)]
+    assert_eq!(
+        run[3],
+        "'pi' '--session-id' 's-1' '--session-dir' '.pi/sessions'"
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        run[3],
+        "\"pi\" \"--session-id\" \"s-1\" \"--session-dir\" \".pi/sessions\""
+    );
+}
+
+#[test]
+fn workspace_create_warns_with_the_rename_remedy() {
+    // The lookup keys on the label alone, so an operator working in a workspace
+    // under another label gets a fresh sibling. The warning is the record that
+    // explains the extra workspace, and it carries the rename that ends it.
+    let warns = Warns::default();
+    let script = Script::default()
+        .reply(0, envelope(serde_json::json!({"workspaces": []})))
+        .reply(0, create_workspace())
+        .reply(0, envelope(serde_json::json!({"tabs": []})))
+        .reply(0, create_tab())
+        .reply(0, split_pane())
+        .reply(0, agent_started());
+    let (backend, script) = backend(script);
+    let session = tracing::subscriber::with_default(warns.clone(), || {
+        backend
+            .spawn(spec(
+                session_command(),
+                Some(PanePlacement {
+                    direction: SplitDirection::Right,
+                    ratio: 0.5,
+                }),
+            ))
+            .unwrap()
+    });
+    assert_eq!(session.backend_ref["herdr"]["workspace_id"], "wF");
+    assert_eq!(
+        session.backend_ref["herdr"]["workspace_label"],
+        "onlyne:lab"
+    );
+    let create = script
+        .argv()
+        .into_iter()
+        .find(|args| {
+            args.first().map(String::as_str) == Some("workspace")
+                && args.get(1).map(String::as_str) == Some("create")
+        })
+        .unwrap();
+    assert!(create.windows(2).any(|w| w == ["--label", "onlyne:lab"]));
+    let line = warns
+        .lines()
+        .into_iter()
+        .find(|line| line.contains("workspace rename"))
+        .unwrap_or_else(|| panic!("no rename remedy in the warnings: {warns:?}"));
+    assert!(line.contains(r#"label = "onlyne:lab""#), "{line}");
+    assert!(line.contains(r#"workspace_id = "wF""#), "{line}");
+    assert!(
+        line.contains("herdr workspace rename <WORKSPACE_ID> onlyne:lab"),
+        "{line}"
+    );
+}
+
+#[test]
+fn a_found_workspace_emits_no_rename_remedy() {
+    // The labelled workspace is the ordinary case after the first spawn, and a
+    // warning on every one of them would bury the signal.
+    let warns = Warns::default();
+    let script = Script::default()
+        .reply(
+            0,
+            envelope(serde_json::json!({
+                "workspaces": [{
+                    "workspace_id": "wF",
+                    "label": "onlyne:lab"
+                }]
+            })),
+        )
+        .reply(
+            0,
+            envelope(serde_json::json!({
+                "tabs": [{
+                    "tab_id": "wF:t1",
+                    "label": "planner",
+                    "pane_count": 2,
+                    "workspace_id": "wF"
+                }]
+            })),
+        )
+        .reply(
+            0,
+            envelope(serde_json::json!({
+                "panes": [{
+                    "pane_id": "wF:p1",
+                    "tab_id": "wF:t1",
+                    "workspace_id": "wF",
+                    "focused": true
+                }]
+            })),
+        )
+        .reply(0, split_pane())
+        .reply(0, agent_started());
+    let (backend, script) = backend(script);
+    tracing::subscriber::with_default(warns.clone(), || {
+        backend.spawn(spec(session_command(), None)).unwrap()
+    });
+    assert!(
+        warns
+            .lines()
+            .iter()
+            .all(|line| !line.contains("workspace rename")),
+        "{:?}",
+        warns.lines()
+    );
+    assert!(
+        script
+            .argv()
+            .iter()
+            .all(|args| !(args[0] == "workspace" && args[1] == "create")),
+        "{:?}",
+        script.argv()
+    );
+}
+
+/// Collects the warn-level messages one call emits, so a test can read an
+/// operator-facing remedy the way the log does.
+#[derive(Clone, Debug, Default)]
+struct Warns(Arc<Mutex<Vec<String>>>);
+
+impl Warns {
+    fn lines(&self) -> Vec<String> {
+        self.0.lock().clone()
+    }
+}
+
+struct WarnRecord(Vec<String>);
+
+impl tracing::field::Visit for WarnRecord {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.push(format!("{} = {:?}", field.name(), value));
+    }
+}
+
+/// Spans are outside what these tests read, so the span half of the trait
+/// stays inert and only `enabled` plus `event` carry meaning.
+impl tracing::Subscriber for Warns {
+    fn enabled(&self, meta: &tracing::Metadata<'_>) -> bool {
+        meta.level() <= &tracing::Level::WARN
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut record = WarnRecord(Vec::new());
+        event.record(&mut record);
+        self.0.lock().push(record.0.join(", "));
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
 }
 
 #[test]
@@ -458,6 +751,28 @@ fn close_sends_pane_close() {
         .close(&session_ref("wF:p2"), CloseReason::Completed, true)
         .unwrap();
     assert_eq!(script.argv(), vec![vec!["pane", "close", "wF:p2"]]);
+}
+
+#[test]
+fn herdr_pane_close_is_idempotent_only_for_a_missing_pane() {
+    let missing = Script::default().reply_err(
+        1,
+        r#"{"error":{"code":"pane_not_found","message":"pane wF:p2 not found"},"id":"cli:pane:close"}"#,
+    );
+    let (missing_backend, _) = backend(missing);
+    missing_backend
+        .close(&session_ref("wF:p2"), CloseReason::Completed, false)
+        .expect("a missing pane already satisfies close");
+
+    let refused = Script::default().reply_err(
+        1,
+        r#"{"error":{"code":"session_unavailable","message":"session is unavailable"},"id":"cli:pane:close"}"#,
+    );
+    let (backend, _) = backend(refused);
+    let error = backend
+        .close(&session_ref("wF:p2"), CloseReason::Completed, false)
+        .expect_err("a different close failure remains visible");
+    assert!(error.to_string().contains("session_unavailable"), "{error}");
 }
 
 #[test]

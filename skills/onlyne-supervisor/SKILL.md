@@ -32,7 +32,12 @@ queueing, and ACL are mechanics. Every call is yours, together with the spec fil
    it fails: exit 4, and the output is deleted. Move a generated directory wherever you
    want — `mv`, then `onlyne client run --workspace <new-path>` in the foreground;
    whoever wants it backgrounded starts it that way. That is the whole relocation
-   story.
+   story. A client started inside herdr places sessions in a workspace labelled
+   `onlyne:<cluster>` and a tab named for the role, so before those sessions spawn,
+   point the backend at the workspace you use: `herdr workspace rename <WORKSPACE_ID>
+   onlyne:<cluster>` and `herdr tab rename <TAB_ID> <role>`. A label that differs yields
+   a second workspace, and the client logs a warning naming the label and the workspace
+   it created.
 4. Append the fragments to `spec.toml`, then run `onlyne reload`. `onlyne spec-diff` shows
    the pending delta first. The spec file is the only truth; there is no runtime config API.
 
@@ -87,8 +92,16 @@ keeps the settled completion either way. Both kinds open once per task and stay 
 
 `stalled` is the client's own report: a session whose projection tuple froze for
 `stall_report_secs` (1800 default, 0 disables) faults once per episode. No-op beats keep the
-row beating; `stalled` is the progress verdict beside the liveness one. `control probe` first,
-then `recycle` or `repair retry` as the answer demands.
+row beating; `stalled` is the progress verdict beside the liveness one. The verdict means real
+silence on live work: the client checks the stored lifecycle at the scan and again at the send
+boundary, so a session that already completed has its progress clock retired before any fault
+fires. `control probe` first, then `recycle` or `repair retry` as the answer demands.
+
+A finished session takes its host resource with it. The client closes the pane, tab, zellij
+session, or exec child once that session holds no task and its agent has detached, and the
+client log records the closure with `retiring idle session resource`. An idle pane still open
+in front of you means its agent remains attached — the `reuse` case — or the owning client is
+down.
 
 Automatic re-delivery rides two spec gates: `[server].requeue_max_attempts` (0 unlimited) lands
 a starving row as `rejected` with reason `requeue_exhausted`, and `[server].requeue_ttl_secs`

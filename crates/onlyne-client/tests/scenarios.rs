@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use onlyne_adapter::AdapterIo;
+use onlyne_adapter::{AdapterIo, WireMessage};
 use onlyne_client::{
     accept::AcceptPath,
     adapter_socket::AdapterSocket,
@@ -159,11 +159,26 @@ fn permissions_mode_600_for_role_key_and_socket() {
     std::fs::write(&sock_path, "stale").unwrap();
     assert!(sock_path.exists());
 
-    let listener = rt.block_on(adapter.bind()).unwrap();
+    let (listener, endpoint) = rt.block_on(adapter.bind()).unwrap();
+    assert_eq!(
+        endpoint.actual(),
+        sock_path.as_path(),
+        "the bound endpoint is the path the accessor named: {}",
+        endpoint.actual().display(),
+    );
+    assert!(
+        endpoint.marker().exists(),
+        "the bind publishes the served path in {}",
+        endpoint.marker().display(),
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let sock_mode = std::fs::metadata(&sock_path).unwrap().permissions().mode() & 0o777;
+        let sock_mode = std::fs::metadata(endpoint.actual())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(sock_mode, 0o600);
     }
     drop(listener);
@@ -852,8 +867,8 @@ async fn exited_sessions_do_not_hold_the_capacity_cap() {
     assert_ne!(fourth, first);
     assert_eq!(
         backend.sessions().len(),
-        4,
-        "every task spawned its own resource"
+        3,
+        "the completion resource retired and each bound exited task kept its resource"
     );
     // The rows behind the cap spend nothing and stay readable.
     assert_eq!(
@@ -1717,6 +1732,8 @@ async fn report_when_link_down_lands_in_intents() {
 struct ReasonBackend {
     inner: FakeBackend,
     reasons: Arc<parking_lot::Mutex<Vec<onlyne_session::CloseReason>>>,
+    closed_sessions: Arc<parking_lot::Mutex<Vec<onlyne_session::SessionRef>>>,
+    fail_close: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl onlyne_session::SessionBackend for ReasonBackend {
@@ -1736,7 +1753,9 @@ impl onlyne_session::SessionBackend for ReasonBackend {
         &self,
         session: &onlyne_session::SessionRef,
     ) -> anyhow::Result<onlyne_session::SessionRef> {
-        self.inner.attach(session)
+        let mut refreshed = self.inner.attach(session)?;
+        refreshed.backend_ref["refreshed"] = serde_json::Value::Bool(true);
+        Ok(refreshed)
     }
     fn probe(
         &self,
@@ -1751,6 +1770,10 @@ impl onlyne_session::SessionBackend for ReasonBackend {
         force: bool,
     ) -> anyhow::Result<()> {
         self.reasons.lock().push(reason);
+        self.closed_sessions.lock().push(session.clone());
+        if self.fail_close.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow::anyhow!("recorded close failure"));
+        }
         self.inner.close(session, reason, force)
     }
 }
@@ -1909,6 +1932,19 @@ fn the_live_dispatch_leaves_pane_placement_to_the_backend() {
     assert_eq!(
         specs[0].env.get("ONLYNE_SESSION_ID").map(String::as_str),
         Some(task_id.as_str())
+    );
+    // The socket travels with the identity: the spawn site resolves the same
+    // workspace root that lands in `cwd`, so the session reaches the client that
+    // spawned it through the path that one tree serves.
+    assert_eq!(
+        specs[0].env.get("ONLYNE_SOCKET").map(String::as_str),
+        Some(
+            onlyne_layout::RoleWorkspace::resolve(dir.path())
+                .socket_path()
+                .to_string_lossy()
+                .as_ref()
+        ),
+        "the session is handed the served socket of its own workspace"
     );
 }
 
@@ -2126,6 +2162,105 @@ async fn mount_plugin(
     (io, assigns_rx)
 }
 
+async fn complete_plugin(io: &AdapterIo, task_id: &str, outcome: Outcome) {
+    let body = io
+        .request(AdapterMsg::Plugin(PluginOp::Report(Report::Complete {
+            task_id: task_id.to_string(),
+            outcome,
+            head: Some("done".into()),
+            reply_to: None,
+            cluster_ref: None,
+        })))
+        .await
+        .expect("the completion report is answered");
+    assert!(body.ok, "the completion report is accepted: {body:?}");
+}
+
+async fn mount_raw_plugin(socket: &Path, session: &str) -> onlyne_layout::LocalStream {
+    let mut stream = onlyne_layout::connect_local(socket)
+        .await
+        .expect("the role socket accepts a raw plugin");
+    let hello = HelloArgs {
+        protocol: PROTOCOL_VERSION,
+        plugin: "onlyne-agent-raw-test".into(),
+        version: "1.0.0".into(),
+        kind: MountKind::Agent,
+        capabilities: vec![Capability::Report, Capability::Inject, Capability::Recycle],
+        mount: Some(Mount::Agent(AgentMount {
+            role: "planner".into(),
+            session: Some(session.to_string()),
+            task_id: Some(session.to_string()),
+            pid: None,
+        })),
+    };
+    write_frame(
+        &mut stream,
+        &WireMessage {
+            id: Some(1),
+            reply_to: None,
+            msg: AdapterMsg::Plugin(PluginOp::Hello(hello)),
+        },
+    )
+    .await
+    .unwrap();
+    let welcome = read_frame::<_, WireMessage>(&mut stream)
+        .await
+        .unwrap()
+        .expect("the raw plugin receives welcome");
+    assert!(
+        matches!(&welcome.msg, AdapterMsg::Res(body) if body.ok),
+        "the raw plugin is admitted: {:?}",
+        welcome.msg
+    );
+    loop {
+        let frame = read_frame::<_, WireMessage>(&mut stream)
+            .await
+            .unwrap()
+            .expect("the raw plugin connection stays open for assign");
+        if let AdapterMsg::Host(HostOp::Assign(assign)) = frame.msg {
+            assert_eq!(assign.task_id, session);
+            return stream;
+        }
+    }
+}
+
+async fn complete_raw_plugin(
+    stream: &mut onlyne_layout::LocalStream,
+    task_id: &str,
+    outcome: Outcome,
+) {
+    write_frame(
+        &mut *stream,
+        &WireMessage {
+            id: Some(2),
+            reply_to: None,
+            msg: AdapterMsg::Plugin(PluginOp::Report(Report::Complete {
+                task_id: task_id.to_string(),
+                outcome,
+                head: Some("done".into()),
+                reply_to: None,
+                cluster_ref: None,
+            })),
+        },
+    )
+    .await
+    .unwrap();
+    loop {
+        let frame = read_frame::<_, WireMessage>(&mut *stream)
+            .await
+            .unwrap()
+            .expect("the raw completion receives a response");
+        if frame.reply_to == Some(2) {
+            assert!(
+                matches!(&frame.msg, AdapterMsg::Res(body) if body.ok),
+                "the raw completion is accepted: {:?}",
+                frame.msg
+            );
+            return;
+        }
+    }
+}
+
 /// Poll a state predicate so a socket-level hand-off is never raced.
 async fn eventually(mut predicate: impl FnMut() -> bool, what: &str) {
     for _ in 0..400 {
@@ -2232,7 +2367,8 @@ async fn reuse_off_gives_the_second_task_its_own_session_and_connection() {
         .expect("the plugin connection is still open");
     assert_eq!(assigned, first_task);
 
-    // It completes; no reuse means the slot goes with the settled task.
+    // It completes while its attached transport keeps the resource tracked.
+    // `reuse = false` reserves the next task for a separate session.
     on_plugin_report(
         &state,
         Report::Complete {
@@ -2247,8 +2383,8 @@ async fn reuse_off_gives_the_second_task_its_own_session_and_connection() {
     .unwrap();
     assert_eq!(
         state.session_count(),
-        0,
-        "without reuse a settled session leaves the live map"
+        1,
+        "the attached settled resource stays tracked until its agent leaves"
     );
     assert_settled(&store, &first_task);
     assert!(
@@ -2373,10 +2509,269 @@ async fn an_idle_session_whose_plugin_left_is_not_reused() {
     let second_task = deliver(&state, &task_delivery("task B")).await;
     assert_eq!(
         backend.sessions().len(),
-        2,
-        "a session whose plugin left cannot carry the next task"
+        1,
+        "the retired resource leaves one live replacement"
     );
+    assert!(backend.sessions().contains_key(&second_task));
     let _second_io = mount_plugin(&socket, Some(&second_task)).await;
+    host.abort();
+}
+
+#[tokio::test]
+async fn automatic_retirement_survives_a_backend_close_failure() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    backend
+        .fail_close
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        true,
+        backend.clone(),
+        store.clone(),
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+
+    let envelope = sample_envelope("planner", "task A");
+    let task_id = envelope.task_id().unwrap().to_string();
+    dispatch(&state, &envelope).unwrap();
+    on_plugin_report(
+        &state,
+        Report::Complete {
+            task_id: task_id.clone(),
+            outcome: Outcome::Done,
+            head: Some("done".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .expect("a retirement close failure stays local to cleanup");
+
+    assert_eq!(backend.closed_sessions.lock().len(), 1);
+    assert_eq!(state.session_count(), 0, "the unusable slot leaves routing");
+    assert_eq!(
+        projection_of(&store.get_session(&task_id).unwrap().unwrap()).resource,
+        onlyne_proto::ResourcePhase::Closed
+    );
+}
+
+#[tokio::test]
+async fn graceful_detach_retires_the_completed_session_resource() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        true,
+        backend.clone(),
+        store.clone(),
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    let task_id = deliver(&state, &task_delivery("task A")).await;
+    let (io, mut assigns) = mount_plugin(&socket, Some(&task_id)).await;
+    assert_eq!(assigns.recv().await.as_deref(), Some(task_id.as_str()));
+    complete_plugin(&io, &task_id, Outcome::Done).await;
+    assert!(backend.closed_sessions.lock().is_empty());
+
+    io.notify(AdapterMsg::Plugin(PluginOp::Detach(DetachArgs {
+        reason: "session complete".into(),
+    })))
+    .await
+    .unwrap();
+    eventually(
+        || backend.closed_sessions.lock().len() == 1,
+        "the detached session resource to close",
+    )
+    .await;
+
+    let closed = backend.closed_sessions.lock();
+    assert_eq!(closed[0].task_id, task_id);
+    assert_eq!(closed[0].backend_ref["refreshed"], true);
+    assert_eq!(
+        backend.reasons.lock().as_slice(),
+        [onlyne_session::CloseReason::Completed]
+    );
+    assert_eq!(state.session_count(), 0);
+    host.abort();
+}
+
+#[tokio::test]
+async fn completion_keeps_the_resource_while_the_plugin_is_attached() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        false,
+        backend.clone(),
+        store,
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    let task_id = deliver(&state, &task_delivery("task A")).await;
+    let (io, mut assigns) = mount_plugin(&socket, Some(&task_id)).await;
+    assert_eq!(assigns.recv().await.as_deref(), Some(task_id.as_str()));
+    complete_plugin(&io, &task_id, Outcome::Done).await;
+
+    assert!(backend.closed_sessions.lock().is_empty());
+    assert_eq!(
+        state.session_count(),
+        1,
+        "the attached resource stays tracked"
+    );
+    assert!(state.session_transport(&task_id).is_some());
+    host.abort();
+}
+
+#[tokio::test]
+async fn connection_loss_without_detach_keeps_the_completed_resource() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        true,
+        backend.clone(),
+        store,
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    let task_id = deliver(&state, &task_delivery("task A")).await;
+    let mut stream = mount_raw_plugin(&socket, &task_id).await;
+    complete_raw_plugin(&mut stream, &task_id, Outcome::Done).await;
+    drop(stream);
+    eventually(
+        || state.session_transport(&task_id).is_none(),
+        "the dropped connection binding to clear",
+    )
+    .await;
+
+    assert!(backend.closed_sessions.lock().is_empty());
+    assert_eq!(
+        state.session_count(),
+        1,
+        "the reconnectable resource stays tracked"
+    );
+    host.abort();
+}
+
+#[tokio::test]
+async fn ended_connection_forgets_its_inflight_stall_clock() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        true,
+        backend.clone(),
+        store,
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    let task_id = deliver(&state, &task_delivery("task A")).await;
+    let (io, mut assigns) = mount_plugin(&socket, Some(&task_id)).await;
+    assert_eq!(assigns.recv().await.as_deref(), Some(task_id.as_str()));
+    io.notify(AdapterMsg::Plugin(PluginOp::SessionRegister(
+        onlyne_proto::SessionRegisterArgs {
+            session_id: "terminated".into(),
+            pid: None,
+            generation: 1,
+            title: None,
+            task_id: Some(task_id.clone()),
+        },
+    )))
+    .await
+    .unwrap();
+    eventually(
+        || state.session_transport(&task_id).is_none(),
+        "the ended connection binding to clear",
+    )
+    .await;
+
+    assert!(
+        state
+            .stall_due(Instant::now() + Duration::from_secs(3600), 1)
+            .is_empty(),
+        "the ended transport leaves no future stall report"
+    );
+    assert_eq!(state.session_count(), 1, "the in-flight slot stays tracked");
+    assert!(backend.closed_sessions.lock().is_empty());
+    host.abort();
+}
+
+#[tokio::test]
+async fn periodic_reclaim_closes_an_exited_session_after_connection_loss() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        true,
+        backend.clone(),
+        store.clone(),
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    let task_id = deliver(&state, &task_delivery("task A")).await;
+    let (io, mut assigns) = mount_plugin(&socket, Some(&task_id)).await;
+    assert_eq!(assigns.recv().await.as_deref(), Some(task_id.as_str()));
+    complete_plugin(&io, &task_id, Outcome::Done).await;
+    assert_eq!(
+        projection_of(&store.get_session(&task_id).unwrap().unwrap()).lifecycle,
+        Lifecycle::Exited
+    );
+    io.notify(AdapterMsg::Plugin(PluginOp::SessionRegister(
+        onlyne_proto::SessionRegisterArgs {
+            session_id: "terminated".into(),
+            pid: None,
+            generation: 1,
+            title: None,
+            task_id: Some(task_id.clone()),
+        },
+    )))
+    .await
+    .unwrap();
+    eventually(
+        || state.session_transport(&task_id).is_none(),
+        "the ended connection binding to clear",
+    )
+    .await;
+    assert!(backend.closed_sessions.lock().is_empty());
+
+    state.reclaim_exited_resources();
+
+    assert_eq!(backend.closed_sessions.lock()[0].task_id, task_id);
+    assert_eq!(
+        backend.reasons.lock().as_slice(),
+        [onlyne_session::CloseReason::Completed]
+    );
+    assert_eq!(state.session_count(), 0);
     host.abort();
 }
 

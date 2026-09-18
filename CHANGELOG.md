@@ -1,5 +1,130 @@
 # Changelog
 
+## [Unreleased]
+
+Scope: the socket-path field fix reported 2026-09-17 from the formal-research
+tree, plus the herdr argv fixes from the same session. On macOS `sun_path`
+holds 104 bytes including its NUL, and a generated role workspace nests three
+levels below its server root
+(`<root>/.onlyne/ws/<topology>/<role>/.onlyne/run/s`), so seven of the eleven
+clients in that swarm could not bind the adapter socket. Each logged
+`adapter socket restarting error=bind <path>` on a half-second loop, the pi
+plugin logged `connect EINVAL <path>`, and `onlyne status` kept reading
+`connected_roles=11`: the TLS half of every role was healthy, the local half
+was dead, and nothing said so. The same run reported the fifth field defect — a
+completed session kept its host pane alive — and its companion: a task already
+acked as complete was reported `stalled` half an hour later.
+
+### Added
+
+- layout: `SocketEndpoint` with `socket_path()`/`bind_socket` on both owner
+  trees. On unix a daemon binds the canonical `<root>/.onlyne/run/s` while that
+  path fits `UNIX_SOCKET_PATH_MAX` = 103 bytes, and past the bound a short
+  derived path `<temp_dir>/onlyne-<16hex>/s` (the hex is a sha256 prefix over
+  the canonical owner root). The bound path is published in
+  `<root>/.onlyne/run/socket` (mode `0600`, one path plus a newline), and every
+  finder — the `onlyne` CLI, `onlyne-tui`, the fake agent, the pi plugin —
+  reaches the served path through the owner tree. Files:
+  `crates/onlyne-layout/src/lib.rs`, `crates/onlyne-layout/src/local_socket.rs`.
+- client and cli: the client injects the served adapter-socket path into every
+  session it spawns as `ONLYNE_SOCKET`, and the `onlyne` CLI honors
+  `ONLYNE_SOCKET` — after `--socket`, before `--server-root`/`--workspace` — so
+  a shell inside a role pane reaches the socket without spelling it. Files:
+  `crates/onlyne-client/src/dispatch.rs`, `crates/onlyne-cli/src/flags.rs`,
+  `crates/onlyne-cli/src/socket.rs`.
+- e2e: verification case 17 `socket-path-length.sh` builds a workspace whose
+  canonical socket path is past 103 bytes with padding, runs the client and the
+  fake agent there, asserts the served path is short, published in
+  `run/socket`, holding a bound socket, with the canonical path left bare and
+  the client log naming the served path; then `onlyne --workspace <deep ws>
+  who` answers `planner` and one task settles `acked` with the session
+  `exited`/`done`. File: `crates/onlyne-testkit/e2e/socket-path-length.sh`.
+
+### Changed
+
+- session: `herdr agent start <name> --kind <k> --pane <id> --timeout 25000`
+  carries the `session_command` tail after `--`
+  (`-- --session-id <id> --session-dir .pi/sessions`), the call shape herdr
+  0.9.0 documents; the same argv without the separator answers `unknown
+  option: --session-id` with exit 2. `--cwd` travels absolute in `workspace
+  create`, `tab create`, and `pane split`, since herdr resolves a relative
+  `--cwd` against its own working directory. The create path for a herdr
+  workspace now warns with the label, the new `workspace_id`, and the remedy
+  `herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>`. File:
+  `crates/onlyne-session/src/backend/herdr.rs`.
+- client: `onlyne-client run --workspace <rel>` resolves the workspace to an
+  absolute path before use. File: `crates/onlyne-client/src/main.rs`.
+- cli and tui: socket discovery resolves through the owner tree — a directory
+  owns a surface when `.onlyne/run/s` or `.onlyne/run/socket` answers — so the
+  walk reaches a deep workspace's short served path. Files:
+  `crates/onlyne-cli/src/socket.rs`, `crates/onlyne-tui/src/socket.rs`,
+  `crates/onlyne-testkit/src/lib.rs`.
+- e2e: live verification case 13 `herdr-live.sh` now closes the resource loop.
+  The case reads the session pane's shell pid through `herdr pane
+  process-info`, drives `onlyne control ... recycle` on that session, then
+  asserts the pane id is gone from `herdr pane list` and `kill -0` finds the
+  recorded pid gone, with the tab's `pane_count` back to 1 and the surviving
+  pane still the recorded root. The SIGTERM drain follows the closed session, and
+  the case keeps its `SKIP herdr-live` discipline plus its cleanup of every
+  workspace it created. File: `crates/onlyne-testkit/e2e/herdr-live.sh`.
+
+### Fixed
+
+- client: a session's host resource retires with the session. The observed shape
+  was a planner tab holding three panes — two empty shells left behind by
+  completed sessions plus the live one — and two older residuals still running a
+  full `pi` process tree (`volta-shim` → `node` → `bun`) after their sessions
+  read `lifecycle=exited`; each needed a manual `herdr pane close`. The rule
+  now: a pane, tab, zellij session, or exec child closes when its session holds
+  no task and no plugin transport is attached. Three triggers carry that rule — a
+  graceful plugin `detach` closes the resources of the idle sessions that
+  connection served, a settle with no attached agent closes at settle time, and
+  the 250 ms readiness tick closes any idle tracked session that carries a stored
+  outcome while its stored lifecycle projects `Exited` and its agent is gone,
+  taking the reason from that outcome (`done` → `Completed`, `failed` → `Fault`,
+  `cancelled` → `Cancelled`).
+  A connection that ends without a `detach` keeps the resource for an agent that
+  may reconnect, and a settled session whose agent is still attached keeps it for
+  the next task `reuse` hands over. While the stored resource state is still
+  open, each retirement refreshes a stale reference through `backend.attach`,
+  projects `resource_closed`, and logs `retiring idle session resource` with the
+  task, backend, resource, and reason; a close failure lands as a warning. Files:
+  `crates/onlyne-client/src/dispatch.rs`, `crates/onlyne-client/src/runloop.rs`,
+  `crates/onlyne-client/src/adapter_socket.rs`.
+- client: a completed task stays out of the stall watch. The shape on the wire
+  was a `stalled` fault with reason `no applied progress` landing 30 minutes (the
+  `stall_report_secs` default of 1800) after an acked completion — faults id 5 on
+  `da069be7` and id 7 on `53da164d`. When its previous beat read something other
+  than `idle`, the pi plugin answers one observation after the completion reply —
+  a heartbeat carrying `agent: "idle"` — and that heartbeat path called
+  `StallWatch::note_applied`, which opened a fresh progress clock for a task the
+  settle path had just forgotten. `note_applied` now refreshes an assigned clock,
+  a connection release forgets the clocks of the sessions it served, the due scan
+  suppresses and forgets any task whose stored lifecycle projects `Exited`, and
+  `stall_report` repeats that lifecycle check at the send boundary. Clearing the
+  non-working projection rows out of `state.db` left the fault intact, since the
+  clock lives in client memory, and a restart of that role's client stopped it.
+  Files: `crates/onlyne-client/src/stall.rs`,
+  `crates/onlyne-client/src/dispatch.rs`.
+- session: `herdr pane close` answering `pane_not_found` is a success. The close
+  logs `herdr pane already closed` at debug, so a workspace that disappeared on
+  its own stops reading as `session close failed during shutdown`. File:
+  `crates/onlyne-session/src/backend/herdr.rs`.
+- client: `onlyne-client run` exits 1 with `onlyne-client: bind the workspace
+  socket <canonical path>: <detail>` when the adapter socket cannot be bound —
+  the detail names the served path, both byte lengths, and the OS reason —
+  because a client whose local surface is dead still holds its TLS link and
+  still reads as connected. An `accept` error after a successful bind logs at
+  `error` level (`adapter socket accept failed; retrying`) and retries on a
+  100 ms interval with the listener held. The silent half-second rebind loop is
+  gone. Files: `crates/onlyne-client/src/runloop.rs`,
+  `crates/onlyne-client/src/adapter_socket.rs`,
+  `crates/onlyne-client/tests/scenarios.rs`.
+- server: `onlyne-server` logs the served path at startup — the short-path case
+  names both spellings with the canonical length — so the marker's answer is
+  visible in the log from the first line. File:
+  `crates/onlyne-server/src/admin.rs`.
+
 ## [1.1.0] - 2026-09-15
 
 Scope: the exec session backend as a first-class headless path, a Windows

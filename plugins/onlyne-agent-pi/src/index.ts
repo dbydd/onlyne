@@ -20,6 +20,7 @@ import { Type } from "typebox";
 import { OnlyneAgent } from "./agent.mjs";
 import { loadConfig, sessionIdentity } from "./config.mjs";
 import { loadRelay, relayEnabled } from "./relay.mjs";
+import { resolveSocketPath } from "./socket.mjs";
 import { createSurface } from "./pi-surface.mjs";
 
 /**
@@ -31,9 +32,6 @@ declare const process: {
   pid: number;
   stderr: { write(chunk: string): void };
 };
-
-/** Socket every role workspace serves; `crates/onlyne-client/src/adapter_socket.rs`. */
-const SOCKET_RELATIVE_PATH = ".onlyne/run/s";
 
 /** One image part handed to the pi message surface. */
 interface ImagePartInput {
@@ -235,7 +233,9 @@ export default function onlyne(pi: ExtensionAPI) {
       log(`disabled by ${config.path}`);
       return;
     }
-    const socketPath = env.ONLYNE_SOCKET || `${ctx.cwd}/${SOCKET_RELATIVE_PATH}`;
+    // Environment first (the client injects the path it serves), then the
+    // marker the daemon publishes, then the canonical `run/s` (socket.mjs).
+    const socketPath = resolveSocketPath(env, ctx.cwd);
     // The guard's policy comes from the spec through the client's environment;
     // a hand-written `relay.toml` beside the package is the fallback a manual
     // installation still has (relay.mjs).

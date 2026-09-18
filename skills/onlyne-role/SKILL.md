@@ -61,3 +61,9 @@ session on the other side.
 - When the server link drops, keep working: your running session still reaches its terminal
   state, and outgoing receipts persist as intents and flush after reconnect. Nothing needs
   your memory to bridge a gap.
+- Your pane sits in the operator's session host, addressed as a herdr workspace labelled
+  `onlyne:<cluster>` plus a tab named for your role. The operator points the backend at the
+  workspace they use by renaming it before sessions spawn: `herdr workspace rename
+  <WORKSPACE_ID> onlyne:<cluster>`, then `herdr tab rename <TAB_ID> <role>`. A label that
+  differs yields a second workspace, and the client logs a warning naming the label and the
+  workspace it created.

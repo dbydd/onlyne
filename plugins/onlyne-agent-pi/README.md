@@ -329,7 +329,7 @@ the shipped client.
 | `ONLYNE_ROLE` | yes | the mount role |
 | `ONLYNE_SESSION_ID` | yes | mounted session id; `session_id` equals `task_id` in the shipped client |
 | `ONLYNE_TASK_ID` | yes | the task this process serves; drives `session_register` and the initial `ready` |
-| `ONLYNE_SOCKET` | no | overrides the socket path (default `<cwd>/.onlyne/run/s`) |
+| `ONLYNE_SOCKET` | no | the socket the client serves for this workspace, injected into every session process it spawns; with the variable unset the plugin reads the marker `<cwd>/.onlyne/run/socket` for the path the daemon published, and falls back to `<cwd>/.onlyne/run/s` |
 | `ONLYNE_RELAY_REQUIRED` | no | the role's spec `relay_required`, comma-joined: the guard's list mode (§5) |
 | `ONLYNE_RELAY_COUNT` | no | the role's spec `relay_count`: the guard's count mode, which decides only when the list is empty (§5) |
 | `ORCA_PANE_KEY` | no | where this process runs (`<tab_id>:<leaf_id>`), reported on every heartbeat as `observed.host.orca.pane_key`; unset outside an Orca pane, which is why the field is then absent |
@@ -339,9 +339,10 @@ the shipped client.
 Constants worth knowing: the plugin heartbeats every 10 s (`heartbeat_timeout_ms` is 30 s),
 allows 5 s for `hello` and 30 s per request, and reconnects on a 1/2/4/8/16/30 s ladder.
 
-The plugin reads two files of its own: `<cwd>/.pi/onlyne.json` (the switch, §1) and
+The plugin reads three files of its own: `<cwd>/.pi/onlyne.json` (the switch, §1),
 `relay.toml` next to its `package.json` (the relay policy's fallback, read only when the
-client injected none, §5).
+client injected none, §5), and `<cwd>/.onlyne/run/socket` (the marker naming the socket
+path the client's daemon bound, read when the environment carried none, §8).
 
 ## 8. Troubleshooting
 
@@ -349,6 +350,7 @@ client injected none, §5).
 | --- | --- | --- |
 | `[pi-onlyne] session …` never appears | one of the three env vars is missing, or `enabled` is false | `env \| grep ONLYNE_`; `cat .pi/onlyne.json` |
 | `socket error: connect ENOENT …/.onlyne/run/s` | no `onlyne-client run` for this workspace | start the client, or `onlyne-client status` |
+| `socket error: connect EINVAL …/.onlyne/run/s` on a deep workspace | macOS gives `sun_path` 104 bytes, so a socket path past 103 is refused; a generated role workspace nests three levels under its server root and a long root carries the canonical spelling over the bound. The client serves such a workspace from a short path under the temporary directory and publishes it in `<workspace>/.onlyne/run/socket` | `onlyne-client status` for the line `onlyne: client running … socket <path>`, which names the served path, plus the client log line carrying `socket = <path>`; `cat <workspace>/.onlyne/run/socket` holds that same path, and the plugin dials it when the environment injected nothing |
 | `reconnecting in 4000ms` in a loop | the client is down or the socket was replaced | `onlyne --server-root … roles` |
 | `ready refused: internal: unknown session for …` | the plugin mounted and reported for a task the client never staged (normal when pi is started by hand outside a task) | start pi under the client, not by hand |
 | `assign` never arrives | the client's `session_command` did not spawn pi, or `inject` was dropped | the client log for the spawn line; `/onlyne status` for the capability set |
@@ -368,7 +370,7 @@ client injected none, §5).
 
 ```bash
 cd plugins/onlyne-agent-pi
-node --test src/*.test.mjs        # framing, protocol, agent state machine, config, relay guard
+node --test src/*.test.mjs        # framing, protocol, agent state machine, config, relay guard, socket path
 ```
 
 `src/agent.live.test.mjs` skips itself unless `target/debug/onlyne-client` and

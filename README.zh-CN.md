@@ -61,7 +61,7 @@ TUI 把同一件事画成活图——第 1 页是角色网络，第 2 页是集�
 | `onlyne-gateway` | 每进程一个聊天平台：telegram · feishu · qqbot · weixin，编译期 feature 门控。 |
 | `onlyne` | 人机薄入口：转发守护进程、直连 socket、输出 JSON。 |
 | `onlyne-tui` | 两页观测面板，走 admin socket。 |
-| `onlyne-agent-fake` | 脚本化假 agent，喂给 `crates/onlyne-testkit/e2e/` 下的十三份端到端证明。 |
+| `onlyne-agent-fake` | 脚本化假 agent，喂给 `crates/onlyne-testkit/e2e/` 下的十六份端到端证明。 |
 
 ```mermaid
 graph LR
@@ -80,9 +80,9 @@ graph LR
 
 **有自己生命周期的会话。** 角色通过屏幕后端拉起 coding agent：herdr pane、Orca 标签页、zellij 会话、无头 exec，或测试用的 fake。`ONLYNE_BACKEND` 的取值是 `herdr | orca | zellij | exec | fake | auto`。写出 `herdr`、`orca`、`zellij`、`exec` 或 `fake` 即选用该后端。空值或 `auto` 按 herdr → orca → zellij 探测。`exec` 与 `fake` 只在 `ONLYNE_BACKEND` 写出其名时启用。全无匹配时 `onlyne-client run` 以退出码 5 退出，文案为 `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`。会话生命周期是一张证明过的状态机——21 种事件走五条状态轴，有全表测试——同时喂给账本镜像和 TUI 的星号。
 
-herdr 层级：herdr session 由 client 进程环境继承，pane 内的 pi 子进程继续继承；workspace = 一个 server root/topology（label 为 `onlyne:<cluster>`）；tab = role；pane = 一个 onlyne session。`<cluster>` 取 server 自己的 `[server] name`：client 从 `welcome.cluster` 读到它，再以 `ONLYNE_CLUSTER` 交给它创建的每一个 pane。首个 welcome 之前拉起的 pane 没有这个变量，herdr 就用自己那个默认 label 的 workspace。关闭命令是 `herdr pane close`。id 形状为 `wF` / `wF:t1` / `wF:p1`。`onlyne-test` 这类命名 session 取 client 环境里已有的 `HERDR_SESSION`。client 的 `sessions` 行把地址记在 `backend_ref`：`workspace_id`、`tab_id`、`pane_id`、`agent`、`workspace_label`，加上传下来的分屏记录（`base_pane`、`split_direction`）。
+herdr 层级：herdr session 由 client 进程环境继承，pane 内的 pi 子进程继续继承；workspace = 一个 server root/topology（label 为 `onlyne:<cluster>`）；tab = role；pane = 一个 onlyne session。`<cluster>` 取 server 自己的 `[server] name`：client 从 `welcome.cluster` 读到它，再以 `ONLYNE_CLUSTER` 交给它创建的每一个 pane。首个 welcome 之前拉起的 pane 没有这个变量，herdr 就用自己那个默认 label 的 workspace。关闭命令是 `herdr pane close`。id 形状为 `wF` / `wF:t1` / `wF:p1`。`onlyne-test` 这类命名 session 取 client 环境里已有的 `HERDR_SESSION`。client 的 `sessions` 行把地址记在 `backend_ref`：`workspace_id`、`tab_id`、`pane_id`、`agent`、`workspace_label`，加上传下来的分屏记录（`base_pane`、`split_direction`）。后端按 label 认 herdr workspace（`onlyne:<cluster>`），按名字认 tab（role 自己的名字）。想让后端用上现有那个 workspace 或 tab，操作者在 client 拉起 session 之前先改名：`herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>`、`herdr tab rename <TAB_ID> <role>`。label 对不上的 workspace 会拿到第二个 workspace，tab 名对不上会拿到第二个 tab，这时 client 打一条 warning，点名该 label 与新建出来的 workspace。新建那一步的 warning 同时给出 label、新的 `workspace_id`，以及补救命令 `herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>`；`workspace create`、`tab create`、`pane split` 的 `--cwd` 一律以绝对路径递给 herdr，herdr 按自己的工作目录解析这条路径。
 
-spawn 双轨：`session_command` 首 token 命中已知 agent 名（`pi`、`omp` 以及 herdr `--kind` 表其余项）时执行 `herdr agent start <name> --kind <k> --pane <id> --timeout 25000`。首 token 不在该表里的命令执行 `herdr pane run <pane_id> '<一条 shell 行>'`。`pane run` 无 JSON 输出。命令经 `shell_quote` 拼成单个 argv token。分屏由 `PanePlacement::from_pane_count` 决定：`(count+1).is_power_of_two()` 映射为 `right`，其余 count 映射为 `down`，ratio 为 `0.5`。`count` 取自 `herdr tab list --workspace W` 的 `result.tabs[].pane_count`，缺字段按 0。生产 spawn 传入 `placement: None`。
+spawn 双轨：`session_command` 首 token 命中已知 agent 名（`pi`、`omp` 以及 herdr `--kind` 表其余项）时执行 `herdr agent start <name> --kind <k> --pane <id> --timeout 25000 -- --session-id <id> --session-dir .pi/sessions`：`--kind` 选定 token 0 指名的可执行文件，`session_command` 余下的 token 跟在 `--` 分隔符之后传给 agent，这正是 herdr 0.9.0 文档里的调用形态。首 token 不在该表里的命令执行 `herdr pane run <pane_id> '<一条 shell 行>'`。`pane run` 无 JSON 输出。命令经 `shell_quote` 拼成单个 argv token。分屏由 `PanePlacement::from_pane_count` 决定：`(count+1).is_power_of_two()` 映射为 `right`，其余 count 映射为 `down`，ratio 为 `0.5`。`count` 取自 `herdr tab list --workspace W` 的 `result.tabs[].pane_count`，缺字段按 0。生产 spawn 传入 `placement: None`。
 
 focus 链路：`herdr workspace focus <W>`，随后 `herdr tab focus <T>`（位置参数，恢复该 tab 上次聚焦的 pane）。managed agent 的 pane 再执行 `herdr agent focus <pane_id>`。`agent focus` 认 managed agent。`pane run` 拉起的 shell pane 会得到 `agent_not_found`。herdr 的 `pane focus` 形态是 `--pane <base_pane> --direction <split_direction>`，从该锚点走到邻居，所以分屏时记下的两个值就是把普通 shell pane 拿到的路径。`herdr pane get <pane_id>` 是确认那一步：`result.pane.focused` 要为 true，落在别的 pane 时报错并指名当前持焦的 pane。入口为 `onlyne control focus --task <id>` 与 TUI 的 `F` 键。`focus()` 失败记 `Report::Fault{kind:"focus"}`。
 
@@ -149,22 +149,24 @@ target/debug/onlyne-agent-fake --workspace "$tmp/planner" --script \
 target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-一行 JSON 回以 `data.state = "in_flight"`。随后该任务的账本行落到 `acked`，会话投影走到 `exited` 且 `outcome = "done"`。同一序列有可执行证明：`crates/onlyne-testkit/e2e/local-task.sh`，另有十一份姊妹脚本覆盖 ACL 拒收、幂等、断连补投、gateway 挂载、目录搬迁、双集群联邦。
+一行 JSON 回以 `data.state = "in_flight"`。随后该任务的账本行落到 `acked`，会话投影走到 `exited` 且 `outcome = "done"`。同一序列有可执行证明：`crates/onlyne-testkit/e2e/local-task.sh`，另有十五份姊妹脚本覆盖 ACL 拒收、幂等、断连补投、重启后的 hello 接管、gateway 挂载、目录搬迁、双集群联邦、无头 exec 路径（`exec-headless.sh`）、深路径工作区的 socket（`socket-path-length.sh`）。
 
 在 macOS 上把二进制拷进 `PATH` 要多做一步：拷出来的二进制如果代码签名和文件对不上，一 exec 就被杀，所以拷完要 ad-hoc 重签一下（`codesign --force --sign - ~/.cargo/bin/onlyne*`）。
 
 ## 数据在哪
 
 ```text
-<server-root>/.onlyne/          spec.toml · state.db · run/s（admin） · keys/ · templates/ · logs/
-<workspace>/.onlyne/            config.toml · client.db · run/s（adapter） · keys/ · logs/ · agent/
+<server-root>/.onlyne/          spec.toml · state.db · run/s（admin，规范名） · run/socket（记下实际服务的 socket 路径） · keys/ · templates/ · logs/
+<workspace>/.onlyne/            config.toml · client.db · run/s（adapter，规范名） · run/socket（记下实际服务的 socket 路径） · keys/ · logs/ · agent/
 ```
+
+unix 上每个守护进程绑定的都是规范名 `run/s`，前提是这条路径不超过 103 字节；目录树深过这条界限时，socket 落到系统临时目录下的短派生路径，`run/socket` 记下实际服务的那条路径。
 
 每个工作区自包含、可整搬：`onlyne server generate` 按模板生成角色工作区，产物里没有绝对路径，`mv` 之后 `onlyne client run` 在哪都能接上。旧布局与旧数据库到门口就 exit 2——v1.0.0 只认一套线格式、一张 schema、一种目录。
 
 ## 状态
 
-最新 tag 是 `v1.1.0`（`e2d0e15`），18 件 crate 已上册 crates.io。本机 `cargo test --workspace` 为 760 passed、0 failed、1 ignored（`herdr_live_probe`）。fake e2e 12/12。双平台 CI 全绿（run 34977562567）。macOS release 已 ad-hoc codesign 换装 `~/.cargo/bin`，`onlyne --version` 为 `1.1.0`。环图 TUI、supervisor demo、pi adapter 插件在 macOS 全绿；四个 IM gateway 以 feature-gated crate 交付，等待真平台浸泡。`cargo build --workspace` 需要 Rust 1.85。
+最新 tag 是 `v1.1.0`（`e2d0e15`），18 件 crate 已上册 crates.io。本机 `cargo test --workspace` 为 760 passed、0 failed、1 ignored（`herdr_live_probe`）。fake e2e 12/12。tag 之后加入的第 17 例 `socket-path-length.sh` 通过，fake 组达到 13/13。双平台 CI 全绿（run 34977562567）。macOS release 已 ad-hoc codesign 换装 `~/.cargo/bin`，`onlyne --version` 为 `1.1.0`。环图 TUI、supervisor demo、pi adapter 插件在 macOS 全绿；四个 IM gateway 以 feature-gated crate 交付，等待真平台浸泡。`cargo build --workspace` 需要 Rust 1.85。
 
 ## 阅读
 

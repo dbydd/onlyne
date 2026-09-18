@@ -23,6 +23,7 @@ workspace_id=""
 tab_id=""
 ref_pane=""
 root_pane=""
+pane_pid=""
 task=""
 workspace_closed=false
 
@@ -178,6 +179,16 @@ if cmd == "pane-absent":
 if cmd == "focused":
     pane = pane_of(sys.argv[2])
     sys.exit(0 if pane.get("focused") is True else 1)
+if cmd == "process-pid":
+    info = load(sys.argv[2])
+    nested = info.get("process_info")
+    if isinstance(nested, dict):
+        info = nested
+    pid = info.get("shell_pid")
+    if isinstance(pid, int) and pid > 1:
+        print(pid)
+        sys.exit(0)
+    sys.exit(1)
 if cmd == "snapshot":
     workspaces_path, panes_path = sys.argv[2], sys.argv[3]
     json.dump(
@@ -400,22 +411,41 @@ done
   "pane=$(cat "$tmp/pane-get.json" 2>/dev/null) err=$(cat "$tmp/pane-get.err" 2>/dev/null) focus=$focus_out client=$(cat "$tmp/client.log" 2>/dev/null)"
 printf 'PASS herdr-live focus: pane %s focused=true\n' "$ref_pane"
 
-# e. drain the client. The sleep pane closes; the role tab keeps its root pane.
-kill -TERM "$client_pid" 2>/dev/null || true
-drain_pid "$client_pid"
-client_pid=""
+# e. capture the process herdr reports for the session pane, then close the
+# session through the control surface.
+herdr_q pane process-info --pane "$ref_pane" >"$tmp/process-info.json" 2>"$tmp/process-info.err" \
+  || fail "pane process-info must describe the live session process" \
+    "pane=$ref_pane err=$(cat "$tmp/process-info.err" 2>/dev/null)"
+pane_pid=$(python3 "$tmp/herdr_case.py" process-pid "$tmp/process-info.json" 2>/dev/null) \
+  || fail "pane process-info must carry a shell_pid" \
+    "pane=$ref_pane info=$(cat "$tmp/process-info.json" 2>/dev/null)"
+kill -0 "$pane_pid" 2>/dev/null \
+  || fail "the process reported for the live pane must exist" "pane=$ref_pane pid=$pane_pid"
+
+recycle_out=$("$ONLYNE" --server-root "$tmp/server" control --from planner recycle \
+  --task "$task" --reason "herdr live close") \
+  || fail "control recycle --task failed" \
+    "out=$recycle_out client=$(cat "$tmp/client.log" 2>/dev/null)"
 
 pane_gone=false
+process_gone=false
 for _ in $(seq 1 150); do
   herdr_q pane list >"$tmp/panes.json" 2>"$tmp/panes.err" || true
   if python3 "$tmp/herdr_case.py" pane-absent "$tmp/panes.json" "$ref_pane" 2>/dev/null; then
     pane_gone=true
+  fi
+  if ! kill -0 "$pane_pid" 2>/dev/null; then
+    process_gone=true
+  fi
+  if [ "$pane_gone" = true ] && [ "$process_gone" = true ]; then
     break
   fi
   sleep 0.2
 done
-[ "$pane_gone" = true ] || fail "pane list must drop the drained pane id" \
-  "panes=$(cat "$tmp/panes.json" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
+[ "$pane_gone" = true ] || fail "pane list must drop the control-closed pane id" \
+  "panes=$(cat "$tmp/panes.json" 2>/dev/null) recycle=$recycle_out client=$(cat "$tmp/client.log" 2>/dev/null)"
+[ "$process_gone" = true ] || fail "the process inside the control-closed pane must exit" \
+  "pane=$ref_pane pid=$pane_pid recycle=$recycle_out client=$(cat "$tmp/client.log" 2>/dev/null)"
 
 set +e
 herdr_q pane get "$ref_pane" >"$tmp/pane-get-gone.out" 2>"$tmp/pane-get-gone.err"
@@ -437,13 +467,18 @@ for _ in $(seq 1 150); do
   fi
   sleep 0.2
 done
-[ "$count_back" = true ] || fail "role tab pane_count must return to 1 after drain" \
+[ "$count_back" = true ] || fail "role tab pane_count must return to 1 after control close" \
   "tabs=$(cat "$tmp/tabs.json" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
 [ "$survivor" = "$root_pane" ] \
   || fail "the tab root pane must survive the session pane" \
     "survivor=$survivor root=$root_pane"
-printf 'PASS herdr-live drain: pane %s gone, pane_not_found, pane_count=1, root %s kept\n' \
-  "$ref_pane" "$root_pane"
+printf 'PASS herdr-live control close: pane %s gone, process %s gone, pane_count=1, root %s kept\n' \
+  "$ref_pane" "$pane_pid" "$root_pane"
+
+# f. drain the client after the closed session has released its host resource.
+kill -TERM "$client_pid" 2>/dev/null || true
+drain_pid "$client_pid"
+client_pid=""
 
 herdr_q workspace close "$workspace_id" >"$tmp/workspace-close.json" 2>"$tmp/workspace-close.err" \
   || fail "workspace close of the case workspace must succeed" \

@@ -13,6 +13,12 @@ pub const DEFAULT_ROLE: &str = "cli";
 /// Environment variable holding the sender role of a client-surface connection.
 pub const ROLE_ENV: &str = "ONLYNE_ROLE";
 
+/// Environment variable naming the socket to speak to. The client injects it
+/// into every session it starts, so a verb run from inside a session reaches
+/// the socket its daemon actually binds, which for a deep workspace sits in a
+/// short derived directory. `--socket` outranks it.
+pub const SOCKET_ENV: &str = "ONLYNE_SOCKET";
+
 /// `--as <surface>` selection, applied to a `--socket` path that carries no other hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum AsArg {
@@ -33,12 +39,13 @@ pub struct GlobalFlags {
     /// Unix socket path, used verbatim.
     #[arg(long, global = true)]
     pub socket: Option<PathBuf>,
-    /// Server root; the admin socket is `<dir>/.onlyne/run/s`. `--server-root`
-    /// selects the server, and a second cluster is addressed by giving it its
-    /// own root directory.
+    /// Server root; its admin socket is resolved from `<dir>/.onlyne/run`.
+    /// `--server-root` selects the server, and a second cluster is addressed by
+    /// giving it its own root directory.
     #[arg(long, global = true)]
     pub server_root: Option<PathBuf>,
-    /// Role workspace; the client socket is `<dir>/.onlyne/run/s`, searched upward.
+    /// Role workspace; its client socket is resolved from
+    /// `<dir>/.onlyne/run`, searched upward.
     #[arg(long, global = true)]
     pub workspace: Option<PathBuf>,
     /// Surface hint for a `--socket` path with no other hint.

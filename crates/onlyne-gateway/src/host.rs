@@ -1,5 +1,5 @@
 use onlyne_adapter::{AdapterError, GatewayHandle, GatewayHost};
-use onlyne_layout::connect_local;
+use onlyne_layout::{ServerRoot, connect_local};
 use onlyne_proto::{
     Delivery, Envelope, GatewayHealth, HealthArgs, RegisterChannelArgs, TypingArgs,
 };
@@ -127,8 +127,12 @@ impl GatewayHost for Host {
     }
 }
 
+/// The run socket a server rooted at `server_root` serves.
+///
+/// [`ServerRoot::socket_path`] reads the published marker when the derived short
+/// endpoint is in use, so a gateway mounts the socket the daemon actually bound.
 pub fn socket_path(server_root: &Path) -> PathBuf {
-    server_root.join(".onlyne").join("run").join("s")
+    ServerRoot::resolve(server_root).socket_path()
 }
 
 pub fn spec_path(server_root: &Path) -> PathBuf {

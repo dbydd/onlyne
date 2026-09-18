@@ -1,6 +1,6 @@
 # Operations
 
-Onlyne 运维以 server 账本、client 工作区、admin 本地 socket（`.onlyne/run/s`）为边界。
+Onlyne 运维以 server 账本、client 工作区、admin 本地 socket（规范名 `.onlyne/run/s`；路径不超过 103 字节时绑在这一条，超限时绑到系统临时目录下的短派生路径，实际服务的路径记在同目录的 `run/socket` 标记里）为边界。
 
 ## 值守入口
 
@@ -19,6 +19,22 @@ Onlyne 运维以 server 账本、client 工作区、admin 本地 socket（`.only
 `onlyne history` 回放事件记录。
 
 `onlyne spec_diff` 对比运行中 spec 与磁盘 spec。
+
+## 服务路径的读法
+
+每个守护进程绑定 socket 时把实际服务的路径发布在 `<owner>/.onlyne/run/socket`（mode `0600`，一条绝对路径加一个换行）。操作者读这条路径有三个入口：
+
+`onlyne-client status --workspace <dir>` 打印 `socket <path>`，字段值就是这条服务路径。
+
+client 日志在启动时点名这条路径：短路径场景一行同时给出规范路径、其字节长度、服务路径与 marker（`adapter socket moved to the short path`）；规范路径场景一行给出 socket 路径（`adapter socket serving`）。server 侧同口径：短路径场景一行给出 served 与 canonical 两条路径及其长度（`the run socket is served from a short path; the marker names it`），常规场景一行 `the run socket is open`。
+
+`cat <workspace>/.onlyne/run/socket` 直接读 marker 文件。
+
+session 进程带着 `ONLYNE_SOCKET` 启动，值是这条服务路径；role pane 里的 `onlyne` 命令凭它直达 socket。CLI 的解析次序是 `--socket` > `ONLYNE_SOCKET` > `--server-root` > `--workspace`/cwd 上行查找，查找以 `.onlyne/run/s` 或 `.onlyne/run/socket` 认定属主目录，路径经 `socket_path()` 解析。
+
+bind 失败的 client 以 exit 1 结束，stderr 一行 `onlyne-client: bind the workspace socket <规范路径>: <明细>`，明细给出服务路径、两条路径各自的字节长度与 OS 原因；一个绑不上 socket 的 client 选择退出，保持 TLS 链路静默重试的循环已移除。绑定成功之后的 `accept` 错误以 `error` 级记日志（`adapter socket accept failed; retrying`），每 100 毫秒重试一次，listener 保持在手。
+
+验证链路由 `crates/onlyne-testkit/e2e/socket-path-length.sh` 钉住：垫深的工作区、短服务路径、marker 发布、规范路径保持空位、任务端到端结清。
 
 ## 并发度
 
@@ -68,6 +84,8 @@ spec 改完后执行 `onlyne reload` 生效。
 
 `--from` 是 admin 面的全局旗标，写在 `control` 之后。焦点命令的 ACL 与投递同口径：对目标有 `send` 边的 role 掌握该目标会话的控制权，`ControlOp::Broadcast` 需要全局边。
 
+herdr 后端按 label 认 workspace（`onlyne:<cluster>`），按名字认 tab（role 自己的名字）。想让 session 落进手上这个 workspace 与 role tab，操作者在拉起 session 之前先改名：`herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>`、`herdr tab rename <TAB_ID> <role>`。label 对不上的 workspace 会拿到第二个 workspace，tab 名对不上会拿到第二个 tab，这时 client 打一条 warning，点名该 label 与新建出来的 workspace。
+
 ## 故障恢复
 
 fault 是 server 记录的可审计事实。
@@ -90,7 +108,7 @@ fault 通过 advisory `Event::Fault` 推给观察者。
 
 `onlyne repair ack --fault-id <fault-id> --reason <reason>` 确认一条 fault。
 
-repair 族走 `<server-root>/.onlyne/run/s` 的 admin 面。
+repair 族走 `<server-root>/.onlyne/run/s` 的 admin 面；树深过 103 字节界限时走 `run/socket` 记下的那条短服务路径。
 
 repair 族不经过 role 工作区的 adapter socket。
 
@@ -196,6 +214,10 @@ completion 落定为 `exited` 之后同 generation 的 heartbeat 把行抬回 `w
 
 no-op 心跳抬存活水位，不抬进展水位；`stalled` 只看后者。
 
+`stalled` 的 reason 文本是 `no applied progress`。
+
+一条已结清的任务走不进这条判据：进展时钟只由 task 分配建立，`note_applied` 只刷新已经建立的时钟，plugin 在完成回执之后送出的最后一拍 `agent: "idle"` 心跳落在空处。到期扫描与发送边界各查一次存储 lifecycle，投影为 `exited` 的 task 被抑制并被遗忘；连接释放顺手忘掉它服务过的每个 session 的时钟。
+
 同一冻结 episode 只报一次，下一次 `Applied` 解除去重。`stall_report_secs = 0` 关闭这条判定。
 
 行不翻面：`stalled` 只落 faults 表并推事件，恢复决策留给 supervisor 与 repair 族。
@@ -244,6 +266,24 @@ onlyne --server-root <server-root> repair fail --task <id> --reason session_dead
 第一条命令读取残账和 session 投影。
 
 第二条命令把任务收敛为失败并保留 `session_dead` 原因。
+
+## 宿主资源回收
+
+一条会话结束，它的宿主资源跟着回收：herdr pane、Orca 标签页、zellij session、exec 子进程在“该会话不持任务且无 plugin transport 挂载”时由 client 关闭。会话结清后留在 role tab 里的空 shell 由这三条路径收走，手工 `herdr pane close` 退到兜底位置。
+
+三条触发路径：
+
+- plugin 优雅 `detach`：这条连接服务过的每个空闲会话就地关闭资源。
+- 结清且 agent 未挂载：关闭发生在结清那一刻。
+- 250 ms readiness tick：扫描被跟踪的会话，存储 lifecycle 已投影 `exited`、已存 outcome 有值、且 agent 已离开的会话关闭掉，reason 由该 outcome 推导（`done` 得 `Completed`，`failed` 得 `Fault`，`cancelled` 得 `Cancelled`）。
+
+两条保留路径：连接在 plugin 未发 `detach` 的情况下断开，该 agent 还可能重连；会话已结清、agent 仍挂载，`reuse` 还能把下一个任务交给它。
+
+每一次回收在存储资源状态仍为开时先经 `backend.attach` 刷新过期 ref，投影 `resource_closed`，并在 client 日志记一行 `retiring idle session resource`，字段是 `task`、`backend`、`resource`、`reason`；槽位随后从跟踪表里移除。关闭失败落一条 warning，run 照常继续。
+
+herdr 的关闭是幂等的：`herdr pane close` 回 `pane_not_found` 记为成功，日志落一行 debug `herdr pane already closed`，字段 `task` 与 `pane`。一个已经消失的 workspace 在此之后读作已关闭。
+
+`stalled` 的含义因此收窄到真实静默：一条已完成的任务带 `no applied progress` 的 `stalled` 从这条面上消失，fault 表里的 `stalled` 只描述仍在跑的会话。判据细节见上一节的进展时钟条目。
 
 ## Headless（exec）会话
 

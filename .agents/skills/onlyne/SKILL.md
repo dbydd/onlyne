@@ -62,7 +62,9 @@ recorded task origin. Widening it needs a spec decision first.
 **CLI verb** (`onlyne-cli`): args live in `verbs.rs`/`admin.rs`, out comes one JSON line.
 Exit codes: `0` answer ok, `1` failed daemon answer or `wait-ready` bound, `2` validation,
 `3` no socket, `4` generate refusal, `127` missing sibling. Socket resolution order stays
-`--socket` → `--server-root` (admin) → `--workspace`/cwd walk (client). `--from` belongs to
+`--socket` → `ONLYNE_SOCKET` (the served path the client injects into every session) →
+`--server-root` (admin) → `--workspace`/cwd walk (client), and each tree answer resolves
+through `socket_path()`. `--from` belongs to
 the admin surface only; every message verb already prints JSON.
 
 **Backend** (`onlyne-session/src/backend/`): capabilities `{spawn,attach,probe,close,
@@ -72,13 +74,20 @@ or `auto` probes herdr, then orca, then zellij. `exec` and `fake` enable only wh
 `ONLYNE_BACKEND` names them. No match is `NoSupportedHost`; `onlyne-client run`
 exits 5 with `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`.
 `onlyne-client doctor` prints host-detection JSON and exits 0.
+The adapter socket binds `.onlyne/run/s` while the path fits 103 bytes, and a deeper tree binds the short derived path that `run/socket` records; `run` exits 1 with `onlyne-client: bind the workspace socket <canonical path>: <detail>` when the bind fails — the detail names the served path, both lengths, and the OS reason — and a later `accept` error logs at `error` level and retries every 100 ms.
 herdr maps session (inherited) → workspace `onlyne:<cluster>` → tab = role → pane = one onlyne session.
 `<cluster>` is the server's `[server] name`, read from `welcome.cluster` and injected into every pane as `ONLYNE_CLUSTER`.
-Spawn: known agent first token → `herdr agent start --kind`; remaining commands → `herdr pane run`.
+Workspace label `onlyne:<cluster>` and role-name tab are what the backend matches on: a label that differs yields a second workspace, and a tab name that differs yields a second tab.
+Before spawning sessions, rename the workspace and tab the backend should use: `herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>` and `herdr tab rename <TAB_ID> <role>`.
+The client logs a warning naming the label and the created workspace on the create path.
+Spawn: known agent first token → `herdr agent start --kind ... -- <session_command tail>`; remaining commands → `herdr pane run`. `workspace create`/`tab create`/`pane split` pass `--cwd` absolute.
 Split: `PanePlacement::from_pane_count`, `(count+1).is_power_of_two()` → `right`, remaining counts → `down`, ratio `0.5`.
 Focus: `workspace focus` → `tab focus` → `agent focus <pane_id>` for a managed agent, `pane focus --pane <base_pane> --direction <split_direction>` for a `pane run` shell pane, then `pane get <pane_id>` must report `result.pane.focused`.
 `backend_ref` stores `workspace_id`, `tab_id`, `pane_id`, `agent`, `workspace_label`, `base_pane`, `split_direction`.
 Control reaches a full role: a client at `max_sessions` pulls with `control_only`, so `focus`/`recycle`/`cancel` land on the session holding the last slot while task rows stay `queued`.
+Retirement invariant an editor keeps: a session's host resource (pane, tab, zellij session, exec child) is closed when the session holds no task and no plugin transport is attached. `reuse` survives only while the agent is attached. The client owns the closes (`retire_idle_locked` in `onlyne-client/src/dispatch.rs`), and a backend's `close` must stay safe to call on a resource the host already dropped — herdr reads `pane_not_found` as success, debug line `herdr pane already closed`.
+
+**Client dispatch** (`onlyne-client/src/dispatch.rs`, `onlyne-client/src/stall.rs`): the dispatch lock serializes slot, transport, backend, and lifecycle work, and the 250 ms readiness tick (`runloop.rs`) drives `reclaim_exited_resources`. `StallWatch::note_applied` refreshes an assigned clock; `note_assigned` owns clock creation, so a late observation from a plugin that already answered cannot reopen a stall episode on a settled task. A connection release forgets the progress clocks of the sessions it served, and both `stall_due` and `stall_report` check the stored lifecycle before a `stalled` fault reaches the wire.
 
 ## Gates
 
@@ -89,12 +98,18 @@ cargo test --workspace                 # per-crate -p reruns suffice for isolate
 crates/onlyne-testkit/e2e/<case>.sh    # ONLYNE_BACKEND=fake, built target/debug, no real creds
 ```
 
-The fourteen scripts under `crates/onlyne-testkit/e2e/` each encode one verification case
+The sixteen scripts under `crates/onlyne-testkit/e2e/` each encode one verification case
 from `docs/v1-PLAN.md` (ACL rejects, idempotency, reconnect requeue, hello claim across a
 server restart, gateway mount, relocation, two-cluster federation, legacy refusal, frame
-bounds). A bug fix needs its
+bounds, and the deep-workspace socket `socket-path-length.sh`). A bug fix needs its
 reproduction as an e2e or a table test: red before the fix, green after. The live ring demo
 (`examples/supervisor/run.py`) needs Orca and real pi binaries. Treat it as manual smoke.
+
+Socket invariant: the path a daemon binds is the path `socket_path()` returns, and every
+finder — CLI, TUI, fake agent, plugin — resolves through `onlyne-layout`
+(`SocketEndpoint`/`socket_path()`/`bind_socket`). An edit that joins `.onlyne/run/s` by hand
+splits a deep workspace in two: the canonical spelling stays bare while the daemon serves a
+short derived path, and `run/socket` names the served one.
 
 ## Formal invariants
 

@@ -61,7 +61,7 @@ The TUI draws the same picture live — page 1 is the role network, page 2 the s
 | `onlyne-gateway` | One chat platform per process: telegram · feishu · qqbot · weixin, feature-gated at compile time. |
 | `onlyne` | Thin human entry: forwards to the daemons, speaks the sockets, prints JSON. |
 | `onlyne-tui` | Two-page observation board over the admin socket. |
-| `onlyne-agent-fake` | Scripted agent for the thirteen e2e proofs under `crates/onlyne-testkit/e2e/`. |
+| `onlyne-agent-fake` | Scripted agent for the sixteen e2e proofs under `crates/onlyne-testkit/e2e/`. |
 
 ```mermaid
 graph LR
@@ -82,12 +82,12 @@ graph LR
 
 | Host | Local socket | Session backends |
 | --- | --- | --- |
-| macOS, Linux | filesystem UDS at `.onlyne/run/s` (mode `0600`) | herdr, orca, zellij, exec (`headless` alias), fake |
+| macOS, Linux | filesystem UDS (mode `0600`) at the canonical `.onlyne/run/s` while that path fits 103 bytes; past the bound a short derived path under the system temporary directory, with the served path recorded in `.onlyne/run/socket` | herdr, orca, zellij, exec (`headless` alias), fake |
 | Windows (x86_64 / aarch64 MSVC) | named pipe; `.onlyne/run/s` is a `v1:onlyne-<32hex>` marker | exec (`headless` alias), fake; pane hosts when the host binary is present |
 
-The herdr map is: session inherited from the client environment (a pi child inherits it), workspace = one server root/topology labelled `onlyne:<cluster>`, tab = role, pane = one onlyne session. `<cluster>` is the server's own `[server] name`, which the client reads from `welcome.cluster` and hands each pane it creates as `ONLYNE_CLUSTER`; a pane spawned before the first welcome carries no such variable and herdr keeps its own default-labelled workspace. Close is `herdr pane close`. Ids look like `wF` / `wF:t1` / `wF:p1`. A named session such as `onlyne-test` is the `HERDR_SESSION` value already in the client environment. `backend_ref` on the client `sessions` row stores `workspace_id`, `tab_id`, `pane_id`, `agent`, `workspace_label`, and the recorded split (`base_pane`, `split_direction`).
+The herdr map is: session inherited from the client environment (a pi child inherits it), workspace = one server root/topology labelled `onlyne:<cluster>`, tab = role, pane = one onlyne session. `<cluster>` is the server's own `[server] name`, which the client reads from `welcome.cluster` and hands each pane it creates as `ONLYNE_CLUSTER`; a pane spawned before the first welcome carries no such variable and herdr keeps its own default-labelled workspace. Close is `herdr pane close`. Ids look like `wF` / `wF:t1` / `wF:p1`. A named session such as `onlyne-test` is the `HERDR_SESSION` value already in the client environment. `backend_ref` on the client `sessions` row stores `workspace_id`, `tab_id`, `pane_id`, `agent`, `workspace_label`, and the recorded split (`base_pane`, `split_direction`). The backend addresses a herdr workspace by the label `onlyne:<cluster>` and a tab by the role's own name. An operator who wants a particular workspace or tab used renames it before the client spawns sessions: `herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>` and `herdr tab rename <TAB_ID> <role>`. A workspace label that differs yields a second workspace, a tab name that differs yields a second tab, and the client logs a warning naming the label and the created workspace each time it takes that create path. The create warning carries the label, the new `workspace_id`, and the remedy `herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>`, and `--cwd` reaches herdr as an absolute path in `workspace create`, `tab create`, and `pane split` — the spelling herdr resolves against its own working directory.
 
-Spawn: the first token of `session_command` matching a known agent name (`pi`, `omp`, and the rest of herdr's `--kind` table) runs `herdr agent start <name> --kind <k> --pane <id> --timeout 25000`. Commands whose first token is absent from that table run `herdr pane run <pane_id> '<one shell line>'`. `pane run` emits no JSON. The command is `shell_quote`d into a single argv token. Split uses `PanePlacement::from_pane_count`: `(count+1).is_power_of_two()` maps to `right`; remaining counts map to `down`; ratio is `0.5`. `count` is `result.tabs[].pane_count` from `herdr tab list --workspace W`. A missing field is 0. Production spawn passes `placement: None`.
+Spawn: the first token of `session_command` matching a known agent name (`pi`, `omp`, and the rest of herdr's `--kind` table) runs `herdr agent start <name> --kind <k> --pane <id> --timeout 25000 -- --session-id <id> --session-dir .pi/sessions`: `--kind` selects the executable named by token 0, and the remaining `session_command` tokens travel after the `--` separator, the call shape herdr 0.9.0 documents. Commands whose first token is absent from that table run `herdr pane run <pane_id> '<one shell line>'`. `pane run` emits no JSON. The command is `shell_quote`d into a single argv token. Split uses `PanePlacement::from_pane_count`: `(count+1).is_power_of_two()` maps to `right`; remaining counts map to `down`; ratio is `0.5`. `count` is `result.tabs[].pane_count` from `herdr tab list --workspace W`. A missing field is 0. Production spawn passes `placement: None`.
 
 Focus issues `herdr workspace focus <W>`, then `herdr tab focus <T>` (positional; the tab restores its last focused pane). A managed-agent pane then takes `herdr agent focus <pane_id>`. `agent focus` accepts a managed agent. A shell pane from `pane run` answers `agent_not_found`. Herdr's `pane focus` form is `--pane <base_pane> --direction <split_direction>` and moves to the neighbor of that anchor, so the two values the split recorded are what carry a plain shell pane. `herdr pane get <pane_id>` is the confirmation step: `result.pane.focused` must be true, and a hop that landed elsewhere answers with an error naming the pane that holds focus. Entries: `onlyne control focus --task <id>` and the TUI `F` key. A failed `focus()` records `Report::Fault{kind:"focus"}`.
 
@@ -154,7 +154,7 @@ target/debug/onlyne-agent-fake --workspace "$tmp/planner" --script \
 target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-One JSON line answers with `data.state = "in_flight"`. The task's ledger row then settles to `acked`, and its session projects to `exited` with `outcome = "done"`. The same sequence ships as an executable proof, `crates/onlyne-testkit/e2e/local-task.sh`, joined by fifteen siblings covering ACL rejects, idempotency, reconnect requeue, the hello claim across a server restart, gateway mount, relocation, two-cluster federation, and the headless exec path (`exec-headless.sh`).
+One JSON line answers with `data.state = "in_flight"`. The task's ledger row then settles to `acked`, and its session projects to `exited` with `outcome = "done"`. The same sequence ships as an executable proof, `crates/onlyne-testkit/e2e/local-task.sh`, joined by fifteen siblings covering ACL rejects, idempotency, reconnect requeue, the hello claim across a server restart, gateway mount, relocation, two-cluster federation, the headless exec path (`exec-headless.sh`), and the deep-workspace socket (`socket-path-length.sh`).
 
 Copying the binaries onto `PATH` takes one extra step on macOS: a copied binary
 whose code signature no longer matches its file is killed at exec, so re-sign it
@@ -163,15 +163,17 @@ ad-hoc after copying (`codesign --force --sign - ~/.cargo/bin/onlyne*`).
 ## Where things live
 
 ```text
-<server-root>/.onlyne/          spec.toml · state.db · run/s (admin local socket) · keys/ · templates/ · logs/
-<workspace>/.onlyne/            config.toml · client.db · run/s (adapter local socket) · keys/ · logs/ · agent/
+<server-root>/.onlyne/          spec.toml · state.db · run/s (admin local socket, canonical) · run/socket (names the served path) · keys/ · templates/ · logs/
+<workspace>/.onlyne/            config.toml · client.db · run/s (adapter local socket, canonical) · run/socket (names the served path) · keys/ · logs/ · agent/
 ```
+
+On unix each daemon binds the canonical `run/s` while that path fits 103 bytes; a tree deeper than the bound serves from a short derived path under the system temporary directory, and the `run/socket` marker names the path actually served.
 
 Every workspace is self-contained and portable. `onlyne server generate` lays a role's work out from templates, the generated tree carries no absolute paths, and after an `mv`, `onlyne client run` reconnects from anywhere. Legacy layouts and old databases exit 2 at the door: v1.0.0 speaks one wire, one schema, one layout.
 
 ## Status
 
-Release `v1.1.0` (tag `e2d0e15`) is on crates.io. `cargo test --workspace` is 760 passed, 0 failed, 1 ignored (`herdr_live_probe`). Fake-backend e2e is 12/12. Dual-platform CI is green (run 34977562567). macOS release binaries in `~/.cargo/bin` print `onlyne --version` `1.1.0`. The ring TUI, the supervisor demo, and the pi adapter plugin run green on macOS. The four IM gateways ship as feature-gated crates awaiting live-platform soak. `cargo build --workspace` needs Rust 1.85.
+Release `v1.1.0` (tag `e2d0e15`) is on crates.io. `cargo test --workspace` is 760 passed, 0 failed, 1 ignored (`herdr_live_probe`). Fake-backend e2e is 12/12. Case 17 `socket-path-length.sh` joined after the tag and passes, bringing the fake set to 13/13. Dual-platform CI is green (run 34977562567). macOS release binaries in `~/.cargo/bin` print `onlyne --version` `1.1.0`. The ring TUI, the supervisor demo, and the pi adapter plugin run green on macOS. The four IM gateways ship as feature-gated crates awaiting live-platform soak. `cargo build --workspace` needs Rust 1.85.
 
 ## Reading
 
