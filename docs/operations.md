@@ -306,6 +306,33 @@ backend = "headless"
 session_command = ["pi", "--mode", "rpc", "--session-id", "{session}"]
 ```
 
+## ACP 会话后端
+
+`acp` 是显式选择的后端：它不进入宿主探测的候选集，由 env `ONLYNE_BACKEND=acp` 或工作区 `config.toml` 的 `backend = "acp"` 指定。`session_command` 是该 agent 的 ACP 启动命令，例如 `qoderclicn --acp`。
+
+一个 agent 进程托管该 role 的全部会话，进程按渲染后的命令复用，会话按 agent 分配的 id 区分。
+
+配置面是工作区 `config.toml` 的 `[acp]` 表：
+
+| 配置文件 | 字段 | 默认 | 作用 |
+|---|---|---|---|
+| `<workspace>/.onlyne/config.toml` 的 `[acp]` | `mode` | 空 | 会话模式，经 `session/set_mode` 交给 agent；空值用 agent 自己的默认 |
+| `<workspace>/.onlyne/config.toml` 的 `[acp]` | `model` | 空 | 模型配置项的值；空值用 agent 自己的默认 |
+| `<workspace>/.onlyne/config.toml` 的 `[acp]` | `reasoning_effort` | 空 | 推理档位配置项的值；空值用 agent 自己的默认 |
+| `<workspace>/.onlyne/config.toml` 的 `[acp]` | `permission` | `deny` | agent 请求权限时本机的答复：`deny` 拒绝并落一条 fault，`allow` 放行 |
+
+被拒的权限请求落一条 `permission` fault，其 reason 列出被拒的工具调用与本机策略；同一任务的终态照常进 ledger。
+
+## 会话内容与查看器
+
+ACP 会话没有终端，可见面是两部分：`<workspace>/.onlyne/logs/session-<task>.events.jsonl` 每行一个 JSON 对象，内容是该 agent 的 `session/update` 通知，加上 client 自己的 `dispatch` 与 `turn` 记录；`<workspace>/.onlyne/logs/session-<task>.log` 是给人看的渲染件。`<workspace>/.onlyne/logs/content.index.jsonl` 每条记录一行元数据，记下它在任务 journal 里的偏移与长度，role 级的内容序号由此在 client 重启后仍可续。
+
+`onlyne-view --workspace <dir> --task <id>` 全屏渲染这份内容。`m` 在 full 与 compact 两档之间切换，`--once` 打印一屏后退出，`--follow` 跟随增长，页脚给出当前来源与 journal 路径。
+
+数据源默认读文件。`--socket <path>` 指向 client 的 adapter socket 时改走订阅：以 admin 挂载接入（`hello.kind = "admin"`，`mount` 为空），`watch_content` 是它唯一可发的 op，随后收到 client 推送的 `content` 帧。socket 缺席、不可达或握手被拒时回落到文件。
+
+`onlyne-client run --tui` 在每个 ACP 会话旁开一个查看器窗格，其内容面与 `onlyne-view` 相同。该会话的 `backend_ref` 顶层留 agent 的会话 id，另带窗格引用，`focus` / `probe` / `close` 据此到达窗格。
+
 ## Windows 关停
 
 Windows 没有 SIGTERM / SIGHUP。`tokio::signal::windows::ctrl_c` 接到现有 SIGINT 收尾路径。运维优雅关停走 `onlyne shutdown`；spec 热加载走 `onlyne reload`。exec 会话子进程的杀阶梯见上一节。
