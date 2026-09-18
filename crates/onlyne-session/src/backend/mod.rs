@@ -407,6 +407,10 @@ pub trait SessionBackend: Send + Sync {
         ))
     }
 
+    /// Install the client-owned destination for records journalled by this
+    /// backend. Backends without a journal keep the default no-op.
+    fn set_content_sink(&self, _sink: Arc<dyn crate::content::ContentSink>) {}
+
     /// Terminal facts this backend observed without an adapter report.
     /// Absent for backends whose sessions end through the adapter socket.
     fn outcomes(&self) -> Option<OutcomeFeed> {

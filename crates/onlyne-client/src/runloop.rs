@@ -87,6 +87,8 @@ pub struct ClientInit {
     /// Workspace `config.toml` `backend`. Empty means auto. `ONLYNE_BACKEND`
     /// in the process environment takes precedence when it is nonempty.
     pub backend: String,
+    /// Open a journal viewer pane beside each supported session.
+    pub tui: bool,
     /// The workspace config's `[acp]` table. Only the ACP session backend reads
     /// it: the mode, model and reasoning effort handed to the agent when a
     /// session opens, and what to answer when the agent asks for permission.
@@ -111,6 +113,7 @@ impl ClientInit {
             stale_grace_secs: onlyne_config::DEFAULT_STALE_GRACE_SECS,
             stall_report_secs: onlyne_config::DEFAULT_STALL_REPORT_SECS,
             backend: String::new(),
+            tui: false,
             acp: onlyne_config::AcpSection::default(),
         }
     }
@@ -132,6 +135,10 @@ impl ClientInit {
         self.backend = backend.into();
         self
     }
+    pub fn with_tui(mut self, tui: bool) -> Self {
+        self.tui = tui;
+        self
+    }
     /// Adopt the `[acp]` table the workspace config carries.
     pub fn with_acp(mut self, acp: onlyne_config::AcpSection) -> Self {
         self.acp = acp;
@@ -148,6 +155,7 @@ pub fn acp_options(acp: &onlyne_config::AcpSection) -> AcpOptions {
         mode: acp.mode.clone(),
         model: acp.model.clone(),
         reasoning_effort: acp.reasoning_effort.clone(),
+        tui: false,
         allow_permissions: acp.permission == "allow",
     }
 }
@@ -168,12 +176,14 @@ impl RunState {
             .ok()
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| init.backend.clone());
+        let mut acp = acp_options(&init.acp);
+        acp.tui = init.tui;
         let backend = backend_for_env(
             &requested,
             &process_env(),
             Arc::new(ProcessRunner),
             WorktreePolicy::from_config(&init.orca_worktree),
-            &acp_options(&init.acp),
+            &acp,
         )?;
         let dispatch = DispatchState::new(
             init.role.clone(),

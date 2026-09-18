@@ -1,3 +1,4 @@
+use crate::content::{ContentSubscription, frame as content_frame};
 use crate::dispatch::{DispatchState, ReadyNotice, on_plugin_report, on_ready};
 use anyhow::{Context, Result};
 use onlyne_adapter::{AdapterIo, AdapterServer, ServerConnection};
@@ -9,8 +10,84 @@ use onlyne_proto::{
     AdapterMsg, Capability, ErrorCode, HelloAck, HelloArgs, HostOp, Mount, MountKind,
     PROTOCOL_VERSION, PluginOp, Report, ResBody, ServerInfo,
 };
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+struct ClientContentHost {
+    dispatch: DispatchState,
+    watched: AtomicBool,
+    subscription: tokio::sync::Mutex<Option<ContentSubscription>>,
+}
+
+impl ClientContentHost {
+    fn new(dispatch: DispatchState) -> Self {
+        Self {
+            dispatch,
+            watched: AtomicBool::new(false),
+            subscription: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn take_subscription(&self) -> Option<ContentSubscription> {
+        self.subscription.lock().await.take()
+    }
+}
+
+impl onlyne_adapter::Host for ClientContentHost {
+    fn hello<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        _args: &'life1 HelloArgs,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<HelloAck, (ErrorCode, String)>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Err((ErrorCode::Invalid, "hello already completed".into())) })
+    }
+
+    fn watch_content<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        args: &'life1 onlyne_proto::WatchContentArgs,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<(), (ErrorCode, String)>> + Send + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            if self
+                .watched
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return Err((ErrorCode::Invalid, "watch_content is already active".into()));
+            }
+            let next = match self.dispatch.watch_content(args) {
+                Ok(next) => next,
+                Err(error) => {
+                    self.watched.store(false, Ordering::Release);
+                    return Err((ErrorCode::Internal, error.to_string()));
+                }
+            };
+            *self.subscription.lock().await = Some(next);
+            Ok(())
+        })
+    }
+}
 
 #[derive(Clone)]
 pub struct AdapterSocket {
@@ -263,8 +340,33 @@ impl AdapterSocket {
                 .await;
         }
         let mut graceful_detach = false;
+        let mut content_forwarder = None;
+        let content_host = ClientContentHost::new(self.dispatch.clone());
         while let Some(frame) = connection.inbound.recv().await {
             let id = frame.id.unwrap_or_default();
+            if connection.hello.kind == MountKind::Admin {
+                let forbidden = match &frame.msg {
+                    AdapterMsg::Plugin(op) if !matches!(op, PluginOp::WatchContent(_)) => {
+                        Some(op.name().to_string())
+                    }
+                    _ => None,
+                };
+                if let Some(op) = forbidden {
+                    if frame.id.is_some() {
+                        io.respond(
+                            id,
+                            ResBody::err(
+                                ErrorCode::Forbidden,
+                                format!("op {op} forbidden on Admin mount"),
+                                Some("op".into()),
+                            ),
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                    }
+                    continue;
+                }
+            }
             match frame.msg {
                 AdapterMsg::Plugin(PluginOp::Report(report)) => {
                     let result = match report {
@@ -325,6 +427,41 @@ impl AdapterSocket {
                             .map_err(|e| anyhow::anyhow!(e))?;
                     }
                 }
+                AdapterMsg::Plugin(PluginOp::WatchContent(args)) => {
+                    let result = if connection.hello.kind != MountKind::Admin {
+                        Err((
+                            ErrorCode::Forbidden,
+                            "watch_content requires an admin mount".to_string(),
+                        ))
+                    } else {
+                        onlyne_adapter::Host::watch_content(&content_host, &args).await
+                    };
+                    match result {
+                        Ok(()) => {
+                            if frame.id.is_some() {
+                                io.respond(id, ResBody::ok(serde_json::Value::Null))
+                                    .await
+                                    .map_err(|e| anyhow::anyhow!(e))?;
+                            }
+                            let subscription = content_host
+                                .take_subscription()
+                                .await
+                                .expect("successful watch stores its subscription");
+                            let writer = io.clone();
+                            content_forwarder = Some(tokio::spawn(async move {
+                                if let Err(error) = forward_content(writer, subscription).await {
+                                    tracing::debug!(error = %error, "content subscription ended");
+                                }
+                            }));
+                        }
+                        Err((code, message)) if frame.id.is_some() => {
+                            io.respond(id, ResBody::err(code, message, Some("op".into())))
+                                .await
+                                .map_err(|e| anyhow::anyhow!(e))?;
+                        }
+                        Err(_) => {}
+                    }
+                }
                 AdapterMsg::Plugin(PluginOp::Detach(_)) => {
                     graceful_detach = true;
                     break;
@@ -370,6 +507,10 @@ impl AdapterSocket {
                 }
             }
         }
+        if let Some(forwarder) = content_forwarder {
+            forwarder.abort();
+            let _ = forwarder.await;
+        }
         if agent {
             // The ended connection releases its bindings. A detach frame also
             // retires each idle resource served by this agent.
@@ -411,6 +552,40 @@ impl AdapterSocket {
             .bind_adapter(session_id, io, capabilities.clone());
         if let Err(error) = self.dispatch.hand_staged(session_id).await {
             tracing::warn!(error = %error, session = %session_id, "staged hand-off refused");
+        }
+    }
+}
+
+async fn forward_content(io: AdapterIo, mut subscription: ContentSubscription) -> Result<()> {
+    let replay = std::mem::take(&mut subscription.replay);
+    for record in replay {
+        let message = AdapterMsg::Host(HostOp::Content(Box::new(content_frame(record))));
+        tokio::select! {
+            changed = subscription.cancel.changed() => {
+                let _ = changed;
+                return Ok(());
+            }
+            result = io.notify(message) => result.map_err(|error| anyhow::anyhow!(error))?,
+        }
+    }
+    loop {
+        let record = tokio::select! {
+            changed = subscription.cancel.changed() => {
+                let _ = changed;
+                return Ok(());
+            }
+            record = subscription.receiver.recv() => match record {
+                Some(record) => record,
+                None => return Ok(()),
+            },
+        };
+        let message = AdapterMsg::Host(HostOp::Content(Box::new(content_frame(record))));
+        tokio::select! {
+            changed = subscription.cancel.changed() => {
+                let _ = changed;
+                return Ok(());
+            }
+            result = io.notify(message) => result.map_err(|error| anyhow::anyhow!(error))?,
         }
     }
 }
@@ -527,6 +702,278 @@ mod tests {
             std::sync::Arc::new(FakeBackend::new()),
             store,
         )
+    }
+
+    const CONTENT_FAKE_AGENT: &str = r#"import json, os, sys
+
+trace = sys.argv[1]
+def note(text):
+    with open(trace, "a", encoding="utf-8") as fh:
+        fh.write(text + "\n")
+        fh.flush()
+def send(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+def result(rid, value):
+    send({"jsonrpc": "2.0", "id": rid, "result": value})
+
+note("start %d" % os.getpid())
+for line in sys.stdin:
+    message = json.loads(line)
+    rid = message.get("id")
+    method = message.get("method")
+    params = message.get("params") or {}
+    if method == "initialize":
+        result(rid, {"protocolVersion": 1,
+                     "agentInfo": {"name": "content-test", "version": "0"},
+                     "authMethods": [],
+                     "agentCapabilities": {"sessionCapabilities": {"close": {}}}})
+    elif method == "session/new":
+        result(rid, {"sessionId": "content-session",
+                     "modes": {"currentModeId": "default"},
+                     "models": {"currentModelId": "fast"},
+                     "configOptions": []})
+    elif method == "session/prompt":
+        session = params.get("sessionId")
+        text = "".join(block.get("text", "") for block in params.get("prompt") or [])
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": session,
+                         "sessionUpdate": "agent_message_chunk",
+                         "content": {"type": "text", "text": "answer:" + text}}})
+        result(rid, {"stopReason": "end_turn"})
+    elif method == "session/close":
+        note("close")
+        result(rid, {})
+    elif method == "session/cancel":
+        note("cancel")
+note("eof")
+"#;
+
+    async fn admin(path: &Path) -> onlyne_adapter::AdminHandle {
+        let stream = connect_local(path).await.expect("connect admin viewer");
+        let admin = onlyne_adapter::AdapterClient::admin_with_timeouts(
+            stream,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        admin
+            .hello_admin("content-test-viewer")
+            .await
+            .expect("admin hello");
+        admin
+    }
+
+    async fn through_turn(admin: &onlyne_adapter::AdminHandle) -> Vec<onlyne_proto::ContentFrame> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut frames = Vec::new();
+            loop {
+                let frame = admin.wait_content().await.expect("content frame");
+                let ended = frame
+                    .record
+                    .pointer("/onlyne/kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("turn");
+                frames.push(frame);
+                if ended {
+                    return frames;
+                }
+            }
+        })
+        .await
+        .expect("content turn arrives")
+    }
+
+    /// The role socket owns one cursor stream for every viewer: both live
+    /// subscribers receive the same journal objects, resume is exclusive, an
+    /// empty cursor repeats only the head, and a viewer that never reads cannot
+    /// hold the ACP turn thread on a socket write.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn content_fans_out_and_resumes_over_the_real_socket() {
+        use onlyne_proto::WatchContentArgs;
+        use onlyne_session::{AcpBackend, AcpOptions, CloseReason, SessionBackend, SpawnSpec};
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        let dir = tempdir().unwrap();
+        let layout = RoleWorkspace::resolve(dir.path());
+        layout.bootstrap().unwrap();
+        let script = dir.path().join("content_fake_agent.py");
+        let trace = dir.path().join("content_fake_agent.trace");
+        std::fs::write(&script, CONTENT_FAKE_AGENT).unwrap();
+        let store = ClientStore::open(layout.client_db_path()).unwrap();
+        let backend = Arc::new(AcpBackend::new(AcpOptions::default()));
+        let dispatch = DispatchState::new(
+            "planner",
+            dir.path(),
+            Vec::new(),
+            2,
+            true,
+            backend.clone(),
+            store,
+        );
+        let adapter = AdapterSocket {
+            workspace: dir.path().to_path_buf(),
+            role: "planner".into(),
+            cluster: "test".into(),
+            server: "test".into(),
+            dispatch: dispatch.clone(),
+        };
+        let (listener, endpoint) = adapter.bind().await.unwrap();
+        let served = adapter.clone();
+        let server = tokio::spawn(async move { served.accept_loop(listener).await });
+        let session = backend
+            .spawn(SpawnSpec {
+                cwd: dir.path().to_path_buf(),
+                task_id: "task-1".into(),
+                command: vec![
+                    "python3".into(),
+                    "-u".into(),
+                    script.to_string_lossy().into_owned(),
+                    trace.to_string_lossy().into_owned(),
+                ],
+                env: BTreeMap::new(),
+                focus: None,
+                placement: None,
+                rename: None,
+            })
+            .unwrap();
+
+        let first = admin(endpoint.actual()).await;
+        let second = admin(endpoint.actual()).await;
+        let from_zero = WatchContentArgs {
+            task_id: Some("task-1".into()),
+            since: Some(0),
+        };
+        first.watch(from_zero.clone()).await.unwrap();
+        second.watch(from_zero).await.unwrap();
+        backend.deliver(&session, "task-1", "first").unwrap();
+        let (one, two) = tokio::join!(through_turn(&first), through_turn(&second));
+        assert!(
+            backend
+                .outcomes()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .is_some(),
+            "the first turn settles"
+        );
+        assert_eq!(one, two, "both subscribers receive the same frames");
+        assert!(
+            one.len() >= 3,
+            "dispatch, update and turn are visible: {one:?}"
+        );
+        assert!(one.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+        assert!(one.iter().all(|frame| frame.task_id == "task-1"));
+        assert!(
+            one.iter()
+                .all(|frame| frame.session_id.as_deref() == Some("content-session"))
+        );
+        let journal =
+            std::fs::read_to_string(dir.path().join(".onlyne/logs/session-task-1.events.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>();
+        assert_eq!(
+            one.iter()
+                .map(|frame| frame.record.clone())
+                .collect::<Vec<_>>(),
+            journal,
+            "socket records are the exact journal objects"
+        );
+
+        let cursor = one[0].seq;
+        let resumed = admin(endpoint.actual()).await;
+        resumed
+            .watch(WatchContentArgs {
+                task_id: Some("task-1".into()),
+                since: Some(cursor),
+            })
+            .await
+            .unwrap();
+        let mut replay = Vec::new();
+        for _ in 0..one.len() - 1 {
+            replay.push(resumed.wait_content().await.unwrap());
+        }
+        assert_eq!(
+            replay.iter().map(|frame| frame.seq).collect::<Vec<_>>(),
+            one[1..].iter().map(|frame| frame.seq).collect::<Vec<_>>()
+        );
+        assert!(replay.iter().all(|frame| frame.seq > cursor));
+
+        let head = admin(endpoint.actual()).await;
+        head.watch(WatchContentArgs {
+            task_id: Some("task-1".into()),
+            since: None,
+        })
+        .await
+        .unwrap();
+        let repeated = head.wait_content().await.unwrap();
+        assert_eq!(
+            repeated,
+            *one.last().unwrap(),
+            "absent since repeats the head"
+        );
+
+        drop(first);
+        drop(second);
+        drop(resumed);
+        drop(head);
+        let slow = admin(endpoint.actual()).await;
+        slow.watch(WatchContentArgs {
+            task_id: None,
+            since: Some(one.last().unwrap().seq),
+        })
+        .await
+        .unwrap();
+        let fast = admin(endpoint.actual()).await;
+        fast.watch(WatchContentArgs {
+            task_id: Some("task-2".into()),
+            since: Some(one.last().unwrap().seq),
+        })
+        .await
+        .unwrap();
+        backend.deliver(&session, "task-2", "second").unwrap();
+        let next = through_turn(&fast).await;
+        assert!(next.iter().all(|frame| frame.task_id == "task-2"));
+        assert!(next.first().unwrap().seq > one.last().unwrap().seq);
+        let outcome = backend.outcomes().unwrap();
+        let settled =
+            tokio::task::spawn_blocking(move || outcome.recv_timeout(Duration::from_secs(5)))
+                .await
+                .unwrap();
+        assert!(
+            settled.is_some(),
+            "the producer settles while one viewer never reads"
+        );
+
+        drop(slow);
+        drop(fast);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while dispatch.content_subscriber_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("disconnect removes every content subscription");
+        backend
+            .close(&session, CloseReason::Completed, false)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if std::fs::read_to_string(&trace)
+                    .unwrap_or_default()
+                    .contains("eof")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("fake agent exits");
+        server.abort();
+        let _ = server.await;
     }
 
     /// A workspace whose canonical socket spelling is over the unix bound binds

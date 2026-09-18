@@ -3,6 +3,7 @@
 pub mod accept;
 pub mod adapter_socket;
 pub mod claim;
+pub(crate) mod content;
 pub mod daemon;
 pub mod dispatch;
 pub mod host;
