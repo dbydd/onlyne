@@ -1,4 +1,8 @@
-use crate::{SpecError, env::Env, locate::line_from_span};
+use crate::{
+    SpecError,
+    env::Env,
+    locate::{find_key_line_in_table, line_from_span},
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -21,6 +25,9 @@ pub struct ClientConfig {
     /// Orca session backend settings.
     #[serde(default)]
     pub orca: OrcaSection,
+    /// ACP session backend settings.
+    #[serde(default)]
+    pub acp: AcpSection,
     /// Seconds a startup reconcile waits before declaring an orphaned in-flight task stale.
     #[serde(default = "default_stale_grace_secs")]
     pub stale_grace_secs: u64,
@@ -63,6 +70,43 @@ impl Default for OrcaSection {
 fn default_orca_worktree() -> String {
     "host".to_string()
 }
+
+/// `[acp]` — settings for the ACP session backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AcpSection {
+    /// Session mode handed to the agent. Empty leaves the agent's own default.
+    #[serde(default)]
+    pub mode: String,
+    /// Model handed to the agent. Empty leaves the agent's own default.
+    #[serde(default)]
+    pub model: String,
+    /// Reasoning effort handed to the agent. Empty leaves the agent's own
+    /// default.
+    #[serde(default)]
+    pub reasoning_effort: String,
+    /// What the local client answers when the agent asks for permission:
+    /// `deny` (the default) refuses every request and records a fault, `allow`
+    /// grants it.
+    #[serde(default = "default_acp_permission")]
+    pub permission: String,
+}
+
+impl Default for AcpSection {
+    fn default() -> Self {
+        Self {
+            mode: String::new(),
+            model: String::new(),
+            reasoning_effort: String::new(),
+            permission: default_acp_permission(),
+        }
+    }
+}
+
+fn default_acp_permission() -> String {
+    "deny".to_string()
+}
+
 pub const DEFAULT_STALE_GRACE_SECS: u64 = 300;
 pub const DEFAULT_STALL_REPORT_SECS: u64 = 1800;
 
@@ -106,6 +150,7 @@ impl ClientConfig {
                 err.message().to_string(),
             )
         })?;
+        validate_acp(&config, text, file)?;
         Ok(config)
     }
 
@@ -144,6 +189,7 @@ impl ClientConfig {
             cert_pin: resolve_field(&self.cert_pin, "cert_pin", env)?,
             key_path: resolve_field(&self.key_path, "key_path", env)?,
             plugins: self.plugins.clone(),
+            acp: self.acp.clone(),
             stale_grace_secs: self.stale_grace_secs,
             stall_report_secs: self.stall_report_secs,
         })
@@ -208,6 +254,33 @@ fn locate_field_line(text: &str, field: &str) -> usize {
     1
 }
 
+/// `[acp] permission` is `deny` | `allow`. The refusal points at the line that
+/// carries the rejected value, falling back to the `[acp]` key.
+fn validate_acp(config: &ClientConfig, text: &str, file: &str) -> Result<(), SpecError> {
+    let permission = config.acp.permission.as_str();
+    if matches!(permission, "deny" | "allow") {
+        return Ok(());
+    }
+    Err(SpecError::parse(
+        file,
+        acp_permission_line(text, permission),
+        format!("acp.permission must be `deny` or `allow`, got `{permission}`"),
+    ))
+}
+
+/// Line of `[acp] permission`: the key inside the table when it is written
+/// there, otherwise the line that carries the rejected value (dotted or inline
+/// table forms).
+fn acp_permission_line(text: &str, permission: &str) -> usize {
+    find_key_line_in_table(text, "acp", "permission")
+        .or_else(|| {
+            text.lines()
+                .position(|line| line.contains("permission") && line.contains(permission))
+                .map(|idx| idx + 1)
+        })
+        .unwrap_or(1)
+}
+
 /// Server host and port pair used by the client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -231,6 +304,8 @@ pub struct ResolvedClientConfig {
     pub key_path: String,
     /// Plugin list.
     pub plugins: Vec<String>,
+    /// ACP session backend settings, carried through unchanged.
+    pub acp: AcpSection,
     /// Startup reconcile grace in seconds.
     pub stale_grace_secs: u64,
     /// Stall report threshold in seconds. Zero disables the report.

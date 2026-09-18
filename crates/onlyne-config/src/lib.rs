@@ -28,7 +28,8 @@ mod spec;
 pub mod template;
 
 pub use client::{
-    ClientConfig, DEFAULT_STALE_GRACE_SECS, DEFAULT_STALL_REPORT_SECS, OrcaSection, ServerEndpoint,
+    AcpSection, ClientConfig, DEFAULT_STALE_GRACE_SECS, DEFAULT_STALL_REPORT_SECS, OrcaSection,
+    ServerEndpoint,
 };
 pub use diff::{RoleChange, SpecDiff};
 pub use env::Env;

@@ -49,14 +49,28 @@ pub(crate) fn key_line_in_array_entry(
 /// Find the line of a key inside a top-level table.
 pub(crate) fn key_line_in_table(source: &str, table_name: &str, key: &str) -> usize {
     let lines: Vec<&str> = source.lines().collect();
-    let header = format!("[{table_name}]");
-    let Some(start_idx) = lines.iter().position(|line| line.trim() == header) else {
+    let Some((start, end)) = table_bounds(&lines, table_name) else {
         return 1;
     };
-    let end_idx = lines
+    key_line_between(&lines, start + 1, end, key).unwrap_or(start + 1)
+}
+
+/// Find the line of a key inside a top-level table, `None` when the table is
+/// absent or does not carry the key.
+pub(crate) fn find_key_line_in_table(source: &str, table_name: &str, key: &str) -> Option<usize> {
+    let lines: Vec<&str> = source.lines().collect();
+    let (start, end) = table_bounds(&lines, table_name)?;
+    key_line_between(&lines, start + 1, end, key)
+}
+
+/// Header index and exclusive end index of a top-level table.
+fn table_bounds(lines: &[&str], table_name: &str) -> Option<(usize, usize)> {
+    let header = format!("[{table_name}]");
+    let start = lines.iter().position(|line| line.trim() == header)?;
+    let end = lines
         .iter()
         .enumerate()
-        .skip(start_idx + 1)
+        .skip(start + 1)
         .find_map(|(idx, line)| {
             let trimmed = line.trim();
             if trimmed.starts_with('[') && trimmed.ends_with(']') {
@@ -66,7 +80,7 @@ pub(crate) fn key_line_in_table(source: &str, table_name: &str, key: &str) -> us
             }
         })
         .unwrap_or(lines.len());
-    key_line_between(&lines, start_idx + 1, end_idx, key).unwrap_or(start_idx + 1)
+    Some((start, end))
 }
 
 fn key_line_between(lines: &[&str], start: usize, end: usize, key: &str) -> Option<usize> {

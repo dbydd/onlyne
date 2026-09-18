@@ -10,6 +10,20 @@
     "server"
   ],
   "properties": {
+    "acp": {
+      "description": "ACP session backend settings.",
+      "default": {
+        "mode": "",
+        "model": "",
+        "permission": "deny",
+        "reasoning_effort": ""
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/AcpSection"
+        }
+      ]
+    },
     "backend": {
       "description": "Requested session backend (`herdr` | `orca` | `zellij` | `exec` / `headless` | `fake` | `auto`). Empty means auto-detect. The process environment `ONLYNE_BACKEND` takes precedence when it is nonempty.",
       "default": "",
@@ -71,6 +85,33 @@
   },
   "additionalProperties": false,
   "definitions": {
+    "AcpSection": {
+      "description": "`[acp]` — settings for the ACP session backend.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "Session mode handed to the agent. Empty leaves the agent's own default.",
+          "default": "",
+          "type": "string"
+        },
+        "model": {
+          "description": "Model handed to the agent. Empty leaves the agent's own default.",
+          "default": "",
+          "type": "string"
+        },
+        "permission": {
+          "description": "What the local client answers when the agent asks for permission: `deny` (the default) refuses every request and records a fault, `allow` grants it.",
+          "default": "deny",
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "description": "Reasoning effort handed to the agent. Empty leaves the agent's own default.",
+          "default": "",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
     "OrcaSection": {
       "description": "`[orca]` — settings for the Orca session backend.",
       "type": "object",
