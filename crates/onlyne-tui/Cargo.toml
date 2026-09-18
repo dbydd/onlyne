@@ -11,6 +11,12 @@ description = "Onlyne v1 admin-socket observation TUI"
 name = "onlyne-tui"
 path = "src/main.rs"
 
+# The journal viewer: one ACP session, full screen, no admin socket needed. Same
+# crate and same widgets as the board, because it reads the same content surface.
+[[bin]]
+name = "onlyne-view"
+path = "src/view.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 chrono = { workspace = true }
