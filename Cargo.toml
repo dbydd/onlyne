@@ -9,6 +9,7 @@ default-members = [
   "crates/onlyne-config",
   "crates/onlyne-layout",
   "crates/onlyne-store",
+  "crates/onlyne-acp",
   "crates/onlyne-session",
   "crates/onlyne-net",
   "crates/onlyne-adapter",
