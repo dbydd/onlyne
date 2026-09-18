@@ -1,16 +1,20 @@
+use crate::lifecycle::Outcome;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+pub mod acp;
 pub mod exec;
 pub mod fake;
 pub mod herdr;
 pub mod orca;
 pub mod zellij;
 
+pub use acp::{AcpBackend, AcpOptions};
 pub use orca::WorktreePolicy;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +90,7 @@ pub enum BackendName {
     Orca,
     Zellij,
     Exec,
+    Acp,
     Fake,
 }
 
@@ -96,6 +101,7 @@ impl BackendName {
             Self::Orca => "orca",
             Self::Zellij => "zellij",
             Self::Exec => "exec",
+            Self::Acp => "acp",
             Self::Fake => "fake",
         }
     }
@@ -107,6 +113,7 @@ impl BackendName {
             "zellij" => Some(Self::Zellij),
             // `headless` is the operator-facing alias; projections keep `exec`.
             "exec" | "headless" => Some(Self::Exec),
+            "acp" => Some(Self::Acp),
             "fake" => Some(Self::Fake),
             _ => None,
         }
@@ -225,7 +232,9 @@ pub fn doctor_report(env: &BTreeMap<String, String>) -> Value {
                 .cloned()
                 .unwrap_or_else(|| "zellij".into()),
         ),
-        Some(BackendName::Exec) | Some(BackendName::Fake) => None,
+        // `exec`, `acp` and `fake` run or drive a command the role config names,
+        // so there is no host binary to report.
+        Some(BackendName::Exec) | Some(BackendName::Acp) | Some(BackendName::Fake) => None,
         None => None,
     };
     let mut report = serde_json::json!({
@@ -270,6 +279,94 @@ pub enum CloseReason {
     Operator,
 }
 
+/// One terminal fact a self-driven backend observed for itself.
+///
+/// A session served by an adapter reports its own ending, and the client only
+/// has to write it down. A backend that owns its agent has no reporter, so it
+/// states the fact here: which task ended, how, and what the receiving role
+/// should read as its closing line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionOutcome {
+    pub task_id: String,
+    pub outcome: Outcome,
+    /// The agent's closing text, already stripped of the status markers an agent
+    /// stamps into its own stream. Becomes the completion head.
+    pub head: Option<String>,
+    /// Fault detail for the ledger on a failure. An agent process that died
+    /// mid-turn names its exit status and the tail of its stderr here.
+    pub note: Option<String>,
+    /// One-line summary of the permission asks this client refused during the
+    /// turn, `None` when the agent asked for nothing. A refusal is recorded on
+    /// the session row as a fault and settles nothing by itself: the turn kept
+    /// running without the thing the agent wanted.
+    pub refusals: Option<String>,
+}
+
+/// The queue behind one backend's outcome stream, and the flag its consumer
+/// sleeps on. Every handle shares it.
+#[derive(Default)]
+struct OutcomeQueue {
+    items: parking_lot::Mutex<VecDeque<SessionOutcome>>,
+    arrival: parking_lot::Condvar,
+}
+
+/// Producer half of a backend's outcome stream, held by the backend.
+#[derive(Clone, Default)]
+pub struct OutcomeSink {
+    queue: Arc<OutcomeQueue>,
+}
+
+impl OutcomeSink {
+    /// Record one terminal fact for the next consumer that asks.
+    pub fn push(&self, outcome: SessionOutcome) {
+        self.queue.items.lock().push_back(outcome);
+        self.queue.arrival.notify_all();
+    }
+}
+
+/// Receiver side of a backend's own outcome stream.
+///
+/// Cloning hands out another view of the same queue, and a view takes each fact
+/// at most once, so exactly one consumer settles a given task however many
+/// drains are alive. That is why this is a queue and not a channel: a backend
+/// outlives its first drain, and a receiver handed to a consumer that then died
+/// would leave the stream un-drainable.
+#[derive(Clone, Default)]
+pub struct OutcomeFeed {
+    queue: Arc<OutcomeQueue>,
+}
+
+impl OutcomeFeed {
+    /// The paired ends of one outcome stream.
+    pub fn channel() -> (OutcomeSink, Self) {
+        let queue = Arc::new(OutcomeQueue::default());
+        (
+            OutcomeSink {
+                queue: Arc::clone(&queue),
+            },
+            Self { queue },
+        )
+    }
+
+    /// The next fact, without waiting.
+    pub fn try_recv(&self) -> Option<SessionOutcome> {
+        self.queue.items.lock().pop_front()
+    }
+
+    /// The next fact, waiting at most `timeout`.
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<SessionOutcome> {
+        let deadline = Instant::now() + timeout;
+        let mut items = self.queue.items.lock();
+        while items.is_empty() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if self.queue.arrival.wait_for(&mut items, left).timed_out() && items.is_empty() {
+                return None;
+            }
+        }
+        items.pop_front()
+    }
+}
+
 pub trait SessionBackend: Send + Sync {
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> Capabilities;
@@ -291,6 +388,29 @@ pub trait SessionBackend: Send + Sync {
             "focus",
             "backend does not expose focus",
         ))
+    }
+
+    /// Whether this backend carries task payloads itself. A backend that
+    /// answers true delivers through [`SessionBackend::deliver`]; one that
+    /// answers false keeps the adapter-socket path where a mounted plugin
+    /// receives `assign` or `config_get{key:"stdin:<text>"}`.
+    fn self_driven(&self) -> bool {
+        false
+    }
+
+    /// Hand one task payload to a session this backend owns.
+    fn deliver(&self, _session: &SessionRef, _task_id: &str, _prose: &str) -> Result<()> {
+        Err(unsupported(
+            self.name(),
+            "deliver",
+            "backend delivers through an adapter socket",
+        ))
+    }
+
+    /// Terminal facts this backend observed without an adapter report.
+    /// Absent for backends whose sessions end through the adapter socket.
+    fn outcomes(&self) -> Option<OutcomeFeed> {
+        None
     }
 }
 
@@ -496,17 +616,19 @@ pub(crate) fn unsupported(backend: &str, operation: &str, detail: &str) -> anyho
 }
 
 /// Build a backend from an environment map. `ONLYNE_BACKEND` wins when it
-/// names `herdr`, `orca`, `zellij`, `exec` (alias `headless`), or `fake`. An
-/// empty or `auto` value probes herdr, then orca, then zellij. `exec` and
-/// `fake` are never discovered. No match returns [`NoSupportedHost`].
+/// names `herdr`, `orca`, `zellij`, `exec` (alias `headless`), `acp`, or
+/// `fake`. An empty or `auto` value probes herdr, then orca, then zellij.
+/// `exec`, `acp` and `fake` are never discovered. No match returns
+/// [`NoSupportedHost`].
 pub fn select_backend_from_env(
     env: &BTreeMap<String, String>,
     runner: Arc<dyn Runner>,
     policy: WorktreePolicy,
+    acp: &AcpOptions,
 ) -> Result<Box<dyn SessionBackend>> {
     let detected = detect_host(env);
     match detected.backend {
-        Some(name) => backend_by_name(name.as_str(), runner, policy),
+        Some(name) => backend_by_name(name.as_str(), runner, policy, acp),
         None if detected
             .explicit
             .as_deref()
@@ -527,16 +649,18 @@ pub fn select_backend_from_env(
 pub fn select_backend(
     runner: Arc<dyn Runner>,
     policy: WorktreePolicy,
+    acp: &AcpOptions,
 ) -> Result<Box<dyn SessionBackend>> {
     let mut env = process_env();
     env.remove("ONLYNE_BACKEND");
-    select_backend_from_env(&env, runner, policy)
+    select_backend_from_env(&env, runner, policy, acp)
 }
 
 pub fn backend_by_name(
     name: &str,
     runner: Arc<dyn Runner>,
     policy: WorktreePolicy,
+    acp: &AcpOptions,
 ) -> Result<Box<dyn SessionBackend>> {
     match BackendName::parse(name) {
         Some(BackendName::Herdr) => Ok(Box::new(herdr::HerdrBackend::new(runner))),
@@ -544,6 +668,7 @@ pub fn backend_by_name(
         Some(BackendName::Zellij) => Ok(Box::new(zellij::ZellijBackend::new(runner))),
         Some(BackendName::Fake) => Ok(Box::new(fake::FakeBackend::new())),
         Some(BackendName::Exec) => Ok(Box::new(exec::ExecBackend::new())),
+        Some(BackendName::Acp) => Ok(Box::new(acp::AcpBackend::new(acp.clone()))),
         None => Err(anyhow::anyhow!("unknown session backend: {name}")),
     }
 }
@@ -555,8 +680,9 @@ pub fn backend_for(
     requested: &str,
     runner: Arc<dyn Runner>,
     policy: WorktreePolicy,
+    acp: &AcpOptions,
 ) -> Result<Box<dyn SessionBackend>> {
-    backend_for_env(requested, &process_env(), runner, policy)
+    backend_for_env(requested, &process_env(), runner, policy, acp)
 }
 
 pub fn backend_for_env(
@@ -564,31 +690,37 @@ pub fn backend_for_env(
     env: &BTreeMap<String, String>,
     runner: Arc<dyn Runner>,
     policy: WorktreePolicy,
+    acp: &AcpOptions,
 ) -> Result<Box<dyn SessionBackend>> {
     let name = requested.trim();
     if name.eq_ignore_ascii_case("auto") || name.is_empty() {
         let mut probe = env.clone();
         probe.remove("ONLYNE_BACKEND");
-        return select_backend_from_env(&probe, runner, policy);
+        return select_backend_from_env(&probe, runner, policy, acp);
     }
-    backend_by_name(name, runner, policy)
+    backend_by_name(name, runner, policy, acp)
 }
 
 /// Client default backend: driven by `ONLYNE_BACKEND`
-/// (`herdr` | `orca` | `zellij` | `exec`/`headless` | `fake` | `auto`). An
-/// empty value probes herdr, then orca, then zellij. `exec` and `fake` stay
-/// opt-in. `headless` selects [`BackendName::Exec`]; [`BackendName::as_str`]
-/// still answers `exec`.
+/// (`herdr` | `orca` | `zellij` | `exec`/`headless` | `acp` | `fake` | `auto`).
+/// An empty value probes herdr, then orca, then zellij. `exec`, `acp` and
+/// `fake` stay opt-in. `headless` selects [`BackendName::Exec`];
+/// [`BackendName::as_str`] still answers `exec`.
 ///
 /// `worktree` is the workspace config's `[orca] worktree` policy; only the
-/// Orca backend reads it.
-pub fn default_backend(worktree: WorktreePolicy) -> Result<Box<dyn SessionBackend>> {
+/// Orca backend reads it. `acp` is the `[acp]` table, read only by the ACP
+/// backend.
+pub fn default_backend(
+    worktree: WorktreePolicy,
+    acp: &AcpOptions,
+) -> Result<Box<dyn SessionBackend>> {
     let env = process_env();
     backend_for_env(
         env.get("ONLYNE_BACKEND").map(String::as_str).unwrap_or(""),
         &env,
         Arc::new(ProcessRunner),
         worktree,
+        acp,
     )
 }
 
@@ -673,6 +805,11 @@ mod tests {
                 SelectionSource::Explicit,
             ),
             (
+                env(&[("ONLYNE_BACKEND", "ACP")]),
+                Some(BackendName::Acp),
+                SelectionSource::Explicit,
+            ),
+            (
                 env(&[
                     ("HERDR_ENV", "1"),
                     ("HERDR_SESSION", "onlyne-test"),
@@ -709,9 +846,14 @@ mod tests {
     #[test]
     fn empty_env_refuses_with_no_supported_host() {
         let runner = Arc::new(ProbeRunner::default());
-        let error = select_backend_from_env(&BTreeMap::new(), runner, WorktreePolicy::Host)
-            .err()
-            .expect("empty env must refuse");
+        let error = select_backend_from_env(
+            &BTreeMap::new(),
+            runner,
+            WorktreePolicy::Host,
+            &AcpOptions::default(),
+        )
+        .err()
+        .expect("empty env must refuse");
         assert!(error.downcast_ref::<NoSupportedHost>().is_some());
         assert_eq!(error.to_string(), NO_SUPPORTED_HOST);
     }
@@ -720,9 +862,14 @@ mod tests {
     fn named_backends_stay_exact_and_unknown_names_error() {
         let runner = Arc::new(ProbeRunner::default());
         assert_eq!(
-            backend_by_name("herdr", runner.clone(), WorktreePolicy::Host)
-                .unwrap()
-                .name(),
+            backend_by_name(
+                "herdr",
+                runner.clone(),
+                WorktreePolicy::Host,
+                &AcpOptions::default()
+            )
+            .unwrap()
+            .name(),
             "herdr"
         );
         assert_eq!(
@@ -730,7 +877,8 @@ mod tests {
                 "zellij",
                 &BTreeMap::new(),
                 runner.clone(),
-                WorktreePolicy::Host
+                WorktreePolicy::Host,
+                &AcpOptions::default()
             )
             .unwrap()
             .name(),
@@ -741,7 +889,8 @@ mod tests {
                 "fake",
                 &BTreeMap::new(),
                 runner.clone(),
-                WorktreePolicy::Host
+                WorktreePolicy::Host,
+                &AcpOptions::default()
             )
             .unwrap()
             .name(),
@@ -752,16 +901,23 @@ mod tests {
                 "exec",
                 &BTreeMap::new(),
                 runner.clone(),
-                WorktreePolicy::Host
+                WorktreePolicy::Host,
+                &AcpOptions::default()
             )
             .unwrap()
             .name(),
             "exec"
         );
         assert_eq!(runner.calls().len(), 0);
-        let error = backend_for_env("nope", &BTreeMap::new(), runner, WorktreePolicy::Host)
-            .err()
-            .expect("unknown name must error");
+        let error = backend_for_env(
+            "nope",
+            &BTreeMap::new(),
+            runner,
+            WorktreePolicy::Host,
+            &AcpOptions::default(),
+        )
+        .err()
+        .expect("unknown name must error");
         assert_eq!(error.to_string(), "unknown session backend: nope");
     }
 
@@ -782,15 +938,25 @@ mod tests {
 
         let runner = Arc::new(ProbeRunner::default());
         assert_eq!(
-            backend_by_name("headless", runner.clone(), WorktreePolicy::Host)
-                .unwrap()
-                .name(),
+            backend_by_name(
+                "headless",
+                runner.clone(),
+                WorktreePolicy::Host,
+                &AcpOptions::default()
+            )
+            .unwrap()
+            .name(),
             "exec"
         );
         assert_eq!(
-            backend_by_name("HEADLESS", runner.clone(), WorktreePolicy::Host)
-                .unwrap()
-                .name(),
+            backend_by_name(
+                "HEADLESS",
+                runner.clone(),
+                WorktreePolicy::Host,
+                &AcpOptions::default()
+            )
+            .unwrap()
+            .name(),
             "exec"
         );
         assert_eq!(
@@ -798,15 +964,22 @@ mod tests {
                 "headless",
                 &BTreeMap::new(),
                 runner.clone(),
-                WorktreePolicy::Host
+                WorktreePolicy::Host,
+                &AcpOptions::default()
             )
             .unwrap()
             .name(),
             "exec"
         );
-        let error = backend_for_env("nope", &BTreeMap::new(), runner, WorktreePolicy::Host)
-            .err()
-            .expect("unknown name must error");
+        let error = backend_for_env(
+            "nope",
+            &BTreeMap::new(),
+            runner,
+            WorktreePolicy::Host,
+            &AcpOptions::default(),
+        )
+        .err()
+        .expect("unknown name must error");
         assert_eq!(error.to_string(), "unknown session backend: nope");
     }
 
@@ -822,9 +995,77 @@ mod tests {
             ]),
             runner,
             WorktreePolicy::Host,
+            &AcpOptions::default(),
         )
         .unwrap();
         assert_eq!(backend.name(), "herdr");
+    }
+
+    /// `acp` is a name like any other: selectable by name and by
+    /// `ONLYNE_BACKEND`, and never a host that auto-discovery can stumble into.
+    #[test]
+    fn acp_is_named_but_never_discovered() {
+        let runner = Arc::new(ProbeRunner::default());
+        assert_eq!(
+            backend_by_name(
+                "acp",
+                runner.clone(),
+                WorktreePolicy::Host,
+                &AcpOptions::default()
+            )
+            .unwrap()
+            .name(),
+            "acp"
+        );
+        let explicit = select_backend_from_env(
+            &env(&[("ONLYNE_BACKEND", "acp"), ("ZELLIJ", "1")]),
+            runner.clone(),
+            WorktreePolicy::Host,
+            &AcpOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(explicit.name(), "acp");
+        // An auto probe in a zellij terminal must still pick zellij, not acp.
+        let auto = select_backend_from_env(
+            &env(&[("ONLYNE_BACKEND", "auto"), ("ZELLIJ", "1")]),
+            runner,
+            WorktreePolicy::Host,
+            &AcpOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(auto.name(), "zellij");
+    }
+
+    /// A backend outlives its first drain, and any number of views may pull from
+    /// one stream: each fact is taken once and only once.
+    #[test]
+    fn an_outcome_stream_hands_each_fact_to_one_consumer() {
+        let (sink, feed) = OutcomeFeed::channel();
+        let second = feed.clone();
+        assert!(feed.try_recv().is_none());
+        sink.push(SessionOutcome {
+            task_id: "t1".into(),
+            outcome: crate::lifecycle::Outcome::Done,
+            head: Some("done".into()),
+            note: None,
+            refusals: None,
+        });
+        sink.push(SessionOutcome {
+            task_id: "t2".into(),
+            outcome: crate::lifecycle::Outcome::Failed,
+            head: None,
+            note: Some("agent exited".into()),
+            refusals: Some("2 refused".into()),
+        });
+        assert_eq!(
+            feed.recv_timeout(Duration::from_millis(10))
+                .unwrap()
+                .task_id,
+            "t1"
+        );
+        assert_eq!(second.try_recv().unwrap().task_id, "t2");
+        assert!(feed.try_recv().is_none());
+        assert!(feed.recv_timeout(Duration::from_millis(5)).is_none());
     }
 
     #[test]

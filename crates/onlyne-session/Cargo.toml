@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Onlyne v1 session kernel: lifecycle reducer, session backends, persistence bridge"
 
 [dependencies]
+onlyne-acp = { path = "../onlyne-acp", version = "1.1.1" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

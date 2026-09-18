@@ -281,7 +281,7 @@ impl AdapterSocket {
                                     task_id,
                                     session_id,
                                     generation,
-                                    io: io.clone(),
+                                    io: Some(io.clone()),
                                     capabilities: capabilities.clone(),
                                 },
                                 &prose,

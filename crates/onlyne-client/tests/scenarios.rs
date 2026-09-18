@@ -166,11 +166,27 @@ fn permissions_mode_600_for_role_key_and_socket() {
         "the bound endpoint is the path the accessor named: {}",
         endpoint.actual().display(),
     );
-    assert!(
-        endpoint.marker().exists(),
-        "the bind publishes the served path in {}",
-        endpoint.marker().display(),
-    );
+    #[cfg(unix)]
+    {
+        assert!(
+            endpoint.marker().exists(),
+            "the bind publishes the served path in {}",
+            endpoint.marker().display(),
+        );
+    }
+    // Windows cannot bind a unix UDS: the file at `run/s` is a marker naming the
+    // NPFS pipe the listener holds, so there is no separate `run/socket` to
+    // publish and the served path is the canonical spelling.
+    #[cfg(not(unix))]
+    {
+        assert_eq!(endpoint.actual(), endpoint.natural());
+        let served = std::fs::read_to_string(endpoint.actual()).expect("read the served run/s");
+        assert!(
+            served.starts_with("v1:"),
+            "the served file names the pipe, got {served:?}"
+        );
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -945,7 +961,7 @@ async fn ready_barrier_orders_assign_after_ready() {
             task_id: task_id.clone(),
             session_id: session.task_id.clone(),
             generation: 1,
-            io: io_server,
+            io: Some(io_server),
             capabilities: vec![Capability::Inject],
         },
         "prose",
@@ -1379,7 +1395,7 @@ async fn spawn_ready(
             task_id: task_id.clone(),
             session_id: session.task_id.clone(),
             generation: 1,
-            io: io_server,
+            io: Some(io_server),
             capabilities: vec![Capability::Inject],
         },
         "prose",

@@ -19,7 +19,9 @@ use onlyne_proto::{
     AckArgs, ClientOp, Delivery, EventTier, Frame, LedgerEntry, LedgerQuery, LedgerState, MsgKind,
     PullArgs, PullReply, QueryRolesArgs, RoleInfo, Subscribe, Welcome,
 };
-use onlyne_session::{ProcessRunner, WorktreePolicy, backend_for_env, process_env};
+use onlyne_session::{
+    AcpOptions, ProcessRunner, SessionOutcome, WorktreePolicy, backend_for_env, process_env,
+};
 use onlyne_store::ClientStore;
 use std::path::PathBuf;
 use std::sync::{
@@ -51,6 +53,8 @@ pub const SHUTDOWN_CLOSE_BUDGET: Duration = Duration::from_secs(8);
 pub const EVENT_CURSOR_KEY: &str = "event_seq";
 /// Retry delay for a request that the transport answered `NotReady`.
 pub const NOT_READY_PAUSE_MS: u64 = 200;
+/// Poll cadence for terminal facts emitted by a self-driven session backend.
+pub const OUTCOME_POLL_MS: u64 = 100;
 
 /// Ladder used until `welcome` carries the role's own values.
 pub fn default_intent_backoff() -> Vec<u64> {
@@ -83,6 +87,10 @@ pub struct ClientInit {
     /// Workspace `config.toml` `backend`. Empty means auto. `ONLYNE_BACKEND`
     /// in the process environment takes precedence when it is nonempty.
     pub backend: String,
+    /// The workspace config's `[acp]` table. Only the ACP session backend reads
+    /// it: the mode, model and reasoning effort handed to the agent when a
+    /// session opens, and what to answer when the agent asks for permission.
+    pub acp: onlyne_config::AcpSection,
 }
 
 impl ClientInit {
@@ -103,6 +111,7 @@ impl ClientInit {
             stale_grace_secs: onlyne_config::DEFAULT_STALE_GRACE_SECS,
             stall_report_secs: onlyne_config::DEFAULT_STALL_REPORT_SECS,
             backend: String::new(),
+            acp: onlyne_config::AcpSection::default(),
         }
     }
 
@@ -122,6 +131,24 @@ impl ClientInit {
     pub fn with_backend(mut self, backend: impl Into<String>) -> Self {
         self.backend = backend.into();
         self
+    }
+    /// Adopt the `[acp]` table the workspace config carries.
+    pub fn with_acp(mut self, acp: onlyne_config::AcpSection) -> Self {
+        self.acp = acp;
+        self
+    }
+}
+
+/// The `[acp]` table in the shape a session backend can read without a config
+/// dependency. The only decision made here is the one the backend acts on: the
+/// permission word, already validated by the config loader, becomes whether this
+/// client grants an agent's request.
+pub fn acp_options(acp: &onlyne_config::AcpSection) -> AcpOptions {
+    AcpOptions {
+        mode: acp.mode.clone(),
+        model: acp.model.clone(),
+        reasoning_effort: acp.reasoning_effort.clone(),
+        allow_permissions: acp.permission == "allow",
     }
 }
 
@@ -146,6 +173,7 @@ impl RunState {
             &process_env(),
             Arc::new(ProcessRunner),
             WorktreePolicy::from_config(&init.orca_worktree),
+            &acp_options(&init.acp),
         )?;
         let dispatch = DispatchState::new(
             init.role.clone(),
@@ -228,6 +256,7 @@ pub async fn run(init: ClientInit) -> Result<()> {
     let state = RunState::new(&init, store)?;
     let mut acceptor = tokio::spawn(acceptor(init.clone(), state.clone()));
     let closing = tokio::spawn(close_on_signal(state.dispatch.clone()));
+    let mut outcomes = tokio::spawn(outcome_loop(state.clone()));
     let outcome = tokio::select! {
         link = link_loop(&init, &state) => link,
         served = &mut acceptor => match served {
@@ -235,10 +264,64 @@ pub async fn run(init: ClientInit) -> Result<()> {
             Ok(Err(error)) => Err(error),
             Err(error) => Err(anyhow!("adapter acceptor task ended: {error}")),
         },
+        pumped = &mut outcomes => match pumped {
+            Ok(Ok(())) => Err(anyhow!("the session outcome pump stopped")),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(anyhow!("session outcome pump task ended: {error}")),
+        },
     };
     acceptor.abort();
     closing.abort();
+    outcomes.abort();
     outcome
+}
+
+/// Drain terminal facts emitted by a backend that owns its agent.
+///
+/// The backend queue is synchronous and destructive. Each fact is moved out
+/// before this task awaits the ordinary settlement path, so neither its queue
+/// lock nor the dispatch lock can survive into session teardown.
+async fn outcome_loop(state: RunState) -> Result<()> {
+    let Some(feed) = state.dispatch.outcome_feed() else {
+        return std::future::pending::<Result<()>>().await;
+    };
+    loop {
+        while let Some(outcome) = feed.try_recv() {
+            settle_session_outcome(&state, outcome).await?;
+        }
+        sleep(Duration::from_millis(OUTCOME_POLL_MS)).await;
+    }
+}
+
+/// Feed one self-driven ending through the same fault and settlement paths an
+/// adapter report uses.
+async fn settle_session_outcome(state: &RunState, outcome: SessionOutcome) -> Result<()> {
+    let SessionOutcome {
+        task_id,
+        outcome,
+        head,
+        note,
+        refusals,
+    } = outcome;
+    let terminal = match outcome {
+        onlyne_session::Outcome::Done => onlyne_proto::Outcome::Done,
+        onlyne_session::Outcome::Failed => onlyne_proto::Outcome::Failed,
+        onlyne_session::Outcome::Cancelled => onlyne_proto::Outcome::Cancelled,
+        onlyne_session::Outcome::Pending => {
+            return Err(anyhow!(
+                "self-driven backend reported a non-terminal outcome for task {task_id}"
+            ));
+        }
+    };
+    if let Some(reason) = refusals.as_deref() {
+        onlyne_session::record_fault(&state.store, &task_id, "permission", "acp", reason)?;
+    }
+    if outcome == onlyne_session::Outcome::Failed
+        && let Some(reason) = note.as_deref()
+    {
+        onlyne_session::record_fault(&state.store, &task_id, "acp", "acp", reason)?;
+    }
+    dispatch::on_out(&state.dispatch, &task_id, terminal, head).await
 }
 
 /// Keep the server link up until a permanent failure ends the run.
@@ -879,9 +962,14 @@ pub fn accept_path(state: &RunState) -> Result<AcceptPath> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use onlyne_proto::{Outcome, Presence, Report};
+    use onlyne_net::NetError;
+    use onlyne_proto::{
+        Body, Causality, Outcome, Presence, Principal, Report, ResBody, new_envelope, new_task_id,
+    };
     use onlyne_session::backend::fake::FakeBackend;
-    use onlyne_session::{SessionLedger, VersionedSession};
+    use onlyne_session::{AcpBackend, SessionLedger, VersionedSession};
+    use std::future::Future;
+    use std::pin::Pin;
     use tempfile::tempdir;
 
     fn test_state(max_sessions: u32, reuse: bool, command: Vec<String>) -> (RunState, ClientStore) {
@@ -911,6 +999,132 @@ mod tests {
             stall_report_secs: 1,
         };
         (state, store)
+    }
+
+    /// Real ACP v1 peer used by the client-level delivery test below. The ready
+    /// marker is written by the test outbox when the Ready report leaves; the
+    /// child checks it at the instant it receives the prompt, making the causal
+    /// order observable across the process boundary.
+    const CLIENT_ACP_FAKE: &str = r##"import json, os, sys
+
+TRACE = sys.argv[1]
+READY = sys.argv[2]
+
+
+def trace(line):
+    with open(TRACE, "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+        fh.flush()
+
+
+def send(message):
+    sys.stdout.write(json.dumps(message) + "\n")
+    sys.stdout.flush()
+
+
+def result(rid, value):
+    send({"jsonrpc": "2.0", "id": rid, "result": value})
+
+
+def failure(rid, code, message):
+    send({"jsonrpc": "2.0", "id": rid,
+          "error": {"code": code, "message": message}})
+
+
+def read_message():
+    line = sys.stdin.readline()
+    if not line:
+        return None
+    return json.loads(line)
+
+
+def wait_for(rid):
+    while True:
+        message = read_message()
+        if message is None:
+            return None
+        if message.get("id") == rid and ("result" in message or "error" in message):
+            return message
+
+
+trace("start pid %d" % os.getpid())
+while True:
+    message = read_message()
+    if message is None:
+        trace("eof")
+        break
+    method = message.get("method")
+    rid = message.get("id")
+    params = message.get("params") or {}
+    if method == "initialize":
+        result(rid, {"protocolVersion": 1,
+                     "agentInfo": {"name": "onlyne-client-test", "version": "0"},
+                     "authMethods": [],
+                     "agentCapabilities": {"sessionCapabilities": {"close": {}}}})
+    elif method == "session/new":
+        result(rid, {"sessionId": "client-e2e-session",
+                     "modes": {"currentModeId": "default"},
+                     "models": {"currentModelId": "fast"},
+                     "configOptions": []})
+    elif method == "session/prompt":
+        prompt = "".join(block.get("text", "") for block in params.get("prompt") or [])
+        session = params.get("sessionId")
+        trace("prompt " + prompt)
+        trace("ready-before-prompt %s" % os.path.exists(READY))
+        send({"jsonrpc": "2.0", "id": "permission-1",
+              "method": "session/request_permission",
+              "params": {"sessionId": session,
+                         "toolCall": {"toolCallId": "call-1", "title": "Edit file",
+                                      "kind": "edit", "status": "pending"},
+                         "options": [{"optionId": "once", "kind": "allow_once",
+                                      "name": "Allow once"},
+                                     {"optionId": "no", "kind": "reject_once",
+                                      "name": "Reject once"}]}})
+        reply = wait_for("permission-1") or {}
+        chosen = ((reply.get("result") or {}).get("outcome") or {}).get("optionId", "none")
+        trace("permission " + chosen)
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": session,
+                         "sessionUpdate": "agent_message_chunk",
+                         "content": {"type": "text", "text": "permission denied\n"}}})
+        result(rid, {"stopReason": "refusal"})
+    elif method == "session/close":
+        trace("close " + str(params.get("sessionId")))
+        result(rid, {})
+    elif method == "session/cancel":
+        trace("cancel")
+    elif rid is not None:
+        failure(rid, -32601, "unsupported " + str(method))
+"##;
+
+    #[derive(Clone)]
+    struct ReadyMarkerOutbox {
+        marker: PathBuf,
+        frames: Arc<parking_lot::Mutex<Vec<ClientOp>>>,
+    }
+
+    impl crate::dispatch::Outbox for ReadyMarkerOutbox {
+        fn send(
+            &self,
+            op: ClientOp,
+        ) -> Pin<Box<dyn Future<Output = Result<(), NetError>> + Send + '_>> {
+            let marker = self.marker.clone();
+            let frames = Arc::clone(&self.frames);
+            Box::pin(async move {
+                if matches!(&op, ClientOp::Report(Report::Ready { .. })) {
+                    std::fs::write(marker, b"ready").expect("write the ready marker");
+                }
+                frames.lock().push(op);
+                Ok(())
+            })
+        }
+
+        fn request(
+            &self,
+            _op: ClientOp,
+        ) -> Pin<Box<dyn Future<Output = Result<ResBody, NetError>> + Send + '_>> {
+            Box::pin(async { Ok(ResBody::ok(serde_json::Value::Null)) })
+        }
     }
 
     fn role_info(max_sessions: u32, reuse: bool, command: Vec<String>) -> RoleInfo {
@@ -944,11 +1158,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let workspace = RoleWorkspace::resolve(dir.path());
         workspace.bootstrap().unwrap();
+        #[cfg(unix)]
         std::fs::write(
             workspace.run_dir().join("socket"),
             "/nonexistent-dir-onlyne-for-this-test/sock\n",
         )
         .unwrap();
+        // Windows resolves the natural path regardless of the Unix endpoint
+        // marker. Hold the production NPFS listener instead: a second bind to
+        // that live name is the platform's EADDRINUSE equivalent.
+        #[cfg(windows)]
+        let (_held_listener, _endpoint) =
+            onlyne_layout::bind_socket(workspace.root(), &workspace.run_dir()).unwrap();
         let init = ClientInit::new(
             dir.path(),
             "planner",
@@ -964,6 +1185,177 @@ mod tests {
         assert!(
             error.to_string().contains("bind the workspace socket"),
             "{error}"
+        );
+    }
+
+    /// A real ACP child takes a pulled task without an adapter mount, observes
+    /// the payload only after Ready left, and reports its refusal through the
+    /// ordinary client fault, settlement, head, and delivery-ack paths.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_acp_delivery_reaches_the_agent_and_settles_through_the_client() {
+        let dir = tempdir().expect("ACP client workspace");
+        let workspace = RoleWorkspace::resolve(dir.path());
+        workspace.bootstrap().expect("bootstrap workspace");
+        let script = dir.path().join("onlyne_client_acp_fake_agent.py");
+        let trace_path = dir.path().join("agent.trace");
+        let ready_marker = dir.path().join("ready.reported");
+        std::fs::write(&script, CLIENT_ACP_FAKE).expect("write ACP fake agent");
+
+        let store = ClientStore::open(workspace.client_db_path()).expect("client store");
+        store
+            .put_prose("planner", "Act as the planner.", "spec-hash")
+            .expect("cache role prose");
+        let backend = Arc::new(AcpBackend::new(AcpOptions::default()));
+        let dispatch = DispatchState::new(
+            "planner",
+            dir.path(),
+            vec![
+                "python3".into(),
+                "-u".into(),
+                script.to_string_lossy().into_owned(),
+                trace_path.to_string_lossy().into_owned(),
+                ready_marker.to_string_lossy().into_owned(),
+            ],
+            1,
+            false,
+            backend,
+            store.clone(),
+        );
+        let frames = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        dispatch.attach_outbox(Arc::new(ReadyMarkerOutbox {
+            marker: ready_marker,
+            frames: Arc::clone(&frames),
+        }));
+        let state = RunState {
+            accept_new: dispatch.accept_new(),
+            store: store.clone(),
+            intents: Arc::new(parking_lot::Mutex::new(IntentMachine::new(
+                store.clone(),
+                DEFAULT_INTENT_ATTEMPTS,
+                default_intent_backoff(),
+            ))),
+            dispatch,
+            welcome: Arc::new(Mutex::new(None)),
+            stall_report_secs: 0,
+        };
+        let pump = tokio::spawn(outcome_loop(state.clone()));
+
+        let task_id = new_task_id();
+        let delivery = Delivery {
+            msg_id: "msg-acp-client-e2e".into(),
+            envelope: Box::new(
+                new_envelope(
+                    MsgKind::Task,
+                    Principal::role("sender"),
+                    Principal::role("planner"),
+                    Body::text("repair the failing widget"),
+                    Some(Causality::root(task_id.clone())),
+                )
+                .expect("task envelope"),
+            ),
+        };
+        accept_delivery(&state, &delivery).await;
+
+        let settled = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(row) = store.get_session(&task_id).expect("read session")
+                    && row.public_lifecycle == "exited"
+                {
+                    break row;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let row = match settled {
+            Ok(row) => row,
+            Err(error) => {
+                crate::dispatch::close_all(
+                    &state.dispatch,
+                    onlyne_session::CloseReason::Shutdown,
+                    Duration::from_secs(1),
+                );
+                pump.abort();
+                panic!(
+                    "ACP task did not settle: {error}; trace={:?}",
+                    std::fs::read_to_string(&trace_path)
+                );
+            }
+        };
+
+        // `on_out` removes the slot and asks the ACP backend to close. Wait for
+        // the child to observe EOF before asserting, so even a failed assertion
+        // below cannot leave the fake agent behind.
+        let trace = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+                if trace.contains("eof") {
+                    break trace;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the ACP fake agent exits after settlement");
+        pump.abort();
+        let _ = pump.await;
+
+        assert!(
+            trace.contains("prompt repair the failing widget"),
+            "the task payload crossed the real ACP pipe: {trace}"
+        );
+        assert!(
+            trace.contains("ready-before-prompt True"),
+            "Ready must leave before the agent sees the payload: {trace}"
+        );
+        assert!(trace.contains("permission no"), "{trace}");
+        assert!(trace.contains("close client-e2e-session"), "{trace}");
+        assert!(!state.dispatch.has_mounted_adapter());
+        assert_eq!(state.dispatch.session_count(), 0);
+
+        let observed: serde_json::Value =
+            serde_json::from_str(&row.observed_json).expect("stored observation JSON");
+        assert_eq!(observed["outcome"], "failed");
+        assert_eq!(
+            store
+                .out_head(&task_id)
+                .expect("read completion head")
+                .as_deref(),
+            Some("permission denied")
+        );
+        let faults = store.list_faults(&task_id).expect("read ACP faults");
+        assert_eq!(
+            faults
+                .iter()
+                .map(|fault| fault.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["permission", "acp"],
+            "{faults:?}"
+        );
+        assert!(faults[0].reason.contains("permission ask(s) refused"));
+        assert!(faults[1].reason.contains("agent stopped the turn: refusal"));
+
+        assert!(
+            frames.lock().iter().any(|op| {
+                matches!(
+                    op,
+                    ClientOp::Report(Report::Ready { task_id: ready, .. })
+                        if ready == &task_id
+                )
+            }),
+            "the existing Ready report path was used"
+        );
+        let intents = store
+            .due_intents(chrono::Utc::now() + chrono::Duration::seconds(1), 100)
+            .expect("read durable intents");
+        assert!(
+            intents.iter().any(|row| {
+                matches!(
+                    serde_json::from_value::<ClientOp>(row.env_json.clone()),
+                    Ok(ClientOp::Ack(ack)) if ack.msg_id == "msg-acp-client-e2e" && ack.accepted
+                )
+            }),
+            "the delivery ack was queued through the existing settlement path: {intents:?}"
         );
     }
 

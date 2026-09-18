@@ -175,6 +175,10 @@ impl DispatchState {
             .find(|slot| slot.task_id.as_deref() == Some(task_id))
             .map(|slot| slot.session.backend.clone())
     }
+    /// The terminal-fact stream of a backend that drives its own agent.
+    pub fn outcome_feed(&self) -> Option<onlyne_session::OutcomeFeed> {
+        self.inner.lock().backend.outcomes()
+    }
     /// Bind one adapter connection to the session it named.
     ///
     /// The name is the session id the client spawned the plugin with, which is
@@ -623,7 +627,7 @@ impl DispatchState {
                 task_id: task_id.to_string(),
                 session_id: task_id.to_string(),
                 generation: self.session_generation(task_id).unwrap_or(1),
-                io,
+                io: Some(io),
                 capabilities,
             },
             &prose,
@@ -674,15 +678,33 @@ impl DispatchState {
             .and_then(|(_, slot)| slot.task_id.clone())
     }
 
-    /// Route one staged session to the connection that serves it.
+    /// Route one staged session to the thing that serves it.
     ///
-    /// The session's own connection comes first: a plugin the client spawned
-    /// mounts with this session's id in `ONLYNE_SESSION_ID`, and a plugin that
-    /// reconnected mounts with it again, so its assignment rides that socket
-    /// alone. A plugin parked for the role takes the next staged session, once.
-    /// A session with neither waits: its own plugin is still coming up, and its
-    /// mount hands the payload over. Answers whether a transport was found.
+    /// A self-driven backend owns its agent and takes the payload immediately,
+    /// without an adapter socket. Otherwise the session's own connection comes
+    /// first: a plugin the client spawned mounts with this session's id in
+    /// `ONLYNE_SESSION_ID`, and a plugin that reconnected mounts with it again,
+    /// so its assignment rides that socket alone. A plugin parked for the role
+    /// takes the next staged session, once. A plugin-driven session with neither
+    /// waits for its mount. Answers whether the payload had somewhere to go.
     pub async fn hand_staged(&self, session_id: &str) -> Result<bool> {
+        let self_driven = self.inner.lock().backend.self_driven();
+        if self_driven {
+            let prose = self.role_prose();
+            on_ready(
+                self,
+                ReadyNotice {
+                    task_id: session_id.to_string(),
+                    session_id: session_id.to_string(),
+                    generation: self.session_generation(session_id).unwrap_or(1),
+                    io: None,
+                    capabilities: Vec::new(),
+                },
+                &prose,
+            )
+            .await?;
+            return Ok(true);
+        }
         let transport = self
             .session_transport(session_id)
             .or_else(|| self.claim_parked_transport(session_id));
@@ -989,13 +1011,15 @@ pub struct ReadyNotice {
     pub task_id: String,
     pub session_id: String,
     pub generation: u64,
-    pub io: AdapterIo,
+    /// Adapter transport for plugin-driven backends. A self-driven backend owns
+    /// its agent and therefore reports ready without a socket.
+    pub io: Option<AdapterIo>,
     pub capabilities: Vec<Capability>,
 }
 
-/// Report the session ready and hand its held payload to the adapter. The
-/// `ready` row reaches the ledger before the `assign` frame leaves, which is
-/// the causal order §6 requires.
+/// Report the session ready and hand its held payload to its agent. The `ready`
+/// row reaches the ledger before either the backend delivery or adapter frame,
+/// which is the causal order §6 requires.
 pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -> Result<()> {
     let ReadyNotice {
         task_id,
@@ -1004,8 +1028,9 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
         io,
         capabilities,
     } = notice;
-    let (payload, target, version) = {
+    let (payload, target, session, backend, version) = {
         let mut inner = state.inner.lock();
+        let backend = Arc::clone(&inner.backend);
         let slot = inner
             .sessions
             .values_mut()
@@ -1026,9 +1051,10 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
         };
         slot.origin = Some(payload.from.clone());
         slot.ready = true;
+        let session = slot.session.clone();
         let verdict = feed_ready(&inner.bridge, &inner.store, &task_id)?;
         let version = note_verdict(&verdict, &task_id).unwrap_or(Version::new(generation, 0));
-        (payload, io, version)
+        (payload, io, session, backend, version)
     };
     // The ready report reaches the server before the payload reaches the agent.
     send_frame(
@@ -1044,29 +1070,36 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
     .await?;
     sync_session(state, &task_id).await?;
     let text = payload.body.text.clone().unwrap_or_default();
-    if capabilities.contains(&Capability::Inject) {
-        let assign = AssignArgs {
-            envelope: Box::new(payload),
-            prose: prose.to_string(),
-            task_id,
-            generation,
-            parent: None,
-        };
-        target
-            .notify(AdapterMsg::Host(HostOp::Assign(assign)))
-            .await
-            .map_err(|e| anyhow!(e))?;
-    } else {
-        target
+    match (backend.self_driven(), target) {
+        (true, None) => backend.deliver(&session, &task_id, &text),
+        (true, Some(_)) => Err(anyhow!(
+            "self-driven session {session_id} unexpectedly has an adapter transport"
+        )),
+        (false, Some(target)) if capabilities.contains(&Capability::Inject) => {
+            let assign = AssignArgs {
+                envelope: Box::new(payload),
+                prose: prose.to_string(),
+                task_id,
+                generation,
+                parent: None,
+            };
+            target
+                .notify(AdapterMsg::Host(HostOp::Assign(assign)))
+                .await
+                .map_err(|e| anyhow!(e))
+        }
+        (false, Some(target)) => target
             .notify(AdapterMsg::Host(HostOp::ConfigGet(
                 onlyne_proto::ConfigGetArgs {
                     key: format!("stdin:{text}"),
                 },
             )))
             .await
-            .map_err(|e| anyhow!(e))?;
+            .map_err(|e| anyhow!(e)),
+        (false, None) => Err(anyhow!(
+            "adapter-backed session {session_id} reported ready without a transport"
+        )),
     }
-    Ok(())
 }
 
 pub async fn on_out(
