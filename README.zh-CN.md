@@ -4,16 +4,16 @@
 
 Onlyne 把一群 coding agent 编成一个工作集群。**server** 在 agent 角色之间路由消息，并把每次投递写进持久账本。每个工作区一个 **client**，负责本角色全部 coding-agent 会话。**gateway** 进程把 Telegram / 飞书 / QQ / 微信的聊天翻译成同一套消息模型。agent 的运行时保持原样，Onlyne 只是让它们的手互相够得着，并留下一条可审计的痕迹。集群能跨机器：client 用 TLS 从任何地方连回 server，生成好的工作区 `mv` 一下就能搬走，集群还能嵌套成更大的集群。
 
-![version](https://img.shields.io/badge/version-v1.1.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
+![version](https://img.shields.io/badge/version-v1.1.1-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
 ![Onlyne — supervisor 向五个 pi agent 派十跳环任务，账本逐跳结清](assets/promo/onlyne-hero.png)
 
 ## 安装
 
-全部 18 件 1.1.0 已上册 [crates.io](https://crates.io)。瘦入口是 `onlyne-cli`（安装出二进制 `onlyne`）；四个守护进程同样从 crates.io 装进 cargo bin，`onlyne` 在那里找兄弟件。
+全部 18 件 1.1.1 已上册 [crates.io](https://crates.io)。瘦入口是 `onlyne-cli`（安装出二进制 `onlyne`）；四个守护进程同样从 crates.io 装进 cargo bin，`onlyne` 在那里找兄弟件。
 
 ```bash
-cargo install onlyne-cli --version 1.1.0
-cargo install onlyne-server onlyne-client onlyne-gateway onlyne-tui --version 1.1.0
+cargo install onlyne-cli --version 1.1.1
+cargo install onlyne-server onlyne-client onlyne-gateway onlyne-tui --version 1.1.1
 ```
 
 `onlyne` 是薄转发器（`server`/`client`/`gateway`/`admin` 动词）；TUI 单独叫 `onlyne-tui`。pi 角色的 adapter 插件在 npm：
@@ -166,7 +166,7 @@ unix 上每个守护进程绑定的都是规范名 `run/s`，前提是这条路�
 
 ## 状态
 
-最新 tag 是 `v1.1.0`（`e2d0e15`），18 件 crate 已上册 crates.io。本机 `cargo test --workspace` 为 760 passed、0 failed、1 ignored（`herdr_live_probe`）。fake e2e 12/12。tag 之后加入的第 17 例 `socket-path-length.sh` 通过，fake 组达到 13/13。双平台 CI 全绿（run 34977562567）。macOS release 已 ad-hoc codesign 换装 `~/.cargo/bin`，`onlyne --version` 为 `1.1.0`。环图 TUI、supervisor demo、pi adapter 插件在 macOS 全绿；四个 IM gateway 以 feature-gated crate 交付，等待真平台浸泡。`cargo build --workspace` 需要 Rust 1.85。
+最新 tag 是 `v1.1.1`，18 件 crate 已上册 crates.io。本轮修的是 herdr 首跑现场：过长 adapter socket、`herdr agent start` 丢尾参、相对 `--cwd`、会话结束后 pane 不回收、已完成任务被追认为 `stalled`。fake e2e 13/13，含 `socket-path-length.sh`。`cargo build --workspace` 需要 Rust 1.85。安装：`cargo install onlyne-cli --version 1.1.1`，四个守护进程同号。
 
 ## 阅读
 

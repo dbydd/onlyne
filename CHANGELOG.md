@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.1.1] - 2026-09-18
 
 Scope: the socket-path field fix reported 2026-09-17 from the formal-research
 tree, plus the herdr argv fixes from the same session. On macOS `sun_path`
@@ -124,6 +124,15 @@ acked as complete was reported `stalled` half an hour later.
   names both spellings with the canonical length — so the marker's answer is
   visible in the log from the first line. File:
   `crates/onlyne-server/src/admin.rs`.
+
+All eighteen crates move to 1.1.1: `onlyne-proto`, `onlyne-frame`,
+`onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-session`,
+`onlyne-net`, `onlyne-adapter`, `onlyne-testkit`, `onlyne-server`,
+`onlyne-client`, `onlyne-gateway`, `onlyne-gateway-telegram`,
+`onlyne-gateway-feishu`, `onlyne-gateway-qqbot`, `onlyne-gateway-weixin`,
+`onlyne-tui`, and `onlyne-cli`. Tag `v1.1.1`. Install:
+`cargo install onlyne-cli --version 1.1.1` plus
+`onlyne-server onlyne-client onlyne-gateway onlyne-tui` at the same version.
 
 ## [1.1.0] - 2026-09-15
 

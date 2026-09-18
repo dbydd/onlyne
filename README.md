@@ -4,16 +4,16 @@
 
 Onlyne ties a fleet of coding agents into one working cluster. A **server** routes every message between agent roles, and records each delivery in a durable ledger. A **client** per workspace runs that role's coding-agent sessions. **Gateway** processes turn Telegram / Feishu / QQ / WeChat chats into the same message model. Your agents keep their own runtimes; Onlyne gives them hands that reach each other, plus a paper trail you can audit. The cluster spans machines: a client reaches the server over TLS from anywhere, a generated workspace relocates with a plain `mv`, and clusters nest into larger clusters.
 
-![version](https://img.shields.io/badge/version-v1.1.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
+![version](https://img.shields.io/badge/version-v1.1.1-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
 ![Onlyne — a supervisor dispatches a ten-hop ring task to five pi agents; ledger receipts settle every hop](assets/promo/onlyne-hero.png)
 
 ## Install
 
-Everything ships to [crates.io](https://crates.io) at 1.1.0. The thin entry is `onlyne-cli` (binary `onlyne`); the four daemons install the same way and `onlyne` finds them in the cargo bin directory.
+Everything ships to [crates.io](https://crates.io) at 1.1.1. The thin entry is `onlyne-cli` (binary `onlyne`); the four daemons install the same way and `onlyne` finds them in the cargo bin directory.
 
 ```bash
-cargo install onlyne-cli --version 1.1.0
-cargo install onlyne-server onlyne-client onlyne-gateway onlyne-tui --version 1.1.0
+cargo install onlyne-cli --version 1.1.1
+cargo install onlyne-server onlyne-client onlyne-gateway onlyne-tui --version 1.1.1
 ```
 
 `onlyne` is the thin forwarder (`server`/`client`/`gateway`/`admin` verbs); the TUI runs separately as `onlyne-tui`. For a pi agent role, the adapter plugin lives on npm:
@@ -173,7 +173,7 @@ Every workspace is self-contained and portable. `onlyne server generate` lays a 
 
 ## Status
 
-Release `v1.1.0` (tag `e2d0e15`) is on crates.io. `cargo test --workspace` is 760 passed, 0 failed, 1 ignored (`herdr_live_probe`). Fake-backend e2e is 12/12. Case 17 `socket-path-length.sh` joined after the tag and passes, bringing the fake set to 13/13. Dual-platform CI is green (run 34977562567). macOS release binaries in `~/.cargo/bin` print `onlyne --version` `1.1.0`. The ring TUI, the supervisor demo, and the pi adapter plugin run green on macOS. The four IM gateways ship as feature-gated crates awaiting live-platform soak. `cargo build --workspace` needs Rust 1.85.
+Release `v1.1.1` is on crates.io. Field fixes from the first herdr run: overlong adapter sockets, `herdr agent start` argv, absolute `--cwd`, pane retirement, and the false `stalled` fault on a completed task. Fake-backend e2e is 13/13 including `socket-path-length.sh`. `cargo build --workspace` needs Rust 1.85. Install with `cargo install onlyne-cli --version 1.1.1` plus the four daemons at the same version.
 
 ## Reading
 
