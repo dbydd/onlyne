@@ -294,6 +294,7 @@ allowed_targets = ["planner"]
     /// The field shape that moves the socket: a server root whose canonical
     /// spelling passes the unix bound, so the daemon serves a short derived path
     /// and every reader reaches it through the published marker.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_root_past_the_path_bound_serves_the_published_short_path() {
         use onlyne_layout::UNIX_SOCKET_PATH_MAX;
@@ -365,6 +366,76 @@ allowed_targets = ["planner"]
                 .actual()
                 .parent()
                 .expect("the served path sits in its own directory"),
+        );
+    }
+
+    /// Windows binds no `sun_path`: `<root>/.onlyne/run/s` is a regular marker
+    /// file naming the NPFS pipe the daemon holds, so the canonical spelling needs
+    /// no length rule and `run/socket` is never written. A root past the unix
+    /// bound still serves that one path end to end.
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn a_root_past_the_path_bound_keeps_the_canonical_path() {
+        use onlyne_layout::UNIX_SOCKET_PATH_MAX;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("server-root".repeat(8)).join("deep");
+        std::fs::create_dir_all(root.join(".onlyne")).expect("create the root");
+        std::fs::write(root.join(".onlyne/spec.toml"), spec_text()).expect("write the spec");
+        let state = Server::open(&ServerInit { root, listen: None }).expect("open the server");
+
+        let layout = ServerRoot::resolve(&state.root);
+        let natural = layout.socket_path_natural();
+        assert!(
+            natural.as_os_str().len() > UNIX_SOCKET_PATH_MAX,
+            "{} is {} bytes",
+            natural.display(),
+            natural.as_os_str().len()
+        );
+
+        let listener = bind(&state).expect("bind on a root past the bound");
+        let endpoint = layout.socket_endpoint();
+        assert_eq!(endpoint.actual(), endpoint.natural());
+        assert!(!endpoint.short(), "the canonical path needs no stand-in");
+        let served = std::fs::read_to_string(endpoint.actual()).expect("read the served path");
+        assert!(
+            served.starts_with("v1:"),
+            "the served path names the pipe, got {served:?}"
+        );
+        assert_eq!(layout.socket_path(), endpoint.actual());
+
+        let serving = state.clone();
+        let socket_task = tokio::spawn(async move {
+            let _ = serve_socket(serving, listener).await;
+        });
+        let mut stream = onlyne_layout::connect_local(endpoint.actual())
+            .await
+            .expect("connect the served path");
+        let probe: Frame<ClientOp> = Frame::Ping { t: 1_700_000_000 };
+        write_frame(&mut stream, &probe)
+            .await
+            .expect("write the ping");
+        let answer: Frame<ClientOp> = read_frame(&mut stream)
+            .await
+            .expect("read the answer")
+            .expect("one answer frame");
+        assert!(
+            matches!(
+                answer,
+                Frame::Pong {
+                    t: 1_700_000_000,
+                    ..
+                }
+            ),
+            "the served path answers {answer:?}"
+        );
+        drop(stream);
+        socket_task.abort();
+
+        unlink(&state).expect("unlink the served path");
+        assert!(
+            !endpoint.actual().exists(),
+            "the served path survived unlink"
         );
     }
 }

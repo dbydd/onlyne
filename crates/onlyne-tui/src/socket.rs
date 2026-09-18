@@ -86,6 +86,7 @@ mod tests {
 
     /// A cluster that moved its admin socket off the canonical spelling is still
     /// addressed by its root directory, which is what the operator types.
+    #[cfg(unix)]
     #[test]
     fn server_root_reads_the_published_path() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -124,6 +125,7 @@ mod tests {
     /// The marker alone makes a directory an owner: a daemon whose socket lives
     /// outside the tree leaves the live path in `run/socket`, and a watcher that
     /// joined `run/s` itself would sit on a file nobody binds.
+    #[cfg(unix)]
     #[test]
     fn marker_only_workspace_resolves_the_published_path() {
         let tmp = tempfile::tempdir().expect("temp dir");
@@ -148,6 +150,7 @@ mod tests {
     /// the canonical spelling can pass `UNIX_SOCKET_PATH_MAX` and the bound path
     /// is a short derived one. Both moments answer one path: the length rule
     /// before a daemon binds, the marker after.
+    #[cfg(unix)]
     #[test]
     fn long_workspace_resolves_the_short_served_path() {
         let tmp = tempfile::tempdir().expect("temp dir");
@@ -181,6 +184,51 @@ mod tests {
         let endpoint = RoleWorkspace::resolve(&root).socket_endpoint();
         endpoint.publish().expect("publish the bound path");
         let after = resolve_socket(&args).expect("the marker names the socket");
+        assert_eq!(after, endpoint.actual());
+        assert_eq!(
+            after, before,
+            "one owner tree resolves to one path across the bind"
+        );
+    }
+
+    /// Windows binds no `sun_path`: `<run>/s` is a regular marker file naming the
+    /// NPFS pipe the daemon holds, so the canonical spelling needs no length rule
+    /// and there is no `run/socket` to publish. The same deep workspace still
+    /// answers one canonical path before and after endpoint publication.
+    #[cfg(not(unix))]
+    #[test]
+    fn long_workspace_resolves_the_canonical_spelling() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mut root = tmp.path().to_path_buf();
+        for _ in 0..6 {
+            root.push("role-workspace-with-a-long-name");
+        }
+        let run = root.join(".onlyne/run");
+        fs::create_dir_all(run.join("src")).expect("run dir");
+        let natural = run.join("s");
+        fs::write(&natural, "").expect("canonical placeholder");
+        assert!(
+            natural.as_os_str().len() > onlyne_layout::UNIX_SOCKET_PATH_MAX,
+            "the case needs a canonical spelling over the bound, got {}",
+            natural.as_os_str().len()
+        );
+        let args = SocketArgs {
+            socket: None,
+            server_root: None,
+            workspace: Some(run.join("src")),
+        };
+
+        let before = resolve_socket(&args).expect("a deep workspace names a socket");
+        assert_eq!(
+            before, natural,
+            "the canonical spelling is the one bound here"
+        );
+
+        let endpoint = RoleWorkspace::resolve(&root).socket_endpoint();
+        endpoint.publish().expect("publish the endpoint");
+        assert_eq!(endpoint.actual(), endpoint.natural());
+        assert!(!endpoint.short(), "the canonical path needs no stand-in");
+        let after = resolve_socket(&args).expect("the owner tree still names the socket");
         assert_eq!(after, endpoint.actual());
         assert_eq!(
             after, before,

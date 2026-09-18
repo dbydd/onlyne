@@ -163,6 +163,7 @@ mod tests {
     use crate::flags::{GlobalFlags, SOCKET_ENV};
     use clap::Parser as _;
     use onlyne_layout::{RoleWorkspace, UNIX_SOCKET_PATH_MAX};
+    #[cfg(unix)]
     use std::ffi::OsStr;
     use std::fs;
     use std::path::Path;
@@ -250,6 +251,7 @@ mod tests {
     /// behind, and that file is the only thing in the tree naming the live path.
     /// The incident this guards: a caller joined `.onlyne/run/s` itself and
     /// connected to a file the daemon never binds.
+    #[cfg(unix)]
     #[test]
     fn marker_only_workspace_resolves_the_published_path() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -277,6 +279,7 @@ mod tests {
     /// answers with the short served path in both moments that matter: before a
     /// daemon binds, where the length rule is the only source, and after it,
     /// where the marker is.
+    #[cfg(unix)]
     #[test]
     fn long_workspace_resolves_the_short_served_path() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -320,6 +323,49 @@ mod tests {
         let after = resolve(&flags).expect("the marker names the socket");
         assert_eq!(after.path, endpoint.actual());
         assert!(endpoint.short(), "the case is about a moved endpoint");
+        assert_eq!(
+            after.path, before.path,
+            "one owner tree resolves to one path across the bind"
+        );
+        assert_eq!(after.surface, Surface::Client);
+    }
+
+    /// Windows binds no `sun_path`: `<run>/s` is a regular marker file naming the
+    /// NPFS pipe the daemon holds, so the canonical spelling needs no length rule
+    /// and there is no `run/socket` to publish. The same deep workspace still
+    /// answers one canonical path before and after endpoint publication.
+    #[cfg(not(unix))]
+    #[test]
+    fn long_workspace_resolves_the_canonical_spelling() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut workspace = dir.path().to_path_buf();
+        for _ in 0..6 {
+            workspace.push("role-workspace-with-a-long-name");
+        }
+        let run = workspace.join(".onlyne/run");
+        fs::create_dir_all(run.join("src")).expect("run dir");
+        let natural = run.join("s");
+        fs::write(&natural, "").expect("canonical placeholder");
+        assert!(
+            natural.as_os_str().len() > UNIX_SOCKET_PATH_MAX,
+            "the case needs a canonical spelling over the bound, got {}",
+            natural.as_os_str().len()
+        );
+        let flags = flags_for(&["--workspace", &run.join("src").to_string_lossy()]);
+
+        let before = resolve(&flags).expect("a deep workspace still names a socket");
+        assert_eq!(before.surface, Surface::Client);
+        assert_eq!(
+            before.path, natural,
+            "the canonical spelling is the one bound here"
+        );
+
+        let endpoint = RoleWorkspace::resolve(&workspace).socket_endpoint();
+        endpoint.publish().expect("publish the endpoint");
+        assert_eq!(endpoint.actual(), endpoint.natural());
+        assert!(!endpoint.short(), "the canonical path needs no stand-in");
+        let after = resolve(&flags).expect("the owner tree still names the socket");
+        assert_eq!(after.path, endpoint.actual());
         assert_eq!(
             after.path, before.path,
             "one owner tree resolves to one path across the bind"
@@ -392,6 +438,7 @@ mod tests {
 
     /// `--server-root` selects the server through the same endpoint machinery, so
     /// a cluster that moved its admin socket is addressed by its root directory.
+    #[cfg(unix)]
     #[test]
     fn server_root_resolves_the_published_admin_path() {
         let dir = tempfile::tempdir().expect("temp dir");
