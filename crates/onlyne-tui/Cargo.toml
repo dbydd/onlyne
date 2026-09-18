@@ -11,8 +11,8 @@ description = "Onlyne v1 admin-socket observation TUI"
 name = "onlyne-tui"
 path = "src/main.rs"
 
-# The journal viewer: one ACP session, full screen, no admin socket needed. Same
-# crate and same widgets as the board, because it reads the same content surface.
+# The session viewer: bootstrap from the ACP journal, then watch the client
+# adapter socket when one is supplied. Same crate and same widgets as the board.
 [[bin]]
 name = "onlyne-view"
 path = "src/view.rs"
@@ -21,6 +21,7 @@ path = "src/view.rs"
 anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+onlyne-adapter = { workspace = true }
 onlyne-frame = { workspace = true }
 onlyne-layout = { workspace = true }
 onlyne-proto = { path = "../onlyne-proto", version = "1.1.1" }

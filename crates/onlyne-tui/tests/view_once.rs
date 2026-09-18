@@ -157,6 +157,10 @@ fn once_prints_the_turn_in_full_by_default() {
         "the footer names the journal\n{footer}"
     );
     assert!(
+        footer.contains("source journal fallback (no --socket)"),
+        "the footer makes the absent live source explicit\n{footer}"
+    );
+    assert!(
         footer.contains("m mode"),
         "the footer teaches the toggle key\n{footer}"
     );
@@ -177,6 +181,34 @@ fn compact_keeps_the_answer_and_the_tool_names() {
     assert!(
         !compact.contains("The docstring needs the args"),
         "{compact}"
+    );
+}
+
+#[test]
+fn an_unreachable_socket_falls_back_to_the_journal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write_journal(dir.path());
+    let missing_socket = dir.path().join("nothing-listens-here.sock");
+    let text = view(
+        dir.path(),
+        &[
+            "--once",
+            "--socket",
+            missing_socket.to_str().expect("utf-8 socket path"),
+        ],
+    );
+    assert_eq!(
+        body(&text),
+        FULL_BODY,
+        "journal fallback keeps the page\n{text}"
+    );
+    assert!(
+        text.contains("source journal fallback (socket"),
+        "the footer names the fallback source\n{text}"
+    );
+    assert!(
+        text.contains("nothing-listens-here.sock"),
+        "the footer names the socket that failed\n{text}"
     );
 }
 

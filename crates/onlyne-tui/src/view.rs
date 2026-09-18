@@ -1,11 +1,11 @@
-//! `onlyne-view`: one ACP session journal, full screen.
+//! `onlyne-view`: one ACP session's content, full screen.
 //!
 //! An ACP session owns no terminal — the client holds the agent's process and
 //! journals every record to
 //! `<workspace>/.onlyne/logs/session-<task>.events.jsonl`. This binary is the
-//! other half of that: point it at a workspace and a task, and it renders the
-//! conversation and keeps up with the file as the turn runs. The client runs one
-//! per pane.
+//! other half of that: it bootstraps the conversation from the journal, watches
+//! the client adapter socket when `--socket` is available, and falls back visibly
+//! to the file when it is not. The client runs one viewer per pane.
 //!
 //! Everything here is chrome. Reading, grouping, the two verbosity modes, and
 //! the text the `--once` path prints all come from [`onlyne_tui::content`], the
@@ -17,7 +17,10 @@ use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use onlyne_tui::content;
-use onlyne_tui::content::{ContentLine, ContentMode, Doc, JournalSource, LineKind, plain_text};
+use onlyne_tui::content::{
+    ContentLine, ContentMode, ContentSource, Doc, JournalSource, LineKind, SocketSource,
+    SourceRevision, plain_text,
+};
 use onlyne_tui::ui;
 use ratatui::Frame;
 use ratatui::Terminal;
@@ -27,8 +30,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::io::{Stdout, stdout};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 /// The narrowest `--once` frame: the same width the board prints at. A frame
 /// only grows past it to keep the footer's journal path whole.
@@ -36,14 +39,17 @@ const ONCE_WIDTH: u16 = 120;
 /// The rows around the journal in a text frame: the top bar, the pane's two
 /// border rows, and the footer.
 const CHROME: usize = 4;
-/// How often the view checks the journal for growth.
+/// How often the view checks its source for growth.
 const POLL: Duration = Duration::from_millis(250);
+/// `--once` is a snapshot and the protocol has no caught-up marker. Give the
+/// initial push a bounded window to arrive, then render what is present.
+const ONCE_LIVE_WAIT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Parser)]
 #[command(
     name = "onlyne-view",
     version,
-    about = "Read one Onlyne ACP session journal full screen"
+    about = "Read one Onlyne ACP session live or from its journal"
 )]
 struct Cli {
     /// Workspace whose `.onlyne/logs` holds the session journal.
@@ -62,8 +68,7 @@ struct Cli {
     /// summary line per call, `compact` keeps the names.
     #[arg(long, value_enum, default_value_t = ModeFlag::Full)]
     mode: ModeFlag,
-    /// Accepted and ignored for now: a later slice points this view at the
-    /// client socket instead of the journal file.
+    /// Client adapter socket to watch live; failures fall back to the journal.
     #[arg(long)]
     socket: Option<PathBuf>,
 }
@@ -95,14 +100,22 @@ fn main() {
 
 fn run() -> anyhow::Result<i32> {
     let cli = Cli::parse();
-    if cli.socket.is_some() {
-        eprintln!("onlyne-view: --socket is not a feed yet; reading the journal file");
-    }
-    let mut view = Viewer::open(
-        JournalSource::new(cli.workspace),
-        &cli.task,
-        cli.mode.into(),
-    );
+    let source: Box<dyn ContentSource> = match cli.socket {
+        Some(socket) => match SocketSource::connect(&cli.workspace, &socket, &cli.task) {
+            Ok(source) => {
+                if cli.once {
+                    source.wait_for_initial_push(ONCE_LIVE_WAIT);
+                }
+                Box::new(source)
+            }
+            Err(error) => Box::new(
+                JournalSource::new(&cli.workspace)
+                    .with_notice(format!("socket {}: {error}", socket.display())),
+            ),
+        },
+        None => Box::new(JournalSource::new(&cli.workspace).with_notice("no --socket")),
+    };
+    let mut view = Viewer::open(source, &cli.task, cli.mode.into());
     if cli.once {
         println!("{}", view.render_text());
         if cli.follow {
@@ -161,7 +174,7 @@ fn run_loop(
     }
 }
 
-/// `--once --follow`: print the journal, then print what it grows by.
+/// `--once --follow`: print the current content, then print what it grows by.
 ///
 /// The first frame is the framed render; what follows is bare appended text, so
 /// the output stays readable through `less` and greppable by an operator who
@@ -181,8 +194,8 @@ fn follow_appended(view: &mut Viewer) -> anyhow::Result<i32> {
     }
 }
 
-/// One key press, classified. The journal has no lists to walk, so every key is
-/// about this one page.
+/// One key press, classified. The page has no lists to walk, so every key is
+/// about this one session.
 #[derive(Debug, PartialEq, Eq)]
 enum ViewKey {
     Quit,
@@ -214,22 +227,22 @@ fn classify_key(code: KeyCode, modifiers: KeyModifiers) -> ViewKey {
 /// The page: a journal read through the content seam, the verbosity mode it is
 /// showing, and where in it the operator stands.
 struct Viewer {
-    source: JournalSource,
+    source: Box<dyn ContentSource>,
     task_id: String,
     mode: ContentMode,
     doc: Doc,
     lines: Vec<ContentLine>,
     body: String,
     scroll: u16,
-    /// Whether the view tracks the tail of the journal. `End` resumes it,
+    /// Whether the view tracks the tail of the content. `End` resumes it,
     /// scrolling back leaves it, and a reload while set lands on the last line.
     following: bool,
     pane: Rect,
-    stamp: Option<FileStamp>,
+    revision: Option<SourceRevision>,
 }
 
 impl Viewer {
-    fn open(source: JournalSource, task_id: &str, mode: ContentMode) -> Self {
+    fn open(source: Box<dyn ContentSource>, task_id: &str, mode: ContentMode) -> Self {
         let mut view = Self {
             source,
             task_id: task_id.to_string(),
@@ -240,17 +253,20 @@ impl Viewer {
             scroll: 0,
             following: true,
             pane: Rect::new(0, 0, ONCE_WIDTH, 36),
-            stamp: None,
+            revision: None,
         };
         view.reload();
         view
     }
 
-    /// Re-read the journal. A file that grew while the operator was reading shows
-    /// up here, so following the session needs no restart.
+    /// Re-read the selected source. Journal growth and pushed socket records
+    /// both arrive here, so following a session needs no restart.
     fn reload(&mut self) {
-        self.doc = content::load(&self.source, &self.task_id);
-        self.stamp = FileStamp::of(&self.doc.path);
+        // Read the revision first. If the source changes between this token and
+        // the snapshot, the next poll may reload redundantly but cannot miss it.
+        let revision = self.source.revision(&self.task_id);
+        self.doc = content::load(self.source.as_ref(), &self.task_id);
+        self.revision = Some(revision);
         self.recompose();
     }
 
@@ -299,7 +315,7 @@ impl Viewer {
     }
 
     fn changed(&self) -> bool {
-        FileStamp::of(&self.doc.path) != self.stamp
+        Some(self.source.revision(&self.task_id)) != self.revision
     }
 
     fn max_scroll(&self) -> usize {
@@ -357,25 +373,8 @@ impl Viewer {
     }
 }
 
-/// What changed in a journal, without reading it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct FileStamp {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-impl FileStamp {
-    fn of(path: &Path) -> Option<Self> {
-        let meta = std::fs::metadata(path).ok()?;
-        Some(Self {
-            len: meta.len(),
-            modified: meta.modified().ok(),
-        })
-    }
-}
-
-/// The three bands the page owns: a bar naming the session, the journal, and the
-/// footer naming the mode and the file.
+/// The three bands the page owns: a bar naming the session, its content, and the
+/// footer naming the mode and active source.
 fn bands(area: Rect) -> (Rect, Rect, Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -460,13 +459,14 @@ fn style_for(kind: LineKind) -> Style {
     }
 }
 
-/// The footer, with the two things an operator checks first: how much is being
-/// shown, and which file it came from.
+/// The footer, with the things an operator checks first: how much is shown,
+/// where history lives, and whether records are live or a journal fallback.
 fn footer(view: &Viewer) -> String {
     format!(
-        "mode {} · {} · {} · keys: m mode  j/k·↑↓ line  PgUp/PgDn page  End tail  Home top  r reload  q quit",
+        "mode {} · {} · source {} · {} · keys: m mode  j/k·↑↓ line  PgUp/PgDn page  End tail  Home top  r reload  q quit",
         view.mode.label(),
         view.doc.path.display(),
+        view.source.source_label(),
         if view.following { "live" } else { "back" },
     )
 }
@@ -474,6 +474,7 @@ fn footer(view: &Viewer) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     /// A journal long enough to run past one pane, in the shape the client writes.
     fn write_journal(dir: &Path, task_id: &str, turns: usize) {
@@ -531,7 +532,11 @@ mod tests {
     fn scrolling_back_pauses_following_and_end_resumes_it() {
         let dir = tempfile::tempdir().expect("temp dir");
         write_journal(dir.path(), "t-1", 30);
-        let mut view = Viewer::open(JournalSource::new(dir.path()), "t-1", ContentMode::Full);
+        let mut view = Viewer::open(
+            Box::new(JournalSource::new(dir.path())),
+            "t-1",
+            ContentMode::Full,
+        );
         view.set_pane(Rect::new(0, 0, 40, 8));
         view.reload();
         assert!(view.following, "the page opens on the tail");
@@ -554,7 +559,11 @@ mod tests {
     #[test]
     fn a_journal_that_is_not_there_is_said_on_the_page() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let view = Viewer::open(JournalSource::new(dir.path()), "t-9", ContentMode::Full);
+        let view = Viewer::open(
+            Box::new(JournalSource::new(dir.path())),
+            "t-9",
+            ContentMode::Full,
+        );
         assert_eq!(view.lines.len(), 1);
         assert_eq!(view.lines[0].kind, LineKind::Notice);
         assert!(
@@ -572,7 +581,11 @@ mod tests {
     fn the_text_frame_holds_the_whole_journal() {
         let dir = tempfile::tempdir().expect("temp dir");
         write_journal(dir.path(), "t-1", 6);
-        let mut view = Viewer::open(JournalSource::new(dir.path()), "t-1", ContentMode::Full);
+        let mut view = Viewer::open(
+            Box::new(JournalSource::new(dir.path())),
+            "t-1",
+            ContentMode::Full,
+        );
         let text = view.render_text();
         assert_eq!(view.scroll, 0, "nothing is scrolled away in a tall frame");
         assert!(

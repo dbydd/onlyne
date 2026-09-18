@@ -12,12 +12,20 @@
 //! half-written. That is normal, not a fault: [`parse_line`] answers
 //! [`Record::Ignored`] for it and the next reload sees the finished line.
 //!
-//! [`ContentSource`] is the one seam between the journal and the renderer: the
-//! renderer and every page that shows a session consume records, never files.
+//! [`ContentSource`] is the seam between transport and renderer: the file
+//! source reads the journal, while the socket source bootstraps that history and
+//! appends pushed `ContentFrame.record` values. The renderer and every page that
+//! shows a session consume records, never files or wire frames.
 
+use onlyne_adapter::{AdapterClient, AdminHandle};
+use onlyne_proto::WatchContentArgs;
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::watch;
 
 /// Where a workspace keeps the journals the client writes.
 pub const LOGS_RELATIVE: &str = ".onlyne/logs";
@@ -121,12 +129,10 @@ impl Record {
     }
 }
 
-/// Classify one journal line. Never fails: a line the reader cannot use is
-/// [`Record::Ignored`], which is what keeps a half-written tail harmless.
-pub fn parse_line(line: &str) -> Record {
-    let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
-        return Record::Ignored;
-    };
+/// Classify one parsed journal value. Socket content hands this function the
+/// `ContentFrame.record` value directly; it is the journal line object, not the
+/// containing frame.
+pub fn parse_value(value: &Value) -> Record {
     if let Some(ours) = value.get("onlyne") {
         return match ours.get("kind").and_then(Value::as_str) {
             Some("dispatch") => Record::dispatch(ours),
@@ -135,9 +141,18 @@ pub fn parse_line(line: &str) -> Record {
         };
     }
     match value.get("sessionUpdate").and_then(Value::as_str) {
-        Some(kind) => Record::Update(parse_update(kind, &value)),
+        Some(kind) => Record::Update(parse_update(kind, value)),
         None => Record::Ignored,
     }
+}
+
+/// Classify one journal line. Never fails: a line the reader cannot use is
+/// [`Record::Ignored`], which is what keeps a half-written tail harmless.
+pub fn parse_line(line: &str) -> Record {
+    let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+        return Record::Ignored;
+    };
+    parse_value(&value)
 }
 
 fn parse_update(kind: &str, value: &Value) -> Update {
@@ -188,10 +203,30 @@ fn opt_string(value: &Value, key: &str) -> Option<String> {
         .map(|text| text.to_string())
 }
 
+/// A cheap change token for one content source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceRevision {
+    Journal(Option<FileRevision>),
+    Live(u64),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileRevision {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl FileRevision {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+}
+
 /// Where a session's records come from.
-///
-/// One seam, so a later slice can hand the page a live client-socket feed in
-/// place of the journal file without touching the renderer or the page.
 pub trait ContentSource {
     /// The journal path for `task_id`, for the footer and the missing-journal
     /// line. Answers even when nothing is there: the path is what an operator
@@ -212,28 +247,60 @@ pub trait ContentSource {
     /// record with the last line read, before it reaches the grouping.
     fn records(&self, task_id: &str) -> Box<dyn Iterator<Item = Record> + '_>;
 
-    /// Whether the journal is there to be read at all.
+    /// Whether this source exists. A subscribed socket exists even when its
+    /// journal file did not, so an empty live view says it is waiting rather
+    /// than claiming the journal path is the only possible source.
     fn journal_exists(&self, task_id: &str) -> bool {
         self.journal_path(task_id).is_file()
     }
+
+    /// A token the page can poll without parsing and grouping every record.
+    fn revision(&self, task_id: &str) -> SourceRevision {
+        SourceRevision::Journal(FileRevision::of(&self.journal_path(task_id)))
+    }
+
+    /// Operator-facing source state for the footer.
+    fn source_label(&self) -> String;
 }
 
 /// The journal-file implementation of [`ContentSource`]: read
 /// `<workspace>/.onlyne/logs/session-<task>.events.jsonl` line by line.
 pub struct JournalSource {
     pub workspace: PathBuf,
+    notice: Option<String>,
 }
 
 impl JournalSource {
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         Self {
             workspace: workspace.into(),
+            notice: None,
         }
+    }
+
+    /// Explain why the viewer is on the journal rather than the live socket.
+    pub fn with_notice(mut self, notice: impl Into<String>) -> Self {
+        self.notice = Some(notice.into());
+        self
     }
 
     /// `<workspace>/.onlyne/logs`, where the client journals every session.
     pub fn logs_dir(&self) -> PathBuf {
         self.workspace.join(LOGS_RELATIVE)
+    }
+
+    /// Parsed journal objects for the file-to-socket handoff. The final raw
+    /// value is retained so the head-inclusive subscription can compare values
+    /// before either one reaches [`Grouper`].
+    fn raw_values(&self, task_id: &str) -> Vec<Value> {
+        let Ok(file) = std::fs::File::open(self.journal_path(task_id)) else {
+            return Vec::new();
+        };
+        BufReader::new(file)
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|line| serde_json::from_str(line.trim()).ok())
+            .collect()
     }
 }
 
@@ -257,6 +324,372 @@ impl ContentSource for JournalSource {
                 .map(|line| parse_line(&line)),
         )
     }
+
+    fn source_label(&self) -> String {
+        match &self.notice {
+            Some(notice) => format!("journal fallback ({notice})"),
+            None => "journal".to_string(),
+        }
+    }
+}
+
+const SOCKET_STARTUP_TIMEOUT: Duration = Duration::from_millis(1500);
+const SOCKET_LIVE_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+const SOCKET_RECONNECT_DELAY: Duration = Duration::from_millis(100);
+
+type SharedLiveState = Arc<(Mutex<LiveState>, Condvar)>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LiveStatus {
+    Live,
+    Reconnecting(String),
+}
+
+struct LiveState {
+    values: Vec<Value>,
+    revision: u64,
+    status: LiveStatus,
+}
+
+/// A journal bootstrap followed by the client's live admin content stream.
+///
+/// Construction reads the journal first, then performs the admin hello and
+/// `watch_content`. If that startup exchange fails, construction returns the
+/// reason and the caller can keep the ordinary [`JournalSource`]. Once live,
+/// this source is the sole writer of its snapshot: a dropped connection resumes
+/// with the last frame sequence rather than rereading the file and creating a
+/// second, ambiguous merge boundary.
+pub struct SocketSource {
+    journal: JournalSource,
+    socket: PathBuf,
+    task_id: String,
+    shared: SharedLiveState,
+    cancel: watch::Sender<bool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl SocketSource {
+    pub fn connect(
+        workspace: impl Into<PathBuf>,
+        socket: impl Into<PathBuf>,
+        task_id: impl Into<String>,
+    ) -> Result<Self, String> {
+        let journal = JournalSource::new(workspace);
+        let socket = socket.into();
+        let task_id = task_id.into();
+        let values = journal.raw_values(&task_id);
+        let journal_tail = values.last().cloned();
+        let shared = Arc::new((
+            Mutex::new(LiveState {
+                values,
+                revision: 0,
+                status: LiveStatus::Reconnecting("connecting".to_string()),
+            }),
+            Condvar::new(),
+        ));
+        let (cancel, cancel_rx) = watch::channel(false);
+        let (startup_tx, startup_rx) = mpsc::sync_channel(1);
+        let worker_shared = shared.clone();
+        let worker_socket = socket.clone();
+        let worker_task = task_id.clone();
+        let worker = std::thread::Builder::new()
+            .name("onlyne-view-content".to_string())
+            .spawn(move || {
+                run_socket_worker(
+                    worker_socket,
+                    worker_task,
+                    journal_tail,
+                    worker_shared,
+                    cancel_rx,
+                    startup_tx,
+                );
+            })
+            .map_err(|error| format!("start socket reader: {error}"))?;
+
+        let mut source = Self {
+            journal,
+            socket,
+            task_id,
+            shared,
+            cancel,
+            worker: Some(worker),
+        };
+        match startup_rx.recv_timeout(SOCKET_STARTUP_TIMEOUT + Duration::from_secs(1)) {
+            Ok(Ok(())) => Ok(source),
+            Ok(Err(error)) => {
+                source.stop_worker();
+                Err(error)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                source.stop_worker();
+                Err(format!(
+                    "socket startup exceeded {}ms",
+                    SOCKET_STARTUP_TIMEOUT.as_millis()
+                ))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                source.stop_worker();
+                Err("socket reader stopped during startup".to_string())
+            }
+        }
+    }
+
+    /// Give a one-shot render a bounded window in which to collect the host's
+    /// initial push. The protocol has no caught-up marker, so this is a snapshot
+    /// deadline rather than a claim that the live stream ended.
+    pub fn wait_for_initial_push(&self, wait: Duration) {
+        let deadline = Instant::now() + wait;
+        let (state, changed) = &*self.shared;
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            let (next, result) = changed
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard = next;
+            if result.timed_out() {
+                return;
+            }
+        }
+    }
+
+    fn stop_worker(&mut self) {
+        let _ = self.cancel.send(true);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for SocketSource {
+    fn drop(&mut self) {
+        self.stop_worker();
+    }
+}
+
+impl ContentSource for SocketSource {
+    fn journal_path(&self, task_id: &str) -> PathBuf {
+        self.journal.journal_path(task_id)
+    }
+
+    fn records(&self, task_id: &str) -> Box<dyn Iterator<Item = Record> + '_> {
+        if task_id != self.task_id {
+            return Box::new(std::iter::empty());
+        }
+        let (state, _) = &*self.shared;
+        let values = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values
+            .clone();
+        Box::new(values.into_iter().map(|value| parse_value(&value)))
+    }
+
+    fn journal_exists(&self, task_id: &str) -> bool {
+        task_id == self.task_id
+    }
+
+    fn revision(&self, _task_id: &str) -> SourceRevision {
+        let (state, _) = &*self.shared;
+        SourceRevision::Live(
+            state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .revision,
+        )
+    }
+
+    fn source_label(&self) -> String {
+        let (state, _) = &*self.shared;
+        let status = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .status
+            .clone();
+        match status {
+            LiveStatus::Live => format!("socket {}", self.socket.display()),
+            LiveStatus::Reconnecting(reason) => {
+                format!("socket {} reconnecting ({reason})", self.socket.display())
+            }
+        }
+    }
+}
+
+fn run_socket_worker(
+    socket: PathBuf,
+    task_id: String,
+    journal_tail: Option<Value>,
+    shared: SharedLiveState,
+    cancel: watch::Receiver<bool>,
+    startup: mpsc::SyncSender<Result<(), String>>,
+) {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = startup.send(Err(format!("start socket runtime: {error}")));
+            return;
+        }
+    };
+    runtime.block_on(read_socket(
+        socket,
+        task_id,
+        journal_tail,
+        shared,
+        cancel,
+        startup,
+    ));
+}
+
+async fn read_socket(
+    socket: PathBuf,
+    task_id: String,
+    mut journal_tail: Option<Value>,
+    shared: SharedLiveState,
+    mut cancel: watch::Receiver<bool>,
+    startup: mpsc::SyncSender<Result<(), String>>,
+) {
+    let mut startup = Some(startup);
+    let mut cursor = None;
+    loop {
+        let connection = tokio::select! {
+            _ = cancelled(&mut cancel) => return,
+            result = subscribe(&socket, &task_id, cursor) => result,
+        };
+        let handle = match connection {
+            Ok(handle) => handle,
+            Err(error) => {
+                if let Some(startup) = startup.take() {
+                    let _ = startup.send(Err(error));
+                    return;
+                }
+                publish_status(&shared, LiveStatus::Reconnecting(error));
+                if reconnect_pause(&mut cancel).await {
+                    return;
+                }
+                continue;
+            }
+        };
+        publish_status(&shared, LiveStatus::Live);
+        if let Some(startup) = startup.take() {
+            let _ = startup.send(Ok(()));
+        }
+
+        loop {
+            let frame = tokio::select! {
+                _ = cancelled(&mut cancel) => return,
+                result = handle.wait_content() => result,
+            };
+            match frame {
+                Ok(frame) => {
+                    publish_frame(&shared, &task_id, &mut cursor, &mut journal_tail, frame)
+                }
+                Err(error) => {
+                    publish_status(&shared, LiveStatus::Reconnecting(error.to_string()));
+                    if reconnect_pause(&mut cancel).await {
+                        return;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn subscribe(
+    socket: &Path,
+    task_id: &str,
+    since: Option<u64>,
+) -> Result<AdminHandle, String> {
+    let deadline = tokio::time::Instant::now() + SOCKET_STARTUP_TIMEOUT;
+    let stream = tokio::time::timeout_at(deadline, onlyne_layout::connect_local(socket))
+        .await
+        .map_err(|_| format!("connect to {} timed out", socket.display()))?
+        .map_err(|error| format!("connect to {}: {error}", socket.display()))?;
+    let handle = AdapterClient::admin_with_timeouts(
+        stream,
+        SOCKET_LIVE_READ_TIMEOUT,
+        SOCKET_STARTUP_TIMEOUT,
+    );
+    tokio::time::timeout_at(deadline, handle.hello_admin("onlyne-view"))
+        .await
+        .map_err(|_| format!("hello on {} timed out", socket.display()))?
+        .map_err(|error| format!("hello on {}: {error}", socket.display()))?;
+    tokio::time::timeout_at(
+        deadline,
+        handle.watch(WatchContentArgs {
+            task_id: Some(task_id.to_string()),
+            since,
+        }),
+    )
+    .await
+    .map_err(|_| format!("watch_content on {} timed out", socket.display()))?
+    .map_err(|error| format!("watch_content on {}: {error}", socket.display()))?;
+    Ok(handle)
+}
+
+async fn cancelled(cancel: &mut watch::Receiver<bool>) {
+    if *cancel.borrow() {
+        return;
+    }
+    let _ = cancel.changed().await;
+}
+
+async fn reconnect_pause(cancel: &mut watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        _ = cancelled(cancel) => true,
+        _ = tokio::time::sleep(SOCKET_RECONNECT_DELAY) => false,
+    }
+}
+
+fn publish_status(shared: &SharedLiveState, status: LiveStatus) {
+    let (state, changed) = &**shared;
+    let mut state = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.status == status {
+        return;
+    }
+    state.status = status;
+    state.revision = state.revision.saturating_add(1);
+    changed.notify_all();
+}
+
+fn publish_frame(
+    shared: &SharedLiveState,
+    task_id: &str,
+    cursor: &mut Option<u64>,
+    journal_tail: &mut Option<Value>,
+    frame: onlyne_proto::ContentFrame,
+) {
+    if cursor.is_some_and(|last| frame.seq <= last) {
+        return;
+    }
+    let fresh = cursor.is_none();
+    let replay = fresh && journal_tail.as_ref() == Some(&frame.record);
+    *cursor = Some(frame.seq);
+    if fresh {
+        *journal_tail = None;
+    }
+
+    let (state, changed) = &**shared;
+    let mut state = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if frame.task_id == task_id && !replay {
+        state.values.push(frame.record);
+    }
+    // Advancing the cursor is itself a state change: a dropped head replay must
+    // still become the `since` value used by the next connection.
+    state.revision = state.revision.saturating_add(1);
+    changed.notify_all();
 }
 
 /// One thing the operator reads: what was asked, what the agent thought, what it
@@ -860,6 +1293,25 @@ mod tests {
             plain_text(&doc.lines(ContentMode::Compact)),
             "  call_orphan",
             "compact still names the call it knows about"
+        );
+    }
+
+    #[test]
+    fn pushed_record_values_use_the_same_classifier_as_journal_lines() {
+        let value = serde_json::json!({
+            "content": {"text": "from the socket", "type": "text"},
+            "sessionUpdate": "agent_message_chunk"
+        });
+        assert_eq!(
+            parse_value(&value),
+            Record::Update(Update::Message {
+                text: "from the socket".to_string()
+            })
+        );
+        assert_eq!(
+            parse_value(&value),
+            parse_line(&serde_json::to_string(&value).expect("serialize fixture")),
+            "the socket value is classified directly, while file text reaches the same path"
         );
     }
 
