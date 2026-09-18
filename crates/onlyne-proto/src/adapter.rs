@@ -1,9 +1,11 @@
 //! The adapter protocol (§7, decision D16).
 //!
 //! One protocol, mounted twice: an agent plugin connects to its role client's
-//! socket, a platform gateway connects to the server's socket. The `hello`
-//! handshake carries a [`MountKind`] and the [`Capability`] set, and every later
-//! frame is answered by whichever side owns that op.
+//! socket, a platform gateway connects to the server's socket. An `admin` mount
+//! is local operator tooling on either socket — the admin verbs on the server,
+//! a session-content viewer ([`PluginOp::WatchContent`]) on a role client. The
+//! `hello` handshake carries a [`MountKind`] and the [`Capability`] set, and
+//! every later frame is answered by whichever side owns that op.
 
 use crate::envelope::{Envelope, Outcome};
 use crate::event::GatewayHealth;
@@ -33,7 +35,9 @@ pub enum MountKind {
     Agent,
     /// Platform gateway on the server socket.
     Gateway,
-    /// Local operator tooling on the server socket.
+    /// Local operator tooling on the server socket or on a role client socket.
+    /// A viewer watching one role's session content mounts here: the client that
+    /// owns the session is the process that wrote the content it reads.
     Admin,
 }
 
@@ -236,6 +240,8 @@ pub enum PluginOp {
     Typing(TypingArgs),
     /// Stop receiving work; the plugin is leaving while its session continues.
     Detach(DetachArgs),
+    /// Subscribe to this role's session content (admin mounts only).
+    WatchContent(WatchContentArgs),
 }
 
 impl PluginOp {
@@ -251,6 +257,7 @@ impl PluginOp {
             PluginOp::Health(_) => "health",
             PluginOp::Typing(_) => "typing",
             PluginOp::Detach(_) => "detach",
+            PluginOp::WatchContent(_) => "watch_content",
         }
     }
 
@@ -287,6 +294,11 @@ pub enum HostOp {
     Recycle(RecycleArgs),
     /// Read one host config key.
     ConfigGet(ConfigGetArgs),
+    /// One session content record, pushed to a viewer that asked with
+    /// [`PluginOp::WatchContent`]. The frame is boxed so a `welcome`, `assign`,
+    /// or `bye` does not carry its payload inline, the way the `ev` frame boxes
+    /// its event.
+    Content(Box<ContentFrame>),
     /// The host is going away.
     Bye(ByeNotice),
 }
@@ -300,6 +312,7 @@ impl HostOp {
             HostOp::Probe(_) => "probe",
             HostOp::Recycle(_) => "recycle",
             HostOp::ConfigGet(_) => "config_get",
+            HostOp::Content(_) => "content",
             HostOp::Bye(_) => "bye",
         }
     }
@@ -395,6 +408,58 @@ pub struct TypingArgs {
 #[serde(rename_all = "snake_case", default)]
 pub struct DetachArgs {
     pub reason: String,
+}
+
+/// `watch_content`: subscribe to this role's session content. A local viewer
+/// mounted as admin sends it on the client socket that owns the sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WatchContentArgs {
+    /// One task, or every task of this role when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Resume after this content sequence number: with `since: N` the client
+    /// sends `seq > N` and nothing at or below `N`.
+    ///
+    /// Absent is head-inclusive instead — the client's newest journalled line
+    /// arrives first, then everything after it. A viewer that named no cursor
+    /// has told the host nothing about what it already holds, so the host
+    /// duplicates one line rather than risk dropping one. The duplicate is the
+    /// reader's debt, not the wire's: it must be dropped where records enter the
+    /// consumer, by structural equality with the last journalled record that
+    /// reader took. Past that boundary it is unrecognisable — a viewer that
+    /// accumulates streamed text into one buffer shows the replay as doubled
+    /// text, not as a repeated row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+}
+
+/// `content`: one pushed record answering a [`WatchContentArgs`] subscription.
+///
+/// `record` is the journal line itself — the JSON object the client appended to
+/// `<workspace>/.onlyne/logs/session-<task>.events.jsonl` — carried through
+/// unparsed rather than translated into a frame-local shape, so a viewer reads
+/// one record type over the socket and over the file. It travels as parsed JSON,
+/// so a re-encode may reorder its keys: a reader takes fields, never bytes.
+/// `at` is journalled for the same reason — that line's own timestamp text, not
+/// a clock re-stamped at push time — which is why it is a string where an
+/// envelope's `ts` is a formatted datetime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContentFrame {
+    /// This role's content counter, strictly increasing across every task the
+    /// client journals, so one `since` resumes a subscription that spans
+    /// several tasks. The number belongs to the frame: a reader that only opened
+    /// the journal file has no cursor to name unless the host wrote one into the
+    /// line as well, which is why an absent `since` repeats the head line rather
+    /// than risk skipping it.
+    pub seq: u64,
+    pub task_id: String,
+    /// The session that wrote the line, when the client had one to name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub at: String,
+    pub record: Value,
 }
 
 /// `bye` from a host.
@@ -716,6 +781,139 @@ mod tests {
             serde_json::to_value(&bye).expect("encode")["args"]["reason"],
             "shutdown"
         );
+    }
+
+    #[test]
+    fn watch_content_names_one_task_or_the_whole_role() {
+        let every = PluginOp::WatchContent(WatchContentArgs {
+            task_id: None,
+            since: None,
+        });
+        assert_eq!(every.name(), "watch_content");
+        let value = serde_json::to_value(&every).expect("encode");
+        assert_eq!(value["op"], "watch_content");
+        assert_eq!(
+            value["args"],
+            serde_json::json!({}),
+            "an empty args object is the whole subscription: every task, head-inclusive",
+        );
+        let back: PluginOp = serde_json::from_value(value).expect("decode the empty form");
+        assert_eq!(back, every);
+
+        let scoped = WatchContentArgs {
+            task_id: Some("task-1".into()),
+            since: Some(41),
+        };
+        let value = serde_json::to_value(PluginOp::WatchContent(scoped.clone())).expect("encode");
+        assert_eq!(value["args"]["task_id"], "task-1");
+        assert_eq!(value["args"]["since"], 41);
+        assert_eq!(
+            serde_json::from_value::<PluginOp>(value).expect("decode"),
+            PluginOp::WatchContent(scoped)
+        );
+
+        // `since: 0` and no `since` are different requests, and the wire has to
+        // say so: a host that numbers its content from 0 needs "after the first
+        // record" to mean something other than "start at the head".
+        let zero = WatchContentArgs {
+            task_id: None,
+            since: Some(0),
+        };
+        let value =
+            serde_json::to_value(PluginOp::WatchContent(zero.clone())).expect("encode zero");
+        assert_eq!(value["args"], serde_json::json!({"since": 0}));
+        let back: PluginOp = serde_json::from_value(value).expect("decode the zero cursor");
+        assert_eq!(
+            back,
+            PluginOp::WatchContent(zero.clone()),
+            "a cursor of 0 must not read back as no cursor"
+        );
+        assert_ne!(
+            zero,
+            WatchContentArgs {
+                task_id: None,
+                since: None
+            },
+            "an explicit cursor is not the same subscription as no cursor"
+        );
+
+        serde_json::from_value::<WatchContentArgs>(serde_json::json!({"tasks": "all"}))
+            .expect_err("a field watch_content never defined is refused, not ignored");
+    }
+
+    #[test]
+    fn content_carries_the_journal_line_as_one_object() {
+        let frame = ContentFrame {
+            // 2^53 + 1: the first integer an f64 round trip would silently rewrite.
+            seq: 9_007_199_254_740_993,
+            task_id: "task-1".into(),
+            session_id: None,
+            at: "2026-09-18T12:00:00Z".into(),
+            record: serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "读取任务 — done"},
+                "meta": {"depth": {"nested": [1, 2, 3]}},
+            }),
+        };
+        let value = serde_json::to_value(HostOp::Content(Box::new(frame.clone()))).expect("encode");
+        assert_eq!(value["op"], "content");
+        assert!(
+            value["args"].get("session_id").is_none(),
+            "an unnamed session is absent, not null"
+        );
+        let text = serde_json::to_string(&value).expect("text");
+        assert!(
+            text.contains("9007199254740993"),
+            "the sequence number must survive as an integer: {text}"
+        );
+        assert_eq!(
+            serde_json::from_value::<HostOp>(value).expect("decode"),
+            HostOp::Content(Box::new(frame))
+        );
+    }
+
+    #[test]
+    fn any_record_shape_round_trips_through_content() {
+        // `record` is another program's JSON, so no shape is privileged: a
+        // scalar, an array, and a null all travel as the viewer wrote them.
+        for record in [
+            serde_json::json!("plain text"),
+            serde_json::json!([1, "two", null]),
+            Value::Null,
+        ] {
+            let frame = ContentFrame {
+                seq: 1,
+                task_id: "task-1".into(),
+                session_id: Some("s1".into()),
+                at: "2026-09-18T12:00:00Z".into(),
+                record: record.clone(),
+            };
+            let value = serde_json::to_value(HostOp::Content(Box::new(frame))).expect("encode");
+            assert_eq!(value["args"]["record"], record);
+            assert_eq!(value["args"]["session_id"], "s1");
+        }
+    }
+
+    #[test]
+    fn the_two_new_ops_keep_their_directions_apart() {
+        // `AdapterMsg` is untagged, so the two vocabularies must stay disjoint
+        // even as both gain a name: a `content` frame must never read as a
+        // plugin op, and a `watch_content` request never as a host push.
+        let watch: AdapterMsg = serde_json::from_value(serde_json::json!({
+            "op": "watch_content",
+            "args": {"task_id": "task-1"}
+        }))
+        .expect("decode watch_content");
+        assert_eq!(watch.direction(), MsgDirection::ToHost);
+        assert_eq!(watch.op_name(), Some("watch_content"));
+
+        let content: AdapterMsg = serde_json::from_value(serde_json::json!({
+            "op": "content",
+            "args": {"seq": 7, "task_id": "task-1", "at": "2026-09-18T12:00:00Z", "record": {}}
+        }))
+        .expect("decode content");
+        assert_eq!(content.direction(), MsgDirection::ToPlugin);
+        assert_eq!(content.op_name(), Some("content"));
     }
 
     #[test]

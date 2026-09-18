@@ -46,7 +46,7 @@ The implementation must satisfy all of the following:
 
 4. **Three socket surfaces**
    - role connections use TCP plus TLS 1.3 with certificate pinning and ed25519 admission
-   - agent adapters connect to the client unix socket
+   - agent adapters, and admin mounts that watch one role's session content, connect to the client unix socket
    - gateway adapters and admin commands connect to the server unix socket
 
 5. **Gateway abstraction**
@@ -231,7 +231,9 @@ Gateway to server op vocabulary has five closed verbs:
 
 `render_send` travels host to gateway plugin. `typing` stays an optional gateway capability.
 
-Adapter plugin vocabulary uses the same protocol on both mount kinds. Plugin-to-host ops are `hello`, `welcome`, `report`, `session_register`, `assign_ack`, `send`, `deliver`, and `detach`. Host-to-plugin ops are `welcome`, `assign`, `render_send`, `probe`, `recycle`, `config_get`, and `bye`.
+Adapter plugin vocabulary uses the same protocol on both mount kinds. Plugin-to-host ops are `hello`, `report`, `session_register`, `assign_ack`, `send`, `deliver`, `register_channel`, `health`, `typing`, `detach`, and `watch_content`. Host-to-plugin ops are `welcome`, `assign`, `render_send`, `probe`, `recycle`, `config_get`, `content`, and `bye`. `welcome` travels one way only — it is the host's answer to `hello`. Which of the plugin-to-host set a mount may send is decided by its kind, and `crates/onlyne-adapter/PROTOCOL.md` carries that rule; `register_channel`, `health`, `typing`, and `deliver` are a gateway mount's, and `watch_content` is an admin mount's.
+
+A viewer mount is the admin class on a role client socket: a local process attaches with `kind: admin` and `mount` null, sends `watch_content` — the only op an admin mount may send — and then reads the `content` frames that client pushes. `watch_content` names one `task_id` or none, and `since` resumes after a content sequence number; its own response is only `ok`, because the records arrive afterwards unprompted. An absent `since` is head-inclusive: the client's newest journalled line is delivered too, so the reader drops that repeat where records enter it — by value, not text — because a head-exclusive start would instead drop one real line per file-to-socket handoff, and no viewer can tell a lost line from a quiet agent. Read the journal, then subscribe. A `content` frame carries `seq`, `task_id`, an optional `session_id`, the journalled `at`, and `record`: the session journal line passed through as JSON rather than re-described, so the viewer renders what the client wrote instead of a second vocabulary for it. `seq` counts one role's content across its tasks, so one cursor resumes a subscription that spans tasks. The client socket is bound mode `0600` under a private run directory, so this route grants no reader that the workspace's own journal files did not already grant.
 
 `res.error.code` is a closed set:
 - `invalid`

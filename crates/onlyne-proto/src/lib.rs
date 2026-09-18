@@ -33,9 +33,10 @@ pub mod text;
 
 pub use adapter::{
     AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, ByeNotice, Capability, ClusterMount,
-    ConfigGetArgs, DetachArgs, GatewayBinding, GatewayMount, HELLO_REQUIRED_MESSAGE,
+    ConfigGetArgs, ContentFrame, DetachArgs, GatewayBinding, GatewayMount, HELLO_REQUIRED_MESSAGE,
     HELLO_TIMEOUT_MS, HelloAck, HelloArgs, HostOp, Mount, MountKind, MsgDirection, PluginOp,
-    RecycleArgs, RenderSendArgs, ServerInfo, SessionRegisterArgs, TypingArgs, WelcomeSlice,
+    RecycleArgs, RenderSendArgs, ServerInfo, SessionRegisterArgs, TypingArgs, WatchContentArgs,
+    WelcomeSlice,
 };
 pub use envelope::{
     BODY_TEXT_MAX_BYTES, Body, Causality, ControlOp, Envelope, Error, IMAGE_DATA_MAX_BYTES,
