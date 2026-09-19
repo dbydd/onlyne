@@ -19,6 +19,7 @@ mod forward;
 mod ledger;
 mod media;
 mod render;
+mod report;
 mod runtime;
 mod socket;
 mod verbs;
@@ -47,12 +48,30 @@ nothing to say carries no `reason` key. `onlyne-tui` page 2 appends \
 `reason=<text>` to a row's tail only where that key is present, so an `acked` \
 row prints what it printed before the column reached the board.";
 
+/// the exit-code table and the session backend value range, spelled once for
+/// the installed user who sees no crate README. Printed at the foot of
+/// `onlyne --help`.
+const CLI_AFTER_HELP: &str = "\
+Exit codes: 0 the verb answered ok. 1 a socket answer failed or a runtime
+error ended the verb. 2 local validation or usage refusal; the code is
+multipurpose: a bad flag, a bad --request, an invalid report file, and a
+report file that is absent or unreadable all share it. 3 nothing resolved as
+a socket. 4 `generate` refused the operator's input, propagated from
+onlyne-server. 5 `client run` found no session host (see backends below).
+127 a sibling binary was not found.
+
+Session backends (the `backend` key of a role workspace's `config.toml`, read
+by `onlyne client run`): herdr | orca | zellij | exec | headless | acp | fake
+| auto. An empty or absent value probes the host, and the environment variable
+ONLYNE_BACKEND takes precedence over the configured value when it is nonempty.";
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "onlyne",
     bin_name = "onlyne",
     version,
     about = "One socket, one protocol, three sibling binaries.",
+    after_help = CLI_AFTER_HELP,
     subcommand_negates_reqs = true
 )]
 struct Cli {
@@ -79,6 +98,9 @@ enum Verb {
     Complete(CompleteCmd),
     /// Hand a task to another role.
     Handoff(HandoffCmd),
+    /// Validate a completion report file locally; opens no socket.
+    #[command(long_about = report::family_long_about())]
+    Report(report::ReportCmd),
     /// Accept a delivered envelope by its msg id.
     Ack(verbs::AckArgs),
     /// Reject a delivered envelope by its msg id.
@@ -121,6 +143,8 @@ enum Verb {
     Tui(RestArgs),
     /// Print the version and each sibling's path.
     Version,
+    /// Print the compiled JSON Schema for one configuration surface.
+    Schema(SchemaCmd),
     /// Emit a shell completion script.
     Completions(CompletionsCmd),
 }
@@ -356,6 +380,58 @@ struct CompletionsCmd {
     shell: Shell,
 }
 
+/// The configuration surface `schema` prints the JSON Schema of.
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+enum SchemaTarget {
+    /// `<workspace>/.onlyne/config.toml`, the role client's own file.
+    Client,
+    /// `<server-root>/.onlyne/spec.toml`, the cluster's shared file.
+    Spec,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct SchemaCmd {
+    /// Which schema to print: `client` or `spec`.
+    #[arg(value_enum)]
+    target: SchemaTarget,
+}
+
+/// Print one compiled schema. The bytes were embedded by `onlyne-config`'s
+/// build script; a `--pretty` answer reprints the same document indented, and
+/// a document that no longer parses as JSON is a build fault, refused as a
+/// local validation failure with exit 2.
+fn schema(flags: &GlobalFlags, target: SchemaTarget) -> i32 {
+    let raw = match target {
+        SchemaTarget::Client => onlyne_config::config_client_schema(),
+        SchemaTarget::Spec => onlyne_config::spec_schema(),
+    };
+    let text = if flags.pretty {
+        match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(value) => match serde_json::to_string_pretty(&value) {
+                Ok(pretty) => pretty,
+                Err(error) => {
+                    return runtime::usage_error(format!(
+                        "onlyne: schema re-render failed: {error}"
+                    ));
+                }
+            },
+            Err(error) => {
+                return runtime::usage_error(format!(
+                    "onlyne: the embedded {} schema is not JSON: {error}",
+                    match target {
+                        SchemaTarget::Client => "client",
+                        SchemaTarget::Spec => "spec",
+                    }
+                ));
+            }
+        }
+    } else {
+        raw.trim_end().to_string()
+    };
+    println!("{text}");
+    runtime::EXIT_OK
+}
+
 fn run() -> i32 {
     let cli = Cli::parse();
     let Some(verb) = cli.verb else {
@@ -372,6 +448,7 @@ fn run() -> i32 {
         Verb::Reply(cmd) => verbs::reply(flags, &cmd.sender, cmd.args),
         Verb::Complete(cmd) => verbs::complete(flags, &cmd.sender, cmd.args),
         Verb::Handoff(cmd) => verbs::handoff(flags, &cmd.sender, cmd.args),
+        Verb::Report(cmd) => report::run(flags, cmd.verb),
         Verb::Ack(args) => verbs::ack(flags, args),
         Verb::Reject(args) => verbs::reject(flags, args),
         Verb::Control(cmd) => {
@@ -421,6 +498,7 @@ fn run() -> i32 {
             println!("{}", render::version_json());
             runtime::EXIT_OK
         }
+        Verb::Schema(cmd) => schema(flags, cmd.target),
         Verb::Completions(cmd) => {
             let mut stdout = std::io::stdout();
             clap_complete::generate(cmd.shell, &mut Cli::command(), "onlyne", &mut stdout);

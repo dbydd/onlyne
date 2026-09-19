@@ -733,7 +733,6 @@ pub struct RepairTarget {
 #[serde(rename_all = "snake_case", default)]
 pub struct RepairAdopt {
     pub task_id: String,
-    pub session_id: String,
     pub backend: String,
     pub backend_ref: Value,
     pub reason: String,
@@ -756,8 +755,6 @@ pub struct RepairRebind {
 pub struct RepairFail {
     pub task_id: String,
     pub reason: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub notify: Option<Principal>,
 }
 
 /// Close a fault record as handled.
@@ -1161,7 +1158,6 @@ mod tests {
             (
                 AdminOp::RepairAdopt(RepairAdopt {
                     task_id: new_task_id(),
-                    session_id: "s".into(),
                     backend: "orca".into(),
                     backend_ref: serde_json::json!({"pane": 3}),
                     reason: "attested".into(),
@@ -1189,7 +1185,6 @@ mod tests {
                 AdminOp::RepairFail(RepairFail {
                     task_id: new_task_id(),
                     reason: "dead".into(),
-                    notify: None,
                 }),
                 "repair_fail",
             ),

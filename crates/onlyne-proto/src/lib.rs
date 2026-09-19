@@ -12,6 +12,8 @@
 //! - [`event`]: the observation plane (§9), at-most-once with cursor resync.
 //! - [`ops`]: the client-to-server and admin vocabularies (§6, §8).
 //! - [`adapter`]: the one adapter protocol mounted on both sides (§7).
+//! - [`payload`]: the closing-report grammar a session writes on disk, off the
+//!   wire but shared by the binaries that read and check it.
 //!
 //! Compatibility posture: [`PROTOCOL_VERSION`] is checked at handshake and a
 //! mismatch answers [`frame::ErrorCode::ProtocolVersion`]. Legacy layouts and
@@ -29,6 +31,7 @@ pub mod envelope;
 pub mod event;
 pub mod frame;
 pub mod ops;
+pub mod payload;
 pub mod text;
 
 pub use adapter::{
@@ -58,6 +61,8 @@ pub use ops::{
     RepairFail, RepairRebind, RepairTarget, Report, ResourcePhase, RoleInfo, SessionProjection,
     SessionRow, SessionSyncArgs, ShutdownArgs, Subscribe, Welcome,
 };
+
+pub use payload::{GRAMMAR_V2, Handoff, MAX_REPORT_HANDOFFS, MAX_REPORT_LINES, PayloadV2};
 
 pub use text::{
     BINARY_NOT_FOUND_PREFIX, LEGACY_WORKSPACE_MESSAGE, NO_SOCKET_MESSAGE,

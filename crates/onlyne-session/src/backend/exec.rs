@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use super::*;
+use onlyne_layout::RoleWorkspace;
 
 /// How long `SIGTERM` gets before `SIGKILL`, inside the shutdown budget the
 /// client allows its own teardown.
@@ -291,10 +292,11 @@ impl SessionBackend for ExecBackend {
                 spec.task_id
             ));
         };
-        let logs = spec.cwd.join(".onlyne").join("logs");
+        let layout = RoleWorkspace::resolve(&spec.cwd);
+        let logs = layout.logs_dir();
         std::fs::create_dir_all(&logs)
             .map_err(|error| anyhow::anyhow!("create {}: {error}", logs.display()))?;
-        let log_path = logs.join(format!("session-{}.log", spec.task_id));
+        let log_path = layout.session_log_path(&spec.task_id);
         let log = std::fs::OpenOptions::new()
             .create(true)
             .append(true)

@@ -497,13 +497,25 @@ async fn complete_inner(
     if let Some(message) = sender.check(target) {
         return runtime::usage_error(message);
     }
+    // The head `complete` files has one of two sources. `--head-from local`
+    // truncates `--text`, and that flag is required there. `--head-from ledger`
+    // reads the row's `out_head`, and `--text` stays an optional payload there.
+    let local_head = match args.head_from {
+        HeadFrom::Local => match args.text.as_deref() {
+            Some(text) => Some(head_of(text)),
+            None => {
+                return runtime::usage_error("onlyne: --text is required with --head-from local");
+            }
+        },
+        HeadFrom::Ledger => None,
+    };
     let mut stream = match runtime::open(flags, target).await {
         Ok(stream) => stream,
         Err(code) => return code,
     };
-    let head = match args.head_from {
-        HeadFrom::Local => head_of(&args.text),
-        HeadFrom::Ledger => {
+    let head = match local_head {
+        Some(head) => head,
+        None => {
             let row = match lookup_row(
                 &mut stream,
                 flags,
@@ -547,7 +559,7 @@ async fn complete_inner(
             kind: MsgKind::Completion,
             to,
             from: sender.from.clone(),
-            text: Some(args.text),
+            text: args.text,
             image: None,
             causality,
             ttl_ms: None,
@@ -839,14 +851,15 @@ pub struct CompleteArgs {
     /// Task being completed.
     #[arg(long)]
     pub task: String,
-    /// Completion text.
+    /// Completion text. `--head-from local` requires it: that head is this text
+    /// truncated to the character ceiling.
     #[arg(long)]
-    pub text: String,
+    pub text: Option<String>,
     /// Terminal outcome: done, failed, cancelled.
     #[arg(long, value_parser = parse_outcome)]
     pub outcome: Outcome,
-    /// Head source: local, or ledger.
-    #[arg(long, value_parser = parse_head_from)]
+    /// Head source: local, or ledger. Omitted means `local`.
+    #[arg(long, value_parser = parse_head_from, default_value = "local")]
     pub head_from: HeadFrom,
 }
 

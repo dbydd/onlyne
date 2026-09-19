@@ -244,7 +244,7 @@ fn empty_intersection_writes_nothing() {
     assert_eq!(err.exit_code(), 4);
     assert_eq!(
         err.to_string(),
-        "onlyne: no role matches the requested templates/roles"
+        "onlyne: no role matches the requested templates/roles; available roles: dev, planner"
     );
     assert!(!out.exists());
 }

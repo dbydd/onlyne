@@ -37,8 +37,9 @@
 //! * **the conversation is written down.** An ACP session owns no terminal, so
 //!   `<workspace>/.onlyne/logs/session-<task>.log` (rendered, for `tail -f`) and
 //!   `session-<task>.events.jsonl` (raw updates, plus this client's own
-//!   `dispatch`, `payload` and `turn` records) are the whole human-visible
-//!   surface. Both are best effort: a write that fails is a warning, never a
+//!   `dispatch`, `payload`, `handoff` and `turn` records) are the whole
+//!   human-visible surface. Both are best effort: a write that fails is a
+//!   warning, never a
 //!   failed turn.
 //! * **closing does not wait on the dispatch lock.** A close asks the agent to
 //!   stop, waits a short bounded moment for the turn, and hands a turn that is
@@ -51,6 +52,8 @@ use onlyne_acp::{
     Agent, AgentOptions, ClientCapabilities, ClientInfo, ContentBlock, Event, PermissionOption,
     PermissionOutcome, PermissionRequest, PromptOutcome, Update,
 };
+use onlyne_layout::RoleWorkspace;
+use onlyne_proto::payload::{Handoff, PayloadV2};
 use parking_lot::{Condvar, Mutex};
 use serde_json::json;
 use std::io::Write;
@@ -800,6 +803,14 @@ fn stripped_at(message: &str, from: usize) -> String {
 
 /// Map a stop reason onto what the ledger records: the outcome, the fault note
 /// when there is one, and the reason word the turn record carries.
+///
+/// What the agent claims about its own ending is a separate input, and a
+/// `hop-blocked:` report line is not a state this function reads: the verdict
+/// word is the agent naming something outside the task it is waiting on, and
+/// only the caller that folds the report in can lower a standing with it. A
+/// write that fails because a path is a file where a directory belongs — a
+/// blocked journal, a blocked report directory — is blocked in a third sense
+/// again, and it costs a warning, never a verdict.
 fn settle_for(stop_reason: &str, answer: Option<&str>) -> (Outcome, Option<String>, String) {
     let named = if stop_reason.is_empty() {
         "(absent)".to_string()
@@ -831,49 +842,50 @@ fn settle_for(stop_reason: &str, answer: Option<&str>) -> (Outcome, Option<Strin
     }
 }
 
-/// Where one turn leaves its payload-v1 result report, derived from the
+/// Where one turn leaves its payload-v2 result report, derived from the
 /// session's workspace and the task id. Both directions call this — the
 /// directive that hands the agent its path and the ending that reads it — so
 /// they cannot drift, and the path is absolute because a shared agent process
 /// may run with some other session's directory as its cwd.
 fn payload_dir(workdir: &Path) -> PathBuf {
-    workdir.join(".onlyne").join("out")
+    RoleWorkspace::resolve(workdir).out_dir()
 }
 
 fn payload_path(workdir: &Path, task_id: &str) -> PathBuf {
-    payload_dir(workdir).join(format!("{task_id}.md"))
+    RoleWorkspace::resolve(workdir).report_path(task_id)
 }
 
 /// The block appended to every ACP prompt: where to report this task's
 /// outcome, in what form, and the rule that settlement is ours. The agent is
-/// not an onlyne client and is told so; the file is all it has to leave.
+/// not an onlyne client and is told so; the file is all it has to leave. The
+/// grammar is printed from [`GRAMMAR_V2`](onlyne_proto::payload::GRAMMAR_V2),
+/// the same text the CLI's `report check --help` shows, so an agent and an
+/// operator reading the two never get two answers.
 fn completion_directive(workdir: &Path, task_id: &str) -> String {
     format!(
-        "\n\nResult report (write before you stop): {}\n\
-         The file carries exactly one line: `hop-done: <the result in one \
-         line>` or `hop-failed: <why the task failed, one sentence>`.\n\
+        "\n\nResult report (write before you stop): {}\n{}\n\
          Create it under a temporary name in the same directory and rename it \
          into place, so no reader ever sees a half-written report.\n\
-         Keep the detail in project files; the line may name them.\n\
-         Do not run any `onlyne` command: this client reads the file and \
-         settles the task itself.",
-        payload_path(workdir, task_id).display()
+         Keep the detail in project files; the verdict line may name them.\n\
+         Where an `onlyne` command is on your PATH, `onlyne report check --path \
+         <the path above>` names the line it cannot parse: use it before you \
+         write the report and after, and fix what it refuses.\n\
+         Do not run any `onlyne` command to settle the task: this client reads \
+         the file and settles the task itself.",
+        payload_path(workdir, task_id).display(),
+        onlyne_proto::payload::GRAMMAR_V2,
     )
 }
 
-/// One turn's result report, as the ending found it.
+/// One turn's result report, as the ending found it. The grammar is the shared
+/// one in [`onlyne_proto::payload`], and this holds only what that parser
+/// cannot see: a turn whose report never arrived.
 enum Payload {
     /// No file, or one this client could not open: the turn settles on its
     /// stop reason alone, exactly as it did before reports existed.
     Absent,
-    /// `hop-done:` — the agent's own account of the result, taken as the head.
-    Done(String),
-    /// `hop-failed:` — the agent's account of a failure, which this client has
-    /// no reason to argue with.
-    Failed(String),
-    /// A file is there and is not a report. The reason names the category so
-    /// the fault record can say what the client actually found.
-    Invalid(String),
+    /// What the parser made of a file that was there.
+    Parsed(PayloadV2),
 }
 
 impl Payload {
@@ -882,55 +894,97 @@ impl Payload {
     fn payload_kind(&self) -> &'static str {
         match self {
             Payload::Absent => "absent",
-            Payload::Done(_) => "done",
-            Payload::Failed(_) => "failed",
-            Payload::Invalid(_) => "invalid",
+            Payload::Parsed(PayloadV2::Done { .. }) => "done",
+            Payload::Parsed(PayloadV2::Failed { .. }) => "failed",
+            Payload::Parsed(PayloadV2::Blocked { .. }) => "blocked",
+            Payload::Parsed(PayloadV2::Invalid { .. }) => "invalid",
+        }
+    }
+
+    /// The verdict line's own text: the head of a done task, the reason of a
+    /// failed or blocked one. `None` when there is no verdict to read.
+    fn verdict(&self) -> Option<&str> {
+        match self {
+            Payload::Absent => None,
+            Payload::Parsed(report) => report.verdict(),
+        }
+    }
+
+    /// The handoff lines the report named, none of them routed yet.
+    fn handoffs(&self) -> &[Handoff] {
+        match self {
+            Payload::Absent => &[],
+            Payload::Parsed(report) => report.handoffs(),
+        }
+    }
+
+    /// The reason a report was refused, `Some` for exactly the reports that
+    /// stay on disk.
+    fn error(&self) -> Option<&str> {
+        match self {
+            Payload::Parsed(PayloadV2::Invalid { error }) => Some(error.as_str()),
+            _ => None,
         }
     }
 }
 
-/// Read this turn's report and take it away. Deleting after reading is the
-/// isolation a requeued task id needs: the next turn starts with no report
-/// until an agent living through it writes one.
-fn read_payload(workdir: &Path, task_id: &str) -> Payload {
+/// Read this turn's report, write down what it asks to hand on, and take the
+/// file away. Deleting after reading is the isolation a requeued task id needs:
+/// the next turn starts with no report until an agent living through it writes
+/// one. A file that is not a report is kept — it is the evidence for the
+/// refusal this client recorded, and its author can still fix it in place.
+fn read_payload(workdir: &Path, task_id: &str, journal: &Journal) -> (Payload, Vec<Handoff>) {
     let path = payload_path(workdir, task_id);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(_) => return Payload::Absent,
+        Err(_) => return (Payload::Absent, Vec::new()),
     };
+    let payload = match String::from_utf8(bytes) {
+        Err(_) => Payload::Parsed(PayloadV2::Invalid {
+            error: "payload is not valid utf-8".to_string(),
+        }),
+        Ok(text) => Payload::Parsed(onlyne_proto::payload::parse(&text)),
+    };
+    let handoffs = emit_handoffs(journal, task_id, &payload);
+    if payload.error().is_some() {
+        return (payload, Vec::new());
+    }
     if let Err(error) = std::fs::remove_file(&path) {
         tracing::warn!(error = %error, path = %path.display(), "acp: report file stayed behind");
     }
-    match String::from_utf8(bytes) {
-        Err(_) => Payload::Invalid("payload is not valid utf-8".to_string()),
-        Ok(text) => parse_payload(&text),
-    }
+    (payload, handoffs)
 }
 
-/// payload-v1 parsing: one non-empty line whose exact prefix decides the
-/// verdict. The file's own terminating newline is allowed; anything past a
-/// single report line is noise this client will not read a verdict from.
-fn parse_payload(text: &str) -> Payload {
-    let line = text.trim();
-    if line.is_empty() {
-        return Payload::Invalid("payload is empty".to_string());
-    }
-    if line.contains('\n') {
-        return Payload::Invalid("payload is more than one line".to_string());
-    }
-    let (prefix, report) = match line.split_once(':') {
-        Some((prefix, report)) => (prefix, report.trim()),
-        None => {
-            return Payload::Invalid("payload carries no report prefix".to_string());
+/// Record this turn's handoff lines, and answer the ones worth routing.
+///
+/// The journal takes them while the report file still exists: the file is the
+/// only place the agent put them down, and it is gone a moment later. A
+/// `hop-blocked:` verdict hands nothing on — work that did not finish has
+/// nothing to pass along — so its lines are recorded as skipped and stay in
+/// this process. Routing belongs to the client, the one process that holds a
+/// server link, and it carries the returned lines to that link.
+fn emit_handoffs(journal: &Journal, task_id: &str, payload: &Payload) -> Vec<Handoff> {
+    let head = payload.verdict().unwrap_or_default();
+    let blocked = payload.payload_kind() == "blocked";
+    let mut queued = Vec::new();
+    for handoff in payload.handoffs() {
+        journal.record(
+            "handoff",
+            vec![
+                ("task_id", Value::from(task_id)),
+                ("to_role", Value::from(handoff.to_role.clone())),
+                ("text", Value::from(handoff.text_or(head).to_string())),
+                (
+                    "status",
+                    Value::from(if blocked { "skipped_blocked" } else { "queued" }),
+                ),
+            ],
+        );
+        if !blocked {
+            queued.push(handoff.clone());
         }
-    };
-    match (prefix, report.is_empty()) {
-        ("hop-done", false) => Payload::Done(report.to_string()),
-        ("hop-failed", false) => Payload::Failed(report.to_string()),
-        ("hop-done", true) => Payload::Invalid("hop-done carries no result".to_string()),
-        ("hop-failed", true) => Payload::Invalid("hop-failed carries no reason".to_string()),
-        _ => Payload::Invalid(format!("unknown report prefix {prefix:?}")),
     }
+    queued
 }
 
 /// One turn's journal files, named for the task it ran.
@@ -945,13 +999,13 @@ struct Journal {
 
 impl Journal {
     fn new(workdir: &Path, task_id: &str, session_id: &str, content: ContentWriter) -> Self {
-        let logs = workdir.join(".onlyne").join("logs");
+        let layout = RoleWorkspace::resolve(workdir);
         Journal {
             workspace: workdir.to_path_buf(),
             task_id: task_id.to_string(),
             session_id: session_id.to_string(),
-            log: logs.join(format!("session-{task_id}.log")),
-            events: logs.join(format!("session-{task_id}.events.jsonl")),
+            log: layout.session_log_path(task_id),
+            events: layout.session_events_path(task_id),
             content,
         }
     }
@@ -1063,13 +1117,21 @@ fn run_turn(
         append(&journal.log, &drained.log);
     }
     let head = completion_head(&drained.message);
-    // payload-v1: a report the agent left stands in for what the closing
+    // payload-v2: a report the agent left stands in for what the closing
     // message said, and may only lower the turn's standing. `hop-done`
     // replaces the head while the stop reason still decides the outcome, so a
-    // report can never promote a turn the agent was cut short on.
-    let payload = read_payload(&entry.workdir, &task_id);
+    // report can never promote a turn the agent was cut short on. The handoff
+    // lines are written into the journal here, before the file goes.
+    let (payload, handoffs) = read_payload(&entry.workdir, &task_id, &journal);
+    let payload_kind = payload.payload_kind();
+    let payload_error = payload.error().map(str::to_string);
+    let head_kind = match &payload {
+        Payload::Absent => None,
+        Payload::Parsed(report) => report.head_kind(),
+    }
+    .map(str::to_string);
     let head = match &payload {
-        Payload::Done(text) => Some(text.clone()),
+        Payload::Parsed(PayloadV2::Done { head, .. }) => Some(head.clone()),
         _ => head,
     };
     let (settled, note, stop_reason) = match &turn {
@@ -1085,19 +1147,29 @@ fn run_turn(
     // and the reason travels in the fault note rather than a head. A turn whose
     // process died or was cut short already carries a harder fact than any
     // report, so the verdict changes and the detail is added to that note.
-    let payload_kind = payload.payload_kind();
     let (settled, head, note) = match payload {
-        Payload::Failed(text) => {
+        Payload::Parsed(PayloadV2::Failed { reason, .. }) => {
             // The sender reads the agent's own line; where the turn was cut
             // short or its process died, that harder fact stays in the note.
             let note = match note {
-                Some(found) => format!("{found}; the agent reported: {text}"),
-                None => text.clone(),
+                Some(found) => format!("{found}; the agent reported: {reason}"),
+                None => reason.clone(),
             };
-            (Outcome::Failed, Some(text), Some(note))
+            (Outcome::Failed, Some(reason), Some(note))
         }
-        Payload::Invalid(reason) => {
-            let detail = format!("acp payload invalid: {reason}");
+        Payload::Parsed(PayloadV2::Blocked { reason, .. }) => {
+            // A task waiting on something outside itself did not finish, so it
+            // cannot settle as done; `head_kind` says this was a block rather
+            // than a break, and the handoff lines stayed in the journal.
+            let detail = format!("the agent reported it is blocked: {reason}");
+            let note = match note {
+                Some(found) => format!("{found}; {detail}"),
+                None => detail,
+            };
+            (Outcome::Failed, Some(reason), Some(note))
+        }
+        Payload::Parsed(PayloadV2::Invalid { error }) => {
+            let detail = format!("acp payload invalid: {error}");
             let note = match note {
                 Some(found) => format!("{found}; {detail}"),
                 None => detail,
@@ -1106,18 +1178,22 @@ fn run_turn(
         }
         _ => (settled, head, note),
     };
-    journal.record(
-        "payload",
-        vec![
-            ("task_id", Value::from(task_id.clone())),
-            (
-                "path",
-                Value::from(payload_path(&entry.workdir, &task_id).display().to_string()),
-            ),
-            ("payload_kind", Value::from(payload_kind)),
-            ("head", head.clone().map(Value::from).unwrap_or(Value::Null)),
-        ],
-    );
+    let mut payload_fields = vec![
+        ("task_id", Value::from(task_id.clone())),
+        (
+            "path",
+            Value::from(payload_path(&entry.workdir, &task_id).display().to_string()),
+        ),
+        ("payload_kind", Value::from(payload_kind)),
+        ("head", head.clone().map(Value::from).unwrap_or(Value::Null)),
+        ("handoffs", Value::from(handoffs.len())),
+    ];
+    // A refused report stays on disk, so the record that says so names the line
+    // it could not read; an accepted one needs no such field.
+    if let Some(refused) = &payload_error {
+        payload_fields.push(("error", Value::from(refused.as_str())));
+    }
+    journal.record("payload", payload_fields);
     journal.record(
         "turn",
         vec![
@@ -1134,8 +1210,10 @@ fn run_turn(
         task_id,
         outcome: settled,
         head,
+        head_kind,
         note,
         refusals,
+        handoffs,
     });
 }
 
@@ -2063,7 +2141,9 @@ main()
     /// (nothing for the absent rows, which must behave exactly as a turn
     /// without the contract), the prose marker that chooses the agent's stop
     /// reason, and everything the ending has to leave behind. The note
-    /// expectations match as substrings; the head is compared exactly.
+    /// expectations match as substrings; the head is compared exactly. A row
+    /// whose `payload_kind` is `invalid` keeps its file; every other row has it
+    /// consumed.
     struct Cell {
         name: &'static str,
         payload: Option<&'static [u8]>,
@@ -2164,7 +2244,9 @@ main()
                 marker: "go",
                 outcome: Outcome::Cancelled,
                 head: None,
-                note: Some("acp payload invalid: payload is more than one line"),
+                note: Some(
+                    "acp payload invalid: line 2: payload carries more than one verdict line",
+                ),
                 payload_kind: "invalid",
             },
             Cell {
@@ -2173,7 +2255,7 @@ main()
                 marker: "MARK:maxtokens go",
                 outcome: Outcome::Cancelled,
                 head: None,
-                note: Some("acp payload invalid: unknown report prefix"),
+                note: Some("acp payload invalid: line 1: unknown report prefix \"hop-tripped\""),
                 payload_kind: "invalid",
             },
             Cell {
@@ -2182,7 +2264,7 @@ main()
                 marker: "go",
                 outcome: Outcome::Cancelled,
                 head: None,
-                note: Some("acp payload invalid: hop-done carries no result"),
+                note: Some("acp payload invalid: line 1: hop-done carries no result"),
                 payload_kind: "invalid",
             },
             Cell {
@@ -2191,7 +2273,7 @@ main()
                 marker: "MARK:maxtokens go",
                 outcome: Outcome::Cancelled,
                 head: None,
-                note: Some("acp payload invalid: payload carries no report prefix"),
+                note: Some("acp payload invalid: line 1: report line carries no prefix"),
                 payload_kind: "invalid",
             },
             Cell {
@@ -2230,11 +2312,13 @@ main()
                     outcome.note
                 ),
             }
-            // The report is consumed on the read: a requeued task id starts
-            // from nothing rather than from the last turn's words.
-            assert!(
-                !path.exists(),
-                "{}: the report outlived its read",
+            // An accepted report is consumed on the read: a requeued task id
+            // starts from nothing rather than from the last turn's words. A
+            // refused one stays on disk as the evidence for the record below.
+            assert_eq!(
+                path.exists(),
+                cell.payload_kind == "invalid",
+                "{}: the report file took the wrong side of its read",
                 cell.name
             );
             let records = onlyne_records(&lines, "payload");

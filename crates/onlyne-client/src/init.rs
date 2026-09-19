@@ -4,6 +4,34 @@ use onlyne_layout::{LEGACY_WORKSPACE_MESSAGE, RoleWorkspace, ServerRoot, detect_
 use onlyne_net::KeyPair;
 use std::path::{Path, PathBuf};
 
+/// the backend key `init` seeds (as a comment) among the top-level keys of a
+/// fresh workspace config: a commented key above `[server]` uncomments into
+/// the table it belongs to, and the parse never sees a value the template
+/// invented. The value range and the precedence are the ones `onlyne-config`'s
+/// `ClientConfig::backend` documents.
+const BACKEND_COMMENTS: &str = "\
+# The session backend `onlyne client run` starts from: herdr | orca | zellij |
+# exec | headless | acp | fake | auto. An empty or absent value probes the
+# host, and a nonempty ONLYNE_BACKEND wins over this key.
+# backend = \"auto\"
+";
+
+/// the `[acp]` table `init` seeds (as a comment) at the foot of a fresh
+/// workspace config, where an uncommented table header opens a table of its
+/// own. The four keys are the ones `onlyne-config`'s `AcpSection` reads.
+const ACP_COMMENTS: &str = "\
+# ACP backend options, read only when the backend is `acp`. `mode`, `model`,
+# and `reasoning_effort` name the agent's own configuration values: the agent
+# validates them, and an empty one keeps the agent's default. `permission` is
+# this machine's answer to a permission request from the agent: `deny` (the
+# default, it refuses and records a fault) or `allow`.
+# [acp]
+# mode = \"\"
+# model = \"\"
+# reasoning_effort = \"\"
+# permission = \"deny\"
+";
+
 #[derive(Debug, Clone)]
 pub struct InitArgs {
     pub workspace: PathBuf,
@@ -48,7 +76,7 @@ pub async fn init(args: InitArgs) -> Result<String> {
         .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or(0)))
         .unwrap_or((listen, 0));
     let config = format!(
-        "role = {role:?}\ncert_pin = {pin:?}\nkey_path = {key_path:?}\nplugins = []\n\n[server]\nhost = {host:?}\nport = {port}\n",
+        "role = {role:?}\ncert_pin = {pin:?}\nkey_path = {key_path:?}\nplugins = []\n\n{BACKEND_COMMENTS}\n[server]\nhost = {host:?}\nport = {port}\n\n{ACP_COMMENTS}",
         role = args.role,
         pin = cert_pin,
         key_path = workspace.key_path().display().to_string(),
@@ -78,10 +106,34 @@ pub fn fragment(role: &str, public_key: &str, prose: &str) -> String {
     let key = toml_string(public_key);
     let prose = toml_string(prose);
     format!(
-        "[[client]]\nrole = {role}\nkey = {key}\nadmin = false\nmax_sessions = 1\nallowed_senders = [\"*\", {role}]\nallowed_targets = [{role}]\nprose = {prose}\nreuse = true\n{command}\n",
+        "[[client]]\nrole = {role}\nkey = {key}\nadmin = false\nmax_sessions = 1\nallowed_senders = [\"*\", {role}]\nallowed_targets = [{role}]\nprose = {prose}\nreuse = true\n{command}\n{KNOB_COMMENTS}",
         command = SEED_SESSION_COMMAND,
     )
 }
+
+/// The implemented-but-unprinted `[[client]]` keys, carried as comment lines
+/// so the entry an operator pastes is the whole vocabulary. Each line shows
+/// the default the parser applies; uncommenting one changes what the entry
+/// says, leaving every line commented changes nothing. The field names and
+/// values are the ones `onlyne-config`'s `ClientEntry` declares.
+const KNOB_COMMENTS: &str = "\
+# timeout = { ready_ms = 30000, running_ms = 120000, idle_ms = 60000 }
+# Per-session budgets in milliseconds: how long a spawn may take to answer
+# `ready`, how long a `running` session may hold a turn, and how long an
+# unclaimed session lives before the client closes it.
+# intent = { attempts = 3, backoff_ms = [1000, 2000, 4000] }
+# Retry policy for one intent: total attempts, then the per-retry waits in
+# milliseconds; a longer list repeats its last entry.
+# aggregate = \"\"
+# The child-cluster name this role stands for. It is an annotation only: no
+# delivery decision reads it, and a plain role leaves it empty.
+# relay_required = []
+# Downstream roles one of this role's sessions must have handed work to before
+# it may report a terminal outcome. Absent or empty is the default: no guard.
+# relay_count = <n>
+# The count form of relay_required: this many distinct downstream roles. When
+# both keys are present the non-empty list wins.
+";
 
 /// One TOML basic string, with the characters a basic string cannot hold escaped.
 pub fn toml_string(text: &str) -> String {

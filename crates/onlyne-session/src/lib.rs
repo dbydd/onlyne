@@ -8,11 +8,12 @@ pub mod reconcile;
 
 pub use backend::herdr::HerdrBackend;
 pub use backend::{
-    AcpBackend, AcpOptions, BackendName, Capabilities, CloseReason, CommandOutput, HostDetection,
-    NO_SUPPORTED_HOST, NoSupportedHost, OutcomeFeed, OutcomeSink, PanePlacement, ProcessRunner,
-    ResourceProbe, Runner, SelectionSource, SessionBackend, SessionOutcome, SessionRef, SpawnSpec,
-    SplitDirection, WorktreePolicy, backend_by_name, backend_for, backend_for_env, default_backend,
-    detect_host, doctor_report, process_env, select_backend, select_backend_from_env,
+    AcpBackend, AcpOptions, BACKEND_NAMES, BackendName, Capabilities, CloseReason, CommandOutput,
+    HostDetection, NO_SUPPORTED_HOST, NoSupportedHost, OutcomeFeed, OutcomeSink, PanePlacement,
+    ProcessRunner, ResourceProbe, Runner, SelectionSource, SessionBackend, SessionOutcome,
+    SessionRef, SpawnSpec, SplitDirection, WorktreePolicy, backend_by_name, backend_for,
+    backend_for_env, default_backend, detect_host, doctor_report, process_env, select_backend,
+    select_backend_from_env,
 };
 pub use content::{ContentRecord, ContentSink, read_content_records};
 pub use host::{HostRef, OrcaPane};

@@ -155,45 +155,12 @@ impl ClientConfig {
         Ok(config)
     }
 
-    /// Collect every `$NAME` value in the config. Each tuple carries the
-    /// configuration field label and the environment variable name.
-    pub fn secret_refs(&self) -> Vec<(String, String)> {
-        let mut refs = Vec::new();
-        if let Some(name) = indirect(&self.cert_pin) {
-            refs.push(("cert_pin".to_string(), name));
-        }
-        if let Some(name) = indirect(&self.key_path) {
-            refs.push(("key_path".to_string(), name));
-        }
-        if let Some(name) = indirect(&self.server.host) {
-            refs.push(("server.host".to_string(), name));
-        }
-        refs
-    }
-
     /// Resolve every `$NAME` value in place at read time.
     pub fn resolve_secrets(&mut self, env: &Env) -> Result<(), SpecError> {
         self.cert_pin = resolve_field(&self.cert_pin, "cert_pin", env)?;
         self.key_path = resolve_field(&self.key_path, "key_path", env)?;
         self.server.host = resolve_field(&self.server.host, "server.host", env)?;
         Ok(())
-    }
-
-    /// Resolved view of the config, for callers that bind fresh maps once.
-    pub fn resolved(&self, env: &Env) -> Result<ResolvedClientConfig, SpecError> {
-        Ok(ResolvedClientConfig {
-            role: self.role.clone(),
-            server: ResolvedEndpoint {
-                host: resolve_field(&self.server.host, "server.host", env)?,
-                port: self.server.port,
-            },
-            cert_pin: resolve_field(&self.cert_pin, "cert_pin", env)?,
-            key_path: resolve_field(&self.key_path, "key_path", env)?,
-            plugins: self.plugins.clone(),
-            acp: self.acp.clone(),
-            stale_grace_secs: self.stale_grace_secs,
-            stall_report_secs: self.stall_report_secs,
-        })
     }
 }
 
@@ -290,43 +257,6 @@ pub struct ServerEndpoint {
     pub host: String,
     /// TCP port.
     pub port: u16,
-}
-
-/// Client config with every `$NAME` value resolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedClientConfig {
-    /// Role name.
-    pub role: String,
-    /// Resolved endpoint.
-    pub server: ResolvedEndpoint,
-    /// Resolved certificate pin.
-    pub cert_pin: String,
-    /// Resolved key path.
-    pub key_path: String,
-    /// Plugin list.
-    pub plugins: Vec<String>,
-    /// ACP session backend settings, carried through unchanged.
-    pub acp: AcpSection,
-    /// Startup reconcile grace in seconds.
-    pub stale_grace_secs: u64,
-    /// Stall report threshold in seconds. Zero disables the report.
-    pub stall_report_secs: u64,
-}
-
-/// Resolved server endpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedEndpoint {
-    /// Resolved host.
-    pub host: String,
-    /// TCP port.
-    pub port: u16,
-}
-
-fn indirect(value: &str) -> Option<String> {
-    value
-        .trim()
-        .strip_prefix('$')
-        .map(|name| name.trim().to_string())
 }
 
 fn resolve_field(raw: &str, label: &str, env: &Env) -> Result<String, SpecError> {

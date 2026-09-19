@@ -75,10 +75,12 @@ fn discovery_reports_no_match() {
 
 #[test]
 fn no_role_matches_message_is_exact() {
-    let error = TemplateError::NoRoleMatches;
+    let error = TemplateError::NoRoleMatches {
+        roles: vec!["builder".to_string(), "planner".to_string()],
+    };
     assert_eq!(
         error.to_string(),
-        "onlyne: no role matches the requested templates/roles"
+        "onlyne: no role matches the requested templates/roles; available roles: builder, planner"
     );
     assert_eq!(error.exit_code(), 4);
 }

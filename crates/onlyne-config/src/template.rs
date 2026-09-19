@@ -9,6 +9,7 @@
 //! * [`Placeholders`]: substitution bag used by the `onlyne-server` generate driver.
 //! * [`TemplateError`]: failure type used by the `onlyne-server` generate driver.
 //! * [`discover`]: role directory locator called by the `onlyne-server` generate driver.
+//! * [`available_roles`]: candidate role name lister called by the `onlyne-server` generate driver.
 //! * [`load_tree`]: file reader called by the `onlyne-server` generate driver.
 //! * [`local_override`]: fragment reader called by the `onlyne-server` generate driver.
 //! * [`merge_fragment`]: table merger called by the `onlyne-server` generate driver.
@@ -61,8 +62,9 @@ pub enum TemplateError {
         role: String,
         template_root: PathBuf,
     },
-    /// The caller selected a role/template intersection with no result.
-    NoRoleMatches,
+    /// the caller selected a role/template intersection with no result.
+    /// `roles` names what the scanned template root still offers.
+    NoRoleMatches { roles: Vec<String> },
     /// A file contains a placeholder outside the closed set.
     UnknownPlaceholder { key: String, path: String },
     /// `{{agent_package}}` was requested with an empty package setting.
@@ -102,9 +104,15 @@ impl fmt::Display for TemplateError {
                 "onlyne: no template directory named {role} under {}",
                 template_root.display()
             ),
-            Self::NoRoleMatches => {
-                f.write_str("onlyne: no role matches the requested templates/roles")
-            }
+            Self::NoRoleMatches { roles } => write!(
+                f,
+                "onlyne: no role matches the requested templates/roles; available roles: {}",
+                if roles.is_empty() {
+                    "none".to_string()
+                } else {
+                    roles.join(", ")
+                }
+            ),
             Self::UnknownPlaceholder { key, path } => {
                 write!(f, "onlyne: unknown placeholder {{{{{key}}}}} in {path}")
             }
@@ -153,6 +161,38 @@ pub fn discover(template_root: &Path, role: &str) -> Result<Vec<Template>, Templ
         });
     }
     Ok(matches)
+}
+
+/// list the role names a template root can still offer.
+///
+/// [`discover`] matches a role against any directory whose basename equals it,
+/// so every non-dot directory name below `template_root` is a candidate and is
+/// reported here. Names are deduplicated and sorted. A root that cannot be read
+/// yields an empty list, because this is hint text for a failure the caller
+/// already holds.
+pub fn available_roles(template_root: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_role_names(template_root, &mut names);
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn collect_role_names(current: &Path, names: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(current) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        names.push(name.to_string_lossy().into_owned());
+        collect_role_names(&entry.path(), names);
+    }
 }
 
 /// Load all ordinary files below one role template.

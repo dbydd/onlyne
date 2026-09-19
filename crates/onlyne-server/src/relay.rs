@@ -28,6 +28,11 @@ use std::collections::HashSet;
 /// bounds the overshoot of the shortest ttl a sender can usefully express.
 pub const SWEEP_INTERVAL_MS: u64 = 1000;
 
+/// the `[[route]]` key set, appended to every route miss so the answer states
+/// the row shape the matcher wanted beside the row it could not find.
+const ROUTE_KEYS: &str = "a [[route]] row keys on gateway, channel, an optional \
+    conversation, and the inline table to = { role, [session] }";
+
 /// A send the server accepted and recorded.
 #[derive(Debug, Clone)]
 pub struct SendOutcome {
@@ -137,7 +142,9 @@ pub fn resolve_target(spec: &Spec, to: &Principal) -> Result<String, RelayReject
                 .ok_or_else(|| {
                     RelayReject::new(
                         ErrorCode::UnknownRole,
-                        format!("no [[route]] row carries gateway {gateway} channel {channel}"),
+                        format!(
+                            "no [[route]] row carries gateway {gateway} channel {channel}; {ROUTE_KEYS}"
+                        ),
                         Some("route"),
                     )
                 })
@@ -252,7 +259,7 @@ pub fn check_acl(
                 Some(_) => Ok(()),
                 None => Err(RelayReject::new(
                     ErrorCode::AclDenied,
-                    format!("role {role} has no [[route]] open to gateway {gateway}"),
+                    format!("role {role} has no [[route]] open to gateway {gateway}; {ROUTE_KEYS}"),
                     Some("route"),
                 )),
             }
@@ -272,7 +279,9 @@ pub fn check_acl(
             .ok_or_else(|| {
                 RelayReject::new(
                     ErrorCode::AclDenied,
-                    format!("no [[route]] row carries gateway {gateway} channel {channel}"),
+                    format!(
+                        "no [[route]] row carries gateway {gateway} channel {channel}; {ROUTE_KEYS}"
+                    ),
                     Some("route"),
                 )
             }),
@@ -333,7 +342,9 @@ pub fn send(
             else {
                 return Ok(RelayReply::Rejected(RelayReject::new(
                     ErrorCode::AclDenied,
-                    format!("no [[route]] row carries gateway {gateway} channel {channel}"),
+                    format!(
+                        "no [[route]] row carries gateway {gateway} channel {channel}; {ROUTE_KEYS}"
+                    ),
                     Some("route"),
                 )));
             };

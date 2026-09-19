@@ -14,10 +14,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run one role client against its workspace config.
+    ///
+    /// Each session this client holds needs a terminal host for its pane, so a
+    /// run with no host detected and no explicit ONLYNE_BACKEND stops at
+    /// startup with exit 5.
+    #[command(
+        after_help = "config: --workspace names the role workspace; its `.onlyne/config.toml` \
+                      carries `backend` (herdr|orca|zellij|exec|headless|acp|fake|auto; empty \
+                      probes the host, ONLYNE_BACKEND wins) and, for the acp backend, the \
+                      `[acp]` table: `mode`, `model`, `reasoning_effort` (each validated by \
+                      the agent, empty keeps its default) and `permission` (`deny`, the \
+                      default, or `allow`)."
+    )]
     Run {
         #[arg(long)]
         workspace: PathBuf,
     },
+    /// Create a role workspace and print its `[[client]]` spec fragment. Writes
+    /// `.onlyne/config.toml` and `.onlyne/keys/role.key` under `--workspace`,
+    /// takes `cert_pin` and the endpoint from `--server-root`'s spec, and appends
+    /// nothing to that spec. Exits 2 on a legacy workspace.
     Init {
         #[arg(long)]
         workspace: PathBuf,
@@ -32,6 +49,9 @@ enum Command {
         )]
         prose: String,
     },
+    /// Report the client answering this workspace's socket. Prints uptime, the
+    /// served socket path, and the recorded fault count, and says whether the
+    /// client holds a ready server link. Exits 2 when no client answers.
     Status {
         #[arg(long)]
         workspace: PathBuf,
@@ -119,7 +139,8 @@ async fn main() {
             // surface happens to start its pane in.
             let workspace = onlyne_layout::absolute_path(&workspace);
             let path = onlyne_layout::RoleWorkspace::resolve(&workspace);
-            match onlyne_config::ClientConfig::load(path.config_path()) {
+            local_cli::heal_workspace_config(&workspace);
+            match load_workspace_config(&path.config_path()) {
                 Ok(config) => match onlyne_client::run(
                     ClientInit::new(
                         workspace,
@@ -183,7 +204,8 @@ async fn main() {
         Command::Roles { workspace } => local_roles(&workspace),
         Command::Sessions { .. } | Command::Watch { .. } | Command::History { .. } => {
             eprintln!(
-                "onlyne: this verb needs the live role runtime; v1.0.0 has no local query socket"
+                "onlyne: no local query socket here; these three answer on the admin surface as \
+                 onlyne sessions, onlyne watch, and onlyne history"
             );
             1
         }
@@ -207,6 +229,18 @@ async fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// Load a workspace's `config.toml` and resolve every `$NAME` value from the
+/// process environment. `cert_pin`, `key_path`, and `server.host` may each hold
+/// an environment variable reference. A reference whose variable is unset ends
+/// startup, and the message names the variable.
+fn load_workspace_config(
+    path: &Path,
+) -> Result<onlyne_config::ClientConfig, onlyne_config::SpecError> {
+    let mut config = onlyne_config::ClientConfig::load(path)?;
+    config.resolve_secrets(&onlyne_config::Env::current())?;
+    Ok(config)
 }
 
 /// Route `tracing` output to stderr, which the operator redirects into
@@ -266,5 +300,32 @@ fn local_roles(workspace: &Path) -> i32 {
             eprintln!("onlyne-client: {error}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_workspace_config;
+
+    /// `cert_pin = "$NAME"` with the variable unset: the loader refuses and the
+    /// operator-visible message names the variable. The name carries the process
+    /// id, so no ambient environment can make it resolve.
+    #[test]
+    fn missing_env_secret_names_the_variable_in_the_error() {
+        let var = format!("ONLYNE_TEST_MISSING_PIN_{}", std::process::id());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "role = \"planner\"\ncert_pin = \"${var}\"\nkey_path = \"keys/role.key\"\n\n[server]\nhost = \"127.0.0.1\"\nport = 7811\n"
+            ),
+        )
+        .unwrap();
+        let error = load_workspace_config(&path).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("missing secret ${var} for cert_pin; set the environment variable")
+        );
     }
 }

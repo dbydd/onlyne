@@ -5,6 +5,7 @@
 //! those original bytes back, whoever the eventual reader is.
 
 use anyhow::{Context, Result, anyhow};
+use onlyne_layout::RoleWorkspace;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,10 +14,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-/// Cursor metadata for journalled content.  The event bytes themselves remain
-/// solely in `session-<task>.events.jsonl`.
-pub const CONTENT_INDEX_RELATIVE: &str = ".onlyne/logs/content.index.jsonl";
 
 /// One content record after the journal append that gave it a role-wide cursor.
 #[derive(Clone, Debug, PartialEq)]
@@ -124,7 +121,7 @@ impl ContentWriter {
 }
 
 fn indexed_head(workspace: &Path) -> std::io::Result<u64> {
-    let path = workspace.join(CONTENT_INDEX_RELATIVE);
+    let path = RoleWorkspace::resolve(workspace).content_index_path();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -153,7 +150,7 @@ fn append_record(path: &Path, record: &Value) -> std::io::Result<(u64, u64)> {
 }
 
 fn append_index(workspace: &Path, entry: &ContentIndexEntry) -> std::io::Result<()> {
-    let path = workspace.join(CONTENT_INDEX_RELATIVE);
+    let path = RoleWorkspace::resolve(workspace).content_index_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -170,7 +167,7 @@ fn append_index(workspace: &Path, entry: &ContentIndexEntry) -> std::io::Result<
 /// range that no longer names exactly one JSON object is an error rather than a
 /// silent stream gap.
 pub fn read_content_records(workspace: &Path) -> Result<Vec<ContentRecord>> {
-    let index_path = workspace.join(CONTENT_INDEX_RELATIVE);
+    let index_path = RoleWorkspace::resolve(workspace).content_index_path();
     let text = match std::fs::read_to_string(&index_path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

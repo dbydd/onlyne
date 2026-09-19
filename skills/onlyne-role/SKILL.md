@@ -36,9 +36,11 @@ or, inside a pi session, the `onlyne_complete{outcome, text}` tool.
   carries no plugin and no fallback: `onlyne complete` is yours to run before you stop.
 - A `backend = "acp"` session mounts nothing and needs no `onlyne` command. Its prompt
   ends with an absolute report path your client prepared under the workspace; the last
-  action before you stop is one line in that file — `hop-done: <the result in one line>`
-  or `hop-failed: <why it failed, one sentence>` — and the client reads that file,
-  settles the task, and files the receipt.
+  action before you stop is that file: one `hop-done:` / `hop-failed:` / `hop-blocked:`
+  verdict line, optionally followed by `handoff:` lines your client routes for you. The
+  client reads the file, settles the task, files the receipt, and passes the handoffs on.
+  Write and check the file with the `onlyne report` verbs, or read
+  `skills/onlyne-role-payload-v2/SKILL.md` for the whole grammar before you write one.
 - One completion per task. Inside your session the plugin keeps that record: a second
   `onlyne_complete` for a task it already reported answers `duplicate`, files no report, and the
   process exits once. A hand-run `onlyne complete` carries a fresh `op_id` each call, so the

@@ -126,6 +126,8 @@ pub const UNIX_SOCKET_PATH_MAX: usize = 103;
 
 /// Socket file name inside `run/`, the leaf every layout path has always used.
 const SOCKET_FILE_NAME: &str = "s";
+/// The role-wide content index beside the session logs, named in plan §5.
+pub const CONTENT_INDEX_FILE_NAME: &str = "content.index.jsonl";
 /// Marker file name inside `run/` naming the path actually bound.
 const SOCKET_MARKER_FILE_NAME: &str = "socket";
 
@@ -551,6 +553,32 @@ impl RoleWorkspace {
 
     pub fn log_path(&self) -> PathBuf {
         self.logs_dir().join("client.log")
+    }
+
+    /// The rendered transcript of one session, the file an operator tails.
+    pub fn session_log_path(&self, task_id: &str) -> PathBuf {
+        self.logs_dir().join(format!("session-{task_id}.log"))
+    }
+
+    /// The raw update journal of one session, one JSON line per backend event.
+    pub fn session_events_path(&self, task_id: &str) -> PathBuf {
+        self.logs_dir()
+            .join(format!("session-{task_id}.events.jsonl"))
+    }
+
+    /// The role-wide content index named in plan §5.
+    pub fn content_index_path(&self) -> PathBuf {
+        self.logs_dir().join(CONTENT_INDEX_FILE_NAME)
+    }
+
+    /// The report file one session closes its task through.
+    pub fn report_path(&self, task_id: &str) -> PathBuf {
+        self.out_dir().join(format!("{task_id}.md"))
+    }
+
+    /// Directory holding the closing reports of this role's sessions.
+    pub fn out_dir(&self) -> PathBuf {
+        self.onlyne.join("out")
     }
 
     pub fn keys_dir(&self) -> PathBuf {

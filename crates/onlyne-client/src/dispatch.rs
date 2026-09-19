@@ -1,3 +1,4 @@
+use crate::handoff::{self, Denial};
 use crate::intent::stamp_op_id;
 use crate::runloop::ClientInit;
 use anyhow::{Context, Result, anyhow};
@@ -7,7 +8,7 @@ use onlyne_net::conn::{ClientConn, ConnReadiness, dial};
 use onlyne_net::{ConnSettings, KeyPair, NetError};
 use onlyne_proto::{
     AckArgs, AdapterMsg, AgentPhase, AssignArgs, Body, Capability, Causality, ClientOp, ControlOp,
-    DeliveryPhase, Envelope, Frame, HandshakeArgs, HostOp, Lifecycle, MsgKind, Outcome,
+    DeliveryPhase, Envelope, Frame, Handoff, HandshakeArgs, HostOp, Lifecycle, MsgKind, Outcome,
     PROTOCOL_VERSION, Principal, RecoveryPhase, RecycleArgs, Report, ResBody, ResourcePhase,
     SessionProjection, SessionSyncArgs, Welcome, new_envelope,
 };
@@ -85,6 +86,10 @@ pub struct SessionSlot {
     pub msg_id: Option<String>,
     /// Sender of the payload this session serves, kept for its `Completion`.
     pub origin: Option<Principal>,
+    /// How deep the task this slot serves sits in its chain, read off the
+    /// envelope that arrived with it. A handoff the session reports afterwards
+    /// is one hop below this, which is what `onlyne handoff` computes too.
+    pub hop: u32,
 }
 
 /// Write one ack into the durable intent queue.
@@ -808,6 +813,16 @@ fn family_of(envelope: &Envelope) -> String {
         .unwrap_or_else(|| envelope.id.clone())
 }
 
+/// How deep an inbound task sits in its chain. An envelope that names no
+/// causality is a root, and a relay born from it takes the hop below this.
+fn hop_of(envelope: &Envelope) -> u32 {
+    envelope
+        .causality
+        .as_ref()
+        .map(|causality| causality.hop)
+        .unwrap_or(0)
+}
+
 fn render_tokens(tokens: &[String], session: &str, task: &str) -> Vec<String> {
     tokens
         .iter()
@@ -946,6 +961,7 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
         .map(|slot| {
             if slot.payload.is_none() {
                 slot.payload = Some(envelope.clone());
+                slot.hop = hop_of(envelope);
             }
             slot.session.clone()
         })
@@ -974,6 +990,7 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
             .map(|slot| {
                 slot.task_id = Some(task_id.clone());
                 slot.payload = Some(envelope.clone());
+                slot.hop = hop_of(envelope);
                 slot.ready = false;
                 let session = SessionRef {
                     task_id: task_id.clone(),
@@ -1030,6 +1047,7 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
             payload: Some(envelope.clone()),
             msg_id: None,
             origin: Some(envelope.from.clone()),
+            hop: hop_of(envelope),
         },
     );
     inner.stall.note_assigned(&task_id, Instant::now());
@@ -1132,13 +1150,22 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
     }
 }
 
+/// Settle one finished task: relay what its report asked to hand on, publish the
+/// verdict, and answer the sender.
+///
+/// The relay runs first and on purpose. A role that takes the handed-on task
+/// must find the chain already pointing at it when the completion receipt
+/// arrives, and a handoff that outlives this call has no caller left to record
+/// its refusal.
 pub async fn on_out(
     state: &DispatchState,
     task_id: &str,
     outcome: Outcome,
     head: Option<String>,
+    head_kind: Option<&str>,
+    handoffs: &[Handoff],
 ) -> Result<()> {
-    let (verdict, receipt) = {
+    let (verdict, receipt, role, hop) = {
         let mut inner = state.inner.lock();
         let verdict = settle(
             &inner.bridge,
@@ -1158,6 +1185,7 @@ pub async fn on_out(
             .values_mut()
             .find(|slot| slot.task_id.as_deref() == Some(task_id));
         let origin = slot.as_ref().and_then(|slot| slot.origin.clone());
+        let hop = slot.as_ref().map(|slot| slot.hop).unwrap_or(0);
         let msg_id = slot.and_then(|slot| slot.msg_id.take());
         if let Some(msg_id) = msg_id {
             store_ack(
@@ -1177,9 +1205,25 @@ pub async fn on_out(
         (
             verdict,
             completion_envelope(&inner.role, origin, task_id, head.as_deref()),
+            inner.role.clone(),
+            hop,
         )
     };
     note_verdict(&verdict, task_id);
+    // Every relay is answered before the verdict travels, and none of them
+    // moves it: a refused handoff is a record on the settled task, not a
+    // different outcome for it.
+    let denied = handoff::route(
+        state,
+        &role,
+        task_id,
+        hop,
+        head_kind,
+        head.as_deref().unwrap_or_default(),
+        handoffs,
+    )
+    .await;
+    record_denials(state, task_id, &denied)?;
     // The terminal receipt leaves as its own envelope, so the origin — a role
     // or a gateway conversation — learns the outcome (plan §3 `Completion`).
     // It rides the intent queue, which is what makes a completion survive the
@@ -1188,6 +1232,44 @@ pub async fn on_out(
         transport_envelope(state, &envelope).await?;
     }
     sync_session(state, task_id).await
+}
+
+/// Write down the relays this role could not send.
+///
+/// Each refusal gets an event of its own, because that is the plane a supervisor
+/// reads to see which handoff line died. The fault queue dedups on
+/// `(task, kind, generation)`, so the first refusal of a turn is also the one
+/// the task's fault row names; the rest stay in the events.
+fn record_denials(state: &DispatchState, task_id: &str, denied: &[Denial]) -> Result<()> {
+    if denied.is_empty() {
+        return Ok(());
+    }
+    let inner = state.inner.lock();
+    for refusal in denied {
+        tracing::warn!(
+            task = %task_id,
+            to_role = %refusal.to_role,
+            error = %refusal.reason,
+            "handoff denied"
+        );
+        inner.store.append_event(
+            "handoff_denied",
+            &serde_json::json!({
+                "task_id": task_id,
+                "to_role": refusal.to_role,
+                "text": refusal.text,
+                "error": refusal.reason,
+            }),
+        )?;
+        onlyne_session::record_fault(
+            &inner.store,
+            task_id,
+            "handoff_denied",
+            "acp",
+            &format!("{}: {}", refusal.to_role, refusal.reason),
+        )?;
+    }
+    Ok(())
 }
 
 /// The receipt for one finished task, or `None` when its sender is unknown.
@@ -1591,7 +1673,10 @@ pub async fn on_plugin_report(state: &DispatchState, report: Report) -> Result<(
             head,
             ..
         } => {
-            on_out(state, &task_id, outcome, head).await?;
+            // A plugin reports its own ending, and it hands nothing on: the
+            // report file is the only place handoff lines are put down, and that
+            // is a route a plugin-backed session does not have.
+            on_out(state, &task_id, outcome, head, None, &[]).await?;
             false
         }
         Report::Fault {

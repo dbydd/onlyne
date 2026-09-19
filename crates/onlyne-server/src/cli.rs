@@ -273,8 +273,16 @@ fn spec_template(name: &str, listen: &str, cert_pin: &str) -> String {
          heartbeat_timeout_ms = 30000\n\
          stale_watch_secs = 60\n\
          heartbeat_grace_secs = 90\n\
+         # `requeue_max_attempts` caps the automatic requeues one in-flight row\n\
+         # may take, and `requeue_ttl_secs` bounds its age from enqueue. Both\n\
+         # default to 0, which leaves the requeue gate uncapped.\n\
+         requeue_max_attempts = 0\n\
+         requeue_ttl_secs = 0\n\
          agent_package = \"\"\n\
          template_root = \".onlyne/templates\"\n\
+         # A session's backend and its `acp` parameters live in the role\n\
+         # workspace's `.onlyne/config.toml`, which `onlyne-client init` writes,\n\
+         # not in this spec.\n\
          \n\
          # Each role is one `[[client]]` row. `onlyne-client init` prints a ready row\n\
          # whose `key` value matches the workspace it just created.\n"

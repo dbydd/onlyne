@@ -1,7 +1,7 @@
 use chrono::Utc;
 use onlyne_config::template::{
-    Placeholders, Template, TemplateError, discover, load_tree, local_override, merge_fragment,
-    scan_for_prefixes, substitute_at,
+    Placeholders, Template, TemplateError, available_roles, discover, load_tree, local_override,
+    merge_fragment, scan_for_prefixes, substitute_at,
 };
 use onlyne_config::{ClientEntry, Spec};
 use onlyne_layout::{ServerRoot, apply_private_mode};
@@ -206,7 +206,10 @@ pub fn generate(args: &GenerateArgs, spec: &Spec) -> Result<GenerateReport, Gene
         });
     }
     if pending.is_empty() {
-        return Err(TemplateError::NoRoleMatches.into());
+        return Err(TemplateError::NoRoleMatches {
+            roles: available_roles(&template_root),
+        }
+        .into());
     }
 
     for item in &pending {
@@ -390,7 +393,10 @@ fn choose_template(
             }
         }
     }
-    Err(TemplateError::NoRoleMatches.into())
+    Err(TemplateError::NoRoleMatches {
+        roles: available_roles(root),
+    }
+    .into())
 }
 
 fn certificate_pin(root: &ServerRoot, spec: &Spec) -> Result<String, GenerateError> {

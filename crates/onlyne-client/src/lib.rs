@@ -5,6 +5,7 @@ pub mod adapter_socket;
 pub mod claim;
 pub mod daemon;
 pub mod dispatch;
+pub mod handoff;
 pub mod host;
 pub mod init;
 pub mod intent;

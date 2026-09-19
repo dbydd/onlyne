@@ -80,9 +80,12 @@ impl PanePlacement {
     }
 }
 
-/// Stderr line and [`NoSupportedHost`] display when no host is selected.
-pub const NO_SUPPORTED_HOST: &str =
-    "onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND";
+/// Stderr line and [`NoSupportedHost`] display when no host is selected. The
+/// two hint lines name the config key and its accepted values, because the
+/// failure an operator actually hits is a workspace configured for no host.
+pub const NO_SUPPORTED_HOST: &str = "onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND\n\
+onlyne: or set the backend in the client config: `backend = \"acp\"`, accepted: herdr|orca|zellij|exec|headless|acp|fake|auto (empty probes, ONLYNE_BACKEND wins)\n\
+onlyne: an acp backend reads its agent from the `[acp]` table: mode, model, reasoning_effort, permission";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendName {
@@ -93,6 +96,11 @@ pub enum BackendName {
     Acp,
     Fake,
 }
+
+/// Every name an operator may put in `backend` or `ONLYNE_BACKEND`, the `auto`
+/// probe and the `headless` alias included. A rejection names this list, because
+/// the miss it answers is a typo the operator cannot otherwise see.
+pub const BACKEND_NAMES: &str = "herdr|orca|zellij|exec|headless|acp|fake|auto";
 
 impl BackendName {
     pub fn as_str(self) -> &'static str {
@@ -285,13 +293,20 @@ pub enum CloseReason {
 /// has to write it down. A backend that owns its agent has no reporter, so it
 /// states the fact here: which task ended, how, and what the receiving role
 /// should read as its closing line.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionOutcome {
     pub task_id: String,
     pub outcome: Outcome,
     /// The agent's closing text, already stripped of the status markers an agent
     /// stamps into its own stream. Becomes the completion head.
     pub head: Option<String>,
+    /// Which verdict line [`SessionOutcome::head`] came from: `done`, `failed`,
+    /// or `blocked`. `None` when the head is the agent's closing message rather
+    /// than a report line, which is every session that left no report. The
+    /// reader that hands work on needs the word: a blocked task finished
+    /// nothing, so its handoff lines route nowhere.
+    #[serde(default)]
+    pub head_kind: Option<String>,
     /// Fault detail for the ledger on a failure. An agent process that died
     /// mid-turn names its exit status and the tail of its stderr here.
     pub note: Option<String>,
@@ -300,6 +315,11 @@ pub struct SessionOutcome {
     /// the session row as a fault and settles nothing by itself: the turn kept
     /// running without the thing the agent wanted.
     pub refusals: Option<String>,
+    /// The handoff lines this turn's report asked for, with a blocked verdict's
+    /// lines already dropped. Empty is the common case: a report with no
+    /// handoff line, or no report at all.
+    #[serde(default)]
+    pub handoffs: Vec<onlyne_proto::payload::Handoff>,
 }
 
 /// The queue behind one backend's outcome stream, and the flag its consumer
@@ -639,8 +659,9 @@ pub fn select_backend_from_env(
             .is_some_and(|name| !name.eq_ignore_ascii_case("auto")) =>
         {
             Err(anyhow::anyhow!(
-                "unknown session backend: {}",
-                detected.explicit.unwrap_or_default()
+                "unknown session backend: {}; accepted: {}",
+                detected.explicit.unwrap_or_default(),
+                BACKEND_NAMES
             ))
         }
         None => Err(NoSupportedHost.into()),
@@ -673,13 +694,15 @@ pub fn backend_by_name(
         Some(BackendName::Fake) => Ok(Box::new(fake::FakeBackend::new())),
         Some(BackendName::Exec) => Ok(Box::new(exec::ExecBackend::new())),
         Some(BackendName::Acp) => Ok(Box::new(acp::AcpBackend::new(acp.clone()))),
-        None => Err(anyhow::anyhow!("unknown session backend: {name}")),
+        None => Err(anyhow::anyhow!(
+            "unknown session backend: {name}; accepted: {BACKEND_NAMES}"
+        )),
     }
 }
 
 /// Resolve a backend name to a concrete backend. `auto` and empty probe the
 /// supplied runner's process environment through [`select_backend`]. Named
-/// values stay exact: unknown names error with the existing spelling.
+/// values stay exact: an unknown name errors and names the accepted set.
 pub fn backend_for(
     requested: &str,
     runner: Arc<dyn Runner>,
@@ -922,7 +945,10 @@ mod tests {
         )
         .err()
         .expect("unknown name must error");
-        assert_eq!(error.to_string(), "unknown session backend: nope");
+        assert_eq!(
+            error.to_string(),
+            format!("unknown session backend: nope; accepted: {BACKEND_NAMES}")
+        );
     }
 
     #[test]
@@ -984,7 +1010,10 @@ mod tests {
         )
         .err()
         .expect("unknown name must error");
-        assert_eq!(error.to_string(), "unknown session backend: nope");
+        assert_eq!(
+            error.to_string(),
+            format!("unknown session backend: nope; accepted: {BACKEND_NAMES}")
+        );
     }
 
     #[test]
@@ -1051,15 +1080,19 @@ mod tests {
             task_id: "t1".into(),
             outcome: crate::lifecycle::Outcome::Done,
             head: Some("done".into()),
+            head_kind: Some("done".into()),
             note: None,
             refusals: None,
+            handoffs: Vec::new(),
         });
         sink.push(SessionOutcome {
             task_id: "t2".into(),
             outcome: crate::lifecycle::Outcome::Failed,
             head: None,
+            head_kind: None,
             note: Some("agent exited".into()),
             refusals: Some("2 refused".into()),
+            handoffs: Vec::new(),
         });
         assert_eq!(
             feed.recv_timeout(Duration::from_millis(10))

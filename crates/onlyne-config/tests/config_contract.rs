@@ -978,7 +978,9 @@ port = 7811
     assert_eq!(config.acp.model, "qwen3-coder");
     assert_eq!(config.acp.reasoning_effort, "high");
     assert_eq!(config.acp.permission, "allow");
-    assert_eq!(config.resolved(&Env::default()).unwrap().acp, config.acp);
+    let mut resolved = config.clone();
+    resolved.resolve_secrets(&Env::default()).unwrap();
+    assert_eq!(resolved.acp, config.acp);
 }
 
 #[test]
@@ -998,10 +1000,9 @@ port = 7811
     assert_eq!(config.acp.model, "");
     assert_eq!(config.acp.reasoning_effort, "");
     assert_eq!(config.acp.permission, "deny");
-    assert_eq!(
-        config.resolved(&Env::default()).unwrap().acp,
-        AcpSection::default()
-    );
+    let mut resolved = config.clone();
+    resolved.resolve_secrets(&Env::default()).unwrap();
+    assert_eq!(resolved.acp, AcpSection::default());
 }
 
 #[test]
@@ -1061,5 +1062,7 @@ mode = "yolo"
     assert_eq!(config.acp.model, "");
     assert_eq!(config.acp.reasoning_effort, "");
     assert_eq!(config.acp.permission, "deny");
-    assert_eq!(config.resolved(&Env::default()).unwrap().acp, config.acp);
+    let mut resolved = config.clone();
+    resolved.resolve_secrets(&Env::default()).unwrap();
+    assert_eq!(resolved.acp, config.acp);
 }

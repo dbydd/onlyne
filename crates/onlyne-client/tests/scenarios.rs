@@ -89,7 +89,13 @@ fn permissions_mode_600_for_role_key_and_socket() {
         }))
         .unwrap();
     assert!(fragment.starts_with("[[client]]\n"));
-    let lines: Vec<&str> = fragment.lines().collect();
+    // The knob comments ride the fragment as TOML comments; the effective
+    // entry is the ten live lines in their fixed shape, and the comments are
+    // the documented vocabulary behind them.
+    let lines: Vec<&str> = fragment
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect();
     assert_eq!(lines.len(), 10, "fragment shape is fixed: {fragment:?}");
     assert_eq!(lines[0], "[[client]]");
     assert_eq!(lines[1], "role = \"planner\"");
@@ -110,9 +116,10 @@ fn permissions_mode_600_for_role_key_and_socket() {
             "session_command = [\"pi\", \"--session-id\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]",
         ]
     );
-    assert!(fragment.ends_with(
-        "session_command = [\"pi\", \"--session-id\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]\n"
-    ));
+    assert!(
+        lines[9].starts_with("session_command = "),
+        "the live entry closes with the command line: {fragment:?}"
+    );
     assert!(fragment.contains("key = \"ed25519/"));
 
     let key_path = ws_dir.path().join(".onlyne/keys/role.key");

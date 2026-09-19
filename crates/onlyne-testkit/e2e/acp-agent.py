@@ -159,6 +159,10 @@ def parse_args(argv):
         required=True,
         help="file this process traces its pid and every received method to",
     )
+    parser.add_argument(
+        "--caller-report-marker",
+        help="when a prompt contains this marker, leave the report file to the caller",
+    )
     return parser.parse_args(argv)
 
 
@@ -203,7 +207,7 @@ def wait_for_gate(path, trace):
     trace.write("gate open")
 
 
-def write_payload(prompt, trace):
+def write_payload(prompt, trace, caller_report_marker=None):
     """Follow the client's report directive, the last action before stopping.
 
     The directive is part of what the case tests, so a missing path is traced
@@ -213,6 +217,9 @@ def write_payload(prompt, trace):
     match = re.search(r"Result report \(write before you stop\): (.*)$", prompt, re.M)
     if match is None:
         trace.write("payload skipped: no report path in the prompt")
+        return
+    if caller_report_marker is not None and caller_report_marker in prompt:
+        trace.write("payload skipped: caller owns the report file")
         return
     path = match.group(1).strip()
     line = PAYLOAD_FAIL_LINE if FAIL_MARKER in prompt else PAYLOAD_HEAD_LINE
@@ -228,7 +235,7 @@ def write_payload(prompt, trace):
     trace.write("payload line=%s" % line)
 
 
-def run_turn(rid, session_id, prompt, gate, trace):
+def run_turn(rid, session_id, prompt, gate, trace, caller_report_marker=None):
     """One deterministic turn: traced, gated, then streamed in a fixed order."""
     trace.write("session/prompt id=%s text=%s" % (session_id, prompt.replace("\n", " / ")))
     wait_for_gate(gate, trace)
@@ -264,11 +271,11 @@ def run_turn(rid, session_id, prompt, gate, trace):
             "content": {"type": "text", "text": ANSWER},
         },
     )
-    write_payload(prompt, trace)
+    write_payload(prompt, trace, caller_report_marker)
     result(rid, {"stopReason": "end_turn"})
 
 
-def dispatch(msg, gate, trace):
+def dispatch(msg, gate, trace, caller_report_marker=None):
     method = msg.get("method")
     rid = msg.get("id")
     params = msg.get("params") or {}
@@ -298,7 +305,7 @@ def dispatch(msg, gate, trace):
         prompt = "".join(
             block.get("text", "") for block in blocks if isinstance(block, dict)
         )
-        run_turn(rid, params.get("sessionId"), prompt, gate, trace)
+        run_turn(rid, params.get("sessionId"), prompt, gate, trace, caller_report_marker)
     elif method == "session/close":
         trace.write("session/close id=%s" % params.get("sessionId"))
         result(rid, {})
@@ -334,7 +341,7 @@ def main(argv):
             trace.write("unparsable frame")
             continue
         if isinstance(msg, dict) and msg.get("method"):
-            dispatch(msg, args.gate, trace)
+            dispatch(msg, args.gate, trace, args.caller_report_marker)
 
 
 if __name__ == "__main__":

@@ -2,27 +2,51 @@
 
 use onlyne_proto::{
     AdminOp, ClientOp, EventTier, Frame, HistoryArgs as ProtoHistoryArgs, LedgerQuery, LedgerState,
-    Lifecycle, MsgKind, Principal, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, RepairAck,
-    RepairAdopt, RepairFail, RepairRebind, RepairTarget, ResBody, Subscribe, new_id,
+    Lifecycle, MsgKind, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, RepairAck, RepairAdopt,
+    RepairFail, RepairRebind, RepairTarget, ResBody, Subscribe, new_id,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
 use crate::flags::GlobalFlags;
-use crate::runtime::{self, EXIT_ANSWER_FAILED, EXIT_NO_SOCKET, EXIT_OK, EXIT_VALIDATION};
+use crate::runtime::{self, EXIT_ANSWER_FAILED, EXIT_NO_SOCKET, EXIT_OK};
 use crate::socket::{SocketTarget, Surface};
 use crate::wire::{self, ExchangeError, Outbound};
 
+/// the two things an operator must not confuse from the foot of `onlyne repair
+/// --help`: which verb re-points a binding and which one re-bases the row, and
+/// who is allowed to move state at all.
+const REPAIR_AFTER_HELP: &str = "\
+`adopt` rewrites the desired backend binding and keeps the row's session id and
+generation. `rebind` rewrites the same binding and moves the row to the
+`--session-id` you give, bumping its generation and resetting its seq to 0, so
+reports under the old generation stop being believed.
+Use `adopt` when the resource is the one the row already names, and `rebind` when
+the task is now carried by a different session.
+
+The server detects and records faults; it never repairs them. A fault stays open
+until a person or the supervisor runs one of these `repair_*` verbs, so nothing
+here is racing an automatic recovery, and a task whose rows have settled past
+in flight has no edge back to the queue.";
+
 /// One `repair` verb on the admin surface.
 #[derive(Debug, Clone, clap::Subcommand)]
+#[command(after_help = REPAIR_AFTER_HELP)]
 pub enum RepairVerb {
+    /// Print one task's session projection with every fault recorded against it.
     Inspect(RepairTargetArgs),
+    /// Re-point the row's desired backend binding without touching its generation.
     Adopt(RepairAdoptArgs),
+    /// Move the row to another session id, bumping its generation and resetting seq.
     Rebind(RepairRebindArgs),
+    /// Put the task's still in flight rows back in the queue, dropping their tickets.
     Retry(RepairTargetArgs),
+    /// Settle the task as failed, rejecting its undelivered rows and cancelling its owner.
     Fail(RepairFailArgs),
+    /// Settle the task as cancelled, with the same row sweep and cancel as `fail`.
     Close(RepairTargetArgs),
+    /// Close one fault record by id as handled, leaving ledger rows alone.
     Ack(RepairAckArgs),
 }
 
@@ -30,6 +54,9 @@ pub enum RepairVerb {
 pub struct RepairTargetArgs {
     #[arg(long)]
     pub task: String,
+    /// Recorded as the reason on the faults the verb moves; `retry` and `close`
+    /// substitute their own default text when it is omitted, and `inspect` records
+    /// nothing, so the value goes unread there.
     #[arg(long)]
     pub reason: Option<String>,
 }
@@ -38,10 +65,12 @@ pub struct RepairTargetArgs {
 pub struct RepairAdoptArgs {
     #[arg(long)]
     pub task: String,
-    #[arg(long)]
-    pub session_id: String,
+    /// Backend name written into the row's desired binding.
     #[arg(long)]
     pub backend: String,
+    /// Handle the backend uses for this session. A spelling that parses as JSON
+    /// travels as its parsed value; other text travels as one JSON string; an
+    /// omitted flag travels as null.
     #[arg(long)]
     pub backend_ref: Option<String>,
     #[arg(long)]
@@ -52,10 +81,15 @@ pub struct RepairAdoptArgs {
 pub struct RepairRebindArgs {
     #[arg(long)]
     pub task: String,
+    /// Written into the row as its session id, beside the generation bump.
     #[arg(long)]
     pub session_id: String,
+    /// Backend name written into the row's desired binding.
     #[arg(long)]
     pub backend: String,
+    /// Handle the backend uses for this session. A spelling that parses as JSON
+    /// travels as its parsed value; other text travels as one JSON string; an
+    /// omitted flag travels as null.
     #[arg(long)]
     pub backend_ref: Option<String>,
     #[arg(long)]
@@ -68,8 +102,6 @@ pub struct RepairFailArgs {
     pub task: String,
     #[arg(long)]
     pub reason: String,
-    #[arg(long)]
-    pub notify: Option<String>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -466,8 +498,9 @@ async fn status_probe(target: &SocketTarget, timeout_ms: u64) -> Probe {
 /// `wait-ready` polls `status` every interval until the answer is `ok: true`
 /// or the timeout bound elapses.
 pub fn wait_ready(flags: &GlobalFlags, args: WaitReadyArgs) -> i32 {
-    let Ok(target) = admin_surface(flags, "wait-ready") else {
-        return EXIT_VALIDATION;
+    let target = match admin_surface(flags, "wait-ready") {
+        Ok(target) => target,
+        Err(code) => return code,
     };
     runtime::block_on(async move {
         let bound = Duration::from_millis(flags.timeout_ms);
@@ -497,29 +530,37 @@ fn repair_target(args: RepairTargetArgs) -> RepairTarget {
     }
 }
 
+/// The wire value for `--backend-ref`: a spelling that parses as JSON travels as
+/// the parsed value, any other text travels as one JSON string, and an omitted
+/// flag travels as null.
+fn backend_ref_value(raw: Option<String>) -> Value {
+    match raw {
+        Some(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        None => Value::Null,
+    }
+}
+
 /// `repair` drives the recovery verbs on the admin surface.
 pub fn repair(flags: &GlobalFlags, verb: RepairVerb) -> i32 {
     let op = match verb {
         RepairVerb::Inspect(args) => AdminOp::RepairInspect(repair_target(args)),
         RepairVerb::Adopt(args) => AdminOp::RepairAdopt(RepairAdopt {
             task_id: args.task,
-            session_id: args.session_id,
             backend: args.backend,
-            backend_ref: serde_json::json!(args.backend_ref),
+            backend_ref: backend_ref_value(args.backend_ref),
             reason: args.reason,
         }),
         RepairVerb::Rebind(args) => AdminOp::RepairRebind(RepairRebind {
             task_id: args.task,
             session_id: args.session_id,
             backend: args.backend,
-            backend_ref: serde_json::json!(args.backend_ref),
+            backend_ref: backend_ref_value(args.backend_ref),
             reason: args.reason,
         }),
         RepairVerb::Retry(args) => AdminOp::RepairRetry(repair_target(args)),
         RepairVerb::Fail(args) => AdminOp::RepairFail(RepairFail {
             task_id: args.task,
             reason: args.reason,
-            notify: args.notify.map(|role| Principal::role(&role)),
         }),
         RepairVerb::Close(args) => AdminOp::RepairClose(repair_target(args)),
         RepairVerb::Ack(args) => AdminOp::RepairAck(RepairAck {
@@ -596,4 +637,30 @@ pub fn export_prose(flags: &GlobalFlags, args: ExportProseArgs) -> i32 {
         }
         EXIT_OK
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backend_ref_value;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn an_object_spelling_travels_as_an_object() {
+        let value = backend_ref_value(Some(r#"{"id": "p-7", "pane": 3}"#.to_string()));
+        assert_eq!(value["id"], json!("p-7"));
+        assert_eq!(value["pane"], json!(3));
+    }
+
+    #[test]
+    fn a_plain_word_travels_as_one_json_string() {
+        assert_eq!(
+            backend_ref_value(Some("term_1".to_string())),
+            json!("term_1")
+        );
+    }
+
+    #[test]
+    fn an_omitted_flag_travels_as_null() {
+        assert_eq!(backend_ref_value(None), Value::Null);
+    }
 }

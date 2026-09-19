@@ -2381,7 +2381,6 @@ fn repair_fail_settles_the_task_and_publishes_a_fault_event() {
         &AdminOp::RepairFail(RepairFail {
             task_id: task_id.clone(),
             reason: "unrecoverable".to_string(),
-            notify: None,
         }),
     )
     .expect("repair")
@@ -2573,7 +2572,6 @@ fn a_fault_survives_every_repair_transition() {
         &fixture.state,
         &AdminOp::RepairAdopt(RepairAdopt {
             task_id: adopt_task.clone(),
-            session_id: "sess-1".to_string(),
             backend: "zellij".to_string(),
             backend_ref: json!({ "pane": 3 }),
             reason: "operator adopted".to_string(),
@@ -3035,7 +3033,6 @@ async fn every_admin_arm_answers_without_internal_failure() {
         }),
         AdminOp::RepairAdopt(RepairAdopt {
             task_id: task_id.clone(),
-            session_id: "sess-1".to_string(),
             backend: "fake".to_string(),
             backend_ref: json!({}),
             reason: "test".to_string(),
@@ -3054,7 +3051,6 @@ async fn every_admin_arm_answers_without_internal_failure() {
         AdminOp::RepairFail(RepairFail {
             task_id: task_id.clone(),
             reason: "test".to_string(),
-            notify: None,
         }),
         AdminOp::RepairClose(RepairTarget {
             task_id: task_id.clone(),

@@ -292,6 +292,25 @@ fn wait_ready_reports_the_bound_when_the_server_never_answers() {
     );
 }
 
+/// With no socket reachable by any resolution rule, `wait-ready` answers with
+/// the canonical hint on stderr and exit 3.
+#[test]
+fn wait_ready_exits_three_when_no_socket_resolves() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .env_remove("ONLYNE_SOCKET")
+        .arg("wait-ready")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(EXIT_NO_SOCKET));
+    assert_eq!(stderr_of(&output), format!("{NO_SOCKET_MESSAGE}\n"));
+    assert!(
+        output.stdout.is_empty(),
+        "a local resolution failure must not print an answer"
+    );
+}
+
 /// With a `PATH` that carries no daemon sibling, an exec verb reports the
 /// canonical line byte for byte, including the `onlyne: ` prefix, and exits 127.
 /// The binary is copied to a scratch dir first, so the "next to the exe" lookup
@@ -591,6 +610,147 @@ fn pretty_and_quiet_shape_the_answer() {
     );
 }
 
+/// `--head-from` defaults to `local`, so a `complete` that omits it truncates
+/// `--text` into the head. Both frames reach the role socket, and the head filed
+/// with the report is the completion text.
+#[test]
+fn complete_without_head_from_files_a_local_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("role");
+    let listener = role_listener(&workspace);
+    let ok = || serde_json::json!({"f": "res", "id": "r1", "ok": true, "data": {}});
+    let server = serve_sequence(listener, vec![ok(), ok()]);
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .env("ONLYNE_ROLE", "planner")
+        .args([
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "complete",
+            "--task",
+            TEST_TASK,
+            "--text",
+            "default head source",
+            "--outcome",
+            "done",
+        ])
+        .output()
+        .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_OK),
+        "an omitted `--head-from` takes its default: {}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        requests.len(),
+        2,
+        "the completion send and its report both reach the socket"
+    );
+    let send = &requests[0];
+    assert_eq!(send["op"], "send");
+    assert_eq!(send["args"]["kind"], "completion");
+    assert_eq!(send["args"]["body"]["text"], "default head source");
+    let report = &requests[1];
+    assert_eq!(report["op"], "report");
+    assert_eq!(report["args"]["kind"], "complete");
+    assert_eq!(report["args"]["data"]["task_id"], TEST_TASK);
+    assert_eq!(report["args"]["data"]["outcome"], "done");
+    assert_eq!(report["args"]["data"]["head"], "default head source");
+}
+
+/// `--head-from ledger` takes the head from the row, so `--text` is optional
+/// there. The run clears clap and the local head rule, and the ledger query frame
+/// is on the wire; the empty completion body then meets the protocol's own rule.
+#[test]
+fn complete_with_ledger_head_omits_text_without_a_flag_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("role");
+    let listener = role_listener(&workspace);
+    let server = serve_sequence(
+        listener,
+        vec![serde_json::json!({
+            "f": "res",
+            "id": "r1",
+            "ok": true,
+            "data": {"rows": [{"msg_id": ACK_MSG_ID, "out_head": "head filed by the row"}]}
+        })],
+    );
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .env("ONLYNE_ROLE", "planner")
+        .args([
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "complete",
+            "--task",
+            TEST_TASK,
+            "--head-from",
+            "ledger",
+            "--outcome",
+            "done",
+        ])
+        .output()
+        .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(
+        requests.len(),
+        1,
+        "a ledger head is read before the payload is built"
+    );
+    assert_eq!(requests[0]["op"], "query_ledger");
+    assert_eq!(requests[0]["args"]["task"], TEST_TASK);
+    assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("body requires text or image"),
+        "the protocol's own body rule ends the run: {stderr}"
+    );
+    assert!(
+        !stderr.contains("--text"),
+        "`--text` is optional with a ledger head: {stderr}"
+    );
+}
+
+/// A local head comes from `--text`, so a `complete` naming neither flag is a
+/// local validation failure decided before the socket: exit 2, the flag named on
+/// stderr, stdout empty.
+#[test]
+fn complete_local_head_without_text_names_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("run").join("s");
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--socket",
+            socket.to_str().unwrap(),
+            "--as",
+            "admin",
+            "complete",
+            "--task",
+            TEST_TASK,
+            "--outcome",
+            "done",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+    assert_eq!(
+        stderr_of(&output),
+        "onlyne: --text is required with --head-from local\n"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a local refusal must not print an answer body"
+    );
+}
+
 /// `completions zsh` prints one zsh script on stdout, and nothing on stderr.
 #[test]
 fn completions_zsh_writes_a_script_to_stdout() {
@@ -613,6 +773,108 @@ fn completions_zsh_writes_a_script_to_stdout() {
     assert!(
         stderr_of(&output).is_empty(),
         "a generated script writes nothing to stderr"
+    );
+}
+
+/// `schema <target>` is a public surface: each target answers with one compiled
+/// JSON Schema object naming its own type, and the two targets carry the key set
+/// of the file they describe.
+#[test]
+fn schema_prints_the_compiled_document_per_target() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for (target, title, key) in [
+        ("client", "ClientConfig", "backend"),
+        ("spec", "Spec", "server"),
+    ] {
+        let output = Command::new(bin())
+            .current_dir(dir.path())
+            .args(["schema", target])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(EXIT_OK),
+            "`schema {target}` answers: {}",
+            stderr_of(&output)
+        );
+        assert!(
+            stderr_of(&output).is_empty(),
+            "a printed schema writes nothing to stderr"
+        );
+        assert!(
+            output.stdout.starts_with(b"{"),
+            "`schema {target}` opens its json object"
+        );
+        let schema: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("`schema {target}` must print json: {error}"));
+        assert_eq!(schema["title"], title, "the document names its type");
+        let properties = schema["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("`schema {target}` describes an object surface"));
+        assert!(
+            properties.contains_key(key),
+            "`schema {target}` carries the `{key}` key of its file: {properties:?}"
+        );
+    }
+}
+
+/// `--pretty` re-renders the embedded bytes: the same document, one key per
+/// indented line, and the pair agree field by field.
+#[test]
+fn schema_pretty_reprints_the_same_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = Command::new(bin())
+        .current_dir(dir.path())
+        .args(["schema", "client"])
+        .output()
+        .unwrap();
+    let pretty = Command::new(bin())
+        .current_dir(dir.path())
+        .args(["--pretty", "schema", "client"])
+        .output()
+        .unwrap();
+
+    assert_eq!(plain.status.code(), Some(EXIT_OK));
+    assert_eq!(pretty.status.code(), Some(EXIT_OK));
+    let plain_text = String::from_utf8_lossy(&plain.stdout).into_owned();
+    let pretty_text = String::from_utf8_lossy(&pretty.stdout).into_owned();
+    assert!(
+        pretty_text.contains("\n  \""),
+        "the pretty document breaks each key onto its own indented line:\n{pretty_text}"
+    );
+    let plain_value: serde_json::Value = serde_json::from_str(&plain_text).unwrap();
+    let pretty_value: serde_json::Value = serde_json::from_str(&pretty_text).unwrap();
+    assert_eq!(
+        plain_value, pretty_value,
+        "`--pretty` re-renders one document"
+    );
+}
+
+/// A target outside the value enum is refused before a schema is read: exit 2,
+/// the value named, and the accepted set printed for the operator to copy.
+#[test]
+fn schema_rejects_an_unknown_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args(["schema", "bogus"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("bogus"),
+        "the refusal names the value: {stderr}"
+    );
+    assert!(
+        stderr.contains("[possible values: client, spec]"),
+        "the refusal lists the accepted targets: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a clap refusal must not print a schema"
     );
 }
 
@@ -1123,6 +1385,9 @@ fn control_subcommand_help_lists_reason_only_where_required() {
 /// A pinned `op_id` in the protocol's own spelling, `o-` plus uuid v4.
 const VALID_OP_ID: &str = "o-33333333-3333-4333-8333-333333333333";
 
+/// A task id a completion may carry: the envelope validator requires a uuid.
+const TEST_TASK: &str = "44444444-4444-4444-8444-444444444444";
+
 /// An admin `send` with pinned envelope identity, the shape `--request` takes.
 fn pinned_send(op_id: Option<&str>) -> onlyne_proto::AdminSend {
     onlyne_proto::AdminSend {
@@ -1188,6 +1453,45 @@ fn serve_once(
                     thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(_) => return None,
+            }
+        }
+    })
+}
+
+/// Answer a scripted run of request frames on one connection, in order, and hand
+/// back every frame the CLI wrote.
+///
+/// The accept loop gives up after ten seconds, so a CLI that never connects leaves
+/// the joining test an empty frame list to assert on. A CLI that writes more frames
+/// than the script carries meets a stream with nothing left to answer, and reports
+/// that through its own exchange-error path.
+fn serve_sequence(
+    listener: LocalListenerSync,
+    answers: Vec<serde_json::Value>,
+) -> thread::JoinHandle<Vec<serde_json::Value>> {
+    thread::spawn(move || {
+        let frame_count = answers.len();
+        let mut answers = answers.into_iter();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match listener.accept() {
+                Ok(mut stream) => {
+                    let mut requests = Vec::with_capacity(frame_count);
+                    for mut answer in answers.by_ref() {
+                        let request = read_frame(&mut stream);
+                        answer["id"] = request["id"].clone();
+                        write_frame(&mut stream, &answer);
+                        requests.push(request);
+                    }
+                    return requests;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() > deadline {
+                        return Vec::new();
+                    }
+                    thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => return Vec::new(),
             }
         }
     })

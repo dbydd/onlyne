@@ -294,14 +294,16 @@ async fn outcome_loop(state: RunState) -> Result<()> {
 }
 
 /// Feed one self-driven ending through the same fault and settlement paths an
-/// adapter report uses.
+/// adapter report uses, and hand on whatever the ending's report asked for.
 async fn settle_session_outcome(state: &RunState, outcome: SessionOutcome) -> Result<()> {
     let SessionOutcome {
         task_id,
         outcome,
         head,
+        head_kind,
         note,
         refusals,
+        handoffs,
     } = outcome;
     let terminal = match outcome {
         onlyne_session::Outcome::Done => onlyne_proto::Outcome::Done,
@@ -321,7 +323,15 @@ async fn settle_session_outcome(state: &RunState, outcome: SessionOutcome) -> Re
     {
         onlyne_session::record_fault(&state.store, &task_id, "acp", "acp", reason)?;
     }
-    dispatch::on_out(&state.dispatch, &task_id, terminal, head).await
+    dispatch::on_out(
+        &state.dispatch,
+        &task_id,
+        terminal,
+        head,
+        head_kind.as_deref(),
+        &handoffs,
+    )
+    .await
 }
 
 /// Keep the server link up until a permanent failure ends the run.
