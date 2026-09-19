@@ -742,7 +742,6 @@ mod tests {
             allowed_senders: vec!["*".into()],
             session_command: Some(vec!["pi".into(), "--session-id".into(), "{session}".into()]),
             timeout_ready_ms: Some(30_000),
-            timeout_running_ms: Some(120_000),
             timeout_idle_ms: Some(60_000),
             intent_attempts: Some(3),
             intent_backoff_ms: Some(vec![1000, 2000, 4000]),

@@ -117,10 +117,9 @@ pub fn fragment(role: &str, public_key: &str, prose: &str) -> String {
 /// says, leaving every line commented changes nothing. The field names and
 /// values are the ones `onlyne-config`'s `ClientEntry` declares.
 const KNOB_COMMENTS: &str = "\
-# timeout = { ready_ms = 30000, running_ms = 120000, idle_ms = 60000 }
+# timeout = { ready_ms = 30000, idle_ms = 60000 }
 # Per-session budgets in milliseconds: how long a spawn may take to answer
-# `ready`, how long a `running` session may hold a turn, and how long an
-# unclaimed session lives before the client closes it.
+# `ready`, and how long an unclaimed session lives before the client closes it.
 # intent = { attempts = 3, backoff_ms = [1000, 2000, 4000] }
 # Retry policy for one intent: total attempts, then the per-retry waits in
 # milliseconds; a longer list repeats its last entry.

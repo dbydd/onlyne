@@ -36,7 +36,7 @@ reuse = true
 allowed_senders = ["*"]
 allowed_targets = ["builder", "reviewer"]
 session_command = ["pi", "--session-id", "{session}"]
-timeout = { ready_ms = 30000, running_ms = 120000, idle_ms = 60000 }
+timeout = { ready_ms = 30000, idle_ms = 60000 }
 intent = { attempts = 3, backoff_ms = [1000, 2000, 4000] }
 
 [[client]]
@@ -104,7 +104,6 @@ fn sample_spec_parses_and_defaults_are_asserted() {
         vec!["pi", "--session-id", "{session}"]
     );
     assert_eq!(planner.timeout.ready_ms, 30_000);
-    assert_eq!(planner.timeout.running_ms, 120_000);
     assert_eq!(planner.timeout.idle_ms, 60_000);
     assert_eq!(planner.intent.attempts, 3);
     assert_eq!(planner.intent.backoff_ms, DEFAULT_BACKOFF_MS);

@@ -578,8 +578,6 @@ pub struct Welcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ready_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_running_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_idle_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent_attempts: Option<u32>,
@@ -1069,7 +1067,6 @@ mod tests {
             "allowed_senders": ["*"],
             "session_command": ["pi", "--session-id", "{session}"],
             "timeout_ready_ms": 30_000,
-            "timeout_running_ms": 120_000,
             "timeout_idle_ms": 60_000,
             "intent_attempts": 3,
             "intent_backoff_ms": [1000, 2000, 4000],

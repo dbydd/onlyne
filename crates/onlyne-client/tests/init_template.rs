@@ -334,8 +334,8 @@ fn the_documented_defaults_are_the_parsers_defaults() {
     let timeouts = Timeouts::default();
     assert!(
         fragment.contains(&format!(
-            "# timeout = {{ ready_ms = {}, running_ms = {}, idle_ms = {} }}",
-            timeouts.ready_ms, timeouts.running_ms, timeouts.idle_ms
+            "# timeout = {{ ready_ms = {}, idle_ms = {} }}",
+            timeouts.ready_ms, timeouts.idle_ms
         )),
         "the timeout line quotes `Timeouts::default()`:\n{fragment}"
     );

@@ -162,8 +162,6 @@ pub struct RouteTarget {
 pub struct Timeouts {
     #[serde(default = "default_ready_ms")]
     pub ready_ms: u64,
-    #[serde(default = "default_running_ms")]
-    pub running_ms: u64,
     #[serde(default = "default_idle_ms")]
     pub idle_ms: u64,
 }
@@ -251,7 +249,6 @@ impl Default for Timeouts {
     fn default() -> Self {
         Self {
             ready_ms: default_ready_ms(),
-            running_ms: default_running_ms(),
             idle_ms: default_idle_ms(),
         }
     }
@@ -548,7 +545,6 @@ fn locate_table_line(text: &str, field: &str) -> usize {
         "intent",
         "aggregate",
         "ready_ms",
-        "running_ms",
         "idle_ms",
         "attempts",
         "backoff_ms",
@@ -789,10 +785,6 @@ pub(crate) fn default_max_sessions() -> u32 {
 
 fn default_ready_ms() -> u64 {
     30_000
-}
-
-fn default_running_ms() -> u64 {
-    120_000
 }
 
 fn default_idle_ms() -> u64 {

@@ -128,8 +128,7 @@
         "timeout": {
           "default": {
             "idle_ms": 60000,
-            "ready_ms": 30000,
-            "running_ms": 120000
+            "ready_ms": 30000
           },
           "allOf": [
             {
@@ -328,12 +327,6 @@
         },
         "ready_ms": {
           "default": 30000,
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        },
-        "running_ms": {
-          "default": 120000,
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0

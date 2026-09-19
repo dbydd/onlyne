@@ -56,7 +56,6 @@ fn welcome() -> Welcome {
         allowed_senders: vec![],
         session_command: None,
         timeout_ready_ms: None,
-        timeout_running_ms: None,
         timeout_idle_ms: None,
         intent_attempts: Some(3),
         intent_backoff_ms: Some(vec![10, 20]),

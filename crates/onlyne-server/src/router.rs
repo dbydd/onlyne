@@ -386,7 +386,6 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
         allowed_senders: entry.allowed_senders.clone(),
         session_command: (!entry.session_command.is_empty()).then(|| entry.session_command.clone()),
         timeout_ready_ms: Some(entry.timeout.ready_ms),
-        timeout_running_ms: Some(entry.timeout.running_ms),
         timeout_idle_ms: Some(entry.timeout.idle_ms),
         intent_attempts: Some(entry.intent.attempts),
         intent_backoff_ms: Some(entry.intent.backoff_ms.clone()),
