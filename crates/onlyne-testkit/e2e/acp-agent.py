@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""A scripted ACP v1 agent for the acp-viewer end-to-end case (case 18).
+"""A scripted ACP v1 agent for the acp-session end-to-end case (case 18).
 
 The case runs this file as the role's `session_command`:
 
-    python3 -u acp-viewer-agent.py --acp --gate <path> --trace <path>
+    python3 -u acp-agent.py --acp --gate <path> --trace <path>
 
 Protocol discipline, which is what makes the case observable:
 
@@ -25,28 +25,28 @@ import os
 import sys
 import time
 
-# The sentences this agent speaks and the case asserts on. `acp-viewer.sh`
+# The sentences this agent speaks and the case asserts on. `acp-session.sh`
 # carries the same literals and checks them against the `start` trace line, so a
 # drift between the two files fails at the gate with both sides in the message.
-REASONING = "The fixture reasons about the acp viewer."
-ANSWER = "The fixture answered through the acp viewer."
-TOOL_TITLE = "Edit viewer.rs"
-TOOL_CALL_ID = "call-viewer-1"
+REASONING = "The fixture reasons about the acp session."
+ANSWER = "The fixture answered through the acp session."
+TOOL_TITLE = "Edit session.rs"
+TOOL_CALL_ID = "call-session-1"
 TOOL_KIND = "edit"
-SESSION_ID = "acp-viewer-session-1"
+SESSION_ID = "acp-session-1"
 ACCEPT_MODE = "acceptEdits"
 DEFAULT_MODE = "default"
 
 GATE_POLL_SECONDS = 0.05
-# Long enough for a slow machine to start a viewer and read its first frame,
+# Long enough for a slow machine to complete the gated assertions,
 # short enough that a case which never releases the gate still reports.
 GATE_WAIT_SECONDS = 120.0
 
 INITIALIZE_RESULT = {
     "protocolVersion": 1,
     "agentInfo": {
-        "name": "acp-viewer-agent",
-        "title": "Onlyne ACP viewer fixture",
+        "name": "acp-agent",
+        "title": "Onlyne ACP session fixture",
         "version": "1.0.0",
     },
     "authMethods": [
@@ -119,7 +119,7 @@ class Trace:
                 handle.write(line + "\n")
                 handle.flush()
         except OSError as error:
-            sys.stderr.write("acp-viewer-agent: trace %s: %s\n" % (self.path, error))
+            sys.stderr.write("acp-agent: trace %s: %s\n" % (self.path, error))
             sys.stderr.flush()
 
 
@@ -266,7 +266,7 @@ def dispatch(msg, gate, trace):
         trace.write("ignored notification %s" % method)
     else:
         trace.write("unknown request %s" % method)
-        failure(rid, -32601, "acp-viewer-agent does not implement %s" % method)
+        failure(rid, -32601, "acp-agent does not implement %s" % method)
 
 
 def main(argv):

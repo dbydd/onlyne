@@ -1,39 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Case 18: the ACP session backend with the standalone viewer, end to end.
+# Case 18: the ACP session backend, end to end.
 #
-# The role runs `python3 -u acp-viewer-agent.py ... --acp` as its
-# `session_command`: a real ACP v1 peer on stdio, not a fake backend. The
-# workspace config names a top-level `backend = "acp"` plus an `[acp]` table, so
-# the client opens the session with the mode, model and reasoning effort this
-# case chose, and the agent's trace is the proof it received them.
+# The role runs `python3 -u acp-agent.py ... --acp` as its `session_command`: a
+# real ACP v1 peer on stdio, not a fake backend. The workspace config names a
+# top-level `backend = "acp"` plus an `[acp]` table, so the client opens the
+# session with the mode, model and reasoning effort this case chose, and the
+# agent's trace is the proof it received them.
 #
-# The agent holds its one turn at a gate. That is the whole trick: while the gate
-# is held, the journal provably carries the client's dispatch record alone and a
-# live `onlyne-view --follow` proves it is subscribed to the bound socket and
-# reading that half. Releasing the gate then makes the turn's updates arrive in
-# the journal, the content index, the rendered log, the follower, and the file
-# and live renders — one conversation read five ways.
+# The agent holds its one turn at a gate. That is the whole trick: while the
+# gate is held, the journal provably carries the client's dispatch record
+# alone. Releasing the gate then makes the turn's updates arrive in the journal,
+# the content index, and the rendered log — one conversation read three ways,
+# all of them durable files under the role workspace.
 #
 # No product id is assumed. The task comes from `send`, the socket from the
 # client's own marker, and the ACP session id, agent pid, journal and log paths
 # from `client.db`'s stored reference for that task.
 SRC=$(pwd)
-# A short scratch root is part of this case, not a convenience: `onlyne-view
-# --once` grows its frame to fit the footer but caps it at 240 columns, and the
-# darwin default temp root pushes the footer's `source socket <path>` past that
-# cap, so a correct live view would read as a missing socket source. `/tmp` is
-# unique under `mktemp -d` like any other root and keeps both the frame and the
-# bound socket path short.
-tmp=$(mktemp -d /tmp/onlyne-acp-viewer.XXXXXX)
+# A short scratch root is part of this case: the client publishes the adapter
+# socket path it bound, and this case reads that marker back and probes the
+# path after the client exits. `/tmp` is unique under `mktemp -d` like any
+# other root and keeps the served socket path inside the bare spelling.
+tmp=$(mktemp -d /tmp/onlyne-acp-session.XXXXXX)
 server_pid=""
 client_pid=""
-viewer_pid=""
 acp_pid=""
 
 # `alive <pid>` is true while the process exists and is not a zombie. `kill -0`
 # alone answers true for a child this shell has not reaped yet, which is exactly
-# the state a viewer that died before its first frame sits in.
+# the state an already-exited ACP child sits in while its client is alive.
 alive() {
   local pid=$1 state
   [ -n "$pid" ] || return 1
@@ -43,25 +39,24 @@ alive() {
 
 cleanup() {
   local status=$? survived="" pid
-  # The viewer and the client hold the sockets; the ACP agent is the client's
-  # child, and draining the client closes the stdin that ends it. Each drain is
+  # The client holds the session, and the ACP agent is the client's child;
+  # draining the client closes the stdin that ends it. Each drain is
   # unconditional, so a case that failed halfway still leaves nothing behind.
-  drain_pid "$viewer_pid" 2>/dev/null || true
   drain_pid "$client_pid" 2>/dev/null || true
   drain_pid "$acp_pid" 2>/dev/null || true
   drain_pid "$server_pid" 2>/dev/null || true
-  for pid in "$viewer_pid" "$client_pid" "$acp_pid" "$server_pid"; do
+  for pid in "$client_pid" "$acp_pid" "$server_pid"; do
     if alive "$pid"; then
       survived="$survived $pid"
     fi
   done
   if [ -n "$survived" ]; then
-    echo "acp-viewer: processes survived cleanup:$survived" >&2
+    echo "acp-session: processes survived cleanup:$survived" >&2
   fi
   if [ "$status" -eq 0 ] && [ "${E2E_KEEP:-0}" != 1 ]; then
     rm -rf "$tmp"
   else
-    echo "acp-viewer: scratch directory kept at $tmp" >&2
+    echo "acp-session: scratch directory kept at $tmp" >&2
   fi
   exit "$status"
 }
@@ -76,19 +71,18 @@ export ONLYNE_BACKEND=acp
 SERVER=$(bin onlyne-server)
 CLIENT=$(bin onlyne-client)
 ONLYNE=$(bin onlyne)
-VIEW=$(bin onlyne-view)
-AGENT="$SRC/crates/onlyne-testkit/e2e/acp-viewer-agent.py"
+AGENT="$SRC/crates/onlyne-testkit/e2e/acp-agent.py"
 [ -f "$AGENT" ] || fail "the ACP fixture must sit beside this case" "$AGENT"
 
-# The turn the fixture performs. `acp-viewer-agent.py` carries the same six
-# strings and traces them in its `start` line, which the trace assertions check
-# against these values, so a drift between the two files fails at the gate with
-# both sides in the message.
-TASK_PROSE='acp viewer task: prove both halves of the turn'
-REASONING='The fixture reasons about the acp viewer.'
-ANSWER='The fixture answered through the acp viewer.'
-TOOL_TITLE='Edit viewer.rs'
-TOOL_CALL_ID='call-viewer-1'
+# The turn the fixture performs. `acp-agent.py` carries the same six strings
+# and traces them in its `start` line, which the trace assertions check against
+# these values, so a drift between the two files fails at the gate with both
+# sides in the message.
+TASK_PROSE='acp session task: prove both halves of the turn'
+REASONING='The fixture reasons about the acp session.'
+ANSWER='The fixture answered through the acp session.'
+TOOL_TITLE='Edit session.rs'
+TOOL_CALL_ID='call-session-1'
 TOOL_KIND='edit'
 ACCEPT_MODE='acceptEdits'
 FIXTURE_MODEL='fixture-model'
@@ -159,8 +153,8 @@ done
   "roles=$(cat "$tmp/roles.json" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
 
 # The client publishes the path it bound in `<run>/socket`, and the case reads
-# that instead of spelling the canonical path: the socket it subscribes to below
-# is then the one the client is serving, whatever the path cost.
+# that instead of spelling the canonical path: the socket whose lifecycle this
+# case then follows is the one the client is serving, whatever the path cost.
 marker="$ws/.onlyne/run/socket"
 for _ in $(seq 1 100); do
   if [ -s "$marker" ]; then
@@ -251,29 +245,6 @@ PY
 then
   fail "a gated turn must leave exactly the one dispatch record in the journal" "$journal_report"
 fi
-
-# The live viewer is the subscription-ready barrier: it renders from the socket
-# and never from the file, and its first frame shows the gated turn. A viewer
-# that dies before that frame stops the case here rather than at the poll's end.
-"$VIEW" --workspace "$ws" --task "$task" --socket "$socket" --once --follow \
-  >"$tmp/follow.out" 2>"$tmp/follow.err" &
-viewer_pid=$!
-subscribed="false"
-for _ in $(seq 1 100); do
-  if ! alive "$viewer_pid"; then
-    fail "the live viewer must survive to its first frame" \
-      "out=$(cat "$tmp/follow.out" 2>/dev/null) err=$(cat "$tmp/follow.err" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
-  fi
-  if grep -q -F "source socket $socket" "$tmp/follow.out" 2>/dev/null \
-    && grep -q -F "turn running" "$tmp/follow.out" 2>/dev/null \
-    && grep -q -F "> $TASK_PROSE" "$tmp/follow.out" 2>/dev/null; then
-    subscribed="true"
-    break
-  fi
-  sleep 0.1
-done
-[ "$subscribed" = "true" ] || fail "the live viewer must show the gated turn from the bound socket" \
-  "out=$(cat "$tmp/follow.out" 2>/dev/null) err=$(cat "$tmp/follow.err" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
 
 # Release the turn. Nothing between here and the assertions below changes what
 # the agent sends: the gate is the only switch it has.
@@ -409,86 +380,6 @@ for want in \
   fi
 done
 
-# What the follower printed after the release is the live half of the same
-# conversation, so the pushed records have to read the same way.
-followed="false"
-for _ in $(seq 1 200); do
-  if grep -q -F -- "~ $REASONING" "$tmp/follow.out" 2>/dev/null \
-    && grep -q -F -- "[$TOOL_KIND] $TOOL_TITLE (completed)" "$tmp/follow.out" 2>/dev/null \
-    && grep -q -F -- "$ANSWER" "$tmp/follow.out" 2>/dev/null; then
-    followed="true"
-    break
-  fi
-  sleep 0.1
-done
-[ "$followed" = "true" ] || fail "the live follower must print the released turn" \
-  "out=$(cat "$tmp/follow.out" 2>/dev/null) err=$(cat "$tmp/follow.err" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
-drain_pid "$viewer_pid"
-viewer_pid=""
-
-# The same journal through the file render, in both verbosity modes.
-"$VIEW" --workspace "$ws" --task "$task" --once > "$tmp/full.txt" 2> "$tmp/full.err" \
-  || fail "the file full render must exit 0" "$(cat "$tmp/full.err" 2>/dev/null)"
-"$VIEW" --workspace "$ws" --task "$task" --once --mode compact > "$tmp/compact.txt" 2> "$tmp/compact.err" \
-  || fail "the file compact render must exit 0" "$(cat "$tmp/compact.err" 2>/dev/null)"
-full_report=$(cat "$tmp/full.txt" 2>/dev/null || true)
-for want in "> $TASK_PROSE" "~ $REASONING" "$ANSWER" "[$TOOL_KIND] $TOOL_TITLE (completed)" "turn end_turn"; do
-  if ! grep -q -F -- "$want" "$tmp/full.txt"; then
-    fail "the full render must carry: $want" "$full_report"
-  fi
-done
-compact_report=$(cat "$tmp/compact.txt" 2>/dev/null || true)
-for want in "> $TASK_PROSE" "  $TOOL_TITLE" "$ANSWER"; do
-  if ! grep -q -F -- "$want" "$tmp/compact.txt"; then
-    fail "the compact render must keep: $want" "$compact_report"
-  fi
-done
-for gone in "~ $REASONING" "[$TOOL_KIND]" "(completed)"; do
-  if grep -q -F -- "$gone" "$tmp/compact.txt"; then
-    fail "the compact render must drop: $gone" "$compact_report"
-  fi
-done
-
-# One snapshot per source, compared as content rows: the border is chrome, the
-# footer names a different source, and neither is what the two sources must
-# agree on. The selection and trimming mirror `body()` in
-# `crates/onlyne-tui/tests/view_socket.rs`.
-"$VIEW" --workspace "$ws" --task "$task" --socket "$socket" --once > "$tmp/live.txt" 2> "$tmp/live.err" \
-  || fail "the live snapshot must exit 0" "$(cat "$tmp/live.err" 2>/dev/null)"
-live_report=$(cat "$tmp/live.txt" 2>/dev/null || true)
-if ! grep -q -F -- "source socket $socket" "$tmp/live.txt"; then
-  fail "the completed snapshot must read the bound socket, not the file fallback" "$live_report"
-fi
-if grep -q -F "journal fallback" "$tmp/live.txt"; then
-  fail "the completed snapshot must not fall back to the journal" "$live_report"
-fi
-if ! python3 - "$tmp/live.txt" "$tmp/full.txt" <<'PY'
-import sys
-
-
-def rows(path):
-    out = []
-    for line in open(path, encoding="utf-8").read().splitlines():
-        if not line.startswith("\u2502"):
-            continue
-        body = line[1:]
-        if body.endswith("\u2502"):
-            body = body[:-1]
-        out.append(body.rstrip())
-    return out
-
-
-live, file = rows(sys.argv[1]), rows(sys.argv[2])
-assert live, "the live snapshot must show content rows"
-assert live == file, "\n".join(
-    "live %r\nfile %r" % (a, b) for a, b in zip(live, file) if a != b
-)
-PY
-then
-  fail "the completed live snapshot must render the file's rows" \
-    "live=$live_report file=$(cat "$tmp/full.txt" 2>/dev/null)"
-fi
-
 # The turn is over and every assertion has passed, so the client is drained
 # exactly as an operator would stop it: it closes its session on the way out,
 # which is what ends the ACP child this case read its pid from.
@@ -520,4 +411,4 @@ then
   fail "the published socket must stop listening with its client" "$socket"
 fi
 
-echo "PASS acp-viewer"
+echo "PASS acp-session"
