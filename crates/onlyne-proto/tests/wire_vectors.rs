@@ -147,9 +147,15 @@ fn every_vector_matches_its_published_type() {
         } else if let Some(kind) = name.strip_prefix("ev_") {
             let value = round_trip::<Frame>(name, frame);
             assert_eq!(value["f"], "ev", "{name}");
-            assert_eq!(
-                value["type"], kind,
-                "{name}: event type follows the file name"
+            let published = value["type"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name}: an event frame carries its type as a string"));
+            assert!(
+                kind == published
+                    || kind
+                        .strip_prefix(published)
+                        .is_some_and(|rest| rest.starts_with('_')),
+                "{name}: event type leads the file name, and a suffix names the shape pinned"
             );
         } else if name.starts_with("res_") {
             let value = round_trip::<Frame>(name, frame);
@@ -191,8 +197,8 @@ fn every_vector_matches_its_published_type() {
         ("req_client", 13usize),
         ("req_gateway", 5),
         ("req_admin", 19),
-        ("res", 12),
-        ("ev", 6),
+        ("res", 13),
+        ("ev", 7),
         ("frame", 4),
         ("error", 14),
         ("adapter", 11),
@@ -204,7 +210,7 @@ fn every_vector_matches_its_published_type() {
             "{family}: vector count"
         );
     }
-    assert_eq!(vectors.len(), 84, "total vector count");
+    assert_eq!(vectors.len(), 86, "total vector count");
 }
 
 #[test]

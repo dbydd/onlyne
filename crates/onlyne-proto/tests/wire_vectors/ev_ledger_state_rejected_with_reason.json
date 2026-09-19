@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"ev\",\"seq\":43,\"type\":\"ledger_state\",\"data\":{\"msg_id\":\"7c4d3e2f-1a0b-4c9d-8e7f-6a5b4c3d2e10\",\"op_id\":\"o-33333333-3333-4333-8333-333333333333\",\"kind\":\"task\",\"from\":{\"role\":{\"role\":\"planner\"}},\"to\":{\"role\":{\"role\":\"builder\"}},\"task\":\"22222222-2222-4222-8222-222222222222\",\"state\":\"rejected\",\"reason\":\"orca backend cannot host a protocol session: --mode rpc speaks JSON-RPC on its own stdio and the pane would print the frames; set backend = \\\"exec\\\" or backend = \\\"acp\\\" in the workspace config\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "a rejected ledger_state event carries the refusal text in reason and omits outcome, which the settle path leaves unset"
+}
