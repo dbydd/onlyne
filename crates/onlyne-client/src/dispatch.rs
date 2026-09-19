@@ -1202,10 +1202,11 @@ fn completion_envelope(
     head: Option<&str>,
 ) -> Option<Envelope> {
     let origin = origin?;
-    let body = match head {
-        Some(text) if !text.is_empty() => Body::text(text.to_string()),
-        _ => Body::default(),
-    };
+    // A turn that left no result line still ends its task, and the sender still
+    // gets its answer: an empty body travels as `text: Some("")`, which the
+    // validator accepts, where an absent body would drop the receipt and leave
+    // the origin waiting on a task this role has already retired.
+    let body = Body::text(head.unwrap_or_default());
     let causality = Causality {
         task: task_id.to_string(),
         parent_task: None,
@@ -1213,17 +1214,16 @@ fn completion_envelope(
         hop: 0,
         attempt: 0,
     };
-    let mut envelope = new_envelope(
+    // `new_envelope` validates every protocol rule on the way out, so a receipt
+    // that cannot be addressed to its sender is the only one that goes unsent.
+    new_envelope(
         MsgKind::Completion,
         Principal::role(role),
         origin,
         body,
         Some(causality),
     )
-    .ok()?;
-    envelope.body.text = envelope.body.text.or_else(|| Some(String::new()));
-    envelope.validate().ok()?;
-    Some(envelope)
+    .ok()
 }
 
 /// Hand one envelope to the live link, or to the intent queue when it is down.
@@ -1954,9 +1954,57 @@ pub fn note_verdict(verdict: &Verdict, task_id: &str) -> Option<Version> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Path, PathBuf, RoleWorkspace, SpawnSpec, served_socket, session_env};
+    use super::{
+        Path, PathBuf, RoleWorkspace, SpawnSpec, completion_envelope, served_socket, session_env,
+    };
     use onlyne_layout::UNIX_SOCKET_PATH_MAX;
+    use onlyne_proto::{MsgKind, Principal, new_task_id};
     use tempfile::tempdir;
+
+    /// Every settled task answers its sender, including the turn that left no
+    /// result line. The protocol requires a body, so the empty answer travels as
+    /// an empty text field, and the receipt survives validation. A dropped
+    /// receipt strands the origin: it waits on a task the role has already
+    /// retired, which is how a ring stops mid-circle.
+    #[test]
+    fn a_settled_task_without_a_result_line_still_files_its_receipt() {
+        let task = new_task_id();
+        let quiet = completion_envelope("planner", Some(Principal::role("reviewer")), &task, None)
+            .expect("an answer with nothing to say is still an answer");
+        assert_eq!(quiet.kind, MsgKind::Completion);
+        assert_eq!(quiet.causality.as_ref().unwrap().task, task);
+        assert_eq!(quiet.body.text.as_deref(), Some(""));
+        assert_eq!(
+            quiet.to,
+            Principal::role("reviewer"),
+            "the receipt is addressed to the sender"
+        );
+
+        // A blank head and an absent one are the same answer to the sender.
+        let blank = completion_envelope(
+            "planner",
+            Some(Principal::role("reviewer")),
+            &task,
+            Some(""),
+        )
+        .expect("a blank result line files too");
+        assert_eq!(blank.body.text, quiet.body.text);
+
+        let said = completion_envelope(
+            "planner",
+            Some(Principal::role("reviewer")),
+            &task,
+            Some("done"),
+        )
+        .expect("a result line travels verbatim");
+        assert_eq!(said.body.text.as_deref(), Some("done"));
+
+        // The one case that stays silent is the one with no sender to answer.
+        assert!(
+            completion_envelope("planner", None, &task, Some("done")).is_none(),
+            "an unaddressed task files no receipt"
+        );
+    }
 
     /// The guard reads its policy from the environment before its own
     /// `relay.toml`, so what the client injects is the whole contract between
