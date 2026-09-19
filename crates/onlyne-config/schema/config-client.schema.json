@@ -25,7 +25,7 @@
       ]
     },
     "backend": {
-      "description": "Requested session backend (`herdr` | `orca` | `zellij` | `exec` / `headless` | `fake` | `auto`). Empty means auto-detect. The process environment `ONLYNE_BACKEND` takes precedence when it is nonempty.",
+      "description": "Requested session backend (`herdr` | `orca` | `zellij` | `exec` / `headless` | `acp` | `fake` | `auto`). Empty means auto-detect. The process environment `ONLYNE_BACKEND` takes precedence when it is nonempty.",
       "default": "",
       "type": "string"
     },

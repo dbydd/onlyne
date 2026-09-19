@@ -815,6 +815,35 @@ fn render_tokens(tokens: &[String], session: &str, task: &str) -> Vec<String> {
         .collect()
 }
 
+/// Refuse a protocol-speaking session command on a pane backend.
+///
+/// `herdr`, `orca` and `zellij` hand the agent a terminal and read its screen,
+/// so a command that speaks JSON-RPC on its own stdio would print frames into
+/// the pane and answer nobody. The fix belongs in the workspace config: swapping
+/// the backend at spawn time instead would turn "orca configured, exec
+/// running" into a silent drift the operator never sees, so the delivery fails
+/// and the reason reaches the ledger.
+fn reject_protocol_command_in_pane(backend: &str, command: &[String]) -> Result<()> {
+    if !matches!(backend, "herdr" | "orca" | "zellij") {
+        return Ok(());
+    }
+    let token = command.iter().enumerate().find_map(|(index, arg)| {
+        if arg == "--acp" || arg == "--mode=rpc" {
+            Some(arg.as_str())
+        } else if arg == "--mode" && command.get(index + 1).is_some_and(|next| next == "rpc") {
+            Some("--mode rpc")
+        } else {
+            None
+        }
+    });
+    if let Some(token) = token {
+        return Err(anyhow!(
+            "{backend} backend cannot host a protocol session: {token} speaks JSON-RPC on its own stdio and the pane would print the frames; set backend = \"exec\" or backend = \"acp\" in the workspace config"
+        ));
+    }
+    Ok(())
+}
+
 /// The socket a session spawned in `workspace` dials.
 ///
 /// `dispatch` passes this to [`session_env`] and the same tree lands in
@@ -966,6 +995,7 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
     }
     let session_id = task_id.clone();
     let command = render_tokens(&inner.command, &session_id, &task_id);
+    reject_protocol_command_in_pane(inner.backend.name(), &command)?;
     let env = session_env(
         &inner.role,
         &session_id,

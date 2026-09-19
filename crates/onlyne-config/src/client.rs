@@ -36,8 +36,9 @@ pub struct ClientConfig {
     #[serde(default = "default_stall_report_secs")]
     pub stall_report_secs: u64,
     /// Requested session backend (`herdr` | `orca` | `zellij` | `exec` /
-    /// `headless` | `fake` | `auto`). Empty means auto-detect. The process
-    /// environment `ONLYNE_BACKEND` takes precedence when it is nonempty.
+    /// `headless` | `acp` | `fake` | `auto`). Empty means auto-detect. The
+    /// process environment `ONLYNE_BACKEND` takes precedence when it is
+    /// nonempty.
     #[serde(default)]
     pub backend: String,
 }
