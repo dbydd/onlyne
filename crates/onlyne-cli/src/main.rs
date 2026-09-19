@@ -30,6 +30,23 @@ use std::path::PathBuf;
 
 use crate::flags::GlobalFlags;
 
+/// The ledger row shape, shared by `onlyne ledger` and `onlyne server ledger`.
+const LEDGER_LONG_ABOUT: &str = "\
+List ledger rows, one row per recorded send.
+
+The keys this CLI reads off a row are `msg_id`, `task`, `state`, `reason`, \
+`out_head`, and the row's body; the answer projects every field of the durable \
+row, so `op_id`, `kind`, `from`, `to`, `parent_task`, `hop`, `attempt`, \
+`enqueued_at`, and `acked_at` travel with it.
+
+`reason` names why the row last settled. A refusal arrives with the receiver's \
+whole sentence, as when a pane backend rejects a session command that speaks \
+its protocol on its own stdio, and the server's own budgets settle a row as \
+`requeue_exhausted`, `requeue_ttl`, or `expired`. A row that settled with \
+nothing to say carries no `reason` key. `onlyne-tui` page 2 appends \
+`reason=<text>` to a row's tail only where that key is present, so an `acked` \
+row prints what it printed before the column reached the board.";
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "onlyne",
@@ -78,7 +95,8 @@ enum Verb {
     Roles(AdminRolesCmd),
     /// List sessions.
     Sessions(SessionsCmd),
-    /// List ledger rows.
+    /// List ledger rows, one row per recorded send.
+    #[command(long_about = LEDGER_LONG_ABOUT)]
     Ledger(LedgerCmd),
     /// List recorded faults.
     Faults(FaultsCmd),
@@ -142,7 +160,8 @@ enum ServerVerb {
     Roles(AdminRolesCmd),
     /// List sessions.
     Sessions(SessionsCmd),
-    /// List ledger rows.
+    /// List ledger rows, one row per recorded send.
+    #[command(long_about = LEDGER_LONG_ABOUT)]
     Ledger(LedgerCmd),
     /// List recorded faults.
     Faults(FaultsCmd),

@@ -82,59 +82,90 @@ pub struct RepairAckArgs {
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct RolesArgs {
+    /// Role name to keep, matched against the spec entry. Omitting it lists
+    /// every registered role.
     #[arg(long)]
     pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct SessionsArgs {
+    /// Task whose session row is kept; the session table is keyed by task.
     #[arg(long)]
     pub task: Option<String>,
+    /// Role owning the session row.
     #[arg(long)]
     pub role: Option<String>,
+    /// Public lifecycle to keep: `created`, `working`, `idle`, `exited`.
     #[arg(long, value_parser = parse_lifecycle)]
     pub lifecycle: Option<Lifecycle>,
+    /// Rows to print. Omitted, or `0`, asks for the server default of 100; the
+    /// server reads at most 500.
     #[arg(long)]
     pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct LedgerArgs {
+    /// Task family whose rows are kept, matched against the row's own task.
     #[arg(long)]
     pub task: Option<String>,
+    /// One envelope id, keeping exactly the row that send wrote.
     #[arg(long)]
     pub msg_id: Option<String>,
+    /// One operation id, keeping every row that send attempt carries it. The
+    /// server dedups an idempotent send on this column.
     #[arg(long)]
     pub op_id: Option<String>,
+    /// Role on either end of the hop, keeping rows it sent or received.
     #[arg(long)]
     pub role: Option<String>,
+    /// Settled state to keep: `queued` for a recipient not connected yet,
+    /// `in_flight` for one handed out awaiting `ack`, `acked`, `rejected` for a
+    /// refusal at the gate or an exhausted requeue budget, `expired` for a note
+    /// or row past its age limit.
     #[arg(long, value_parser = parse_ledger_state)]
     pub state: Option<LedgerState>,
+    /// Delivery intent to keep: `task`, `completion`, `note`, `control`.
     #[arg(long, value_parser = parse_msg_kind)]
     pub kind: Option<MsgKind>,
+    /// Rows to print, newest enqueue first. Omitted, or `0`, asks for the server
+    /// default of 100; the server reads at most 500.
     #[arg(long)]
     pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct FaultsArgs {
+    /// Role the fault was recorded against.
     #[arg(long)]
     pub role: Option<String>,
+    /// Task the fault was recorded for.
     #[arg(long)]
     pub task: Option<String>,
+    /// Recorded fault kind, matched verbatim. The server stores whatever the
+    /// reporter named, so `probe_dead`, `mismatch_terminate`, and
+    /// `intent_exhausted` are the names this filter sees.
     #[arg(long)]
     pub kind: Option<String>,
+    /// Keep rows still wanting a decision, dropping the settled ones.
     #[arg(long)]
     pub open_only: bool,
+    /// Rows to print, oldest recording first. Omitted, or `0`, asks for the
+    /// server default of 100; the server reads at most 500.
     #[arg(long)]
     pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct WatchArgs {
+    /// Event cursor to resume after. Omitting it, or `0`, starts at the current
+    /// head, so the stream carries only what follows the handshake.
     #[arg(long)]
     pub since: Option<u64>,
     /// Replay tier to subscribe to; repeatable, every tier when omitted.
+    /// `durable` rows are persisted and replayable from a cursor; `advisory`
+    /// rows are best effort, and a lagging subscriber resyncs by querying.
     #[arg(long, value_parser = parse_tier)]
     pub tier: Vec<EventTier>,
     /// Keep the connection open and print one JSON line per event frame.
@@ -144,12 +175,21 @@ pub struct WatchArgs {
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct HistoryArgs {
+    /// Event cursor to read after. Omitting it, or `0`, reads from the first
+    /// retained event.
     #[arg(long)]
     pub since: Option<u64>,
+    /// Events to read before filtering. Omitted, or `0`, asks for the replay
+    /// default of 256; the store reads at most 500.
     #[arg(long)]
     pub limit: Option<u32>,
+    /// Task named by the event, keeping `session_state` rows for it, the
+    /// `ledger_state` rows it owns, and the `fault` rows raised against it. An
+    /// event carrying no task never matches.
     #[arg(long)]
     pub task: Option<String>,
+    /// Event type name to keep: `role_presence`, `session_state`,
+    /// `ledger_state`, `fault`, `gateway_presence`, `spec_reloaded`.
     #[arg(long)]
     pub kind: Option<String>,
 }
