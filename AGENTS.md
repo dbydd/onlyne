@@ -171,7 +171,7 @@ Role workspace, selected by `onlyne-client run --workspace <dir>`:
 
 The Orca session backend writes `cache/orca-tabs.jsonl` append-only. The tab-to-session map is a side channel for supervisor scripts and displays. Session identity is owned by the adapter protocol, never by Orca.
 
-The ACP session backend journals each turn as it runs. `logs/session-<task>.events.jsonl` holds one JSON object per line: the agent's own `session/update` notifications plus this client's `dispatch` and `turn` records, so the file carries both halves of the conversation. `logs/session-<task>.log` is the rendered form an operator tails. `logs/content.index.jsonl` holds one entry per journalled record naming its offset and length inside that task's journal, which gives the role one content sequence number that survives a client restart. `onlyne-view --workspace <dir> --task <id>` renders that surface from the files, or live over the client socket when `--socket` names it.
+The ACP session backend journals each turn as it runs. `logs/session-<task>.events.jsonl` holds one JSON object per line: the agent's own `session/update` notifications plus this client's `dispatch` and `turn` records, so the file carries both halves of the conversation. `logs/session-<task>.log` is the rendered form an operator tails. `logs/content.index.jsonl` holds one entry per journalled record naming its offset and length inside that task's journal, which gives the role one content sequence number that survives a client restart. The journal is the whole surface of an ACP session: the client holds the agent process, and nothing about the session is offered to another process.
 
 A legacy workspace layout is refused outright. If `.onlyne/state.db` contains `io_cursors` or `loopback_idempotency`, or if `.onlyne/channels/` exists, the command prints `onlyne: legacy workspace layout; v1.0.0 does not migrate` and exits 2.
 
@@ -382,7 +382,6 @@ v1.0.0 delivery is complete when these are true:
 
 - three daemon binaries ship: `onlyne-server`, `onlyne-client`, and `onlyne-gateway`
 - one thin entrypoint ships: `onlyne`
-- one session viewer ships: `onlyne-view`, which renders one task's journal from the files or live from the client socket
 - adapter SDK ships with conformance fixtures and `onlyne-agent-fake`
 - four platform gateway plugins ship behind Cargo features: `telegram`, `feishu`, `qqbot`, and `weixin`
 - `onlyne server generate` creates relocatable role workspaces from templates
