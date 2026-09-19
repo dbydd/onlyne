@@ -30,8 +30,15 @@ or, inside a pi session, the `onlyne_complete{outcome, text}` tool.
 - Your `--text` becomes the ledger `out_head`, verbatim: one line, whitespace-collapsed,
   capped at 200 characters. Put the whole answer there. It is the only upward channel.
 - `--outcome done|failed|cancelled`. Provable impossibility → `failed`, with the reason in
-  `text`. If you fall silent, a fallback still files a receipt from your last assistant
-  text — so name the result in that text.
+  `text`. The report path depends on your host. A mounted pi session answers through the
+  `onlyne_complete` tool, and if you fall silent there the plugin files a fallback receipt
+  from your last assistant text — so name the result in that text. A plain `exec` session
+  carries no plugin and no fallback: `onlyne complete` is yours to run before you stop.
+- A `backend = "acp"` session mounts nothing and needs no `onlyne` command. Its prompt
+  ends with an absolute report path your client prepared under the workspace; the last
+  action before you stop is one line in that file — `hop-done: <the result in one line>`
+  or `hop-failed: <why it failed, one sentence>` — and the client reads that file,
+  settles the task, and files the receipt.
 - One completion per task. Inside your session the plugin keeps that record: a second
   `onlyne_complete` for a task it already reported answers `duplicate`, files no report, and the
   process exits once. A hand-run `onlyne complete` carries a fresh `op_id` each call, so the

@@ -167,9 +167,12 @@ Role workspace, selected by `onlyne-client run --workspace <dir>`:
   keys/role.key
   agent/<pkg>/
   cache/orca-tabs.jsonl
+  out/<task-id>.md
 ```
 
 The Orca session backend writes `cache/orca-tabs.jsonl` append-only. The tab-to-session map is a side channel for supervisor scripts and displays. Session identity is owned by the adapter protocol, never by Orca.
+
+`out/<task-id>.md` is an `acp` role's report file: the client names its absolute path in every prompt it delivers, the agent leaves one line there (`hop-done: <result>` or `hop-failed: <reason>`) before it stops, and the turn's end reads it once and takes it away. A report may lower a turn's standing, never raise it, and a file present in any other shape settles as a client-authored cancellation. A role on another backend owns its own reporting through the adapter or `onlyne complete`, and writes nothing here.
 
 The ACP session backend journals each turn as it runs. `logs/session-<task>.events.jsonl` holds one JSON object per line: the agent's own `session/update` notifications plus this client's `dispatch` and `turn` records, so the file carries both halves of the conversation. `logs/session-<task>.log` is the rendered form an operator tails. `logs/content.index.jsonl` holds one entry per journalled record naming its offset and length inside that task's journal, which gives the role one content sequence number that survives a client restart. The journal is the whole surface of an ACP session: the client holds the agent process, and nothing about the session is offered to another process.
 

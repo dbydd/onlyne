@@ -1,5 +1,66 @@
 # Changelog
 
+## [Unreleased]
+
+Scope: the ACP session gains a client-owned completion contract, and every
+settled task files its receipt. Each ACP prompt ends with a directive naming
+one report file under the workspace; the agent's last action is to write one
+line there, and the turn's end reads that line once to decide what reaches the
+ledger. Settlement itself keeps traveling the single `dispatch::on_out` path it
+used before, so the change moves the source of a task's head and verdict while
+the accounting surface stays. The receipt fix below completes that surface: a
+task whose turn left no result line now files a `completion` row whose text is
+empty, where its envelope used to fail validation and vanish.
+
+### Added
+
+- session: the payload-v1 report contract on the `acp` backend. `deliver`
+  appends a fixed directive block to every ACP prompt — its first line names
+  the absolute path `<workdir>/.onlyne/out/<task-id>.md` — and the client
+  creates that directory beforehand; a directory the client cannot create
+  costs the directive alone, the turn runs on the task's prose, and a
+  `warning` record lands beside the journal's `dispatch` record. The agent
+  reports by writing exactly one line to the file, `hop-done: <the result in
+  one line>` or `hop-failed: <why the task failed, one sentence>`, created
+  under a temporary name in the same directory and renamed into place.
+  `run_turn` reads the file once after the drain and deletes it, so a requeued
+  task id starts from nothing. Absence settles as it did before the contract.
+  `hop-done` replaces the head `dispatch::on_out` writes into `out_head` while
+  the stop reason still decides the outcome; `hop-failed` settles the task
+  Failed with the same line as its head and fault reason, downgrading a clean
+  `end_turn`. A file that is empty, multi-line, bare of any prefix, prefixed
+  beyond the two forms, empty after its colon, or undecodable as utf-8 settles
+  the task Cancelled with head cleared and a fault reason opening with
+  `acp payload invalid:` plus the category. Every read appends a `payload`
+  journal record carrying `task_id`, `path`, `payload_kind` (one of `done`,
+  `failed`, `invalid`, `absent`), and `head`; the absent read is recorded as
+  well, so the journal names the turn that left no report. Zero config keys,
+  zero CLI use inside the session, every other backend untouched. Tests: the
+  thirteen-cell matrix `a_payload_report_replaces_the_head_and_can_only_lower_the_ending`,
+  the shared-path test `the_prompt_hands_the_agent_the_path_the_ending_reads`,
+  and the fallback test `an_unbuildable_report_directory_costs_only_the_directive`
+  in `crates/onlyne-session/src/backend/acp.rs`; e2e case 18 runs both report
+  shapes — a `hop-done` line that lands in `out_head` while the streamed
+  answer stays out of it, and an `HOPFAIL` task settling Failed with one `acp`
+  fault, its receipt filed, and its report file consumed. Files:
+  `crates/onlyne-session/src/backend/acp.rs`,
+  `crates/onlyne-testkit/e2e/acp-agent.py`,
+  `crates/onlyne-testkit/e2e/acp-session.sh`.
+
+### Fixed
+
+- client: a task that ended without a result line files its receipt.
+  `completion_envelope` built its body from the head alone, `new_envelope`
+  runs `Envelope::validate` on the way in, and validation requires text or an
+  image, so the empty-headed envelope failed and the receipt was dropped in
+  silence: the task row settled `acked`, the session projected `exited` with
+  its outcome, and the origin received no `completion` row for that task. A
+  ring whose next hop waits on that receipt stalled exactly one hop, the shape
+  observed live. The body is now `Body::text(head.unwrap_or_default())`, so a
+  settled task files its receipt with the empty string as text whenever it
+  carries no result line (commit `23ba012`). Files:
+  `crates/onlyne-client/src/dispatch.rs`.
+
 ## [1.2.0] - 2026-09-19
 
 Scope: two halves moving in opposite directions land together. The first

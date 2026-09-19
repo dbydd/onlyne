@@ -327,9 +327,26 @@ session_command = ["pi", "--mode", "rpc", "--session-id", "{session}"]
 
 被拒的权限请求落一条 `permission` fault，其 reason 列出被拒的工具调用与本机策略；同一任务的终态照常进 ledger。
 
+### 结项报告（payload-v1）
+
+ACP 会话的结项由 client 完成，agent 会话内没有 `onlyne` CLI，也不需要它。`deliver` 在每次投递的 prompt 尾部注入一段报告指令，首行给出绝对路径 `<workspace>/.onlyne/out/<task-id>.md`，要求 agent 在停止前把结果写进该文件：内容一行，两种前缀之一，`hop-done: <一行结果>` 或 `hop-failed: <一句话原因>`；写入方式是先写同目录的临时名，再 rename 进位。报告行的取值沿用 `out_head` 的既有规则：单行、空白折叠、200 字符截断。
+
+报告目录由 client 在投递前创建。创建失败的那次 prompt 不带指令块，本轮按缺位情形照常结项，journal 在 `dispatch` 记录旁补一条 `warning` 记录。
+
+turn 结束、该轮全部 `session/update` 落账之后，client 读取报告文件一次并随即删除；同一 task 重投时读到的一定是新一轮写入的文件。结项取值：
+
+| 报告情形 | 结果 |
+|---|---|
+| 文件缺位或读不到 | 维持契约前的行为：outcome 与 head 由 stopReason 与该轮末条 assistant 文本推出 |
+| `hop-done: <非空>` | 报告文本作为 head；outcome 仍由 stopReason 判定，被 stopReason 判为非正常终止的那一轮保持原判 |
+| `hop-failed: <非空>` | outcome 为 failed，报告文本同时是 head 与 fault reason，正常的 `end_turn` 也被降级 |
+| 空文件、多行、无前缀、未知前缀、冒号后为空、坏 UTF-8 | outcome 为 cancelled，fault reason 以 `acp payload invalid:` 开头并写明类别，head 为空 |
+
+每次读取都向该任务的 journal 追加一条 `payload` 记录，字段为 `task_id`、`path`、`payload_kind`（取值 `done`、`failed`、`invalid`、`absent` 之一）、`head`；缺位也记录，账上因此能看出这一轮有没有上报。结项事实经 `dispatch::on_out` 这一条通路落账：settle、`out_head`、ack 与 completion receipt 都在那里发出。每个终态任务都发 receipt，报告与末条文本都缺位的那次落一条正文为空文本的 `completion` 行。
+
 ## 会话内容
 
-ACP 会话没有终端：agent 是 client 持有的子进程，会话对 client 之外的进程不可见。留下的面是落盘的 journal。`<workspace>/.onlyne/logs/session-<task>.events.jsonl` 每行一个 JSON 对象，内容是该 agent 的 `session/update` 通知，加上 client 自己的 `dispatch` 与 `turn` 记录；`<workspace>/.onlyne/logs/session-<task>.log` 是给人看的渲染件。`<workspace>/.onlyne/logs/content.index.jsonl` 每条记录一行元数据，记下它在任务 journal 里的偏移与长度，role 级的内容序号由此在 client 重启后仍可续。三个都是普通文件，谁在读写它们由本机权限决定，client 不向任何会话外的进程提供实时流。
+ACP 会话没有终端：agent 是 client 持有的子进程，会话对 client 之外的进程不可见。留下的面是落盘的 journal。`<workspace>/.onlyne/logs/session-<task>.events.jsonl` 每行一个 JSON 对象，内容是该 agent 的 `session/update` 通知，加上 client 自己的 `dispatch`、`payload` 与 `turn` 记录；`<workspace>/.onlyne/logs/session-<task>.log` 是给人看的渲染件。`<workspace>/.onlyne/logs/content.index.jsonl` 每条记录一行元数据，记下它在任务 journal 里的偏移与长度，role 级的内容序号由此在 client 重启后仍可续。三个都是普通文件，谁在读写它们由本机权限决定，client 不向任何会话外的进程提供实时流。
 
 ## Windows 关停
 
