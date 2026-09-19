@@ -1,5 +1,216 @@
 # Changelog
 
+## [1.2.2] - 2026-09-19
+
+Scope: the acp closing report grows a routing vocabulary. The closing report is
+the one file that ends a task, as before: a verdict line, plus zero to eight
+`handoff:` lines naming another role. A handoff names another role for the work
+to travel to, and the client that reads the file sends it there. The grammar
+lives in one place, `onlyne_proto::payload`, so the prompt an agent reads, the
+`onlyne report check` an operator runs, and the client that settles the turn
+parse the same bytes. A new `onlyne report` verb family lets any author validate
+that file before the turn stops, with no daemon and no socket. The
+discoverability pass that came with it puts the answer inside the help surfaces:
+flag ranges, key sets, defaults, and the dead ends, so an agent or operator
+reading `--help` needs no other file.
+
+Gate on the tree at `86d34ff` plus this round's edits, run 2026-09-19:
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -D warnings`,
+and `cargo test --workspace` on the bumped 1.2.2 manifests give 962 passed, 0
+failed, 1 ignored across 68 suites. That count sits eleven above the gate that
+closed the payload-v2 work.
+The eleven new cases are six CLI cases for the `complete` head sources (the text
+the task reports, which the row keeps in `out_head`) and the `schema` surface,
+three for the `--backend-ref` shapes, one client launch-path case for a secret
+name the environment leaves unset, and one `wait-ready` case for its exit code.
+Fake-backend e2e runs fifteen cases at exit 0 — 1 through 7, 9, 12, and 14
+through 19 — including `acp-payload-v2.sh` (case 19, new: two routed relays
+(handoffs the client delivered), one refused relay, one blocked report, one
+invalid report rewritten), `acp-session.sh`, and `running-lights.sh`.
+
+### Added
+
+- proto: `onlyne_proto::payload` owns the payload-v2 grammar (the shape a report
+  file follows) as one authority. `parse` reads one report file into
+  `PayloadV2::{Done, Failed, Blocked, Invalid}` with its `Handoff` lines.
+  `GRAMMAR_V2` is the prose the prompt and the CLI help both print.
+  `MAX_REPORT_LINES` caps a file at 16 lines, and `MAX_REPORT_HANDOFFS` caps it
+  at 8 handoff lines. Verdict prefixes are `hop-done:`, `hop-failed:`, and
+  `hop-blocked:`. A handoff line is `handoff: <role>` with an optional
+  `| <one line>`. Lines starting with `#` and blank lines are skipped, and CRLF
+  and a lone CR normalize before the first line is classified. Every rejection
+  names the physical line number the author will re-open. An unreadable file
+  yields `Invalid` carrying zero handoffs, so a report this client cannot trust
+  routes nothing. Seventeen unit cases.
+- session: the `acp` backend records each handoff line in the task journal
+  before it deletes the report file, and `head_kind` keeps a self-reported block
+  apart from a broken turn. A `hop-blocked:` report settles `Failed` and carries
+  the agent's own reason. An invalid report settles `Cancelled` and leaves the
+  file on disk, so a rewrite is enough. `emit_handoffs` runs ahead of
+  `remove_file`, and the parse failure returns before the delete.
+- client: `onlyne_client::handoff` puts one handoff line on the wire as a
+  `MsgKind::Task` envelope over the role's existing link. The envelope is the
+  child of the settled task, one hop deeper (a hop is one step along the chain
+  of handed-on tasks), and its body carries the `handoff: ` prefix. The whole
+  set runs under a six-second budget. `acl_denied` and `unknown_role` land as
+  `handoff_denied` events beside one fault row in `client.db`, and the verdict
+  and the outcome kind stay untouched. A link that cannot answer at all leaves
+  the envelope to the durable intent queue, where every other outbound frame of
+  that role already waits.
+- cli: `onlyne report path`, `check`, `write`, and `validate`. `path` prints the
+  report file and the three journal surfaces of one task. `check` parses a file
+  and prints the verdict and every handoff, or the exact line it broke on plus
+  the whole grammar. `write` builds a valid report from `--verdict`, `--head`,
+  and repeatable `--handoff` parts, then renames it into place atomically.
+  `validate` reads a string or standard input with no file touched. Exit codes
+  follow the contract: 0 success, 1 io, 2 for an invalid, absent, or unreadable
+  report and for refused arguments, with 3 reserved for socket resolution.
+  `path` pins the four surfaces an agent or operator needs to find after a turn,
+  and it refuses a `--task` that is not one bare file name. Eight integration
+  cases run the shipped binary.
+- client: the `$NAME` spelling now reaches the running daemon. `cert_pin`,
+  `key_path`, and `[server] host` read from `config.toml` through
+  `Env::current()` at the top of `run`, so a workspace can carry an environment
+  variable name in place of a pin. The gateway plugins already use that same
+  idiom for platform tokens. A name the environment holds no value for stops the
+  launch with exit 1 and names both the field and the variable:
+  `onlyne-client: missing secret $ONLYNE_CERT for cert_pin; set the environment
+  variable`. The resolver, the `Env` readers, and their tests were in the tree
+  ahead of this, and `onlyne-client run` is the caller that was missing. One
+  binary-target case runs the launch against a workspace whose pin names an
+  unset variable and asserts the refusal text.
+- cli: `--backend-ref` on `repair adopt` and `repair rebind` carries an object.
+  A spelling that parses as JSON travels as that value. The pane references the
+  client matches on (`dispatch.rs` reads `backend_ref.get("id")`) now have a CLI
+  spelling: `--backend-ref '{"id":"p-7"}'`. Any other text travels as one JSON
+  string, and an omitted flag travels as null. Three unit cases cover the
+  three shapes.
+- cli: `onlyne schema client|spec [--pretty]` prints the generated JSON Schema
+  for one config surface — `<workspace>/.onlyne/config.toml` for `client`,
+  `<server-root>/.onlyne/spec.toml` for `spec` — and it reads that schema from
+  the same compile-time document `onlyne-config` validates against. The answer
+  is local: no socket, no daemon.
+  `onlyne completions <bash|elvish|fish|powershell|zsh>` writes the shell's
+  completion script for the whole vocabulary. Four integration cases cover the
+  two target documents, the longer `--pretty` rendering, and the exit-2 refusal
+  of an unknown target.
+- testkit: e2e case 19, `crates/onlyne-testkit/e2e/acp-payload-v2.sh`, drives a
+  real server, an acp-role client, and a fake recipient through the four endings
+  a report can have. It asserts the routed children's `parent_task`, `hop + 1`,
+  literal body prefix, and completion receipts. `e2e/acp-agent.py` gained one
+  optional `--caller-report-marker` selector; with the flag absent the scripted
+  agent behaves byte for byte as before.
+- skills: `skills/onlyne-role-payload-v2/SKILL.md` teaches an acp role the
+  grammar, the path lookup, the self-check before it stops, and what a
+  refusal costs.
+
+### Changed
+
+- proto, cli: the two repair flags the server never read are gone. `RepairFail`
+  carries `task_id` and `reason`. `RepairAdopt` carries `task_id`, `backend`,
+  `backend_ref`, and `reason`, and it keeps the session id the row already holds
+  — moving a task to another session is `rebind`'s job, which writes the id
+  beside the generation bump. `onlyne repair fail --notify` and
+  `onlyne repair adopt --session-id` no longer exist. A supervisor that wants a
+  role to hear about a settlement sends it
+  (`onlyne send --from <supervisor> --to <role> --text ...`) or watches the
+  `ledger_state` events. Both structs deserialize with serde `default`, so an
+  older script line that passes either name lands as an ignored key.
+- cli: `onlyne complete --head-from` carries a default. The flag accepts `local`
+  and `ledger`, and it now reads `local` when omitted, the shape nearly every
+  caller wants. `--text` became optional, and the `local` branch alone requires
+  it, since the `ledger` branch takes the head from the row's own `out_head`.
+  Missing both answers `onlyne: --text is required with --head-from local` and
+  exits 2, the same refusal style as the rest of the family.
+- layout: one owner now spells the per-task file names. `RoleWorkspace` gained
+  `out_dir`, `report_path`, `session_log_path`, `session_events_path`, and
+  `content_index_path`, beside `CONTENT_INDEX_FILE_NAME`. `onlyne-session` takes
+  the layout edge, and `backend/acp.rs`, `backend/exec.rs`, `content.rs`, and
+  the CLI's `report path` verb all read those accessors. The duplicated
+  `CONTENT_INDEX_RELATIVE` and `REPORT_DIR_RELATIVE` constants are gone, so a
+  workspace `generate` writes, a session that runs, and a report the CLI names
+  all stay on one spelling.
+- client: the config repair path tolerates the spellings a hand-edited file
+  produces. `[[plugin]]` folding accepts `[[ plugin ]]` and a trailing comment
+  on the header line. Duplicate top-level `plugins` lines merge onto the first
+  with their ids deduplicated, and every refusal names the line it stopped on.
+  `agent_install` consults the config before creating any path, so re-installing
+  a registered id changes nothing on disk.
+- cli: `onlyne-client init` prints the whole entry vocabulary.
+  `BACKEND_COMMENTS` above `[server]` names the accepted `backend` values and
+  the `[acp]` keys. `ACP_COMMENTS` below it states the closing-report contract.
+  `KNOB_COMMENTS` carries the keys the code implements and the help leaves
+  unprinted, with the defaults the parser applies, taken from `onlyne-config`.
+  `onlyne repair` documents all seven `repair_*` verbs and the flags each one
+  takes. `unknown session backend` now lists the accepted names, and the no-host
+  refusal names `backend = "acp"` plus the `[acp]` keys it needs.
+- config: the unread resolution layer is gone. `secret_refs`,
+  `ResolvedClientConfig`, and `ResolvedEndpoint` had no caller. The client read
+  the raw `ClientConfig`, and the resolved copy drifted beside it, so
+  `resolve_secrets` on the config itself is now the single path. The three
+  `[acp]` assertions that walked the old struct now assert the same keys through
+  the resolved value.
+- docs: `README.md` and `README.zh-CN.md` describe the entry as two shapes, with
+  the admin nouns at the top level. They add the local `schema` and
+  `completions` verbs, and name `onlyne report --help` as the authority for the
+  closing-report grammar. They record the e2e directory at eighteen scripts, and
+  spell the one-task grant as what it is: a role written into `allowed_targets`
+  in `spec.toml`, an `onlyne reload`, and the same edit removing the edge when
+  the task closes. `docs/v1-CONTRACT.md` splits the `onlyne server` line into
+  the exec verbs and the in-process admin answers, and attributes the
+  `missing binary …; run cargo build --workspace` refusal to the e2e harness
+  where it lives. `docs/operations.md` carries the payload-v2 section and the
+  `report` family, plus the paragraph stating that eight routes and an unbounded
+  hop depth are the design and that `allowed_targets` is the control point.
+  `crates/onlyne-client/README.md` documents `$NAME` for `cert_pin`, `key_path`,
+  and `[server] host`, with the value a blank environment variable produces. The
+  `handoff` module header now describes one routing path, the one the code
+  takes. `onlyne-config::template` gained `NoRoleMatches`, which lists the roles
+  a template directory actually holds, and `docs/v1-PLAN.md` and
+  `docs/v1-ARCHITECTURE.md` print the overwrite refusal the code emits.
+
+### Fixed
+
+- cli: `wait-ready` reports a socket it cannot resolve the way every other verb
+  does. It printed
+  `onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace`
+  and exited 2, and the contract pins that message to exit 3. The shared helper
+  already handed back 3. `admin.rs` now passes the code through, so the answer
+  matches the message. A new integration case runs the verb in an empty
+  directory with `ONLYNE_SOCKET` cleared and asserts exit 3, the byte-exact line
+  on stderr, and empty stdout; reverting the pass-through turns that case red.
+- cli: `onlyne report check` on an absent or unreadable report exits 2 and names
+  the file, matching the contract's exit-code table. Code 3 stays with
+  socket resolution.
+- server: the gateway relay's key-set hint is one shared constant across its four
+  refusal sites, so the four messages cannot drift. Each route miss now states
+  the `[[route]]` row shape beside the row it could not find.
+- server: `onlyne server init` writes the requeue and backend keys into the
+  generated `spec.toml` with their comments. `requeue_max_attempts` and
+  `requeue_ttl_secs` appear with the default that leaves the gate uncapped, and
+  the block names where a role's backend and its `acp` parameters live.
+
+All nineteen crates move to 1.2.2: `onlyne-proto`, `onlyne-frame`,
+`onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-acp`,
+`onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-testkit`,
+`onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-gateway-telegram`,
+`onlyne-gateway-feishu`, `onlyne-gateway-qqbot`, `onlyne-gateway-weixin`,
+`onlyne-tui`, and `onlyne-cli`. Seven library crates carry code:
+`onlyne-proto` holds the report grammar and the two shed repair fields,
+`onlyne-session` journals the handoff lines ahead of the report delete,
+`onlyne-client` routes them, resolves `$NAME` secrets at launch, and tolerates
+the hand-edited spellings on the config repair path, `onlyne-cli` carries the
+`report` family plus the `schema`, `complete`, and repair surfaces,
+`onlyne-config` holds the one secret path after the dead resolution layer went
+and names the roles a template directory actually holds, `onlyne-layout` owns
+the per-task file names, and `onlyne-server` carries the relay's key-set hint
+beside the `spec.toml` keys it now comments. `onlyne-testkit` gains e2e case 19.
+The remaining eleven members — `onlyne-frame`, `onlyne-net`, `onlyne-store`,
+`onlyne-acp`, `onlyne-adapter`, `onlyne-gateway`, `onlyne-tui`, and the four
+gateway plugins — move with no code of their own, so every internal path
+dependency keeps a matching registry floor and each manifest stays publishable on
+its own.
+
 ## [1.2.1] - 2026-09-19
 
 Scope: the ACP session gains a client-owned completion contract, and every
