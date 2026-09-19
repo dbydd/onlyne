@@ -4,16 +4,16 @@
 
 Onlyne 把一群 coding agent 编成一个工作集群。**server** 在 agent 角色之间路由消息，并把每次投递写进持久账本。每个工作区一个 **client**，负责本角色全部 coding-agent 会话。**gateway** 进程把 Telegram / 飞书 / QQ / 微信的聊天翻译成同一套消息模型。agent 的运行时保持原样，Onlyne 只是让它们的手互相够得着，并留下一条可审计的痕迹。集群能跨机器：client 用 TLS 从任何地方连回 server，生成好的工作区 `mv` 一下就能搬走，集群还能嵌套成更大的集群。
 
-![version](https://img.shields.io/badge/version-v1.1.1-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
+![version](https://img.shields.io/badge/version-v1.2.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
 ![Onlyne — supervisor 向五个 pi agent 派十跳环任务，账本逐跳结清](assets/promo/onlyne-hero.png)
 
 ## 安装
 
-全部 18 件 1.1.1 已上册 [crates.io](https://crates.io)。瘦入口是 `onlyne-cli`（安装出二进制 `onlyne`）；四个守护进程同样从 crates.io 装进 cargo bin，`onlyne` 在那里找兄弟件。
+全部 19 件 1.2.0 已上册 [crates.io](https://crates.io)。瘦入口是 `onlyne-cli`（安装出二进制 `onlyne`）；四个守护进程同样从 crates.io 装进 cargo bin，`onlyne` 在那里找兄弟件。
 
 ```bash
-cargo install onlyne-cli --version 1.1.1
-cargo install onlyne-server onlyne-client onlyne-gateway onlyne-tui --version 1.1.1
+cargo install onlyne-cli --version 1.2.0
+cargo install onlyne-server onlyne-client onlyne-gateway onlyne-tui --version 1.2.0
 ```
 
 `onlyne` 是薄转发器（`server`/`client`/`gateway`/`admin` 动词）；TUI 单独叫 `onlyne-tui`。pi 角色的 adapter 插件在 npm：
@@ -61,7 +61,7 @@ TUI 把同一件事画成活图——第 1 页是角色网络，第 2 页是集�
 | `onlyne-gateway` | 每进程一个聊天平台：telegram · feishu · qqbot · weixin，编译期 feature 门控。 |
 | `onlyne` | 人机薄入口：转发守护进程、直连 socket、输出 JSON。 |
 | `onlyne-tui` | 两页观测面板，走 admin socket。 |
-| `onlyne-agent-fake` | 脚本化假 agent，喂给 `crates/onlyne-testkit/e2e/` 下的十六份端到端证明。 |
+| `onlyne-agent-fake` | 脚本化假 agent，喂给 `crates/onlyne-testkit/e2e/` 下的十七份端到端证明。 |
 
 ```mermaid
 graph LR
@@ -78,7 +78,15 @@ graph LR
 
 **可审计的投递。** 控制面消息（task、completion、control）按 at-least-once 送达，每条都带 `op_id` 幂等键。每笔投递都在账本里留行，`onlyne server ledger` 读起来像银行流水。观测面（心跳、事件）按 at-most-once 送达，落后了用游标追补，慢观察者拖不慢干活的人。
 
-**有自己生命周期的会话。** 角色通过屏幕后端拉起 coding agent：herdr pane、Orca 标签页、zellij 会话、无头 exec，或测试用的 fake。`ONLYNE_BACKEND` 的取值是 `herdr | orca | zellij | exec | fake | auto`。写出 `herdr`、`orca`、`zellij`、`exec` 或 `fake` 即选用该后端。空值或 `auto` 按 herdr → orca → zellij 探测。`exec` 与 `fake` 只在 `ONLYNE_BACKEND` 写出其名时启用。全无匹配时 `onlyne-client run` 以退出码 5 退出，文案为 `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`。会话生命周期是一张证明过的状态机——21 种事件走五条状态轴，有全表测试——同时喂给账本镜像和 TUI 的星号。
+**有自己生命周期的会话。** 角色通过一个后端拉起 coding agent：herdr pane、Orca 标签页、zellij 会话、无头 exec、client 按自有协议驱动的 acp agent，或测试用的 fake。`ONLYNE_BACKEND` 的取值是 `herdr | orca | zellij | exec | acp | fake | auto`。写出 `herdr`、`orca`、`zellij`、`exec`、`acp` 或 `fake` 即选用该后端。空值或 `auto` 按 herdr → orca → zellij 探测。`exec`、`acp` 与 `fake` 只在 `ONLYNE_BACKEND` 写出其名时启用。全无匹配时 `onlyne-client run` 以退出码 5 退出，文案为 `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`。会话生命周期是一张证明过的状态机——21 种事件走五条状态轴，有全表测试——同时喂给账本镜像和 TUI 的星号。
+
+在 Windows 上，`acp` 属编译可达：`onlyne-acp` 备有 Windows 进程组分支，CI 的 Windows job 不覆盖该 crate，ACP 的实测全部发生在 macOS。
+
+pane 后端开一个终端，读它的屏幕。`session_command` 在自己的 stdio 上说协议时（渲染后的 argv 携带 `--acp`、`--mode=rpc` 或 `--mode rpc`），`herdr`、`orca`、`zellij` 三个后端在开页之前拒收这条投递：JSON-RPC 帧只会打进 pane，没有读者。投递落 `rejected`，拒收文案原文进账本行的 `reason` 列，五角色环上配 Orca 后端跑 `pi --mode rpc` 的那条记录为：
+
+> orca backend cannot host a protocol session: --mode rpc speaks JSON-RPC on its own stdio and the pane would print the frames; set backend = "exec" or backend = "acp" in the workspace config
+
+文案点名生效的后端与命中的 token。改法在工作区 `config.toml`：写 `backend = "exec"` 或 `backend = "acp"`。运行期不会替你换后端。
 
 herdr 层级：herdr session 由 client 进程环境继承，pane 内的 pi 子进程继续继承；workspace = 一个 server root/topology（label 为 `onlyne:<cluster>`）；tab = role；pane = 一个 onlyne session。`<cluster>` 取 server 自己的 `[server] name`：client 从 `welcome.cluster` 读到它，再以 `ONLYNE_CLUSTER` 交给它创建的每一个 pane。首个 welcome 之前拉起的 pane 没有这个变量，herdr 就用自己那个默认 label 的 workspace。关闭命令是 `herdr pane close`。id 形状为 `wF` / `wF:t1` / `wF:p1`。`onlyne-test` 这类命名 session 取 client 环境里已有的 `HERDR_SESSION`。client 的 `sessions` 行把地址记在 `backend_ref`：`workspace_id`、`tab_id`、`pane_id`、`agent`、`workspace_label`，加上传下来的分屏记录（`base_pane`、`split_direction`）。后端按 label 认 herdr workspace（`onlyne:<cluster>`），按名字认 tab（role 自己的名字）。想让后端用上现有那个 workspace 或 tab，操作者在 client 拉起 session 之前先改名：`herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>`、`herdr tab rename <TAB_ID> <role>`。label 对不上的 workspace 会拿到第二个 workspace，tab 名对不上会拿到第二个 tab，这时 client 打一条 warning，点名该 label 与新建出来的 workspace。新建那一步的 warning 同时给出 label、新的 `workspace_id`，以及补救命令 `herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>`；`workspace create`、`tab create`、`pane split` 的 `--cwd` 一律以绝对路径递给 herdr，herdr 按自己的工作目录解析这条路径。
 
@@ -121,6 +129,8 @@ focus 链路：`herdr workspace focus <W>`，随后 `herdr tab focus <T>`（位�
 
 投递按 msg id 结清：`onlyne ack --msg-id <id> --reason <text>` 收下，`onlyne reject --msg-id <id> --reason <text>` 拒收。两者都可选带 `--op-id`，`onlyne control --task <id> recycle|cancel --reason <text>` 的 reason 同样是必填。
 
+账本行记下自己为何结清。`reason` 列随行输出：`onlyne ledger` 的行键为 `msg_id`、`task`、`state`、`reason`、`out_head`、`body`；TUI 第二页的 task 详情面板在账本行尾追加 `reason=<text>`。没有值的行不出现该键，列加入之前写的旧行读起来与往日一致。实测出现过的取值：`requeue_exhausted`、`requeue_ttl`、`expired`、`session_dead`，以及上文 pane 拒收的整句。操作者经 `onlyne reject` 或 `onlyne repair fail` 自填的 `--reason` 文本原样进这一行；`onlyne ack` 收下时，该文本随结清事件走，行上的 `reason` 保持原样。字符串 `operator ack` 是 faults 表自己 `reason` 列的用例数据（`crates/onlyne-store/src/tests.rs`），账本列没有它的记录。
+
 ## supervisor 教义
 
 派发顺流而下：supervisor 向角色发 task，角色以完成 task 作答。回执落在账本里，supervisor 拉账本读报告，汇报自带凭证。角色直接给 supervisor 发消息的形态等于把编排压平成队列——demo 的 ACL 把这条路关着，环上每个角色的 `allowed_targets` 只留环内邻居。某个任务确实需要中途够到操作者时，supervisor 就为这一个任务开一条上行路，任务完结，路即收回。
@@ -149,7 +159,7 @@ target/debug/onlyne-agent-fake --workspace "$tmp/planner" --script \
 target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-一行 JSON 回以 `data.state = "in_flight"`。随后该任务的账本行落到 `acked`，会话投影走到 `exited` 且 `outcome = "done"`。同一序列有可执行证明：`crates/onlyne-testkit/e2e/local-task.sh`，另有十五份姊妹脚本覆盖 ACL 拒收、幂等、断连补投、重启后的 hello 接管、gateway 挂载、目录搬迁、双集群联邦、无头 exec 路径（`exec-headless.sh`）、深路径工作区的 socket（`socket-path-length.sh`）。
+一行 JSON 回以 `data.state = "in_flight"`。随后该任务的账本行落到 `acked`，会话投影走到 `exited` 且 `outcome = "done"`。同一序列有可执行证明：`crates/onlyne-testkit/e2e/local-task.sh`，另有十六份姊妹脚本覆盖 ACL 拒收、幂等、断连补投、重启后的 hello 接管、gateway 挂载、目录搬迁、双集群联邦、心跳巡检、无头 exec 路径（`exec-headless.sh`）、深路径工作区的 socket（`socket-path-length.sh`），以及脚本化 ACP agent 撑起的 acp 后端（`acp-session.sh`）。
 
 在 macOS 上把二进制拷进 `PATH` 要多做一步：拷出来的二进制如果代码签名和文件对不上，一 exec 就被杀，所以拷完要 ad-hoc 重签一下（`codesign --force --sign - ~/.cargo/bin/onlyne*`）。
 
@@ -166,7 +176,7 @@ unix 上每个守护进程绑定的都是规范名 `run/s`，前提是这条路�
 
 ## 状态
 
-最新 tag 是 `v1.1.1`，18 件 crate 已上册 crates.io。本轮修的是 herdr 首跑现场：过长 adapter socket、`herdr agent start` 丢尾参、相对 `--cwd`、会话结束后 pane 不回收、已完成任务被追认为 `stalled`。fake e2e 13/13，含 `socket-path-length.sh`。`cargo build --workspace` 需要 Rust 1.85。安装：`cargo install onlyne-cli --version 1.1.1`，四个守护进程同号。
+最新 tag 是 `v1.2.0`，19 件 crate 已上册 crates.io。本轮把无头会话后端做齐：`backend = "acp"` 让 client 以子进程方式驱动一个 ACP v1 agent，工作区 `[acp]` 表管 mode、model、reasoning_effort、permission，会话正文落 `<workspace>/.onlyne/logs/session-<task>.log` 与 `session-<task>.events.jsonl`。三条行为守住边界：`initialize` 恒带 client 版本号；`herdr`、`orca`、`zellij` 后端在开 pane 之前拒收自带 stdio 协议的 `session_command`，整句拒收理由写进账本行的 `reason`；`onlyne ledger` 与 TUI 第二页现在都读得到这一列。会话内容的查看面已撤下——`onlyne-view` 二进制、client socket 上的实时内容页、adapter 协议里的 `watch_content`——journal 与两条上报通路保留（ACP 侧 `outcomes()` 解析、pi 侧 adapter 插件）。fake e2e 14/14，含 `acp-session.sh`；五角色环跑了 11 跳，每跳的账行都是 `acked`。`cargo build --workspace` 需要 Rust 1.85。安装：`cargo install onlyne-cli --version 1.2.0`，四个守护进程同号。
 
 ## 阅读
 

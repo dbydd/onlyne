@@ -4,16 +4,16 @@
 
 Onlyne ties a fleet of coding agents into one working cluster. A **server** routes every message between agent roles, and records each delivery in a durable ledger. A **client** per workspace runs that role's coding-agent sessions. **Gateway** processes turn Telegram / Feishu / QQ / WeChat chats into the same message model. Your agents keep their own runtimes; Onlyne gives them hands that reach each other, plus a paper trail you can audit. The cluster spans machines: a client reaches the server over TLS from anywhere, a generated workspace relocates with a plain `mv`, and clusters nest into larger clusters.
 
-![version](https://img.shields.io/badge/version-v1.1.1-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
+![version](https://img.shields.io/badge/version-v1.2.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
 ![Onlyne — a supervisor dispatches a ten-hop ring task to five pi agents; ledger receipts settle every hop](assets/promo/onlyne-hero.png)
 
 ## Install
 
-Everything ships to [crates.io](https://crates.io) at 1.1.1. The thin entry is `onlyne-cli` (binary `onlyne`); the four daemons install the same way and `onlyne` finds them in the cargo bin directory.
+Everything ships to [crates.io](https://crates.io) at 1.2.0. The thin entry is `onlyne-cli` (binary `onlyne`); the four daemons install the same way and `onlyne` finds them in the cargo bin directory.
 
 ```bash
-cargo install onlyne-cli --version 1.1.1
-cargo install onlyne-server onlyne-client onlyne-gateway onlyne-tui --version 1.1.1
+cargo install onlyne-cli --version 1.2.0
+cargo install onlyne-server onlyne-client onlyne-gateway onlyne-tui --version 1.2.0
 ```
 
 `onlyne` is the thin forwarder (`server`/`client`/`gateway`/`admin` verbs); the TUI runs separately as `onlyne-tui`. For a pi agent role, the adapter plugin lives on npm:
@@ -61,7 +61,7 @@ The TUI draws the same picture live — page 1 is the role network, page 2 the s
 | `onlyne-gateway` | One chat platform per process: telegram · feishu · qqbot · weixin, feature-gated at compile time. |
 | `onlyne` | Thin human entry: forwards to the daemons, speaks the sockets, prints JSON. |
 | `onlyne-tui` | Two-page observation board over the admin socket. |
-| `onlyne-agent-fake` | Scripted agent for the sixteen e2e proofs under `crates/onlyne-testkit/e2e/`. |
+| `onlyne-agent-fake` | Scripted agent for the seventeen e2e proofs under `crates/onlyne-testkit/e2e/`. |
 
 ```mermaid
 graph LR
@@ -78,12 +78,20 @@ graph LR
 
 **Delivery you can audit.** Control-plane messages (task, completion, control) travel at-least-once, each carrying an `op_id` idempotency key. The ledger keeps every row, so `onlyne server ledger` reads like a bank statement. Observation (heartbeats, events) runs at-most-once with cursor resync, so a slow watcher never slows a worker.
 
-**Sessions that own their lives.** Each role spawns its coding agent through a screen backend: herdr panes, Orca tabs, zellij sessions, headless exec, or the fake used in tests. Backend selection is env `ONLYNE_BACKEND` (nonempty) > workspace `config.toml` `backend` > auto. `ONLYNE_BACKEND` and the config field take `herdr | orca | zellij | exec | fake | auto`; `headless` is a parse alias for `exec`, and projections still name the backend `exec`. A nonempty value that names `herdr`, `orca`, `zellij`, `exec`/`headless`, or `fake` selects that backend. An empty value or `auto` probes herdr, then orca, then zellij. `exec` and `fake` enable only when the env or the config field names them. With no match, `onlyne-client run` exits 5 and prints `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`. On exec exit the probe detail may carry `output_tail` (at most 200 lines / 16 KiB of the session log). A session's lifecycle is a proven reducer — 21 events over five state axes, table-tested — feeding both the ledger mirror and the TUI stars.
+**Sessions that own their lives.** Each role spawns its coding agent through a backend: herdr panes, Orca tabs, zellij sessions, headless exec, an ACP agent the client drives over its own protocol, or the fake used in tests. Backend selection is env `ONLYNE_BACKEND` (nonempty) > workspace `config.toml` `backend` > auto. `ONLYNE_BACKEND` and the config field take `herdr | orca | zellij | exec | acp | fake | auto`; `headless` is a parse alias for `exec`, and projections still name the backend `exec`. A nonempty value that names `herdr`, `orca`, `zellij`, `exec`/`headless`, `acp`, or `fake` selects that backend. An empty value or `auto` probes herdr, then orca, then zellij. `exec`, `acp` and `fake` enable only when the env or the config field names them. With no match, `onlyne-client run` exits 5 and prints `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`. On exec exit the probe detail may carry `output_tail` (at most 200 lines / 16 KiB of the session log). A session's lifecycle is a proven reducer — 21 events over five state axes, table-tested — feeding both the ledger mirror and the TUI stars.
 
 | Host | Local socket | Session backends |
 | --- | --- | --- |
-| macOS, Linux | filesystem UDS (mode `0600`) at the canonical `.onlyne/run/s` while that path fits 103 bytes; past the bound a short derived path under the system temporary directory, with the served path recorded in `.onlyne/run/socket` | herdr, orca, zellij, exec (`headless` alias), fake |
-| Windows (x86_64 / aarch64 MSVC) | named pipe; `.onlyne/run/s` is a `v1:onlyne-<32hex>` marker | exec (`headless` alias), fake; pane hosts when the host binary is present |
+| macOS, Linux | filesystem UDS (mode `0600`) at the canonical `.onlyne/run/s` while that path fits 103 bytes; past the bound a short derived path under the system temporary directory, with the served path recorded in `.onlyne/run/socket` | herdr, orca, zellij, exec (`headless` alias), acp, fake |
+| Windows (x86_64 / aarch64 MSVC) | named pipe; `.onlyne/run/s` is a `v1:onlyne-<32hex>` marker | exec (`headless` alias), acp, fake; pane hosts when the host binary is present |
+
+On Windows, `acp` is a compile-reachable backend: `onlyne-acp` carries a Windows process-group path, the Windows CI job does not cover that crate, and every recorded ACP run happened on macOS.
+
+A pane backend opens a terminal and reads its screen. A `session_command` that speaks its own protocol on stdio — a rendered argv carrying `--acp`, `--mode=rpc`, or `--mode rpc` — is refused by `herdr`, `orca`, and `zellij` before any pane opens: the JSON-RPC frames would print into the pane and reach no reader. The delivery settles `rejected` and the refusal lands verbatim in the ledger row's `reason` column, as the live ring recorded it for an Orca role running `pi --mode rpc`:
+
+> orca backend cannot host a protocol session: --mode rpc speaks JSON-RPC on its own stdio and the pane would print the frames; set backend = "exec" or backend = "acp" in the workspace config
+
+The message names the acting backend and the token that matched. The fix lives in the workspace `config.toml`: `backend = "exec"` or `backend = "acp"`. The client never swaps the backend at spawn time.
 
 The herdr map is: session inherited from the client environment (a pi child inherits it), workspace = one server root/topology labelled `onlyne:<cluster>`, tab = role, pane = one onlyne session. `<cluster>` is the server's own `[server] name`, which the client reads from `welcome.cluster` and hands each pane it creates as `ONLYNE_CLUSTER`; a pane spawned before the first welcome carries no such variable and herdr keeps its own default-labelled workspace. Close is `herdr pane close`. Ids look like `wF` / `wF:t1` / `wF:p1`. A named session such as `onlyne-test` is the `HERDR_SESSION` value already in the client environment. `backend_ref` on the client `sessions` row stores `workspace_id`, `tab_id`, `pane_id`, `agent`, `workspace_label`, and the recorded split (`base_pane`, `split_direction`). The backend addresses a herdr workspace by the label `onlyne:<cluster>` and a tab by the role's own name. An operator who wants a particular workspace or tab used renames it before the client spawns sessions: `herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>` and `herdr tab rename <TAB_ID> <role>`. A workspace label that differs yields a second workspace, a tab name that differs yields a second tab, and the client logs a warning naming the label and the created workspace each time it takes that create path. The create warning carries the label, the new `workspace_id`, and the remedy `herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>`, and `--cwd` reaches herdr as an absolute path in `workspace create`, `tab create`, and `pane split` — the spelling herdr resolves against its own working directory.
 
@@ -126,6 +134,8 @@ A message body is text plus at most one inline image. Media pipelines live besid
 
 A delivery settles by msg id: `onlyne ack --msg-id <id> --reason <text>` accepts it, and `onlyne reject --msg-id <id> --reason <text>` refuses it. Both take an optional `--op-id`, and `onlyne control --task <id> recycle|cancel --reason <text>` carries the same required reason.
 
+Every ledger row records why it settled. The `reason` column ships with the row: `onlyne ledger` prints rows with the keys `msg_id`, `task`, `state`, `reason`, `out_head`, `body`, and the TUI task panel on page 2 appends `reason=<text>` to its ledger line. A row without a value omits the key, so rows written before the column still read unchanged. Values seen in live runs: `requeue_exhausted`, `requeue_ttl`, `expired`, `session_dead`, and the pane-refusal sentence quoted above. The `--reason` text an operator types into `onlyne reject` or `onlyne repair fail` lands in the row verbatim; an accepted `onlyne ack` travels the settlement event with its text and leaves the row's `reason` as it stood. The string `operator ack` is faults-suite test data for the faults table's own `reason` column (`crates/onlyne-store/src/tests.rs`); the ledger never recorded it.
+
 ## The supervisor doctrine
 
 Dispatch flows downhill. The supervisor sends tasks to roles, and roles answer by completing them. A role's completion lands in the ledger, and the supervisor polls the ledger, so reports arrive with proof attached. A role messaging its supervisor directly is the flat queue you already have elsewhere — the demo ACLs refuse it, and each role's `allowed_targets` stays inside the working ring. When a role genuinely needs to reach the operator mid-task, the supervisor grants a route for that one task, and the grant dies with the task.
@@ -154,7 +164,7 @@ target/debug/onlyne-agent-fake --workspace "$tmp/planner" --script \
 target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
 ```
 
-One JSON line answers with `data.state = "in_flight"`. The task's ledger row then settles to `acked`, and its session projects to `exited` with `outcome = "done"`. The same sequence ships as an executable proof, `crates/onlyne-testkit/e2e/local-task.sh`, joined by fifteen siblings covering ACL rejects, idempotency, reconnect requeue, the hello claim across a server restart, gateway mount, relocation, two-cluster federation, the headless exec path (`exec-headless.sh`), and the deep-workspace socket (`socket-path-length.sh`).
+One JSON line answers with `data.state = "in_flight"`. The task's ledger row then settles to `acked`, and its session projects to `exited` with `outcome = "done"`. The same sequence ships as an executable proof, `crates/onlyne-testkit/e2e/local-task.sh`, joined by sixteen siblings covering ACL rejects, idempotency, reconnect requeue, the hello claim across a server restart, gateway mount, relocation, two-cluster federation, the heartbeat watch, the headless exec path (`exec-headless.sh`), the deep-workspace socket (`socket-path-length.sh`), and the ACP backend driven by a scripted agent (`acp-session.sh`).
 
 Copying the binaries onto `PATH` takes one extra step on macOS: a copied binary
 whose code signature no longer matches its file is killed at exec, so re-sign it
@@ -173,7 +183,7 @@ Every workspace is self-contained and portable. `onlyne server generate` lays a 
 
 ## Status
 
-Release `v1.1.1` is on crates.io. Field fixes from the first herdr run: overlong adapter sockets, `herdr agent start` argv, absolute `--cwd`, pane retirement, and the false `stalled` fault on a completed task. Fake-backend e2e is 13/13 including `socket-path-length.sh`. `cargo build --workspace` needs Rust 1.85. Install with `cargo install onlyne-cli --version 1.1.1` plus the four daemons at the same version.
+Release `v1.2.0` is on crates.io, nineteen crates. This round puts a second kind of session host beside the panes: `backend = "acp"` drives an ACP v1 agent as a child process through the client, with the workspace `[acp]` table carrying mode, model, reasoning effort, and permission, and the conversation landing in `<workspace>/.onlyne/logs/session-<task>.log` plus `session-<task>.events.jsonl`. Three behaviours hold the boundary: an `initialize` always carries the client version, a `herdr`, `orca`, or `zellij` backend refuses a `session_command` that speaks a protocol on its own stdio before any pane opens, and the settlement `reason` on a ledger row now reaches `onlyne ledger` and the TUI task panel. The session-content viewer surface — the `onlyne-view` binary, its live page over the client socket, and `watch_content` on the adapter protocol — left the tree; the journal it read stays, and so do both reporting paths, the ACP `outcomes()` parse and the pi adapter plugin. Fake-backend e2e is 14/14 including `acp-session.sh`; a five-role ring ran eleven hops with every row `acked`. `cargo build --workspace` needs Rust 1.85. Install with `cargo install onlyne-cli --version 1.2.0` plus the four daemons at the same version.
 
 ## Reading
 

@@ -11,21 +11,22 @@ v1.1.0 is on crates.io and tagged `v1.1.0` (`e2d0e15`). `docs/v1-PLAN.md` is the
 
 ## Crate state
 
-Counts come from `cargo test --workspace` on 2026-09-15 (760 passed, 0 failed, 1 ignored: `herdr_live_probe`), one line per crate with its libraries and integration targets summed.
+Counts come from `cargo test --workspace` on 2026-09-19 (883 passed, 0 failed, 1 ignored: `herdr_live_probe`), one line per crate with its libraries and integration targets summed.
 
-- [x] `onlyne-proto` green with envelope, frame variants, ops, errors, and events: 59 unit + 5 wire vectors + 2 sizes.
+- [x] `onlyne-proto` green with envelope, frame variants, ops, errors, and events: 60 unit + 5 wire vectors (86 fixtures) + 2 sizes.
+- [x] `onlyne-acp` green with the ACP v1 client, its stdio transport, and the protocol fixtures: 40 unit + 14 scripted-peer + 1 doc example.
 - [x] `onlyne-frame` green with length-prefixed codec: 9.
-- [x] `onlyne-config` green with spec parse and reload: 11 template + 30 config contract + 17 ACL table + 3 spec example.
-- [x] `onlyne-layout` green with legacy refusal exit 2 and the local-socket seam: 20.
+- [x] `onlyne-config` green with spec parse and reload: 11 template + 38 config contract + 17 ACL table + 3 spec example.
+- [x] `onlyne-layout` green with legacy refusal exit 2 and the local-socket seam: 30.
 - [x] `onlyne-store` green with ledger and local DB: 31 unit + 2 schema statements.
-- [x] `onlyne-session` green with the lifecycle port and the session backends (zellij, Orca, exec, fake, herdr): 106 unit + 13 herdr.
+- [x] `onlyne-session` green with the lifecycle port and the session backends (zellij, Orca, exec, acp, fake, herdr): 128 unit + 18 herdr.
 - [x] `onlyne-net` green with TLS, handshake, ACL, and backoff: 25.
 - [x] `onlyne-adapter` green with SDK and protocol schema: 5 unit + 3 conformance + 1 protocol doc.
-- [x] `onlyne-server` green with router, relay, projection, faults, admin, and generate: 13 unit + 83 delivery + 27 generate + 2 stale.
-- [x] `onlyne-client` green with runloop, intents, adapter socket, host detection, and dispatch: 35 unit + 41 scenarios.
-- [x] `onlyne-tui` green with the role network graph, the swarm monitor, and the key table: 72.
+- [x] `onlyne-server` green with router, relay, projection, faults, admin, and generate: 14 unit + 84 delivery + 27 generate + 2 stale.
+- [x] `onlyne-client` green with runloop, intents, adapter socket, host detection, and dispatch: 42 unit + 50 scenarios.
+- [x] `onlyne-tui` green with the role network graph, the swarm monitor, and the key table: 74 unit + 2 one-shot snapshots.
 - [x] `onlyne-gateway` green with shared kit: 47.
-- [x] `onlyne-cli` green with entrypoint, socket resolution, and the admin verbs: 33 + 1.
+- [x] `onlyne-cli` green with entrypoint, socket resolution, and the admin verbs: 5 unit + 33 cli.
 - [x] `onlyne-testkit` green with fake agent, fake gateway, and conformance: 3 unit + 2 binaries + 11 conformance.
 - [x] Four gateway plugins green behind `telegram`, `feishu`, `qqbot`, and `weixin` features: 11, 10, 10, 13.
 
@@ -37,7 +38,7 @@ Counts come from `cargo test --workspace` on 2026-09-15 (760 passed, 0 failed, 1
 
 ## Verification cases
 
-Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root. The directory holds seventeen scripts besides `lib.sh`. Thirteen fake-backend cases (1-7, 9, 12, 14, 15, 16, 17) exited 0, `running-lights` the long one and `gateway-mount` the quick one; case 16 `exec-headless` joined the set for 1.1.0, and case 17 `socket-path-length` joined on 2026-09-17 as the field fix for the deep-workspace socket. Case 18 `acp-session` joins as the ACP backend proof: a real server and client against a scripted ACP agent as the role's `session_command`, so it is neither a fake-backend case nor a live one. Cases 10 and 11 are live and last exited 0 on 2026-09-11 (2 seconds and 9 seconds). Case 13 is live against herdr session `onlyne-test` and exited 0 on 2026-09-14 in 3 seconds, its workspace closed and the session's workspace list back to the single `~` entry it started with. The pane-reclaim step that case 13 gained on 2026-09-17 is operator-pending: the script passed `bash -n`, and the next live run on a host with a reachable `onlyne-test` records its own green line. Cases 10, 11, and 13 override the backend: case 10 needs a shell inside an Orca tab with the app answering, case 11 needs a `pi` that answers a credential probe, and case 13 needs a reachable herdr session `onlyne-test`. On a host without its requirement, a live case prints `SKIP` and exits 0, so a green line says "passed here" and a skip says "not exercised here".
+Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root. The directory holds seventeen case scripts besides `lib.sh`, the shared harness, and `acp-agent.py`, the scripted ACP peer case 18 drives. Fourteen exited 0 on 2026-09-19 at `8c8848d`: the thirteen fake-backend cases (1-7, 9, 12, 14, 15, 16, 17) and case 18, `running-lights` the long one and `gateway-mount` the quick one; case 16 `exec-headless` joined the set for 1.1.0, and case 17 `socket-path-length` joined on 2026-09-17 as the field fix for the deep-workspace socket. Case 18 `acp-session` joins as the ACP backend proof: a real server and client against a scripted ACP agent as the role's `session_command`, so it is neither a fake-backend case nor a live one. Cases 10 and 11 are live and last exited 0 on 2026-09-11 (2 seconds and 9 seconds). Case 13 is live against herdr session `onlyne-test` and exited 0 on 2026-09-14 in 3 seconds, its workspace closed and the session's workspace list back to the single `~` entry it started with. The pane-reclaim step that case 13 gained on 2026-09-17 is operator-pending: the script passed `bash -n`, and the next live run on a host with a reachable `onlyne-test` records its own green line. Cases 10, 11, and 13 override the backend: case 10 needs a shell inside an Orca tab with the app answering, case 11 needs a `pi` that answers a credential probe, and case 13 needs a reachable herdr session `onlyne-test`. On a host without its requirement, a live case prints `SKIP` and exits 0, so a green line says "passed here" and a skip says "not exercised here".
 
 - [x] Case 1 `local-task.sh`: single-machine fake-backend task reaches `acked`.
 - [x] Case 2 `acl-reject.sh`: ACL refusal emits `acl_denied`.
