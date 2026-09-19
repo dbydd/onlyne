@@ -32,7 +32,13 @@ or, inside a pi session, the `onlyne_complete{outcome, text}` tool.
 - `--outcome done|failed|cancelled`. Provable impossibility → `failed`, with the reason in
   `text`. If you fall silent, a fallback still files a receipt from your last assistant
   text — so name the result in that text.
-- The second completion for the same task is refused. Call it once.
+- One completion per task. Inside your session the plugin keeps that record: a second
+  `onlyne_complete` for a task it already reported answers `duplicate`, files no report, and the
+  process exits once. A hand-run `onlyne complete` carries a fresh `op_id` each call, so the
+  ledger reads it as a new frame and appends a second `completion` row beside the first while the
+  task's own row keeps the state it settled in. Idempotence keys on `op_id` alone: the same
+  `op_id` with the same body answers `duplicate` and replays the first receipt byte for byte, and
+  the same `op_id` with a changed body answers `conflict`; each writes no row. Call it once.
 
 ## Passing work sideways
 

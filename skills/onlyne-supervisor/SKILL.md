@@ -111,6 +111,23 @@ leaves a running task's row `in_flight` and un-duplicated; a claimed session tha
 completing gets its row requeued the moment the client reports it exited, and `repair inspect`
 keeps the whole trail either way.
 
+Both gates leave their mark where you can read it. `onlyne ledger` prints the row it holds, and a
+settled row's `reason` travels with it; the key is among the six the CLI recognizes on a ledger
+answer (`msg_id`, `task`, `state`, `reason`, `out_head`, `body` — `ROW_FIELD_KEYS` in
+`onlyne-cli/src/ledger.rs`). A row carries the key only where it has a value: a clean `acked` row
+simply omits it, and the bytes match what the same row printed before the column existed. The
+TUI's page-2 task panel appends `reason=<text>` to the row's tail under the same rule. Five places
+put a value on the column. `requeue_exhausted` and `requeue_ttl` come from the two gates above.
+`expired` comes from the deadline sweep on a queued note past its `--ttl`. Free text comes from
+`onlyne reject --reason <text>` and `onlyne repair fail --reason <text>`, and a pane backend's
+refusal to host a protocol session writes the whole sentence, e.g. `orca backend cannot host a
+protocol session: --mode rpc speaks JSON-RPC on its own stdio and the pane would print the
+frames; set backend = "exec" or backend = "acp" in the workspace config` (the `--acp`,
+`--mode=rpc`, and `--mode rpc` spellings all trigger it on `herdr`, `orca`, and `zellij`). The
+ack side stays out of it: `onlyne ack --msg-id` settles the row through `mark_acked`, and
+`onlyne repair ack --fault-id --reason` closes a fault row only, so either reason travels with
+the settlement event and the ledger line keeps what it already held.
+
 ## Errors you will see
 
 `acl_denied` → the edge is missing from the spec. `unauthorized` → the key is not

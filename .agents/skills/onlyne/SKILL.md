@@ -27,7 +27,7 @@ onlyne-proto     types + validation + error codes; no tokio
 onlyne-config    TOML spec/config parsing, env secrets
 onlyne-layout    workspace/server root discovery, legacy refusal
 onlyne-store     server ledger + client db; (generation,seq) monotonic gates
-onlyne-session   pure lifecycle reducer + SessionBackend (herdr|orca|zellij|exec|fake)
+onlyne-session   pure lifecycle reducer + SessionBackend (herdr|orca|zellij|exec|acp|fake)
 onlyne-net       TLS 1.3 + pinning, ed25519 challenge, acl_allows, backoff
 onlyne-adapter   the one adapter protocol SDK (agent side and gateway side)
 onlyne-server/-client/-gateway   three bins; onlyne-cli the thin entry; onlyne-testkit fakes+e2e
@@ -67,11 +67,28 @@ Exit codes: `0` answer ok, `1` failed daemon answer or `wait-ready` bound, `2` v
 through `socket_path()`. `--from` belongs to
 the admin surface only; every message verb already prints JSON.
 
+The `reason` column on a ledger row reaches both read surfaces. `onlyne ledger` projects every
+field of the durable row, and `ROW_FIELD_KEYS` (`onlyne-cli/src/ledger.rs`) names `reason` among
+the keys a caller reads off it; `task_detail_text` in `onlyne-tui/src/ui.rs` appends
+`reason=<text>` to a page-2 row that carries one. `LedgerEntry::reason` (`onlyne-proto/src/ops.rs`)
+and `LedgerStateEvent::reason` (`onlyne-proto/src/event.rs`) both serialize `#[serde(default,
+skip_serializing_if = "Option::is_none")]`, so a row with nothing to say omits the key and its
+bytes match the pre-column shape, and a stored row without the key decodes as no value. The
+with-value shape keeps its fixtures under `crates/onlyne-proto/tests/wire_vectors/`
+(`res_ledger_answer_rejected_with_reason.json`, `ev_ledger_state_rejected_with_reason.json`).
+
 **Backend** (`onlyne-session/src/backend/`): capabilities `{spawn,attach,probe,close,
 focus,rename}`. A missing capability degrades through faults, never panics.
-`ONLYNE_BACKEND` names `herdr | orca | zellij | exec | fake | auto`. An empty value
-or `auto` probes herdr, then orca, then zellij. `exec` and `fake` enable only when
-`ONLYNE_BACKEND` names them. No match is `NoSupportedHost`; `onlyne-client run`
+`ONLYNE_BACKEND` names `herdr | orca | zellij | exec | acp | fake | auto`; `headless` parses as
+`exec` and projections keep the name `exec` (`BackendName::parse`/`as_str`). Selection order is a
+nonempty process `ONLYNE_BACKEND`, then the workspace `config.toml` `backend`, then auto. An empty
+value or `auto` probes herdr, then orca, then zellij. `exec`, `acp` and `fake` enable only when one
+of those two names them, so auto discovery never picks one. The workspace `[acp]` table
+(`AcpSection` in `onlyne-config/src/client.rs`) carries `mode`, `model`, `reasoning_effort` and
+`permission` (`deny` default, `allow`), and the ACP backend is its only reader. An ACP session
+opens no pane: the client drives the agent with `session/prompt` and reads the streamed
+`session/update` notifications, and the conversation lands in
+`<workspace>/.onlyne/logs/session-<task>.log` plus `session-<task>.events.jsonl`. No match is `NoSupportedHost`; `onlyne-client run`
 exits 5 with `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`.
 `onlyne-client doctor` prints host-detection JSON and exits 0.
 The adapter socket binds `.onlyne/run/s` while the path fits 103 bytes, and a deeper tree binds the short derived path that `run/socket` records; `run` exits 1 with `onlyne-client: bind the workspace socket <canonical path>: <detail>` when the bind fails — the detail names the served path, both lengths, and the OS reason — and a later `accept` error logs at `error` level and retries every 100 ms.
@@ -89,6 +106,8 @@ Retirement invariant an editor keeps: a session's host resource (pane, tab, zell
 
 **Client dispatch** (`onlyne-client/src/dispatch.rs`, `onlyne-client/src/stall.rs`): the dispatch lock serializes slot, transport, backend, and lifecycle work, and the 250 ms readiness tick (`runloop.rs`) drives `reclaim_exited_resources`. `StallWatch::note_applied` refreshes an assigned clock; `note_assigned` owns clock creation, so a late observation from a plugin that already answered cannot reopen a stall episode on a settled task. A connection release forgets the progress clocks of the sessions it served, and both `stall_due` and `stall_report` check the stored lifecycle before a `stalled` fault reaches the wire.
 
+A pane backend refuses a protocol-speaking command before it spawns: `reject_protocol_command_in_pane` runs on `herdr`, `orca`, and `zellij` once the `{session}`/`{task}` tokens are rendered and before `backend.spawn`, and it fires when the argv holds `--acp`, `--mode=rpc`, or `--mode` followed by `rpc`. The correction belongs in the workspace config; an editor that swaps the backend at spawn time hides a mis-set config behind a silent drift, so the delivery fails and the reason reaches the ledger. Nothing opens: no pane, no process, the task row lands `rejected`, and the row's `reason` carries the whole sentence, byte for byte — `{backend} backend cannot host a protocol session: {token} speaks JSON-RPC on its own stdio and the pane would print the frames; set backend = "exec" or backend = "acp" in the workspace config`. The client hands that text to the server as the refusal reason on the delivery's settle intent (`push_settled` → `store_ack` in `dispatch.rs`, answered by `relay::ack`), and the server writes it into the row through `mark_rejected`, which is where the operator reads it.
+
 ## Gates
 
 ```bash
@@ -98,11 +117,18 @@ cargo test --workspace                 # per-crate -p reruns suffice for isolate
 crates/onlyne-testkit/e2e/<case>.sh    # ONLYNE_BACKEND=fake, built target/debug, no real creds
 ```
 
-The sixteen scripts under `crates/onlyne-testkit/e2e/` each encode one verification case
-from `docs/v1-PLAN.md` (ACL rejects, idempotency, reconnect requeue, hello claim across a
-server restart, gateway mount, relocation, two-cluster federation, legacy refusal, frame
-bounds, and the deep-workspace socket `socket-path-length.sh`). A bug fix needs its
-reproduction as an e2e or a table test: red before the fix, green after. The live ring demo
+The seventeen case scripts under `crates/onlyne-testkit/e2e/` each encode one verification case
+from `docs/v1-PLAN.md`, and the directory keeps `lib.sh`, the shared harness, beside them plus
+`acp-agent.py`, the scripted ACP peer case 18 drives. The named cases cover the single-machine
+task (1), ACL rejects (2), idempotency (3), reconnect requeue (4), two-cluster federation (5),
+gateway mount (6), legacy refusal (7), relocation (9), the running-lights ring (12), the
+heartbeat watch (14), the hello claim across a server restart (15), the headless `exec` face
+(16), the deep-workspace socket `socket-path-length.sh` (17), and the ACP backend
+`acp-session.sh` (18); the live-host faces are Orca (10), pi (11), and herdr (13). Cases 1-7,
+9, 12, and 14-17 run on `ONLYNE_BACKEND=fake`, and case 18 names `backend = "acp"` with that
+scripted agent; all fourteen exited 0 at HEAD. Cases 10, 11, and 13 print `SKIP` and exit 0 on
+a host without their session host. A bug fix needs its reproduction as an e2e or a table test:
+red before the fix, green after. The live ring demo
 (`examples/supervisor/run.py`) needs Orca and real pi binaries. Treat it as manual smoke.
 
 Socket invariant: the path a daemon binds is the path `socket_path()` returns, and every
