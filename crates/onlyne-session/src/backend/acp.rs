@@ -76,8 +76,6 @@ pub struct AcpOptions {
     pub model: String,
     /// `reasoning_effort` config option value. Empty leaves the default.
     pub reasoning_effort: String,
-    /// Whether an ACP session also opens its journal viewer in a host pane.
-    pub tui: bool,
     /// Whether this client answers an agent's permission request with a grant.
     /// Off by default: the refusal is recorded and a supervisor decides.
     pub allow_permissions: bool,
@@ -114,8 +112,6 @@ struct State {
     feed: OutcomeFeed,
     /// Serializes journal cursors across every task served by this role.
     content: ContentWriter,
-    /// Host pane backend used only for the optional journal viewer.
-    viewer: Option<Arc<dyn SessionBackend>>,
 }
 
 struct AgentSlot {
@@ -219,16 +215,6 @@ impl Turn {
 
 impl AcpBackend {
     pub fn new(options: AcpOptions) -> Self {
-        let viewer = options.tui.then(|| {
-            Arc::new(super::herdr::HerdrBackend::new(Arc::new(ProcessRunner)))
-                as Arc<dyn SessionBackend>
-        });
-        Self::with_viewer(options, viewer)
-    }
-
-    /// Construct with an explicit pane backend. Tests use this to observe the
-    /// real host requests through a fake [`Runner`].
-    pub fn with_viewer(options: AcpOptions, viewer: Option<Arc<dyn SessionBackend>>) -> Self {
         let (sink, feed) = OutcomeFeed::channel();
         AcpBackend {
             options,
@@ -238,69 +224,8 @@ impl AcpBackend {
                 sink,
                 feed,
                 content: ContentWriter::default(),
-                viewer,
             }),
         }
-    }
-
-    fn spawn_viewer(&self, spec: &SpawnSpec) -> Result<Option<SessionRef>> {
-        let Some(viewer) = self.state.viewer.as_ref() else {
-            return Ok(None);
-        };
-        if !viewer.available()? {
-            tracing::warn!(
-                task = %spec.task_id,
-                "ACP viewer requested but no pane host is available"
-            );
-            return Ok(None);
-        }
-        let socket = spec.env.get("ONLYNE_SOCKET").ok_or_else(|| {
-            anyhow::anyhow!(
-                "ACP viewer requires ONLYNE_SOCKET for task {}",
-                spec.task_id
-            )
-        })?;
-        let command = vec![
-            "onlyne-view".to_string(),
-            "--workspace".to_string(),
-            spec.cwd.to_string_lossy().into_owned(),
-            "--task".to_string(),
-            spec.task_id.clone(),
-            "--socket".to_string(),
-            socket.clone(),
-        ];
-        viewer
-            .spawn(SpawnSpec {
-                cwd: spec.cwd.clone(),
-                task_id: spec.task_id.clone(),
-                command,
-                env: spec.env.clone(),
-                focus: spec.focus,
-                placement: spec.placement,
-                rename: spec.rename.clone(),
-            })
-            .map(Some)
-    }
-
-    fn viewer_session(&self, session: &SessionRef) -> Option<SessionRef> {
-        let viewer = self.state.viewer.as_ref()?;
-        let pane = session.backend_ref.get("pane")?.clone();
-        Some(SessionRef {
-            task_id: session.task_id.clone(),
-            backend: viewer.name().to_string(),
-            backend_ref: pane,
-            generation: session.generation,
-        })
-    }
-
-    fn close_viewer(&self, session: &SessionRef, reason: CloseReason, force: bool) -> Result<()> {
-        let Some(viewer) = self.state.viewer.as_ref() else {
-            return Ok(());
-        };
-        let Some(pane) = self.viewer_session(session) else {
-            return Ok(());
-        };
-        viewer.close(&pane, reason, force)
     }
 
     /// The argv this session's agent runs as: the role's rendered
@@ -823,10 +748,9 @@ fn tool_line(update: &Update, value: &Value) -> String {
 
 /// Drop the `<status>…</status>` markers an agent stamps into its own answer.
 ///
-/// The same convention the operator's viewer applies; restated here because a
-/// session backend must not depend on a viewer crate. An agent closes the marker
-/// with a matching tag and, in a stream cut short, leaves it open — an unclosed
-/// marker runs to the end of the block, which is where the agent puts it.
+/// An agent closes the marker with a matching tag and, in a stream cut short,
+/// leaves it open — an unclosed marker runs to the end of the block, which is
+/// where the agent puts it.
 fn strip_status(text: &str) -> String {
     const OPEN: &str = "<status>";
     const CLOSE: &str = "</status>";
@@ -1090,7 +1014,7 @@ impl SessionBackend for AcpBackend {
             attach: true,
             probe: true,
             close: true,
-            focus: self.state.viewer.is_some(),
+            focus: false,
             // ACP v1 has no title path: naming a session is the terminal
             // backends' trick, and the agent's own session id is what this one
             // reports.
@@ -1118,40 +1042,12 @@ impl SessionBackend for AcpBackend {
 
     fn spawn(&self, spec: SpawnSpec) -> Result<SessionRef> {
         let command = Self::command_of(&spec)?;
-        let viewer_session = self.spawn_viewer(&spec)?;
         let key = command.join(" ");
-        let slot = match self.agent_for(&key, &command, &spec.cwd, &spec.env) {
-            Ok(slot) => slot,
-            Err(error) => {
-                if let (Some(viewer), Some(pane)) =
-                    (self.state.viewer.as_ref(), viewer_session.as_ref())
-                {
-                    if let Err(close_error) = viewer.close(pane, CloseReason::Fault, true) {
-                        tracing::warn!(
-                            error = %close_error,
-                            task = %spec.task_id,
-                            "ACP viewer cleanup failed after agent spawn failure"
-                        );
-                    }
-                }
-                return Err(error);
-            }
-        };
+        let slot = self.agent_for(&key, &command, &spec.cwd, &spec.env)?;
         let entry = match self.open_session(&slot, &spec, &key) {
             Ok(entry) => entry,
             Err(error) => {
                 self.state.retire(&key);
-                if let (Some(viewer), Some(pane)) =
-                    (self.state.viewer.as_ref(), viewer_session.as_ref())
-                {
-                    if let Err(close_error) = viewer.close(pane, CloseReason::Fault, true) {
-                        tracing::warn!(
-                            error = %close_error,
-                            task = %spec.task_id,
-                            "ACP viewer cleanup failed after session open failure"
-                        );
-                    }
-                }
                 return Err(error);
             }
         };
@@ -1161,20 +1057,16 @@ impl SessionBackend for AcpBackend {
             &entry.id,
             self.state.content.clone(),
         );
-        let mut backend_ref = json!({
-            "id": entry.id,
-            "pid": entry.agent.pid(),
-            "agent": key,
-            "log": journal.log.to_string_lossy(),
-            "events": journal.events.to_string_lossy(),
-        });
-        if let Some(pane) = viewer_session {
-            backend_ref["pane"] = pane.backend_ref;
-        }
         Ok(SessionRef {
             task_id: spec.task_id.clone(),
             backend: self.name().into(),
-            backend_ref,
+            backend_ref: json!({
+                "id": entry.id,
+                "pid": entry.agent.pid(),
+                "agent": key,
+                "log": journal.log.to_string_lossy(),
+                "events": journal.events.to_string_lossy(),
+            }),
             generation: 1,
         })
     }
@@ -1206,37 +1098,15 @@ impl SessionBackend for AcpBackend {
             });
         };
         let gone = entry.agent.is_gone();
-        let mut detail = json!({
-            "pid": entry.agent.pid(),
-            "acp_session": entry.id,
-            "turn": entry.turn.phase.lock().live,
-        });
-        if let (Some(viewer), Some(pane)) =
-            (self.state.viewer.as_ref(), self.viewer_session(session))
-        {
-            let pane_probe = viewer.probe(&pane)?;
-            detail["pane"] = json!({
-                "alive": pane_probe.alive,
-                "attached": pane_probe.attached,
-                "detail": pane_probe.detail,
-            });
-        }
         Ok(ResourceProbe {
             alive: !gone,
             attached: !gone,
-            detail: Some(detail),
+            detail: Some(json!({
+                "pid": entry.agent.pid(),
+                "acp_session": entry.id,
+                "turn": entry.turn.phase.lock().live,
+            })),
         })
-    }
-
-    fn focus(&self, session: &SessionRef) -> Result<()> {
-        let viewer =
-            self.state.viewer.as_ref().ok_or_else(|| {
-                unsupported(self.name(), "focus", "ACP session has no viewer pane")
-            })?;
-        let pane = self.viewer_session(session).ok_or_else(|| {
-            unsupported(self.name(), "focus", "ACP session ref has no viewer pane")
-        })?;
-        viewer.focus(&pane)
     }
 
     fn deliver(&self, session: &SessionRef, task_id: &str, prose: &str) -> Result<()> {
@@ -1281,13 +1151,12 @@ impl SessionBackend for AcpBackend {
         Ok(())
     }
 
-    fn close(&self, session: &SessionRef, reason: CloseReason, force: bool) -> Result<()> {
-        let pane_result = self.close_viewer(session, reason, force);
+    fn close(&self, session: &SessionRef, reason: CloseReason, _force: bool) -> Result<()> {
         let Some(entry) = self.take_entry(session) else {
-            // Already closed, or closed by the client run that held the process.
-            // The viewer close above remains idempotent and gets its own retry.
+            // Already closed, or closed by the client run that held the process
+            // before this one. Either way there is nothing left to end.
             tracing::debug!(task = %session.task_id, ?reason, "acp session already gone");
-            return pane_result;
+            return Ok(());
         };
         let key = entry.agent_key.clone();
         let id = entry.id.clone();
@@ -1334,7 +1203,7 @@ impl SessionBackend for AcpBackend {
             ?reason,
             "acp session closed"
         );
-        pane_result
+        Ok(())
     }
 }
 
@@ -1621,76 +1490,6 @@ main()
         }
     }
 
-    #[derive(Default)]
-    struct ViewerRunner {
-        calls: Mutex<Vec<String>>,
-    }
-
-    impl ViewerRunner {
-        fn calls(&self) -> Vec<String> {
-            self.calls.lock().clone()
-        }
-    }
-
-    impl Runner for ViewerRunner {
-        fn run(
-            &self,
-            program: &str,
-            args: &[String],
-            _cwd: Option<&Path>,
-            _env: &BTreeMap<String, String>,
-        ) -> Result<CommandOutput> {
-            let call = format!("{program} {}", args.join(" "));
-            self.calls.lock().push(call.clone());
-            let result = if call.contains("workspace list") {
-                json!({"workspaces": [{"workspace_id": "w-view", "label": "onlyne:lab"}]})
-            } else if call.contains("tab list") {
-                json!({"tabs": [{"tab_id": "t-view", "label": "planner", "pane_count": 1}]})
-            } else if call.contains("pane list") {
-                json!({
-                    "panes": [{
-                        "pane_id": "p-base",
-                        "tab_id": "t-view",
-                        "workspace_id": "w-view",
-                        "focused": true
-                    }]
-                })
-            } else if call.contains("pane split") {
-                json!({
-                    "pane": {
-                        "pane_id": "p-view",
-                        "tab_id": "t-view",
-                        "workspace_id": "w-view",
-                        "focused": false
-                    }
-                })
-            } else if call.contains("pane get") {
-                json!({
-                    "pane": {
-                        "pane_id": "p-view",
-                        "tab_id": "t-view",
-                        "workspace_id": "w-view",
-                        "focused": true
-                    }
-                })
-            } else {
-                json!({})
-            };
-            let stdout = if call.contains("pane run") {
-                Vec::new()
-            } else {
-                json!({"id": "viewer-test", "result": result})
-                    .to_string()
-                    .into_bytes()
-            };
-            Ok(CommandOutput {
-                status: 0,
-                stdout,
-                stderr: Vec::new(),
-            })
-        }
-    }
-
     fn journal(session: &SessionRef, key: &str) -> PathBuf {
         PathBuf::from(
             session
@@ -1803,65 +1602,6 @@ main()
         assert!(!backend.capabilities().rename);
         assert!(backend.attach(&session).expect("the live session attaches") == session);
         finish(&backend, &fake, &[&session]);
-    }
-
-    #[test]
-    fn tui_spawn_uses_the_pane_runner_and_keeps_both_references() {
-        let fake = Fake::new();
-        let runner = Arc::new(ViewerRunner::default());
-        let viewer = Arc::new(crate::backend::herdr::HerdrBackend::with_env(
-            runner.clone(),
-            BTreeMap::from([
-                ("HERDR_ENV".to_string(), "1".to_string()),
-                ("HERDR_SESSION".to_string(), "test".to_string()),
-            ]),
-        ));
-        let backend = AcpBackend::with_viewer(
-            AcpOptions {
-                tui: true,
-                ..AcpOptions::default()
-            },
-            Some(viewer),
-        );
-        let mut spec = fake.spec("t-view");
-        spec.env.extend([
-            ("ONLYNE_CLUSTER".to_string(), "lab".to_string()),
-            ("ONLYNE_ROLE".to_string(), "planner".to_string()),
-            (
-                "ONLYNE_SOCKET".to_string(),
-                fake.root
-                    .path()
-                    .join(".onlyne/run/s")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-        ]);
-        let session = backend.spawn(spec).unwrap();
-
-        assert_eq!(session.backend_ref["id"], "sess-1");
-        assert_eq!(session.backend_ref["pane"]["herdr"]["pane_id"], "p-view");
-        assert!(backend.capabilities().focus);
-        assert!(backend.probe(&session).unwrap().alive);
-        backend.focus(&session).unwrap();
-        let calls = runner.calls();
-        let pane_run = calls
-            .iter()
-            .find(|call| call.contains("pane run"))
-            .expect("viewer went through the real herdr pane runner");
-        for part in ["onlyne-view", "--workspace", "--task", "t-view", "--socket"] {
-            assert!(pane_run.contains(part), "{pane_run}");
-        }
-        assert!(calls.iter().any(|call| call.contains("pane get p-view")));
-        assert!(calls.iter().any(|call| call.contains("pane focus")));
-
-        finish(&backend, &fake, &[&session]);
-        assert!(
-            runner
-                .calls()
-                .iter()
-                .any(|call| call.contains("pane close p-view")),
-            "closing the ACP session closes its viewer pane"
-        );
     }
 
     #[test]
@@ -2222,7 +1962,6 @@ main()
             mode: "acceptEdits".into(),
             model: "qfmodel".into(),
             reasoning_effort: "high".into(),
-            tui: false,
             allow_permissions: false,
         });
         let session = backend.spawn(fake.spec("t-config")).unwrap();

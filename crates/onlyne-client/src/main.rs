@@ -17,9 +17,6 @@ enum Command {
     Run {
         #[arg(long)]
         workspace: PathBuf,
-        /// Open a session viewer pane when the selected backend supports one.
-        #[arg(long)]
-        tui: bool,
     },
     Init {
         #[arg(long)]
@@ -113,7 +110,7 @@ async fn main() {
                 1
             }
         },
-        Command::Run { workspace, tui } => {
+        Command::Run { workspace } => {
             // The operator may name the workspace relatively. `absolute_path`
             // canonicalizes what exists and falls back to a lexical absolute
             // spelling, so the tree the client resolves, binds, and hands the
@@ -139,7 +136,6 @@ async fn main() {
                     .with_stale_grace_secs(config.stale_grace_secs)
                     .with_stall_report_secs(config.stall_report_secs)
                     .with_backend(config.backend)
-                    .with_tui(tui)
                     .with_acp(config.acp),
                 )
                 .await

@@ -1,4 +1,3 @@
-use crate::content::{ContentHub, ContentSubscription};
 use crate::intent::stamp_op_id;
 use crate::runloop::ClientInit;
 use anyhow::{Context, Result, anyhow};
@@ -44,7 +43,6 @@ struct DispatchInner {
     /// The count form of the same policy (`relay_count`).
     pub relay_count: Option<u32>,
     pub backend: Arc<dyn SessionBackend>,
-    pub content: Arc<ContentHub>,
     pub store: ClientStore,
     pub bridge: Bridge,
     pub sessions: HashMap<String, SessionSlot>,
@@ -135,20 +133,16 @@ impl DispatchState {
         backend: Arc<dyn SessionBackend>,
         store: ClientStore,
     ) -> Self {
-        let workspace = workspace.into();
-        let content = ContentHub::new(workspace.clone());
-        backend.set_content_sink(content.clone());
         Self {
             inner: Arc::new(Mutex::new(DispatchInner {
                 role: role.into(),
-                workspace,
+                workspace: workspace.into(),
                 command,
                 max_sessions,
                 reuse,
                 relay_required: Vec::new(),
                 relay_count: None,
                 backend,
-                content,
                 store,
                 bridge: Bridge::new(),
                 sessions: HashMap::new(),
@@ -185,21 +179,6 @@ impl DispatchState {
     pub fn outcome_feed(&self) -> Option<onlyne_session::OutcomeFeed> {
         self.inner.lock().backend.outcomes()
     }
-
-    pub(crate) fn watch_content(
-        &self,
-        args: &onlyne_proto::WatchContentArgs,
-    ) -> Result<ContentSubscription> {
-        let content = self.inner.lock().content.clone();
-        content.subscribe(args)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn content_subscriber_count(&self) -> usize {
-        let content = self.inner.lock().content.clone();
-        content.subscriber_count()
-    }
-
     /// Bind one adapter connection to the session it named.
     ///
     /// The name is the session id the client spawned the plugin with, which is
