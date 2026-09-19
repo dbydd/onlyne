@@ -1,5 +1,132 @@
 # Changelog
 
+## [1.2.0] - 2026-09-19
+
+Scope: two halves moving in opposite directions land together. The first
+withdraws the session-content surface: the `onlyne-view` binary target, its
+live content page over the client socket, its full-screen journal page, the
+`watch_content` / `content` session subscription on the adapter protocol, and
+the client-side `ContentHub`. The ACP session backend, the workspace `[acp]`
+table, and the per-session journal stay, because the journal is durable record
+and the backend works without a viewer pointed at it. The second half adds
+three behaviors on top of the surviving surface: an ACP `initialize` that
+always carries a client version, a refusal of a protocol `session_command`
+handed to a pane backend, and a settlement reason readable off the ledger row.
+The five rollbacks (`444caa7`, `d40d60b`, `aebb949`, `622623b`, `1228412`) and
+the wording pass (`34504ed`) are new commits; the history they follow is
+intact. The release scope is every crate in this workspace, nineteen at 1.2.0.
+`plugins/onlyne-agent-pi` published 1.1.2 to npm earlier (`0522986`) and keeps
+that number through this bump.
+
+Gate on the tree at `8c8848d`, run 2026-09-19: `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets -D warnings`, and
+`cargo test --workspace` give 883 passed, 0 failed, 1 ignored across 66 suites.
+Fake-backend e2e is 14/14 at exit 0 — cases 1-7, 9, 12, 14, 15, 16, 17, 18. A
+five-role ring ran hops 0..10 with every hop `acked`. Two of its roles carried
+`backend = "exec"` with `pi --mode rpc` and
+`backend = "acp"`, and both held zero panes for the whole run: the judgement is
+`cache/orca-tabs.jsonl` staying absent, or present and gaining no line. The
+role carrying `backend = "orca"` with an interactive pi entered its panes as
+before.
+
+### Added
+
+- client: `reject_protocol_command_in_pane` refuses a protocol session command
+  before any pane opens. When the role's backend is `herdr`, `orca`, or
+  `zellij` and the rendered `session_command` argv contains `--acp`,
+  `--mode=rpc`, or `--mode rpc`, the delivery fails, the task row settles
+  `rejected`, and the full sentence lands in that row's `reason` column:
+  `{backend} backend cannot host a protocol session: {token} speaks JSON-RPC on
+  its own stdio and the pane would print the frames; set backend = "exec" or
+  backend = "acp" in the workspace config`. The guard keys on the backend name.
+  A workspace chooses `backend` once per client process, so the operator's
+  remedy is the config field. Files: `crates/onlyne-client/src/dispatch.rs`,
+  cases in `crates/onlyne-client/tests/scenarios.rs`.
+- proto, server, cli, and tui: `LedgerEntry.reason` is an `Option<String>` with
+  the serde attribute
+  `#[serde(default, skip_serializing_if = "Option::is_none")]`, and the read
+  path carries it. `entry_from_row` copies
+  `row.reason` (`crates/onlyne-server/src/relay.rs`), the CLI's row-shape probe
+  `ROW_FIELD_KEYS` grows from five keys to six, with `reason` fourth behind
+  `msg_id`, `task`, and `state`
+  (`crates/onlyne-cli/src/ledger.rs`), and the board's second page prints
+  `reason=<x>` in the task detail row's tail when the field holds a value
+  (`crates/onlyne-tui/src/ui.rs`). The column and its writers predate this —
+  `mark_rejected`, `fail_one`, and `expire_one` in
+  `crates/onlyne-store/src/server.rs`, plus the operator `reject --reason`, which
+  reaches the same `mark_rejected` — `mark_acked` takes no reason
+  (`crates/onlyne-store/src/server.rs:450-452`), so an operator `ack --reason`
+  travels the settlement event and leaves the row's column as it stood, and
+  `repair ack` closes only the fault row. Readers could not see any of it. Values
+  that have appeared
+  in a live run: `requeue_exhausted`, `requeue_ttl`, `expired`, `session_dead`.
+  A row an older server wrote decodes with the field empty and re-encodes
+  without the key, covered by
+  `a_ledger_row_without_the_reason_key_decodes_as_no_reason` in
+  `crates/onlyne-proto/src/ops.rs`.
+
+### Changed
+
+- tui: the `onlyne-view` binary is removed with its two content views — the
+  live content page fed from the client socket and the full-screen journal
+  viewer. `src/view.rs`, `src/content.rs`, the `view_once` and `view_socket`
+  tests, the bin section and the adapter dependency it needed are gone, and
+  `render_once_text` renders the board through the single path it had before
+  the shared `render_text` entry point. The board's own page set is unchanged.
+  Files: `crates/onlyne-tui/Cargo.toml`, `crates/onlyne-tui/src/ui.rs`,
+  `crates/onlyne-tui/src/lib.rs`.
+- adapter and proto: the session-content subscription leaves the wire.
+  `PluginOp::watch_content` and `HostOp::content`, `WatchContentArgs` and
+  `ContentFrame` with their schema entries, the two wire-vector fixtures, the
+  SDK's `Host::watch_content` seam, and the `MountKind::Admin` rule that bought
+  it are gone. Files: `crates/onlyne-proto/src/adapter.rs`,
+  `crates/onlyne-proto/schema/adapter.schema.json`,
+  `crates/onlyne-adapter/src/lib.rs`, `crates/onlyne-adapter/PROTOCOL.md`.
+- client: `ContentHub`, its subscriptions, the `watch_content` serving on the
+  adapter socket, and the `run --tui` flag are removed, and with them the ACP
+  backend's viewer-pane machinery: the options field, the herdr viewer backend,
+  and its spawn, focus, probe, and close handling. A session is a child process
+  its own client holds. Files: `crates/onlyne-client/src/content.rs`,
+  `crates/onlyne-client/src/adapter_socket.rs`,
+  `crates/onlyne-session/src/backend/acp.rs`.
+- session: the journal and the seam that writes it stay. `ContentWriter`,
+  `ContentRecord`, `read_content_records`, the offset index, and the
+  `ContentSink` trait behind the backend's `set_content_sink` seam keep writing
+  `<workspace>/.onlyne/logs/session-<task>.log` and
+  `session-<task>.events.jsonl`. Two reporting surfaces remain: the ACP backend
+  parses `outcomes()` on the client side, and pi reaches the client over the
+  adapter socket plugin. The header and the `ContentSink` contract now address
+  readers generally, since the surface they named is gone. Files:
+  `crates/onlyne-session/src/content.rs`,
+  `crates/onlyne-session/src/backend/acp.rs`.
+- config: `schema/spec.schema.json` is regenerated from the current doc
+  comments by `cargo run -p onlyne-config --bin config-schema`. The
+  `relay_count` description gains the sentence naming the guard file's own
+  spelling `relay_required_count`, and the `[server]` keys come out in the
+  alphabetical order the generator emits. `config-client.schema.json` was
+  already current. File: `crates/onlyne-config/schema/spec.schema.json`.
+
+### Fixed
+
+- acp: `ClientInfo.version` is a required `String`. ACP types `clientInfo` as
+  `{name, title?, version}` with `version` a string, and a real agent answers
+  `-32602 Invalid params` when the field is absent, so an `initialize` built
+  from `ClientInfo::new` never reached `session/new`. `ClientInfo::new` fills
+  the field from `env!("CARGO_PKG_VERSION")`, and `with_version` puts a host's
+  own release number on the wire. File: `crates/onlyne-acp/src/types.rs`.
+
+All nineteen crates move to 1.2.0: `onlyne-proto`, `onlyne-frame`,
+`onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-acp`,
+`onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-testkit`,
+`onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-gateway-telegram`,
+`onlyne-gateway-feishu`, `onlyne-gateway-qqbot`, `onlyne-gateway-weixin`,
+`onlyne-tui`, and `onlyne-cli`. Every internal path dependency in
+`[workspace.dependencies]`, in the crate manifests, and in
+`crates/onlyne-gateway/Cargo.toml`'s four plugin entries carries the matching
+registry floor, so each manifest stays publishable on its own. This section
+records no crates.io or npm receipt; publication rides the release action that
+follows.
+
 ## [1.1.1] - 2026-09-18
 
 Scope: the socket-path field fix reported 2026-09-17 from the formal-research
