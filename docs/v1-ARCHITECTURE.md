@@ -208,7 +208,7 @@ Generation flow:
 
 Source: Plan §11 lines 383-397.
 
-Generation errors with exit 4 include `onlyne: no role matches the requested templates/roles`, `onlyne: template for role <r> is ambiguous: <p1>, <p2>`, `onlyne: no template directory named <r> under <template_root>`, `onlyne: refusing to overwrite <path>; pass --force`, `onlyne: agent_package not set in spec.toml [server]`, and `onlyne: generated workspace embeds absolute path <path>`. Source: Plan §11 lines 383-391.
+Generation errors with exit 4 include `onlyne: no role matches the requested templates/roles; available roles: <r1>, <r2>`, `onlyne: template for role <r> is ambiguous: <p1>, <p2>`, `onlyne: no template directory named <r> under <template_root>`, `onlyne: workspace exists at <path>; pass --force to overwrite`, `onlyne: agent_package not set in spec.toml [server]`, and `onlyne: generated workspace embeds absolute path <path>`. Source: Plan §11 lines 383-391.
 
 Relocation guarantee: generated workspaces derive runtime paths from their own `--workspace`; the connection to the server uses `listen` plus `cert_pin`. Source: Plan §11 line 391; Verification case 9 lines 509-518.
 

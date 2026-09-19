@@ -1,70 +1,88 @@
-# GOAL — onlyne 1.1.0：headless 后端转正 + Windows 平移，发中版本
+# GOAL — onlyne：payload-v2 结项报告收口为 v1.2.2 发布
 
 ## Objective
 
-在 1.0.9 基线上交付 1.1.0：无头（headless）会话后端成为一等公民，整仓向 Windows（x86_64/aarch64 MSVC）平移并挂上 CI，全部六 crate 版本号统一 1.1.0，过发布门。
+在 `v1.2.1`（tag `38aece8`，工作树基线 `86d34ff`）之上交付下一轮的代码面：agent 写的那一份结项文件从「一行结论」扩成「一行结论 + 至多八行转手」，读它的文法收在一个模块里，写它的人可以在停手前自己校验，client 把转手线沿该 role 已有的连接送出去。附带把「查文档才能知道的东西」搬进 `--help` 与 fragment 注释。
 
-执行窗口：夜间谷时计价带，子代理大批并行。
+本轮把这些面收进一次发布：工作区版本 `1.2.1` → `1.2.2`，CHANGELOG 的对应节从开发中标题改为带日期的发布标题，提交、打 tag、发 crates.io、刷新本机安装。
 
 ## Scope（in）
 
-### P1 headless 补全（2026-09-15 修订：exec.rs 即 headless 后端本体，零新结构体）
+### P1 文法单一权威（proto）
 
-实证（`backend/exec.rs:1-29,215-246`）：stdin 常开管道（rpc 模式 EOF 语义已写进注释）、stdout/stderr 并流进 `.onlyne/logs/session-<task>.log`（输出落盘=天然的"环"，比内存环强）、`process_group(0)`、TERM→5s→KILL 收组再收身、持柄 `try_wait` 精确 probe（detail 带 `{"exit": code}`）、`focus=false` 已 unsupported、显式 `ONLYNE_BACKEND=exec` 天然跳宿主探测。**不新造 headless 结构体（AGENTS §11 品味条款），P1 剩余缺口是：**
+- `crates/onlyne-proto/src/payload.rs`：`parse` 把一个报告文件读成 `PayloadV2::{Done, Failed, Blocked, Invalid}`，`Handoff::text_or` 给转手线兜底正文，`GRAMMAR_V2` 是 prompt 与 CLI help 共用的文法全文，`MAX_REPORT_LINES = 16`、`MAX_REPORT_HANDOFFS = 8`。
+- 前缀：`hop-done:` / `hop-failed:` / `hop-blocked:` / `handoff: <role>[ | <一行>]`；`#` 注释行与空行跳过；CRLF 与孤立 CR 在分类前归一；行号按物理行报；读不到的文件一律 `Invalid` 且零转手（fail closed）。
+- 17 条内联用例（`TestPayload`）。
 
-- config 面：`[client] backend = "exec"` 字段落 `onlyne-config/client.rs`，`runloop.rs:133` 选择链改成 env `ONLYNE_BACKEND` > config.backend > auto；deny_unknown_fields 下新增可选字段，无 marker bump（1.0.9 `stall_report_secs` 先例）。
-- 别名：`BackendName::parse`/`backend_by_name` 认 `"headless"`→Exec；`as_str()` 维持 `"exec"`，投影/事件字节不变。
-- Windows 杀阶梯（exec.rs 内 cfg 分支，不拆共享函数出去）：spawn 加 `CREATE_NEW_PROCESS_GROUP`；stop = `GenerateConsoleCtrlEvent(CTRL_BREAK)`→grace→`child.kill()`；无柄判活 windows 分支 = `GetExitCodeProcess`（`windows-sys`，与 interprocess 同版本对齐，workspace 依赖）。
-- 输出尾上投影：会话退出时 reconcile 读 log 尾部 N 行（常量入 exec.rs）填 `ResourceProbe.detail` 的 `output_tail` 键——proto SessionState 的 detail 是透传 JSON，无 schema 改动。
-- 红线：trait、reconcile 判定序、1.0.9 claims/adoption、stall 检测、四个 pane 后端文件零改动；`exec` 语义只加不改（现有 `kill -0`/`process_group` unix 路径逐字节等价）。
-- 测试：exec.rs 单测补跨平台用例（sleep 子进程精确退码、log 文件增长、TERM 阶梯 unix-gated）；fake e2e 新场景 `exec-headless.sh`（fake agent 作 session_command：assign→子进程跑→log 断言→exit 码→reconcile 标 exited→report 链路→exit 5 豁免用 config 面）；case4/case15 重跑零回归。
-- docs：client README 后端表加 `headless` 别名行 + config 字段；operations 增 headless 运维段（log 路径、TERM 语义、`pi --mode rpc` 示例：stdout 归 log、消息面走 adapter socket）；spec 示例注释一句。
+### P2 acp 后端读报告（session）
 
-### P2 Windows 平移（2026-09-15 修订：AF_UNIX 前提被编译器驳回，走 GOAL 预埋的 named-pipe fallback）
+- `emit_handoffs` 先于 `remove_file`；`Invalid` 不删文件，重写即可消费。
+- `head_kind` 把「agent 自报阻塞」与断链分开：`hop-blocked:` → `Outcome::Failed` + note，`Invalid` → `Cancelled`。
+- `payload` journal 记录带 `handoffs`，被拒时带 `error`；每条待路由的转手线另记 `handoff` 记录。
 
-- 实证：tokio 1.52 `Unix*` = `cfg(all(unix, feature="net"))`，Windows 无此类型；std 同类在 nightly（rust-lang#150487）、mio#1609 未合 → AF_UNIX 在 stable 1.85 不可用。
-- 定案：**`interprocess` 2.4.4 `features=["tokio"]` 的 `local_socket`**——Windows byte-mode named pipe，Unix 仍 UDS（`GenericFilePath` + `mode(0o600)` + `reclaim_name(false)`，unlink 归 onlyne）。frame 协议零改动（IO 层已泛型）。全文实证在 local://windows-seam-feasibility.md。
-- 落点：a) `onlyne-layout` 新增 `to_local_name` + Windows marker（`.onlyne/run/s` 变普通 marker 文件存 pipe 名；NPFS 名 = `v1:` 派生 `sha256(std::path::absolute 归一化)[..16]hex`，**禁 canonicalize**）；b) `server/admin.rs`、`client/adapter_socket.rs`、`cli/wire.rs`、`gateway/host.rs`、`adapter::connect_unix` 换类型；c) Windows bind 必带 owner-only SDDL `D:P(A;;GA;;;OW)(A;;GA;;;SY)`（默认 DACL 给 Everyone 读=权限回归红线）；d) `apply_private_mode` 非 unix 维持 no-op。
-- 其余 cfg 点：
-  1. `cli/forward.rs`：`MetadataExt`/`CommandExt::exec` 双实现（Windows=spawn+wait、可执行判定=存在+is_file）。
-  2. `orca.rs` 的 `Command::new("sh")` 包壳改 argv 直传；`nix::fs` 一处、`zellij.rs` 的 `MetadataExt` 属主检查：cfg 门。
-  3. 测试：`#!/bin/sh` stub 与 `PermissionsExt`/`std::os::unix::net` 断言按 OS 换（`.cmd`/`current_exe --helper` 模式），0600 断言 cfg 门。
-  4. `server/cli.rs` 的 `CommandExt`/`kill -KILL`。
-- 信号面：`tokio::signal::windows::ctrl_c` 接现有 SIGINT 收尾路径；SIGTERM/SIGHUP 语义在 Windows 以 `onlyne shutdown` / `onlyne reload`（现成 admin 动词）为准，写进文档。
-- CI：新建 `.github/workflows/ci.yml`——`ubuntu-latest` + `windows-latest` 双 job：`cargo test -p onlyne-proto -p onlyne-config -p onlyne-net -p onlyne-session -p onlyne-store -p onlyne-frame -p onlyne-adapter -p onlyne-server -p onlyne-client -p onlyne-gateway -p onlyne-layout -p onlyne-cli -p onlyne-tui`；fake e2e 在 windows job 里能跑多少跑多少（headless/cli 面必跑，pane 面按 OS 门）。本地开发环配 `cargo check --target x86_64-pc-windows-msvc`。
-- 首验硬点：深层 workspace 路径下双 socket（marker+派生 pipe 名）bind/accept/connect 在 windows-latest 实测通过；`ERROR_PIPE_BUSY` 重试被 `--timeout` 罩住；owner-only SDDL 生效（第二个 Windows 用户/进程连不上，CI 上用 LOCAL SERVICE 或 SID 断言验证）。
-- 明确不做：防火墙/端口耗尽类环境问题、Win7/Server2019、MSVC 之外的 windows 工具链、ConPTY（宿主自理）。
+### P3 client 路由（handoff）
 
-### P3 宿主上报映射（机会性，不拦发布）
+- `crates/onlyne-client/src/handoff.rs`：转手 = 现有 `send` 通路上的 `MsgKind::Task`，`parent_task` 指向本轮，`hop + 1`，正文前缀常量 `RELAY_BODY_PREFIX = "handoff: "`，整组 6 秒预算。
+- `acl_denied` / `unknown_role` 判 `NetError::Rejected`：写 client.db 的 `handoff_denied` events 行 + 首条同名 fault 行，verdict 与 outcome kind 保持原样；链路本身无应答时回落 durable intents（与其余出站帧同路）。
+- 消费点在 `dispatch.rs on_out`；`SessionSlot.hop` / `hop_of()` 提供 hop 继承。
 
-- `zellij.rs` probe 读 `list-panes` 的 pane 状态/退出码 → 映射 `unknown` 为 `exited(code)`；`herdr.rs`/`orca.rs` 若其 CLI 暴露同等字段则跟进。改动圈在各后端文件内部；宿主不暴露就维持 `unknown`。
+### P4 本地校验动词族（cli）
 
-### P4 版本与发布
+- `onlyne report path | check | write | validate`，`crates/onlyne-cli/src/report.rs`。只读写工作区文件，零 socket。
+- 退出码形状：0 成功 / 2 无效、缺失、读不到、参数被拒 / 1 io 失败；3 留给 socket 解析。
+- 8 条集成用例跑真二进制（`tests/cli_report.rs`）。
 
-- 六 crate + cli + tui 版本统一 `1.1.0`；CHANGELOG 新段（headless/Windows/CI/宿主映射）。
-- 全量门：`cargo test --workspace` 零红、clippy/fmt 绿、fake e2e 全数（含新 headless 场景）、`--target x86_64-pc-windows-msvc` 全仓 check 绿。
-- release build + codesign（本机，沿用 ad-hoc 方式）+ 装 `~/.cargo/bin`；crates.io publish 走网络窗口纪律：有界 watcher，先 publish 后 `cargo new` 冷编译消费验证；README/docs 发布记录。
+### P5 可发现性
+
+- `onlyne-client init` fragment 三组注释（`BACKEND_COMMENTS` / `ACP_COMMENTS` / `KNOB_COMMENTS`），默认值取自 parser 的 `Default`。
+- `admin.rs` 七个 repair 动词的 doc + 两段 `after_help`；`NO_SUPPORTED_HOST` 三行点名 `[acp]` 键；`BACKEND_NAMES` 常量，`unknown session backend` 带 accepted 列表。
+- 文档：`README.md` / `README.zh-CN.md`、`docs/v1-CONTRACT.md`、`v1-ARCHITECTURE.md`、`v1-PLAN.md`、`docs/operations.md`（payload-v2 节、journal 字段、`onlyne report` 动词表、退出码）、`skills/onlyne-role/SKILL.md`。
+- `template.rs` 新增 `NoRoleMatches` + `available_roles()`；`relay.rs` 四处键集提示共用一常量。
+
+### P6 路径拼写上提到 layout
+
+- `CONTENT_INDEX_FILE_NAME` 与 `RoleWorkspace::{out_dir, report_path, session_log_path, session_events_path, content_index_path}`（`onlyne-layout/src/lib.rs`）。
+- `acp.rs`、`exec.rs`、`content.rs`、`report.rs` 改走 accessor；两处副本常量删除。
+
+### P7 client 配置格式宽松化
+
+- `local_cli.rs`：`is_plugin_table_header` 容忍 `[[ plugin ]]` 与表头行内注释；`PluginsEdit{primary, duplicates}` + 倒序删重复行；`migrate_plugin_blocks` 合并重复表头；仅文本变化时原子写；四类拒绝消息统一带 `(line N)`。
+- `agent_install` 在碰文件系统前用 `config_lists_plugin` 拒绝重复注册；操作员串改为 `registered plugin <id> in plugins = [...]` / `deregistered plugin <id> from plugins`。
+
+### P8 门禁与 e2e
+
+- `cargo fmt --all`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`。
+- 新建 `crates/onlyne-testkit/e2e/acp-payload-v2.sh`（case 19）：两条路由、一条被 ACL 拒、一条 blocked、一条 invalid 后重写；断言 `parent_task`、`hop + 1`、`handoff: ` 前缀、completion receipt、`handoff_denied` 且零 child row。`acp-agent.py` 新增可选 `--caller-report-marker`，缺省路径逐字节不变。
+
+### P9 收口文书
+
+- `CHANGELOG.md` `[Unreleased]` 段；`docs/STATUS.md` 计数、case 19、payload-v2 一句；本文件。
+
+## 已决事项（用户拍板，2026-09-19 深夜）
+
+- 转手链条深度：协议与 server 对 hop 不做上限判定，一条报告可同时交给至多八个 role、每条自带正文——这是初衷。授权模型保持 spec 的 `allowed_targets` 边 + ACL 逐条判定，操作员剪边即收束链条。零代码改动，口径写在 `docs/operations.md` 的结项报告节。
+- `repair fail --notify` 与 `repair adopt --session-id`：两个字段删除（通知有替代渠道：`onlyne send --from <supervisor> --to <role>` 或订阅 `ledger_state` 事件）。
+- `$NAME` 间接取值接到 client 的读配置路径，与 gateway 面口径一致。
+- `onlyne complete --head-from` 给缺省值 `local`，`--text` 改为只在 `local` 分支必填；`onlyne schema` 定为长期公共面，补 CLI 用例与 README/契约记载。
+- `--backend-ref` 收 JSON：可整体解析的值按该值上线，其余按 JSON 字符串上线，缺省 null；rebind/adopt 的操作员从此能表达行内对象引用。
+- skill 文件保持仓库侧文档，`server generate` 往工作区复制的内容维持现状（模板普通文件、`.pi` 树、按需的 `agent/<pkg>`）；文法权威在 `onlyne report --help` 内嵌的 `GRAMMAR_V2`。
 
 ## Out of scope
 
+- 版本 bump、tag、crates.io 发布、装机与冷编译验证（下一轮发布窗口）。
 - web admin、调度器、模型 runtime、workspace 文件同步（AGENTS.md §0）。
-- named-pipe 传输（除非深路径 bind 实测失败才议）。
-- 任何对 trait/reconcile/claims/stall 的改动。
-- Server Core/老 Windows、gnu 工具链。
+- trait / reconcile 判定序 / claims / stall 检测的改动。
 
 ## Completion criteria
 
-1. headless 后端 e2e 新场景绿，case4/case15 零回归。
-2. windows-latest CI job 绿（workspace test 或按 OS 门的等价集合 + 深路径 socket 实测过）。
-3. 本机三平台门全绿 + `1.1.0` 六件套发布、装机、冷编译验证。
-4. docs：README/CHANGELOG/cli/socket-api/verification 的 Windows 与 headless 口径落齐。
+1. `cargo test --workspace` 零红。实测：951 passed / 0 failed / 1 ignored（`herdr_live_probe`）/ 68 suites，较 1.2.1 的 887 增 64。
+2. fmt 与 clippy `-D warnings` 全绿。实测：`cargo clippy --workspace --all-targets -- -D warnings` Finished dev 零告警。
+3. case 19 连跑两次 exit 0，`acp-session.sh` 与 `running-lights.sh` 零回归，进程树无残留。实测：三者均 PASS，`pgrep` 干净。
+4. 文法只有一处定义：全仓 `grep` 只有 `payload.rs` 持前缀与行序规则，CLI help 与 prompt 打印 `GRAMMAR_V2`。
+5. 文书齐：CHANGELOG `[Unreleased]`、STATUS 计数与 case 19、operations payload 节、README 双语、SKILL.md。
 
-## Contract（给并行 worker 的共享裁定，2026-09-15 修订版）
+## 待用户拍板（本轮零实现）
 
-- backend 正名 `exec`，`"headless"` 为 parse 别名；优先级 env `ONLYNE_BACKEND` > config `[client] backend` > auto。投影/事件里 backend 字符串维持 `"exec"` 字节不变。
-- 输出环=现状 log 文件；退出尾部 N 行进 `ResourceProbe.detail.output_tail`（常量 `OUTPUT_TAIL_LINES` 入 exec.rs），proto 零改动。
-- 杀阶梯留在 exec.rs 内 cfg 分支（unix 路径逐字节等价）；windows 用 `windows-sys`（0.61，features 只开 Console/Process）：CREATE_NEW_PROCESS_GROUP + CTRL_BREAK→grace→TerminateProcess；无柄判活 = GetExitCodeProcess。
-- socket seam：`interprocess = "2.4.4"` features `["tokio"]` 入 workspace.dependencies；Name 派生 + Windows marker + owner-only SDDL `D:P(A;;GA;;;OW)(A;;GA;;;SY)` 全放 `onlyne-layout`（新 `local_socket` 模块）；unix `GenericFilePath`+`mode(0o600)`+`reclaim_name(false)`，unlink 归 onlyne 现有逻辑；`--socket` 以 `\\.\pipe\` 开头原样透传；marker 内容 `v1:<pipe名>`，缺失时双方独立复算（`std::path::absolute` 归一化 sha256 前 16B hex，禁 canonicalize）。
-- exit 码/消息字节兼容：2/3/4/5 全保留；`ERROR_PIPE_BUSY` 在 cli `--timeout` 罩内重试。
-- 所有权互斥：W1(Headless)=session backend mod/exec、config client.rs、client runloop.rs、testkit e2e 新脚本、client README/operations docs；W2(Windows)=layout、server admin/cli、client adapter_socket/daemon、cli 全 src+tests、adapter lib、gateway host/main/onboarding、net identity/tls、根 Cargo.toml、ci.yml。root Cargo.toml 只有 W2 碰；W1 的 windows-sys 写在 onlyne-session/Cargo.toml 局部。
-- 版本 bump 不属于 worker：统一 1.1.0 由 Release 阶段一次做。
+- 装饰旗标：`repair fail --notify`（`faults.rs` 零消费）、`repair adopt --session-id`（`faults.rs:249` 只取 `task_id`）→ 删字段或补服务端行为。
+- token 路线（`HandoffGrant` / `accept_handoff` / grant topic）→ 建或删文档段。
+- `wait-ready` 退出码、`complete --head-from` 默认值、`NO_SOCKET_MESSAGE` 是否加指引、`$NAME` 间接值是否接线、`onlyne schema` 与顶层退出码表是否长期保留、skill 是否由 `server generate` 复制进工作区、`--backend-ref` 打包。

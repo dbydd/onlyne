@@ -96,9 +96,11 @@ fault 通过 advisory `Event::Fault` 推给观察者。
 
 `onlyne repair inspect --task <id>` 读取一条任务的恢复上下文。
 
-`onlyne repair adopt --task <id> --session-id <session> --backend <backend> --reason <reason>` 把任务接到已知 session。
+`onlyne repair adopt --task <id> --backend <backend> [--backend-ref <值>] --reason <reason>` 换掉这一行 desired 里的 backend 绑定，行内的 session id 与 generation 保持原样，seq 前进一格。要把任务搬到另一个 session，用下面的 `rebind`。
 
-`onlyne repair rebind --task <id> --session-id <session> --backend <backend> --reason <reason>` 重写任务的 backend 绑定。
+`onlyne repair rebind --task <id> --session-id <session> --backend <backend> [--backend-ref <值>] --reason <reason>` 重写任务的 backend 绑定，把行内的 session id 换成给定值，generation 加一、seq 归零，旧 generation 的上报从此不再被采信。
+
+两个动词的 `--backend-ref` 同一规则：能整体解析为 JSON 的取值按解析结果上线（pane 引用这类对象形值因此可直接写 `--backend-ref '{"id":"p-7"}'`），其余文本按一个 JSON 字符串上线，旗标缺省上线 null。服务端与 client 按对象消费该值（`crates/onlyne-server/src/faults.rs:253-257,273-277`、`crates/onlyne-client/src/dispatch.rs:1088-1092`）。
 
 `onlyne repair retry --task <id> --reason <reason>` 把可重试任务送回队列。
 
@@ -296,7 +298,7 @@ herdr 的关闭是幂等的：`herdr pane close` 回 `pane_not_found` 记为成�
 关闭阶梯：
 
 - unix：会话是独立进程组。`close` 用 `kill(2)` 只打记录的 pgid（`backend_ref.pgid`，与 leader pid 相同），先 `SIGTERM`，宽限 5 秒后再 `SIGKILL`，最后 `child.kill` 收尸。组信号失败时退回到对 leader pid 的同名信号。pid 0/`-1` 拒绝发送（那是“本进程组 / 一切可杀进程”，不是会话）。从不按 cmdline 通配杀进程。
-- windows：spawn 带 `CREATE_NEW_PROCESS_GROUP`，停机先 `GenerateConsoleCtrlEvent(CTRL_BREAK)`，宽限后再 `child.kill()`（TerminateProcess）。客户端没有控制台时 CTRL_BREAK 失败，直接走终止。Windows 没有 SIGTERM；运维面的优雅停机用 `onlyne shutdown`。
+- windows：spawn 带 `CREATE_NEW_PROCESS_GROUP`，停机先 `GenerateConsoleCtrlEvent(CTRL_BREAK)`，宽限后再 `child.kill()`（TerminateProcess）。客户端没有控制台时 CTRL_BREAK 失败，直接走终止。Windows 没有 SIGTERM；关停由 supervisor 在 server root 所在主机执行 `onlyne server stop`。
 
 `pi --mode rpc` 是这条后端的典型 `session_command`：stdin 由 client 持开（EOF 对 rpc 意味着操作者离开），stdout 进 session log，消息面走 adapter socket，不走子进程的 stdio。
 
@@ -327,22 +329,61 @@ session_command = ["pi", "--mode", "rpc", "--session-id", "{session}"]
 
 被拒的权限请求落一条 `permission` fault，其 reason 列出被拒的工具调用与本机策略；同一任务的终态照常进 ledger。
 
-### 结项报告（payload-v1）
+### 结项报告（payload-v2）
 
-ACP 会话的结项由 client 完成，agent 会话内没有 `onlyne` CLI，也不需要它。`deliver` 在每次投递的 prompt 尾部注入一段报告指令，首行给出绝对路径 `<workspace>/.onlyne/out/<task-id>.md`，要求 agent 在停止前把结果写进该文件：内容一行，两种前缀之一，`hop-done: <一行结果>` 或 `hop-failed: <一句话原因>`；写入方式是先写同目录的临时名，再 rename 进位。报告行的取值沿用 `out_head` 的既有规则：单行、空白折叠、200 字符截断。
+ACP 会话的结项由 client 完成，agent 会话内没有 `onlyne` CLI，也不需要它。`deliver` 在每次投递的 prompt 尾部注入一段报告指令。这段指令首行给出绝对路径 `<workspace>/.onlyne/out/<task-id>.md`，并原样打印整份文法。指令要求 agent 在停止前把结果写进该文件：先写同目录的临时名，再 rename 进位。报告正文的取值沿用 `out_head` 的既有规则：单行、空白折叠、200 字符截断。
+
+文法 v2 规定：一个报告文件由一行 verdict 加零或多行 handoff 组成（v1 的单行文件同样合法）：
+
+| 行 | 含义 |
+|---|---|
+| `hop-done: <一行结果>` | verdict：任务做完了，正文是结论 |
+| `hop-failed: <一句话原因>` | verdict：任务失败，正文是原因 |
+| `hop-blocked: <一行阻塞>` | verdict：任务停在外部依赖上，正文是所等之物 |
+| `handoff: <目标 role> \| <交给该 role 的一句话>` | 转手一行，可出现零到八条；`\|` 之后可缺省，缺省即把 verdict 正文当交付内容 |
+
+行首 `#` 是注释行，空行忽略。除此之外任何不合文法的行 ⇒ 整份文件 Invalid（fail closed：零转手、零路由）。单文件上限 16 行、handoff 上限 8 条，超限同样 Invalid。CRLF 与裸 CR 先归一为 LF 再逐行分类。
 
 报告目录由 client 在投递前创建。创建失败的那次 prompt 不带指令块，本轮按缺位情形照常结项，journal 在 `dispatch` 记录旁补一条 `warning` 记录。
 
-turn 结束、该轮全部 `session/update` 落账之后，client 读取报告文件一次并随即删除；同一 task 重投时读到的一定是新一轮写入的文件。结项取值：
+turn 结束、该轮全部 `session/update` 落账之后，client 读取报告文件一次：先解析，再路由 handoff，最后删文件。结项取值：
 
 | 报告情形 | 结果 |
 |---|---|
 | 文件缺位或读不到 | 维持契约前的行为：outcome 与 head 由 stopReason 与该轮末条 assistant 文本推出 |
-| `hop-done: <非空>` | 报告文本作为 head；outcome 仍由 stopReason 判定，被 stopReason 判为非正常终止的那一轮保持原判 |
-| `hop-failed: <非空>` | outcome 为 failed，报告文本同时是 head 与 fault reason，正常的 `end_turn` 也被降级 |
-| 空文件、多行、无前缀、未知前缀、冒号后为空、坏 UTF-8 | outcome 为 cancelled，fault reason 以 `acp payload invalid:` 开头并写明类别，head 为空 |
+| `hop-done: <非空>` | 报告文本作为 head；outcome 仍由 stopReason 判定，被 stopReason 判为非正常终止的那一轮保持原判；handoff 行照常路由 |
+| `hop-failed: <非空>` | outcome 为 failed，报告文本同时是 head 与 fault reason，正常的 `end_turn` 也被降级；handoff 行照常路由 |
+| `hop-blocked: <非空>` | outcome 与 head 取报告的阻塞正文，但任务不转手：活没干完，没有可交给下一 role 的东西 |
+| Invalid（多余行、未知前缀、超限、空文件、坏 UTF-8） | outcome 为 cancelled，fault reason 以 `acp payload invalid:` 开头并写明类别与行号，head 为空，零转手；文件保留在原地，重写后同一 task 重投即可消费 |
 
-每次读取都向该任务的 journal 追加一条 `payload` 记录，字段为 `task_id`、`path`、`payload_kind`（取值 `done`、`failed`、`invalid`、`absent` 之一）、`head`；缺位也记录，账上因此能看出这一轮有没有上报。结项事实经 `dispatch::on_out` 这一条通路落账：settle、`out_head`、ack 与 completion receipt 都在那里发出。每个终态任务都发 receipt，报告与末条文本都缺位的那次落一条正文为空文本的 `completion` 行。
+`done|failed|blocked` 三种 verdict 由 `Outcome::Finalized` 的 `head_kind` 字段带上报文层，client 据此区分 blocked 与另两种。
+
+handoff 的路由由 client 用该 role 已有的 server 连接发出，不冒充人类请求。单条路由失败（ACL 拒、目标 role 不在本机连接面上）只记一条 `handoff_denied`：journal 记 `handoff_denied` 事件（带 `to_role` 与拒绝原因），faults 面报同名的 fault。verdict 不删，Outcome kind 不变，其余 handoff 继续。
+
+一条报告可以同时交给至多八个 role，每个 role 拿到属于自己那一条的正文：行内带 `| <一行>` 时收件人读那一句，缺省时读 verdict 正文（`Handoff::text_or`，`crates/onlyne-proto/src/payload.rs:29`）。
+
+hop 记录一次转手在链条上的步深。转手链条的深度按产品初衷保持开放：协议与 server 都对 hop 计数不做上限判定，hop 只作因果记录随信封走（`crates/onlyne-proto/src/envelope.rs:331-339`、`crates/onlyne-server/src/relay.rs:640`）。一个 role 能交给谁由 `spec.toml` 的 `allowed_targets` 边决定，server 的 ACL 闸门按这些边逐条回答每一次 send（`crates/onlyne-server/src/relay.rs:379-393`）。
+
+操作员要收束链条，改法就一条：剪掉对应的 `allowed_targets` 边再 `onlyne reload`。
+
+每次读取都向该任务的 journal 追加一条 `payload` 记录，字段为 `task_id`、`path`、`payload_kind`（取值 `done`、`failed`、`blocked`、`invalid`、`absent` 之一）、`head`、`handoffs`（本轮可读出的转手线条数）。报告被拒时记录再多带一个 `error` 字段，写明拒绝原因与行号；缺位同样记录，账上因此能看出这一轮有没有上报。
+
+每条值得路由的转手线在删除结项文件之前另记一条 `handoff` 记录，字段为 `task_id`、`to_role`、`head`；被拒的转手线在 client 侧落 `handoff_denied`。
+
+结项事实经 `dispatch::on_out` 这一条通路落账：settle、`out_head`、ack 与 completion receipt 都在那里发出。每个终态任务都发 receipt，报告与末条文本都缺位的那次落一条正文为空文本的 `completion` 行。
+
+### 本地校验动词族（`onlyne report`）
+
+同一份文法解析器（`onlyne_proto::payload`）暴露成本地 CLI 动词，全部只读写工作区文件，不开任何 socket：
+
+| 动词 | 行为 |
+|---|---|
+| `onlyne report path --task <id>` | 打印该任务的结项文件绝对路径，连同 `log:` / `events:` / `content:` 三条会话落盘路径 |
+| `onlyne report check --task <id>`（或 `--path <file>`） | 合法：打印 verdict kind、head/reason 与全部 handoff 行，退出 0；非法：`onlyne: <精确原因（含行号）>` 加整份文法进 stderr，退出 2；文件不存在或读不到：stderr 报 `absent`/读失败原因，退出 2（3 只留给 socket 解析） |
+| `onlyne report write --task <id> --verdict <done\|failed\|blocked> --head <text> [--handoff <role\|text>]...` | 按部件构造合法报告，临时名 + rename 原子写入，打印最终路径 |
+| `onlyne report validate --text <s>`（或 `--from -` 读 stdin） | 对字符串跑同一解析器，不碰文件 |
+
+`--workspace` 的定位与 socket 解析同一惯例：给定目录起、沿祖先目录找 `.onlyne/config.toml`；找不到就用给定目录本身。文法全文内嵌在 `onlyne report --help` 与 `onlyne report check --help` 里，装机用户不查文档也能核格式。
 
 ## 会话内容
 
@@ -350,6 +391,6 @@ ACP 会话没有终端：agent 是 client 持有的子进程，会话对 client 
 
 ## Windows 关停
 
-Windows 没有 SIGTERM / SIGHUP。`tokio::signal::windows::ctrl_c` 接到现有 SIGINT 收尾路径。运维优雅关停走 `onlyne shutdown`；spec 热加载走 `onlyne reload`。exec 会话子进程的杀阶梯见上一节。
+Windows 没有 SIGTERM / SIGHUP。`tokio::signal::windows::ctrl_c` 接到现有 SIGINT 收尾路径。关停由 supervisor 在 server root 所在主机执行 `onlyne server stop`；spec 热加载走 `onlyne reload`。exec 会话子进程的杀阶梯见上一节。
 
 `.onlyne/run/s` 在 Windows 是 marker 文件（内容 `v1:onlyne-<32hex>`），named pipe 名由路径的 lexical-absolute 小写 sha256 派生。`--socket \\.\pipe\` 原样透传。`ERROR_PIPE_BUSY` 在 CLI `--timeout` 内重试。Unix 上 AF_UNIX 仍是文件系统 UDS。

@@ -50,13 +50,14 @@ Cargo workspace, `members = ["crates/*", "plugins/*"]`, 18 packages: 14 under `c
 ## CLI vocabulary (`onlyne-cli`, output is JSON by default)
 
 ```
-onlyne server start|stop|run|init|generate|status|roles|sessions|ledger|faults|watch|history|repair ...   # execs onlyne-server
+onlyne server init|run|start|stop|generate ...                                 # execs onlyne-server
+onlyne server status|roles|sessions|ledger|faults|watch|history|repair ...     # same admin answers, in-process
 onlyne client run|status|init|roles|sessions|watch|history                                                # execs onlyne-client
 onlyne status|roles|sessions|ledger|faults|watch|history|spec_diff|reload|generate|wait-ready|repair ...          # admin surface, one frame per call
 onlyne cluster export-prose
 onlyne send --to <role> [--task <id>] [--text ...|--file -] [--image f.png] [--note]
 onlyne reply --to <envelope-id> --text ...
-onlyne complete --task <id> [--outcome done|failed|cancelled] --text ...
+onlyne complete --task <id> [--outcome done|failed|cancelled] [--head-from local|ledger] [--text ...]
 onlyne handoff --to <role> --task <id> --text ...
 onlyne ack --msg-id <id> [--op-id <id>] --reason <text>            # role surface only
 onlyne reject --msg-id <id> [--op-id <id>] --reason <text>         # role surface only
@@ -64,13 +65,17 @@ onlyne control --task <id> probe|snapshot
 onlyne control --task <id> recycle|cancel --reason <text>
 onlyne gateway run <telegram|feishu|qqbot|weixin> --server-root <dir> [--token ...]
 onlyne gateway list|status|auth <platform> [...]
-onlyne who|ping|version|completions <zsh|fish>
+onlyne who|ping|version|completions <bash|elvish|fish|powershell|zsh>
+onlyne schema <client|spec> [--pretty]                                                # local JSON Schema, zero socket
 ```
 
-Three daemons plus one entrypoint: `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne`. `onlyne <group> <verb>` execs the matching daemon binary; message verbs connect straight to the local socket (UDS on unix, named pipe on Windows) and print one JSON answer.
-The admin noun set resolves through the same socket rule and shares the message-verb exit-code table. `wait-ready` polls admin `status` at 200 ms intervals with a 10 s bound, and prints `onlyne: server not ready after 10000ms` on failure. `generate` writes the `[[client]]` fragment to stdout and progress to stderr.
-A missing daemon binary makes the CLI and the e2e script print exactly this to stderr and exit 127:
-`onlyne: missing binary <path>; run cargo build --workspace`
+The CLI ships three daemons and one entrypoint: `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne`. `onlyne <group> <verb>` execs the matching daemon binary. Message verbs connect straight to the local socket (UDS on unix, named pipe on Windows) and print one JSON answer.
+`onlyne complete` takes its head — the short result line a completion carries — from one of two sources. `--head-from local` is the default: it builds the head by truncating `--text`, so that branch requires `--text`, and a missing one answers `onlyne: --text is required with --head-from local` and exits 2. `--head-from ledger` reads the head from the ledger row's own `out_head`, so `--text` stays optional there.
+`onlyne schema <client|spec> [--pretty]` and `onlyne completions <bash|elvish|fish|powershell|zsh>` never touch the socket, so the server root and the workspace may both be absent. `onlyne schema` prints the document `onlyne-config` generates at build time and embeds with `include_str!`, and that same document validates `config.toml` and `spec.toml`.
+The admin noun set resolves its socket the same way and shares the message-verb exit-code table. `wait-ready` polls admin `status` at 200 ms intervals with a 10 s bound, and prints `onlyne: server not ready after 10000ms` on failure. `generate` writes the `[[client]]` fragment to stdout and progress to stderr.
+A missing daemon binary makes the CLI print exactly this to stderr and exit 127:
+`onlyne: binary not found: <name>`
+The line names the binary and stops there. For a `cargo install` user it means the sibling daemon is absent from the cargo bin directory, so the remedy is to install or update the crate that ships it. The e2e harness keeps its own pre-flight line, `onlyne: missing binary <path>; run cargo build --workspace`, and that advice fits only where the binaries come from a workspace build.
 `onlyne cluster export-prose` prints raw prose by default and takes `--json`. It issues the existing role query and adds no protocol op.
 
 Socket resolution runs in this order: `--socket <path>` → `--server-root <dir>` as `<dir>/.onlyne/run/s` → `--workspace <dir>` or the current directory upward for `.onlyne/run/s`. A `--socket` value that starts with `\\.\pipe\` is used as the NPFS name with no hashing. `ERROR_PIPE_BUSY` retries inside `--timeout`. Exit codes 2, 3, 4, and 5 stay. A path that never resolves answers the same way as a path that resolves to nothing on disk. Both write exactly this to stderr and exit 3, with stdout left empty so a script reads no answer body:

@@ -26,7 +26,7 @@ Both `init` and `run` create these paths under `--workspace`:
 
 | path | mode | content |
 | --- | --- | --- |
-| `.onlyne/config.toml` | | role, `cert_pin`, `key_path`, `[server]` host and port, `[orca]` worktree, `[[plugin]]` entries |
+| `.onlyne/config.toml` | | role, `cert_pin`, `key_path`, `plugins = [...]`, `[server]` host and port, `[orca]` worktree |
 | `.onlyne/client.db` | | SQLite: `intents`, `sessions`, `faults`, `prose_cache`, `config_cache`, `events` |
 | `.onlyne/keys/role.key` | `0600` | 32 raw ed25519 bytes, generated once |
 | `.onlyne/run/` | `0700` | runtime directory |
@@ -37,6 +37,8 @@ Both `init` and `run` create these paths under `--workspace`:
 | `.onlyne/cache/orca-tabs.jsonl` | | append-only Orca tab to session map: a supervisor/display side-channel, not the identity (the adapter protocol owns that) |
 
 `init` never writes `spec.toml`. A workspace holding the pre-v1 layout is refused before any write: exit 2 and the byte-exact line `onlyne: legacy workspace layout; v1.0.0 does not migrate`.
+
+Three config values take a `$NAME` spelling: `cert_pin`, `key_path`, and `[server] host`. At startup `run` reads the environment variable named after the `$`, then puts its value where the config line sits. The gateway plugins use that same idiom for platform tokens. A name the environment carries no value for — absent, or present and blank — stops the launch with exit 1 and one line on stderr naming both the field and the variable: `onlyne-client: missing secret $ONLYNE_CERT for cert_pin; set the environment variable`. A value with no leading `$` travels verbatim, so a literal `$` inside a value stays part of the string.
 
 ## Exit codes
 
@@ -62,7 +64,7 @@ Selection is env `ONLYNE_BACKEND` (nonempty) > workspace `config.toml` `backend`
 | `herdr` | | env, config, or auto probe (first) | pane host |
 | `orca` | | env, config, or auto probe | tab host |
 | `zellij` | | env, config, or auto probe | pane host; probe maps EXITED / `exit_status` |
-| `exec` | `headless` | env or config only | projections still write `exec` |
+| `exec` | `headless` | env or config only | projections record the backend as `exec` |
 | `fake` | | env or config only | in-process, for tests |
 | `auto` | empty string | default when env and config are empty | probes herdr, then orca, then zellij |
 
