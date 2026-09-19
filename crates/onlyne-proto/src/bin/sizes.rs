@@ -137,10 +137,6 @@ fn main() {
             ("Health(HealthArgs)", size_of::<HealthArgs>()),
             ("Typing(TypingArgs)", size_of::<TypingArgs>()),
             ("Detach(DetachArgs)", size_of::<DetachArgs>()),
-            (
-                "WatchContent(WatchContentArgs)",
-                size_of::<WatchContentArgs>(),
-            ),
         ],
     );
 
@@ -154,7 +150,6 @@ fn main() {
             ("Probe(Value)", size_of::<serde_json::Value>()),
             ("Recycle(RecycleArgs)", size_of::<RecycleArgs>()),
             ("ConfigGet(ConfigGetArgs)", size_of::<ConfigGetArgs>()),
-            ("Content(Box<ContentFrame>)", size_of::<Box<ContentFrame>>()),
             ("Bye(ByeNotice)", size_of::<ByeNotice>()),
         ],
     );
@@ -239,6 +234,4 @@ fn main() {
     struct_row::<RoleInfo>("RoleInfo");
     struct_row::<SessionRow>("SessionRow");
     struct_row::<Subscribe>("Subscribe");
-    struct_row::<WatchContentArgs>("WatchContentArgs");
-    struct_row::<ContentFrame>("ContentFrame");
 }

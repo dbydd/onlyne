@@ -1,14 +1,11 @@
 //! Adapter SDK for the Onlyne v1 local socket.
 //!
 //! One protocol is mounted by agent plugins on role client sockets and by
-//! platform gateways on server sockets. A local viewer takes the third mount,
-//! `admin`, on a role client socket: it names no session, asks for that role's
-//! session content with `watch_content`, and reads the pushed `content` frames
-//! through [`AdminHandle::content_stream`].
+//! platform gateways on server sockets.
 
 pub mod conn {
     pub use super::{
-        AdapterClient, AdapterError, AdapterIo, AdapterServer, AdminHandle, IncomingFrame, Result,
+        AdapterClient, AdapterError, AdapterIo, AdapterServer, IncomingFrame, Result,
         ServerConnection,
     };
 }
@@ -48,10 +45,10 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use onlyne_frame::{read_frame, write_frame};
 use onlyne_proto::{
-    AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, ConfigGetArgs, ContentFrame, Delivery,
-    DetachArgs, Envelope, ErrorCode, GatewayHealth, GatewayMount, HELLO_REQUIRED_MESSAGE,
-    HealthArgs, HostOp, ImagePart, Outcome, PluginOp, Principal, Receipt, RegisterChannelArgs,
-    RenderSendArgs, Report, ResBody, SessionRegisterArgs, TypingArgs, WatchContentArgs,
+    AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, ConfigGetArgs, Delivery, DetachArgs,
+    Envelope, ErrorCode, GatewayHealth, GatewayMount, HELLO_REQUIRED_MESSAGE, HealthArgs, HostOp,
+    ImagePart, Outcome, PluginOp, Principal, Receipt, RegisterChannelArgs, RenderSendArgs, Report,
+    ResBody, SessionRegisterArgs, TypingArgs,
 };
 pub use onlyne_proto::{Capability, HelloAck, HelloArgs, Mount, MountKind, PROTOCOL_VERSION};
 use serde_json::{Value, json};
@@ -62,18 +59,18 @@ use tracing::warn;
 
 pub mod prelude {
     pub use crate::{
-        AdapterClient, AdapterError, AdapterHealth, AdapterIo, AdapterServer, AdminHandle,
-        AgentHandle, AgentSurface, CapabilitySet, GatewayHandle, GatewayHost, GatewayPlugin, Host,
+        AdapterClient, AdapterError, AdapterHealth, AdapterIo, AdapterServer, AgentHandle,
+        AgentSurface, CapabilitySet, GatewayHandle, GatewayHost, GatewayPlugin, Host,
         HostDispatcher, HostGap, IncomingFrame, MountKind, OnboardingKind, OnboardingPrompt,
         Outbound, ReportSender, SendReceipt, SurfaceGap, SurfaceGaps, WakeUser,
         accept_report_generation, degrade_for,
     };
     pub use onlyne_proto::{
         AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, ByeNotice, Capability, ConfigGetArgs,
-        ContentFrame, Delivery, DetachArgs, Envelope, ErrorCode, GatewayHealth, GatewayMount,
-        HealthArgs, HelloAck, HelloArgs, HostOp, Mount, Outcome, PluginOp, Principal, Receipt,
-        RecycleArgs, RegisterChannelArgs, RenderSendArgs, Report, ResBody, ServerInfo,
-        SessionRegisterArgs, TypingArgs, WatchContentArgs,
+        Delivery, DetachArgs, Envelope, ErrorCode, GatewayHealth, GatewayMount, HealthArgs,
+        HelloAck, HelloArgs, HostOp, Mount, Outcome, PluginOp, Principal, Receipt, RecycleArgs,
+        RegisterChannelArgs, RenderSendArgs, Report, ResBody, ServerInfo, SessionRegisterArgs,
+        TypingArgs,
     };
 }
 
@@ -454,27 +451,6 @@ impl AdapterClient {
         let (io, inbound) = AdapterIo::new_with_inbound(stream, read_timeout, write_timeout);
         GatewayHandle::new(io, inbound)
     }
-
-    /// Wrap a stream as a local viewer's admin mount.
-    pub fn admin<S>(stream: S) -> AdminHandle
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        Self::admin_with_timeouts(stream, DEFAULT_READ_TIMEOUT, DEFAULT_WRITE_TIMEOUT)
-    }
-
-    /// [`Self::admin`] with the caller's own frame timeouts.
-    pub fn admin_with_timeouts<S>(
-        stream: S,
-        read_timeout: Duration,
-        write_timeout: Duration,
-    ) -> AdminHandle
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        let (io, inbound) = AdapterIo::new_with_inbound(stream, read_timeout, write_timeout);
-        AdminHandle::new(io, inbound)
-    }
 }
 
 pub struct AdapterServer;
@@ -714,13 +690,6 @@ impl AdapterClient {
         let stream = onlyne_layout::connect_local(path.as_ref()).await?;
         Ok(Self::gateway(stream))
     }
-
-    /// Connect a local viewer to the client socket that owns the sessions it
-    /// wants to watch.
-    pub async fn connect_admin_local(path: impl AsRef<Path>) -> Result<AdminHandle> {
-        let stream = onlyne_layout::connect_local(path.as_ref()).await?;
-        Ok(Self::admin(stream))
-    }
 }
 
 impl From<Vec<Capability>> for CapabilitySet {
@@ -930,38 +899,6 @@ pub trait Host: Send + Sync {
     async fn detach(&self, _args: &DetachArgs) -> std::result::Result<(), (ErrorCode, String)> {
         Err((ErrorCode::UnknownOp, "detach is unsupported".to_string()))
     }
-
-    /// Take a viewer's subscription to this role's session content.
-    ///
-    /// The arm records the subscription and answers; the content itself travels
-    /// afterwards as [`HostOp::Content`] pushed over the connection's own
-    /// [`AdapterIo`], exactly as `assign` and `render_send` travel from a host
-    /// that registered the transport. A host with no content to hand out answers
-    /// through the default arm instead of inventing an empty stream.
-    ///
-    /// The cursor rule an implementation owes its viewer: `since: N` sends
-    /// `seq > N`, and an absent `since` is head-inclusive — the newest
-    /// journalled line is pushed as well. Duplicate one line rather than drop
-    /// one, because a viewer cannot tell a quiet session from a lost record.
-    /// Nothing in this crate can enforce that yet, so it is the client-side test
-    /// that has to hold it once the push arm exists — assert the first frame of a
-    /// cursor-free subscription equals the last journalled line.
-    ///
-    /// How a host numbers its content decides how much of that debt is anyone's:
-    /// a counter written into the journal line when the line is appended gives a
-    /// reader a number it can name as `since`, so a file-then-subscribe handoff
-    /// becomes exact and the duplicate is left to viewers that never read the
-    /// file. Assigning the counter at push time keeps the frame identical and
-    /// leaves every reader deduping by content instead.
-    async fn watch_content(
-        &self,
-        _args: &WatchContentArgs,
-    ) -> std::result::Result<(), (ErrorCode, String)> {
-        Err((
-            ErrorCode::UnknownOp,
-            "watch_content is unsupported".to_string(),
-        ))
-    }
 }
 
 pub struct HostDispatcher<H> {
@@ -1009,9 +946,6 @@ where
             PluginOp::Health(args) => self.host.health(&args).await.map(|_| Value::Null),
             PluginOp::Typing(args) => self.host.typing(&args).await.map(|_| Value::Null),
             PluginOp::Detach(args) => self.host.detach(&args).await.map(|_| Value::Null),
-            PluginOp::WatchContent(args) => {
-                self.host.watch_content(&args).await.map(|_| Value::Null)
-            }
         })
     }
 
@@ -1051,12 +985,7 @@ where
                     | PluginOp::Typing(_)
                     | PluginOp::Detach(_)
             ),
-            // An admin mount names no session and binds nothing, so the one
-            // thing it may ask for is the session content it came to watch.
-            // Everything else stays denied — including the agent and gateway
-            // vocabularies — which is what keeps a self-declared `kind: admin`
-            // on a local socket from buying a viewer more than a read.
-            MountKind::Admin => matches!(op, PluginOp::WatchContent(_)),
+            MountKind::Admin => false,
         };
         if allowed {
             Ok(())
@@ -1390,120 +1319,6 @@ impl GatewayHandle {
             .request_ok(AdapterMsg::Plugin(PluginOp::RegisterChannel(args)))
             .await
             .map(|_| ())
-    }
-}
-
-/// A local viewer's handle, mounted `admin` on the socket it watches.
-///
-/// One handle type per mount class, because the classes differ by what they may
-/// send, not by the `kind` string they declare: an agent mount binds a session
-/// and answers `assign`, a gateway mount carries platform traffic, and an admin
-/// mount asks for exactly one thing — this role's session content.
-/// [`HostDispatcher`] denies every other op on it, so this surface has no
-/// `send`, no `report`, and no `detach`: a viewer stops watching by hanging up.
-pub struct AdminHandle {
-    io: AdapterIo,
-    inbound: Mutex<mpsc::Receiver<IncomingFrame>>,
-}
-
-impl AdminHandle {
-    fn new(io: AdapterIo, inbound: mpsc::Receiver<IncomingFrame>) -> Self {
-        AdminHandle {
-            io,
-            inbound: Mutex::new(inbound),
-        }
-    }
-
-    /// The adapter handshake, forced onto the admin mount.
-    ///
-    /// `mount` is cleared rather than taken from the caller: an admin mount
-    /// carries no mount data, `Mount::Admin` writes JSON `null`, and the sibling
-    /// `kind` field is the only thing that identifies it.
-    pub async fn hello(&self, mut args: HelloArgs) -> Result<HelloAck> {
-        args.kind = MountKind::Admin;
-        args.mount = None;
-        let value = self
-            .io
-            .request_ok(AdapterMsg::Plugin(PluginOp::Hello(args)))
-            .await?;
-        decode_welcome(value)
-    }
-
-    /// The admin counterpart of `AgentHandle::hello_role`: name the watching
-    /// program and declare no capabilities. A capability tells a host which
-    /// degradation path a mount needs; a viewer degrades nothing, so the list
-    /// stays empty and `watch_content` carries the whole subscription.
-    pub async fn hello_admin(&self, plugin: impl Into<String>) -> Result<HelloAck> {
-        self.hello(HelloArgs {
-            protocol: PROTOCOL_VERSION,
-            plugin: plugin.into(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            kind: MountKind::Admin,
-            capabilities: Vec::new(),
-            mount: None,
-        })
-        .await
-    }
-
-    pub async fn next_host_op(&self) -> Result<HostOp> {
-        let mut inbound = self.inbound.lock().await;
-        match inbound.recv().await {
-            Some(frame) => match frame.msg {
-                AdapterMsg::Host(op) => Ok(op),
-                AdapterMsg::Res(body) => Err(AdapterError::Protocol(body)),
-                AdapterMsg::Plugin(_) => Err(AdapterError::Unexpected(
-                    "plugin op on admin inbound".to_string(),
-                )),
-            },
-            None => Err(AdapterError::Closed),
-        }
-    }
-
-    /// Subscribe to this role's session content.
-    ///
-    /// The response only says the host took the subscription. Records arrive
-    /// afterwards as [`HostOp::Content`] frames, and an absent `since` is
-    /// head-inclusive: the line the host had most recently journalled is
-    /// delivered too, and this handle will hand it to you. Dedupe it at the
-    /// boundary — compare each frame's `record` against the last journalled
-    /// record you already took, before anything accumulates or renders it — or
-    /// name `since` and get a strict continuation. A host that started after the
-    /// head instead would drop one line per handoff, silently.
-    ///
-    /// The ack carries no head, and that is deliberate rather than unfinished:
-    /// the turn boundary is a journalled record the stream delivers like any
-    /// other, so a transport-level caught-up fact would only be a second source
-    /// for it, and one that could disagree.
-    pub async fn watch(&self, args: WatchContentArgs) -> Result<()> {
-        self.io
-            .request_ok(AdapterMsg::Plugin(PluginOp::WatchContent(args)))
-            .await
-            .map(|_| ())
-    }
-
-    /// Every content frame the host pushes, in the order it pushed them.
-    ///
-    /// A frame that is not content is skipped, and the stream ends when the
-    /// connection does, so a consumer sees records and nothing else.
-    pub fn content_stream(&self) -> Pin<Box<dyn Stream<Item = ContentFrame> + Send + '_>> {
-        Box::pin(async_stream::stream! {
-            while let Ok(op) = self.next_host_op().await {
-                if let HostOp::Content(frame) = op {
-                    yield *frame;
-                }
-            }
-        })
-    }
-
-    /// The next content frame, waiting through any frame that is not one.
-    pub async fn wait_content(&self) -> Result<ContentFrame> {
-        loop {
-            match self.next_host_op().await? {
-                HostOp::Content(frame) => return Ok(*frame),
-                HostOp::Bye(bye) => return Err(AdapterError::Unexpected(bye.reason)),
-                _ => {}
-            }
-        }
     }
 }
 

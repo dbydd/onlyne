@@ -1,5 +1,0 @@
-{
-  "frame": "{\"op\":\"watch_content\",\"args\":{\"task_id\":\"task-1\",\"since\":41}}",
-  "encoding": "u32_be_length_prefix_plus_utf8_json",
-  "note": "watch_content is the one op an admin mount may send; both fields are optional, so an empty args object asks for every task of this role from the current head"
-}

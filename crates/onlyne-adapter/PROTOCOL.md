@@ -27,9 +27,6 @@ A request carries `id`; its response carries `reply_to`. Operation payloads read
 | plugin → host | `typing` (gateway) | `{"id":12,"op":"typing","args":{"conversation":"c1","on":true}}` |
 | host → plugin | `render_send` (gateway) | `{"op":"render_send","args":{"envelope":{"protocol":1,"id":"3f2504e0-4f89-41d3-9a0c-0305e82c3305","kind":"note","from":{"role":{"role":"planner"}},"to":{"gateway":{"gateway":"fg1","channel":"fake","conversation":"c1"}},"body":{"text":"hello"},"ts":"2026-01-01T00:00:00Z","admin":false},"conversation":"c1","gateway_ref":"r1"}}` |
 | plugin → host | `detach` | `{"id":13,"op":"detach","args":{"reason":"operator"}}` |
-| plugin → host | `watch_content` (admin) | `{"id":14,"op":"watch_content","args":{"task_id":"task-1","since":41}}` |
-| plugin → host | `watch_content` (admin, empty form) | `{"id":14,"op":"watch_content","args":{}}` |
-| host → plugin | `content` (admin) | `{"op":"content","args":{"seq":42,"task_id":"task-1","at":"2026-09-18T12:00:03Z","record":{"sessionUpdate":"agent_message_chunk","content":{"text":"build it","type":"text"}}}}` |
 | host → plugin | `bye` | `{"op":"bye","args":{"reason":"shutdown"}}` |
 | either | response success | `{"reply_to":8,"ok":true,"data":{"msg_id":"..."}}` |
 | either | response error | `{"reply_to":8,"ok":false,"error":{"code":"invalid","message":"body requires text or image","field":"body"}}` |
@@ -38,37 +35,19 @@ A request carries `id`; its response carries `reply_to`. Operation payloads read
 
 ## Mounts and capabilities
 
-Pick the mount by `kind`. Agent plugins send `kind: agent` with `mount.role` and an optional `mount.session`. Gateways send `kind: gateway` with `mount.gateway` and `mount.platform`. A connection that speaks for a sub-cluster carries `mount.cluster` and `mount.role`. Admin tooling sends `kind: admin` with `mount` null. An admin mount is local operator tooling on either socket: the admin verbs on the server socket, and a session-content viewer on a role client socket — a viewer is a process on the same machine that displays what one role's sessions are saying, so it attaches to the client that wrote those bytes rather than dialing through the server.
+Pick the mount by `kind`. Agent plugins send `kind: agent` with `mount.role` and an optional `mount.session`. Gateways send `kind: gateway` with `mount.gateway` and `mount.platform`. A connection that speaks for a sub-cluster carries `mount.cluster` and `mount.role`. Admin tooling sends `kind: admin` with `mount` null.
 
 `kind` names the connection class. The mount payload is flat and untagged. `kind` sits beside it inside `hello.args`, not inside a wrapper: `{"role":"planner","session":"8b1c..."}` for an agent, `{"gateway":"gw1","platform":"telegram"}` for a gateway, `{"cluster":"cluster-b","role":"cluster-b"}` for a cluster.
 
 The host matches the payload's field set against the variants in declaration order — agent, gateway, cluster, admin. Every payload denies unknown fields. So adding a field to one payload changes which variant answers, and the new field belongs to the earliest variant that owns it.
 
-An agent connection may send `report`, `session_register`, `assign_ack`, `send`, and `detach`. A gateway connection may send `deliver`, `register_channel`, `health`, `typing`, and `detach`. An admin connection may send `watch_content` and nothing else — not `detach` either, so a viewer that stops watching hangs up and the host sees the closed connection. A forbidden operation returns `forbidden` with an `op` field and a message naming the operation and the mount kind.
-
-Nothing authenticates a `kind: admin` declaration beyond the socket itself: these endpoints are bound mode `0600` under a `0700` run directory, so a process that can connect already owns the workspace. An admin mount therefore buys no reader that the journalled files under `<workspace>/.onlyne/logs/` did not already have; it decides when that process sees the bytes, not whether it may.
+An agent connection may send `report`, `session_register`, `assign_ack`, `send`, and `detach`. A gateway connection may send `deliver`, `register_channel`, `health`, `typing`, and `detach`. A forbidden operation returns `forbidden` with an `op` field and a message naming the operation and the mount kind.
 
 `register` binds the process to a task. `report` pushes lifecycle facts. `inject` declares support for `assign`. `recycle` declares that the plugin tears down its process when asked. `probe` declares that the host may ask for fresh resource observations. `typing` and `conversations` describe gateway features.
 
 With no `recycle`, the host must judge resource loss through `probe`. With no `report`, the affected session moves to `idle_fault` and the host records a fault. With no `inject`, the host sends the payload through process stdin or argv, then reads the terminal state from the exit code and the last output line.
 
 On this socket that delivery is a `config_get` frame whose only key is `stdin:{task text}`. So a plugin without `inject` must read an unrecognised `config_get` key as a task body, not as a configuration read. The plan lists `config_get{key}` host-to-plugin at §7 line 308 and names no frame for the stdin route at line 310. This document writes the overload down for that reason, instead of leaving it as folklore.
-
-## Content subscription (admin mount)
-
-`watch_content` is how a local viewer asks a role client for the session content that client is journalling. Both fields are optional, and the empty form `{"args":{}}` is a real subscription: every task of this role. Name `task_id` to scope one task; name `since` to resume after a content sequence number you already saw. There is no 'from the beginning' on this socket — a subscription without `since` starts at the head, not at the first line the role ever wrote — so a viewer that wants the whole history reads the journal file, which is where the history lives.
-
-The two cursor states are deliberately asymmetric, and the rule behind them is that the host errs toward a duplicate rather than a gap. `since: N` is exclusive: you named what you have, so the client sends `seq > N`. An absent `since` is head-inclusive: the client's newest journalled line arrives too, because a viewer that named no cursor has told the host nothing about what it already holds. The duplicate is the wire being right — and it is a debt the reader has to pay. Drop the replayed record at the source boundary, before it reaches anything that renders it, by comparing its `record` against the last journalled record the reader already took. Compare values, not text: `record` is re-encoded, so key order can differ. Nothing downstream can undo it. A viewer that accumulates chunk text into one buffer turns the replay into `Added the docstring.Added the docstring.` on a single line, which is indistinguishable from an agent that stuttered, and a repeated dispatch line is a second user block. Idempotent kinds — a `turn` note, a `tool_call_update` — are the only ones where the repeat is genuinely invisible.
-
-Why the reader has to be the one to fix it: `seq` lives on the frame, not in the journalled line, so a viewer that has read the file holds no number it can name as `since`. A host that numbers its lines when it writes them, rather than when it pushes them, closes that hole outright — then a file-then-subscribe handoff passes an exact cursor and head-inclusive starts only affect a viewer that never read the file. That is a host-side choice; the wire shape does not change either way.
-
-The answer to `watch_content` is `ok` and nothing else. Records arrive afterwards, unprompted, as `content` frames on the same connection, and a frame that carries no `reply_to` is the norm — the same notification shape `assign` and `render_send` use. Because the ack names no head, a viewer that must not miss a line reads the journal file first and subscribes afterwards, keeping whatever it received while the file was open and deduping as above. Read, then subscribe — never subscribe, then read: the overlap is the same either way, but opening the subscription first means the reader's file pass runs against a stream it is already buffering, which is the ordering that loses lines in practice.
-
-The ack deliberately stays head-free, and the reason is that "where the turn ends" is already in the content: the client's own turn record is what tells a reader a turn closed, so a transport-level caught-up flag would be a second source for a fact the stream already states, and the two could disagree. A gap a viewer perceives is therefore a cursor mistake at subscribe time, not something the wire can promise away.
-
-`seq` counts one role's content, strictly increasing across every task that client journals, so a single `since` resumes a subscription that spans several tasks. `record` is the journal line itself, passed through as JSON rather than re-described: read its fields, and do not compare bytes, because a payload that is parsed and re-encoded may come back with its keys in another order. `at` is the journalled timestamp text, not a clock stamped at push time, so a line says when it was written and not when it was delivered.
-
-A host that has no session content to serve answers `watch_content` with `unknown_op` and the message `watch_content is unsupported`. That is a different answer from `forbidden`, which means the mount was wrong, and a viewer should tell the two apart rather than retrying.
 
 ## Handshake and errors
 

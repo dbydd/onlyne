@@ -195,7 +195,7 @@ fn every_vector_matches_its_published_type() {
         ("ev", 6),
         ("frame", 4),
         ("error", 14),
-        ("adapter", 13),
+        ("adapter", 11),
     ];
     for (family, count) in expected {
         assert_eq!(
@@ -204,7 +204,7 @@ fn every_vector_matches_its_published_type() {
             "{family}: vector count"
         );
     }
-    assert_eq!(vectors.len(), 86, "total vector count");
+    assert_eq!(vectors.len(), 84, "total vector count");
 }
 
 #[test]
@@ -531,7 +531,7 @@ fn every_vector_validates_against_the_embedded_schemas() {
         "every vector carrying an Envelope is schema-checked"
     );
     assert_eq!(
-        adapter_messages, 13,
+        adapter_messages, 11,
         "every adapter vector is schema-checked"
     );
 }

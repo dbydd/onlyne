@@ -258,39 +258,6 @@
         }
       }
     },
-    "ContentFrame": {
-      "description": "`content`: one pushed record answering a [`WatchContentArgs`] subscription.\n\n`record` is the journal line itself — the JSON object the client appended to `<workspace>/.onlyne/logs/session-<task>.events.jsonl` — carried through unparsed rather than translated into a frame-local shape, so a viewer reads one record type over the socket and over the file. It travels as parsed JSON, so a re-encode may reorder its keys: a reader takes fields, never bytes. `at` is journalled for the same reason — that line's own timestamp text, not a clock re-stamped at push time — which is why it is a string where an envelope's `ts` is a formatted datetime.",
-      "type": "object",
-      "required": [
-        "at",
-        "record",
-        "seq",
-        "task_id"
-      ],
-      "properties": {
-        "at": {
-          "type": "string"
-        },
-        "record": true,
-        "seq": {
-          "description": "This role's content counter, strictly increasing across every task the client journals, so one `since` resumes a subscription that spans several tasks. The number belongs to the frame: a reader that only opened the journal file has no cursor to name unless the host wrote one into the line as well, which is why an absent `since` repeats the head line rather than risk skipping it.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        },
-        "session_id": {
-          "description": "The session that wrote the line, when the client had one to name.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "task_id": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false
-    },
     "ControlOp": {
       "description": "A command over an existing task.",
       "oneOf": [
@@ -899,25 +866,6 @@
           }
         },
         {
-          "description": "One session content record, pushed to a viewer that asked with [`PluginOp::WatchContent`]. The frame is boxed so a `welcome`, `assign`, or `bye` does not carry its payload inline, the way the `ev` frame boxes its event.",
-          "type": "object",
-          "required": [
-            "args",
-            "op"
-          ],
-          "properties": {
-            "args": {
-              "$ref": "#/definitions/ContentFrame"
-            },
-            "op": {
-              "type": "string",
-              "enum": [
-                "content"
-              ]
-            }
-          }
-        },
-        {
           "description": "The host is going away.",
           "type": "object",
           "required": [
@@ -994,7 +942,7 @@
           ]
         },
         {
-          "description": "Local operator tooling on the server socket or on a role client socket. A viewer watching one role's session content mounts here: the client that owns the session is the process that wrote the content it reads.",
+          "description": "Local operator tooling on the server socket.",
           "type": "string",
           "enum": [
             "admin"
@@ -1233,25 +1181,6 @@
               "type": "string",
               "enum": [
                 "detach"
-              ]
-            }
-          }
-        },
-        {
-          "description": "Subscribe to this role's session content (admin mounts only).",
-          "type": "object",
-          "required": [
-            "args",
-            "op"
-          ],
-          "properties": {
-            "args": {
-              "$ref": "#/definitions/WatchContentArgs"
-            },
-            "op": {
-              "type": "string",
-              "enum": [
-                "watch_content"
               ]
             }
           }
@@ -1723,29 +1652,6 @@
           "type": "boolean"
         }
       }
-    },
-    "WatchContentArgs": {
-      "description": "`watch_content`: subscribe to this role's session content. A local viewer mounted as admin sends it on the client socket that owns the sessions.",
-      "type": "object",
-      "properties": {
-        "since": {
-          "description": "Resume after this content sequence number: with `since: N` the client sends `seq > N` and nothing at or below `N`.\n\nAbsent is head-inclusive instead — the client's newest journalled line arrives first, then everything after it. A viewer that named no cursor has told the host nothing about what it already holds, so the host duplicates one line rather than risk dropping one. The duplicate is the reader's debt, not the wire's: it must be dropped where records enter the consumer, by structural equality with the last journalled record that reader took. Past that boundary it is unrecognisable — a viewer that accumulates streamed text into one buffer shows the replay as doubled text, not as a repeated row.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "minimum": 0.0
-        },
-        "task_id": {
-          "description": "One task, or every task of this role when absent.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "additionalProperties": false
     }
   }
 }

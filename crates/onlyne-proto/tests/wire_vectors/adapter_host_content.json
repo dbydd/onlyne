@@ -1,5 +1,0 @@
-{
-  "frame": "{\"op\":\"content\",\"args\":{\"seq\":42,\"task_id\":\"task-1\",\"at\":\"2026-09-18T12:00:03Z\",\"record\":{\"content\":{\"text\":\"读取任务 — reading the task\",\"type\":\"text\"},\"sessionUpdate\":\"agent_message_chunk\"}}}",
-  "encoding": "u32_be_length_prefix_plus_utf8_json",
-  "note": "content pushes the journalled line as one JSON object under record, and record's keys come back in sorted order because the frame parses rather than copies text — a viewer reads fields, never bytes; session_id is omitted when the client had no session to name, and seq counts one role's content across its tasks so one since resumes a multi-task subscription"
-}
