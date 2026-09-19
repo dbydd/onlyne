@@ -4,16 +4,16 @@
 
 Onlyne ties a fleet of coding agents into one working cluster. A **server** routes every message between agent roles, and records each delivery in a durable ledger. A **client** per workspace runs that role's coding-agent sessions. **Gateway** processes turn Telegram / Feishu / QQ / WeChat chats into the same message model. Your agents keep their own runtimes; Onlyne gives them hands that reach each other, plus a paper trail you can audit. The cluster spans machines: a client reaches the server over TLS from anywhere, a generated workspace relocates with a plain `mv`, and clusters nest into larger clusters.
 
-![version](https://img.shields.io/badge/version-v1.2.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
+![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
 ![Onlyne — a supervisor dispatches a ten-hop ring task to five pi agents; ledger receipts settle every hop](assets/promo/onlyne-hero.png)
 
 ## Install
 
-Everything ships to [crates.io](https://crates.io) at 1.2.0. The thin entry is `onlyne-cli` (binary `onlyne`); the four daemons install the same way and `onlyne` finds them in the cargo bin directory.
+Everything ships to [crates.io](https://crates.io); a plain `cargo install` takes the latest release. The thin entry is `onlyne-cli` (binary `onlyne`); the four daemons install the same way and `onlyne` finds them in the cargo bin directory.
 
 ```bash
-cargo install onlyne-cli --version 1.2.0
-cargo install onlyne-server onlyne-client onlyne-gateway onlyne-tui --version 1.2.0
+cargo install onlyne-cli
+cargo install onlyne-server onlyne-client onlyne-gateway onlyne-tui
 ```
 
 `onlyne` is the thin forwarder (`server`/`client`/`gateway`/`admin` verbs); the TUI runs separately as `onlyne-tui`. For a pi agent role, the adapter plugin lives on npm:
@@ -185,7 +185,7 @@ Every workspace is self-contained and portable. `onlyne server generate` lays a 
 
 ## Status
 
-Release `v1.2.0` is on crates.io, nineteen crates. This round puts a second kind of session host beside the panes: `backend = "acp"` drives an ACP v1 agent as a child process through the client, with the workspace `[acp]` table carrying mode, model, reasoning effort, and permission, and the conversation landing in `<workspace>/.onlyne/logs/session-<task>.log` plus `session-<task>.events.jsonl`. Three behaviours hold the boundary: an `initialize` always carries the client version, a `herdr`, `orca`, or `zellij` backend refuses a `session_command` that speaks a protocol on its own stdio before any pane opens, and the settlement `reason` on a ledger row now reaches `onlyne ledger` and the TUI task panel. The session-content viewer surface — the `onlyne-view` binary, its live page over the client socket, and `watch_content` on the adapter protocol — left the tree; the journal it read stays, and so do both reporting paths, the ACP `outcomes()` parse and the pi adapter plugin. Fake-backend e2e is 14/14 including `acp-session.sh`; a five-role ring ran eleven hops with every row `acked`. `cargo build --workspace` needs Rust 1.85. Install with `cargo install onlyne-cli --version 1.2.0` plus the four daemons at the same version.
+The release line lives in `CHANGELOG.md`. Every release moves all nineteen crates together and each manifest keeps a matching registry floor, so a plain `cargo install` takes a consistent set. Newest session host beside the panes: `backend = "acp"` drives an ACP v1 agent as a child process through the client, with the workspace `[acp]` table carrying mode, model, reasoning effort, and permission, and the conversation landing in `<workspace>/.onlyne/logs/session-<task>.log` plus `session-<task>.events.jsonl`. Each ACP turn closes on a one-line report the agent writes to `<workspace>/.onlyne/out/<task-id>.md`, and that line decides what reaches the ledger. Three behaviours hold the boundary: an `initialize` always carries the client version, a `herdr`, `orca`, or `zellij` backend refuses a `session_command` that speaks a protocol on its own stdio before any pane opens, and the settlement `reason` on a ledger row reaches `onlyne ledger` and the TUI task panel. Every settled task files a `completion` row, including the ones that end with no result line. Fake-backend e2e covers the local, exec, idempotency, requeue, ACL, and acp paths, and a five-role ring closes its circuit with every row `acked`. `cargo build --workspace` needs Rust 1.85.
 
 ## Reading
 
