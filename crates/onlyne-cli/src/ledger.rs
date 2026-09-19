@@ -15,7 +15,7 @@ use crate::wire::{self, ExchangeError};
 /// expected, from the most complete down to a bare row.
 const ROW_LIST_KEYS: [&str; 4] = ["rows", "results", "ledger", "items"];
 
-const ROW_FIELD_KEYS: [&str; 5] = ["msg_id", "task", "state", "out_head", "body"];
+const ROW_FIELD_KEYS: [&str; 6] = ["msg_id", "task", "state", "reason", "out_head", "body"];
 
 /// Rows returned by one `query_ledger` answer.
 pub fn rows_of(data: &Value) -> Vec<Value> {

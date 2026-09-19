@@ -867,6 +867,16 @@ fn task_detail_text(detail: &TaskDetail) -> (String, String) {
         out.push_str("  (none)\n");
     }
     for entry in &detail.ledger {
+        // The reason joins the row's tail: an acked row prints exactly what it
+        // printed before the column reached the board.
+        let mut tail = entry.out_head.clone().unwrap_or_default();
+        if let Some(reason) = &entry.reason {
+            if !tail.is_empty() {
+                tail.push(' ');
+            }
+            tail.push_str("reason=");
+            tail.push_str(reason);
+        }
         out.push_str(&format!(
             "  {} {}→{} {} att={} {}\n",
             short(&entry.msg_id),
@@ -874,7 +884,7 @@ fn task_detail_text(detail: &TaskDetail) -> (String, String) {
             principal_label(&entry.to),
             ledger_state_label(entry),
             entry.attempt,
-            entry.out_head.as_deref().unwrap_or("")
+            tail
         ));
     }
     out.push_str("\nsessions\n");
@@ -1096,6 +1106,7 @@ mod tests {
             hop: 0,
             attempt: 1,
             state,
+            reason: None,
             out_head: None,
             body_json: None,
             enqueued_at: Utc::now(),
@@ -1689,6 +1700,31 @@ mod tests {
         assert!(body.contains("aggregate cluster-b"), "{body}");
         assert!(body.contains("acl peers planner"), "{body}");
         assert!(body.contains("#7 intent_exhausted"), "{body}");
+    }
+
+    /// A task panel row names its settlement reason when the row carries one;
+    /// a settled row prints exactly as it did before the column reached the
+    /// board, trailing space and all.
+    #[test]
+    fn the_task_panel_prints_the_settlement_reason_only_when_a_row_has_one() {
+        let settled = ledger_row("planner", "builder", "abcdef12-3456", LedgerState::Acked);
+        let mut vetoed = ledger_row("planner", "builder", "abcdef12-3456", LedgerState::Rejected);
+        vetoed.reason = Some("not my scope".into());
+        let detail = Detail::Task(TaskDetail {
+            task_id: "abcdef12-3456".into(),
+            ledger: vec![settled, vetoed],
+            sessions: Vec::new(),
+            faults: Vec::new(),
+        });
+        let body = detail_text(&detail).1;
+        assert!(
+            body.contains("  m1 planner→builder done att=1 \n"),
+            "an acked row carries no reason tail\n{body}"
+        );
+        assert!(
+            body.contains("  m1 planner→builder failed att=1 reason=not my scope\n"),
+            "a rejected row names the refusal the receiver stored\n{body}"
+        );
     }
 
     #[test]

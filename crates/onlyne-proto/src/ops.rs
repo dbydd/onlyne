@@ -340,6 +340,11 @@ pub struct LedgerEntry {
     pub hop: u32,
     pub attempt: u32,
     pub state: LedgerState,
+    /// Why this row last settled: the receiver's refusal on a rejection, the
+    /// budget or age that ended the attempts on `requeue_exhausted` /
+    /// `requeue_ttl`. An `acked` row carries `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub out_head: Option<String>,
     /// The stored envelope body, which retention clears after the ack window
@@ -1088,6 +1093,33 @@ mod tests {
         let armed: Welcome = serde_json::from_value(frame).expect("the relay slice lands");
         assert_eq!(armed.relay_required, Some(vec!["writer".to_string()]));
         assert_eq!(armed.relay_count, Some(2));
+    }
+
+    /// The reason column is additive, so a ledger row a server wrote before the
+    /// key existed still lands, with `reason` staying `None` — and re-encoding
+    /// such a row omits the key rather than sending null, keeping the answer's
+    /// bytes what an older reader parses.
+    #[test]
+    fn a_ledger_row_without_the_reason_key_decodes_as_no_reason() {
+        let raw = serde_json::json!({
+            "msg_id": "3f2a1c4e-5b6d-4e7f-8a90-1b2c3d4e5f60",
+            "kind": "task",
+            "from": {"role": {"role": "planner"}},
+            "to": {"role": {"role": "builder"}},
+            "hop": 0,
+            "attempt": 1,
+            "state": "acked",
+            "out_head": "hello v1",
+            "enqueued_at": "2026-09-10T12:00:00Z",
+            "acked_at": "2026-09-10T12:00:00Z",
+        });
+        let entry: LedgerEntry = serde_json::from_value(raw).expect("the pre-reason row lands");
+        assert_eq!(entry.reason, None);
+        let encoded = serde_json::to_value(&entry).expect("encode the row");
+        assert!(
+            encoded.get("reason").is_none(),
+            "an absent reason omits the key rather than sending null: {encoded}"
+        );
     }
 
     #[test]

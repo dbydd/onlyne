@@ -907,6 +907,7 @@ pub fn entry_from_row(row: &LedgerRow) -> onlyne_proto::LedgerEntry {
         hop: row.hop.max(0) as u32,
         attempt: row.attempt.max(0) as u32,
         state: row.state,
+        reason: row.reason.clone(),
         out_head: row.out_head.clone(),
         body_json: row.body_json.clone(),
         enqueued_at: parse_time(&row.enqueued_at),

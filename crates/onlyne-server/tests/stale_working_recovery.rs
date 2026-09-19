@@ -33,6 +33,7 @@ fn stale_ledger_entry(task_id: &str) -> LedgerEntry {
         hop: 0,
         attempt: 0,
         state: LedgerState::Acked,
+        reason: None,
         out_head: None,
         body_json: Some(serde_json::to_string(&Body::text("stale work")).unwrap()),
         enqueued_at: at,

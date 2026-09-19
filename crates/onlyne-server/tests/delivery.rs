@@ -1409,6 +1409,79 @@ fn ack_idempotence_keeps_the_settled_shape() {
     assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Acked);
 }
 
+/// What `query_ledger` projects is what `onlyne ledger` prints: the refusal a
+/// receiver stored on its way out of `rejected`, and nothing on a row that
+/// closed clean. Each assertion settles a fresh row, so no idempotent-ack
+/// early return stands in for a real transition.
+#[test]
+fn ledger_query_entries_carry_the_settlement_reason() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let refused = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    relay::ack(
+        &fixture.state,
+        &AckArgs {
+            msg_id: refused.receipt.msg_id.clone(),
+            op_id: None,
+            accepted: false,
+            reason: Some("not my scope".into()),
+        },
+    )
+    .expect("reject")
+    .expect("settled");
+
+    let second = task("planner", "builder", "more work");
+    let settled = accepted(relay::send(&fixture.state, &second, false, None).expect("relay"));
+    relay::pull(
+        &fixture.state,
+        "builder",
+        Some("sess-1"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    relay::ack(
+        &fixture.state,
+        &AckArgs {
+            msg_id: settled.receipt.msg_id.clone(),
+            op_id: None,
+            accepted: true,
+            reason: None,
+        },
+    )
+    .expect("ack")
+    .expect("settled");
+
+    let query = |msg_id: String| -> onlyne_proto::LedgerEntry {
+        let rows = fixture
+            .state
+            .ledger
+            .ledger_query(LedgerQuery {
+                msg_id: Some(msg_id),
+                limit: 1,
+                ..LedgerQuery::default()
+            })
+            .expect("query");
+        relay::entry_from_row(&rows[0])
+    };
+    assert_eq!(
+        query(refused.receipt.msg_id.clone()).reason.as_deref(),
+        Some("not my scope"),
+        "the rejection reads back the receiver's refusal"
+    );
+    assert_eq!(
+        query(settled.receipt.msg_id.clone()).reason,
+        None,
+        "an acked row settles clean and carries no reason"
+    );
+}
+
 #[test]
 fn admin_control_bypasses_role_control_admin_edge() {
     let fixture = fixture_with(&format!(
