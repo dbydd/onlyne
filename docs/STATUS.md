@@ -1,6 +1,6 @@
 # Onlyne Status
 
-v1.2.0 is on crates.io and tagged `v1.2.0` (`947917a`), nineteen crates, with the acp session backend, the pane refusal of protocol commands, and the ledger settlement reason. `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONTRACT.md` owns the work split. Root README files are the user manual.
+v1.2.1 is on crates.io and tagged `v1.2.1` (`38aece8`), nineteen crates, with the acp report contract that settles a task from the one line its agent writes under `.onlyne/out/`, and the completion receipt that files even when a turn leaves no result line. Earlier releases keep their own receipts in `CHANGELOG.md`. `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONTRACT.md` owns the work split. Root README files are the user manual.
 
 ## Three-process shape
 
@@ -11,7 +11,7 @@ v1.2.0 is on crates.io and tagged `v1.2.0` (`947917a`), nineteen crates, with th
 
 ## Crate state
 
-Counts come from `cargo test --workspace` on 2026-09-19 (883 passed, 0 failed, 1 ignored: `herdr_live_probe`), one line per crate with its libraries and integration targets summed.
+Counts come from `cargo test --workspace` on 2026-09-19 (887 passed, 0 failed, 1 ignored: `herdr_live_probe`), one line per crate with its libraries and integration targets summed.
 
 - [x] `onlyne-proto` green with envelope, frame variants, ops, errors, and events: 60 unit + 5 wire vectors (86 fixtures) + 2 sizes.
 - [x] `onlyne-acp` green with the ACP v1 client, its stdio transport, and the protocol fixtures: 40 unit + 14 scripted-peer + 1 doc example.
@@ -19,11 +19,11 @@ Counts come from `cargo test --workspace` on 2026-09-19 (883 passed, 0 failed, 1
 - [x] `onlyne-config` green with spec parse and reload: 11 template + 38 config contract + 17 ACL table + 3 spec example.
 - [x] `onlyne-layout` green with legacy refusal exit 2 and the local-socket seam: 30.
 - [x] `onlyne-store` green with ledger and local DB: 31 unit + 2 schema statements.
-- [x] `onlyne-session` green with the lifecycle port and the session backends (zellij, Orca, exec, acp, fake, herdr): 128 unit + 18 herdr.
+- [x] `onlyne-session` green with the lifecycle port and the session backends (zellij, Orca, exec, acp, fake, herdr): 131 unit + 18 herdr.
 - [x] `onlyne-net` green with TLS, handshake, ACL, and backoff: 25.
 - [x] `onlyne-adapter` green with SDK and protocol schema: 5 unit + 3 conformance + 1 protocol doc.
 - [x] `onlyne-server` green with router, relay, projection, faults, admin, and generate: 14 unit + 84 delivery + 27 generate + 2 stale.
-- [x] `onlyne-client` green with runloop, intents, adapter socket, host detection, and dispatch: 42 unit + 50 scenarios.
+- [x] `onlyne-client` green with runloop, intents, adapter socket, host detection, and dispatch: 43 unit + 50 scenarios.
 - [x] `onlyne-tui` green with the role network graph, the swarm monitor, and the key table: 74 unit + 2 one-shot snapshots.
 - [x] `onlyne-gateway` green with shared kit: 47.
 - [x] `onlyne-cli` green with entrypoint, socket resolution, and the admin verbs: 5 unit + 33 cli.

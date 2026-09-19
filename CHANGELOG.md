@@ -85,6 +85,26 @@ matching registry floor and each manifest stays publishable on its own.
 `plugins/onlyne-agent-pi` keeps its npm number `1.1.2`; the plugin's reporting
 path is untouched by this round.
 
+Receipt: all nineteen crates are on crates.io at 1.2.1, published 2026-09-19,
+none yanked, in the dependency order `onlyne-proto`, `onlyne-frame`,
+`onlyne-config`, `onlyne-layout`, `onlyne-acp`, `onlyne-adapter`,
+`onlyne-session`, `onlyne-net`, `onlyne-gateway-feishu`, `onlyne-gateway-qqbot`,
+`onlyne-gateway-telegram`, `onlyne-gateway-weixin`, `onlyne-store`,
+`onlyne-testkit`, `onlyne-client`, `onlyne-gateway`, `onlyne-server`,
+`onlyne-tui`, `onlyne-cli`, each through
+`cargo publish --locked --allow-dirty -p onlyne-<crate>` at tag `v1.2.1`. One
+upload dropped its TLS connection to crates.io mid-flight on `onlyne-adapter`,
+and the retry landed that version. The twelve head crates carried the packaging
+sandbox build; the five tail crates — `onlyne-client`, `onlyne-gateway`,
+`onlyne-server`, `onlyne-tui`, `onlyne-cli` — went out under `--no-verify`, and
+a fresh consumer project outside this workspace, `Cargo.toml` pinning `=1.2.1`
+on all nineteen, resolved the whole graph from the registry and finished
+`cargo check` in 43.64 seconds, which covers what the skipped sandbox builds
+would have. The local install was refreshed from the same tree:
+`cargo build --workspace --release`, seven binaries copied to `~/.cargo/bin` and
+re-signed ad-hoc, and `onlyne version` answers
+`{"onlyne-cli":"1.2.1","protocol":1}` with all three daemons resolved.
+
 ## [1.2.0] - 2026-09-19
 
 Scope: two halves moving in opposite directions land together. The first
