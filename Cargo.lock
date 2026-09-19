@@ -2338,7 +2338,6 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
- "onlyne-adapter",
  "onlyne-frame",
  "onlyne-layout",
  "onlyne-net",

@@ -73,19 +73,11 @@ pub fn map_view_size(area: Rect) -> (usize, usize) {
 /// `--once` and the render tests share this path, so the text they assert on is
 /// the same text an operator sees in the alternate screen.
 pub fn render_once_text(snapshot: &Snapshot, state: &UiState, width: u16, height: u16) -> String {
-    render_text(width, height, |frame| {
-        render(frame, snapshot, state);
-    })
-}
-
-/// Draw anything into a test backend and flatten it to plain text.
-///
-/// The board's `--once` and the standalone viewer's share this, so a journal
-/// reads the same whether it came through the board or through `onlyne-view`.
-pub fn render_text(width: u16, height: u16, draw: impl FnOnce(&mut ratatui::Frame)) -> String {
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("test backend");
-    terminal.draw(draw).expect("render once");
+    terminal
+        .draw(|frame| render(frame, snapshot, state))
+        .expect("render once");
     buffer_text(terminal.backend().buffer())
 }
 
