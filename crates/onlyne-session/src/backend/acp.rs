@@ -8,7 +8,9 @@
 //! speaks a turn protocol on a pipe, so this backend owns both halves the plugin
 //! would otherwise supply. It carries the payload itself
 //! ([`SessionBackend::deliver`]) and it reports the ending itself
-//! ([`SessionBackend::outcomes`]).
+//! ([`SessionBackend::outcomes`]). The agent's half is one file: every prompt
+//! names an absolute report path under the workspace, and the turn's end reads
+//! it once, consumes it, and lets it stand in for the agent's closing words.
 //!
 //! Process discipline, which is what makes it different from a loop that just
 //! calls [`onlyne_acp::Agent::prompt`]:
@@ -34,9 +36,10 @@
 //!   the session `mode`, not a client default.
 //! * **the conversation is written down.** An ACP session owns no terminal, so
 //!   `<workspace>/.onlyne/logs/session-<task>.log` (rendered, for `tail -f`) and
-//!   `session-<task>.events.jsonl` (raw updates, plus this client's own `dispatch`
-//!   and `turn` records) are the whole human-visible surface. Both are best
-//!   effort: a write that fails is a warning, never a failed turn.
+//!   `session-<task>.events.jsonl` (raw updates, plus this client's own
+//!   `dispatch`, `payload` and `turn` records) are the whole human-visible
+//!   surface. Both are best effort: a write that fails is a warning, never a
+//!   failed turn.
 //! * **closing does not wait on the dispatch lock.** A close asks the agent to
 //!   stop, waits a short bounded moment for the turn, and hands a turn that is
 //!   still running to a detached thread rather than parking its caller.
@@ -828,6 +831,108 @@ fn settle_for(stop_reason: &str, answer: Option<&str>) -> (Outcome, Option<Strin
     }
 }
 
+/// Where one turn leaves its payload-v1 result report, derived from the
+/// session's workspace and the task id. Both directions call this — the
+/// directive that hands the agent its path and the ending that reads it — so
+/// they cannot drift, and the path is absolute because a shared agent process
+/// may run with some other session's directory as its cwd.
+fn payload_dir(workdir: &Path) -> PathBuf {
+    workdir.join(".onlyne").join("out")
+}
+
+fn payload_path(workdir: &Path, task_id: &str) -> PathBuf {
+    payload_dir(workdir).join(format!("{task_id}.md"))
+}
+
+/// The block appended to every ACP prompt: where to report this task's
+/// outcome, in what form, and the rule that settlement is ours. The agent is
+/// not an onlyne client and is told so; the file is all it has to leave.
+fn completion_directive(workdir: &Path, task_id: &str) -> String {
+    format!(
+        "\n\nResult report (write before you stop): {}\n\
+         The file carries exactly one line: `hop-done: <the result in one \
+         line>` or `hop-failed: <why the task failed, one sentence>`.\n\
+         Create it under a temporary name in the same directory and rename it \
+         into place, so no reader ever sees a half-written report.\n\
+         Keep the detail in project files; the line may name them.\n\
+         Do not run any `onlyne` command: this client reads the file and \
+         settles the task itself.",
+        payload_path(workdir, task_id).display()
+    )
+}
+
+/// One turn's result report, as the ending found it.
+enum Payload {
+    /// No file, or one this client could not open: the turn settles on its
+    /// stop reason alone, exactly as it did before reports existed.
+    Absent,
+    /// `hop-done:` — the agent's own account of the result, taken as the head.
+    Done(String),
+    /// `hop-failed:` — the agent's account of a failure, which this client has
+    /// no reason to argue with.
+    Failed(String),
+    /// A file is there and is not a report. The reason names the category so
+    /// the fault record can say what the client actually found.
+    Invalid(String),
+}
+
+impl Payload {
+    /// The word the turn's `payload` journal record carries under
+    /// `payload_kind`; the record type `kind` is taken by the journal.
+    fn payload_kind(&self) -> &'static str {
+        match self {
+            Payload::Absent => "absent",
+            Payload::Done(_) => "done",
+            Payload::Failed(_) => "failed",
+            Payload::Invalid(_) => "invalid",
+        }
+    }
+}
+
+/// Read this turn's report and take it away. Deleting after reading is the
+/// isolation a requeued task id needs: the next turn starts with no report
+/// until an agent living through it writes one.
+fn read_payload(workdir: &Path, task_id: &str) -> Payload {
+    let path = payload_path(workdir, task_id);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Payload::Absent,
+    };
+    if let Err(error) = std::fs::remove_file(&path) {
+        tracing::warn!(error = %error, path = %path.display(), "acp: report file stayed behind");
+    }
+    match String::from_utf8(bytes) {
+        Err(_) => Payload::Invalid("payload is not valid utf-8".to_string()),
+        Ok(text) => parse_payload(&text),
+    }
+}
+
+/// payload-v1 parsing: one non-empty line whose exact prefix decides the
+/// verdict. The file's own terminating newline is allowed; anything past a
+/// single report line is noise this client will not read a verdict from.
+fn parse_payload(text: &str) -> Payload {
+    let line = text.trim();
+    if line.is_empty() {
+        return Payload::Invalid("payload is empty".to_string());
+    }
+    if line.contains('\n') {
+        return Payload::Invalid("payload is more than one line".to_string());
+    }
+    let (prefix, report) = match line.split_once(':') {
+        Some((prefix, report)) => (prefix, report.trim()),
+        None => {
+            return Payload::Invalid("payload carries no report prefix".to_string());
+        }
+    };
+    match (prefix, report.is_empty()) {
+        ("hop-done", false) => Payload::Done(report.to_string()),
+        ("hop-failed", false) => Payload::Failed(report.to_string()),
+        ("hop-done", true) => Payload::Invalid("hop-done carries no result".to_string()),
+        ("hop-failed", true) => Payload::Invalid("hop-failed carries no reason".to_string()),
+        _ => Payload::Invalid(format!("unknown report prefix {prefix:?}")),
+    }
+}
+
 /// One turn's journal files, named for the task it ran.
 struct Journal {
     workspace: PathBuf,
@@ -922,6 +1027,7 @@ fn run_turn(
     content: ContentWriter,
     task_id: String,
     prompt: String,
+    warning: Option<String>,
     policy: &'static str,
 ) {
     let journal = Journal::new(&entry.workdir, &task_id, &entry.id, content);
@@ -932,6 +1038,15 @@ fn run_turn(
             ("prose", Value::from(prompt.clone())),
         ],
     );
+    if let Some(detail) = &warning {
+        journal.record(
+            "warning",
+            vec![
+                ("task_id", Value::from(task_id.clone())),
+                ("detail", Value::from(detail.clone())),
+            ],
+        );
+    }
     let events = entry.agent.subscribe();
     let turn = entry
         .agent
@@ -948,6 +1063,15 @@ fn run_turn(
         append(&journal.log, &drained.log);
     }
     let head = completion_head(&drained.message);
+    // payload-v1: a report the agent left stands in for what the closing
+    // message said, and may only lower the turn's standing. `hop-done`
+    // replaces the head while the stop reason still decides the outcome, so a
+    // report can never promote a turn the agent was cut short on.
+    let payload = read_payload(&entry.workdir, &task_id);
+    let head = match &payload {
+        Payload::Done(text) => Some(text.clone()),
+        _ => head,
+    };
     let (settled, note, stop_reason) = match &turn {
         Ok(outcome) => settle_for(&outcome.stop_reason, head.as_deref()),
         Err(error) => (
@@ -956,6 +1080,44 @@ fn run_turn(
             "(error)".to_string(),
         ),
     };
+    // A report that is present but not a report cancels the completion: the
+    // client will not guess a verdict out of a file it asked for in one shape,
+    // and the reason travels in the fault note rather than a head. A turn whose
+    // process died or was cut short already carries a harder fact than any
+    // report, so the verdict changes and the detail is added to that note.
+    let payload_kind = payload.payload_kind();
+    let (settled, head, note) = match payload {
+        Payload::Failed(text) => {
+            // The sender reads the agent's own line; where the turn was cut
+            // short or its process died, that harder fact stays in the note.
+            let note = match note {
+                Some(found) => format!("{found}; the agent reported: {text}"),
+                None => text.clone(),
+            };
+            (Outcome::Failed, Some(text), Some(note))
+        }
+        Payload::Invalid(reason) => {
+            let detail = format!("acp payload invalid: {reason}");
+            let note = match note {
+                Some(found) => format!("{found}; {detail}"),
+                None => detail,
+            };
+            (Outcome::Cancelled, None, Some(note))
+        }
+        _ => (settled, head, note),
+    };
+    journal.record(
+        "payload",
+        vec![
+            ("task_id", Value::from(task_id.clone())),
+            (
+                "path",
+                Value::from(payload_path(&entry.workdir, &task_id).display().to_string()),
+            ),
+            ("payload_kind", Value::from(payload_kind)),
+            ("head", head.clone().map(Value::from).unwrap_or(Value::Null)),
+        ],
+    );
     journal.record(
         "turn",
         vec![
@@ -1136,11 +1298,40 @@ impl SessionBackend for AcpBackend {
         let sink = self.state.sink.clone();
         let content = self.state.content.clone();
         let task_id = task_id.to_string();
-        let prompt = prose.to_string();
+        // The prompt tells the agent where to leave its result before the turn
+        // starts, so how a task ends never depends on the agent knowing that
+        // onlyne exists. The whole text lands in the journal's dispatch
+        // record, which is the operator's proof of what was asked. The agent
+        // can only write where the directory already is, so the client makes
+        // it first; a failure costs only the directive — the turn runs on the
+        // task's prose, settles as a turn whose agent left no report, and
+        // leaves a warning beside the dispatch record saying why.
+        let warning = match std::fs::create_dir_all(payload_dir(&entry.workdir)) {
+            Ok(()) => None,
+            Err(error) => Some(format!("report directory not created: {error}")),
+        };
+        let prompt = match &warning {
+            None => format!(
+                "{}{}",
+                prose,
+                completion_directive(&entry.workdir, &task_id)
+            ),
+            Some(_) => prose.to_string(),
+        };
         let policy = self.options.policy();
         if let Err(error) = thread::Builder::new()
             .name(format!("acp-turn {}", short(&task_id)))
-            .spawn(move || run_turn(thread_entry, sink, content, task_id, prompt, policy))
+            .spawn(move || {
+                run_turn(
+                    thread_entry,
+                    sink,
+                    content,
+                    task_id,
+                    prompt,
+                    warning,
+                    policy,
+                )
+            })
         {
             entry.turn.finish();
             *entry.task_id.lock() = session.task_id.clone();
@@ -1621,7 +1812,14 @@ main()
         let dispatch = onlyne_records(&lines, "dispatch");
         assert_eq!(dispatch.len(), 1, "{lines:?}");
         assert_eq!(dispatch[0]["task_id"], "t-journal");
-        assert_eq!(dispatch[0]["prose"], "fix the bug");
+        // The dispatch record is the whole prompt: the task's prose with this
+        // backend's completion directive appended.
+        let prose = dispatch[0]["prose"].as_str().expect("a prompt is text");
+        assert!(prose.starts_with("fix the bug"), "{prose}");
+        assert!(
+            prose.contains("Result report (write before you stop): "),
+            "{prose}"
+        );
         assert!(dispatch[0]["at"].as_str().unwrap().ends_with('Z'));
         assert!(lines[0].get("onlyne").is_some());
         let turn = onlyne_records(&lines, "turn");
@@ -1859,6 +2057,293 @@ main()
             fake.traced().contains("eof"),
             "the agent left with its client"
         );
+    }
+
+    /// One row of the payload matrix: the bytes pre-placed at the report path
+    /// (nothing for the absent rows, which must behave exactly as a turn
+    /// without the contract), the prose marker that chooses the agent's stop
+    /// reason, and everything the ending has to leave behind. The note
+    /// expectations match as substrings; the head is compared exactly.
+    struct Cell {
+        name: &'static str,
+        payload: Option<&'static [u8]>,
+        marker: &'static str,
+        outcome: Outcome,
+        head: Option<&'static str>,
+        note: Option<&'static str>,
+        payload_kind: &'static str,
+    }
+
+    #[test]
+    fn a_payload_report_replaces_the_head_and_can_only_lower_the_ending() {
+        const DONE_TEXT: &str = "payload says the edit landed";
+        const FAIL_TEXT: &str = "payload says the hop was abandoned";
+        const DONE_FILE: &[u8] = b"hop-done: payload says the edit landed\n";
+        const FAIL_FILE: &[u8] = b"hop-failed: payload says the hop was abandoned\n";
+        let cells = [
+            Cell {
+                name: "absent-end",
+                payload: None,
+                marker: "go",
+                outcome: Outcome::Done,
+                head: Some("I edited hello.py."),
+                note: None,
+                payload_kind: "absent",
+            },
+            Cell {
+                name: "absent-cut",
+                payload: None,
+                marker: "MARK:maxtokens go",
+                outcome: Outcome::Failed,
+                head: Some("I edited hello.py."),
+                note: Some("max_tokens"),
+                payload_kind: "absent",
+            },
+            Cell {
+                name: "done-end",
+                payload: Some(DONE_FILE),
+                marker: "go",
+                outcome: Outcome::Done,
+                head: Some(DONE_TEXT),
+                note: None,
+                payload_kind: "done",
+            },
+            // The heart of the contract: a cheerful report cannot promote a
+            // turn the stop reason already vetoed.
+            Cell {
+                name: "done-cannot-promote",
+                payload: Some(DONE_FILE),
+                marker: "MARK:maxtokens go",
+                outcome: Outcome::Failed,
+                head: Some(DONE_TEXT),
+                note: Some("max_tokens"),
+                payload_kind: "done",
+            },
+            Cell {
+                name: "failed-end",
+                payload: Some(FAIL_FILE),
+                marker: "go",
+                outcome: Outcome::Failed,
+                head: Some(FAIL_TEXT),
+                note: Some(FAIL_TEXT),
+                payload_kind: "failed",
+            },
+            Cell {
+                name: "failed-cut",
+                payload: Some(FAIL_FILE),
+                marker: "MARK:maxtokens go",
+                outcome: Outcome::Failed,
+                head: Some(FAIL_TEXT),
+                // Both halves of a cut-short turn survive into the one note the
+                // fault record carries: what the stop reason proved, then what
+                // the agent said.
+                note: Some("max_tokens; the agent reported: payload says the hop was abandoned"),
+                payload_kind: "failed",
+            },
+            Cell {
+                name: "empty-file",
+                payload: Some(b""),
+                marker: "go",
+                outcome: Outcome::Cancelled,
+                head: None,
+                note: Some("acp payload invalid: payload is empty"),
+                payload_kind: "invalid",
+            },
+            Cell {
+                name: "empty-file-cut",
+                payload: Some(b""),
+                marker: "MARK:maxtokens go",
+                outcome: Outcome::Cancelled,
+                head: None,
+                note: Some("acp payload invalid: payload is empty"),
+                payload_kind: "invalid",
+            },
+            Cell {
+                name: "two-lines",
+                payload: Some(b"hop-done: one\nhop-failed: two\n"),
+                marker: "go",
+                outcome: Outcome::Cancelled,
+                head: None,
+                note: Some("acp payload invalid: payload is more than one line"),
+                payload_kind: "invalid",
+            },
+            Cell {
+                name: "unknown-prefix",
+                payload: Some(b"hop-tripped: neither form\n"),
+                marker: "MARK:maxtokens go",
+                outcome: Outcome::Cancelled,
+                head: None,
+                note: Some("acp payload invalid: unknown report prefix"),
+                payload_kind: "invalid",
+            },
+            Cell {
+                name: "empty-report",
+                payload: Some(b"hop-done:\n"),
+                marker: "go",
+                outcome: Outcome::Cancelled,
+                head: None,
+                note: Some("acp payload invalid: hop-done carries no result"),
+                payload_kind: "invalid",
+            },
+            Cell {
+                name: "bare-prose",
+                payload: Some(b"the agent typed its answer into the file\n"),
+                marker: "MARK:maxtokens go",
+                outcome: Outcome::Cancelled,
+                head: None,
+                note: Some("acp payload invalid: payload carries no report prefix"),
+                payload_kind: "invalid",
+            },
+            Cell {
+                name: "not-utf8",
+                payload: Some(&[0xff, 0xf7, 0x00]),
+                marker: "go",
+                outcome: Outcome::Cancelled,
+                head: None,
+                note: Some("acp payload invalid: payload is not valid utf-8"),
+                payload_kind: "invalid",
+            },
+        ];
+        let fake = Fake::new();
+        let backend = AcpBackend::new(AcpOptions::default());
+        for cell in cells {
+            let task = format!("t-{}", cell.name);
+            let path = payload_path(fake.root.path(), &task);
+            if let Some(bytes) = cell.payload {
+                fs::create_dir_all(path.parent().expect("the report path names a file"))
+                    .expect("create the report directory");
+                fs::write(&path, bytes).expect("pre-place the report");
+            }
+            let session = backend.spawn(fake.spec(&task)).unwrap();
+            let (outcome, lines, _log) = run_turn(&backend, &session, &task, cell.marker);
+            assert_eq!(outcome.outcome, cell.outcome, "{}", cell.name);
+            assert_eq!(outcome.head.as_deref(), cell.head, "{}", cell.name);
+            match cell.note {
+                None => assert!(outcome.note.is_none(), "{}: {:?}", cell.name, outcome.note),
+                Some(want) => assert!(
+                    outcome
+                        .note
+                        .as_deref()
+                        .is_some_and(|got| got.contains(want)),
+                    "{}: {:?}",
+                    cell.name,
+                    outcome.note
+                ),
+            }
+            // The report is consumed on the read: a requeued task id starts
+            // from nothing rather than from the last turn's words.
+            assert!(
+                !path.exists(),
+                "{}: the report outlived its read",
+                cell.name
+            );
+            let records = onlyne_records(&lines, "payload");
+            assert_eq!(records.len(), 1, "{}: {lines:?}", cell.name);
+            assert_eq!(records[0]["task_id"], task, "{}", cell.name);
+            assert_eq!(
+                records[0]["payload_kind"], cell.payload_kind,
+                "{}",
+                cell.name
+            );
+            assert_eq!(
+                records[0]["path"],
+                Value::from(path.display().to_string()),
+                "{}",
+                cell.name
+            );
+            let head = records[0].get("head").and_then(Value::as_str);
+            assert_eq!(head, cell.head, "{}: {lines:?}", cell.name);
+            // The turn record closes the journal with the same head.
+            assert_eq!(
+                onlyne_records(&lines, "turn")[0]
+                    .get("head")
+                    .and_then(Value::as_str),
+                cell.head,
+                "{}",
+                cell.name
+            );
+            backend
+                .close(&session, CloseReason::Completed, false)
+                .expect("close");
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline && !backend.state.agents.lock().is_empty() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(backend.state.agents.lock().is_empty());
+    }
+
+    #[test]
+    fn the_prompt_hands_the_agent_the_path_the_ending_reads() {
+        let fake = Fake::new();
+        let backend = AcpBackend::new(AcpOptions::default());
+        let session = backend.spawn(fake.spec("t-path")).unwrap();
+        let (_outcome, lines, _log) = run_turn(&backend, &session, "t-path", "carry on");
+        let path = payload_path(fake.root.path(), "t-path");
+        let prose = onlyne_records(&lines, "dispatch")[0]["prose"]
+            .as_str()
+            .expect("the prompt is recorded")
+            .to_string();
+        // The directive carries the absolute path this backend will read, and
+        // the agent received the same text it is told it received.
+        assert!(
+            prose.contains(&format!(
+                "Result report (write before you stop): {}",
+                path.display()
+            )),
+            "{prose}"
+        );
+        assert!(
+            fake.traced().contains(&format!(
+                "Result report (write before you stop): {}",
+                path.display()
+            )),
+            "{}",
+            fake.traced()
+        );
+        // The client makes the directory before the agent is asked to write
+        // into it: a fresh workspace has no `.onlyne/out` of its own.
+        assert!(
+            payload_dir(fake.root.path()).is_dir(),
+            "the report directory must stand ready for the agent"
+        );
+        finish(&backend, &fake, &[&session]);
+    }
+
+    #[test]
+    fn an_unbuildable_report_directory_costs_only_the_directive() {
+        let fake = Fake::new();
+        // `out` is a regular file: neither `create_dir_all` nor a report path
+        // under it can exist.
+        let onlyne = fake.root.path().join(".onlyne");
+        fs::create_dir_all(&onlyne).expect("create the workspace state dir");
+        fs::write(onlyne.join("out"), "not a directory").expect("block the report dir");
+        let backend = AcpBackend::new(AcpOptions::default());
+        let session = backend.spawn(fake.spec("t-nowrite")).unwrap();
+        let (outcome, lines, _log) = run_turn(&backend, &session, "t-nowrite", "carry on");
+        // The turn settles on its stop reason alone, exactly the branch a
+        // missing report takes: no cancel conjured by the failed bookkeeping.
+        assert_eq!(outcome.outcome, Outcome::Done);
+        assert_eq!(outcome.head.as_deref(), Some("I edited hello.py."));
+        assert!(outcome.note.is_none(), "{:?}", outcome.note);
+        let prose = onlyne_records(&lines, "dispatch")[0]["prose"]
+            .as_str()
+            .expect("the prompt is recorded")
+            .to_string();
+        assert_eq!(prose, "carry on", "no directive with an unreachable path");
+        let warnings = onlyne_records(&lines, "warning");
+        assert_eq!(warnings.len(), 1, "{lines:?}");
+        assert!(
+            warnings[0]["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("report directory not created")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            onlyne_records(&lines, "payload")[0]["payload_kind"],
+            "absent"
+        );
+        finish(&backend, &fake, &[&session]);
     }
 
     #[test]

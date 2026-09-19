@@ -16,12 +16,19 @@ Protocol discipline, which is what makes the case observable:
   deterministic turn — one reasoning chunk, one tool call, its completion, one
   answer chunk — and answering `stopReason: end_turn`. The wait is bounded, so a
   case that never releases the gate fails its own assertions instead of hanging.
+* the turn's last action is the payload-v1 report: the case sends prompts the
+  client has decorated with its report directive, and this fixture follows that
+  directive literally — parse the absolute report path out of it, write one
+  report line under a temporary name, rename it into place. Prompt prose
+  carrying `HOPFAIL` chooses the `hop-failed:` line, everything else reports
+  `hop-done:`.
 * end of stdin is the client leaving: the agent exits 0.
 """
 
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -36,6 +43,17 @@ TOOL_KIND = "edit"
 SESSION_ID = "acp-session-1"
 ACCEPT_MODE = "acceptEdits"
 DEFAULT_MODE = "default"
+
+# The payload-v1 lines this agent writes to the report path named in the
+# client's injected directive. `acp-session.sh` carries the same literals and
+# asserts the ledger's `out_head` carries the text after the prefix, so a
+# drift between the two files fails at the gate with both sides in the message.
+PAYLOAD_HEAD = "The fixture reported through the payload file."
+PAYLOAD_FAIL_NOTE = "The fixture failed on purpose for the payload case."
+PAYLOAD_HEAD_LINE = "hop-done: " + PAYLOAD_HEAD
+PAYLOAD_FAIL_LINE = "hop-failed: " + PAYLOAD_FAIL_NOTE
+# The prose marker the case sends to make this agent report a failure.
+FAIL_MARKER = "HOPFAIL"
 
 GATE_POLL_SECONDS = 0.05
 # Long enough for a slow machine to complete the gated assertions,
@@ -185,6 +203,31 @@ def wait_for_gate(path, trace):
     trace.write("gate open")
 
 
+def write_payload(prompt, trace):
+    """Follow the client's report directive, the last action before stopping.
+
+    The directive is part of what the case tests, so a missing path is traced
+    rather than silently skipped: the case's ledger assertion then fails with
+    this line beside it.
+    """
+    match = re.search(r"Result report \(write before you stop\): (.*)$", prompt, re.M)
+    if match is None:
+        trace.write("payload skipped: no report path in the prompt")
+        return
+    path = match.group(1).strip()
+    line = PAYLOAD_FAIL_LINE if FAIL_MARKER in prompt else PAYLOAD_HEAD_LINE
+    temporary = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        os.replace(temporary, path)
+    except OSError as error:
+        trace.write("payload write %s failed: %s" % (path, error))
+        return
+    trace.write("payload line=%s" % line)
+
+
 def run_turn(rid, session_id, prompt, gate, trace):
     """One deterministic turn: traced, gated, then streamed in a fixed order."""
     trace.write("session/prompt id=%s text=%s" % (session_id, prompt.replace("\n", " / ")))
@@ -221,6 +264,7 @@ def run_turn(rid, session_id, prompt, gate, trace):
             "content": {"type": "text", "text": ANSWER},
         },
     )
+    write_payload(prompt, trace)
     result(rid, {"stopReason": "end_turn"})
 
 

@@ -14,6 +14,12 @@ set -euo pipefail
 # the content index, and the rendered log — one conversation read three ways,
 # all of them durable files under the role workspace.
 #
+# Every prompt travels with the backend's payload-v1 report directive, and the
+# fixture obeys it: the first task leaves a `hop-done:` line that becomes the
+# ledger head in place of the streamed answer; a second task whose prose
+# carries `HOPFAIL` reports `hop-failed:` and must settle Failed with the
+# reason as its head and one acp fault on the record.
+#
 # No product id is assumed. The task comes from `send`, the socket from the
 # client's own marker, and the ACP session id, agent pid, journal and log paths
 # from `client.db`'s stored reference for that task.
@@ -74,7 +80,7 @@ ONLYNE=$(bin onlyne)
 AGENT="$SRC/crates/onlyne-testkit/e2e/acp-agent.py"
 [ -f "$AGENT" ] || fail "the ACP fixture must sit beside this case" "$AGENT"
 
-# The turn the fixture performs. `acp-agent.py` carries the same six strings
+# The turn the fixture performs. `acp-agent.py` carries the same strings
 # and traces them in its `start` line, which the trace assertions check against
 # these values, so a drift between the two files fails at the gate with both
 # sides in the message.
@@ -87,6 +93,11 @@ TOOL_KIND='edit'
 ACCEPT_MODE='acceptEdits'
 FIXTURE_MODEL='fixture-model'
 FIXTURE_EFFORT='high'
+# The payload-v1 report literals: the fixture writes these lines to the report
+# path its prompt names, and the ledger rows below must carry the text after
+# the prefix — not the streamed answer.
+PAYLOAD_HEAD='The fixture reported through the payload file.'
+PAYLOAD_FAIL_NOTE='The fixture failed on purpose for the payload case.'
 
 ws="$tmp/planner"
 gate="$tmp/gate"
@@ -217,6 +228,10 @@ acp_session=$(sed -n '1p' "$tmp/acp-ref.txt")
 acp_pid=$(sed -n '2p' "$tmp/acp-ref.txt")
 events=$(sed -n '3p' "$tmp/acp-ref.txt")
 log=$(sed -n '4p' "$tmp/acp-ref.txt")
+# The backend derives both journal paths and the report path from the same
+# workspace, so the two `dirname`s off the stored journal spelling reach
+# `<workdir>/.onlyne/out` whatever way the path was written to disk.
+report_path="$(dirname "$(dirname "$events")")/out/$task.md"
 case "$acp_pid" in
   ''|*[!0-9]*) fail "the ACP session reference must carry a numeric pid" "pid=$acp_pid ref=$ref" ;;
 esac
@@ -230,17 +245,20 @@ fi
 [ -s "$events" ] || fail "the ACP backend must journal the dispatch record before the prompt" \
   "logs=$(ls -1 "$ws/.onlyne/logs" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
 journal_report=$(cat "$events" 2>/dev/null || true)
-if ! python3 - "$events" "$task" "$TASK_PROSE" <<'PY'
+if ! python3 - "$events" "$task" "$TASK_PROSE" "$report_path" <<'PY'
 import json
 import sys
 
-path, task, prose = sys.argv[1:4]
+path, task, prose, report_path = sys.argv[1:5]
 lines = [line for line in open(path, encoding="utf-8").read().splitlines() if line.strip()]
 assert len(lines) == 1, lines
 record = json.loads(lines[0])["onlyne"]
 assert record["kind"] == "dispatch", record
 assert record["task_id"] == task, record
-assert record["prose"] == prose, record
+# The dispatch record is the whole prompt: the task's prose with the report
+# directive appended, naming the very path the fixture's agent will write.
+assert record["prose"].startswith(prose), record
+assert f"Result report (write before you stop): {report_path}" in record["prose"], record
 PY
 then
   fail "a gated turn must leave exactly the one dispatch record in the journal" "$journal_report"
@@ -261,10 +279,15 @@ for _ in $(seq 1 120); do
 done
 rows_any "$tmp/ledger.json" state acked || fail "ledger state must become acked" \
   "ledger=$ledger_out trace=$(cat "$trace" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
+# Every settled task files its completion receipt, and this one's head is the
+# payload report the fixture wrote — the streamed answer no longer settles.
+rows_any "$tmp/ledger.json" kind completion || fail "the settled task must file a completion row" \
+  "ledger=$ledger_out trace=$(cat "$trace" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
 out_head=$(row_value "$tmp/ledger.json" out_head state acked)
+[ "$out_head" = "$PAYLOAD_HEAD" ] \
+  || fail "the acked row must carry the payload report in out_head" "out_head=$out_head ledger=$ledger_out"
 case "$out_head" in
-  *"$ANSWER"*) ;;
-  *) fail "the acked row must carry the agent's answer in out_head" "out_head=$out_head ledger=$ledger_out" ;;
+  *"$ANSWER"*) fail "out_head must not fall back to the streamed answer" "out_head=$out_head" ;;
 esac
 
 sessions_out=""
@@ -281,28 +304,37 @@ rows_any "$tmp/sessions.json" public_lifecycle exited || fail "sessions public_l
 [ "$(row_value "$tmp/sessions.json" outcome)" = "done" ] || fail "sessions outcome must be done" "$sessions_out"
 
 # The journal's two halves, semantically: the client's dispatch first, the
-# agent's four updates in the order it sent them, the client's turn record last.
+# agent's four updates in the order it sent them, then the client's own read of
+# the payload report and the turn record closing the file.
 journal_report=$(cat "$events" 2>/dev/null || true)
-if ! python3 - "$events" "$task" "$acp_session" "$TASK_PROSE" "$REASONING" "$ANSWER" "$TOOL_TITLE" <<'PY'
+if ! python3 - "$events" "$task" "$acp_session" "$TASK_PROSE" "$REASONING" "$ANSWER" "$TOOL_TITLE" \
+  "$report_path" "$PAYLOAD_HEAD" <<'PY'
 import json
 import sys
 
-path, task, session, prose, reasoning, answer, tool_title = sys.argv[1:8]
+path, task, session, prose, reasoning, answer, tool_title, report_path, payload_head = sys.argv[1:10]
 lines = [line for line in open(path, encoding="utf-8").read().splitlines() if line.strip()]
 records = [json.loads(line) for line in lines]
 
 ours = [record for record in records if "onlyne" in record]
-assert len(ours) == 2, ours
+assert len(ours) == 3, ours
 assert records[0] is ours[0], "the dispatch record opens the journal"
-assert records[-1] is ours[1], "the turn record closes the journal"
-dispatch, turn = ours[0]["onlyne"], ours[-1]["onlyne"]
+assert records[-1] is ours[2], "the turn record closes the journal"
+dispatch, payload, turn = (record["onlyne"] for record in ours)
 assert dispatch["kind"] == "dispatch" and dispatch["task_id"] == task, dispatch
-assert dispatch["prose"] == prose, dispatch
+assert dispatch["prose"].startswith(prose), dispatch
+assert f"Result report (write before you stop): {report_path}" in dispatch["prose"], dispatch
+assert payload["kind"] == "payload" and payload["task_id"] == task, payload
+assert payload["path"] == report_path, payload
+assert payload["payload_kind"] == "done", payload
+assert payload["head"] == payload_head, payload
 assert turn["kind"] == "turn" and turn["task_id"] == task, turn
 assert turn["stop_reason"] == "end_turn", turn
-assert turn["head"] == answer, turn
+# The report stands in for the closing message: the head of record is the
+# payload line, and the streamed answer survives only in the agent's update.
+assert turn["head"] == payload_head, turn
 
-updates = records[1:-1]
+updates = [record for record in records if "onlyne" not in record]
 assert [update.get("sessionUpdate") for update in updates] == [
     "agent_thought_chunk",
     "tool_call",
@@ -319,7 +351,7 @@ assert call["kind"] == "edit" and call["status"] == "pending", call
 assert done["status"] == "completed", done
 PY
 then
-  fail "the journal must hold the dispatch, the four ordered updates, and the turn" "$journal_report"
+  fail "the journal must hold dispatch, updates, payload and turn in order" "$journal_report"
 fi
 
 # The index is the role-wide cursor over those same records, so it has one entry
@@ -374,13 +406,64 @@ for want in \
   "session/set_config_option id=$acp_session configId=model value=$FIXTURE_MODEL" \
   "session/set_config_option id=$acp_session configId=reasoning_effort value=$FIXTURE_EFFORT" \
   "session/prompt id=$acp_session text=$TASK_PROSE" \
-  "gate open"; do
+  "Result report (write before you stop): $report_path" \
+  "gate open" \
+  "payload line=hop-done: $PAYLOAD_HEAD"; do
   if ! grep -q -F -- "$want" "$trace"; then
     fail "the fixture trace must carry: $want" "$trace_report"
   fi
 done
 
-# The turn is over and every assertion has passed, so the client is drained
+# The contract's downgrading half: a fresh task whose prose carries `HOPFAIL`
+# makes the fixture report `hop-failed:`, and that one line must settle the
+# task Failed — reason as head and fault note, receipt still filed, report
+# consumed. The second turn runs on the same client path as the first.
+fail_prose='acp session task: HOPFAIL settle this one from the report'
+send2_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "$fail_prose") \
+  || fail "second send command failed" "$send2_out"
+printf '%s\n' "$send2_out" > "$tmp/send2.json"
+[ "$(json_field "$tmp/send2.json" '.ok' 'str(json.load(sys.stdin).get("ok")).lower()')" = "true" ] \
+  || fail "second send ok must be true" "$send2_out"
+task2=$(json_field "$tmp/send2.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
+ledger2_out=""
+out_head2=""
+for _ in $(seq 1 120); do
+  ledger2_out=$("$ONLYNE" --server-root "$tmp/server" ledger --task "$task2" 2>/dev/null) || true
+  printf '%s\n' "$ledger2_out" > "$tmp/ledger2.json"
+  out_head2=$(row_value "$tmp/ledger2.json" out_head state acked)
+  if [ "$out_head2" = "$PAYLOAD_FAIL_NOTE" ]; then
+    break
+  fi
+  sleep 0.5
+done
+[ "$out_head2" = "$PAYLOAD_FAIL_NOTE" ] \
+  || fail "the failed task must carry the report's reason in out_head" \
+     "out_head=$out_head2 ledger=$ledger2_out trace=$(cat "$trace" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
+rows_any "$tmp/ledger2.json" kind completion || fail "a failed ACP task must still file its completion" \
+  "ledger=$ledger2_out client=$(cat "$tmp/client.log" 2>/dev/null)"
+sessions2_out=""
+for _ in $(seq 1 120); do
+  sessions2_out=$("$ONLYNE" --server-root "$tmp/server" sessions --task "$task2" 2>/dev/null) || true
+  printf '%s\n' "$sessions2_out" > "$tmp/sessions2.json"
+  if rows_any "$tmp/sessions2.json" public_lifecycle exited 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+done
+rows_any "$tmp/sessions2.json" public_lifecycle exited || fail "the failed session must reach exited" \
+  "sessions=$sessions2_out client=$(cat "$tmp/client.log" 2>/dev/null)"
+[ "$(row_value "$tmp/sessions2.json" outcome)" = "failed" ] \
+  || fail "the failed report must settle the session as failed" "$sessions2_out"
+if ! grep -q -F -- "payload line=hop-failed: $PAYLOAD_FAIL_NOTE" "$trace"; then
+  fail "the fixture trace must carry the failed report line" "$(cat "$trace" 2>/dev/null)"
+fi
+[ ! -e "$ws/.onlyne/out/$task2.md" ] || fail "the client must consume the report file" \
+  "reports=$(ls -1 "$ws/.onlyne/out" 2>/dev/null)"
+faults=$(db_count "$db" "SELECT COUNT(*) FROM faults WHERE task_id='$task2' AND kind='acp'") || faults=0
+[ "${faults:-0}" -ge 1 ] || fail "a failed ACP turn must record one acp fault" \
+  "faults=$faults ledger=$ledger2_out client=$(cat "$tmp/client.log" 2>/dev/null)"
+
+# The turns are over and every assertion has passed, so the client is drained
 # exactly as an operator would stop it: it closes its session on the way out,
 # which is what ends the ACP child this case read its pid from.
 drain_pid "$client_pid"
