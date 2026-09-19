@@ -17,18 +17,29 @@ pub struct ClientInfo {
     /// Human-facing label, optional on the wire.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Client version, optional on the wire.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
+    /// Client version. Required on the wire: ACP types `clientInfo` as
+    /// `{name, title?, version}` with `version` a string, and a real agent
+    /// answers `-32602 Invalid params` when the field is absent. It is never
+    /// empty because [`ClientInfo::new`] fills it from this crate's own version.
+    pub version: String,
 }
 
 impl ClientInfo {
+    /// Name this crate's own workspace version, so a caller cannot build an
+    /// `initialize` payload with the version missing.
     pub fn new(name: impl Into<String>) -> Self {
         ClientInfo {
             name: name.into(),
             title: None,
-            version: None,
+            version: env!("CARGO_PKG_VERSION").to_string(),
         }
+    }
+
+    /// Override the reported version, for a host that owns its own release
+    /// number and wants that on the wire rather than this crate's.
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = version.into();
+        self
     }
 }
 
