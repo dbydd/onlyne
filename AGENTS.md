@@ -433,6 +433,14 @@ Ignore most of:
 
 ## 14. Tests and verification expectations
 
+**Test permission for this repository (user order, 2026-09-19, `[keep]`).** The user
+granted standing test authority for this project: writing and running tests here is
+ordered, and this grant overrides the global machine rule that requires a user order in
+the current session (`~/.omp/agent/AGENTS.md`, TEST DISCIPLINE, "Tests require an
+explicit user order"). The global rule's remaining clauses still hold: existing tests are
+touched only where a change makes an assertion stale, and test code is authored by
+subagents on a tier above the session model rather than by the main thread.
+
 For every meaningful implementation step, verify with real evidence.
 
 At minimum, add tests for:
