@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.2.1] - 2026-09-19
 
 Scope: the ACP session gains a client-owned completion contract, and every
 settled task files its receipt. Each ACP prompt ends with a directive naming
@@ -11,6 +11,18 @@ used before, so the change moves the source of a task's head and verdict while
 the accounting surface stays. The receipt fix below completes that surface: a
 task whose turn left no result line now files a `completion` row whose text is
 empty, where its envelope used to fail validation and vanish.
+
+Gate on the tree at `798d3c1`, run 2026-09-19: `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets -D warnings`, and
+`cargo test --workspace` give 887 passed, 0 failed, 1 ignored across 66 suites,
+four above the 1.2.0 count for the three new `acp` report cases and the client
+receipt case. Fake-backend e2e passes at exit 0 on `acp-session.sh` (case 18,
+which now carries both report shapes), `local-task.sh`, `exec-headless.sh`,
+`idempotency.sh`, `requeue-claim.sh`, `running-lights.sh`, and `acl-reject.sh`.
+Against a real ACP agent, `qoderclicn --acp` served one task in a
+single-role cluster in 33 seconds: the prompt reached it carrying the report
+path, it wrote the file, the client consumed it, and the ledger's acked row
+carried the agent's own line in `out_head` with one `completion` row beside it.
 
 ### Added
 
@@ -60,6 +72,18 @@ empty, where its envelope used to fail validation and vanish.
   settled task files its receipt with the empty string as text whenever it
   carries no result line (commit `23ba012`). Files:
   `crates/onlyne-client/src/dispatch.rs`.
+
+All nineteen crates move to 1.2.1: `onlyne-proto`, `onlyne-frame`,
+`onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-acp`,
+`onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-testkit`,
+`onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-gateway-telegram`,
+`onlyne-gateway-feishu`, `onlyne-gateway-qqbot`, `onlyne-gateway-weixin`,
+`onlyne-tui`, and `onlyne-cli`. Two of them carry the behavior:
+`onlyne-session` holds the report contract and `onlyne-client` holds the
+receipt fix; the rest move together so every internal path dependency keeps a
+matching registry floor and each manifest stays publishable on its own.
+`plugins/onlyne-agent-pi` keeps its npm number `1.1.2`; the plugin's reporting
+path is untouched by this round.
 
 ## [1.2.0] - 2026-09-19
 

@@ -1,6 +1,6 @@
 [package]
 name = "onlyne-server"
-version = "1.2.0"
+version = "1.2.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,14 +13,14 @@ async-trait = "0.1"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-onlyne-adapter = { path = "../onlyne-adapter", version = "1.2.0" }
-onlyne-config = { path = "../onlyne-config", version = "1.2.0" }
-onlyne-frame = { path = "../onlyne-frame", version = "1.2.0" }
-onlyne-layout = { path = "../onlyne-layout", version = "1.2.0" }
+onlyne-adapter = { path = "../onlyne-adapter", version = "1.2.1" }
+onlyne-config = { path = "../onlyne-config", version = "1.2.1" }
+onlyne-frame = { path = "../onlyne-frame", version = "1.2.1" }
+onlyne-layout = { path = "../onlyne-layout", version = "1.2.1" }
 interprocess = { workspace = true }
-onlyne-net = { path = "../onlyne-net", version = "1.2.0" }
-onlyne-proto = { path = "../onlyne-proto", version = "1.2.0" }
-onlyne-store = { path = "../onlyne-store", version = "1.2.0" }
+onlyne-net = { path = "../onlyne-net", version = "1.2.1" }
+onlyne-proto = { path = "../onlyne-proto", version = "1.2.1" }
+onlyne-store = { path = "../onlyne-store", version = "1.2.1" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,10 +39,10 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 base64 = "0.22"
-onlyne-client = { path = "../onlyne-client", version = "1.2.0" }
-onlyne-frame = { path = "../onlyne-frame", version = "1.2.0" }
+onlyne-client = { path = "../onlyne-client", version = "1.2.1" }
+onlyne-frame = { path = "../onlyne-frame", version = "1.2.1" }
 rusqlite = { version = "0.32", features = ["bundled"] }
-onlyne-net = { path = "../onlyne-net", version = "1.2.0" }
+onlyne-net = { path = "../onlyne-net", version = "1.2.1" }
 tempfile = "3"
 
-onlyne-testkit = { path = "../onlyne-testkit", version = "1.2.0" }
+onlyne-testkit = { path = "../onlyne-testkit", version = "1.2.1" }

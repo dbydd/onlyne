@@ -20,12 +20,12 @@ async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-onlyne-adapter = { path = "../onlyne-adapter", version = "1.2.0" }
-onlyne-config = { path = "../onlyne-config", version = "1.2.0" }
-onlyne-layout = { path = "../onlyne-layout", version = "1.2.0" }
+onlyne-adapter = { path = "../onlyne-adapter", version = "1.2.1" }
+onlyne-config = { path = "../onlyne-config", version = "1.2.1" }
+onlyne-layout = { path = "../onlyne-layout", version = "1.2.1" }
 interprocess = { workspace = true }
-onlyne-net = { path = "../onlyne-net", version = "1.2.0" }
-onlyne-proto = { path = "../onlyne-proto", version = "1.2.0" }
+onlyne-net = { path = "../onlyne-net", version = "1.2.1" }
+onlyne-proto = { path = "../onlyne-proto", version = "1.2.1" }
 pulldown-cmark = "0.12"
 qrcode = { version = "0.14", default-features = false }
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -39,25 +39,25 @@ unicode-display-width = "0.2"
 [dependencies.onlyne-gateway-telegram]
 package = "onlyne-gateway-telegram"
 path = "../../plugins/onlyne-gateway-telegram"
-version = "1.2.0"
+version = "1.2.1"
 optional = true
 
 [dependencies.onlyne-gateway-feishu]
 package = "onlyne-gateway-feishu"
 path = "../../plugins/onlyne-gateway-feishu"
-version = "1.2.0"
+version = "1.2.1"
 optional = true
 
 [dependencies.onlyne-gateway-qqbot]
 package = "onlyne-gateway-qqbot"
 path = "../../plugins/onlyne-gateway-qqbot"
-version = "1.2.0"
+version = "1.2.1"
 optional = true
 
 [dependencies.onlyne-gateway-weixin]
 package = "onlyne-gateway-weixin"
 path = "../../plugins/onlyne-gateway-weixin"
-version = "1.2.0"
+version = "1.2.1"
 optional = true
 
 [dev-dependencies]
