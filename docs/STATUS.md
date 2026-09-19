@@ -1,6 +1,6 @@
 # Onlyne Status
 
-v1.1.0 is on crates.io and tagged `v1.1.0` (`e2d0e15`). `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONTRACT.md` owns the work split. Root README files are the user manual.
+v1.2.0 is on crates.io and tagged `v1.2.0` (`947917a`), nineteen crates, with the acp session backend, the pane refusal of protocol commands, and the ledger settlement reason. `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONTRACT.md` owns the work split. Root README files are the user manual.
 
 ## Three-process shape
 

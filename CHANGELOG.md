@@ -123,9 +123,26 @@ All nineteen crates move to 1.2.0: `onlyne-proto`, `onlyne-frame`,
 `onlyne-tui`, and `onlyne-cli`. Every internal path dependency in
 `[workspace.dependencies]`, in the crate manifests, and in
 `crates/onlyne-gateway/Cargo.toml`'s four plugin entries carries the matching
-registry floor, so each manifest stays publishable on its own. This section
-records no crates.io or npm receipt; publication rides the release action that
-follows.
+registry floor, so each manifest stays publishable on its own.
+
+Receipt: all nineteen crates are on crates.io at 1.2.0, published 2026-09-19,
+none yanked, in the dependency order `onlyne-proto`, `onlyne-frame`,
+`onlyne-config`, `onlyne-layout`, `onlyne-acp`, `onlyne-adapter`,
+`onlyne-session`, `onlyne-net`, `onlyne-gateway-feishu`, `onlyne-gateway-qqbot`,
+`onlyne-gateway-telegram`, `onlyne-gateway-weixin`, `onlyne-store`,
+`onlyne-testkit`, `onlyne-client`, `onlyne-gateway`, `onlyne-server`,
+`onlyne-tui`, `onlyne-cli`, each through
+`cargo publish --locked --allow-dirty -p onlyne-<crate>` at tag `v1.2.0`. A
+fresh consumer project outside this workspace, `Cargo.toml` pinning `=1.2.0` on
+`onlyne-cli`, `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-tui`,
+`onlyne-acp`, `onlyne-testkit`, and `onlyne-gateway-telegram`, resolved the
+whole graph from the registry and finished `cargo check` in 35.7 seconds.
+`onlyne-cli` answers the consumer with `ignoring invalid dependency ... missing
+a lib target`: the crate ships the `onlyne` binary and no library, which is the
+shape `cargo install` reads. The local install was refreshed from the same
+tree: `cargo build --workspace --release`, seven binaries copied to
+`~/.cargo/bin` and re-signed ad-hoc, and `onlyne version` answers
+`{"onlyne-cli":"1.2.0","protocol":1}` with all three daemons resolved.
 
 ## [1.1.1] - 2026-09-18
 
