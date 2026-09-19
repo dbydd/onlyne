@@ -201,7 +201,7 @@ fn init_command(root: &Path, listen: &str, force: bool, output: Output) -> i32 {
     let layout = ServerRoot::resolve(root);
     let spec_path = layout.spec_path();
     if spec_path.exists() && !force {
-        return refuse(GenerateError::WorkspaceExists(spec_path));
+        return refuse(GenerateError::RefuseOverwrite { path: spec_path });
     }
     if let Err(error) = layout.bootstrap() {
         eprintln!("onlyne-server: {error}");

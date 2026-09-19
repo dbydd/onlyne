@@ -239,7 +239,7 @@ reuse = true                     # 允许复用 idle 且无未完成 task 的 se
 allowed_senders = ["*"]          # 谁能向本 role 投递
 allowed_targets = ["builder", "reviewer"]
 session_command = ["pi", "--session-id", "{session}"]
-timeout = { ready_ms = 30000, running_ms = 120000, idle_ms = 60000 }
+timeout = { ready_ms = 30000, idle_ms = 60000 }
 intent = { attempts = 3, backoff_ms = [1000, 2000, 4000] }
 
 [[client]]
@@ -383,7 +383,7 @@ onlyne server generate --root <server-root> [--template <相对路径>]... [--ro
 - `--out` 默认 `<server-root>/.onlyne/ws`。默认遍历 `spec.toml` 里全部 `[[client]]` 条目，每条生成一份工作区，带 `aggregate` 的 supervisor role 条目也算——它在本集群里同样是本地 role。`--template` / `--role` 用来取子集；两个同时给出时取交集，交集为空就报 `onlyne: no role matches the requested templates/roles; available roles: <r1>, <r2>`（末尾列出模板根下实际扫到的候选 role 名），退出码 4，不写任何文件。
 - 模板到 role 的映射只有一条规则：在 `template_root` 下递归找 basename 恰好等于 role 名的目录，它就是该 role 的模板，父路径就是拓扑位置（`templates/dev/planner/` → role `planner`，拓扑 `dev`）。匹配到多处就报 `onlyne: template for role <r> is ambiguous: <p1>, <p2>`；一处也没有就报 `onlyne: no template directory named <r> under <template_root>`。两种情况都退出码 4，且不写任何文件。`--template <相对路径>` 显式指定单个模板，绕过 basename 匹配，拓扑位置取该模板的父路径。
 - 输出目录照抄模板层级：`<out>/<模板相对路径>/<role>/`（模板 `.onlyne/templates/dev/planner/` + role `planner` → `<out>/dev/planner/`）。单机集群原地不动就已经按拓扑排好；要放异地，由 supervisor/user 把整个目录搬走。
-- 目标已存在又没给 `--force`，就报 `onlyne: workspace exists at <path>; pass --force to overwrite`，退出码 4，不写任何文件。`--force` 只覆盖 `.onlyne/config.toml`、`.onlyne/keys/role.key`（仅当不存在时生成）与模板内容文件；已存在的 `.onlyne/client.db`、`.onlyne/run/`、`.onlyne/logs/` **永不覆盖**。
+- 目标文件已存在、字节与本次渲染结果不同又没给 `--force`，就报 `onlyne: refusing to overwrite <path>; pass --force`（指向那个文件），退出码 4，不写任何文件；字节相同就跳过不重写（mtime 不变）。`--force` 只覆盖模板内容文件与 `.onlyne/config.toml`，`.onlyne/keys/role.key` 仅当不存在时生成；已存在的 `.onlyne/client.db`、`.onlyne/run/`、`.onlyne/logs/` **永不覆盖**。
 - 每次 generate 都为该 role 新生成一对独立 ed25519 keypair。私钥落 `<ws>/.onlyne/keys/role.key`（0600）；公钥只出现在输出的 spec 片段与 generation manifest 里。
 
 **占位符替换**（封闭集；出现未识别的 `{{...}}` 就报错，列出键名与文件路径，退出码 4）：`{{role}}`、`{{cluster}}`、`{{server_name}}`、`{{listen}}`、`{{cert_pin}}`、`{{admin}}`、`{{max_sessions}}`、`{{agent_package}}`。`{{agent_package}}` 指向 `[server].agent_package`（本机绝对路径，只在这一步读一次）：generate 把该包目录整体复制进 `<ws>/.onlyne/agent/<pkg-name>/`（跳过包内 `.onlyne/`、`target/`、`.git/`），写出的 `.pi/settings.json` 用 `.onlyne/agent/<pkg-name>` 引用副本。这样搬迁时插件跟着工作区一起走；做法沿用旧 `sync.rs::copy_pi_onlyne_package`（152-163）与其 settings 路径改写（196-210），所以产物里不含那个绝对路径。`agent_package` 为空而模板用到 `{{agent_package}}` 就报 `onlyne: agent_package not set in spec.toml [server]`，退出码 4；模板没用这个占位符就不 vendor。

@@ -1,5 +1,61 @@
 # Changelog
 
+## [Unreleased]
+
+Scope: the core stops describing a running turn as bounded. `[client.timeout]`
+carried a `running_ms` key documented as bounding one running task, and the
+server projected it into the `welcome` reply beside its two siblings. The key
+carries no behavior: no reader in `onlyne-client` or `onlyne-session` consults a
+running-task clock, and the ACP transport already states the working rule
+(`onlyne-acp` waits on the agent and lets the agent end its own turn). This round
+cuts the key from the parser, the wire, the generated schema, the shipped
+examples, and the plan. What survives is the split the code already keeps:
+`ready_ms` covers the handoff window before an agent starts work, `idle_ms`
+covers a session nobody claims, and the detection-only watches
+(`stall_report_secs`, `stale_watch_secs`, `heartbeat_grace_secs`) record a fault
+and leave the row `working`. The other half of the round gives
+`onlyne server generate` a per-file overwrite guard, so a workspace an operator
+customized survives a rerun.
+
+Check on this tree, run 2026-09-19: `cargo fmt --all --check` and
+`cargo check --workspace --all-targets` pass. This round leaves the test suite
+unrun on purpose: the change deletes one field from three types and rewrites one
+guard, and the compile names every site a deletion reaches. The case count moves
+with the guard cases described below; the next full gate reports the number.
+
+### Removed
+
+- config: `Timeouts::running_ms`, its default helper, and its entry in the
+  unknown-key name list. `[client.timeout]` now reads `ready_ms` and `idle_ms`.
+  The struct keeps `deny_unknown_fields`, so a `spec.toml` still carrying
+  `running_ms` stops at parse with that key named.
+- proto: `Welcome::timeout_running_ms`. The field was `Option` with
+  `skip_serializing_if`, so an older server sending it lands as an ignored key
+  (`Welcome` declares no `deny_unknown_fields`), and an older client reading a
+  reply without it gets `None`.
+- server: the `router` line that copied `entry.timeout.running_ms` into the
+  `hello` reply.
+- docs: the `running_ms` entry in the plan's `[[client]]` table, the
+  `running_ms` comment and value in the four `[client.timeout]` blocks of
+  `.onlyne.example/spec.toml`, and the `timeout` line `onlyne-client init` prints
+  into a pasted `[[client]]` fragment. The surviving comments name what actually
+  touches those two keys: the server projects them into the `hello` reply.
+
+### Changed
+
+- server: `onlyne server generate` guards each template file by content. A file
+  missing from the target gets created. A file whose bytes already match this
+  render is left alone, so a rerun following a `spec.toml` edit writes nothing it
+  does not have to, and the untouched file keeps its mtime. A file holding other
+  bytes is a hand edit, and the run stops before writing anything with
+  `onlyne: refusing to overwrite <path>; pass --force` at exit 4. `--force`
+  replaces those files. `.onlyne/config.toml` stays a derived artifact and
+  refreshes each run; `role.key` is written when absent; `client.db`, `run/`, and
+  `logs/` stay untouched either way.
+- server: `onlyne server init` on a root that already has a `spec.toml` prints
+  the same refusal wording, which is the message §6 of `AGENTS.md` has
+  documented throughout.
+
 ## [1.2.2] - 2026-09-19
 
 Scope: the acp closing report grows a routing vocabulary. The closing report is

@@ -38,7 +38,7 @@ pub struct GenerateReport {
 #[derive(Debug)]
 pub enum GenerateError {
     Template(TemplateError),
-    WorkspaceExists(PathBuf),
+    RefuseOverwrite { path: PathBuf },
     Io { path: PathBuf, source: io::Error },
     Net(String),
     Config(String),
@@ -48,7 +48,7 @@ impl GenerateError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Template(error) => error.exit_code(),
-            Self::WorkspaceExists(_) => 4,
+            Self::RefuseOverwrite { .. } => 4,
             Self::Io { .. } | Self::Net(_) | Self::Config(_) => 4,
         }
     }
@@ -58,9 +58,9 @@ impl std::fmt::Display for GenerateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Template(error) => error.fmt(f),
-            Self::WorkspaceExists(path) => write!(
+            Self::RefuseOverwrite { path } => write!(
                 f,
-                "onlyne: workspace exists at {}; pass --force to overwrite",
+                "onlyne: refusing to overwrite {}; pass --force",
                 path.display()
             ),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
@@ -212,9 +212,18 @@ pub fn generate(args: &GenerateArgs, spec: &Spec) -> Result<GenerateReport, Gene
         .into());
     }
 
-    for item in &pending {
-        if item.target.exists() && !args.force {
-            return Err(GenerateError::WorkspaceExists(item.target.clone()));
+    // A template file already in the workspace is operator ground: someone may
+    // have edited it after generation. The render may replace it only when
+    // `--force` says so. An unchanged file is left alone, so re-running after a
+    // `spec.toml` edit costs nothing and keeps every hand edit in place.
+    if !args.force {
+        for item in &pending {
+            for (relative, bytes) in &item.files {
+                let path = item.target.join(relative);
+                if differs_from_render(&path, bytes) {
+                    return Err(GenerateError::RefuseOverwrite { path });
+                }
+            }
         }
     }
 
@@ -254,6 +263,9 @@ pub fn generate(args: &GenerateArgs, spec: &Spec) -> Result<GenerateReport, Gene
         created_files.push(config_path);
         for (relative, bytes) in &item.files {
             let path = item.target.join(relative);
+            if !differs_from_render(&path, bytes) {
+                continue;
+            }
             if let Some(parent) = path.parent() {
                 ensure_dir(parent, &mut created_dirs).map_err(|source| GenerateError::Io {
                     path: parent.to_path_buf(),
@@ -578,6 +590,17 @@ fn replace_bytes(source: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
     }
     out.extend_from_slice(&source[cursor..]);
     out
+}
+
+/// Whether a render may not write this path. An absent file is free to create,
+/// a file whose bytes already match the render is free to leave, and a file
+/// holding other bytes is a hand edit `--force` speaks for. A path that exists
+/// and will not read counts as an edit: the write loop reports what it finds.
+fn differs_from_render(path: &Path, rendered: &[u8]) -> bool {
+    match fs::read(path) {
+        Ok(existing) => existing != rendered,
+        Err(source) => source.kind() != io::ErrorKind::NotFound,
+    }
 }
 
 fn ensure_dir(path: &Path, created: &mut Vec<PathBuf>) -> io::Result<()> {

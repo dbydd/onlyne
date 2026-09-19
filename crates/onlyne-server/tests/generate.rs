@@ -21,7 +21,6 @@ fn client_entry(role: &str) -> ClientEntry {
         session_command: vec![],
         timeout: Timeouts {
             ready_ms: 30_000,
-            running_ms: 120_000,
             idle_ms: 60_000,
         },
         intent: IntentPolicy {
@@ -127,7 +126,7 @@ fn first_run_creates_plan_tree() {
 }
 
 #[test]
-fn rerun_without_force_refuses_with_byte_exact_message() {
+fn rerun_without_force_leaves_unchanged_files_untouched() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("srv");
     let out = tmp.path().join("ws");
@@ -135,18 +134,66 @@ fn rerun_without_force_refuses_with_byte_exact_message() {
     write_template(&root, "dev/planner", &[("AGENTS.md", "v1 {{role}}")]);
     let spec = spec_with_roles(&["planner"]);
     generate(&args(&root, &out), &spec).unwrap();
-    let before = fs::read(out.join("dev/planner/AGENTS.md")).unwrap();
+    let ws = out.join("dev/planner");
+    let agents = ws.join("AGENTS.md");
+    let before = fs::read(&agents).unwrap();
+    let mtime = fs::metadata(&agents).unwrap().modified().unwrap();
+    generate(&args(&root, &out), &spec).expect("a no-op rerun lands");
+    assert_eq!(fs::read(&agents).unwrap(), before);
+    assert_eq!(fs::metadata(&agents).unwrap().modified().unwrap(), mtime);
+    assert!(ws.join(".onlyne/config.toml").is_file());
+}
+
+#[test]
+fn rerun_without_force_refuses_a_hand_edited_file_with_byte_exact_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("srv");
+    let out = tmp.path().join("ws");
+    fs::create_dir_all(&root).unwrap();
+    write_template(&root, "dev/planner", &[("AGENTS.md", "v1 {{role}}")]);
+    let spec = spec_with_roles(&["planner"]);
+    generate(&args(&root, &out), &spec).unwrap();
+    let agents = out.join("dev/planner").join("AGENTS.md");
+    fs::write(&agents, "hand edited").unwrap();
     let err = generate(&args(&root, &out), &spec).expect_err("must refuse");
     assert_eq!(err.exit_code(), 4);
     assert_eq!(
         err.to_string(),
         format!(
-            "onlyne: workspace exists at {}; pass --force to overwrite",
-            out.join("dev/planner").display()
+            "onlyne: refusing to overwrite {}; pass --force",
+            out.join("dev/planner").join("AGENTS.md").display()
         )
     );
-    assert_eq!(fs::read(out.join("dev/planner/AGENTS.md")).unwrap(), before);
-    assert_eq!(walk(&out).len(), walk(&out).len());
+    assert_eq!(fs::read_to_string(&agents).unwrap(), "hand edited");
+    // The scan covers every file before the first write, so a refusal leaves the
+    // workspace as it found it: a file the template grew after that hand edit
+    // stays unwritten rather than landing beside the edited one.
+    write_template(&root, "dev/planner", &[("PROMPT.md", "v1")]);
+    generate(&args(&root, &out), &spec).expect_err("the edit still refuses");
+    assert!(!out.join("dev/planner").join("PROMPT.md").exists());
+}
+
+#[test]
+fn force_replaces_a_hand_edited_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("srv");
+    let out = tmp.path().join("ws");
+    fs::create_dir_all(&root).unwrap();
+    write_template(&root, "dev/planner", &[("AGENTS.md", "v1 {{role}}")]);
+    let spec = spec_with_roles(&["planner"]);
+    generate(&args(&root, &out), &spec).unwrap();
+    let ws = out.join("dev/planner");
+    let key_path = ws.join(".onlyne/keys/role.key");
+    let key_before = fs::read(&key_path).unwrap();
+    fs::write(ws.join("AGENTS.md"), "hand edited").unwrap();
+    let mut forced = args(&root, &out);
+    forced.force = true;
+    generate(&forced, &spec).expect("force");
+    assert_eq!(
+        fs::read_to_string(ws.join("AGENTS.md")).unwrap(),
+        "v1 planner"
+    );
+    assert_eq!(fs::read(&key_path).unwrap(), key_before);
 }
 
 #[test]
@@ -661,7 +708,7 @@ fn init_writes_spec_prints_pin_and_refuses_second_run() {
     assert_eq!(
         stderr.trim_end(),
         format!(
-            "onlyne: workspace exists at {}; pass --force to overwrite",
+            "onlyne: refusing to overwrite {}; pass --force",
             root.join(".onlyne").join("spec.toml").display()
         )
     );
