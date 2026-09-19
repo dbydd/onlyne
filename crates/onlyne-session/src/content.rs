@@ -2,7 +2,7 @@
 //!
 //! The event JSON remains in the task journal exactly once.  The companion
 //! index stores only enough metadata to recover the role-wide sequence and read
-//! those original bytes back for a resumed viewer.
+//! those original bytes back, whoever the eventual reader is.
 
 use anyhow::{Context, Result, anyhow};
 use parking_lot::Mutex;
@@ -33,7 +33,7 @@ pub struct ContentRecord {
 ///
 /// The backend calls `publish` only after the journal object and its durable
 /// cursor index entry have both been appended. An implementation must do bounded
-/// bookkeeping only and must never perform a socket write or wait for a viewer.
+/// bookkeeping only and must never block the journalling turn.
 pub trait ContentSink: Send + Sync {
     fn publish(&self, record: ContentRecord);
 }
