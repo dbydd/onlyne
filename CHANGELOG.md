@@ -211,6 +211,28 @@ gateway plugins — move with no code of their own, so every internal path
 dependency keeps a matching registry floor and each manifest stays publishable on
 its own.
 
+Receipt: all nineteen crates are on crates.io at 1.2.2, published 2026-09-19,
+none yanked, in the dependency order `onlyne-acp`, `onlyne-config`,
+`onlyne-frame`, `onlyne-layout`, `onlyne-proto`, `onlyne-adapter`, `onlyne-cli`,
+`onlyne-net`, `onlyne-session`, `onlyne-gateway-feishu`, `onlyne-gateway-qqbot`,
+`onlyne-gateway-telegram`, `onlyne-gateway-weixin`, `onlyne-store`,
+`onlyne-testkit`, `onlyne-client`, `onlyne-gateway`, `onlyne-server`,
+`onlyne-tui`, each through `cargo publish --locked -p onlyne-<crate>` at tag
+`v1.2.2` from a clean worktree. Every crate went out on its first attempt, zero
+retries, and all nineteen carried the packaging sandbox build — the tree needed
+neither `--allow-dirty` nor `--no-verify` this time. The sandbox builds are also
+the registry-side proof: `onlyne-adapter` compiled against `onlyne-proto`,
+`onlyne-frame`, and `onlyne-layout` 1.2.2 downloaded from the registry,
+`onlyne-client` against `onlyne-net` and `onlyne-store` 1.2.2, and
+`onlyne-gateway` against all four platform plugins 1.2.2. One cosmetic note:
+cargo's availability poll for `onlyne-config` reported a timeout after its upload
+landed, and the later sandbox build of `onlyne-cli` downloaded
+`onlyne-config v1.2.2` from the registry. The local install was refreshed from
+the same tree: `cargo build --workspace --release`, seven binaries copied to
+`~/.cargo/bin` and re-signed ad-hoc, and `onlyne version` answers
+`{"onlyne-cli":"1.2.2","protocol":1}` with all three daemons resolved;
+`onlyne schema client` prints 149 lines.
+
 ## [1.2.1] - 2026-09-19
 
 Scope: the ACP session gains a client-owned completion contract, and every
