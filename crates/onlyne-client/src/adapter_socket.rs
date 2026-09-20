@@ -265,6 +265,9 @@ impl AdapterSocket {
         let mut graceful_detach = false;
         while let Some(frame) = connection.inbound.recv().await {
             let id = frame.id.unwrap_or_default();
+            // Nothing in this handler may tell this connection to leave ahead of
+            // the answer it is about to receive.
+            let _held = self.dispatch.hold_frame(&io);
             match frame.msg {
                 AdapterMsg::Plugin(PluginOp::Report(report)) => {
                     let result = match report {

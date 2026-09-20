@@ -83,6 +83,12 @@ struct DispatchInner {
     /// carries it. `on_out` drains the key before it routes, so the recipient
     /// reads one relay per downstream role.
     pub held_handoffs: HashMap<String, Vec<Handoff>>,
+    /// Connections inside one of their own inbound frames right now.
+    ///
+    /// A frame handler runs to completion before `adapter_socket` answers the
+    /// frame, so a host frame written on the same connection during that handler
+    /// leaves first. The bye sweep in `retire_revived` skips these connections.
+    pub in_frame: Vec<AdapterIo>,
 }
 
 #[derive(Clone)]
@@ -363,7 +369,38 @@ fn attach_transport_locked(
     true
 }
 
+/// One plugin connection held inside an inbound frame it is still being answered.
+///
+/// The bye sweep in `retire_revived` leaves such a connection alone, which keeps a
+/// bye behind the response to the frame. A plugin's bye handler drops the socket and
+/// rejects every request awaiting an answer, so a bye that overtakes the response
+/// turns work the ledger already holds into a failure the agent reports again.
+#[must_use = "the connection stops being held as soon as the guard is dropped"]
+pub struct FrameGuard<'a> {
+    state: &'a DispatchState,
+    io: AdapterIo,
+}
+
+impl Drop for FrameGuard<'_> {
+    fn drop(&mut self) {
+        self.state
+            .inner
+            .lock()
+            .in_frame
+            .retain(|held| !held.same_connection(&self.io));
+    }
+}
+
 impl DispatchState {
+    /// Hold `io` for as long as one of its inbound frames is being handled.
+    pub fn hold_frame(&self, io: &AdapterIo) -> FrameGuard<'_> {
+        self.inner.lock().in_frame.push(io.clone());
+        FrameGuard {
+            state: self,
+            io: io.clone(),
+        }
+    }
+
     pub fn new(
         role: impl Into<String>,
         workspace: impl Into<PathBuf>,
@@ -396,6 +433,7 @@ impl DispatchState {
                 stall: crate::stall::StallWatch::new(),
                 revived: Vec::new(),
                 held_handoffs: HashMap::new(),
+                in_frame: Vec::new(),
             })),
         }
     }
@@ -1312,6 +1350,28 @@ fn live_sessions(inner: &DispatchInner) -> usize {
         .count()
 }
 
+/// Whether an unbound slot can take the next task under `reuse`.
+///
+/// `reuse` means the next task goes to a session that is still here. A slot that
+/// `control recycle` left behind has no resource below it: that arm writes the
+/// closed word and closes the backend resource before releasing the binding.
+/// Staging onto such a slot writes a payload onto a session with nothing to run
+/// it, and the spawn path below stays unreachable, so the server row sits
+/// `in_flight` while the role still looks like it has room. `detached` is a
+/// different word: it means the client never confirmed the resource, and the
+/// arm above leaves it alone, so it stays a candidate.
+fn reuse_candidate(inner: &DispatchInner, slot: &SessionSlot) -> bool {
+    if slot.task_id.is_some() || slot.read_only {
+        return false;
+    }
+    inner
+        .store
+        .get_session(&slot.session.task_id)
+        .ok()
+        .flatten()
+        .is_some_and(|row| row.resource_state != "closed")
+}
+
 pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef> {
     let task_id = envelope
         .task_id()
@@ -1344,13 +1404,13 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
         let same_family = inner
             .sessions
             .iter()
-            .find(|(_, slot)| slot.task_id.is_none() && !slot.read_only && slot.family == family)
+            .find(|(_, slot)| reuse_candidate(&inner, slot) && slot.family == family)
             .map(|(key, _)| key.clone());
         let idle = same_family.or_else(|| {
             inner
                 .sessions
                 .iter()
-                .find(|(_, slot)| slot.task_id.is_none() && !slot.read_only)
+                .find(|(_, slot)| reuse_candidate(&inner, slot))
                 .map(|(key, _)| key.clone())
         });
         let reused = idle
@@ -1694,15 +1754,26 @@ fn merged_handoffs<'a>(
 /// it had to say travelled with the relay above. A slot that lost its task to a
 /// newer session has the transport naming it dropped, its task binding released,
 /// and is retired as `Replaced`: the resource its agent was holding is this
-/// client's to close, and the newer session answers for the task. Neither
-/// `settle` nor `release_locked` runs here — the completion that merged the
-/// handoff already paid the task's account.
+/// client's to close, and the newer session answers for the task. The account for
+/// the task is the settlement above.
+///
+/// A connection inside its own inbound frame is left alone. `adapter_socket`
+/// awaits the handler before it answers the frame, so a bye written here would
+/// leave ahead of that connection's own response, and the plugin's bye handler
+/// drops the socket and rejects every request awaiting an answer — a completion
+/// the ledger already holds would reach the agent as a failure it retries. The
+/// entry stays in `revived`: the connection's `detach` frame or its socket end
+/// retires it through `release_connection`, and the plugin that just completed
+/// ends its own session either way.
 async fn retire_revived(state: &DispatchState, task_id: &str) {
     let leaving = {
         let mut inner = state.inner.lock();
         let mut leaving: Vec<AdapterIo> = Vec::new();
         let mut silent: Vec<String> = Vec::new();
         for (session_id, io, _) in inner.revived.iter() {
+            if inner.in_frame.iter().any(|busy| busy.same_connection(io)) {
+                continue;
+            }
             let reaches = slot_key_named(&inner, session_id)
                 .and_then(|key| {
                     inner

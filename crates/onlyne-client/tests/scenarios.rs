@@ -710,60 +710,78 @@ fn the_offline_reply_reports_the_key_the_row_stores() {
     );
 }
 
-#[test]
-fn session_reuse_and_capacity_capping() {
+/// A settled session whose agent is still attached is the one its family's next
+/// task rides, and `max_sessions` caps the live ones.
+///
+/// The idle slot here is produced the way the protocol produces one: the task's
+/// completion report over the agent's own connection. A session ended by
+/// `control recycle` is deliberately absent from this shape — its resource is
+/// closed, and a closed resource takes no reused task.
+#[tokio::test]
+async fn session_reuse_and_capacity_capping() {
     let dir = tempdir().unwrap();
-    let db = dir.path().join("client.db");
-    let store = ClientStore::open(&db).unwrap();
-    let backend = Arc::new(FakeBackend::new());
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
     let state = DispatchState::new(
         "planner",
         dir.path(),
         vec!["echo".into()],
         2,
         true,
-        backend,
+        backend.clone(),
         store.clone(),
     );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
 
-    let mut env1 = sample_envelope("planner", "task 1");
     let family1 = new_task_id();
-    env1.causality = Some(onlyne_proto::Causality {
-        task: new_task_id(),
-        parent_task: Some(family1.clone()),
-        reply_to: None,
-        hop: 0,
-        attempt: 0,
-    });
-
-    let s1 = dispatch(&state, &env1).unwrap();
-    assert_eq!(state.session_count(), 1);
-
-    // Recycle task 1 so session becomes idle
-    on_recycled(
-        &state,
-        env1.task_id().unwrap(),
-        onlyne_session::CloseReason::Completed,
-    )
-    .unwrap();
-
-    // Task 2 with same family reuses session 1
-    let mut env2 = sample_envelope("planner", "task 2");
-    env2.causality = Some(onlyne_proto::Causality {
-        task: new_task_id(),
-        parent_task: Some(family1),
-        reply_to: None,
-        hop: 0,
-        attempt: 0,
-    });
-    let s2 = dispatch(&state, &env2).unwrap();
+    let family2 = new_task_id();
+    let first_task = deliver(&state, &family_delivery("task 1", &family1)).await;
+    let (first_io, mut first_assigns) = mount_plugin(&socket, Some(&first_task)).await;
     assert_eq!(
-        s1.backend_ref, s2.backend_ref,
-        "the same backend resource carries the next task"
+        first_assigns.recv().await.as_deref(),
+        Some(first_task.as_str())
     );
-    assert_eq!(state.session_count(), 1);
+    let second_task = deliver(&state, &family_delivery("task 2", &family2)).await;
+    let (second_io, mut second_assigns) = mount_plugin(&socket, Some(&second_task)).await;
+    assert_eq!(
+        second_assigns.recv().await.as_deref(),
+        Some(second_task.as_str())
+    );
+    assert_eq!(state.session_count(), 2);
+
+    // Task 1 ends on its own connection: the session is settled and its agent is
+    // still attached, which is the only idle shape `reuse` may take.
+    complete_plugin(&first_io, &first_task, Outcome::Done).await;
+    assert!(
+        backend.closed_sessions.lock().is_empty(),
+        "the attached resource stays open"
+    );
+
+    // Task 3 from the first family rides the session that family owns.
+    let third_task = deliver(&state, &family_delivery("task 3", &family1)).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), first_assigns.recv())
+            .await
+            .expect("the attached agent is handed its family's next task")
+            .as_deref(),
+        Some(third_task.as_str()),
+        "the assignment reaches the agent that is still attached"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), second_assigns.recv())
+            .await
+            .is_err(),
+        "the other family's agent is handed nothing"
+    );
+    assert_eq!(state.session_count(), 2, "reuse spends no new slot");
+    assert_eq!(
+        backend.closed_sessions.lock().len(),
+        0,
+        "the reused task rides the resource that was already open"
+    );
     let reused_row = store
-        .get_session(env2.task_id().unwrap())
+        .get_session(&third_task)
         .unwrap()
         .expect("the reused task has a ledger row");
     assert_ne!(
@@ -772,31 +790,20 @@ fn session_reuse_and_capacity_capping() {
         "a reused session must resolve to its backend resource"
     );
 
-    // Task 3 with different family spawns session 2
-    let mut env3 = sample_envelope("planner", "task 3");
-    let family2 = new_task_id();
-    env3.causality = Some(onlyne_proto::Causality {
-        task: new_task_id(),
-        parent_task: Some(family2),
-        reply_to: None,
-        hop: 0,
-        attempt: 0,
-    });
-    let _s3 = dispatch(&state, &env3).unwrap();
-    assert_eq!(state.session_count(), 2);
-
-    // Task 4 with different family exceeds max_sessions (2)
-    let mut env4 = sample_envelope("planner", "task 4");
-    env4.causality = Some(onlyne_proto::Causality {
+    // A fourth task exceeds `max_sessions` (2): the live rows are task 2 and the
+    // reused task 3, and task 1's exited row spends nothing.
+    let mut overflow = sample_envelope("planner", "task 4");
+    overflow.causality = Some(onlyne_proto::Causality {
         task: new_task_id(),
         parent_task: Some(new_task_id()),
         reply_to: None,
         hop: 0,
         attempt: 0,
     });
-    let err = dispatch(&state, &env4);
-    assert!(err.is_err());
-    assert_eq!(err.unwrap_err().to_string(), "max_sessions reached");
+    let err = dispatch(&state, &overflow).expect_err("the role is at its cap");
+    assert_eq!(err.to_string(), "max_sessions reached");
+    drop(second_io);
+    host.abort();
 }
 
 /// A settled session spends no concurrency.
@@ -2278,6 +2285,23 @@ fn task_delivery(text: &str) -> Delivery {
     }
 }
 
+/// One delivery whose chain hangs under `family`, which is the handle `reuse`
+/// prefers when it picks among the role's idle sessions.
+fn family_delivery(text: &str, family: &str) -> Delivery {
+    let mut envelope = sample_envelope("planner", text);
+    envelope.causality = Some(onlyne_proto::Causality {
+        task: new_task_id(),
+        parent_task: Some(family.to_string()),
+        reply_to: None,
+        hop: 0,
+        attempt: 0,
+    });
+    Delivery {
+        msg_id: format!("msg-{}", new_task_id()),
+        envelope: Box::new(envelope),
+    }
+}
+
 /// Hand one delivery to this role the way the pull loop does: stage the
 /// session, then route its payload to whichever connection serves it.
 async fn deliver(state: &DispatchState, delivery: &Delivery) -> String {
@@ -3533,5 +3557,133 @@ async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
     );
     assert_eq!(state.session_count(), 1, "one session serves the role");
     assert_settled(&store, &second_task);
+    host.abort();
+}
+
+/// A read-only connection's own completion is answered before any bye reaches it.
+///
+/// `adapter_socket` runs the report handler to completion and only then answers the
+/// frame, so a bye written inside that handler left ahead of the response. The pi
+/// plugin's bye handler drops the socket and rejects every request still awaiting
+/// an answer, which turned completions the ledger already held into failures the
+/// agent reported again: three terminal writes for one task on the live ring, with
+/// a `heartbeat_after_complete` fault beside them.
+#[tokio::test]
+async fn a_read_only_completion_is_answered_before_any_bye() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        2,
+        true,
+        backend.clone(),
+        store.clone(),
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    // One session, served by the connection that mounted it.
+    let task_id = deliver(&state, &task_delivery("task A")).await;
+    let (_serving_io, mut assigns) = mount_plugin(&socket, Some(&task_id)).await;
+    assert_eq!(assigns.recv().await.as_deref(), Some(task_id.as_str()));
+
+    // A second connection comes back for the session the first one serves: it is
+    // held read-only, and it files the completion anyway.
+    let (io_returning, mut witnessed) = witnessed_plugin(&socket, &task_id).await;
+    assert!(
+        witnessed.try_recv().is_err(),
+        "the returning connection is handed nothing at mount"
+    );
+    let body = io_returning
+        .request(AdapterMsg::Plugin(PluginOp::Report(Report::Complete {
+            task_id: task_id.clone(),
+            outcome: Outcome::Done,
+            head: Some("the returning half".into()),
+            reply_to: None,
+            cluster_ref: None,
+        })))
+        .await
+        .expect("the completion report is answered");
+    assert!(body.ok, "the completion is accepted: {body:?}");
+    assert_settled(&store, &task_id);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), witnessed.recv())
+            .await
+            .is_err(),
+        "no bye reaches the connection that just answered for this task: its own agent \
+         treats one as the socket dying mid-request and reports the completion again"
+    );
+    host.abort();
+}
+
+/// A slot that `control recycle` left behind takes no reused task.
+///
+/// The recycle arm closes the backend resource and releases the task binding, and
+/// `reuse` keeps the slot for the agent still attached to it. Selecting that slot
+/// for the next task wrote a payload onto a session with nothing behind it: the
+/// spawn path below stayed unreachable, the server row sat `in_flight`, and the
+/// role still looked like it had room because an exited row spends no capacity.
+#[tokio::test]
+async fn a_recycled_slot_takes_no_reused_task() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        2,
+        true,
+        backend.clone(),
+        store.clone(),
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    let first_task = deliver(&state, &task_delivery("task A")).await;
+    let (_io, mut assigns) = mount_plugin(&socket, Some(&first_task)).await;
+    assert_eq!(assigns.recv().await.as_deref(), Some(first_task.as_str()));
+
+    on_control(
+        &state,
+        &ControlOp::Recycle {
+            task_id: first_task.clone(),
+            reason: "operator recycle".into(),
+        },
+    )
+    .await
+    .expect("the command is applied");
+    assert_eq!(
+        backend.closed_sessions.lock().len(),
+        1,
+        "the recycled session's resource is closed"
+    );
+    assert_eq!(
+        state.session_count(),
+        1,
+        "reuse keeps the slot while its agent is still attached"
+    );
+
+    let second_task = deliver(&state, &task_delivery("task B")).await;
+    assert_eq!(
+        state.session_count(),
+        2,
+        "the next task spawns a session of its own"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), assigns.recv())
+            .await
+            .is_err(),
+        "the closed session is handed no assignment"
+    );
+    let (_second_io, mut second_assigns) = mount_plugin(&socket, Some(&second_task)).await;
+    assert_eq!(
+        second_assigns.recv().await.as_deref(),
+        Some(second_task.as_str()),
+        "the fresh session carries the task the recycled slot refused"
+    );
     host.abort();
 }
