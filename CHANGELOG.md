@@ -1,5 +1,97 @@
 # Changelog
 
+## [1.3.1] - 2026-09-20
+
+Scope: one bug class in the client's accept path. The server re-offers a delivery
+row whose ack has not landed — a link flap, an adoption requeue, an operator
+`repair retry` — and a completion still in the durable intent queue when that
+happens arrives after the row it answers. Such a redelivery reached
+`accept_delivery` looking like new work, and the dispatcher's `reuse` branch
+stages new work on whichever session sits idle: it looks for a session in the
+same family, finds none, and takes any idle slot. So a task belonging to one
+chain ran inside another conversation, with that agent's context and its
+plugin's process-memory state, and its second answer travelled against the
+ledger row the first answer had already settled. The existing
+`dispatch::tests::a_read_only_slot_never_holds_the_handle_of_the_task_it_lost`
+case already names the symptom in its own comment; that fix moved the delivery
+handle to the right slot, and the execution half stayed open.
+
+The guard reads the durable record this role already owns. `settle` writes the
+terminal outcome the agent filed into `client.db`, so a session row reading
+`Done` means this role answered for that task id once. The predicate is
+`DispatchState::task_completed_here`, and `accept_delivery` applies it ahead of
+the capacity gate and the `accept_new` gate: the row is acked with
+`accepted = true` and reason `task already completed by this role`, nothing is
+staged, and no capacity is spent. Acking is what ends the requeue loop, so the
+row settles whatever the link state.
+
+`Done` is the only outcome that closes the door. A session killed or crashed
+mid-flight ends without a `Done`, and `requeue_max_attempts`, `repair_retry`,
+and `control retry` exist to re-offer exactly those rows, so a failed or
+cancelled task stays retryable. The second test pins that boundary.
+
+The release stops a second bleeding point, found by running the workspace suite
+1.3.0's own gate had skipped. `onlyne server generate` on a fresh tree wrote
+`config.toml` and the role key and left every template file out: the write loop
+asked the overwrite guard's predicate `differs_from_render` whether to write
+(`crates/onlyne-server/src/generate.rs`), and that predicate answers `false` for
+a path that does not exist, which is correct for the guard — a missing file is
+nobody's hand edit — and inverted for the writer, where a missing file is exactly
+the copy to place. Nine cases in `crates/onlyne-server/tests/generate.rs` were
+red on the shipped 1.3.0 tree, reproduced on a detached worktree at the release
+commit, and the release note's check covered `onlyne-client` and `onlyne-config`
+alone. The writer now asks its own predicate, `needs_write`.
+
+### Fixed
+
+- client: a redelivery of a task this role completed is acked and runs nowhere
+  (`crates/onlyne-client/src/runloop.rs`, `accept_delivery`).
+- client: `DispatchState::task_completed_here` (`crates/onlyne-client/src/dispatch.rs`)
+  answers from the stored session row through `stored_close_reason`, so the
+  decision survives a client restart with the workspace.
+- server: `onlyne server generate` writes every template file into a fresh
+  workspace, and a no-op rerun still leaves each existing file's bytes and mtime
+  untouched (`crates/onlyne-server/src/generate.rs`, `needs_write`). This closes
+  the nine red cases in `crates/onlyne-server/tests/generate.rs`, among them
+  delivery case 9's generate-plus-relocate path.
+- client test lint: `witnessed.try_recv().is_err()` replaces a
+  `matches!(.., Err(_))` that clippy 1.98 rejects
+  (`crates/onlyne-client/tests/scenarios.rs`). No behavior moves.
+
+### Check on this tree
+
+Run 2026-09-20: `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -j 4 -- -D warnings`, and `cargo test --workspace --no-fail-fast
+-j 4 --lib --tests` pass, the last at 970 cases across 50 suites with 0 failures
+and 1 ignored (`herdr_live_probe`), in 144 seconds. This is the full-workspace
+gate, `onlyne-server`'s generate suite included, which is the coverage the 1.3.0
+note did not claim.
+
+### Added
+
+- client tests: `a_redelivered_finished_task_is_acked_and_runs_nowhere` and
+  `a_task_ended_without_a_completion_stays_eligible_for_its_retry`
+  (`crates/onlyne-client/src/runloop.rs`).
+
+### Documentation
+
+- `docs/operations.md`, 「投递与重投」: the operator-facing rule, including the
+  consequence that `repair retry` on a row whose task is already `Done` for this
+  role is answered with an ack and no execution. Re-running finished work takes
+  a new task via `onlyne send`.
+
+### Not in this release
+
+Three neighbouring defects stay open, each needing a wider change than a patch:
+the `reuse` fallback picks any idle session once family preference misses, so
+delivery is order-dependent across unrelated chains; `park_transport` holds one
+parked connection, so a second unnamed mount silently evicts the first; and
+`slot_key_serving_task` returns a read-only slot when it is the only one
+matching, which leaves a payload on a connection that can never receive it.
+
+Wire format: unchanged. No `onlyne-proto`, `onlyne-config`, or generated schema
+file moves in this release.
+
 ## [1.3.0] - 2026-09-20
 
 Scope: the core stops describing a running turn as bounded, and a session whose
