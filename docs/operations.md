@@ -139,6 +139,10 @@ push 投递与 pull 投递的 `in_flight` 翻面都各有一条 `ledger_state` �
 
 完整链路（server 在活 link 下死亡、client 重连接管、单一会话自然结清）由 `crates/onlyne-testkit/e2e/requeue-claim.sh` 在真实进程上验证。
 
+本角色已经以 `Done` 结项的 task 再次投来时，client 认得它。判定读 `client.db` 的会话终态，入口是 `onlyne-client` 的 `DispatchState::task_completed_here`，动作在 `accept_delivery` 的容量闸之前：这一行就地 ack，`accepted = true`，reason 为 `task already completed by this role`，会话不 stage，容量不占。该 reason 进 `ledger_state` 事件，行本身落 `acked`。日志面同一时刻记一条 `redelivery of a finished task settled without running it`，带 `msg_id` 与 `task`。
+
+这道判定读的是 `Done`。会话被终止、崩溃、`Failed` 的 task 保持可重投，`onlyne repair retry` 与 `control retry` 对这一类行照常生效。要重跑一个已完成的 task，操作者发新 task（`onlyne send`）。已 `Done` 的行等到的是这条 ack 和一次空跑。
+
 ## 拒收面
 
 `onlyne ack --msg-id <id> --reason <text>` 把一条投递结为 `acked`。

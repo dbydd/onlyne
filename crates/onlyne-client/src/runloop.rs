@@ -624,6 +624,30 @@ async fn accept_delivery(state: &RunState, delivery: &Delivery) {
         settle_control(state, delivery).await;
         return;
     }
+    // A task this role already finished is not new work. The server re-offers an
+    // unacknowledged row after a link flap or an operator repair, and a
+    // completion that was in flight when the link dropped can land after the
+    // requeue, so this row's task may already be `Done` here. Dispatching it
+    // again would stage its payload on whichever session is idle — one chain's
+    // task running inside another conversation, with a second answer aimed at
+    // the ledger row the first one settled. Acknowledge the row and run nothing.
+    if delivery.envelope.kind == onlyne_proto::MsgKind::Task
+        && let Some(task_id) = delivery.envelope.task_id()
+        && state.dispatch.task_completed_here(task_id)
+    {
+        tracing::warn!(
+            msg_id = %delivery.msg_id,
+            task = %task_id,
+            "redelivery of a finished task settled without running it"
+        );
+        state.dispatch.push_settled(AckArgs {
+            msg_id: delivery.msg_id.clone(),
+            op_id: None,
+            accepted: true,
+            reason: Some("task already completed by this role".to_string()),
+        });
+        return;
+    }
     if !state.dispatch.has_capacity() {
         // The row stays in flight on the server, which offers it again when a
         // session frees (plan §5 `max_sessions`).
@@ -1591,6 +1615,140 @@ while True:
         assert!(
             state.dispatch.stall_due(Instant::now(), 1).is_empty(),
             "the exited task leaves the progress clock"
+        );
+    }
+
+    /// A row re-offered for a task this role already finished is acked and runs
+    /// nowhere. The server requeues an unacknowledged row after a link flap, and
+    /// a completion still in flight when the link dropped lands after that
+    /// requeue, so the same task arrives twice. Untreated, the second delivery
+    /// read as new work: under `reuse` the dispatcher staged its payload on
+    /// whichever session sat idle, which is one chain's task running inside
+    /// another conversation with a second answer aimed at the ledger row the
+    /// first answer settled. The row is acked rather than left in flight,
+    /// because an unacked row is offered again forever.
+    #[tokio::test]
+    async fn a_redelivered_finished_task_is_acked_and_runs_nowhere() {
+        let (state, _store) = test_state(2, true, vec!["echo".into()]);
+        let task_id = new_task_id();
+        let delivery = |msg_id: &str| Delivery {
+            msg_id: msg_id.into(),
+            envelope: Box::new(
+                new_envelope(
+                    MsgKind::Task,
+                    Principal::role("sender"),
+                    Principal::role("planner"),
+                    Body::text("work"),
+                    Some(Causality::root(task_id.clone())),
+                )
+                .expect("task envelope"),
+            ),
+        };
+
+        accept_delivery(&state, &delivery("msg-first")).await;
+        assert!(
+            state.dispatch.hello_live_tasks().contains(&task_id),
+            "the first delivery takes a session for the task"
+        );
+
+        crate::dispatch::on_out(
+            &state.dispatch,
+            &task_id,
+            Outcome::Done,
+            Some("done".into()),
+            None,
+            &[],
+        )
+        .await
+        .expect("the completion files");
+        assert!(
+            state.dispatch.task_completed_here(&task_id),
+            "the finished task is readable as finished in this role's store"
+        );
+
+        accept_delivery(&state, &delivery("msg-again")).await;
+
+        // `accept_new` is false by now — `on_out` queued its report with no link
+        // attached and `send_frame` drops the flag while outbound work waits in
+        // the intent table — so this ack also proves the guard sits ahead of
+        // that gate: a finished row is answered whatever the link state.
+        assert!(
+            !state.dispatch.hello_live_tasks().contains(&task_id),
+            "the redelivery stages no session on the role's idle slot"
+        );
+        let acked = pending_intent_ops(&state)
+            .expect("pending intents")
+            .into_iter()
+            .find(|op| matches!(op, ClientOp::Ack(args) if args.msg_id == "msg-again"));
+        match acked {
+            Some(ClientOp::Ack(args)) => assert!(
+                args.accepted,
+                "a row for work this role did is refused on the ledger: {args:?}"
+            ),
+            other => panic!("the redelivered row answers with an ack, got {other:?}"),
+        }
+    }
+
+    /// A task whose session died mid-flight stays open for the retry the server
+    /// means. Killing is the difference this guard turns on: `requeue`,
+    /// `repair_retry`, and `control retry` all re-offer exactly such a row, and
+    /// closing the door on them would strand work the role never finished.
+    #[tokio::test]
+    async fn a_task_ended_without_a_completion_stays_eligible_for_its_retry() {
+        let (state, _store) = test_state(2, true, vec!["echo".into()]);
+        let task_id = new_task_id();
+        accept_delivery(
+            &state,
+            &Delivery {
+                msg_id: "msg-lost".into(),
+                envelope: Box::new(
+                    new_envelope(
+                        MsgKind::Task,
+                        Principal::role("sender"),
+                        Principal::role("planner"),
+                        Body::text("work"),
+                        Some(Causality::root(task_id.clone())),
+                    )
+                    .expect("task envelope"),
+                ),
+            },
+        )
+        .await;
+
+        crate::dispatch::on_out(
+            &state.dispatch,
+            &task_id,
+            Outcome::Failed,
+            Some("crashed".into()),
+            None,
+            &[],
+        )
+        .await
+        .expect("the failure files");
+        assert!(
+            !state.dispatch.task_completed_here(&task_id),
+            "a failed turn is not a finished task"
+        );
+
+        // The retry is asserted at the dispatcher, one step below
+        // `accept_delivery`: `on_out` above queued its report with no link
+        // attached, and `send_frame` drops `accept_new` while the outbound work
+        // waits in the intent table (§6 line 289). That gate is older than this
+        // guard and belongs to the reconnect, so it would answer here for a
+        // reason unrelated to the one under test.
+        let retried = new_envelope(
+            MsgKind::Task,
+            Principal::role("sender"),
+            Principal::role("planner"),
+            Body::text("work again"),
+            Some(Causality::root(task_id.clone())),
+        )
+        .expect("task envelope");
+        crate::dispatch::dispatch(&state.dispatch, &retried).expect("a failed task is retryable");
+
+        assert!(
+            state.dispatch.hello_live_tasks().contains(&task_id),
+            "the retried task takes a session again"
         );
     }
 

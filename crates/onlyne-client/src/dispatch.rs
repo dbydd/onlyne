@@ -1007,6 +1007,27 @@ impl DispatchState {
             || inner.sessions.values().any(|slot| slot.task_id.is_none())
     }
 
+    /// Whether this role already finished one task with a terminal `Done`.
+    ///
+    /// The durable row is the record: `settle` writes the outcome the agent
+    /// filed, so a row reading `Done` means this role answered for this task id
+    /// once already. A redelivery of that task is not new work — running it
+    /// again would stage its payload on whichever session happens to be idle, so
+    /// one chain's task executes inside another conversation and the second
+    /// answer collides with the ledger row the first one settled.
+    ///
+    /// Only `Done` counts. A session killed or crashed mid-flight reaches
+    /// `Exited` with no `Done`, and the server's requeue, `repair_retry`, and
+    /// `control retry` all re-offer that task on purpose, so those deliveries
+    /// still run.
+    pub fn task_completed_here(&self, task_id: &str) -> bool {
+        let inner = self.inner.lock();
+        matches!(
+            stored_close_reason(&inner, task_id),
+            Some(onlyne_session::CloseReason::Completed)
+        )
+    }
+
     /// The task of one session that holds a payload with no connection bound.
     ///
     /// A work item that arrives before its always-running agent mounts waits in
