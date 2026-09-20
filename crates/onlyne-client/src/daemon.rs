@@ -111,7 +111,6 @@ mod tests {
             dir,
             vec!["agent".into()],
             1,
-            false,
             Arc::new(FakeBackend::new()),
             store,
         );

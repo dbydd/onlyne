@@ -90,7 +90,6 @@
       "minimum": 0.0
     }
   },
-  "additionalProperties": false,
   "definitions": {
     "AcpSection": {
       "description": "`[acp]` — settings for the ACP session backend.",
@@ -116,8 +115,7 @@
           "default": "",
           "type": "string"
         }
-      },
-      "additionalProperties": false
+      }
     },
     "OrcaSection": {
       "description": "`[orca]` — settings for the Orca session backend.",
@@ -128,8 +126,7 @@
           "default": "host",
           "type": "string"
         }
-      },
-      "additionalProperties": false
+      }
     },
     "ServerEndpoint": {
       "description": "Server host and port pair used by the client.",
@@ -149,8 +146,7 @@
           "format": "uint16",
           "minimum": 0.0
         }
-      },
-      "additionalProperties": false
+      }
     }
   }
 }

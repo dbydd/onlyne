@@ -379,7 +379,6 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
         // role represents which child cluster (plan §5 line 243).
         aggregate: (!entry.aggregate.is_empty()).then(|| entry.aggregate.clone()),
         max_sessions: entry.max_sessions,
-        reuse: entry.reuse,
         prose: entry.prose.clone(),
         spec_hash: spec.semantic_hash(),
         allowed_targets: entry.allowed_targets.clone(),
@@ -495,7 +494,6 @@ pub fn roles(state: &Arc<State>, query: &QueryRolesArgs) -> anyhow::Result<Vec<R
             name: entry.role.clone(),
             admin: entry.admin,
             max_sessions: entry.max_sessions,
-            reuse: entry.reuse,
             session_command: entry.session_command.clone(),
             spec_hash: stored
                 .iter()

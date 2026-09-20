@@ -18,7 +18,6 @@ role = "planner"
 key = "ed25519/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 admin = false
 max_sessions = 3
-reuse = true
 # Self-delivery names the role in both lists; `["*"]` covers every other role.
 allowed_senders = ["*", "planner"]
 allowed_targets = ["*", "planner"]

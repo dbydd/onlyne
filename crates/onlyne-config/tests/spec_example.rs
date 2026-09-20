@@ -1,15 +1,14 @@
 //! Guards for the repository's full-coverage example spec and the ACL fixtures.
 //!
 //! `.onlyne.example/spec.toml` is the only file that exercises every key in
-//! `docs/v1-PLAN.md` §5. Nothing loaded it, so a key the plan's `[server]` block
-//! does not contain sat in the file unnoticed until an operator copied it and
-//! `deny_unknown_fields` refused the start. These tests hold the example and the
-//! fixture set to one rule.
+//! `docs/v1-PLAN.md` §5. Parsing ignores a key no field declares, so a stale key
+//! in an example would reach an operator's cluster silently. These tests hold the
+//! example and the fixture set to one rule: every key they carry names a field.
 //!
 //! The example carries `REPLACE_ME` credentials by design, so `Spec::load`
-//! always stops in credential validation. The schema rule, which is where a
-//! stale key fails, runs through `Spec::parse_str`; `Spec::load` is held to the
-//! same rule on the fixtures, whose keys are shaped.
+//! always stops in credential validation. The key-set rule reads the document as
+//! text through [`onlyne_config::keys::unknown_spec_keys`], which never touches
+//! the values.
 
 use onlyne_config::Spec;
 use std::{net::SocketAddr, path::PathBuf, str::FromStr};
@@ -138,4 +137,65 @@ fn fixtures_follow_one_rule() {
     }
     names.sort();
     assert_eq!(names, vec!["spec-acl.toml"], "fixture set changed");
+}
+
+/// Parsing is lenient now, so the stale-key catch moved here.
+///
+/// Every spec and client config the repository ships has to name only fields that
+/// exist. An example carrying a key no struct declares would load, say nothing,
+/// and teach the reader a knob that does nothing.
+#[test]
+fn no_shipped_config_key_goes_unrecognized() {
+    let example = std::fs::read_to_string(example_path()).expect("example spec reads");
+    assert_eq!(
+        onlyne_config::keys::unknown_spec_keys(&example),
+        Ok(Vec::new()),
+        "{}",
+        example_path().display()
+    );
+
+    for entry in std::fs::read_dir(fixtures_dir()).expect("fixtures directory reads") {
+        let path = entry.expect("directory entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("fixture spec reads");
+        assert_eq!(
+            onlyne_config::keys::unknown_spec_keys(&text),
+            Ok(Vec::new()),
+            "{}",
+            path.display()
+        );
+    }
+
+    let templates =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.onlyne.example/templates");
+    for path in template_configs(&templates) {
+        let text = std::fs::read_to_string(&path).expect("template config reads");
+        assert_eq!(
+            onlyne_config::keys::unknown_client_keys(&text),
+            Ok(Vec::new()),
+            "{}",
+            path.display()
+        );
+    }
+}
+
+/// Every `.onlyne/templates/<topology>/<role>/.onlyne/config.toml` under `root`.
+fn template_configs(root: &PathBuf) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(template_configs(&path));
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some("config.toml") {
+            found.push(path);
+        }
+    }
+    found
 }

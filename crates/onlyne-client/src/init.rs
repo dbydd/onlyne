@@ -119,7 +119,7 @@ pub fn fragment(role: &str, public_key: &str, prose: &str) -> String {
     let key = toml_string(public_key);
     let prose = toml_string(prose);
     format!(
-        "[[client]]\nrole = {role}\nkey = {key}\nadmin = false\nmax_sessions = 1\nallowed_senders = [\"*\", {role}]\nallowed_targets = [{role}]\nprose = {prose}\nreuse = true\n{command}\n{KNOB_COMMENTS}",
+        "[[client]]\nrole = {role}\nkey = {key}\nadmin = false\nmax_sessions = 1\nallowed_senders = [\"*\", {role}]\nallowed_targets = [{role}]\nprose = {prose}\n{command}\n{KNOB_COMMENTS}",
         command = SEED_SESSION_COMMAND,
     )
 }

@@ -37,7 +37,6 @@ struct DispatchInner {
     pub workspace: PathBuf,
     pub command: Vec<String>,
     pub max_sessions: u32,
-    pub reuse: bool,
     /// Downstream roles a session of this role owes a handoff to, from the
     /// server's spec slice (`relay_required`). Empty is the default and means
     /// the guard is off.
@@ -94,7 +93,6 @@ struct DispatchInner {
 #[derive(Clone)]
 pub struct SessionSlot {
     pub session: SessionRef,
-    pub family: String,
     pub task_id: Option<String>,
     pub ready: bool,
     /// Payload held until the adapter reports ready, which keeps the ready
@@ -168,8 +166,10 @@ fn held_recipient(to: &Principal) -> String {
 /// Whether one session slot is the session an adapter mount named.
 ///
 /// The mount carries the id the client spawned the plugin with
-/// (`ONLYNE_SESSION_ID`), which is the slot's key and its stored reference; a
-/// slot a later task reused also answers to the task it serves.
+/// (`ONLYNE_SESSION_ID`), which is the slot's key and its stored reference.
+/// Each task gets its own session, so those spellings all name one session; the
+/// extra checks stay because a slot keeps the id its session was born with even
+/// after its task binding changes.
 fn names_session(key: &str, slot: &SessionSlot, session_id: &str) -> bool {
     key == session_id
         || slot.session.task_id == session_id
@@ -406,7 +406,6 @@ impl DispatchState {
         workspace: impl Into<PathBuf>,
         command: Vec<String>,
         max_sessions: u32,
-        reuse: bool,
         backend: Arc<dyn SessionBackend>,
         store: ClientStore,
     ) -> Self {
@@ -416,7 +415,6 @@ impl DispatchState {
                 workspace: workspace.into(),
                 command,
                 max_sessions,
-                reuse,
                 relay_required: Vec::new(),
                 relay_count: None,
                 backend,
@@ -529,7 +527,6 @@ impl DispatchState {
         crate::slice::RoleSlice {
             command: inner.command.clone(),
             max_sessions: inner.max_sessions,
-            reuse: inner.reuse,
             relay_required: inner.relay_required.clone(),
             relay_count: inner.relay_count,
         }
@@ -613,7 +610,6 @@ impl DispatchState {
         let mut inner = self.inner.lock();
         inner.command = slice.command;
         inner.max_sessions = slice.max_sessions;
-        inner.reuse = slice.reuse;
         inner.relay_required = slice.relay_required;
         inner.relay_count = slice.relay_count;
     }
@@ -731,10 +727,9 @@ impl DispatchState {
     ///
     /// An always-running plugin mounts naming no session, so the park holds the
     /// only connection that can serve the session staged next (plan §6 line 285).
-    /// The claim binds that connection to the session it takes, because the
-    /// later tasks a `reuse` role hands to the same session ride that connection
-    /// too. A claim left unbound strands those tasks: the session has a payload
-    /// and this client holds no record of the socket that serves it.
+    /// The claim binds that connection to the session it takes. A claim left
+    /// unbound strands the staged work: the session has a payload and this
+    /// client holds no record of the socket that serves it.
     fn claim_parked_transport(&self, session_id: &str) -> Option<(AdapterIo, Vec<Capability>)> {
         let mut inner = self.inner.lock();
         let (io, capabilities) = inner.parked.take()?;
@@ -748,8 +743,7 @@ impl DispatchState {
 
     /// The connection that serves one session, when its plugin is attached.
     ///
-    /// A plugin names the session it was spawned for, and a later task of a
-    /// reused session arrives under its own task id, so the slot's key is the
+    /// A plugin names the session it was spawned for, and the slot's key is the
     /// other spelling worth trying.
     pub fn session_transport(&self, session_id: &str) -> Option<(AdapterIo, Vec<Capability>)> {
         let inner = self.inner.lock();
@@ -816,9 +810,9 @@ impl DispatchState {
 
     /// Release the bindings served by one plugin connection.
     ///
-    /// A graceful detach retires each idle session because the agent that could
-    /// reuse its resource has left. An attached transport preserves the idle
-    /// resource because reuse remains possible. A connection ending through
+    /// A graceful detach retires each idle session because the agent that owned
+    /// it has left. An attached transport preserves the idle resource because
+    /// the same agent is still reachable. A connection ending through
     /// another path preserves the slot and resource for an agent reconnection and
     /// starts the reconnect clock on it, which is what bounds how long a session
     /// waits for an agent that is never coming back. Every released binding
@@ -928,8 +922,8 @@ impl DispatchState {
     /// Retire tracked resources whose stored lifecycle has reached `Exited`.
     ///
     /// The periodic readiness tick calls this after completed work becomes an
-    /// idle slot. Task-free sessions with an attached transport retain reuse,
-    /// and task-free sessions whose agent has left release their host resource.
+    /// idle slot. Task-free sessions with an attached transport stay bound to
+    /// their host resource, and task-free sessions whose agent has left release it.
     pub fn reclaim_exited_resources(&self) {
         let mut inner = self.inner.lock();
         let candidates: Vec<(String, onlyne_session::CloseReason)> = inner
@@ -1036,13 +1030,11 @@ impl DispatchState {
     ///
     /// §5's `max_sessions` caps concurrency, so a delivery that arrives at the
     /// cap waits on the server: the row stays in flight and the next pull
-    /// offers it again once a session frees. An idle session a finished task
-    /// handed back is free capacity (§5 `reuse`), and a session the reducer has
-    /// ended spends none of it.
+    /// offers it again once a session frees. Each task runs in its own session,
+    /// so a slot whose task has finished still spends capacity until it retires.
     pub fn has_capacity(&self) -> bool {
         let inner = self.inner.lock();
         live_sessions(&inner) < inner.max_sessions as usize
-            || inner.sessions.values().any(|slot| slot.task_id.is_none())
     }
 
     /// Whether this role already finished one task with a terminal `Done`.
@@ -1069,8 +1061,8 @@ impl DispatchState {
     /// The task of one session that holds a payload with no connection bound.
     ///
     /// A work item that arrives before its always-running agent mounts waits in
-    /// exactly this state, and the mount ends the wait. A reused session answers
-    /// through the transport its first task claimed, so it stays served.
+    /// exactly this state, and the mount ends the wait. A session answers through
+    /// the transport its first task claimed, so it stays served.
     pub fn staged_without_transport(&self) -> Option<String> {
         let inner = self.inner.lock();
         inner
@@ -1207,15 +1199,6 @@ impl DispatchState {
     }
 }
 
-fn family_of(envelope: &Envelope) -> String {
-    envelope
-        .causality
-        .as_ref()
-        .and_then(|c| c.parent_task.clone())
-        .or_else(|| envelope.task_id().map(str::to_string))
-        .unwrap_or_else(|| envelope.id.clone())
-}
-
 /// How deep an inbound task sits in its chain. An envelope that names no
 /// causality is a root, and a relay born from it takes the hop below this.
 fn hop_of(envelope: &Envelope) -> u32 {
@@ -1350,34 +1333,11 @@ fn live_sessions(inner: &DispatchInner) -> usize {
         .count()
 }
 
-/// Whether an unbound slot can take the next task under `reuse`.
-///
-/// `reuse` means the next task goes to a session that is still here. A slot that
-/// `control recycle` left behind has no resource below it: that arm writes the
-/// closed word and closes the backend resource before releasing the binding.
-/// Staging onto such a slot writes a payload onto a session with nothing to run
-/// it, and the spawn path below stays unreachable, so the server row sits
-/// `in_flight` while the role still looks like it has room. `detached` is a
-/// different word: it means the client never confirmed the resource, and the
-/// arm above leaves it alone, so it stays a candidate.
-fn reuse_candidate(inner: &DispatchInner, slot: &SessionSlot) -> bool {
-    if slot.task_id.is_some() || slot.read_only {
-        return false;
-    }
-    inner
-        .store
-        .get_session(&slot.session.task_id)
-        .ok()
-        .flatten()
-        .is_some_and(|row| row.resource_state != "closed")
-}
-
 pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef> {
     let task_id = envelope
         .task_id()
         .context("task envelope missing causality.task")?
         .to_string();
-    let family = family_of(envelope);
     let mut inner = state.inner.lock();
     // A task this role already serves rides its own slot, and the slot that
     // still holds delivery rights is the one that serves it: staging the payload
@@ -1395,45 +1355,6 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
     {
         inner.stall.note_assigned(&task_id, Instant::now());
         return Ok(session);
-    }
-    if inner.reuse {
-        // An idle session with no bound task takes the next task, preferring
-        // one from the same family; §5's `reuse` is what makes a second task
-        // share a session instead of waiting for a new slot. A read-only slot
-        // answers for a task another session serves, so it takes no new one.
-        let same_family = inner
-            .sessions
-            .iter()
-            .find(|(_, slot)| reuse_candidate(&inner, slot) && slot.family == family)
-            .map(|(key, _)| key.clone());
-        let idle = same_family.or_else(|| {
-            inner
-                .sessions
-                .iter()
-                .find(|(_, slot)| reuse_candidate(&inner, slot))
-                .map(|(key, _)| key.clone())
-        });
-        let reused = idle
-            .and_then(|key| inner.sessions.get_mut(&key))
-            .map(|slot| {
-                slot.task_id = Some(task_id.clone());
-                slot.payload = Some(envelope.clone());
-                slot.hop = hop_of(envelope);
-                slot.ready = false;
-                let session = SessionRef {
-                    task_id: task_id.clone(),
-                    ..slot.session.clone()
-                };
-                slot.session = session.clone();
-                session
-            });
-        if let Some(session) = reused {
-            inner.bridge.track_live(session.clone());
-            feed_created(&inner.bridge, &inner.store, &task_id)?;
-            feed_dispatched(&inner.bridge, &inner.store, &task_id);
-            inner.stall.note_assigned(&task_id, Instant::now());
-            return Ok(session);
-        }
     }
     if live_sessions(&inner) >= inner.max_sessions as usize {
         return Err(anyhow!("max_sessions reached"));
@@ -1469,7 +1390,6 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
         session_id,
         SessionSlot {
             session: session.clone(),
-            family,
             task_id: Some(task_id.clone()),
             ready: false,
             payload: Some(envelope.clone()),
@@ -2031,9 +1951,9 @@ fn stored_close_reason(
 
 /// Retire one task-free session after its transport set becomes empty.
 ///
-/// The idle slot releases its backend resource because the agent able to reuse
-/// it has left. An attached transport keeps the resource because reuse remains
-/// possible. The dispatch lock serializes the final transport check, reference
+/// The idle slot releases its backend resource because the agent able to run
+/// another task in it has left. An attached transport keeps the resource because
+/// that agent remains reachable. The dispatch lock serializes the final transport check, reference
 /// refresh, lifecycle projection, backend close, and slot removal with adapter
 /// binding.
 fn retire_idle_locked(
@@ -2122,14 +2042,7 @@ fn release_locked(
                 inner.backend.close(&slot.session, reason, false)?;
             }
             inner.bridge.untrack_live(task_id);
-            if inner.reuse {
-                if let Some(session) = inner.sessions.get_mut(&key) {
-                    session.task_id = None;
-                    session.ready = false;
-                }
-            } else {
-                inner.sessions.remove(&key);
-            }
+            inner.sessions.remove(&key);
         } else {
             if let Some(session) = inner.sessions.get_mut(&key) {
                 session.task_id = None;
@@ -2862,7 +2775,6 @@ mod tests {
             dir.path(),
             Vec::new(),
             8,
-            true,
             Arc::new(FakeBackend::new()),
             store,
         );
@@ -2874,7 +2786,6 @@ mod tests {
                 backend_ref: serde_json::Value::Null,
                 generation: 1,
             },
-            family: "test".into(),
             task_id: Some(task.clone()),
             ready: true,
             payload: None,

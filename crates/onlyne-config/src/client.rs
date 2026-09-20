@@ -9,7 +9,6 @@ use std::path::Path;
 
 /// Client-side `<workspace>/.onlyne/config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     /// Role name used for this workspace.
     pub role: String,
@@ -49,7 +48,6 @@ pub struct ClientConfig {
 
 /// `[orca]` — settings for the Orca session backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct OrcaSection {
     /// Where a spawned terminal's tab lands: `host` (the default) uses the
     /// worktree the spawning supervisor's own Orca tab runs in
@@ -78,7 +76,6 @@ fn default_orca_worktree() -> String {
 
 /// `[acp]` — settings for the ACP session backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct AcpSection {
     /// Session mode handed to the agent. Empty leaves the agent's own default.
     #[serde(default)]
@@ -153,7 +150,7 @@ impl ClientConfig {
                 err.message().to_string(),
             )
         })?;
-        let config: Self = parsed.try_into().map_err(|err: toml::de::Error| {
+        let config: Self = parsed.clone().try_into().map_err(|err: toml::de::Error| {
             SpecError::parse(
                 file,
                 serde_error_line(text, err.span(), err.message()),
@@ -161,6 +158,7 @@ impl ClientConfig {
             )
         })?;
         validate_acp(&config, text, file)?;
+        crate::keys::warn_ignored(&crate::keys::client_unknown(&parsed), file);
         Ok(config)
     }
 
@@ -260,7 +258,6 @@ fn acp_permission_line(text: &str, permission: &str) -> usize {
 
 /// Server host and port pair used by the client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ServerEndpoint {
     /// Hostname or address, possibly a `$NAME` env reference.
     pub host: String,

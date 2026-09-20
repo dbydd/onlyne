@@ -33,7 +33,6 @@ pub const ALLOWED_PLACEHOLDERS: [&str; 2] = ["session", "task"];
 
 /// Cluster spec loaded from `<server-root>/.onlyne/spec.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct Spec {
     pub server: ServerSection,
     #[serde(default)]
@@ -46,7 +45,6 @@ pub struct Spec {
 
 /// `[server]` section for the cluster.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ServerSection {
     pub name: String,
     pub listen: String,
@@ -81,7 +79,6 @@ pub struct ServerSection {
 /// `[[client]]` entry. Aggregate roles use the same struct and carry an
 /// annotation in `aggregate`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ClientEntry {
     pub role: String,
     pub key: String,
@@ -91,8 +88,6 @@ pub struct ClientEntry {
     pub admin: bool,
     #[serde(default = "default_max_sessions")]
     pub max_sessions: u32,
-    #[serde(default)]
-    pub reuse: bool,
     #[serde(default)]
     pub allowed_senders: Vec<String>,
     #[serde(default)]
@@ -127,7 +122,6 @@ pub struct ClientEntry {
 
 /// `[[gateway]]` entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct GatewayEntry {
     pub id: String,
     pub platform: String,
@@ -138,7 +132,6 @@ pub struct GatewayEntry {
 
 /// External inbound message route.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct RouteEntry {
     pub gateway: String,
     pub channel: String,
@@ -149,7 +142,6 @@ pub struct RouteEntry {
 
 /// Destination role and optional fixed session for a route.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct RouteTarget {
     pub role: String,
     #[serde(default)]
@@ -158,7 +150,6 @@ pub struct RouteTarget {
 
 /// Client timeout policy in milliseconds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct Timeouts {
     #[serde(default = "default_ready_ms")]
     pub ready_ms: u64,
@@ -168,7 +159,6 @@ pub struct Timeouts {
 
 /// Intent retry policy for coding-agent responses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct IntentPolicy {
     #[serde(default = "default_intent_attempts")]
     pub attempts: u32,
@@ -303,6 +293,7 @@ impl Spec {
             )
         })?;
         validate(&spec, &parsed, text, file)?;
+        crate::keys::warn_ignored(&crate::keys::spec_unknown(&parsed), file);
         Ok(spec)
     }
 
@@ -397,8 +388,8 @@ impl Spec {
 
 /// Move each `[[client]]` `relay_required_count` onto `relay_count` before serde
 /// sees the table. A present `relay_count` keeps its value and the alias is
-/// dropped, so `deny_unknown_fields` never names the alias in an error.
-fn rewrite_client_relay_count_alias(value: &mut toml::Value) {
+/// dropped, so the guard file's own spelling never reads back as an ignored key.
+pub(crate) fn rewrite_client_relay_count_alias(value: &mut toml::Value) {
     let Some(entries) = value
         .as_table_mut()
         .and_then(|table| table.get_mut("client"))
@@ -493,9 +484,6 @@ fn serde_error_line(text: &str, span: Option<std::ops::Range<usize>>, message: &
     if span.is_some() && line > 1 {
         return line;
     }
-    if let Some(field) = unknown_field(message) {
-        return locate_field_line(text, field);
-    }
     if let Some(literal) = invalid_type_literal(message) {
         return locate_value_line(text, literal);
     }
@@ -537,7 +525,6 @@ fn locate_table_line(text: &str, field: &str) -> usize {
         "prose",
         "admin",
         "max_sessions",
-        "reuse",
         "allowed_senders",
         "allowed_targets",
         "session_command",
@@ -582,12 +569,6 @@ fn locate_table_line(text: &str, field: &str) -> usize {
             .unwrap_or(1);
     }
     locate_field_line(text, field)
-}
-
-fn unknown_field(message: &str) -> Option<&str> {
-    message
-        .strip_prefix("unknown field `")
-        .and_then(|rest| rest.split_once('`').map(|(field, _)| field))
 }
 
 fn expected_field(message: &str) -> Option<&str> {

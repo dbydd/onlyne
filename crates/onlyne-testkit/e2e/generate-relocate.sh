@@ -119,7 +119,7 @@ done
 rows_any "$tmp/ledger.json" state acked || fail "the relocated role must ack its task" "ledger=$ledger_out fake=$(cat "$tmp/fake.log" 2>/dev/null)"
 
 # Plan line 518: `--force` replaces generated files and leaves the runtime paths
-# alone, and the reuse rule in `generate` keys on the stored role key, so the
+# alone, and `generate`'s overwrite rule keys on the stored role key, so the
 # identity the moved workspace already carries decides the second render.
 db="$tmp/elsewhere/b1/.onlyne/client.db"
 mkdir -p "$(dirname "$db")"

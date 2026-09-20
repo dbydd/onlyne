@@ -32,7 +32,6 @@
       "$ref": "#/definitions/ServerSection"
     }
   },
-  "additionalProperties": false,
   "definitions": {
     "ClientEntry": {
       "description": "`[[client]]` entry. Aggregate roles use the same struct and carry an annotation in `aggregate`.",
@@ -111,10 +110,6 @@
             "type": "string"
           }
         },
-        "reuse": {
-          "default": false,
-          "type": "boolean"
-        },
         "role": {
           "type": "string"
         },
@@ -136,8 +131,7 @@
             }
           ]
         }
-      },
-      "additionalProperties": false
+      }
     },
     "GatewayEntry": {
       "description": "`[[gateway]]` entry.",
@@ -161,8 +155,7 @@
         "platform": {
           "type": "string"
         }
-      },
-      "additionalProperties": false
+      }
     },
     "IntentPolicy": {
       "description": "Intent retry policy for coding-agent responses.",
@@ -187,8 +180,7 @@
             "minimum": 0.0
           }
         }
-      },
-      "additionalProperties": false
+      }
     },
     "RouteEntry": {
       "description": "External inbound message route.",
@@ -215,8 +207,7 @@
         "to": {
           "$ref": "#/definitions/RouteTarget"
         }
-      },
-      "additionalProperties": false
+      }
     },
     "RouteTarget": {
       "description": "Destination role and optional fixed session for a route.",
@@ -235,8 +226,7 @@
             "null"
           ]
         }
-      },
-      "additionalProperties": false
+      }
     },
     "ServerSection": {
       "description": "`[server]` section for the cluster.",
@@ -312,8 +302,7 @@
           "default": ".onlyne/templates",
           "type": "string"
         }
-      },
-      "additionalProperties": false
+      }
     },
     "Timeouts": {
       "description": "Client timeout policy in milliseconds.",
@@ -331,8 +320,7 @@
           "format": "uint64",
           "minimum": 0.0
         }
-      },
-      "additionalProperties": false
+      }
     }
   }
 }

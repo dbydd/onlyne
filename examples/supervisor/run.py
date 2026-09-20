@@ -217,7 +217,7 @@ def seed_entries() -> str:
     )
 
     def entry(role: str, prose: str, *, admin: bool, senders: list[str],
-              targets: list[str], reuse: bool) -> str:
+              targets: list[str]) -> str:
         return (
             "[[client]]\n"
             f'role = "{role}"\n'
@@ -225,14 +225,13 @@ def seed_entries() -> str:
             f"prose = '{prose}'\n"
             f"admin = {'true' if admin else 'false'}\n"
             "max_sessions = 2\n"
-            f"reuse = {'true' if reuse else 'false'}\n"
             f"allowed_senders = {json.dumps(senders)}\n"
             f"allowed_targets = {json.dumps(targets)}\n"
             f"session_command = {command}\n\n"
         )
 
     rows = [entry(SUPERVISOR, supervisor_prose, admin=True,
-                  senders=list(RING), targets=list(RING), reuse=True)]
+                  senders=list(RING), targets=list(RING))]
     for index, role in enumerate(RING):
         predecessor = RING[index - 1]
         successor = RING[(index + 1) % len(RING)]
@@ -244,8 +243,7 @@ def seed_entries() -> str:
         # what the supervisor reads for the result.
         neighbours = [successor, predecessor]
         rows.append(entry(role, ring_prose.format(role=role), admin=False,
-                          senders=neighbours + [SUPERVISOR], targets=neighbours,
-                          reuse=False))
+                          senders=neighbours + [SUPERVISOR], targets=neighbours))
     return "".join(rows)
 
 

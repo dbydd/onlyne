@@ -3,7 +3,7 @@
 //! `reconfigure` currently only runs on `welcome`. A live connection that
 //! stays up across `onlyne reload` never sees that frame, so this module
 //! compares the `query_roles` row against the dispatcher's current slice
-//! and calls `reconfigure` only when `max_sessions`, `reuse`,
+//! and calls `reconfigure` only when `max_sessions`,
 //! `session_command`, or the relay policy changed.
 
 use onlyne_proto::{RoleInfo, Welcome};
@@ -13,7 +13,6 @@ use onlyne_proto::{RoleInfo, Welcome};
 pub struct RoleSlice {
     pub command: Vec<String>,
     pub max_sessions: u32,
-    pub reuse: bool,
     /// Downstream handoffs a session of this role owes (`relay_required`).
     pub relay_required: Vec<String>,
     /// The count form of the same policy (`relay_count`); a non-empty list wins
@@ -26,7 +25,6 @@ impl RoleSlice {
         Self {
             command: welcome.session_command.clone().unwrap_or_default(),
             max_sessions: welcome.max_sessions,
-            reuse: welcome.reuse,
             relay_required: welcome.relay_required.clone().unwrap_or_default(),
             relay_count: welcome.relay_count,
         }
@@ -36,7 +34,6 @@ impl RoleSlice {
         Self {
             command: info.session_command.clone(),
             max_sessions: info.max_sessions,
-            reuse: info.reuse,
             relay_required: info.relay_required.clone().unwrap_or_default(),
             relay_count: info.relay_count,
         }
@@ -51,9 +48,6 @@ pub fn slice_diff(current: &RoleSlice, next: &RoleSlice) -> Vec<&'static str> {
     }
     if current.max_sessions != next.max_sessions {
         fields.push("max_sessions");
-    }
-    if current.reuse != next.reuse {
-        fields.push("reuse");
     }
     if current.relay_required != next.relay_required {
         fields.push("relay_required");
@@ -82,11 +76,10 @@ mod tests {
     use super::*;
     use onlyne_proto::Presence;
 
-    fn slice(max: u32, reuse: bool) -> RoleSlice {
+    fn slice(max: u32) -> RoleSlice {
         RoleSlice {
             command: vec!["pi".into()],
             max_sessions: max,
-            reuse,
             relay_required: Vec::new(),
             relay_count: None,
         }
@@ -97,7 +90,6 @@ mod tests {
             name: "planner".into(),
             admin: false,
             max_sessions: max,
-            reuse: true,
             session_command: vec!["pi".into()],
             spec_hash: "h".into(),
             prose: None,
@@ -113,7 +105,7 @@ mod tests {
 
     #[test]
     fn a_changed_max_sessions_is_applied() {
-        let current = slice(1, true);
+        let current = slice(1);
         let next = RoleSlice::from_role_info(&info(2), &current);
         let (applied, fields) = apply_if_changed(&current, next).expect("a change");
         assert_eq!(applied.max_sessions, 2);
@@ -122,28 +114,27 @@ mod tests {
 
     #[test]
     fn an_identical_slice_is_a_no_op() {
-        let current = slice(2, true);
+        let current = slice(2);
         let next = RoleSlice::from_role_info(&info(2), &current);
         assert!(apply_if_changed(&current, next).is_none());
     }
 
     #[test]
-    fn reuse_and_command_are_compared() {
-        let current = slice(1, false);
+    fn command_is_compared() {
+        let current = slice(1);
         let next = RoleSlice {
             command: vec!["other".into()],
             max_sessions: 1,
-            reuse: true,
             relay_required: Vec::new(),
             relay_count: None,
         };
         let fields = slice_diff(&current, &next);
-        assert_eq!(fields, ["session_command", "reuse"]);
+        assert_eq!(fields, ["session_command"]);
     }
 
     #[test]
     fn a_changed_relay_policy_is_compared() {
-        let current = slice(1, true);
+        let current = slice(1);
         let armed = RoleSlice {
             relay_required: vec!["writer".into()],
             relay_count: Some(2),

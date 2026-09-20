@@ -1,15 +1,17 @@
 //! Onlyne v1.0.0 cluster spec and client configuration.
 //!
 //! `<server-root>/.onlyne/spec.toml` is the cluster's single source of truth. The
-//! file is written by humans and by `onlyne server generate`. This crate parses it
-//! strictly, validates it semantically, and reports every rejection with the
-//! offending line number.
+//! file is written by humans and by `onlyne server generate`. This crate parses it,
+//! validating every field it recognizes and reporting each rejection with the
+//! offending line number. A key no field declares is ignored, and [`keys`] names
+//! the ones a load left behind.
 //!
 //! Layout of the crate:
-//! * [`spec`] — the document types and the strict loader
+//! * [`spec`] — the document types and the loader
 //! * [`client`] — `<workspace>/.onlyne/config.toml` with `$NAME` env-indirect values
 //! * [`env`] — the read-time environment resolver
 //! * [`diff`] — [`SpecDiff`] for the reload answer
+//! * [`keys`] — the keys a document carried beyond the schema
 //! * [`redact`] — debug strings with secret material masked
 //! * [`hash`] — [`spec_hash`] and [`canonical_bytes`] for cache keys
 //!
@@ -21,6 +23,7 @@ mod diff;
 mod env;
 mod error;
 mod hash;
+pub mod keys;
 mod locate;
 #[path = "redact.rs"]
 mod redact_impl;

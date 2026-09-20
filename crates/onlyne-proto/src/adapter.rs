@@ -734,7 +734,6 @@ mod tests {
             role: "planner".into(),
             admin: false,
             max_sessions: 3,
-            reuse: true,
             prose: "Read the incoming task".into(),
             spec_hash: "abc".into(),
             aggregate: Some("cluster-b".into()),

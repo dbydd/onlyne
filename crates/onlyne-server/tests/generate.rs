@@ -15,7 +15,6 @@ fn client_entry(role: &str) -> ClientEntry {
         prose: format!("prose for {role}"),
         admin: false,
         max_sessions: 1,
-        reuse: false,
         allowed_senders: vec![],
         allowed_targets: vec![],
         session_command: vec![],

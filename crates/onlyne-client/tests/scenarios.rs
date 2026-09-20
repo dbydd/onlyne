@@ -96,7 +96,7 @@ fn permissions_mode_600_for_role_key_and_socket() {
         .lines()
         .filter(|line| !line.starts_with('#'))
         .collect();
-    assert_eq!(lines.len(), 10, "fragment shape is fixed: {fragment:?}");
+    assert_eq!(lines.len(), 9, "fragment shape is fixed: {fragment:?}");
     assert_eq!(lines[0], "[[client]]");
     assert_eq!(lines[1], "role = \"planner\"");
     assert!(
@@ -112,12 +112,11 @@ fn permissions_mode_600_for_role_key_and_socket() {
             "allowed_senders = [\"*\", \"planner\"]",
             "allowed_targets = [\"planner\"]",
             "prose = \"v1 smoke prose\"",
-            "reuse = true",
             "session_command = [\"pi\", \"--session-id\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]",
         ]
     );
     assert!(
-        lines[9].starts_with("session_command = "),
+        lines[8].starts_with("session_command = "),
         "the live entry closes with the command line: {fragment:?}"
     );
     assert!(fragment.contains("key = \"ed25519/"));
@@ -148,7 +147,6 @@ fn permissions_mode_600_for_role_key_and_socket() {
         ws_dir.path(),
         vec!["agent".into()],
         2,
-        true,
         backend,
         store,
     );
@@ -270,7 +268,6 @@ async fn an_admin_hello_survives_the_wire_and_is_admitted() {
         dir.path(),
         vec!["agent".into()],
         1,
-        false,
         backend,
         store,
     );
@@ -360,7 +357,6 @@ async fn a_local_ping_is_answered_and_keeps_the_socket_open() {
         dir.path(),
         vec!["agent".into()],
         1,
-        false,
         backend,
         store,
     );
@@ -422,7 +418,6 @@ async fn the_link_probe_follows_the_clients_connection() {
         dir.path(),
         vec!["agent".into()],
         1,
-        false,
         backend,
         store,
     );
@@ -604,7 +599,6 @@ fn a_note_without_a_key_gets_one_the_row_stores_and_replays() {
         dir.path(),
         vec!["agent".into()],
         1,
-        false,
         Arc::new(FakeBackend::new()),
         store.clone(),
     );
@@ -644,7 +638,6 @@ fn a_task_envelope_keeps_the_key_it_brought() {
         dir.path(),
         vec!["agent".into()],
         1,
-        false,
         Arc::new(FakeBackend::new()),
         store.clone(),
     );
@@ -664,7 +657,6 @@ fn two_notes_queue_under_two_distinct_keys() {
         dir.path(),
         vec!["agent".into()],
         1,
-        false,
         Arc::new(FakeBackend::new()),
         store.clone(),
     );
@@ -710,15 +702,16 @@ fn the_offline_reply_reports_the_key_the_row_stores() {
     );
 }
 
-/// A settled session whose agent is still attached is the one its family's next
-/// task rides, and `max_sessions` caps the live ones.
+/// Each task runs in a session of its own, and `max_sessions` caps the live
+/// ones.
 ///
-/// The idle slot here is produced the way the protocol produces one: the task's
-/// completion report over the agent's own connection. A session ended by
-/// `control recycle` is deliberately absent from this shape — its resource is
-/// closed, and a closed resource takes no reused task.
+/// A second task gets a second session and a connection of its own rather than
+/// riding the first task's agent. While both rows are live the cap refuses a
+/// third, and the first task's row reaching `exited` gives that capacity back:
+/// the next task is accepted and spawns its own session, while the settled slot
+/// stays tracked for the agent still attached to it.
 #[tokio::test]
-async fn session_reuse_and_capacity_capping() {
+async fn each_task_gets_its_own_session_and_max_sessions_caps_the_live_ones() {
     let dir = tempdir().unwrap();
     let store = ClientStore::open(dir.path().join("client.db")).unwrap();
     let backend = Arc::new(ReasonBackend::default());
@@ -727,81 +720,69 @@ async fn session_reuse_and_capacity_capping() {
         dir.path(),
         vec!["echo".into()],
         2,
-        true,
         backend.clone(),
         store.clone(),
     );
     state.attach_outbox(Arc::new(RecordingOutbox::default()));
     let (socket, host) = serve_role_socket(&state, dir.path()).await;
 
-    let family1 = new_task_id();
-    let family2 = new_task_id();
-    let first_task = deliver(&state, &family_delivery("task 1", &family1)).await;
+    let first_task = deliver(&state, &task_delivery("task 1")).await;
     let (first_io, mut first_assigns) = mount_plugin(&socket, Some(&first_task)).await;
     assert_eq!(
         first_assigns.recv().await.as_deref(),
         Some(first_task.as_str())
     );
-    let second_task = deliver(&state, &family_delivery("task 2", &family2)).await;
+    let second_task = deliver(&state, &task_delivery("task 2")).await;
+    assert_ne!(second_task, first_task);
     let (second_io, mut second_assigns) = mount_plugin(&socket, Some(&second_task)).await;
     assert_eq!(
         second_assigns.recv().await.as_deref(),
         Some(second_task.as_str())
     );
     assert_eq!(state.session_count(), 2);
-
-    // Task 1 ends on its own connection: the session is settled and its agent is
-    // still attached, which is the only idle shape `reuse` may take.
-    complete_plugin(&first_io, &first_task, Outcome::Done).await;
-    assert!(
-        backend.closed_sessions.lock().is_empty(),
-        "the attached resource stays open"
-    );
-
-    // Task 3 from the first family rides the session that family owns.
-    let third_task = deliver(&state, &family_delivery("task 3", &family1)).await;
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), first_assigns.recv())
-            .await
-            .expect("the attached agent is handed its family's next task")
-            .as_deref(),
-        Some(third_task.as_str()),
-        "the assignment reaches the agent that is still attached"
-    );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), second_assigns.recv())
-            .await
-            .is_err(),
-        "the other family's agent is handed nothing"
-    );
-    assert_eq!(state.session_count(), 2, "reuse spends no new slot");
-    assert_eq!(
-        backend.closed_sessions.lock().len(),
-        0,
-        "the reused task rides the resource that was already open"
-    );
-    let reused_row = store
-        .get_session(&third_task)
-        .unwrap()
-        .expect("the reused task has a ledger row");
-    assert_ne!(
-        reused_row.backend_ref.trim(),
-        "{}",
-        "a reused session must resolve to its backend resource"
+        backend.inner.sessions().len(),
+        2,
+        "each task spawned a resource of its own"
     );
 
-    // A fourth task exceeds `max_sessions` (2): the live rows are task 2 and the
-    // reused task 3, and task 1's exited row spends nothing.
-    let mut overflow = sample_envelope("planner", "task 4");
+    // A third task meets the cap while both rows are live.
+    let mut overflow = sample_envelope("planner", "task 3");
     overflow.causality = Some(onlyne_proto::Causality {
         task: new_task_id(),
-        parent_task: Some(new_task_id()),
+        parent_task: None,
         reply_to: None,
         hop: 0,
         attempt: 0,
     });
     let err = dispatch(&state, &overflow).expect_err("the role is at its cap");
     assert_eq!(err.to_string(), "max_sessions reached");
+
+    // Task 1 ends on its own connection. Its settled slot keeps the attached
+    // resource and spends no capacity, so the next task is accepted.
+    complete_plugin(&first_io, &first_task, Outcome::Done).await;
+    assert!(
+        backend.closed_sessions.lock().is_empty(),
+        "the attached resource stays open"
+    );
+    let third_task = deliver(&state, &task_delivery("task 3")).await;
+    assert_eq!(
+        backend.inner.sessions().len(),
+        3,
+        "the accepted task spawns a resource of its own"
+    );
+    assert!(backend.inner.sessions().contains_key(&third_task));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), first_assigns.recv())
+            .await
+            .is_err(),
+        "the settled session's agent is handed nothing"
+    );
+    assert_eq!(
+        state.session_count(),
+        3,
+        "the settled slot stays while its agent is attached"
+    );
     drop(second_io);
     host.abort();
 }
@@ -826,7 +807,6 @@ async fn exited_sessions_do_not_hold_the_capacity_cap() {
         dir.path(),
         vec!["agent".into()],
         2,
-        false,
         backend.clone(),
         store.clone(),
     );
@@ -917,7 +897,6 @@ fn redelivered_task_keeps_its_one_session() {
         dir.path(),
         vec!["echo".into()],
         2,
-        true,
         backend.clone(),
         store,
     );
@@ -946,7 +925,6 @@ async fn ready_barrier_orders_assign_after_ready() {
         dir.path(),
         vec!["echo".into()],
         2,
-        true,
         backend,
         store,
     );
@@ -1066,7 +1044,6 @@ fn assign_ack_rejection_queues_a_rejected_delivery_ack() {
         dir.path(),
         vec!["agent".into()],
         1,
-        false,
         Arc::new(FakeBackend::new()),
         store.clone(),
     );
@@ -1134,7 +1111,6 @@ async fn pinned_tls_link_fetches_welcome_and_caches_prose() {
         role: "planner".into(),
         admin: false,
         max_sessions: 2,
-        reuse: true,
         prose: "cluster b exposes planner".into(),
         spec_hash: "hash-spec-b".into(),
         aggregate: Some("cluster-b".into()),
@@ -1428,7 +1404,6 @@ async fn ready_is_reported_before_assign() {
         dir.path(),
         vec!["echo".into()],
         2,
-        true,
         backend,
         store,
     );
@@ -1464,7 +1439,6 @@ async fn lifecycle_write_emits_session_sync() {
         dir.path(),
         vec!["echo".into()],
         2,
-        true,
         backend,
         store.clone(),
     );
@@ -1517,7 +1491,6 @@ async fn noop_heartbeats_republish_session_sync() {
         dir.path(),
         vec!["echo".into()],
         2,
-        true,
         backend,
         store.clone(),
     );
@@ -1585,7 +1558,6 @@ async fn stale_heartbeat_does_not_republish() {
         dir.path(),
         vec!["echo".into()],
         2,
-        true,
         backend,
         store.clone(),
     );
@@ -1656,7 +1628,6 @@ async fn illegal_heartbeat_does_not_republish() {
         dir.path(),
         vec!["echo".into()],
         2,
-        true,
         backend,
         store.clone(),
     );
@@ -1727,7 +1698,6 @@ async fn report_when_link_down_lands_in_intents() {
         dir.path(),
         vec!["echo".into()],
         2,
-        true,
         backend,
         store.clone(),
     );
@@ -1909,7 +1879,6 @@ fn pane_backend_refuses_a_protocol_session_command() {
         dir.path(),
         vec!["pi".into(), "--mode".into(), "rpc".into(), "-ns".into()],
         2,
-        false,
         backend,
         store.clone(),
     );
@@ -1944,7 +1913,6 @@ fn pane_backend_still_spawns_an_interactive_session_command() {
         dir.path(),
         vec!["pi".into(), "-ns".into(), "-nc".into()],
         2,
-        false,
         backend,
         store.clone(),
     );
@@ -1957,7 +1925,6 @@ fn pane_backend_still_spawns_an_interactive_session_command() {
         dir.path(),
         vec!["pi".into(), "--mode".into(), "rpc".into(), "-ns".into()],
         2,
-        false,
         Arc::new(FakeBackend::new()),
         store,
     );
@@ -1990,7 +1957,7 @@ fn every_protocol_spelling_in_a_pane_session_command_is_refused() {
             inner: FakeBackend::new(),
             name,
         });
-        let state = DispatchState::new("planner", dir.path(), command, 2, false, backend, store);
+        let state = DispatchState::new("planner", dir.path(), command, 2, backend, store);
         let err = dispatch(&state, &sample_envelope("planner", "task 1")).unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -2012,7 +1979,6 @@ fn cancelled_settle_closes_with_the_real_reason() {
         dir.path(),
         vec!["echo".into()],
         2,
-        false,
         backend.clone(),
         store,
     );
@@ -2039,7 +2005,6 @@ fn detached_tuple_sees_no_close_call() {
         dir.path(),
         vec!["echo".into()],
         2,
-        false,
         backend.clone(),
         store.clone(),
     );
@@ -2090,7 +2055,6 @@ fn the_live_dispatch_leaves_pane_placement_to_the_backend() {
         dir.path(),
         vec!["echo".into()],
         2,
-        false,
         backend.clone(),
         store,
     );
@@ -2138,7 +2102,6 @@ fn a_supervisor_report_names_its_cluster() {
         dir.path(),
         vec![],
         1,
-        false,
         Arc::new(FakeBackend::new()),
         store,
     );
@@ -2165,7 +2128,6 @@ fn a_plain_role_report_omits_the_cluster_key() {
         dir.path(),
         vec![],
         1,
-        false,
         Arc::new(FakeBackend::new()),
         store,
     );
@@ -2249,7 +2211,6 @@ fn a_reminted_reference_is_written_back_before_the_next_probe() {
         dir.path(),
         vec!["echo".into()],
         2,
-        false,
         backend.clone(),
         store,
     );
@@ -2282,23 +2243,6 @@ fn task_delivery(text: &str) -> Delivery {
     Delivery {
         msg_id: format!("msg-{}", new_task_id()),
         envelope: Box::new(sample_envelope("planner", text)),
-    }
-}
-
-/// One delivery whose chain hangs under `family`, which is the handle `reuse`
-/// prefers when it picks among the role's idle sessions.
-fn family_delivery(text: &str, family: &str) -> Delivery {
-    let mut envelope = sample_envelope("planner", text);
-    envelope.causality = Some(onlyne_proto::Causality {
-        task: new_task_id(),
-        parent_task: Some(family.to_string()),
-        reply_to: None,
-        hop: 0,
-        attempt: 0,
-    });
-    Delivery {
-        msg_id: format!("msg-{}", new_task_id()),
-        envelope: Box::new(envelope),
     }
 }
 
@@ -2523,8 +2467,8 @@ fn assert_settled(store: &ClientStore, task_id: &str) {
     );
 }
 
-/// With `reuse = false` a second task must get a session and a connection of
-/// its own, and it must be spawned by the client that is already running.
+/// A second task gets a session and a connection of its own, spawned by the
+/// client that is already running.
 ///
 /// Before this case passed, a plugin's connection was remembered as the whole
 /// role's transport (`DispatchInner::plugin_transport`), so the assignment of
@@ -2537,7 +2481,7 @@ fn assert_settled(store: &ClientStore, task_id: &str) {
 /// the session settles and serves the next task, which the admin hello at the
 /// end asserts on the same socket.
 #[tokio::test]
-async fn reuse_off_gives_the_second_task_its_own_session_and_connection() {
+async fn the_second_task_gets_its_own_session_and_connection() {
     let dir = tempdir().unwrap();
     let store = ClientStore::open(dir.path().join("client.db")).unwrap();
     let backend = Arc::new(FakeBackend::new());
@@ -2546,7 +2490,6 @@ async fn reuse_off_gives_the_second_task_its_own_session_and_connection() {
         dir.path(),
         vec!["agent".into()],
         2,
-        false,
         backend.clone(),
         store.clone(),
     );
@@ -2565,8 +2508,8 @@ async fn reuse_off_gives_the_second_task_its_own_session_and_connection() {
         .expect("the plugin connection is still open");
     assert_eq!(assigned, first_task);
 
-    // It completes while its attached transport keeps the resource tracked.
-    // `reuse = false` reserves the next task for a separate session.
+    // It completes while its attached transport keeps the resource tracked,
+    // and the next task is reserved for a session of its own.
     on_plugin_report(
         &state,
         Report::Complete {
@@ -2648,13 +2591,13 @@ async fn reuse_off_gives_the_second_task_its_own_session_and_connection() {
     host.abort();
 }
 
-/// `reuse` hands the next task to an idle session, and an idle session is only
-/// usable while its agent is attached. A plugin that detached — the shape a
-/// session process that exited itself leaves behind, and the shape an operator
-/// `/onlyne disconnect` leaves — takes its slot out of the map, so the next
-/// task spawns a new session instead of writing into a dead connection.
+/// A settled session lives only as long as its agent is attached. A plugin
+/// that detached — the shape a session process that exited itself leaves
+/// behind, and the shape an operator `/onlyne disconnect` leaves — takes its
+/// slot out of the map, so the next task spawns a new session instead of
+/// writing into a dead connection.
 #[tokio::test]
-async fn an_idle_session_whose_plugin_left_is_not_reused() {
+async fn a_settled_session_whose_plugin_left_is_retired() {
     let dir = tempdir().unwrap();
     let store = ClientStore::open(dir.path().join("client.db")).unwrap();
     let backend = Arc::new(FakeBackend::new());
@@ -2663,7 +2606,6 @@ async fn an_idle_session_whose_plugin_left_is_not_reused() {
         dir.path(),
         vec!["agent".into()],
         2,
-        true,
         backend.clone(),
         store.clone(),
     );
@@ -2692,7 +2634,7 @@ async fn an_idle_session_whose_plugin_left_is_not_reused() {
     assert_eq!(
         state.session_count(),
         1,
-        "reuse keeps the idle slot for the role's next task"
+        "the settled slot stays while its agent is attached"
     );
 
     // The plugin leaves: the connection it served on is over.
@@ -2728,7 +2670,6 @@ async fn automatic_retirement_survives_a_backend_close_failure() {
         dir.path(),
         vec!["agent".into()],
         1,
-        true,
         backend.clone(),
         store.clone(),
     );
@@ -2768,7 +2709,6 @@ async fn graceful_detach_retires_the_completed_session_resource() {
         dir.path(),
         vec!["agent".into()],
         1,
-        true,
         backend.clone(),
         store.clone(),
     );
@@ -2813,7 +2753,6 @@ async fn completion_keeps_the_resource_while_the_plugin_is_attached() {
         dir.path(),
         vec!["agent".into()],
         1,
-        false,
         backend.clone(),
         store,
     );
@@ -2845,7 +2784,6 @@ async fn connection_loss_without_detach_keeps_the_completed_resource() {
         dir.path(),
         vec!["agent".into()],
         1,
-        true,
         backend.clone(),
         store,
     );
@@ -2881,7 +2819,6 @@ async fn ended_connection_forgets_its_inflight_stall_clock() {
         dir.path(),
         vec!["agent".into()],
         1,
-        true,
         backend.clone(),
         store,
     );
@@ -2929,7 +2866,6 @@ async fn periodic_reclaim_closes_an_exited_session_after_connection_loss() {
         dir.path(),
         vec!["agent".into()],
         1,
-        true,
         backend.clone(),
         store.clone(),
     );
@@ -2973,17 +2909,17 @@ async fn periodic_reclaim_closes_an_exited_session_after_connection_loss() {
     host.abort();
 }
 
-/// An always-running agent carries every task a reused session is given.
+/// An always-running agent's claim records the socket it arrived on.
 ///
 /// The plugin that mounts naming no session is the only connection this role has
 /// for the session staged next, so the claim that hands it the first task also
 /// has to record the socket it arrived on. A claim that takes the connection and
-/// binds nothing hands out one assignment and then forgets the path: the second
-/// task of the session sits `in_flight` on the server, the plugin waits on
-/// `assign` forever, and nothing on the client side says why. `reuse = true` with
-/// `max_sessions = 1` is the running ring's own shape.
+/// binds nothing hands out one assignment and then forgets the path: the
+/// session's payload reaches nobody and the plugin waits on `assign` forever.
+/// The claim serves the one session it took, and a later task runs in a session
+/// of its own with a plugin of its own mounted for it.
 #[tokio::test]
-async fn a_parked_agent_carries_every_later_task_of_its_reused_session() {
+async fn a_parked_agent_serves_the_session_it_claimed() {
     let dir = tempdir().unwrap();
     let store = ClientStore::open(dir.path().join("client.db")).unwrap();
     let backend = Arc::new(FakeBackend::new());
@@ -2992,7 +2928,6 @@ async fn a_parked_agent_carries_every_later_task_of_its_reused_session() {
         dir.path(),
         vec!["agent".into()],
         1,
-        true,
         backend.clone(),
         store.clone(),
     );
@@ -3000,7 +2935,7 @@ async fn a_parked_agent_carries_every_later_task_of_its_reused_session() {
     let (socket, host) = serve_role_socket(&state, dir.path()).await;
 
     // The agent is up before any work exists, naming no session.
-    let (_io, mut assigns) = mount_plugin(&socket, None).await;
+    let (io, mut assigns) = mount_plugin(&socket, None).await;
 
     let first_task = deliver(&state, &task_delivery("task A")).await;
     let assigned = tokio::time::timeout(Duration::from_secs(2), assigns.recv())
@@ -3024,23 +2959,34 @@ async fn a_parked_agent_carries_every_later_task_of_its_reused_session() {
     assert_eq!(
         state.session_count(),
         1,
-        "reuse keeps the idle session for the role's next task"
+        "the settled slot stays while its agent is attached"
     );
 
+    // The agent leaves with the task it served, so its session retires.
+    io.notify(AdapterMsg::Plugin(PluginOp::Detach(DetachArgs {
+        reason: "task A done".into(),
+    })))
+    .await
+    .unwrap();
+    eventually(|| state.session_count() == 0, "the settled slot to go").await;
+
+    // The next task runs in a session of its own, and its assignment never rides
+    // the connection that served task A.
     let second_task = deliver(&state, &task_delivery("task B")).await;
-    let assigned = tokio::time::timeout(Duration::from_secs(2), assigns.recv())
-        .await
-        .expect("the second task reaches the connection that serves its session")
-        .expect("the plugin connection is open");
-    assert_eq!(
-        assigned, second_task,
-        "the second assign names the second task"
-    );
+    assert_ne!(second_task, first_task);
     assert_eq!(
         backend.sessions().len(),
         1,
-        "one reused resource carries both tasks"
+        "the next task spawns a resource of its own"
     );
+    assert!(backend.sessions().contains_key(&second_task));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), assigns.recv())
+            .await
+            .is_err(),
+        "the finished session's connection is handed nothing more"
+    );
+    let _second_io = mount_plugin(&socket, Some(&second_task)).await;
     host.abort();
 }
 
@@ -3059,7 +3005,6 @@ async fn a_session_staged_before_its_agent_mounts_is_handed_its_payload() {
         dir.path(),
         vec!["agent".into()],
         1,
-        true,
         backend.clone(),
         store.clone(),
     );
@@ -3115,7 +3060,6 @@ async fn a_delivered_cancel_stops_the_session_process() {
         dir.path(),
         vec!["sleep".into(), "120".into()],
         1,
-        false,
         Arc::new(onlyne_session::backend::exec::ExecBackend::new()),
         store,
     );
@@ -3159,7 +3103,6 @@ async fn a_cancel_for_an_unknown_task_creates_no_session() {
         dir.path(),
         vec!["sleep".into(), "120".into()],
         1,
-        false,
         Arc::new(onlyne_session::backend::exec::ExecBackend::new()),
         store,
     );
@@ -3188,7 +3131,6 @@ async fn a_focus_for_an_unknown_task_still_settles() {
         dir.path(),
         vec!["sleep".into(), "120".into()],
         1,
-        false,
         Arc::new(onlyne_session::backend::exec::ExecBackend::new()),
         store,
     );
@@ -3277,7 +3219,6 @@ async fn the_reconnect_grace_retires_a_ghost_whose_agent_never_returns() {
         dir.path(),
         vec!["agent".into()],
         1,
-        true,
         backend.clone(),
         store,
     );
@@ -3335,15 +3276,14 @@ async fn the_reconnect_grace_retires_a_ghost_whose_agent_never_returns() {
     host.abort();
 }
 
-/// An agent that reconnects inside the grace window keeps its session, clears the
-/// clock, and takes the role's next task.
+/// An agent that reconnects inside the grace window keeps its session and clears
+/// the clock.
 ///
 /// The regression this guards is the sweep mistaking a returning agent for a
 /// ghost: a role whose always-running plugin restarts (the shape an agent upgrade
-/// leaves behind) must not lose the session it was reusing, and must not spawn a
-/// second one behind `max_sessions = 1`. The mount that arrives inside the window
-/// clears the stamp, so no later sweep — however far past the window it reads the
-/// clock — has anything to retire.
+/// leaves behind) must not lose the session it held. The mount that arrives
+/// inside the window clears the stamp, so no later sweep — however far past the
+/// window it reads the clock — has anything to retire.
 #[tokio::test]
 async fn an_agent_that_reconnects_inside_the_window_keeps_its_session() {
     let dir = tempdir().unwrap();
@@ -3354,7 +3294,6 @@ async fn an_agent_that_reconnects_inside_the_window_keeps_its_session() {
         dir.path(),
         vec!["agent".into()],
         1,
-        true,
         backend.clone(),
         store,
     );
@@ -3397,34 +3336,32 @@ async fn an_agent_that_reconnects_inside_the_window_keeps_its_session() {
     );
 
     let second_task = deliver(&state, &task_delivery("task B")).await;
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), reconnected.recv())
-            .await
-            .expect("the resident agent is handed the next task")
-            .as_deref(),
-        Some(second_task.as_str()),
-        "the reused session takes the role's next assignment"
+    assert_ne!(second_task, first_task);
+    assert!(
+        backend.inner.sessions().contains_key(&second_task),
+        "the next task spawns a session of its own"
     );
-    assert_eq!(
-        state.session_count(),
-        1,
-        "the next task rides the session that came back, so no second one spawns"
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), reconnected.recv())
+            .await
+            .is_err(),
+        "the reconnected session is handed no later task"
     );
     drop(io);
     host.abort();
 }
 
-/// A connection that comes back for a session a newer one already serves is held
-/// read-only, and what it sends travels with the completion that answered the task.
+/// A connection that returns for a session another connection already serves is
+/// held read-only, and what it sends travels with the completion that answered the
+/// task.
 ///
-/// The shape is the field report behind the grace window: the agent dies, the
-/// retry is spawned and takes the task, and the old process — or a plugin that
-/// restarted against the same session id — mounts again. Handing it the
-/// assignment it no longer owns is the double-answer this path exists to stop, so
-/// the returning connection gets nothing, and its `send` is held rather than put
-/// on the wire. When the retry finishes, the two accounts leave as one relay per
-/// downstream role, each line marked with the session that wrote it, and the
-/// returning connection is told to leave.
+/// The shape is a plugin that redialed while the client still holds the socket
+/// behind it, or a restarted process that mounts under the id its session was born
+/// with. Handing it the assignment would put two answers on one task, so the
+/// returning connection gets nothing, and its `send` is held rather than put on the
+/// wire. When the task settles, the two accounts leave as one relay per downstream
+/// role, each line marked with the session that wrote it, and the returning
+/// connection is told to leave.
 #[tokio::test]
 async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
     let dir = tempdir().unwrap();
@@ -3435,7 +3372,6 @@ async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
         dir.path(),
         vec!["agent".into()],
         2,
-        true,
         backend.clone(),
         store.clone(),
     );
@@ -3443,41 +3379,19 @@ async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
     state.attach_outbox(outbox.clone());
     let (socket, host) = serve_role_socket(&state, dir.path()).await;
 
-    // Task A runs, settles, and its agent's connection ends without a detach.
-    // The drop has to be a raw stream drop: that is the only thing in this file
-    // that makes the host see EOF.
+    // Task A runs on the connection its own plugin mounted with.
     let first_task = deliver(&state, &task_delivery("task A")).await;
-    let mut stream = mount_raw_plugin(&socket, &first_task).await;
-    complete_raw_plugin(&mut stream, &first_task, Outcome::Done).await;
-    drop(stream);
-    eventually(
-        || state.session_transport(&first_task).is_none(),
-        "the dropped connection binding to clear",
-    )
-    .await;
+    let stream = mount_raw_plugin(&socket, &first_task).await;
 
-    // The next task lands on the same session inside the window, and a new
-    // connection claims it.
-    let second_task = deliver(&state, &task_delivery("task B")).await;
-    let (_io_retry, mut assigns_retry) = mount_plugin(&socket, None).await;
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), assigns_retry.recv())
-            .await
-            .expect("the retry is handed the task")
-            .as_deref(),
-        Some(second_task.as_str())
-    );
-
-    // The old agent's process comes back for the session it no longer serves.
+    // The same session id mounts a second time.
     let (io_zombie, mut witnessed) = witnessed_plugin(&socket, &first_task).await;
     assert!(
         witnessed.try_recv().is_err(),
-        "a returning connection for a taken session is handed no assignment"
+        "a returning connection for a served session is handed no assignment"
     );
     assert!(
-        state.session_transport(&first_task).is_none(),
-        "the returning connection attaches to nothing: the session it came back for stays \
-         served by the connection that took it"
+        state.session_transport(&first_task).is_some(),
+        "the session stays served by the connection that came first"
     );
     let queued_before = store.flush_order().unwrap().len();
     let body = io_zombie
@@ -3516,30 +3430,32 @@ async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
         "nothing reaches the downstream role before the task is answered"
     );
     assert!(
-        state.session_transport(&second_task).is_some(),
-        "the task the retry serves is still served"
+        state.session_transport(&first_task).is_some(),
+        "the session the returning connection named is still served"
     );
 
     outbox.clear().await;
+    // The connection that owns the task answers it, so the held lines travel
+    // beside the ones the session wrote.
     let handoffs = [Handoff {
         to_role: "reviewer".into(),
-        text: Some("the part the retry wrote".into()),
+        text: Some("the part the task wrote".into()),
     }];
     on_out(
         &state,
-        &second_task,
+        &first_task,
         Outcome::Done,
-        Some("the part the retry wrote".into()),
+        Some("the part the task wrote".into()),
         None,
         &handoffs,
     )
     .await
-    .expect("the retry settles its task");
+    .expect("the task settles");
 
     let relayed = relays(outbox.frames().await);
     assert_eq!(
         relayed.as_slice(),
-        ["handoff: [retry] the part the retry wrote\n[zombie] the part I had already written"],
+        ["handoff: [retry] the part the task wrote\n[zombie] the part I had already written"],
         "the two accounts leave as one relay for the downstream role"
     );
     assert_eq!(
@@ -3556,7 +3472,8 @@ async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
         "the session that answered the task is left standing"
     );
     assert_eq!(state.session_count(), 1, "one session serves the role");
-    assert_settled(&store, &second_task);
+    assert_settled(&store, &first_task);
+    drop(stream);
     host.abort();
 }
 
@@ -3578,7 +3495,6 @@ async fn a_read_only_completion_is_answered_before_any_bye() {
         dir.path(),
         vec!["agent".into()],
         2,
-        true,
         backend.clone(),
         store.clone(),
     );
@@ -3619,15 +3535,16 @@ async fn a_read_only_completion_is_answered_before_any_bye() {
     host.abort();
 }
 
-/// A slot that `control recycle` left behind takes no reused task.
+/// A slot that `control recycle` left behind is gone, and the next task spawns a
+/// session of its own.
 ///
-/// The recycle arm closes the backend resource and releases the task binding, and
-/// `reuse` keeps the slot for the agent still attached to it. Selecting that slot
-/// for the next task wrote a payload onto a session with nothing behind it: the
-/// spawn path below stayed unreachable, the server row sat `in_flight`, and the
-/// role still looked like it had room because an exited row spends no capacity.
+/// The recycle arm closes the backend resource and releases the task binding, so
+/// the slot leaves the map even while its agent is still attached. A payload
+/// staged onto that slot would have nothing behind it to run it: the spawn path
+/// would stay unreachable, the server row would sit `in_flight`, and the role
+/// would still look like it had room because an exited row spends no capacity.
 #[tokio::test]
-async fn a_recycled_slot_takes_no_reused_task() {
+async fn a_recycled_slot_is_gone_and_the_next_task_spawns_its_own() {
     let dir = tempdir().unwrap();
     let store = ClientStore::open(dir.path().join("client.db")).unwrap();
     let backend = Arc::new(ReasonBackend::default());
@@ -3636,7 +3553,6 @@ async fn a_recycled_slot_takes_no_reused_task() {
         dir.path(),
         vec!["agent".into()],
         2,
-        true,
         backend.clone(),
         store.clone(),
     );
@@ -3661,16 +3577,12 @@ async fn a_recycled_slot_takes_no_reused_task() {
         1,
         "the recycled session's resource is closed"
     );
-    assert_eq!(
-        state.session_count(),
-        1,
-        "reuse keeps the slot while its agent is still attached"
-    );
+    assert_eq!(state.session_count(), 0, "the recycled slot leaves the map");
 
     let second_task = deliver(&state, &task_delivery("task B")).await;
     assert_eq!(
         state.session_count(),
-        2,
+        1,
         "the next task spawns a session of its own"
     );
     assert!(

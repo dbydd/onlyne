@@ -114,8 +114,9 @@ fn sorted_keys(table: &toml::Table) -> Vec<String> {
 /// `[acp]` table below it, and that placement is load-bearing in TOML: a key
 /// belongs to whichever table was last opened. Uncomment the block in place and
 /// the config must load with each key in its own table. A family moved to the
-/// wrong side of `[server]` produces a config that fails `deny_unknown_fields`,
-/// which is the silent breakage a line-by-line text match would wave through.
+/// wrong side of `[server]` lands under a table that does not declare it, which
+/// the parser reports as an ignored unknown key: fine for the load, and wrong for
+/// the operator, so the line-by-line check below catches it.
 #[test]
 fn uncommenting_the_template_lands_each_key_in_its_own_table() {
     let server = server_root();
@@ -301,11 +302,10 @@ fn stripping_the_comments_leaves_exactly_the_live_keys() {
             "key",
             "max_sessions",
             "prose",
-            "reuse",
             "role",
             "session_command",
         ],
-        "the live entry carries exactly the nine keys the fragment writes"
+        "the live entry carries exactly the eight keys the fragment writes"
     );
 
     let spec = format!("{SERVER_SPEC}\n{fragment}");

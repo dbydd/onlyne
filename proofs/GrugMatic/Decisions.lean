@@ -166,14 +166,13 @@ theorem d15_wild_supervisor_single_prose (source : String)
       Fact.rememberedProse ∉ (supervisorWelcome source left).2 := by
   simp [supervisorWelcome]
 
-/-- A session context contains prior-task state exactly when reuse is enabled. -/
-def sessionContext (reuse : Bool) (task : Fact) : Ctx :=
-  if reuse then [.priorTask, task] else [task]
+/-- A session context holds the one task its session serves. -/
+def sessionContext (task : Fact) : Ctx := [task]
 
-/-- Disabling session reuse bounds each session to one task and removes prior-task persistence. -/
+/-- One task per session bounds each session to that task and keeps prior-task state out. -/
 theorem one_shot_session_bound (task : Fact) (hnew : task ≠ Fact.priorTask) :
-    (sessionContext false task).length ≤ 1 ∧
-      Fact.priorTask ∉ sessionContext false task := by
+    (sessionContext task).length ≤ 1 ∧
+      Fact.priorTask ∉ sessionContext task := by
   simp [sessionContext, Ne.symm hnew]
 
 end GrugMatic

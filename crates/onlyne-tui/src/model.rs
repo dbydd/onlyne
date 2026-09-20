@@ -60,9 +60,9 @@ impl From<RoleInfo> for RoleView {
 }
 
 /// Decode one `roles` row. A row from a server that predates `edges`,
-/// `aggregate`, `reuse`, or `session_command` still lands: `edges` and
-/// `aggregate` default and the page then draws no arrow, `reuse` defaults to
-/// `true`, and `session_command` defaults to an empty token list.
+/// `aggregate`, or `session_command` still lands: `edges` and `aggregate`
+/// default and the page then draws no arrow, and `session_command` defaults to
+/// an empty token list.
 impl TryFrom<Value> for RoleView {
     type Error = serde_json::Error;
 

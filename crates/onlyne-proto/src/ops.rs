@@ -356,11 +356,6 @@ pub struct LedgerEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acked_at: Option<DateTime<Utc>>,
 }
-/// The spec default for a role's idle-slot reuse.
-fn role_info_reuse_default() -> bool {
-    true
-}
-
 /// One `roles` answer row: the registry record plus live presence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -368,10 +363,6 @@ pub struct RoleInfo {
     pub name: String,
     pub admin: bool,
     pub max_sessions: u32,
-    /// Whether the live role client may reuse idle slots. A row from a server
-    /// that predates the field still lands: `true` is spec's own default.
-    #[serde(default = "role_info_reuse_default")]
-    pub reuse: bool,
     /// Command tokens used to spawn one role session.
     #[serde(default)]
     pub session_command: Vec<String>,
@@ -558,7 +549,6 @@ pub struct Welcome {
     pub role: String,
     pub admin: bool,
     pub max_sessions: u32,
-    pub reuse: bool,
     pub prose: String,
     pub spec_hash: String,
     /// The cluster this authenticated role represents, or `None` for a plain
@@ -1059,7 +1049,6 @@ mod tests {
             "role": "planner",
             "admin": false,
             "max_sessions": 3,
-            "reuse": true,
             "prose": "Read the incoming task",
             "spec_hash": "abc123",
             "aggregate": null,

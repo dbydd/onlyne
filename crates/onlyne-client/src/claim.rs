@@ -92,7 +92,6 @@ mod tests {
             dir.path(),
             vec!["echo".into()],
             2,
-            false,
             Arc::new(FakeBackend::new()),
             store,
         );
@@ -115,7 +114,6 @@ mod tests {
             dir.path(),
             vec!["echo".into()],
             2,
-            false,
             Arc::new(FakeBackend::new()),
             store,
         );

@@ -215,9 +215,6 @@ fn changed_client_fields(before: &ClientEntry, after: &ClientEntry) -> Vec<Strin
     if before.max_sessions != after.max_sessions {
         fields.push("max_sessions".to_string());
     }
-    if before.reuse != after.reuse {
-        fields.push("reuse".to_string());
-    }
     if before.allowed_senders != after.allowed_senders {
         fields.push("allowed_senders".to_string());
     }

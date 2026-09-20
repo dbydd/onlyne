@@ -111,8 +111,7 @@ struct State {
     agents: Mutex<BTreeMap<String, Arc<AgentSlot>>>,
     /// Every session this client holds, keyed by the agent command and the id that
     /// agent chose for it: ACP ids are unique within a process, not across
-    /// processes, and an id stays stable across a `reuse` hand-over where a task id
-    /// does not.
+    /// processes, so the pair is the stable name, where a task id is not.
     sessions: Mutex<BTreeMap<(String, String), Arc<SessionEntry>>>,
     sink: OutcomeSink,
     feed: OutcomeFeed,
@@ -129,8 +128,8 @@ struct AgentSlot {
 
 /// One ACP session, plus the turn state this client keeps for it.
 struct SessionEntry {
-    /// The task this session is serving right now. A `reuse` role moves a second
-    /// task onto the same ACP conversation, and that task owns its own journal.
+    /// The task this session serves. One session runs one task, and that task
+    /// owns its own journal.
     task_id: Mutex<String>,
     /// The id the agent gave this session; every later request is keyed by it.
     id: String,
@@ -1202,9 +1201,8 @@ fn run_turn(
             ("head", head.clone().map(Value::from).unwrap_or(Value::Null)),
         ],
     );
-    // The session is free for a `reuse` role's next task the moment this releases,
-    // and it must be released before the report is handed over: a role that takes
-    // the next task between the two would otherwise be refused as busy.
+    // The turn is released before the report is handed over: a session that
+    // reports while still marked busy would refuse the next request against it.
     entry.turn.finish();
     sink.push(SessionOutcome {
         task_id,
@@ -2023,8 +2021,8 @@ main()
         let session = backend.spawn(fake.spec("t-two")).unwrap();
         let (first, _lines, _log) = run_turn(&backend, &session, "t-two", "MARK:ask first");
         assert!(first.refusals.is_some());
-        // A `reuse` role moves its next task onto the same conversation; the
-        // previous task's refusal must not be reported against this one.
+        // The refusal accumulator belongs to the turn that asked, so a later
+        // turn on the same conversation reports none of it.
         let (second, _lines, _log) = run_turn(&backend, &session, "t-two", "second");
         assert_eq!(second.outcome, Outcome::Done);
         assert!(second.refusals.is_none(), "{:?}", second.refusals);

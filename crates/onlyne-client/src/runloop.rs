@@ -192,7 +192,6 @@ impl RunState {
             init.workspace.clone(),
             Vec::new(),
             1,
-            false,
             Arc::from(backend),
             store.clone(),
         );
@@ -1041,7 +1040,7 @@ mod tests {
     use std::pin::Pin;
     use tempfile::tempdir;
 
-    fn test_state(max_sessions: u32, reuse: bool, command: Vec<String>) -> (RunState, ClientStore) {
+    fn test_state(max_sessions: u32, command: Vec<String>) -> (RunState, ClientStore) {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("client.db");
         let store = ClientStore::open(path).expect("client store");
@@ -1050,7 +1049,6 @@ mod tests {
             dir.path(),
             command,
             max_sessions,
-            reuse,
             Arc::new(FakeBackend::new()),
             store.clone(),
         );
@@ -1199,12 +1197,11 @@ while True:
         }
     }
 
-    fn role_info(max_sessions: u32, reuse: bool, command: Vec<String>) -> RoleInfo {
+    fn role_info(max_sessions: u32, command: Vec<String>) -> RoleInfo {
         RoleInfo {
             name: "planner".into(),
             admin: false,
             max_sessions,
-            reuse,
             session_command: command,
             spec_hash: "hash".into(),
             prose: None,
@@ -1289,7 +1286,6 @@ while True:
                 ready_marker.to_string_lossy().into_owned(),
             ],
             1,
-            false,
             backend,
             store.clone(),
         );
@@ -1436,19 +1432,18 @@ while True:
 
     #[test]
     fn spec_reloaded_role_slice_change_updates_dispatch_gate() {
-        let (state, _store) = test_state(1, false, vec!["old".into()]);
-        let changed = apply_role_info(&state, &role_info(2, true, vec!["new".into()]));
-        assert_eq!(changed, vec!["session_command", "max_sessions", "reuse"]);
+        let (state, _store) = test_state(1, vec!["old".into()]);
+        let changed = apply_role_info(&state, &role_info(2, vec!["new".into()]));
+        assert_eq!(changed, vec!["session_command", "max_sessions"]);
         let applied = state.dispatch.role_slice();
         assert_eq!(applied.max_sessions, 2);
-        assert!(applied.reuse);
         assert_eq!(applied.command, vec!["new"]);
     }
 
     #[test]
     fn spec_reloaded_identical_role_slice_is_noop() {
-        let (state, _store) = test_state(2, true, vec!["pi".into()]);
-        let changed = apply_role_info(&state, &role_info(2, true, vec!["pi".into()]));
+        let (state, _store) = test_state(2, vec!["pi".into()]);
+        let changed = apply_role_info(&state, &role_info(2, vec!["pi".into()]));
         assert!(changed.is_empty());
         assert_eq!(state.dispatch.role_slice().max_sessions, 2);
     }
@@ -1458,8 +1453,8 @@ while True:
     /// and the next spawn reads the policy off the dispatcher.
     #[test]
     fn a_relay_policy_from_the_role_row_is_adopted() {
-        let (state, _store) = test_state(2, true, vec!["pi".into()]);
-        let mut armed = role_info(2, true, vec!["pi".into()]);
+        let (state, _store) = test_state(2, vec!["pi".into()]);
+        let mut armed = role_info(2, vec!["pi".into()]);
         armed.relay_required = Some(vec!["writer".into()]);
         armed.relay_count = Some(2);
         let changed = apply_role_info(&state, &armed);
@@ -1468,7 +1463,7 @@ while True:
         assert_eq!(applied.relay_required, vec!["writer".to_string()]);
         assert_eq!(applied.relay_count, Some(2));
 
-        let disarmed = role_info(2, true, vec!["pi".into()]);
+        let disarmed = role_info(2, vec!["pi".into()]);
         let changed = apply_role_info(&state, &disarmed);
         assert_eq!(changed, vec!["relay_required", "relay_count"]);
         let applied = state.dispatch.role_slice();
@@ -1478,7 +1473,7 @@ while True:
 
     #[tokio::test]
     async fn startup_residual_report_uses_durable_report_path() {
-        let (state, store) = test_state(1, false, Vec::new());
+        let (state, store) = test_state(1, Vec::new());
         let convergence = crate::stale::Convergence {
             task_id: "task-dead".into(),
         };
@@ -1504,7 +1499,7 @@ while True:
 
     #[tokio::test]
     async fn stall_scan_queues_one_fault_until_applied_resets() {
-        let (state, store) = test_state(1, false, Vec::new());
+        let (state, store) = test_state(1, Vec::new());
         let past = Instant::now()
             .checked_sub(Duration::from_secs(5))
             .expect("clock");
@@ -1579,7 +1574,7 @@ while True:
 
     #[tokio::test]
     async fn exited_session_clock_is_forgotten_without_a_fault_frame() {
-        let (state, store) = test_state(1, false, Vec::new());
+        let (state, store) = test_state(1, Vec::new());
         let task_id = "task-finished";
         store
             .upsert_session(
@@ -1622,14 +1617,14 @@ while True:
     /// nowhere. The server requeues an unacknowledged row after a link flap, and
     /// a completion still in flight when the link dropped lands after that
     /// requeue, so the same task arrives twice. Untreated, the second delivery
-    /// read as new work: under `reuse` the dispatcher staged its payload on
-    /// whichever session sat idle, which is one chain's task running inside
-    /// another conversation with a second answer aimed at the ledger row the
-    /// first answer settled. The row is acked rather than left in flight,
-    /// because an unacked row is offered again forever.
+    /// read as new work: the dispatcher staged its payload on whichever session
+    /// sat idle, which is one chain's task running inside another conversation
+    /// with a second answer aimed at the ledger row the first answer settled.
+    /// The row is acked rather than left in flight, because an unacked row is
+    /// offered again forever.
     #[tokio::test]
     async fn a_redelivered_finished_task_is_acked_and_runs_nowhere() {
-        let (state, _store) = test_state(2, true, vec!["echo".into()]);
+        let (state, _store) = test_state(2, vec!["echo".into()]);
         let task_id = new_task_id();
         let delivery = |msg_id: &str| Delivery {
             msg_id: msg_id.into(),
@@ -1695,7 +1690,7 @@ while True:
     /// closing the door on them would strand work the role never finished.
     #[tokio::test]
     async fn a_task_ended_without_a_completion_stays_eligible_for_its_retry() {
-        let (state, _store) = test_state(2, true, vec!["echo".into()]);
+        let (state, _store) = test_state(2, vec!["echo".into()]);
         let task_id = new_task_id();
         accept_delivery(
             &state,
@@ -1754,7 +1749,7 @@ while True:
 
     #[tokio::test]
     async fn stall_scan_stays_quiet_when_disabled() {
-        let (mut state, store) = test_state(1, false, Vec::new());
+        let (mut state, store) = test_state(1, Vec::new());
         state.stall_report_secs = 0;
         let past = Instant::now()
             .checked_sub(Duration::from_secs(5))

@@ -402,8 +402,7 @@ impl AdapterSocket {
             self.dispatch.park_transport(io, capabilities);
             // Work that arrived ahead of this agent is staged with a payload and
             // no connection. The park is that connection now, so the wait ends
-            // here, and the claim binds the session to it for the tasks a `reuse`
-            // role hands the same session later.
+            // here, and the claim binds the session to this plugin.
             let Some(staged) = self.dispatch.staged_without_transport() else {
                 return;
             };
@@ -528,7 +527,6 @@ mod tests {
             workspace,
             vec!["agent".into()],
             1,
-            false,
             std::sync::Arc::new(FakeBackend::new()),
             store,
         )
