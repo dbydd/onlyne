@@ -3447,7 +3447,7 @@ async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
     // The old agent's process comes back for the session it no longer serves.
     let (io_zombie, mut witnessed) = witnessed_plugin(&socket, &first_task).await;
     assert!(
-        matches!(witnessed.try_recv(), Err(_)),
+        witnessed.try_recv().is_err(),
         "a returning connection for a taken session is handed no assignment"
     );
     assert!(
