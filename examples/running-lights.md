@@ -114,10 +114,7 @@ frame B, hop 4 in flight
 frames the light moves `light2` to `light5`. The ledger's one `in_flight` row moves with it,
 `light1 -> light2` to `light4 -> light5` — the same edge the graph highlights.
 
-The `*` beside a name is not the light. A settled session stays warm for reuse, so every role that
-has already served a task keeps its star for the rest of the run; by frame B, five roles carry one.
-That is why the case reads the `◐` and the ledger together instead of trusting the star, and why
-the two frames it captures always show a different role.
+The `*` beside a name is not the light. A settled session keeps its star for the rest of the run, so by frame B five roles carry one. That is why the case reads the `◐` and the ledger together and never trusts the star, and why the two frames it captures always show a different role.
 
 ## Where the pieces live
 

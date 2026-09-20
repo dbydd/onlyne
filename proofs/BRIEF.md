@@ -57,7 +57,7 @@ exhibits the safe side.
   D13 spec as file truth + reload (config never carried in context),
   D15 wild supervisor + prose single-source (operator identity outside
   lifecycle; instruction refetched, never memorized),
-  one-shot sessions (reuse = false ⇒ per-session context depth bounded by 1 task).
+  one-shot sessions (per-session context depth bounded by 1 task).
 - Closing theorem `grug_thin_and_local`: assemble the lemmas, and the Onlyne
   design is one concrete protocol with the rot-independent bound of
   `grug_ledger_rescue`. A comment line may map each constant to its file/crate

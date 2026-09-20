@@ -127,7 +127,7 @@ The second commitment has machine-checked backing. `proofs/` is a core Lean 4 de
 
 | Kind | Purpose | Delivery |
 |---|---|---|
-| `task` | Deliver work to a role; spawns or reuses a session | at-least-once, queued while offline |
+| `task` | Deliver work to a role; spawns a session | at-least-once, queued while offline |
 | `completion` | Terminal receipt for a task; carries the result summary | at-least-once, queued while offline |
 | `note` | Free chat between humans and agents | best-effort, needs a session already running on its role; `note_queue` holds one that waits |
 | `control` | `recycle · probe · snapshot · cancel` on a task | admin or task owner only |

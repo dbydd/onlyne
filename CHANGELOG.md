@@ -2,11 +2,12 @@
 
 ## [Unreleased]
 
-Scope: two holes in the client's session bookkeeping, both read out of one field
-report. A role on the live ring logged three `connection lost` errors for a single
-task. The ledger says that task completed, on all three reports, and the agents
-filed the terminal write again by hand each time (`applied: true`). Nothing was
-lost on the way in; the answer went out late.
+Scope: three changes in one window. Two close session-bookkeeping holes read out of
+one field report, and the third removes the mechanism the second hole lived in.
+A role on the live ring logged three `connection lost` errors for a single task.
+The ledger says that task completed, on all three reports, and the agents filed the
+terminal write again by hand each time (`applied: true`). Nothing was lost on the
+way in; the answer went out late.
 
 The ordering hole is the client writing a `bye` to a connection that is mid-request
 on itself. `adapter_socket` runs an inbound frame's handler to completion before it
@@ -20,56 +21,95 @@ any connection inside one of its own frames (`DispatchState::hold_frame`,
 `FrameGuard`, `DispatchInner::in_frame`), and that connection is retired by its own
 `detach` frame or socket end, exactly as before.
 
-The selection hole is an idle slot that nobody will ever hand work to. `control
-recycle` closes the session's host resource and, under `reuse`, keeps the slot with
-its task binding released. `reuse` picked such a slot whenever it missed on family,
-wrote the payload onto a session with nothing behind it, and returned early, so the
-spawn path below stayed unreachable while `live_sessions` stopped counting the exited
-row: the role looked like it had room and the server row sat `in_flight`. The reuse
-filter now asks the stored resource leg, `reuse_candidate`, and a `closed` resource
-is out. `detached` means the client never confirmed the resource, and that stays a
-candidate.
+The selection hole was an idle slot nobody would ever hand work to. `control
+recycle` closed the session's host resource and left the slot in the map for the
+next task; the payload then went onto a session with nothing behind it while the
+spawn path below stayed unreachable, so the server row sat `in_flight` and the role
+still looked like it had room. That shape is unreachable now, because `reuse` is
+gone and every task spawns a session of its own.
+
+### Breaking
+
+- client and server: `reuse` is gone. Every task runs in a session of its own, so
+  `[[client]].reuse`, `Welcome.reuse`, and `RoleInfo.reuse` are removed, together
+  with the dispatcher's selection path (`family_of`, `reuse_candidate`, the
+  per-slot `family`). `max_sessions` caps live sessions: a slot whose stored
+  lifecycle reads `exited` holds no capacity, and a settled slot stays tracked only
+  while its agent is attached — when that connection ends, the slot and its host
+  resource retire. The `welcome` frame and the `roles` row no longer carry the
+  field, so a new client cannot read an old server's answer and an old client
+  cannot read a new one's: restart the server and every client of a role together
+  on one build. The removed key also moves every `spec_hash`, which only
+  `spec_diff` and the `roles` display read.
+
+### Changed
+
+- config: a key no field declares is ignored, and the parse still succeeds. Each
+  ignored key is named once by `onlyne-config`'s `keys` walker, which reads the
+  same generated JSON Schema `config-schema` writes, so a path like
+  `server.extra`, `client[0].x`, or `orca.extra` reaches the loader's `tracing`
+  warning with no list to maintain. A wrong value for a declared key still refuses
+  the load with its line number, and the two generated schemas shed
+  `additionalProperties`.
+- config: `ServerSection.crate` carries `#[serde(default)]`. A `[server]` table
+  without a `crate` list loads, which is the shape `onlyne server generate` and the
+  relocate e2e read; before this it failed with `missing field crate`.
 
 ### Fixed
 
 - client: the answer to a plugin's own report leaves before any bye that report
   triggers (`crates/onlyne-client/src/adapter_socket.rs`, `crates/onlyne-client/src/
   dispatch.rs`, `retire_revived`). One task's terminal write is now reported once.
-- client: an idle slot whose resource `control recycle` closed takes no reused
-  task, and the next task spawns a session of its own (`reuse_candidate` in
-  `crates/onlyne-client/src/dispatch.rs`).
 
-### Added
+### Tests
 
-- client tests: `a_read_only_completion_is_answered_before_any_bye` and
-  `a_recycled_slot_takes_no_reused_task`
-  (`crates/onlyne-client/tests/scenarios.rs`). Both were run against the previous
-  tree and fail there, at the bye arriving and at the recycled slot keeping the task.
-
-### Changed
-
-- client test: `session_reuse_and_capacity_capping` moved from a dispatch-only case
-  to the role socket. It manufactured its idle slot with `on_recycled` and asserted
-  that slot takes the next task, which is the hole above stated as a contract. The
-  coverage it exists for — family preference and the `max_sessions` cap — now runs on
-  a completion report over an attached agent connection, the shape `reuse` is for.
+- client: `each_task_gets_its_own_session_and_max_sessions_caps_the_live_ones`
+  replaces `session_reuse_and_capacity_capping`, and the cases that asserted an
+  idle slot keeps work were rewritten to the one-session-per-task shape:
+  `a_recycled_slot_is_gone_and_the_next_task_spawns_its_own`,
+  `a_settled_session_whose_plugin_left_is_retired`,
+  `a_parked_agent_serves_the_session_it_claimed`,
+  `an_agent_that_reconnects_inside_the_window_keeps_its_session`, and
+  `the_second_task_gets_its_own_session_and_connection`
+  (`crates/onlyne-client/tests/scenarios.rs`).
+- config: `an_unknown_spec_key_loads_and_is_named`,
+  `an_unknown_client_key_loads_and_is_named`, and
+  `the_guard_alias_is_not_reported_as_ignored` in
+  `crates/onlyne-config/tests/config_contract.rs`, plus
+  `no_shipped_config_key_goes_unrecognized`, which holds the example spec, the
+  fixtures, and `templates/**/config.toml` to the schema
+  (`crates/onlyne-config/tests/spec_example.rs`). The generated schemas are held
+  to their new shape by `the_published_client_schema_carries_acp`, which asserts
+  the client schema declares no `additionalProperties`.
 
 ### Check on this tree
 
 Run 2026-09-20: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
 -j 4 -- -D warnings`, and `cargo test --workspace --no-fail-fast -j 4 --lib --tests`
-pass, the last at 972 cases across 50 suites with 0 failures and 1 ignored
-(`herdr_live_probe`).
+pass, the last at 975 cases across 50 suites with 0 failures and 1 ignored
+(`herdr_live_probe`); `cd proofs && lake build` completes with 7 jobs. Both e2e
+runs below used `BIN_DIR=target/release` on this tree.
+
+`crates/onlyne-testkit/e2e/local-task.sh` passes. `reconnect-requeue.sh` fails on
+this tree with `acked=1` and on its parent 898de2d with `acked=2`, so the red line
+predates this release. That fixture hands three tasks to one `onlyne-agent-fake`
+process, and one process serves one session: the other sessions have no transport,
+so their tasks never settle. A role that runs more than one concurrent session needs
+one agent per session, and the fixture has to mount them.
 
 ### Documentation
 
 - `docs/operations.md`, 「会话残影与属主判定」: the bye exception and why an answer
   must precede it.
-- `docs/operations.md`, 「并发度」: `reuse` selects a session that is still there, and
-  a recycled one is out.
+- `docs/operations.md`, 「配置加载」: ignored keys warn once, declared keys with
+  wrong values still refuse, and a client and its server restart together on one
+  build.
+- `docs/v1-ARCHITECTURE.md` §5: the client task path no longer selects among idle
+  sessions; it spawns a session per task.
 
-Wire format: unchanged. No `onlyne-proto`, `onlyne-config`, or generated schema
-file moves in this release.
+Wire format: `Welcome` and `RoleInfo` lose `reuse`, and both proto schemas are
+regenerated. The spec and client config schemas lose `additionalProperties`, and
+their fixtures move with them.
 
 ## [1.3.1] - 2026-09-20
 

@@ -142,7 +142,7 @@ onlyne --server-root /tmp/onlyne-sup sessions --json | jq '.data[0].observed'
 
 - 演示证明委派机制：任务下发、跨角色消息、handoff 的父子账、回执闭环、账本可查。
   模型答什么不在验证范围。
-- 会话按任务生灭（`reuse = false`）。pi 冷启动每单要几秒，这是这套架构的固有成本。
+- 会话按任务生灭：一单起一个 session，结清即归还槽位。pi 冷启动每单要几秒，这是这套架构的固有成本。
 - `_supervisor` 的入口是管理员面（admin socket）。这不是演示的例外：操作 agent
   本来就该拿本机 admin socket 的访问权。
 - 环首把根任务的完成回执发给 `_supervisor`，这是内置的上行通道。spec 里环成员的

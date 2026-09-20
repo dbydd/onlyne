@@ -100,8 +100,7 @@ fires. `control probe` first, then `recycle` or `repair retry` as the answer dem
 A finished session takes its host resource with it. The client closes the pane, tab, zellij
 session, or exec child once that session holds no task and its agent has detached, and the
 client log records the closure with `retiring idle session resource`. An idle pane still open
-in front of you means its agent remains attached — the `reuse` case — or the owning client is
-down.
+in front of you means the owning client is down.
 
 Automatic re-delivery rides two spec gates: `[server].requeue_max_attempts` (0 unlimited) lands
 a starving row as `rejected` with reason `requeue_exhausted`, and `[server].requeue_ttl_secs`

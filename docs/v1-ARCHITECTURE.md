@@ -162,7 +162,7 @@ Backend selection is env `ONLYNE_BACKEND` > workspace `config.toml` `backend` > 
 | `Outcome` | `Done`, `Failed`, `Cancelled` | Plan §3 line 140 |
 | `PublicLifecycle` | `Created`, `Working`, `Idle`, `Exited` | Plan §6 line 280 |
 
-The client task path is a fixed order: apply the reuse policy, reuse an idle session or spawn `SessionBackend`, record `sessions`, report `ready`, then deliver the assignment. Source: Plan §6 line 285.
+The client task path is a fixed order: spawn `SessionBackend` for the task, record `sessions`, report `ready`, then deliver the assignment. Source: Plan §6 line 285.
 
 Disconnect behavior is a fixed order: stop accepting new delivery, let running sessions reach a terminal state, persist completion intents, reconnect with capped backoff, then flush intents in `seq` order. Source: Plan §6 lines 287-289.
 

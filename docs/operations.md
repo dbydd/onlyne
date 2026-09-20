@@ -36,6 +36,12 @@ bind 失败的 client 以 exit 1 结束，stderr 一行 `onlyne-client: bind the
 
 验证链路由 `crates/onlyne-testkit/e2e/socket-path-length.sh` 钉住：垫深的工作区、短服务路径、marker 发布、规范路径保持空位、任务端到端结清。
 
+## 配置加载
+
+spec.toml 或角色工作区 config.toml 里的未识别键被忽略，进程照常启动；每个被忽略的键在加载时于 daemon 日志落一行 `tracing` warning。真实键的取值错误仍是拒绝启动的硬错误。推论：拼错的键静默回退到默认值，除那行 warning 外无其他信号。
+
+一次版本升级后，role client 与其 server 必须跑同一 build：`hello` 回复少了一个字段，二者不匹配时连不上。升级时把 server 和每个 `onlyne-client` 一起重启。
+
 ## 并发度
 
 同 role 多 session 并行的旋钮是 `[[client]].max_sessions`。
@@ -67,10 +73,6 @@ spec 改完后执行 `onlyne reload` 生效。
 存量 client 刷新 role slice 后立即使用新的 `max_sessions` 闸门。
 
 存量 client 无需重启。
-
-`reuse = true` 让 settled 槽即时归还容量。
-
-`reuse` 挑的是还活着的会话。`control recycle` 关掉某会话的宿主资源之后，它留下的空闲槽不再领复用任务，下一条任务起新 session。判据读存储里的资源位：`closed` 即出局，`detached` 只表示从未确认，照常可选。现场后果写在 `crates/onlyne-client/tests/scenarios.rs` 的 `a_recycled_slot_takes_no_reused_task`：任务落进这种槽时既无人来领，spawn 那条路又够不着，服务端行停在 `in_flight`，而角色看上去还有空位。
 
 `crates/onlyne-testkit/e2e/reconnect-requeue.sh` 用 `max_sessions = 2` 和三条 task 覆盖挂账再 offer 路径。
 
@@ -309,7 +311,7 @@ onlyne --server-root <server-root> repair fail --task <id> --reason session_dead
 - 结清且 agent 未挂载：关闭发生在结清那一刻。
 - 250 ms readiness tick：扫描被跟踪的会话，存储 lifecycle 已投影 `exited`、已存 outcome 有值、且 agent 已离开的会话关闭掉，reason 由该 outcome 推导（`done` 得 `Completed`，`failed` 得 `Fault`，`cancelled` 得 `Cancelled`）。
 
-两条保留路径：连接在 plugin 未发 `detach` 的情况下断开，该 agent 还可能重连；会话已结清、agent 仍挂载，`reuse` 还能把下一个任务交给它。
+会话结清后不再接新任务：一单一个 session，槽位随即归还，不再占用 `max_sessions`，宿主资源按上面三条路径收走。一条保留路径：连接在 plugin 未发 `detach` 的情况下断开，该 agent 还可能重连。
 
 每一次回收在存储资源状态仍为开时先经 `backend.attach` 刷新过期 ref，投影 `resource_closed`，并在 client 日志记一行 `retiring idle session resource`，字段是 `task`、`backend`、`resource`、`reason`；槽位随后从跟踪表里移除。关闭失败落一条 warning，run 照常继续。
 
