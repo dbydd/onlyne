@@ -107,6 +107,32 @@ handoff. The other fifteen — `onlyne-frame`, `onlyne-layout`, `onlyne-store`,
 move on their internal path-dependency floors, so each manifest stays publishable
 on its own.
 
+Receipt: all nineteen crates are on crates.io at 1.3.0, published 2026-09-20,
+none yanked, in the dependency order `onlyne-acp`, `onlyne-config`,
+`onlyne-frame`, `onlyne-layout`, `onlyne-proto`, `onlyne-adapter`, `onlyne-cli`,
+`onlyne-net`, `onlyne-session`, `onlyne-gateway-feishu`, `onlyne-gateway-qqbot`,
+`onlyne-gateway-telegram`, `onlyne-gateway-weixin`, `onlyne-store`,
+`onlyne-testkit`, `onlyne-client`, `onlyne-gateway`, `onlyne-server`,
+`onlyne-tui`, each through `cargo publish --locked -p onlyne-<crate>` at tag
+`v1.3.0` from a clean worktree. Every crate went out on its first attempt, zero
+retries, and all nineteen carried the packaging sandbox build cargo runs by
+default — the tree needed neither `--allow-dirty` nor `--no-verify`. Each publish
+closed on its registry availability poll rather than on a skip, so the build of
+every crate after it had its dependencies' 1.3.0 versions in the registry to
+resolve against.
+
+The local install was refreshed from the same tree: `cargo install --force
+--locked --path crates/<crate>` for the six binary members, which leaves seven
+executables at 1.3.0 in `~/.cargo/bin` (`onlyne`, `onlyne-server`,
+`onlyne-client`, `onlyne-gateway`, `onlyne-tui`, `onlyne-agent-fake`,
+`onlyne-gateway-fake`). One of those six died on its way through the registry
+index refresh — `LibreSSL SSL_connect: SSL_ERROR_SYSCALL` against
+`index.crates.io:443` — and the retry for `onlyne-testkit` landed it, which is
+the single hiccup of the release. `onlyne version` answers
+`{"onlyne-cli":"1.3.0","protocol":1}` with all three daemons resolved under
+`~/.cargo/bin`, and `onlyne schema client` prints 156 lines against 1.2.2's 149:
+the seven-line difference is `reconnect_grace_secs`.
+
 ## [1.2.2] - 2026-09-19
 
 Scope: the acp closing report grows a routing vocabulary. The closing report is

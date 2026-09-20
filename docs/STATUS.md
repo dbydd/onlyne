@@ -1,6 +1,6 @@
 # Onlyne Status
 
-v1.2.2 is tagged `v1.2.2` (`300cbd6`), nineteen crates at 1.2.2. The release carries payload-v2: the acp closing report — the one file that ends a task — keeps its verdict line and gains zero to eight `handoff:` lines naming another role, `onlyne_proto::payload` owns that grammar for the prompt, the checker, and the client, the client sends each named route over the role's existing link, and the socketless `onlyne report` family lets an author check the file before the turn stops. The same round puts flag ranges, key sets, defaults, and refusal shapes inside `--help`, `onlyne schema`, and the generated fragment, so a reader needs one command rather than a document. `CHANGELOG.md` keeps the details under `[1.2.2]`. Earlier releases keep their own receipts in `CHANGELOG.md`. `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONTRACT.md` owns the work split. Root README files are the user manual.
+v1.3.0 is tagged `v1.3.0` (`5fadaa8`), nineteen crates at 1.3.0. The release turns the client's promise about a plugin that went away from unbounded to bounded: a connection that ends without a `detach` frame keeps its session for `[client] reconnect_grace_secs`, sixty seconds by default and off at `0`, past which the client retires the task-free session it left behind — the shape that held a role's only capacity slot open for a process that was simply gone. A connection returning for a session a retry already answers is held: it is handed no assignment, what it sends rides that task's closing handoff as one marked message per downstream role, and it is told to leave once the merge is out. The same round deletes `[client.timeout] running_ms` from the parser, the wire, the schema, and the examples, and gives `onlyne server generate` a per-file content guard, so a workspace an operator hand-edited survives a rerun. `CHANGELOG.md` keeps the details under `[1.3.0]`. Earlier releases keep their own receipts in `CHANGELOG.md`. `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONTRACT.md` owns the work split. Root README files are the user manual.
 
 ## Three-process shape
 
@@ -11,19 +11,19 @@ v1.2.2 is tagged `v1.2.2` (`300cbd6`), nineteen crates at 1.2.2. The release car
 
 ## Crate state
 
-Counts come from `cargo test --workspace` on 2026-09-19 (962 passed, 0 failed, 1 ignored: `herdr_live_probe`, across 68 suites). Each line below covers one crate, with its libraries and integration targets summed.
+Counts come from `cargo test --workspace` on 2026-09-19 (962 passed, 0 failed, 1 ignored: `herdr_live_probe`, across 68 suites). The `onlyne-client` and `onlyne-config` lines carry the 2026-09-20 counts from `cargo test --no-fail-fast -p onlyne-client -p onlyne-config --lib --tests` (208 passed, 0 failed), which is where this release's five new cases live. Each line below covers one crate, with its libraries and integration targets summed.
 
 - [x] `onlyne-proto` green with envelope, frame variants, ops, errors, events, and the payload-v2 report grammar: 76 unit + 5 wire vectors (86 fixtures) + 2 sizes, where a wire vector is a recorded protocol fixture.
 - [x] `onlyne-acp` green with the ACP v1 client, its stdio transport, and the protocol fixtures: 40 unit + 14 scripted-peer + 1 doc example.
 - [x] `onlyne-frame` green with length-prefixed codec: 9.
-- [x] `onlyne-config` green with spec parse and reload: 11 template + 38 config contract + 17 ACL table + 3 spec example.
+- [x] `onlyne-config` green with spec parse and reload: 11 template + 39 config contract + 17 ACL table + 3 spec example.
 - [x] `onlyne-layout` green with legacy refusal exit 2, the local-socket seam, and the one spelling of the per-task report, log, events, and content-index paths: 30.
 - [x] `onlyne-store` green with ledger and local DB: 31 unit + 2 schema statements.
 - [x] `onlyne-session` green with the lifecycle port and the session backends (zellij, Orca, exec, acp, fake, herdr): 131 unit + 18 herdr.
 - [x] `onlyne-net` green with TLS, handshake, ACL, and backoff: 25.
 - [x] `onlyne-adapter` green with SDK and protocol schema: 5 unit + 3 conformance + 1 protocol doc.
 - [x] `onlyne-server` green with router, relay, projection, faults, admin, and generate: 14 unit + 84 delivery + 27 generate + 2 stale.
-- [x] `onlyne-client` green with runloop, intents, adapter socket, host detection, dispatch, secret resolution at launch, and the plugin config repair: 79 unit + 1 binary + 50 scenarios + 4 init-template.
+- [x] `onlyne-client` green with runloop, intents, adapter socket, host detection, dispatch, secret resolution at launch, the plugin config repair, the reconnect grace, and the held connection: 80 unit + 1 binary + 53 scenarios + 4 init-template.
 - [x] `onlyne-tui` green with the role network graph, the swarm monitor, and the key table: 74 unit + 2 one-shot snapshots.
 - [x] `onlyne-gateway` green with shared kit: 47.
 - [x] `onlyne-cli` green with entrypoint, socket resolution, the admin verbs, the local config surface, and the `report` family: 8 unit + 40 cli + 8 report.
