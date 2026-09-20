@@ -1,27 +1,33 @@
 # Changelog
 
-## [Unreleased]
+## [1.3.0] - 2026-09-20
 
-Scope: the core stops describing a running turn as bounded. `[client.timeout]`
-carried a `running_ms` key documented as bounding one running task, and the
-server projected it into the `welcome` reply beside its two siblings. The key
-carries no behavior: no reader in `onlyne-client` or `onlyne-session` consults a
-running-task clock, and the ACP transport already states the working rule
-(`onlyne-acp` waits on the agent and lets the agent end its own turn). This round
-cuts the key from the parser, the wire, the generated schema, the shipped
-examples, and the plan. What survives is the split the code already keeps:
-`ready_ms` covers the handoff window before an agent starts work, `idle_ms`
-covers a session nobody claims, and the detection-only watches
-(`stall_report_secs`, `stale_watch_secs`, `heartbeat_grace_secs`) record a fault
-and leave the row `working`. The other half of the round gives
+Scope: the core stops describing a running turn as bounded, and a session whose
+plugin never comes back ends. `[client.timeout]` carried a `running_ms` key
+documented as bounding one running task, and the server projected it into the
+`welcome` reply beside its two siblings. The key carries no behavior: no reader
+in `onlyne-client` or `onlyne-session` consults a running-task clock, and the ACP
+transport already states the working rule (`onlyne-acp` waits on the agent and
+lets the agent end its own turn). This round cuts the key from the parser, the
+wire, the generated schema, the shipped examples, and the plan. What survives is
+the split the code already keeps: `ready_ms` covers the handoff window before an
+agent starts work, `idle_ms` covers a session nobody claims, and the
+detection-only watches (`stall_report_secs`, `stale_watch_secs`,
+`heartbeat_grace_secs`) record a fault and leave the row `working`. The second
+half gives the client a bounded promise where it had an unbounded one: a plugin
+connection that ends without a `detach` frame keeps its session for
+`[client] reconnect_grace_secs` (60 seconds) and no longer, and a session that a
+retry already answers stops accepting what its returning agent says, holding
+those lines for the merged handoff instead. The third gives
 `onlyne server generate` a per-file overwrite guard, so a workspace an operator
 customized survives a rerun.
 
-Check on this tree, run 2026-09-19: `cargo fmt --all --check` and
-`cargo check --workspace --all-targets` pass. This round leaves the test suite
-unrun on purpose: the change deletes one field from three types and rewrites one
-guard, and the compile names every site a deletion reaches. The case count moves
-with the guard cases described below; the next full gate reports the number.
+Check on this tree, run 2026-09-20: `cargo fmt --all`, `cargo check --workspace
+--all-targets`, and `cargo test --no-fail-fast -p onlyne-client -p onlyne-config
+--lib --tests` pass, the last at 208 cases with 0 failures. Every other member
+keeps the 2026-09-19 full-workspace count below. On the field root that started
+this round, a role whose `pi` process was killed outside its session now retires
+the session the client tracked for it, which is the behavior the round adds.
 
 ### Removed
 
@@ -55,6 +61,51 @@ with the guard cases described below; the next full gate reports the number.
 - server: `onlyne server init` on a root that already has a `spec.toml` prints
   the same refusal wording, which is the message §6 of `AGENTS.md` has
   documented throughout.
+- client: a plugin connection that returns for a session another connection
+  already serves is held. Concurrency decides: a mount finding its session held
+  by another transport, or its task answered from a slot of its own, never joins
+  `transports`, so it is handed no assignment, delivery, or note. The connection
+  the client waited behind is what promotes it, which keeps an agent that redials
+  over a socket the client has not yet seen die in the session it owns.
+- client: what a held connection sends is buffered instead of queued, answered
+  `{"queued": true, "held": true}`, and leaves at its task's completion as one
+  envelope per downstream role, each line marked `[retry]` or `[zombie]` so the
+  recipient reads the two accounts in one message. The held connection is then
+  sent `bye`, and a slot that lost its task to a newer session retires as
+  `CloseReason::Replaced`. The task's own account stays the single one its
+  completion pays.
+- client: four task-to-slot lookups (`attach_msg_id`, `push_assign_ack`,
+  `on_out`, `release_locked`) name the slot serving the task. Two slots on one
+  task let `HashMap` order decide which one held the message id, and that is how
+  a retry's acknowledgement could reach the session which had lost the task.
+
+### Added
+
+- config: `[client] reconnect_grace_secs`, defaulting to 60 and disabled at `0`.
+  It bounds the promise that a session keeps its slot, its projected `idle` row,
+  and its live host resource while its plugin reconnects. `onlyne-client init`
+  writes the key commented beside `backend`, and the published client schema
+  carries it with the parser's own default.
+- client: `DispatchState::retire_dropped_ghosts`, driven from the readiness tick
+  beside `reclaim_exited_resources` and `scan_stalls`. A connection ending
+  without a `detach` frame starts the clock; a mount that takes the session back
+  clears it; a session past the window with no task bound retires through the
+  existing idle path, with the reason its settled task earned and `Fault` where
+  it earned none. A session still bound to a task belongs to lifecycle, and the
+  retry that answers it ends it through the merge above. `docs/operations.md`
+  states the boundary, including the shape this window leaves alone: a ghost
+  whose retry never arrives stays with the stall and heartbeat watches.
+
+All nineteen crates move to 1.3.0. Four carry code: `onlyne-config` loses
+`Timeouts::running_ms` and gains the reconnect knob with its schema entry,
+`onlyne-proto` loses `Welcome::timeout_running_ms`, `onlyne-server` loses the
+router line that projected it and guards each generated file by content, and
+`onlyne-client` runs the grace window, the held connection, and the merged
+handoff. The other fifteen — `onlyne-frame`, `onlyne-layout`, `onlyne-store`,
+`onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-acp`, `onlyne-cli`,
+`onlyne-tui`, `onlyne-testkit`, `onlyne-gateway`, and the four gateway plugins —
+move on their internal path-dependency floors, so each manifest stays publishable
+on its own.
 
 ## [1.2.2] - 2026-09-19
 
