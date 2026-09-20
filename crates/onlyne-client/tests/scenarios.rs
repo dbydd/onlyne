@@ -3337,18 +3337,28 @@ async fn an_agent_that_reconnects_inside_the_window_keeps_its_session() {
     state.attach_outbox(Arc::new(RecordingOutbox::default()));
     let (socket, host) = serve_role_socket(&state, dir.path()).await;
 
+    // The agent's first connection dies without a detach: a raw stream drop is
+    // real EOF, where dropping an `AdapterIo` only closes one sender.
     let first_task = deliver(&state, &task_delivery("task A")).await;
-    let (io, mut assigns) = mount_plugin(&socket, Some(&first_task)).await;
-    assert_eq!(assigns.recv().await.as_deref(), Some(first_task.as_str()));
-    complete_plugin(&io, &first_task, Outcome::Done).await;
-    drop(io);
+    let mut stream = mount_raw_plugin(&socket, &first_task).await;
+    complete_raw_plugin(&mut stream, &first_task, Outcome::Done).await;
+    drop(stream);
     eventually(
         || state.session_transport(&first_task).is_none(),
         "the dropped connection binding to clear",
     )
     .await;
 
-    let (io, mut reconnected) = witnessed_plugin(&socket, &first_task).await;
+    // Inside the window nothing leaves: this is the reconnect an always-running
+    // agent lives in, and retiring here would drop the resource it returns to.
+    assert_eq!(
+        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(30), 60),
+        0,
+        "a ghost inside the reconnect grace is kept"
+    );
+
+    // The same agent comes back before the window ends, on the session it had.
+    let (io, mut reconnected) = mount_plugin(&socket, Some(&first_task)).await;
     // The returning agent cleared the clock: even a sweep that reads the clock an
     // hour ahead finds nothing to retire.
     assert_eq!(
@@ -3410,14 +3420,12 @@ async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
     let (socket, host) = serve_role_socket(&state, dir.path()).await;
 
     // Task A runs, settles, and its agent's connection ends without a detach.
+    // The drop has to be a raw stream drop: that is the only thing in this file
+    // that makes the host see EOF.
     let first_task = deliver(&state, &task_delivery("task A")).await;
-    let (io_first, mut assigns_first) = mount_plugin(&socket, Some(&first_task)).await;
-    assert_eq!(
-        assigns_first.recv().await.as_deref(),
-        Some(first_task.as_str())
-    );
-    complete_plugin(&io_first, &first_task, Outcome::Done).await;
-    drop(io_first);
+    let mut stream = mount_raw_plugin(&socket, &first_task).await;
+    complete_raw_plugin(&mut stream, &first_task, Outcome::Done).await;
+    drop(stream);
     eventually(
         || state.session_transport(&first_task).is_none(),
         "the dropped connection binding to clear",
@@ -3441,6 +3449,11 @@ async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
     assert!(
         matches!(witnessed.try_recv(), Err(_)),
         "a returning connection for a taken session is handed no assignment"
+    );
+    assert!(
+        state.session_transport(&first_task).is_none(),
+        "the returning connection attaches to nothing: the session it came back for stays \
+         served by the connection that took it"
     );
     let queued_before = store.flush_order().unwrap().len();
     let body = io_zombie
@@ -3479,8 +3492,8 @@ async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
         "nothing reaches the downstream role before the task is answered"
     );
     assert!(
-        state.session_transport(&first_task).is_some(),
-        "the session the retry serves is still served"
+        state.session_transport(&second_task).is_some(),
+        "the task the retry serves is still served"
     );
 
     outbox.clear().await;
