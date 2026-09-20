@@ -263,7 +263,7 @@ pub fn generate(args: &GenerateArgs, spec: &Spec) -> Result<GenerateReport, Gene
         created_files.push(config_path);
         for (relative, bytes) in &item.files {
             let path = item.target.join(relative);
-            if !differs_from_render(&path, bytes) {
+            if !needs_write(&path, bytes) {
                 continue;
             }
             if let Some(parent) = path.parent() {
@@ -595,11 +595,27 @@ fn replace_bytes(source: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
 /// Whether a render may not write this path. An absent file is free to create,
 /// a file whose bytes already match the render is free to leave, and a file
 /// holding other bytes is a hand edit `--force` speaks for. A path that exists
-/// and will not read counts as an edit: the write loop reports what it finds.
+/// and will not read counts as an edit: the guard refuses, and the operator sees
+/// the path named rather than a silent overwrite of bytes nobody read.
 fn differs_from_render(path: &Path, rendered: &[u8]) -> bool {
     match fs::read(path) {
         Ok(existing) => existing != rendered,
         Err(source) => source.kind() != io::ErrorKind::NotFound,
+    }
+}
+
+/// Whether one rendered file has to reach the disk.
+///
+/// A path the workspace does not hold takes its first copy here — the case the
+/// overwrite guard above answers `false` to, because a missing file is nobody's
+/// hand edit. A path it holds is rewritten only when its bytes differ from the
+/// render, which is what lets a no-op rerun leave every mtime alone. An
+/// unreadable path is written: the guard refused that path without `--force`, so
+/// reaching the writer with it means the operator asked for the overwrite.
+fn needs_write(path: &Path, rendered: &[u8]) -> bool {
+    match fs::read(path) {
+        Ok(existing) => existing != rendered,
+        Err(_) => true,
     }
 }
 
