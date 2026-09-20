@@ -70,6 +70,8 @@ spec 改完后执行 `onlyne reload` 生效。
 
 `reuse = true` 让 settled 槽即时归还容量。
 
+`reuse` 挑的是还活着的会话。`control recycle` 关掉某会话的宿主资源之后，它留下的空闲槽不再领复用任务，下一条任务起新 session。判据读存储里的资源位：`closed` 即出局，`detached` 只表示从未确认，照常可选。现场后果写在 `crates/onlyne-client/tests/scenarios.rs` 的 `a_recycled_slot_takes_no_reused_task`：任务落进这种槽时既无人来领，spawn 那条路又够不着，服务端行停在 `in_flight`，而角色看上去还有空位。
+
 `crates/onlyne-testkit/e2e/reconnect-requeue.sh` 用 `max_sessions = 2` 和三条 task 覆盖挂账再 offer 路径。
 
 满容量时 control 仍到达这一条，由 `crates/onlyne-server/tests/delivery.rs` 的 `a_control_only_pull_hands_the_command_and_leaves_the_work_queued` 在协议面钉住，并由 `crates/onlyne-testkit/e2e/herdr-live.sh` 的 d 步在活宿主上验一次：该 case 的 role 用种子值 `max_sessions = 1`，唯一槽被一条 `sleep` 占满，`control focus` 依然落到 session 的 pane。
@@ -249,6 +251,8 @@ no-op 心跳抬存活水位，不抬进展水位；`stalled` 只看后者。
 重试那条 session 结项时，缓冲与它自己的 handoff 按下游 role 合并成一条：一个 role 一条 envelope，正文每行带来源标注，`[retry]` 是结项那条 session 写的，`[zombie]` 是攒着的旧连接写的。
 
 合并投递之后，只读连接收到 `bye` 并被摘掉；它若还占着自己的 slot，该 slot 以 `Replaced` 退役。结项的账只付一次，这一步不再 settle，也不再 release。
+
+一条例外：促成这次合并的那份 report 就是从这条只读连接上收进来的，那么它在这一轮收不到 `bye`。client 先把这条 report 的应答写出去，连接的收尾交给它自己的 `detach` 帧或 socket 结束。插件对 `bye` 的处理是断开 socket 并把所有在途请求判为失败，抢在应答之前的 `bye` 会把一笔已经落账的完成读成失败，agent 因此重发终态。顺序由 `crates/onlyne-client/tests/scenarios.rs` 的 `a_read_only_completion_is_answered_before_any_bye` 钉住。
 
 faults 表的 kind 字段保存 `stale_working`、`heartbeat_missing`、`heartbeat_after_complete`、`stalled` 文本。
 

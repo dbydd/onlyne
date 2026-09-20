@@ -1,5 +1,76 @@
 # Changelog
 
+## [Unreleased]
+
+Scope: two holes in the client's session bookkeeping, both read out of one field
+report. A role on the live ring logged three `connection lost` errors for a single
+task. The ledger says that task completed, on all three reports, and the agents
+filed the terminal write again by hand each time (`applied: true`). Nothing was
+lost on the way in; the answer went out late.
+
+The ordering hole is the client writing a `bye` to a connection that is mid-request
+on itself. `adapter_socket` runs an inbound frame's handler to completion before it
+answers the frame, and `Report::Complete` drives `on_out`, whose tail runs
+`retire_revived` over the read-only connections a merged handoff has just answered.
+The connection that filed that completion is one of them, so its bye left ahead of
+its response. A plugin treats a bye as the socket dying: the pi adapter drops the
+connection and rejects every request awaiting an answer, which turns a completion
+the ledger already holds into a failure the agent reports again. The sweep now skips
+any connection inside one of its own frames (`DispatchState::hold_frame`,
+`FrameGuard`, `DispatchInner::in_frame`), and that connection is retired by its own
+`detach` frame or socket end, exactly as before.
+
+The selection hole is an idle slot that nobody will ever hand work to. `control
+recycle` closes the session's host resource and, under `reuse`, keeps the slot with
+its task binding released. `reuse` picked such a slot whenever it missed on family,
+wrote the payload onto a session with nothing behind it, and returned early, so the
+spawn path below stayed unreachable while `live_sessions` stopped counting the exited
+row: the role looked like it had room and the server row sat `in_flight`. The reuse
+filter now asks the stored resource leg, `reuse_candidate`, and a `closed` resource
+is out. `detached` means the client never confirmed the resource, and that stays a
+candidate.
+
+### Fixed
+
+- client: the answer to a plugin's own report leaves before any bye that report
+  triggers (`crates/onlyne-client/src/adapter_socket.rs`, `crates/onlyne-client/src/
+  dispatch.rs`, `retire_revived`). One task's terminal write is now reported once.
+- client: an idle slot whose resource `control recycle` closed takes no reused
+  task, and the next task spawns a session of its own (`reuse_candidate` in
+  `crates/onlyne-client/src/dispatch.rs`).
+
+### Added
+
+- client tests: `a_read_only_completion_is_answered_before_any_bye` and
+  `a_recycled_slot_takes_no_reused_task`
+  (`crates/onlyne-client/tests/scenarios.rs`). Both were run against the previous
+  tree and fail there, at the bye arriving and at the recycled slot keeping the task.
+
+### Changed
+
+- client test: `session_reuse_and_capacity_capping` moved from a dispatch-only case
+  to the role socket. It manufactured its idle slot with `on_recycled` and asserted
+  that slot takes the next task, which is the hole above stated as a contract. The
+  coverage it exists for — family preference and the `max_sessions` cap — now runs on
+  a completion report over an attached agent connection, the shape `reuse` is for.
+
+### Check on this tree
+
+Run 2026-09-20: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+-j 4 -- -D warnings`, and `cargo test --workspace --no-fail-fast -j 4 --lib --tests`
+pass, the last at 972 cases across 50 suites with 0 failures and 1 ignored
+(`herdr_live_probe`).
+
+### Documentation
+
+- `docs/operations.md`, 「会话残影与属主判定」: the bye exception and why an answer
+  must precede it.
+- `docs/operations.md`, 「并发度」: `reuse` selects a session that is still there, and
+  a recycled one is out.
+
+Wire format: unchanged. No `onlyne-proto`, `onlyne-config`, or generated schema
+file moves in this release.
+
 ## [1.3.1] - 2026-09-20
 
 Scope: one bug class in the client's accept path. The server re-offers a delivery
