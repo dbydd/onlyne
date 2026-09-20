@@ -92,6 +92,29 @@ matching, which leaves a payload on a connection that can never receive it.
 Wire format: unchanged. No `onlyne-proto`, `onlyne-config`, or generated schema
 file moves in this release.
 
+### Receipt
+
+All nineteen crates are on crates.io at 1.3.1, published 2026-09-20, none yanked,
+in the dependency order `onlyne-acp`, `onlyne-config`, `onlyne-frame`,
+`onlyne-layout`, `onlyne-proto`, `onlyne-adapter`, `onlyne-cli`, `onlyne-net`,
+`onlyne-session`, `onlyne-gateway-feishu`, `onlyne-gateway-qqbot`,
+`onlyne-gateway-telegram`, `onlyne-gateway-weixin`, `onlyne-store`,
+`onlyne-testkit`, `onlyne-client`, `onlyne-gateway`, `onlyne-server`,
+`onlyne-tui`, each through `cargo publish --locked -p onlyne-<crate>` at tag
+`v1.3.1` from a clean worktree, driven by `scripts/publish.py`. Seventeen went out
+on the first attempt, `onlyne-acp` and `onlyne-proto` on the second. Every crate
+carried cargo's packaging sandbox build; the run needed neither `--allow-dirty`
+nor `--no-verify`. The whole publish closed in 362 seconds.
+
+The local install was refreshed from the registry rather than from the tree, which
+proves the published artifacts resolve on their own: `cargo install --locked
+onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui onlyne-testkit`
+built in 231 seconds and replaced all seven executables in `~/.cargo/bin`.
+`onlyne version` answers `{"onlyne-cli":"1.3.1","protocol":1}` with
+`onlyne-server`, `onlyne-client`, and `onlyne-gateway` resolved under
+`~/.cargo/bin`. A role already running keeps the image it started with, so the
+redelivery guard lands on the next restart of each `onlyne-client`.
+
 ## [1.3.0] - 2026-09-20
 
 Scope: the core stops describing a running turn as bounded, and a session whose
