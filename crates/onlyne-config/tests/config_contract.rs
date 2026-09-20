@@ -1,10 +1,10 @@
 use onlyne_config::{
     AcpSection, ClientConfig, DEFAULT_BACKOFF_MS, DEFAULT_FAULT_HISTORY_DAYS,
     DEFAULT_HEARTBEAT_GRACE_SECS, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_SESSIONS,
-    DEFAULT_NOTE_QUEUE, DEFAULT_REQUEUE_MAX_ATTEMPTS, DEFAULT_REQUEUE_TTL_SECS, DEFAULT_RESYNC_LAG,
-    DEFAULT_STALE_GRACE_SECS, DEFAULT_STALE_WATCH_SECS, DEFAULT_STALL_REPORT_SECS,
-    DEFAULT_TEMPLATE_ROOT, Env, IntentPolicy, Spec, SpecDiff, Timeouts, canonical_bytes,
-    config_client_schema, redact, spec_hash,
+    DEFAULT_NOTE_QUEUE, DEFAULT_RECONNECT_GRACE_SECS, DEFAULT_REQUEUE_MAX_ATTEMPTS,
+    DEFAULT_REQUEUE_TTL_SECS, DEFAULT_RESYNC_LAG, DEFAULT_STALE_GRACE_SECS,
+    DEFAULT_STALE_WATCH_SECS, DEFAULT_STALL_REPORT_SECS, DEFAULT_TEMPLATE_ROOT, Env, IntentPolicy,
+    Spec, SpecDiff, Timeouts, canonical_bytes, config_client_schema, redact, spec_hash,
 };
 use std::fs;
 
@@ -831,6 +831,19 @@ fn the_published_client_schema_carries_stall_report_secs() {
     assert_eq!(schema["properties"]["stall_report_secs"]["default"], 1800);
     assert_eq!(
         schema["properties"]["stall_report_secs"]["format"],
+        "uint64"
+    );
+}
+
+#[test]
+fn the_published_client_schema_carries_reconnect_grace_secs() {
+    let schema: serde_json::Value = serde_json::from_str(config_client_schema()).unwrap();
+    assert_eq!(
+        schema["properties"]["reconnect_grace_secs"]["default"], DEFAULT_RECONNECT_GRACE_SECS,
+        "the published schema must state the parser's own default"
+    );
+    assert_eq!(
+        schema["properties"]["reconnect_grace_secs"]["format"],
         "uint64"
     );
 }

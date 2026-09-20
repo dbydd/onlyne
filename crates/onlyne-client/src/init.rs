@@ -41,6 +41,19 @@ pub struct InitArgs {
     pub prose: String,
 }
 
+/// the reconnect window `init` seeds (as a comment) among the top-level keys of
+/// a fresh workspace config, above the `[server]` header beside `backend`. The
+/// key and its default are the ones `onlyne-config`'s `ClientConfig` declares,
+/// and the sweep that reads it runs inside `onlyne client run`.
+const RECONNECT_COMMENTS: &str = "\
+# Seconds a dropped plugin connection may stay away before this client retires
+# the session it left behind that holds no task. An agent that reconnects inside
+# the window keeps its session; a connection that returns after a newer session
+# took the task is held read-only, and what it sends rides that session's
+# closing handoff. 0 disables the sweep.
+# reconnect_grace_secs = 60
+";
+
 /// The role identity, loaded from `role.key` or generated there.
 ///
 /// The file holds the 32-byte ed25519 seed; the spec fragment publishes the
@@ -76,7 +89,7 @@ pub async fn init(args: InitArgs) -> Result<String> {
         .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or(0)))
         .unwrap_or((listen, 0));
     let config = format!(
-        "role = {role:?}\ncert_pin = {pin:?}\nkey_path = {key_path:?}\nplugins = []\n\n{BACKEND_COMMENTS}\n[server]\nhost = {host:?}\nport = {port}\n\n{ACP_COMMENTS}",
+        "role = {role:?}\ncert_pin = {pin:?}\nkey_path = {key_path:?}\nplugins = []\n\n{BACKEND_COMMENTS}\n{RECONNECT_COMMENTS}\n[server]\nhost = {host:?}\nport = {port}\n\n{ACP_COMMENTS}",
         role = args.role,
         pin = cert_pin,
         key_path = workspace.key_path().display().to_string(),

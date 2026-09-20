@@ -344,10 +344,12 @@ impl AdapterSocket {
                     }
                 }
                 AdapterMsg::Plugin(PluginOp::Send(envelope)) => {
-                    let result = self
-                        .dispatch
-                        .enqueue_outbound(&envelope)
-                        .map(|op_id| serde_json::json!({"queued": true, "op_id": op_id}));
+                    // A live connection's frame lands in the durable outbound
+                    // queue. A frame from a connection held read-only because its
+                    // session was taken by a newer one is held for that task's
+                    // completion, which is what routes it beside the newer
+                    // session's own handoff.
+                    let result = self.dispatch.plugin_send(&io, &envelope);
                     if frame.id.is_some() {
                         io.respond(id, result_to_body(result))
                             .await

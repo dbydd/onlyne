@@ -171,12 +171,13 @@ client 死亡期间无人代该 role 判定 session 生命周期。
 
 旧 `working` 账由重启后的同 role client 开机自检收敛。
 
-残影判定与冻结上报有四个旋钮：
+残影判定与冻结上报有五个旋钮：
 
 | 配置文件 | 字段 | 默认 | 作用 |
 |---|---|---|---|
 | `<workspace>/.onlyne/config.toml` | `stale_grace_secs` | 300 | client 开机自检宽限，单位秒 |
 | `<workspace>/.onlyne/config.toml` | `stall_report_secs` | 1800 | 会话投影 tuple 冻结时长上限，client 据此上报 `stalled` fault，0 关闭，单位秒 |
+| `<workspace>/.onlyne/config.toml` | `reconnect_grace_secs` | 60 | plugin 连接断开后允许其离席的时长，超期由 client 退役它留下的无 task 槽位，0 关闭，单位秒 |
 | `<server-root>/.onlyne/spec.toml` 的 `[server]` | `stale_watch_secs` | 60 | server 观察器扫描周期，单位秒；0 关闭观察器 |
 | `<server-root>/.onlyne/spec.toml` 的 `[server]` | `heartbeat_grace_secs` | 90 | 属主在线时 `working` 行允许的心跳静默时长，单位秒 |
 
@@ -225,6 +226,25 @@ no-op 心跳抬存活水位，不抬进展水位；`stalled` 只看后者。
 同一冻结 episode 只报一次，下一次 `Applied` 解除去重。`stall_report_secs = 0` 关闭这条判定。
 
 行不翻面：`stalled` 只落 faults 表并推事件，恢复决策留给 supervisor 与 repair 族。
+
+连接断开宽限走另一个旋钮。plugin 连接在没有 `detach` 帧的情况下结束时，client 保留它的 session 与宿主资源，`reconnect_grace_secs` 从这一刻起计。
+
+窗内重连清掉这个时钟：agent 回到它原来那个 session，照常领下一个任务。
+
+超过窗口仍未回来，且该 slot 已不绑 task 时，client 退役它：关掉宿主资源，吐出容量槽位，reason 取该 task 已落的终态，无终态可取时记 `Fault`。`reconnect_grace_secs = 0` 关闭这条判定。
+
+退役面只此一类。仍绑着 task 的 ghost 不在这条路上，「重试 session 永不到来」也不另设计时器或缓冲超时：那条 task 的静默由 `stalled` 与服务端心跳两个面兜底，这是这轮运维定的边界。
+
+一个更新的 session 已经在服务同一 task 时，旧 id 的连接回来即降级为只读：它不再收到 `assign`、`deliver`、`render_send`，也不占该 session 的投递面。
+
+只读连接本身仍被接纳，它送出的 `send` 帧不入 durable 队列、不发往服务端，而是攒进该 task 的缓冲，等一次合并。
+
+降级只在那条更新的连接在线期间成立：它结束时，为该 session 攒着的第一个连接即被提升为其 transport，只读标记同时解除，所以插件抢在 client 察觉旧 socket 已死之前重挂不会被永久静音。
+
+
+重试那条 session 结项时，缓冲与它自己的 handoff 按下游 role 合并成一条：一个 role 一条 envelope，正文每行带来源标注，`[retry]` 是结项那条 session 写的，`[zombie]` 是攒着的旧连接写的。
+
+合并投递之后，只读连接收到 `bye` 并被摘掉；它若还占着自己的 slot，该 slot 以 `Replaced` 退役。结项的账只付一次，这一步不再 settle，也不再 release。
 
 faults 表的 kind 字段保存 `stale_working`、`heartbeat_missing`、`heartbeat_after_complete`、`stalled` 文本。
 

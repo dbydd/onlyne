@@ -19,6 +19,7 @@ use onlyne_session::{
 };
 use onlyne_store::ClientStore;
 use parking_lot::Mutex;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -71,6 +72,17 @@ struct DispatchInner {
     pub parked: Option<(AdapterIo, Vec<Capability>)>,
     /// Zero-activity clock for running tasks. Applied persists refresh it.
     pub stall: crate::stall::StallWatch,
+    /// A plugin connection that mounted a session a live connection already
+    /// serves: the agent that dropped came back after a newer session took the
+    /// task. It is served nothing, and what it sends is held rather than sent,
+    /// keyed by the name it mounted with. The capabilities that mount came with
+    /// are kept beside it, because a session whose live connection goes away
+    /// hands itself to the first connection that was holding for it.
+    pub revived: Vec<(String, AdapterIo, Vec<Capability>)>,
+    /// What those held connections sent, keyed by the task whose completion
+    /// carries it. `on_out` drains the key before it routes, so the recipient
+    /// reads one relay per downstream role.
+    pub held_handoffs: HashMap<String, Vec<Handoff>>,
 }
 
 #[derive(Clone)]
@@ -90,6 +102,16 @@ pub struct SessionSlot {
     /// envelope that arrived with it. A handoff the session reports afterwards
     /// is one hop below this, which is what `onlyne handoff` computes too.
     pub hop: u32,
+    /// When the connection serving this session last ended without a `detach`
+    /// frame, and `None` while a connection is attached or one never left. The
+    /// reconnect grace of `[client] reconnect_grace_secs` reads it: an agent
+    /// that comes back inside the window clears it and keeps its session.
+    pub dropped_at: Option<Instant>,
+    /// Whether this session's task has been taken by a newer session, leaving
+    /// this slot served only by a connection that came back for it. A read-only
+    /// slot is handed no assignment and no note, and what its agent sends is
+    /// held for the completion that merges it.
+    pub read_only: bool,
 }
 
 /// Write one ack into the durable intent queue.
@@ -110,6 +132,33 @@ fn store_ack(inner: &DispatchInner, mut ack: AckArgs) {
     }
 }
 
+/// Queue one envelope into the durable intent table while the dispatch lock is
+/// already held. The `op_id` rule and the validation are `enqueue_outbound`'s.
+fn queue_outbound_locked(inner: &mut DispatchInner, envelope: &Envelope) -> Result<String> {
+    let mut stamped = envelope.clone();
+    let op_id = stamp_op_id(&mut stamped);
+    stamped
+        .validate()
+        .map_err(|error| anyhow!(error.to_string()))?;
+    inner
+        .store
+        .enqueue_intent(&op_id, &serde_json::to_value(&stamped)?)?;
+    Ok(op_id)
+}
+
+/// The name one held frame is addressed to.
+///
+/// A role recipient keeps its own name, which is the role the merged relay is
+/// addressed to. Any other recipient keeps the spelling the operator reads in a
+/// session listing, and the merged relay addressed to it is refused and recorded
+/// rather than quietly dropped: a read-only session cannot answer a conversation
+/// it no longer serves.
+fn held_recipient(to: &Principal) -> String {
+    to.role_name()
+        .map(str::to_string)
+        .unwrap_or_else(|| to.to_string())
+}
+
 /// Whether one session slot is the session an adapter mount named.
 ///
 /// The mount carries the id the client spawned the plugin with
@@ -126,6 +175,192 @@ fn has_attached_transport(inner: &DispatchInner, key: &str, slot: &SessionSlot) 
         .transports
         .keys()
         .any(|session_id| names_session(key, slot, session_id))
+}
+
+/// The task one slot answers for: its current binding, or the task its session
+/// was spawned for while no task is bound.
+fn slot_task(slot: &SessionSlot) -> String {
+    slot.task_id
+        .clone()
+        .unwrap_or_else(|| slot.session.task_id.clone())
+}
+
+/// The slot one adapter mount names, answered as its key.
+fn slot_key_named(inner: &DispatchInner, session_id: &str) -> Option<String> {
+    inner
+        .sessions
+        .iter()
+        .find(|(key, slot)| names_session(key, slot, session_id))
+        .map(|(key, _)| key.clone())
+}
+
+/// The slot serving one task, preferring the one that still holds delivery
+/// rights.
+///
+/// Two slots answer to one task only when a session came back for a task a newer
+/// session already took, and `HashMap` order decides which one a search reaches
+/// first. Every handle that belongs to the task — its delivery `msg_id` above
+/// all — has to land on the session that is actually serving it, or the ack the
+/// retry earns would be written into a slot that can never answer and the server
+/// row would sit in flight.
+fn slot_key_serving_task(inner: &DispatchInner, task_id: &str) -> Option<String> {
+    let mut bound = None;
+    for (key, slot) in inner.sessions.iter() {
+        if slot.task_id.as_deref() != Some(task_id) {
+            continue;
+        }
+        if !slot.read_only {
+            return Some(key.clone());
+        }
+        if bound.is_none() {
+            bound = Some(key.clone());
+        }
+    }
+    bound
+}
+
+/// Whether a connection other than `io` is the one serving one slot.
+fn attached_to_other(inner: &DispatchInner, key: &str, slot: &SessionSlot, io: &AdapterIo) -> bool {
+    inner.transports.iter().any(|(session_id, (live, _))| {
+        !live.same_connection(io) && names_session(key, slot, session_id)
+    })
+}
+
+/// Whether one connection is held read-only: it mounted a session this client
+/// already serves through a different live connection.
+fn is_revived_connection(inner: &DispatchInner, io: &AdapterIo) -> bool {
+    inner
+        .revived
+        .iter()
+        .any(|(_, revived, _)| revived.same_connection(io))
+}
+
+/// Record a returning connection as read-only, once per connection.
+fn record_revived_connection(
+    inner: &mut DispatchInner,
+    session_id: &str,
+    io: AdapterIo,
+    capabilities: Vec<Capability>,
+) {
+    if !is_revived_connection(inner, &io) {
+        inner
+            .revived
+            .push((session_id.to_string(), io, capabilities));
+    }
+}
+
+/// Give one session back to the oldest connection that was held read-only for it.
+///
+/// A held connection is read-only only while another connection serves its
+/// session, so the moment that connection goes is the moment the held one becomes
+/// the session's only transport. Without this, a plugin that redials while the
+/// client still holds the dead socket behind it is silenced for the rest of the
+/// session: the assignment it came for is written to a connection nobody reads,
+/// and nothing promotes it later. The demotion lifts with the promotion, so the
+/// reconnected agent keeps both its session and its delivery rights.
+fn promote_held_connection(inner: &mut DispatchInner, key: &str) {
+    let attached = inner
+        .sessions
+        .get(key)
+        .is_some_and(|slot| has_attached_transport(inner, key, slot));
+    if attached {
+        return;
+    }
+    let held = inner.revived.iter().position(|(name, _, _)| {
+        slot_key_named(inner, name).is_some_and(|held_key| held_key == key)
+    });
+    let Some(index) = held else { return };
+    let (name, io, capabilities) = inner.revived.remove(index);
+    if let Some(slot) = inner.sessions.get_mut(key) {
+        slot.read_only = false;
+    }
+    tracing::info!(
+        session = %name,
+        "a held connection takes the session its predecessor left"
+    );
+    attach_transport_locked(inner, &name, io, capabilities);
+}
+
+/// Settle what one mounting connection means for the session it names.
+///
+/// A mount that finds nothing serving its session takes it and clears the clock
+/// [`DispatchState::release_connection`] started: that is the agent that came
+/// back inside the reconnect grace, and the always-running agent serving task
+/// after task lives in this path. A mount that finds the session already served
+/// takes nothing — either another connection holds that very slot, or the task it
+/// names now answers from a slot of its own, which is the case where a newer
+/// session was spawned to retry the work while the old agent's process came back.
+/// Such a connection is recorded read-only, and the slot it names is demoted too
+/// when it owns a slot of its own.
+///
+/// Every binding path runs this one judgement, including the ready report, which
+/// reaches an agent without writing a transport. Concurrency is what decides, not
+/// the drop clock: the retry that claims an unclaimed session is served, and the
+/// connection that returns to a session already served is held, whichever of the
+/// two mounted first. [`DispatchState::release_connection`] promotes a held
+/// connection when the live one it waited behind goes away, so a plugin that
+/// redials over a socket the client has not yet seen die still gets its session.
+fn note_binding_locked(inner: &mut DispatchInner, session_id: &str, io: &AdapterIo) -> bool {
+    if is_revived_connection(inner, io) {
+        return false;
+    }
+    let Some(key) = slot_key_named(inner, session_id) else {
+        return true;
+    };
+    let Some(slot) = inner.sessions.get(&key) else {
+        return true;
+    };
+    let task = slot_task(slot);
+    let taken = attached_to_other(inner, &key, slot, io);
+    let moved_on = !taken
+        && inner.sessions.iter().any(|(other, other_slot)| {
+            *other != key
+                && slot_task(other_slot) == task
+                && attached_to_other(inner, other, other_slot, io)
+        });
+    let revived = taken || moved_on;
+    if let Some(slot) = inner.sessions.get_mut(&key) {
+        if revived {
+            // Only the spelling where this name's own slot is still served by
+            // the newer connection leaves a slot of its own to silence; when it
+            // is, the slot belongs to that live connection and keeps its rights.
+            slot.read_only = moved_on;
+        } else {
+            slot.dropped_at = None;
+            slot.read_only = false;
+        }
+    }
+    if revived {
+        tracing::warn!(
+            session = %session_id,
+            task = %task,
+            "a plugin mounted a session this client already serves; it is held read-only"
+        );
+        return false;
+    }
+    true
+}
+
+/// Attach one plugin connection to the session it names, or hold it read-only.
+///
+/// This is the only place a mount becomes a transport, so the read-only
+/// connection of §1 (b) never lands in `transports` and never steals the
+/// assignment, delivery, or note addressed to the connection that serves the
+/// session now. Answers whether the connection took the session.
+fn attach_transport_locked(
+    inner: &mut DispatchInner,
+    session_id: &str,
+    io: AdapterIo,
+    capabilities: Vec<Capability>,
+) -> bool {
+    if !note_binding_locked(inner, session_id, &io) {
+        record_revived_connection(inner, session_id, io, capabilities);
+        return false;
+    }
+    inner
+        .transports
+        .insert(session_id.to_string(), (io, capabilities));
+    true
 }
 
 impl DispatchState {
@@ -159,6 +394,8 @@ impl DispatchState {
                 transports: HashMap::new(),
                 parked: None,
                 stall: crate::stall::StallWatch::new(),
+                revived: Vec::new(),
+                held_handoffs: HashMap::new(),
             })),
         }
     }
@@ -191,20 +428,19 @@ impl DispatchState {
     /// session is remembered here and takes the payload the moment it is
     /// staged, and a plugin that mounts after finds its session waiting.
     pub fn bind_adapter(&self, session_id: &str, io: AdapterIo, capabilities: Vec<Capability>) {
-        self.inner
-            .lock()
-            .transports
-            .insert(session_id.to_string(), (io, capabilities));
+        attach_transport_locked(&mut self.inner.lock(), session_id, io, capabilities);
     }
 
     /// Remember the delivery handle for one task.
+    ///
+    /// The handle goes to the session serving the task, not to a read-only slot
+    /// that came back for it, so the ack this earns answers the live delivery.
     pub fn attach_msg_id(&self, task_id: &str, msg_id: &str) {
         let mut inner = self.inner.lock();
-        if let Some(slot) = inner
-            .sessions
-            .values_mut()
-            .find(|slot| slot.task_id.as_deref() == Some(task_id))
-        {
+        let Some(key) = slot_key_serving_task(&inner, task_id) else {
+            return;
+        };
+        if let Some(slot) = inner.sessions.get_mut(&key) {
             slot.msg_id = Some(msg_id.to_string());
         }
     }
@@ -219,10 +455,8 @@ impl DispatchState {
             return false;
         }
         let mut inner = self.inner.lock();
-        let msg_id = inner
-            .sessions
-            .values_mut()
-            .find(|slot| slot.task_id.as_deref() == Some(ack.task_id.as_str()))
+        let msg_id = slot_key_serving_task(&inner, &ack.task_id)
+            .and_then(|key| inner.sessions.get_mut(&key))
             .and_then(|slot| slot.msg_id.take());
         let Some(msg_id) = msg_id else {
             return false;
@@ -366,16 +600,43 @@ impl DispatchState {
     /// whole stamped envelope. A non-note keeps the id it brought, so a
     /// re-delivered task still dedups on its original one.
     pub fn enqueue_outbound(&self, envelope: &Envelope) -> Result<String> {
-        let mut stamped = envelope.clone();
-        let op_id = stamp_op_id(&mut stamped);
-        stamped
-            .validate()
-            .map_err(|error| anyhow!(error.to_string()))?;
-        self.inner
-            .lock()
-            .store
-            .enqueue_intent(&op_id, &serde_json::to_value(&stamped)?)?;
-        Ok(op_id)
+        queue_outbound_locked(&mut self.inner.lock(), envelope)
+    }
+
+    /// Take one plugin `send` frame and answer what the plugin is told.
+    ///
+    /// A live connection's envelope goes to the durable outbound queue exactly as
+    /// it always has, and the answer keeps the shape the plugin reads. A frame
+    /// from a connection this client holds read-only is held instead (§1 (c)): it
+    /// leaves as part of the merged handoff its task's completion routes, so the
+    /// recipient sees one message per downstream role and can tell which session
+    /// wrote which half of it.
+    pub fn plugin_send(&self, io: &AdapterIo, envelope: &Envelope) -> Result<serde_json::Value> {
+        let mut inner = self.inner.lock();
+        let Some(session_id) = inner
+            .revived
+            .iter()
+            .find(|(_, revived, _)| revived.same_connection(io))
+            .map(|(session_id, _, _)| session_id.clone())
+        else {
+            let op_id = queue_outbound_locked(&mut inner, envelope)?;
+            return Ok(serde_json::json!({"queued": true, "op_id": op_id}));
+        };
+        let task = slot_key_named(&inner, &session_id)
+            .and_then(|key| inner.sessions.get(&key))
+            .map(slot_task)
+            .unwrap_or(session_id);
+        let held = Handoff {
+            to_role: held_recipient(&envelope.to),
+            text: Some(envelope.body.text.clone().unwrap_or_default()),
+        };
+        tracing::warn!(
+            task = %task,
+            to = %held.to_role,
+            "a read-only session's send is held for that task's completion"
+        );
+        inner.held_handoffs.entry(task).or_default().push(held);
+        Ok(serde_json::json!({"queued": true, "held": true}))
     }
 
     /// The flag the runloop and the dispatcher share.
@@ -439,9 +700,11 @@ impl DispatchState {
     fn claim_parked_transport(&self, session_id: &str) -> Option<(AdapterIo, Vec<Capability>)> {
         let mut inner = self.inner.lock();
         let (io, capabilities) = inner.parked.take()?;
-        inner
-            .transports
-            .insert(session_id.to_string(), (io.clone(), capabilities.clone()));
+        if !attach_transport_locked(&mut inner, session_id, io.clone(), capabilities.clone()) {
+            // The waiting agent is an older connection returning for a session
+            // the role already serves: it holds the socket and takes nothing.
+            return None;
+        }
         Some((io, capabilities))
     }
 
@@ -518,9 +781,11 @@ impl DispatchState {
     /// A graceful detach retires each idle session because the agent that could
     /// reuse its resource has left. An attached transport preserves the idle
     /// resource because reuse remains possible. A connection ending through
-    /// another path preserves the slot and resource for an agent reconnection.
-    /// Every released binding retires its task progress clock. A slot carrying
-    /// work remains under lifecycle ownership.
+    /// another path preserves the slot and resource for an agent reconnection and
+    /// starts the reconnect clock on it, which is what bounds how long a session
+    /// waits for an agent that is never coming back. Every released binding
+    /// retires its task progress clock. A slot carrying work remains under
+    /// lifecycle ownership.
     pub fn release_connection(
         &self,
         session_id: Option<&str>,
@@ -528,6 +793,15 @@ impl DispatchState {
         graceful_detach: bool,
     ) {
         let mut inner = self.inner.lock();
+        // A read-only connection ending is not the session losing its agent: the
+        // live connection still serves it, and its drop clock stays untouched.
+        let revived_connection = {
+            let before = inner.revived.len();
+            inner
+                .revived
+                .retain(|(_, revived, _)| !revived.same_connection(io));
+            before != inner.revived.len()
+        };
         if inner
             .parked
             .as_ref()
@@ -564,6 +838,30 @@ impl DispatchState {
         }
         for session in &released {
             inner.transports.remove(session);
+        }
+        if !graceful_detach && !revived_connection {
+            // The agent left without saying so. Its session keeps its slot and
+            // its resource, and the reconnect grace of `[client]
+            // reconnect_grace_secs` starts counting from here.
+            let now = Instant::now();
+            for session in &released {
+                if let Some((_, slot)) = inner
+                    .sessions
+                    .iter_mut()
+                    .find(|(key, slot)| names_session(key, slot, session))
+                {
+                    slot.dropped_at = Some(now);
+                }
+            }
+        }
+        for session in &released {
+            // Nothing serves this name any more, so the first connection that
+            // mounted it read-only behind the one that just went becomes its
+            // transport; a session with no such connection keeps waiting out the
+            // reconnect grace, which is the sweep's to answer.
+            if let Some(key) = slot_key_named(&inner, session) {
+                promote_held_connection(&mut inner, &key);
+            }
         }
         if graceful_detach {
             let idle: Vec<String> = released
@@ -612,6 +910,52 @@ impl DispatchState {
         for (key, reason) in candidates {
             retire_idle_locked(&mut inner, &key, reason);
         }
+    }
+
+    /// Retire the idle sessions whose plugin connection dropped and never came
+    /// back, and answer how many left.
+    ///
+    /// A connection that ends without a `detach` frame leaves its session tracked
+    /// so an agent that restarts inside `[client] reconnect_grace_secs` finds the
+    /// resource it was using. That promise has to expire: a process that is
+    /// simply gone would otherwise hold a slot, a projected `idle` row, and a live
+    /// host resource forever, and on a role with `max_sessions = 1` it stops every
+    /// later delivery. Only a session with no task bound is this sweep's to take —
+    /// a session still bound to a task is under lifecycle ownership, and the retry
+    /// that answers it ends that session through the merge in `on_out`. A session
+    /// whose agent never returns while its task stays in flight is left to the
+    /// stall and heartbeat surfaces, which is the boundary the operator set for
+    /// this window.
+    pub fn retire_dropped_ghosts(&self, now: Instant, grace_secs: u64) -> usize {
+        if grace_secs == 0 {
+            return 0;
+        }
+        let window = Duration::from_secs(grace_secs);
+        let mut inner = self.inner.lock();
+        let due: Vec<String> = inner
+            .sessions
+            .iter()
+            .filter(|(_, slot)| slot.task_id.is_none())
+            .filter(|(_, slot)| {
+                slot.dropped_at.is_some_and(|dropped| {
+                    now.checked_duration_since(dropped)
+                        .is_some_and(|away| away >= window)
+                })
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut retired = 0;
+        for key in due {
+            let reason = inner
+                .sessions
+                .get(&key)
+                .and_then(|slot| stored_close_reason(&inner, &slot.session.task_id))
+                .unwrap_or(onlyne_session::CloseReason::Fault);
+            if retire_idle_locked(&mut inner, &key, reason) {
+                retired += 1;
+            }
+        }
+        retired
     }
 
     /// Bind a plugin transport to one staged session and hand it the payload.
@@ -758,7 +1102,7 @@ impl DispatchState {
         inner
             .sessions
             .iter()
-            .find(|(_, slot)| slot.ready && slot.task_id.is_some())
+            .find(|(_, slot)| slot.ready && slot.task_id.is_some() && !slot.read_only)
             .map(|(key, slot)| {
                 (
                     slot.task_id.clone().unwrap_or_else(|| key.clone()),
@@ -954,10 +1298,12 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
         .to_string();
     let family = family_of(envelope);
     let mut inner = state.inner.lock();
-    if let Some(session) = inner
-        .sessions
-        .values_mut()
-        .find(|slot| slot.task_id.as_deref() == Some(task_id.as_str()))
+    // A task this role already serves rides its own slot, and the slot that
+    // still holds delivery rights is the one that serves it: staging the payload
+    // on a read-only revival would hand the work to an agent that may answer for
+    // it but may be handed nothing.
+    if let Some(session) = slot_key_serving_task(&inner, &task_id)
+        .and_then(|key| inner.sessions.get_mut(&key))
         .map(|slot| {
             if slot.payload.is_none() {
                 slot.payload = Some(envelope.clone());
@@ -972,17 +1318,18 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
     if inner.reuse {
         // An idle session with no bound task takes the next task, preferring
         // one from the same family; §5's `reuse` is what makes a second task
-        // share a session instead of waiting for a new slot.
+        // share a session instead of waiting for a new slot. A read-only slot
+        // answers for a task another session serves, so it takes no new one.
         let same_family = inner
             .sessions
             .iter()
-            .find(|(_, slot)| slot.task_id.is_none() && slot.family == family)
+            .find(|(_, slot)| slot.task_id.is_none() && !slot.read_only && slot.family == family)
             .map(|(key, _)| key.clone());
         let idle = same_family.or_else(|| {
             inner
                 .sessions
                 .iter()
-                .find(|(_, slot)| slot.task_id.is_none())
+                .find(|(_, slot)| slot.task_id.is_none() && !slot.read_only)
                 .map(|(key, _)| key.clone())
         });
         let reused = idle
@@ -1048,6 +1395,8 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
             msg_id: None,
             origin: Some(envelope.from.clone()),
             hop: hop_of(envelope),
+            dropped_at: None,
+            read_only: false,
         },
     );
     inner.stall.note_assigned(&task_id, Instant::now());
@@ -1079,6 +1428,24 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
     let (payload, target, session, backend, version) = {
         let mut inner = state.inner.lock();
         let backend = Arc::clone(&inner.backend);
+        // A ready report binds its connection to the session as much as a mount
+        // does, so it runs the same judgement §1 (b) hangs on: a connection that
+        // returns to a session a newer connection already serves takes nothing,
+        // leaves nothing marked ready, and is held for that task's completion.
+        if let Some(connection) = io.as_ref() {
+            if is_revived_connection(&inner, connection) {
+                return Ok(());
+            }
+            if !note_binding_locked(&mut inner, &session_id, connection) {
+                record_revived_connection(
+                    &mut inner,
+                    &session_id,
+                    connection.clone(),
+                    capabilities.clone(),
+                );
+                return Ok(());
+            }
+        }
         let slot = inner
             .sessions
             .values_mut()
@@ -1092,6 +1459,9 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
                         == Some(session_id.as_str())
             })
             .ok_or_else(|| anyhow!("unknown session for {task_id}"))?;
+        if slot.read_only {
+            return Ok(());
+        }
         // The hand-off runs once per session: a plugin that reports ready
         // after the assignment already left finds the payload gone.
         let Some(payload) = slot.payload.take() else {
@@ -1165,7 +1535,7 @@ pub async fn on_out(
     head_kind: Option<&str>,
     handoffs: &[Handoff],
 ) -> Result<()> {
-    let (verdict, receipt, role, hop) = {
+    let (verdict, receipt, role, hop, held) = {
         let mut inner = state.inner.lock();
         let verdict = settle(
             &inner.bridge,
@@ -1180,10 +1550,10 @@ pub async fn on_out(
         inner
             .store
             .put_out_head(task_id, head.as_deref().unwrap_or(""))?;
-        let slot = inner
-            .sessions
-            .values_mut()
-            .find(|slot| slot.task_id.as_deref() == Some(task_id));
+        // The handle and the chain this answer travels on belong to the session
+        // serving the task, not to a read-only one that came back for it.
+        let slot =
+            slot_key_serving_task(&inner, task_id).and_then(|key| inner.sessions.get_mut(&key));
         let origin = slot.as_ref().and_then(|slot| slot.origin.clone());
         let hop = slot.as_ref().map(|slot| slot.hop).unwrap_or(0);
         let msg_id = slot.and_then(|slot| slot.msg_id.take());
@@ -1201,18 +1571,28 @@ pub async fn on_out(
         // A settled session gives its capacity back, so a role at
         // `max_sessions` takes the next row instead of holding finished slots.
         release_locked(&mut inner, task_id, None)?;
+        // Whatever a read-only connection held for this task is answered by this
+        // completion, so it leaves the buffer here and travels beside the report.
+        let held = inner.held_handoffs.remove(task_id);
 
         (
             verdict,
             completion_envelope(&inner.role, origin, task_id, head.as_deref()),
             inner.role.clone(),
             hop,
+            held,
         )
     };
     note_verdict(&verdict, task_id);
     // Every relay is answered before the verdict travels, and none of them
     // moves it: a refused handoff is a record on the settled task, not a
-    // different outcome for it.
+    // different outcome for it. The merge happens on the way in, so a downstream
+    // role reads one envelope for this task, not two.
+    let routed = merged_handoffs(
+        handoffs,
+        held.as_deref(),
+        head.as_deref().unwrap_or_default(),
+    );
     let denied = handoff::route(
         state,
         &role,
@@ -1220,10 +1600,14 @@ pub async fn on_out(
         hop,
         head_kind,
         head.as_deref().unwrap_or_default(),
-        handoffs,
+        &routed,
     )
     .await;
     record_denials(state, task_id, &denied)?;
+    // The merged relay has left, so the read-only session that wrote its half of
+    // it is retired. The settled account above is the whole settlement: nothing
+    // here settles or releases this task a second time.
+    retire_revived(state, task_id).await;
     // The terminal receipt leaves as its own envelope, so the origin — a role
     // or a gateway conversation — learns the outcome (plan §3 `Completion`).
     // It rides the intent queue, which is what makes a completion survive the
@@ -1232,6 +1616,132 @@ pub async fn on_out(
         transport_envelope(state, &envelope).await?;
     }
     sync_session(state, task_id).await
+}
+
+/// One relay per downstream role, carrying this completion's own lines and the
+/// ones a read-only connection held for the same task.
+///
+/// Each line keeps the marker of the session that wrote it — `[retry]` for the
+/// session that finished and `[zombie]` for the one that came back for the task
+/// and was held — so the recipient can tell the two accounts apart inside the one
+/// envelope. Line order follows the report's own order, with the held lines of the
+/// same role below them. Nothing held is the ordinary case, and it routes the
+/// report's lines without copying them.
+fn merged_handoffs<'a>(
+    own: &'a [Handoff],
+    held: Option<&'a [Handoff]>,
+    head: &str,
+) -> Cow<'a, [Handoff]> {
+    let held: &[Handoff] = match held {
+        Some(held) if !held.is_empty() => held,
+        _ => return Cow::Borrowed(own),
+    };
+    let mut order: Vec<String> = Vec::new();
+    let mut segments: HashMap<String, Vec<String>> = HashMap::new();
+    for (marker, group) in [("[retry]", own), ("[zombie]", held)] {
+        for handoff in group {
+            let line = format!("{marker} {}", handoff.text_or(head));
+            if !segments.contains_key(handoff.to_role.as_str()) {
+                order.push(handoff.to_role.clone());
+            }
+            segments
+                .entry(handoff.to_role.clone())
+                .or_default()
+                .push(line);
+        }
+    }
+    Cow::Owned(
+        order
+            .into_iter()
+            .map(|to_role| Handoff {
+                text: Some(
+                    segments
+                        .remove(to_role.as_str())
+                        .unwrap_or_default()
+                        .join("\n"),
+                ),
+                to_role,
+            })
+            .collect(),
+    )
+}
+
+/// Retire the read-only connections and slots a merged handoff has just answered.
+///
+/// A connection that came back for a session another connection serves is
+/// dropped from that session's record and its agent is told to leave, since what
+/// it had to say travelled with the relay above. A slot that lost its task to a
+/// newer session has the transport naming it dropped, its task binding released,
+/// and is retired as `Replaced`: the resource its agent was holding is this
+/// client's to close, and the newer session answers for the task. Neither
+/// `settle` nor `release_locked` runs here — the completion that merged the
+/// handoff already paid the task's account.
+async fn retire_revived(state: &DispatchState, task_id: &str) {
+    let leaving = {
+        let mut inner = state.inner.lock();
+        let mut leaving: Vec<AdapterIo> = Vec::new();
+        let mut silent: Vec<String> = Vec::new();
+        for (session_id, io, _) in inner.revived.iter() {
+            let reaches = slot_key_named(&inner, session_id)
+                .and_then(|key| {
+                    inner
+                        .sessions
+                        .get(&key)
+                        .map(|slot| slot_task(slot) == task_id)
+                })
+                .unwrap_or_else(|| session_id == task_id);
+            if reaches {
+                leaving.push(io.clone());
+                silent.push(session_id.clone());
+            }
+        }
+        inner
+            .revived
+            .retain(|(session_id, _, _)| !silent.contains(session_id));
+        let silenced: Vec<String> = inner
+            .sessions
+            .iter()
+            .filter(|(_, slot)| slot.read_only && slot_task(slot) == task_id)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in silenced {
+            let Some(slot) = inner.sessions.get(&key).cloned() else {
+                continue;
+            };
+            if slot.payload.is_some() {
+                tracing::warn!(
+                    session = %key,
+                    task = %task_id,
+                    "a read-only session retires with a payload it was never handed"
+                );
+            }
+            let served: Vec<String> = inner
+                .transports
+                .keys()
+                .filter(|served| names_session(&key, &slot, served))
+                .cloned()
+                .collect();
+            for session_id in served {
+                inner.transports.remove(&session_id);
+            }
+            if let Some(current) = inner.sessions.get_mut(&key) {
+                current.task_id = None;
+                current.ready = false;
+                current.read_only = false;
+                current.dropped_at = None;
+            }
+            retire_idle_locked(&mut inner, &key, onlyne_session::CloseReason::Replaced);
+        }
+        leaving
+    };
+    for io in leaving {
+        let notice = AdapterMsg::Host(HostOp::Bye(onlyne_proto::ByeNotice {
+            reason: "the session that took this task answered for yours".into(),
+        }));
+        if let Err(error) = io.notify(notice).await {
+            tracing::debug!(error = %error, "the read-only connection had already left");
+        }
+    }
 }
 
 /// Write down the relays this role could not send.
@@ -1511,11 +2021,8 @@ fn release_locked(
         .get_session(task_id)?
         .map(|row| row.resource_state)
         .unwrap_or_else(|| "detached".to_string());
-    if let Some((key, slot)) = inner
-        .sessions
-        .iter()
-        .find(|(_, slot)| slot.task_id.as_deref() == Some(task_id))
-        .map(|(k, s)| (k.clone(), s.clone()))
+    if let Some((key, slot)) = slot_key_serving_task(inner, task_id)
+        .and_then(|key| inner.sessions.get(&key).map(|slot| (key, slot.clone())))
     {
         if let Some(reason) = reason {
             if resource != "detached" && resource != "closed" {
@@ -2040,10 +2547,12 @@ pub fn note_verdict(verdict: &Verdict, task_id: &str) -> Option<Version> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Path, PathBuf, RoleWorkspace, SpawnSpec, completion_envelope, served_socket, session_env,
+        Arc, ClientStore, DispatchState, Path, PathBuf, RoleWorkspace, SessionRef, SessionSlot,
+        SpawnSpec, completion_envelope, served_socket, session_env,
     };
     use onlyne_layout::UNIX_SOCKET_PATH_MAX;
     use onlyne_proto::{MsgKind, Principal, new_task_id};
+    use onlyne_session::backend::fake::FakeBackend;
     use tempfile::tempdir;
 
     /// Every settled task answers its sender, including the turn that left no
@@ -2238,5 +2747,78 @@ mod tests {
             PathBuf::from(&spec.env["ONLYNE_SOCKET"]),
             "one tree answers both the cwd and the socket"
         );
+    }
+
+    /// A task's delivery handle belongs to the session serving it, never to one
+    /// that came back for it.
+    ///
+    /// Two slots can name one task: the session that took the task while the
+    /// older one's connection still stands. The lookup the assignment path uses
+    /// has to prefer the slot that is not read-only, because the handle it stores
+    /// is what settles the server's delivery row. The unfixed lookup took
+    /// whichever slot the hash map yielded first, so with eight read-only slots
+    /// and one live it named a read-only handle in eight runs of nine — the retry
+    /// kept waiting for an ack that had already been written for another session,
+    /// and the server re-delivered the task to a role that had finished it. The
+    /// fixed rule names the live slot every run.
+    #[test]
+    fn a_read_only_slot_never_holds_the_handle_of_the_task_it_lost() {
+        let dir = tempdir().unwrap();
+        let store = ClientStore::open(dir.path().join("client.db")).expect("client store");
+        let state = DispatchState::new(
+            "planner",
+            dir.path(),
+            Vec::new(),
+            8,
+            true,
+            Arc::new(FakeBackend::new()),
+            store,
+        );
+        let task = new_task_id();
+        let serving = |read_only: bool| SessionSlot {
+            session: SessionRef {
+                task_id: task.clone(),
+                backend: "fake".into(),
+                backend_ref: serde_json::Value::Null,
+                generation: 1,
+            },
+            family: "test".into(),
+            task_id: Some(task.clone()),
+            ready: true,
+            payload: None,
+            msg_id: None,
+            origin: None,
+            hop: 0,
+            dropped_at: None,
+            read_only,
+        };
+        state
+            .inner
+            .lock()
+            .sessions
+            .insert("serving".into(), serving(false));
+        for index in 0..8 {
+            state
+                .inner
+                .lock()
+                .sessions
+                .insert(format!("revived-{index}"), serving(true));
+        }
+
+        state.attach_msg_id(&task, "msg-serving");
+
+        let inner = state.inner.lock();
+        assert_eq!(
+            inner.sessions["serving"].msg_id.as_deref(),
+            Some("msg-serving"),
+            "the session serving the task carries its delivery handle"
+        );
+        for index in 0..8 {
+            let key = format!("revived-{index}");
+            assert_eq!(
+                inner.sessions[&key].msg_id, None,
+                "the read-only slot {key} is handed no handle for a task it no longer serves"
+            );
+        }
     }
 }

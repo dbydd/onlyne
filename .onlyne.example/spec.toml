@@ -66,6 +66,7 @@ allowed_targets = ["builder", "reviewer", "_supervisor"]
 session_command = ["pi", "--session-id", "{session}"]
 # aggregate marks this role as the representative of an external cluster. Read by the server and the generate driver as an annotation. Default: empty string, which marks a local role.
 aggregate = ""
+# reconnect_grace_secs is not a key of this file. The window a dropped plugin connection may stay away before its role client retires the task-free session it left behind is read from that role's own workspace `.onlyne/config.toml` (Default: 60 seconds; 0 disables the sweep), and this file parses with deny_unknown_fields, so a line here refuses the start.
 
 # docs/v1-PLAN.md §5 line 242
 [client.timeout]

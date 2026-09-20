@@ -7,7 +7,7 @@ use onlyne_client::{
     accept::AcceptPath,
     adapter_socket::AdapterSocket,
     dispatch::{
-        ClientLink, DispatchState, ReadyNotice, dispatch, missing_capability, on_control,
+        ClientLink, DispatchState, ReadyNotice, dispatch, missing_capability, on_control, on_out,
         on_plugin_report, on_ready, on_recycled, plugin_gap, projection_of, session_alive,
     },
     init::{InitArgs, init, legacy_error_code},
@@ -22,9 +22,9 @@ use onlyne_net::{
 };
 use onlyne_proto::{
     AdapterMsg, AgentMount, AssignAckArgs, Capability, ClientOp, ControlOp, Delivery, DetachArgs,
-    Envelope, ErrorCode, Frame, HelloArgs, HostOp, Lifecycle, Mount, MountKind, MsgKind, Outcome,
-    PROTOCOL_VERSION, PluginOp, QueryRolesArgs, Receipt, Report, ResBody, Welcome, new_envelope,
-    new_task_id,
+    Envelope, ErrorCode, Frame, Handoff, HelloArgs, HostOp, Lifecycle, Mount, MountKind, MsgKind,
+    Outcome, PROTOCOL_VERSION, PluginOp, QueryRolesArgs, Receipt, Report, ResBody, Welcome,
+    new_envelope, new_task_id,
 };
 use onlyne_session::SessionLedger;
 use onlyne_session::backend::fake::FakeBackend;
@@ -3183,4 +3183,342 @@ async fn a_focus_for_an_unknown_task_still_settles() {
         0,
         "a focus command spawns no session"
     );
+}
+
+/// Mount one plugin on the role socket and record every host frame it receives.
+///
+/// `mount_plugin` keeps the assignments alone. The reconnect cases below also
+/// have to see a `bye`, because which frames a returning agent is handed — and
+/// which end it — is the fact the grace window and the merge are judged on.
+async fn witnessed_plugin(
+    socket: &Path,
+    session: &str,
+) -> (AdapterIo, tokio::sync::mpsc::UnboundedReceiver<String>) {
+    let stream = onlyne_layout::connect_local(socket)
+        .await
+        .expect("the role socket accepts a plugin");
+    let (io, mut inbound) =
+        AdapterIo::new_with_inbound(stream, Duration::from_secs(5), Duration::from_secs(5));
+    let (frames_tx, frames_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        while let Some(frame) = inbound.recv().await {
+            match frame.msg {
+                AdapterMsg::Host(HostOp::Assign(assign)) => {
+                    let _ = frames_tx.send(format!("assign:{}", assign.task_id));
+                }
+                AdapterMsg::Host(HostOp::Bye(bye)) => {
+                    let _ = frames_tx.send(format!("bye:{}", bye.reason));
+                }
+                _ => {}
+            }
+        }
+    });
+    let hello = HelloArgs {
+        protocol: PROTOCOL_VERSION,
+        plugin: "onlyne-agent-test".into(),
+        version: "1.0.0".into(),
+        kind: MountKind::Agent,
+        capabilities: vec![Capability::Report, Capability::Inject, Capability::Recycle],
+        mount: Some(Mount::Agent(AgentMount {
+            role: "planner".into(),
+            session: Some(session.to_string()),
+            task_id: Some(session.to_string()),
+            pid: None,
+        })),
+    };
+    let body = io
+        .request(AdapterMsg::Plugin(PluginOp::Hello(hello)))
+        .await
+        .expect("the mount answers");
+    assert!(body.ok, "the role socket admits this plugin: {body:?}");
+    (io, frames_rx)
+}
+
+/// The reconnect grace retires a ghost whose agent never came back.
+///
+/// A connection that ends without a `detach` frame keeps its session and its
+/// resource so a restarting agent finds the work it was doing. That promise has
+/// to expire: the field left roles holding a slot, a projected `idle` row, and a
+/// live pane for a process that was simply gone, and on `max_sessions = 1` one
+/// such ghost stops every later delivery on that role. The sweep past
+/// `[client] reconnect_grace_secs` is what ends it, and it closes the resource
+/// with the reason the settled task already earned.
+#[tokio::test]
+async fn the_reconnect_grace_retires_a_ghost_whose_agent_never_returns() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        true,
+        backend.clone(),
+        store,
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    let task_id = deliver(&state, &task_delivery("task A")).await;
+    let mut stream = mount_raw_plugin(&socket, &task_id).await;
+    complete_raw_plugin(&mut stream, &task_id, Outcome::Done).await;
+    drop(stream);
+    eventually(
+        || state.session_transport(&task_id).is_none(),
+        "the dropped connection binding to clear",
+    )
+    .await;
+
+    // Inside the window nothing leaves: this is the reconnect an always-running
+    // agent lives in, and retiring here would drop the resource it returns to.
+    assert_eq!(
+        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(30), 60),
+        0,
+        "a ghost inside the reconnect grace is kept"
+    );
+    assert_eq!(state.session_count(), 1, "the session stays tracked");
+    assert!(
+        backend.closed_sessions.lock().is_empty(),
+        "no resource closes inside the window"
+    );
+
+    // Past the window the ghost is retired and its capacity spent.
+    assert_eq!(
+        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(61), 60),
+        1,
+        "a ghost past the reconnect grace retires"
+    );
+    assert_eq!(backend.closed_sessions.lock()[0].task_id, task_id);
+    assert_eq!(
+        backend.reasons.lock().as_slice(),
+        [onlyne_session::CloseReason::Completed],
+        "the close carries the reason the settled task earned"
+    );
+    assert_eq!(
+        state.session_count(),
+        0,
+        "the retired ghost spends the role's only capacity slot"
+    );
+    assert_eq!(
+        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(120), 60),
+        0,
+        "a retired ghost is not swept twice"
+    );
+    // A closed window disables the sweep entirely, the same spelling as every
+    // other `[client] *_secs` knob.
+    assert_eq!(state.retire_dropped_ghosts(Instant::now(), 0), 0);
+    host.abort();
+}
+
+/// An agent that reconnects inside the grace window keeps its session, clears the
+/// clock, and takes the role's next task.
+///
+/// The regression this guards is the sweep mistaking a returning agent for a
+/// ghost: a role whose always-running plugin restarts (the shape an agent upgrade
+/// leaves behind) must not lose the session it was reusing, and must not spawn a
+/// second one behind `max_sessions = 1`. The mount that arrives inside the window
+/// clears the stamp, so no later sweep — however far past the window it reads the
+/// clock — has anything to retire.
+#[tokio::test]
+async fn an_agent_that_reconnects_inside_the_window_keeps_its_session() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        true,
+        backend.clone(),
+        store,
+    );
+    state.attach_outbox(Arc::new(RecordingOutbox::default()));
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    let first_task = deliver(&state, &task_delivery("task A")).await;
+    let (io, mut assigns) = mount_plugin(&socket, Some(&first_task)).await;
+    assert_eq!(assigns.recv().await.as_deref(), Some(first_task.as_str()));
+    complete_plugin(&io, &first_task, Outcome::Done).await;
+    drop(io);
+    eventually(
+        || state.session_transport(&first_task).is_none(),
+        "the dropped connection binding to clear",
+    )
+    .await;
+
+    let (io, mut reconnected) = witnessed_plugin(&socket, &first_task).await;
+    // The returning agent cleared the clock: even a sweep that reads the clock an
+    // hour ahead finds nothing to retire.
+    assert_eq!(
+        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(3600), 60),
+        0,
+        "a reconnect inside the window leaves no ghost behind"
+    );
+    assert_eq!(state.session_count(), 1, "the session was not retired");
+    assert!(
+        backend.closed_sessions.lock().is_empty(),
+        "its resource stays open"
+    );
+
+    let second_task = deliver(&state, &task_delivery("task B")).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), reconnected.recv())
+            .await
+            .expect("the resident agent is handed the next task")
+            .as_deref(),
+        Some(second_task.as_str()),
+        "the reused session takes the role's next assignment"
+    );
+    assert_eq!(
+        state.session_count(),
+        1,
+        "the next task rides the session that came back, so no second one spawns"
+    );
+    drop(io);
+    host.abort();
+}
+
+/// A connection that comes back for a session a newer one already serves is held
+/// read-only, and what it sends travels with the completion that answered the task.
+///
+/// The shape is the field report behind the grace window: the agent dies, the
+/// retry is spawned and takes the task, and the old process — or a plugin that
+/// restarted against the same session id — mounts again. Handing it the
+/// assignment it no longer owns is the double-answer this path exists to stop, so
+/// the returning connection gets nothing, and its `send` is held rather than put
+/// on the wire. When the retry finishes, the two accounts leave as one relay per
+/// downstream role, each line marked with the session that wrote it, and the
+/// returning connection is told to leave.
+#[tokio::test]
+async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        2,
+        true,
+        backend.clone(),
+        store.clone(),
+    );
+    let outbox = Arc::new(RecordingOutbox::default());
+    state.attach_outbox(outbox.clone());
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    // Task A runs, settles, and its agent's connection ends without a detach.
+    let first_task = deliver(&state, &task_delivery("task A")).await;
+    let (io_first, mut assigns_first) = mount_plugin(&socket, Some(&first_task)).await;
+    assert_eq!(
+        assigns_first.recv().await.as_deref(),
+        Some(first_task.as_str())
+    );
+    complete_plugin(&io_first, &first_task, Outcome::Done).await;
+    drop(io_first);
+    eventually(
+        || state.session_transport(&first_task).is_none(),
+        "the dropped connection binding to clear",
+    )
+    .await;
+
+    // The next task lands on the same session inside the window, and a new
+    // connection claims it.
+    let second_task = deliver(&state, &task_delivery("task B")).await;
+    let (_io_retry, mut assigns_retry) = mount_plugin(&socket, None).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), assigns_retry.recv())
+            .await
+            .expect("the retry is handed the task")
+            .as_deref(),
+        Some(second_task.as_str())
+    );
+
+    // The old agent's process comes back for the session it no longer serves.
+    let (io_zombie, mut witnessed) = witnessed_plugin(&socket, &first_task).await;
+    assert!(
+        matches!(witnessed.try_recv(), Err(_)),
+        "a returning connection for a taken session is handed no assignment"
+    );
+    let queued_before = store.flush_order().unwrap().len();
+    let body = io_zombie
+        .request(AdapterMsg::Plugin(PluginOp::Send(Box::new(
+            sample_envelope("reviewer", "the part I had already written"),
+        ))))
+        .await
+        .expect("the held send is answered");
+    assert!(body.ok, "the held send is not refused: {body:?}");
+    assert_eq!(
+        body.data.as_ref().and_then(|data| data.get("held")),
+        Some(&serde_json::Value::Bool(true)),
+        "the answer says the frame was held, not sent: {body:?}"
+    );
+    assert_eq!(
+        store.flush_order().unwrap().len(),
+        queued_before,
+        "a held send leaves nothing in the outbound queue"
+    );
+    let relays = |frames: Vec<ClientOp>| -> Vec<String> {
+        frames
+            .into_iter()
+            .filter_map(|op| match op {
+                ClientOp::Send(envelope) => Some(envelope),
+                _ => None,
+            })
+            .filter(|envelope| {
+                envelope.kind == MsgKind::Task
+                    && envelope.to == onlyne_proto::Principal::role("reviewer")
+            })
+            .map(|envelope| envelope.body.text.unwrap_or_default())
+            .collect()
+    };
+    assert!(
+        relays(outbox.frames().await).is_empty(),
+        "nothing reaches the downstream role before the task is answered"
+    );
+    assert!(
+        state.session_transport(&first_task).is_some(),
+        "the session the retry serves is still served"
+    );
+
+    outbox.clear().await;
+    let handoffs = [Handoff {
+        to_role: "reviewer".into(),
+        text: Some("the part the retry wrote".into()),
+    }];
+    on_out(
+        &state,
+        &second_task,
+        Outcome::Done,
+        Some("the part the retry wrote".into()),
+        None,
+        &handoffs,
+    )
+    .await
+    .expect("the retry settles its task");
+
+    let relayed = relays(outbox.frames().await);
+    assert_eq!(
+        relayed.as_slice(),
+        ["handoff: [retry] the part the retry wrote\n[zombie] the part I had already written"],
+        "the two accounts leave as one relay for the downstream role"
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), witnessed.recv())
+            .await
+            .expect("the merged handoff retires the returning connection")
+            .as_deref()
+            .map(|line| line.starts_with("bye:")),
+        Some(true),
+        "the read-only connection is told to leave, and was never assigned"
+    );
+    assert!(
+        backend.closed_sessions.lock().is_empty(),
+        "the session that answered the task is left standing"
+    );
+    assert_eq!(state.session_count(), 1, "one session serves the role");
+    assert_settled(&store, &second_task);
+    host.abort();
 }

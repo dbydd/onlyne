@@ -35,6 +35,10 @@ pub struct ClientConfig {
     /// this client reports it stalled. Zero disables the report.
     #[serde(default = "default_stall_report_secs")]
     pub stall_report_secs: u64,
+    /// Seconds a dropped plugin connection may stay away before this client
+    /// retires the task-free session it left behind. Zero disables the sweep.
+    #[serde(default = "default_reconnect_grace_secs")]
+    pub reconnect_grace_secs: u64,
     /// Requested session backend (`herdr` | `orca` | `zellij` | `exec` /
     /// `headless` | `acp` | `fake` | `auto`). Empty means auto-detect. The
     /// process environment `ONLYNE_BACKEND` takes precedence when it is
@@ -110,6 +114,7 @@ fn default_acp_permission() -> String {
 
 pub const DEFAULT_STALE_GRACE_SECS: u64 = 300;
 pub const DEFAULT_STALL_REPORT_SECS: u64 = 1800;
+pub const DEFAULT_RECONNECT_GRACE_SECS: u64 = 60;
 
 fn default_stale_grace_secs() -> u64 {
     DEFAULT_STALE_GRACE_SECS
@@ -117,6 +122,10 @@ fn default_stale_grace_secs() -> u64 {
 
 fn default_stall_report_secs() -> u64 {
     DEFAULT_STALL_REPORT_SECS
+}
+
+fn default_reconnect_grace_secs() -> u64 {
+    DEFAULT_RECONNECT_GRACE_SECS
 }
 
 impl ClientConfig {

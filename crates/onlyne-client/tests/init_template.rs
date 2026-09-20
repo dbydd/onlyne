@@ -8,7 +8,9 @@
 //! quotes, or a comment line that loses its `#`, fails here.
 
 use onlyne_client::init::toml_string;
-use onlyne_config::{AcpSection, ClientEntry, IntentPolicy, Spec, Timeouts};
+use onlyne_config::{
+    AcpSection, ClientEntry, DEFAULT_RECONNECT_GRACE_SECS, IntentPolicy, Spec, Timeouts,
+};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -172,7 +174,14 @@ fn uncommenting_the_template_lands_each_key_in_its_own_table() {
     assert_eq!(
         sorted_keys(&uncommented),
         [
-            "acp", "backend", "cert_pin", "key_path", "plugins", "role", "server"
+            "acp",
+            "backend",
+            "cert_pin",
+            "key_path",
+            "plugins",
+            "reconnect_grace_secs",
+            "role",
+            "server",
         ],
         "one uncommented key per table it belongs to, and the prose lines stay comments"
     );
@@ -368,6 +377,13 @@ fn the_documented_defaults_are_the_parsers_defaults() {
     assert!(
         fragment.contains("# relay_count = "),
         "and the count spelling beside it:\n{fragment}"
+    );
+
+    assert!(
+        config.contains(&format!(
+            "# reconnect_grace_secs = {DEFAULT_RECONNECT_GRACE_SECS}"
+        )),
+        "the reconnect line quotes `onlyne_config::DEFAULT_RECONNECT_GRACE_SECS`:\n{config}"
     );
 
     let acp = AcpSection::default();

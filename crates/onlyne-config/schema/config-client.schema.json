@@ -56,6 +56,13 @@
         "type": "string"
       }
     },
+    "reconnect_grace_secs": {
+      "description": "Seconds a dropped plugin connection may stay away before this client retires the task-free session it left behind. Zero disables the sweep.",
+      "default": 60,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
     "role": {
       "description": "Role name used for this workspace.",
       "type": "string"

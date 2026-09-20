@@ -84,6 +84,9 @@ pub struct ClientInit {
     /// Seconds a running session may sit without Applied progress before a stall
     /// fault is reported. Zero disables the report.
     pub stall_report_secs: u64,
+    /// Seconds a dropped plugin connection may stay away before this client
+    /// retires the task-free session it left behind. Zero disables the sweep.
+    pub reconnect_grace_secs: u64,
     /// Workspace `config.toml` `backend`. Empty means auto. `ONLYNE_BACKEND`
     /// in the process environment takes precedence when it is nonempty.
     pub backend: String,
@@ -110,6 +113,7 @@ impl ClientInit {
             orca_worktree: "host".to_string(),
             stale_grace_secs: onlyne_config::DEFAULT_STALE_GRACE_SECS,
             stall_report_secs: onlyne_config::DEFAULT_STALL_REPORT_SECS,
+            reconnect_grace_secs: onlyne_config::DEFAULT_RECONNECT_GRACE_SECS,
             backend: String::new(),
             acp: onlyne_config::AcpSection::default(),
         }
@@ -126,6 +130,11 @@ impl ClientInit {
     }
     pub fn with_stall_report_secs(mut self, secs: u64) -> Self {
         self.stall_report_secs = secs;
+        self
+    }
+    /// Adopt the `[client] reconnect_grace_secs` value the workspace config carries.
+    pub fn with_reconnect_grace_secs(mut self, secs: u64) -> Self {
+        self.reconnect_grace_secs = secs;
         self
     }
     pub fn with_backend(mut self, backend: impl Into<String>) -> Self {
@@ -160,6 +169,9 @@ pub struct RunState {
     pub dispatch: DispatchState,
     pub welcome: Arc<Mutex<Option<Welcome>>>,
     pub stall_report_secs: u64,
+    /// Seconds a dropped plugin connection may stay away before this client
+    /// retires the task-free session it left behind. Zero disables the sweep.
+    pub reconnect_grace_secs: u64,
 }
 
 impl RunState {
@@ -197,6 +209,7 @@ impl RunState {
             dispatch,
             welcome: Arc::new(Mutex::new(None)),
             stall_report_secs: init.stall_report_secs,
+            reconnect_grace_secs: init.reconnect_grace_secs,
         })
     }
 
@@ -514,6 +527,7 @@ async fn watch_readiness(link: ClientLink, state: RunState) -> Result<()> {
         sleep(Duration::from_millis(READINESS_POLL_MS)).await;
         state.dispatch.reclaim_exited_resources();
         scan_stalls(&state).await;
+        scan_reconnect_grace(&state);
         match link.readiness() {
             ConnReadiness::Ready => {
                 if !ready {
@@ -915,6 +929,27 @@ async fn scan_stalls(state: &RunState) {
     }
 }
 
+/// Retire the sessions whose plugin connection dropped and did not come back
+/// within `[client] reconnect_grace_secs`. The sweep is bounded on purpose: a
+/// session still bound to a task is not this tick's to end, and a task whose
+/// retry never arrives stays under the stall and heartbeat surfaces, which is the
+/// division the operator set for this window.
+fn scan_reconnect_grace(state: &RunState) {
+    if state.reconnect_grace_secs == 0 {
+        return;
+    }
+    let retired = state
+        .dispatch
+        .retire_dropped_ghosts(Instant::now(), state.reconnect_grace_secs);
+    if retired > 0 {
+        tracing::info!(
+            retired,
+            grace_secs = state.reconnect_grace_secs,
+            "dropped sessions retired past the reconnect grace"
+        );
+    }
+}
+
 async fn wait_for_mount_or_grace(state: &RunState, grace_secs: u64) {
     if state.dispatch.has_mounted_adapter() || grace_secs == 0 {
         return;
@@ -1007,6 +1042,9 @@ mod tests {
             dispatch,
             welcome: Arc::new(Mutex::new(None)),
             stall_report_secs: 1,
+            // This fixture exercises the stall and intent surfaces, not the
+            // reconnect sweep, so the window stays closed here.
+            reconnect_grace_secs: 0,
         };
         (state, store)
     }
@@ -1247,6 +1285,9 @@ while True:
             dispatch,
             welcome: Arc::new(Mutex::new(None)),
             stall_report_secs: 0,
+            // The reconnect sweep is not what this pump exercises, and its
+            // window would retire sessions this case holds open on purpose.
+            reconnect_grace_secs: 0,
         };
         let pump = tokio::spawn(outcome_loop(state.clone()));
 
