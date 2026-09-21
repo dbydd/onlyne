@@ -111,9 +111,13 @@ export function readyReport({ taskId, sessionId, generation, seq }) {
 }
 
 /**
- * `report.heartbeat`. `observed` is a full `Observation` (`onlyne-session`'s
- * reducer type), not a loose status string: the host deserialises it and rejects
- * anything that is not a legal state tuple.
+ * `report.heartbeat`. `observed` is an `Observation` (`onlyne-session`'s reducer
+ * type), not a loose status string: the host deserialises the tuple, overwrites
+ * the six dimensions it owns — `delivery` and `recovery` from its intent drain
+ * and reducer history, `generation_live` and the reconcile tuning with its
+ * counter from the role's own records — and repairs whatever pairing that leaves
+ * before the reducer reads it. What
+ * this plugin puts into the body is `observationFor`'s exact key set.
  */
 export function heartbeatReport({ taskId, generation, seq, agent, host = null }) {
   return {
@@ -125,40 +129,6 @@ export function heartbeatReport({ taskId, generation, seq, agent, host = null })
       observed: observationFor(agent, { generation, seq, host }),
     },
   };
-}
-
-/**
- * The final observation of a settled session: `agent: idle` beside the outcome
- * the completion just stated.
- *
- * A session that only ever reported `running` and then completed leaves the
- * ledger's projection saying `running` forever, because nothing observes the
- * exit. This body is the tuple the host's own settle produces
- * (`onlyne-session/src/reconcile.rs::settle_body`) with the agent dimension
- * moved to `idle`, so `is_legal` accepts it: `outcome: done` requires
- * `delivery: accepted` and an idle agent requires `recovery: draining`, and any
- * other outcome carries the delivery unchanged.
- */
-export function settledReport({ taskId, outcome, generation, seq, host = null }) {
-  const normalized = normalizeOutcome(outcome);
-  const done = normalized === "done";
-  const observed = {
-    version: { generation, seq },
-    generation_live: true,
-    isolate_after: 1,
-    terminate_after: 3,
-    mismatch_count: 0,
-    agent: "idle",
-    delivery: done ? "accepted" : "none",
-    resource: "attached",
-    recovery: done ? "draining" : "none",
-    outcome: normalized,
-    // `project(idle, accepted, …, done)` is `exited`; every other outcome keeps
-    // the session `working` until its resource closes.
-    public: done ? "exited" : "working",
-  };
-  if (host) observed.host = host;
-  return { kind: "heartbeat", data: { task_id: taskId, generation, seq, observed } };
 }
 
 /** `report.complete` — the terminal fact the ledger keeps. */
@@ -191,17 +161,29 @@ export function detachArgs(reason) {
 }
 
 /**
- * A legal `Observation` for one agent state.
+ * The observation for one agent state: the plugin's own report, on the wire as
+ * the `observed` body of a heartbeat.
  *
- * `onlyne-session`'s `is_legal` requires `public` to be `project(...)` of the
- * other dimensions and non-zero reconcile policy, so the tuple is built rather
- * than passed through: the plugin owns the agent dimension (the host never
- * synthesises turn state), and leaves delivery at `none`/outcome `pending`,
- * which is its own truth until it reports a completion.
+ * The plugin states three things and only three: the `agent` dimension (its turn
+ * hooks are the only witness), `resource: attached` — the process is running in
+ * the pane, which is the attach the host's dispatch path recorded — and the
+ * `host` binding. `delivery`, `recovery`, `generation_live`, `isolate_after`,
+ * `terminate_after` and `mismatch_count` are placeholders with a reason:
+ * `Observation` has no optional dimensions, the body must deserialize, and the
+ * client rewrites all six from its own records before the reducer reads them
+ * (`crates/onlyne-client/src/session/dispatch/reports.rs`) — the completion
+ * intent and its recovery label are the client's, the reconcile tuning and the
+ * counter beside it are the role's — so what the plugin sends there is never
+ * believed. Neither the task's outcome nor a public view
+ * belongs in a tuple any more — the ledger owns the result, `project` derives
+ * the view — so neither is sent.
  *
- * `host` is where this process runs (`hostBinding`); it is attached only when
- * the environment names a pane, so a pi outside Orca reports a tuple with no
- * host field at all.
+ * `gone` travels as `booting` on purpose: only the host's reconnect-grace window
+ * declares a session dead, and a beat that pre-declared `gone` would bury the
+ * row's agent before that window has run.
+ *
+ * `host` is attached only when the environment names a pane, so a pi outside
+ * Orca reports a tuple with no host field at all.
  * @param {"booting"|"ready"|"running"|"idle"|"gone"} agent
  */
 export function observationFor(agent, { generation, seq, host = null }) {
@@ -217,8 +199,6 @@ export function observationFor(agent, { generation, seq, host = null }) {
     delivery: "none",
     resource: "attached",
     recovery: "none",
-    outcome: "pending",
-    public: state === "running" ? "working" : state === "ready" || state === "idle" ? "idle" : "created",
   };
   if (host) observed.host = host;
   return observed;

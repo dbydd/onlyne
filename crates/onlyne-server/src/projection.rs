@@ -1,7 +1,9 @@
 //! Session projection: the client's durable mirror of one session (§10).
 //!
-//! Every accepted write passes the `(generation, seq)` monotonic gate and then
-//! publishes one durable `session_state` event.
+//! The client publishes that mirror inside its heartbeat report, and the
+//! readiness and completion reports land beside it. Every accepted write passes
+//! the `(generation, seq)` monotonic gate and then publishes one durable
+//! `session_state` event.
 
 use crate::faults::{self, FaultDraft};
 use crate::relay;
@@ -10,11 +12,14 @@ use crate::state::State;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use onlyne_proto::{
-    AgentPhase, DeliveryPhase, Event, Lifecycle, Outcome, QuerySessionsArgs, RecoveryPhase, Report,
-    ResourcePhase, SessionProjection, SessionRow, SessionStateEvent, SessionSyncArgs,
+    AgentPhase, ControlOp, DeliveryPhase, Event, Frame, FreshRead, Lifecycle, Outcome,
+    QuerySessionsArgs, RecoveryPhase, Report, ResourcePhase, SessionProjection, SessionRow,
+    SessionStateEvent,
 };
 use onlyne_store::{FaultQuery, ServerSessionRow, SessionWrite};
 use serde_json::Value;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// The result of one projection write.
 #[derive(Debug, Clone)]
@@ -65,31 +70,56 @@ pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<Proj
         }
         Report::Heartbeat {
             task_id,
+            session_id,
             generation,
             seq,
             observed,
+            projection,
             cluster_ref,
         } => {
-            let observed = merged_observation(observed, cluster_ref.as_ref());
-            let projection = SessionProjection {
-                lifecycle: Lifecycle::Working,
-                agent: AgentPhase::Running,
-                delivery: DeliveryPhase::Pending,
-                resource: ResourcePhase::Attached,
-                recovery: RecoveryPhase::NoRecovery,
-                outcome: None,
-                observed: Some(observed.clone()),
+            // Two frames share this kind. A beat carrying the client's
+            // projection *is* the state publish: the projection lands in the row
+            // verbatim and `desired` stays empty, which is what the projection
+            // mirror has always written. A bare beat is liveness only, and the
+            // server keeps the tuple it infers from it.
+            let (projection, desired) = match projection {
+                Some(projection) => (projection.clone(), None),
+                None => {
+                    let observed = merged_observation(observed, cluster_ref.as_ref());
+                    (
+                        SessionProjection {
+                            lifecycle: Lifecycle::Working,
+                            agent: AgentPhase::Running,
+                            delivery: DeliveryPhase::Pending,
+                            resource: ResourcePhase::Attached,
+                            recovery: RecoveryPhase::NoRecovery,
+                            outcome: None,
+                            observed: Some(observed.clone()),
+                        },
+                        Some(observed),
+                    )
+                }
             };
-            write(
+            let exited = projection.lifecycle == Lifecycle::Exited;
+            let outcome = write(
                 state,
                 role,
                 task_id,
-                "",
+                session_id,
                 *generation,
                 *seq,
                 projection,
-                Some(observed),
-            )
+                desired,
+            )?;
+            // An applied `exited` write is the pane dying while the link is
+            // still up. A claimed in-flight row for this session goes back on
+            // the queue so the next pull can open a replacement. An
+            // already-acked row is left alone. A bare beat never gets here: the
+            // tuple inferred above is always `working`.
+            if outcome.applied && exited {
+                relay::release_exited_delivery(state, task_id, session_id)?;
+            }
+            Ok(outcome)
         }
         Report::Complete {
             task_id,
@@ -179,41 +209,16 @@ pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<Proj
     }
 }
 
-/// The reducer tuple a heartbeat carries, with the relayed cluster merged in as
-/// a sibling key. The tuple is stored *as* the row's observation rather than
-/// wrapped in one, so `sessions --json` — and with it every reader of
-/// `observed.host` — sees a single shape whichever client path wrote the row.
+/// The reducer tuple a liveness-only heartbeat carries, with the relayed cluster
+/// merged in as a sibling key. The tuple is stored *as* the row's observation
+/// rather than wrapped in one, so `sessions --json` — and with it every reader
+/// of `observed.host` — sees a single shape whichever client path wrote the row.
 fn merged_observation(observed: &Value, cluster_ref: Option<&String>) -> Value {
     let mut value = observed.clone();
     if let (Some(cluster), Some(object)) = (cluster_ref, value.as_object_mut()) {
         object.insert("cluster_ref".into(), Value::String(cluster.clone()));
     }
     value
-}
-
-/// Apply one `session_sync` request to the session table.
-pub fn session_sync(
-    state: &State,
-    role: &str,
-    args: &SessionSyncArgs,
-) -> anyhow::Result<ProjectionOutcome> {
-    let outcome = write(
-        state,
-        role,
-        &args.task_id,
-        &args.session_id,
-        args.generation,
-        args.seq,
-        args.projection.clone(),
-        None,
-    )?;
-    // An applied `exited` write is the pane dying while the link is still up.
-    // A claimed in-flight row for this session goes back on the queue so the
-    // next pull can open a replacement. An already-acked row is left alone.
-    if outcome.applied && args.projection.lifecycle == Lifecycle::Exited {
-        relay::release_exited_delivery(state, &args.task_id, &args.session_id)?;
-    }
-    Ok(outcome)
 }
 
 /// Write one projection behind the `(generation, seq)` gate.
@@ -236,7 +241,7 @@ pub fn write(
         }
     }
     let revival = stored.as_ref().is_some_and(|row| {
-        row.public_lifecycle == "exited"
+        projection_from_write(row).lifecycle == Lifecycle::Exited
             && row.generation.max(0) as u64 == generation
             && matches!(
                 projection.lifecycle,
@@ -258,7 +263,6 @@ pub fn write(
         session_id,
         generation: generation as i64,
         seq: seq as i64,
-        public_lifecycle: lifecycle_name(projection.lifecycle).to_string(),
         agent_state: agent_name(projection.agent).to_string(),
         delivery_state: delivery_name(projection.delivery).to_string(),
         resource_state: resource_name(projection.resource).to_string(),
@@ -335,6 +339,124 @@ pub fn sessions(state: &State, query: QuerySessionsArgs) -> anyhow::Result<Vec<S
     Ok(rows.iter().map(|row| answer_row(state, row)).collect())
 }
 
+/// Read the session table, probing the named task first when the caller asked.
+///
+/// A plain read (`fresh_wait_ms` absent) is exactly [`sessions`]: the stored
+/// mirror, no control frame, nothing waited on. A fresh read names one task,
+/// asks its owning client for a fresh observation through the control frame
+/// that path already carries, and waits inside the caller's own bound for that
+/// task's row to move. Either way the answer is the stored rows and a
+/// [`FreshRead`] per row saying what the probe did; the read never turns a
+/// probe that did not land into an error, and it never waits past its bound.
+pub async fn sessions_read(
+    state: &State,
+    query: QuerySessionsArgs,
+    admin: bool,
+) -> anyhow::Result<Vec<SessionRow>> {
+    let Some(wait_ms) = query.fresh_wait_ms else {
+        return sessions(state, query);
+    };
+    let outcome = match query.task_id.clone() {
+        Some(task_id) => probe_task(state, &task_id, wait_ms, admin).await,
+        // No named task: there is no client to ask, and answering a mirror
+        // under a marker that says so is the honest read.
+        None => FreshRead::Offline,
+    };
+    let mut rows = sessions(state, query)?;
+    for row in &mut rows {
+        row.fresh = Some(outcome);
+    }
+    Ok(rows)
+}
+
+/// Ask one task's owning client for a fresh observation, and say how that went.
+///
+/// The ask is the `probe` control the client already answers: the owning role
+/// on both ends of the envelope, no new op verb, and no client change. The wait
+/// watches the durable `session_state` event the projection write publishes, so
+/// what it returns on is the write that landed rather than a promise of one.
+async fn probe_task(state: &State, task_id: &str, wait_ms: u64, admin: bool) -> FreshRead {
+    let Some(row) = state.ledger.get_session_row(task_id).ok().flatten() else {
+        return FreshRead::Offline;
+    };
+    let watermark = (row.generation.max(0) as u64, row.seq.max(0) as u64);
+    let owner = row.role;
+    if !state.is_connected(&owner) {
+        return FreshRead::Offline;
+    }
+    // Subscribe before the probe leaves: the client's republish can land
+    // between the send and a later subscription, and that republish is the
+    // whole answer.
+    let mut frames = state.subscribe_frames();
+    let envelope = crate::router::control_envelope(
+        &owner,
+        &ControlOp::Probe {
+            task_id: task_id.to_string(),
+        },
+        None,
+    );
+    match relay::send(state, &envelope, admin, Some(&owner)) {
+        Ok(relay::RelayReply::Accepted(_)) | Ok(relay::RelayReply::Duplicate(_)) => {}
+        // Nothing went out, so the row is the mirror and says so.
+        _ => return FreshRead::Offline,
+    }
+    let bound = std::time::Duration::from_millis(wait_ms);
+    match tokio::time::timeout(bound, await_advance(state, &mut frames, task_id, watermark)).await {
+        Ok(true) => FreshRead::Probed,
+        _ => FreshRead::Unanswered,
+    }
+}
+
+/// Wait for the probed task's row to move past `watermark`.
+///
+/// The client republishes inside the heartbeat path, so the wait reads the
+/// frame that write already broadcasts. A lagging receiver has missed frames
+/// rather than seen a quiet row, so it re-reads the stored row per gap instead
+/// of waiting out the bound; a closed channel cannot report an advance.
+async fn await_advance(
+    state: &State,
+    frames: &mut broadcast::Receiver<Arc<Frame>>,
+    task_id: &str,
+    watermark: (u64, u64),
+) -> bool {
+    loop {
+        match frames.recv().await {
+            Ok(frame) => {
+                if advances(&frame, task_id, watermark) {
+                    return true;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                if row_version(state, task_id).is_some_and(|moved| moved > watermark) {
+                    return true;
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => return false,
+        }
+    }
+}
+
+/// Whether one broadcast frame is the probed task's row moving past its watermark.
+fn advances(frame: &Frame, task_id: &str, watermark: (u64, u64)) -> bool {
+    let Frame::Ev { event, .. } = frame else {
+        return false;
+    };
+    let Event::SessionState(moved) = &**event else {
+        return false;
+    };
+    moved.task_id == task_id && (moved.generation, moved.seq) > watermark
+}
+
+/// The `(generation, seq)` the stored row of one task carries, when it exists.
+fn row_version(state: &State, task_id: &str) -> Option<(u64, u64)> {
+    state
+        .ledger
+        .get_session_row(task_id)
+        .ok()
+        .flatten()
+        .map(|row| (row.generation.max(0) as u64, row.seq.max(0) as u64))
+}
+
 /// Project one stored row onto the wire type.
 pub fn row_from_write(row: &ServerSessionRow) -> SessionRow {
     let projection = projection_from_write(row);
@@ -344,11 +466,14 @@ pub fn row_from_write(row: &ServerSessionRow) -> SessionRow {
         session_id: row.session_id.clone(),
         generation: row.generation.max(0) as u64,
         seq: row.seq.max(0) as u64,
-        public_lifecycle: parse_lifecycle(&row.public_lifecycle),
+        public_lifecycle: projection.lifecycle,
         outcome: projection.outcome,
         projection,
         updated_at: Some(row.updated_at.to_string()),
         heartbeat_stale: false,
+        // A fresh read stamps this per answer; the stored row knows nothing of
+        // one, and a plain read claims nothing about its freshness.
+        fresh: None,
     }
 }
 
@@ -367,12 +492,18 @@ fn answer_row(state: &State, row: &ServerSessionRow) -> SessionRow {
 }
 
 /// Rebuild the published projection of one stored row.
+///
+/// The mirror holds the client's projection whole, and the lifecycle is a key
+/// inside those bytes — there is no column beside them to fall back to. When the
+/// bytes do not parse, every field here takes the freshly created reading, the
+/// lifecycle included, which is the same reading the store's lifecycle filter
+/// gives such a row.
 pub fn projection_from_write(row: &ServerSessionRow) -> SessionProjection {
     if let Ok(projection) = serde_json::from_str::<SessionProjection>(&row.observed_json) {
         return projection;
     }
     SessionProjection {
-        lifecycle: parse_lifecycle(&row.public_lifecycle),
+        lifecycle: Lifecycle::Created,
         agent: parse_agent(&row.agent_state),
         delivery: parse_delivery(&row.delivery_state),
         resource: parse_resource(&row.resource_state),
@@ -397,16 +528,6 @@ pub fn session_row(state: &State, task_id: &str) -> anyhow::Result<Option<Sessio
         .get_session_row(task_id)?
         .as_ref()
         .map(|row| answer_row(state, row)))
-}
-
-/// Parse a stored lifecycle name.
-pub fn parse_lifecycle(name: &str) -> Lifecycle {
-    match name {
-        "working" => Lifecycle::Working,
-        "idle" => Lifecycle::Idle,
-        "exited" => Lifecycle::Exited,
-        _ => Lifecycle::Created,
-    }
 }
 
 fn parse_agent(name: &str) -> AgentPhase {

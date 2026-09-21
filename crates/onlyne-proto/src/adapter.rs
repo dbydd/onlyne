@@ -672,9 +672,13 @@ mod tests {
     fn report_frames_use_the_lifecycle_kind() {
         let op = PluginOp::Report(Report::Heartbeat {
             task_id: new_task_id(),
+            // The adapter's beat names no session and carries no projection:
+            // the publish is a client-to-server frame.
+            session_id: String::new(),
             generation: 1,
             seq: 14,
             observed: serde_json::json!({"state": "running"}),
+            projection: None,
             cluster_ref: None,
         });
         let value = serde_json::to_value(&op).expect("encode");
@@ -760,9 +764,11 @@ mod tests {
     fn untagged_adapter_msg_resolves_plugin_host_and_response() {
         let plugin = AdapterMsg::Plugin(PluginOp::Report(Report::Heartbeat {
             task_id: new_task_id(),
+            session_id: String::new(),
             generation: 1,
             seq: 14,
             observed: serde_json::json!({"state": "running"}),
+            projection: None,
             cluster_ref: None,
         }));
         let value = serde_json::to_value(&plugin).expect("encode plugin op");

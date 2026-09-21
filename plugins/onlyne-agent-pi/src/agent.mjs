@@ -36,7 +36,6 @@ import {
   sendEnvelope,
   sessionRegisterArgs,
   SEQ_BASE,
-  settledReport,
   stdinTaskText,
   welcomeFrom,
 } from "./protocol.mjs";
@@ -494,14 +493,15 @@ export class OnlyneAgent {
   /**
    * One heartbeat for the task this connection serves.
    *
-   * A task this plugin already completed gets none. `observed` is a full
-   * snapshot, so a heartbeat sent after the completion report would put
-   * `delivery: none` and `outcome: pending` back over the terminal tuple the
-   * host derived from it, and the reducer accepts that snapshot: the session
-   * would read `idle` again after having read `exited`. The e2e case
-   * `crates/onlyne-testkit/e2e/pi-live.sh` caught exactly this race, where a
-   * turn-end heartbeat left over from the finishing turn landed three
-   * milliseconds behind the completion.
+   * A task this plugin already completed gets none: the beat is a full
+   * snapshot of what the plugin can see, and after the completion the agent's
+   * remaining turns are not this session's business — the row belongs to the
+   * settlement the completion earned. The client rewrites the tuple's `delivery`
+   * and `recovery` from its own records, so a late beat could no longer undo
+   * the drain even if it sent one. The e2e case
+   * `crates/onlyne-testkit/e2e/pi-live.sh` caught this race, where a turn-end
+   * heartbeat left over from the finishing turn landed three milliseconds
+   * behind the completion.
    */
   async heartbeat(agent = this.agentState) {
     if (!this.connected) return;
@@ -855,7 +855,7 @@ export class OnlyneAgent {
     this.notice("out", `complete ${taskId.slice(0, 8)} ${normalized}${summary ? `: ${summary}` : ""}`);
     if (this.activeTasks().length === 0) {
       if (exitProcess) {
-        await this.reportSettled(taskId, normalized).catch((error) =>
+        await this.reportSettled(taskId).catch((error) =>
           this.log(`settled observation refused: ${error.message}`),
         );
       }
@@ -881,25 +881,29 @@ export class OnlyneAgent {
   }
 
   /**
-   * One last observation before the process leaves: the tuple the host settled
-   * plus `agent: idle`.
+   * One last observation before the process leaves: the agent dimension at
+   * `idle`.
    *
    * The completion settles the row from the tuple the client holds, which still
    * says `running` when the turn that finished was the last report sent, and
    * nothing observes the process afterwards. This report is what makes an
    * exited session read idle. It is skipped when the last beat was already
-   * idle — the settled tuple is then already right — and it is a request for
+   * idle — the agent dimension is already right — and it is a request for
    * the same reason the completion is: the answer is the handover, and a
    * failure here must not stop the exit that the durable completion earned.
+   *
+   * It carries no completion fact. The outcome belongs to `report.complete`, and
+   * the drain the completion opens belongs to the client: an observation states
+   * where the agent is, not what the session's intent has done.
    */
-  async reportSettled(taskId, outcome) {
+  async reportSettled(taskId) {
     if (!this.connected || this.lastPhase === "idle") return false;
     this.seq += 1;
-    await this.request("report", settledReport({
+    await this.request("report", heartbeatReport({
       taskId,
-      outcome,
       generation: this.generation,
       seq: this.seq,
+      agent: "idle",
       host: this.host,
     }));
     this.stats.reports += 1;
@@ -917,7 +921,7 @@ export class OnlyneAgent {
       this.activity.set({ taskId: this.activeTaskId() ?? null, phase: pending.outcome });
       this.notice("out", `complete ${pending.taskId.slice(0, 8)} ${pending.outcome} flushed after reconnect`);
       if (pending.exitProcess && this.activeTasks().length === 0) {
-        await this.reportSettled(pending.taskId, pending.outcome).catch((error) =>
+        await this.reportSettled(pending.taskId).catch((error) =>
           this.log(`settled observation refused: ${error.message}`),
         );
         this.exitSession(pending.outcome);

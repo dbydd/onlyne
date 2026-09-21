@@ -1,24 +1,14 @@
 //! onlyne-client role runtime.
 
-pub mod accept;
-pub mod adapter_socket;
-pub mod claim;
-pub mod daemon;
-pub mod dispatch;
-pub mod handoff;
 pub mod host;
-pub mod init;
-pub mod intent;
-pub mod local_cli;
-pub mod runloop;
-pub mod slice;
-pub mod stale;
-pub mod stall;
+pub mod ops;
+pub mod runtime;
+pub mod session;
 
-pub use runloop::ClientInit;
+pub use runtime::runloop::ClientInit;
 
 pub async fn run(init: ClientInit) -> anyhow::Result<()> {
-    runloop::run(init).await
+    runtime::runloop::run(init).await
 }
 
 pub fn version() -> &'static str {

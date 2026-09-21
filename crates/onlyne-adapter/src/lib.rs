@@ -777,9 +777,16 @@ impl ReportSender {
     pub async fn heartbeat(&self, task_id: impl Into<String>, observed: Value) -> Result<Report> {
         let report = Report::Heartbeat {
             task_id: task_id.into(),
+            // A plugin's beat reaches its host, not the server: it names no
+            // session and publishes no projection. The client reduces the
+            // observation into the row it keeps and publishes that itself.
+            session_id: String::new(),
             generation: self.generation(),
             seq: self.next_seq(),
             observed,
+            projection: None,
+            // A local report has no origin cluster; a connection speaking for a
+            // sub-cluster carries that name in `hello`'s `Mount::Cluster`.
             cluster_ref: None,
         };
         self.send(report.clone()).await?;

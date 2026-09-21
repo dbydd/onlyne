@@ -8,8 +8,8 @@ use onlyne_proto::{
     Delivery, Envelope, ErrorCode, Event, Frame, GatewayOp, HandshakeArgs, HealthArgs, HistoryArgs,
     LedgerQuery, LedgerState, Lifecycle, MsgKind, OP_ID_CONFLICT_MESSAGE, Outcome, Principal,
     PullArgs, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, RepairAck, RepairAdopt,
-    RepairFail, RepairRebind, RepairTarget, Report, ResBody, SessionProjection, SessionSyncArgs,
-    ShutdownArgs, Subscribe,
+    RepairFail, RepairRebind, RepairTarget, Report, ResBody, SessionProjection, ShutdownArgs,
+    Subscribe,
 };
 use onlyne_server::state::{ChannelBinding, DeliveryTicket, RoleConnection, Server, ServerInit};
 use onlyne_server::{events, faults, gateway_host, projection, relay, router, stale};
@@ -188,6 +188,28 @@ fn exited_projection() -> SessionProjection {
     let mut projection = SessionProjection::default_working();
     projection.lifecycle = Lifecycle::Exited;
     projection
+}
+
+/// One projection publish, shaped as the client shapes it: a heartbeat report
+/// carrying the whole projection. The beat's own `observed` is null — a client
+/// that publishes mirrors the row's tuple inside the projection, and the server
+/// reads the projection, not the beat.
+fn projection_publish(
+    task_id: String,
+    session_id: &str,
+    generation: u64,
+    seq: u64,
+    projection: SessionProjection,
+) -> Report {
+    Report::Heartbeat {
+        task_id,
+        session_id: session_id.to_string(),
+        generation,
+        seq,
+        observed: serde_json::Value::Null,
+        projection: Some(projection),
+        cluster_ref: None,
+    }
 }
 
 fn accepted(reply: relay::RelayReply) -> relay::SendOutcome {
@@ -519,18 +541,18 @@ fn a_role_level_pull_rehands_nothing_while_its_ticket_is_open() {
     // The task owns a session row. That is what armed a session-keyed ticket for
     // a pull that named no session, so the puller could never find its own
     // ticket again and the same row came back every 200 ms, forever.
-    projection::session_sync(
+    projection::report(
         &fixture.state,
         "builder",
-        &SessionSyncArgs {
-            task_id: outcome.receipt.task.clone().expect("task"),
-            session_id: "sess-1".to_string(),
-            generation: 1,
-            seq: 1,
-            projection: SessionProjection::default_working(),
-        },
+        &projection_publish(
+            outcome.receipt.task.clone().expect("task"),
+            "sess-1",
+            1,
+            1,
+            SessionProjection::default_working(),
+        ),
     )
-    .expect("sync");
+    .expect("publish");
 
     let first = relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
     assert_eq!(first.deliveries.len(), 1);
@@ -922,7 +944,7 @@ fn a_claimed_live_task_stays_in_flight_and_teardown_requeues_it() {
 }
 
 #[test]
-fn an_exited_sync_requeues_the_claimed_in_flight_row() {
+fn an_exited_publish_requeues_the_claimed_in_flight_row() {
     let fixture = fixture();
     let envelope = task("planner", "builder", "work");
     let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
@@ -957,18 +979,12 @@ fn an_exited_sync_requeues_the_claimed_in_flight_row() {
     );
 
     let before = ledger_state_events(&fixture.state).len();
-    let applied = projection::session_sync(
+    let applied = projection::report(
         &fixture.state,
         "builder",
-        &SessionSyncArgs {
-            task_id: task_id.clone(),
-            session_id: "sess-live".to_string(),
-            generation: 1,
-            seq: 1,
-            projection: exited_projection(),
-        },
+        &projection_publish(task_id.clone(), "sess-live", 1, 1, exited_projection()),
     )
-    .expect("sync")
+    .expect("publish")
     .applied;
     assert!(applied);
     let row = ledger_rows(&fixture.state)
@@ -1002,7 +1018,7 @@ fn an_exited_sync_requeues_the_claimed_in_flight_row() {
 }
 
 #[test]
-fn an_exited_sync_leaves_an_acked_row_alone() {
+fn an_exited_publish_leaves_an_acked_row_alone() {
     let fixture = fixture();
     let envelope = task("planner", "builder", "work");
     let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
@@ -1027,18 +1043,12 @@ fn an_exited_sync_leaves_an_acked_row_alone() {
     .expect("ack")
     .expect("acked");
     let before = ledger_state_events(&fixture.state).len();
-    projection::session_sync(
+    projection::report(
         &fixture.state,
         "builder",
-        &SessionSyncArgs {
-            task_id,
-            session_id: "sess-1".to_string(),
-            generation: 1,
-            seq: 1,
-            projection: exited_projection(),
-        },
+        &projection_publish(task_id, "sess-1", 1, 1, exited_projection()),
     )
-    .expect("sync");
+    .expect("publish");
     let row = ledger_rows(&fixture.state)
         .into_iter()
         .find(|row| row.msg_id == msg_id)
@@ -1048,7 +1058,7 @@ fn an_exited_sync_leaves_an_acked_row_alone() {
 }
 
 #[test]
-fn an_exited_sync_does_not_move_another_session_ticket() {
+fn an_exited_publish_does_not_move_another_session_ticket() {
     let fixture = fixture();
     let envelope = task("planner", "builder", "work");
     let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
@@ -1061,18 +1071,12 @@ fn an_exited_sync_does_not_move_another_session_ticket() {
         &PullArgs::default(),
     )
     .expect("pull");
-    projection::session_sync(
+    projection::report(
         &fixture.state,
         "builder",
-        &SessionSyncArgs {
-            task_id,
-            session_id: "sess-b".to_string(),
-            generation: 1,
-            seq: 1,
-            projection: exited_projection(),
-        },
+        &projection_publish(task_id, "sess-b", 1, 1, exited_projection()),
     )
-    .expect("sync");
+    .expect("publish");
     let row = ledger_rows(&fixture.state)
         .into_iter()
         .find(|row| row.msg_id == msg_id)
@@ -1683,7 +1687,9 @@ fn stale_working_observer_records_fault_without_mutating_session() {
             .ledger
             .get_session_row(&task_id)
             .expect("session row")
-            .is_some_and(|row| row.public_lifecycle == "working"),
+            .is_some_and(|row| {
+                projection::row_from_write(&row).public_lifecycle == Lifecycle::Working
+            }),
         "observer records a fault but never changes lifecycle"
     );
     assert!(
@@ -1780,7 +1786,11 @@ fn observe_once_records_heartbeat_missing_for_an_online_role() {
         .get_session_row(&task_id)
         .expect("row")
         .expect("present");
-    assert_eq!(row.public_lifecycle, "working");
+    assert_eq!(
+        projection::row_from_write(&row).public_lifecycle,
+        Lifecycle::Working,
+        "the mirrored row answers with the lifecycle inside the bytes it stores"
+    );
 }
 
 #[test]
@@ -1851,18 +1861,18 @@ fn a_post_complete_heartbeat_records_heartbeat_after_complete_and_revives_the_ro
         .expect("present");
     assert_eq!(exited.public_lifecycle, Lifecycle::Exited);
 
-    let revived = projection::session_sync(
+    let revived = projection::report(
         &fixture.state,
         "builder",
-        &SessionSyncArgs {
-            task_id: task_id.clone(),
-            session_id: "sess-1".into(),
-            generation: 1,
-            seq: exited.seq + 1,
-            projection: heartbeat_projection(),
-        },
+        &projection_publish(
+            task_id.clone(),
+            "sess-1",
+            1,
+            exited.seq + 1,
+            heartbeat_projection(),
+        ),
     )
-    .expect("sync");
+    .expect("publish");
     assert!(revived.applied);
     let row = projection::session_row(&fixture.state, &task_id)
         .expect("row")
@@ -1899,16 +1909,16 @@ fn a_post_complete_heartbeat_records_heartbeat_after_complete_and_revives_the_ro
     let exited_again = projection::session_row(&fixture.state, &task_id)
         .expect("row")
         .expect("present");
-    projection::session_sync(
+    projection::report(
         &fixture.state,
         "builder",
-        &SessionSyncArgs {
-            task_id: task_id.clone(),
-            session_id: "sess-1".into(),
-            generation: 1,
-            seq: exited_again.seq + 1,
-            projection: heartbeat_projection(),
-        },
+        &projection_publish(
+            task_id.clone(),
+            "sess-1",
+            1,
+            exited_again.seq + 1,
+            heartbeat_projection(),
+        ),
     )
     .expect("second revival");
     let after_again = fixture
@@ -2085,31 +2095,33 @@ async fn a_lagging_subscriber_is_told_rather_than_losing_events() {
 fn the_projection_gate_refuses_a_stale_watermark() {
     let fixture = fixture();
     let task_id = onlyne_proto::new_task_id();
-    let write = |generation: u64, seq: u64| SessionSyncArgs {
-        task_id: task_id.clone(),
-        session_id: "sess-1".to_string(),
-        generation,
-        seq,
-        projection: SessionProjection::default_working(),
+    let write = |generation: u64, seq: u64| {
+        projection_publish(
+            task_id.clone(),
+            "sess-1",
+            generation,
+            seq,
+            SessionProjection::default_working(),
+        )
     };
     assert!(
-        projection::session_sync(&fixture.state, "builder", &write(1, 5))
-            .expect("sync")
+        projection::report(&fixture.state, "builder", &write(1, 5))
+            .expect("publish")
             .applied
     );
     assert!(
-        !projection::session_sync(&fixture.state, "builder", &write(1, 4))
-            .expect("sync")
+        !projection::report(&fixture.state, "builder", &write(1, 4))
+            .expect("publish")
             .applied
     );
     assert!(
-        !projection::session_sync(&fixture.state, "builder", &write(1, 5))
-            .expect("sync")
+        !projection::report(&fixture.state, "builder", &write(1, 5))
+            .expect("publish")
             .applied
     );
     assert!(
-        projection::session_sync(&fixture.state, "builder", &write(2, 0))
-            .expect("sync")
+        projection::report(&fixture.state, "builder", &write(2, 0))
+            .expect("publish")
             .applied
     );
     let rows = projection::sessions(
@@ -2124,6 +2136,152 @@ fn the_projection_gate_refuses_a_stale_watermark() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].generation, 2);
     assert_eq!(rows[0].seq, 0);
+}
+
+/// `sessions --fresh` goes down the chain for the named task, while a plain
+/// read answers the mirror the heartbeat had landed.
+///
+/// The client half is the frames the real client sends, in the order it sends
+/// them: its pull loop takes the `probe` control this read addressed to the
+/// owning role, the probe arm republishes the projection the reducer holds —
+/// which the `(generation, seq)` gate drops, because nothing moved — and the
+/// plugin's own answer to that probe lands one sequence later
+/// (`on_plugin_report` → `sync_session`). The fresh read has to answer what the
+/// plugin reported; the plain read has to still answer the mirror.
+#[tokio::test]
+async fn a_fresh_read_answers_the_probed_value_and_a_plain_read_the_mirror() {
+    async fn read(
+        state: &Arc<onlyne_server::State>,
+        task_id: &str,
+        fresh_wait_ms: Option<u64>,
+    ) -> ResBody {
+        router::dispatch_admin(
+            state,
+            &mut router::Session::default(),
+            AdminOp::Sessions(QuerySessionsArgs {
+                task_id: Some(task_id.to_string()),
+                limit: 10,
+                fresh_wait_ms,
+                ..QuerySessionsArgs::default()
+            }),
+        )
+        .await
+    }
+
+    fn sole_row(body: &ResBody) -> serde_json::Value {
+        body.data.clone().expect("a sessions answer")["sessions"][0].clone()
+    }
+
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    let idle = SessionProjection {
+        agent: onlyne_proto::AgentPhase::Idle,
+        ..heartbeat_projection()
+    };
+    projection::report(
+        &fixture.state,
+        "planner",
+        &projection_publish(task_id.clone(), "sess-1", 1, 1, idle.clone()),
+    )
+    .expect("the mirror the heartbeat path lands");
+    let (sender, _outbound) = tokio::sync::mpsc::channel(8);
+    fixture.state.register_role(RoleConnection {
+        role: "planner".to_string(),
+        sender,
+        last_seq: 0,
+        connected_at: Utc::now(),
+        draining: false,
+        generation: 0,
+    });
+
+    let plain = read(&fixture.state, &task_id, None).await;
+    assert!(plain.ok, "{plain:?}");
+    let mirror = sole_row(&plain);
+    assert_eq!(mirror["projection"]["agent"], json!("idle"));
+    assert!(
+        mirror.get("fresh").is_none(),
+        "a plain read makes no freshness claim: {mirror}"
+    );
+
+    // The read and the client run together: only the client's publish moves the
+    // row, so the answer cannot be the mirror unless the wait is a no-op.
+    let client = async {
+        let pulled =
+            relay::pull(&fixture.state, "planner", None, &PullArgs::default()).expect("pull");
+        let delivery = pulled
+            .deliveries
+            .first()
+            .expect("the probe reaches the owning role");
+        assert_eq!(
+            delivery.envelope.control,
+            Some(ControlOp::Probe {
+                task_id: task_id.clone(),
+            }),
+            "the read asks through the control frame the client already answers"
+        );
+        projection::report(
+            &fixture.state,
+            "planner",
+            &projection_publish(task_id.clone(), "sess-1", 1, 1, idle),
+        )
+        .expect("the probe arm's own republish, which moves nothing");
+        projection::report(
+            &fixture.state,
+            "planner",
+            &projection_publish(
+                task_id.clone(),
+                "sess-1",
+                1,
+                2,
+                SessionProjection {
+                    agent: onlyne_proto::AgentPhase::Running,
+                    ..heartbeat_projection()
+                },
+            ),
+        )
+        .expect("the plugin's answer to the probe");
+    };
+    let (fresh, ()) = tokio::join!(read(&fixture.state, &task_id, Some(2_000)), client);
+    assert!(fresh.ok, "{fresh:?}");
+    let answered = sole_row(&fresh);
+    assert_eq!(answered["fresh"], json!("probed"));
+    assert_eq!(
+        answered["projection"]["agent"],
+        json!("running"),
+        "the read answers the value the plugin reported, not the mirror: {answered}"
+    );
+    assert_eq!(answered["seq"], json!(2));
+
+    // A probe that does not land answers the stored row inside the read's own
+    // bound. It is never given a longer one: the bound is the operator's.
+    let quiet = onlyne_proto::new_task_id();
+    ready(&fixture.state, "planner", &quiet, 1);
+    let started = std::time::Instant::now();
+    let silent = read(&fixture.state, &quiet, Some(300)).await;
+    assert!(silent.ok, "{silent:?}");
+    let silent_row = sole_row(&silent);
+    assert_eq!(silent_row["fresh"], json!("unanswered"));
+    assert_eq!(silent_row["public_lifecycle"], json!("working"));
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(250)
+            && started.elapsed() < std::time::Duration::from_secs(2),
+        "the read waits the bound it was given and answers inside it: {:?}",
+        started.elapsed()
+    );
+
+    // A task no connected client owns has nobody to ask, so nothing is waited
+    // on: the stored row comes back with the marker that says so.
+    let unowned = onlyne_proto::new_task_id();
+    ready(&fixture.state, "builder", &unowned, 1);
+    let started = std::time::Instant::now();
+    let offline = read(&fixture.state, &unowned, Some(10_000)).await;
+    assert!(offline.ok, "{offline:?}");
+    assert_eq!(sole_row(&offline)["fresh"], json!("offline"));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "an unowned task is not waited on: {:?}",
+        started.elapsed()
+    );
 }
 
 #[test]
@@ -2214,6 +2372,106 @@ fn a_cluster_bearing_report_marks_its_projection() {
     );
 }
 
+/// The projection publish as it looked on the wire before it moved into the
+/// heartbeat report: the `projection` payload a client sent for a working session
+/// holding its first delivery, captured off the standalone frame. The bytes are
+/// the contract — the server mirrors this object into the `sessions` row.
+const PUBLISHED_WORKING_PROJECTION: &str = concat!(
+    r#"{"lifecycle":"working","agent":"running","delivery":"pending","#,
+    r#""resource":"attached","recovery":"none","observed":{"agent":"running","#,
+    r#""delivery":"pending","generation_live":true,"isolate_after":1,"mismatch_count":0,"#,
+    r#""recovery":"none","resource":"attached","#,
+    r#""terminate_after":3,"version":{"generation":1,"seq":7}}}"#
+);
+
+/// One session activity, published end to end. The bytes a client writes arrive
+/// as a heartbeat *report* — there is no projection verb on the wire — get decoded,
+/// dispatched through the router over an authenticated link, and read back out of
+/// the `sessions` table. The stored row is the published projection verbatim, and
+/// `desired_json` stays empty: a publish mirrors state, it does not set intent.
+/// That is the row the standalone frame wrote.
+#[test]
+fn a_heartbeat_report_publishes_the_sessions_row_through_the_router() {
+    let fixture = fixture();
+    let task_id = "11111111-1111-4111-8111-111111111111".to_string();
+    let projection: serde_json::Value =
+        serde_json::from_str(PUBLISHED_WORKING_PROJECTION).expect("a published projection");
+
+    let wire = json!({
+        "op": "report",
+        "args": {
+            "kind": "heartbeat",
+            "data": {
+                "task_id": task_id,
+                "session_id": task_id,
+                "generation": 1,
+                "seq": 7,
+                "observed": projection["observed"].clone(),
+                "projection": projection,
+            },
+        },
+    });
+    let text = serde_json::to_string(&wire).expect("frame text");
+    let op: ClientOp = serde_json::from_str(&text).expect("a client heartbeat report");
+    assert!(
+        matches!(
+            op,
+            ClientOp::Report(Report::Heartbeat {
+                projection: Some(_),
+                ..
+            })
+        ),
+        "the publish decodes as a heartbeat carrying a projection"
+    );
+
+    let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
+    let mut session = router::Session::with_sender(sender, "builder");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let hello = runtime.block_on(router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(hello_args("builder")),
+    ));
+    assert!(hello.ok, "the link authenticates: {hello:?}");
+    let reply = runtime.block_on(router::dispatch_client(&fixture.state, &mut session, op));
+    assert!(reply.ok, "the publish is accepted: {reply:?}");
+
+    let row = fixture
+        .state
+        .ledger
+        .get_session_row(&task_id)
+        .expect("session read")
+        .expect("the heartbeat published the session");
+    assert_eq!((row.generation, row.seq), (1, 7));
+    assert_eq!(row.session_id, task_id);
+    assert_eq!(
+        projection::row_from_write(&row).public_lifecycle,
+        Lifecycle::Working,
+        "the mirrored row answers with the lifecycle inside the bytes it stores"
+    );
+    assert_eq!(row.agent_state, "running");
+    assert_eq!(row.delivery_state, "pending");
+    assert_eq!(row.resource_state, "attached");
+    assert_eq!(row.recovery_substate, "none");
+    assert_eq!(
+        row.observed_json, PUBLISHED_WORKING_PROJECTION,
+        "the mirrored row is the published projection, byte for byte"
+    );
+    assert_eq!(
+        row.desired_json, "null",
+        "a publish mirrors state and sets no intent"
+    );
+
+    let page =
+        events::replay(&fixture.state, 0, &events::EventFilter::default(), 100).expect("replay");
+    assert!(
+        page.rows
+            .iter()
+            .any(|row| row.event.type_name() == "session_state"),
+        "one accepted publish durable-publishes one session_state event"
+    );
+}
+
 #[test]
 fn a_heartbeat_is_stored_flat_with_the_pane_binding_inside_it() {
     let fixture = fixture();
@@ -2223,12 +2481,14 @@ fn a_heartbeat_is_stored_flat_with_the_pane_binding_inside_it() {
         "builder",
         &Report::Heartbeat {
             task_id: task_id.clone(),
+            session_id: String::new(),
             generation: 1,
             seq: 1,
             observed: json!({
                 "lifecycle": "working",
                 "host": { "orca": { "pane_key": "tab-1:leaf-1" } },
             }),
+            projection: None,
             cluster_ref: Some("cluster-b".to_string()),
         },
     )
@@ -2265,12 +2525,14 @@ fn a_completion_keeps_the_pane_the_session_ran_in() {
         "builder",
         &Report::Heartbeat {
             task_id: task_id.clone(),
+            session_id: String::new(),
             generation: 1,
             seq: 1,
             observed: json!({
                 "lifecycle": "working",
                 "host": { "orca": { "pane_key": "tab-1:leaf-1", "handle": "term_1" } },
             }),
+            projection: None,
             cluster_ref: None,
         },
     )
@@ -2358,18 +2620,18 @@ fn repair_fail_settles_the_task_and_publishes_a_fault_event() {
     let envelope = task("planner", "builder", "work");
     let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
     let task_id = outcome.receipt.task.clone().expect("task");
-    projection::session_sync(
+    projection::report(
         &fixture.state,
         "builder",
-        &SessionSyncArgs {
-            task_id: task_id.clone(),
-            session_id: "sess-1".to_string(),
-            generation: 1,
-            seq: 1,
-            projection: SessionProjection::default_working(),
-        },
+        &projection_publish(
+            task_id.clone(),
+            "sess-1",
+            1,
+            1,
+            SessionProjection::default_working(),
+        ),
     )
-    .expect("sync");
+    .expect("publish");
     faults::record(
         &fixture.state,
         faults::FaultDraft::probe_failure("builder", &task_id, "gone"),
@@ -2421,18 +2683,18 @@ fn repair_close_files_a_cancel_its_owner_can_pull() {
     let envelope = task("planner", "builder", "work");
     let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
     let task_id = outcome.receipt.task.clone().expect("task");
-    projection::session_sync(
+    projection::report(
         &fixture.state,
         "builder",
-        &SessionSyncArgs {
-            task_id: task_id.clone(),
-            session_id: "sess-1".to_string(),
-            generation: 1,
-            seq: 1,
-            projection: SessionProjection::default_working(),
-        },
+        &projection_publish(
+            task_id.clone(),
+            "sess-1",
+            1,
+            1,
+            SessionProjection::default_working(),
+        ),
     )
-    .expect("sync");
+    .expect("publish");
 
     let body = faults::repair(
         &fixture.state,
@@ -2551,18 +2813,20 @@ fn a_control_only_pull_hands_the_command_and_leaves_the_work_queued() {
 #[test]
 fn a_fault_survives_every_repair_transition() {
     let fixture = fixture();
-    let session = |task_id: &str| SessionSyncArgs {
-        task_id: task_id.to_string(),
-        session_id: "sess-1".to_string(),
-        generation: 1,
-        seq: 1,
-        projection: SessionProjection::default_working(),
+    let session = |task_id: &str| {
+        projection_publish(
+            task_id.to_string(),
+            "sess-1",
+            1,
+            1,
+            SessionProjection::default_working(),
+        )
     };
     let adopt_task = onlyne_proto::new_task_id();
     let envelope = task("planner", "builder", "adopt");
     let adopted = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
     let adopt_task = adopted.receipt.task.clone().unwrap_or(adopt_task);
-    projection::session_sync(&fixture.state, "builder", &session(&adopt_task)).expect("sync");
+    projection::report(&fixture.state, "builder", &session(&adopt_task)).expect("publish");
     faults::record(
         &fixture.state,
         faults::FaultDraft::probe_failure("builder", &adopt_task, "detached"),
@@ -2947,13 +3211,13 @@ async fn every_client_and_gateway_arm_answers_without_internal_failure() {
             desired: None,
             observed: None,
         }),
-        ClientOp::SessionSync(SessionSyncArgs {
-            task_id: task_id.clone(),
-            session_id: "sess-1".to_string(),
-            generation: 1,
-            seq: 1,
-            projection: SessionProjection::default_working(),
-        }),
+        ClientOp::Report(projection_publish(
+            task_id.clone(),
+            "sess-1",
+            1,
+            1,
+            SessionProjection::default_working(),
+        )),
         ClientOp::Subscribe(Subscribe::default()),
         ClientOp::QueryLedger(LedgerQuery::default()),
         ClientOp::QuerySessions(QuerySessionsArgs::default()),

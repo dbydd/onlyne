@@ -12,7 +12,7 @@ mod error;
 mod server;
 #[cfg(test)]
 mod tests;
-pub use client::{CLIENT_DDL, ClientStore, IntentRow};
+pub use client::{CLIENT_DDL, ClientStore, IntentRow, TaskRow};
 pub use error::{StoreError, StoreResult, UNSUPPORTED_SCHEMA};
 pub use server::{
     Append, CursorRow, EventRecord, FaultQuery, LedgerRow, RoleRow, SERVER_DDL, ServerFaultRow,

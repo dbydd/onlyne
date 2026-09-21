@@ -6,7 +6,7 @@
 `node:net` 上重写，四字节大端长度前缀加 UTF-8 JSON 的编解码是手写的，运行时零 npm 依赖。
 
 扩展在 onlyne 之外完全静默。客户端 spawn 进程时会注入 `ONLYNE_ROLE`、`ONLYNE_SESSION_ID`、
-`ONLYNE_TASK_ID`（`crates/onlyne-client/src/dispatch.rs`）；三者缺一，就是普通 pi session，
+`ONLYNE_TASK_ID`（`crates/onlyne-client/src/session/dispatch.rs`）；三者缺一，就是普通 pi session，
 插件不注册任何工具、不打开任何 socket。
 
 ```
@@ -173,7 +173,7 @@ assistant 文本。自动规则就是那条退路：它报的是自己那一轮�
 让 pi 退出。socket 当时送不出去的 outcome 会被记住，并在下一次 `hello` 后补发，那次补发的
 应答就是结束进程的交接点。被宿主拒掉的 completion 不会让进程退出，任务不会因为退出而丢失。
 
-最后一条上报是：在已结算的 outcome 旁边带一个 `agent: "idle"` 的观测，发在 completion 被
+最后一条上报只说 agent 这一维：`agent: "idle"` 的观测，发在 completion 被
 ack 之后、进程退出之前。completion 是按 client 手里的元组结算 session 行的，而收尾那一轮
 就是最后一次 heartbeat 时，这个元组读到的仍是 `running`；此后没有任何东西再观测这个进程，
 所以缺了这条上报，已退出的 session 会一直说 `running`。最后一次心跳本来就是 idle 时，插件
@@ -238,17 +238,19 @@ stderr 告警并忽略，把机会让回文件。
 
 - **report 序号基址。** 插件自己的 `report` 序号从 1000 起，不是 1。client 把自身的派发事件
   （`created`、资源 attach、`ready`）写进同一个 `(generation, seq)` 水位，reducer 会静默丢弃
-  水位及以下的报告（`crates/onlyne-session/src/reconcile.rs`），所以从 1 起会丢掉最初的观测。
+  水位及以下的报告（`crates/onlyne-session/src/reconcile/`），所以从 1 起会丢掉最初的观测。
   其余版本语义与规范一致。
 - **`observed` 是完整的 `Observation`。** `report.heartbeat` 携带整个合法状态元组
   （`version`、`generation_live`、`isolate_after`、`terminate_after`、`mismatch_count`、
-  `agent`、`delivery`、`resource`、`recovery`、`outcome`、`public`），不是
-  `{"state": "running"}` 这种简写。宿主会反序列化它，`is_legal` 不接受的一律拒绝。本插件只管
-  `agent` 这一维（turn hooks），`delivery` 保持 `none`、`outcome` 保持 `pending`——在它报出
-  completion 之前这就是它的事实。`resource` 报 `attached`，因为宿主的派发路径已经记过这次
-  attach。
+  `agent`、`delivery`、`resource`、`recovery`），不是
+  `{"state": "running"}` 这种简写。宿主会反序列化它，先改写 client 主张的那六项，再套用 `is_legal`。本插件主张的
+  是 `agent`（turn hooks）、`resource`（进程还活在那块 pane 里，attach 早被宿主派发路径记过）
+  与 `host` 绑定这三件事。`delivery`、`recovery`、`generation_live`、`isolate_after`、
+  `terminate_after`、`mismatch_count` 它一个见证都没有：client 在归约前会用自己
+  的 intent 队列、reducer 历史与角色配置重写这六项，插件填什么都不会被读。任务的 outcome 与公开视图
+  更已经不在元组里，所以也就不再上报。
 - **`ready` 每连接报一次。** 宿主的 hand-off 路径
-  （`crates/onlyne-client/src/dispatch.rs::hand_session`）在把 session 交给挂载的插件时已经报过
+  （`crates/onlyne-client/src/session/dispatch/delivery.rs::hand_session`）在把 session 交给挂载的插件时已经报过
   `ready`，所以插件再报一次在宿主侧是 no-op。插件仍然发送：先挂载、后有活正是 ready barrier
   描述的情形，而且只花一帧。
 - **从不发 `cluster_ref`。** 本插件代表本地 role 说话，从不代表 aggregate；Rust 侧出于同样的
@@ -314,7 +316,7 @@ stderr 告警并忽略，把机会让回文件。
 | `hello` 后立刻 `forbidden` / 断连 | mount role 与 client 的 role 不一致 | `hello.args.mount.role` 对该工作区的 role |
 | `frame_too_large` | 正文超过 8 MiB | 只会由超限的出站图片触发；上限来自核心 |
 | 工具缺失 | 该 pi 版本没有 `pi.registerTool` | `/onlyne status`；对照上面的能力表 |
-| 会话在 `exited` 之后又回到 `idle` | completion 之后还落进了一条 heartbeat 快照，带着 `outcome: pending` | 看 session 日志里 `completion` 之后的 report 顺序；插件对已完成任务不再上报 |
+| 会话在 `exited` 之后又回到 `idle` | completion 之后又落进一条 turn-end heartbeat，把 agent 维搬了回去 | 看 session 日志里 `completion` 之后的 report 顺序；插件对已完成任务不再上报，而 client 自己的 `delivery` 两条都会保住 |
 | supervisor 看板一个 tab 都不列 | 没有 live session 上报过 pane：适配器版本早于这条上报，或这个 pi 不在 Orca pane 里 | `onlyne --server-root … sessions --json` 看 `projection.observed.host.orca.pane_key`；在 pane 里跑 `env \| grep ORCA_` |
 
 `/onlyne status` 打印实时状态（`connected`、`socket`、`role`、`sessionId`、`generation`、

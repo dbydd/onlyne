@@ -111,7 +111,7 @@ The prose reaches a client through `welcome`, which carries the role's `prose` a
 
 ## Limits
 
-The parent cannot see child session projections. Projection rows follow the client connections of the server that holds them, the child's clients connect to the child server, and a projection arrives only through `session_sync` from a client of that server. Source: `sessions` in `SERVER_DDL` (`crates/onlyne-store/src/server.rs` lines 28-43); `ClientOp::SessionSync` in `crates/onlyne-proto/src/ops.rs` line 426; `projection::session_sync` in `crates/onlyne-server/src/router.rs` lines 117-129; decision D5 at `docs/v1-PLAN.md` line 19.
+The parent cannot see child session projections. Projection rows follow the client connections of the server that holds them, the child's clients connect to the child server, and a projection arrives only inside a heartbeat `report` from a client of that server. Source: `sessions` in `SERVER_DDL` (`crates/onlyne-store/src/server.rs` lines 36-54); `Report::Heartbeat` in `crates/onlyne-proto/src/ops.rs` lines 140-158; the `report` arm in `crates/onlyne-server/src/router.rs` lines 118-131, which hands the frame to `projection::report` (`crates/onlyne-server/src/projection.rs` lines 67-120); decision D5 at `docs/v1-PLAN.md` line 19.
 
 A name collision between a child role and a parent role is the supervisor's responsibility, since the aggregate name is the only identity visible upward. Open item: confirm against `crates/onlyne-net/src/acl.rs` (role names are the ACL key) and `crates/onlyne-testkit/e2e/two-cluster.sh`.
 

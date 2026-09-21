@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
-use onlyne_session::{FaultRecord, SessionLedger, SessionRecord, VersionedSession};
+use onlyne_proto::Causality;
+use onlyne_session::{FaultRecord, SessionLedger, SessionRecord, TaskState, VersionedSession};
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -11,11 +12,14 @@ use serde_json::Value;
 use crate::error::{StoreError, StoreResult};
 use crate::server::{
     EventRecord, append_event_conn, event_head_conn, events_since_conn, open_connection, rfc3339,
+    string_tag,
 };
 
 const CLIENT_MARKER: &str = "onlyne-client";
 /// The client DDL's own revision; the server store carries a separate one.
-const CLIENT_SCHEMA_VERSION: i64 = 1;
+/// Version 2 is the tuple rebuild: the `sessions` row lost its
+/// `public_lifecycle` column, and the task moved into a table of its own.
+const CLIENT_SCHEMA_VERSION: i64 = 2;
 const DEFAULT_LIMIT: i64 = 100;
 
 pub const CLIENT_DDL: &str = r#"CREATE TABLE IF NOT EXISTS sessions(
@@ -24,7 +28,6 @@ pub const CLIENT_DDL: &str = r#"CREATE TABLE IF NOT EXISTS sessions(
   session_id TEXT NOT NULL,
   generation INTEGER NOT NULL,
   seq INTEGER NOT NULL,
-  public_lifecycle TEXT NOT NULL,
   agent_state TEXT NOT NULL,
   delivery_state TEXT NOT NULL,
   resource_state TEXT NOT NULL,
@@ -38,8 +41,28 @@ pub const CLIENT_DDL: &str = r#"CREATE TABLE IF NOT EXISTS sessions(
   -- docs/v1-PLAN.md:368 defers the session fields to the lifecycle store, whose SessionRecord.updated_at in crates/onlyne-session/src/reconcile.rs is i64 unix seconds, and the store encodes those seconds through its own helper on every write.
   updated_at TEXT NOT NULL
 );
--- Secondary index for the kernel's session-addressed delete and close paths; task_id stays the primary key so a task holds one projection row.
+-- Secondary index for the kernel's session-addressed delete and close paths; task_id stays the primary key so a task holds one session tuple.
 CREATE INDEX IF NOT EXISTS sessions_session_id_idx ON sessions(session_id);
+-- The task's own record. How its work ended is not a session dimension: the
+-- session tuple says what this session can prove about its agent, intent,
+-- resource, and recovery line, and `project` needs the task's verdict handed
+-- in before it can say whether the session is over. A row is opened when a
+-- delivery becomes a session, from the envelope's causality, and settled once;
+-- a verdict that arrives for a task this process never opened writes its own
+-- row, so a completion is never dropped because of who opened what. `kind` is
+-- how the delivery reached this role: `root` for work given here, `relay` for
+-- work handed down from a parent task.
+CREATE TABLE IF NOT EXISTS task(
+  task_id TEXT PRIMARY KEY,
+  kind TEXT,
+  parent_task TEXT,
+  hop INTEGER NOT NULL DEFAULT 0,
+  attempt INTEGER NOT NULL DEFAULT 0,
+  -- TaskState's own snake_case tag from crates/onlyne-session/src/lifecycle/state.rs. `pending` is the open state, and the settle write is the only thing that leaves it, so `settled_at IS NULL` and `task_state = 'pending'` answer the same question.
+  task_state TEXT NOT NULL,
+  opened_at TEXT NOT NULL,
+  settled_at TEXT
+);
 CREATE TABLE IF NOT EXISTS intents(
   op_id TEXT PRIMARY KEY,
   env_json TEXT NOT NULL,
@@ -106,6 +129,23 @@ pub struct IntentRow {
     pub last_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// One task record, as the `task` table holds it. The chain columns come from
+/// the delivery envelope's causality, so a task says who caused it and how deep
+/// it sits without its owner being asked. `task_state` is the whole answer to
+/// "how did this end": no session row carries it, and `None` from [`ClientStore::task`]
+/// means this role never opened the task, not that it is in flight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRow {
+    pub task_id: String,
+    pub kind: Option<String>,
+    pub parent_task: Option<String>,
+    pub hop: i64,
+    pub attempt: i64,
+    pub task_state: TaskState,
+    pub opened_at: String,
+    pub settled_at: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -322,6 +362,84 @@ impl ClientStore {
         Ok(changed == 1)
     }
 
+    /// Open the task record for one delivery.
+    ///
+    /// The causality of the envelope that became a session is the record: the
+    /// task id, its parent, its depth, and the redelivery count it arrived on.
+    /// An already-open task keeps its settle, its `opened_at`, and its verdict —
+    /// a re-dispatch refreshes only the chain it arrived on, and takes the
+    /// larger attempt so the count never runs backwards. `kind` is how the
+    /// delivery reached this role — `root` or `relay` — never the envelope's
+    /// message kind, which says nothing a reader can act on. Answers true when
+    /// the record was written, which covers both the fresh open and a chain
+    /// refresh on a task that is already there.
+    pub fn open_task(&self, causality: &Causality, kind: &str) -> StoreResult<bool> {
+        let conn = self.conn()?;
+        let now = rfc3339(Utc::now());
+        let changed = conn.execute(
+            "INSERT INTO task(task_id,kind,parent_task,hop,attempt,task_state,opened_at,settled_at) VALUES(?,?,?,?,?,'pending',?,NULL)
+             ON CONFLICT(task_id) DO UPDATE SET kind=excluded.kind,parent_task=excluded.parent_task,hop=excluded.hop,attempt=MAX(excluded.attempt,task.attempt)",
+            params![
+                causality.task,
+                kind,
+                causality.parent_task,
+                i64::from(causality.hop),
+                i64::from(causality.attempt),
+                now
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Settle one task with the verdict its completion carries.
+    ///
+    /// The first terminal verdict wins. A task sitting open takes the verdict
+    /// and stamps `settled_at`; one already settled keeps its record and answers
+    /// `false`, which is what stops a zombie session that came back after a
+    /// newer one answered from rewriting the answer it already gave.
+    ///
+    /// The write never depends on the open having run. A task this process never
+    /// dispatched — a completion reported for work an earlier process opened, or
+    /// a delivery that found its slot already serving and returned before the
+    /// open — gets its record here, with no kind, no parent, and both clocks at
+    /// this verdict. Without that, the verdict would be dropped on the floor and
+    /// the session could never project its way out of `working`.
+    pub fn settle_task(&self, task_id: &str, task_state: TaskState) -> StoreResult<bool> {
+        let conn = self.conn()?;
+        let now = rfc3339(Utc::now());
+        let changed = conn.execute(
+            "INSERT INTO task(task_id,kind,parent_task,hop,attempt,task_state,opened_at,settled_at) VALUES(?,NULL,NULL,0,0,?,?,?)
+             ON CONFLICT(task_id) DO UPDATE SET task_state=excluded.task_state,settled_at=excluded.settled_at WHERE task.settled_at IS NULL",
+            params![task_id, string_tag(&task_state)?, now, now],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// The record of one task, when this role opened it.
+    pub fn task(&self, task_id: &str) -> StoreResult<Option<TaskRow>> {
+        let conn = self.conn()?;
+        let row = conn
+            .query_row(
+                "SELECT task_id,kind,parent_task,hop,attempt,task_state,opened_at,settled_at FROM task WHERE task_id=?",
+                params![task_id],
+                task_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Tasks this role has opened and not settled, oldest first.
+    pub fn open_tasks(&self, limit: u32) -> StoreResult<Vec<TaskRow>> {
+        let conn = self.conn()?;
+        let rows = conn
+            .prepare(
+                "SELECT task_id,kind,parent_task,hop,attempt,task_state,opened_at,settled_at FROM task WHERE settled_at IS NULL ORDER BY opened_at,rowid LIMIT ?",
+            )?
+            .query_map(params![sql_limit(limit)], task_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     fn conn(&self) -> StoreResult<MutexGuard<'_, Connection>> {
         self.inner
             .lock()
@@ -334,7 +452,7 @@ impl SessionLedger for ClientStore {
         let conn = self.conn()?;
         let row = conn
             .query_row(
-                "SELECT task_id,agent_state,delivery_state,resource_state,public_lifecycle,recovery_substate,desired_json,observed_json,generation,seq,backend_ref,mismatch_count,updated_at FROM sessions WHERE task_id=?",
+                "SELECT task_id,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,generation,seq,backend_ref,mismatch_count,updated_at FROM sessions WHERE task_id=?",
                 params![task_id],
                 session_record_row,
             )
@@ -346,15 +464,14 @@ impl SessionLedger for ClientStore {
         let conn = self.conn()?;
         let (backend, session_id) = backend_parts(task_id, &version.backend_ref);
         let changed = conn.execute(
-            "INSERT INTO sessions(task_id,role,session_id,generation,seq,public_lifecycle,agent_state,delivery_state,resource_state,recovery_substate,observed_json,backend,backend_ref,desired_json,mismatch_count,updated_at) VALUES(?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-             ON CONFLICT(task_id) DO UPDATE SET session_id=excluded.session_id,generation=excluded.generation,seq=excluded.seq,public_lifecycle=excluded.public_lifecycle,agent_state=excluded.agent_state,delivery_state=excluded.delivery_state,resource_state=excluded.resource_state,recovery_substate=excluded.recovery_substate,observed_json=excluded.observed_json,backend=COALESCE(excluded.backend,sessions.backend),backend_ref=excluded.backend_ref,desired_json=excluded.desired_json,mismatch_count=excluded.mismatch_count,updated_at=excluded.updated_at
+            "INSERT INTO sessions(task_id,role,session_id,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,observed_json,backend,backend_ref,desired_json,mismatch_count,updated_at) VALUES(?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(task_id) DO UPDATE SET session_id=excluded.session_id,generation=excluded.generation,seq=excluded.seq,agent_state=excluded.agent_state,delivery_state=excluded.delivery_state,resource_state=excluded.resource_state,recovery_substate=excluded.recovery_substate,observed_json=excluded.observed_json,backend=COALESCE(excluded.backend,sessions.backend),backend_ref=excluded.backend_ref,desired_json=excluded.desired_json,mismatch_count=excluded.mismatch_count,updated_at=excluded.updated_at
              WHERE excluded.generation > sessions.generation OR (excluded.generation = sessions.generation AND excluded.seq > sessions.seq)",
             params![
                 task_id,
                 session_id,
                 version.generation,
                 version.seq,
-                version.public_lifecycle,
                 version.agent_state,
                 version.delivery_state,
                 version.resource_state,
@@ -479,15 +596,30 @@ fn session_record_row(r: &Row<'_>) -> rusqlite::Result<SessionRecord> {
         agent_state: r.get(1)?,
         delivery_state: r.get(2)?,
         resource_state: r.get(3)?,
-        public_lifecycle: r.get(4)?,
-        recovery_substate: r.get(5)?,
-        desired_json: r.get(6)?,
-        observed_json: r.get(7)?,
-        generation: r.get(8)?,
-        seq: r.get(9)?,
-        backend_ref: r.get(10)?,
-        mismatch_count: r.get(11)?,
-        updated_at: crate::server::rfc3339_to_unix(&r.get::<_, String>(12)?),
+        recovery_substate: r.get(4)?,
+        desired_json: r.get(5)?,
+        observed_json: r.get(6)?,
+        generation: r.get(7)?,
+        seq: r.get(8)?,
+        backend_ref: r.get(9)?,
+        mismatch_count: r.get(10)?,
+        updated_at: crate::server::rfc3339_to_unix(&r.get::<_, String>(11)?),
+    })
+}
+
+fn task_row(r: &Row<'_>) -> rusqlite::Result<TaskRow> {
+    let state_word: String = r.get(5)?;
+    let task_state = serde_json::from_value(Value::String(state_word.clone()))
+        .map_err(|e| conversion_error(5, format!("task_state column holds {state_word:?}: {e}")))?;
+    Ok(TaskRow {
+        task_id: r.get(0)?,
+        kind: r.get(1)?,
+        parent_task: r.get(2)?,
+        hop: r.get(3)?,
+        attempt: r.get(4)?,
+        task_state,
+        opened_at: r.get(6)?,
+        settled_at: r.get(7)?,
     })
 }
 

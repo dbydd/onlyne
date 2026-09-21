@@ -7,7 +7,7 @@
 //! parser in `onlyne-config`, so a template that drifts from the defaults it
 //! quotes, or a comment line that loses its `#`, fails here.
 
-use onlyne_client::init::toml_string;
+use onlyne_client::ops::init::toml_string;
 use onlyne_config::{
     AcpSection, ClientEntry, DEFAULT_RECONNECT_GRACE_SECS, IntentPolicy, Spec, Timeouts,
 };

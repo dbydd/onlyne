@@ -42,6 +42,34 @@ function heartbeats(host) {
     .map((args) => args.data.observed);
 }
 
+/**
+ * The exact keys of a plugin observation outside a pane. `agent`, `resource` and
+ * the reconcile defaults are what the plugin states; `delivery` and `recovery`
+ * ride as placeholders the client overwrites with its own records, and no
+ * outcome or public view travels in a tuple at all.
+ */
+const OBSERVED_KEYS = [
+  "version",
+  "generation_live",
+  "isolate_after",
+  "terminate_after",
+  "mismatch_count",
+  "agent",
+  "delivery",
+  "resource",
+  "recovery",
+];
+
+/**
+ * The observation's keys with the pane binding discounted: `host` rides along
+ * when the process was spawned in an Orca pane, and the test host's own
+ * environment decides whether it does.
+ */
+function dimensionKeys(observed) {
+  const { host, ...rest } = observed;
+  return Object.keys(rest);
+}
+
 /** Poll until `predicate` holds, so a test never races the event loop. */
 async function waitFor(predicate, { timeoutMs = 2_000, stepMs = 5 } = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -298,7 +326,8 @@ test("every heartbeat names the Orca pane this process was spawned in", async ()
     });
     // The binding rides beside the state dimensions instead of replacing them.
     assert.equal(observed.agent, "running");
-    assert.equal(observed.public, "working");
+    assert.equal(observed.resource, "attached");
+    assert.deepEqual(Object.keys(observed), [...OBSERVED_KEYS, "host"]);
     assert.equal(observed.version.generation, 1);
   });
 });
@@ -545,12 +574,14 @@ test("turn hooks report running then idle, and a settle completes done with the 
   agent.onTurnStart();
   const running = await waitFor(() => host.of("report").find((report) => report.data?.observed?.agent === "running"));
   assert.equal(running.kind, "heartbeat");
-  assert.equal(running.data.observed.public, "working");
+  assert.equal(running.data.observed.resource, "attached");
+  assert.deepEqual(dimensionKeys(running.data.observed), OBSERVED_KEYS, "a running beat carries exactly the dimensions the plugin can see");
   assert.equal(running.data.observed.version.generation, 1);
 
   agent.onTurnEnd();
   const idle = await waitFor(() => host.of("report").find((report) => report.data?.observed?.agent === "idle"));
-  assert.equal(idle.data.observed.public, "idle");
+  assert.equal(idle.kind, "heartbeat");
+  assert.deepEqual(dimensionKeys(idle.data.observed), OBSERVED_KEYS, "an idle beat claims no dimension the plugin does not own");
 
   agent.noteAssistantText("OK");
   agent.onSettled();
@@ -567,9 +598,10 @@ test("turn hooks report running then idle, and a settle completes done with the 
 
 // The live case found this ordering too: pi's turn-end hook fires in the same
 // millisecond as the settle that reports the completion, so the turn-end
-// heartbeat lands after the completion report. `observed` is a whole snapshot,
-// and one carrying `delivery: none`/`outcome: pending` puts the session back to
-// `idle` after the host has already recorded `exited`.
+// heartbeat lands after the completion report. The beat no longer carries a
+// delivery or recovery the host would believe — the client composes those from
+// its own records — but a snapshot of an agent dimension nobody is watching any
+// more is still a frame the protocol does not need, so the plugin stays quiet.
 test("a turn-end heartbeat after the completion never leaves the plugin", async () => {
   const { agent, host, surface } = await startAgent();
   agent.start();
@@ -767,10 +799,7 @@ test("a completion after a running beat publishes the settled observation before
   );
   const settled = reports.at(-1).data.observed;
   assert.equal(settled.agent, "idle");
-  assert.equal(settled.outcome, "done");
-  assert.equal(settled.delivery, "accepted");
-  assert.equal(settled.recovery, "draining");
-  assert.equal(settled.public, "exited");
+  assert.deepEqual(dimensionKeys(settled), OBSERVED_KEYS, "the last observation states the agent and nothing else");
   assert.deepEqual(surface.calls.exits, ["done"]);
 });
 
@@ -821,7 +850,7 @@ test("a queued completion and its settled observation flush in order after recon
     ],
     "the settled observation rides after the flushed completion: " + JSON.stringify(reports),
   );
-  assert.equal(reports.at(-1).data.observed.outcome, "done");
+  assert.deepEqual(dimensionKeys(reports.at(-1).data.observed), OBSERVED_KEYS, "the flushed tail states the agent and nothing else");
 });
 
 test("an inbound image is written under the workspace and handed to pi", async () => {

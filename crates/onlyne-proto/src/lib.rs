@@ -55,11 +55,11 @@ pub use frame::{
 };
 pub use ops::{
     AckArgs, AdminControl, AdminOp, AdminSend, AgentPhase, ByeArgs, ClientOp, ControlArgs,
-    ConversationInfo, Delivery, DeliveryPhase, GatewayOp, HandshakeArgs, HealthArgs, HistoryArgs,
-    LedgerEntry, LedgerQuery, PullArgs, PullReply, QueryFaultsArgs, QueryRolesArgs,
+    ConversationInfo, Delivery, DeliveryPhase, FreshRead, GatewayOp, HandshakeArgs, HealthArgs,
+    HistoryArgs, LedgerEntry, LedgerQuery, PullArgs, PullReply, QueryFaultsArgs, QueryRolesArgs,
     QuerySessionsArgs, Receipt, RecoveryPhase, RegisterChannelArgs, RepairAck, RepairAdopt,
     RepairFail, RepairRebind, RepairTarget, Report, ResourcePhase, RoleInfo, SessionProjection,
-    SessionRow, SessionSyncArgs, ShutdownArgs, Subscribe, Welcome,
+    SessionRow, ShutdownArgs, Subscribe, Welcome,
 };
 
 pub use payload::{GRAMMAR_V2, Handoff, MAX_REPORT_HANDOFFS, MAX_REPORT_LINES, PayloadV2};

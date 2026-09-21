@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.4.0] - 2026-09-21
 
 Scope: three changes in one window. Two close session-bookkeeping holes read out of
 one field report, and the third removes the mechanism the second hole lived in.
@@ -28,6 +28,23 @@ spawn path below stayed unreachable, so the server row sat `in_flight` and the r
 still looked like it had room. That shape is unreachable now, because `reuse` is
 gone and every task spawns a session of its own.
 
+Scope, second window: the session lifecycle is rebuilt around one rule. In plugin
+mode a session's state comes from the frames the mounted plugin reports and from
+heartbeat liveness. Three sources competed before it. The adapter frames, a
+backend probe that read a pane or a tab, and stored rows in `client.db` read as
+current fact; a fourth, the client's own clocks, decided death on a schedule no
+plugin had witnessed. The rule assigns each one a job. A frame from the serving
+connection moves `agent`, `resource` and `host`. The client composes `delivery`
+and `recovery` from its own outbound queue, and the reconcile policy with its
+counters from its own tuple, before the reducer reads a beat. A probe result
+answers a question and stands in for no fact. Death is one clock with three
+starts — a session's birth, a lost connection, a graceful goodbye while work is
+owed — cleared when a connection attaches and read by one sweep, which also
+settles the task its dead session owed. The task's result left the session tuple
+for a record of its own, so a session row describes a session and the task table
+answers for a task. The public lifecycle left the tuple as well and is derived
+where it is read.
+
 ### Breaking
 
 - client and server: `reuse` is gone. Every task runs in a session of its own, so
@@ -41,9 +58,48 @@ gone and every task spawns a session of its own.
   cannot read a new one's: restart the server and every client of a role together
   on one build. The removed key also moves every `spec_hash`, which only
   `spec_diff` and the `roles` display read.
+- session: the tuple a session publishes describes the session alone. `Outcome` leaves
+  `Observation` and becomes `TaskState`, a value the caller hands `project`, and the
+  public lifecycle leaves it too, so a reader derives `created`/`working`/`idle`/`exited`
+  from the dimensions beside the task's own verdict at the point of use. `settle` loses
+  its fourth argument. The fabrication both sides carried — `delivery: accepted` with
+  `recovery: draining`, written for any completed task to satisfy the tuple's legality
+  rule — has nothing left to satisfy, and the rule that demanded it is gone.
+- client and server: `session_sync` is gone, and the client-to-server vocabulary is twelve
+  verbs. A `report` whose kind is `heartbeat` is the only carrier of session state: a beat
+  with no projection is liveness alone, an accepted publish passes the same
+  `(generation, seq)` gate as every state write before it, and the mirrored row keeps
+  `desired` empty. A client and a server from different sides of this change cannot read
+  each other's state on that path, so restart them together on one build.
+- adapter: a plugin's `report.heartbeat` carries an observation of the session's own
+  dimensions. The `outcome` and `public` keys are gone from it, and the host discards
+  whatever the body claims for `delivery`, `recovery`, `generation_live`, `isolate_after`,
+  `terminate_after` and `mismatch_count`, which are the client's own. A body without the
+  removed keys decodes, so an older plugin keeps mounting and is answered the same way.
+- store: the client database moves to schema marker 2 and the server's to 3. The
+  `sessions` row loses `public_lifecycle`, and the client gains a `task` table —
+  `task_id`, `kind`, `parent_task`, `hop`, `attempt`, `task_state`, `opened_at`,
+  `settled_at` — which holds the task's result where the session row used to. A database
+  written by the previous layout is refused outright with `onlyne: unsupported schema;
+  v1.0.0 does not migrate`, so a workspace on this tree migrates its own data or drops it.
 
 ### Changed
 
+- server and tui: `RoleInfo` carries `queued`, the exact number of deliveries
+  waiting in one role's inbox, counted by the server
+  (`ServerLedger::queued_count_for`) rather than read off a capped page. It is
+  the depth `relay::pull` would hand a session of that role, `note` rows excluded
+  as `pull` excludes them. A row from a server that predates the field omits the
+  key and reads as nothing waiting. Page 1 prints it beside the role's capacity
+  and the role's map box counts it in its third interior row.
+- tui: the role map is a function of the session set, not of the order the server
+  happened to answer in or of the clock. `visible_sessions` and `live_sessions`
+  sort on `(role, task_id)`, so the role boxes, the page-2 graph table and the
+  row its cursor highlights agree and hold still across a refresh; the server's
+  own `ORDER BY updated_at DESC` is untouched. `box_width` measures a fixed
+  number of cells for a session row's age and takes the widest row of the whole
+  set rather than the first two, so a heartbeat or a longer age no longer resizes
+  every box and re-routes every hop.
 - config: a key no field declares is ignored, and the parse still succeeds. Each
   ignored key is named once by `onlyne-config`'s `keys` walker, which reads the
   same generated JSON Schema `config-schema` writes, so a path like
@@ -54,12 +110,63 @@ gone and every task spawns a session of its own.
 - config: `ServerSection.crate` carries `#[serde(default)]`. A `[server]` table
   without a `crate` list loads, which is the shape `onlyne server generate` and the
   relocate e2e read; before this it failed with `missing field crate`.
+- client: a plugin heartbeat moves `agent`, `resource` and `host`, and the client composes
+  the rest of the tuple before the reducer reads it (`compose_observation`). A beat
+  claiming `delivery: none` cannot clear an intent the server has not receipted, and a
+  beat cannot reset the reconcile ladder or its counters: `isolate_after`,
+  `terminate_after`, `mismatch_count` and `generation_live` come from the client's own
+  tuple, where the plugin sends constants.
+- client: the receipt reaches the reducer. An accepted answer on the outbound queue —
+  `IntentResult::Accepted`, which the flusher had parsed and dropped — now feeds
+  `IntentReceipt` for the session its intent names, so `DeliveryState` records `accepted`
+  once the server answers and a completed task exits through `Done` beside `Accepted`.
+  The routing accepts exactly two payload shapes, a `completion` envelope and a
+  `report.complete`, because a receipt fed for any accepted op that merely names a task
+  would close a completion's drain on the strength of an ack.
+- client: death is one clock with three starts and one clear. A slot is born with the
+  window running, a connection end restarts it, a graceful detach past the point the
+  session still owes work restarts it, and an attaching connection clears it. The sweep
+  reads that stamp and takes every session, task-bound included; at expiry it feeds the
+  agent-gone event, settles the task `failed`, and closes the resource with the reason the
+  task's own state earns. `session_alive`, the attach-and-probe liveness check, is gone
+  with its last caller.
+- client: the sweep reads silence as well. A plugin that holds its connection and stops
+  beating opens the same window once its last accepted frame is older than
+  `HEARTBEAT_INTERVAL` times a margin, guarded on an attached transport, a bound task and
+  an unsettled verdict, because the pi plugin stops beating between tasks by design and a
+  quiet session with nothing owed is an agent waiting for work.
+- client: a mount that follows a drop rebases the watermark, so a reporter that reconnects
+  inside the grace window lands its next frame. The version a beat carries is the
+  generation the session's tuple holds beside the reporter's own sequence; the plugin's
+  generation field is read nowhere on that path. The rebase moves the generation with the
+  content, because the reducer's no-op detection compares the dimensions without the
+  version and a watermark-only event reads as a replay.
+- client: a state frame is applied only when its sender is the connection the client bound
+  to that session (`serves_session`). A connection the client holds read-only is answered
+  `ok` and its claims about state reach the log alone; a second verdict for a task whose
+  record is settled builds no receipt and releases no binding, which stops a zombie
+  completion from clearing the live session's delivery handle.
+- cli and server: `onlyne sessions --fresh --task T` asks T's owning client to probe its
+  plugin and answers what that probe produced. The wait lives inside the read's own
+  `--timeout` less a reserve, the answer marks each row `probed`, `offline` or
+  `unanswered`, and a read without the flag sends no frame and waits on nothing.
 
 ### Fixed
 
 - client: the answer to a plugin's own report leaves before any bye that report
   triggers (`crates/onlyne-client/src/adapter_socket.rs`, `crates/onlyne-client/src/
   dispatch.rs`, `retire_revived`). One task's terminal write is now reported once.
+- client: no path answers a task question from a stored session row. The close reason, the
+  capacity count, the "this role already finished this task" check and the stall report
+  read the task's own record and the derived projection.
+- client: the grace sweep leaves a slot the client holds read-only alone, and feeds the id
+  its close reason reads. A ghost whose task a newer session took can no longer push the
+  live session's mirror to `exited` or release its in-flight delivery row.
+- client: a session whose plugin never mounted has a clock. It held a slot and its host
+  resource until its task settled by some other path, and for a plugin that never arrived
+  there was no other path.
+- session: the reducer's `AdoptNewGeneration` and `Supersede` have a producer, and the
+  rebase they exist for is reachable from a re-mount.
 
 ### Tests
 
@@ -81,11 +188,40 @@ gone and every task spawns a session of its own.
   (`crates/onlyne-config/tests/spec_example.rs`). The generated schemas are held
   to their new shape by `the_published_client_schema_carries_acp`, which asserts
   the client schema declares no `additionalProperties`.
+- client: the rebuilt lifecycle holds one case per rule —
+  `a_re_mounting_plugin_inside_the_grace_has_its_next_heartbeat_applied`,
+  `a_state_frame_from_a_connection_held_read_only_leaves_the_tuple_alone`,
+  `a_session_whose_plugin_stops_beating_dies_when_the_window_expires`,
+  `a_session_whose_plugin_never_mounts_retires_past_the_grace`,
+  `the_reconnect_grace_does_not_take_a_slot_the_client_holds_read_only`, and
+  `a_session_that_died_at_the_grace_window_settles_the_task_it_owed`
+  (`crates/onlyne-client/tests/scenarios/reconnect.rs`, and
+  `crates/onlyne-client/src/session/dispatch/{reports,retire}/tests.rs`).
+- client: `a_beat_disowning_the_drain_leaves_the_open_intent_in_place`,
+  `a_beat_cannot_reset_the_reconcile_policy_or_its_counters`, and
+  `heartbeat_junk_in_the_client_dimensions_writes_none_of_it` pin the ownership split at
+  the plugin door, and
+  `an_accepted_completion_intent_exits_the_session_without_closing_its_resource` pins the
+  receipt path.
+- session: the reducer's tables were rebuilt around the five dimensions
+  (`crates/onlyne-session/src/lifecycle/tests.rs`), and
+  `a_done_task_with_its_intent_still_in_flight_stays_working` is the shape the removed
+  legality rule refused.
+- tui: `a_permuted_session_order_renders_the_same_picture` renders one logical snapshot
+  twice with `sessions` reversed and asserts byte equality, and holds `box_width` still
+  under the same permutation (`crates/onlyne-tui/src/ui.rs`).
+- proto: `the_two_heartbeat_shapes_write_only_their_own_keys` holds the publish beat and
+  the liveness beat to their own key sets, so an older plugin's bytes keep decoding.
 
 ### Check on this tree
 
-Run 2026-09-20: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
--j 4 -- -D warnings`, and `cargo test --workspace --no-fail-fast -j 4 --lib --tests`
+Run 2026-09-21, after the lifecycle rebuild: `cargo fmt --all --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, and `cargo test --workspace` pass, the last at
+1006 cases across 68 result blocks with 0 failures and 1 ignored (`herdr_live_probe`).
+
+Run 2026-09-20, earlier in the same window: `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets -j 4 -- -D warnings`, and
+`cargo test --workspace --no-fail-fast -j 4 --lib --tests`
 pass, the last at 975 cases across 50 suites with 0 failures and 1 ignored
 (`herdr_live_probe`); `cd proofs && lake build` completes with 7 jobs. Both e2e
 runs below used `BIN_DIR=target/release` on this tree.
@@ -97,6 +233,11 @@ process, and one process serves one session: the other sessions have no transpor
 so their tasks never settle. A role that runs more than one concurrent session needs
 one agent per session, and the fixture has to mount them.
 
+`crates/onlyne-testkit/e2e/local-task.sh` passes on this tree too, run 2026-09-21 with
+`BIN_DIR=target/debug`. The `reconnect-requeue.sh` paragraph above dates from 2026-09-20
+and the lifecycle rebuild did not re-run that fixture; its own proof lives in the
+workspace tests named under `### Tests`.
+
 ### Documentation
 
 - `docs/operations.md`, 「会话残影与属主判定」: the bye exception and why an answer
@@ -106,10 +247,27 @@ one agent per session, and the fixture has to mount them.
   build.
 - `docs/v1-ARCHITECTURE.md` §5: the client task path no longer selects among idle
   sessions; it spawns a session per task.
+- `AGENTS.md` §6 and §8: the client-to-server vocabulary is twelve verbs, `report`'s
+  heartbeat variant is the only state carrier, and the schema markers read 2 and 3.
+- `docs/operations.md`: the `onlyne sessions` entry carries the `--fresh` bound, its
+  three answer markers and its `--task` requirement; the retired-scan rule reads the
+  derived lifecycle beside the task's own record.
+- `docs/v1-ARCHITECTURE.md`, `## Session lifecycle`: the dimension table lists the five
+  session dimensions, `TaskState` as an input and the public view as a derived reading;
+  `## CLI verbs and flags` names the fresh read.
+- `crates/onlyne-adapter/PROTOCOL.md`: the heartbeat example carries the session's own
+  observation, and a beat's claims about the client's dimensions are discarded at the
+  door.
+- `plugins/onlyne-agent-pi/README.md` and `README.zh.md`: the plugin reports `agent`,
+  `resource` and `host`, and the completion report carries the task's verdict.
 
-Wire format: `Welcome` and `RoleInfo` lose `reuse`, and both proto schemas are
-regenerated. The spec and client config schemas lose `additionalProperties`, and
-their fixtures move with them.
+Wire format: `Welcome` and `RoleInfo` lose `reuse`; `RoleInfo` gains `queued`,
+`SessionRow` gains `fresh` and `QuerySessionsArgs` gains `fresh_wait_ms`; the
+`session_sync` op is gone and `Report::Heartbeat` gains `session_id` and `projection`,
+both skipped when unset, so a bare liveness beat keeps its bytes. The observed object a
+plugin sends loses its `outcome` and `public` keys. Both proto schemas are regenerated.
+The spec and client config schemas lose `additionalProperties`, and their fixtures move
+with them.
 
 ## [1.3.1] - 2026-09-20
 

@@ -900,8 +900,8 @@ fn role_detail_text(detail: &RoleDetail) -> (String, String) {
     let mut out = String::new();
     out.push_str(&format!("state {}\n", detail.state.as_str()));
     out.push_str(&format!(
-        "sessions {}/{}\n",
-        detail.session_count, detail.max_sessions
+        "sessions {}/{} · queued {}\n",
+        detail.session_count, detail.max_sessions, detail.queued
     ));
     out.push_str(&format!(
         "admin {}\n",
@@ -1076,7 +1076,21 @@ mod tests {
             outcome: None,
             updated_at: Some(Utc::now().timestamp().to_string()),
             heartbeat_stale: false,
+            fresh: None,
         }
+    }
+
+    /// A session whose last projection is `age_secs` old. A render test fixes
+    /// the age rather than reading the clock, so two renders of one snapshot
+    /// cannot straddle a format boundary (`59s` becoming `1m`).
+    fn session_aged(task: &str, age_secs: i64) -> SessionRow {
+        let mut row = session(task, Lifecycle::Working, AgentPhase::Running);
+        row.updated_at = Some(
+            (Utc::now() - chrono::Duration::seconds(age_secs))
+                .timestamp()
+                .to_string(),
+        );
+        row
     }
 
     fn role(name: &str, edges: &[&str]) -> RoleView {
@@ -1088,6 +1102,7 @@ mod tests {
             prose: None,
             state: Presence::Online,
             session_count: 0,
+            queued: 0,
             detail: None,
             edges: edges.iter().map(|edge| (*edge).to_string()).collect(),
             aggregate: None,
@@ -1285,6 +1300,70 @@ mod tests {
         );
     }
 
+    /// The server answers `sessions` `ORDER BY updated_at DESC`, so a heartbeat
+    /// or a fresh session permutes that slice on every refresh. One logical
+    /// snapshot, permuted, must render byte for byte the same: the role boxes,
+    /// the page-2 table and the row its cursor highlights all read the same
+    /// canonical order, and the box width reads neither the order nor the clock.
+    ///
+    /// The four sessions are built so a width taken from "the first two rows"
+    /// would differ between the two orders: two carry a long task id with a
+    /// two-cell age, two a short task id with a three-cell age.
+    #[test]
+    fn a_permuted_session_order_renders_the_same_picture() {
+        let snapshot = Snapshot {
+            status: serde_json::json!({"cluster": "local"}),
+            roles: vec![role("planner", &["builder"]), role("builder", &[])],
+            sessions: vec![
+                session_aged("aaaaaaaa-1", 5),
+                session_aged("bbbbbbbb-2", 300),
+                session_aged("c-3", 12 * 3600),
+                session_aged("d-4", 20 * 86_400),
+            ],
+            server_online: true,
+            // A fixed clock: the footer prints the refresh time, and a live one
+            // would part two renders of one snapshot on its own.
+            refreshed_at: Some(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+            ),
+            ..Snapshot::default()
+        };
+        let mut permuted = snapshot.clone();
+        permuted.sessions.reverse();
+
+        // The width the map lays its boxes out at is a function of the session
+        // set alone, so permuting the slice a node carries cannot move it: a
+        // width that followed the front of the list would resize every box and
+        // re-route every hop on the refresh that reshuffled it.
+        let nodes = layout_nodes(&snapshot, false);
+        let mut permuted_nodes = nodes.clone();
+        for node in &mut permuted_nodes {
+            node.sessions.reverse();
+        }
+        assert_eq!(
+            layout::box_width(&nodes),
+            layout::box_width(&permuted_nodes),
+            "the box width turned on the session order"
+        );
+
+        for (label, state) in [
+            ("page 1", UiState::default()),
+            (
+                "page 2",
+                UiState {
+                    page: Page::Swarm,
+                    ..UiState::default()
+                },
+            ),
+        ] {
+            assert_eq!(
+                render_once_text(&snapshot, &state, 120, 36),
+                render_once_text(&permuted, &state, 120, 36),
+                "{label} moved when only the session order changed"
+            );
+        }
+    }
+
     #[test]
     fn a_wider_repulsion_spreads_the_ring_further_apart() {
         let snapshot = five_node_ring_snapshot();
@@ -1462,6 +1541,7 @@ mod tests {
             state: Presence::Online,
             session_count: 40,
             max_sessions: 4,
+            queued: 0,
             admin: false,
             aggregate: None,
             peers: vec!["planner".into()],
@@ -1681,6 +1761,7 @@ mod tests {
             state: Presence::Draining,
             session_count: 2,
             max_sessions: 3,
+            queued: 0,
             admin: true,
             aggregate: Some("cluster-b".into()),
             peers: vec!["planner".into()],
@@ -1736,6 +1817,7 @@ mod tests {
             state: Presence::Online,
             session_count: 1,
             max_sessions: 2,
+            queued: 0,
             admin: false,
             aggregate: None,
             peers: vec!["b".into()],

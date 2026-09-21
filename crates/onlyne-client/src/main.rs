@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use onlyne_client::{
-    ClientInit, daemon, init::InitArgs, intent::IntentMachine, local_cli, local_cli::LocalCli,
+    ClientInit, ops::init::InitArgs, ops::local_cli, ops::local_cli::LocalCli, runtime::daemon,
+    runtime::intent::IntentMachine,
 };
 use onlyne_proto::QueryRolesArgs;
 use std::path::{Path, PathBuf};
@@ -112,7 +113,7 @@ async fn main() {
             role,
             server_root,
             prose,
-        } => match onlyne_client::init::init(InitArgs {
+        } => match onlyne_client::ops::init::init(InitArgs {
             workspace,
             role,
             server_root,

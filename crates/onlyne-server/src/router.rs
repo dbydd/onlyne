@@ -129,19 +129,6 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
                 Err(error) => internal(error),
             }
         }
-        ClientOp::SessionSync(args) => {
-            let role = match session.role_or_reject() {
-                Ok(role) => role.to_string(),
-                Err(body) => return body,
-            };
-            match projection::session_sync(state, &role, &args) {
-                Ok(outcome) => ResBody::ok(json!({
-                    "applied": outcome.applied,
-                    "task_id": args.task_id,
-                })),
-                Err(error) => internal(error),
-            }
-        }
         ClientOp::Subscribe(subscribe) => match events::page_for(state, &subscribe) {
             Ok(page) => {
                 if let Some(sender) = session.sender.clone() {
@@ -161,10 +148,13 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
             })),
             Err(error) => internal(error.into()),
         },
-        ClientOp::QuerySessions(query) => match projection::sessions(state, query) {
-            Ok(rows) => ResBody::ok(json!({ "sessions": rows })),
-            Err(error) => internal(error),
-        },
+        ClientOp::QuerySessions(query) => {
+            let admin = session.admin;
+            match projection::sessions_read(state, query, admin).await {
+                Ok(rows) => ResBody::ok(json!({ "sessions": rows })),
+                Err(error) => internal(error),
+            }
+        }
         ClientOp::QueryRoles(query) => match roles(state, &query) {
             Ok(rows) => ResBody::ok(json!({ "roles": rows })),
             Err(error) => internal(error),
@@ -204,7 +194,7 @@ pub async fn dispatch_admin(state: &Arc<State>, session: &mut Session, op: Admin
             Ok(rows) => ResBody::ok(json!({ "roles": rows })),
             Err(error) => internal(error),
         },
-        AdminOp::Sessions(query) => match projection::sessions(state, query) {
+        AdminOp::Sessions(query) => match projection::sessions_read(state, query, true).await {
             Ok(rows) => ResBody::ok(json!({ "sessions": rows })),
             Err(error) => internal(error),
         },
@@ -490,6 +480,10 @@ pub fn roles(state: &Arc<State>, query: &QueryRolesArgs) -> anyhow::Result<Vec<R
                 ..onlyne_proto::QuerySessionsArgs::default()
             })?
             .len() as u32;
+        // The role's inbox depth, counted exactly rather than read off a capped
+        // page: a display that reports the cap as the depth tells an operator a
+        // saturated role looks the same as a busy one.
+        let queued = state.ledger.queued_count_for(&entry.role)?;
         rows.push(RoleInfo {
             name: entry.role.clone(),
             admin: entry.admin,
@@ -503,6 +497,7 @@ pub fn roles(state: &Arc<State>, query: &QueryRolesArgs) -> anyhow::Result<Vec<R
             prose: Some(entry.prose.clone()),
             state: presence,
             sessions,
+            queued,
             detail,
             edges: entry.allowed_targets.clone(),
             aggregate: (!entry.aggregate.is_empty()).then(|| entry.aggregate.clone()),

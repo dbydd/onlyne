@@ -7,8 +7,10 @@
 //! statement in the panic message.
 
 use chrono::{TimeZone, Utc};
-use onlyne_proto::{Body, Causality, LedgerQuery, MsgKind, Principal, new_envelope};
-use onlyne_session::{FaultRecord, SessionLedger, VersionedSession};
+use onlyne_proto::{
+    Body, Causality, LedgerQuery, Lifecycle, MsgKind, Principal, QuerySessionsArgs, new_envelope,
+};
+use onlyne_session::{FaultRecord, SessionLedger, TaskState, VersionedSession};
 use onlyne_store::{
     Append, ClientStore, FaultQuery, LedgerRow, ServerFaultRow, ServerLedger, SessionWrite,
 };
@@ -126,7 +128,6 @@ fn every_client_statement_runs_against_the_client_schema() {
         agent_state: "idle".to_string(),
         delivery_state: "none".to_string(),
         resource_state: "detached".to_string(),
-        public_lifecycle: "created".to_string(),
         recovery_substate: "idle_waiting".to_string(),
         desired_json: "{\"desired\":true}".to_string(),
         observed_json: "{\"observed\":true}".to_string(),
@@ -144,6 +145,34 @@ fn every_client_statement_runs_against_the_client_schema() {
     store
         .get_session(task_id)
         .describe("SELECT ... FROM sessions WHERE task_id=?");
+    store
+        .open_task(&Causality::root(task_id.to_string()), "root")
+        .describe("INSERT INTO task(...) ... ON CONFLICT(task_id) DO UPDATE");
+    store
+        .task(task_id)
+        .describe("SELECT ... FROM task WHERE task_id=?");
+    store
+        .open_tasks(10)
+        .describe("SELECT ... FROM task WHERE settled_at IS NULL ORDER BY opened_at");
+    store.settle_task(task_id, TaskState::Done).describe(
+        "INSERT INTO task ... ON CONFLICT(task_id) DO UPDATE ... WHERE settled_at IS NULL",
+    );
+    assert!(
+        store
+            .task(task_id)
+            .describe("SELECT ... FROM task WHERE task_id=?")
+            .is_some_and(
+                |record| record.task_state == TaskState::Done && record.settled_at.is_some()
+            ),
+        "the settle above must be visible to the reader"
+    );
+    assert!(
+        store
+            .open_tasks(10)
+            .describe("SELECT ... FROM task WHERE settled_at IS NULL ORDER BY opened_at")
+            .is_empty(),
+        "a settled task leaves the open set"
+    );
     store
         .task_is_known(task_id)
         .describe("SELECT COUNT(*) FROM sessions WHERE task_id=?");
@@ -211,7 +240,6 @@ fn every_server_statement_runs_against_the_server_schema() {
             session_id: session_id.to_string(),
             generation: 1,
             seq: 1,
-            public_lifecycle: "created".to_string(),
             agent_state: "booting".to_string(),
             delivery_state: "none".to_string(),
             resource_state: "detached".to_string(),
@@ -228,6 +256,33 @@ fn every_server_statement_runs_against_the_server_schema() {
     store
         .list_sessions(Default::default())
         .describe("SELECT ... FROM sessions ORDER BY updated_at");
+    // The mirror's lifecycle filter reads a key out of the stored projection.
+    // The row above holds `{}`, which has no such key, so this is the filter
+    // answering for a projection that cannot say: the read path calls it
+    // `created`, and a scan that dropped it would leave a stale session for
+    // nothing to observe.
+    assert!(
+        store
+            .list_sessions(QuerySessionsArgs {
+                lifecycle: Some(Lifecycle::Created),
+                ..Default::default()
+            })
+            .describe("SELECT ... FROM sessions WHERE lifecycle-from-observed_json=?")
+            .iter()
+            .any(|row| row.task_id == task_id),
+        "a projection that cannot say its lifecycle reads back as created"
+    );
+    assert!(
+        store
+            .list_sessions(QuerySessionsArgs {
+                lifecycle: Some(Lifecycle::Working),
+                ..Default::default()
+            })
+            .describe("SELECT ... FROM sessions WHERE lifecycle-from-observed_json=?")
+            .iter()
+            .all(|row| row.task_id != task_id),
+        "the same row is not working"
+    );
 
     let mut env = envelope(
         MsgKind::Task,

@@ -105,9 +105,11 @@ async fn stale_generation_is_conflict_and_watermark_is_unchanged() {
     host.set_watermark((4, 9)).await;
     let stale = Report::Heartbeat {
         task_id: "task-1".to_string(),
+        session_id: String::new(),
         generation: 4,
         seq: 9,
         observed: json!({"state":"old"}),
+        projection: None,
         cluster_ref: None,
     };
     let error = host

@@ -37,7 +37,10 @@ pub struct WorkingSession {
 
 impl WorkingSession {
     pub fn from_row(row: &ServerSessionRow) -> Option<Self> {
-        if row.public_lifecycle != "working" {
+        // The mirror's lifecycle lives inside the projection bytes it stores, so
+        // deciding whether a row is working means reading that projection back,
+        // exactly as the query answer does.
+        if crate::projection::projection_from_write(row).lifecycle != Lifecycle::Working {
             return None;
         }
         Some(Self {

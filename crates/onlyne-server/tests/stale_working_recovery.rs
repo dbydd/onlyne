@@ -74,6 +74,7 @@ fn role_info() -> RoleInfo {
         prose: Some("planner prose".into()),
         state: onlyne_proto::Presence::Online,
         sessions: 0,
+        queued: 0,
         detail: None,
         edges: Vec::new(),
         aggregate: None,
@@ -183,7 +184,10 @@ async fn restarted_client_reports_session_dead_for_stale_acked_work() {
         } => {
             assert_eq!(reported, task_id);
             assert_eq!(outcome, Outcome::Failed);
-            assert_eq!(head.as_deref(), Some(onlyne_client::stale::SESSION_DEAD));
+            assert_eq!(
+                head.as_deref(),
+                Some(onlyne_client::session::stale::SESSION_DEAD)
+            );
         }
         other => panic!("expected session_dead completion, got {other:?}"),
     }
@@ -241,7 +245,11 @@ fn server_observer_emits_stale_working_without_auto_settling() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].kind, stale::KIND_STALE_WORKING);
     let row = state.ledger.get_session_row(&task_id).unwrap().unwrap();
-    assert_eq!(row.public_lifecycle, "working");
+    assert_eq!(
+        onlyne_server::projection::row_from_write(&row).public_lifecycle,
+        onlyne_proto::Lifecycle::Working,
+        "the watched row is working on the projection it stores"
+    );
     let faults = state.ledger.open_faults().unwrap();
     assert_eq!(faults.len(), 1);
     assert_eq!(faults[0].kind, stale::KIND_STALE_WORKING);

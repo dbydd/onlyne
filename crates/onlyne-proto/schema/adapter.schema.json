@@ -48,6 +48,17 @@
       },
       "additionalProperties": false
     },
+    "AgentPhase": {
+      "description": "Agent-side lifecycle fact, as reported by the plugin and stored verbatim.",
+      "type": "string",
+      "enum": [
+        "booting",
+        "ready",
+        "running",
+        "idle",
+        "gone"
+      ]
+    },
     "AssignAckArgs": {
       "description": "`assign_ack`: whether the plugin took the payload.",
       "type": "object",
@@ -397,6 +408,17 @@
           "type": "string"
         }
       }
+    },
+    "DeliveryPhase": {
+      "description": "Intent delivery fact for the current turn exit.",
+      "type": "string",
+      "enum": [
+        "none",
+        "pending",
+        "retrying",
+        "accepted",
+        "exhausted"
+      ]
     },
     "DetachArgs": {
       "description": "`detach`: the plugin leaves; the reason is recorded verbatim.",
@@ -906,6 +928,16 @@
         }
       }
     },
+    "Lifecycle": {
+      "description": "Public lifecycle projection of a session, as published by the client that owns it.",
+      "type": "string",
+      "enum": [
+        "created",
+        "working",
+        "idle",
+        "exited"
+      ]
+    },
     "Mount": {
       "description": "Plugin and gateway mount data, discriminated by [`MountKind`].\n\nThe mount names the configured instance the connection serves, and that is the identity the ACL and the routing use: `gateway` holds a `[[gateway]]` id and `role` holds a spec role name, both taken from the server's spec, because one plugin crate can back several configured instances with their own credentials, channels, and `[[route]]` bindings.\n\nThe program name travels in its own field. `HelloArgs::plugin` on this surface and `HandshakeArgs::agent` on a role connection name the crate that connected, which is the thing a protocol or version mismatch is about. Deriving the instance from the program would collapse the several-instances case.\n\nThe enum is untagged, so the wire form is the plan's own `hello` example at §7 line 298 — `\"mount\":{\"role\":\"planner\",\"session\":\"8b1c...\"}` — with `kind` beside it in the same args object rather than nested under a tag.\n\nUntagged matching is first-match-wins, so the variant order below is the disambiguation rule: `Agent`, then `Gateway`, then `Cluster`, then `Admin`. Each payload denies unknown fields, and that guard is what makes the order safe to read rather than a silent mis-decode: `AgentMount` and `ClusterMount` both carry `role`, so without it a cluster mount would decode as an agent mount. A new field belongs to the earliest variant that owns it, and making one collide with an earlier variant's set is a wire change this list must be updated for.\n\nA bare `Admin` mount serializes as JSON `null`; the sibling `kind` field is what identifies it.",
       "anyOf": [
@@ -1271,6 +1303,16 @@
         }
       ]
     },
+    "RecoveryPhase": {
+      "description": "Recovery substate of an idle or draining session.",
+      "type": "string",
+      "enum": [
+        "none",
+        "idle_waiting",
+        "idle_fault",
+        "draining"
+      ]
+    },
     "RecycleArgs": {
       "description": "`recycle`: reason is mandatory so the ledger records the decision.",
       "type": "object",
@@ -1352,7 +1394,7 @@
       }
     },
     "Report": {
-      "description": "The report envelope kinds a client pushes (§6, §7).\n\n`cluster_ref` names the origin cluster on a relayed report, so a federated projection can say where it came from. Only the three state-carrying kinds hold it: `Fault` carries no projection, and a ninth optional field there would push `Report` and `ClientOp` from 192 to 224 bytes on the hot path.",
+      "description": "The report envelope kinds a client pushes (§6, §7).\n\n`cluster_ref` names the origin cluster on a relayed report, so a federated projection can say where it came from. Only the three state-carrying kinds hold it: `Fault` carries no projection, and a ninth optional field there would push `Report` and `ClientOp` from 192 to 224 bytes on the hot path.\n\n`heartbeat` is the one frame that carries a session's state to the server. Two shapes travel under the same kind, and both are optional-skipped so neither writes a field the other has no use for: - the adapter's beat — a plugin telling its host it is alive — holds `observed` alone. The host reduces that tuple into the session row it keeps, and `session_id`/`projection` stay absent. - the client's publish to the server holds `projection`, the whole [`SessionProjection`] it stores for the task, beside the same `observed` tuple so the two never disagree. The server mirrors that projection verbatim; `session_id` names the row it belongs to.\n\nA beat holding no `projection` is liveness only: the server keeps the working/running/pending/attached tuple it has always inferred from it.",
       "oneOf": [
         {
           "description": "The ready barrier passed; the server may now deliver the payload.",
@@ -1404,7 +1446,7 @@
           }
         },
         {
-          "description": "Liveness plus the reducer's own view of the world.",
+          "description": "Liveness plus, on the client-to-server path, the whole projection.",
           "type": "object",
           "required": [
             "data",
@@ -1432,10 +1474,25 @@
                   "minimum": 0.0
                 },
                 "observed": true,
+                "projection": {
+                  "description": "The client's full session projection, published for the server to mirror. Absent on a liveness-only beat.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/SessionProjection"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "seq": {
                   "type": "integer",
                   "format": "uint64",
                   "minimum": 0.0
+                },
+                "session_id": {
+                  "description": "The session the published projection belongs to. Absent on the adapter's beat, which names no session.",
+                  "type": "string"
                 },
                 "task_id": {
                   "type": "string"
@@ -1585,6 +1642,16 @@
         }
       }
     },
+    "ResourcePhase": {
+      "description": "Backend resource fact.",
+      "type": "string",
+      "enum": [
+        "detached",
+        "attached",
+        "closing",
+        "closed"
+      ]
+    },
     "ServerInfo": {
       "description": "Cluster identity handed out at handshake.",
       "type": "object",
@@ -1600,6 +1667,65 @@
         "name": {
           "default": "",
           "type": "string"
+        }
+      }
+    },
+    "SessionProjection": {
+      "description": "The full projection the client publishes for one session (§10 `sessions`).",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "default": "booting",
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentPhase"
+            }
+          ]
+        },
+        "delivery": {
+          "default": "none",
+          "allOf": [
+            {
+              "$ref": "#/definitions/DeliveryPhase"
+            }
+          ]
+        },
+        "lifecycle": {
+          "default": "created",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Lifecycle"
+            }
+          ]
+        },
+        "observed": {
+          "description": "Raw reducer observation, retained for repair and forensics."
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Outcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "default": "none",
+          "allOf": [
+            {
+              "$ref": "#/definitions/RecoveryPhase"
+            }
+          ]
+        },
+        "resource": {
+          "default": "detached",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ResourcePhase"
+            }
+          ]
         }
       }
     },

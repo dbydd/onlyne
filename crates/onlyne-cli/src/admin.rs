@@ -135,6 +135,12 @@ pub struct SessionsArgs {
     /// server reads at most 500.
     #[arg(long)]
     pub limit: Option<u32>,
+    /// Ask the task's owning client to probe its plugin, and answer with the
+    /// observation that probe produced. Needs `--task`, and lives inside
+    /// `--timeout`: a probe that does not land answers the stored row with a
+    /// `fresh` marker instead of blocking past the bound.
+    #[arg(long)]
+    pub fresh: bool,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -337,13 +343,48 @@ pub fn roles(flags: &GlobalFlags, args: RolesArgs) -> i32 {
     )
 }
 
+/// Share of one read's `--timeout` kept for the frames around the probe: the
+/// request out, the client's control round trip, and the answer back.
+///
+/// The server's wait is bounded by what is left, which is what keeps a fresh
+/// read inside the bound the operator set. The reserve does not grow with
+/// `--timeout`, and the wait is never widened past it to give the probe more
+/// room than the operator allowed.
+const FRESH_RESERVE_MS: u64 = 250;
+
+/// The probe wait one `--fresh` read carries: the read's own bound less the
+/// frames it has to travel in. `None` when that bound cannot hold a frame.
+fn fresh_wait_ms(timeout_ms: u64) -> Option<u64> {
+    let wait = timeout_ms.saturating_sub(FRESH_RESERVE_MS);
+    (wait > 0).then_some(wait)
+}
+
 /// `sessions` lists sessions, mapped onto `query_sessions`.
 pub fn sessions(flags: &GlobalFlags, args: SessionsArgs) -> i32 {
+    let fresh_wait_ms = match (args.fresh, args.task.is_some()) {
+        (false, _) => None,
+        // A read that asks nobody is the mirror under a name that says fresh.
+        (true, false) => {
+            return runtime::usage_error(
+                "onlyne: --fresh needs --task; a fresh read asks one task's client".to_string(),
+            );
+        }
+        (true, true) => match fresh_wait_ms(flags.timeout_ms) {
+            Some(wait) => Some(wait),
+            None => {
+                return runtime::usage_error(format!(
+                    "onlyne: --fresh needs a --timeout above {FRESH_RESERVE_MS}ms; the probe \
+                     wait lives inside that bound"
+                ));
+            }
+        },
+    };
     let filter = QuerySessionsArgs {
         task_id: args.task,
         role: args.role,
         lifecycle: args.lifecycle,
         limit: args.limit.unwrap_or_default(),
+        fresh_wait_ms,
     };
     query(
         flags,

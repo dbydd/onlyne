@@ -11,6 +11,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Whether a count is zero, so its key stays off the wire. A count that says
+/// nothing — no queued work, no hops owed — costs a client a key it has to
+/// ignore, and an old client never learns the field exists.
+fn is_zero(count: &u32) -> bool {
+    *count == 0
+}
+
 /// Server's durable answer to an accepted send (§8 `send`, §10 `ledger`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -111,6 +118,20 @@ impl SessionProjection {
 /// projection can say where it came from. Only the three state-carrying kinds
 /// hold it: `Fault` carries no projection, and a ninth optional field there
 /// would push `Report` and `ClientOp` from 192 to 224 bytes on the hot path.
+///
+/// `heartbeat` is the one frame that carries a session's state to the server.
+/// Two shapes travel under the same kind, and both are optional-skipped so
+/// neither writes a field the other has no use for:
+/// - the adapter's beat — a plugin telling its host it is alive — holds
+///   `observed` alone. The host reduces that tuple into the session row it
+///   keeps, and `session_id`/`projection` stay absent.
+/// - the client's publish to the server holds `projection`, the whole
+///   [`SessionProjection`] it stores for the task, beside the same `observed`
+///   tuple so the two never disagree. The server mirrors that projection
+///   verbatim; `session_id` names the row it belongs to.
+///
+/// A beat holding no `projection` is liveness only: the server keeps the
+/// working/running/pending/attached tuple it has always inferred from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "data")]
 pub enum Report {
@@ -123,12 +144,20 @@ pub enum Report {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cluster_ref: Option<String>,
     },
-    /// Liveness plus the reducer's own view of the world.
+    /// Liveness plus, on the client-to-server path, the whole projection.
     Heartbeat {
         task_id: String,
+        /// The session the published projection belongs to. Absent on the
+        /// adapter's beat, which names no session.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        session_id: String,
         generation: u64,
         seq: u64,
         observed: Value,
+        /// The client's full session projection, published for the server to
+        /// mirror. Absent on a liveness-only beat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        projection: Option<SessionProjection>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cluster_ref: Option<String>,
     },
@@ -298,6 +327,33 @@ pub struct QuerySessionsArgs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<Lifecycle>,
     pub limit: u32,
+    /// Opt-in freshness: ask the named task's owning client to probe its plugin
+    /// and wait up to these many milliseconds for that task's row to move past
+    /// the watermark the read started at. Absent is the plain read — the stored
+    /// mirror, answered with no control frame and nothing waited on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh_wait_ms: Option<u64>,
+}
+
+/// How the opt-in fresh read of one session row ended (§10 `sessions`).
+///
+/// The marker travels with the row it describes, because the row alone cannot
+/// say whether it is the mirror or the answer a probe just produced: a mirror
+/// is a legal answer either way, and `updated_at` dates it without saying who
+/// wrote it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FreshRead {
+    /// The owning client probed its plugin and republished: the row carries
+    /// the observation that probe produced, and `updated_at` dates it.
+    Probed,
+    /// Nothing was asked — no task was named, the task has no row, no client
+    /// owns it, that client is not connected, or the ask was refused on the way
+    /// out — so the row is the stored mirror and `updated_at` says how old it is.
+    Offline,
+    /// The probe went out and the row did not move inside the read's own bound:
+    /// the row is the stored mirror, as of `updated_at`.
+    Unanswered,
 }
 
 /// One `query_sessions` answer row: the stored projection with its address.
@@ -319,6 +375,10 @@ pub struct SessionRow {
     /// True when a working row the server has seen is silent past heartbeat grace.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub heartbeat_stale: bool,
+    /// What the opt-in fresh read of this row did. Absent on a plain read,
+    /// which answers the stored mirror and makes no claim about its freshness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh: Option<FreshRead>,
 }
 /// One `query_ledger` answer row: the observable ledger projection for one send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -371,6 +431,14 @@ pub struct RoleInfo {
     pub prose: Option<String>,
     pub state: Presence,
     pub sessions: u32,
+    /// The deliveries queued for this role's inbox, counted exactly by the
+    /// server. It is the depth a session of this role would have to drain: the
+    /// queued ledger rows addressed to the role that `pull` would hand out,
+    /// `note` rows excluded because `pull` never offers one (§3 line 152 gives
+    /// them no session). A row from a server that predates the field omits the
+    /// key, which reads as nothing waiting.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub queued: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     /// The entry's `allowed_targets` verbatim: a `*` stays unexpanded and a
@@ -433,17 +501,6 @@ pub struct ByeArgs {
     pub drain_ms: Option<u64>,
 }
 
-/// `session_sync` request: publish a full projection for one session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "snake_case", default)]
-pub struct SessionSyncArgs {
-    pub task_id: String,
-    pub session_id: String,
-    pub generation: u64,
-    pub seq: u64,
-    pub projection: SessionProjection,
-}
-
 /// Handshake request on a role connection (§5, §9).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case", default)]
@@ -484,8 +541,6 @@ pub enum ClientOp {
     Ack(AckArgs),
     /// Push a lifecycle report.
     Report(Report),
-    /// Publish a session projection mirror.
-    SessionSync(SessionSyncArgs),
     /// Start or resume the observation stream.
     Subscribe(Subscribe),
     /// Read the ledger.
@@ -510,7 +565,6 @@ impl ClientOp {
             ClientOp::Pull(_) => "pull",
             ClientOp::Ack(_) => "ack",
             ClientOp::Report(_) => "report",
-            ClientOp::SessionSync(_) => "session_sync",
             ClientOp::Subscribe(_) => "subscribe",
             ClientOp::QueryLedger(_) => "query_ledger",
             ClientOp::QuerySessions(_) => "query_sessions",
@@ -894,16 +948,6 @@ mod tests {
                 "report",
             ),
             (
-                ClientOp::SessionSync(SessionSyncArgs {
-                    task_id: new_task_id(),
-                    session_id: "s".into(),
-                    generation: 1,
-                    seq: 4,
-                    projection: SessionProjection::default_working(),
-                }),
-                "session_sync",
-            ),
-            (
                 ClientOp::Subscribe(Subscribe {
                     since_seq: 7,
                     tiers: vec![EventTier::Durable],
@@ -953,7 +997,7 @@ mod tests {
             let back: ClientOp = serde_json::from_value(value).expect("decode");
             assert_eq!(&back, op);
         }
-        assert_eq!(cases.len(), 13);
+        assert_eq!(cases.len(), 12);
     }
 
     // Rejection-path marker only: this pre-v1 `loopback` op name must stay outside the closed vocabulary (plan §8 line 324).
@@ -1010,6 +1054,46 @@ mod tests {
         let value = serde_json::to_value(&fault).expect("encode");
         assert_eq!(value["kind"], "fault");
         assert_eq!(value["data"]["kind"], "intent_exhausted");
+    }
+
+    #[test]
+    fn the_two_heartbeat_shapes_write_only_their_own_keys() {
+        let beat = Report::Heartbeat {
+            task_id: new_task_id(),
+            session_id: String::new(),
+            generation: 1,
+            seq: 14,
+            observed: serde_json::json!({"state": "alive"}),
+            projection: None,
+            cluster_ref: None,
+        };
+        let value = serde_json::to_value(&beat).expect("encode");
+        assert_eq!(value["kind"], "heartbeat");
+        assert_eq!(beat.version(), Some((1, 14)));
+        // The adapter's beat: no session, no projection, so neither key moves
+        // the bytes the plugin socket is pinned to.
+        assert!(value["data"].get("session_id").is_none(), "{value}");
+        assert!(value["data"].get("projection").is_none(), "{value}");
+        let back: Report = serde_json::from_value(value).expect("decode");
+        assert_eq!(back, beat);
+
+        let publish = Report::Heartbeat {
+            task_id: new_task_id(),
+            session_id: "sess-1".into(),
+            generation: 2,
+            seq: 3,
+            observed: serde_json::json!({"state": "closed"}),
+            projection: Some(SessionProjection {
+                observed: Some(serde_json::json!({"state": "closed"})),
+                ..SessionProjection::default_working()
+            }),
+            cluster_ref: None,
+        };
+        let value = serde_json::to_value(&publish).expect("encode");
+        assert_eq!(value["data"]["session_id"], "sess-1");
+        assert_eq!(value["data"]["projection"]["lifecycle"], "created");
+        let back: Report = serde_json::from_value(value).expect("decode");
+        assert_eq!(back, publish);
     }
 
     #[test]

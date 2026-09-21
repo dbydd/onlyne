@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use onlyne_proto::{
-    Envelope, Event, FaultEvent, LedgerQuery, LedgerState, LedgerStateEvent, MsgKind, Principal,
-    QueryFaultsArgs, QuerySessionsArgs,
+    Envelope, Event, FaultEvent, LedgerQuery, LedgerState, LedgerStateEvent, Lifecycle, MsgKind,
+    Principal, QueryFaultsArgs, QuerySessionsArgs,
 };
 use rusqlite::types::{Type, Value as SqlValue};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
@@ -18,10 +18,12 @@ use crate::transition_allowed;
 
 /// Server store schema revision. The `hop` column set this to 2: the ledger
 /// keeps the hop count of `Causality`, which `onlyne handoff` reads back to
-/// extend a chain. The `expires_at` and `requeued` columns are applied in
-/// place, so the marker stays 2 and an existing file keeps opening. The client
-/// store keeps its own revision, since its DDL did not move.
-const SERVER_SCHEMA_VERSION: i64 = 2;
+/// extend a chain. The `expires_at` and `requeued` columns were applied in
+/// place, so they never moved the marker. Version 3 is the tuple rebuild: the
+/// `sessions` row lost its `public_lifecycle` column, which cannot be taken
+/// back from an existing file, so an old layout is refused rather than carried.
+/// The client store keeps its own revision.
+const SERVER_SCHEMA_VERSION: i64 = 3;
 const PROTOCOL_VERSION: i64 = 1;
 const SERVER_MARKER: &str = "onlyne-server";
 const DEFAULT_LIMIT: i64 = 100;
@@ -40,13 +42,13 @@ CREATE TABLE IF NOT EXISTS sessions(
   session_id TEXT NOT NULL,
   generation INTEGER NOT NULL,
   seq INTEGER NOT NULL,
-  public_lifecycle TEXT NOT NULL,
   agent_state TEXT NOT NULL,
   delivery_state TEXT NOT NULL,
   resource_state TEXT NOT NULL,
   recovery_substate TEXT NOT NULL,
   -- docs/v1-PLAN.md:356 requires the (generation, seq) gate and the kernel's isolate-after-N and terminate-after-N policy needs a persisted counter, so this pair carries DEFAULT_ISOLATE_AFTER and DEFAULT_TERMINATE_AFTER from crates/onlyne-session/src/reconcile.rs; the fence at line 354 omits both columns.
   desired_json TEXT NOT NULL,
+  -- docs/v1-PLAN.md:354 lists `public_lifecycle TEXT` among the session columns, and this row carried one beside the four dimensions it came from. The tuple rebuild took the duplicate back: this column holds the client's published projection whole, lifecycle included, and every reader of the mirror parses its lifecycle out of here.
   observed_json TEXT NOT NULL,
   mismatch_count INTEGER NOT NULL,
   -- docs/v1-PLAN.md:354 types this column TEXT while SessionRecord.updated_at in crates/onlyne-session/src/reconcile.rs is i64 unix seconds, and the store encodes those seconds through its own helper on every write.
@@ -138,7 +140,6 @@ pub struct SessionWrite {
     pub session_id: String,
     pub generation: i64,
     pub seq: i64,
-    pub public_lifecycle: String,
     pub agent_state: String,
     pub delivery_state: String,
     pub resource_state: String,
@@ -365,8 +366,8 @@ impl ServerLedger {
     pub fn project_session(&self, write: &SessionWrite) -> StoreResult<bool> {
         let conn = self.conn()?;
         let changed = conn.execute(
-            "INSERT INTO sessions(task_id,role,session_id,generation,seq,public_lifecycle,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-             ON CONFLICT(task_id) DO UPDATE SET role=excluded.role,session_id=excluded.session_id,generation=excluded.generation,seq=excluded.seq,public_lifecycle=excluded.public_lifecycle,agent_state=excluded.agent_state,delivery_state=excluded.delivery_state,resource_state=excluded.resource_state,recovery_substate=excluded.recovery_substate,desired_json=excluded.desired_json,observed_json=excluded.observed_json,mismatch_count=excluded.mismatch_count,updated_at=excluded.updated_at
+            "INSERT INTO sessions(task_id,role,session_id,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(task_id) DO UPDATE SET role=excluded.role,session_id=excluded.session_id,generation=excluded.generation,seq=excluded.seq,agent_state=excluded.agent_state,delivery_state=excluded.delivery_state,resource_state=excluded.resource_state,recovery_substate=excluded.recovery_substate,desired_json=excluded.desired_json,observed_json=excluded.observed_json,mismatch_count=excluded.mismatch_count,updated_at=excluded.updated_at
              WHERE excluded.generation > sessions.generation OR (excluded.generation = sessions.generation AND excluded.seq > sessions.seq)",
             params![
                 write.task_id,
@@ -374,7 +375,6 @@ impl ServerLedger {
                 write.session_id,
                 write.generation,
                 write.seq,
-                write.public_lifecycle,
                 write.agent_state,
                 write.delivery_state,
                 write.resource_state,
@@ -392,7 +392,7 @@ impl ServerLedger {
         let conn = self.conn()?;
         let row = conn
             .query_row(
-                "SELECT task_id,role,session_id,generation,seq,public_lifecycle,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,updated_at FROM sessions WHERE task_id=?",
+                "SELECT task_id,role,session_id,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,updated_at FROM sessions WHERE task_id=?",
                 params![task_id],
                 session_row,
             )
@@ -413,14 +413,27 @@ impl ServerLedger {
             args.push(SqlValue::Text(role));
         }
         if let Some(lifecycle) = filter.lifecycle {
-            clauses.push("public_lifecycle=?".to_string());
+            // The mirror holds one copy of the published projection, in
+            // `observed_json`, and the lifecycle is a key inside it. The row's
+            // own dimensions stay columns; this one stays derived.
+            //
+            // Bytes that do not parse, or that never carried the key, read back
+            // as `created` on the row's own read path, which decodes the mirror
+            // and falls back to the columns. The filter has to agree: JSON1
+            // answers NULL for a key it cannot find and fails outright on bytes
+            // that are not JSON, and a scan that dropped such a row would leave
+            // a stale session without ever earning its fault row.
+            clauses.push(
+                "IFNULL(CASE WHEN json_valid(observed_json) THEN json_extract(observed_json,'$.lifecycle') END,?)=?".to_string(),
+            );
+            args.push(SqlValue::Text(string_tag(&Lifecycle::Created)?));
             args.push(SqlValue::Text(string_tag(&lifecycle)?));
         }
         let where_sql = where_sql(&clauses);
         let limit = sql_limit(filter.limit);
         args.push(SqlValue::Integer(limit));
         let sql = format!(
-            "SELECT task_id,role,session_id,generation,seq,public_lifecycle,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,updated_at FROM sessions{where_sql} ORDER BY updated_at DESC,rowid DESC LIMIT ?"
+            "SELECT task_id,role,session_id,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,updated_at FROM sessions{where_sql} ORDER BY updated_at DESC,rowid DESC LIMIT ?"
         );
         let rows = conn
             .prepare(&sql)?
@@ -472,6 +485,26 @@ impl ServerLedger {
 
     pub fn queued_for(&self, role: &str, limit: u32) -> StoreResult<Vec<LedgerRow>> {
         self.ledger_for_role(role, LedgerState::Queued, limit)
+    }
+
+    /// How many deliveries are queued for one role's inbox, counted exactly.
+    ///
+    /// [`ServerLedger::queued_for`] takes a limit, so a caller that counted its
+    /// rows would report the cap as the depth: an operator reading "512" when
+    /// the truth is 900 reads a saturated role as a full one. The rows are the
+    /// ones `pull` would hand this role, so `note` rows are left out exactly as
+    /// `relay::pull` leaves them out (`crates/onlyne-server/src/relay.rs`).
+    pub fn queued_count_for(&self, role: &str) -> StoreResult<u32> {
+        let conn = self.conn()?;
+        let count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ledger WHERE state=? AND json_extract(to_json,'$.role.role')=? AND kind<>?",
+                params![LedgerState::Queued.as_str(), role, MsgKind::Note.as_str()],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(count)
     }
 
     pub fn in_flight_for(&self, role: &str) -> StoreResult<Vec<LedgerRow>> {
@@ -1080,15 +1113,14 @@ fn session_row(r: &Row<'_>) -> rusqlite::Result<ServerSessionRow> {
         session_id: r.get(2)?,
         generation: r.get(3)?,
         seq: r.get(4)?,
-        public_lifecycle: r.get(5)?,
-        agent_state: r.get(6)?,
-        delivery_state: r.get(7)?,
-        resource_state: r.get(8)?,
-        recovery_substate: r.get(9)?,
-        desired_json: r.get(10)?,
-        observed_json: r.get(11)?,
-        mismatch_count: r.get(12)?,
-        updated_at: rfc3339_to_unix(&r.get::<_, String>(13)?),
+        agent_state: r.get(5)?,
+        delivery_state: r.get(6)?,
+        resource_state: r.get(7)?,
+        recovery_substate: r.get(8)?,
+        desired_json: r.get(9)?,
+        observed_json: r.get(10)?,
+        mismatch_count: r.get(11)?,
+        updated_at: rfc3339_to_unix(&r.get::<_, String>(12)?),
     })
 }
 
@@ -1263,7 +1295,7 @@ fn parse_ledger_state(value: &str) -> Option<LedgerState> {
     }
 }
 
-fn string_tag<T: Serialize>(value: &T) -> StoreResult<String> {
+pub(crate) fn string_tag<T: Serialize>(value: &T) -> StoreResult<String> {
     match serde_json::to_value(value)? {
         Value::String(text) => Ok(text),
         other => Err(StoreError::Serialization(format!(

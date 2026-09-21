@@ -8,7 +8,17 @@ Onlyne 运维以 server 账本、client 工作区、admin 本地 socket（规范
 
 `onlyne roles` 读取 role 注册表和在线状态。
 
-`onlyne sessions` 读取 session 投影。
+`onlyne sessions` 读取 session 投影，答案就是心跳落下的那一行镜像，`updated_at` 是它的年龄。
+
+`onlyne sessions --fresh --task <task>` 现场取一次真值：server 把既有的 `control` op `probe` 发给该 task 的属主 client，等这一行越过读取开始时的 `(generation, seq)`，再按这一行作答。admin 词表不加动词，client 侧也不加代码。
+
+等待的上界是这次读取自己的 `--timeout` 减去帧往返预留的 250ms；probe 没落地时照常按存下的镜像作答，读取不会超出这个界，也不会为了等它而放宽这个界。
+
+`--fresh` 的答案在行上带 `fresh` 字段：`probed` 是 probe 落地后的观察，`offline` 是没有可问的对象（没给 `--task`、该 task 没有行、没有 client 拥有它、或属主不在线），`unanswered` 是 probe 出去了但界内没有重发布。三种情况都答那一行，不报错、不挂起。
+
+`--fresh` 必须带 `--task`：fresh 读取问的是一个具名 task 的 client。
+
+不带 `--fresh` 的读取与从前逐字节相同：不发 control 帧、不等待、答案里没有 `fresh` 键。
 
 `onlyne ledger` 读取投递账本。
 
@@ -104,7 +114,7 @@ fault 通过 advisory `Event::Fault` 推给观察者。
 
 `onlyne repair rebind --task <id> --session-id <session> --backend <backend> [--backend-ref <值>] --reason <reason>` 重写任务的 backend 绑定，把行内的 session id 换成给定值，generation 加一、seq 归零，旧 generation 的上报从此不再被采信。
 
-两个动词的 `--backend-ref` 同一规则：能整体解析为 JSON 的取值按解析结果上线（pane 引用这类对象形值因此可直接写 `--backend-ref '{"id":"p-7"}'`），其余文本按一个 JSON 字符串上线，旗标缺省上线 null。服务端与 client 按对象消费该值（`crates/onlyne-server/src/faults.rs:253-257,273-277`、`crates/onlyne-client/src/dispatch.rs:1088-1092`）。
+两个动词的 `--backend-ref` 同一规则：能整体解析为 JSON 的取值按解析结果上线（pane 引用这类对象形值因此可直接写 `--backend-ref '{"id":"p-7"}'`），其余文本按一个 JSON 字符串上线，旗标缺省上线 null。服务端与 client 按对象消费该值（`crates/onlyne-server/src/faults.rs:253-257,273-277`、`crates/onlyne-client/src/session/dispatch.rs`）。
 
 `onlyne repair retry --task <id> --reason <reason>` 把可重试任务送回队列。
 
@@ -207,7 +217,9 @@ server 侧观察器按 `[server].stale_watch_secs` 周期扫描，一次扫描�
 
 探测器二扫描 `working` 且属主在线的行，判据是心跳新鲜度。
 
-pi 插件每 10 秒发一个 heartbeat 包，client 每收到一拍就重发一次 `session_sync`，服务端行的 `updated_at` 随心跳前进。
+pi 插件每 10 秒发一个 heartbeat 包，client 每收到一拍就在自己的 heartbeat 报告里重发一次完整投影，服务端行的 `updated_at` 随心跳前进。
+
+不等下一拍心跳、要当下观察时用 `onlyne sessions --fresh --task <task>`：它把 `probe` 发给属主 client，等这一行越过读取开始时的水位，插件用一条 heartbeat 应答这个 `probe`。
 
 静默一拍即翻面的 no-op 心跳同样携带存活事实，client 对其抬升本地版本号并重发，健康会话的 `updated_at` 保持新鲜。
 
@@ -229,7 +241,7 @@ no-op 心跳抬存活水位，不抬进展水位；`stalled` 只看后者。
 
 `stalled` 的 reason 文本是 `no applied progress`。
 
-一条已结清的任务走不进这条判据：进展时钟只由 task 分配建立，`note_applied` 只刷新已经建立的时钟，plugin 在完成回执之后送出的最后一拍 `agent: "idle"` 心跳落在空处。到期扫描与发送边界各查一次存储 lifecycle，投影为 `exited` 的 task 被抑制并被遗忘；连接释放顺手忘掉它服务过的每个 session 的时钟。
+一条已结清的任务走不进这条判据：进展时钟只由 task 分配建立，`note_applied` 只刷新已经建立的时钟，plugin 在完成回执之后送出的最后一拍 `agent: "idle"` 心跳落在空处。到期扫描与发送边界各派生一次 lifecycle——存储元组与 `task` 表里该任务的结清值一起过 `project`——得出 `exited` 的 task 被抑制并被遗忘；连接释放顺手忘掉它服务过的每个 session 的时钟。
 
 同一冻结 episode 只报一次，下一次 `Applied` 解除去重。`stall_report_secs = 0` 关闭这条判定。
 
@@ -254,7 +266,7 @@ no-op 心跳抬存活水位，不抬进展水位；`stalled` 只看后者。
 
 合并投递之后，只读连接收到 `bye` 并被摘掉；它若还占着自己的 slot，该 slot 以 `Replaced` 退役。结项的账只付一次，这一步不再 settle，也不再 release。
 
-一条例外：促成这次合并的那份 report 就是从这条只读连接上收进来的，那么它在这一轮收不到 `bye`。client 先把这条 report 的应答写出去，连接的收尾交给它自己的 `detach` 帧或 socket 结束。插件对 `bye` 的处理是断开 socket 并把所有在途请求判为失败，抢在应答之前的 `bye` 会把一笔已经落账的完成读成失败，agent 因此重发终态。顺序由 `crates/onlyne-client/tests/scenarios.rs` 的 `a_read_only_completion_is_answered_before_any_bye` 钉住。
+一条例外：促成这次合并的那份 report 就是从这条只读连接上收进来的，那么它在这一轮收不到 `bye`。client 先把这条 report 的应答写出去，连接的收尾交给它自己的 `detach` 帧或 socket 结束。插件对 `bye` 的处理是断开 socket 并把所有在途请求判为失败，抢在应答之前的 `bye` 会把一笔已经落账的完成读成失败，agent 因此重发终态。顺序由 `crates/onlyne-client/tests/scenarios/reconnect.rs` 的 `a_read_only_completion_is_answered_before_any_bye` 钉住。
 
 faults 表的 kind 字段保存 `stale_working`、`heartbeat_missing`、`heartbeat_after_complete`、`stalled` 文本。
 
@@ -309,7 +321,7 @@ onlyne --server-root <server-root> repair fail --task <id> --reason session_dead
 
 - plugin 优雅 `detach`：这条连接服务过的每个空闲会话就地关闭资源。
 - 结清且 agent 未挂载：关闭发生在结清那一刻。
-- 250 ms readiness tick：扫描被跟踪的会话，存储 lifecycle 已投影 `exited`、已存 outcome 有值、且 agent 已离开的会话关闭掉，reason 由该 outcome 推导（`done` 得 `Completed`，`failed` 得 `Fault`，`cancelled` 得 `Cancelled`）。
+- 250 ms readiness tick：扫描被跟踪的会话。一个会话是否结束是派生出来的：存储元组与 `task` 表里该任务的结清值一起过 `project`，得出 `exited` 才关掉，reason 由 task 表的那个结清值推导（`done` 得 `Completed`，`failed` 得 `Fault`，`cancelled` 得 `Cancelled`；`pending` 或无记录不产生 reason）。会话行本身不再存有 lifecycle，也不再自报任务结果。
 
 会话结清后不再接新任务：一单一个 session，槽位随即归还，不再占用 `max_sessions`，宿主资源按上面三条路径收走。一条保留路径：连接在 plugin 未发 `detach` 的情况下断开，该 agent 还可能重连。
 

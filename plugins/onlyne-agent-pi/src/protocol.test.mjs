@@ -128,22 +128,38 @@ test("heartbeat carries a full legal observation", () => {
     delivery: "none",
     resource: "attached",
     recovery: "none",
-    outcome: "pending",
-    public: "working",
   });
 });
 
 test("every observation is a state tuple the reducer calls legal", () => {
-  // Mirrors onlyne-session's `project`: running works, idle/ready wait, booting creates.
-  const expected = { booting: "created", ready: "idle", running: "working", idle: "idle", gone: "created" };
-  for (const [agent, projected] of Object.entries(expected)) {
+  // The tuple carries no derived view and no task result any more: `Observation`
+  // dropped `public` and `outcome`, so the projection mapping that once had to be
+  // mirrored here is gone, and the key set is the whole contract.
+  const keys = [
+    "version",
+    "generation_live",
+    "isolate_after",
+    "terminate_after",
+    "mismatch_count",
+    "agent",
+    "delivery",
+    "resource",
+    "recovery",
+  ];
+  const agents = { booting: "booting", ready: "ready", running: "running", idle: "idle", gone: "booting" };
+  for (const [agent, state] of Object.entries(agents)) {
     const observed = observationFor(agent, { generation: 1, seq: 1 });
-    assert.equal(observed.public, projected, `agent=${agent}`);
+    assert.deepEqual(Object.keys(observed), keys, `agent=${agent}`);
+    assert.equal(observed.agent, state, `agent=${agent}: gone travels as booting; only the host's grace declares death`);
     assert.notEqual(observed.isolate_after, 0);
     assert.notEqual(observed.terminate_after, 0);
-    assert.equal(observed.outcome, "pending");
+    // The plugin can see neither the intent drain nor its own resource's close,
+    // and it does not pretend otherwise: the two placeholders below are
+    // overwritten by the client's composition, and `resource: attached` is the
+    // attach the host's dispatch path already recorded.
     assert.equal(observed.delivery, "none");
     assert.equal(observed.recovery, "none");
+    assert.equal(observed.resource, "attached");
   }
 });
 

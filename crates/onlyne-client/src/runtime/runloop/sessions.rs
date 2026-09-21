@@ -1,0 +1,270 @@
+use super::config::{OUTCOME_POLL_MS, RunState};
+use super::run::settle_control;
+use crate::session::accept::AcceptPath;
+use crate::session::dispatch::{self, ClientLink};
+use anyhow::{Result, anyhow};
+use onlyne_proto::{AckArgs, ClientOp, Delivery, QueryRolesArgs, RoleInfo};
+use onlyne_session::SessionOutcome;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
+
+/// Drain terminal facts emitted by a backend that owns its agent.
+///
+/// The backend queue is synchronous and destructive. Each fact is moved out
+/// before this task awaits the ordinary settlement path, so neither its queue
+/// lock nor the dispatch lock can survive into session teardown.
+pub(super) async fn outcome_loop(state: RunState) -> Result<()> {
+    let Some(feed) = state.dispatch.outcome_feed() else {
+        return std::future::pending::<Result<()>>().await;
+    };
+    loop {
+        while let Some(outcome) = feed.try_recv() {
+            settle_session_outcome(&state, outcome).await?;
+        }
+        sleep(Duration::from_millis(OUTCOME_POLL_MS)).await;
+    }
+}
+
+/// Feed one self-driven ending through the same fault and settlement paths an
+/// adapter report uses, and hand on whatever the ending's report asked for.
+pub(super) async fn settle_session_outcome(
+    state: &RunState,
+    outcome: SessionOutcome,
+) -> Result<()> {
+    let SessionOutcome {
+        task_id,
+        outcome,
+        head,
+        head_kind,
+        note,
+        refusals,
+        handoffs,
+    } = outcome;
+    // A self-driven backend reports in the task's own vocabulary, and the
+    // settlement travels in the wire's. `pending` is the absence of a verdict,
+    // which is nothing this loop can settle: the backend owes an ending.
+    let terminal = dispatch::task_outcome_of(outcome).ok_or_else(|| {
+        anyhow!("self-driven backend reported a non-terminal outcome for task {task_id}")
+    })?;
+    if let Some(reason) = refusals.as_deref() {
+        onlyne_session::record_fault(&state.store, &task_id, "permission", "acp", reason)?;
+    }
+    if outcome == onlyne_session::TaskState::Failed
+        && let Some(reason) = note.as_deref()
+    {
+        onlyne_session::record_fault(&state.store, &task_id, "acp", "acp", reason)?;
+    }
+    dispatch::on_out(
+        &state.dispatch,
+        &task_id,
+        terminal,
+        head,
+        head_kind.as_deref(),
+        &handoffs,
+    )
+    .await
+}
+
+/// One delivery becomes a session, or an immediate refusal ack.
+///
+/// A plugin mounted before any work existed is parked in the dispatcher, so the
+/// session staged here hands straight over to it. That is the order an
+/// always-running agent takes: it attaches first and receives its assignment
+/// when a task arrives (plan §6 line 285).
+pub(super) async fn accept_delivery(state: &RunState, delivery: &Delivery) {
+    // A control command acts on the work the role already holds, so it answers
+    // before the capacity gate and before the `accept_new` gate: a role at
+    // `max_sessions` is exactly the role whose operator wants to free.
+    if delivery.envelope.kind == onlyne_proto::MsgKind::Control {
+        settle_control(state, delivery).await;
+        return;
+    }
+    // A task this role already finished is not new work. The server re-offers an
+    // unacknowledged row after a link flap or an operator repair, and a
+    // completion that was in flight when the link dropped can land after the
+    // requeue, so this row's task may already be `Done` here. Dispatching it
+    // again would stage its payload on whichever session is idle — one chain's
+    // task running inside another conversation, with a second answer aimed at
+    // the ledger row the first one settled. Acknowledge the row and run nothing.
+    if delivery.envelope.kind == onlyne_proto::MsgKind::Task
+        && let Some(task_id) = delivery.envelope.task_id()
+        && state.dispatch.task_completed_here(task_id)
+    {
+        tracing::warn!(
+            msg_id = %delivery.msg_id,
+            task = %task_id,
+            "redelivery of a finished task settled without running it"
+        );
+        state.dispatch.push_settled(AckArgs {
+            msg_id: delivery.msg_id.clone(),
+            op_id: None,
+            accepted: true,
+            reason: Some("task already completed by this role".to_string()),
+        });
+        return;
+    }
+    if !state.dispatch.has_capacity() {
+        // The row stays in flight on the server, which offers it again when a
+        // session frees (plan §5 `max_sessions`).
+        tracing::debug!(msg_id = %delivery.msg_id, "delivery waits for a free session");
+        return;
+    }
+    // A `Completion` is a terminal receipt, so it settles the row it names and
+    // starts no session (plan §3 line 152's `Completion`).
+    if delivery.envelope.kind == onlyne_proto::MsgKind::Completion {
+        state.dispatch.push_settled(AckArgs {
+            msg_id: delivery.msg_id.clone(),
+            op_id: None,
+            accepted: true,
+            reason: None,
+        });
+        return;
+    }
+    // A `Note` names no task, so it starts no session: it is the wake-up a role
+    // sends to a running agent (§3), and an agent that does not exist yet has
+    // nothing to wake. §5's `note_queue` keeps one out of the queue when its
+    // role is offline, and this is the matching half on the receiving side.
+    if delivery.envelope.kind == onlyne_proto::MsgKind::Note {
+        let injected = state.dispatch.inject_note(&delivery.envelope).await;
+        state.dispatch.push_settled(AckArgs {
+            msg_id: delivery.msg_id.clone(),
+            op_id: None,
+            accepted: injected,
+            reason: (!injected).then(|| "note has no live session to wake".to_string()),
+        });
+        return;
+    }
+    let accept_new = state.accept_new.load(Ordering::SeqCst);
+    let path = AcceptPath::new(state.dispatch.clone(), state.dispatch.role_prose());
+    match path.accept_new(delivery, accept_new) {
+        Ok(Some(session)) => {
+            if let Some(task_id) = delivery.envelope.task_id() {
+                state.dispatch.attach_msg_id(task_id, &delivery.msg_id);
+            }
+            // A plugin attached to this session takes the payload now, or the
+            // one parked for the role does; a session whose own plugin is
+            // still starting waits for its mount to hand it over.
+            if let Err(error) = state.dispatch.hand_staged(&session.task_id).await {
+                tracing::warn!(error = %error, task = %session.task_id, "staged hand-off refused");
+            }
+        }
+        Ok(None) => state.dispatch.push_settled(AckArgs {
+            msg_id: delivery.msg_id.clone(),
+            op_id: None,
+            accepted: false,
+            reason: Some("client is not accepting new work".to_string()),
+        }),
+        Err(error) => {
+            tracing::warn!(error = %error, msg_id = %delivery.msg_id, "delivery refused");
+            state.dispatch.push_settled(AckArgs {
+                msg_id: delivery.msg_id.clone(),
+                op_id: None,
+                accepted: false,
+                reason: Some(error.to_string()),
+            });
+        }
+    }
+}
+
+/// Report running sessions whose Applied clock has exceeded the stall
+/// threshold. The fault is observation-only; the ledger row stays as stored.
+pub(super) async fn scan_stalls(state: &RunState) {
+    if state.stall_report_secs == 0 {
+        return;
+    }
+    let due = state
+        .dispatch
+        .stall_due(Instant::now(), state.stall_report_secs);
+    for task_id in due {
+        let Some(report) = state.dispatch.stall_report(&task_id) else {
+            continue;
+        };
+        match dispatch::send_frame(&state.dispatch, ClientOp::Report(report)).await {
+            Ok(()) => state.dispatch.mark_stalled(&task_id),
+            Err(error) => {
+                tracing::warn!(error = %error, task = %task_id, "stall fault was not sent")
+            }
+        }
+    }
+}
+
+/// Retire the sessions whose plugin connection dropped and did not come back
+/// within `[client] reconnect_grace_secs`. The tick sweeps every session the
+/// window expired on, bound to a task or not: a plugin that never came back is an
+/// agent that is gone, whether or not its work was still owed.
+pub(super) fn scan_reconnect_grace(state: &RunState) {
+    if state.reconnect_grace_secs == 0 {
+        return;
+    }
+    let retired = state
+        .dispatch
+        .retire_dropped_ghosts(Instant::now(), state.reconnect_grace_secs);
+    if retired > 0 {
+        tracing::info!(
+            retired,
+            grace_secs = state.reconnect_grace_secs,
+            "dropped sessions retired past the reconnect grace"
+        );
+    }
+}
+
+pub(super) async fn wait_for_mount_or_grace(state: &RunState, grace_secs: u64) {
+    if state.dispatch.has_mounted_adapter() || grace_secs == 0 {
+        return;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(grace_secs);
+    while std::time::Instant::now() < deadline {
+        if state.dispatch.has_mounted_adapter() {
+            return;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+pub(super) async fn refresh_role_slice(link: &ClientLink, state: &RunState) -> Result<()> {
+    let role = state.dispatch.role();
+    let reply = link
+        .request(ClientOp::QueryRoles(QueryRolesArgs { role: Some(role) }))
+        .await?;
+    if !reply.ok {
+        tracing::warn!(error = ?reply.error, "role slice refresh query refused");
+        return Ok(());
+    }
+    let rows: Vec<RoleInfo> = reply
+        .data
+        .as_ref()
+        .and_then(|value| value.get("roles"))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(info) = rows.first() {
+        apply_role_info(state, info);
+    }
+    Ok(())
+}
+
+pub(super) fn apply_role_info(state: &RunState, info: &RoleInfo) -> Vec<&'static str> {
+    let current = state.dispatch.role_slice();
+    let next = crate::session::slice::RoleSlice::from_role_info(info, &current);
+    let Some((applied, fields)) = crate::session::slice::apply_if_changed(&current, next) else {
+        return Vec::new();
+    };
+    state.dispatch.reconfigure(applied);
+    fields
+}
+
+/// The local accept path for the current role slice.
+pub fn accept_path(state: &RunState) -> Result<AcceptPath> {
+    Ok(AcceptPath::new(
+        state.dispatch.clone(),
+        state.dispatch.role_prose(),
+    ))
+}
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod scan_tests;

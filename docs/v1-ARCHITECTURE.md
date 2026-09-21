@@ -124,7 +124,7 @@ CLI socket discovery is fixed. `--socket <path>` wins first, then `ONLYNE_SOCKET
 
 | Surface | Closed op set | Source |
 |---|---|---|
-| Client to server | `hello`, `send`, `pull`, `ack`, `report`, `session_sync`, `subscribe`, `query_ledger`, `query_sessions`, `query_roles`, `query_faults`, `control`, `bye` | Plan §8 line 318 |
+| Client to server | `hello`, `send`, `pull`, `ack`, `report`, `subscribe`, `query_ledger`, `query_sessions`, `query_roles`, `query_faults`, `control`, `bye` | Plan §8 line 318 |
 | Admin | `status`, `roles`, `sessions`, `ledger`, `faults`, `watch`, `history`, `spec_diff`, `reload`, `send`, `control`, `repair_inspect`, `repair_adopt`, `repair_rebind`, `repair_retry`, `repair_fail`, `repair_close`, `repair_ack`, `shutdown` | Plan §8 line 320; `AdminOp` in `crates/onlyne-proto/src/ops.rs` |
 | Gateway to server | `hello`, `register_channel`, `deliver`, `health`, `bye` (`render_send` travels host to gateway; `typing` is an optional gateway capability) | Plan §8 line 322; `GatewayOp` in `crates/onlyne-proto/src/ops.rs`; `HostOp::RenderSend` and `PluginOp::Typing` in `crates/onlyne-proto/src/adapter.rs` |
 | Adapter plugin to host | `hello`, `report`, `session_register`, `assign_ack`, `send`, `deliver`, `register_channel`, `health`, `typing`, `detach` | `PluginOp` in `crates/onlyne-proto/src/adapter.rs`; frame names in `crates/onlyne-adapter/PROTOCOL.md` |
@@ -151,16 +151,21 @@ Idempotency keys on `op_id`. A repeated identical request returns the durable re
 
 The client is the authority for execution state. The server stores projections. Source: Plan D5 line 19; Plan §6 lines 276-289.
 
+A `sessions` read answers that mirror, and `onlyne sessions --fresh --task T` is its one opt-in exception. It adds no vocabulary: the server sends the existing `control` op `probe` to T's owning client (`control_envelope` in `crates/onlyne-server/src/router.rs`, the owning role on both ends — the shape `onlyne control --from <role>` already uses), waits inside the read's own `--timeout` for T's row to move past the `(generation, seq)` watermark the read started at, and stamps the row it answers with `fresh`: `probed` when the client's republish landed, `offline` when nothing could be asked (no `--task`, no row, no owner, or an owner that is not connected), `unanswered` when the probe went out and nothing moved inside the bound. The wait watches the `session_state` event `projection::write` already broadcasts, and the republish the client sends before its plugin answers (`sync_session` on the `probe` arm) is dropped by the `(generation, seq)` gate, so the row that ends the wait is the one carrying the probe's observation. A probe that does not land answers the stored mirror with that marker rather than an error or a longer wait; a read without the flag sends no control frame, waits for nothing, and carries no `fresh` key.
+
 Backend selection is env `ONLYNE_BACKEND` > workspace `config.toml` `backend` > auto. `headless` parses as `exec`. zellij `probe` reads `list-sessions` (keeping the EXITED marker) then `action list-panes --json --state`, and maps `exited` / `exit_status` so an EXITED session is not alive. herdr and orca probes stay on host presence: those CLIs expose no integer pane/tab exit code.
 
 | Dimension | Values | Source |
 |---|---|---|
-| `AgentState` | `Booting`, `Ready`, `Running`, `Idle`, `Gone` | Plan §6 line 280; `AgentState` in `crates/onlyne-session/src/lifecycle.rs` |
+| `AgentState` | `Booting`, `Ready`, `Running`, `Idle`, `Gone` | Plan §6 line 280; `AgentState` in `crates/onlyne-session/src/lifecycle/state.rs` |
 | `DeliveryState` | `None`, `Pending`, `Retrying`, `Accepted`, `Exhausted` | Plan §6 line 280 |
 | `ResourceState` | `Detached`, `Attached`, `Closing`, `Closed` | Plan §6 line 280 |
 | `RecoveryState` | `None`, `IdleWaiting`, `IdleFault`, `Draining` | Plan §6 line 280 |
-| `Outcome` | `Done`, `Failed`, `Cancelled` | Plan §3 line 140 |
-| `PublicLifecycle` | `Created`, `Working`, `Idle`, `Exited` | Plan §6 line 280 |
+
+Two more names in that vocabulary are not dimensions, and no tuple carries them:
+
+- `TaskState` (`Pending`, `Done`, `Failed`, `Cancelled`) is the task's own record, held by the client's `task` table and handed to `project` as an input. Source: Plan §3 line 140.
+- `PublicLifecycle` (`Created`, `Working`, `Idle`, `Exited`) is derived per read by `project(agent, delivery, resource, recovery, task_state)`; nothing stores it. Source: Plan §6 line 280.
 
 The client task path is a fixed order: spawn `SessionBackend` for the task, record `sessions`, report `ready`, then deliver the assignment. Source: Plan §6 line 285.
 
@@ -228,7 +233,7 @@ Top-level groups are `onlyne server <verb>`, `onlyne client <verb>`, and `onlyne
 
 Inside the `server` group, the lifecycle verbs (`init`, `run`, `start`, `stop`, `status`, `generate`, `reload`) exec `onlyne-server` with the remaining arguments verbatim, and the admin nouns (`roles`, `sessions`, `ledger`, `faults`, `watch`, `history`, `repair`) resolve against the admin socket inside the CLI process. `onlyne` has no intermediate `forward` verb. An unrecognized server verb is refused with exit 2.
 
-`spec_diff` is primary with the `spec-diff` alias. `--timeout` is primary with the `--timeout-ms` alias. `wait-ready` takes `--interval-ms` (default 200) with the global `--timeout` bound (default 10000). `--from` is a per-verb flag on `send`, `reply`, `complete`, `handoff`, and `control` for the admin surface only. `reply --to <envelope-id>` answers that ledger row and addresses its recipient. Exit codes: 0 success, 1 failed daemon answer or `wait-ready` bound hit, 2 local validation, 3 no socket, 4 propagated generate-child failure, 5 no supported session host, 127 missing sibling binary. Source: `Verb` and `ServerVerb` in `crates/onlyne-cli/src/main.rs`; `forward::exec` in `crates/onlyne-cli/src/forward.rs`; `crates/onlyne-cli/tests/cli.rs`.
+`spec_diff` is primary with the `spec-diff` alias. `--timeout` is primary with the `--timeout-ms` alias. `wait-ready` takes `--interval-ms` (default 200) with the global `--timeout` bound (default 10000). `--from` is a per-verb flag on `send`, `reply`, `complete`, `handoff`, and `control` for the admin surface only. `reply --to <envelope-id>` answers that ledger row and addresses its recipient. `sessions` takes `--fresh`, which needs `--task` and asks that task's owning client to probe its plugin: the probe wait is `--timeout` less a 250ms frame reserve (`FRESH_RESERVE_MS` in `crates/onlyne-cli/src/admin.rs`), so the answer lands inside the bound the operator set; `--fresh` without `--task`, or with a `--timeout` that cannot hold a frame, is refused as local validation. Exit codes: 0 success, 1 failed daemon answer or `wait-ready` bound hit, 2 local validation, 3 no socket, 4 propagated generate-child failure, 5 no supported session host, 127 missing sibling binary. Source: `Verb` and `ServerVerb` in `crates/onlyne-cli/src/main.rs`; `forward::exec` in `crates/onlyne-cli/src/forward.rs`; `crates/onlyne-cli/tests/cli.rs`.
 
 ## Where the code lives
 

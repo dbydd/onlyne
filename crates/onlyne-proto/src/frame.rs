@@ -298,7 +298,7 @@ mod tests {
     use crate::ops::{
         AckArgs, AdminOp, ByeArgs, ControlArgs, GatewayOp, HandshakeArgs, LedgerQuery, PullArgs,
         QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, RegisterChannelArgs, Report,
-        SessionProjection, SessionSyncArgs, Subscribe,
+        SessionProjection, Subscribe,
     };
     use crate::{PROTOCOL_VERSION, envelope::ControlOp};
 
@@ -560,13 +560,6 @@ mod tests {
                 seq: 3,
                 cluster_ref: None,
             }),
-            ClientOp::SessionSync(SessionSyncArgs {
-                task_id: new_task_id(),
-                session_id: "s".into(),
-                generation: 1,
-                seq: 4,
-                projection: SessionProjection::default_working(),
-            }),
             ClientOp::Subscribe(Subscribe {
                 since_seq: 7,
                 tiers: vec![EventTier::Durable],
@@ -588,7 +581,7 @@ mod tests {
                 drain_ms: None,
             }),
         ];
-        assert_eq!(ops.len(), 13);
+        assert_eq!(ops.len(), 12);
         for (index, op) in ops.into_iter().enumerate() {
             let id = format!("r{index}");
             let frame = Frame::req(&id, op);

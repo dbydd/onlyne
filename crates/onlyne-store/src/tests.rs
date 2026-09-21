@@ -2,18 +2,19 @@
 mod ledger_gates {
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use onlyne_proto::{
-        Body, Causality, Envelope, LedgerQuery, LedgerState, MsgKind, Principal, new_envelope,
+        Body, Causality, Envelope, LedgerQuery, LedgerState, MsgKind, Principal, QuerySessionsArgs,
+        new_envelope,
     };
     use onlyne_session::lifecycle::Version;
     use onlyne_session::reconcile::{Bridge, feed_ready};
     use onlyne_session::{SessionLedger, VersionedSession, apply_persist};
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
     use serde_json::json;
     use tempfile::TempDir;
 
     use crate::{
-        Append, ClientStore, FaultQuery, LedgerRow, ServerFaultRow, ServerLedger, StoreError,
-        transition_allowed,
+        Append, ClientStore, FaultQuery, LedgerRow, ServerFaultRow, ServerLedger, SessionWrite,
+        StoreError, transition_allowed,
     };
 
     fn temp_db(name: &str) -> (TempDir, std::path::PathBuf) {
@@ -55,7 +56,6 @@ mod ledger_gates {
             agent_state: format!("agent-{value}"),
             delivery_state: format!("delivery-{value}"),
             resource_state: format!("resource-{value}"),
-            public_lifecycle: format!("life-{value}"),
             recovery_substate: format!("recovery-{value}"),
             desired_json: format!("{{\"desired\":\"{value}\"}}"),
             observed_json: format!("{{\"observed\":\"{value}\"}}"),
@@ -83,7 +83,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-server".to_string(), 2, 1));
+        assert_eq!(marker, ("onlyne-server".to_string(), 3, 1));
 
         let (_dir, client_path) = temp_db("client.db");
         ClientStore::open(&client_path).unwrap();
@@ -96,7 +96,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-client".to_string(), 1, 1));
+        assert_eq!(marker, ("onlyne-client".to_string(), 2, 1));
     }
 
     #[test]
@@ -112,7 +112,7 @@ mod ledger_gates {
         let conn = Connection::open(&marker_path).unwrap();
         conn.execute("CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL)", []).unwrap();
         conn.execute(
-            "INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',3,1)",
+            "INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',2,1)",
             [],
         )
         .unwrap();
@@ -133,7 +133,7 @@ mod ledger_gates {
         let conn = Connection::open(&marker_path).unwrap();
         conn.execute("CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL)", []).unwrap();
         conn.execute(
-            "INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-client',2,1)",
+            "INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-client',1,1)",
             [],
         )
         .unwrap();
@@ -553,6 +553,73 @@ mod ledger_gates {
     }
 
     #[test]
+    fn a_row_whose_projection_does_not_parse_still_answers_the_lifecycle_filter() {
+        let (_dir, path) = temp_db("server-corrupt-projection.db");
+        let ledger = ServerLedger::open(&path, 14).unwrap();
+        let task_id = new_uuid(30);
+        let write = SessionWrite {
+            task_id: task_id.clone(),
+            role: "builder".to_string(),
+            session_id: "8b1c".to_string(),
+            generation: 1,
+            seq: 4,
+            agent_state: "running".to_string(),
+            delivery_state: "pending".to_string(),
+            resource_state: "attached".to_string(),
+            recovery_substate: "none".to_string(),
+            desired_json: "{}".to_string(),
+            observed_json: serde_json::to_string(&onlyne_proto::SessionProjection {
+                lifecycle: onlyne_proto::Lifecycle::Working,
+                ..Default::default()
+            })
+            .unwrap(),
+            mismatch_count: 0,
+            updated_at: 1_789_000_000,
+        };
+        assert!(ledger.project_session(&write).unwrap());
+        let working = || {
+            ledger
+                .list_sessions(QuerySessionsArgs {
+                    lifecycle: Some(onlyne_proto::Lifecycle::Working),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .unwrap()
+                .iter()
+                .any(|row| row.task_id == task_id)
+        };
+        let created = || {
+            ledger
+                .list_sessions(QuerySessionsArgs {
+                    lifecycle: Some(onlyne_proto::Lifecycle::Created),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .unwrap()
+                .iter()
+                .any(|row| row.task_id == task_id)
+        };
+        assert!(working() && !created(), "the key inside the mirror decides");
+
+        // Break only those bytes. The lifecycle filter reads a key out of them,
+        // and JSON1 answers `malformed JSON` rather than NULL for bytes that are
+        // not JSON at all — without the guard the scan itself fails and every
+        // session behind this row stops being observed. With it, the row reads
+        // back as the freshly created projection, exactly as the row's own read
+        // path reports it, so it stays visible to a `created` filter and stays
+        // out of a `working` one.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE sessions SET observed_json='not json' WHERE task_id=?",
+            params![task_id],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(!working(), "a row that cannot say is not working");
+        assert!(created(), "and it says what the read path says: created");
+    }
+
+    #[test]
     fn client_store_drives_apply_persist_created_and_ready() {
         let (_dir, path) = temp_db("client.db");
         let store = ClientStore::open(&path).unwrap();
@@ -579,14 +646,112 @@ mod ledger_gates {
         )
         .unwrap();
         let created = store.get_session(&task_id).unwrap().unwrap();
-        assert_eq!(created.public_lifecycle, "created");
+        // The row answers with its tuple, and the public view comes out of
+        // `project` beside the task state the caller owns. Nothing here holds a
+        // lifecycle to read.
+        let created_tuple = onlyne_session::project(
+            observation(&created).agent,
+            observation(&created).delivery,
+            observation(&created).resource,
+            observation(&created).recovery,
+            onlyne_session::TaskState::Pending,
+        );
+        assert_eq!(created_tuple, onlyne_session::PublicLifecycle::Created);
         assert_eq!((created.generation, created.seq), (1, 1));
         feed_ready(&bridge, &store, &task_id).unwrap();
         let ready = store.get_session(&task_id).unwrap().unwrap();
-        assert_eq!(ready.public_lifecycle, "idle");
+        let ready_tuple = observation(&ready);
+        assert_eq!(ready_tuple.agent, onlyne_session::AgentState::Ready);
+        assert_eq!(
+            onlyne_session::project(
+                ready_tuple.agent,
+                ready_tuple.delivery,
+                ready_tuple.resource,
+                ready_tuple.recovery,
+                onlyne_session::TaskState::Pending,
+            ),
+            onlyne_session::PublicLifecycle::Idle
+        );
         assert_eq!((ready.generation, ready.seq), (1, 2));
         assert!(store.list_faults(&task_id).unwrap().is_empty());
         assert!(store.event_head().unwrap() >= 2);
+    }
+
+    /// Decode the tuple one stored row carries.
+    fn observation(row: &onlyne_session::SessionRecord) -> onlyne_session::Observation {
+        serde_json::from_str(&row.observed_json).expect("the stored tuple is readable")
+    }
+
+    #[test]
+    fn a_settled_task_is_readable_only_from_the_task_table() {
+        let (_dir, path) = temp_db("client-task.db");
+        let store = ClientStore::open(&path).unwrap();
+        let task_id = new_uuid(20);
+        let causality = Causality::root(task_id.clone());
+        assert!(store.open_task(&causality, "task").unwrap());
+        let opened = store.task(&task_id).unwrap().expect("the open record");
+        assert_eq!(opened.task_state, onlyne_session::TaskState::Pending);
+        assert_eq!(opened.kind.as_deref(), Some("task"));
+        assert_eq!((opened.hop, opened.attempt), (0, 0));
+        assert!(opened.settled_at.is_none());
+        assert_eq!(store.open_tasks(10).unwrap().len(), 1);
+
+        assert!(
+            store
+                .settle_task(&task_id, onlyne_session::TaskState::Done)
+                .unwrap()
+        );
+        let settled = store.task(&task_id).unwrap().expect("the settled record");
+        assert_eq!(settled.task_state, onlyne_session::TaskState::Done);
+        assert!(settled.settled_at.is_some(), "the settle stamps its clock");
+        assert!(store.open_tasks(10).unwrap().is_empty());
+        // The first terminal verdict is the record: a later report for the same
+        // task cannot rewrite it.
+        assert!(
+            !store
+                .settle_task(&task_id, onlyne_session::TaskState::Failed)
+                .unwrap(),
+            "a settled task keeps the verdict that settled it"
+        );
+        assert_eq!(
+            store
+                .task(&task_id)
+                .unwrap()
+                .expect("the record")
+                .task_state,
+            onlyne_session::TaskState::Done
+        );
+        // Re-dispatching the task refreshes its chain and keeps its verdict.
+        let deeper = Causality {
+            task: task_id.clone(),
+            parent_task: Some(new_uuid(21)),
+            reply_to: None,
+            hop: 3,
+            attempt: 2,
+        };
+        assert!(store.open_task(&deeper, "relay").unwrap());
+        let again = store.task(&task_id).unwrap().expect("the record");
+        assert_eq!((again.hop, again.attempt), (3, 2));
+        assert_eq!(again.parent_task.as_deref(), Some(new_uuid(21).as_str()));
+        assert_eq!(again.task_state, onlyne_session::TaskState::Done);
+        assert_eq!(again.opened_at, settled.opened_at);
+        // A verdict for a task this store never opened writes its own record
+        // rather than being dropped.
+        let unopened = new_uuid(22);
+        assert!(
+            store
+                .settle_task(&unopened, onlyne_session::TaskState::Cancelled)
+                .unwrap(),
+            "a settle with no open record still lands"
+        );
+        let arrived = store.task(&unopened).unwrap().expect("the verdict's row");
+        assert_eq!(arrived.task_state, onlyne_session::TaskState::Cancelled);
+        assert!(arrived.kind.is_none(), "nobody claimed a delivery cause");
+        assert_eq!(
+            arrived.opened_at,
+            arrived.settled_at.expect("settled clock")
+        );
+        assert!(store.task(&new_uuid(23)).unwrap().is_none());
     }
 
     #[test]
@@ -1083,12 +1248,12 @@ mod ledger_gates {
     }
 
     #[test]
-    fn ensure_schema_adds_expires_at_in_place_on_a_version_2_file() {
+    fn ensure_schema_adds_expires_at_in_place_on_a_version_3_file() {
         let (_dir, path) = temp_db("server.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL);
-             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',2,1);
+             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',3,1);
              CREATE TABLE ledger(
                msg_id TEXT PRIMARY KEY,
                op_id TEXT UNIQUE,
@@ -1122,7 +1287,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-server".to_string(), 2, 1));
+        assert_eq!(marker, ("onlyne-server".to_string(), 3, 1));
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(ledger)")
             .unwrap()
@@ -1154,12 +1319,12 @@ mod ledger_gates {
     }
 
     #[test]
-    fn ensure_schema_adds_requeued_in_place_on_a_version_2_file() {
+    fn ensure_schema_adds_requeued_in_place_on_a_version_3_file() {
         let (_dir, path) = temp_db("server.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL);
-             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',2,1);
+             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',3,1);
              CREATE TABLE ledger(
                msg_id TEXT PRIMARY KEY,
                op_id TEXT UNIQUE,
@@ -1194,7 +1359,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-server".to_string(), 2, 1));
+        assert_eq!(marker, ("onlyne-server".to_string(), 3, 1));
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(ledger)")
             .unwrap()

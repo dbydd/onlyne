@@ -1,6 +1,28 @@
 # Onlyne Status
 
-v1.3.1 is tagged `v1.3.1` (`9d72e50`), nineteen crates at 1.3.1, and it stops two bleedings. A delivery row re-offered for a task this role already finished is now acked where it stands: the client reads the stored session row's terminal outcome through `DispatchState::task_completed_here` and runs nothing, which closes the path where a requeued row read as new work and the dispatcher's `reuse` branch staged it on whichever session sat idle — one chain's task executing inside another conversation, its second answer aimed at the ledger row the first had settled. `Done` is the outcome that closes the door, so a killed or crashed session leaves its task open for `requeue`, `repair_retry`, and `control retry`. The second stop is the generator: `onlyne server generate` wrote `config.toml` and the key into a fresh workspace and left every template file out, because its write loop asked the overwrite guard's predicate, and that predicate's `false` for a missing path is the guard's correct answer and the writer's inverted one. Nine cases in `crates/onlyne-server/tests/generate.rs` had been red since 1.3.0, where the release check covered `onlyne-client` and `onlyne-config` alone. The full workspace gate is green here at 970 cases across 50 suites with 1 ignored, and no wire type, config key, or generated schema moves.
+v1.4.0 is on this tree, nineteen crates at 1.4.0, and it rebuilds the client's session
+lifecycle around one rule: in plugin mode a session's state comes from the frames the
+mounted plugin reports and from heartbeat liveness. Three sources competed before it —
+the adapter frames, a backend probe that read a pane or a tab, and stored rows read as
+current fact — and a fourth, the client's own clocks, decided death on a schedule no
+plugin had witnessed. A plugin beat now moves `agent`, `resource` and `host`, and the
+client supplies `delivery`, `recovery` and the reconcile policy with its counters from
+its own record before the reducer reads it, so a beat cannot clear an intent the server
+has not receipted. The task's result left the session tuple for a `task` table of its
+own, so a session row describes a session and the task table answers for a task; the
+public lifecycle left the tuple as well and is derived where it is read. `session_sync`
+is gone and the client-to-server vocabulary is twelve verbs, with `report`'s heartbeat
+variant the only state carrier. Death is one clock with three starts — a session's
+birth, a lost connection, a graceful goodbye while work is owed — and the sweep that
+reads it takes every session, settles the task a dead session owed, and closes the
+resource with the reason that task's state earns. The receipt reaches the reducer at
+last, so a completed task exits through `Done` beside `Accepted`, which is the exit the
+adapter protocol promises. Two databases move: the client's schema marker to 2 with the
+new `task` table, the server's to 3 with `public_lifecycle` dropped and the lifecycle
+read out of the stored projection, and a database from the previous layout is refused
+with `onlyne: unsupported schema; v1.0.0 does not migrate`.
+
+v1.3.1 is tagged `v1.3.1` (`9d72e50`), nineteen crates at 1.3.1, and it stops two bleedings. A delivery row re-offered for a task this role already finished is now acked where it stands: the client reads the verdict from the task's own record through `DispatchState::task_completed_here` and runs nothing, which closes the path where a requeued row read as new work and the dispatcher's `reuse` branch staged it on whichever session sat idle — one chain's task executing inside another conversation, its second answer aimed at the ledger row the first had settled. `Done` is the outcome that closes the door, so a killed or crashed session leaves its task open for `requeue`, `repair_retry`, and `control retry`. The second stop is the generator: `onlyne server generate` wrote `config.toml` and the key into a fresh workspace and left every template file out, because its write loop asked the overwrite guard's predicate, and that predicate's `false` for a missing path is the guard's correct answer and the writer's inverted one. Nine cases in `crates/onlyne-server/tests/generate.rs` had been red since 1.3.0, where the release check covered `onlyne-client` and `onlyne-config` alone. The full workspace gate is green here at 970 cases across 50 suites with 1 ignored, and no wire type, config key, or generated schema moves.
 
 v1.3.0 (tag `v1.3.0`, `5fadaa8`) shipped nineteen crates at 1.3.0. The release turns the client's promise about a plugin that went away from unbounded to bounded: a connection that ends without a `detach` frame keeps its session for `[client] reconnect_grace_secs`, sixty seconds by default and off at `0`, past which the client retires the task-free session it left behind — the shape that held a role's only capacity slot open for a process that was simply gone. A connection returning for a session a retry already answers is held: it is handed no assignment, what it sends rides that task's closing handoff as one marked message per downstream role, and it is told to leave once the merge is out. The same round deletes `[client.timeout] running_ms` from the parser, the wire, the schema, and the examples, and gives `onlyne server generate` a per-file content guard, so a workspace an operator hand-edited survives a rerun. `CHANGELOG.md` keeps the details under `[1.3.0]`. Earlier releases keep their own receipts in `CHANGELOG.md`. `docs/v1-PLAN.md` is the settled spec. `docs/v1-CONTRACT.md` owns the work split. Root README files are the user manual.
 

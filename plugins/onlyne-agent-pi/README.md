@@ -9,7 +9,7 @@ length-prefixed JSON codec, and the runtime has no npm dependencies.
 
 Outside an onlyne session the extension is inert. The client injects `ONLYNE_ROLE`,
 `ONLYNE_SESSION_ID` and `ONLYNE_TASK_ID` into every process it spawns
-(`crates/onlyne-client/src/dispatch.rs`). With any of the three missing, this is an
+(`crates/onlyne-client/src/session/dispatch.rs`). With any of the three missing, this is an
 ordinary pi session: the plugin registers nothing and opens nothing.
 
 ```
@@ -26,7 +26,7 @@ hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{r
   ├─ assign_ack{accepted:true}
   ├─ report.heartbeat{running|idle} — per turn, and every 10s while a task is live
   ├─ report.complete{outcome, head} — the ledger's terminal fact
-  │    └─ then one report.heartbeat{agent:"idle"} carrying the settled tuple
+  │    └─ then one report.heartbeat{agent:"idle"} stating the agent only
   │       └─ the client's answer is the handover: pi is asked to shut down, then detaches
   ├─ probe ──► one heartbeat
   ◀── recycle ──► complete (if unsettled) → stop → pi exits
@@ -193,7 +193,7 @@ outcome the socket could not carry is queued and flushed after the next `hello`,
 flush's answer is the handover that ends the process. A completion the host refused leaves
 the process running, so an exit never loses the task.
 
-The last report is one observation with `agent: "idle"` beside the settled outcome, sent
+The last report is one observation with `agent: "idle"`, sent
 after the completion is acknowledged and before the process leaves. The completion settles
 the row from the tuple the client holds, and that tuple still reads `running` when the
 finishing turn was the last heartbeat. Nothing observes the process afterwards, so without
@@ -271,18 +271,22 @@ the shipped client.
 - **Report sequence base.** The plugin's own `report` sequence starts at 1000, not 1. The
   client stamps its own dispatch events (`created`, resource attach, `ready`) into the
   same `(generation, seq)` watermark, and the reducer silently drops any report at or
-  below it (`crates/onlyne-session/src/reconcile.rs`). A plugin sequence starting at 1
+  below it (`crates/onlyne-session/src/reconcile/`). A plugin sequence starting at 1
   would lose its first observations. Everything else about the versioning is per spec.
-- **`observed` is a full `Observation`.** `report.heartbeat` carries the whole legal state
+- **`observed` is a full `Observation`.** `report.heartbeat` carries the state
   tuple (`version`, `generation_live`, `isolate_after`, `terminate_after`,
-  `mismatch_count`, `agent`, `delivery`, `resource`, `recovery`, `outcome`, `public`), not
-  a `{"state": "running"}` shorthand: the host deserialises it and rejects anything
-  `is_legal` refuses. This plugin owns only the `agent` dimension (turn hooks). It leaves
-  `delivery` at `none` and `outcome` at `pending`, which is its own truth until it reports
-  a completion. It reports `resource` as `attached` because the host's own dispatch path
-  already recorded the attach.
+  `mismatch_count`, `agent`, `delivery`, `resource`, `recovery`), not
+  a `{"state": "running"}` shorthand: the host deserialises it, overwrites the six
+  keys the client owns, and applies only a tuple `is_legal` accepts. This plugin owns the `agent` dimension (turn hooks), the
+  `resource` claim — its process is live in the pane the attach was recorded on —
+  and the `host` binding. It has no witness for `delivery`, `recovery`,
+  `generation_live`, `isolate_after`, `terminate_after` or `mismatch_count`: the
+  client rewrites all six from its own intent queue, reducer history and role
+  config before the tuple is applied, so whatever this plugin sends there is
+  never read. Neither a
+  task outcome nor a public view travels in a tuple at all.
 - **`ready` is reported once per connection.** The host's own hand-off path
-  (`crates/onlyne-client/src/dispatch.rs::hand_session`) already reports `ready` when the
+  (`crates/onlyne-client/src/session/dispatch/delivery.rs::hand_session`) already reports `ready` when the
   client stages the session for a mounting plugin, so a second report from the plugin is a
   no-op at the host. The plugin sends it anyway: a plugin that mounts *before* any work
   exists is the case the ready barrier names, and it costs one frame.
@@ -359,7 +363,7 @@ path the client's daemon bound, read when the environment carried none, §8).
 | `hello … forbidden` / connection closed right after `hello` | the mount role does not match the client's role | `hello.args.mount.role` vs the workspace's role |
 | `frame_too_large` | a body above 8 MiB | only reachable through an oversize outbound image; the ceiling is the core's |
 | tools missing | `pi.registerTool` is absent in that pi version | `/onlyne status`; the capability table above |
-| session reads `idle` again after `exited` | a heartbeat snapshot landed after the completion, carrying `outcome: pending` | the session log for the report order after `completion`; the plugin stops reporting for a completed task |
+| session reads `idle` again after `exited` | a turn-end heartbeat landed after the completion, moving the agent dimension back | the session log for the report order after `completion`; the plugin stops reporting for a completed task, and the client's own `delivery` survives either way |
 | the supervisor board lists no tabs | no live session reported a pane: the adapter predates the report, or this pi is not inside an Orca pane | `onlyne --server-root … sessions --json` for `projection.observed.host.orca.pane_key`; `env \| grep ORCA_` inside the pane |
 
 `/onlyne status` prints the live state (`connected`, `socket`, `role`, `sessionId`,

@@ -14,6 +14,23 @@ use std::path::Path;
 use std::time::SystemTime;
 use tokio::time::{Duration, timeout};
 
+/// The one order the TUI renders sessions in.
+///
+/// The server answers `sessions` `ORDER BY updated_at DESC, rowid DESC`
+/// (`crates/onlyne-store/src/server.rs:436`), which is the `onlyne sessions`
+/// semantics and belongs to the wire, not to this view. Every consumer of that
+/// slice on screen — the role box interiors, the page-2 graph table and the row
+/// its cursor highlights — reads it through here, so one sort keeps the picture
+/// still: a heartbeat or a fresh session reshuffles the server's answer, and
+/// without this the boxes, the table and the cursor all jump on every refresh.
+///
+/// A role's sessions group together and the task id breaks the tie inside a
+/// role. The task id is the sessions table's primary key, so the order is total
+/// and a pure function of the session set: permuting the slice cannot change it.
+fn session_order_key(session: &SessionRow) -> (&str, &str) {
+    (session.role.as_deref().unwrap_or(""), &session.task_id)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub status: Value,
@@ -37,6 +54,8 @@ pub struct RoleView {
     pub prose: Option<String>,
     pub state: Presence,
     pub session_count: u32,
+    /// The deliveries queued for this role's inbox, as the server counted them.
+    pub queued: u32,
     pub detail: Option<String>,
     pub edges: Vec<String>,
     pub aggregate: Option<String>,
@@ -52,6 +71,7 @@ impl From<RoleInfo> for RoleView {
             prose: info.prose,
             state: info.state,
             session_count: info.sessions,
+            queued: info.queued,
             detail: info.detail,
             edges: info.edges,
             aggregate: info.aggregate,
@@ -386,6 +406,8 @@ pub struct RoleDetail {
     pub state: Presence,
     pub session_count: u32,
     pub max_sessions: u32,
+    /// The deliveries queued for this role's inbox, as the server counted them.
+    pub queued: u32,
     pub admin: bool,
     pub aggregate: Option<String>,
     /// The role's `allowed_targets` verbatim.
@@ -590,6 +612,7 @@ pub async fn role_detail(socket: &Path, role: &str) -> anyhow::Result<RoleDetail
         state: view.state,
         session_count: view.session_count,
         max_sessions: view.max_sessions,
+        queued: view.queued,
         admin: view.admin,
         aggregate: view.aggregate,
         peers: view.edges,
@@ -795,6 +818,7 @@ pub fn layout_nodes(snapshot: &Snapshot, active_only: bool) -> Vec<LayoutNode> {
                 })
                 .collect(),
             aggregate: role.aggregate.clone(),
+            queued: role.queued,
             busy,
         });
     }
@@ -858,20 +882,25 @@ pub fn active_sessions(snapshot: &Snapshot) -> Vec<&SessionRow> {
 /// The sessions a view lists: every row, or only the ones still holding a
 /// slot while `active_only`.
 pub fn visible_sessions(snapshot: &Snapshot, active_only: bool) -> Vec<&SessionRow> {
-    snapshot
+    let mut rows: Vec<&SessionRow> = snapshot
         .sessions
         .iter()
         .filter(|session| !active_only || session_busy(session))
-        .collect()
+        .collect();
+    rows.sort_by(|left, right| session_order_key(left).cmp(&session_order_key(right)));
+    rows
 }
 
 /// The sessions one role's panel lists: the same "still holds its slot" test
 /// [`visible_sessions`] applies for `active_only`, so page 1's panel and page
 /// 2's session views never disagree about what is live.
 pub fn live_sessions(rows: &[SessionRow]) -> Vec<&SessionRow> {
-    rows.iter()
+    let mut live: Vec<&SessionRow> = rows
+        .iter()
         .filter(|session| session_busy(session))
-        .collect()
+        .collect();
+    live.sort_by(|left, right| session_order_key(left).cmp(&session_order_key(right)));
+    live
 }
 
 /// A control-plane role: the supervisor and every aggregate role. Its box
@@ -1425,6 +1454,7 @@ mod tests {
             outcome: None,
             updated_at: None,
             heartbeat_stale: false,
+            fresh: None,
         }
     }
 
@@ -1573,6 +1603,7 @@ mod tests {
             prose: None,
             state: Presence::Online,
             session_count: 0,
+            queued: 0,
             detail: None,
             edges: Vec::new(),
             aggregate: None,

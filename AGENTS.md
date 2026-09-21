@@ -184,13 +184,12 @@ Active workspace data stays local to the selected server root or role workspace.
 
 Onlyne v1.0.0 uses length-prefixed JSON frames: `u32` big-endian length plus UTF-8 JSON. One connection carries `req`, `res`, `ev`, `ack`, `ping`, `pong`, and `bye` frames. Frames above `MAX_FRAME_BYTES` return `error{code:"frame_too_large"}` and close the connection.
 
-Client to server op vocabulary has thirteen closed verbs:
+Client to server op vocabulary has twelve closed verbs:
 - `hello`
 - `send`
 - `pull`
 - `ack`
 - `report`
-- `session_sync`
 - `subscribe`
 - `query_ledger`
 - `query_sessions`
@@ -198,6 +197,13 @@ Client to server op vocabulary has thirteen closed verbs:
 - `query_faults`
 - `control`
 - `bye`
+
+`report` is the only frame that puts a session's state on the wire. Its heartbeat
+variant carries the session's whole projection beside the beat's own observation; a
+beat with no projection is liveness only, and the server keeps the tuple it infers
+from it. An accepted publish passes the same `(generation, seq)` monotonic gate that
+ordered every projection write before it, and mirrors the projection verbatim with the
+row's `desired` left empty.
 
 `pull` takes an optional `control_only`. When it is true the server hands rows whose `kind` is
 `control` and leaves `task`, `relay`, and `notice` rows `queued` with their ticket untouched, which
@@ -321,6 +327,7 @@ Server database persists:
 Client database persists:
 - `schema_marker`
 - `sessions`
+- `task`
 - `intents`
 - `out_head_cache`
 - `prose_cache`
@@ -331,11 +338,11 @@ Persist at least:
 - server ledger state and body JSON retention
 - the automatic requeue count per delivery row, bounded by `[server].requeue_max_attempts` and `requeue_ttl_secs` where the operator sets them
 - session projection mirror on the server
-- client-authoritative lifecycle rows
+- client-authoritative session tuples, with each task's verdict in the client's own `task` table
 - outbound intents with `op_id`, attempt, state, next attempt time, receipt, and last error
 - event cursor/checkpoint state where protocol requires it
 
-Schema gates expect `('onlyne-server',1,1)` or `('onlyne-client',1,1)`. A mismatch, an old table, or a `swarm` prefix prints `onlyne: unsupported schema; v1.0.0 does not migrate`.
+Schema gates expect `('onlyne-server',3,1)` or `('onlyne-client',2,1)`. A mismatch, an old table, or a `swarm` prefix prints `onlyne: unsupported schema; v1.0.0 does not migrate`.
 
 Do not introduce Redis, Kafka, Postgres, Docker services, or anything similarly heavy.
 

@@ -365,9 +365,9 @@ faults(id INTEGER PK AUTOINCREMENT, task_id, role, session_id, generation, seq,
 inbox_cursors(role TEXT PK, last_msg_id TEXT, last_seq INT, updated_at TEXT)
 ```
 
-`client.db`：`sessions`（本地权威，字段同 lifecycle 存储）、`intents`（§6）、`out_head_cache(task_id, head)`、`prose_cache(role, prose, spec_hash)`、`config_cache(key,value)`。
+`client.db`：`sessions`（本地权威，字段同 lifecycle 存储，不含 lifecycle 列）、`task(task_id PK, kind, parent_task, hop, attempt, task_state, opened_at, settled_at)`（任务自己的记录：结果不是 session 维度）、`intents`（§6）、`out_head_cache(task_id, head)`、`prose_cache(role, prose, spec_hash)`、`config_cache(key,value)`。
 
-迁移策略：启动时读 `schema_marker(name PK, version INT, protocol_version INT)`，期望值是 `('onlyne-server',1,1)` / `('onlyne-client',1,1)`。不匹配，或发现旧表（`io_cursors`、`loopback_idempotency`、`pending_replies`、`swarm` 前缀），就拒绝启动，提示 `onlyne: unsupported schema; v1.0.0 does not migrate`。
+迁移策略：启动时读 `schema_marker(name PK, version INT, protocol_version INT)`，期望值是 `('onlyne-server',3,1)` / `('onlyne-client',2,1)`。不匹配，或发现旧表（`io_cursors`、`loopback_idempotency`、`pending_replies`、`swarm` 前缀），就拒绝启动，提示 `onlyne: unsupported schema; v1.0.0 does not migrate`。
 
 ### 11. role 工作区生成与放置（D20）
 

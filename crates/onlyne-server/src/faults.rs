@@ -6,7 +6,7 @@
 use crate::relay::RelayReject;
 use crate::state::State;
 use chrono::Utc;
-use onlyne_proto::{AdminOp, ErrorCode, Event, FaultEvent, Lifecycle, Outcome, QueryFaultsArgs};
+use onlyne_proto::{AdminOp, ErrorCode, Event, FaultEvent, Outcome, QueryFaultsArgs};
 use onlyne_store::{FaultQuery, ServerFaultRow};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -334,13 +334,7 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
         }
         AdminOp::RepairFail(fail) => {
             let reason = fail.reason.clone();
-            settle_task(
-                state,
-                &fail.task_id,
-                Lifecycle::Exited,
-                Outcome::Failed,
-                &reason,
-            )?;
+            settle_task(state, &fail.task_id, Outcome::Failed, &reason)?;
             transition_task_faults(state, &fail.task_id, "failed", &reason)?;
             retire_task_resource(state, &fail.task_id, &reason);
             Ok(Ok(json!({ "task_id": fail.task_id, "outcome": "failed" })))
@@ -350,13 +344,7 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
                 .reason
                 .clone()
                 .unwrap_or_else(|| "operator close".to_string());
-            settle_task(
-                state,
-                &target.task_id,
-                Lifecycle::Exited,
-                Outcome::Cancelled,
-                &reason,
-            )?;
+            settle_task(state, &target.task_id, Outcome::Cancelled, &reason)?;
             transition_task_faults(state, &target.task_id, "closed", &reason)?;
             retire_task_resource(state, &target.task_id, &reason);
             Ok(Ok(
@@ -447,17 +435,20 @@ fn unknown_task(task_id: &str) -> RelayReject {
 }
 
 /// Settle one task on the session projection and the ledger.
+///
+/// The mirror holds one copy of the projection, and the lifecycle travels inside
+/// it: writing the verdict means rewriting the stored projection with its outcome
+/// and its `exited` view, not updating a column beside the bytes that already
+/// say the same thing.
 fn settle_task(
     state: &Arc<State>,
     task_id: &str,
-    lifecycle: Lifecycle,
     outcome: Outcome,
     reason: &str,
 ) -> anyhow::Result<()> {
     if let Some(row) = state.ledger.get_session_row(task_id)? {
         let mut next = row.clone();
         let projection = crate::projection::projection_with_outcome(&next, outcome);
-        next.public_lifecycle = lifecycle_name(lifecycle).to_string();
         next.seq = next.seq.saturating_add(1);
         next.observed_json = serde_json::to_string(&projection)?;
         next.updated_at = Utc::now().timestamp();
@@ -503,15 +494,6 @@ fn settle_task(
         }
     }
     Ok(())
-}
-
-fn lifecycle_name(lifecycle: Lifecycle) -> &'static str {
-    match lifecycle {
-        Lifecycle::Created => "created",
-        Lifecycle::Working => "working",
-        Lifecycle::Idle => "idle",
-        Lifecycle::Exited => "exited",
-    }
 }
 
 /// Move every open fault of a task to `next_state`.

@@ -59,7 +59,6 @@ fn main() {
             ("Pull(PullArgs)", size_of::<PullArgs>()),
             ("Ack(AckArgs)", size_of::<AckArgs>()),
             ("Report(Report)", size_of::<Report>()),
-            ("SessionSync(SessionSyncArgs)", size_of::<SessionSyncArgs>()),
             ("Subscribe(Subscribe)", size_of::<Subscribe>()),
             ("QueryLedger(LedgerQuery)", size_of::<LedgerQuery>()),
             (
@@ -195,8 +194,15 @@ fn main() {
                 size_of::<(String, String, u64, u64)>(),
             ),
             (
-                "Heartbeat(String,u64,u64,Value)",
-                size_of::<(String, u64, u64, serde_json::Value)>(),
+                "Heartbeat(String,String,u64,u64,Value,Option<SessionProjection>)",
+                size_of::<(
+                    String,
+                    String,
+                    u64,
+                    u64,
+                    serde_json::Value,
+                    Option<SessionProjection>,
+                )>(),
             ),
             (
                 "Complete(String,Outcome,Option<String>,Option<String>)",

@@ -18,6 +18,19 @@ use std::collections::{BTreeMap, BTreeSet};
 const NODE_W: usize = 28;
 /// The narrowest box that still shows a title and a session line.
 const NODE_MIN_W: usize = 14;
+/// The cells a box reserves for a session row's age. The age is live text whose
+/// length the clock changes — `30s` becomes `12m` becomes `20d` — and a width
+/// that moved with the clock moved every box and every hop with it. So the
+/// measurement holds this many cells whatever the text says, and `draw_node`
+/// truncates an age that outgrows them the way it truncates any long line. Three
+/// cells cover `999d`, so only a timestamp years out of date reads short.
+const AGE_CELLS: usize = 3;
+/// The cells the third interior row asks for: the `+N` overflow marker and the
+/// queued-delivery marker side by side. Both counts grow as work arrives, so
+/// this row is measured at a fixed width too rather than at whatever the counts
+/// happen to be; ten is the room the narrowest box gives it, and a longer
+/// summary truncates the way any other overlong line does.
+const SUMMARY_ROW_CELLS: usize = 10;
 /// Box height: a title row, up to two session rows, and the borders.
 const NODE_H: usize = 5;
 /// Clear space the force layout keeps between two neighbouring boxes, on top of
@@ -47,6 +60,8 @@ pub struct LayoutNode {
     pub title: String,
     pub presence: Presence,
     pub sessions: Vec<SessionLine>,
+    /// The deliveries queued for this role's inbox, counted by the server.
+    pub queued: u32,
     pub aggregate: Option<String>,
     pub busy: bool,
 }
@@ -59,6 +74,7 @@ impl LayoutNode {
             name,
             presence: Presence::Offline,
             sessions: Vec::new(),
+            queued: 0,
             aggregate: None,
             busy: false,
         }
@@ -212,15 +228,22 @@ pub fn box_width(nodes: &[LayoutNode]) -> usize {
     (longest + 4).clamp(NODE_MIN_W, NODE_W)
 }
 
+/// The widest line one role's box draws. Every term is a function of the role's
+/// own facts: its title, its markers, and the session set it projects — never
+/// of which sessions a refresh happened to put first, and never of the clock.
 fn longest_line(node: &LayoutNode) -> usize {
     let mut longest =
         node.title.chars().count() + usize::from(node.aggregate.is_some()) + usize::from(node.busy);
-    for session in node.sessions.iter().take(2) {
-        longest =
-            longest.max(session.task.chars().count().min(8) + session.age.chars().count() + 4);
+    // The whole set rather than the two rows on screen: the pair at the top
+    // changes whenever a session arrives or leaves, and a width that followed
+    // it would resize the map on that refresh. The cells are exactly the ones
+    // the drawn row occupies: the task id clipped to the eight the box draws,
+    // the space-glyph-space separator, and the age's reserved cells.
+    for session in &node.sessions {
+        longest = longest.max(session.task.chars().count().min(8) + 3 + AGE_CELLS);
     }
     if node.sessions.len() > 2 {
-        longest = longest.max(3);
+        longest = longest.max(SUMMARY_ROW_CELLS);
     }
     longest
 }
@@ -840,9 +863,28 @@ fn draw_node(canvas: &mut Canvas, node: &LayoutNode, rect: Rect) -> (String, isi
             CellKind::Plain,
         );
     }
-    if node.sessions.len() > visible.len() && rect.h > 4 {
-        let text = format!("+{}", node.sessions.len() - visible.len());
-        draw_text(canvas, rect.y + 3, label_x, &text, CellKind::Plain);
+    // The third interior row: the sessions the box could not fit, then the work
+    // the role has waiting. A queued count of zero says nothing an operator
+    // reads as saturation, so it stays off the box.
+    let mut summary = String::new();
+    let hidden = node.sessions.len().saturating_sub(visible.len());
+    if hidden > 0 {
+        summary.push_str(&format!("+{hidden}"));
+    }
+    if node.queued > 0 {
+        if !summary.is_empty() {
+            summary.push(' ');
+        }
+        summary.push_str(&format!("q{}", node.queued));
+    }
+    if !summary.is_empty() && rect.h > 4 {
+        draw_text(
+            canvas,
+            rect.y + 3,
+            label_x,
+            &truncate(&summary, text_width),
+            CellKind::Plain,
+        );
     }
     (title.into_owned(), label_x)
 }
