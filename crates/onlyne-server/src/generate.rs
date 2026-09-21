@@ -137,14 +137,8 @@ pub fn generate(args: &GenerateArgs, spec: &Spec) -> Result<GenerateReport, Gene
             max_sessions: role.max_sessions.to_string(),
             agent_package: agent.as_ref().map(|name| format!(".onlyne/agent/{name}")),
         };
-        let mut source_files = load_tree(&template)?;
-        source_files.extend(load_dot_pi(&template.role_dir).map_err(|source| {
-            GenerateError::Io {
-                path: template.role_dir.join(".pi"),
-                source,
-            }
-        })?);
-        // `.pi/settings.json` resolves `packages` against the settings
+        let source_files = load_tree(&template)?;
+        // A runtime settings file resolves `packages` against the settings
         // directory (`<ws>/.pi`), where pi 0.85.1 loads `../.onlyne/agent/<name>`
         // and refuses `.onlyne/agent/<name>` (`docs/v1-CONTRACT.md`, the
         // vendoring line). Every other generated file names the package from
@@ -159,33 +153,26 @@ pub fn generate(args: &GenerateArgs, spec: &Spec) -> Result<GenerateReport, Gene
         let mut files = Vec::with_capacity(source_files.len());
         for (relative, bytes) in source_files {
             let path = template.role_dir.join(&relative);
-            let substituted = if relative == ".pi/settings.json" {
+            let settings = is_runtime_settings(&relative);
+            let substituted = if settings {
                 substitute_at(&bytes, &settings_placeholders, path.display().to_string())?
             } else {
                 substitute_at(&bytes, &placeholders, path.display().to_string())?
             };
-            if relative == ".pi/settings.json" {
-                // A literal absolute package path written into a template
-                // settings file rewrites to the same `../` reference the
-                // placeholder form renders, so both template styles ship a
-                // loadable package.
-                if let Some(source) =
-                    Some(spec.server.agent_package.as_str()).filter(|v| !v.is_empty())
-                {
-                    if let Some(name) = agent_name(source)? {
-                        files.push((
-                            relative,
-                            rewrite_agent_package_bytes(&substituted, source, &name),
-                        ));
-                    } else {
-                        files.push((relative, substituted.into_owned()));
+            // A literal absolute package path written into a template settings
+            // file rewrites to the same `../` reference the placeholder form
+            // renders, so both template styles ship a loadable package.
+            let rendered = if settings {
+                match agent_name(&spec.server.agent_package)? {
+                    Some(name) => {
+                        rewrite_agent_package_bytes(&substituted, &spec.server.agent_package, &name)
                     }
-                } else {
-                    files.push((relative, substituted.into_owned()));
+                    None => substituted.into_owned(),
                 }
             } else {
-                files.push((relative, substituted.into_owned()));
-            }
+                substituted.into_owned()
+            };
+            files.push((relative, rendered));
         }
         let derived = client_config_value(&role, spec, &cert_pin);
         let config_value = local_override(&template)
@@ -504,41 +491,6 @@ fn copy_package(
     Ok(())
 }
 
-fn load_dot_pi(role_dir: &Path) -> io::Result<Vec<(String, Vec<u8>)>> {
-    let pi = role_dir.join(".pi");
-    if !pi.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    collect_pi_files(&pi, Path::new(".pi"), &mut out)?;
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
-}
-
-fn collect_pi_files(
-    root: &Path,
-    relative: &Path,
-    out: &mut Vec<(String, Vec<u8>)>,
-) -> io::Result<()> {
-    let mut entries = fs::read_dir(root)?.collect::<Result<Vec<_>, io::Error>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let name = entry.file_name();
-        let file_type = entry.file_type()?;
-        let nested = relative.join(&name);
-        if file_type.is_dir() {
-            collect_pi_files(&entry.path(), &nested, out)?;
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-        let relative_string = nested.to_string_lossy().replace('\\', "/");
-        out.push((relative_string, fs::read(entry.path())?));
-    }
-    Ok(())
-}
-
 /// The scan set from `docs/v1-PLAN.md` §11 line 391: `out.canonicalize()` and the
 /// server root, plus each given path so a leak of either spelling is caught.
 fn scan_prefixes(root: &Path, out: &Path) -> Vec<String> {
@@ -555,7 +507,20 @@ fn scan_prefixes(root: &Path, out: &Path) -> Vec<String> {
     prefixes
 }
 
-/// Rewrite a literal `agent_package` path in `.pi/settings.json`.
+/// Whether a carried template path is an agent-runtime settings file: a
+/// `settings.json` sitting directly under a top-level dot-directory, which is
+/// where `.pi/` and `.omp/` each hold theirs. A `settings.json` nested any
+/// deeper, or one outside a dot-directory, is an ordinary template file and
+/// keeps the ordinary placeholder bag.
+fn is_runtime_settings(relative: &str) -> bool {
+    let mut parts = relative.split('/');
+    let Some(directory) = parts.next() else {
+        return false;
+    };
+    directory.starts_with('.') && parts.next() == Some("settings.json") && parts.next().is_none()
+}
+
+/// Rewrite a literal `agent_package` path in a runtime settings file.
 ///
 /// JSON encodes `\` as `\\`, so a Windows source path written by
 /// `serde_json::to_string` does not match the raw `display()` bytes. The

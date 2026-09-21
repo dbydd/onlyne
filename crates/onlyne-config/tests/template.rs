@@ -126,22 +126,30 @@ other = true
 }
 
 #[test]
-fn load_tree_prunes_dot_directories_and_separates_override() {
+fn load_tree_carries_dot_directories_and_separates_override() {
     let tmp = tempfile::tempdir().unwrap();
     let template = make_template(tmp.path(), "dev/planner");
     fs::write(template.role_dir.join("AGENTS.md"), b"instructions").unwrap();
     fs::create_dir_all(template.role_dir.join(".pi")).unwrap();
     fs::write(template.role_dir.join(".pi/settings.json"), b"hidden").unwrap();
+    fs::create_dir_all(template.role_dir.join(".git")).unwrap();
+    fs::write(template.role_dir.join(".git/config"), b"repository").unwrap();
     fs::create_dir_all(template.role_dir.join(".onlyne")).unwrap();
     fs::write(
         template.role_dir.join(".onlyne/config.toml"),
         b"[local]\nvalue = true\n",
     )
     .unwrap();
+    fs::write(template.role_dir.join(".onlyne/client.db"), b"stale state").unwrap();
     let files = load_tree(&template).unwrap();
+    // `.pi` is carried in the same sorted run as everything else; `.onlyne` and
+    // `.git` are left behind at every depth.
     assert_eq!(
         files,
-        vec![("AGENTS.md".to_string(), b"instructions".to_vec())]
+        vec![
+            (".pi/settings.json".to_string(), b"hidden".to_vec()),
+            ("AGENTS.md".to_string(), b"instructions".to_vec()),
+        ]
     );
     let override_ = local_override(&template).unwrap();
     assert_eq!(override_["local"]["value"].as_bool(), Some(true));

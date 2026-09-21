@@ -203,9 +203,9 @@ Generation flow:
 3. Map each role to a template directory whose basename equals the role name.
 4. Mirror the template topology into `<out>/<template-relative-path>/<role>/`.
 5. Create `.onlyne/config.toml` and `.onlyne/keys/role.key` with a new ed25519 keypair.
-6. Copy template content and merge a template `.onlyne/config.toml` fragment with derived values taking priority.
+6. Copy template content — every file the template holds, dot-directories included, except `.onlyne` (the runtime and config tree the generator owns) and `.git` (the repository the template sits in) — and merge a template `.onlyne/config.toml` fragment with derived values taking priority.
 7. Replace the closed placeholder set: `{{role}}`, `{{cluster}}`, `{{server_name}}`, `{{listen}}`, `{{cert_pin}}`, `{{admin}}`, `{{max_sessions}}`, `{{agent_package}}`.
-8. Vendor `[server].agent_package` into `<ws>/.onlyne/agent/<pkg-name>/` when the template uses `{{agent_package}}`, and write its `.pi/settings.json` entry as `../.onlyne/agent/<pkg-name>`: pi 0.85.1 resolves a project `packages` path against the directory holding that settings file.
+8. Vendor `[server].agent_package` into `<ws>/.onlyne/agent/<pkg-name>/` when the template uses `{{agent_package}}`, and write its runtime settings entry — the `settings.json` directly under a top-level dot-directory, `.pi/settings.json` or `.omp/settings.json` — as `../.onlyne/agent/<pkg-name>`: pi 0.85.1 resolves a project `packages` path against the directory holding that settings file.
 9. Scan output bytes for the generated output root and server root absolute prefixes.
 10. Delete this generation output on absolute-path match and return `onlyne: generated workspace embeds absolute path <path>`.
 11. Print a `[[client]]` TOML fragment and `<out>/.onlyne-generation.json`.

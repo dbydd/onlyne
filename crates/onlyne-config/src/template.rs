@@ -18,7 +18,14 @@
 //! * [`scan_for_prefixes`]: prefix guard called by the `onlyne-server` generate driver.
 //!
 //! Placeholders are closed to `role`, `cluster`, `server_name`, `listen`, `cert_pin`, `admin`, `max_sessions`, and `agent_package`.
-//! The file `.onlyne/config.toml` is the single carried exception to dot-directory pruning.
+//! A template carries every file it holds, dot-directories included, except the
+//! two named in `EXCLUDED_DOT_DIRECTORIES`. `.onlyne/config.toml` is read by
+//! [`local_override`] and never appears in the carried file list.
+//!
+//! Deviation from `docs/v1-PLAN.md` §11 line 374, which names
+//! `.onlyne/config.toml` as the template's only departure from opaque content:
+//! a template also carries its dot-directories, so one template can ship the
+//! project-local configuration of whichever agent runtime the operator runs.
 
 use std::{
     borrow::Cow,
@@ -197,8 +204,10 @@ fn collect_role_names(current: &Path, names: &mut Vec<String>) {
 
 /// Load all ordinary files below one role template.
 ///
-/// Dot-directories are omitted. `.onlyne/config.toml` is read by
-/// [`local_override`] and never appears in this returned file list.
+/// Every file is carried, dot-directories included, except the two named in
+/// `EXCLUDED_DOT_DIRECTORIES`. `.onlyne/config.toml` is read by
+/// [`local_override`] and never appears in this returned file list. Paths are
+/// relative to the role directory with `/` separators, sorted as strings.
 pub fn load_tree(template: &Template) -> Result<Vec<(String, Vec<u8>)>, TemplateError> {
     let mut files = Vec::new();
     collect_files(&template.role_dir, &template.role_dir, &mut files)?;
@@ -367,6 +376,22 @@ fn collect_role_dirs(
     Ok(())
 }
 
+/// Dot-directories a template never carries, by name.
+///
+/// Every other dot-directory is carried at every depth, because a template has
+/// to be able to ship the project-local configuration of whichever agent
+/// runtime the operator runs — `.pi` today, `.omp` next, and whatever follows.
+/// Both entries are directory names, so a `.onlyne` or `.git` at any depth
+/// stays behind.
+///
+/// * `.onlyne` — the generated workspace's own runtime and config tree. Its
+///   `config.toml` is the merge fragment [`local_override`] reads, and the rest
+///   is state the generator and the daemons own; carrying any of it would
+///   shadow what the generator just wrote or ship a stale key from the template.
+/// * `.git` — a repository the template directory happens to sit inside, not
+///   template content.
+const EXCLUDED_DOT_DIRECTORIES: [&str; 2] = [".onlyne", ".git"];
+
 fn collect_files(
     root: &Path,
     current: &Path,
@@ -384,13 +409,13 @@ fn collect_files(
             .file_type()
             .map_err(|source| TemplateError::io(&entry.path(), source))?;
         if file_type.is_dir() {
-            if name_string.starts_with('.') {
+            if EXCLUDED_DOT_DIRECTORIES.contains(&name_string.as_ref()) {
                 continue;
             }
             collect_files(root, &entry.path(), out)?;
             continue;
         }
-        if !file_type.is_file() || (current.ends_with(".onlyne") && name_string == "config.toml") {
+        if !file_type.is_file() {
             continue;
         }
         let path = entry.path();

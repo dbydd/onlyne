@@ -150,6 +150,13 @@ where it is read.
   plugin and answers what that probe produced. The wait lives inside the read's own
   `--timeout` less a reserve, the answer marks each row `probed`, `offline` or
   `unanswered`, and a read without the flag sends no frame and waits on nothing.
+- config and server: a role template carries every dot-directory it holds, minus `.onlyne`
+  and `.git`. `.pi` was the one exception to dot-directory pruning, which kept a template
+  from shipping the project-local configuration of another agent runtime; a template can
+  now carry `.omp/`, an opencode tree, or whatever comes next. The `../`-form
+  `agent_package` reference generalizes with it: any `settings.json` sitting directly under
+  a top-level dot-directory receives it, because a project `packages` path resolves against
+  the directory holding that settings file.
 
 ### Fixed
 

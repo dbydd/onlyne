@@ -469,6 +469,62 @@ fn agent_package_placeholder_in_settings_renders_the_parent_relative_form() {
     assert!(!agents.contains("../.onlyne"));
 }
 
+/// A template ships the project-local config of whichever runtime the operator
+/// runs, so it carries every dot-directory it holds — `.onlyne` (the workspace
+/// the generator owns) and `.git` (the repository the template sits in) aside.
+/// The `../` settings form stays narrow: it belongs to a `settings.json`
+/// directly under a top-level dot-directory, not to one nested deeper.
+#[test]
+fn dot_directories_are_carried_except_onlyne_and_git() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("srv");
+    let out = tmp.path().join("ws");
+    let package = tmp.path().join("pkg-source/pi-onlyne");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.json"), "{\"name\":\"pi-onlyne\"}").unwrap();
+    fs::create_dir_all(&root).unwrap();
+    write_template(
+        &root,
+        "dev/planner",
+        &[
+            ("AGENTS.md", "plug {{agent_package}}"),
+            (
+                ".omp/settings.json",
+                "{\"packages\":[\"{{agent_package}}\"]}",
+            ),
+            (
+                ".omp/nested/settings.json",
+                "{\"packages\":[\"{{agent_package}}\"]}",
+            ),
+            (".config/opencode/rules.md", "role {{role}}"),
+            (".git/config", "[core]\n"),
+            (".git/refs/heads/main", "ref: refs/heads/main\n"),
+            (".onlyne/run/role.lock", "lock\n"),
+        ],
+    );
+    let mut spec = spec_with_roles(&["planner"]);
+    spec.server.agent_package = package.display().to_string();
+    generate(&args(&root, &out), &spec).unwrap();
+    let ws = out.join("dev/planner");
+
+    let settings = fs::read_to_string(ws.join(".omp/settings.json")).unwrap();
+    assert!(
+        settings.contains("\"../.onlyne/agent/pi-onlyne\""),
+        "{settings}"
+    );
+    assert!(!settings.contains(&package.display().to_string()));
+    let nested = fs::read_to_string(ws.join(".omp/nested/settings.json")).unwrap();
+    assert!(nested.contains("\".onlyne/agent/pi-onlyne\""), "{nested}");
+    assert!(!nested.contains("../.onlyne"), "{nested}");
+    assert_eq!(
+        fs::read_to_string(ws.join(".config/opencode/rules.md")).unwrap(),
+        "role planner"
+    );
+    assert!(ws.join(".onlyne/agent/pi-onlyne/package.json").is_file());
+    assert!(!ws.join(".git").exists());
+    assert!(!ws.join(".onlyne/run").exists());
+}
+
 #[test]
 fn manifest_shape_is_stable() {
     let tmp = tempfile::tempdir().unwrap();
