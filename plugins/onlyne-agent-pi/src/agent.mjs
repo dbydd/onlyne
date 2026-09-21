@@ -1,7 +1,8 @@
 // The agent side of the onlyne adapter protocol: one connection to
 // `<role workspace>/.onlyne/run/s`, the hello/welcome handshake, assign
-// delivery, turn-state reports, the completion exit, probe, recycle and
-// detach — plus reconnect when the client restarts under it.
+// delivery, turn-state reports, the completion exit and the idle reminder
+// ladder that leads to it, probe, recycle and detach — plus reconnect when the
+// client restarts under it.
 //
 // Everything pi-specific lives behind `surface` (see pi-surface.mjs): this
 // module decides *what* the protocol says and hands the *effects* to the
@@ -19,6 +20,7 @@ import { createConnection } from "node:net";
 import { basename, join } from "node:path";
 import { createFrameDecoder, encodeFrame } from "./frame.mjs";
 import { createActivity } from "./activity.mjs";
+import { DEFAULT_IDLE_REMINDERS } from "./config.mjs";
 import {
   DEFAULT_HEARTBEAT_MS,
   assignAckArgs,
@@ -92,6 +94,7 @@ export class OnlyneAgent {
    *   requestTimeoutMs?: number,
    *   helloTimeoutMs?: number,
    *   settleFallbackMs?: number,
+   *   idleReminders?: number,
    *   createConnection?: (path: string) => any,
    *   timer?: { set: (fn: () => void, ms: number) => any, clear: (handle: any) => void },
    * }} options
@@ -115,6 +118,12 @@ export class OnlyneAgent {
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.helloTimeoutMs = options.helloTimeoutMs ?? HELLO_TIMEOUT_MS;
     this.settleFallbackMs = options.settleFallbackMs ?? SETTLE_FALLBACK_MS;
+    /**
+     * How many idle reminders one task may collect: the bound that turns the
+     * third idle without a completion into a failure (`settleNow`). It comes
+     * from the workspace's `.pi/onlyne.json` (`config.mjs`).
+     */
+    this.idleReminders = options.idleReminders ?? DEFAULT_IDLE_REMINDERS;
     this.createConnection = options.createConnection ?? ((path) => createConnection(path));
     // The pane this process was spawned in, reported on every heartbeat so the
     // supervisor board can attribute the tab (protocol.mjs `hostBinding`). Read
@@ -584,10 +593,16 @@ export class OnlyneAgent {
     if (typeof args.generation === "number") this.generation = args.generation;
 
     const attachments = this.writeAttachments(taskId, envelope);
+    const attachmentPaths = attachments.map((item) => item.path);
     const prose = typeof args.prose === "string" ? args.prose.trim() : "";
     const proseIsNew = prose.length > 0 && !this.deliveredProse.has(prose);
     if (proseIsNew) this.deliveredProse.add(prose);
-    const text = injectionText({ assign: { ...args, task_id: taskId }, proseIsNew, attachmentPaths: attachments.map((item) => item.path) });
+    // The assignment as the injection saw it, retained so the idle ladder can
+    // re-send it (`remind`): the task identity, its source, its kind, the task
+    // text with whatever handoff lines a relay put inside it, and the paths of
+    // the attachments this call already wrote.
+    const assignment = { ...args, task_id: taskId };
+    const text = injectionText({ assign: assignment, proseIsNew, attachmentPaths });
 
     const held = this.tasks.get(taskId);
     // A completed record is not a live one: a new envelope for a task that
@@ -598,9 +613,16 @@ export class OnlyneAgent {
       // is: its delivered set keeps the relay guard's count, and its completion
       // state still settles the task. Only the "since this instruction" counter
       // moves, so the settled-without-completing watchdog measures the newest one.
+      // The ladder restarts with it: the reminder count, the idle episode it was
+      // charged to (`remindedAt`), and the failure an errored turn proved all
+      // belong to the instruction being replaced.
       held.turnsSinceAssign = 0;
+      held.reminders = 0;
+      held.remindedAt = 0;
+      held.errored = false;
       held.envelopeId = envelope.id ?? held.envelopeId;
-      if (held.failed) held.failed = false;
+      held.assignment = assignment;
+      held.attachmentPaths = attachmentPaths;
     } else {
       this.tasks.set(taskId, {
         taskId,
@@ -612,7 +634,12 @@ export class OnlyneAgent {
         turns: 0,
         errored: false,
         head: "",
-        failed: false,
+        assignment,
+        attachmentPaths,
+        /** Idle reminders sent for this task; the bound is `idleReminders`. */
+        reminders: 0,
+        /** The `turnsSinceAssign` the last reminder was charged to. */
+        remindedAt: 0,
       });
     }
     this.agentState = "running";
@@ -691,17 +718,18 @@ export class OnlyneAgent {
     this.armSettleFallback();
   }
 
-  /** pi will not continue on its own: run the completion exit. */
+  /** pi will not continue on its own: take the settle decision for this idle. */
   onSettled() {
     this.clearSettleFallback();
     this.trySettle();
   }
 
   /**
-   * The one completion trigger. pi keeps `isIdle()` false while it is running,
+   * The one settle decision. pi keeps `isIdle()` false while it is running,
    * retrying, compacting, or holding a queued continuation, so a settle signal
-   * that arrives during any of those waits instead of reporting a premature
-   * outcome.
+   * that arrives during any of those waits instead of deciding on a session
+   * that is still busy. The fallback timer and `agent_settled` both land here,
+   * and `settleNow` makes the decision idempotent for one idle episode.
    */
   trySettle() {
     if (this.closed || this.activeTasks().length === 0) return;
@@ -709,14 +737,13 @@ export class OnlyneAgent {
       this.armSettleFallback();
       return;
     }
-    void this.settleNow().catch((error) => this.log(`completion failed: ${error.message}`));
+    void this.settleNow().catch((error) => this.log(`settle decision failed: ${error.message}`));
   }
 
-  /** A failed turn: the task's outcome is `failed` unless it already ended. */
+  /** A failed turn: the task's outcome is `failed`, with the error as its head. */
   onTurnError(text) {
     for (const task of this.tasks.values()) {
       if (task.completed) continue;
-      task.failed = true;
       task.errored = true;
       if (text) task.head = headOf(text);
     }
@@ -724,13 +751,15 @@ export class OnlyneAgent {
   }
 
   /**
-   * The last assistant text seen, kept as the completion summary for a task the
-   * model never handed an explicit argument over for.
+   * The last assistant text seen, kept as the completion summary for a task
+   * whose `onlyne_complete` call hands no argument over.
    *
    * This is the fallback, never the deliverable: `onlyne_complete`'s `text` is
    * reported byte for byte by `completeFromTool` and is never written back
    * here, so the sentence a turn happened to end on cannot stand in for a
-   * payload the tool call carried.
+   * payload the tool call carried. Nothing else reads it: an idle that runs out
+   * of reminders fails the task and says why, rather than reporting the text of
+   * a turn nobody completed.
    */
   noteAssistantText(text) {
     const flat = headOf(text);
@@ -756,26 +785,78 @@ export class OnlyneAgent {
   }
 
   /**
-   * The auto outcome rule: every active task whose turn produced output ends
-   * `done` (or `failed` when the turn errored), with the last assistant text as
-   * its head. That fallback is the only head this path may report — an explicit
-   * `onlyne_complete` argument is the tool path's, and this rule runs after it,
-   * for the tasks it left unsettled. A task assigned but not yet turned is left
-   * alone: the injected message has not run yet, and completing now would lie.
+   * The idle ladder's decision, taken for every task this session still holds
+   * when a settle signal finds the agent idle.
+   *
+   * An errored turn is proof on its own — pi may skip the clean turn end — so
+   * its task is reported `failed` at once, with the error as its head. Every
+   * other open task gets one rung of the ladder: the plugin re-sends the
+   * assignment (`remind`) and counts it, and the idle that finds the bound
+   * already spent reports `failed` and leaves the session.
+   *
+   * `onlyne_complete` is the only path to `done`. A turn that ends without it
+   * leaves the task `idle_waiting` (the design's own word for it), and the
+   * answer is the reinforcing prompt the model gets instead of a completion it
+   * never claimed.
+   *
+   * A task whose injected message has not run a turn is left alone at every
+   * rung: the reminder would re-send an assignment the model may not have read
+   * yet, and failing now would claim work that never happened.
+   *
+   * A rung belongs to an idle episode, not to a settle signal: `remindedAt`
+   * records the `turnsSinceAssign` the last reminder was charged to, so the
+   * fallback timer and an `agent_settled` answering the same turn end spend one
+   * rung between them.
    */
   async settleNow() {
     for (const task of [...this.tasks.values()]) {
       if (task.completed) continue;
-      // A turn has to have run: a full turn end is the ordinary proof, and an
-      // errored turn is proof enough on its own (pi may skip the clean turn_end).
-      if (task.turnsSinceAssign === 0 && !task.errored) continue;
-      await this.complete(task.taskId, task.failed ? "failed" : "done", task.head);
+      if (task.errored) {
+        await this.complete(task.taskId, "failed", task.head);
+        continue;
+      }
+      if (task.turnsSinceAssign === 0 || task.remindedAt === task.turnsSinceAssign) continue;
+      task.remindedAt = task.turnsSinceAssign;
+      if (task.reminders < this.idleReminders) {
+        this.remind(task);
+        continue;
+      }
+      const rungs = `${task.reminders} idle reminder${task.reminders === 1 ? "" : "s"}`;
+      await this.complete(task.taskId, "failed", `no completion after ${rungs}`);
     }
   }
 
   /**
-   * `onlyne_complete`: an explicit outcome from the model, which wins over the
-   * auto rule.
+   * One rung of the idle ladder: hand the assignment back to the model.
+   *
+   * The reminder is the injection's own text — `injectionText` with the prose
+   * flag off, so the role prose already in the session's context is not
+   * repeated — under one line saying why it is back. The task text is where a
+   * relay carries its handoff lines, so a handoff the model still owes comes
+   * back with it.
+   *
+   * The attachments travel as the paths the injection wrote, never as parts:
+   * the images were handed to pi once, and re-attaching them would put the same
+   * bytes into the context a second time.
+   *
+   * @param {any} task a record with `assignment` and `attachmentPaths` retained
+   * from `onAssign`
+   */
+  remind(task) {
+    task.reminders += 1;
+    const rung = `reminder ${task.reminders} of ${this.idleReminders}`;
+    const text = [
+      `[onlyne] your turn ended without a completion exit; this task is still open (${rung}). Call onlyne_complete when it is finished.`,
+      "",
+      injectionText({ assign: task.assignment, proseIsNew: false, attachmentPaths: task.attachmentPaths }),
+    ].join("\n");
+    this.surface.wakeUser?.(text, []);
+    this.notice("out", `${rung} for task ${task.taskId.slice(0, 8)}`);
+  }
+
+  /**
+   * `onlyne_complete`: the model's explicit outcome, and the only path to
+   * `done`.
    *
    * A non-empty `text` is the completion body: it is what the model handed
    * over, reported verbatim as the ledger's one-line `head`, so the last

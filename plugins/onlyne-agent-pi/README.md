@@ -25,6 +25,8 @@ hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{r
   ├─ task text (+ image path) ──► pi user message (deliverAs:"followUp")
   ├─ assign_ack{accepted:true}
   ├─ report.heartbeat{running|idle} — per turn, and every 10s while a task is live
+  ├─ a turn that ends without `onlyne_complete` ──► the idle ladder: the same
+  │    message again (at most `idleReminders` times), then `failed` and out
   ├─ report.complete{outcome, head} — the ledger's terminal fact
   │    └─ then one report.heartbeat{agent:"idle"} stating the agent only
   │       └─ the client's answer is the handover: pi is asked to shut down, then detaches
@@ -102,9 +104,10 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | --- | --- | --- |
 | `enabled` | `true` | `false` turns the extension off for this workspace |
 | `watch.autoStart` | `true` | `false` registers the tools but opens no socket until `/onlyne connect` |
+| `idleReminders` | `2` | how many times an idle turn end re-sends the assignment before the task fails (§4); 0 means the first idle without a completion fails it |
 
-A missing file means both defaults. A malformed file prints one warning on stderr and
-keeps both defaults: a typo must not silently disable a role. The client does not read
+A missing file means every default. A malformed file prints one warning on stderr and
+keeps the defaults: a typo must not silently disable a role. The client does not read
 this file (§11 of the plan downgraded the old readiness gates to generate-time template
 advice), so only this extension consumes it; the key shape stays the one the templates
 carry.
@@ -154,7 +157,8 @@ png/jpeg/gif/webp file: the plugin reads it, base64-encodes it and attaches it a
 
 ### `onlyne_complete{outcome?, text?, force?, reason?}`
 
-Ends the current task with an explicit outcome (`done` by default, or `failed`). A
+Ends the current task with an explicit outcome (`done` by default, or `failed`). It is the
+only path to `done`: a turn that ends without it is reminded and then failed (§4). A
 non-empty `text` becomes the ledger `head` verbatim: whitespace collapses to one line and
 the text stops at 200 characters. An absent or blank `text` carries no summary, so the
 completion falls back to the last assistant text. The call also ends the session's
@@ -165,26 +169,38 @@ handling. When the workspace carries a relay policy (§5), `force: true` with a 
 
 ## 4. Outcome rules
 
-The plugin sends one completion per task, at the first of these events:
+`onlyne_complete` is the only path to `done`. The plugin sends one completion per task,
+at the first of these events:
 
-1. **`onlyne_complete`** — the model gives an explicit outcome. It wins over everything
-   else, and a later completion for the same task is refused (not re-reported). Its
-   non-empty `text` is the head.
-2. **`agent_settled`** — pi will not continue on its own: no retry, compaction or queued
-   continuation is pending. The plugin reports:
-   - `failed` when the turn ended with a provider error (`stopReason: "error"`), with the
-     error as the head;
-   - `done` otherwise, with the last assistant text as the head;
-   - nothing at all when the task was assigned but no turn has run yet. The injected
-     message has not executed, so completing now would claim work that never happened.
-3. **`recycle{outcome}`** — the host is tearing the session down. The plugin settles an
+1. **`onlyne_complete`** — the model gives an explicit outcome (`done` by default, or
+   `failed` / `cancelled`). A later completion for the same task is refused (not
+   re-reported). Its non-empty `text` is the head.
+2. **An errored turn** — the turn ended with a provider error (`stopReason: "error"`).
+   That is proof on its own, so the plugin reports `failed` at once, with the error as
+   the head.
+3. **The idle ladder** — the turn ended cleanly without a completion, and the task is
+   still open. The plugin re-sends the assignment and counts the rung. The idle that
+   finds the bound `idleReminders` names already spent reports `failed` — head
+   `no completion after <n> idle reminders` — and the session exits the way any
+   completion makes it exit.
+4. **`recycle{outcome}`** — the host is tearing the session down. The plugin settles an
    unsettled task with the host's outcome first, then stops and exits pi.
+
+Two things settle nothing: a task that was assigned but whose turn has not run yet (the
+injected message has not executed, so completing now would claim work that never
+happened), and an idle the ladder still has a rung for. The ladder re-sends the
+assignment the task arrived with — the same header, task text and attachment paths the
+injection carried, under one line saying the previous turn ended without a completion —
+and never the role prose, which is already in the session's context. Its images are not
+re-attached: the paths travel as text, so the same bytes are not put into the context
+twice. A new envelope for the same task restarts the count.
 
 `head` is a single line, capped at 200 characters; it matches what the client puts in
 `out_head` and what the receipt carries. Each task has one source for it: the `text` of
-the explicit `onlyne_complete` call when that call carried one, and the last assistant
-text otherwise. The auto rule is that fallback path: it reports the text of the turn it
-settles, and a sentence spoken after the call cannot replace what the call handed over.
+the explicit `onlyne_complete` call when that call carried one, the error a failed turn
+reported, or the ladder's own line. The last assistant text is the fallback for an
+`onlyne_complete` call that carried no text at all — a sentence spoken after such a call
+cannot replace what the call handed over, and nothing else reads it.
 
 A reported completion ends the session's process. `report.complete` goes out as a request,
 and the client answers it only after it has settled the session row, acked the delivery
@@ -253,7 +269,7 @@ file its turn.
 | scope | this session's own sends, in process memory: a reconnect keeps them, a restarted session starts empty rather than guessing at what an earlier process sent |
 | waiver | `force: true` with a non-empty `reason`; it only matters when the guard refuses |
 | audit | a waived completion's ledger head starts with `relay-guard-forced: <reason>`, followed by the model's `text` when the call carried one |
-| not guarded | the automatic outcomes: `agent_settled` and `recycle{outcome}` still complete a task that owes a handoff |
+| not guarded | outcomes the plugin reports without the model: an errored turn, the idle ladder's failure, and `recycle{outcome}` |
 
 `relay.toml` is a closed subset of TOML: flat `key = value` lines, the two keys above,
 one-line arrays of double-quoted strings, `#` comments. Anything outside that warns on
@@ -358,7 +374,7 @@ path the client's daemon bound, read when the environment carried none, §8).
 | `reconnecting in 4000ms` in a loop | the client is down or the socket was replaced | `onlyne --server-root … roles` |
 | `ready refused: internal: unknown session for …` | the plugin mounted and reported for a task the client never staged (normal when pi is started by hand outside a task) | start pi under the client, not by hand |
 | `assign` never arrives | the client's `session_command` did not spawn pi, or `inject` was dropped | the client log for the spawn line; `/onlyne status` for the capability set |
-| ledger stays `in_flight` | no completion was reported: no turn ran, or `agent_settled` never fired | the pi session file for `onlyne-assign` / `onlyne-complete` entries |
+| ledger stays `in_flight` | no completion yet: no turn has run (the injected message has not executed), or the ladder is still reminding it (`idleReminders`) | the pi session file for the `onlyne-assign` entry and the reminders injected after it; the `onlyne` panel for `reminder n of m`; `/onlyne status` for the task and phase |
 | `onlyne_complete` answers `relay guard: missing handoff to: …` | the workspace's spec (or a `relay.toml` standing in for it) names a role this session never sent to | routine notices appear in the `onlyne` panel; stderr keeps refusals such as `relay guard from …`, socket errors, timeouts and framing faults; `required=…` names the policy; `relay guard: missing handoff …` names the delivered set |
 | `hello … forbidden` / connection closed right after `hello` | the mount role does not match the client's role | `hello.args.mount.role` vs the workspace's role |
 | `frame_too_large` | a body above 8 MiB | only reachable through an oversize outbound image; the ceiling is the core's |

@@ -98,6 +98,8 @@ graph TD
 
 Body validation runs in the constructor and rejects bad input. Text or image must exist. Text is capped at 1 MiB, decoded image bytes are capped at 2 MiB, and the image mime must be one of `image/png`, `image/jpeg`, `image/gif`, or `image/webp`. Source: Plan §3 line 177.
 
+Role-to-role permission is a load-time pair set: `Spec::acl_edges` emits one concrete row per permitted pair and class, `AclTable::new` refuses a `"*"` endpoint, and `acl_allows` answers one delivery. The reserved role `_supervisor` reaches every registered role on its own `allowed_targets` alone: an empty list reaches every registered role, a non-empty list names the reachable roles exactly, and no receiver `allowed_senders` is read on its rows. Source: Plan D15 line 29; Contract lines 39-44; `crates/onlyne-config/src/spec.rs`; `crates/onlyne-net/src/acl.rs`.
+
 ## Frame protocol
 
 Frames use a `u32` big-endian length prefix plus UTF-8 JSON. A frame above `MAX_FRAME_BYTES = 8 * 1024 * 1024` produces `error{code:"frame_too_large"}` and closes the connection. Source: Plan §4 lines 191-198.

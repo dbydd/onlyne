@@ -31,6 +31,12 @@ pub const DEFAULT_REQUEUE_TTL_SECS: u64 = 0;
 pub const KEY_BYTE_LEN: usize = 32;
 pub const ALLOWED_PLACEHOLDERS: [&str; 2] = ["session", "task"];
 
+/// The reserved role name that carries the operator's cluster-agent identity
+/// (`docs/v1-PLAN.md` decision D15, `skills/onlyne-supervisor/SKILL.md`).
+/// [`Spec::acl_edges`] reads that one sender's `allowed_targets` alone and
+/// reaches every registered role with it.
+pub const SUPERVISOR_ROLE: &str = "_supervisor";
+
 /// Cluster spec loaded from `<server-root>/.onlyne/spec.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Spec {
@@ -319,11 +325,24 @@ impl Spec {
     /// sender itself and `allowed_senders = ["*"]` admits every role except the
     /// receiver itself.
     ///
+    /// A sender named [`SUPERVISOR_ROLE`] is one-sided: its own
+    /// `allowed_targets` is the only gate on its reach. An empty list reaches
+    /// every registered role, including the sender itself, and a non-empty list
+    /// names the reachable roles exactly. A receiver's `allowed_senders` is read
+    /// on no row of that sender, which is what keeps the operator's repair path
+    /// open while the receiver's own inbound list is the thing that is wrong.
+    /// Every other sender keeps the two-sided rule above, and a row into
+    /// [`SUPERVISOR_ROLE`] still needs that role to name its sender, so the
+    /// operator's inbox stays as narrow as the file says.
+    ///
     /// Pair rows are deduplicated, so a spec that also names its own role in
     /// `allowed_targets` and `allowed_senders` produces the same single self row,
     /// and the row count stays below the naive product of roles and classes. The
     /// `onlyne-client init` fragment keeps those explicit entries as
-    /// belt-and-braces, which makes the intent visible in the file.
+    /// belt-and-braces, which makes the intent visible in the file. The
+    /// supervisor's own name arrives from the default reach and again from the
+    /// unconditional self row, and one `BTreeSet` collapses the two into a single
+    /// row.
     ///
     /// This function is the single arbiter of wildcard meaning. Rows carry
     /// concrete role names only, and `"*"` never reaches the table.
@@ -340,6 +359,12 @@ impl Spec {
         let roles = self.role_names();
         let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
         for sender in &self.client {
+            if sender.role == SUPERVISOR_ROLE {
+                for target in supervisor_reach(&sender.allowed_targets, &roles) {
+                    pairs.insert((sender.role.clone(), target));
+                }
+                continue;
+            }
             for target in expand_targets(&sender.allowed_targets, &sender.role, &roles) {
                 let Some(receiver) = self
                     .client
@@ -420,6 +445,16 @@ fn expand_targets(list: &[String], sender: &str, roles: &[String]) -> Vec<String
 /// `receiver`, other names are kept when they name a registered role.
 fn expand_senders(list: &[String], receiver: &str, roles: &[String]) -> Vec<String> {
     expand(list, receiver, roles)
+}
+
+/// The reach of [`SUPERVISOR_ROLE`]: this sender names its targets on its own,
+/// an empty list widens to every registered role, and no receiver list is read.
+fn supervisor_reach(list: &[String], roles: &[String]) -> Vec<String> {
+    if list.is_empty() {
+        roles.to_vec()
+    } else {
+        expand(list, SUPERVISOR_ROLE, roles)
+    }
 }
 
 /// Expand one ACL list. `"*"` covers every registered role except `owner`, the

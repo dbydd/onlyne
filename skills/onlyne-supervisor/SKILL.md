@@ -60,7 +60,11 @@ onlyne --server-root <root> sessions --task <task-id>     # lifecycle projection
 onlyne --server-root <root> watch --follow --tier durable  # live stream; tiers: durable|advisory
 ```
 
-- Keep `allowed_targets` on ring and worker edges only. A role that can message
+- Your sends need no receiver grant. Leave `allowed_targets` off your own entry and every
+  registered role is reachable; name a list there and the reach is exactly that list. The
+  receiver's `allowed_senders` is read on no row of yours, so dispatch and repair start at
+  `send`, with no spec edit first.
+- Keep inbound edges to your role on ring and worker edges only. A role that can message
   `_supervisor` turns you into a work queue. When one task genuinely needs a live uplink,
   add `_supervisor` to that role's `allowed_targets`, run `reload`, then drop the edge once
   the task settles — grants are per task.
@@ -129,11 +133,13 @@ the settlement event and the ledger line keeps what it already held.
 
 ## Errors you will see
 
-`acl_denied` → the edge is missing from the spec. `unauthorized` → the key is not
-registered. `recipient_offline` → a `note` found nothing to wake: its role was
-offline, or online with no session running while `note_queue` stays off. The
-message says which. `duplicate` → the same `op_id` again; its `data` is the
-original receipt, byte for byte.
+`acl_denied` → the edge is missing from the spec: the sender's `allowed_targets` and
+the receiver's `allowed_senders` have to name each other. Your own sends read
+`allowed_targets` alone, so a denial on one means that list is non-empty and omits
+the target. `unauthorized` → the key is not registered. `recipient_offline` → a
+`note` found nothing to wake: its role was offline, or online with no session
+running while `note_queue` stays off. The message says which. `duplicate` → the
+same `op_id` again; its `data` is the original receipt, byte for byte.
 `conflict` → same `op_id`, different body. `not_admin` → a non-admin role sent with
 `--from`. Every reject writes no ledger row and leaves no sender intent. A queued
 note's `--ttl` deadline sits on its ledger row, so the sweep answers `expired` after
@@ -144,8 +150,7 @@ carries no deadline and stays `queued`; settle it with `repair_fail` or `repair_
 
 `onlyne tui --server-root <root>` opens the two-page board: page 1 the role network
 (serpentine grid, `●` busy, `◐` in flight, orthogonal hops), page 2 the ledger. `hjkl`
-walks edges, `l` follows one, `e` reveals your dispatch spokes, `a` filters to active,
-arrows pan.
+walks edges, `l` follows one, `a` filters to active, arrows pan.
 
 ## Clusters under clusters
 

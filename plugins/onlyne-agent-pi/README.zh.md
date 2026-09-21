@@ -22,6 +22,8 @@ hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{r
   ├─ 任务文本（含图片路径）──► pi user message（deliverAs:"followUp"）
   ├─ assign_ack{accepted:true}
   ├─ report.heartbeat{running|idle} —— 每个 turn，以及任务存续期间每 10 秒
+  ├─ turn 结束却没有 `onlyne_complete` ──► idle 阶梯：同一条消息再注入
+  │    （最多 `idleReminders` 次），之后 `failed` 并退出
   ├─ report.complete{outcome, head} —— ledger 的终态事实
   │    └─ client 的应答就是交接点：插件据此让 pi 退出，随后 detach
   ├─ probe ──► 一条 heartbeat
@@ -95,8 +97,9 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | --- | --- | --- |
 | `enabled` | `true` | `false` 时该工作区禁用扩展 |
 | `watch.autoStart` | `true` | `false` 时注册工具但不建连接，需 `/onlyne connect` |
+| `idleReminders` | `2` | turn 结束却空闲时重发任务的次数上限（§4）；`0` 表示第一次空闲就判失败 |
 
-文件缺失即两个默认值。文件格式错误时打印一行警告，并保留默认值：一个笔误不该静默关掉一个
+文件缺失即取各自默认值。文件格式错误时打印一行警告，并保留默认值：一个笔误不该静默关掉一个
 role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 generate 期模板提示），所以
 只有本扩展消费它；键名沿用模板里既有的形状。
 
@@ -143,7 +146,8 @@ png/jpeg/gif/webp 的绝对路径：插件读出内容，base64 编码后挂成 
 
 ### `onlyne_complete{outcome?, text?, force?, reason?}`
 
-显式结束当前任务，`outcome` 缺省 `done`，也可 `failed`。`text` 非空时就是 ledger 的 `head`，
+显式结束当前任务，`outcome` 缺省 `done`，也可 `failed`。它是通向 `done` 的唯一路径：turn 结束时
+没有这次调用，任务会被重发提醒，之后判失败（§4）。`text` 非空时就是 ledger 的 `head`，
 原样写出：空白折叠成单行，截到 200 字符。`text` 缺失或全空白时不带摘要，completion 退回
 最后一段 assistant 文本。这一调用同时结束所在 session 的进程。client 应答完 completion
 报告（见 §4）之后，插件通过 `ctx.shutdown()` 让 pi 退出。pi 0.85.1 没有 tool-result
@@ -152,21 +156,27 @@ png/jpeg/gif/webp 的绝对路径：插件读出内容，base64 编码后挂成 
 
 ## 4. outcome 判定规则
 
-插件每个任务只发一次 completion，取以下三者的先到者：
+`onlyne_complete` 是通向 `done` 的唯一路径。插件每个任务只发一次 completion，取以下四者的先到者：
 
-1. **`onlyne_complete`** —— 模型给显式 outcome，优先级最高；同一任务的第二次 completion 被
-   拒（不重报）。`text` 非空时即 head，原样写出。
-2. **`agent_settled`** —— pi 不会自己继续：没有待重试、待压缩或排队续跑。此时：
-   - turn 以 provider 错误告终（`stopReason: "error"`）→ `failed`，错误信息当 head；
-   - 其余 → `done`，最后一段 assistant 文本当 head；
-   - 任务已投递但还没跑过任何 turn → 不发 completion。注入的消息尚未执行，这时报终态就是撒谎。
-3. **`recycle{outcome}`** —— 宿主拆 session。插件先按宿主给的 outcome 结算未终态的任务，再停
+1. **`onlyne_complete`** —— 模型给显式 outcome（缺省 `done`，也可 `failed` / `cancelled`）。同一
+   任务的第二次 completion 被拒（不重报）。`text` 非空时即 head，原样写出。
+2. **turn 出错** —— turn 以 provider 错误告终（`stopReason: "error"`）。这本身就是证据，插件立即
+   报 `failed`，错误信息当 head。
+3. **idle 阶梯** —— turn 干净结束却没有 completion，任务还开着。插件重发任务并记一次；当空闲发现
+   `idleReminders` 给的次数已经用完，就报 `failed`（head 为 `no completion after <n> idle
+   reminders`），并像任何一次 completion 一样退出 session。
+4. **`recycle{outcome}`** —— 宿主拆 session。插件先按宿主给的 outcome 结算未终态的任务，再停
    插件并退出 pi。
 
-`head` 恒为单行、上限 200 字符，与 client 写入 `out_head` 和回执携带的内容一致。每个任务的
-head 只有一个来源：显式 `onlyne_complete` 带的 `text`（有则原样采用），否则是最后一段
-assistant 文本。自动规则就是那条退路：它报的是自己那一轮的文字，工具调用之后再说的话，顶不掉
-调用交出的内容。
+两种情况都不结算：任务已投递但还没跑过任何 turn（注入的消息尚未执行，这时报终态就是撒谎），
+以及阶梯还有余额的那次空闲。阶梯重发的是任务到手时的那条消息——同样的头部、任务文本和附件路径，
+外加一行说明上一轮没有 completion——但不重发 role prose，它已经在上下文里；图片也不重挂，
+路径以文本出现，同样的字节不会进上下文两次。同一任务收到新 envelope 时计数重来。
+
+`head` 恒为单行、上限 200 字符，与 client 写入 `out_head` 和回执携带的内容一致。每个任务的 head
+只有一个来源：显式 `onlyne_complete` 带的 `text`（有则原样采用）、出错 turn 报的错误，或阶梯自己
+的那一行。最后一段 assistant 文本只是 `text` 完全缺失的 `onlyne_complete` 的退路——调用之后再说
+的话顶不掉调用交出的内容，此外没有任何东西读它。
 
 报出去的 completion 会结束所在 session 的进程。`report.complete` 以请求形式发出，client 只有
 在结算 session 行、ack 掉投递、并写好 `Completion` envelope 之后才应答，插件就在这个应答处
@@ -224,7 +234,7 @@ stderr 告警并忽略，把机会让回文件。
 | 作用域 | 本会话自己的投递，仅进程内存：重连不丢，会话重启从空开始，不去猜上一个进程发过什么 |
 | 豁免 | `force: true` 加非空 `reason`；只在守卫拒绝时才起作用 |
 | 审计 | 被豁免的 completion，ledger head 以 `relay-guard-forced: <reason>` 开头；调用带了 `text` 时紧接其后 |
-| 不管的路 | 自动终态：`agent_settled` 与 `recycle{outcome}` 照旧结算欠着接力的任务 |
+| 不管的路 | 插件不经过模型就报出的终态：turn 出错、idle 阶梯用尽，以及 `recycle{outcome}` |
 
 `relay.toml` 是 TOML 的封闭子集：扁平的 `key = value` 行、上面两个键、单行双引号字符串数组、
 `#` 注释。子集之外一律 stderr 告警并忽略。它刻意不放 `.onlyne/config.toml`：client 以
@@ -311,7 +321,7 @@ stderr 告警并忽略，把机会让回文件。
 | 反复 `reconnecting in 4000ms` | client 已停或 socket 被替换 | `onlyne --server-root … roles` |
 | `ready refused: internal: unknown session for …` | 插件为 client 从未暂存的任务报了 ready（手工起 pi 时的正常现象） | 让 client 拉起 pi，而不是手工起 |
 | `assign` 一直不来 | client 的 `session_command` 没能拉起 pi，或 `inject` 被降级 | client 日志里的 spawn 行；`/onlyne status` 看能力集 |
-| ledger 停在 `in_flight` | 没有 completion：没跑 turn，或 `agent_settled` 没触发 | pi session 文件里的 `onlyne-assign` / `onlyne-complete` 条目 |
+| ledger 停在 `in_flight` | 还没有 completion：没跑过 turn（注入的消息尚未执行），或阶梯还在提醒（`idleReminders`） | pi session 文件里的 `onlyne-assign` 条目和其后注入的提醒；`onlyne` 面板里的 `reminder n of m`；`/onlyne status` 看任务与阶段 |
 | `onlyne_complete` 回答 `relay guard: missing handoff to: …` | 工作区的 spec（或顶替它的 `relay.toml`）点名了一个本会话从未触达的 role | 日常通知显示在 `onlyne` 面板；stderr 保留 `relay guard from …` 等拒绝、socket 错误、超时与帧错误；`required=…` 说明策略；`relay guard: missing handoff …` 列出已投递集合 |
 | `hello` 后立刻 `forbidden` / 断连 | mount role 与 client 的 role 不一致 | `hello.args.mount.role` 对该工作区的 role |
 | `frame_too_large` | 正文超过 8 MiB | 只会由超限的出站图片触发；上限来自核心 |

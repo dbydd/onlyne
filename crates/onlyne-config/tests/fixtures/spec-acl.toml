@@ -3,10 +3,13 @@
 # Registered roles, in document order: planner, builder, reviewer, silent,
 # isolated, _supervisor, scout. Every ACL case in the test cites one of these.
 #
-# Expected table: 20 permitted pairs = 13 cross-role pairs + 7 unconditional
-# self pairs (one per role), and 60 rows = 20 pairs x 3 classes
+# Expected table: 25 permitted pairs = 18 cross-role pairs + 7 unconditional
+# self pairs (one per role), and 75 rows = 25 pairs x 3 classes
 # (Any, Note, Control). The self pair is unconditional, so `planner` naming
-# itself in both lists adds no extra row.
+# itself in both lists adds no extra row. `_supervisor` carries no
+# `allowed_targets`, so its default reach covers every registered role: the row
+# `_supervisor -> planner` the two-sided rule used to admit is joined by five
+# rows whose receivers never named it.
 
 [server]
 name = "cluster-acl"
@@ -52,8 +55,11 @@ role = "_supervisor"
 key = "ed25519/AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
 admin = true
 aggregate = "cluster-b"
+# The operator's inbox stays narrow: planner alone reaches this role.
 allowed_senders = ["planner"]
-allowed_targets = ["planner"]
+# `allowed_targets` omitted: a role named `_supervisor` reaches every
+# registered role with no receiver-side entry. A non-empty list would name the
+# reachable roles exactly.
 
 [[client]]
 role = "scout"

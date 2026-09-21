@@ -9,9 +9,9 @@
 //
 //   session_start    -> read env + .pi/onlyne.json, connect, register tools
 //   turn_start       -> heartbeat{running}
-//   turn_end         -> heartbeat{idle}
+//   turn_end         -> heartbeat{idle}; the settle window opens
 //   message_end      -> keep the last assistant text; a failed turn is `failed`
-//   agent_settled    -> completion exit: done|failed
+//   agent_settled    -> settle decision: the idle ladder, or `failed` at once
 //   session_shutdown -> detach{reason}
 
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -165,10 +165,11 @@ export default function onlyne(pi: ExtensionAPI) {
         name: "onlyne_complete",
         label: "Onlyne complete",
         description:
-          "End this onlyne task with an explicit outcome. Call it once, when the assigned work is finished (outcome=done), provably impossible (outcome=failed), or withdrawn (outcome=cancelled). Without this call the session still completes on its own: done, or failed when the turn errored. In a workspace whose relay policy (relay.toml) names the handoffs this session owes, the call is refused until each one has gone out.",
+          "End this onlyne task with an explicit outcome. Call it once, when the assigned work is finished (outcome=done), provably impossible (outcome=failed), or withdrawn (outcome=cancelled). This call is the only way the task reaches done: a turn that ends without it leaves the task open, the session re-sends you the assignment up to the workspace's idle-reminder bound, and the idle that finds the bound spent fails the task and ends the session. In a workspace whose relay policy (relay.toml) names the handoffs this session owes, the call is refused until each one has gone out.",
         promptSnippet: "Finish the current onlyne task with an outcome and a one-line summary",
         promptGuidelines: [
           "Use onlyne_complete at the end of an onlyne task, naming the outcome and the result in one line; the summary becomes the ledger head.",
+          "If the assignment is sent to you again while it is still open, the previous turn ended without a completion: finish the work and call onlyne_complete.",
           "If onlyne_complete answers 'relay guard', the session still owes a downstream handoff: make it with onlyne_send and call onlyne_complete again. Close the session anyway only when the handoff is genuinely impossible, with force: true and a reason.",
         ],
         parameters: Type.Object({
@@ -256,6 +257,7 @@ export default function onlyne(pi: ExtensionAPI) {
       taskId: identity.taskId,
       surface,
       relay,
+      idleReminders: config.idleReminders,
       log,
     });
     log(`session ${identity.sessionId} role=${identity.role} socket=${socketPath}`);

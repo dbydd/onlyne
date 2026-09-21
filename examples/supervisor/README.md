@@ -102,9 +102,10 @@ K 加一；`b` 追加 `2:b` 交给 `c`……`e` 到了 K=10 不再转发，它�
    `observed.host.orca.pane_key`，也就是这条会话绑定的真实 pane：
    `pane_key = "<tabId>:<leafId>"`。
 3. **TUI**：另开一个标签页，跑 `target/debug/onlyne-tui --server-root /tmp/onlyne-sup`。
-   第 1 页是角色网络：五个环成员在线，`_supervisor` 显示离线——这里的"离线"只表示
-   "没有客户端"，它这个进程活在 Orca 标签页里。第 2 页是逐任务的 swarm 视图，
-   十行按 hop 排开，状态跟着 ack 往前走。按键看 TUI 自己的帮助行。
+   第 1 页是角色网络：五个环成员在线。`_supervisor` 不上图——它是操作者自己的位置，
+   `[[client]]` 条目只登记操作者身份，没有客户端进程，图上不给它盒子；它派出去的活和
+   排队的回执，在第 2 页的账本和 `ledger` 里照样看得到。第 2 页是逐任务的 swarm
+   视图，十行按 hop 排开，状态跟着 ack 往前走。按键看 TUI 自己的帮助行。
 4. **收摊**：`run.py stop` 关掉它开的 supervisor 标签页（关完会再查一遍，没关掉就
    报错），清掉留在 Orca 里的会话标签页，再 SIGTERM 掉脚本自己拉起的五个 client
    和服务器。

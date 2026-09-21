@@ -33,6 +33,39 @@ allowed_senders = ["*"]
 allowed_targets = ["planner"]
 "#;
 
+/// A supervisor whose `allowed_targets` names its reach: `reviewer` alone, the
+/// one receiver whose own `allowed_senders` omits the supervisor.
+const NARROW_SUPERVISOR: &str = r#"[server]
+name = "cluster-narrow"
+listen = "0.0.0.0:7811"
+cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
+
+[[client]]
+role = "_supervisor"
+key = "ed25519/AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+admin = true
+allowed_senders = ["planner"]
+allowed_targets = ["reviewer"]
+
+[[client]]
+role = "planner"
+key = "ed25519/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+allowed_senders = ["*"]
+allowed_targets = ["*"]
+
+[[client]]
+role = "builder"
+key = "ed25519/AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+allowed_senders = ["*"]
+allowed_targets = ["*"]
+
+[[client]]
+role = "reviewer"
+key = "ed25519/AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+allowed_senders = ["planner"]
+allowed_targets = ["planner"]
+"#;
+
 fn spec() -> Spec {
     Spec::parse_str(FIXTURE).expect("ACL fixture parses")
 }
@@ -166,7 +199,8 @@ const CASES: &[Case] = &[
         kind: MsgKindClass::Any,
         expected: true,
     },
-    // 4. Aggregate role naming one parent-visible role.
+    // 4. The reserved supervisor role reaches every registered role on its own
+    //    `allowed_targets` alone; an empty list is the default reach.
     Case {
         name: "aggregate role reaches planner",
         from: "_supervisor",
@@ -175,11 +209,11 @@ const CASES: &[Case] = &[
         expected: true,
     },
     Case {
-        name: "aggregate role cannot reach builder",
+        name: "supervisor default reaches builder without a builder entry",
         from: "_supervisor",
         to: "builder",
         kind: MsgKindClass::Any,
-        expected: false,
+        expected: true,
     },
     // 5. Control class rows exist; the admin half rides on the edge flag.
     Case {
@@ -267,15 +301,20 @@ fn empty_targets_role_reaches_only_itself_and_still_receives() {
 }
 
 #[test]
-fn empty_senders_role_admits_only_itself_and_still_sends() {
+fn empty_senders_role_admits_only_itself_and_the_supervisor_and_still_sends() {
     let edges = spec().acl_edges();
-    let inbound: Vec<&str> = edges
+    let mut inbound: Vec<&str> = edges
         .iter()
-        .filter(|edge| edge.to == "isolated")
+        .filter(|edge| edge.to == "isolated" && edge.kind == MsgKindClass::Any)
         .map(|edge| edge.from.as_str())
         .collect();
-    assert!(!inbound.is_empty());
-    assert!(inbound.iter().all(|from| *from == "isolated"));
+    inbound.sort_unstable();
+    inbound.dedup();
+    // The empty list turns every two-sided grant away: `planner` names
+    // `isolated` and still holds no row. The supervisor's row arrives from its
+    // own one-sided reach, and the unconditional self row brings the role
+    // itself.
+    assert_eq!(inbound, vec!["_supervisor", "isolated"]);
     assert!(
         edges
             .iter()
@@ -366,7 +405,7 @@ fn has_edge(edges: &[AclEdge], from: &str, to: &str, kind: MsgKindClass) -> bool
 }
 
 #[test]
-fn aggregate_role_reaches_itself_and_the_parent_visible_role() {
+fn supervisor_role_reaches_every_registered_role() {
     let mut targets: Vec<String> = spec()
         .acl_edges()
         .iter()
@@ -375,7 +414,20 @@ fn aggregate_role_reaches_itself_and_the_parent_visible_role() {
         .collect();
     targets.sort();
     targets.dedup();
-    assert_eq!(targets, vec!["_supervisor", "planner"]);
+    // The fixture leaves `allowed_targets` off the supervisor entry, so the
+    // default reach is every registered role, the entry's own name included.
+    assert_eq!(
+        targets,
+        vec![
+            "_supervisor",
+            "builder",
+            "isolated",
+            "planner",
+            "reviewer",
+            "scout",
+            "silent"
+        ]
+    );
 }
 
 #[test]
@@ -384,6 +436,57 @@ fn aggregate_annotation_contributes_no_edges() {
     let without = Spec::parse_str(&FIXTURE.replace("aggregate = \"cluster-b\"\n", ""))
         .expect("fixture parses without the annotation");
     assert_eq!(with_annotation.acl_edges(), without.acl_edges());
+}
+
+#[test]
+fn supervisor_default_reaches_a_role_that_does_not_admit_it() {
+    let edges = spec().acl_edges();
+    let mut admitted: Vec<&str> = edges
+        .iter()
+        .filter(|edge| edge.to == "reviewer" && edge.kind == MsgKindClass::Any)
+        .map(|edge| edge.from.as_str())
+        .collect();
+    admitted.sort_unstable();
+    admitted.dedup();
+    // `reviewer` names `planner` alone in `allowed_senders`, and `isolated`
+    // names no sender at all. Their rows arrive on the supervisor's own grant,
+    // which reads no receiver list.
+    assert_eq!(admitted, vec!["_supervisor", "planner", "reviewer"]);
+    let mut isolated: Vec<&str> = edges
+        .iter()
+        .filter(|edge| edge.to == "isolated" && edge.kind == MsgKindClass::Any)
+        .map(|edge| edge.from.as_str())
+        .collect();
+    isolated.sort_unstable();
+    assert_eq!(isolated, vec!["_supervisor", "isolated"]);
+}
+
+#[test]
+fn supervisor_explicit_targets_narrow_its_reach() {
+    let edges = Spec::parse_str(NARROW_SUPERVISOR)
+        .expect("narrowed supervisor fixture parses")
+        .acl_edges();
+    let mut reach: Vec<String> = edges
+        .iter()
+        .filter(|edge| edge.from == "_supervisor" && edge.kind == MsgKindClass::Any)
+        .map(|edge| edge.to.clone())
+        .collect();
+    reach.sort();
+    // The non-empty list is the whole reach: `planner` and `builder` admit every
+    // sender and hold no row, and `reviewer` holds one while naming `planner`
+    // alone in `allowed_senders`. The self row arrives from the unconditional
+    // rule.
+    assert_eq!(reach, vec!["_supervisor", "reviewer"]);
+    let mut inbound: Vec<&str> = edges
+        .iter()
+        .filter(|edge| edge.to == "_supervisor" && edge.kind == MsgKindClass::Any)
+        .map(|edge| edge.from.as_str())
+        .collect();
+    inbound.sort_unstable();
+    // The reverse direction keeps the two-sided rule: `planner` reaches the
+    // narrow inbox because the supervisor names it, and `builder` names every
+    // target and stays out.
+    assert_eq!(inbound, vec!["_supervisor", "planner"]);
 }
 
 #[test]
@@ -430,10 +533,10 @@ fn every_permitted_pair_carries_three_class_rows() {
         .iter()
         .map(|edge| (edge.from.as_str(), edge.to.as_str()))
         .collect();
-    // 13 cross-role pairs plus 7 unconditional self pairs over 7 roles.
-    assert_eq!(pairs.len(), 20);
+    // 18 cross-role pairs plus 7 unconditional self pairs over 7 roles.
+    assert_eq!(pairs.len(), 25);
     assert_eq!(edges.len(), pairs.len() * 3);
-    assert_eq!(edges.len(), 60);
+    assert_eq!(edges.len(), 75);
     for (from, to) in &pairs {
         for kind in [MsgKindClass::Any, MsgKindClass::Note, MsgKindClass::Control] {
             assert!(

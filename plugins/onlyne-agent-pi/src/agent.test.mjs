@@ -12,6 +12,7 @@ import { afterEach, test } from "node:test";
 
 import { OnlyneAgent } from "./agent.mjs";
 import { MAX_LINES, MAX_WIDTH } from "./activity.mjs";
+import { DEFAULT_IDLE_REMINDERS } from "./config.mjs";
 import { createFrameDecoder, encodeFrame } from "./frame.mjs";
 import { SEQ_BASE, readyReport } from "./protocol.mjs";
 
@@ -564,7 +565,7 @@ test("an assign sharing the hello reply's chunk waits for the welcome", async ()
   assert.deepEqual(acks[0], { task_id: TASK_ID, accepted: true });
 });
 
-test("turn hooks report running then idle, and a settle completes done with the head", async () => {
+test("turn hooks report running then idle, and the settle after them re-sends the assignment", async () => {
   const { agent, host, surface } = await startAgent();
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
@@ -585,15 +586,15 @@ test("turn hooks report running then idle, and a settle completes done with the 
 
   agent.noteAssistantText("OK");
   agent.onSettled();
-  const complete = await waitFor(() => host.of("report").find((report) => report.kind === "complete"));
-  assert.deepEqual(complete, { kind: "complete", data: { task_id: TASK_ID, outcome: "done", head: "OK" } });
-  assert.deepEqual(agent.status().tasks, []);
-  // The completion ends the session: the process that ran it is asked to leave.
-  assert.deepEqual(surface.calls.exits, ["done"]);
-  // Heartbeats stop with the last task, so a settled session stops writing.
-  const reports = host.of("report").length;
-  await new Promise((resolve) => setTimeout(resolve, 120));
-  assert.equal(host.of("report").length, reports);
+  // A turn that ends without a completion leaves the task open: the settle sends
+  // the assignment again rather than reporting an outcome the model never
+  // claimed. `onlyne_complete` is the only path to `done`.
+  const reminded = await waitFor(() =>
+    surface.calls.wakeUser.length === 2 ? surface.calls.wakeUser : null,
+  );
+  assert.match(reminded[1].text, /build it/, "the reminder carries the task text");
+  assert.deepEqual(host.of("report").filter((report) => report.kind === "complete"), []);
+  assert.deepEqual(surface.calls.exits, [], "a task with a rung left is not failed");
 });
 
 // The live case found this ordering too: pi's turn-end hook fires in the same
@@ -620,7 +621,7 @@ test("a turn-end heartbeat after the completion never leaves the plugin", async 
   assert.deepEqual(host.of("report").slice(reports), [], "the completion is the last report");
 });
 
-test("a busy pi holds the completion until it is idle", async () => {
+test("a busy pi holds the settle decision until it is idle", async () => {
   let idle = false;
   const surface = fakeSurface({ idle: () => idle });
   const { agent, host } = await startAgent({ surface, options: { settleFallbackMs: 40 } });
@@ -629,14 +630,95 @@ test("a busy pi holds the completion until it is idle", async () => {
   host.notify("assign", assignArgs());
   await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
   agent.onTurnEnd();
-  agent.noteAssistantText("still working");
   agent.onSettled();
   await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.deepEqual(host.of("report").filter((report) => report.kind === "complete"), []);
+  assert.equal(surface.calls.wakeUser.length, 1, "a busy pi is not reminded");
 
   idle = true;
+  const reminded = await waitFor(() =>
+    surface.calls.wakeUser.length === 2 ? surface.calls.wakeUser : null,
+  );
+  assert.match(reminded[1].text, /build it/, "the decision waits for the idle it is about");
+});
+
+// The idle ladder (`docs/SWARM-REFACTOR-GRILLME.md` §4.2): a turn that ends
+// without a completion exit re-sends the assignment, and the idle that finds the
+// bound spent fails the task instead of settling it `done`. The bound is the
+// workspace's (`config.mjs`, two by default) and the count lives on the record
+// `onAssign` wrote for the task, which is why a task can be reminded twice and
+// failed on the third idle without the tool ever being called.
+test("an idle without a completion is reminded, the idle past the bound fails the task, and a completed turn is not reminded", async () => {
+  const { agent, host, surface } = await startAgent();
+  assert.equal(agent.idleReminders, DEFAULT_IDLE_REMINDERS, "the bound is the workspace's, two by default");
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  // The assignment carries an image, so the reminder has an attachment path to
+  // name and a part it must not hand over twice.
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const assignment = structuredClone(assignArgs());
+  assignment.envelope.body = {
+    text: "build it",
+    image: { data_base64: bytes.toString("base64"), mime: "image/png", name: "shot.png" },
+  };
+  host.notify("assign", assignment);
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+  assert.equal(surface.calls.wakeUser[0].parts.length, 1, "the injection carries the image");
+
+  // Two idles, two reminders: the assignment comes back whole — header, task
+  // text and all — and the model is told why it is seeing it again.
+  for (const rung of [1, 2]) {
+    agent.onTurnStart();
+    agent.onTurnEnd();
+    agent.onSettled();
+    const sent = await waitFor(() =>
+      surface.calls.wakeUser.length === 1 + rung ? surface.calls.wakeUser : null,
+    );
+    const reminder = sent.at(-1);
+    assert.match(reminder.text, new RegExp(`reminder ${rung} of 2`));
+    assert.match(reminder.text, /build it/, "the reminder carries the task text");
+    assert.match(
+      reminder.text,
+      /\[onlyne\] task 11111111-1111-4111-8111-111111111111 from role:planner \(kind task\)/,
+      "and the identity and source the injection named",
+    );
+    assert.match(reminder.text, /\[onlyne\] attachment saved to: .*shot\.png/, "the path travels as text");
+    assert.deepEqual(reminder.parts, [], "and the image itself is not handed over twice");
+    assert.doesNotMatch(reminder.text, /Read the incoming task/, "the role prose is already in the context");
+    assert.deepEqual(
+      host.of("report").filter((report) => report.kind === "complete"),
+      [],
+      `rung ${rung}: an open task is not settled while it has a rung left`,
+    );
+  }
+
+  // The third idle: the bound is spent, so the open task fails and the session
+  // leaves — the tool was never called, and no completion was ever reported.
+  agent.onTurnStart();
+  agent.onTurnEnd();
+  agent.onSettled();
   const complete = await waitFor(() => host.of("report").find((report) => report.kind === "complete"));
-  assert.equal(complete.data.head, "still working");
+  assert.deepEqual(complete.data, {
+    task_id: TASK_ID,
+    outcome: "failed",
+    head: "no completion after 2 idle reminders",
+  });
+  assert.deepEqual(surface.calls.exits, ["failed"], "the ladder's failure leaves the session");
+  assert.equal(surface.calls.wakeUser.length, 3, "the bound is spent: no third reminder");
+
+  // A turn that hands the outcome over is never reminded: the tool call is the
+  // exit the ladder exists to get.
+  const second = await startAgent();
+  second.agent.start();
+  await waitFor(() => second.host.of("report").length >= 1);
+  second.host.notify("assign", assignArgs());
+  await waitFor(() => (second.surface.calls.wakeUser.length === 1 ? true : null));
+  second.agent.onTurnStart();
+  second.agent.onTurnEnd();
+  await second.agent.completeFromTool({ outcome: "done", text: "built it" });
+  second.agent.onSettled();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(second.surface.calls.wakeUser.length, 1, "the completion is the exit: no reminder follows it");
+  assert.deepEqual(second.surface.calls.exits, ["done"]);
 });
 
 test("an assigned task that never ran is not completed", async () => {
@@ -692,9 +774,9 @@ test("an explicit tool outcome wins and a second completion is refused", async (
 });
 
 // The completion body is what the tool call handed over. The sentence a turn
-// ends on is only the fallback for a task whose argument carries nothing, and
-// the auto rule reports exactly that fallback field — so an explicit argument
-// can never be displaced, in either call path.
+// ends on is only the fallback for a call whose argument carries nothing, and a
+// call that carries a `text` reports it byte for byte — so the argument can
+// never be displaced, before or after the call.
 test("an explicit tool argument is the head over the last assistant text", async () => {
   const { agent, host, surface } = await startAgent();
   agent.start();

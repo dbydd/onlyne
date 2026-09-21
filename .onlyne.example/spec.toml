@@ -58,9 +58,9 @@ prose = """Read the incoming task, produce a concise completion reply, and hand 
 admin = true
 # max_sessions caps concurrent sessions for this role. Read by client dispatch and server projection. Default: 1.
 max_sessions = 3
-# allowed_senders lists roles allowed to deliver to this role. Read by acl_allows before the ledger write. Default: empty list, which denies every sender. ["*"] admits every registered role.
+# allowed_senders lists roles allowed to deliver to this role. Read by acl_allows before the ledger write. Default: empty list, which denies every sender. ["*"] admits every registered role. A role named `_supervisor` delivers with no entry here: that sender reads no receiver list.
 allowed_senders = ["*"]
-# allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role.
+# allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role. On the entry of a role named `_supervisor` this list is the only gate: an empty one reaches every registered role, and a non-empty one names the reachable roles exactly.
 allowed_targets = ["builder", "reviewer", "_supervisor"]
 # session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list. Headless/exec runs this argv as a child of the client (`backend = "headless"` in workspace config.toml, or ONLYNE_BACKEND=exec).
 session_command = ["pi", "--session-id", "{session}"]
@@ -94,9 +94,9 @@ prose = """Read the assigned build task, edit the tree under your workspace, the
 admin = false
 # max_sessions caps concurrent sessions for this role. Read by client dispatch and server projection. Default: 1.
 max_sessions = 2
-# allowed_senders lists roles allowed to deliver to this role. Read by acl_allows before the ledger write. Default: empty list, which denies every sender. ["*"] admits every registered role.
+# allowed_senders lists roles allowed to deliver to this role. Read by acl_allows before the ledger write. Default: empty list, which denies every sender. ["*"] admits every registered role. A role named `_supervisor` delivers with no entry here: that sender reads no receiver list.
 allowed_senders = ["planner", "_supervisor"]
-# allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role.
+# allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role. On the entry of a role named `_supervisor` this list is the only gate: an empty one reaches every registered role, and a non-empty one names the reachable roles exactly.
 allowed_targets = ["planner", "reviewer"]
 # session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list.
 session_command = ["pi", "--session-id", "{session}"]
@@ -129,9 +129,9 @@ prose = """Read the submitted change, list findings in severity order, then reco
 admin = false
 # max_sessions caps concurrent sessions for this role. Read by client dispatch and server projection. Default: 1.
 max_sessions = 1
-# allowed_senders lists roles allowed to deliver to this role. Read by acl_allows before the ledger write. Default: empty list, which denies every sender. ["*"] admits every registered role.
+# allowed_senders lists roles allowed to deliver to this role. Read by acl_allows before the ledger write. Default: empty list, which denies every sender. ["*"] admits every registered role. A role named `_supervisor` delivers with no entry here: that sender reads no receiver list.
 allowed_senders = ["planner", "builder"]
-# allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role.
+# allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role. On the entry of a role named `_supervisor` this list is the only gate: an empty one reaches every registered role, and a non-empty one names the reachable roles exactly.
 allowed_targets = ["planner"]
 # session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list.
 session_command = ["pi", "--session-id", "{session}"]
@@ -164,9 +164,9 @@ prose = """Accept one task per inbound batch from the parent cluster, forward it
 admin = false
 # max_sessions caps concurrent sessions for this role. Read by client dispatch and server projection. Default: 1.
 max_sessions = 1
-# allowed_senders lists roles allowed to deliver to this role. Read by acl_allows before the ledger write. Default: empty list, which denies every sender. ["*"] admits every registered role.
+# allowed_senders lists roles allowed to deliver to this role. Read by acl_allows before the ledger write. Default: empty list, which denies every sender. ["*"] admits every registered role. A role named `_supervisor` delivers with no entry here: that sender reads no receiver list.
 allowed_senders = ["*"]
-# allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role.
+# allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role. On the entry of a role named `_supervisor` this list is the only gate: an empty one reaches every registered role, and a non-empty one names the reachable roles exactly.
 allowed_targets = ["_supervisor", "builder"]
 # session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list.
 session_command = ["pi", "--session-id", "{session}"]

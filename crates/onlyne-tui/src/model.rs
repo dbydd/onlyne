@@ -45,6 +45,28 @@ pub struct Snapshot {
     pub refreshed_at: Option<SystemTime>,
 }
 
+/// The operator's own cluster agent (`docs/v1-PLAN.md`, decision D15): one
+/// ordinary `[[client]]` entry whose key registers the operator identity and
+/// whose `admin = true` is what lets the admin surface send as it. No client is
+/// ever started for it, so it is never a role on the cluster the board draws,
+/// and no view draws it at all. The name is spelled here once.
+pub const SUPERVISOR_ROLE: &str = "_supervisor";
+
+/// Whether a role is one the views never draw.
+pub fn hidden_role(name: &str) -> bool {
+    name == SUPERVISOR_ROLE
+}
+
+impl Snapshot {
+    /// Every role the views draw, in registry order: the registry minus
+    /// [`hidden_role`]. Every role-shaped surface — the map's boxes, the ACL
+    /// hops, the page-1 cursor, the role lists — reads the registry through
+    /// here, so one filter keeps them all in step.
+    pub fn visible_roles(&self) -> impl Iterator<Item = &RoleView> {
+        self.roles.iter().filter(|role| !hidden_role(&role.name))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoleView {
     pub name: String,
@@ -171,7 +193,7 @@ impl Page {
     pub fn keys(self) -> &'static str {
         match self {
             Page::RoleMap => {
-                "1/2·Tab switch  hjkl navigate  ←→↑↓ pan  +/- repel  0 recentre  wheel zoom  drag pan  Enter detail  e edges  F session  a all/active  r refresh  q quit"
+                "1/2·Tab switch  hjkl navigate  ←→↑↓ pan  +/- repel  0 recentre  wheel zoom  drag pan  Enter detail  F session  a all/active  r refresh  q quit"
             }
             Page::Swarm => {
                 "1/2·Tab switch  g/h focus  ↑↓ select  ^p/^n back/forward  Enter detail  J/K scroll  / search  f state  F session  t window  o role  e edge  a all/active  PgUp/PgDn page  r refresh  q quit"
@@ -332,9 +354,6 @@ pub struct UiState {
     /// Whether the views list only the sessions still holding a slot. `a`
     /// flips it, and the history views keep their own state filter.
     pub active_only: bool,
-    /// Whether control-plane out-edges are drawn. They crowd the chain, so
-    /// the page hides them until `e`.
-    pub show_control_edges: bool,
     /// The pane's subject: page 1 holds a role, page 2 a task.
     pub detail: Option<Detail>,
     /// The subject the loaded detail belongs to.
@@ -361,7 +380,6 @@ impl Default for UiState {
             nav: NavStack::default(),
             drag: None,
             active_only: true,
-            show_control_edges: false,
             detail: None,
             detail_key: None,
             detail_scroll: 0,
@@ -414,13 +432,6 @@ pub struct RoleDetail {
     pub peers: Vec<String>,
     pub faults: Vec<FaultEvent>,
     pub sessions: Vec<SessionRow>,
-}
-
-/// What the page-1 map knows about one role's place in the topology.
-impl RoleView {
-    pub fn control(&self) -> bool {
-        control_role(&self.name, self.aggregate.as_deref())
-    }
 }
 
 pub async fn pull(socket: &Path, filter: &HistoryFilter, page_size: usize) -> Snapshot {
@@ -793,7 +804,7 @@ pub fn layout_nodes(snapshot: &Snapshot, active_only: bool) -> Vec<LayoutNode> {
         }
     }
     let mut nodes = Vec::new();
-    for role in &snapshot.roles {
+    for role in snapshot.visible_roles() {
         let sessions = sessions_by_role.remove(&role.name).unwrap_or_default();
         let busy = sessions.iter().any(|session| session_busy(session));
         nodes.push(LayoutNode {
@@ -825,10 +836,12 @@ pub fn layout_nodes(snapshot: &Snapshot, active_only: bool) -> Vec<LayoutNode> {
     nodes
 }
 
+/// The hops the map draws: every ACL target between two roles the views draw,
+/// plus the ones an in-flight delivery is walking. A hop to a hidden role is
+/// no hop at all, so a box never carries an arrow to one.
 pub fn layout_edges(snapshot: &Snapshot) -> Vec<LayoutEdge> {
     let roles = snapshot
-        .roles
-        .iter()
+        .visible_roles()
         .map(|role| role.name.clone())
         .collect::<BTreeSet<_>>();
     let active = snapshot
@@ -843,7 +856,7 @@ pub fn layout_edges(snapshot: &Snapshot) -> Vec<LayoutEdge> {
         })
         .collect::<BTreeSet<_>>();
     let mut edges = BTreeMap::<(String, String), bool>::new();
-    for role in &snapshot.roles {
+    for role in snapshot.visible_roles() {
         for target in &role.edges {
             if role.name != *target && roles.contains(target) {
                 let key = (role.name.clone(), target.clone());
@@ -880,12 +893,16 @@ pub fn active_sessions(snapshot: &Snapshot) -> Vec<&SessionRow> {
 }
 
 /// The sessions a view lists: every row, or only the ones still holding a
-/// slot while `active_only`.
+/// slot while `active_only`, and never one projected onto a role the views do
+/// not draw. A session reaches the screen on its own — the page-2 table, the
+/// row its cursor highlights, a box's interior — so the hiding rule has to
+/// reach the session slice as well as the registry.
 pub fn visible_sessions(snapshot: &Snapshot, active_only: bool) -> Vec<&SessionRow> {
     let mut rows: Vec<&SessionRow> = snapshot
         .sessions
         .iter()
         .filter(|session| !active_only || session_busy(session))
+        .filter(|session| !session.role.as_deref().is_some_and(hidden_role))
         .collect();
     rows.sort_by(|left, right| session_order_key(left).cmp(&session_order_key(right)));
     rows
@@ -901,13 +918,6 @@ pub fn live_sessions(rows: &[SessionRow]) -> Vec<&SessionRow> {
         .collect();
     live.sort_by(|left, right| session_order_key(left).cmp(&session_order_key(right)));
     live
-}
-
-/// A control-plane role: the supervisor and every aggregate role. Its box
-/// takes a row of its own below the chain, and its spoke edges stay off the
-/// map until `e`.
-pub fn control_role(name: &str, aggregate: Option<&str>) -> bool {
-    name.starts_with('_') || aggregate.is_some()
 }
 
 /// The repulsion the page-1 map's `+`/`-` keys step through. Level 2 is the
@@ -1012,43 +1022,28 @@ pub fn nav_step(state: &mut UiState, delta: isize) -> bool {
     true
 }
 
-/// The edges the map draws: every ACL target, minus the control-plane spokes
-/// while they are hidden.
-pub fn visible_edges(snapshot: &Snapshot, show_control_edges: bool) -> Vec<LayoutEdge> {
-    layout_edges(snapshot)
-        .into_iter()
-        .filter(|edge| show_control_edges || !source_is_control(snapshot, &edge.from))
-        .collect()
-}
-
-fn source_is_control(snapshot: &Snapshot, name: &str) -> bool {
-    snapshot
-        .roles
-        .iter()
-        .any(|role| role.name == name && role.control())
-}
-
-/// The role the page-1 cursor sits on: the operator's pick while it is still
-/// registered, else the first role with an out-edge to walk, else the first
-/// role.
+/// The role the page-1 cursor sits on: the operator's pick while the views
+/// still draw it, else the first role with an out-edge to walk, else the first
+/// role. Since it is the cursor's seat, it is also the subject the page-1
+/// detail pane loads, so a role this never names is a role whose panel never
+/// opens.
 pub fn selected_role(snapshot: &Snapshot, state: &UiState) -> Option<String> {
     if let Some(name) = &state.role_selected {
-        if snapshot.roles.iter().any(|role| &role.name == name) {
+        if snapshot.visible_roles().any(|role| &role.name == name) {
             return Some(name.clone());
         }
     }
-    let edges = visible_edges(snapshot, state.show_control_edges);
+    let edges = layout_edges(snapshot);
     snapshot
-        .roles
-        .iter()
+        .visible_roles()
         .find(|role| edges.iter().any(|edge| edge.from == role.name))
-        .or_else(|| snapshot.roles.first())
+        .or_else(|| snapshot.visible_roles().next())
         .map(|role| role.name.clone())
 }
 
 /// The out-edges `j`/`k` walks for one role, in map order.
-pub fn role_edges(snapshot: &Snapshot, state: &UiState, role: &str) -> Vec<LayoutEdge> {
-    let mut edges: Vec<LayoutEdge> = visible_edges(snapshot, state.show_control_edges)
+pub fn role_edges(snapshot: &Snapshot, role: &str) -> Vec<LayoutEdge> {
+    let mut edges: Vec<LayoutEdge> = layout_edges(snapshot)
         .into_iter()
         .filter(|edge| edge.from == role)
         .collect();
@@ -1065,9 +1060,11 @@ pub fn cycle_state(filter: &mut HistoryFilter) {
     filter.reset_page();
 }
 
-pub fn cycle_role(roles: &[RoleView], filter: &mut HistoryFilter) {
-    let choices = roles
-        .iter()
+/// The page-2 `o` key: the role filter steps on to the next role the views
+/// draw.
+pub fn cycle_role(snapshot: &Snapshot, filter: &mut HistoryFilter) {
+    let choices = snapshot
+        .visible_roles()
         .map(|role| role.name.clone())
         .collect::<Vec<_>>();
     filter.role = cycle_option(filter.role.take(), &choices);
@@ -1215,7 +1212,6 @@ pub enum KeyCmd {
     Enter,
     DetailScroll(i16),
     Refresh,
-    ToggleControlEdges,
     Spacing(i8),
     Recentre,
     RoleEdge(isize),
@@ -1257,7 +1253,6 @@ pub fn interpret_key(
         KeyCode::Char('K') => KeyCmd::DetailScroll(-1),
         KeyCode::Char('r') => KeyCmd::Refresh,
         KeyCode::Char('F') => KeyCmd::SessionFocus,
-        KeyCode::Char('e') if page == Page::RoleMap => KeyCmd::ToggleControlEdges,
         KeyCode::Char(c) if page == Page::RoleMap && (c == '+' || c == '=') => KeyCmd::Spacing(1),
         KeyCode::Char('-') if page == Page::RoleMap => KeyCmd::Spacing(-1),
         KeyCode::Char('0') if page == Page::RoleMap => KeyCmd::Recentre,
@@ -1494,30 +1489,6 @@ mod tests {
         let active = active_sessions(&snapshot);
         assert_eq!(active.len(), 1, "{active:?}");
         assert_eq!(active[0].public_lifecycle, Lifecycle::Working);
-    }
-
-    #[test]
-    fn control_edges_stay_off_the_map_until_told() {
-        let snapshot = Snapshot {
-            roles: vec![
-                RoleView {
-                    name: "_supervisor".into(),
-                    aggregate: None,
-                    edges: vec!["builder".into()],
-                    ..role_view("_supervisor")
-                },
-                RoleView {
-                    edges: vec!["_supervisor".into()],
-                    ..role_view("builder")
-                },
-            ],
-            ..Snapshot::default()
-        };
-        let hidden = visible_edges(&snapshot, false);
-        assert_eq!(hidden.len(), 1, "{hidden:?}");
-        assert_eq!(hidden[0].from, "builder");
-        let shown = visible_edges(&snapshot, true);
-        assert_eq!(shown.len(), 2, "{shown:?}");
     }
 
     fn place(focus: Focus, graph: usize, history: usize) -> Location {

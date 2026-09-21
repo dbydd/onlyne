@@ -158,6 +158,16 @@ pub async fn on_plugin_report(
                 let row = inner.store.get_session(&task_id).ok().flatten();
                 let stored = stored_observation(&inner.store, row.as_ref());
                 let generation = stored.version.generation;
+                // The task this beat speaks for, as this client holds it. No
+                // record means nothing was ever opened here for that id, which is
+                // not the same fact as an open task: the composition labels open
+                // work, and there is none to label without a record.
+                let task_state = inner
+                    .store
+                    .task(&task_id)
+                    .ok()
+                    .flatten()
+                    .map(|record| record.task_state);
                 let verdict = match serde_json::from_value::<Observation>(observed) {
                     Ok(body) => apply_persist(
                         &inner.bridge,
@@ -165,7 +175,7 @@ pub async fn on_plugin_report(
                         &task_id,
                         &LifecycleEvent::Heartbeat {
                             v: Version::new(generation, seq),
-                            body: compose_observation(&stored, body),
+                            body: compose_observation(&stored, body, task_state),
                         },
                     )?,
                     Err(error) => {
@@ -242,6 +252,11 @@ pub async fn on_plugin_report(
 /// read: a plugin that says `delivery: none` because it cannot see the drain
 /// must not be able to clear an intent the server has not receipted.
 ///
+/// `task_state` is the task record's own verdict, read from the store beside the
+/// row (`None` when this client holds no record for the task). It is here
+/// because `idle_waiting` is a fact about the work, not about the tuple: the
+/// label says a turn ended while an open task had no completion exit.
+///
 /// The repairs after the copy are what makes the result legal by construction,
 /// and they are independent: one reads the drain, the other the label beside it,
 /// and a beat can break both pairings at once. The reducer replaces the agent
@@ -254,7 +269,11 @@ pub async fn on_plugin_report(
 /// composed into legality rather than refused by it; `RejectReason::IllegalObservation`
 /// is still the reducer's answer to every other feed, the reconcile loop's own
 /// heartbeats included.
-fn compose_observation(client: &Observation, mut body: Observation) -> Observation {
+fn compose_observation(
+    client: &Observation,
+    mut body: Observation,
+    task_state: Option<TaskState>,
+) -> Observation {
     body.delivery = client.delivery;
     body.recovery = client.recovery;
     // The reconcile tuning and its counter are the client's as well, and for the
@@ -283,17 +302,41 @@ fn compose_observation(client: &Observation, mut body: Observation) -> Observati
     if body.agent == AgentState::Booting && body.delivery == DeliveryState::Accepted {
         body.delivery = DeliveryState::Pending;
     }
-    // A recovery substate describes an idle or draining agent. `Booting` and
-    // `Ready` are neither, and `Gone` keeps no recovery line at all — that is the
-    // reducer's own coupling for those transitions (`reduce.rs::transition`),
-    // applied here because a heartbeat body bypasses it.
-    if body.recovery != RecoveryState::None
-        && matches!(
-            body.agent,
-            AgentState::Booting | AgentState::Ready | AgentState::Gone
-        )
-    {
+    // A recovery substate rides only the agents `is_legal` allows it on, which is
+    // the reducer's own coupling for those transitions (`reduce.rs::transition`),
+    // applied here because a heartbeat body bypasses it: `Idle` for the two
+    // waiting labels, `Idle` or `Running` for `Draining` — a completion in
+    // asynchronous send outlives the turn that reported it — and none of them on
+    // `Booting`, `Ready` or `Gone`, whose own definitions say no turn is open to
+    // be waiting on or draining from. The `Running` arm is not decoration: the
+    // beat of a turn that started after a reminder is exactly that pair, and
+    // dropping the label is what keeps the reducer from refusing the beat whole —
+    // the frame that says the session went back to work would be the one lost.
+    let held = match body.recovery {
+        RecoveryState::IdleWaiting | RecoveryState::IdleFault => body.agent == AgentState::Idle,
+        RecoveryState::Draining => matches!(body.agent, AgentState::Idle | AgentState::Running),
+        RecoveryState::None => true,
+    };
+    if !held {
         body.recovery = RecoveryState::None;
+    }
+    // An idle agent whose task is still open and whose exit has no receipt is
+    // the design's `idle_waiting` (§2.2, §4.2): the turn ended without a
+    // completion exit, and the plugin's answer is to send the assignment again.
+    // No other writer reaches the label on a live session — the reducer's own
+    // turn-end rule (`crates/onlyne-session/src/lifecycle/reduce.rs`,
+    // `transition`) needs a `TurnEnded` event that no plugin-backed session
+    // feeds, and a beat carries the agent state as its only news — so the
+    // composition is where that rule has to land or `idle_waiting` never
+    // appears at all. A stronger label the client already holds is left alone:
+    // `draining` says the exit is in asynchronous send and `idle_fault` says a
+    // fact disagreed, while `idle_waiting` means there is no exit yet.
+    if body.agent == AgentState::Idle
+        && task_state == Some(TaskState::Pending)
+        && body.delivery != DeliveryState::Accepted
+        && body.recovery == RecoveryState::None
+    {
+        body.recovery = RecoveryState::IdleWaiting;
     }
     body
 }

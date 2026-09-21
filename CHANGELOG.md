@@ -82,6 +82,14 @@ where it is read.
   `settled_at` — which holds the task's result where the session row used to. A database
   written by the previous layout is refused outright with `onlyne: unsupported schema;
   v1.0.0 does not migrate`, so a workspace on this tree migrates its own data or drops it.
+- plugin: a turn that ends without `onlyne_complete` no longer completes itself. The
+  settle window reported every task with a turn behind it as `done` two seconds after the
+  turn ended, which settled the task and retired the session. An active task now gets the
+  design's reinforcing prompt — the assignment again, its task text and handoff lines
+  included — bounded by `idleReminders` in `.pi/onlyne.json`, default 2, and the idle
+  after the bound reports the task `failed` and ends the session. An errored turn still
+  reports `failed` at once. A role whose agent never calls the tool now sees its work fail
+  rather than silently succeed.
 
 ### Changed
 
@@ -157,6 +165,25 @@ where it is read.
   `agent_package` reference generalizes with it: any `settings.json` sitting directly under
   a top-level dot-directory receives it, because a project `packages` path resolves against
   the directory holding that settings file.
+- config and server: a role named `_supervisor` reaches every registered role by default,
+  and `onlyne_config::SUPERVISOR_ROLE` is the one spelling of that name. Its own
+  `allowed_targets` is the only gate: empty reaches every registered role, a non-empty list
+  narrows the reach to what it names, and the receiver's `allowed_senders` is not consulted
+  for that sender. Every other pair keeps the two-sided rule, and the reverse direction is
+  untouched, so an operator's inbox stays as narrow as the spec says. This is the repair
+  path: the role that needs repairing is the one whose own list would have denied the
+  supervisor.
+- client: `idle_waiting` is reachable. The composition behind a plugin heartbeat derives
+  it — an idle agent, a task still open, and no accepted delivery — which is the reducer's
+  own turn-end rule with no producer until now. The label clears the moment a beat reports
+  the turn running again, so the frame that says work resumed is not refused as illegal,
+  and a session with no task record is left alone.
+- tui: the role named `_supervisor` is not drawn. One filter on the role registry
+  (`Snapshot::visible_roles`) removes its box, every hop in either direction, its seat for
+  the cursor, its role-list row and its sessions. A fault, ledger or history row that names
+  it still prints the name: those record messages that named a principal, and hiding them
+  would erase the operator's own audit trail. The `e` key and the hidden-by-default control
+  spokes it revealed are gone with it, so an aggregate role's hops draw like any other.
 
 ### Fixed
 
@@ -219,12 +246,27 @@ where it is read.
   under the same permutation (`crates/onlyne-tui/src/ui.rs`).
 - proto: `the_two_heartbeat_shapes_write_only_their_own_keys` holds the publish beat and
   the liveness beat to their own key sets, so an older plugin's bytes keep decoding.
+- config, client, tui and plugin, for the second window of this release:
+  `supervisor_default_reaches_a_role_that_does_not_admit_it` and
+  `supervisor_explicit_targets_narrow_its_reach`
+  (`crates/onlyne-config/tests/acl_table.rs`);
+  `an_idle_beat_over_an_open_task_is_composed_idle_waiting`
+  (`crates/onlyne-client/src/session/dispatch/reports/tests.rs`);
+  `a_registered_supervisor_draws_nothing`, which compares a snapshot carrying the role
+  against the same snapshot with it stripped, page by page (`crates/onlyne-tui/src/ui.rs`);
+  and `an idle without a completion is reminded, the idle past the bound fails the task,
+  and a completed turn is not reminded` (`plugins/onlyne-agent-pi/src/agent.test.mjs`).
 
 ### Check on this tree
 
-Run 2026-09-21, after the lifecycle rebuild: `cargo fmt --all --check`, `cargo clippy
---workspace --all-targets -- -D warnings`, and `cargo test --workspace` pass, the last at
-1006 cases across 68 result blocks with 0 failures and 1 ignored (`herdr_live_probe`).
+Run 2026-09-22, after the supervisor, TUI and idle-ladder slices: `cargo fmt --all
+--check`, `cargo clippy --workspace --all-targets -- -D warnings`, and
+`cargo test --workspace` pass, the last at 1009 cases across 68 result blocks with 0
+failures and 1 ignored (`herdr_live_probe`); `node --test src/*.test.mjs` in
+`plugins/onlyne-agent-pi` reports 97 pass and 0 fail.
+
+Run 2026-09-21, after the lifecycle rebuild: the same gate at 1006 cases across 68 result
+blocks with 0 failures and 1 ignored.
 
 Run 2026-09-20, earlier in the same window: `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets -j 4 -- -D warnings`, and

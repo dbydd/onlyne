@@ -181,11 +181,149 @@ fn exhausted_row(state: &DispatchState, task: &str) {
     assert_eq!(row.recovery, RecoveryState::IdleFault);
 }
 
+/// The task state the composition's caller hands it: the task record's own
+/// verdict, or `None` when this client holds no record for the task. Deliberately
+/// not `stored_task_state`, which reads the same row but answers `pending` for a
+/// task nobody opened — the projection's convention, not the composition's.
+fn stored_task(state: &DispatchState, task: &str) -> Option<TaskState> {
+    let inner = state.inner.lock();
+    inner
+        .store
+        .task(task)
+        .expect("read the task record")
+        .map(|record| record.task_state)
+}
+
 /// Compose one plugin beat against the client's stored row.
 fn compose(state: &DispatchState, task: &str, spelling: &str) -> Observation {
     let body: Observation =
         serde_json::from_value(plugin_beat(spelling, "none", "none")).expect("plugin tuple");
-    compose_observation(&client_tuple(state, task), body)
+    compose_observation(&client_tuple(state, task), body, stored_task(state, task))
+}
+
+/// Drive one plugin beat through the client's own door, the way a serving
+/// connection's frame arrives. No connection is the sender: the test composes
+/// one the way the client composes its own reports.
+async fn beat(state: &DispatchState, task: &str, spelling: &str, seq: u64) {
+    on_plugin_report(
+        state,
+        None,
+        Report::Heartbeat {
+            task_id: task.to_string(),
+            session_id: String::new(),
+            generation: 1,
+            seq,
+            observed: plugin_beat(spelling, "none", "none"),
+            projection: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .expect("the beat is handled");
+}
+
+/// The client's row for one task, as its columns hold it.
+fn row_of(state: &DispatchState, task: &str) -> SessionRecord {
+    let inner = state.inner.lock();
+    inner
+        .store
+        .get_session(task)
+        .expect("read row")
+        .expect("seeded row")
+}
+
+/// An idle beat over an open task with no receipt is the design's
+/// `idle_waiting` (§2.2, §4.2): the turn ended without a completion exit, and
+/// the plugin answers by sending the assignment again.
+///
+/// Nothing else writes that label on a live session. The reducer's own turn-end
+/// rule (`crates/onlyne-session/src/lifecycle/reduce.rs`, `transition`) needs a
+/// `TurnEnded` event, and a plugin-backed session feeds none: its news is the
+/// `agent` dimension of a beat. So the composition is where the rule has to
+/// land, or a session that finished a turn owing a completion still reads as a
+/// plain idle one — and the beat of the turn that follows has to carry the
+/// label off again, which is the `working → idle_waiting → working` cycle the
+/// design names.
+#[tokio::test]
+async fn an_idle_beat_over_an_open_task_is_composed_idle_waiting() {
+    let dir = tempdir().expect("tempdir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    // The two records the dispatch writes for delivered work, and the turn whose
+    // end the beat reports.
+    {
+        let inner = state.inner.lock();
+        inner
+            .store
+            .open_task(&Causality::root(task.as_str()), "root")
+            .expect("open the task record");
+    }
+    seeded_ready(&state, &task);
+    {
+        let inner = state.inner.lock();
+        feed_turn_started(&inner.bridge, &inner.store, &task).expect("a turn ran");
+        feed_turn_ended(&inner.bridge, &inner.store, &task).expect("the turn ended");
+    }
+    let client = client_tuple(&state, &task);
+    assert_eq!(
+        client.agent,
+        AgentState::Idle,
+        "the turn that ran has ended"
+    );
+    assert_eq!(client.delivery, DeliveryState::None, "no exit was reported");
+    assert_eq!(
+        client.recovery,
+        RecoveryState::None,
+        "and no label is stored"
+    );
+
+    let idle = compose(&state, &task, "idle");
+    assert!(is_legal(&idle), "{idle:?}");
+    assert_eq!(
+        idle.recovery,
+        RecoveryState::IdleWaiting,
+        "an idle agent over an open task with no receipt is waiting for its exit"
+    );
+    assert_eq!(
+        idle.delivery,
+        DeliveryState::None,
+        "the label invents no intent: the plugin reported no completion"
+    );
+
+    // The same beat through the client's door lands the label in the row.
+    beat(&state, &task, "idle", 1005).await;
+    let row = row_of(&state, &task);
+    assert_eq!(row.agent_state, "idle");
+    assert_eq!(row.recovery_substate, "idle_waiting");
+
+    // The next turn starts. A waiting label cannot ride a running agent —
+    // `is_legal` couples it to `Idle` — so the composition has to carry it off
+    // the tuple, or the reducer refuses the very beat that says work resumed and
+    // the row keeps a wait nobody is in.
+    beat(&state, &task, "running", 1006).await;
+    let row = row_of(&state, &task);
+    assert_eq!(row.agent_state, "running", "the turn's own news is applied");
+    assert_eq!(row.recovery_substate, "none", "and the wait is over");
+
+    // The label needs the open task. A session this client holds no record for
+    // has no work to be waiting on, and `stored_task_state` reads that case as
+    // `pending` for the projection's sake — so the composition takes the record
+    // itself, and nothing is labelled for a task nobody opened.
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    {
+        let inner = state.inner.lock();
+        feed_turn_started(&inner.bridge, &inner.store, &task).expect("a turn ran");
+        feed_turn_ended(&inner.bridge, &inner.store, &task).expect("the turn ended");
+    }
+    let idle = compose(&state, &task, "idle");
+    assert!(is_legal(&idle), "{idle:?}");
+    assert_eq!(
+        idle.recovery,
+        RecoveryState::None,
+        "no task record means no open work to wait for: {idle:?}"
+    );
 }
 
 /// A beat that disowns the drain must not clear it.
@@ -431,7 +569,11 @@ fn a_beat_cannot_reset_the_reconcile_policy_or_its_counters() {
         "recovery": "none",
     }))
     .expect("plugin tuple");
-    let composed = compose_observation(&client_tuple(&state, &task), body);
+    let composed = compose_observation(
+        &client_tuple(&state, &task),
+        body,
+        stored_task(&state, &task),
+    );
 
     assert_eq!(composed.generation_live, client.generation_live);
     assert_eq!(composed.isolate_after, client.isolate_after);

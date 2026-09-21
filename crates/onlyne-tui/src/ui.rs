@@ -4,7 +4,7 @@ use crate::model::{
     Alert, AlertKind, Detail, Focus, Page, RoleDetail, Snapshot, TaskDetail, UiState, alerts,
     event_task, layout_edges, layout_nodes, ledger_state_label, live_sessions, page_history,
     principal_label, role_edges, selected_graph_task, selected_history_task, selected_role,
-    visible_edges, visible_sessions,
+    visible_sessions,
 };
 use chrono::{DateTime, Local};
 use onlyne_proto::{Event, EventRow, FaultEvent, LedgerState, Lifecycle, SessionRow};
@@ -152,9 +152,9 @@ pub struct RoleScene {
 /// lazily on a topology change, so this is cheap while the graph holds still.
 pub fn role_scene(snapshot: &Snapshot, state: &UiState, view: (usize, usize)) -> RoleScene {
     let nodes = layout_nodes(snapshot, state.active_only);
-    let edges = visible_edges(snapshot, state.show_control_edges);
+    let edges = layout_edges(snapshot);
     let mut map = state.map.clone();
-    map.sync(&nodes, &layout_edges(snapshot), state.spacing);
+    map.sync(&nodes, &edges, state.spacing);
     // The map is framed on its own middle: the layout already puts the focus
     // at the centre of the rings, and the cursor only marks a role.
     let anchor = map.centre(&nodes);
@@ -253,27 +253,12 @@ fn highlight_cells(
     cells
 }
 
-/// The dim line under the map: which edges the page holds back and which hop
-/// `l` would walk.
+/// The dim line under the map: the hop `l` would walk.
 fn role_note(snapshot: &Snapshot, state: &UiState) -> String {
-    let mut parts = Vec::new();
-    let control: Vec<String> = snapshot
-        .roles
-        .iter()
-        .filter(|role| role.control())
-        .map(|role| role.name.clone())
-        .collect();
-    if !control.is_empty() {
-        parts.push(if state.show_control_edges {
-            format!("{} edges shown · e hides them", control.join(" "))
-        } else {
-            format!("{} edges hidden · e shows them", control.join(" "))
-        });
+    match highlighted_edge(snapshot, state) {
+        Some(edge) => format!("→ {} · l walks it", edge.to),
+        None => String::new(),
     }
-    if let Some(edge) = highlighted_edge(snapshot, state) {
-        parts.push(format!("→ {} · l walks it", edge.to));
-    }
-    parts.join(" · ")
 }
 
 fn style_for_cell(kind: CellKind) -> Style {
@@ -731,7 +716,7 @@ pub fn apply_page_history(
 /// The hop `l` would walk: the selected role's highlighted out-edge.
 pub fn highlighted_edge(snapshot: &Snapshot, state: &UiState) -> Option<LayoutEdge> {
     let role = selected_role(snapshot, state)?;
-    let edges = role_edges(snapshot, state, &role);
+    let edges = role_edges(snapshot, &role);
     state.role_edge.and_then(|index| edges.get(index).cloned())
 }
 
@@ -759,7 +744,7 @@ pub fn move_role_edge(delta: isize, snapshot: &Snapshot, state: &mut UiState) {
     let Some(role) = selected_role(snapshot, state) else {
         return;
     };
-    let len = role_edges(snapshot, state, &role).len();
+    let len = role_edges(snapshot, &role).len();
     if len == 0 {
         state.role_edge = None;
         return;
@@ -1044,7 +1029,7 @@ fn short(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::RoleView;
+    use crate::model::{RoleView, SUPERVISOR_ROLE, cycle_role, hidden_role};
     use chrono::Utc;
     use onlyne_proto::{
         AgentPhase, DeliveryPhase, LedgerEntry, Lifecycle, MsgKind, Presence, Principal,
@@ -1151,18 +1136,61 @@ mod tests {
         }
     }
 
-    /// A control role whose spokes are the default-hidden kind.
-    fn controlled_snapshot() -> Snapshot {
+    /// A cluster whose registry carries the operator's own agent
+    /// ([`SUPERVISOR_ROLE`]) beside a two-role ring. Every surface it could
+    /// reach is loaded: it is offline and holding queued deliveries, a hop runs
+    /// to it and one runs back, and the server projects a live session and a
+    /// finished one onto it.
+    fn supervised_snapshot() -> Snapshot {
+        let mut supervisor = role(SUPERVISOR_ROLE, &["a"]);
+        supervisor.state = Presence::Offline;
+        supervisor.queued = 3;
+        let mut live = session_aged("aaaa1111-live", 12);
+        live.role = Some(SUPERVISOR_ROLE.into());
+        let mut finished = session_aged("bbbb2222-done", 300);
+        finished.role = Some(SUPERVISOR_ROLE.into());
+        finished.public_lifecycle = Lifecycle::Exited;
+        let mut ring = session_aged("cccc3333-ring", 40);
+        ring.role = Some("a".into());
         Snapshot {
             status: serde_json::json!({"cluster": "local"}),
             roles: vec![
-                role("_supervisor", &["a"]),
-                role("a", &["b"]),
-                role("b", &[]),
+                supervisor,
+                role("a", &[SUPERVISOR_ROLE, "b"]),
+                role("b", &["a"]),
             ],
+            sessions: vec![live, finished, ring],
+            ledger: vec![ledger_row("a", "b", "cccc3333-ring", LedgerState::InFlight)],
             server_online: true,
-            refreshed_at: Some(SystemTime::now()),
+            // A fixed clock: the footer prints the refresh time, and a live one
+            // would part two renders of one snapshot on its own.
+            refreshed_at: Some(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+            ),
             ..Snapshot::default()
+        }
+    }
+
+    /// The same snapshot as the board would read it with the operator's agent
+    /// never registered: the registry row goes, and so do the sessions the
+    /// server projects onto it, because a role that is not in the registry can
+    /// have neither. The ledger and the faults stay: they are records of
+    /// messages that name principals, not rows of the registry.
+    fn without_supervisor(snapshot: &Snapshot) -> Snapshot {
+        Snapshot {
+            roles: snapshot
+                .roles
+                .iter()
+                .filter(|role| !hidden_role(&role.name))
+                .cloned()
+                .collect(),
+            sessions: snapshot
+                .sessions
+                .iter()
+                .filter(|session| session.role.as_deref() != Some(SUPERVISOR_ROLE))
+                .cloned()
+                .collect(),
+            ..snapshot.clone()
         }
     }
 
@@ -1294,10 +1322,6 @@ mod tests {
             text.contains("page 1/2 roles"),
             "the footer names the page it prints\n{text}"
         );
-        assert!(
-            text.contains("planner edges hidden · e shows them"),
-            "the map states which spokes it holds back\n{text}"
-        );
     }
 
     /// The server answers `sessions` `ORDER BY updated_at DESC`, so a heartbeat
@@ -1360,6 +1384,91 @@ mod tests {
                 render_once_text(&snapshot, &state, 120, 36),
                 render_once_text(&permuted, &state, 120, 36),
                 "{label} moved when only the session order changed"
+            );
+        }
+    }
+
+    /// The board draws the cluster, and `_supervisor` is the operator's own
+    /// seat on it: a registry entry whose key registers the operator identity,
+    /// with no client behind it (decision D15). Nothing of it reaches the
+    /// screen, so a snapshot that carries it draws the very bytes the same
+    /// snapshot draws without it — the same map, the same hops both ways, the
+    /// same rows in the role lists, the same sessions, and the same pane the
+    /// cursor would open on it.
+    #[test]
+    fn a_registered_supervisor_draws_nothing() {
+        let snapshot = supervised_snapshot();
+        let stripped = without_supervisor(&snapshot);
+        // The subject is really here, so the equality below cannot hold for
+        // want of a fixture.
+        assert!(
+            snapshot.roles.iter().any(|role| hidden_role(&role.name)),
+            "the fixture registers no {}",
+            SUPERVISOR_ROLE
+        );
+        assert!(
+            snapshot
+                .sessions
+                .iter()
+                .any(|session| session.role.as_deref() == Some(SUPERVISOR_ROLE)),
+            "the fixture projects no session onto {}",
+            SUPERVISOR_ROLE
+        );
+        // A fixed clock and fixed session ages keep two renders of one snapshot
+        // together, so the only difference either render can see is the two
+        // snapshots.
+        assert_eq!(
+            render_once_text(&snapshot, &UiState::default(), 120, 36),
+            render_once_text(&snapshot, &UiState::default(), 120, 36),
+            "the fixture does not render the same way twice"
+        );
+
+        let states = [
+            ("page 1", UiState::default()),
+            (
+                "page 1 with the cursor left on it",
+                UiState {
+                    role_selected: Some(SUPERVISOR_ROLE.into()),
+                    ..UiState::default()
+                },
+            ),
+            (
+                "page 2 over every session",
+                UiState {
+                    page: Page::Swarm,
+                    active_only: false,
+                    ..UiState::default()
+                },
+            ),
+        ];
+        for (label, state) in states {
+            for (width, height) in [(120, 36), (90, 24)] {
+                assert_eq!(
+                    render_once_text(&snapshot, &state, width, height),
+                    render_once_text(&stripped, &state, width, height),
+                    "{label} at {width}x{height} drew the {SUPERVISOR_ROLE}"
+                );
+            }
+        }
+        assert!(
+            !render_once_text(&snapshot, &UiState::default(), 120, 36).contains(SUPERVISOR_ROLE),
+            "page 1 printed the hidden role"
+        );
+
+        // Its row in the role lists: the page-2 `o` filter stops on the same
+        // names either way, and never on the hidden one.
+        let (mut with, mut without) = (UiState::default(), UiState::default());
+        for _ in 0..4 {
+            cycle_role(&snapshot, &mut with.filter);
+            cycle_role(&stripped, &mut without.filter);
+            assert_eq!(
+                with.filter.role, without.filter.role,
+                "the role list moved apart"
+            );
+            assert!(
+                !with.filter.role.as_deref().is_some_and(hidden_role),
+                "the role list stops on {:?}",
+                with.filter.role
             );
         }
     }
@@ -1630,36 +1739,6 @@ mod tests {
         assert!(
             body.contains("life=working+stale"),
             "a row the server timed out carries the mark the on-call reads\n{body}"
-        );
-    }
-
-    #[test]
-    fn e_reveals_and_hides_the_control_roles_spokes() {
-        let snapshot = controlled_snapshot();
-        let mut state = UiState::default();
-        assert!(
-            visible_edges(&snapshot, state.show_control_edges)
-                .iter()
-                .all(|edge| edge.from != "_supervisor"),
-            "the supervisor's spokes stay off the map"
-        );
-        let hidden = render_once_text(&snapshot, &state, 120, 36);
-        assert!(
-            hidden.contains("_supervisor edges hidden · e shows them"),
-            "{hidden}"
-        );
-
-        state.show_control_edges = true;
-        assert!(
-            visible_edges(&snapshot, state.show_control_edges)
-                .iter()
-                .any(|edge| edge.from == "_supervisor"),
-            "e shows them"
-        );
-        let shown = render_once_text(&snapshot, &state, 120, 36);
-        assert!(
-            shown.contains("_supervisor edges shown · e hides them"),
-            "{shown}"
         );
     }
 

@@ -27,18 +27,20 @@ listen = "127.0.0.1:0"
 cert_pin = "{CERT_PIN}"
 heartbeat_timeout_ms = 60000
 
+# builder comes first: page 1's cursor opens on the first registered role that
+# has a hop to walk, and the queued count this fixture is about is builder's.
+[[client]]
+role = "builder"
+key = "{key}"
+allowed_senders = ["planner", "builder"]
+allowed_targets = ["planner"]
+
 [[client]]
 role = "planner"
 aggregate = "cluster-b"
 key = "{key}"
 allowed_senders = ["planner", "builder"]
 allowed_targets = ["planner", "builder"]
-
-[[client]]
-role = "builder"
-key = "{key}"
-allowed_senders = ["planner", "builder"]
-allowed_targets = ["planner"]
 "#,
         key = key()
     )
@@ -200,10 +202,6 @@ async fn once_prints_the_role_network_and_the_busy_star() {
         "the footer names the page it prints\n{text}"
     );
     assert!(
-        text.contains("planner edges hidden · e shows them"),
-        "the map states which spokes it holds back\n{text}"
-    );
-    assert!(
         text.contains("+/- repel"),
         "the footer advertises spacing controls\n{text}"
     );
@@ -262,9 +260,8 @@ async fn the_roles_answer_carries_the_queued_count_and_the_panel_shows_it() {
         "the role that sent the work holds none of it\n{planner:?}"
     );
 
-    // Page 1's cursor lands on builder: planner's spokes are control-plane
-    // edges, which the map holds back, so builder owns the one visible hop.
-    // Its panel is the one that has to print the number.
+    // Page 1's cursor lands on builder: it is the first registered role and it
+    // has a hop to walk, so its panel is the one that has to print the number.
     let text = once(&root, None);
     assert!(
         text.contains("sessions 0/1 · queued 1"),

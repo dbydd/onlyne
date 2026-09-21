@@ -45,8 +45,8 @@ pub use spec::{
     DEFAULT_HEARTBEAT_GRACE_SECS, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_INTENT_ATTEMPTS,
     DEFAULT_KEY_PREFIX, DEFAULT_MAX_SESSIONS, DEFAULT_NOTE_QUEUE, DEFAULT_REQUEUE_MAX_ATTEMPTS,
     DEFAULT_REQUEUE_TTL_SECS, DEFAULT_RESYNC_LAG, DEFAULT_STALE_WATCH_SECS, DEFAULT_TEMPLATE_ROOT,
-    GatewayEntry, IntentPolicy, KEY_BYTE_LEN, MsgKindClass, RouteEntry, RouteTarget, ServerSection,
-    Spec, Timeouts,
+    GatewayEntry, IntentPolicy, KEY_BYTE_LEN, MsgKindClass, RouteEntry, RouteTarget,
+    SUPERVISOR_ROLE, ServerSection, Spec, Timeouts,
 };
 pub use template::{
     Placeholders, Template, TemplateError, discover, load_tree, local_override, merge_fragment,

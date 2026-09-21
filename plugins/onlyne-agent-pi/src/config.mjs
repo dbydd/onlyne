@@ -6,7 +6,8 @@
 // generate-time template advice), so the only consumer is this extension. A
 // malformed or missing file falls back to the defaults and reports a warning
 // instead of disabling the session: the extension's own `enabled` key is the one
-// deliberate off switch.
+// deliberate off switch. A key whose value is unusable — the idle bound below,
+// say — keeps the one default it names and leaves the rest of the file alone.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,15 +15,26 @@ import { join } from "node:path";
 /** Where the switch file lives, relative to the pi working directory. */
 export const CONFIG_RELATIVE_PATH = join(".pi", "onlyne.json");
 
-/** Defaults: on, and connecting as soon as a session starts. */
-export const DEFAULT_CONFIG = Object.freeze({ enabled: true, autoStart: true });
+/**
+ * How many idle reminders one task may collect before the ladder fails it
+ * (`agent.mjs` `settleNow`): two, so the third idle without a completion is the
+ * failure.
+ */
+export const DEFAULT_IDLE_REMINDERS = 2;
+
+/** Defaults: on, connecting as soon as a session starts, and the idle bound. */
+export const DEFAULT_CONFIG = Object.freeze({
+  enabled: true,
+  autoStart: true,
+  idleReminders: DEFAULT_IDLE_REMINDERS,
+});
 
 /**
  * Read `.pi/onlyne.json`.
  *
  * @param {string} cwd
  * @param {{ readFile?: (path: string) => string }} [options]
- * @returns {{ enabled: boolean, autoStart: boolean, path: string, warning: string | null, present: boolean }}
+ * @returns {{ enabled: boolean, autoStart: boolean, idleReminders: number, path: string, warning: string | null, present: boolean }}
  */
 export function loadConfig(cwd, options = {}) {
   const readFile = options.readFile ?? ((path) => readFileSync(path, "utf8"));
@@ -48,11 +60,21 @@ export function loadConfig(cwd, options = {}) {
     return { ...DEFAULT_CONFIG, path, warning: `${path} must hold a JSON object; using defaults`, present: true };
   }
   const watch = parsed.watch && typeof parsed.watch === "object" ? parsed.watch : {};
+  // The bound is a count, so only a non-negative integer is a value: a string,
+  // a fraction or a negative would either count nothing or count forever.
+  // Zero is a value — it says the first idle without a completion is already
+  // the failure — and it is the operator's call to make.
+  const idleReminders = parsed.idleReminders;
+  const usable = Number.isInteger(idleReminders) && idleReminders >= 0;
   return {
     enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : DEFAULT_CONFIG.enabled,
     autoStart: typeof watch.autoStart === "boolean" ? watch.autoStart : DEFAULT_CONFIG.autoStart,
+    idleReminders: usable ? idleReminders : DEFAULT_CONFIG.idleReminders,
     path,
-    warning: null,
+    warning:
+      idleReminders !== undefined && !usable
+        ? `${path} idleReminders must be a non-negative integer; using ${DEFAULT_CONFIG.idleReminders}`
+        : null,
     present: true,
   };
 }

@@ -46,7 +46,7 @@ The TUI draws the same picture live — page 1 is the role network, page 2 the s
 └─────────────────────────────────────────────────────────────┘
 ```
 
-`hjkl` walks the edges, `l` follows one, the arrow keys pan, `+`/`-` widen and tighten the map, `e` reveals the supervisor's dispatch edges, and `a` toggles the active-only view. One task per round, one finished tab per session: tabs reclaim themselves when their agent exits.
+`hjkl` walks the edges, `l` follows one, the arrow keys pan, `+`/`-` widen and tighten the map, and `a` toggles the active-only view. The supervisor's own seat stays off the board: its `[[client]]` entry registers the operator identity, and no client process ever joins the ring. One task per round, one finished tab per session: tabs reclaim themselves when their agent exits.
 
 ## Showcase: research-flywheel
 

@@ -206,9 +206,6 @@ fn handle_key(
             clamp_detail_scroll(state, panel);
         }
         KeyCmd::Refresh => refresh_now(runtime, socket, terminal, snapshot, state, refreshed),
-        KeyCmd::ToggleControlEdges => {
-            state.show_control_edges = !state.show_control_edges;
-        }
         KeyCmd::Spacing(delta) => {
             if delta >= 0 {
                 state.spacing = (state.spacing + delta as usize).min(MAX_SPACING);
@@ -251,7 +248,7 @@ fn handle_key(
             refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
         }
         KeyCmd::CycleRole => {
-            cycle_role(&snapshot.roles, &mut state.filter);
+            cycle_role(snapshot, &mut state.filter);
             refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
         }
         KeyCmd::CycleEdge => {
@@ -429,7 +426,7 @@ fn sync_selection_and_detail(
             let role = selected_role(snapshot, state);
             let len = role
                 .as_deref()
-                .map(|role| role_edges(snapshot, state, role).len())
+                .map(|role| role_edges(snapshot, role).len())
                 .unwrap_or(0);
             state.role_edge = state.role_edge.filter(|index| *index < len);
             role
