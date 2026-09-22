@@ -219,6 +219,13 @@ where it is read.
   which `pull` never re-offers and `release_exited_delivery` cannot release for a
   role-level ticket. It now queues a refusal ack whose reason is `session_dead`, the word
   the operations page already names for a residual account's closure.
+- server: an `exited` projection returns its delivery row to the queue. The release
+  compared the armed ticket's session id against the published one, and nothing arms a
+  session-level ticket — `router::Session.session_id` is set nowhere and `pull` always
+  passes `None` — so that comparison was true for every row: the release was a no-op, the
+  automatic requeue never ran, and the ticket was never taken either. A ticket with no
+  session id now matches by the row's task, which for a client-held session is the identity
+  the session itself published.
 
 ### Tests
 

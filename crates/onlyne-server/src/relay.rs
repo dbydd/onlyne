@@ -759,9 +759,15 @@ pub fn requeue_role_rows(
 ///
 /// A claimed hello leaves the row `in_flight` for the pane that still holds
 /// it. When that pane dies while the link is up, this is the path that returns
-/// the row to the queue. The ticket's `session_id` has to match the sync that
-/// landed, so a write from another session of the same task does not move the
-/// row. TTL and budget run in the same order as [`requeue_role_rows`].
+/// the row to the queue. A ticket armed by a named pull holds that session's
+/// id, and it has to match the sync that landed, so a write from another
+/// session of the same task does not move the row. A ticket armed by a
+/// role-level pull holds no id — `pull` keys it by the puller so that pull can
+/// find it again — and falls back to the row's task: a client-held session's id
+/// *is* its task id, so the session that published this `exited` is exactly the
+/// session the row belongs to. Without that fallback no role-level ticket ever
+/// matched and the row stayed `in_flight` behind a pane that was gone. TTL and
+/// budget run in the same order as [`requeue_role_rows`].
 pub fn release_exited_delivery(
     state: &State,
     task_id: &str,
@@ -778,7 +784,11 @@ pub fn release_exited_delivery(
         let Some(ticket) = state.delivery_ticket(&row.msg_id) else {
             continue;
         };
-        if ticket.session_id.as_deref() != Some(session_id) {
+        let released = match ticket.session_id.as_deref() {
+            Some(held) => held == session_id,
+            None => row.task.as_deref() == Some(session_id),
+        };
+        if !released {
             continue;
         }
         if apply_automatic_requeue(state, &row)? {

@@ -1089,6 +1089,67 @@ fn an_exited_publish_does_not_move_another_session_ticket() {
     assert_eq!(ticket.session_id.as_deref(), Some("sess-a"));
 }
 
+/// The client pulls at role level, so the ticket that holds the row names no
+/// session at all. A client-held session publishes its task id as its session
+/// id, and that publish is the pane dying: the row has to go back on the queue.
+/// A ticket check that only compares session ids against the sync that landed
+/// never matches a ticket holding `None`, which left the row `in_flight` behind
+/// a pane that was gone.
+#[test]
+fn a_role_level_ticket_releases_when_its_task_publishes_exited() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+    let task_id = outcome.receipt.task.clone().expect("task id");
+    let handed = relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+    assert_eq!(handed.deliveries.len(), 1);
+    let ticket = fixture
+        .state
+        .delivery_ticket(&msg_id)
+        .expect("a ticket for the row just handed");
+    assert_eq!(
+        ticket.session_id, None,
+        "the ticket is keyed by the pull that armed it"
+    );
+
+    let before = ledger_state_events(&fixture.state).len();
+    let applied = projection::report(
+        &fixture.state,
+        "builder",
+        &projection_publish(task_id.clone(), &task_id, 1, 1, exited_projection()),
+    )
+    .expect("publish")
+    .applied;
+    assert!(applied);
+    let row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("row");
+    assert_eq!(row.state, LedgerState::Queued);
+    assert!(
+        fixture.state.delivery_ticket(&msg_id).is_none(),
+        "the dead pane's ticket goes with the row"
+    );
+    assert_eq!(ledger_state_events(&fixture.state).len(), before + 1);
+    match &ledger_state_events(&fixture.state)
+        .last()
+        .expect("requeue event")
+        .event
+    {
+        Event::LedgerState(event) => {
+            assert_eq!(event.msg_id, msg_id);
+            assert_eq!(event.state, LedgerState::Queued);
+        }
+        other => panic!("expected ledger_state, got {other:?}"),
+    }
+
+    let repulled =
+        relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+    assert_eq!(repulled.deliveries.len(), 1);
+    assert_eq!(repulled.deliveries[0].msg_id, msg_id);
+}
+
 #[test]
 fn an_old_hello_json_without_live_tasks_requeues_like_today() {
     let raw = json!({
