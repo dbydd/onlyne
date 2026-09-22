@@ -21,10 +21,9 @@ pub const KIND_HEARTBEAT_AFTER_COMPLETE: &str = "heartbeat_after_complete";
 
 /// Age a working session must exceed, in seconds, before it is observed.
 ///
-/// The client-side `stale_grace_secs` is not visible to the server, so this
-/// constant is the observation window. It is not a third config field: the
-/// scan interval is `[server].stale_watch_secs` and the client grace is
-/// `[client] stale_grace_secs`.
+/// A client's own death sweep runs on `[client] reconnect_grace_secs` and is
+/// not visible to the server, so this constant is the observation window. It is
+/// not a second config field: the scan interval is `[server].stale_watch_secs`.
 pub const STALE_WATCH_GRACE_SECS: u64 = 600;
 
 /// One working session considered for observation.

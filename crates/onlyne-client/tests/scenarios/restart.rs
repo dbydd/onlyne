@@ -6,8 +6,9 @@
 //! row) that speaks the shipped protocol: `hello` requeues every in-flight row the
 //! registering role does not claim, `pull` hands one row at a time and arms its
 //! ticket, `ack` settles it. What the client does with a row the server requeued,
-//! what it records for a row whose session died under it, and who may shut intake,
-//! are the three facts the cases below pin.
+//! how it leaves a row it has already answered alone on the way back up, what it
+//! records for a row whose session died under it, and who may shut intake, are the
+//! four facts the cases below pin.
 
 use crate::common::complete_plugin;
 use onlyne_adapter::AdapterIo;
@@ -113,6 +114,14 @@ struct Cluster {
     sends: Vec<Envelope>,
     acks: Vec<AckArgs>,
     handed: u32,
+    /// Pulls answered. Each one follows the hello, subscribe, and intent flush of
+    /// the link it arrived on, so a test reads this as "the client has been
+    /// through its post-connect order again".
+    pulls: u32,
+    /// Connections the fixture closes after answering their first pull. One flap
+    /// is what `link_loop` answers with a fresh `hello`, a fresh flush, and — for
+    /// the sweep that used to run per link — a fresh pass over the ledger.
+    closes: u32,
 }
 
 impl Cluster {
@@ -195,6 +204,16 @@ impl Cluster {
     }
 }
 
+/// Spend one scheduled close, and answer whether this link is the one to drop.
+fn take_close(cluster: &Arc<Mutex<Cluster>>) -> bool {
+    let mut cluster = cluster.lock();
+    if cluster.closes == 0 {
+        return false;
+    }
+    cluster.closes -= 1;
+    true
+}
+
 /// The fake cluster's endpoint and the client that dials it.
 struct Fixture {
     _dir: TempDir,
@@ -255,11 +274,19 @@ async fn fixture(cluster: Cluster, adjust: impl FnOnce(ClientInit) -> ClientInit
                     let Frame::Req { id, op } = frame else {
                         continue;
                     };
+                    let pulled = matches!(op, ClientOp::Pull(_));
                     let body = respond(&serving, op);
                     if write_frame(&mut stream, &Frame::res(id, body))
                         .await
                         .is_err()
                     {
+                        break;
+                    }
+                    // The flap a case asked for: the answer is on the wire and the
+                    // link dies behind it, which `watch_readiness` reads as
+                    // `Reconnecting` and the runloop's accept gate as new work it is
+                    // no longer taking.
+                    if pulled && take_close(&serving) {
                         break;
                     }
                 }
@@ -298,7 +325,9 @@ fn respond(cluster: &Arc<Mutex<Cluster>>, op: ClientOp) -> ResBody {
         }
         ClientOp::Subscribe(_) => ResBody::ok(serde_json::json!({"subscribed": true})),
         ClientOp::Pull(args) => {
-            let delivery = cluster.lock().take(args.control_only.unwrap_or(false));
+            let mut cluster = cluster.lock();
+            cluster.pulls += 1;
+            let delivery = cluster.take(args.control_only.unwrap_or(false));
             ResBody::ok(
                 serde_json::to_value(PullReply {
                     deliveries: delivery.into_iter().collect(),
@@ -471,7 +500,7 @@ async fn a_restart_drains_the_work_left_in_flight() {
     cluster
         .rows
         .push(Row::new("msg-restart", &task, LedgerState::InFlight, 1));
-    let fixture = fixture(cluster, |init| init.with_stale_grace_secs(300)).await;
+    let fixture = fixture(cluster, |init| init).await;
     let client = tokio::spawn(onlyne_client::run(fixture.init.clone()));
     let (io, mut assigns) = mount_when_ready(&fixture.socket).await;
 
@@ -535,6 +564,127 @@ async fn a_restart_drains_the_work_left_in_flight() {
     fixture.server.abort();
 }
 
+/// A row this role already answered is never re-reported as failed.
+///
+/// `Acked` is what the ledger reads after a settle: this client acks inside
+/// `on_out`, in the same section that writes the task's own record, so an acked
+/// inbound row is work this role answered rather than work still owed. The startup
+/// self-check read that state as "delivered and acked, with a session that is
+/// gone" and reported `failed{session_dead}` for it, which the server mirrors as
+/// the session's ending — so a task that had ended `Done` read `failed` in
+/// `onlyne sessions` after the next start, the oldest rows first. The ending a
+/// session owes is the sweep's to write
+/// (`a_task_whose_agent_is_gone_reaches_a_recorded_ending`), so nothing reports
+/// anything for a row the role already answered, on the link it starts with or on
+/// the one it reconnects to.
+///
+/// The other half of that sentence is in this case too: the row whose agent left
+/// before answering is buried by the same sweep, past the reconnect grace, with the
+/// reason the ledger and `onlyne sessions` read for a death.
+#[tokio::test]
+async fn an_answered_row_is_left_alone_while_a_dead_session_still_ends() {
+    let answered = onlyne_proto::new_task_id();
+    let owed = onlyne_proto::new_task_id();
+    let mut cluster = Cluster::default();
+    let mut row = Row::new("msg-answered", &answered, LedgerState::Acked, 1);
+    // Older than any grace the client could still be holding.
+    row.acked_at = Some(fixture_time());
+    cluster.rows.push(row);
+    // The work this client does take, and whose agent leaves before it answers.
+    cluster
+        .rows
+        .push(Row::new("msg-owed", &owed, LedgerState::Queued, 0));
+    let fixture = fixture(cluster, |init| init.with_reconnect_grace_secs(1)).await;
+
+    // The other half of the acked row: the verdict this role's own settle wrote,
+    // which is what the mirror had already been told.
+    let store = ClientStore::open(fixture.workspace.join(".onlyne/client.db")).unwrap();
+    store
+        .open_task(&Causality::root(answered.clone()), "root")
+        .unwrap();
+    store.settle_task(&answered, TaskState::Done).unwrap();
+
+    let client = tokio::spawn(onlyne_client::run(fixture.init.clone()));
+    // An always-running agent mounts, and the queued row is handed to it.
+    let (io, mut assigns) = mount_when_ready(&fixture.socket).await;
+    let assigned = tokio::time::timeout(Duration::from_secs(10), assigns.recv())
+        .await
+        .expect("the queued row reaches the agent")
+        .expect("the plugin connection stays open");
+    assert_eq!(assigned, owed, "the agent takes the row still owed");
+
+    // The link flaps under a client that is already serving, so the role comes back
+    // over its own ledger and runs the whole post-connect order a second time. The
+    // flap is armed here rather than at the fixture: the first pass over the ledger
+    // has to have had its chance, and an armed flap swallows the very request that
+    // would take it.
+    fixture.cluster.lock().closes = 1;
+    let again = fixture.cluster.clone();
+    eventually(
+        move || {
+            let cluster = again.lock();
+            cluster.claims.len() >= 2 && cluster.pulls >= 4
+        },
+        "the client reconnects and settles into its post-connect order again",
+    )
+    .await;
+
+    // The one ending that is still this client's to write: the agent that left
+    // before answering. Dropping the plugin's half of the socket is the death the
+    // sweep reads, and past `reconnect_grace_secs` it buries the session and files
+    // what the work owed.
+    drop(io);
+    let buried = fixture.cluster.clone();
+    eventually(
+        move || buried.lock().row("msg-owed").state == LedgerState::Rejected,
+        "the dead session's row is refused rather than left in flight",
+    )
+    .await;
+
+    let cluster = fixture.cluster.lock();
+    assert!(
+        cluster.reports.iter().all(|report| !matches!(
+            report,
+            Report::Complete { task_id, .. } if task_id == &answered
+        )),
+        "a later connect reports no ending for a row this role answered: {:?}",
+        cluster.reports
+    );
+    assert_eq!(
+        cluster.row("msg-answered").state,
+        LedgerState::Acked,
+        "the row keeps the answer it was given"
+    );
+    let ended = cluster.row("msg-owed");
+    assert_eq!(ended.state, LedgerState::Rejected, "{ended:?}");
+    assert_eq!(
+        ended.reason.as_deref(),
+        Some(onlyne_client::session::dispatch::SESSION_DEAD),
+        "the ending names the death the client judged: {ended:?}"
+    );
+    drop(cluster);
+
+    // The role's own account says the same: the answered task keeps its verdict, the
+    // task whose agent left is settled failed, and nothing is left open for the
+    // server to offer again.
+    let store = ClientStore::open(fixture.workspace.join(".onlyne/client.db")).unwrap();
+    let record = store
+        .task(&answered)
+        .unwrap()
+        .expect("the answered task has a record");
+    assert_eq!(record.task_state, TaskState::Done, "{record:?}");
+    assert!(record.settled_at.is_some(), "{record:?}");
+    let record = store
+        .task(&owed)
+        .unwrap()
+        .expect("the task whose agent left has a record");
+    assert_eq!(record.task_state, TaskState::Failed, "{record:?}");
+    assert!(record.settled_at.is_some(), "{record:?}");
+
+    client.abort();
+    fixture.server.abort();
+}
+
 /// A task whose agent is gone reaches a recorded ending, and does not come back on
 /// its own.
 ///
@@ -555,10 +705,7 @@ async fn a_task_whose_agent_is_gone_reaches_a_recorded_ending() {
     cluster
         .rows
         .push(Row::new("msg-dead", &task, LedgerState::Queued, 0));
-    let fixture = fixture(cluster, |init| {
-        init.with_reconnect_grace_secs(1).with_stale_grace_secs(300)
-    })
-    .await;
+    let fixture = fixture(cluster, |init| init.with_reconnect_grace_secs(1)).await;
     let workspace = fixture.workspace.clone();
     let client = tokio::spawn(onlyne_client::run(fixture.init.clone()));
 
@@ -580,7 +727,7 @@ async fn a_task_whose_agent_is_gone_reaches_a_recorded_ending() {
     let row = cluster.row("msg-dead");
     assert_eq!(
         row.reason.as_deref(),
-        Some(onlyne_client::session::stale::SESSION_DEAD),
+        Some(onlyne_client::session::dispatch::SESSION_DEAD),
         "the refusal names the death the client judged: {row:?}",
     );
     assert_eq!(
@@ -628,9 +775,11 @@ async fn a_task_whose_agent_is_gone_reaches_a_recorded_ending() {
 /// caller, and `onlyne_net::conn` records that "the silent peer keeps the link up;
 /// only this call gave up" — and a client that read it as a dead link closed the
 /// shared gate for good. Nothing re-opens that gate but a readiness transition
-/// (`runloop::link`), so the pull loop stopped draining the role's inbox while the
-/// work sat queued on the server, and the next delivery to arrive was answered
-/// `client is not accepting new work` — a refusal, which is terminal for the row.
+/// (`runloop::link`), so the pull loop stopped draining the role's inbox for the
+/// life of that link: the work sat queued on the server and nothing took it. A
+/// delivery the role still had in hand then owed the server no answer either —
+/// `accept_delivery` leaves a row the gate kept out in flight — so the latch's
+/// damage was the stall itself, long enough to outlive the operator's patience.
 #[tokio::test]
 async fn a_send_that_cannot_leave_does_not_shut_the_accept_gate() {
     let dir = tempdir().unwrap();

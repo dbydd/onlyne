@@ -27,9 +27,6 @@ pub struct ClientConfig {
     /// ACP session backend settings.
     #[serde(default)]
     pub acp: AcpSection,
-    /// Seconds a startup reconcile waits before declaring an orphaned in-flight task stale.
-    #[serde(default = "default_stale_grace_secs")]
-    pub stale_grace_secs: u64,
     /// Seconds a running session may sit without an Applied tuple change before
     /// this client reports it stalled. Zero disables the report.
     #[serde(default = "default_stall_report_secs")]
@@ -109,13 +106,8 @@ fn default_acp_permission() -> String {
     "deny".to_string()
 }
 
-pub const DEFAULT_STALE_GRACE_SECS: u64 = 300;
 pub const DEFAULT_STALL_REPORT_SECS: u64 = 1800;
 pub const DEFAULT_RECONNECT_GRACE_SECS: u64 = 60;
-
-fn default_stale_grace_secs() -> u64 {
-    DEFAULT_STALE_GRACE_SECS
-}
 
 fn default_stall_report_secs() -> u64 {
     DEFAULT_STALL_REPORT_SECS

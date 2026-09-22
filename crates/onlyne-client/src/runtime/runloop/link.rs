@@ -1,16 +1,12 @@
 use super::config::{ClientInit, FLUSH_PAUSE_MS, READINESS_POLL_MS, RunState, reconnect_backoff};
 use super::run::pull_ack_loop;
-use super::sessions::{
-    refresh_role_slice, scan_reconnect_grace, scan_stalls, wait_for_mount_or_grace,
-};
+use super::sessions::{refresh_role_slice, scan_reconnect_grace, scan_stalls};
 use crate::runtime::intent::op_for_intent;
 use crate::session::dispatch::{self, ClientLink};
 use anyhow::{Result, anyhow};
 use onlyne_net::conn::ConnReadiness;
 use onlyne_net::is_permanent;
-use onlyne_proto::{
-    ClientOp, EventTier, Frame, LedgerEntry, LedgerQuery, LedgerState, MsgKind, Subscribe,
-};
+use onlyne_proto::{ClientOp, EventTier, Frame, Subscribe};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -74,19 +70,6 @@ pub(super) async fn run_link(init: &ClientInit, link: &ClientLink, state: &RunSt
     let mut flusher = tokio::spawn(flush_loop(link.clone(), state.clone()));
     let mut reader = tokio::spawn(read_events(link.clone(), state.clone()));
     let mut watcher = tokio::spawn(watch_readiness(link.clone(), state.clone()));
-    // The residual sweep can wait out `stale_grace_secs` for a plugin mount, so
-    // it sits behind the four loops: a restarted role pulls, flushes, and reads
-    // events from the moment its link is up. Its reports are advisory, so it
-    // runs detached and logs its own failure (field report: a client spawned at
-    // 13:46:51 logged `server link ready` at 13:51:51).
-    let sweep_init = init.clone();
-    let sweep_link = link.clone();
-    let sweep_state = state.clone();
-    tokio::spawn(async move {
-        if let Err(error) = reconcile_residuals(&sweep_init, &sweep_link, &sweep_state).await {
-            tracing::warn!(error = %error, "residual reconcile ended with an error");
-        }
-    });
     tracing::info!(role = %init.role, "server link ready");
     tokio::select! {
         _ = &mut pull => {}
@@ -290,63 +273,6 @@ pub(super) async fn read_events(link: ClientLink, state: RunState) -> Result<()>
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
         }
     }
-}
-
-pub(super) async fn reconcile_residuals(
-    init: &ClientInit,
-    link: &ClientLink,
-    state: &RunState,
-) -> Result<()> {
-    let reply = link
-        .request(ClientOp::QueryLedger(LedgerQuery {
-            role: Some(init.role.clone()),
-            state: Some(LedgerState::Acked),
-            kind: Some(MsgKind::Task),
-            limit: 500,
-            ..LedgerQuery::default()
-        }))
-        .await?;
-    if !reply.ok {
-        tracing::warn!(error = ?reply.error, "residual reconcile ledger query refused");
-        return Ok(());
-    }
-    let entries: Vec<LedgerEntry> = reply
-        .data
-        .as_ref()
-        .and_then(|value| value.get("ledger"))
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()?
-        .unwrap_or_default();
-    let mut rows: Vec<_> = entries
-        .iter()
-        .filter_map(crate::session::stale::WorkingRow::from_entry)
-        .collect();
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let pending_ops = pending_intent_ops(state)?;
-    rows.retain(|row| !crate::session::stale::pending_terminal_for(&row.task_id, &pending_ops));
-    if rows.is_empty() {
-        return Ok(());
-    }
-    wait_for_mount_or_grace(state, init.stale_grace_secs).await;
-    let convergences = crate::session::stale::reconcile(
-        &rows,
-        &state.dispatch.live_task_ids(),
-        chrono::Utc::now(),
-        init.stale_grace_secs,
-        &init.role,
-    );
-    for convergence in convergences {
-        dispatch::send_frame(&state.dispatch, ClientOp::Report(convergence.report())).await?;
-    }
-    Ok(())
-}
-
-pub(super) fn pending_intent_ops(state: &RunState) -> Result<Vec<ClientOp>> {
-    let rows = state.intents.lock().pending()?;
-    rows.iter().map(op_for_intent).collect()
 }
 
 #[cfg(test)]

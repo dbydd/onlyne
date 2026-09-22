@@ -1,7 +1,7 @@
 use super::config::{DEFAULT_INTENT_ATTEMPTS, RunState, default_intent_backoff};
-use crate::runtime::intent::IntentMachine;
+use crate::runtime::intent::{IntentMachine, op_for_intent};
 use crate::session::dispatch::DispatchState;
-use onlyne_proto::{Presence, RoleInfo};
+use onlyne_proto::{ClientOp, Presence, RoleInfo};
 use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
 use std::sync::Arc;
@@ -56,4 +56,14 @@ pub(super) fn role_info(max_sessions: u32, command: Vec<String>) -> RoleInfo {
         relay_required: None,
         relay_count: None,
     }
+}
+
+/// The frames the durable intent queue still holds, decoded.
+///
+/// A case reads this as "what the client owes the server": the queue is where an
+/// ack, a report, or a completion waits for the flusher, so a row with no entry
+/// here is a row this client has said nothing about.
+pub(super) fn pending_intent_ops(state: &RunState) -> anyhow::Result<Vec<ClientOp>> {
+    let rows = state.intents.lock().pending()?;
+    rows.iter().map(op_for_intent).collect()
 }

@@ -155,7 +155,6 @@ async fn main() {
                         config.cert_pin,
                     )
                     .with_orca_worktree(config.orca.worktree)
-                    .with_stale_grace_secs(config.stale_grace_secs)
                     .with_stall_report_secs(config.stall_report_secs)
                     .with_reconnect_grace_secs(config.reconnect_grace_secs)
                     .with_backend(config.backend)

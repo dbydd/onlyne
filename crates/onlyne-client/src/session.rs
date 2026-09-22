@@ -7,5 +7,4 @@ pub mod claim;
 pub mod dispatch;
 pub mod handoff;
 pub mod slice;
-pub mod stale;
 pub mod stall;

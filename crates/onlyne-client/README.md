@@ -130,6 +130,8 @@ The client reconnects on a ladder of 1, 2, 4, 8, 16, 32, 60 seconds; 60 seconds 
 
 A link failure or a `bye` frame sets `accept_new = false`. Queued deliveries wait on the server, running sessions continue to their terminal state, and the completions those sessions produce enter the intent queue. `accept_new = false` blocks new session spawns and new pulls. The gate follows the connection rather than any one frame: the runloop sets it from the link's readiness, and a frame that could not leave — a request past its own deadline with the link still up — goes to the intent queue alone.
 
+A delivery the pull already had in hand when the gate shut is left unanswered: the row stays in flight and the next `hello` requeues it. A refusal would settle that row `rejected`, which is terminal, so the work would come back only through an operator's `repair retry`.
+
 ## Intent queue
 
 Every outbound envelope lands in `client.db` `intents` before the first socket write, keyed by `op_id`.

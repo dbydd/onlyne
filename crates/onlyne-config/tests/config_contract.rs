@@ -2,9 +2,9 @@ use onlyne_config::{
     AcpSection, ClientConfig, DEFAULT_BACKOFF_MS, DEFAULT_FAULT_HISTORY_DAYS,
     DEFAULT_HEARTBEAT_GRACE_SECS, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_SESSIONS,
     DEFAULT_NOTE_QUEUE, DEFAULT_RECONNECT_GRACE_SECS, DEFAULT_REQUEUE_MAX_ATTEMPTS,
-    DEFAULT_REQUEUE_TTL_SECS, DEFAULT_RESYNC_LAG, DEFAULT_STALE_GRACE_SECS,
-    DEFAULT_STALE_WATCH_SECS, DEFAULT_STALL_REPORT_SECS, DEFAULT_TEMPLATE_ROOT, Env, IntentPolicy,
-    Spec, SpecDiff, Timeouts, canonical_bytes, config_client_schema, redact, spec_hash,
+    DEFAULT_REQUEUE_TTL_SECS, DEFAULT_RESYNC_LAG, DEFAULT_STALE_WATCH_SECS,
+    DEFAULT_STALL_REPORT_SECS, DEFAULT_TEMPLATE_ROOT, Env, IntentPolicy, Spec, SpecDiff, Timeouts,
+    canonical_bytes, config_client_schema, redact, spec_hash,
 };
 use std::fs;
 
@@ -164,36 +164,6 @@ key = "{KEY_A}"
     assert_eq!(spec.client[0].intent.attempts, 3);
     assert_eq!(spec.client[0].intent.backoff_ms, vec![1000, 2000, 4000]);
 }
-#[test]
-fn client_stale_grace_defaults_and_reads_override() {
-    let config = ClientConfig::parse_str(
-        r#"role = "planner"
-cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
-key_path = "keys/role.key"
-
-[server]
-host = "127.0.0.1"
-port = 7811
-"#,
-    )
-    .unwrap();
-    assert_eq!(config.stale_grace_secs, DEFAULT_STALE_GRACE_SECS);
-
-    let configured = ClientConfig::parse_str(
-        r#"role = "planner"
-cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
-key_path = "keys/role.key"
-stale_grace_secs = 7
-
-[server]
-host = "127.0.0.1"
-port = 7811
-"#,
-    )
-    .unwrap();
-    assert_eq!(configured.stale_grace_secs, 7);
-}
-
 #[test]
 fn client_stall_report_defaults_when_omitted() {
     let config = ClientConfig::parse_str(

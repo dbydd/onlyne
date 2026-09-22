@@ -7,6 +7,14 @@ use super::state::{
 };
 use super::transport::{held_read_only, names_session};
 
+/// Reason a session that stopped answering is closed with.
+///
+/// The wire word the ledger and `onlyne sessions` read for a death this client
+/// judged: the reconnect sweep stamps it on the refusal ack that buries the
+/// session's delivery, and an operator's own
+/// `repair fail --reason session_dead` writes the same word.
+pub const SESSION_DEAD: &str = "session_dead";
+
 /// Retire one session. The stored tuple decides whether a live resource
 /// remains to close, and the caller's reason reaches the backend unchanged, so an
 /// operator cancel stops reporting itself as a completion.
@@ -419,10 +427,9 @@ impl DispatchState {
                 // path to match — so nothing would answer for this task until the
                 // link dropped, and an operator reading `onlyne ledger` would see
                 // a session that has been buried as one still holding its
-                // delivery. The reason is the one the residual account already
-                // carries (`session::stale::SESSION_DEAD`), and a refusal is
-                // terminal: the work comes back through `repair retry`, not by
-                // itself.
+                // delivery. The reason is this client's own word for a death
+                // (`SESSION_DEAD`), and a refusal is terminal: the work comes back
+                // through `repair retry`, not by itself.
                 let handle = inner
                     .sessions
                     .get_mut(&key)
@@ -434,7 +441,7 @@ impl DispatchState {
                             msg_id,
                             op_id: None,
                             accepted: false,
-                            reason: Some(crate::session::stale::SESSION_DEAD.to_string()),
+                            reason: Some(SESSION_DEAD.to_string()),
                         },
                     );
                 }

@@ -90,6 +90,17 @@ where it is read.
   after the bound reports the task `failed` and ends the session. An errored turn still
   reports `failed` at once. A role whose agent never calls the tool now sees its work fail
   rather than silently succeed.
+- client: the startup residual reconcile is gone, with `[client] stale_grace_secs`,
+  `ClientInit::with_stale_grace_secs`, `onlyne_client::session::stale` and its tests.
+  `SESSION_DEAD` moves to `onlyne_client::session::dispatch`, where the death path that
+  uses it lives. The reconcile asked the server for `Acked` rows and reported each one
+  past its grace as `Complete { outcome: Failed, head: "session_dead" }`, and this client
+  acks at settlement (`on_out`), so an acked task row is work the role already answered:
+  every (re)connect re-reported the role's history, and the server writes its session
+  mirror from that report, so a completed task read `failed` in `onlyne sessions`. The two
+  paths beside it cover what it was written for — a row this client never acked comes back
+  through the `hello` requeue, and a session that dies at a lost connection is settled by
+  the sweep on `[client] reconnect_grace_secs`, which also closes its delivery row.
 
 ### Changed
 
@@ -226,6 +237,12 @@ where it is read.
   automatic requeue never ran, and the ticket was never taken either. A ticket with no
   session id now matches by the row's task, which for a client-held session is the identity
   the session itself published.
+- client: a delivery refused because the accept gate is closed leaves its row unanswered.
+  `accept_delivery` answered `accepted: false` with the gate as the reason, which settles
+  the row `rejected`, a terminal state, so a link flap landing between a pull and its
+  accept destroyed a row the teardown's requeue would have brought back. A refusal now
+  belongs to work this client cannot serve at all — its own reason — and the gate's reason
+  leaves the row where `pull` will offer it again.
 
 ### Tests
 
@@ -281,8 +298,28 @@ where it is read.
   against the same snapshot with it stripped, page by page (`crates/onlyne-tui/src/ui.rs`);
   and `an idle without a completion is reminded, the idle past the bound fails the task,
   and a completed turn is not reminded` (`plugins/onlyne-agent-pi/src/agent.test.mjs`).
+- client and server, for the restart path found in the third window: one case per rule —
+  `a_restart_drains_the_work_left_in_flight`,
+  `a_send_that_cannot_leave_does_not_shut_the_accept_gate`,
+  `a_task_whose_agent_is_gone_reaches_a_recorded_ending`, and
+  `an_answered_row_is_left_alone_while_a_dead_session_still_ends`
+  (`crates/onlyne-client/tests/scenarios/restart.rs`, a fixture whose cluster answers
+  pulls, holds ledger rows, and can drop a link after a chosen pull);
+  `a_gated_delivery_owes_no_answer_and_an_unservable_one_is_refused`
+  (`crates/onlyne-client/src/runtime/runloop/sessions/tests.rs`) holds a refusal to its
+  own reason; and `a_role_level_ticket_releases_when_its_task_publishes_exited`
+  (`crates/onlyne-server/tests/delivery.rs`) fails with `InFlight != Queued` when the old
+  ticket comparison is restored.
 
 ### Check on this tree
+
+Run 2026-09-23, after the restart-path window: `cargo fmt --all --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`, and `cargo test --workspace` pass at 1009 cases
+across 68 result blocks with 0 failures and 1 ignored (`herdr_live_probe`). The count lands
+level with the run below by construction: this window deletes the four cases in
+`crates/onlyne-client/src/session/stale/tests.rs` with the path they covered, deletes three
+more whose premise was the residual reconcile or the removed config key, and adds three of
+its own. The plugin suite is untouched at 97 pass.
 
 Run 2026-09-22, after the supervisor, TUI and idle-ladder slices: `cargo fmt --all
 --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and

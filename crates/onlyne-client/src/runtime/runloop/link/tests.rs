@@ -1,6 +1,8 @@
 use super::*;
 use crate::runtime::runloop::test_support::test_state;
-use onlyne_proto::{Body, Causality, Lifecycle, Principal, Report, new_envelope, new_task_id};
+use onlyne_proto::{
+    Body, Causality, Lifecycle, MsgKind, Principal, Report, new_envelope, new_task_id,
+};
 use onlyne_session::{
     Bridge, LifecycleEvent, SessionLedger, TaskState, apply_persist, next_version,
 };

@@ -149,12 +149,18 @@ pub(super) async fn accept_delivery(state: &RunState, delivery: &Delivery) {
                 tracing::warn!(error = %error, task = %session.task_id, "staged hand-off refused");
             }
         }
-        Ok(None) => state.dispatch.push_settled(AckArgs {
-            msg_id: delivery.msg_id.clone(),
-            op_id: None,
-            accepted: false,
-            reason: Some("client is not accepting new work".to_string()),
-        }),
+        // The gate is the connection's own (`watch_readiness` shuts it when the
+        // link leaves `Ready` and opens it when the redial lands), so a delivery
+        // the pull already had in hand when the link flapped arrives here with the
+        // gate shut. That answer is not this client's to give: a refusal settles
+        // the row `rejected`, which is terminal, and the row the teardown's
+        // requeue would have brought back is destroyed instead. The row stays in
+        // flight — unanswered is not a decision — and the next `hello` that does
+        // not claim it is what puts it back on the queue.
+        Ok(None) => tracing::debug!(
+            msg_id = %delivery.msg_id,
+            "the link is not taking work; the delivery stays in flight"
+        ),
         Err(error) => {
             tracing::warn!(error = %error, msg_id = %delivery.msg_id, "delivery refused");
             state.dispatch.push_settled(AckArgs {
@@ -206,19 +212,6 @@ pub(super) fn scan_reconnect_grace(state: &RunState) {
             grace_secs = state.reconnect_grace_secs,
             "dropped sessions retired past the reconnect grace"
         );
-    }
-}
-
-pub(super) async fn wait_for_mount_or_grace(state: &RunState, grace_secs: u64) {
-    if state.dispatch.has_mounted_adapter() || grace_secs == 0 {
-        return;
-    }
-    let deadline = std::time::Instant::now() + Duration::from_secs(grace_secs);
-    while std::time::Instant::now() < deadline {
-        if state.dispatch.has_mounted_adapter() {
-            return;
-        }
-        sleep(Duration::from_millis(100)).await;
     }
 }
 

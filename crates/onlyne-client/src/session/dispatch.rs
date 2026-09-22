@@ -59,6 +59,6 @@ pub use projection::{
     with_cluster,
 };
 pub use reports::{on_control, on_plugin_report};
-pub use retire::{close_all, on_recycled};
+pub use retire::{SESSION_DEAD, close_all, on_recycled};
 pub use settle::on_out;
 pub use state::{DispatchState, FrameGuard, SessionSlot};

@@ -147,7 +147,7 @@ role link 死亡时，服务端把该 role 的 `in_flight` 投递行重投回 `q
 
 先判 TTL，再判次数，两者都各发一条 `ledger_state` 事件。
 
-`reason` 的读法：`onlyne ledger` 的行键为 `msg_id`、`task`、`state`、`reason`、`out_head`、`body`；该键只在这一行有值时出现，无值的行与列加入之前逐字节一致。TUI 第二页的 task 详情面板在账本行尾追加 `reason=<text>`。落进这一列的取值：`requeue_exhausted` 与 `requeue_ttl` 来自上面两道闸，`expired` 来自到期扫描，`session_dead` 来自超期残账的结清（见「会话残影与属主判定」一节），pane 后端（`herdr` / `orca` / `zellij`）在开页前拒收协议 `session_command` 时整句拒收文案落 `rejected` 行（见「Headless（exec）会话」一节末段）；操作者经 `onlyne reject --reason` 或 `onlyne repair fail --reason` 自填的文本原样进这一列，`onlyne ack` 收下时该文本随结清事件走，行上的 `reason` 保持原样。字符串 `operator ack` 是 faults 表 `reason` 列的用例数据（`crates/onlyne-store/src/tests.rs` 的 `update_fault_state` 用例），账本列没有它的记录。
+`reason` 的读法：`onlyne ledger` 的行键为 `msg_id`、`task`、`state`、`reason`、`out_head`、`body`；该键只在这一行有值时出现，无值的行与列加入之前逐字节一致。TUI 第二页的 task 详情面板在账本行尾追加 `reason=<text>`。落进这一列的取值：`requeue_exhausted` 与 `requeue_ttl` 来自上面两道闸，`expired` 来自到期扫描，`session_dead` 来自 client 结清掉线 session 时写下的拒收（见「会话残影与属主判定」一节），pane 后端（`herdr` / `orca` / `zellij`）在开页前拒收协议 `session_command` 时整句拒收文案落 `rejected` 行（见「Headless（exec）会话」一节末段）；操作者经 `onlyne reject --reason` 或 `onlyne repair fail --reason` 自填的文本原样进这一列，`onlyne ack` 收下时该文本随结清事件走，行上的 `reason` 保持原样。字符串 `operator ack` 是 faults 表 `reason` 列的用例数据（`crates/onlyne-store/src/tests.rs` 的 `update_fault_state` 用例），账本列没有它的记录。
 
 push 投递与 pull 投递的 `in_flight` 翻面都各有一条 `ledger_state` 事件；离线读账的 ledger 状态与会话投影在任何采样点互相对得上。
 
@@ -187,27 +187,22 @@ lifecycle 属主是 role 自己的 client 进程。
 
 client 死亡期间无人代该 role 判定 session 生命周期。
 
-旧 `working` 账由重启后的同 role client 开机自检收敛。
+属主进程活着时，掉线的 session 由 client 结清：plugin 连接断开、`reconnect_grace_secs` 超期后，退役它留下的 session。
 
-残影判定与冻结上报有五个旋钮：
+结清写两条：该 task 落 `failed`，它占着的投递行以 `session_dead` 拒收。
+
+该拒收是终态，工作只由 operator 的 `repair retry` 唤回。
+
+重启的 client 不对旧账做终态判定：`Acked` 的行是它自己已经答过的，重启不上报它们的死，也不替别的属主判定。
+
+残影判定与冻结上报有四个旋钮：
 
 | 配置文件 | 字段 | 默认 | 作用 |
 |---|---|---|---|
-| `<workspace>/.onlyne/config.toml` | `stale_grace_secs` | 300 | client 开机自检宽限，单位秒 |
 | `<workspace>/.onlyne/config.toml` | `stall_report_secs` | 1800 | 会话投影 tuple 冻结时长上限，client 据此上报 `stalled` fault，0 关闭，单位秒 |
 | `<workspace>/.onlyne/config.toml` | `reconnect_grace_secs` | 60 | plugin 连接断开后允许其离席的时长，超期由 client 退役它留下的无 task 槽位，0 关闭，单位秒 |
 | `<server-root>/.onlyne/spec.toml` 的 `[server]` | `stale_watch_secs` | 60 | server 观察器扫描周期，单位秒；0 关闭观察器 |
 | `<server-root>/.onlyne/spec.toml` 的 `[server]` | `heartbeat_grace_secs` | 90 | 属主在线时 `working` 行允许的心跳静默时长，单位秒 |
-
-宽限期内，自检等待 adapter 重挂。
-
-自检跳过仍有活 slot 的 task。
-
-超过宽限期的残账通过 report 路径上报终态。
-
-超期残账的终态是 `failed`。
-
-超期残账的 reason 是 `session_dead`。
 
 server 侧观察器按 `[server].stale_watch_secs` 周期扫描，一次扫描跑两个探测器。
 
@@ -251,9 +246,13 @@ no-op 心跳抬存活水位，不抬进展水位；`stalled` 只看后者。
 
 窗内重连清掉这个时钟：agent 回到它原来那个 session，照常领下一个任务。
 
-超过窗口仍未回来，且该 slot 已不绑 task 时，client 退役它：关掉宿主资源，吐出容量槽位，reason 取该 task 已落的终态，无终态可取时记 `Fault`。`reconnect_grace_secs = 0` 关闭这条判定。
+超过窗口仍未回来时，client 退役它：关掉宿主资源，吐出容量槽位。
 
-退役面只此一类。仍绑着 task 的 ghost 不在这条路上，「重试 session 永不到来」也不另设计时器或缓冲超时：那条 task 的静默由 `stalled` 与服务端心跳两个面兜底，这是这轮运维定的边界。
+退役前先结清这个 session 欠的那件事：仍绑着 task 时，该 task 落 `failed`，它占着的投递行以 `session_dead` 拒收。未绑 task 的 slot 只退役。
+
+退役的 reason 取该 session 名下 task 已落的终态，无终态可取时记 `Fault`。`reconnect_grace_secs = 0` 关闭这条判定。
+
+退役面只此一类。「重试 session 永不到来」不另设计时器或缓冲超时：仍活着的 task 的静默由 `stalled` 与服务端心跳两个面兜底，这是这轮运维定的边界。
 
 一个更新的 session 已经在服务同一 task 时，旧 id 的连接回来即降级为只读：它不再收到 `assign`、`deliver`、`render_send`，也不占该 session 的投递面。
 

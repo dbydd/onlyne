@@ -57,8 +57,6 @@ pub struct ClientInit {
     /// The workspace config's `[orca] worktree` value: `host`, `inherit`, or a
     /// literal Orca worktree selector. Only an Orca session backend reads it.
     pub orca_worktree: String,
-    /// Seconds a residual working row may age before this client reports it dead.
-    pub stale_grace_secs: u64,
     /// Seconds a running session may sit without Applied progress before a stall
     /// fault is reported. Zero disables the report.
     pub stall_report_secs: u64,
@@ -89,7 +87,6 @@ impl ClientInit {
             key_path: key_path.into(),
             cert_pin: cert_pin.into(),
             orca_worktree: "host".to_string(),
-            stale_grace_secs: onlyne_config::DEFAULT_STALE_GRACE_SECS,
             stall_report_secs: onlyne_config::DEFAULT_STALL_REPORT_SECS,
             reconnect_grace_secs: onlyne_config::DEFAULT_RECONNECT_GRACE_SECS,
             backend: String::new(),
@@ -100,10 +97,6 @@ impl ClientInit {
     /// Adopt the `[orca] worktree` policy the workspace config carries.
     pub fn with_orca_worktree(mut self, worktree: impl Into<String>) -> Self {
         self.orca_worktree = worktree.into();
-        self
-    }
-    pub fn with_stale_grace_secs(mut self, secs: u64) -> Self {
-        self.stale_grace_secs = secs;
         self
     }
     pub fn with_stall_report_secs(mut self, secs: u64) -> Self {

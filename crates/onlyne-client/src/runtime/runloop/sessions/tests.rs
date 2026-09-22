@@ -1,9 +1,8 @@
 use super::{accept_delivery, outcome_loop};
-use crate::runtime::intent::{IntentMachine, op_for_intent};
+use crate::runtime::intent::IntentMachine;
 use crate::runtime::runloop::config::{DEFAULT_INTENT_ATTEMPTS, RunState, default_intent_backoff};
-use crate::runtime::runloop::link::pending_intent_ops;
-use crate::runtime::runloop::test_support::test_state;
-use crate::session::dispatch::{self, DispatchState};
+use crate::runtime::runloop::test_support::{pending_intent_ops, test_state};
+use crate::session::dispatch::DispatchState;
 use anyhow::Result;
 use onlyne_layout::RoleWorkspace;
 use onlyne_net::NetError;
@@ -333,32 +332,6 @@ async fn an_acp_delivery_reaches_the_agent_and_settles_through_the_client() {
     );
 }
 
-#[tokio::test]
-async fn startup_residual_report_uses_durable_report_path() {
-    let (state, store) = test_state(1, Vec::new());
-    let convergence = crate::session::stale::Convergence {
-        task_id: "task-dead".into(),
-    };
-    dispatch::send_frame(&state.dispatch, ClientOp::Report(convergence.report()))
-        .await
-        .expect("report queues without a link");
-    let rows = store.flush_order().expect("pending intents");
-    let ops = rows
-        .iter()
-        .map(op_for_intent)
-        .collect::<Result<Vec<_>>>()
-        .unwrap();
-    assert!(ops.iter().any(|op| matches!(
-        op,
-        ClientOp::Report(Report::Complete {
-            task_id,
-            outcome: Outcome::Failed,
-            head: Some(reason),
-            ..
-        }) if task_id == "task-dead" && reason == crate::session::stale::SESSION_DEAD
-    )));
-}
-
 /// A row re-offered for a task this role already finished is acked and runs
 /// nowhere. The server requeues an unacknowledged row after a link flap, and
 /// a completion still in flight when the link dropped lands after that
@@ -497,5 +470,92 @@ async fn a_task_ended_without_a_completion_stays_eligible_for_its_retry() {
     assert!(
         state.dispatch.hello_live_tasks().contains(&task_id),
         "the retried task takes a session again"
+    );
+}
+
+/// A delivery the link kept out owes the server nothing, and one this client can
+/// never serve is refused.
+///
+/// The gate is the connection's own: `watch_readiness` shuts it when the link
+/// leaves `Ready` and opens it again when the redial lands, so a delivery already
+/// on its way when the flap happens is read here with the gate shut. Answering
+/// that one `accepted: false` settles its row `rejected`, which is terminal, and
+/// the row the teardown requeues is destroyed instead of run. An unanswered row is
+/// not a decision: the row stays in flight and comes back through the requeue,
+/// which the second half of this case is.
+///
+/// The refusal that does stand is the other reason: a delivery this client can
+/// never serve at all. The one below names no task, so no session could ever take
+/// it and no later link changes that — leaving it unanswered would have the server
+/// offer it to this role forever.
+#[tokio::test]
+async fn a_gated_delivery_owes_no_answer_and_an_unservable_one_is_refused() {
+    let (state, _store) = test_state(2, vec!["echo".into()]);
+    let gated = new_task_id();
+    let delivery = |msg_id: &str| Delivery {
+        msg_id: msg_id.into(),
+        envelope: Box::new(
+            new_envelope(
+                MsgKind::Task,
+                Principal::role("sender"),
+                Principal::role("planner"),
+                Body::text("work"),
+                Some(Causality::root(gated.clone())),
+            )
+            .expect("task envelope"),
+        ),
+    };
+
+    // The link is down where the pull already had this row in hand.
+    state.accept_new.store(false, Ordering::SeqCst);
+    accept_delivery(&state, &delivery("msg-gated")).await;
+
+    assert!(
+        !state.dispatch.hello_live_tasks().contains(&gated),
+        "a client that is not taking work stages no session for it"
+    );
+    let owed = pending_intent_ops(&state).expect("pending intents");
+    assert!(
+        !owed
+            .iter()
+            .any(|op| matches!(op, ClientOp::Ack(args) if args.msg_id == "msg-gated")),
+        "a row the link kept out is left unanswered rather than refused: {owed:?}"
+    );
+
+    // The requeue brings the same row back, and the client takes it: that is what
+    // the answer above was spared.
+    state.accept_new.store(true, Ordering::SeqCst);
+    accept_delivery(&state, &delivery("msg-gated")).await;
+    assert!(
+        state.dispatch.hello_live_tasks().contains(&gated),
+        "the requeued row runs once the link is back"
+    );
+
+    // A task this client can never serve, on a link that is up and taking work.
+    let mut bare = new_envelope(
+        MsgKind::Task,
+        Principal::role("sender"),
+        Principal::role("planner"),
+        Body::text("work"),
+        Some(Causality::root(new_task_id())),
+    )
+    .expect("task envelope");
+    bare.causality = None;
+    accept_delivery(
+        &state,
+        &Delivery {
+            msg_id: "msg-unservable".into(),
+            envelope: Box::new(bare),
+        },
+    )
+    .await;
+
+    let owed = pending_intent_ops(&state).expect("pending intents");
+    assert!(
+        owed.iter().any(|op| matches!(
+            op,
+            ClientOp::Ack(args) if args.msg_id == "msg-unservable" && !args.accepted
+        )),
+        "a delivery this client can never serve is refused: {owed:?}"
     );
 }
