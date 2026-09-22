@@ -252,9 +252,14 @@ async fn report_when_link_down_lands_in_intents() {
 
     let (task_id, _assigns) = spawn_ready(&state, "task 1").await;
 
+    // The frame waits in the intent table, which is all a failed send says. The
+    // accept gate belongs to the connection and the runloop is its only author
+    // (`watch_readiness`): a send that gave up must not park intake, because the
+    // pull loop reads this flag and a latch here is a role that stops draining its
+    // inbox for the life of the link (`scenarios::restart`, the gate case).
     assert!(
-        !state.accept_new().load(std::sync::atomic::Ordering::SeqCst),
-        "a frame that could not be sent parks intake"
+        state.accept_new().load(std::sync::atomic::Ordering::SeqCst),
+        "a frame that could not be sent leaves intake where the link left it"
     );
     assert_eq!(
         store.get_session(&task_id).unwrap().unwrap().agent_state,

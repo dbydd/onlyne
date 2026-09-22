@@ -17,6 +17,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
@@ -406,12 +407,13 @@ async fn a_redelivered_finished_task_is_acked_and_runs_nowhere() {
         "the finished task is readable as finished in this role's store"
     );
 
+    // Hold the accept gate shut, which is where the runloop leaves it while the
+    // link is down (`watch_readiness`): this ack then also proves the redelivery
+    // guard sits ahead of that gate, so a finished row is answered whatever the
+    // link state.
+    state.accept_new.store(false, Ordering::SeqCst);
     accept_delivery(&state, &delivery("msg-again")).await;
 
-    // `accept_new` is false by now — `on_out` queued its report with no link
-    // attached and `send_frame` drops the flag while outbound work waits in
-    // the intent table — so this ack also proves the guard sits ahead of
-    // that gate: a finished row is answered whatever the link state.
     assert!(
         !state.dispatch.hello_live_tasks().contains(&task_id),
         "the redelivery stages no session on the role's idle slot"
@@ -470,22 +472,27 @@ async fn a_task_ended_without_a_completion_stays_eligible_for_its_retry() {
         "a failed turn is not a finished task"
     );
 
-    // The retry is asserted at the dispatcher, one step below
-    // `accept_delivery`: `on_out` above queued its report with no link
-    // attached, and `send_frame` drops `accept_new` while the outbound work
-    // waits in the intent table (§6 line 289). That gate is older than this
-    // guard and belongs to the reconnect, so it would answer here for a
-    // reason unrelated to the one under test.
-    let retried = new_envelope(
-        MsgKind::Task,
-        Principal::role("sender"),
-        Principal::role("planner"),
-        Body::text("work again"),
-        Some(Causality::root(task_id.clone())),
+    // The retry arrives the way the server offers one: an ordinary delivery on the
+    // pull path. The report `on_out` queued went into the intent table, which is
+    // not the accept gate — the runloop owns that one, from the connection's own
+    // state.
+    accept_delivery(
+        &state,
+        &Delivery {
+            msg_id: "msg-retry".into(),
+            envelope: Box::new(
+                new_envelope(
+                    MsgKind::Task,
+                    Principal::role("sender"),
+                    Principal::role("planner"),
+                    Body::text("work again"),
+                    Some(Causality::root(task_id.clone())),
+                )
+                .expect("task envelope"),
+            ),
+        },
     )
-    .expect("task envelope");
-    crate::session::dispatch::dispatch(&state.dispatch, &retried)
-        .expect("a failed task is retryable");
+    .await;
 
     assert!(
         state.dispatch.hello_live_tasks().contains(&task_id),

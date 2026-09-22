@@ -240,6 +240,17 @@ impl Outbox for ClientLink {
 ///
 /// §6 line 289: a running session reaches its terminal state while the outbound
 /// work waits in `client.db` intents for the flusher.
+///
+/// The frame that could not leave says nothing about the link, so the shared
+/// accept gate is left exactly where the runloop put it. A send fails with the
+/// link still `Ready` — the request deadline belongs to the caller, and
+/// `onlyne_net::conn` records that "the silent peer keeps the link up; only this
+/// call gave up" — and dropping the flag here latched it: `watch_readiness` only
+/// re-arms `accept_new` on a readiness transition, so the pull loop stopped
+/// draining the role's inbox for the life of that link while the work sat queued
+/// on the server, and the next delivery to arrive found a client that refused
+/// new work. The connection's own state is the flag's only author
+/// (`runloop::link`).
 pub async fn send_frame(state: &DispatchState, op: ClientOp) -> Result<()> {
     let op = match op {
         ClientOp::Report(report) => ClientOp::Report(with_cluster(state, report)),
@@ -250,7 +261,6 @@ pub async fn send_frame(state: &DispatchState, op: ClientOp) -> Result<()> {
             return Ok(());
         }
     }
-    state.accept_new().store(false, Ordering::SeqCst);
     state.enqueue_op(&op)?;
     Ok(())
 }

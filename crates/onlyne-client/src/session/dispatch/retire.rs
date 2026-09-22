@@ -1,5 +1,6 @@
 use super::*;
 
+use super::outbound::store_ack;
 use super::projection::stored_task_state;
 use super::state::{
     DispatchInner, DispatchState, has_attached_transport, session_exited, slot_key_serving_task,
@@ -402,14 +403,41 @@ impl DispatchState {
             // hand-back, both of which end this slot's turn through the sweep:
             // the id is captured here, and the verdict is on disk before the
             // only handle on it goes away.
-            if let Some(owed) = slot.task_id.clone()
-                && let Err(error) = inner.store.settle_task(&owed, TaskState::Failed)
-            {
-                tracing::warn!(
-                    task = %owed,
-                    error = %error,
-                    "the task of a retired ghost was not settled"
-                );
+            if let Some(owed) = slot.task_id.clone() {
+                if let Err(error) = inner.store.settle_task(&owed, TaskState::Failed) {
+                    tracing::warn!(
+                        task = %owed,
+                        error = %error,
+                        "the task of a retired ghost was not settled"
+                    );
+                }
+                // The delivery handle this session was holding is spent as a
+                // refusal that names the death, and it is the ledger half of the
+                // verdict above. A row left `in_flight` is handed to a pull no
+                // longer — `pull` passes by a row whose ticket is armed, and a
+                // role-level pull's ticket carries no session id for the release
+                // path to match — so nothing would answer for this task until the
+                // link dropped, and an operator reading `onlyne ledger` would see
+                // a session that has been buried as one still holding its
+                // delivery. The reason is the one the residual account already
+                // carries (`session::stale::SESSION_DEAD`), and a refusal is
+                // terminal: the work comes back through `repair retry`, not by
+                // itself.
+                let handle = inner
+                    .sessions
+                    .get_mut(&key)
+                    .and_then(|slot| slot.msg_id.take());
+                if let Some(msg_id) = handle {
+                    store_ack(
+                        &inner,
+                        AckArgs {
+                            msg_id,
+                            op_id: None,
+                            accepted: false,
+                            reason: Some(crate::session::stale::SESSION_DEAD.to_string()),
+                        },
+                    );
+                }
             }
             if let Err(error) = feed_agent_gone(&inner.bridge, &inner.store, &task_id) {
                 tracing::warn!(

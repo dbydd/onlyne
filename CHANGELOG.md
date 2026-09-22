@@ -209,6 +209,16 @@ where it is read.
   backwards instead, which satisfies the whole order, and a listing filtered by `state`
   keeps using `ledger_state_enqueued_idx` the same way. The orders themselves are
   unchanged.
+- client: a failed send no longer shuts the delivery gate. `send_frame` cleared the flag
+  the pull loop follows on any failure, while only a readiness transition re-arms it, so a
+  request that gave up with the link still up — a shape `onlyne-net`'s own timeout test
+  pins — stopped the client pulling for the life of the link and made every later delivery
+  answer `client is not accepting new work`. The gate follows the connection alone now.
+- client: a session that dies at the reconnect grace records its ending on its delivery
+  row. The sweep settled the task locally and left the row `in_flight` with no verdict,
+  which `pull` never re-offers and `release_exited_delivery` cannot release for a
+  role-level ticket. It now queues a refusal ack whose reason is `session_dead`, the word
+  the operations page already names for a residual account's closure.
 
 ### Tests
 

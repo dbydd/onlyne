@@ -13,6 +13,7 @@ mod link;
 mod plugins;
 mod projection;
 mod reconnect;
+mod restart;
 mod retirement;
 mod role_socket;
 mod settlement;
