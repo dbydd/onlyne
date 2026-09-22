@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS sessions(
 );
 -- Secondary index for session-addressed reads; task_id is the primary key per docs/v1-PLAN.md:354, and a re-keyed session can appear on two task rows.
 CREATE INDEX IF NOT EXISTS sessions_session_id_idx ON sessions(session_id);
+-- The order `list_sessions` reads in, ascending so the read walks it backwards:
+-- a descending index does not satisfy `updated_at DESC, rowid DESC` — SQLite
+-- leaves a `TEMP B-TREE FOR LAST TERM` and spills it to a temporary file on
+-- every read, and a reader that polls once a second turns that into megabytes
+-- per second of writes nothing asked for.
+CREATE INDEX IF NOT EXISTS sessions_updated_idx ON sessions(updated_at);
 CREATE TABLE IF NOT EXISTS ledger(
   msg_id TEXT PRIMARY KEY,
   op_id TEXT UNIQUE,
@@ -87,6 +93,10 @@ CREATE TABLE IF NOT EXISTS ledger(
 CREATE INDEX IF NOT EXISTS ledger_state_enqueued_idx ON ledger(state,enqueued_at);
 CREATE INDEX IF NOT EXISTS ledger_task_idx ON ledger(task);
 CREATE INDEX IF NOT EXISTS ledger_kind_state_idx ON ledger(kind,state);
+-- The ledger listing's own reading order, on the same terms as the sessions
+-- index above. A listing filtered by `state` keeps using `ledger_state_enqueued_idx`
+-- and reads that backwards.
+CREATE INDEX IF NOT EXISTS ledger_enqueued_idx ON ledger(enqueued_at);
 CREATE TABLE IF NOT EXISTS events(
   seq INTEGER PRIMARY KEY,
   type TEXT NOT NULL,
@@ -432,9 +442,7 @@ impl ServerLedger {
         let where_sql = where_sql(&clauses);
         let limit = sql_limit(filter.limit);
         args.push(SqlValue::Integer(limit));
-        let sql = format!(
-            "SELECT task_id,role,session_id,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,updated_at FROM sessions{where_sql} ORDER BY updated_at DESC,rowid DESC LIMIT ?"
-        );
+        let sql = sessions_list_sql(&where_sql);
         let rows = conn
             .prepare(&sql)?
             .query_map(params_from_iter(args), session_row)?
@@ -668,10 +676,7 @@ impl ServerLedger {
             args.push(SqlValue::Text(kind.as_str().to_string()));
         }
         args.push(SqlValue::Integer(sql_limit(query.limit)));
-        let sql = format!(
-            "SELECT {LEDGER_COLUMNS} FROM ledger{} ORDER BY enqueued_at DESC,rowid DESC LIMIT ?",
-            where_sql(&clauses)
-        );
+        let sql = ledger_list_sql(&where_sql(&clauses));
         let rows = conn
             .prepare(&sql)?
             .query_map(params_from_iter(args), ledger_row)?
@@ -1066,6 +1071,26 @@ fn ledger_by_op_id(conn: &Connection, op_id: &str) -> StoreResult<Option<LedgerR
 
 const LEDGER_COLUMNS: &str = "msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json,hop,expires_at,requeued";
 const FAULT_COLUMNS: &str = "id,task_id,role,session_id,generation,seq,desired_json,observed_json,intent,attempt,backend_ref,kind,reason,state,created_at";
+
+/// The sessions listing read, as SQL. Named so the caller and the plan test run
+/// one text: the order's tie key is the primary key because an explicit `rowid`
+/// cannot be an index column, and an order SQLite cannot satisfy from an index
+/// makes it spill a sorter to a temporary file on every read.
+fn sessions_list_sql(where_sql: &str) -> String {
+    format!(
+        "SELECT task_id,role,session_id,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,updated_at FROM sessions{where_sql} ORDER BY updated_at DESC,rowid DESC LIMIT ?"
+    )
+}
+
+/// The ledger listing read, as SQL, on the same terms as the sessions listing.
+fn ledger_list_sql(where_sql: &str) -> String {
+    format!(
+        "SELECT {LEDGER_COLUMNS} FROM ledger{where_sql} ORDER BY enqueued_at DESC,rowid DESC LIMIT ?"
+    )
+}
+
+#[cfg(test)]
+mod tests;
 
 fn ledger_row(r: &Row<'_>) -> rusqlite::Result<LedgerRow> {
     let kind: String = r.get(3)?;

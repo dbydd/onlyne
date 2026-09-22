@@ -16,9 +16,9 @@ use tokio::time::{Duration, timeout};
 
 /// The one order the TUI renders sessions in.
 ///
-/// The server answers `sessions` `ORDER BY updated_at DESC, rowid DESC`
-/// (`crates/onlyne-store/src/server.rs:436`), which is the `onlyne sessions`
-/// semantics and belongs to the wire, not to this view. Every consumer of that
+/// The server answers `sessions` `ORDER BY updated_at DESC, task_id DESC`
+/// (`crates/onlyne-store/src/server.rs`, `list_sessions`), which is the
+/// `onlyne sessions` semantics and belongs to the wire, not to this view. Every consumer of that
 /// slice on screen — the role box interiors, the page-2 graph table and the row
 /// its cursor highlights — reads it through here, so one sort keeps the picture
 /// still: a heartbeat or a fresh session reshuffles the server's answer, and

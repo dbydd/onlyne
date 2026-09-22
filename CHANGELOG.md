@@ -201,6 +201,14 @@ where it is read.
   there was no other path.
 - session: the reducer's `AdoptNewGeneration` and `Supersede` have a producer, and the
   rebase they exist for is reachable from a re-mount.
+- store: both listing reads stop spilling a sorter into a temporary file. Their
+  `ORDER BY … DESC, rowid DESC` could never be satisfied by an index — SQLite refuses
+  `rowid` as an index column — so every read scanned the table and materialized the order,
+  and a read on a timer turned that into megabytes per second of writes nothing asked for.
+  An ascending index on `sessions(updated_at)` and on `ledger(enqueued_at)` is read
+  backwards instead, which satisfies the whole order, and a listing filtered by `state`
+  keeps using `ledger_state_enqueued_idx` the same way. The orders themselves are
+  unchanged.
 
 ### Tests
 
