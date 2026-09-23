@@ -298,6 +298,18 @@ fn queued_ops(state: &DispatchState) -> Vec<ClientOp> {
         .collect()
 }
 
+/// The projection this client most recently published for one session.
+fn published_projection(state: &DispatchState, task: &str) -> Option<SessionProjection> {
+    queued_ops(state).into_iter().find_map(|op| match op {
+        ClientOp::Report(Report::Heartbeat {
+            task_id,
+            projection,
+            ..
+        }) if task_id == task => projection,
+        _ => None,
+    })
+}
+
 /// The fault queue one task carries, as kind and reason pairs.
 fn faults(state: &DispatchState, task: &str) -> Vec<(String, String)> {
     let inner = state.inner.lock();
@@ -1072,6 +1084,10 @@ async fn a_completion_that_answers_the_clients_own_recycle_settles_with_no_turn(
     .await
     .expect("the command is applied");
     assert!(held, "the command named a task this client holds");
+    let close_projection =
+        published_projection(&state, &task).expect("the close published its row");
+    assert_eq!(close_projection.lifecycle, Lifecycle::Exited);
+    assert_eq!(close_projection.outcome, None);
     complete_report(&state, &task, Outcome::Done, Some("recycled".into())).await;
 
     let (task_state, head) = verdict(&state, &task);
@@ -1084,6 +1100,76 @@ async fn a_completion_that_answers_the_clients_own_recycle_settles_with_no_turn(
     assert!(
         faults(&state, &task).is_empty(),
         "a settle the client asked for files no fault"
+    );
+}
+
+/// A cancel close publishes the exited row with the task outcome already stored.
+#[tokio::test]
+async fn a_cancel_close_publishes_the_exited_row_and_its_existing_outcome() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    opened_task(&state, &task);
+    state
+        .inner
+        .lock()
+        .store
+        .settle_task(&task, TaskState::Done)
+        .expect("the task's own door already answered");
+    serving_slot(&state, &task, "msg-cancelled");
+
+    on_control(
+        &state,
+        &ControlOp::Cancel {
+            task_id: task.clone(),
+            reason: "operator cancel".into(),
+        },
+    )
+    .await
+    .expect("the command is applied");
+
+    let published = published_projection(&state, &task).expect("the close published its row");
+    assert_eq!(published.lifecycle, Lifecycle::Exited);
+    assert_eq!(
+        published.outcome,
+        Some(Outcome::Done),
+        "the task carried done before the control close"
+    );
+}
+
+/// A recycle close publishes the exited row with the task outcome already stored.
+#[tokio::test]
+async fn a_recycle_close_publishes_the_exited_row_and_its_existing_outcome() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    opened_task(&state, &task);
+    state
+        .inner
+        .lock()
+        .store
+        .settle_task(&task, TaskState::Cancelled)
+        .expect("the task's own door already answered");
+    serving_slot(&state, &task, "msg-recycled");
+
+    on_control(
+        &state,
+        &ControlOp::Recycle {
+            task_id: task.clone(),
+            reason: "workspace moved".into(),
+        },
+    )
+    .await
+    .expect("the command is applied");
+
+    let published = published_projection(&state, &task).expect("the close published its row");
+    assert_eq!(published.lifecycle, Lifecycle::Exited);
+    assert_eq!(
+        published.outcome,
+        Some(Outcome::Cancelled),
+        "the task carried cancelled before the control close"
     );
 }
 

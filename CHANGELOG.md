@@ -361,6 +361,13 @@ where it is read.
   asking the ghost sweep's own pair of reads (`ghosts::task_ledger_state`, `ghosts::settled_outcome`)
   and landing the row `rejected` with `task_settled`, out of the requeued count and with its ticket
   spent; a task carrying no verdict still rides the TTL and budget gates and still requeues.
+- client: a control close publishes the row it just closed. Both control arms answered the delivery
+  row and returned, so this client's row read `exited` while the server's mirror kept the older
+  `working` bytes — the one shape the ghost sweep collects, and a live `recycle` run let it collect
+  that row about fifteen seconds after the close. Both arms now publish the projection their row
+  already holds: the lifecycle the close wrote, the outcome it already carried. The close writes no
+  outcome of its own, so a plugin that finished its work before the command landed still settles
+  `done` through its own report, which the operator's word had marked `ControlDriven`.
 - server: the ghost sweep keeps a verdict the client published. It read a delivery row's rejection
   as `failed` and overwrote a mirror the client had already published as `cancelled`, so
   `onlyne ghosts` reported a verdict nobody gave. The pass still moves a row that reads `working` —
