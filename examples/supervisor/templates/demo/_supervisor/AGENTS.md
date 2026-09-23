@@ -8,8 +8,8 @@
 都用它们。工具箱是产品自己的 CLI，二进制在 `{{onlyne_cli}}`；下面命令里的
 `<root>` 就是集群根：
 
-- 派活：`send --from _supervisor --to <角色> --text "<文本>"`。回答是 JSON，
-  `data.task` 是这单的 task id。
+- 派活：`send --from _supervisor --to <角色> --text "<文本>" --force --yes-i-am-supervisor-not-other-role`。
+  回答是 JSON，`data.task` 是这单的 task id。
 - 看账：`ledger --task <task id>`、`ledger`、`roles --json`、`sessions --json`、
   `faults`、`watch --follow`。
 - 运维：`server status`、`server reload`、`server stop`。环上的 client 进程由 driver
@@ -28,7 +28,7 @@
 
 派活的命令形状（`<task id>` 从派活回答里取）：
 
-    {{onlyne_cli}} --server-root <root> send --from _supervisor --to a --text "<上面那行>"
+    {{onlyne_cli}} --server-root <root> send --from _supervisor --to a --text "<上面那行>" --force --yes-i-am-supervisor-not-other-role
     {{onlyne_cli}} --server-root <root> ledger --task <task id>
     wc -l <记录文件>
 

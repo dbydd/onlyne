@@ -125,7 +125,7 @@ Verification case 5 restated as assertions a human can run. Source: `docs/v1-PLA
 2. The child server runs with its builder role.
 3. The parent spec holds one `[[client]]` row whose `role` and `aggregate` are `cluster-b`.
 4. The child supervisor's client connects to the parent server with that row's key and presents `role = "cluster-b"` (`hello.args.mount.role` in plan terms).
-5. The parent runs `onlyne --server-root <parent-root> send --to cluster-b --text "P1 round trip"`.
+5. The parent runs `onlyne --server-root <parent-root> send --to cluster-b --text "P1 round trip" --force --yes-i-am-supervisor-not-other-role`.
 6. The child supervisor receives the envelope as the aggregate role and acks it.
 7. The parent ledger shows one row with `state = "acked"` and `from.role = "cluster-b"`.
 8. The parent ledger shows only aggregate role rows.

@@ -246,7 +246,7 @@ Gateway to server op vocabulary has five closed verbs:
 
 `render_send` travels host to gateway plugin. `typing` stays an optional gateway capability.
 
-Adapter plugin vocabulary uses the same protocol on both mount kinds. Plugin-to-host ops are `hello`, `report`, `session_register`, `assign_ack`, `send`, `deliver`, `register_channel`, `health`, `typing`, and `detach`. Host-to-plugin ops are `welcome`, `assign`, `render_send`, `probe`, `recycle`, `config_get`, and `bye`. `welcome` travels one way only — it is the host's answer to `hello`. Which of the plugin-to-host set a mount may send is decided by its kind, and `crates/onlyne-adapter/PROTOCOL.md` carries that rule; `register_channel`, `health`, `typing`, and `deliver` are a gateway mount's.
+Adapter plugin vocabulary uses the same protocol on both mount kinds. Plugin-to-host ops are `hello`, `report`, `session_register`, `assign_ack`, `send`, `handoff`, `deliver`, `register_channel`, `health`, `typing`, and `detach`. `handoff` is an agent mount's: the plugin asks the host to hand the session's task on, and the host mints the child itself (`Causality::child_of`), so the family's rules live in one place Host-to-plugin ops are `welcome`, `assign`, `render_send`, `probe`, `recycle`, `config_get`, and `bye`. `welcome` travels one way only — it is the host's answer to `hello`. Which of the plugin-to-host set a mount may send is decided by its kind, and `crates/onlyne-adapter/PROTOCOL.md` carries that rule; `register_channel`, `health`, `typing`, and `deliver` are a gateway mount's.
 
 `res.error.code` is a closed set:
 - `invalid`
@@ -307,7 +307,7 @@ The internal message model should carry enough metadata to support:
 - sender identity
 - timestamps
 - text plus one inline image
-- causality with task, parent task, reply target, hop, and attempt
+- causality with task, parent task, reply target, hop, attempt, family root, hop budget, origin, deadline, and labels
 - gateway-local correlation for raw platform payloads
 
 Raw platform payloads stay inside gateway-local storage. Cross-process envelopes carry `Principal::Gateway`, `reply_to`, and causality fields.

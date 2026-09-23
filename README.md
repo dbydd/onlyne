@@ -148,16 +148,16 @@ The second commitment has machine-checked backing. `proofs/` is a core Lean 4 de
 
 A message body is text plus at most one inline image. Media pipelines live beside Onlyne, inside your agents; what Onlyne owns is delivery and accounting.
 
-A delivery settles by msg id: `onlyne ack --msg-id <id> --reason <text>` accepts it, and `onlyne reject --msg-id <id> --reason <text>` refuses it. Both take an optional `--op-id`, and `onlyne control --task <id> recycle|cancel --reason <text>` carries the same required reason.
+A delivery settles by msg id: `onlyne ack --msg-id <id> --reason <text> --force --yes-i-am-supervisor-not-other-role` accepts it, and `onlyne reject --msg-id <id> --reason <text> --force --yes-i-am-supervisor-not-other-role` refuses it. Both take an optional `--op-id`, and `onlyne control --task <id> recycle|cancel --reason <text> --force --yes-i-am-supervisor-not-other-role` carries the same required reason. The flag pair `--force --yes-i-am-supervisor-not-other-role` is required on all three of these verbs.
 
-Every ledger row records why it settled. The `reason` column ships with the row: `onlyne ledger` prints rows with the keys `msg_id`, `task`, `state`, `reason`, `out_head`, `body`, and the TUI task panel on page 2 appends `reason=<text>` to its ledger line. A row without a value omits the key, so rows written before the column read unchanged. Values seen in live runs: `requeue_exhausted`, `requeue_ttl`, `expired`, `session_dead`, and the pane-refusal sentence quoted above. The `--reason` text an operator types into `onlyne reject` or `onlyne repair fail` lands in the row verbatim; an accepted `onlyne ack` travels the settlement event with its text and leaves the row's `reason` as it stood. The string `operator ack` is faults-suite test data for the faults table's own `reason` column (`crates/onlyne-store/src/tests.rs`); the ledger never recorded it.
+Every ledger row records why it settled. The `reason` column ships with the row: `onlyne ledger` prints rows with the keys `msg_id`, `task`, `state`, `reason`, `out_head`, `body`, `family`, `hop_budget`, and the TUI task panel on page 2 appends `reason=<text>` to its ledger line. A row without a value omits the key, so rows written before the column read unchanged. Values seen in live runs: `requeue_exhausted`, `requeue_ttl`, `expired`, `session_dead`, and the pane-refusal sentence quoted above. The `--reason` text an operator types into `onlyne reject` or `onlyne repair fail` lands in the row verbatim; an accepted `onlyne ack` travels the settlement event with its text and leaves the row's `reason` as it stood. The string `operator ack` is faults-suite test data for the faults table's own `reason` column (`crates/onlyne-store/src/tests.rs`); the ledger never recorded it.
 
 ## The supervisor doctrine
 
 Dispatch flows from the supervisor down to the roles. The supervisor sends tasks to roles, and roles answer by completing them. A role's completion lands in the ledger, and the supervisor polls the ledger, so reports arrive with proof attached. A role messaging its supervisor directly is the flat queue you already have elsewhere — the demo ACLs refuse it, and each role's `allowed_targets` stays inside the working ring. When a role needs to reach the operator mid-task, the supervisor adds that role to `allowed_targets` — the `spec.toml` field listing whom a role may message — and runs `onlyne reload` to load the change. Once the task closes, one more edit to that same field removes the edge.
 
 ```bash
-onlyne --server-root <root> send --from _supervisor --to a --text "RING=a,b,c,d,e K=10"
+onlyne --server-root <root> send --from _supervisor --to a --text "RING=a,b,c,d,e K=10" --force --yes-i-am-supervisor-not-other-role
 onlyne --server-root <root> ledger --task <id>      # the receipts queue up here
 onlyne --server-root <root> sessions --task <id>    # lifecycle, per hop
 ```
@@ -177,7 +177,7 @@ target/debug/onlyne --server-root "$tmp/server" reload
 target/debug/onlyne-client run --workspace "$tmp/planner" &
 target/debug/onlyne-agent-fake --workspace "$tmp/planner" --script \
     crates/onlyne-testkit/scripts/echo-complete.json &
-target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
+target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner --text "hello v1" --force --yes-i-am-supervisor-not-other-role
 ```
 
 One JSON line answers with `data.state = "in_flight"`. The task's ledger row then settles to `acked`, and its session projects to `exited` with `outcome = "done"`. The same sequence ships as an executable proof, `crates/onlyne-testkit/e2e/local-task.sh`. Seventeen sibling scripts cover ACL rejects, idempotency, reconnect requeue, the hello claim across a server restart, gateway mount, relocation, two-cluster federation, the heartbeat watch, the headless exec path (`exec-headless.sh`), the deep-workspace socket (`socket-path-length.sh`), the ACP backend driven by a scripted agent (`acp-session.sh`), and the closing report with its relay routing (`acp-payload-v2.sh`).

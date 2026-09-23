@@ -74,7 +74,8 @@ DEFAULT_TASK = (
     f"记录文件 {LIGHTS}，环 {RING_TEXT}。\n"
     "就绪的派活命令：\n"
     f"{ONLYNE} --server-root {CLUSTER} send --from {SUPERVISOR} --to {RING[0]} "
-    f'--text "RING={RING_TEXT} FILE={LIGHTS} K=1 TOTAL={TOTAL}"'
+    f'--text "RING={RING_TEXT} FILE={LIGHTS} K=1 TOTAL={TOTAL}" '
+    "--force --yes-i-am-supervisor-not-other-role"
 )
 
 
@@ -194,7 +195,8 @@ def seed_entries() -> str:
         f"You are _supervisor, the operator agent of cluster sup-demo. The onlyne "
         f"CLI is {ONLYNE} and the cluster root is {CLUSTER}. The ring roles are "
         f"{','.join(RING)} and their record file is {LIGHTS}. With --server-root "
-        f"{CLUSTER}: send --from _supervisor --to <role> --text <text> dispatches "
+        f"{CLUSTER}: send --from _supervisor --to <role> --text <text> "
+        "--force --yes-i-am-supervisor-not-other-role dispatches "
         "work and answers with data.task; roles, sessions, ledger --task <id>, "
         "faults and watch inspect state; server status, reload and stop operate "
         "the cluster, and the ring's client processes belong to the driver that "
@@ -411,7 +413,8 @@ def dispatch_to_ring() -> None:
         say(f"closed {len(cleared)} tab(s) left by an earlier round")
     LIGHTS.write_text("")
     run([ONLYNE, "--server-root", CLUSTER, "send", "--from", SUPERVISOR,
-         "--to", RING[0], "--text", lights_instruction()])
+         "--to", RING[0], "--text", lights_instruction(),
+         "--force", "--yes-i-am-supervisor-not-other-role"])
 
 
 def task_tabs(role: str) -> list[dict]:
@@ -576,7 +579,8 @@ def main(argv: list[str]) -> None:
         if not text:
             die("usage: run.py send <text>")
         run([ONLYNE, "--server-root", CLUSTER, "send", "--from", SUPERVISOR,
-             "--to", RING[0], "--text", text])
+             "--to", RING[0], "--text", text,
+             "--force", "--yes-i-am-supervisor-not-other-role"])
     elif command == "status":
         status()
     elif command == "stop":

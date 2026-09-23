@@ -112,6 +112,24 @@ where it is read.
   paths beside it cover what it was written for — a row this client never acked comes back
   through the `hello` requeue, and a session that dies at a lost connection is settled by
   the sweep on `[client] reconnect_grace_secs`, which also closes its delivery row.
+- cli: the seven verbs that speak for a role refuse a bare call. `send`, `reply`, `handoff`,
+  `complete`, `ack`, `reject`, and `control` require both `--force` and
+  `--yes-i-am-supervisor-not-other-role`, and a call missing either exits 2 before it opens a
+  socket. The pair declares that this call stands outside a role's plugin session, which the live
+  cluster proved to be a real hazard: a hand-run `onlyne complete --from scriber` wrote a `done`
+  onto a task whose plugin session was still working it, and that session's own completion then
+  arrived as a refused `failed`. The refusal names the plugin tool a role reaches for —
+  `onlyne_send` for `send`, `onlyne_complete` for `complete`. `repair *`, the reads, `ghosts`,
+  `reload`, `shutdown`, `generate --force`, and `skill export --force` carry no such clause.
+- cli: the shipped handbooks and the repository prose lead with the plugin tools, and where a
+  handoff is at stake they name the door it needs. A family handoff lives in the CLI
+  (`handoff_causality` reads the deepest row and mints the child at `hop + 1`), so the role
+  handbook shows `onlyne handoff` for it with both flags, and `onlyne_send{kind: "task"}` for the
+  fresh-family case it actually starts. The reading a live ring supports: the librarian session's
+  own log shows it reaching for `onlyne handoff` because its role guide named that command as the
+  way to pass work on. The supervisor handbook gains the gate's section, the ghost sweep, and the
+  marker-4 revision; the demo role templates, the example supervisor's README, the contract's verb
+  table, the root README, and `docs/operations.md` follow.
 
 ### Changed
 
@@ -256,6 +274,25 @@ where it is read.
   takes each `": "` for the start of a nested mapping: `npx skills add` skipped this file
   with a YAML parse error while finding the other three, so the standard installer could not
   place the closing-report handbook.
+- proto: a task family carries its own metadata. `Causality` gains `family` (the family's root task
+  id), `hop_budget`, `origin`, `deadline`, and `labels` — a free-form map the core carries and never
+  interprets, bounded at eight entries with thirty-two bytes per key and two hundred fifty-six per
+  value, enforced in `Envelope::validate`. `Causality::child_of` hands every one of them to the
+  child, so one run's budget, origin, deadline, and labels reach each hop; a parent minted before
+  the field hands its own task id down as the family. Each field is optional and skipped when
+  absent, so an envelope that names none serializes byte for byte as it did, and `LedgerEntry`
+  carries the same five.
+- proto and client: `PluginOp::Handoff`. A plugin asks the host to hand its session's task on, and
+  the host mints the child through `child_of`, which keeps one implementation of the family's rules
+  and leaves the plugin no counters to reconstruct.
+- cli: `send` takes `--hop-budget <n>`, `--label <k=v>` (repeatable to eight), and `--deadline
+  <rfc3339>`, which set a family's metadata where the run starts; `handoff` inherits all of it off
+  the parent row; and `onlyne ledger` prints `family` and `hop_budget` beside the keys it already
+  printed, omitting either key when the row has no value.
+- plugin: the pi adapter gains `onlyne_handoff{to, text, image}`, the tool that continues the
+  session's own family, and the injected task header names the hop and the budget when the
+  assignment carries them. This closes the gap the refusal gate exposed: `onlyne_send{kind:"task"}`
+  starts a new family, so a role that had to continue one had the CLI door alone.
 
 ### Fixed
 
@@ -271,6 +308,16 @@ where it is read.
 - client: a session whose plugin never mounted has a clock. It held a slot and its host
   resource until its task settled by some other path, and for a plugin that never arrived
   there was no other path.
+- client: a control close ends the session's own row. `release_locked` fed the resource close and
+  dropped the slot in the same breath, and it never fed the agent-gone event, so the tuple kept the
+  agent phase its last beat reported. `project` answers `working` for a begun task
+  (`Done`/`Failed`/`Cancelled`) whenever the agent is not `Gone`, which left the mirrored row
+  reading `working` for a session the client had already closed. Two live sessions showed the
+  shape: retirements carrying `reason=Cancelled` and `reason=Fault` stayed `working` while three
+  carrying `reason=Completed` flipped to `exited`, and each stuck row grew an open
+  `heartbeat_missing` fault beside a `stale working sessions observed` line on every scan. The
+  reconnect sweep fed the agent's exit for the same ending; the control-close path feeds it now,
+  before the slot leaves the map.
 - session: the reducer's `AdoptNewGeneration` and `Supersede` have a producer, and the
   rebase they exist for is reachable from a re-mount.
 - store: both listing reads stop spilling a sorter into a temporary file. Their

@@ -129,7 +129,7 @@ CLI socket discovery is fixed. `--socket <path>` wins first, then `ONLYNE_SOCKET
 | Client to server | `hello`, `send`, `pull`, `ack`, `report`, `subscribe`, `query_ledger`, `query_sessions`, `query_roles`, `query_faults`, `control`, `bye` | Plan §8 line 318 |
 | Admin | `status`, `roles`, `sessions`, `ledger`, `faults`, `query_ghost_sweeps`, `watch`, `history`, `spec_diff`, `reload`, `send`, `control`, `repair_inspect`, `repair_adopt`, `repair_rebind`, `repair_retry`, `repair_fail`, `repair_close`, `repair_ack`, `shutdown` | Plan §8 line 320; `AdminOp` in `crates/onlyne-proto/src/ops.rs` |
 | Gateway to server | `hello`, `register_channel`, `deliver`, `health`, `bye` (`render_send` travels host to gateway; `typing` is an optional gateway capability) | Plan §8 line 322; `GatewayOp` in `crates/onlyne-proto/src/ops.rs`; `HostOp::RenderSend` and `PluginOp::Typing` in `crates/onlyne-proto/src/adapter.rs` |
-| Adapter plugin to host | `hello`, `report`, `session_register`, `assign_ack`, `send`, `deliver`, `register_channel`, `health`, `typing`, `detach` | `PluginOp` in `crates/onlyne-proto/src/adapter.rs`; frame names in `crates/onlyne-adapter/PROTOCOL.md` |
+| Adapter plugin to host | `hello`, `report`, `session_register`, `assign_ack`, `send`, `handoff`, `deliver`, `register_channel`, `health`, `typing`, `detach` | `PluginOp` in `crates/onlyne-proto/src/adapter.rs`; frame names in `crates/onlyne-adapter/PROTOCOL.md` |
 | Host to plugin | `welcome`, `assign`, `render_send`, `probe`, `recycle`, `config_get`, `bye` | Plan §7 line 308 |
 
 The old vocabulary is gone: `loopback`, `swarm_ready`, `swarm_recycled`, `swarm_busy`, `swarm_idle`, `mark_io_consumed`, `consume`, `start_adapter`, `stop_adapter`, `restart_adapter`, the old `fetch_history_page` shape, and raw `onlyne client '<json>'` pass-through. Source: Plan §8 line 324.
@@ -137,6 +137,8 @@ The old vocabulary is gone: `loopback`, `swarm_ready`, `swarm_recycled`, `swarm_
 ## Ledger state
 
 The server ledger table stores `queued`, `in_flight`, `acked`, `rejected`, and `expired`; the code lives in `crates/onlyne-store/src/server.rs`. The server `ledger.body_json` column stays nullable so retention pruning can clear it. Source: Plan §10 lines 357-360.
+
+A row also carries the family metadata its envelope named: `family`, `hop_budget`, `origin`, `deadline`, and `labels_json`. The first four are plain columns added in place, the way `expires_at` and `requeued` were, so an existing marker-4 database keeps its rows and its marker; `labels_json` holds the free-form map as text. `crates/onlyne-proto/src/ops.rs` answers the same five on a `query_ledger` row.
 
 | Current state | Legal next states | Entry and exit meaning | Source |
 |---|---|---|---|

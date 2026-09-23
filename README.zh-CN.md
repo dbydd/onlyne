@@ -127,16 +127,16 @@ focus 链路：`herdr workspace focus <W>`，随后 `herdr tab focus <T>`（位�
 
 消息体是文本加至多一张内联图片。媒体管线住在你的 agent 那边；Onlyne 只管送达和记账。
 
-投递按 msg id 结清：`onlyne ack --msg-id <id> --reason <text>` 收下，`onlyne reject --msg-id <id> --reason <text>` 拒收。两者都可选带 `--op-id`，`onlyne control --task <id> recycle|cancel --reason <text>` 的 reason 同样是必填。
+投递按 msg id 结清：`onlyne ack --msg-id <id> --reason <text> --force --yes-i-am-supervisor-not-other-role` 收下，`onlyne reject --msg-id <id> --reason <text> --force --yes-i-am-supervisor-not-other-role` 拒收。两者都可选带 `--op-id`，`onlyne control --task <id> recycle|cancel --reason <text> --force --yes-i-am-supervisor-not-other-role` 的 reason 同样是必填。三个动词都要求带上旗标对 `--force --yes-i-am-supervisor-not-other-role`。
 
-账本行记下自己为何结清。`reason` 列随行输出：`onlyne ledger` 的行键为 `msg_id`、`task`、`state`、`reason`、`out_head`、`body`；TUI 第二页的 task 详情面板在账本行尾追加 `reason=<text>`。没有值的行不出现该键，列加入之前写的旧行读起来与往日一致。实测出现过的取值：`requeue_exhausted`、`requeue_ttl`、`expired`、`session_dead`，以及上文 pane 拒收的整句。操作者经 `onlyne reject` 或 `onlyne repair fail` 自填的 `--reason` 文本原样进这一行；`onlyne ack` 收下时，该文本随结清事件走，行上的 `reason` 保持原样。字符串 `operator ack` 是 faults 表自己 `reason` 列的用例数据（`crates/onlyne-store/src/tests.rs`），账本列没有它的记录。
+账本行记下自己为何结清。`reason` 列随行输出：`onlyne ledger` 的行键为 `msg_id`、`task`、`state`、`reason`、`out_head`、`body`、`family`、`hop_budget`；TUI 第二页的 task 详情面板在账本行尾追加 `reason=<text>`。没有值的行不出现该键，列加入之前写的旧行读起来与往日一致。实测出现过的取值：`requeue_exhausted`、`requeue_ttl`、`expired`、`session_dead`，以及上文 pane 拒收的整句。操作者经 `onlyne reject` 或 `onlyne repair fail` 自填的 `--reason` 文本原样进这一行；`onlyne ack` 收下时，该文本随结清事件走，行上的 `reason` 保持原样。字符串 `operator ack` 是 faults 表自己 `reason` 列的用例数据（`crates/onlyne-store/src/tests.rs`），账本列没有它的记录。
 
 ## supervisor 教义
 
 派发顺流而下：supervisor 向角色发 task，角色做完 task 后作答。回执落在账本里，supervisor 拉账本读报告，汇报自带凭证。角色直接给 supervisor 发消息，等于把编排压平成队列——demo 的 ACL 把这条路关着，环上每个角色的 `allowed_targets` 只留环内邻居。某个任务确实需要中途够到操作者时，supervisor 就把那个角色写进 `spec.toml` 的 `allowed_targets`，跑一次 `onlyne reload`。任务完结时，用同一次编辑把这条边撤掉。
 
 ```bash
-onlyne --server-root <root> send --from _supervisor --to a --text "RING=a,b,c,d,e K=10"
+onlyne --server-root <root> send --from _supervisor --to a --text "RING=a,b,c,d,e K=10" --force --yes-i-am-supervisor-not-other-role
 onlyne --server-root <root> ledger --task <id>      # 根回执在这里排队
 onlyne --server-root <root> sessions --task <id>   # 每一跳的生命周期
 ```
@@ -156,7 +156,7 @@ target/debug/onlyne --server-root "$tmp/server" reload
 target/debug/onlyne-client run --workspace "$tmp/planner" &
 target/debug/onlyne-agent-fake --workspace "$tmp/planner" --script \
     crates/onlyne-testkit/scripts/echo-complete.json &
-target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner --text "hello v1"
+target/debug/onlyne --server-root "$tmp/server" send --from planner --to planner --text "hello v1" --force --yes-i-am-supervisor-not-other-role
 ```
 
 一行 JSON 回以 `data.state = "in_flight"`。随后该任务的账本行落到 `acked`，会话投影走到 `exited` 且 `outcome = "done"`。同一序列有可执行证明：`crates/onlyne-testkit/e2e/local-task.sh`。另有十七份姊妹脚本覆盖 ACL 拒收、幂等、断连补投、重启后的 hello 接管、gateway 挂载、目录搬迁、双集群联邦、心跳巡检、无头 exec 路径（`exec-headless.sh`）、深路径工作区的 socket（`socket-path-length.sh`）。还有脚本化 ACP agent 驱动的 acp 后端（`acp-session.sh`）与带回传路由的结项报告（`acp-payload-v2.sh`）。

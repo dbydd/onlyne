@@ -22,11 +22,22 @@ session exists for that one task. Do the work, then report in the form the ledge
 
 Report upward by completing the task. The completion row is what the supervisor polls.
 
-```bash
-onlyne complete --task <task-id> --outcome done --text "<one-line result>"
+Inside a pi session the plugin tool is the path:
+
+```
+onlyne_complete{outcome, text}
 ```
 
-or, inside a pi session, the `onlyne_complete{outcome, text}` tool.
+The CLI verbs that speak for a role — `send`, `reply`, `handoff`, `complete`, `ack`, `reject`,
+`control` — refuse a call that carries neither `--force` nor
+`--yes-i-am-supervisor-not-other-role`, because that door stands outside a plugin session and a
+verdict written there answers for a session the plugin is still serving. An `exec` session mounts
+no plugin, so it runs the CLI form and declares itself with both flags:
+
+```bash
+onlyne complete --task <task-id> --outcome done --text "<one-line result>" \
+  --force --yes-i-am-supervisor-not-other-role
+```
 
 - Your text becomes the ledger `out_head`: the first 200 grapheme clusters of the completion
   body (`head_preview` in `crates/onlyne-store/src/server.rs`). The `onlyne_complete` tool
@@ -45,7 +56,8 @@ or, inside a pi session, the `onlyne_complete{outcome, text}` tool.
   spent reports the task `failed` with head `no completion after <n> idle reminders` and ends
   the session; a turn that ends with a provider error reports `failed` at once, with that error
   as the head.
-- A plain `exec` session carries no plugin: `onlyne complete` is yours to run before you stop.
+- A plain `exec` session carries no plugin: `onlyne complete` is yours to run before you
+  stop, with both supervisor flags above.
 - A `backend = "acp"` session mounts nothing and needs no `onlyne` command. Its prompt
   ends with an absolute report path your client prepared under the workspace; the last
   action before you stop is that file: one `hop-done:` / `hop-failed:` / `hop-blocked:`
@@ -64,18 +76,29 @@ or, inside a pi session, the `onlyne_complete{outcome, text}` tool.
 
 ## Passing work sideways
 
-```bash
-onlyne handoff --to <next-role> --task <task-id> --text "<same task text>"
+Inside a pi session, `onlyne_handoff` hands this task on:
+
+```
+onlyne_handoff{to: "<next-role>", text: "<same task text>"}
 ```
 
-The handoff reads the deepest row of your task family, mints a child task under
-`parent_task`, and sets `hop = parent + 1`. The server gates `--to` on your spec entry's
-`allowed_targets`, and any other name returns `acl_denied` before a row exists. Ring and
-fan-out shapes live in your prose. The mechanics here never change.
+The host mints the child: it names this task as `parent_task`, sits one hop deeper, and carries the
+family's metadata — the family root id, the hop budget, the origin, the deadline, and the labels.
+Your injected header names where you stand in that family, so no task text has to carry the count.
+A task that meets the family's hop budget is the one that keeps the work.
 
-`onlyne_send{to, text, kind, image}` covers the same ground from inside a pi session:
-`kind:"task"` mints a fresh family; `kind:"note"` (the default) is free text with no session
-on the other side.
+An `exec` session runs the CLI form of the same step, with both supervisor flags:
+
+```bash
+onlyne handoff --to <next-role> --task <task-id> --text "<same task text>" \
+  --force --yes-i-am-supervisor-not-other-role
+```
+
+`onlyne_send{to, text, kind, image}` starts a fresh family instead: `kind:"task"` mints a task with
+no `parent_task` and `hop = 0`, `kind:"note"` (the default) is free text with no session on the
+other side, and `image` attaches one image, 2 MiB of decoded bytes. The server gates the target of
+every route on your spec entry's `allowed_targets`, and any other name returns `acl_denied` before
+a row exists. Ring and fan-out shapes live in your prose. The mechanics here never change.
 
 ## Rules of the ring
 

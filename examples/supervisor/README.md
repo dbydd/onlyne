@@ -76,11 +76,12 @@ pi-onlyne 插件在 `assign` 时注入。所以 TUI 里能直接看见模型读�
 RING=a,b,c,d,e FILE=/tmp/onlyne-sup/lights.txt K=1 TOTAL=10
 ```
 
-`a` 收到 K=1：追加 `1:a` 到记录文件，再用 `onlyne handoff` 把同样的文本交给 `b`，
-K 加一；`b` 追加 `2:b` 交给 `c`……`e` 到了 K=10 不再转发，它读文件、用
-`onlyne_complete` 把文件内容交回。账本里每个任务一行（根任务加九个 handoff 子任务），
-每个子任务都记着自己的 `parent_task` 和 `hop`。`handoff` 走产品自己的路径：回读
-父任务行，把新任务挂在 `parent_task` 下，`hop` 取父行加一。
+`a` 收到 K=1：追加 `1:a` 到记录文件，再用 `onlyne handoff`（带 `--force` 与
+`--yes-i-am-supervisor-not-other-role` 两个旗标）把同样的文本交给 `b`，K 加一；`b` 追加
+`2:b` 交给 `c`……`e` 到了 K=10 不再转发，它读文件、用 `onlyne_complete` 把文件内容
+交回。账本里每个任务一行（根任务加九个 handoff 子任务），每个子任务都记着自己的
+`parent_task` 和 `hop`。`handoff` 走产品自己的路径：回读父任务行，把新任务挂在
+`parent_task` 下，`hop` 取父行加一。
 
 整条链要冷启动 `len(RING) * 2` 次 pi，再加十轮模型回合，跑完按分钟计。`run.py`
 的默认任务是让 supervisor 去开这一轮；记录文件长到 `TOTAL` 行，灯就全亮。
@@ -91,7 +92,7 @@ K 加一；`b` 追加 `2:b` 交给 `c`……`e` 到了 K=10 不再转发，它�
 
 1. **supervisor 标签页**：标题是 `onlyne-supervisor`，里面是交互式 pi，cwd 是
    `ws/demo/_supervisor`，所以它的 `AGENTS.md` 和集群路径都已经加载好。它先用
-   `onlyne ... send --from _supervisor --to a` 派活，再用 `wc -l lights.txt` 和
+   `onlyne ... send --from _supervisor --to a --force --yes-i-am-supervisor-not-other-role` 派活，再用 `wc -l lights.txt` 和
    `ledger --task <id>` 盯进度，最后把文件内容和账本行报回来。这个标签页跑完不关，
    **继续跟它说话**就行：`再派一单`、`看看账本`、`停掉 planner 之外的角色`。
 2. **环上的会话标签页**：每跳一个 pi 会话，按 `a → b → c → d → e → a → …` 挨个亮起。

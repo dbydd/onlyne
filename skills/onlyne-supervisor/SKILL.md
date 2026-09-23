@@ -58,7 +58,7 @@ queueing, and ACL are mechanics. Every call is yours, together with the spec fil
 4. Append the fragments to `spec.toml`, then run `onlyne reload`. `onlyne spec-diff` shows
    the pending delta first. The spec file is the only truth; there is no runtime config API.
 
-An existing tree carries a store marker: the server's `state.db` names revision 3 and a
+An existing tree carries a store marker: the server's `state.db` names revision 4 and a
 client's `client.db` names revision 2. A marker answering another revision stops that daemon
 with `onlyne: unsupported schema; v1.0.0 does not migrate`, and a pre-v1 layout stops
 `onlyne client init` with exit 2 and `onlyne: legacy workspace layout; v1.0.0 does not
@@ -67,8 +67,28 @@ migrate` before it writes anything.
 ## Dispatch flows downhill
 
 ```bash
-onlyne --server-root <root> send --from _supervisor --to <role> --text "RING=... K=1 TOTAL=10"
+onlyne --server-root <root> send --from _supervisor --to <role> --text "RING=... K=1 TOTAL=10" \
+  --force --yes-i-am-supervisor-not-other-role
 ```
+
+Seven verbs require both flags: `send`, `reply`, `handoff`, `complete`, `ack`, `reject`, and
+`control`. Each writes a role's own voice on the wire, and the pair is your declaration that the
+call stands outside that role's plugin session. The refusal names the plugin tool that answers
+for a role where one exists (`onlyne_send` for `send`, `onlyne_handoff` for `handoff`,
+`onlyne_complete` for `complete`). A call missing either flag exits 2 before it opens a socket.
+`repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, `reload`, `status`, and
+`shutdown` carry no such flag.
+
+A task family carries its own metadata, and you set it where the run starts. `onlyne ... send
+--hop-budget <n>` records the hops the family may spend, `--label <k=v>` (repeat the flag up to
+eight times) records whatever a script of yours reads beside the ledger, and `--deadline
+<rfc3339>` records the wall-clock bound for the whole run. Every handoff inherits all of it: the
+child carries the family's root task id, its budget, its origin — the role that sent the root — its
+deadline, and its labels, so the hop that meets the budget is the hop that keeps the work. The
+figures ride `Causality`, so `onlyne ledger` prints `family` and `hop_budget` off the row without a
+script rebuilding them from `parent_task` links, and the assignment a role's plugin receives names
+the hop and the budget inside the task header. A ring that parsed its own counters out of the task
+text reads them here instead.
 
 - Roles answer by completing the task. The receipt lands in the ledger as `out_head`: the
   first 200 grapheme clusters of the completion body (`head_preview` in
@@ -116,9 +136,9 @@ failed and rejects its undelivered rows, `repair close` settles it cancelled the
 `repair adopt` re-points the row's desired backend binding, `repair rebind` moves the row to
 another session id and bumps its generation, and `repair inspect` prints the session
 projection with every fault recorded against the task. Task control runs beside repair:
-`onlyne control recycle|probe|snapshot|cancel|focus --task <id>`, where `recycle` and
-`cancel` carry a required `--reason` and `focus` brings the task's live session to the front
-of its host. A client holding `max_sessions` sessions pulls with `control_only`, so those
+`onlyne control recycle|probe|snapshot|cancel|focus --task <id> --force
+--yes-i-am-supervisor-not-other-role`, where `recycle` and `cancel` carry a required `--reason`
+and `focus` brings the task's live session to the front of its host. A client holding `max_sessions` sessions pulls with `control_only`, so those
 commands reach the session that holds the last slot; work for that role waits until a slot
 frees. `DeliveryState::Exhausted` is terminal — retry only after an explicit decision here.
 
@@ -141,6 +161,18 @@ fires. `control probe` first, then `control recycle` or `repair retry` as the an
 `stale_working` covers the owner that left: a row the mirror still reads `working` whose role
 has been offline past 600 seconds records this fault once, and the server's own observer
 writes it. `[server].stale_watch_secs` (60 default) is the scan cadence for both observers.
+
+A row no client will ever write again is the ghost sweep's work. A mirror row still reading
+`working` whose task's own ledger row has already reached a terminal state is rewritten by the
+server on its own interval, `[server].ghost_sweep_secs` (60 default, `0` disables the pass), and
+the outcome comes off that ledger row: `acked` settles `done`, `rejected` and `expired` settle
+`failed`. The sequence advances, a `session_state` event travels, and one row lands in
+`ghost_sweeps` naming the session, both sequences, the outcome, and the evidence it acted on
+(`task_settled:acked` and the like). `onlyne ghosts [--limit N]` reads that audit, newest first.
+One class stays out of its reach: a `working` row whose owner role is offline while the task is
+still open, where an ending would decide live work and swallow the requeue that work is owed.
+`stale_working` remains that class's only output, and its recovery stays yours through
+`repair_*`.
 
 A session whose plugin connection drops is retired past `[client] reconnect_grace_secs`
 (60 default, 0 disables that sweep). The retirement settles the task `failed`, refuses the
@@ -172,9 +204,9 @@ of the roles it reconnects as and the next pull hands them out again; `onlyne le
 <id>` shows the rows that came back.
 
 Both gates leave their mark where you can read it. `onlyne ledger` prints the row it holds, and a
-settled row's `reason` travels with it; the key is among the six the CLI recognizes on a ledger
-answer (`msg_id`, `task`, `state`, `reason`, `out_head`, `body` — `ROW_FIELD_KEYS` in
-`crates/onlyne-cli/src/ledger.rs`). A row carries the key only where it has a value: a clean `acked` row
+settled row's `reason` travels with it; the key is among the eight the CLI recognizes on a ledger
+answer (`msg_id`, `task`, `state`, `reason`, `out_head`, `body`, `family`, `hop_budget` —
+`ROW_FIELD_KEYS` in `crates/onlyne-cli/src/ledger.rs`). A row carries the key only where it has a value: a clean `acked` row
 simply omits it, and the bytes match what the same row printed before the column existed. The
 TUI's page-2 task panel appends `reason=<text>` to the row's tail under the same rule. Six
 settlement doors write a value on the column. `requeue_exhausted` and `requeue_ttl` come from the
@@ -188,7 +220,8 @@ print the frames; set backend = "exec" or backend = "acp" in the workspace confi
 `--mode=rpc`, and `--mode rpc` spellings all trigger it on `herdr`, `orca`, and `zellij`). The
 operator's own `onlyne repair fail --task <id> --reason <text>` and `onlyne repair close --task
 <id> --reason <text>` write that text onto every undelivered row of the task, the close falling
-back to `operator close`. The ack side stays out of it: `onlyne ack --msg-id <id> --reason <text>`
+back to `operator close`. The ack side stays out of it: `onlyne ack --msg-id <id> --reason <text>
+--force --yes-i-am-supervisor-not-other-role`
 settles the row through `mark_acked` and keeps a reason the row already carried, and
 `onlyne repair ack --fault-id <n> --reason <text>` writes its reason on the fault row alone. Both
 run against a role workspace or client socket, and both require `--reason`.

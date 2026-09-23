@@ -90,7 +90,7 @@ spec 改完后执行 `onlyne reload` 生效。
 
 ## 焦点
 
-`onlyne control --from <role> focus --task <id>` 把某个 session 的 pane 摆到前台。TUI 的入口是 `F`，作用在选中的那一行上。
+`onlyne control --from <role> focus --task <id> --force --yes-i-am-supervisor-not-other-role` 把某个 session 的 pane 摆到前台。TUI 的入口是 `F`，作用在选中的那一行上。
 
 控制平面用 `ControlOp::Focus{task_id}`，账本行 `kind = control`。命令落到 session 的 `backend_ref`，herdr 后端按三段链路走：`herdr workspace focus <W>`、`herdr tab focus <T>`、第三段按 pane 的来历分岔 —— managed agent 走 `herdr agent focus <pane_id>`，`herdr pane run` 拉起的 shell pane 走 `herdr pane focus --pane <base_pane> --direction <split_direction>`，这两个值是分屏时记下的。`base_pane` 与 `split_direction` 存在 `backend_ref` 里，所以锚点跟着 pane 活。
 
@@ -147,7 +147,7 @@ role link 死亡时，服务端把该 role 的 `in_flight` 投递行重投回 `q
 
 先判 TTL，再判次数，两者都各发一条 `ledger_state` 事件。
 
-`reason` 的读法：`onlyne ledger` 的行键为 `msg_id`、`task`、`state`、`reason`、`out_head`、`body`；该键只在这一行有值时出现，无值的行与列加入之前逐字节一致。TUI 第二页的 task 详情面板在账本行尾追加 `reason=<text>`。落进这一列的取值：`requeue_exhausted` 与 `requeue_ttl` 来自上面两道闸，`expired` 来自到期扫描，`session_dead` 来自 client 结清掉线 session 时写下的拒收（见「会话残影与属主判定」一节），pane 后端（`herdr` / `orca` / `zellij`）在开页前拒收协议 `session_command` 时整句拒收文案落 `rejected` 行（见「Headless（exec）会话」一节末段）；操作者经 `onlyne reject --reason` 或 `onlyne repair fail --reason` 自填的文本原样进这一列，`onlyne ack` 收下时该文本随结清事件走，行上的 `reason` 保持原样。字符串 `operator ack` 是 faults 表 `reason` 列的用例数据（`crates/onlyne-store/src/tests.rs` 的 `update_fault_state` 用例），账本列没有它的记录。
+`reason` 的读法：`onlyne ledger` 的行键为 `msg_id`、`task`、`state`、`reason`、`out_head`、`body`、`family`、`hop_budget`；该键只在这一行有值时出现，无值的行与列加入之前逐字节一致。TUI 第二页的 task 详情面板在账本行尾追加 `reason=<text>`。落进这一列的取值：`requeue_exhausted` 与 `requeue_ttl` 来自上面两道闸，`expired` 来自到期扫描，`session_dead` 来自 client 结清掉线 session 时写下的拒收（见「会话残影与属主判定」一节），pane 后端（`herdr` / `orca` / `zellij`）在开页前拒收协议 `session_command` 时整句拒收文案落 `rejected` 行（见「Headless（exec）会话」一节末段）；操作者经 `onlyne reject --reason` 或 `onlyne repair fail --reason` 自填的文本原样进这一列，`onlyne ack` 收下时该文本随结清事件走，行上的 `reason` 保持原样。字符串 `operator ack` 是 faults 表 `reason` 列的用例数据（`crates/onlyne-store/src/tests.rs` 的 `update_fault_state` 用例），账本列没有它的记录。
 
 push 投递与 pull 投递的 `in_flight` 翻面都各有一条 `ledger_state` 事件；离线读账的 ledger 状态与会话投影在任何采样点互相对得上。
 
@@ -159,9 +159,9 @@ push 投递与 pull 投递的 `in_flight` 翻面都各有一条 `ledger_state` �
 
 ## 拒收面
 
-`onlyne ack --msg-id <id> --reason <text>` 把一条投递结为 `acked`。
+`onlyne ack --msg-id <id> --reason <text> --force --yes-i-am-supervisor-not-other-role` 把一条投递结为 `acked`。
 
-`onlyne reject --msg-id <id> --reason <text>` 把一条投递结为 `rejected`。
+`onlyne reject --msg-id <id> --reason <text> --force --yes-i-am-supervisor-not-other-role` 把一条投递结为 `rejected`。
 
 `--reason` 在两个动词上都是必填。
 
@@ -314,7 +314,7 @@ ghost sweep 在这条红线内移动一类行：镜像仍读 `working`、而该�
 
 supervisor 角色使用 control 动词执行恢复动作。
 
-`onlyne control --task <id> recycle --reason <text>` 与 `onlyne control --task <id> cancel --reason <text>` 的 reason 是必填。
+`onlyne control --task <id> recycle --reason <text> --force --yes-i-am-supervisor-not-other-role` 与 `onlyne control --task <id> cancel --reason <text> --force --yes-i-am-supervisor-not-other-role` 的 reason 是必填。
 
 supervisor 角色的 control 动词需要 spec 授权。
 
@@ -340,6 +340,34 @@ onlyne --server-root <server-root> repair fail --task <id> --reason session_dead
 第一条命令读取残账和 session 投影。
 
 第二条命令把任务收敛为失败并保留 `session_dead` 原因。
+
+## supervisor 维护指令集
+
+`send`、`reply`、`handoff`、`complete`、`ack`、`reject`、`control` 这七个动词要求 `--force` 与 `--yes-i-am-supervisor-not-other-role` 同时在场。
+
+两个旗标缺任何一个，命令在解析 socket 之前退出 2。
+
+拒收文案点名角色在会话里该走的插件工具：`send` 是 `onlyne_send`，`handoff` 是 `onlyne_handoff`，`complete` 是 `onlyne_complete`，其余四个动词由插件本身代答。
+
+CLI 门属于 supervisor，也属于会话不挂插件的 `exec` 角色。
+
+`exec` 角色用 CLI 形态，并以这两个旗标声明自己。
+
+`repair *`、`ledger`、`sessions`、`roles`、`faults`、`watch`、`history`、`status` 这些读动词、`reload` 与 `shutdown` 不带这两个旗标。
+
+## 任务家族与元信息
+
+一个任务家族带着自己的元信息，在起跑处写入：`onlyne send --hop-budget <n>` 记下这一族能花的跳数，`--label <k=v>`（可重复到 8 条）记下脚本要读的自由键值，`--deadline <rfc3339>` 记下整族的墙钟期限。
+
+`family` 是家族根任务的 id，一跳一传、永不改变。子任务继承 `hop_budget`、`origin`（发起根任务的角色）、`deadline` 与全部 `labels`，`hop` 取父行加一。
+
+继承只发生在 `Causality::child_of` 一处：CLI 的 `handoff` 与插件的 `onlyne_handoff` 都走它，两条入口造出的链形状因此一致。
+
+`onlyne ledger` 多印 `family` 与 `hop_budget` 两个键；没有值的行不出现该键，旧行与列加入之前逐字节一致。
+
+`labels` 是核心唯一不解释的字段：上限 8 条，键不超过 32 字节，值不超过 256 字节，越界由 `Envelope::validate` 拒收并点名字段。
+
+ledger 表新增的列走 in-place 加列，与 `expires_at`、`requeued` 同样处理，因此 server 的 schema marker 仍是 4，已有的 state.db 不必重建。
 
 ## 宿主资源回收
 
