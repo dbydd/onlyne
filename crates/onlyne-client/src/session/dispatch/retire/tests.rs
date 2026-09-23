@@ -292,3 +292,66 @@ async fn each_arm_of_the_window_names_itself_on_the_retirement() {
         silent.quiet_secs
     );
 }
+
+/// A control close ends the session's own row.
+///
+/// `release_locked` closes the resource and drops the slot in the same breath, and the agent
+/// goes with them. The tuple's agent phase is what `project` reads: a begun task
+/// (`Done`/`Failed`/`Cancelled`) answers `working` while the agent is not `Gone`, so a close
+/// that fed the resource and skipped the agent left the mirrored row reading `working` beside a
+/// ledger row that had already settled. Two live sessions showed exactly that — cancelled and
+/// faulted, both mirrored as `working`, while three others closed through the reconnect sweep
+/// flipped to `exited`.
+#[tokio::test]
+async fn a_control_close_ends_the_sessions_own_row() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).expect("client store");
+    let backend = Arc::new(FakeBackend::new());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        Vec::new(),
+        8,
+        backend.clone(),
+        store.clone(),
+    );
+    let task = new_task_id();
+    let (stream, _peer) = tokio::io::duplex(1024);
+    let io = AdapterIo::new(stream, Duration::from_secs(5), Duration::from_secs(5));
+
+    {
+        let inner = state.inner.lock();
+        inner.bridge.track_live(session_ref(&task));
+        feed_created(&inner.bridge, &inner.store, &task).expect("seed the session row");
+        feed_ready(&inner.bridge, &inner.store, &task).expect("ready");
+    }
+    {
+        let mut inner = state.inner.lock();
+        inner.sessions.insert("live".into(), slot(&task, false, None));
+        inner.transports.insert("live".into(), (io.clone(), Vec::new()));
+    }
+    store
+        .settle_task(&task, TaskState::Cancelled)
+        .expect("the operator's cancel landed");
+
+    // The verdict on its own leaves the session working: a begun task is open work while the
+    // agent may still be running in its resource.
+    {
+        let inner = state.inner.lock();
+        let row = inner.store.get_session(&task).unwrap().expect("the session row");
+        assert_eq!(
+            crate::session::dispatch::projection_of(&row, TaskState::Cancelled).lifecycle,
+            onlyne_proto::Lifecycle::Working,
+            "a cancelled task with a live agent is still working"
+        );
+    }
+
+    on_recycled(&state, &task, onlyne_session::CloseReason::Cancelled).expect("the close runs");
+
+    let row = store.get_session(&task).unwrap().expect("the session row");
+    assert_eq!(
+        crate::session::dispatch::projection_of(&row, TaskState::Cancelled).lifecycle,
+        onlyne_proto::Lifecycle::Exited,
+        "a closed session reads exited on the row its client holds"
+    );
+}

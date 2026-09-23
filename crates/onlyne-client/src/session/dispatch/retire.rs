@@ -237,6 +237,21 @@ pub(super) fn release_locked(
                 feed_resource_closed(&inner.bridge, &inner.store, task_id)?;
                 inner.backend.close(&slot.session, reason, false)?;
             }
+            // The agent goes with the resource: this path closes a session whose work an
+            // operator ended or whose backend faulted, and the slot below leaves the map in
+            // the same breath. Without this feed the tuple keeps the agent phase its last
+            // beat reported, and `project` answers `working` for a `cancelled` or `failed`
+            // task whenever the agent is not `Gone` — so the mirrored row read `working` for
+            // a session the client had already closed, which is what `onlyne sessions` and
+            // the board showed beside a ledger row that had settled. The reconnect sweep
+            // feeds the same event for the same ending.
+            if let Err(error) = feed_agent_gone(&inner.bridge, &inner.store, task_id) {
+                tracing::warn!(
+                    task = %task_id,
+                    error = %error,
+                    "agent-gone projection failed for a closed session"
+                );
+            }
             inner.bridge.untrack_live(task_id);
             inner.sessions.remove(&key);
         } else {
