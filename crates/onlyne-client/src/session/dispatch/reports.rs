@@ -35,9 +35,6 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
             state.owe_controlled_settle(task_id, ControlWord::Recycle, Instant::now());
             state.recycle_plugin(task_id, reason, None).await;
             on_recycled(state, task_id, onlyne_session::CloseReason::Operator)?;
-            // The ghost sweep selects working mirrors, so this publish carries the
-            // close that answered the delivery row into the mirror beside it.
-            sync_session(state, task_id).await?;
         }
         ControlOp::Cancel { reason, .. } => {
             // The same note for the same reason: a cancel ends the task on the
@@ -47,9 +44,6 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
                 .recycle_plugin(task_id, reason, Some(Outcome::Cancelled))
                 .await;
             on_recycled(state, task_id, onlyne_session::CloseReason::Cancelled)?;
-            // The ghost sweep selects working mirrors, so this publish carries the
-            // close that answered the delivery row into the mirror beside it.
-            sync_session(state, task_id).await?;
         }
         ControlOp::Probe { .. } => {
             // A probe that found no transport asked nothing, so there is no fresh

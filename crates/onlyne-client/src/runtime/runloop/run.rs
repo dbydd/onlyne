@@ -8,7 +8,7 @@ use crate::session::adapter_socket::AdapterSocket;
 use crate::session::dispatch::{self, ClientLink, DispatchState};
 use anyhow::{Result, anyhow};
 use onlyne_layout::RoleWorkspace;
-use onlyne_proto::{AckArgs, ClientOp, Delivery, PullArgs, PullReply};
+use onlyne_proto::{AckArgs, ClientOp, ControlOp, Delivery, PullArgs, PullReply};
 use onlyne_store::ClientStore;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -214,6 +214,21 @@ pub(super) async fn settle_control(state: &RunState, delivery: &Delivery) {
                 "control command applied"
             );
             state.dispatch.push_settled(ack(true, None));
+            if held
+                && matches!(op, ControlOp::Recycle { .. } | ControlOp::Cancel { .. })
+            {
+                // A published exit releases the task's in-flight rows. The
+                // command's own row is one of them until its ack is enqueued.
+                if let Err(error) =
+                    dispatch::sync_session(&state.dispatch, op.task_id()).await
+                {
+                    tracing::warn!(
+                        error = %error,
+                        task = %op.task_id(),
+                        "a closed control session was not published"
+                    );
+                }
+            }
         }
         Err(error) => {
             tracing::warn!(error = %error, op = op.name(), "control command refused");
