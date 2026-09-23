@@ -334,7 +334,7 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
         }
         AdminOp::RepairFail(fail) => {
             let reason = fail.reason.clone();
-            settle_task(state, &fail.task_id, Outcome::Failed, &reason)?;
+            let _ = settle_task(state, &fail.task_id, Outcome::Failed, &reason)?;
             transition_task_faults(state, &fail.task_id, "failed", &reason)?;
             retire_task_resource(state, &fail.task_id, &reason);
             Ok(Ok(json!({ "task_id": fail.task_id, "outcome": "failed" })))
@@ -344,7 +344,7 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
                 .reason
                 .clone()
                 .unwrap_or_else(|| "operator close".to_string());
-            settle_task(state, &target.task_id, Outcome::Cancelled, &reason)?;
+            let _ = settle_task(state, &target.task_id, Outcome::Cancelled, &reason)?;
             transition_task_faults(state, &target.task_id, "closed", &reason)?;
             retire_task_resource(state, &target.task_id, &reason);
             Ok(Ok(
@@ -434,19 +434,35 @@ fn unknown_task(task_id: &str) -> RelayReject {
     )
 }
 
+/// The write facts one settlement leaves on the mirror row.
+///
+/// `seq_before` and `seq_after` are the row's two versions, so a caller can name
+/// the exact write it made and check that the row it read is the row that moved.
+/// A settlement that finds no mirror row, or a row whose projection already
+/// carries the verdict, answers `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Settlement {
+    /// The mirror row's generation, held constant across the write.
+    pub(crate) generation: i64,
+    pub(crate) seq_before: i64,
+    pub(crate) seq_after: i64,
+}
+
 /// Settle one task on the session projection and the ledger.
 ///
 /// The mirror holds one copy of the projection, and the lifecycle travels inside
 /// it: writing the verdict means rewriting the stored projection with its outcome
 /// and its `exited` view, not updating a column beside the bytes that already
 /// say the same thing.
-fn settle_task(
+pub(crate) fn settle_task(
     state: &Arc<State>,
     task_id: &str,
     outcome: Outcome,
     reason: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<Settlement>> {
+    let mut settlement = None;
     if let Some(row) = state.ledger.get_session_row(task_id)? {
+        let seq_before = row.seq;
         let mut next = row.clone();
         let projection = crate::projection::projection_with_outcome(&next, outcome);
         next.seq = next.seq.saturating_add(1);
@@ -462,6 +478,11 @@ fn settle_task(
                 projection,
             });
             state.emit(event)?;
+            settlement = Some(Settlement {
+                generation: next.generation,
+                seq_before,
+                seq_after: next.seq,
+            });
         }
     }
     for row in state.ledger.ledger_query(onlyne_proto::LedgerQuery {
@@ -493,7 +514,7 @@ fn settle_task(
             _ => {}
         }
     }
-    Ok(())
+    Ok(settlement)
 }
 
 /// Move every open fault of a task to `next_state`.

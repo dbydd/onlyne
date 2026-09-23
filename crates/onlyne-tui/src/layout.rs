@@ -1212,7 +1212,9 @@ fn short(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
-fn truncate(value: &str, max: usize) -> std::borrow::Cow<'_, str> {
+/// Cut `value` to `max` cells: on a character boundary, with the ellipsis that
+/// says more follows. The crate's one way to shorten an overlong line.
+pub(crate) fn truncate(value: &str, max: usize) -> std::borrow::Cow<'_, str> {
     if char_len(value) <= max {
         return std::borrow::Cow::Borrowed(value);
     }

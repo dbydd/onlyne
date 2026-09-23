@@ -600,11 +600,22 @@ impl FakeAgent {
                         // beats all take that door never reaches the write the reducer
                         // runs on a readable tuple, which is the path a live agent's
                         // unchanged `running` beat travels every ten seconds. The
-                        // sequence base matches the pi plugin's `SEQ_BASE`.
-                        handle
-                            .report_heartbeat(
-                                assign.task_id.clone(),
-                                json!({
+                        // sequence base matches the pi plugin's `SEQ_BASE`, and it
+                        // belongs on the frame: the client stamps a beat with the
+                        // reporter's own `(generation, seq)` and overwrites the version
+                        // inside `observed`, so a frame numbered from the sender's
+                        // counter — which starts at one, below the dispatch events the
+                        // client already wrote — is dropped as a duplicate and teaches
+                        // the suite nothing. `report_heartbeat` allocates that low
+                        // number, so the frame is built here.
+                        let sender = handle.report_sender();
+                        sender
+                            .send(Report::Heartbeat {
+                                task_id: assign.task_id.clone(),
+                                session_id: String::new(),
+                                generation: sender.generation(),
+                                seq: SEQ_BASE + state.beats,
+                                observed: json!({
                                     "version": { "generation": 1, "seq": SEQ_BASE + state.beats },
                                     "generation_live": true,
                                     "isolate_after": 1,
@@ -615,7 +626,9 @@ impl FakeAgent {
                                     "resource": "attached",
                                     "recovery": "none",
                                 }),
-                            )
+                                projection: None,
+                                cluster_ref: None,
+                            })
                             .await?;
                     }
                     other => bail!("unknown step: report.{other}"),

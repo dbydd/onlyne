@@ -5,7 +5,7 @@ use onlyne_adapter::{AdapterIo, WireMessage};
 use onlyne_client::session::{
     accept::AcceptPath,
     adapter_socket::AdapterSocket,
-    dispatch::{DispatchState, ReadyNotice, dispatch, on_ready, projection_of},
+    dispatch::{DispatchState, ReadyNotice, dispatch, on_plugin_report, on_ready, projection_of},
 };
 use onlyne_frame::{read_frame, write_frame};
 use onlyne_proto::{
@@ -114,6 +114,83 @@ pub(super) fn plugin_beat(
         projection: None,
         cluster_ref: None,
     }
+}
+
+/// The sequence every fixture turn carries: the plugin's own base, above the
+/// dispatch events this client stamps for a session.
+pub(super) const TURN_SEQ: u64 = 1005;
+
+/// One plugin beat that reports `agent`, in the whole-tuple shape the reducer reads.
+/// A beat naming no readable tuple is liveness alone, and the client moves no
+/// dimension for it.
+pub(super) fn agent_beat(task_id: &str, seq: u64, agent: &str) -> Report {
+    plugin_beat(
+        task_id,
+        1,
+        seq,
+        serde_json::json!({
+            "version": { "generation": 1, "seq": seq },
+            "generation_live": true,
+            "isolate_after": 1,
+            "terminate_after": 3,
+            "mismatch_count": 0,
+            "agent": agent,
+            "delivery": "none",
+            "resource": "attached",
+            "recovery": "none",
+        }),
+    )
+}
+
+/// The turn a completion is filed for, over the plugin's own connection.
+///
+/// A session's agent reaching a turn is a fact its beats carry, and the settle door
+/// reads that fact off the row before it writes a verdict onto the task. A fixture
+/// that files a completion with no turn behind it is the shape the door refuses, and
+/// `a_completion_with_no_turn_behind_it_leaves_the_task_open`
+/// (`src/session/dispatch/reports/tests.rs`) holds that case.
+pub(super) async fn ran_a_turn(io: &AdapterIo, task_id: &str) {
+    let body = io
+        .request(AdapterMsg::Plugin(PluginOp::Report(agent_beat(
+            task_id, TURN_SEQ, "running",
+        ))))
+        .await
+        .expect("the beat is answered");
+    assert!(
+        body.ok,
+        "the serving connection's beat is accepted: {body:?}"
+    );
+}
+
+/// The same turn on a raw plugin stream, where the fixture writes frames itself.
+pub(super) async fn ran_a_turn_raw(stream: &mut onlyne_layout::LocalStream, task_id: &str) {
+    write_frame(
+        stream,
+        &WireMessage {
+            id: Some(3),
+            reply_to: None,
+            msg: AdapterMsg::Plugin(PluginOp::Report(agent_beat(task_id, TURN_SEQ, "running"))),
+        },
+    )
+    .await
+    .unwrap();
+    loop {
+        let frame = read_frame::<_, WireMessage>(stream)
+            .await
+            .unwrap()
+            .expect("the beat is answered");
+        if frame.reply_to == Some(3) {
+            return;
+        }
+    }
+}
+
+/// The same turn driven straight through the dispatcher's report door, for the cases
+/// that call `on_plugin_report` with no connection attached.
+pub(super) async fn run_a_turn(state: &DispatchState, task_id: &str) {
+    on_plugin_report(state, None, agent_beat(task_id, TURN_SEQ, "running"))
+        .await
+        .expect("the beat is handled");
 }
 
 impl onlyne_client::session::dispatch::Outbox for RecordingOutbox {
@@ -304,6 +381,9 @@ pub(super) async fn mount_plugin(
 }
 
 pub(super) async fn complete_plugin(io: &AdapterIo, task_id: &str, outcome: Outcome) {
+    // The turn the completion is filed for, first: the settle door reads the
+    // session's own row for it before it writes a verdict onto the task.
+    ran_a_turn(io, task_id).await;
     let body = io
         .request(AdapterMsg::Plugin(PluginOp::Report(Report::Complete {
             task_id: task_id.to_string(),
@@ -370,6 +450,7 @@ pub(super) async fn complete_raw_plugin(
     task_id: &str,
     outcome: Outcome,
 ) {
+    ran_a_turn_raw(stream, task_id).await;
     write_frame(
         &mut *stream,
         &WireMessage {

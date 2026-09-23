@@ -3337,6 +3337,7 @@ async fn every_admin_arm_answers_without_internal_failure() {
         AdminOp::Sessions(QuerySessionsArgs::default()),
         AdminOp::Ledger(LedgerQuery::default()),
         AdminOp::Faults(QueryFaultsArgs::default()),
+        AdminOp::QueryGhostSweeps(0),
         AdminOp::Watch(Subscribe::default()),
         AdminOp::History(HistoryArgs::default()),
         AdminOp::SpecDiff(json!({})),

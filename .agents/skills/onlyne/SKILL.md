@@ -73,7 +73,7 @@ transition needs its table rows in the same commit. Reviewers
 halt on weakened assertions during a migration.
 
 **Ledger/schema** (`onlyne-store`): `schema_marker(name, version, protocol_version)` is the
-gate; this revision writes client 2, server 3 and protocol 1 (`CLIENT_SCHEMA_VERSION`,
+gate; this revision writes client 2, server 4 and protocol 1 (`CLIENT_SCHEMA_VERSION`,
 `SERVER_SCHEMA_VERSION`), and a database carrying an older marker is refused with
 `onlyne: unsupported schema; v1.0.0 does not migrate`. A field change bumps the marker and
 leaves the refuse-at-door string untouched.

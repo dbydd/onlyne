@@ -15,8 +15,8 @@ mod tests;
 pub use client::{CLIENT_DDL, ClientStore, IntentRow, TaskRow};
 pub use error::{StoreError, StoreResult, UNSUPPORTED_SCHEMA};
 pub use server::{
-    Append, CursorRow, EventRecord, FaultQuery, LedgerRow, RoleRow, SERVER_DDL, ServerFaultRow,
-    ServerLedger, ServerSessionRow, SessionWrite, rfc3339,
+    Append, CursorRow, EventRecord, FaultQuery, GhostSweepRow, LedgerRow, RoleRow, SERVER_DDL,
+    ServerFaultRow, ServerLedger, ServerSessionRow, SessionWrite, rfc3339,
 };
 
 pub use onlyne_proto::LedgerState;

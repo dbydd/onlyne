@@ -134,6 +134,8 @@ enum Verb {
     Watch(WatchCmd),
     /// Replay recorded envelopes.
     History(HistoryCmd),
+    /// List the ghost sweep's audit rows.
+    Ghosts(GhostsCmd),
     /// Diff the running spec against the configuration on disk.
     #[command(name = "spec_diff", alias = "spec-diff")]
     SpecDiff,
@@ -204,6 +206,8 @@ enum ServerVerb {
     Watch(WatchCmd),
     /// Replay recorded envelopes.
     History(HistoryCmd),
+    /// List the ghost sweep's audit rows.
+    Ghosts(GhostsCmd),
     /// Drive the recovery verbs.
     Repair(RepairCmd),
     /// A verb outside the server vocabulary.
@@ -337,6 +341,12 @@ struct WatchCmd {
 struct HistoryCmd {
     #[command(flatten)]
     args: admin::HistoryArgs,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+struct GhostsCmd {
+    #[command(flatten)]
+    args: admin::GhostsArgs,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -496,6 +506,7 @@ fn run() -> i32 {
         Verb::Faults(cmd) => admin::faults(flags, cmd.args),
         Verb::Watch(cmd) => admin::watch(flags, cmd.args),
         Verb::History(cmd) => admin::history(flags, cmd.args),
+        Verb::Ghosts(cmd) => admin::ghosts(flags, cmd.args),
         Verb::SpecDiff => admin::spec_diff(flags),
         Verb::Reload => admin::reload(flags),
         Verb::Generate(cmd) => generate(flags, cmd),
@@ -598,6 +609,7 @@ fn server(flags: &GlobalFlags, cmd: ServerCmd) -> i32 {
         ServerVerb::Faults(cmd) => admin::faults(flags, cmd.args),
         ServerVerb::Watch(cmd) => admin::watch(flags, cmd.args),
         ServerVerb::History(cmd) => admin::history(flags, cmd.args),
+        ServerVerb::Ghosts(cmd) => admin::ghosts(flags, cmd.args),
         ServerVerb::Repair(cmd) => admin::repair(flags, cmd.verb),
         ServerVerb::Unknown(args) => unknown_server_verb(&args),
     }

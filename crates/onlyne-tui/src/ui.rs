@@ -429,7 +429,7 @@ fn render_history(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &Ui
             Row::new(vec![
                 Cell::from(row.created_at.format("%H:%M:%S").to_string()),
                 Cell::from(event_kind(row)),
-                Cell::from(event_route(row)),
+                Cell::from(hop_cell(row, area.width)),
                 Cell::from(event_state(row)),
                 Cell::from(event_task(row).map(|id| short(&id)).unwrap_or_default()),
             ])
@@ -440,11 +440,11 @@ fn render_history(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &Ui
         Table::new(
             rows,
             [
-                Constraint::Length(10),
-                Constraint::Length(8),
-                Constraint::Min(17),
-                Constraint::Length(10),
-                Constraint::Length(9),
+                Constraint::Length(HISTORY_CREATED_CELLS),
+                Constraint::Length(HISTORY_KIND_CELLS),
+                Constraint::Min(HISTORY_HOP_FLOOR),
+                Constraint::Length(HISTORY_STATE_CELLS),
+                Constraint::Length(HISTORY_TASK_CELLS),
             ],
         )
         .header(
@@ -454,6 +454,86 @@ fn render_history(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &Ui
         .block(Block::default().title(title).borders(Borders::ALL)),
         area,
     );
+}
+
+/// The cells the history table's `created` column holds its `%H:%M:%S` in.
+const HISTORY_CREATED_CELLS: u16 = 10;
+/// The cells the `kind` column holds `gateway` in.
+const HISTORY_KIND_CELLS: u16 = 8;
+/// The cells the `from→to` column floors at. It is the table's one flexible column,
+/// so this floor is where the pane stops having anything to spare.
+const HISTORY_HOP_FLOOR: u16 = 17;
+/// The cells the `state` column holds `in_flight` in.
+const HISTORY_STATE_CELLS: u16 = 10;
+/// The cells the `task` column holds a `short` task id in.
+const HISTORY_TASK_CELLS: u16 = 9;
+/// What the four fixed columns and the gaps between the five cost the pane: the
+/// arithmetic a row's slack is read out of, spelled from the same constants the table
+/// hands the widget. The flexible column's own [`HISTORY_HOP_FLOOR`] sits on top of
+/// this, and whatever the pane has beyond the two is a row's slack.
+const HISTORY_PINNED_CELLS: usize = HISTORY_CREATED_CELLS as usize
+    + HISTORY_KIND_CELLS as usize
+    + HISTORY_STATE_CELLS as usize
+    + HISTORY_TASK_CELLS as usize
+    + 4;
+/// The label the board puts on a settlement reason, the one the task panel prints and
+/// the `onlyne ledger` help describes.
+const REASON_LABEL: &str = "reason=";
+/// The cells a reason tail asks for: the joining space, the label, and three
+/// characters, the shortest read that tells `session_dead` from `requeue_exh…`. Below
+/// that the row prints its hop alone and the task panel, which wraps, keeps the word.
+const REASON_TAIL_CELLS: usize = 1 + REASON_LABEL.len() + 3;
+
+/// The `from→to` cell: the hop, and where the ledger stored a reason for the state the
+/// row reports, that reason on the cell's tail under the label the task panel uses.
+///
+/// The reason rides this cell because the cell is the row's only slack: the four pinned
+/// columns spend [`HISTORY_PINNED_CELLS`] and `state` fits `in_flight` inside its ten,
+/// so a row has nowhere else to put a field whose text an operator writes. The tail
+/// spends cells the hop left over and cuts itself on a character boundary with the
+/// ellipsis the map's boxes give an overlong line, which keeps the hop whole and leaves
+/// every column of every row exactly where it stands. A row that stored nothing prints
+/// the hop it printed before the field reached the board, byte for byte, at every width.
+///
+/// The board's two promises about this field sit on different surfaces, and moving it
+/// to another column breaks one of them. Here it is the layout promise: a row with no
+/// reason holds its cells. The wire promise — that an empty reason adds no `reason` key
+/// to an answer — is `onlyne ledger`'s, and its help text speaks for itself.
+fn hop_cell(row: &EventRow, width: u16) -> String {
+    let hop = event_route(row);
+    let (Some(reason), Some(column)) = (stored_reason(row), hop_column_cells(width)) else {
+        return hop;
+    };
+    let spare = column.saturating_sub(hop.chars().count());
+    if spare < REASON_TAIL_CELLS {
+        return hop;
+    }
+    let word = spare - (1 + REASON_LABEL.len());
+    format!("{hop} {REASON_LABEL}{}", layout::truncate(reason, word))
+}
+
+/// The word a ledger row stored for the state it reports. A fault row carries its own
+/// text and reaches the board through the alert strip and the panel below, so the tail
+/// stays the ledger's field. A row whose stored word is empty or blank prints the state
+/// word alone, the row it printed with no key at all.
+fn stored_reason(row: &EventRow) -> Option<&str> {
+    match &row.event {
+        Event::LedgerState(event) => event
+            .reason
+            .as_deref()
+            .filter(|reason| !reason.trim().is_empty()),
+        _ => None,
+    }
+}
+
+/// The cells the `from→to` column gets in a pane `width` wide, and `None` where the
+/// pane cannot pay for the four pinned columns and the column's own floor together.
+/// There the solver squeezes every column at once and a row has no slack of its own, so
+/// the row keeps to its hop.
+fn hop_column_cells(width: u16) -> Option<usize> {
+    let inner = usize::from(width).saturating_sub(2);
+    let column = inner.checked_sub(HISTORY_PINNED_CELLS)?;
+    (usize::from(HISTORY_HOP_FLOOR) <= column).then_some(column)
 }
 
 fn history_style(row: &EventRow, idx: usize, state: &UiState) -> Style {
@@ -1032,8 +1112,8 @@ mod tests {
     use crate::model::{RoleView, SUPERVISOR_ROLE, cycle_role, hidden_role};
     use chrono::Utc;
     use onlyne_proto::{
-        AgentPhase, DeliveryPhase, LedgerEntry, Lifecycle, MsgKind, Presence, Principal,
-        RecoveryPhase, ResourcePhase, SessionProjection,
+        AgentPhase, DeliveryPhase, LedgerEntry, LedgerStateEvent, Lifecycle, MsgKind, Presence,
+        Principal, RecoveryPhase, ResourcePhase, SessionProjection,
     };
     use std::time::SystemTime;
 
@@ -1112,6 +1192,64 @@ mod tests {
             enqueued_at: Utc::now(),
             acked_at: None,
         }
+    }
+
+    /// One row of the page-2 feed: a `planner→builder` hop that settled in `state`,
+    /// carrying the `reason` the ledger stored where there is one. The clock is fixed
+    /// and the graph stays idle, so a render test reads the feed and nothing else.
+    fn history_row(state: LedgerState, reason: Option<&str>) -> EventRow {
+        EventRow {
+            seq: 1,
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-09-23T12:34:56Z")
+                .expect("the fixture clock")
+                .with_timezone(&Utc),
+            event: Event::LedgerState(LedgerStateEvent {
+                msg_id: "m1".into(),
+                op_id: None,
+                kind: MsgKind::Task,
+                from: Principal::role("planner"),
+                to: Principal::role("builder"),
+                task: Some("abcdef12-3456".into()),
+                state,
+                outcome: None,
+                reason: reason.map(str::to_string),
+            }),
+        }
+    }
+
+    /// A page-2 snapshot whose feed is `rows`.
+    fn history_snapshot(rows: Vec<EventRow>) -> Snapshot {
+        let total = rows.len();
+        Snapshot {
+            status: serde_json::json!({"cluster": "local"}),
+            history: rows,
+            history_total: total,
+            server_online: true,
+            ..Snapshot::default()
+        }
+    }
+
+    fn swarm_page() -> UiState {
+        UiState {
+            page: Page::Swarm,
+            ..UiState::default()
+        }
+    }
+
+    /// The feed's rows as the pane draws them, one string per row: the pane sits behind
+    /// the graph's right border, and its own border comes off the end.
+    fn history_rows(text: &str) -> Vec<String> {
+        text.lines()
+            .filter(|line| line.contains("12:34:56"))
+            .filter_map(|line| line.split("││").nth(1))
+            .map(|pane| pane.trim_end_matches('│').to_string())
+            .collect()
+    }
+
+    /// The column `needle` starts at in a rendered row, counted in the cells the pane
+    /// counts: the ellipsis a cut tail ends with is one cell.
+    fn cell_column(row: &str, needle: &str) -> Option<usize> {
+        row.find(needle).map(|at| row[..at].chars().count())
     }
 
     /// A ring of three roles: a→b→c→a.
@@ -2062,5 +2200,102 @@ mod tests {
         );
         assert!(text.contains("connection refused"), "{text}");
         assert!(text.contains("+ server down +"), "{text}");
+    }
+
+    /// One settled hop's row: the state it reached, and the row's slack spent on the
+    /// reason the ledger stored. The row's cells hold their places — the tail reaches
+    /// the feed through the cells the hop left behind and through no other cell.
+    #[test]
+    fn the_history_row_carries_the_reason_the_ledger_stored() {
+        let sentence = "the pane backend refused the session command on its stdio";
+        let text = render_once_text(
+            &history_snapshot(vec![
+                history_row(LedgerState::Rejected, Some("session_dead")),
+                history_row(LedgerState::Rejected, Some(sentence)),
+                history_row(LedgerState::Rejected, Some("   ")),
+                history_row(LedgerState::Acked, None),
+            ]),
+            &swarm_page(),
+            160,
+            30,
+        );
+        let rows = history_rows(&text);
+        assert_eq!(rows.len(), 4, "{text}");
+        assert!(
+            rows[0].contains("planner→builder reason=session_dead"),
+            "the reason reaches the row\n{text}"
+        );
+        assert!(
+            rows[1].contains("planner→builder reason=the pane back…"),
+            "a sentence the column cannot hold is cut on a character boundary with the \
+             ellipsis, and the hop keeps every cell it had\n{text}"
+        );
+        assert!(
+            !text.contains("on its stdio"),
+            "the tail stops at the column's edge\n{text}"
+        );
+        assert_eq!(
+            text.matches("reason=").count(),
+            2,
+            "a row whose reason is blank, and a row with no reason at all, print the \
+             hop alone\n{text}"
+        );
+        // The tail spends the hop column's own slack, so no other cell of the row
+        // moves: the state and task cells hold the places a row without a reason has
+        // for them.
+        let state_cell = cell_column(&rows[2], "rejected").expect("the state cell");
+        let task_cell = cell_column(&rows[3], "abcdef12").expect("the task cell");
+        assert!(
+            rows[0].starts_with("12:34:56   ledger   planner→builder reason=session_dead"),
+            "the hop keeps its own cells ahead of the tail\n{text}"
+        );
+        for row in &rows {
+            assert_eq!(
+                cell_column(row, "abcdef12"),
+                Some(task_cell),
+                "{row}\n{text}"
+            );
+            assert_eq!(
+                row.chars().count(),
+                rows[3].chars().count(),
+                "{row}\n{text}"
+            );
+        }
+        for row in &rows[..3] {
+            assert_eq!(
+                cell_column(row, "rejected"),
+                Some(state_cell),
+                "{row}\n{text}"
+            );
+        }
+    }
+
+    /// The hop floor is where a row's slack runs out. In a pane that has only the floor
+    /// to give, a reason reaches no row and the feed prints the bytes it printed before
+    /// the field arrived — the layout promise the board keeps, which is a different
+    /// promise from the one `onlyne ledger`'s help makes about the answer's key.
+    #[test]
+    fn a_history_row_without_slack_keeps_the_row_it_printed() {
+        let text = render_once_text(
+            &history_snapshot(vec![
+                history_row(LedgerState::Rejected, Some("session_dead")),
+                history_row(LedgerState::Acked, None),
+            ]),
+            &swarm_page(),
+            120,
+            30,
+        );
+        assert!(
+            !text.contains("reason="),
+            "a pane at the hop's floor has no slack to spend\n{text}"
+        );
+        assert_eq!(
+            history_rows(&text),
+            vec![
+                "12:34:56   ledger   planner→builder   rejected   abcdef12 ".to_string(),
+                "12:34:56   ledger   planner→builder   acked      abcdef12 ".to_string(),
+            ],
+            "the feed moved a row it had no room to change\n{text}"
+        );
     }
 }

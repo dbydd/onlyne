@@ -39,6 +39,7 @@ impl DispatchState {
                 stall: crate::session::stall::StallWatch::new(),
                 revived: Vec::new(),
                 held_handoffs: HashMap::new(),
+                control_settles: Vec::new(),
                 in_frame: Vec::new(),
             })),
         }
@@ -105,6 +106,40 @@ impl DispatchState {
     /// sender.
     pub fn push_settled(&self, ack: AckArgs) {
         store_ack(&self.inner.lock(), ack);
+    }
+
+    /// Note that one task's plugin has been told by this client's own `control`
+    /// command to report the ending of that task.
+    ///
+    /// `on_control` runs this before the `recycle` frame leaves, which is the
+    /// point where the client still knows the order: the plugin's completion and
+    /// the retirement that command triggers race over the session's row, and a
+    /// guard that read the row would answer the same operator action two ways. One
+    /// note per task is kept, so a command issued twice waits for one answer.
+    pub fn owe_controlled_settle(&self, task_id: &str) {
+        let mut inner = self.inner.lock();
+        if !inner.control_settles.iter().any(|owed| owed == task_id) {
+            inner.control_settles.push(task_id.to_string());
+        }
+    }
+
+    /// Whether one completion answers a command noted above, consuming the note.
+    ///
+    /// The note is spent whichever way the settle it authorises goes: a refused
+    /// verdict leaves no second answer owed, and an applied one has travelled the
+    /// command's own completion. A later report for the same task is the plugin
+    /// speaking for itself again, and reads the ordinary door.
+    pub fn take_controlled_settle(&self, task_id: &str) -> bool {
+        let mut inner = self.inner.lock();
+        let Some(at) = inner
+            .control_settles
+            .iter()
+            .position(|owed| owed == task_id)
+        else {
+            return false;
+        };
+        inner.control_settles.swap_remove(at);
+        true
     }
 
     /// The role slice the dispatcher currently runs.

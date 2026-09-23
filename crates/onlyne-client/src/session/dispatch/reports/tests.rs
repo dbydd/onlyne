@@ -1,6 +1,7 @@
 use super::*;
+use crate::session::dispatch::SETTLE_WITHOUT_TURN;
 use onlyne_proto::new_task_id;
-use onlyne_session::{feed_turn_ended, feed_turn_started, is_legal};
+use onlyne_session::{feed_resource_attached, feed_turn_ended, feed_turn_started, is_legal};
 use serde_json::Value;
 use tempfile::{TempDir, tempdir};
 
@@ -230,6 +231,123 @@ fn row_of(state: &DispatchState, task: &str) -> SessionRecord {
         .get_session(task)
         .expect("read row")
         .expect("seeded row")
+}
+
+/// The task record one settle would answer for: opened by this client, and still
+/// owed its verdict.
+fn opened_task(state: &DispatchState, task: &str) {
+    let inner = state.inner.lock();
+    inner
+        .store
+        .open_task(&Causality::root(task.to_string()), "root")
+        .expect("open the task record");
+}
+
+/// One slot serving the task with its delivery handle and its sender. This is the
+/// pair a settle spends: the ack the completed report owes the server, and the
+/// receipt the task's sender reads.
+fn serving_slot(state: &DispatchState, task: &str, msg_id: &str) {
+    let mut inner = state.inner.lock();
+    inner.sessions.insert(
+        task.to_string(),
+        SessionSlot {
+            session: SessionRef {
+                task_id: task.to_string(),
+                backend: "fake".into(),
+                backend_ref: Value::Null,
+                generation: 1,
+            },
+            task_id: Some(task.to_string()),
+            ready: true,
+            payload: None,
+            msg_id: Some(msg_id.to_string()),
+            origin: Some(Principal::role("reviewer")),
+            hop: 0,
+            dropped_at: None,
+            last_beat: None,
+            read_only: false,
+        },
+    );
+}
+
+/// The verdict column one task carries here, with the head line beside it.
+fn verdict(state: &DispatchState, task: &str) -> (TaskState, Option<String>) {
+    let inner = state.inner.lock();
+    let record = inner
+        .store
+        .task(task)
+        .expect("read the task record")
+        .expect("opened task record");
+    (
+        record.task_state,
+        inner.store.out_head(task).expect("read the head column"),
+    )
+}
+
+/// The frames the settle path owes the server and has queued: a delivery ack and a
+/// completion receipt both live here until the link carries them, the ack as one of
+/// this client's own ops and the receipt as the envelope the flusher sends.
+fn queued_ops(state: &DispatchState) -> Vec<ClientOp> {
+    let inner = state.inner.lock();
+    inner
+        .store
+        .flush_order()
+        .expect("read the intent queue")
+        .iter()
+        .map(|row| crate::runtime::intent::op_for_intent(row).expect("queued frame"))
+        .collect()
+}
+
+/// The fault queue one task carries, as kind and reason pairs.
+fn faults(state: &DispatchState, task: &str) -> Vec<(String, String)> {
+    let inner = state.inner.lock();
+    inner
+        .store
+        .list_faults(task)
+        .expect("read the fault queue")
+        .into_iter()
+        .map(|fault| (fault.kind, fault.reason))
+        .collect()
+}
+
+/// Drive one plugin's `complete` report through the door a serving connection's
+/// frame arrives at, and assert the frame was answered. Which connection filed the
+/// report is a separate judgement; the settle door reads the session's own row.
+async fn complete_report(
+    state: &DispatchState,
+    task: &str,
+    outcome: Outcome,
+    head: Option<String>,
+) {
+    on_plugin_report(
+        state,
+        None,
+        Report::Complete {
+            task_id: task.to_string(),
+            outcome,
+            head,
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .expect("a refused settle is answered the way an applied one is");
+}
+
+/// The row of a session whose resource closed while its agent reported nothing:
+/// the barrier passed, the attach landed, and this client then closed the resource,
+/// which is the write that turns the agent dimension to `Gone`.
+fn closed_row(state: &DispatchState, task: &str) {
+    seeded_ready(state, task);
+    let inner = state.inner.lock();
+    feed_resource_attached(&inner.bridge, &inner.store, task).expect("attach the resource");
+    feed_resource_closed(&inner.bridge, &inner.store, task).expect("close the resource");
+    drop(inner);
+    assert_eq!(
+        client_tuple(state, task).agent,
+        AgentState::Gone,
+        "a closed resource kills the agent fact it hosted"
+    );
 }
 
 /// An idle beat over an open task with no receipt is the design's
@@ -755,5 +873,249 @@ async fn a_no_op_beat_still_stamps_the_liveness_clock() {
         client_tuple(&state, &task).agent,
         AgentState::Running,
         "the first beat's dimension is the one that stands"
+    );
+}
+
+/// The field shape the settle door exists for: a plugin reports the ending of a
+/// task whose agent never ran. The ready barrier passed and the assignment left for
+/// this session, and no frame since has put its tuple through a turn, so the verdict
+/// this report would write belongs to work nobody did. The frame is answered as an
+/// applied one — a plugin treats a failed report as a link that died and sends the
+/// same terminal fact again — and every write the settle owns stays unwritten: the
+/// completion intent, the verdict, the head line, the delivery ack. The fault the
+/// refusal files names the reading that refused, which is what an operator sorting
+/// this task's row reads in `onlyne faults`.
+#[tokio::test]
+async fn a_completion_with_no_turn_behind_it_leaves_the_task_open() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    opened_task(&state, &task);
+    serving_slot(&state, &task, "msg-open-task");
+
+    complete_report(&state, &task, Outcome::Done, None).await;
+
+    let (task_state, head) = verdict(&state, &task);
+    assert_eq!(
+        task_state,
+        TaskState::Pending,
+        "a settle with no turn behind it writes no verdict"
+    );
+    assert_eq!(head, None, "the refusal writes no head line");
+    assert!(
+        !queued_ops(&state)
+            .iter()
+            .any(|op| matches!(op, ClientOp::Ack(ack) if ack.accepted)),
+        "the delivery handle this session holds stays unspent: {:?}",
+        queued_ops(&state)
+    );
+    assert_eq!(
+        faults(&state, &task),
+        vec![(
+            SETTLE_WITHOUT_TURN.to_string(),
+            "no turn ran: the agent phase this client holds for the session reads ready"
+                .to_string(),
+        )],
+        "one fault names the reading that refused the frame"
+    );
+    let tuple = client_tuple(&state, &task);
+    assert_eq!(
+        tuple.agent,
+        AgentState::Ready,
+        "the tuple stays where the barrier left it"
+    );
+    assert_eq!(
+        tuple.delivery,
+        DeliveryState::None,
+        "a completion for work that never ran opens no drain"
+    );
+}
+
+/// A completion for a task this client holds no session row for carries no more
+/// authority than one for a session that never left boot: there is nothing here to
+/// have worked. The row is the record the door reads, and its absence is the answer.
+#[tokio::test]
+async fn a_completion_for_a_task_this_client_holds_no_row_for_leaves_no_verdict() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    opened_task(&state, &task);
+
+    complete_report(
+        &state,
+        &task,
+        Outcome::Done,
+        Some("shaped like a result".into()),
+    )
+    .await;
+
+    let (task_state, head) = verdict(&state, &task);
+    assert_eq!(task_state, TaskState::Pending, "no verdict lands");
+    assert_eq!(head, None, "no head line lands");
+    let refused = faults(&state, &task);
+    assert_eq!(refused.len(), 1, "the refusal files one fault: {refused:?}");
+    assert_eq!(refused[0].0, SETTLE_WITHOUT_TURN);
+    assert!(
+        refused[0].1.contains("no session row"),
+        "the fault names the absence it read: {:?}",
+        refused[0].1
+    );
+}
+
+/// The pi plugin's ordinary completion: the model called `onlyne_complete` inside a
+/// turn, and the turn's own beat is in the row this client wrote. An empty head
+/// travels with it — the tool call carried no text, and `onlyne complete
+/// --head-from ledger` reads a row whose head column is blank — and the empty head
+/// is a legitimate answer: the guard reads the session's turn, and a completion
+/// after one settles with whatever line it brings.
+#[tokio::test]
+async fn a_completion_after_a_running_beat_settles_with_an_empty_head() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    opened_task(&state, &task);
+    serving_slot(&state, &task, "msg-worked");
+    assert_eq!(
+        client_tuple(&state, &task).agent,
+        AgentState::Ready,
+        "the barrier alone is the shape the refusal turns away"
+    );
+
+    beat(&state, &task, "running", 1005).await;
+    complete_report(&state, &task, Outcome::Done, None).await;
+
+    let (task_state, head) = verdict(&state, &task);
+    assert_eq!(task_state, TaskState::Done, "the verdict lands");
+    assert_eq!(
+        head,
+        Some(String::new()),
+        "a completion with nothing to summarise still writes its head line"
+    );
+    assert!(
+        faults(&state, &task).is_empty(),
+        "a settle the turn authorises files no fault"
+    );
+    let queued = queued_ops(&state);
+    assert!(
+        queued.iter().any(
+            |op| matches!(op, ClientOp::Ack(ack) if ack.msg_id == "msg-worked" && ack.accepted)
+        ),
+        "the settle spends the delivery handle it found: {queued:?}"
+    );
+    assert!(
+        queued.iter().any(|op| matches!(
+            op,
+            ClientOp::Send(envelope) if envelope.kind == MsgKind::Completion
+        )),
+        "the task's sender is answered with its receipt: {queued:?}"
+    );
+}
+
+/// The idle ladder's own exit: the agent ended its turn, the rungs were spent, and
+/// the plugin files `failed` for the work it never completed. That report travels the
+/// same door as a `done`, and the turn that ended is in the row — so the ladder's
+/// verdict lands, with the head line naming how many rungs were walked.
+#[tokio::test]
+async fn the_idle_ladders_own_failure_settles_after_its_turn_ended() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    opened_task(&state, &task);
+    beat(&state, &task, "running", 1005).await;
+    beat(&state, &task, "idle", 1006).await;
+
+    complete_report(
+        &state,
+        &task,
+        Outcome::Failed,
+        Some("no completion after 3 idle reminders".into()),
+    )
+    .await;
+
+    let (task_state, head) = verdict(&state, &task);
+    assert_eq!(task_state, TaskState::Failed, "the ladder's verdict lands");
+    assert_eq!(
+        head.as_deref(),
+        Some("no completion after 3 idle reminders"),
+        "the head line names the rungs"
+    );
+    assert!(
+        faults(&state, &task).is_empty(),
+        "a turn that ended is a turn that ran"
+    );
+}
+
+/// The recycle path: an operator's `control recycle` is this client's own command,
+/// and the plugin's report answers it. The command's frame and the retirement it
+/// triggers race over the row, so the authority is the note `on_control` wrote before
+/// the frame left, and the verdict lands on a session that never ran a turn because
+/// the command asked for that ending.
+#[tokio::test]
+async fn a_completion_that_answers_the_clients_own_recycle_settles_with_no_turn() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    opened_task(&state, &task);
+    serving_slot(&state, &task, "msg-recycled");
+
+    let held = on_control(
+        &state,
+        &ControlOp::Recycle {
+            task_id: task.clone(),
+            reason: "workspace moved".into(),
+        },
+    )
+    .await
+    .expect("the command is applied");
+    assert!(held, "the command named a task this client holds");
+    complete_report(&state, &task, Outcome::Done, Some("recycled".into())).await;
+
+    let (task_state, head) = verdict(&state, &task);
+    assert_eq!(
+        task_state,
+        TaskState::Done,
+        "the operator's own command answers for a settle with no turn behind it"
+    );
+    assert_eq!(head.as_deref(), Some("recycled"));
+    assert!(
+        faults(&state, &task).is_empty(),
+        "a settle the client asked for files no fault"
+    );
+}
+
+/// A row the client closed is a row that ran nothing. `AgentGone` and
+/// `ResourceClosed` both write `Gone`, and either one reaches it from a session that
+/// never passed its ready barrier, so the death of an agent that never started reads
+/// like the death of one that worked, and the phase carries no answer either way. A
+/// plugin report landing on such a row is refused; the reconnect sweep's own settle is
+/// the write that answers a session whose agent left, and the operator's `control`
+/// command is the other.
+#[tokio::test]
+async fn a_death_with_no_report_owed_is_no_turn_behind_a_settle() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    closed_row(&state, &task);
+    opened_task(&state, &task);
+
+    complete_report(&state, &task, Outcome::Done, None).await;
+
+    let (task_state, head) = verdict(&state, &task);
+    assert_eq!(
+        task_state,
+        TaskState::Pending,
+        "a closed row writes no verdict"
+    );
+    assert_eq!(head, None, "and no head line");
+    let refused = faults(&state, &task);
+    assert_eq!(refused.len(), 1, "one fault names the refusal: {refused:?}");
+    assert!(
+        refused[0].1.contains("gone"),
+        "the fault names the phase it read: {:?}",
+        refused[0].1
     );
 }

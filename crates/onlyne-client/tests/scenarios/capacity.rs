@@ -3,7 +3,7 @@
 
 use crate::common::{
     ReasonBackend, RecordingOutbox, complete_plugin, deliver, mount_plugin, plugin_beat,
-    published_projection, sample_envelope, serve_role_socket, task_delivery,
+    published_projection, run_a_turn, sample_envelope, serve_role_socket, task_delivery,
 };
 use onlyne_adapter::AdapterIo;
 use onlyne_client::session::dispatch::{
@@ -127,6 +127,7 @@ async fn exited_sessions_do_not_hold_the_capacity_cap() {
 
     // Task 1 ends through the completion report, which gives its slot back.
     let first = deliver(&state, &task_delivery("task 1")).await;
+    run_a_turn(&state, &first).await;
     on_plugin_report(
         &state,
         None,

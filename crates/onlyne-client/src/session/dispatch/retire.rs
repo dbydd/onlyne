@@ -479,6 +479,11 @@ impl DispatchState {
             // the id is captured here, and the verdict is on disk before the
             // only handle on it goes away.
             if let Some(owed) = slot.task_id.clone() {
+                // A verdict written here answers the task for good, so a
+                // `control` command that is still waiting for its plugin's report
+                // has nothing left to authorise: the note goes with the verdict
+                // that outranks it.
+                inner.control_settles.retain(|noted| noted != &owed);
                 if let Err(error) = inner.store.settle_task(&owed, TaskState::Failed) {
                     tracing::warn!(
                         task = %owed,

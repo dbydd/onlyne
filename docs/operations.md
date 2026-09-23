@@ -195,7 +195,7 @@ client 死亡期间无人代该 role 判定 session 生命周期。
 
 重启的 client 不对旧账做终态判定：`Acked` 的行是它自己已经答过的，重启不上报它们的死，也不替别的属主判定。
 
-残影判定与冻结上报有四个旋钮：
+残影判定与冻结上报有五个旋钮：
 
 | 配置文件 | 字段 | 默认 | 作用 |
 |---|---|---|---|
@@ -203,6 +203,7 @@ client 死亡期间无人代该 role 判定 session 生命周期。
 | `<workspace>/.onlyne/config.toml` | `reconnect_grace_secs` | 60 | plugin 连接断开后允许其离席的时长，超期由 client 退役它留下的 session 并结清它欠的那件事；仍绑着 task 时该 task 落 `failed`、其投递行以 `session_dead` 拒收，0 关闭，单位秒 |
 | `<server-root>/.onlyne/spec.toml` 的 `[server]` | `stale_watch_secs` | 60 | server 观察器扫描周期，单位秒；0 关闭观察器 |
 | `<server-root>/.onlyne/spec.toml` 的 `[server]` | `heartbeat_grace_secs` | 90 | 属主在线时 `working` 行允许的心跳静默时长，单位秒 |
+| `<server-root>/.onlyne/spec.toml` 的 `[server]` | `ghost_sweep_secs` | 60 | server ghost sweep 扫描周期，单位秒；0 关闭这一趟 |
 
 server 侧观察器按 `[server].stale_watch_secs` 周期扫描，一次扫描跑两个探测器。
 
@@ -230,6 +231,24 @@ completion 落定为 `exited` 之后同 generation 的 heartbeat 把行抬回 `w
 
 两个探测器都只记 fault 并推送 advisory `Event::Fault`。
 
+观察器之外另有一趟 ghost sweep，按 `[server].ghost_sweep_secs` 周期扫描，首个 tick 落在半个周期处。
+
+它读取镜像里 `working` 的行，并把每一行与该任务自己的 ledger 行对齐。
+
+ledger 行已落终态的那一行 `working` 镜像是化石：账已结清，镜像还留着旧字节。
+
+一趟扫描把该行 ledger 已经载明的判定写进镜像：`acked` 读作 `done`，`rejected` 与 `expired` 读作 `failed`。
+
+写入走 `repair` 族共用的那条结清路径：重写 `observed_json`、抬升 `seq`、落库、推送 durable `session_state`。
+
+ledger 行仍是 `queued` 或 `in_flight` 时，这一趟留下该行原样。
+
+每移动一行就在 `ghost_sweeps` 审计表落一行。该行每个字段都取自服务端已经持有的行：task、role、session、generation、`seq_before`、`seq_after`、outcome、evidence、`swept_at`。
+
+`evidence` 文本是标签加上为这次写入作证的那个 ledger 状态，例如 `task_settled:acked`。
+
+`onlyne ghosts [--limit N]` 读这张表，最新的一趟在前。它是 admin 面的读取，client 面上拒收。
+
 `stalled` 由 client 上报，走 role 的 `report` 面：会话的投影 tuple 连续超过 `stall_report_secs` 没有任何一次 `Applied` 变化时，client 发一条 kind 为 `stalled` 的 `Report::Fault`，带 task 与 session 身份。
 
 no-op 心跳抬存活水位，不抬进展水位；`stalled` 只看后者。
@@ -240,7 +259,7 @@ no-op 心跳抬存活水位，不抬进展水位；`stalled` 只看后者。
 
 同一冻结 episode 只报一次，下一次 `Applied` 解除去重。`stall_report_secs = 0` 关闭这条判定。
 
-行不翻面：`stalled` 只落 faults 表并推事件，恢复决策留给 supervisor 与 repair 族。
+行不翻面：`stalled` 只落 faults 表并推事件，恢复决策留给 supervisor 与 repair 族；会移动镜像的只有 ghost sweep 一趟，口径见本节末。
 
 连接断开宽限走另一个旋钮。plugin 连接在没有 `detach` 帧的情况下结束时，client 保留它的 session 与宿主资源，`reconnect_grace_secs` 从这一刻起计。
 
@@ -276,6 +295,16 @@ server 侧观察器不触发 retry。
 server 侧观察器不触发 fail。
 
 server 侧观察器遵守 §8 的零政策红线。
+
+ghost sweep 在这条红线内移动一类行：镜像仍读 `working`、而该任务自己的 ledger 行已落终态的那一类。
+
+它写进镜像的判定来自那条 ledger 行，同一趟把该任务名下仍未结清的投递行一并结清。
+
+另一类 `working` 行它不动：属主离线、而任务仍未结清的那一类。
+
+给这类行写判定就是替活着的活儿定终局，它该得的重排队列会被吞掉。
+
+`stale_working` 仍是这类行唯一的输出，恢复决定仍归 supervisor 与 `repair_*` 族。
 
 存活判定的信源是 pi-onlyne 心跳包本身，pane 与宿主终端的存活状态不在服务端判定面内。
 

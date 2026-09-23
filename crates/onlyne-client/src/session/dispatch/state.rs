@@ -58,6 +58,17 @@ pub(super) struct DispatchInner {
     /// carries it. `on_out` drains the key before it routes, so the recipient
     /// reads one relay per downstream role.
     pub(super) held_handoffs: HashMap<String, Vec<Handoff>>,
+    /// Tasks whose ending this client asked for with a `control` command.
+    ///
+    /// `recycle` and `cancel` reach the agent as a `notify`, so the completion
+    /// that answers the command races the retirement the same command runs, and
+    /// the row's phase at the moment the frame lands is that race's answer. The
+    /// note is written before the frame leaves, so both orders of the race read
+    /// one authority: the operator asked for this ending, and the settle door
+    /// (`settle.rs`) takes the note as its `SettleAuthority::ControlDriven`.
+    /// `on_out` consumes it, and the reconnect sweep drops the note of every task
+    /// it settles — the other way a command's answer stops coming.
+    pub(super) control_settles: Vec<String>,
     /// Connections inside one of their own inbound frames right now.
     ///
     /// A frame handler runs to completion before `adapter_socket` answers the

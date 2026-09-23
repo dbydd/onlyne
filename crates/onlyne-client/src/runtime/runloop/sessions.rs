@@ -62,6 +62,10 @@ pub(super) async fn settle_session_outcome(
         head,
         head_kind.as_deref(),
         &handoffs,
+        // The ending came from this client's own backend, which watched the agent
+        // it is reporting: the never-ran guard belongs to the plugin's door, where
+        // the claimant and the claim are the same party.
+        dispatch::SettleAuthority::ClientOwned,
     )
     .await
 }

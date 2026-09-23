@@ -196,8 +196,8 @@ fn every_vector_matches_its_published_type() {
     let expected = [
         ("req_client", 12usize),
         ("req_gateway", 5),
-        ("req_admin", 19),
-        ("res", 13),
+        ("req_admin", 20),
+        ("res", 14),
         ("ev", 7),
         ("frame", 4),
         ("error", 14),
@@ -210,7 +210,7 @@ fn every_vector_matches_its_published_type() {
             "{family}: vector count"
         );
     }
-    assert_eq!(vectors.len(), 85, "total vector count");
+    assert_eq!(vectors.len(), 87, "total vector count");
 }
 
 #[test]

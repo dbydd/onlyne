@@ -3,8 +3,8 @@
 //! capability gaps of a backend without recycle, report, or inject.
 
 use crate::common::{
-    RecordingOutbox, assert_settled, deliver, eventually, mount_plugin, serve_role_socket,
-    task_delivery,
+    RecordingOutbox, assert_settled, deliver, eventually, mount_plugin, run_a_turn,
+    serve_role_socket, task_delivery,
 };
 use onlyne_adapter::AdapterIo;
 use onlyne_client::session::dispatch::{
@@ -76,6 +76,7 @@ async fn the_second_task_gets_its_own_session_and_connection() {
 
     // It completes while its attached transport keeps the resource tracked,
     // and the next task is reserved for a session of its own.
+    run_a_turn(&state, &first_task).await;
     on_plugin_report(
         &state,
         None,
@@ -189,6 +190,7 @@ async fn a_parked_agent_serves_the_session_it_claimed() {
         .expect("the plugin connection is open");
     assert_eq!(assigned, first_task);
 
+    run_a_turn(&state, &first_task).await;
     on_plugin_report(
         &state,
         None,

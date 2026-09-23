@@ -215,12 +215,13 @@ in memory. Adoption requeue leaves those rows `in_flight` with their tickets reh
 link, which is how a link flap stops handing a running task to a second session. An absent or empty
 list requeues every unacknowledged row, so a client from an earlier build behaves as before.
 
-Admin op vocabulary has nineteen closed verbs: eight reads plus `reload`, `send`, `control`, seven `repair_*` verbs with suffixes `inspect`, `adopt`, `rebind`, `retry`, `fail`, `close`, `ack`, plus `shutdown`:
+Admin op vocabulary has twenty closed verbs: nine reads plus `reload`, `send`, `control`, seven `repair_*` verbs with suffixes `inspect`, `adopt`, `rebind`, `retry`, `fail`, `close`, `ack`, plus `shutdown`:
 - `status`
 - `roles`
 - `sessions`
 - `ledger`
 - `faults`
+- `query_ghost_sweeps`
 - `watch`
 - `history`
 - `spec_diff`
@@ -322,6 +323,7 @@ Server database persists:
 - `ledger`
 - `events`
 - `faults`
+- `ghost_sweeps`
 - `inbox_cursors`
 
 Client database persists:
@@ -342,7 +344,7 @@ Persist at least:
 - outbound intents with `op_id`, attempt, state, next attempt time, receipt, and last error
 - event cursor/checkpoint state where protocol requires it
 
-Schema gates expect `('onlyne-server',3,1)` or `('onlyne-client',2,1)`. A mismatch, an old table, or a `swarm` prefix prints `onlyne: unsupported schema; v1.0.0 does not migrate`.
+Schema gates expect `('onlyne-server',4,1)` or `('onlyne-client',2,1)`. A mismatch, an old table, or a `swarm` prefix prints `onlyne: unsupported schema; v1.0.0 does not migrate`.
 
 Do not introduce Redis, Kafka, Postgres, Docker services, or anything similarly heavy.
 
@@ -376,7 +378,10 @@ Keep launchd-specific logic out of core business code.
 - Avoid giant generic trait hierarchies unless they clearly reduce complexity
 - Keep one adapter protocol with two mount kinds: agent on client and gateway on server
 - Keep plugin crates limited to SDK traits, protocol types, and platform implementation code
-- Keep automatic policy out of the delivery path; supervisor roles and admin repair verbs own recovery choices
+- Keep automatic policy out of the delivery path; supervisor roles and admin repair verbs own recovery
+  choices. One sweep is the exception the operator authorized: the ghost sweep moves a mirror row whose
+  task account already reached a terminal state, and never one whose work is still owed, so it decides
+  nothing about live work (`[server].ghost_sweep_secs`, default 60, `0` disables it)
 - Enforce binary boundaries through feature gates
 - Keep platform SDKs out of `onlyne-server` and `onlyne-client`
 - Keep ledger, router, and TLS server internals out of `onlyne-gateway`

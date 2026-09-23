@@ -10,6 +10,7 @@ pub mod events;
 pub mod faults;
 pub mod gateway_host;
 pub mod generate;
+pub mod ghosts;
 pub mod projection;
 pub mod relay;
 pub mod router;
@@ -50,6 +51,7 @@ pub async fn serve(state: Arc<crate::state::State>) -> anyhow::Result<()> {
     });
     let sweep_task = spawn_expiry_sweep(state.clone());
     let stale_task = spawn_stale_working_watch(state.clone());
+    let ghost_task = spawn_ghost_sweep(state.clone());
     let role_state = state.clone();
     let role_task = tokio::spawn(async move {
         if let Err(error) = role_listener(role_state, listener, tls_config).await {
@@ -63,6 +65,9 @@ pub async fn serve(state: Arc<crate::state::State>) -> anyhow::Result<()> {
     role_task.abort();
     sweep_task.abort();
     if let Some(task) = stale_task {
+        task.abort();
+    }
+    if let Some(task) = ghost_task {
         task.abort();
     }
     if let Some(task) = signal_task {
@@ -122,6 +127,36 @@ pub fn spawn_stale_working_watch(
                 }
                 Ok(_) => {}
                 Err(error) => tracing::warn!(error = %error, "the stale working watch failed"),
+            }
+        }
+    }))
+}
+
+/// Settle the mirror rows whose own task has already settled.
+///
+/// The first tick fires at half the period, so a pass lands between two of the
+/// stale watch's fault writes at the default knobs. `0` disables the sweep, and
+/// the answer is `None` for a server that runs without it.
+pub fn spawn_ghost_sweep(state: Arc<crate::state::State>) -> Option<tokio::task::JoinHandle<()>> {
+    let seconds = state
+        .spec_snapshot()
+        .map(|spec| spec.server.ghost_sweep_secs)
+        .unwrap_or(onlyne_config::DEFAULT_GHOST_SWEEP_SECS);
+    if seconds == 0 {
+        return None;
+    }
+    let period = std::time::Duration::from_secs(seconds);
+    Some(tokio::spawn(async move {
+        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period / 2, period);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match ghosts::sweep_once(&state) {
+                Ok(swept) if !swept.is_empty() => {
+                    tracing::info!(count = swept.len(), "ghost sessions swept");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(error = %error, "the ghost sweep failed"),
             }
         }
     }))

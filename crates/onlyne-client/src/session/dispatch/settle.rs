@@ -3,8 +3,62 @@ use super::*;
 use super::outbound::{store_ack, transport_envelope};
 use super::projection::{note_verdict, sync_session};
 use super::retire::{release_locked, retire_idle_locked};
-use super::state::{DispatchState, slot_key_named, slot_key_serving_task, slot_task};
+use super::state::{
+    DispatchInner, DispatchState, slot_key_named, slot_key_serving_task, slot_task,
+};
 use super::transport::names_session;
+
+/// Fault kind for a completion this client refused for want of a turn. The word
+/// is what `onlyne faults` and `onlyne-client status` carry, so it names the
+/// reading that refused the frame.
+pub const SETTLE_WITHOUT_TURN: &str = "settle_without_turn";
+
+/// Who asked for one settle, which is what decides whether the never-ran guard
+/// reads it.
+///
+/// The guard exists for the door where the claim and the claimant are the same
+/// party: a plugin reports its own ending, and a session whose agent never ran
+/// can report one too. The other two doors carry the client's own act, so their
+/// evidence is already in this process — a self-driven backend that watched its
+/// agent end, or an operator's `control` command that asked for the ending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettleAuthority {
+    /// A `complete` report from a plugin connection. Guarded.
+    PluginReport,
+    /// A terminal fact this client reached through its own eyes: the ending a
+    /// self-driven backend reported through `outcome_loop`. Unguarded: this
+    /// client is the witness of the work it watched.
+    ClientOwned,
+    /// The answer to a `control recycle` or `control cancel` this client issued
+    /// for the task. Unguarded: the operator asked for this ending, and the
+    /// plugin's report and the retirement this command runs race over the row,
+    /// so the row's phase at the moment the frame lands decides nothing.
+    ControlDriven,
+}
+
+/// Whether one session's own row carries a turn, and the agent-phase word it
+/// holds for the operator's reading.
+///
+/// The row is this client's record: a beat's `agent` dimension reaches it
+/// through the `(generation, seq)` gate in `apply_persist`, and the ready
+/// barrier's `feed_ready` writes `Ready` into the same column. `Running` and
+/// `Idle` are the two phases a turn puts the tuple through
+/// (`crates/onlyne-session/src/lifecycle/state.rs:11`), so one of them is the
+/// answer. `Booting`, `Ready` and `Gone` are each a session that has run nothing
+/// this client can point at: `Gone` is written by `AgentGone` and
+/// `ResourceClosed` from any live phase, which leaves the death of an agent that
+/// never started reading exactly like the death of one that worked. A task this
+/// client holds no row for answers the same way, with its own word in the reason.
+fn turn_recorded(inner: &DispatchInner, task_id: &str) -> (bool, String) {
+    let Ok(Some(row)) = inner.store.get_session(task_id) else {
+        return (false, "no session row".to_string());
+    };
+    let agent = stored_observation(&inner.store, Some(&row)).agent;
+    (
+        matches!(agent, AgentState::Running | AgentState::Idle),
+        row.agent_state,
+    )
+}
 
 /// Settle one finished task: relay what its report asked to hand on, publish the
 /// verdict, and answer the sender.
@@ -17,6 +71,14 @@ use super::transport::names_session;
 /// A second verdict for a task whose record is already settled is refused whole:
 /// the first verdict stands and this one leaves no receipt, no delivery ack and
 /// no binding hand-back behind.
+///
+/// A plugin report with no turn behind it is refused whole the same way, ahead of
+/// every write this call makes: the drain opens over work that never ran, so the
+/// completion intent, the verdict, the `out_head` line and the delivery ack all
+/// stay unwritten and the row is left for the server's requeue. The frame is
+/// answered as an applied one — a plugin treats a failed report as a link that
+/// died, and sends the same terminal fact again — and the fault the refusal
+/// leaves behind names the reading that refused.
 pub async fn on_out(
     state: &DispatchState,
     task_id: &str,
@@ -24,7 +86,31 @@ pub async fn on_out(
     head: Option<String>,
     head_kind: Option<&str>,
     handoffs: &[Handoff],
+    asked: SettleAuthority,
 ) -> Result<()> {
+    if asked == SettleAuthority::PluginReport {
+        let inner = state.inner.lock();
+        let (turn, phase) = turn_recorded(&inner, task_id);
+        if !turn {
+            let reason = format!(
+                "no turn ran: the agent phase this client holds for the session reads {phase}"
+            );
+            onlyne_session::record_fault(
+                &inner.store,
+                task_id,
+                SETTLE_WITHOUT_TURN,
+                "client",
+                &reason,
+            )?;
+            tracing::warn!(
+                task = %task_id,
+                ?outcome,
+                phase = %phase,
+                "a completion arrived for a session that never ran a turn; the task stays open"
+            );
+            return Ok(());
+        }
+    }
     let settled = {
         let mut inner = state.inner.lock();
         let verdict = settle(&inner.bridge, &inner.store, task_id)?;

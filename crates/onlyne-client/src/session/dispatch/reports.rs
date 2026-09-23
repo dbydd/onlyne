@@ -2,7 +2,7 @@ use super::*;
 
 use super::projection::{note_verdict, sync_session};
 use super::retire::on_recycled;
-use super::settle::on_out;
+use super::settle::{SettleAuthority, on_out};
 use super::state::note_beat;
 use super::transport::serves_session;
 
@@ -25,10 +25,19 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
     let held = state.holds_task(task_id);
     match op {
         ControlOp::Recycle { reason, .. } => {
+            // The command asks this session's plugin for its own ending, so the
+            // completion that answers it travels the plugin's door carrying the
+            // client's authority. The note goes on before the frame leaves: the
+            // report and the retirement below race over the row, and the note is
+            // the half of that race this client decides.
+            state.owe_controlled_settle(task_id);
             state.recycle_plugin(task_id, reason, None).await;
             on_recycled(state, task_id, onlyne_session::CloseReason::Operator)?;
         }
         ControlOp::Cancel { reason, .. } => {
+            // The same note for the same reason: a cancel ends the task on the
+            // operator's word, and the plugin's `cancelled` report answers it.
+            state.owe_controlled_settle(task_id);
             state
                 .recycle_plugin(task_id, reason, Some(Outcome::Cancelled))
                 .await;
@@ -233,7 +242,18 @@ pub async fn on_plugin_report(
             // A plugin reports its own ending, and it hands nothing on: the
             // report file is the only place handoff lines are put down, and that
             // is a route a plugin-backed session does not have.
-            on_out(state, &task_id, outcome, head, None, &[]).await?;
+            //
+            // The one completion this client has asked for by name arrives on the
+            // same frame, so the note is what tells the two apart. Everything else
+            // that leaves this arm is the plugin's own claim about work it did, and
+            // `on_out` reads the session's row for that claim, refused whole when
+            // the row says no turn ran.
+            let asked = if state.take_controlled_settle(&task_id) {
+                SettleAuthority::ControlDriven
+            } else {
+                SettleAuthority::PluginReport
+            };
+            on_out(state, &task_id, outcome, head, None, &[], asked).await?;
             false
         }
         Report::Fault {

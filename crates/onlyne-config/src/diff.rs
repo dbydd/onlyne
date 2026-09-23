@@ -186,6 +186,9 @@ fn changed_server_fields(before: &Spec, after: &Spec) -> Vec<String> {
     if before.server.heartbeat_grace_secs != after.server.heartbeat_grace_secs {
         fields.push("heartbeat_grace_secs".to_string());
     }
+    if before.server.ghost_sweep_secs != after.server.ghost_sweep_secs {
+        fields.push("ghost_sweep_secs".to_string());
+    }
     if before.server.agent_package != after.server.agent_package {
         fields.push("agent_package".to_string());
     }

@@ -94,6 +94,13 @@ where it is read.
   after the bound reports the task `failed` and ends the session. An errored turn still
   reports `failed` at once. A role whose agent never calls the tool now sees its work fail
   rather than silently succeed.
+
+- store and proto: the server database moves to schema marker 4, and the admin vocabulary to
+  twenty verbs. The new `ghost_sweeps` table is what carries the marker; the new
+  `query_ghost_sweeps` read is what carries the verb. A database written by marker 3 is refused
+  with the same sentence every older layout earns — `onlyne: unsupported schema; v1.0.0 does not
+  migrate` — so an operator restarts a root on a fresh `state.db`. The client database keeps
+  marker 2 and needs nothing.
 - client: the startup residual reconcile is gone, with `[client] stale_grace_secs`,
   `ClientInit::with_stale_grace_secs`, `onlyne_client::session::stale` and its tests.
   `SESSION_DEAD` moves to `onlyne_client::session::dispatch`, where the death path that
@@ -206,6 +213,12 @@ where it is read.
   it still prints the name: those record messages that named a principal, and hiding them
   would erase the operator's own audit trail. The `e` key and the hidden-by-default control
   spokes it revealed are gone with it, so an aggregate role's hops draw like any other.
+- tui: page 2's ledger rows carry a settlement reason. The `from→to` cell is the table's one
+  flexible column, so the reason rides its tail under the `reason=` label the task panel already
+  prints and `onlyne ledger`'s help describes, cut on a character boundary where the column has
+  less room than the word needs. A row whose ledger stored nothing prints the hop it printed
+  before, byte for byte, at every width, and below roughly 130 columns the row prints that hop
+  alone while the task detail panel keeps the whole word.
 
 ### Added
 
@@ -223,6 +236,21 @@ where it is read.
   copies it archives. The three groups are `role` (`onlyne-role` and
   `onlyne-role-payload-v2`), `supervisor` (`onlyne-supervisor`) and `dev` (the repository
   and CLI development guide, `onlyne`).
+
+- server: the ghost sweep. A session row whose stored projection still reads `working` while its
+  task's own ledger row has already reached a terminal state is a mirror no client will ever
+  write again, and the server now moves it: the projection is rewritten with the outcome read
+  off that ledger row (`acked` → `done`, `rejected` and `expired` → `failed`), the sequence
+  advances, a `session_state` event travels, and the pass records one row in `ghost_sweeps`
+  naming the session, both sequences, the outcome and the evidence it acted on
+  (`task_settled:acked`, `task_settled:rejected`, …). It runs on its own interval,
+  `[server].ghost_sweep_secs`, sixty seconds by default and `0` to disable it. One class is
+  deliberately out of its reach: a `working` row whose owner role is offline while the task is
+  still open, where writing an ending would decide live work and swallow the requeue that work is
+  owed. `stale_working` stays that class's only output, and its recovery stays with the
+  supervisor and the `repair_*` verbs.
+- cli: `onlyne ghosts [--limit N]` reads the sweep's audit rows, newest first, on the admin
+  surface.
 - `skills/onlyne-role-payload-v2/SKILL.md`: its `description` value is quoted. The line was
   an unquoted YAML scalar carrying `handoff:` and `Triggers:` inside its prose, and a reader
   takes each `": "` for the start of a nested mapping: `npx skills add` skipped this file
@@ -336,6 +364,20 @@ where it is read.
   sweep retired it — `acked=6` of the ring's twelve rows, and a child row refused
   `session_dead`. Both mount one agent per session now, synchronized on the ledger's own settle
   rather than on a clock, and both pass (13 s and 5 s).
+- client: a completion settles only where a turn ran. A `Report::Complete` for a session that
+  never left `Booting`/`Ready`, or that this client holds no row for, used to write the verdict
+  the plugin claimed: the task read `done` with whatever head the frame carried, and the ledger
+  answered a completion for work that never happened. The settle path now takes the authority it
+  is answering (`SettleAuthority::{PluginReport, ClientOwned, ControlDriven}`) and judges only the
+  plugin-report door, against the agent phase this client's own reducer wrote for the row —
+  accepted at `Running` and `Idle`, refused at `Booting`, `Ready`, `Gone`, and with no row. A
+  refusal writes no drain, no verdict, no `out_head` and no completed-kind ack, answers the frame
+  the way an applied one is answered so a plugin reads no link failure, and files a
+  `settle_without_turn` fault naming the phase it read. `Gone` is refused deliberately:
+  `AgentGone` and `ResourceClosed` are reachable from `Booting` and `Ready`, so neither is
+  evidence that a turn ran. Empty head is not the predicate — the pi plugin's own
+  `head = explicit || task?.head || ""` and `onlyne complete --head-from ledger` both produce a
+  legitimate empty one.
 
 ### Tests
 
@@ -436,6 +478,28 @@ where it is read.
   clock it left behind — `a beat that changed nothing left a working agent's clock at
   31.200307166s`, past the thirty-second window — and with it the stamp is this moment's while
   the stored dimension stays `running`.
+- client: the settle guard holds one case per rule —
+  `a_completion_with_no_turn_behind_it_leaves_the_task_open`,
+  `a_completion_for_a_task_this_client_holds_no_row_for_leaves_no_verdict`,
+  `a_death_with_no_report_owed_is_no_turn_behind_a_settle`, and
+  `a_completion_that_answers_the_clients_own_recycle_settles_with_no_turn` for the authority
+  split, with `a_completion_after_a_running_beat_settles_with_an_empty_head` and
+  `the_idle_ladders_own_failure_settles_after_its_turn_ended` pinning what the guard must keep
+  working (`crates/onlyne-client/src/session/dispatch/`). The scenario fixtures gained the beat
+  that stands in for a turn: neutralising it fails fourteen existing cases by name, which is the
+  evidence that the fixtures had been completing without one.
+- server and store: the sweep's own cases, covering the fossil written to `exited` with the
+  outcome its ledger row carries, a `working` row whose task is still open left alone, the knob
+  at `0` disabling the pass, and the audit table's round trip
+  (`crates/onlyne-server/tests/ghost_sweep.rs`, `crates/onlyne-store/src/server/tests.rs`).
+- tui: a row carrying a reason renders it in the hop cell and a row without one renders exactly
+  what it rendered before, at a wide and a narrow page size.
+- testkit: the fake agent's beat is built as the frame it is. `{"report":"heartbeat"}` carried the
+  plugin's sequence base inside the observed body while the frame's own `seq` came from the
+  adapter sender, which starts at one, and the client stamps a beat with the frame's pair: every
+  fake beat landed at or below the dispatch watermark and was dropped as a stale sequence. The
+  step now builds `Report::Heartbeat` with `seq: SEQ_BASE + beats`, so the applied, no-op and
+  stale paths a real plugin drives are all reachable from a script.
 - testkit: `crates/onlyne-testkit/e2e/reconnect-requeue.sh` is rewritten to mount one
   `onlyne-agent-fake` per session, which is what lets it prove what it was written for: the
   rows a killed client leaves behind, their redelivery in send order, one ack per row under
@@ -558,6 +622,17 @@ with `BIN_DIR=target/debug`.
   link as well as when nobody answers; `run`'s exit-5 sentence names the workspace `backend`
   key beside `ONLYNE_BACKEND`; and `roles`, `sessions`, `watch`, `history` and `agent` gained
   the one description line each they were missing.
+- `AGENTS.md` §6 and §8: the admin vocabulary is twenty verbs and `query_ghost_sweeps` is among
+  them; the server database persists `ghost_sweeps` beside `faults` and `inbox_cursors`; and §11's
+  rule that automatic policy stays out of the delivery path now names its one exception, the ghost
+  sweep, with the bound that keeps it honest — it moves a mirror row whose task account already
+  reached a terminal state and never one whose work is still owed.
+- `docs/operations.md`: the sweep's own passage — the interval knob, the row it reads, the class it
+  refuses to touch, the audit row's fields, and the `onlyne ghosts` read — plus the sentence that
+  said a row never turns over now points at the one pass that does.
+- `docs/v1-ARCHITECTURE.md`: both lists that name the admin verbs (the socket table and the
+  `server` group's nouns) carry the twentieth.
+- `.agents/skills/onlyne/SKILL.md`: the schema marker the tree writes reads server 4.
 - `onlyne-client init`'s generated `config.toml`: its `reconnect_grace_secs` comment names
   what the sweep does to a bound task, and its `timeout` comment states what this tree does
   with those budgets.

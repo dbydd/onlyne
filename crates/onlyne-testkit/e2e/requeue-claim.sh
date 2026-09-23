@@ -50,7 +50,7 @@ allowed_targets = ["planner"]'
 # The agent sleeps 9000 ms inside the assignment. That window carries the
 # restart, the reconnect, and every ledger check below while the session is
 # genuinely live in the client's memory.
-printf '{"hello":{"capabilities":["register","report","inject","recycle"]},"steps":[{"wait_assign":true},{"assert_prose_equals":"%s"},{"report":"ready"},{"sleep_ms":9000},{"complete":{"outcome":"done","head_from":"assign_body"}}]}\n' \
+printf '{"hello":{"capabilities":["register","report","inject","recycle"]},"steps":[{"wait_assign":true},{"assert_prose_equals":"%s"},{"report":"ready"},{"report":"heartbeat"},{"sleep_ms":9000},{"complete":{"outcome":"done","head_from":"assign_body"}}]}\n' \
   "$E2E_PROSE" > "$tmp/planner-script.json"
 
 "$CLIENT" run --workspace "$tmp/planner" >"$tmp/client.log" 2>&1 &

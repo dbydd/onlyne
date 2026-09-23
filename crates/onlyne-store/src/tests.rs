@@ -83,7 +83,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-server".to_string(), 3, 1));
+        assert_eq!(marker, ("onlyne-server".to_string(), 4, 1));
 
         let (_dir, client_path) = temp_db("client.db");
         ClientStore::open(&client_path).unwrap();
@@ -1248,12 +1248,12 @@ mod ledger_gates {
     }
 
     #[test]
-    fn ensure_schema_adds_expires_at_in_place_on_a_version_3_file() {
+    fn ensure_schema_adds_expires_at_in_place_on_a_version_4_file() {
         let (_dir, path) = temp_db("server.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL);
-             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',3,1);
+             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',4,1);
              CREATE TABLE ledger(
                msg_id TEXT PRIMARY KEY,
                op_id TEXT UNIQUE,
@@ -1287,7 +1287,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-server".to_string(), 3, 1));
+        assert_eq!(marker, ("onlyne-server".to_string(), 4, 1));
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(ledger)")
             .unwrap()
@@ -1319,12 +1319,12 @@ mod ledger_gates {
     }
 
     #[test]
-    fn ensure_schema_adds_requeued_in_place_on_a_version_3_file() {
+    fn ensure_schema_adds_requeued_in_place_on_a_version_4_file() {
         let (_dir, path) = temp_db("server.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL);
-             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',3,1);
+             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',4,1);
              CREATE TABLE ledger(
                msg_id TEXT PRIMARY KEY,
                op_id TEXT UNIQUE,
@@ -1359,7 +1359,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-server".to_string(), 3, 1));
+        assert_eq!(marker, ("onlyne-server".to_string(), 4, 1));
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(ledger)")
             .unwrap()

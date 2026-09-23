@@ -273,6 +273,11 @@ fn spec_template(name: &str, listen: &str, cert_pin: &str) -> String {
          heartbeat_timeout_ms = 30000\n\
          stale_watch_secs = 60\n\
          heartbeat_grace_secs = 90\n\
+         # `ghost_sweep_secs` sets the ghost sweep's scan interval. One pass\n\
+         # settles a `working` session row whose own task ledger row already\n\
+         # reached a terminal state, and records the write in `ghost_sweeps`.\n\
+         # 0 disables the sweep.\n\
+         ghost_sweep_secs = 60\n\
          # `requeue_max_attempts` caps the automatic requeues one in-flight row\n\
          # may take, and `requeue_ttl_secs` bounds its age from enqueue. Both\n\
          # default to 0, which leaves the requeue gate uncapped.\n\

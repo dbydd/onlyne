@@ -3,7 +3,7 @@
 
 use crate::common::{
     ReasonBackend, RecordingOutbox, assert_settled, complete_plugin, complete_raw_plugin, deliver,
-    eventually, mount_plugin, mount_raw_plugin, published_projection, sample_envelope,
+    eventually, mount_plugin, mount_raw_plugin, published_projection, run_a_turn, sample_envelope,
     serve_role_socket, task_delivery,
 };
 use onlyne_client::session::dispatch::{DispatchState, dispatch, on_plugin_report};
@@ -41,6 +41,7 @@ async fn a_settled_session_whose_plugin_left_is_retired() {
         .await
         .expect("the mounted session is handed its payload");
 
+    run_a_turn(&state, &first_task).await;
     on_plugin_report(
         &state,
         None,
@@ -102,6 +103,7 @@ async fn automatic_retirement_survives_a_backend_close_failure() {
     let envelope = sample_envelope("planner", "task A");
     let task_id = envelope.task_id().unwrap().to_string();
     dispatch(&state, &envelope).unwrap();
+    run_a_turn(&state, &task_id).await;
     on_plugin_report(
         &state,
         None,

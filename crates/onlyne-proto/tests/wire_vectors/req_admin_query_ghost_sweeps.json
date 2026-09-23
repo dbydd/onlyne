@@ -1,0 +1,1 @@
+{"frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"query_ghost_sweeps\",\"args\":50}", "encoding": "u32_be_length_prefix_plus_utf8_json", "note": "admin query_ghost_sweeps reads the ghost sweep's audit rows newest first, with the row limit as the whole args value"}

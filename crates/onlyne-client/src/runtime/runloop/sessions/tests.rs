@@ -2,7 +2,7 @@ use super::{accept_delivery, outcome_loop};
 use crate::runtime::intent::IntentMachine;
 use crate::runtime::runloop::config::{DEFAULT_INTENT_ATTEMPTS, RunState, default_intent_backoff};
 use crate::runtime::runloop::test_support::{pending_intent_ops, test_state};
-use crate::session::dispatch::DispatchState;
+use crate::session::dispatch::{DispatchState, SettleAuthority, on_plugin_report};
 use anyhow::Result;
 use onlyne_layout::RoleWorkspace;
 use onlyne_net::NetError;
@@ -21,6 +21,41 @@ use std::time::Duration;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
+
+/// One `running` beat through the plugin's door.
+///
+/// The two settles below are a plugin reporting its own session's ending, so they
+/// arrive at the door that reads the session's row for a turn before it writes a
+/// verdict. The beat is what makes the row answer that reading; the shape where it
+/// has no turn behind it is `on_out`'s own case, held in
+/// `crate::session::dispatch::reports::tests`.
+async fn ran_a_turn(state: &RunState, task_id: &str) {
+    on_plugin_report(
+        &state.dispatch,
+        None,
+        Report::Heartbeat {
+            task_id: task_id.to_string(),
+            session_id: String::new(),
+            generation: 1,
+            seq: 1005,
+            observed: serde_json::json!({
+                "version": { "generation": 1, "seq": 1005 },
+                "generation_live": true,
+                "isolate_after": 1,
+                "terminate_after": 3,
+                "mismatch_count": 0,
+                "agent": "running",
+                "delivery": "none",
+                "resource": "attached",
+                "recovery": "none",
+            }),
+            projection: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .expect("the beat is handled");
+}
 
 /// Real ACP v1 peer used by the client-level delivery test below. The ready
 /// marker is written by the test outbox when the Ready report leaves; the
@@ -365,6 +400,7 @@ async fn a_redelivered_finished_task_is_acked_and_runs_nowhere() {
         "the first delivery takes a session for the task"
     );
 
+    ran_a_turn(&state, &task_id).await;
     crate::session::dispatch::on_out(
         &state.dispatch,
         &task_id,
@@ -372,6 +408,7 @@ async fn a_redelivered_finished_task_is_acked_and_runs_nowhere() {
         Some("done".into()),
         None,
         &[],
+        SettleAuthority::PluginReport,
     )
     .await
     .expect("the completion files");
@@ -430,6 +467,7 @@ async fn a_task_ended_without_a_completion_stays_eligible_for_its_retry() {
     )
     .await;
 
+    ran_a_turn(&state, &task_id).await;
     crate::session::dispatch::on_out(
         &state.dispatch,
         &task_id,
@@ -437,6 +475,7 @@ async fn a_task_ended_without_a_completion_stays_eligible_for_its_retry() {
         Some("crashed".into()),
         None,
         &[],
+        SettleAuthority::PluginReport,
     )
     .await
     .expect("the failure files");

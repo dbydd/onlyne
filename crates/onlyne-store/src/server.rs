@@ -5,7 +5,7 @@ use std::time::Duration;
 use chrono::{DateTime, SecondsFormat, Utc};
 use onlyne_proto::{
     Envelope, Event, FaultEvent, LedgerQuery, LedgerState, LedgerStateEvent, Lifecycle, MsgKind,
-    Principal, QueryFaultsArgs, QuerySessionsArgs,
+    Outcome, Principal, QueryFaultsArgs, QuerySessionsArgs,
 };
 use rusqlite::types::{Type, Value as SqlValue};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
@@ -22,8 +22,12 @@ use crate::transition_allowed;
 /// place, so they never moved the marker. Version 3 is the tuple rebuild: the
 /// `sessions` row lost its `public_lifecycle` column, which cannot be taken
 /// back from an existing file, so an old layout is refused rather than carried.
+/// Version 4 adds the `ghost_sweeps` audit table: the server settles a `working`
+/// mirror row whose task ledger row already reached a terminal state, and each
+/// settlement writes one row there. A marker-3 file carries no such table, so it
+/// stops at the door on the same string every other mismatch prints.
 /// The client store keeps its own revision.
-const SERVER_SCHEMA_VERSION: i64 = 3;
+const SERVER_SCHEMA_VERSION: i64 = 4;
 const PROTOCOL_VERSION: i64 = 1;
 const SERVER_MARKER: &str = "onlyne-server";
 const DEFAULT_LIMIT: i64 = 100;
@@ -124,6 +128,25 @@ CREATE TABLE IF NOT EXISTS faults(
 );
 CREATE INDEX IF NOT EXISTS faults_task_kind_generation_idx ON faults(task_id,kind,generation);
 CREATE INDEX IF NOT EXISTS faults_state_idx ON faults(state);
+-- The ghost sweep's own audit trail, one row per `working` mirror row the server
+-- settled because the task's ledger row had already reached a terminal state.
+-- `seq_before` and `seq_after` are the mirror row's two versions, so an operator
+-- reads the exact write the pass made straight off this row.
+CREATE TABLE IF NOT EXISTS ghost_sweeps(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  seq_before INTEGER NOT NULL,
+  seq_after INTEGER NOT NULL,
+  outcome TEXT NOT NULL,
+  evidence TEXT NOT NULL,
+  swept_at TEXT NOT NULL
+);
+-- The listing's own reading order, on the same terms as the sessions index
+-- above: ascending, so `swept_at DESC, rowid DESC` walks it backwards.
+CREATE INDEX IF NOT EXISTS ghost_sweeps_swept_at_idx ON ghost_sweeps(swept_at);
 CREATE TABLE IF NOT EXISTS inbox_cursors(
   role TEXT PRIMARY KEY,
   last_msg_id TEXT,
@@ -294,6 +317,29 @@ pub struct FaultQuery {
     pub kind: Option<String>,
     pub open_only: bool,
     pub limit: u32,
+}
+
+/// One settlement the server's ghost sweep recorded in its own audit table.
+///
+/// `seq_before` and `seq_after` are the mirror row's two versions. The sweep
+/// writes through the same settlement path a `repair_*` verb uses, and that path
+/// bumps `seq` by one, so the pair names the exact write an operator is reading
+/// about. `swept_at` holds the kernel's unix seconds and the column holds the
+/// RFC 3339 text this crate's conversion helpers produce.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhostSweepRow {
+    pub id: i64,
+    pub task_id: String,
+    pub role: String,
+    pub session_id: String,
+    pub generation: i64,
+    pub seq_before: i64,
+    pub seq_after: i64,
+    /// The verdict written onto the mirror row, read off the task's ledger row.
+    pub outcome: Outcome,
+    /// What justified the sweep: the evidence tag plus the ledger state it read.
+    pub evidence: String,
+    pub swept_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -807,6 +853,41 @@ impl ServerLedger {
         })
     }
 
+    /// Persist one ghost-sweep audit row and return its id.
+    pub fn record_ghost_sweep(&self, sweep: &GhostSweepRow) -> StoreResult<i64> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO ghost_sweeps(task_id,role,session_id,generation,seq_before,seq_after,outcome,evidence,swept_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            params![
+                sweep.task_id,
+                sweep.role,
+                sweep.session_id,
+                sweep.generation,
+                sweep.seq_before,
+                sweep.seq_after,
+                string_tag(&sweep.outcome)?,
+                sweep.evidence,
+                unix_to_rfc3339(sweep.swept_at)
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// The recorded sweeps, newest first.
+    ///
+    /// The order is the sessions listing's order: `swept_at DESC, rowid DESC`
+    /// against an ascending index, which SQLite walks backwards. `rowid` breaks
+    /// the ties inside one second, and it breaks them in the order the pass
+    /// wrote them.
+    pub fn list_ghost_sweeps(&self, limit: u32) -> StoreResult<Vec<GhostSweepRow>> {
+        let conn = self.conn()?;
+        let rows = conn
+            .prepare(&ghost_sweeps_list_sql())?
+            .query_map(params![sql_limit(limit)], ghost_sweep_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn cursor_for(&self, role: &str) -> StoreResult<Option<CursorRow>> {
         let conn = self.conn()?;
         Ok(conn
@@ -926,8 +1007,10 @@ fn ensure_schema(
     Ok(())
 }
 
-/// An existing database keeps its rows; the marker gate stays at version 2 so a
-/// live workspace keeps opening.
+/// Add `ledger.expires_at` to a file whose ledger lacks it.
+///
+/// The column landed in place, so an existing database keeps its rows and a
+/// file at the current marker keeps opening.
 fn ensure_ledger_expires_at(conn: &Connection) -> StoreResult<()> {
     let columns = conn
         .prepare("PRAGMA table_info(ledger)")?
@@ -940,8 +1023,10 @@ fn ensure_ledger_expires_at(conn: &Connection) -> StoreResult<()> {
     Ok(())
 }
 
-/// An existing database keeps its rows; the marker gate stays at version 2 so a
-/// live workspace keeps opening.
+/// Add `ledger.requeued` to a file whose ledger lacks it.
+///
+/// The column landed in place, so an existing database keeps its rows and a
+/// file at the current marker keeps opening.
 fn ensure_ledger_requeued(conn: &Connection) -> StoreResult<()> {
     let columns = conn
         .prepare("PRAGMA table_info(ledger)")?
@@ -1071,6 +1156,8 @@ fn ledger_by_op_id(conn: &Connection, op_id: &str) -> StoreResult<Option<LedgerR
 
 const LEDGER_COLUMNS: &str = "msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json,hop,expires_at,requeued";
 const FAULT_COLUMNS: &str = "id,task_id,role,session_id,generation,seq,desired_json,observed_json,intent,attempt,backend_ref,kind,reason,state,created_at";
+const GHOST_SWEEP_COLUMNS: &str =
+    "id,task_id,role,session_id,generation,seq_before,seq_after,outcome,evidence,swept_at";
 
 /// The sessions listing read, as SQL. Named so the caller and the plan test run
 /// one text: the order's tie key is the primary key because an explicit `rowid`
@@ -1086,6 +1173,14 @@ fn sessions_list_sql(where_sql: &str) -> String {
 fn ledger_list_sql(where_sql: &str) -> String {
     format!(
         "SELECT {LEDGER_COLUMNS} FROM ledger{where_sql} ORDER BY enqueued_at DESC,rowid DESC LIMIT ?"
+    )
+}
+
+/// The ghost-sweep listing read, as SQL, on the same terms as the two listings
+/// above. Named for the same reason: the plan test runs this one text.
+fn ghost_sweeps_list_sql() -> String {
+    format!(
+        "SELECT {GHOST_SWEEP_COLUMNS} FROM ghost_sweeps ORDER BY swept_at DESC,rowid DESC LIMIT ?"
     )
 }
 
@@ -1177,6 +1272,23 @@ fn server_fault_row(r: &Row<'_>) -> rusqlite::Result<ServerFaultRow> {
         reason: r.get(12)?,
         state: r.get(13)?,
         created_at: rfc3339_to_unix(&r.get::<_, String>(14)?),
+    })
+}
+
+fn ghost_sweep_row(r: &Row<'_>) -> rusqlite::Result<GhostSweepRow> {
+    let outcome: String = r.get(7)?;
+    Ok(GhostSweepRow {
+        id: r.get(0)?,
+        task_id: r.get(1)?,
+        role: r.get(2)?,
+        session_id: r.get(3)?,
+        generation: r.get(4)?,
+        seq_before: r.get(5)?,
+        seq_after: r.get(6)?,
+        outcome: parse_outcome(&outcome)
+            .ok_or_else(|| conversion_error(7, format!("invalid outcome {outcome}")))?,
+        evidence: r.get(8)?,
+        swept_at: rfc3339_to_unix(&r.get::<_, String>(9)?),
     })
 }
 
@@ -1316,6 +1428,15 @@ fn parse_ledger_state(value: &str) -> Option<LedgerState> {
         "acked" => Some(LedgerState::Acked),
         "rejected" => Some(LedgerState::Rejected),
         "expired" => Some(LedgerState::Expired),
+        _ => None,
+    }
+}
+
+fn parse_outcome(value: &str) -> Option<Outcome> {
+    match value {
+        "done" => Some(Outcome::Done),
+        "failed" => Some(Outcome::Failed),
+        "cancelled" => Some(Outcome::Cancelled),
         _ => None,
     }
 }

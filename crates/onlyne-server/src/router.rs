@@ -8,6 +8,7 @@
 use crate::events;
 use crate::faults::{self, FaultDraft};
 use crate::gateway_host;
+use crate::ghosts;
 use crate::projection;
 use crate::relay::{self, RelayReply};
 use crate::state::{self as server_state, State};
@@ -208,6 +209,17 @@ pub async fn dispatch_admin(state: &Arc<State>, session: &mut Session, op: Admin
             Ok(rows) => ResBody::ok(json!({ "faults": rows })),
             Err(error) => internal(error),
         },
+        AdminOp::QueryGhostSweeps(limit) => {
+            match state
+                .ledger
+                .list_ghost_sweeps(limit.min(u32::MAX as usize) as u32)
+            {
+                Ok(rows) => ResBody::ok(json!({
+                    "ghost_sweeps": rows.iter().map(ghosts::entry_from_row).collect::<Vec<_>>(),
+                })),
+                Err(error) => internal(error.into()),
+            }
+        }
         AdminOp::Watch(subscribe) => match events::page_for(state, &subscribe) {
             Ok(page) => ResBody::ok(events::page_json(&page)),
             Err(error) => internal(error),

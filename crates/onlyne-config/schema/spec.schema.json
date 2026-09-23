@@ -250,6 +250,13 @@
           "format": "uint32",
           "minimum": 0.0
         },
+        "ghost_sweep_secs": {
+          "description": "Scan interval in seconds for the ghost sweep, which settles a `working` session row whose own task ledger row already reached a terminal state. `0` disables the sweep.",
+          "default": 60,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "heartbeat_grace_secs": {
           "default": 90,
           "type": "integer",

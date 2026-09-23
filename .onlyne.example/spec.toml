@@ -37,6 +37,8 @@ heartbeat_timeout_ms = 30000
 stale_watch_secs = 60
 # heartbeat_grace_secs sets how long a working session may go without a heartbeat while its role link stays online before the server records a heartbeat_missing fault. Read by the onlyne-server stale watch. Default: 90.
 heartbeat_grace_secs = 90
+# ghost_sweep_secs sets the ghost sweep scan interval. One pass settles a working session row whose own task ledger row already reached a terminal state, writes the verdict that row carries, and records the write in the ghost_sweeps audit table. Read by onlyne-server at startup; 0 disables the sweep. Default: 60.
+ghost_sweep_secs = 60
 # requeue_max_attempts caps the automatic re-deliveries one in_flight row may take before it lands rejected with reason requeue_exhausted. Read by the onlyne-server requeue path at hello adoption, link teardown, and the exited-session release; repair verbs ride outside the gate. Default: 0, which keeps the budget unlimited.
 requeue_max_attempts = 0
 # requeue_ttl_secs bounds the age, counted from enqueue, at which an automatic re-delivery attempt expires the row with reason requeue_ttl instead of requeueing. Read by the same requeue path. Default: 0, which disables the deadline.

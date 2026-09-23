@@ -32,7 +32,7 @@ CHILD_PROSE='child prose: builder-only marker 7f3a'
 # One fake-agent transcript per role, so each agent asserts the prose its own spec
 # entry carries.
 agent_script() {
-  printf '{"hello":{"capabilities":["register","report","inject","recycle"]},"steps":[{"wait_assign":true},{"assert_prose_equals":"%s"},{"report":"ready"},{"complete":{"outcome":"done","head_from":"assign_body"}},{"echo_prose_to":"prose.log"}]}\n' "$1"
+  printf '{"hello":{"capabilities":["register","report","inject","recycle"]},"steps":[{"wait_assign":true},{"assert_prose_equals":"%s"},{"report":"ready"},{"report":"heartbeat"},{"complete":{"outcome":"done","head_from":"assign_body"}},{"echo_prose_to":"prose.log"}]}\n' "$1"
 }
 
 # `wait_acked <server_root> <task> <answer_file>` polls one task's ledger rows for

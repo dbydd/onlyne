@@ -59,7 +59,7 @@ ONLYNE_BIN_DIR=${ONLYNE_BIN_DIR:-${BIN_DIR:-}}
 # with no link to send it on and lands in the client's intent outbox.
 agent_script() {
   local sleep_ms=$1
-  printf '{"hello":{"capabilities":["register","report","inject","recycle"]},"steps":[{"wait_assign":true},{"assert_prose_equals":"%s"},{"report":"ready"}' "$E2E_PROSE"
+  printf '{"hello":{"capabilities":["register","report","inject","recycle"]},"steps":[{"wait_assign":true},{"assert_prose_equals":"%s"},{"report":"ready"},{"report":"heartbeat"}' "$E2E_PROSE"
   if [ "$sleep_ms" -gt 0 ]; then
     printf ',{"sleep_ms":%s}' "$sleep_ms"
   fi

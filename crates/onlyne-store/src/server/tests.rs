@@ -1,4 +1,4 @@
-//! Plan checks for the two listing reads.
+//! Plan checks for the three listing reads, and the audit table beside them.
 //!
 //! Both listings run on a timer — a server poll or a TUI refresh reads them about
 //! once a second — so the shape of their query plan decides a constant write
@@ -25,7 +25,10 @@ fn seeded() -> (tempfile::TempDir, ServerLedger) {
              SELECT 't'||i,'planner','s'||i,1,i,'idle','none','attached','none','null','{{\"lifecycle\":\"working\"}}',0,printf('2026-09-22T%02d:00:00Z',i%24) FROM n;
              WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{SEED})
              INSERT INTO ledger(msg_id,op_id,kind,from_json,to_json,attempt,state,enqueued_at)
-             SELECT 'm'||i,'op'||i,'note','{{}}','{{}}',0,'queued',printf('2026-09-22T%02d:00:00Z',i%24) FROM n;"
+             SELECT 'm'||i,'op'||i,'note','{{}}','{{}}',0,'queued',printf('2026-09-22T%02d:00:00Z',i%24) FROM n;
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{SEED})
+             INSERT INTO ghost_sweeps(task_id,role,session_id,generation,seq_before,seq_after,outcome,evidence,swept_at)
+             SELECT 't'||i,'planner','s'||i,1,i,i+1,'done','task_settled:acked',printf('2026-09-22T%02d:00:00Z',i%24) FROM n;"
         ))
         .expect("seed");
     }
@@ -60,6 +63,7 @@ fn the_listing_reads_are_served_by_an_index() {
         sessions_list_sql(&format!(" WHERE {LIFECYCLE_FILTER}")),
         ledger_list_sql(""),
         ledger_list_sql(" WHERE state='queued'"),
+        ghost_sweeps_list_sql(),
     ] {
         let lines = plan(&conn, &sql);
         assert!(
@@ -71,4 +75,83 @@ fn the_listing_reads_are_served_by_an_index() {
             "this read does not use an index: {lines:?}\n{sql}"
         );
     }
+}
+
+/// One audit row per settlement, read back in the order the listing promises.
+///
+/// A pass settles several rows inside one second, so the listing carries two
+/// order keys: the stamp, and the insertion counter that breaks the ties inside
+/// it. The round trip covers every column, the outcome and its evidence text
+/// included.
+#[test]
+fn a_ghost_sweep_round_trips_through_the_audit_table() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ledger = ServerLedger::open(dir.path().join("state.db"), 7).expect("open the store");
+    let base = 1_789_000_000;
+    let record = |task: &str, outcome: Outcome, evidence: &str, at: i64| {
+        let id = ledger
+            .record_ghost_sweep(&GhostSweepRow {
+                id: 0,
+                task_id: task.to_string(),
+                role: "builder".to_string(),
+                session_id: "sess-1".to_string(),
+                generation: 3,
+                seq_before: 11,
+                seq_after: 12,
+                outcome,
+                evidence: evidence.to_string(),
+                swept_at: at,
+            })
+            .expect("record the sweep");
+        (id, at)
+    };
+
+    let (oldest, oldest_at) = record("t-old", Outcome::Done, "task_settled:acked", base);
+    let (middle, middle_at) = record(
+        "t-middle",
+        Outcome::Failed,
+        "task_settled:rejected",
+        base + 60,
+    );
+    let (newest, newest_at) = record("t-new", Outcome::Failed, "task_settled:expired", base + 60);
+    assert_eq!(middle_at, newest_at, "one pass lands inside one second");
+
+    let rows = ledger.list_ghost_sweeps(10).expect("list the sweeps");
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.task_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["t-new", "t-middle", "t-old"],
+        "the stamp orders the rows and the insertion counter breaks its ties"
+    );
+    assert_eq!(
+        rows[0],
+        GhostSweepRow {
+            id: newest,
+            task_id: "t-new".to_string(),
+            role: "builder".to_string(),
+            session_id: "sess-1".to_string(),
+            generation: 3,
+            seq_before: 11,
+            seq_after: 12,
+            outcome: Outcome::Failed,
+            evidence: "task_settled:expired".to_string(),
+            swept_at: newest_at,
+        },
+        "every column comes back as it went in"
+    );
+    assert_eq!(rows[1].id, middle);
+    assert_eq!(rows[2].id, oldest);
+    assert_eq!(rows[2].outcome, Outcome::Done);
+    assert_eq!(rows[2].swept_at, oldest_at);
+
+    let capped = ledger.list_ghost_sweeps(1).expect("list the sweeps");
+    assert_eq!(
+        capped
+            .iter()
+            .map(|row| row.task_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["t-new"],
+        "the limit cuts the older rows off the end"
+    );
 }

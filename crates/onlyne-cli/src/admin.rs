@@ -196,6 +196,14 @@ pub struct FaultsArgs {
 }
 
 #[derive(Debug, Clone, clap::Args)]
+pub struct GhostsArgs {
+    /// Audit rows to print, newest sweep first. Omitted, or `0`, asks for the
+    /// server default of 100; the server reads at most 500.
+    #[arg(long)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, clap::Args)]
 pub struct WatchArgs {
     /// Event cursor to resume after. Omitting it, or `0`, starts at the current
     /// head, so the stream carries only what follows the handshake.
@@ -424,6 +432,15 @@ pub fn faults(flags: &GlobalFlags, args: FaultsArgs) -> i32 {
         flags,
         AdminOp::Faults(filter.clone()),
         ClientOp::QueryFaults(filter),
+    )
+}
+
+/// `ghosts` lists the ghost sweep's audit rows; it needs the admin surface.
+pub fn ghosts(flags: &GlobalFlags, args: GhostsArgs) -> i32 {
+    admin(
+        flags,
+        "ghosts",
+        AdminOp::QueryGhostSweeps(args.limit.unwrap_or_default() as usize),
     )
 }
 

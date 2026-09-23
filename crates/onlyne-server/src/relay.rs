@@ -982,7 +982,7 @@ pub fn task_owner(state: &State, task_id: &str) -> Option<String> {
 /// The dispatch row is the task's first row in ledger order, so the scan finds
 /// it at once. The bound keeps a long task family from turning one completion
 /// into an unbounded read.
-const TASK_ORIGIN_ROW_LIMIT: u32 = 256;
+pub(crate) const TASK_ORIGIN_ROW_LIMIT: u32 = 256;
 
 /// The role whose dispatch created a task, read from the task's ledger row.
 ///

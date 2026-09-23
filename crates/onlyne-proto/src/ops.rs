@@ -416,6 +416,32 @@ pub struct LedgerEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acked_at: Option<DateTime<Utc>>,
 }
+/// One `query_ghost_sweeps` answer row: a settlement the server's ghost sweep
+/// recorded in its own audit table.
+///
+/// `seq_before` and `seq_after` are the mirror row's two versions, so the pair
+/// names the exact write the sweep made. `evidence` carries the evidence tag
+/// plus the ledger state that justified the sweep, `task_settled:acked` for a
+/// task whose own ledger row reached `acked`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct GhostSweep {
+    /// `ghost_sweeps.id` in the ledger.
+    pub id: i64,
+    pub task_id: String,
+    pub role: String,
+    pub session_id: String,
+    /// The mirror row's generation, held constant across the sweep.
+    pub generation: u64,
+    /// The mirror row's version before the sweep, and after it.
+    pub seq_before: u64,
+    pub seq_after: u64,
+    /// The verdict written onto the mirror row, read off the task's ledger row.
+    pub outcome: Outcome,
+    pub evidence: String,
+    /// Unix seconds.
+    pub swept_at: i64,
+}
 /// One `roles` answer row: the registry record plus live presence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -659,6 +685,9 @@ pub enum AdminOp {
     Sessions(QuerySessionsArgs),
     Ledger(LedgerQuery),
     Faults(QueryFaultsArgs),
+    /// Read the ghost sweep's audit rows, newest first. The number is the row
+    /// limit, and `0` asks for the store's own default.
+    QueryGhostSweeps(usize),
     /// Stream events until the connection closes.
     Watch(Subscribe),
     /// Paged history over `events`.
@@ -697,6 +726,7 @@ impl AdminOp {
             AdminOp::Sessions(_) => "sessions",
             AdminOp::Ledger(_) => "ledger",
             AdminOp::Faults(_) => "faults",
+            AdminOp::QueryGhostSweeps(_) => "query_ghost_sweeps",
             AdminOp::Watch(_) => "watch",
             AdminOp::History(_) => "history",
             AdminOp::SpecDiff(_) => "spec_diff",
@@ -722,6 +752,7 @@ impl AdminOp {
                 | AdminOp::Sessions(_)
                 | AdminOp::Ledger(_)
                 | AdminOp::Faults(_)
+                | AdminOp::QueryGhostSweeps(_)
                 | AdminOp::Watch(_)
                 | AdminOp::History(_)
                 | AdminOp::SpecDiff(_)
@@ -1197,6 +1228,7 @@ mod tests {
             (AdminOp::Sessions(QuerySessionsArgs::default()), "sessions"),
             (AdminOp::Ledger(LedgerQuery::default()), "ledger"),
             (AdminOp::Faults(QueryFaultsArgs::default()), "faults"),
+            (AdminOp::QueryGhostSweeps(50), "query_ghost_sweeps"),
             (AdminOp::Watch(Subscribe::default()), "watch"),
             (AdminOp::History(HistoryArgs::default()), "history"),
             (AdminOp::SpecDiff(Value::Null), "spec_diff"),

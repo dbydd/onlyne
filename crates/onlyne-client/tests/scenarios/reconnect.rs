@@ -4,11 +4,11 @@
 
 use crate::common::{
     ReasonBackend, RecordingOutbox, assert_settled, complete_plugin, complete_raw_plugin, deliver,
-    eventually, mount_plugin, mount_raw_plugin, plugin_beat, published_projection, sample_envelope,
-    serve_role_socket, task_delivery,
+    eventually, mount_plugin, mount_raw_plugin, plugin_beat, published_projection, ran_a_turn,
+    ran_a_turn_raw, sample_envelope, serve_role_socket, task_delivery,
 };
 use onlyne_adapter::{AdapterIo, WireMessage};
-use onlyne_client::session::dispatch::{DispatchState, on_out};
+use onlyne_client::session::dispatch::{DispatchState, SettleAuthority, on_out};
 use onlyne_frame::{read_frame, write_frame};
 use onlyne_proto::{
     AdapterMsg, AgentMount, Capability, ClientOp, Handoff, HelloArgs, HostOp, Lifecycle, Mount,
@@ -385,7 +385,7 @@ async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
 
     // Task A runs on the connection its own plugin mounted with.
     let first_task = deliver(&state, &task_delivery("task A")).await;
-    let stream = mount_raw_plugin(&socket, &first_task).await;
+    let mut stream = mount_raw_plugin(&socket, &first_task).await;
 
     // The same session id mounts a second time.
     let (io_zombie, mut witnessed) = witnessed_plugin(&socket, &first_task).await;
@@ -441,6 +441,7 @@ async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
     outbox.clear().await;
     // The connection that owns the task answers it, so the held lines travel
     // beside the ones the session wrote.
+    ran_a_turn_raw(&mut stream, &first_task).await;
     let handoffs = [Handoff {
         to_role: "reviewer".into(),
         text: Some("the part the task wrote".into()),
@@ -452,6 +453,7 @@ async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
         Some("the part the task wrote".into()),
         None,
         &handoffs,
+        SettleAuthority::PluginReport,
     )
     .await
     .expect("the task settles");
@@ -507,8 +509,11 @@ async fn a_read_only_completion_is_answered_before_any_bye() {
 
     // One session, served by the connection that mounted it.
     let task_id = deliver(&state, &task_delivery("task A")).await;
-    let (_serving_io, mut assigns) = mount_plugin(&socket, Some(&task_id)).await;
+    let (serving_io, mut assigns) = mount_plugin(&socket, Some(&task_id)).await;
     assert_eq!(assigns.recv().await.as_deref(), Some(task_id.as_str()));
+    // The session's agent ran a turn, which is the fact the settle door reads
+    // before it lets a completion write a verdict onto the task.
+    ran_a_turn(&serving_io, &task_id).await;
 
     // A second connection comes back for the session the first one serves: it is
     // held read-only, and it files the completion anyway.
