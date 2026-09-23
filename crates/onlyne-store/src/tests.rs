@@ -703,6 +703,63 @@ mod ledger_gates {
     }
 
     #[test]
+    fn publishing_a_mirror_outcome_uses_the_stored_projection_as_its_compare_and_set() {
+        let (_dir, path) = temp_db("server-mirror-outcome.db");
+        let ledger = ServerLedger::open(&path, 14).unwrap();
+        let task_id = new_uuid(30);
+        let stored_projection = r#"{"lifecycle":"exited","agent":"gone"}"#;
+        let verdict_projection =
+            r#"{"lifecycle":"exited","agent":"gone","outcome":"failed"}"#;
+        assert!(
+            ledger
+                .project_session(&SessionWrite {
+                    task_id: task_id.clone(),
+                    role: "builder".to_string(),
+                    session_id: "sess-1".to_string(),
+                    generation: 3,
+                    seq: 9,
+                    agent_state: "gone".to_string(),
+                    delivery_state: "accepted".to_string(),
+                    resource_state: "closed".to_string(),
+                    recovery_substate: "none".to_string(),
+                    desired_json: "null".to_string(),
+                    observed_json: stored_projection.to_string(),
+                    mismatch_count: 0,
+                    updated_at: 1_789_000_000,
+                })
+                .unwrap()
+        );
+
+        assert!(
+            ledger
+                .publish_mirror_outcome(
+                    &task_id,
+                    verdict_projection,
+                    stored_projection,
+                    1_789_000_100,
+                )
+                .unwrap()
+        );
+        assert!(
+            !ledger
+                .publish_mirror_outcome(
+                    &task_id,
+                    r#"{"lifecycle":"exited","agent":"gone","outcome":"done"}"#,
+                    stored_projection,
+                    1_789_000_200,
+                )
+                .unwrap()
+        );
+
+        let row = ledger
+            .get_session_row(&task_id)
+            .unwrap()
+            .expect("the mirror row");
+        assert_eq!(row.observed_json, verdict_projection);
+        assert_eq!((row.generation, row.seq), (3, 9));
+    }
+
+    #[test]
     fn a_row_whose_projection_does_not_parse_still_answers_the_lifecycle_filter() {
         let (_dir, path) = temp_db("server-corrupt-projection.db");
         let ledger = ServerLedger::open(&path, 14).unwrap();

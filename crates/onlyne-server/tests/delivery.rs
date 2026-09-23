@@ -1956,6 +1956,18 @@ fn heartbeat_projection() -> SessionProjection {
     }
 }
 
+fn ready_projection() -> SessionProjection {
+    SessionProjection {
+        lifecycle: Lifecycle::Working,
+        agent: onlyne_proto::AgentPhase::Ready,
+        delivery: onlyne_proto::DeliveryPhase::NoIntent,
+        resource: onlyne_proto::ResourcePhase::Attached,
+        recovery: onlyne_proto::RecoveryPhase::NoRecovery,
+        outcome: None,
+        observed: None,
+    }
+}
+
 #[test]
 fn observe_once_records_heartbeat_missing_for_an_online_role() {
     let fixture = fixture();
@@ -2351,6 +2363,142 @@ fn the_projection_gate_refuses_a_stale_watermark() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].generation, 2);
     assert_eq!(rows[0].seq, 0);
+}
+
+#[test]
+fn a_same_version_publish_applies_only_the_outcome_and_emits_the_stored_version() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    ready(&fixture.state, "builder", &task_id, 7);
+    let mut verdict = ready_projection();
+    verdict.outcome = Some(Outcome::Failed);
+    let event_head = fixture.state.event_head();
+
+    assert!(
+        projection::report(
+            &fixture.state,
+            "builder",
+            &projection_publish(task_id.clone(), "sess-1", 1, 7, verdict.clone()),
+        )
+        .expect("late verdict")
+        .applied
+    );
+
+    let row = fixture
+        .state
+        .ledger
+        .get_session_row(&task_id)
+        .expect("mirror read")
+        .expect("mirror row");
+    assert_eq!((row.generation, row.seq), (1, 7));
+    assert_eq!(row.agent_state, "ready");
+    assert_eq!(row.delivery_state, "none");
+    assert_eq!(row.resource_state, "attached");
+    assert_eq!(row.recovery_substate, "none");
+    assert_eq!(projection::projection_from_write(&row), verdict);
+
+    let page = events::replay(
+        &fixture.state,
+        event_head.max(0) as u64,
+        &events::EventFilter::default(),
+        10,
+    )
+    .expect("event replay");
+    assert_eq!(page.rows.len(), 1);
+    let Event::SessionState(event) = &page.rows[0].event else {
+        panic!("expected one session_state event");
+    };
+    assert_eq!((event.generation, event.seq), (1, 7));
+    assert_eq!(event.projection, verdict);
+}
+
+#[test]
+fn a_same_version_publish_skips_once_the_stored_row_carries_an_outcome() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    ready(&fixture.state, "builder", &task_id, 7);
+    let mut verdict = ready_projection();
+    verdict.outcome = Some(Outcome::Failed);
+    assert!(
+        projection::report(
+            &fixture.state,
+            "builder",
+            &projection_publish(task_id.clone(), "sess-1", 1, 7, verdict.clone()),
+        )
+        .expect("late verdict")
+        .applied
+    );
+    let event_head = fixture.state.event_head();
+
+    assert!(
+        !projection::report(
+            &fixture.state,
+            "builder",
+            &projection_publish(task_id.clone(), "sess-1", 1, 7, verdict.clone()),
+        )
+        .expect("duplicate verdict")
+        .applied
+    );
+    let mut conflicting = verdict;
+    conflicting.outcome = Some(Outcome::Done);
+    assert!(
+        !projection::report(
+            &fixture.state,
+            "builder",
+            &projection_publish(task_id.clone(), "sess-1", 1, 7, conflicting),
+        )
+        .expect("conflicting verdict")
+        .applied
+    );
+
+    let row = fixture
+        .state
+        .ledger
+        .get_session_row(&task_id)
+        .expect("mirror read")
+        .expect("mirror row");
+    assert_eq!(
+        projection::projection_from_write(&row).outcome,
+        Some(Outcome::Failed)
+    );
+    assert_eq!((row.generation, row.seq), (1, 7));
+    assert_eq!(fixture.state.event_head(), event_head);
+}
+
+#[test]
+fn a_same_version_publish_refuses_a_dimension_change_with_an_outcome() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    ready(&fixture.state, "builder", &task_id, 7);
+    let before = fixture
+        .state
+        .ledger
+        .get_session_row(&task_id)
+        .expect("mirror read")
+        .expect("mirror row");
+    let event_head = fixture.state.event_head();
+    let mut changed = ready_projection();
+    changed.agent = onlyne_proto::AgentPhase::Gone;
+    changed.outcome = Some(Outcome::Failed);
+
+    assert!(
+        !projection::report(
+            &fixture.state,
+            "builder",
+            &projection_publish(task_id.clone(), "sess-1", 1, 7, changed),
+        )
+        .expect("dimension change")
+        .applied
+    );
+
+    let after = fixture
+        .state
+        .ledger
+        .get_session_row(&task_id)
+        .expect("mirror read")
+        .expect("mirror row");
+    assert_eq!(after, before);
+    assert_eq!(fixture.state.event_head(), event_head);
 }
 
 /// `sessions --fresh` goes down the chain for the named task, while a plain

@@ -221,6 +221,38 @@ fn merged_observation(observed: &Value, cluster_ref: Option<&String>) -> Value {
     value
 }
 
+/// Whether a late publish adds the task verdict to an otherwise identical
+/// stored projection.
+fn adds_only_outcome(stored: &SessionProjection, incoming: &SessionProjection) -> bool {
+    let SessionProjection {
+        lifecycle: stored_lifecycle,
+        agent: stored_agent,
+        delivery: stored_delivery,
+        resource: stored_resource,
+        recovery: stored_recovery,
+        outcome: stored_outcome,
+        observed: stored_observed,
+    } = stored;
+    let SessionProjection {
+        lifecycle: incoming_lifecycle,
+        agent: incoming_agent,
+        delivery: incoming_delivery,
+        resource: incoming_resource,
+        recovery: incoming_recovery,
+        outcome: incoming_outcome,
+        observed: incoming_observed,
+    } = incoming;
+
+    stored_outcome.is_none()
+        && incoming_outcome.is_some()
+        && stored_lifecycle == incoming_lifecycle
+        && stored_agent == incoming_agent
+        && stored_delivery == incoming_delivery
+        && stored_resource == incoming_resource
+        && stored_recovery == incoming_recovery
+        && stored_observed == incoming_observed
+}
+
 /// Write one projection behind the `(generation, seq)` gate.
 #[allow(clippy::too_many_arguments)]
 pub fn write(
@@ -237,7 +269,35 @@ pub fn write(
     if let Some(row) = &stored {
         let watermark = (row.generation.max(0) as u64, row.seq.max(0) as u64);
         if (generation, seq) <= watermark {
-            return Ok(ProjectionOutcome::skipped());
+            let Ok(stored_projection) = serde_json::from_str(&row.observed_json) else {
+                return Ok(ProjectionOutcome::skipped());
+            };
+            if !adds_only_outcome(&stored_projection, &projection) {
+                return Ok(ProjectionOutcome::skipped());
+            }
+            let mut write = row.clone();
+            write.observed_json = serde_json::to_string(&projection)?;
+            write.updated_at = Utc::now().timestamp();
+            if !state.ledger.publish_mirror_outcome(
+                &write.task_id,
+                &write.observed_json,
+                &row.observed_json,
+                write.updated_at,
+            )? {
+                return Ok(ProjectionOutcome::skipped());
+            }
+            state.note_session_write(task_id);
+            emit_session_state(
+                state,
+                &write,
+                row.generation.max(0) as u64,
+                row.seq.max(0) as u64,
+                projection,
+            )?;
+            return Ok(ProjectionOutcome {
+                applied: true,
+                row: Some(row_from_write(&write)),
+            });
         }
     }
     let revival = stored.as_ref().is_some_and(|row| {
@@ -299,6 +359,20 @@ pub fn write(
             )?;
         }
     }
+    emit_session_state(state, &write, generation, seq, projection)?;
+    Ok(ProjectionOutcome {
+        applied: true,
+        row: Some(row_from_write(&write)),
+    })
+}
+
+fn emit_session_state(
+    state: &State,
+    write: &SessionWrite,
+    generation: u64,
+    seq: u64,
+    projection: SessionProjection,
+) -> anyhow::Result<()> {
     state.emit(Event::SessionState(SessionStateEvent {
         task_id: write.task_id.clone(),
         role: write.role.clone(),
@@ -307,10 +381,7 @@ pub fn write(
         seq,
         projection,
     }))?;
-    Ok(ProjectionOutcome {
-        applied: true,
-        row: Some(row_from_write(&write)),
-    })
+    Ok(())
 }
 
 /// Derived answer flag: a working row this process has seen, older than grace.

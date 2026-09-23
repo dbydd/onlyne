@@ -488,6 +488,29 @@ impl ServerLedger {
         Ok(changed == 1)
     }
 
+    /// Publish a late mirror verdict when the stored projection bytes still
+    /// match the bytes the server compared. The stored tuple remains the
+    /// session version while `observed_json` carries the task verdict.
+    pub fn publish_mirror_outcome(
+        &self,
+        task_id: &str,
+        observed_json: &str,
+        expected_observed_json: &str,
+        updated_at: i64,
+    ) -> StoreResult<bool> {
+        let conn = self.conn()?;
+        let changed = conn.execute(
+            "UPDATE sessions SET observed_json=?,updated_at=? WHERE task_id=? AND observed_json=?",
+            params![
+                observed_json,
+                unix_to_rfc3339(updated_at),
+                task_id,
+                expected_observed_json
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
     pub fn get_session_row(&self, task_id: &str) -> StoreResult<Option<ServerSessionRow>> {
         let conn = self.conn()?;
         let row = conn
