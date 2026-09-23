@@ -579,3 +579,38 @@ fn a_lost_watermark_race_retries_on_the_fresh_row() {
         "the retry wrote past the beat that took the watermark"
     );
 }
+
+/// The ledger's columns are the one authority on a session's watermark: the write
+/// gate compares them, and a heartbeat that lands in the no-op bump advances them
+/// without touching the tuple's bytes. Reading the tuple's older embedded sequence
+/// instead made `next_version` propose a number the gate had already refused, so
+/// every later local write for that session was lost — the shape that left a dead
+/// agent's session projecting `working` beside a task row refused `session_dead`.
+#[test]
+fn a_column_watermark_ahead_of_the_tuple_governs_local_writes() {
+    let ledger = MemoryLedger::new();
+    let (bridge, _) = tracked(&ledger, "wm-1");
+    feed_ready(&bridge, &ledger, "wm-1").unwrap();
+    let stored = ledger.get_session("wm-1").unwrap().unwrap();
+    let tuple: Observation = serde_json::from_str(&stored.observed_json).expect("stored tuple");
+
+    // The bump's shape: columns forward, the tuple's bytes untouched.
+    let mut advanced = to_versioned(&tuple, "{}", "{}").unwrap();
+    advanced.seq = tuple.version.seq as i64 + 10;
+    assert!(
+        ledger.upsert_session("wm-1", &advanced).unwrap(),
+        "the bumped columns are strictly newer than the stored ones"
+    );
+
+    let next = next_version(&ledger, "wm-1").expect("the session's watermark");
+    assert_eq!(
+        next.seq,
+        tuple.version.seq + 11,
+        "a local write is allocated past the column watermark, not the tuple's"
+    );
+    let verdict = feed_turn_ended(&bridge, &ledger, "wm-1").expect("the feed runs");
+    assert!(
+        matches!(verdict, Verdict::Applied(_)),
+        "the gate refuses a write whose reader never saw the bumped column: {verdict:?}"
+    );
+}

@@ -145,16 +145,39 @@ pub(super) fn backend_ref_json(
     "{}".to_string()
 }
 
-/// Decode the stored tuple. A row whose `observed_json` is unparsable or is not
-/// a legal observation is rebuilt from `Observation::initial` at the row's own
-/// watermark: the reducer's protection against stale events is the watermark,
-/// and rewinding it would let an old report overwrite newer truth.
+/// Decode the stored tuple, stamped with the row's column watermark.
+///
+/// The columns are the one authority on where a session's watermark stands. The
+/// write gate compares them (`upsert_session` refuses anything not strictly
+/// newer), `bump_session_version` advances them without touching the tuple's
+/// bytes, and the corrupt-row path below rebuilds from them. Reading a parsed
+/// tuple's own embedded `version` instead made the two ends of one gate disagree
+/// as soon as a heartbeat landed in the no-op bump: the tuple still carried the
+/// older sequence, so every local write the same client then allocated was
+/// refused by a watermark its own reader never saw. A live session whose agent
+/// had died could then never publish its exit, and `onlyne sessions` kept reading
+/// `working` beside a task row already refused `session_dead`.
+///
+/// A row whose `observed_json` is unparsable or is not a legal observation is
+/// rebuilt from `Observation::initial` at the row's own watermark: the reducer's
+/// protection against stale events is the watermark, and rewinding it would let
+/// an old report overwrite newer truth.
 pub fn stored_observation(ledger: &dyn SessionLedger, row: Option<&SessionRecord>) -> Observation {
     let Some(row) = row else {
         return initial_observation();
     };
     match serde_json::from_str::<Observation>(&row.observed_json) {
-        Ok(obs) if lifecycle::is_legal(&obs) => obs,
+        Ok(obs) if lifecycle::is_legal(&obs) => Observation {
+            version: Version::new(
+                if row.generation > 0 {
+                    row.generation as u64
+                } else {
+                    obs.version.generation
+                },
+                row.seq.max(0) as u64,
+            ),
+            ..obs
+        },
         Ok(obs) => corrupt_observation(ledger, row, &format!("illegal tuple {obs:?}")),
         Err(err) => corrupt_observation(ledger, row, &err.to_string()),
     }

@@ -289,15 +289,27 @@ where it is read.
   `working` with `heartbeat_missing` and `stale_working` faults recorded beside them. The
   observation still moves no dimension, which is what the demotion is for, and the stamp is read
   only for a session whose task is still bound and unsettled.
-- session: a local transition whose write lost the watermark race retries. `next_version`
-  allocates one past the stored watermark, and a plugin beat landing between that read and the
-  write made `upsert_session` refuse the row, which `record_verdict` logged (`session write
-  lost to a newer watermark; left the row alone`) and dropped. A completion's settle is one such
-  write, and the tuple it moves is the one the public lifecycle reads, so a task whose ledger row
-  said `acked` projected `working` for the rest of its life (`agent idle, delivery none, outcome
-  done, lifecycle working, seq 1004`). `apply_at_next` now retries on the row as it then stands,
-  bounded by `APPLY_ATTEMPTS`, through one write shared with `apply_persist`; a duplicate or an
-  older event is still dropped by the reducer's own gate.
+- session: one watermark, read from one place. A session's `(generation, seq)` lived in two
+  sources that could not see each other: the write gate compares the `sessions` **columns**
+  (`upsert_session`), the no-op heartbeat bump advances those columns alone
+  (`bump_session_version`, whose own comment says the tuple's bytes stay as stored), while
+  `stored_observation` read the **version embedded in `observed_json`** whenever that JSON
+  parsed, consulting the columns only for a corrupt row. One no-op beat therefore left the
+  columns ahead of the tuple, `next_version` went on proposing a sequence the gate had already
+  refused, and **every later local write for that session was lost forever** — including the
+  retirement's publish of the session's own exit. That is why a task whose ledger row read
+  `rejected` with reason `session_dead` kept a session projecting `working` on both board pages
+  and aging there (`a53a917e`, `◐ 14m`, `life=working+stale`, read off the live screen).
+  `stored_observation` now stamps every tuple it returns with the row's column watermark, which
+  makes the columns the single authority the gate already assumed. The evidence was eight
+  refusals in the client's own log, all naming the same `seq=1026` in the same instant — a real
+  race moves the watermark on re-read, a split source never does.
+- session: a local transition whose write is refused by a newer watermark retries on the row as
+  it then stands, bounded by `APPLY_ATTEMPTS`, through one write shared with `apply_persist`.
+  Added against a suspected race; the live case turned out to be the split source above, so the
+  retries all proposed the same sequence and none of them landed. It stays as the guard a genuine
+  interleaving still needs — `sync_session` runs outside the dispatch lock — and the refusal is no
+  longer silent: the losing write is logged with the version it tried.
 - testkit: `running-lights.sh` (case 12) and `acp-payload-v2.sh` (case 19) mounted one
   `onlyne-agent-fake` per role and then handed that role two tasks, and one agent process serves
   one session, so the second task's session waited out `[client] reconnect_grace_secs` and the
@@ -385,6 +397,11 @@ where it is read.
   (`crates/onlyne-session/src/reconcile/tests.rs`), whose ledger wrapper lands a competing beat
   inside the first write — setting `APPLY_ATTEMPTS` to 1 fails it with `the retry wrote past the
   beat that took the watermark`.
+- session: `a_column_watermark_ahead_of_the_tuple_governs_local_writes`
+  (`crates/onlyne-session/src/reconcile/tests.rs`) writes a row whose columns sit ten sequences
+  past the tuple's own embedded version — the exact shape `bump_session_version` leaves behind —
+  and asserts a local write is allocated past the columns and lands. Reverting the stamp (a scoped
+  `git stash` of `record.rs` alone) fails it; the fix passes.
 - testkit: `crates/onlyne-testkit/e2e/reconnect-requeue.sh` is rewritten to mount one
   `onlyne-agent-fake` per session, which is what lets it prove what it was written for: the
   rows a killed client leaves behind, their redelivery in send order, one ack per row under
