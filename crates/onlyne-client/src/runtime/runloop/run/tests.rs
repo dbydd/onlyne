@@ -4,8 +4,8 @@ use crate::runtime::runloop::test_support::test_state;
 use crate::session::dispatch::{self, ReadyNotice};
 use onlyne_layout::RoleWorkspace;
 use onlyne_proto::{
-    Body, Capability, ClientOp, ControlOp, Delivery, Lifecycle, MsgKind, Outcome, Principal, Report,
-    SessionProjection, new_envelope, new_task_id,
+    Body, Capability, ClientOp, ControlOp, Delivery, Lifecycle, MsgKind, Outcome, Principal,
+    Report, SessionProjection, new_envelope, new_task_id,
 };
 use onlyne_session::{
     Capabilities, CloseReason, ResourceProbe, SessionBackend, SessionRef, SpawnSpec, TaskState,
@@ -56,15 +56,10 @@ impl SessionBackend for CloseFailingBackend {
 
 fn state_with_backend(backend: Arc<dyn SessionBackend>) -> (RunState, tempfile::TempDir) {
     let dir = tempdir().expect("tempdir");
-    let store = onlyne_store::ClientStore::open(dir.path().join("client.db")).expect("client store");
-    let dispatch = dispatch::DispatchState::new(
-        "planner",
-        dir.path(),
-        Vec::new(),
-        2,
-        backend,
-        store.clone(),
-    );
+    let store =
+        onlyne_store::ClientStore::open(dir.path().join("client.db")).expect("client store");
+    let dispatch =
+        dispatch::DispatchState::new("planner", dir.path(), Vec::new(), 2, backend, store.clone());
     let intents = crate::runtime::intent::IntentMachine::new(
         store.clone(),
         crate::runtime::runloop::DEFAULT_INTENT_ATTEMPTS,
@@ -82,11 +77,7 @@ fn state_with_backend(backend: Arc<dyn SessionBackend>) -> (RunState, tempfile::
     (state, dir)
 }
 
-async fn staged_control(
-    state: &RunState,
-    task_id: &str,
-    control: ControlOp,
-) -> (Delivery, usize) {
+async fn staged_control(state: &RunState, task_id: &str, control: ControlOp) -> (Delivery, usize) {
     let task = new_envelope(
         MsgKind::Task,
         Principal::role("sender"),
@@ -124,11 +115,7 @@ async fn staged_control(
     envelope.kind = MsgKind::Control;
     envelope.control = Some(control);
     envelope.validate().expect("control envelope");
-    let before = state
-        .store
-        .flush_order()
-        .expect("intent queue")
-        .len();
+    let before = state.store.flush_order().expect("intent queue").len();
     (
         Delivery {
             msg_id: "msg-control".into(),
@@ -279,8 +266,7 @@ async fn a_refused_control_command_queues_no_publish() {
         ClientOp::Ack(ack) if ack.msg_id == "msg-control" && !ack.accepted
     )));
     assert!(
-        !ops
-            .iter()
+        !ops.iter()
             .any(|op| published_projection(op, &task).is_some()),
         "a refused command queues no publish: {ops:?}"
     );

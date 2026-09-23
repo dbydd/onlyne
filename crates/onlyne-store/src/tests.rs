@@ -708,8 +708,7 @@ mod ledger_gates {
         let ledger = ServerLedger::open(&path, 14).unwrap();
         let task_id = new_uuid(30);
         let stored_projection = r#"{"lifecycle":"exited","agent":"gone"}"#;
-        let verdict_projection =
-            r#"{"lifecycle":"exited","agent":"gone","outcome":"failed"}"#;
+        let verdict_projection = r#"{"lifecycle":"exited","agent":"gone","outcome":"failed"}"#;
         assert!(
             ledger
                 .project_session(&SessionWrite {

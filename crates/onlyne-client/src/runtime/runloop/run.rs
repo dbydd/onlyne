@@ -214,14 +214,10 @@ pub(super) async fn settle_control(state: &RunState, delivery: &Delivery) {
                 "control command applied"
             );
             state.dispatch.push_settled(ack(true, None));
-            if held
-                && matches!(op, ControlOp::Recycle { .. } | ControlOp::Cancel { .. })
-            {
+            if held && matches!(op, ControlOp::Recycle { .. } | ControlOp::Cancel { .. }) {
                 // A published exit releases the task's in-flight rows. The
                 // command's own row is one of them until its ack is enqueued.
-                if let Err(error) =
-                    dispatch::sync_session(&state.dispatch, op.task_id()).await
-                {
+                if let Err(error) = dispatch::sync_session(&state.dispatch, op.task_id()).await {
                     tracing::warn!(
                         error = %error,
                         task = %op.task_id(),
