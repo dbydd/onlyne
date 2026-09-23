@@ -664,3 +664,96 @@ async fn a_beat_from_a_held_connection_refreshes_liveness_and_applies_no_state()
         "the held connection's observation is not this session's state"
     );
 }
+
+/// A beat that changes no dimension still refreshes the session's liveness stamp.
+/// This is the ordinary shape of a long turn: a model streaming for minutes reports
+/// the same `agent: running` every ten seconds, so every one of those beats is a
+/// no-op to the reducer, and the silence arm of the reconnect sweep reads nothing
+/// but this stamp. A beat that leaves it unstamped starves the clock of a working
+/// agent, and the sweep closes the pane under it.
+#[tokio::test]
+async fn a_no_op_beat_still_stamps_the_liveness_clock() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    let (stream, _peer) = tokio::io::duplex(1024);
+    let serving = AdapterIo::new(stream, Duration::from_secs(5), Duration::from_secs(5));
+    {
+        let mut inner = state.inner.lock();
+        let session = SessionRef {
+            task_id: task.clone(),
+            backend: "fake".into(),
+            backend_ref: serde_json::Value::Null,
+            generation: 1,
+        };
+        inner
+            .transports
+            .insert(task.clone(), (serving.clone(), Vec::new()));
+        inner.sessions.insert(
+            task.clone(),
+            SessionSlot {
+                session,
+                task_id: Some(task.clone()),
+                ready: true,
+                payload: None,
+                msg_id: None,
+                origin: None,
+                hop: 0,
+                dropped_at: None,
+                last_beat: None,
+                read_only: false,
+            },
+        );
+    }
+    let beat = |seq: u64| Report::Heartbeat {
+        task_id: task.clone(),
+        generation: 1,
+        seq,
+        observed: plugin_beat("running", "none", "none"),
+        projection: None,
+        session_id: task.clone(),
+        cluster_ref: None,
+    };
+
+    on_plugin_report(&state, Some(&serving), beat(1006))
+        .await
+        .expect("the first beat lands");
+    {
+        let inner = state.inner.lock();
+        assert!(
+            inner.sessions[&task].last_beat.is_some(),
+            "a beat the reducer applied stamps the clock"
+        );
+    }
+
+    // The turn keeps running: the same observation, a newer sequence, so the
+    // reducer has nothing to change. Rewind the clock the silence arm reads to
+    // just past its threshold — three intervals of ten seconds — and let that
+    // no-op beat answer it.
+    {
+        let mut inner = state.inner.lock();
+        let slot = inner.sessions.get_mut(&task).expect("the slot");
+        slot.last_beat =
+            Some(Instant::now() - Duration::from_secs(31) - Duration::from_millis(200));
+    }
+    on_plugin_report(&state, Some(&serving), beat(1007))
+        .await
+        .expect("the no-op beat is answered like any other");
+
+    let inner = state.inner.lock();
+    let stamp = inner.sessions[&task]
+        .last_beat
+        .expect("the no-op beat stamped the liveness clock");
+    assert!(
+        stamp.elapsed() < Duration::from_secs(5),
+        "a beat that changed nothing left a working agent's clock at {:?}",
+        stamp.elapsed()
+    );
+    drop(inner);
+    assert_eq!(
+        client_tuple(&state, &task).agent,
+        AgentState::Running,
+        "the first beat's dimension is the one that stands"
+    );
+}

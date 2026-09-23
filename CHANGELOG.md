@@ -289,6 +289,19 @@ where it is read.
   `working` with `heartbeat_missing` and `stale_working` faults recorded beside them. The
   observation still moves no dimension, which is what the demotion is for, and the stamp is read
   only for a session whose task is still bound and unsettled.
+  The read-only branch is the narrower of the two starvation paths, and the live cluster ruled
+  it out as the common one: all six role workspaces load the plugin exactly once, so the deaths
+  there came from the path below rather than from a demoted second mount.
+- client: a heartbeat that changes no dimension still refreshes the session's liveness stamp.
+  This is the ordinary shape of a long turn: a model streaming for minutes reports the same
+  `agent: running` every ten seconds, so each of those beats is `Ignored(NoOp)` to the reducer,
+  and that arm advanced the stored version while leaving `last_beat` untouched. The silence arm
+  of the reconnect sweep reads nothing but that stamp — `HEARTBEAT_INTERVAL` by
+  `HEARTBEAT_SILENCE_MARGIN`, thirty seconds — so an agent working quietly was judged gone: the
+  sweep closed its pane (bash exit 143) roughly 60-70 s after each delivery, twice running on
+  one cluster (`a53a917e`, then `10a452ed`), and left the session's projection behind as the
+  watermark entry above describes. The arm now stamps first and bumps the version second, and
+  the tuple stays exactly where the last accepted write left it.
 - session: one watermark, read from one place. A session's `(generation, seq)` lived in two
   sources that could not see each other: the write gate compares the `sessions` **columns**
   (`upsert_session`), the no-op heartbeat bump advances those columns alone
@@ -402,6 +415,12 @@ where it is read.
   past the tuple's own embedded version — the exact shape `bump_session_version` leaves behind —
   and asserts a local write is allocated past the columns and lands. Reverting the stamp (a scoped
   `git stash` of `record.rs` alone) fails it; the fix passes.
+- client: `a_no_op_beat_still_stamps_the_liveness_clock`
+  (`crates/onlyne-client/src/session/dispatch/reports/tests.rs`) rewinds one session's stamp
+  past the silence threshold and delivers a no-op beat. Without the fix it fails by naming the
+  clock it left behind — `a beat that changed nothing left a working agent's clock at
+  31.200307166s`, past the thirty-second window — and with it the stamp is this moment's while
+  the stored dimension stays `running`.
 - testkit: `crates/onlyne-testkit/e2e/reconnect-requeue.sh` is rewritten to mount one
   `onlyne-agent-fake` per session, which is what lets it prove what it was written for: the
   rows a killed client leaves behind, their redelivery in send order, one ack per row under

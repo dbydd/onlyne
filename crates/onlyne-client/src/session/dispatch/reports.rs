@@ -205,9 +205,21 @@ pub async fn on_plugin_report(
                         inner.stall.note_applied(&task_id, Instant::now());
                         true
                     }
-                    Verdict::Ignored(IgnoredReason::NoOp) => inner
-                        .store
-                        .bump_session_version(&task_id, generation, seq)?,
+                    Verdict::Ignored(IgnoredReason::NoOp) => {
+                        // A beat that moves no dimension is still the agent saying it is
+                        // alive, and this is where the ordinary long turn lands: a model
+                        // streaming for minutes reports `agent: running` over and over, the
+                        // tuple never changes, and every one of those beats is a no-op to the
+                        // reducer. Leaving the stamp alone for them starves the clock the
+                        // silence arm reads, and the sweep then closes the pane under an agent
+                        // that is working — the shape a live role died of at thirty seconds
+                        // into a turn. The version still advances through the bump below, and
+                        // the tuple stays exactly as the last accepted write left it.
+                        note_beat(&mut inner, &task_id, Instant::now());
+                        inner
+                            .store
+                            .bump_session_version(&task_id, generation, seq)?
+                    }
                     Verdict::Ignored(_) | Verdict::Rejected(_) => false,
                 }
             }
