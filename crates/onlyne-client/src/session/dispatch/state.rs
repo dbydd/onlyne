@@ -117,9 +117,12 @@ pub struct SessionSlot {
 /// Called where a frame is accepted rather than where one arrives — the mount
 /// that binds the connection, the ready barrier, and each beat the reducer took
 /// — because a frame the client refused moved no state and is the evidence of
-/// nothing. It is deliberately not called for a read-only connection's frames:
-/// an agent whose session was taken by a newer one is not the agent this stamp
-/// is about.
+/// nothing. A frame this client refused on other grounds still buys the stamp:
+/// the silence arm asks whether an agent lives behind the slot, and it reads
+/// this stamp only for a session whose task is still bound and unsettled, so a
+/// settled or taken task is never the stamp's question and a demoted slot still
+/// retires on its own schedule. What a refused frame never buys is a write: the
+/// dimensions stay where the connection serving the session left them.
 pub(super) fn note_beat(inner: &mut DispatchInner, task_id: &str, now: Instant) {
     let Some(key) = slot_key_named(inner, task_id) else {
         return;

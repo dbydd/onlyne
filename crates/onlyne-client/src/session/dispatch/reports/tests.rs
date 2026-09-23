@@ -581,3 +581,86 @@ fn a_beat_cannot_reset_the_reconcile_policy_or_its_counters() {
     assert_eq!(composed.mismatch_count, client.mismatch_count);
     assert!(is_legal(&composed), "legal by construction: {composed:?}");
 }
+
+/// A beat that arrives on the connection the client holds read-only still buys
+/// its liveness stamp, and buys no state. The stamp is what the reconnect
+/// sweep's silence arm reads: both copies of a plugin loaded into one agent
+/// process beat on their own connections, and the copy the client demoted used
+/// to leave the session's clock starving, which retired an agent that was alive
+/// and working.
+#[tokio::test]
+async fn a_beat_from_a_held_connection_refreshes_liveness_and_applies_no_state() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    let (serving_stream, _serving_peer) = tokio::io::duplex(1024);
+    let serving = AdapterIo::new(
+        serving_stream,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    let (held_stream, _held_peer) = tokio::io::duplex(1024);
+    let held = AdapterIo::new(held_stream, Duration::from_secs(5), Duration::from_secs(5));
+    {
+        let mut inner = state.inner.lock();
+        let session = SessionRef {
+            task_id: task.clone(),
+            backend: "fake".into(),
+            backend_ref: serde_json::Value::Null,
+            generation: 1,
+        };
+        // One session, served by one connection; the other connection is held
+        // read-only, which is what a second mount of the same session lands in.
+        inner
+            .transports
+            .insert(task.clone(), (serving.clone(), Vec::new()));
+        inner.sessions.insert(
+            task.clone(),
+            SessionSlot {
+                session,
+                task_id: Some(task.clone()),
+                ready: true,
+                payload: None,
+                msg_id: None,
+                origin: None,
+                hop: 0,
+                dropped_at: None,
+                last_beat: None,
+                read_only: false,
+            },
+        );
+        inner.revived.push((task.clone(), held.clone(), Vec::new()));
+    }
+
+    let beat = Report::Heartbeat {
+        task_id: task.clone(),
+        generation: 1,
+        seq: 1006,
+        observed: plugin_beat("running", "none", "none"),
+        projection: None,
+        session_id: task.clone(),
+        cluster_ref: None,
+    };
+    on_plugin_report(&state, Some(&held), beat)
+        .await
+        .expect("a refused beat is still answered as an applied one");
+
+    let inner = state.inner.lock();
+    let stamp = inner
+        .sessions
+        .get(&task)
+        .and_then(|slot| slot.last_beat)
+        .expect("the liveness stamp is stamped even though the state is not");
+    assert!(
+        stamp.elapsed() < Duration::from_secs(5),
+        "the stamp is this moment's, not the session's creation"
+    );
+    drop(inner);
+    let tuple = client_tuple(&state, &task);
+    assert_eq!(
+        tuple.agent,
+        AgentState::Ready,
+        "the held connection's observation is not this session's state"
+    );
+}

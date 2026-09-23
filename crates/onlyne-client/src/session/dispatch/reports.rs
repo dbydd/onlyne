@@ -140,9 +140,20 @@ pub async fn on_plugin_report(
                 // the `send` of §1 (c) — and it is logged rather than dropped in
                 // silence, because a supervisor reading the trail of a session
                 // whose tuple stopped moving wants to see who was talking.
+                // Its liveness half does travel, and that half is what the
+                // agent's life depends on: the stamp the silence arm reads is
+                // about the socket behind it, and both copies of a plugin loaded
+                // into one agent process — the shape a workspace that installs
+                // the plugin twice produces — beat on their own connections.
+                // Letting a refused frame leave the stamp alone starves the
+                // session's clock, and the sweep then retires an agent that is
+                // alive and working. The stamp is read only for a session whose
+                // task is still bound and unsettled, so the demotion keeps its
+                // own retirement.
+                note_beat(&mut inner, &task_id, Instant::now());
                 tracing::warn!(
                     task = %task_id,
-                    "a beat from a connection held read-only is not applied"
+                    "a beat from a connection held read-only refreshes the liveness stamp and applies no state"
                 );
                 false
             } else {
@@ -180,6 +191,10 @@ pub async fn on_plugin_report(
                     )?,
                     Err(error) => {
                         tracing::warn!(task = %task_id, error = %error, "heartbeat carries no readable observation; liveness only");
+                        // The log line's own promise: a frame whose observation no
+                        // client can read still proves the agent is alive, so the
+                        // stamp goes on and the tuple stays where it stood.
+                        note_beat(&mut inner, &task_id, Instant::now());
                         Verdict::Ignored(IgnoredReason::NoOp)
                     }
                 };

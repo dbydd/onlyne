@@ -2,8 +2,8 @@ use super::*;
 use crate::backend::fake::FakeBackend;
 use crate::backend::{Capabilities, CloseReason, SessionBackend, SessionRef, SpawnSpec};
 use crate::lifecycle::{
-    self, IgnoredReason, LifecycleEvent, Observation, PublicLifecycle, TaskState, Verdict, Version,
-    project,
+    self, AgentState, IgnoredReason, LifecycleEvent, Observation, PublicLifecycle, TaskState,
+    Verdict, Version, project,
 };
 use std::collections::BTreeMap;
 
@@ -481,4 +481,101 @@ fn fake_backend_spawn_probe_close_drives_the_reducer() {
     );
     assert_eq!(closed.resource_state, "closed");
     assert_eq!(closed.agent_state, "gone");
+}
+
+/// A competing writer landing between one local event's version read and its
+/// write. The wrapper only interposes on the first `upsert_session`: it writes a
+/// beat at a higher sequence first and then refuses the caller's own write, which
+/// is exactly the race the retry exists for. Every other method is the memory
+/// ledger's own answer.
+struct RacingLedger {
+    inner: MemoryLedger,
+    armed: std::sync::Mutex<bool>,
+    rival: VersionedSession,
+}
+
+impl SessionLedger for RacingLedger {
+    fn get_session(&self, task_id: &str) -> anyhow::Result<Option<SessionRecord>> {
+        self.inner.get_session(task_id)
+    }
+    fn upsert_session(&self, task_id: &str, row: &VersionedSession) -> anyhow::Result<bool> {
+        let mut armed = self.armed.lock().unwrap();
+        if *armed {
+            *armed = false;
+            assert!(
+                self.inner.upsert_session(task_id, &self.rival).unwrap(),
+                "the rival beat must land"
+            );
+            return Ok(false);
+        }
+        self.inner.upsert_session(task_id, row)
+    }
+    fn emit(&self, kind: &str, payload: serde_json::Value) {
+        self.inner.emit(kind, payload);
+    }
+    fn task_is_known(&self, task_id: &str) -> anyhow::Result<bool> {
+        self.inner.task_is_known(task_id)
+    }
+    fn task_attempt(&self, task_id: &str) -> anyhow::Result<i64> {
+        self.inner.task_attempt(task_id)
+    }
+    fn list_faults(&self, task_id: &str) -> anyhow::Result<Vec<FaultRecord>> {
+        self.inner.list_faults(task_id)
+    }
+    fn insert_fault(&self, fault: &FaultRecord) -> anyhow::Result<i64> {
+        self.inner.insert_fault(fault)
+    }
+    fn note_alert(&self, line: String) {
+        self.inner.note_alert(line)
+    }
+}
+
+/// A local transition still lands when a plugin beat takes the watermark between
+/// its version read and its write. The race left the transition behind before the
+/// retry: the delivery stayed `pending` beside a task whose ledger row said
+/// `acked`, and the session's public view read `working` for the rest of its life.
+#[test]
+fn a_lost_watermark_race_retries_on_the_fresh_row() {
+    let ledger = MemoryLedger::new();
+    let (bridge, _) = tracked(&ledger, "race-1");
+    feed_ready(&bridge, &ledger, "race-1").unwrap();
+    let before: Observation =
+        serde_json::from_str(&ledger.get_session("race-1").unwrap().unwrap().observed_json)
+            .unwrap();
+
+    // The rival beat: the session's own generation, a sequence past every version
+    // this test has written so far.
+    let mut rival = before.clone();
+    rival.agent = AgentState::Running;
+    rival.version.seq = before.version.seq + 10;
+    let rival_row = to_versioned(&rival, "{}", "{}").unwrap();
+
+    let mut racing = RacingLedger {
+        inner: ledger,
+        armed: std::sync::Mutex::new(true),
+        rival: rival_row,
+    };
+    let verdict = apply_at_next(&bridge, &mut racing, "race-1", |v| {
+        LifecycleEvent::TurnEnded { v }
+    })
+    .unwrap();
+    assert!(matches!(verdict, Verdict::Applied(_)), "{verdict:?}");
+
+    let after: Observation = serde_json::from_str(
+        &racing
+            .inner
+            .get_session("race-1")
+            .unwrap()
+            .unwrap()
+            .observed_json,
+    )
+    .unwrap();
+    assert_eq!(
+        after.delivery, before.delivery,
+        "the transition carried the delivery it started from"
+    );
+    assert!(
+        after.version.seq > rival.version.seq,
+        "the retry wrote past the beat that took the watermark"
+    );
 }

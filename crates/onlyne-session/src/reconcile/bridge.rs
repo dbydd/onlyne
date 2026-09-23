@@ -109,6 +109,23 @@ pub fn apply_persist(
     task_id: &str,
     event: &LifecycleEvent,
 ) -> anyhow::Result<Verdict> {
+    Ok(apply_persist_reported(bridge, ledger, task_id, event)?.0)
+}
+
+/// Reduce and persist, reporting alongside the verdict whether the write landed.
+///
+/// One implementation of the write, shared by every path: a caller that
+/// allocated the version itself (`apply_at_next`) retries on a lost write, and a
+/// caller handing the version over (`apply_persist`) reads the same answer and
+/// does nothing more with it. `false` means a transition the reducer accepted
+/// whose write lost the watermark; a verdict of `Ignored` or `Rejected` has
+/// nothing to write and reports `true`.
+fn apply_persist_reported(
+    bridge: &Bridge,
+    ledger: &dyn SessionLedger,
+    task_id: &str,
+    event: &LifecycleEvent,
+) -> anyhow::Result<(Verdict, bool)> {
     let row = ledger.get_session(task_id)?;
     if row.is_none() {
         let known =
@@ -124,15 +141,11 @@ pub fn apply_persist(
     }
     let current = stored_observation(ledger, row.as_ref());
     if row.is_none() && matches!(event, LifecycleEvent::Created { .. }) {
-        return Ok(Verdict::Applied(seed_created(
-            bridge,
-            ledger,
-            task_id,
-            version_of(event),
-        )?));
+        let (seeded, landed) = seed_created(bridge, ledger, task_id, version_of(event))?;
+        return Ok((Verdict::Applied(seeded), landed));
     }
     let verdict = lifecycle::apply(&current, event);
-    record_verdict(
+    let landed = record_verdict(
         bridge,
         ledger,
         task_id,
@@ -141,7 +154,7 @@ pub fn apply_persist(
         &current,
         &verdict,
     )?;
-    Ok(verdict)
+    Ok((verdict, landed))
 }
 
 /// Write the `Created` seed row. The reducer defines no transition into
@@ -152,7 +165,7 @@ fn seed_created(
     ledger: &dyn SessionLedger,
     task_id: &str,
     version: Version,
-) -> anyhow::Result<Observation> {
+) -> anyhow::Result<(Observation, bool)> {
     let mut seeded = initial_observation();
     seeded.version = version;
     let backend_ref = backend_ref_json(bridge, task_id, None);
@@ -160,13 +173,14 @@ fn seed_created(
     let stored = to_versioned(&seeded, &backend_ref, &desired)?;
     if ledger.upsert_session(task_id, &stored)? {
         ledger.emit("lifecycle", transition_payload(task_id, &seeded, "created"));
+        Ok((seeded, true))
     } else {
         tracing::warn!(
             task = %task_id,
             "a newer session row appeared while seeding Created; kept the newer watermark"
         );
+        Ok((seeded, false))
     }
-    Ok(seeded)
 }
 
 /// One transition on the bus: the full session tuple the reducer settled on.
@@ -195,7 +209,7 @@ fn record_verdict(
     event: &LifecycleEvent,
     current: &Observation,
     verdict: &Verdict,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     match verdict {
         Verdict::Applied(next) => {
             let backend_ref = backend_ref_json(bridge, task_id, row);
@@ -208,7 +222,7 @@ fn record_verdict(
                     seq = next.version.seq,
                     "session write lost to a newer watermark; left the row alone"
                 );
-                return Ok(());
+                return Ok(false);
             }
             tracing::debug!(
                 task = %task_id,
@@ -224,6 +238,7 @@ fn record_verdict(
                 "lifecycle",
                 transition_payload(task_id, next, event_name(event)),
             );
+            Ok(true)
         }
         Verdict::Ignored(reason) => {
             tracing::debug!(
@@ -234,6 +249,7 @@ fn record_verdict(
                 seq = current.version.seq,
                 "lifecycle event ignored; ledger left as-is"
             );
+            Ok(true)
         }
         Verdict::Rejected(reason) => {
             tracing::warn!(
@@ -244,9 +260,9 @@ fn record_verdict(
                 seq = current.version.seq,
                 "lifecycle event rejected; ledger left as-is"
             );
+            Ok(true)
         }
     }
-    Ok(())
 }
 
 /// The next version for a session observed locally: same generation, one
@@ -263,22 +279,44 @@ pub fn next_version(ledger: &dyn SessionLedger, task_id: &str) -> anyhow::Result
 /// Reduce an event whose version the caller allocates itself. Every feed helper
 /// below goes through here, so an event that arrives twice is dropped by the
 /// reducer's watermark.
+///
+/// The version is read and then written, and a competing writer can land
+/// between the two: a plugin beat arriving inside that window moves the stored
+/// watermark past the version this call allocated, and the write is refused.
+/// A local observation the reducer accepted is a fact, so the window closes by
+/// re-reading the row and writing again, bounded by [`APPLY_ATTEMPTS`]. The
+/// reducer's own gate is unchanged: a duplicate or an older event is still
+/// dropped, and a verdict of `Ignored` or `Rejected` never reaches the retry.
 pub fn apply_at_next(
     bridge: &Bridge,
     ledger: &dyn SessionLedger,
     task_id: &str,
-    make: impl FnOnce(Version) -> LifecycleEvent,
+    make: impl FnMut(Version) -> LifecycleEvent,
 ) -> anyhow::Result<Verdict> {
-    let version = next_version(ledger, task_id)?;
-    apply_persist(bridge, ledger, task_id, &make(version))
+    let mut make = make;
+    let mut attempt = 1;
+    loop {
+        let version = next_version(ledger, task_id)?;
+        let (verdict, landed) = apply_persist_reported(bridge, ledger, task_id, &make(version))?;
+        if landed || attempt == APPLY_ATTEMPTS {
+            return Ok(verdict);
+        }
+        attempt += 1;
+    }
 }
+
+/// Attempts one local event gets to land its write. Four is the number that
+/// covers the writers this client can run against one session — the plugin's
+/// beat, the stall clock, the settle, and the sweep — one retry each, after
+/// which the loss is logged rather than looped over.
+const APPLY_ATTEMPTS: usize = 4;
 
 /// Best-effort feed for local observation points.
 pub fn try_feed(
     bridge: &Bridge,
     ledger: &dyn SessionLedger,
     task_id: &str,
-    make: impl FnOnce(Version) -> LifecycleEvent,
+    make: impl FnMut(Version) -> LifecycleEvent,
 ) {
     if let Err(err) = apply_at_next(bridge, ledger, task_id, make) {
         tracing::warn!(
