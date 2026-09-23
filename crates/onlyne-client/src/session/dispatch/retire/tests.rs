@@ -388,8 +388,16 @@ async fn a_control_close_refuses_the_held_delivery_with_the_operators_word() {
     );
 
     for (key, reason, word) in [
-        ("cancelled", onlyne_session::CloseReason::Cancelled, "operator cancel"),
-        ("recycled", onlyne_session::CloseReason::Operator, "operator recycle"),
+        (
+            "cancelled",
+            onlyne_session::CloseReason::Cancelled,
+            "operator cancel",
+        ),
+        (
+            "recycled",
+            onlyne_session::CloseReason::Operator,
+            "operator recycle",
+        ),
     ] {
         let task = new_task_id();
         let msg_id = format!("msg-{key}");
