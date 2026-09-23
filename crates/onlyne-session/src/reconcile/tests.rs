@@ -550,13 +550,13 @@ fn a_lost_watermark_race_retries_on_the_fresh_row() {
     rival.version.seq = before.version.seq + 10;
     let rival_row = to_versioned(&rival, "{}", "{}").unwrap();
 
-    let mut racing = RacingLedger {
+    let racing = RacingLedger {
         inner: ledger,
         armed: std::sync::Mutex::new(true),
         rival: rival_row,
     };
-    let verdict = apply_at_next(&bridge, &mut racing, "race-1", |v| {
-        LifecycleEvent::TurnEnded { v }
+    let verdict = apply_at_next(&bridge, &racing, "race-1", |v| LifecycleEvent::TurnEnded {
+        v,
     })
     .unwrap();
     assert!(matches!(verdict, Verdict::Applied(_)), "{verdict:?}");
