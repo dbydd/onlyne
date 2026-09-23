@@ -226,3 +226,69 @@ fn a_session_that_died_at_the_grace_window_settles_the_task_it_owed() {
         "the session's projection reads exited: {row:?}"
     );
 }
+
+/// Each arm of the window signs the retirement it decides.
+///
+/// The two readings reach the same verdict through different facts, and an operator telling a
+/// vanished agent apart from one that merely stopped reporting has to be able to see which fact
+/// closed the window: the reconnect grace answers a connection that ended, the silence window
+/// answers one still attached while nothing the client accepts arrives over it. The ages come
+/// off the slot as the sweep read it, before the retirement took the binding away.
+#[tokio::test]
+async fn each_arm_of_the_window_names_itself_on_the_retirement() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).expect("client store");
+    let backend = Arc::new(FakeBackend::new());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        Vec::new(),
+        8,
+        backend.clone(),
+        store.clone(),
+    );
+
+    // The drop arm: a connection that ended a minute back and never came back.
+    let dropped_task = new_task_id();
+    let gone = Instant::now()
+        .checked_sub(Duration::from_secs(61))
+        .expect("an instant a minute back");
+    dispatched_ghost(&state, &dropped_task, gone);
+
+    // The silence arm: the connection is attached, its session's task still owed, and
+    // the last frame this client accepted over it is older than three heartbeats.
+    let quiet_task = new_task_id();
+    dispatched_ghost(&state, &quiet_task, Instant::now());
+    let (stream, _peer) = tokio::io::duplex(1024);
+    let io = AdapterIo::new(stream, Duration::from_secs(5), Duration::from_secs(5));
+    {
+        let mut inner = state.inner.lock();
+        inner
+            .transports
+            .insert(quiet_task.clone(), (io, Vec::new()));
+        let slot = inner.sessions.get_mut(&quiet_task).expect("the slot");
+        slot.dropped_at = None;
+        slot.last_beat =
+            Some(Instant::now() - Duration::from_secs(31) - Duration::from_millis(200));
+    }
+
+    let retired = state.retire_dropped_ghosts(Instant::now(), 60);
+    let dropped = retired
+        .iter()
+        .find(|one| one.session_id == dropped_task)
+        .expect("the grace arm retired the session whose connection ended");
+    assert_eq!(dropped.arm.word(), "reconnect_grace");
+    assert_eq!(dropped.away_secs, Some(61), "the away time it read");
+
+    let silent = retired
+        .iter()
+        .find(|one| one.session_id == quiet_task)
+        .expect("the silence arm retired the session whose connection held");
+    assert_eq!(silent.arm.word(), "heartbeat_silence");
+    assert_eq!(silent.away_secs, None, "no connection ended on this arm");
+    assert!(
+        silent.quiet_secs >= 31,
+        "the quiet age the sweep read: {}",
+        silent.quiet_secs
+    );
+}

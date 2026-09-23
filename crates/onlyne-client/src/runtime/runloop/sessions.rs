@@ -221,15 +221,25 @@ pub(super) async fn scan_reconnect_grace(state: &RunState) {
     if retired.is_empty() {
         return;
     }
-    tracing::info!(
-        retired = retired.len(),
-        grace_secs = state.reconnect_grace_secs,
-        "dropped sessions retired past the reconnect grace"
-    );
-    for session_id in retired {
-        if let Err(error) = dispatch::sync_session(&state.dispatch, &session_id).await {
+    // One line per retirement, and it names the arm: two readings close this window — the
+    // connection ended and stayed away, or the connection held while nothing the client
+    // accepted arrived — and a single count with one threshold made an operator reading the
+    // log guess. The ages are the sweep's own inputs, so the line settles whether the agent
+    // left or merely stopped reporting.
+    for retired in retired {
+        tracing::info!(
+            session = %retired.session_id,
+            arm = retired.arm.word(),
+            quiet_secs = retired.quiet_secs,
+            away_secs = retired.away_secs,
+            silence_window_secs =
+                dispatch::HEARTBEAT_INTERVAL.as_secs() * dispatch::HEARTBEAT_SILENCE_MARGIN as u64,
+            grace_secs = state.reconnect_grace_secs,
+            "session retired past its window"
+        );
+        if let Err(error) = dispatch::sync_session(&state.dispatch, &retired.session_id).await {
             tracing::warn!(
-                session = %session_id,
+                session = %retired.session_id,
                 error = %error,
                 "a retired session's exit was not published"
             );

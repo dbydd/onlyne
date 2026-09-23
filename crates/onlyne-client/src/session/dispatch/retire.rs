@@ -290,6 +290,54 @@ pub fn close_all(state: &DispatchState, reason: onlyne_session::CloseReason, bud
     }
 }
 
+/// Which way a session's window closed.
+///
+/// Two arms reach the same verdict through different facts, and an operator reading one
+/// aggregate log line cannot tell them apart: one means the connection ended and the agent
+/// stayed away, the other means the connection is still up while nothing the client accepts
+/// arrives over it. The words exist so the log can name which reading retired a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetirementArm {
+    /// The plugin connection ended and `[client] reconnect_grace_secs` expired.
+    Dropped,
+    /// The connection stayed up while the session went quiet past the heartbeat window.
+    Silent,
+}
+
+impl RetirementArm {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Dropped => "reconnect_grace",
+            Self::Silent => "heartbeat_silence",
+        }
+    }
+}
+
+/// One session the sweep retired, with what it read on the way.
+pub struct Retired {
+    /// The retired session's own id, which a client-held session shares with its task.
+    pub session_id: String,
+    /// The arm that decided it.
+    pub arm: RetirementArm,
+    /// Seconds since this session's last accepted frame.
+    pub quiet_secs: u64,
+    /// Seconds since its connection ended, when one did.
+    pub away_secs: Option<u64>,
+}
+
+/// How long a session has gone without a frame this client accepted.
+fn quiet_secs(slot: &SessionSlot, now: Instant) -> u64 {
+    slot.last_beat
+        .map(|beat| now.saturating_duration_since(beat).as_secs())
+        .unwrap_or(u64::MAX)
+}
+
+/// How long a session's connection has been gone, for a session still waiting on one.
+fn away_secs(slot: &SessionSlot, now: Instant) -> Option<u64> {
+    slot.dropped_at
+        .map(|left| now.saturating_duration_since(left).as_secs())
+}
+
 impl DispatchState {
     /// Retire tracked resources whose stored lifecycle has reached `Exited`.
     ///
@@ -316,8 +364,9 @@ impl DispatchState {
         }
     }
 
-    /// Retire the sessions whose plugin connection dropped and never came back,
-    /// and answer which ones left.
+    /// Retire the sessions whose plugin connection dropped and never came back, or
+    /// whose connection stayed up while they went quiet, and answer which ones left
+    /// and why.
     ///
     /// A connection that ends without a `detach` frame leaves its session tracked
     /// so an agent that restarts inside `[client] reconnect_grace_secs` finds the
@@ -363,23 +412,31 @@ impl DispatchState {
     /// report an ordinary ending travels on, and it cannot run under this lock —
     /// so the caller is handed what to publish instead of a second writer being
     /// invented here.
-    pub fn retire_dropped_ghosts(&self, now: Instant, grace_secs: u64) -> Vec<String> {
+    pub fn retire_dropped_ghosts(&self, now: Instant, grace_secs: u64) -> Vec<Retired> {
         if grace_secs == 0 {
             return Vec::new();
         }
         let window = Duration::from_secs(grace_secs);
         let mut inner = self.inner.lock();
-        let due: Vec<String> = inner
+        // The arm is decided from the pair of readings here, while both still describe the
+        // slot: which fact closed the window is what the operator has to be able to tell
+        // apart once the retirement itself is a line in the log.
+        let due: Vec<(String, RetirementArm)> = inner
             .sessions
             .iter()
-            .filter(|(key, slot)| {
-                dropped_past_window(&inner, key, slot, now, window)
-                    || silent_past_window(&inner, key, slot, now)
+            .filter_map(|(key, slot)| {
+                let arm = if dropped_past_window(&inner, key, slot, now, window) {
+                    RetirementArm::Dropped
+                } else if silent_past_window(&inner, key, slot, now) {
+                    RetirementArm::Silent
+                } else {
+                    return None;
+                };
+                Some((key.clone(), arm))
             })
-            .map(|(key, _)| key.clone())
             .collect();
-        let mut retired: Vec<String> = Vec::new();
-        for key in due {
+        let mut retired: Vec<Retired> = Vec::new();
+        for (key, arm) in due {
             let Some(slot) = inner.sessions.get(&key).cloned() else {
                 continue;
             };
@@ -471,8 +528,14 @@ impl DispatchState {
             if retire_idle_locked(&mut inner, &key, reason) {
                 // The id that travels is the session's own, the one whose row was
                 // just fed agent-gone and resource-closed: that row is what the
-                // server mirrors, and its ending is what the caller publishes.
-                retired.push(task_id);
+                // server mirrors, and its ending is what the caller publishes. The
+                // ages are read off the slot as it stood before the retirement.
+                retired.push(Retired {
+                    session_id: task_id,
+                    arm,
+                    quiet_secs: quiet_secs(&slot, now),
+                    away_secs: away_secs(&slot, now),
+                });
             }
         }
         retired

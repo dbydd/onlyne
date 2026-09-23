@@ -193,6 +193,13 @@ where it is read.
   own turn-end rule with no producer until now. The label clears the moment a beat reports
   the turn running again, so the frame that says work resumed is not refused as illegal,
   and a session with no task record is left alone.
+- client: the reconnect sweep signs every retirement it decides. One aggregate line reported a
+  count beside `grace_secs`, and the window has two ways to close — a connection that ended and
+  stayed away, and a connection still attached while nothing the client accepted arrived over it
+  — so the log could not tell an operator whether an agent left or merely stopped reporting, and
+  both readings looked like the sixty-second grace. `retire_dropped_ghosts` now answers
+  `Retired { session_id, arm, quiet_secs, away_secs }` and the tick logs one line per session
+  naming the arm beside the two ages it read and both thresholds.
 - tui: the role named `_supervisor` is not drawn. One filter on the role registry
   (`Snapshot::visible_roles`) removes its box, every hop in either direction, its seat for
   the cursor, its role-list row and its sessions. A fault, ledger or history row that names
