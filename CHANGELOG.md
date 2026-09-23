@@ -434,6 +434,15 @@ with `BIN_DIR=target/debug`.
   retirement's own publish beside the refusal it files.
 - `crates/onlyne-testkit/README.md`: one `onlyne-agent-fake` process serves one session, so
   an e2e case that needs two concurrent sessions mounts two agents.
+- `onlyne --help`: its foot gains the socket-resolution order (`--socket`, then
+  ONLYNE_SOCKET, then `--server-root`, then `--workspace` or the current directory walking
+  upward for a tree that owns `.onlyne/run/s` or `.onlyne/run/socket`), and its exit-4 line
+  names `skill export`'s refusal beside `generate`'s. The `--as auto` help reads the surface
+  from the database beside the path and falls back to the `.onlyne/run/s` suffix, which is
+  what `infer_surface` does in `crates/onlyne-cli/src/socket.rs`.
+- `onlyne ledger --help`: its `reason` paragraph names `session_dead` beside the receiver's
+  whole sentence and the server's own budgets, which is the refusal the reconnect sweep
+  files on a retired session's delivery row.
 
 Wire format: `Welcome` and `RoleInfo` lose `reuse`; `RoleInfo` gains `queued`,
 `SessionRow` gains `fresh` and `QuerySessionsArgs` gains `fresh_wait_ms`; the

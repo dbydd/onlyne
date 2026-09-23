@@ -22,7 +22,8 @@ pub const SOCKET_ENV: &str = "ONLYNE_SOCKET";
 /// `--as <surface>` selection, applied to a `--socket` path that carries no other hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum AsArg {
-    /// Infer from the path suffix `.onlyne/run/s`.
+    /// Read the surface from the database beside the path, falling back to the
+    /// `.onlyne/run/s` suffix.
     #[default]
     Auto,
     /// Treat the socket as the local admin surface.

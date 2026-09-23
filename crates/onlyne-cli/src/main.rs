@@ -43,9 +43,11 @@ row, so `op_id`, `kind`, `from`, `to`, `parent_task`, `hop`, `attempt`, \
 
 `reason` names why the row last settled. A refusal arrives with the receiver's \
 whole sentence, as when a pane backend rejects a session command that speaks \
-its protocol on its own stdio, and the server's own budgets settle a row as \
-`requeue_exhausted`, `requeue_ttl`, or `expired`. A row that settled with \
-nothing to say carries no `reason` key. `onlyne-tui` page 2 appends \
+its protocol on its own stdio. A session the reconnect sweep retires refuses \
+the delivery it still held with this client's own word `session_dead`. The \
+server's own budgets settle a row as `requeue_exhausted`, `requeue_ttl`, or \
+`expired`. A row that settled with nothing to say carries no `reason` key. \
+`onlyne-tui` page 2 appends \
 `reason=<text>` to a row's tail only where that key is present, so an `acked` \
 row prints what it printed before the column reached the board.";
 
@@ -61,6 +63,10 @@ a socket. 4 the operator's input was refused: a `generate` refusal propagated
 from onlyne-server, or `skill export` declining to overwrite a file (pass
 `--force`). 5 `client run` found no session host (see backends below). 127 a
 sibling binary was not found.
+
+A socket resolves in this order: `--socket`, then ONLYNE_SOCKET, then
+`--server-root`, then `--workspace` or the current directory walking upward for
+a tree that owns `.onlyne/run/s` or `.onlyne/run/socket`.
 
 Session backends (the `backend` key of a role workspace's `config.toml`, read
 by `onlyne client run`): herdr | orca | zellij | exec | headless | acp | fake
