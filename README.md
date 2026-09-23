@@ -22,6 +22,20 @@ cargo install onlyne-server onlyne-client onlyne-gateway onlyne-tui
 pi install npm:pi-onlyne
 ```
 
+The skill documents ship inside the `onlyne` binary, so an installed build writes
+the set matching its own version:
+
+```bash
+onlyne skill export                     # .agents/skills under the working directory
+onlyne skill export --set role          # a role workspace's two documents
+onlyne skill export --dest ~/.agents/skills
+```
+
+A file whose bytes already match the shipped document is left alone; any other
+existing file stops the export with exit 4 until `--force` is passed.
+`npx skills add dbydd/onlyne` installs the documents from this repository, and
+`npx skills add ./` reads the same set out of a local checkout.
+
 ## See it run
 
 ```bash

@@ -14,6 +14,10 @@ pub const EXIT_OK: i32 = 0;
 pub const EXIT_ANSWER_FAILED: i32 = 1;
 pub const EXIT_VALIDATION: i32 = 2;
 pub const EXIT_NO_SOCKET: i32 = 3;
+/// An operator refusal caught here, with nothing written: `skill export`
+/// declining to overwrite a file. `generate` propagates the same code from
+/// `onlyne-server`.
+pub const EXIT_REFUSAL: i32 = 4;
 pub const EXIT_NO_SIBLING: i32 = 127;
 
 /// Run one verb's future on a fresh runtime.

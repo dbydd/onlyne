@@ -196,6 +196,28 @@ where it is read.
   would erase the operator's own audit trail. The `e` key and the hidden-by-default control
   spokes it revealed are gone with it, so an aggregate role's hops draw like any other.
 
+### Added
+
+- cli: `onlyne skill export` writes the skill documents this build ships into a directory
+  tree. Each one lands at `<dest>/<name>/SKILL.md`, `<dest>` defaults to `.agents/skills`
+  under the working directory, `--set role|supervisor|dev` narrows the selection, and
+  `--force` rewrites a file whose bytes differ. A file that already matches the shipped
+  document is reported `unchanged` and left alone; any other existing file stops the run
+  with exit 4 and `onlyne: refusing to overwrite <path>; pass --force`, which is the rule
+  `generate` follows for template files, and the run writes nothing in that case. The bytes
+  are compiled into the binary (`crates/onlyne-cli/src/skill.rs`, `include_str!` over
+  `crates/onlyne-cli/skills/<name>/SKILL.md`, symlinks to the canonical `skills/**` and
+  `.agents/skills/onlyne/SKILL.md`), so an installed `onlyne` answers with the skills of its
+  own version, with no network and no source checkout, and `cargo package` materializes the
+  copies it archives. The three groups are `role` (`onlyne-role` and
+  `onlyne-role-payload-v2`), `supervisor` (`onlyne-supervisor`) and `dev` (the repository
+  and CLI development guide, `onlyne`).
+- `skills/onlyne-role-payload-v2/SKILL.md`: its `description` value is quoted. The line was
+  an unquoted YAML scalar carrying `handoff:` and `Triggers:` inside its prose, and a reader
+  takes each `": "` for the start of a nested mapping: `npx skills add` skipped this file
+  with a YAML parse error while finding the other three, so the standard installer could not
+  place the closing-report handbook.
+
 ### Fixed
 
 - client: the answer to a plugin's own report leaves before any bye that report

@@ -18,6 +18,7 @@ const EXIT_OK: i32 = 0;
 const EXIT_ANSWER_FAILED: i32 = 1;
 const EXIT_VALIDATION: i32 = 2;
 const EXIT_NO_SOCKET: i32 = 3;
+const EXIT_REFUSAL: i32 = 4;
 const EXIT_NO_SIBLING: i32 = 127;
 
 fn bin() -> PathBuf {
@@ -1798,5 +1799,124 @@ fn gateway_run_forwards_to_onlyne_gateway() {
             "run\ntelegram\n--server-root\n{}\n--token\nt0ken\n",
             root.display()
         )
+    );
+}
+
+/// `skill export` reads the documents out of the binary, so it needs no socket
+/// and no source checkout: the four land under `.agents/skills` in the working
+/// directory, and a second run over that tree matches every byte.
+#[test]
+fn skill_export_writes_the_shipped_documents_under_the_working_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let export = || {
+        Command::new(bin())
+            .current_dir(dir.path())
+            .args(["skill", "export"])
+            .output()
+            .unwrap()
+    };
+    let output = export();
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_OK),
+        "{}",
+        stderr_of(&output)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        body["data"]["written"].as_array().unwrap().len(),
+        4,
+        "{body}"
+    );
+    for name in [
+        "onlyne-supervisor",
+        "onlyne-role",
+        "onlyne-role-payload-v2",
+        "onlyne",
+    ] {
+        let file = dir
+            .path()
+            .join(".agents/skills")
+            .join(name)
+            .join("SKILL.md");
+        let text = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+        assert!(
+            text.starts_with("---\nname:"),
+            "{} carries no skill frontmatter",
+            file.display()
+        );
+    }
+
+    let again = export();
+    assert_eq!(again.status.code(), Some(EXIT_OK), "{}", stderr_of(&again));
+    let body: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert!(
+        body["data"]["written"].as_array().unwrap().is_empty(),
+        "a matching document is left alone: {body}"
+    );
+    assert_eq!(
+        body["data"]["unchanged"].as_array().unwrap().len(),
+        4,
+        "{body}"
+    );
+}
+
+/// A file whose bytes differ from the shipped document stops the export by
+/// name, and `--force` is what rewrites it. `--set` narrows the selection.
+#[test]
+fn skill_export_refuses_a_different_document_until_force_rewrites_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("skills-root");
+    let supervisor = root.join("onlyne-supervisor").join("SKILL.md");
+    let role = root.join("onlyne-role").join("SKILL.md");
+    let dest = |args: &[&str]| {
+        let mut command = Command::new(bin());
+        command.current_dir(dir.path()).args(args).arg(&root);
+        command.output().unwrap()
+    };
+
+    let narrowed = dest(&["skill", "export", "--set", "supervisor", "--dest"]);
+    assert_eq!(
+        narrowed.status.code(),
+        Some(EXIT_OK),
+        "{}",
+        stderr_of(&narrowed)
+    );
+    assert!(supervisor.is_file(), "--set supervisor writes the manual");
+    assert!(!role.exists(), "--set supervisor selects that group alone");
+
+    std::fs::create_dir_all(role.parent().unwrap()).unwrap();
+    std::fs::write(&role, "a document an operator edited\n").unwrap();
+    let refused = dest(&["skill", "export", "--dest"]);
+    assert_eq!(refused.status.code(), Some(EXIT_REFUSAL));
+    assert_eq!(
+        stderr_of(&refused),
+        format!(
+            "onlyne: refusing to overwrite {}; pass --force\n",
+            role.display()
+        )
+    );
+    assert!(
+        refused.stdout.is_empty(),
+        "a refusal answers nothing on stdout"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&role).unwrap(),
+        "a document an operator edited\n",
+        "a refusal writes nothing"
+    );
+
+    let forced = dest(&["skill", "export", "--force", "--dest"]);
+    assert_eq!(
+        forced.status.code(),
+        Some(EXIT_OK),
+        "{}",
+        stderr_of(&forced)
+    );
+    let text = std::fs::read_to_string(&role).unwrap();
+    assert!(
+        text.starts_with("---\nname: onlyne-role"),
+        "the shipped role document came back: {text:.80}"
     );
 }

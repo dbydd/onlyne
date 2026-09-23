@@ -21,6 +21,7 @@ mod media;
 mod render;
 mod report;
 mod runtime;
+mod skill;
 mod socket;
 mod verbs;
 mod wire;
@@ -56,9 +57,10 @@ Exit codes: 0 the verb answered ok. 1 a socket answer failed or a runtime
 error ended the verb. 2 local validation or usage refusal; the code is
 multipurpose: a bad flag, a bad --request, an invalid report file, and a
 report file that is absent or unreadable all share it. 3 nothing resolved as
-a socket. 4 `generate` refused the operator's input, propagated from
-onlyne-server. 5 `client run` found no session host (see backends below).
-127 a sibling binary was not found.
+a socket. 4 the operator's input was refused: a `generate` refusal propagated
+from onlyne-server, or `skill export` declining to overwrite a file (pass
+`--force`). 5 `client run` found no session host (see backends below). 127 a
+sibling binary was not found.
 
 Session backends (the `backend` key of a role workspace's `config.toml`, read
 by `onlyne client run`): herdr | orca | zellij | exec | headless | acp | fake
@@ -141,6 +143,9 @@ enum Verb {
     Cluster(ClusterCmd),
     /// Observe the admin socket in a terminal, forwarding to onlyne-tui.
     Tui(RestArgs),
+    /// Write the shipped skill documents into a directory tree.
+    #[command(long_about = skill::FAMILY_INTRO)]
+    Skill(skill::SkillCmd),
     /// Print the version and each sibling's path.
     Version,
     /// Print the compiled JSON Schema for one configuration surface.
@@ -491,6 +496,9 @@ fn run() -> i32 {
         Verb::WaitReady(cmd) => admin::wait_ready(flags, cmd.args),
         Verb::Repair(cmd) => admin::repair(flags, cmd.verb),
         Verb::Tui(rest) => tui(flags, &rest),
+        Verb::Skill(cmd) => match cmd.verb {
+            skill::SkillVerb::Export(args) => skill::export(flags, &args),
+        },
         Verb::Cluster(cmd) => match cmd.verb {
             ClusterVerb::ExportProse(args) => admin::export_prose(flags, args),
         },
