@@ -2,6 +2,10 @@
 
 ## [1.4.0] - 2026-09-21
 
+Status: **unreleased.** Every fix this window produced is folded into this section, and
+no separate version number is cut for it; 1.3.1 stays the newest published release until the
+operator publishes.
+
 Scope: three changes in one window. Two close session-bookkeeping holes read out of
 one field report, and the third removes the mechanism the second hole lived in.
 A role on the live ring logged three `connection lost` errors for a single task.
@@ -275,6 +279,31 @@ where it is read.
   exit through the publisher an ordinary ending already uses (`sync_session`, a `heartbeat`
   variant carrying the projection), so the mirror reads `exited` in the same tick as the
   retirement.
+- client: a beat that arrives on the connection this client holds read-only still refreshes the
+  session's liveness stamp, which is what the silence arm of the reconnect sweep reads. It used
+  to discard the frame whole, and a plugin loaded twice into one agent process — the shape a
+  workspace that installs the plugin twice produces — beats on both of its connections, so the
+  demoted copy starved the session's clock and the sweep retired an agent that was alive and
+  working: SIGTERM, bash exit 143, 47-60 s after each delivery, seven of the formal cluster's
+  nine task rows `rejected` with reason `session_dead`, and four alexandria sessions left at
+  `working` with `heartbeat_missing` and `stale_working` faults recorded beside them. The
+  observation still moves no dimension, which is what the demotion is for, and the stamp is read
+  only for a session whose task is still bound and unsettled.
+- session: a local transition whose write lost the watermark race retries. `next_version`
+  allocates one past the stored watermark, and a plugin beat landing between that read and the
+  write made `upsert_session` refuse the row, which `record_verdict` logged (`session write
+  lost to a newer watermark; left the row alone`) and dropped. A completion's settle is one such
+  write, and the tuple it moves is the one the public lifecycle reads, so a task whose ledger row
+  said `acked` projected `working` for the rest of its life (`agent idle, delivery none, outcome
+  done, lifecycle working, seq 1004`). `apply_at_next` now retries on the row as it then stands,
+  bounded by `APPLY_ATTEMPTS`, through one write shared with `apply_persist`; a duplicate or an
+  older event is still dropped by the reducer's own gate.
+- testkit: `running-lights.sh` (case 12) and `acp-payload-v2.sh` (case 19) mounted one
+  `onlyne-agent-fake` per role and then handed that role two tasks, and one agent process serves
+  one session, so the second task's session waited out `[client] reconnect_grace_secs` and the
+  sweep retired it — `acked=6` of the ring's twelve rows, and a child row refused
+  `session_dead`. Both mount one agent per session now, synchronized on the ledger's own settle
+  rather than on a clock, and both pass (13 s and 5 s).
 
 ### Tests
 
@@ -349,6 +378,13 @@ where it is read.
   own reason; and `a_role_level_ticket_releases_when_its_task_publishes_exited`
   (`crates/onlyne-server/tests/delivery.rs`) fails with `InFlight != Queued` when the old
   ticket comparison is restored.
+- client and session, for the live-cluster chain: `a_beat_from_a_held_connection_refreshes_liveness_and_applies_no_state`
+  (`crates/onlyne-client/src/session/dispatch/reports/tests.rs`), which commenting the one
+  `note_beat` line fails with `the liveness stamp is stamped even though the state is not`, and
+  `a_lost_watermark_race_retries_on_the_fresh_row`
+  (`crates/onlyne-session/src/reconcile/tests.rs`), whose ledger wrapper lands a competing beat
+  inside the first write — setting `APPLY_ATTEMPTS` to 1 fails it with `the retry wrote past the
+  beat that took the watermark`.
 - testkit: `crates/onlyne-testkit/e2e/reconnect-requeue.sh` is rewritten to mount one
   `onlyne-agent-fake` per session, which is what lets it prove what it was written for: the
   rows a killed client leaves behind, their redelivery in send order, one ack per row under
@@ -490,29 +526,18 @@ with them.
   `crates/onlyne-client`, `crates/onlyne-session` or the plugin names either key, so the
   budgets describe a promise this tree does not keep. Removing the table is a breaking
   config change and stays with the operator.
-- `crates/onlyne-testkit/e2e/running-lights.sh` (case 12) and `acp-payload-v2.sh` (case 19)
-  mounted one `onlyne-agent-fake` per role and then handed that role two tasks, and one agent
-  process serves one session: the second task's session waited out `[client]
-  reconnect_grace_secs` and the sweep retired it, which read `acked=6` of the ring's twelve
-  rows and left a child row refused `session_dead`. Both now mount one agent per session,
-  waiting on the ledger's own settle for a role's next hop and on the first child's ack for the
-  worker's second agent, and both pass (13 s and 5 s).
-
-- One defect chain reported from the two live clusters is fixed in `ade50a6`, and both halves
-were measured on those clusters. A beat arriving on the connection this client holds
-read-only refreshed nothing, and `last_beat` is the liveness half of the reconnect sweep's
-silence arm: a plugin loaded twice into one agent process — the shape a workspace that
-installs it twice produces — beat on both connections, and the demoted copy starved the
-session's clock, so the sweep retired a session whose agent was alive and working (SIGTERM,
-bash exit 143, 47-60 s after each delivery; seven of the formal cluster's nine task rows
-`rejected` with reason `session_dead`; four alexandria sessions at `working` with
-`heartbeat_missing` and `stale_working` faults already recorded beside them). Independently, a
-local transition's write lost to a plugin beat landing between its version read and its
-write, and a completion's settle is one such write, so the session of a task whose ledger row
-says `acked` projected `working` for the rest of its life (`agent idle, delivery none,
-outcome done, lifecycle working, seq 1004`). `apply_at_next` retries the lost case on the row
-as it then stands, bounded by `APPLY_ATTEMPTS`, and the beat's liveness half now travels
-while its observation still does not.
+- Two live-run findings are open as decisions for the operator, recorded here rather than patched
+  on guesswork. First, a task that never ran can still be settled `done`: the honest gate is a
+  completion arriving for a session that never passed `ready`/`turn-start` being refused and
+  faulted, and an empty `head` is not the anomaly on its own, since the plugin's own
+  `head = explicit || task?.head || ""` and `onlyne complete --head-from ledger` both reach a
+  legitimate empty head. Second, `repair close` leaves the session's projection row where it
+  stood, which is the design's own rule (`stale.rs` records a fault and moves no row, and
+  `docs/operations.md` says so), and it is why a dead session keeps reading `working` in
+  `onlyne sessions` and on the board until an operator clears it.
+- The read path holds three accounts of one session — the client's tuple, the server's mirrored
+  row, and the two ends' separate death clocks — and the fixes above close holes in that shape.
+  Whether the public view moves to one source derived at read time is a structure decision.
 
 ## [1.3.1] - 2026-09-20
 
