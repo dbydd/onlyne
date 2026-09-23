@@ -368,6 +368,25 @@ where it is read.
   already holds: the lifecycle the close wrote, the outcome it already carried. The close writes no
   outcome of its own, so a plugin that finished its work before the command landed still settles
   `done` through its own report, which the operator's word had marked `ControlDriven`.
+- client: the command's own row is answered before the mirror moves. Both control arms published the
+  session's exit from inside `on_control`, before `settle_control` enqueued the ack for the
+  command's own delivery row; a published `exited` makes the server return every in-flight row of
+  that task to the queue, and that row was one of them until its ack was enqueued — so a live
+  `recycle` applied the same command twice 203 ms apart, the second inert. `settle_control` queues
+  the accepted ack first and publishes after it, only for an applied `Recycle` or `Cancel` that found
+  the session; a refused command and one this role no longer holds publish nothing.
+- server and store: a verdict that arrives after the tuple is final still reaches the mirror. The
+  mirror's version gate skips `(generation, seq) <= watermark` silently, and a publish's sequence is
+  the session row's own version; a task verdict lives in a separate record by design, so a verdict
+  landing after the tuple is final carried that same version and was dropped as a duplicate — a live
+  run showed a mirror at `exited` with an empty outcome, no send failure on the client, no line on the
+  server, and a sequence that never moved. The write now carries one narrow exception: a non-newer
+  publish whose projection differs from the stored one only in `outcome`, and whose stored row
+  carries none, writes that outcome alone, through a compare-and-set on the stored bytes
+  (`ServerLedger::publish_mirror_outcome`) that keeps generation and sequence untouched and lets the
+  server emit `session_state` with the stored version. The comparison is field by field over the
+  whole projection, so no dimension rides through the exception, and a later older publish finds the
+  outcome in place and skips: a client's verdict is written once.
 - server: the ghost sweep keeps a verdict the client published. It read a delivery row's rejection
   as `failed` and overwrote a mirror the client had already published as `cancelled`, so
   `onlyne ghosts` reported a verdict nobody gave. The pass still moves a row that reads `working` —
