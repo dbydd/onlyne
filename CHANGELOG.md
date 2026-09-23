@@ -346,6 +346,27 @@ where it is read.
   record, which keeps the first verdict it was handed, the delivery row the client still holds is
   refused with `operator cancel` or `operator recycle`, and the settlement publishes. A store that
   refuses the verdict re-owes the note at its original instant.
+- server and client: a settled task's delivery row is answered, not re-dispatched. A live run
+  found a self-sustaining loop: the operator cancelled a young session, the client's fallback settled
+  the task 30 s later, and the mirror read `cancelled`, while the delivery row was never answered —
+  `release_locked`'s close branch removes the slot and the `msg_id` inside it. Every retirement then
+  published an exit, every exit returned that row to the queue through `release_exited_delivery`, and
+  the task re-ran in a fresh generation about every two minutes: the artifact regenerated, the
+  transcript grew, each `Done` was refused by the settle guard, and the row only went terminal when
+  a later generation's retirement refused it with `session_dead`. The client answers the row it still
+  holds at the close with the operator's word — `operator cancel`, `operator recycle`, and
+  `operator close` for a close that named no command, which is the server's own word for such a row
+  already — and every door that answers a held row spends the same handle through `msg_id.take()`, so
+  the row is answered once. The server refuses a released row whose task already carries a verdict,
+  asking the ghost sweep's own pair of reads (`ghosts::task_ledger_state`, `ghosts::settled_outcome`)
+  and landing the row `rejected` with `task_settled`, out of the requeued count and with its ticket
+  spent; a task carrying no verdict still rides the TTL and budget gates and still requeues.
+- server: the ghost sweep keeps a verdict the client published. It read a delivery row's rejection
+  as `failed` and overwrote a mirror the client had already published as `cancelled`, so
+  `onlyne ghosts` reported a verdict nobody gave. The pass still moves a row that reads `working` —
+  a settled task beside a live agent projects that way, and moving the row is what the pass exists
+  for — and the ledger's reading is what a row takes where the mirror carries no outcome. The audit
+  row names what the mirror finally reads; its evidence tag is unchanged.
 - `skills/onlyne-supervisor/SKILL.md`: the `control` example stopped at `--task <id>`, and the admin
   surface requires `--from <role>`, so a reader copying it hit `onlyne: --from is required on the
   admin surface`. The form names the flag now, one sentence says which verbs take it and that the
