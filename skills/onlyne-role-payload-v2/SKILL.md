@@ -1,6 +1,6 @@
 ---
 name: onlyne-role-payload-v2
-description: Use when writing or checking an Onlyne acp session's closing report (结项文件 / payload) under `.onlyne/out` — the one-line verdict with optional `handoff:` lines, its format validation (`onlyne report check` / `validate`), or handing this turn's result on to another role. Triggers: 写 .onlyne/out 结项文件, payload 报告, handoff 转手, 格式校验, acp 结项.
+description: "Use when writing or checking an Onlyne acp session's closing report (结项文件 / payload) under `.onlyne/out` — the one-line verdict with optional `handoff:` lines, its format validation (`onlyne report check` / `validate`), or handing this turn's result on to another role. Triggers: 写 .onlyne/out 结项文件, payload 报告, handoff 转手, 格式校验, acp 结项."
 ---
 
 # Onlyne Role: payload-v2 Closing Report
@@ -32,17 +32,26 @@ hop-blocked: <what the task is waiting on, one sentence>
 handoff: <target role> | <one line for that role>
 ```
 
-- `hop-done:` — the work finished; the text becomes the ledger head.
-- `hop-failed:` — the work failed; the text is both head and fault reason.
-- `hop-blocked:` — the work waits on something outside this task; the text is the
-  reason. A blocked report never hands anything on: the work is not finished.
+- `hop-done:` — the work finished; the text becomes the ledger head. The turn's own
+  stop reason still decides the outcome, so a `hop-done` line replaces the head of a
+  turn the harness cut short and promotes nothing.
+- `hop-failed:` — the work failed; the text becomes both the head and the fault note.
+- `hop-blocked:` — the work waits on something outside this task; the text becomes the
+  reason, the task settles `failed`, and the fault note reads `the agent reported it is
+  blocked: <the text>`. A blocked report never hands anything on: its `handoff:` lines
+  are recorded as skipped, because the work is not finished.
 - `handoff:` — ask your client to deliver one line to another role. The `|` part
   is optional: without it the recipient gets the verdict line's own text. The
   target must be a role your spec entry may address (`allowed_targets`); an
   invalid target is recorded as `handoff_denied` and changes nothing else —
-  your verdict still settles.
+  your verdict still settles. A target that fails the role-name rule (letters,
+  digits, `.`, `_`, `-`) voids the whole report at parse time.
 - At most 16 lines total, at most 8 handoff lines. A single verdict line is a
   valid report (that is the v1 shape).
+
+A report the client accepts is read once and removed, so a requeued task starts
+with no report on disk. A report it cannot parse stays where it is, is recorded
+with the line it broke, and settles the task `cancelled`.
 
 Example — a build role that finished and wants a review pass:
 
@@ -57,7 +66,7 @@ handoff: builder
 ## Get the path, then write
 
 ```bash
-onlyne report path --task <task-id>          # the report path plus the session's log paths
+onlyne report path --task <task-id>          # report:, log:, events:, content: — one labeled line each
 ```
 
 Write the file by creating a temporary name in the same directory and renaming
@@ -86,9 +95,12 @@ echo 'hop-blocked: waiting on the registry' | onlyne report validate --from -
   the exact reason with the line number it broke
   (`onlyne: line 3: unknown report prefix "hop-parked"`) and the whole grammar
   on stderr; a file that is not there answers `absent` and an unreadable one
-  names the OS reason, both on stderr. Exit 3 belongs to socket resolution and
-  never answers a `report` verb. Fix the file and check again — an invalid
-  report cancels the task with zero handoffs, and the file stays where it is,
-  so a rewrite is enough.
+  names the OS reason, both on stderr. A missing `--task`/`--path`, a task id
+  carrying a path separator, an empty or multi-line `--head`, and a `--handoff`
+  whose first token is no role share the same code. A write or rename the verb
+  cannot complete is exit 1, with the OS reason. Exit 3 belongs to socket
+  resolution and never answers a `report` verb. Fix the file and check again —
+  an invalid report cancels the task with zero handoffs, and the file stays
+  where it is, so a rewrite is enough.
 
 Never leave the turn stopping on a report that `check` refuses.

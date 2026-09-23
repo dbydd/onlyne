@@ -443,6 +443,37 @@ with `BIN_DIR=target/debug`.
 - `onlyne ledger --help`: its `reason` paragraph names `session_dead` beside the receiver's
   whole sentence and the server's own budgets, which is the refusal the reconnect sweep
   files on a retired session's delivery row.
+- `skills/onlyne-supervisor/SKILL.md`, `skills/onlyne-role/SKILL.md` and
+  `skills/onlyne-role-payload-v2/SKILL.md`: audited claim by claim against the tree, 34
+  corrections and 10 additions. The idle ladder replaces the fallback receipt a silent turn
+  used to earn; `out_head` is the completion body's first 200 grapheme clusters with the
+  plugin doing the flattening; a handoff reads the deepest row of the task family; and both
+  role documents now name the accept gate, one session per task, and the reconnect sweep's
+  own publish. `onlyne-role-payload-v2`'s `description` value is quoted, since the line was
+  an unquoted YAML scalar carrying `handoff:` and `Triggers:` inside its prose and a reader
+  takes each `": "` for the start of a nested mapping.
+- `.agents/skills/onlyne/SKILL.md`: the repository guide, audited the same way — 24 path
+  tokens, 100 backticked identifiers and 62 numerals, each resolved to a read, a run, or a
+  binary's own output. It states 20 `LifecycleEvent` variants over five axes, the eighteen
+  case scripts with case 19 named, the seven-row exit table, the schema refusal's own code (a
+  database whose marker is older exits 1), the two workspace crates its map was missing, the
+  split submodule paths behind `push_settled`, `store_ack` and `mark_rejected`, herdr's
+  standing, and a dated case table with the red runs named.
+- `crates/onlyne-config/src/client.rs` and the regenerated
+  `crates/onlyne-config/schema/config-client.schema.json`: `reconnect_grace_secs`'s
+  description says what the sweep does to a session with a task bound. The doc comment, the
+  schema bytes and `onlyne schema client` agree, and the template `onlyne-client init` writes
+  carries the same sentences.
+- `docs/operations.md`, the residual-shadow config table: the `reconnect_grace_secs` row
+  described retiring a task-free slot, and the sweep takes a session with a task bound too,
+  settling that task `failed` and refusing its delivery row `session_dead`.
+- `onlyne-client --help`: `status` exits 2 when the answering client holds no ready server
+  link as well as when nobody answers; `run`'s exit-5 sentence names the workspace `backend`
+  key beside `ONLYNE_BACKEND`; and `roles`, `sessions`, `watch`, `history` and `agent` gained
+  the one description line each they were missing.
+- `onlyne-client init`'s generated `config.toml`: its `reconnect_grace_secs` comment names
+  what the sweep does to a bound task, and its `timeout` comment states what this tree does
+  with those budgets.
 
 Wire format: `Welcome` and `RoleInfo` lose `reuse`; `RoleInfo` gains `queued`,
 `SessionRow` gains `fresh` and `QuerySessionsArgs` gains `fresh_wait_ms`; the
@@ -451,6 +482,23 @@ both skipped when unset, so a bare liveness beat keeps its bytes. The observed o
 plugin sends loses its `outcome` and `public` keys. Both proto schemas are regenerated.
 The spec and client config schemas lose `additionalProperties`, and their fixtures move
 with them.
+
+### Not in this release
+
+- `[client.timeout]`'s `ready_ms` and `idle_ms` are declared, carried in the hello reply as
+  `timeout_ready_ms` and `timeout_idle_ms`, and enforced by nothing: no reader under
+  `crates/onlyne-client`, `crates/onlyne-session` or the plugin names either key, so the
+  budgets describe a promise this tree does not keep. Removing the table is a breaking
+  config change and stays with the operator.
+- Two of the eighteen case scripts fail for one measured reason: `running-lights` and
+  `acp-payload-v2` mount one `onlyne-agent-fake` per role and then hand that role two tasks,
+  and one agent process serves one session, so the second task's session waits out
+  `[client] reconnect_grace_secs` and the sweep retires it — the ring reads `acked=6` of its
+  twelve rows, and the payload case leaves a child row refused `session_dead` (its kept
+  scratch directory carries the logs).
+- `crates/onlyne-testkit/e2e/pi-live.sh` (case 11) fails on a live `pi` host: its task
+  settles `acked` and its session stays `working`, with `a plugin mounted a session this
+  client already serves; it is held read-only` in the client's log.
 
 ## [1.3.1] - 2026-09-20
 

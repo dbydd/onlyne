@@ -200,7 +200,7 @@ client 死亡期间无人代该 role 判定 session 生命周期。
 | 配置文件 | 字段 | 默认 | 作用 |
 |---|---|---|---|
 | `<workspace>/.onlyne/config.toml` | `stall_report_secs` | 1800 | 会话投影 tuple 冻结时长上限，client 据此上报 `stalled` fault，0 关闭，单位秒 |
-| `<workspace>/.onlyne/config.toml` | `reconnect_grace_secs` | 60 | plugin 连接断开后允许其离席的时长，超期由 client 退役它留下的无 task 槽位，0 关闭，单位秒 |
+| `<workspace>/.onlyne/config.toml` | `reconnect_grace_secs` | 60 | plugin 连接断开后允许其离席的时长，超期由 client 退役它留下的 session 并结清它欠的那件事；仍绑着 task 时该 task 落 `failed`、其投递行以 `session_dead` 拒收，0 关闭，单位秒 |
 | `<server-root>/.onlyne/spec.toml` 的 `[server]` | `stale_watch_secs` | 60 | server 观察器扫描周期，单位秒；0 关闭观察器 |
 | `<server-root>/.onlyne/spec.toml` 的 `[server]` | `heartbeat_grace_secs` | 90 | 属主在线时 `working` 行允许的心跳静默时长，单位秒 |
 
@@ -248,7 +248,7 @@ no-op 心跳抬存活水位，不抬进展水位；`stalled` 只看后者。
 
 超过窗口仍未回来时，client 退役它：关掉宿主资源，吐出容量槽位。
 
-退役前先结清这个 session 欠的那件事：仍绑着 task 时，该 task 落 `failed`，它占着的投递行以 `session_dead` 拒收。未绑 task 的 slot 只退役。
+退役前先结清这个 session 欠的那件事：仍绑着 task 时，该 task 落 `failed`，它占着的投递行以 `session_dead` 拒收；退役的同一趟再发出该 session 自己的投影，server 行随即读 `exited`。未绑 task 的 slot 只退役。
 
 退役的 reason 取该 session 名下 task 已落的终态，无终态可取时记 `Fault`。`reconnect_grace_secs = 0` 关闭这条判定。
 

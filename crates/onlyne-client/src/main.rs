@@ -18,8 +18,8 @@ enum Command {
     /// Run one role client against its workspace config.
     ///
     /// Each session this client holds needs a terminal host for its pane, so a
-    /// run with no host detected and no explicit ONLYNE_BACKEND stops at
-    /// startup with exit 5.
+    /// run that detects no host and names no backend in ONLYNE_BACKEND or in
+    /// the workspace config's `backend` key stops at startup with exit 5.
     #[command(
         after_help = "config: --workspace names the role workspace; its `.onlyne/config.toml` \
                       carries `backend` (herdr|orca|zellij|exec|headless|acp|fake|auto; empty \
@@ -52,27 +52,34 @@ enum Command {
     },
     /// Report the client answering this workspace's socket. Prints uptime, the
     /// served socket path, and the recorded fault count, and says whether the
-    /// client holds a ready server link. Exits 2 when no client answers.
+    /// client holds a ready server link. Exits 2 when no client answers or the
+    /// answering client holds no ready server link.
     Status {
         #[arg(long)]
         workspace: PathBuf,
     },
+    /// Answer the role query from the prose cache in this workspace's
+    /// `client.db`; opens no socket.
     Roles {
         #[arg(long)]
         workspace: PathBuf,
     },
+    /// Point at `onlyne sessions`, the admin verb that answers this query.
     Sessions {
         #[arg(long)]
         workspace: PathBuf,
     },
+    /// Point at `onlyne watch`, the admin verb that answers this stream.
     Watch {
         #[arg(long)]
         workspace: PathBuf,
     },
+    /// Point at `onlyne history`, the admin verb that answers this replay.
     History {
         #[arg(long)]
         workspace: PathBuf,
     },
+    /// Manage the plugin packages installed in this workspace.
     Agent {
         #[command(subcommand)]
         command: AgentCommand,

@@ -47,10 +47,12 @@ pub struct InitArgs {
 /// and the sweep that reads it runs inside `onlyne client run`.
 const RECONNECT_COMMENTS: &str = "\
 # Seconds a dropped plugin connection may stay away before this client retires
-# the session it left behind that holds no task. An agent that reconnects inside
-# the window keeps its session; a connection that returns after a newer session
-# took the task is held read-only, and what it sends rides that session's
-# closing handoff. 0 disables the sweep.
+# the session it left behind. A session with a task bound goes with it: an
+# unsettled task ends `failed`, the delivery that session still held is refused
+# with reason `session_dead`, and the session's own exit is published. An agent
+# that reconnects inside the window keeps its session; a connection that returns
+# after a newer session took the task is held read-only, and what it sends rides
+# that session's closing handoff. 0 disables the sweep.
 # reconnect_grace_secs = 60
 ";
 
@@ -131,8 +133,8 @@ pub fn fragment(role: &str, public_key: &str, prose: &str) -> String {
 /// values are the ones `onlyne-config`'s `ClientEntry` declares.
 const KNOB_COMMENTS: &str = "\
 # timeout = { ready_ms = 30000, idle_ms = 60000 }
-# Per-session budgets in milliseconds: how long a spawn may take to answer
-# `ready`, and how long an unclaimed session lives before the client closes it.
+# Per-session budgets in milliseconds; the server projects them into the hello
+# reply as `timeout_ready_ms` and `timeout_idle_ms`.
 # intent = { attempts = 3, backoff_ms = [1000, 2000, 4000] }
 # Retry policy for one intent: total attempts, then the per-retry waits in
 # milliseconds; a longer list repeats its last entry.

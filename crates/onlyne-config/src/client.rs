@@ -32,7 +32,13 @@ pub struct ClientConfig {
     #[serde(default = "default_stall_report_secs")]
     pub stall_report_secs: u64,
     /// Seconds a dropped plugin connection may stay away before this client
-    /// retires the task-free session it left behind. Zero disables the sweep.
+    /// retires the session it left behind. A session with a task bound goes with
+    /// it: an unsettled task ends `failed`, the delivery that session still held
+    /// is refused with reason `session_dead`, and the session's own exit is
+    /// published. An agent that reconnects inside the window keeps its session; a
+    /// connection that returns after a newer session took the task is held
+    /// read-only, and what it sends rides that session's closing handoff. 0
+    /// disables the sweep.
     #[serde(default = "default_reconnect_grace_secs")]
     pub reconnect_grace_secs: u64,
     /// Requested session backend (`herdr` | `orca` | `zellij` | `exec` /
