@@ -9,6 +9,7 @@ use crate::common::{
 use onlyne_client::session::dispatch::{DispatchState, dispatch, on_plugin_report};
 use onlyne_proto::{AdapterMsg, DetachArgs, Lifecycle, Outcome, PluginOp, Report};
 use onlyne_session::backend::fake::FakeBackend;
+use onlyne_session::SessionLedger;
 use onlyne_store::ClientStore;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -120,6 +121,12 @@ async fn automatic_retirement_survives_a_backend_close_failure() {
 
     assert_eq!(backend.closed_sessions.lock().len(), 1);
     assert_eq!(state.session_count(), 0, "the unusable slot leaves routing");
+    let row = store.get_session(&task_id).unwrap().expect("the session row");
+    assert_eq!(row.agent_state, "gone", "the completed agent left with its resource");
+    assert_eq!(
+        published_projection(&store, &task_id).lifecycle,
+        Lifecycle::Exited
+    );
     assert_eq!(
         published_projection(&store, &task_id).resource,
         onlyne_proto::ResourcePhase::Closed
@@ -181,7 +188,7 @@ async fn completion_keeps_the_resource_while_the_plugin_is_attached() {
         vec!["agent".into()],
         1,
         backend.clone(),
-        store,
+        store.clone(),
     );
     state.attach_outbox(Arc::new(RecordingOutbox::default()));
     let (socket, host) = serve_role_socket(&state, dir.path()).await;
@@ -331,6 +338,12 @@ async fn periodic_reclaim_closes_an_exited_session_after_connection_loss() {
     assert_eq!(
         backend.reasons.lock().as_slice(),
         [onlyne_session::CloseReason::Completed]
+    );
+    let row = store.get_session(&task_id).unwrap().expect("the session row");
+    assert_eq!(row.agent_state, "gone", "the reclaimed agent is gone");
+    assert_eq!(
+        published_projection(&store, &task_id).lifecycle,
+        Lifecycle::Exited
     );
     assert_eq!(state.session_count(), 0);
     host.abort();

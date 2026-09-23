@@ -212,6 +212,15 @@ pub(super) fn retire_idle_locked(
             );
         }
     }
+    if reason == onlyne_session::CloseReason::Completed {
+        if let Err(error) = feed_agent_gone(&inner.bridge, &inner.store, &task_id) {
+            tracing::warn!(
+                task = %task_id,
+                error = %error,
+                "agent-gone projection failed for a completed session"
+            );
+        }
+    }
     inner.bridge.untrack_live(&task_id);
     inner.sessions.remove(key);
     true

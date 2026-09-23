@@ -387,6 +387,12 @@ where it is read.
   server emit `session_state` with the stored version. The comparison is field by field over the
   whole projection, so no dimension rides through the exception, and a later older publish finds the
   outcome in place and skips: a client's verdict is written once.
+- client: a completed session's retirement carries the agent's exit. A census over a live cluster's
+  session rows showed every plugin-completed session mirrored as `exited` with `agent` still
+  `running`, while the operator-close rows read `gone`: the close path fed `AgentGone` before the slot
+  left the map and the completion path did not, and both reach the same retirement. A completed
+  session's retirement now feeds that event too — after the resource close, before the slot leaves
+  the map, warning and continuing when the projection write fails — so the mirror's two fields agree.
 - server: the ghost sweep keeps a verdict the client published. It read a delivery row's rejection
   as `failed` and overwrote a mirror the client had already published as `cancelled`, so
   `onlyne ghosts` reported a verdict nobody gave. The pass still moves a row that reads `working` —
