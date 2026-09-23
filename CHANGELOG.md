@@ -497,18 +497,22 @@ with them.
   rows and left a child row refused `session_dead`. Both now mount one agent per session,
   waiting on the ledger's own settle for a role's next hop and on the first child's ack for the
   worker's second agent, and both pass (13 s and 5 s).
-- `crates/onlyne-testkit/e2e/pi-live.sh` (case 11) fails on a live `pi` host, and the
-  mechanism is a client-side race. A local transition's version is allocated one past the
-  stored watermark (`next_version`, `crates/onlyne-session/src/reconcile/bridge.rs:254`), and
-  that write is refused when a plugin beat lands between the read and the write:
-  `record_verdict` sees `upsert_session` answer false, logs `session write lost to a newer
-  watermark; left the row alone`, and returns. A completion's settle is one such write, and
-  the tuple it would have moved is the one the public lifecycle reads (`task_state == Done
-  && delivery == Accepted`, `crates/onlyne-session/src/lifecycle/project.rs:33`), so the
-  session of a task whose ledger row reads `acked` projects `working` for the rest of its
-  life. Measured live: `agent idle, delivery none, outcome done, lifecycle working, seq
-  1004`, after the settle's write at `stored + 1` lost to a beat carrying the reporter's own
-  higher sequence.
+
+- One defect chain reported from the two live clusters is fixed in `ade50a6`, and both halves
+were measured on those clusters. A beat arriving on the connection this client holds
+read-only refreshed nothing, and `last_beat` is the liveness half of the reconnect sweep's
+silence arm: a plugin loaded twice into one agent process — the shape a workspace that
+installs it twice produces — beat on both connections, and the demoted copy starved the
+session's clock, so the sweep retired a session whose agent was alive and working (SIGTERM,
+bash exit 143, 47-60 s after each delivery; seven of the formal cluster's nine task rows
+`rejected` with reason `session_dead`; four alexandria sessions at `working` with
+`heartbeat_missing` and `stale_working` faults already recorded beside them). Independently, a
+local transition's write lost to a plugin beat landing between its version read and its
+write, and a completion's settle is one such write, so the session of a task whose ledger row
+says `acked` projected `working` for the rest of its life (`agent idle, delivery none,
+outcome done, lifecycle working, seq 1004`). `apply_at_next` retries the lost case on the row
+as it then stands, bounded by `APPLY_ATTEMPTS`, and the beat's liveness half now travels
+while its observation still does not.
 
 ## [1.3.1] - 2026-09-20
 
