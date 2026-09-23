@@ -371,6 +371,17 @@ workspace tests named under `### Tests`.
   door.
 - `plugins/onlyne-agent-pi/README.md` and `README.zh.md`: the plugin reports `agent`,
   `resource` and `host`, and the completion report carries the task's verdict.
+- `crates/onlyne-session/src/backend/herdr/NOTE.md`, with the module doc above it: the
+  backend is kept by operator decision. The note records why it had been a removal
+  candidate — the tty cost it carries once a workspace holds many panes — the one known
+  flake and its root cause, and the newer backend a workspace names in `config.toml` when
+  it wants one. The file it replaces announced a deprecation that no longer stands.
+- `docs/operations.md`, 「投递与重投」 and 「会话残影与属主判定」: `session_dead` is the refusal
+  the death sweep files on a dropped session's delivery row, and the startup residual
+  reconcile the page used to describe is gone with `[client] stale_grace_secs`.
+- `crates/onlyne-client/README.md`: the accept gate follows the connection rather than a
+  failed send, a session that dies at the grace window has its delivery row answered, and
+  the startup path no longer re-reports work the role already answered.
 
 Wire format: `Welcome` and `RoleInfo` lose `reuse`; `RoleInfo` gains `queued`,
 `SessionRow` gains `fresh` and `QuerySessionsArgs` gains `fresh_wait_ms`; the
