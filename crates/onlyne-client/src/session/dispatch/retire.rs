@@ -317,7 +317,7 @@ impl DispatchState {
     }
 
     /// Retire the sessions whose plugin connection dropped and never came back,
-    /// and answer how many left.
+    /// and answer which ones left.
     ///
     /// A connection that ends without a `detach` frame leaves its session tracked
     /// so an agent that restarts inside `[client] reconnect_grace_secs` finds the
@@ -353,9 +353,19 @@ impl DispatchState {
     /// one retirement, no second threshold beside `[client]
     /// reconnect_grace_secs` and no fault row of the kind `stall_report_secs`
     /// records and leaves behind.
-    pub fn retire_dropped_ghosts(&self, now: Instant, grace_secs: u64) -> usize {
+    ///
+    /// The sessions' own ids come back rather than a count, because a retirement
+    /// still owes the server the session's own ending: it is the only writer left
+    /// for that task, and a mirror nobody tells keeps that session's last reading —
+    /// `working`, for one that had beaten — until the server's own observer records
+    /// a fault about it. The publish is
+    /// [`sync_session`](crate::session::dispatch::sync_session)'s, which is the
+    /// report an ordinary ending travels on, and it cannot run under this lock —
+    /// so the caller is handed what to publish instead of a second writer being
+    /// invented here.
+    pub fn retire_dropped_ghosts(&self, now: Instant, grace_secs: u64) -> Vec<String> {
         if grace_secs == 0 {
-            return 0;
+            return Vec::new();
         }
         let window = Duration::from_secs(grace_secs);
         let mut inner = self.inner.lock();
@@ -368,7 +378,7 @@ impl DispatchState {
             })
             .map(|(key, _)| key.clone())
             .collect();
-        let mut retired = 0;
+        let mut retired: Vec<String> = Vec::new();
         for key in due {
             let Some(slot) = inner.sessions.get(&key).cloned() else {
                 continue;
@@ -459,7 +469,10 @@ impl DispatchState {
                 slot.task_id = None;
             }
             if retire_idle_locked(&mut inner, &key, reason) {
-                retired += 1;
+                // The id that travels is the session's own, the one whose row was
+                // just fed agent-gone and resource-closed: that row is what the
+                // server mirrors, and its ending is what the caller publishes.
+                retired.push(task_id);
             }
         }
         retired

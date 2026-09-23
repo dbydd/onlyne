@@ -189,7 +189,7 @@ client 死亡期间无人代该 role 判定 session 生命周期。
 
 属主进程活着时，掉线的 session 由 client 结清：plugin 连接断开、`reconnect_grace_secs` 超期后，退役它留下的 session。
 
-结清写两条：该 task 落 `failed`，它占着的投递行以 `session_dead` 拒收。
+结清写两条：该 task 落 `failed`，它占着的投递行以 `session_dead` 拒收；退役的同一趟再把该 session 自己的投影随一条 heartbeat 报告发出，server 行随即读 `exited`，不必等观察器的 `stale_working` 或 `heartbeat_missing`。
 
 该拒收是终态，工作只由 operator 的 `repair retry` 唤回。
 

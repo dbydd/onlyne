@@ -91,7 +91,7 @@ pub(super) async fn watch_readiness(link: ClientLink, state: RunState) -> Result
         sleep(Duration::from_millis(READINESS_POLL_MS)).await;
         state.dispatch.reclaim_exited_resources();
         scan_stalls(&state).await;
-        scan_reconnect_grace(&state);
+        scan_reconnect_grace(&state).await;
         match link.readiness() {
             ConnReadiness::Ready => {
                 if !ready {

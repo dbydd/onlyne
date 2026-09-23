@@ -12,6 +12,8 @@ The test kit provides three fixtures for adapter protocol conformance: `HostSim`
 
 Supported steps are `wait_assign`, `report` (`ready` or `heartbeat`), `complete`, `fail`, `exit`, `sleep_ms`, `assert_prose_equals`, `assert_field`, and `echo_prose_to`. An unknown step fails with a message naming the step. `--capabilities` takes a comma-separated capability list and overrides the script hello list. `--workspace DIR` resolves the adapter socket through the owner tree — `DIR/.onlyne/run/s` for a workspace short enough to serve from the canonical path, and the short path recorded in `DIR/.onlyne/run/socket` for a deeper one — and the mount role from `DIR/.onlyne/config.toml`. `--socket PATH` overrides the socket, and `--role NAME` overrides the role. `--once` exits after the script completes.
 
+One process serves one session. The client hands the plugin that mounts naming no session the next session it stages, and that connection then serves that session alone — a task redelivered later is handed to a session of its own, and a session no process ever mounted is left for the grace sweep — so a case that stages several sessions starts one `onlyne-agent-fake` per session.
+
 ## Fake gateway
 
 `onlyne-gateway-fake --platform fake --gateway-id fg1 --socket PATH` connects as a gateway mount. The binary prints each host `render_send` as `{"op":"rendered","conversation":...,"text":...,"has_image":...}`. A stdin line `{"op":"inbound","conversation":"c1","text":"hello"}` sends a `deliver` frame with `Principal::Gateway` as its sender.

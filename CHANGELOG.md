@@ -243,6 +243,16 @@ where it is read.
   accept destroyed a row the teardown's requeue would have brought back. A refusal now
   belongs to work this client cannot serve at all — its own reason — and the gate's reason
   leaves the row where `pull` will offer it again.
+- client: the reconnect-grace sweep publishes the exit it records. Retiring a session
+  settles the task it owed and closes its delivery row, and said nothing about the session
+  itself, so the server's mirrored row kept the last state the client had sent — `working`
+  for a session whose agent had beaten, `idle` for one that mounted and never beat, no row
+  at all for a plugin that never mounted — until the server's own observer recorded
+  `stale_working` or `heartbeat_missing`, which names the silence and moves no row. The
+  sweep now answers the retired sessions' own ids, and the tick that ran it publishes each
+  exit through the publisher an ordinary ending already uses (`sync_session`, a `heartbeat`
+  variant carrying the projection), so the mirror reads `exited` in the same tick as the
+  retirement.
 
 ### Tests
 
@@ -286,6 +296,13 @@ where it is read.
 - tui: `a_permuted_session_order_renders_the_same_picture` renders one logical snapshot
   twice with `sessions` reversed and asserts byte equality, and holds `box_width` still
   under the same permutation (`crates/onlyne-tui/src/ui.rs`).
+- tui: `a_spoke_draws_only_when_the_map_draws_both_its_ends` pins the map's edge rule at two
+  page sizes: an aggregate role's edge toward the operator's seat renders as the same
+  snapshot with the hop left out, and that edge pointed at a drawn role keeps the arrowhead
+  the map always drew. The pin is new because nothing could see the case —
+  `a_registered_supervisor_draws_nothing` stripped the registry row while the
+  `allowed_targets` names pointing at it stayed inside the other roles' edges, so its
+  comparator now drops those names too.
 - proto: `the_two_heartbeat_shapes_write_only_their_own_keys` holds the publish beat and
   the liveness beat to their own key sets, so an older plugin's bytes keep decoding.
 - config, client, tui and plugin, for the second window of this release:
@@ -310,16 +327,22 @@ where it is read.
   own reason; and `a_role_level_ticket_releases_when_its_task_publishes_exited`
   (`crates/onlyne-server/tests/delivery.rs`) fails with `InFlight != Queued` when the old
   ticket comparison is restored.
+- testkit: `crates/onlyne-testkit/e2e/reconnect-requeue.sh` is rewritten to mount one
+  `onlyne-agent-fake` per session, which is what lets it prove what it was written for: the
+  rows a killed client leaves behind, their redelivery in send order, one ack per row under
+  the same task ids, one session per task, no `session_dead` refusal on a redelivered row,
+  an in-flight task's completion outliving the server, and the `op_id` the outbox minted
+  while the link was down being the one the restarted server receipts.
 
 ### Check on this tree
 
 Run 2026-09-23, after the restart-path window: `cargo fmt --all --check`, `cargo clippy
---workspace --all-targets -- -D warnings`, and `cargo test --workspace` pass at 1009 cases
-across 68 result blocks with 0 failures and 1 ignored (`herdr_live_probe`). The count lands
-level with the run below by construction: this window deletes the four cases in
-`crates/onlyne-client/src/session/stale/tests.rs` with the path they covered, deletes three
-more whose premise was the residual reconcile or the removed config key, and adds three of
-its own. The plugin suite is untouched at 97 pass.
+--workspace --all-targets -- -D warnings`, and `cargo test --workspace` pass at 1011 cases
+across 68 result blocks with 0 failures and 1 ignored (`herdr_live_probe`). The window
+deletes seven cases — the four in `crates/onlyne-client/src/session/stale/tests.rs` with the
+path they covered, and three whose premise was the residual reconcile or the removed config
+key — and adds five: three on the restart path, one for the retiring sweep's own publish,
+and one for the map's edge rule. The plugin suite is untouched at 97 pass.
 
 Run 2026-09-22, after the supervisor, TUI and idle-ladder slices: `cargo fmt --all
 --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and
@@ -337,17 +360,18 @@ pass, the last at 975 cases across 50 suites with 0 failures and 1 ignored
 (`herdr_live_probe`); `cd proofs && lake build` completes with 7 jobs. Both e2e
 runs below used `BIN_DIR=target/release` on this tree.
 
-`crates/onlyne-testkit/e2e/local-task.sh` passes. `reconnect-requeue.sh` fails on
-this tree with `acked=1` and on its parent 898de2d with `acked=2`, so the red line
-predates this release. That fixture hands three tasks to one `onlyne-agent-fake`
-process, and one process serves one session: the other sessions have no transport,
-so their tasks never settle. A role that runs more than one concurrent session needs
-one agent per session, and the fixture has to mount them.
-
-`crates/onlyne-testkit/e2e/local-task.sh` passes on this tree too, run 2026-09-21 with
-`BIN_DIR=target/debug`. The `reconnect-requeue.sh` paragraph above dates from 2026-09-20
-and the lifecycle rebuild did not re-run that fixture; its own proof lives in the
-workspace tests named under `### Tests`.
+`crates/onlyne-testkit/e2e/local-task.sh` and `reconnect-requeue.sh` both pass on this
+tree. The reconnect fixture was rewritten in the third window. It handed three tasks to one
+`onlyne-agent-fake` process, and one process serves one session, so only one redelivered
+task ever had a transport and the other two left their rows behind: the run before the
+rewrite reads `acked=1` with two rows `rejected` at reason `session_dead` once the default
+60-second grace passed, and the parent 898de2d reads `acked=2`. A role that runs more than
+one concurrent session needs one mounted agent per session, which the fixture now starts.
+Run 2026-09-23 with `BIN_DIR=target/release`: eight passes in 5-7 s, and each of the
+fixture's checks bites — restoring the one-process design fails at `acked=1`, reversing the
+expected redelivery order fails on the order check, and pointing the pinned-`op_id`
+comparison at a foreign id fails on that comparison. `local-task.sh` was last run 2026-09-21
+with `BIN_DIR=target/debug`.
 
 ### Documentation
 
@@ -378,10 +402,16 @@ workspace tests named under `### Tests`.
   it wants one. The file it replaces announced a deprecation that no longer stands.
 - `docs/operations.md`, 「投递与重投」 and 「会话残影与属主判定」: `session_dead` is the refusal
   the death sweep files on a dropped session's delivery row, and the startup residual
-  reconcile the page used to describe is gone with `[client] stale_grace_secs`.
+  reconcile the page used to describe is gone with `[client] stale_grace_secs`. The same
+  page records that the retiring pass publishes the session's own projection, so the
+  server's row reads `exited` at once rather than waiting for the observer's
+  `stale_working` or `heartbeat_missing`.
 - `crates/onlyne-client/README.md`: the accept gate follows the connection rather than a
   failed send, a session that dies at the grace window has its delivery row answered, and
-  the startup path no longer re-reports work the role already answered.
+  the startup path no longer re-reports work the role already answered. It also carries the
+  retirement's own publish beside the refusal it files.
+- `crates/onlyne-testkit/README.md`: one `onlyne-agent-fake` process serves one session, so
+  an e2e case that needs two concurrent sessions mounts two agents.
 
 Wire format: `Welcome` and `RoleInfo` lose `reuse`; `RoleInfo` gains `queued`,
 `SessionRow` gains `fresh` and `QuerySessionsArgs` gains `fresh_wait_ms`; the

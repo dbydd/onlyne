@@ -112,7 +112,7 @@ async fn the_reconnect_grace_does_not_take_a_slot_the_client_holds_read_only() {
     let before = store.get_session(&task).unwrap().expect("the seeded row");
 
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now(), 60),
+        state.retire_dropped_ghosts(Instant::now(), 60).len(),
         0,
         "a slot the client holds read-only is not the reconnect grace's to take"
     );
@@ -186,7 +186,7 @@ fn a_session_that_died_at_the_grace_window_settles_the_task_it_owed() {
     );
 
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now(), 60),
+        state.retire_dropped_ghosts(Instant::now(), 60).len(),
         2,
         "the sweep takes the ghost and its resource"
     );

@@ -1172,10 +1172,12 @@ mod tests {
     }
 
     /// The same snapshot as the board would read it with the operator's agent
-    /// never registered: the registry row goes, and so do the sessions the
-    /// server projects onto it, because a role that is not in the registry can
-    /// have neither. The ledger and the faults stay: they are records of
-    /// messages that name principals, not rows of the registry.
+    /// never registered: the registry row goes, the sessions the server projects
+    /// onto it go, because a role that is not in the registry can have neither,
+    /// and so does every `allowed_targets` name pointing at it, because a name
+    /// with no row behind it is no hop the map draws. The ledger and the faults
+    /// stay: they are records of messages that name principals, not rows of the
+    /// registry.
     fn without_supervisor(snapshot: &Snapshot) -> Snapshot {
         Snapshot {
             roles: snapshot
@@ -1183,6 +1185,10 @@ mod tests {
                 .iter()
                 .filter(|role| !hidden_role(&role.name))
                 .cloned()
+                .map(|mut role| {
+                    role.edges.retain(|edge| !hidden_role(edge));
+                    role
+                })
                 .collect(),
             sessions: snapshot
                 .sessions
@@ -1470,6 +1476,86 @@ mod tests {
                 "the role list stops on {:?}",
                 with.filter.role
             );
+        }
+    }
+
+    /// One aggregate role's registry row whose single out-edge under test points
+    /// at `target`; `None` leaves that hop out of the edge list. The operator's
+    /// own seat is registered beside it, the way a real registry carries it.
+    fn aggregate_edge_snapshot(target: Option<&str>) -> Snapshot {
+        let mut planner = role("planner", &[]);
+        planner.aggregate = Some("cluster-x".into());
+        planner.edges = target
+            .map(|target| vec![target.to_string()])
+            .unwrap_or_default();
+        Snapshot {
+            status: serde_json::json!({"cluster": "local"}),
+            roles: vec![role(SUPERVISOR_ROLE, &[]), planner, role("builder", &[])],
+            server_online: true,
+            refreshed_at: Some(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+            ),
+            ..Snapshot::default()
+        }
+    }
+
+    /// Whether the map landed a hop's arrowhead somewhere on this page. Only a
+    /// drawn hop has one; the pan and page keys spell other arrows.
+    fn hop_tip(text: &str) -> bool {
+        ['▸', '◂', '▴', '▾'].iter().any(|tip| text.contains(*tip))
+    }
+
+    /// A spoke is drawn only when the map draws both of its ends. An aggregate
+    /// role's edge list is the registry's own, verbatim, so it can name the
+    /// operator's seat ([`SUPERVISOR_ROLE`]) — a role no view draws a box for.
+    /// That hop is no hop at all: the page renders the bytes it renders with the
+    /// hop left out. The same edge, pointed at a role that is on the board,
+    /// draws the spoke it always did.
+    #[test]
+    fn a_spoke_draws_only_when_the_map_draws_both_its_ends() {
+        let pointed = aggregate_edge_snapshot(Some(SUPERVISOR_ROLE));
+        let hidden = aggregate_edge_snapshot(None);
+        let drawn = aggregate_edge_snapshot(Some("builder"));
+        // The subject is really here, so the equality below cannot hold for want
+        // of an edge, nor for want of the seat it points at.
+        assert!(
+            pointed.roles.iter().any(|role| role
+                .edges
+                .iter()
+                .any(|edge| edge.as_str() == SUPERVISOR_ROLE)),
+            "the fixture carries no edge toward {SUPERVISOR_ROLE}"
+        );
+        assert!(
+            pointed
+                .roles
+                .iter()
+                .any(|role| role.name == SUPERVISOR_ROLE),
+            "the fixture registers no {}",
+            SUPERVISOR_ROLE
+        );
+
+        for (width, height) in [(120, 36), (90, 24)] {
+            let toward_hidden = render_once_text(&pointed, &UiState::default(), width, height);
+            let without_hop = render_once_text(&hidden, &UiState::default(), width, height);
+            let toward_drawn = render_once_text(&drawn, &UiState::default(), width, height);
+            assert_eq!(
+                toward_hidden, without_hop,
+                "the hop to {SUPERVISOR_ROLE} drew at {width}x{height}"
+            );
+            assert!(
+                !hop_tip(&without_hop),
+                "the fixture drew a hop of its own\n{without_hop}"
+            );
+            assert!(
+                hop_tip(&toward_drawn),
+                "the hop to a drawn role is gone\n{toward_drawn}"
+            );
+            // Both pages carry the same two boxes, so what the repointed hop
+            // changes is the hop and nothing else.
+            for text in [&toward_hidden, &toward_drawn] {
+                assert!(text.contains("╭─⬡planner"), "{text}");
+                assert!(text.contains("╭─builder"), "{text}");
+            }
         }
     }
 

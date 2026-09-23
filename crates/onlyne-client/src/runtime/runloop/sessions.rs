@@ -196,22 +196,44 @@ pub(super) async fn scan_stalls(state: &RunState) {
 }
 
 /// Retire the sessions whose plugin connection dropped and did not come back
-/// within `[client] reconnect_grace_secs`. The tick sweeps every session the
-/// window expired on, bound to a task or not: a plugin that never came back is an
-/// agent that is gone, whether or not its work was still owed.
-pub(super) fn scan_reconnect_grace(state: &RunState) {
+/// within `[client] reconnect_grace_secs`, and publish each one's exit. The tick
+/// sweeps every session the window expired on, bound to a task or not: a plugin
+/// that never came back is an agent that is gone, whether or not its work was
+/// still owed.
+///
+/// The publish is the half of the ending the sweep cannot write: the retirement
+/// feeds the session's own tuple to `Exited` and files the verdict, and the server
+/// only learns either from what this client reports. Without it the mirrored row
+/// keeps reading `working` until the server's own observer records a
+/// `stale_working` or `heartbeat_missing` fault — a reader waits for a fault, which
+/// names the silence and moves no row, to hear what this client already knew. So
+/// each session that left travels the report an ordinary ending already travels,
+/// once the lock has been given back and the stored row is final. Only the durable
+/// queue refusing the frame reaches the log: a live send that gave up is
+/// `sync_session`'s own fallback to that queue, not a lost publish.
+pub(super) async fn scan_reconnect_grace(state: &RunState) {
     if state.reconnect_grace_secs == 0 {
         return;
     }
     let retired = state
         .dispatch
         .retire_dropped_ghosts(Instant::now(), state.reconnect_grace_secs);
-    if retired > 0 {
-        tracing::info!(
-            retired,
-            grace_secs = state.reconnect_grace_secs,
-            "dropped sessions retired past the reconnect grace"
-        );
+    if retired.is_empty() {
+        return;
+    }
+    tracing::info!(
+        retired = retired.len(),
+        grace_secs = state.reconnect_grace_secs,
+        "dropped sessions retired past the reconnect grace"
+    );
+    for session_id in retired {
+        if let Err(error) = dispatch::sync_session(&state.dispatch, &session_id).await {
+            tracing::warn!(
+                session = %session_id,
+                error = %error,
+                "a retired session's exit was not published"
+            );
+        }
     }
 }
 

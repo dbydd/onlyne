@@ -108,7 +108,9 @@ async fn the_reconnect_grace_retires_a_ghost_whose_agent_never_returns() {
     // Inside the window nothing leaves: this is the reconnect an always-running
     // agent lives in, and retiring here would drop the resource it returns to.
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(30), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(30), 60)
+            .len(),
         0,
         "a ghost inside the reconnect grace is kept"
     );
@@ -120,7 +122,9 @@ async fn the_reconnect_grace_retires_a_ghost_whose_agent_never_returns() {
 
     // Past the window the ghost is retired and its capacity spent.
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(61), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(61), 60)
+            .len(),
         1,
         "a ghost past the reconnect grace retires"
     );
@@ -136,13 +140,15 @@ async fn the_reconnect_grace_retires_a_ghost_whose_agent_never_returns() {
         "the retired ghost spends the role's only capacity slot"
     );
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(120), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(120), 60)
+            .len(),
         0,
         "a retired ghost is not swept twice"
     );
     // A closed window disables the sweep entirely, the same spelling as every
     // other `[client] *_secs` knob.
-    assert_eq!(state.retire_dropped_ghosts(Instant::now(), 0), 0);
+    assert_eq!(state.retire_dropped_ghosts(Instant::now(), 0).len(), 0);
     host.abort();
 }
 
@@ -185,14 +191,18 @@ async fn the_reconnect_grace_takes_a_ghost_whose_task_is_still_open() {
     )
     .await;
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(30), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(30), 60)
+            .len(),
         0,
         "a bound ghost inside the reconnect grace is kept"
     );
     assert_eq!(state.session_count(), 1, "the bound session stays tracked");
 
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(61), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(61), 60)
+            .len(),
         1,
         "a bound ghost past the reconnect grace is this sweep's to take"
     );
@@ -305,7 +315,9 @@ async fn an_agent_that_reconnects_inside_the_window_keeps_its_session() {
     // Inside the window nothing leaves: this is the reconnect an always-running
     // agent lives in, and retiring here would drop the resource it returns to.
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(30), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(30), 60)
+            .len(),
         0,
         "a ghost inside the reconnect grace is kept"
     );
@@ -315,7 +327,9 @@ async fn an_agent_that_reconnects_inside_the_window_keeps_its_session() {
     // The returning agent cleared the clock: even a sweep that reads the clock an
     // hour ahead finds nothing to retire.
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(3600), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(3600), 60)
+            .len(),
         0,
         "a reconnect inside the window leaves no ghost behind"
     );
@@ -656,7 +670,9 @@ async fn a_session_whose_plugin_never_mounts_retires_past_the_grace() {
     // Inside the window nothing leaves: a mount that is merely late still finds
     // the slot and the resource it was spawned for.
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(30), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(30), 60)
+            .len(),
         0,
         "a session inside the reconnect grace is kept"
     );
@@ -669,7 +685,9 @@ async fn a_session_whose_plugin_never_mounts_retires_past_the_grace() {
     // Past the window the plugin that never came is an agent that is gone, and
     // the slot is swept exactly as a dropped connection's is.
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(61), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(61), 60)
+            .len(),
         1,
         "a session whose plugin never mounted is due when the window expires"
     );
@@ -689,7 +707,9 @@ async fn a_session_whose_plugin_never_mounts_retires_past_the_grace() {
         "the retired session spends the role's only capacity slot"
     );
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(120), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(120), 60)
+            .len(),
         0,
         "a retired session is not swept twice"
     );
@@ -941,7 +961,9 @@ async fn a_session_whose_plugin_stops_beating_dies_when_the_window_expires() {
     // merely between beats, and retiring it would drop the resource its agent is
     // still holding.
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(20), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(20), 60)
+            .len(),
         0,
         "a live socket inside the silence window is kept"
     );
@@ -955,7 +977,9 @@ async fn a_session_whose_plugin_stops_beating_dies_when_the_window_expires() {
     // it: the tuple reaches `Exited` through `AgentState::Gone`, and the work the
     // agent left owed ends `failed`.
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(31), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(31), 60)
+            .len(),
         1,
         "a plugin that stopped beating on a live socket is declared dead"
     );
@@ -997,7 +1021,9 @@ async fn a_session_whose_plugin_stops_beating_dies_when_the_window_expires() {
         "the settled session keeps the agent that answered it"
     );
     assert_eq!(
-        state.retire_dropped_ghosts(Instant::now() + Duration::from_secs(3600), 60),
+        state
+            .retire_dropped_ghosts(Instant::now() + Duration::from_secs(3600), 60)
+            .len(),
         0,
         "a session with no task bound is not swept for silence"
     );

@@ -3,14 +3,16 @@
 //! the accept gate those two paths read.
 //!
 //! The fixture is a fake cluster (the TLS endpoint, the handshake, and one ledger
-//! row) that speaks the shipped protocol: `hello` requeues every in-flight row the
-//! registering role does not claim, `pull` hands one row at a time and arms its
-//! ticket, `ack` settles it. What the client does with a row the server requeued,
-//! how it leaves a row it has already answered alone on the way back up, what it
-//! records for a row whose session died under it, and who may shut intake, are the
-//! four facts the cases below pin.
+//! row, plus the mirrored projection its publishes write) that speaks the shipped
+//! protocol: `hello` requeues every in-flight row the registering role does not
+//! claim, `pull` hands one row at a time and arms its ticket, `ack` settles it, and
+//! a projection-carrying heartbeat lands in the mirror. What the client does with a
+//! row the server requeued, how it leaves a row it has already answered alone on the
+//! way back up, what it records for a row whose session died under it, what that
+//! session's own ending tells the mirror, and who may shut intake, are the five
+//! facts the cases below pin.
 
-use crate::common::complete_plugin;
+use crate::common::{complete_plugin, plugin_beat};
 use onlyne_adapter::AdapterIo;
 use onlyne_client::ClientInit;
 use onlyne_client::session::dispatch::{DispatchState, Outbox, send_frame};
@@ -23,15 +25,15 @@ use onlyne_net::{
 };
 use onlyne_proto::{
     AckArgs, AdapterMsg, AgentMount, Body, Capability, Causality, ClientOp, Delivery, Envelope,
-    Frame, HandshakeArgs, HelloArgs, HostOp, LedgerEntry, LedgerQuery, LedgerState, Mount,
-    MountKind, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp, Presence, Principal, PullReply,
-    Report, ResBody, RoleInfo, Welcome, new_envelope,
+    Frame, HandshakeArgs, HelloArgs, HostOp, LedgerEntry, LedgerQuery, LedgerState, Lifecycle,
+    Mount, MountKind, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp, Presence, Principal, PullReply,
+    Report, ResBody, RoleInfo, SessionProjection, Welcome, new_envelope,
 };
 use onlyne_session::backend::fake::FakeBackend;
 use onlyne_session::{SessionLedger, TaskState};
 use onlyne_store::ClientStore;
 use parking_lot::Mutex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -122,6 +124,20 @@ struct Cluster {
     /// is what `link_loop` answers with a fresh `hello`, a fresh flush, and — for
     /// the sweep that used to run per link — a fresh pass over the ledger.
     closes: u32,
+    /// The mirrored row per session, as the server keeps it: the last projection a
+    /// heartbeat from this client carried, behind the same `(generation, seq)` gate
+    /// the real mirror applies. Nothing else writes it — this fixture runs no
+    /// observer — so what a row reads here is exactly what the client reported.
+    mirror: HashMap<String, Mirrored>,
+}
+
+/// One session's mirrored projection with the watermark that admitted it, which is
+/// what the real mirror keeps of a client's publish.
+#[derive(Clone)]
+struct Mirrored {
+    generation: u64,
+    seq: u64,
+    projection: SessionProjection,
 }
 
 impl Cluster {
@@ -192,6 +208,38 @@ impl Cluster {
             row.reason = args.reason.clone();
         }
         row.acked_at = Some(fixture_time());
+    }
+
+    /// Apply one projection-carrying heartbeat the way `projection::write` does:
+    /// the projection lands in the row verbatim, and only when its
+    /// `(generation, seq)` is ahead of the watermark that row already holds.
+    fn publish(
+        &mut self,
+        session_id: &str,
+        generation: u64,
+        seq: u64,
+        projection: &SessionProjection,
+    ) {
+        let ahead = self
+            .mirror
+            .get(session_id)
+            .is_none_or(|held| (generation, seq) > (held.generation, held.seq));
+        if ahead {
+            self.mirror.insert(
+                session_id.to_string(),
+                Mirrored {
+                    generation,
+                    seq,
+                    projection: projection.clone(),
+                },
+            );
+        }
+    }
+
+    /// What the mirrored row for one session reads, or `None` when no publish has
+    /// named it.
+    fn mirrored(&self, session_id: &str) -> Option<&SessionProjection> {
+        self.mirror.get(session_id).map(|held| &held.projection)
     }
 
     /// The ledger read the client's startup reconcile asks for.
@@ -341,7 +389,21 @@ fn respond(cluster: &Arc<Mutex<Cluster>>, op: ClientOp) -> ResBody {
             ResBody::ok(serde_json::json!({"state": "settled"}))
         }
         ClientOp::Report(report) => {
-            cluster.lock().reports.push(report);
+            let mut cluster = cluster.lock();
+            // The projection-carrying heartbeat is the state publish, and this
+            // fixture mirrors it the way the server does. A bare beat carries no
+            // projection and moves no row.
+            if let Report::Heartbeat {
+                session_id,
+                generation,
+                seq,
+                projection: Some(projection),
+                ..
+            } = &report
+            {
+                cluster.publish(session_id, *generation, *seq, projection);
+            }
+            cluster.reports.push(report);
             ResBody::ok(serde_json::json!({"applied": true}))
         }
         ClientOp::Send(envelope) => {
@@ -761,6 +823,127 @@ async fn a_task_whose_agent_is_gone_reaches_a_recorded_ending() {
         store.open_tasks(10).unwrap().is_empty(),
         "nothing is left open for the server to re-offer"
     );
+
+    client.abort();
+    fixture.server.abort();
+}
+
+/// A session the reconnect grace retires publishes its own exit, so the mirrored
+/// row stops reading `working` without the server's observer running.
+///
+/// The mirror holds what this client last reported for a session. A plugin that
+/// mounts and beats publishes the session `working`; its connection then dies
+/// without a `detach`, and past `[client] reconnect_grace_secs` the sweep is what
+/// ends the session. Before this, the sweep filed the ending locally only — the task
+/// settled `failed`, the delivery row refused with `session_dead` — while the
+/// server's row kept reading `working` until its own observer recorded a
+/// `stale_working` or `heartbeat_missing` fault, and that fault names a silence
+/// without moving the row. So the retired session travels the report an ordinary
+/// ending already travels, in the same sweep pass and after the row is final.
+///
+/// This fixture runs no observer at all: the mirrored row is written by the
+/// client's own publishes and nothing else, so a row that reads `exited` here is
+/// the client's doing, beside the verdict and the delivery row the same sweep
+/// filed.
+#[tokio::test]
+async fn a_retired_session_publishes_its_exit_to_the_mirror() {
+    let task = onlyne_proto::new_task_id();
+    let mut cluster = Cluster::default();
+    cluster
+        .rows
+        .push(Row::new("msg-retired", &task, LedgerState::Queued, 0));
+    let fixture = fixture(cluster, |init| init.with_reconnect_grace_secs(1)).await;
+    let workspace = fixture.workspace.clone();
+    let client = tokio::spawn(onlyne_client::run(fixture.init.clone()));
+
+    // An always-running agent mounts and takes the row.
+    let (io, mut assigns) = mount_when_ready(&fixture.socket).await;
+    let assigned = tokio::time::timeout(Duration::from_secs(10), assigns.recv())
+        .await
+        .expect("the queued row reaches the agent")
+        .expect("the plugin connection stays open");
+    assert_eq!(assigned, task, "the agent takes the row");
+    // One beat says the agent is working, and the client republishes the session's
+    // projection the way it does for every beat it takes: the mirror now reads the
+    // session `working`, the one reading the server's own observer can fault about.
+    let beat_seq = 10;
+    let witnessed = onlyne_session::Observation::build(
+        onlyne_session::Version::new(1, beat_seq),
+        true,
+        onlyne_session::DEFAULT_ISOLATE_AFTER,
+        onlyne_session::DEFAULT_TERMINATE_AFTER,
+        0,
+        onlyne_session::AgentState::Running,
+        onlyne_session::DeliveryState::None,
+        onlyne_session::ResourceState::Attached,
+        onlyne_session::RecoveryState::None,
+    );
+    let beat = io
+        .request(AdapterMsg::Plugin(PluginOp::Report(plugin_beat(
+            &task,
+            1,
+            beat_seq,
+            serde_json::to_value(&witnessed).unwrap(),
+        ))))
+        .await
+        .expect("the beat is answered");
+    assert!(beat.ok, "the client applies the agent's beat: {beat:?}");
+    let working = fixture.cluster.clone();
+    let reported = task.clone();
+    eventually(
+        move || {
+            working
+                .lock()
+                .mirrored(&reported)
+                .is_some_and(|row| row.lifecycle == Lifecycle::Working)
+        },
+        "the working session's projection reaches the mirror",
+    )
+    .await;
+
+    // The connection dies without a `detach`, and the window runs from there.
+    drop(io);
+    let buried = fixture.cluster.clone();
+    eventually(
+        move || buried.lock().row("msg-retired").state == LedgerState::Rejected,
+        "the dead session's delivery row is refused rather than left in flight",
+    )
+    .await;
+    let published = fixture.cluster.clone();
+    let exited = task.clone();
+    eventually(
+        move || {
+            published
+                .lock()
+                .mirrored(&exited)
+                .is_some_and(|row| row.lifecycle == Lifecycle::Exited)
+        },
+        "the retired session's exit reaches the mirror",
+    )
+    .await;
+
+    let cluster = fixture.cluster.lock();
+    let row = cluster.row("msg-retired");
+    assert_eq!(
+        row.reason.as_deref(),
+        Some(onlyne_client::session::dispatch::SESSION_DEAD),
+        "the delivery row the sweep filed names the death: {row:?}",
+    );
+    let mirrored = cluster
+        .mirrored(&task)
+        .expect("the mirror holds the session the client published");
+    assert_eq!(
+        mirrored.lifecycle,
+        Lifecycle::Exited,
+        "the mirror reads the exit the client published, with no observer running: {mirrored:?}"
+    );
+    drop(cluster);
+
+    // The role's own account carries the ending the mirror now shows.
+    let store = ClientStore::open(workspace.join(".onlyne/client.db")).unwrap();
+    let record = store.task(&task).unwrap().expect("the task has a record");
+    assert_eq!(record.task_state, TaskState::Failed, "{record:?}");
+    assert!(record.settled_at.is_some(), "{record:?}");
 
     client.abort();
     fixture.server.abort();
