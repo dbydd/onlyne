@@ -152,6 +152,49 @@ pub(super) fn has_attached_transport(inner: &DispatchInner, key: &str, slot: &Se
         .any(|session_id| names_session(key, slot, session_id))
 }
 
+/// Move one session's row onto the generation after the one it holds.
+///
+/// Two shapes leave a row behind a generation that is gone, and both close the
+/// gap the same way. A plugin that comes back to a session this client still
+/// serves reports from a new process, so its sequence starts at its base again.
+/// A session this client stages onto a task that already carries a row is born
+/// onto the record the session that last served the task left, watermark and
+/// all. The watermark is the counter this client's own feeds and the plugin's
+/// beats share — `upsert_session` writes the event's version into it, and
+/// `next_version` allocates the stored one plus one — so an inherited one drops
+/// every frame of the new reporter as a stale duplicate, and no dimension ever
+/// moves on that row again. A same-generation rebase is not available: the
+/// reducer's no-op detection compares the version-free tuple, so an event that
+/// moved only the watermark would be ignored and the row would keep the old one.
+/// The generation is what moves, and the sequence starts again under it.
+///
+/// The caller composes `body`, the content of the new generation, and the caller
+/// attests the old one dead: `Supersede` is the reducer's vocabulary for that
+/// pair, and each caller is the authority on the fact it asserts. Answers `None`
+/// when the task carries no row yet — a first dispatch, which has nothing to
+/// rebase because `feed_created` seeds the row instead.
+pub(super) fn rebase_generation(
+    inner: &DispatchInner,
+    task_id: &str,
+    body: impl FnOnce(&Observation) -> Observation,
+) -> anyhow::Result<Option<Verdict>> {
+    let Some(row) = inner.store.get_session(task_id)? else {
+        return Ok(None);
+    };
+    let stored = stored_observation(&inner.store, Some(&row));
+    let event = LifecycleEvent::Supersede {
+        v: Version::new(stored.version.generation.saturating_add(1), 0),
+        old_generation_dead: true,
+        body: body(&stored),
+    };
+    Ok(Some(apply_persist(
+        &inner.bridge,
+        &inner.store,
+        task_id,
+        &event,
+    )?))
+}
+
 /// The task one slot answers for: its current binding, or the task its session
 /// was spawned for while no task is bound.
 pub(super) fn slot_task(slot: &SessionSlot) -> String {

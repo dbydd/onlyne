@@ -4,8 +4,8 @@ use super::env::missing_capability;
 use super::outbound::queue_outbound_locked;
 use super::retire::{retire_idle_locked, stored_close_reason};
 use super::state::{
-    DispatchInner, DispatchState, FrameGuard, SessionSlot, has_attached_transport, slot_key_named,
-    slot_key_serving_task, slot_task,
+    DispatchInner, DispatchState, FrameGuard, SessionSlot, has_attached_transport,
+    rebase_generation, slot_key_named, slot_key_serving_task, slot_task,
 };
 
 /// The name one held frame is addressed to.
@@ -226,14 +226,12 @@ pub(super) fn note_binding_locked(
 /// sequence climbs past it — for a session that had been running a while, the
 /// whole rest of its work, reported into a tuple that never moves.
 ///
-/// The rebase is a new generation over the tuple the client already holds. The
-/// generation is what moves, because that is the half the reporter cannot be
-/// talked out of: its `generation` field is a constant it never raises, so
-/// stamping the beat with the session's own generation is what lets a frame from
-/// the new generation through at all, and the sequence starts again under it. A
-/// same-generation rebase is not available: the reducer's no-op detection
-/// compares the version-free tuple, so an event that moved only the watermark
-/// would be ignored and the ledger would keep the old one.
+/// The rebase itself is [`rebase_generation`]'s: a new generation over the tuple
+/// the client already holds, because the generation is the half the reporter
+/// cannot be talked out of — its `generation` field is a constant it never
+/// raises, so stamping the beat with the session's own generation is what lets a
+/// frame from the new generation through at all, and the sequence starts again
+/// under it.
 ///
 /// The body is the stored tuple with the agent dimension put back to `Booting`
 /// and the recovery line beside it dropped. That is not a guess about the agent:
@@ -258,29 +256,29 @@ fn rebase_returned_reporter(inner: &mut DispatchInner, key: &str) {
         return;
     };
     let task_id = slot.session.task_id.clone();
-    let row = inner.store.get_session(&task_id).ok().flatten();
-    let stored = stored_observation(&inner.store, row.as_ref());
-    let mut body = stored.clone();
-    body.agent = AgentState::Booting;
-    body.recovery = RecoveryState::None;
-    if body.delivery == DeliveryState::Accepted {
-        body.delivery = DeliveryState::Pending;
-    }
-    let event = LifecycleEvent::Supersede {
-        v: Version::new(stored.version.generation.saturating_add(1), 0),
-        old_generation_dead: true,
-        body,
-    };
-    match apply_persist(&inner.bridge, &inner.store, &task_id, &event) {
-        Ok(Verdict::Applied(next)) => tracing::info!(
+    let verdict = rebase_generation(inner, &task_id, |stored| {
+        let mut body = stored.clone();
+        body.agent = AgentState::Booting;
+        body.recovery = RecoveryState::None;
+        if body.delivery == DeliveryState::Accepted {
+            body.delivery = DeliveryState::Pending;
+        }
+        body
+    });
+    match verdict {
+        Ok(Some(Verdict::Applied(next))) => tracing::info!(
             task = %task_id,
             generation = next.version.generation,
             "a returning plugin's watermark was rebased onto a new generation"
         ),
-        Ok(verdict) => tracing::warn!(
+        Ok(Some(verdict)) => tracing::warn!(
             task = %task_id,
             ?verdict,
             "the returning plugin's watermark was not rebased"
+        ),
+        Ok(None) => tracing::warn!(
+            task = %task_id,
+            "the returning plugin's row was not there to rebase"
         ),
         Err(error) => tracing::warn!(
             task = %task_id,

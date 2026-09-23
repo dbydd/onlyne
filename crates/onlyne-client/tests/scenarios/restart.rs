@@ -9,13 +9,15 @@
 //! a projection-carrying heartbeat lands in the mirror. What the client does with a
 //! row the server requeued, how it leaves a row it has already answered alone on the
 //! way back up, what it records for a row whose session died under it, what that
-//! session's own ending tells the mirror, and who may shut intake, are the five
+//! session's own ending tells the mirror, what a re-dispatched task does with the
+//! session row the dead process left, what a task re-offered after its session was
+//! swept does with the row the sweep closed, and who may shut intake, are the seven
 //! facts the cases below pin.
 
-use crate::common::{complete_plugin, plugin_beat};
+use crate::common::{assert_settled, complete_plugin, plugin_beat, ran_a_turn};
 use onlyne_adapter::AdapterIo;
 use onlyne_client::ClientInit;
-use onlyne_client::session::dispatch::{DispatchState, Outbox, send_frame};
+use onlyne_client::session::dispatch::{DispatchState, Outbox, SETTLE_WITHOUT_TURN, send_frame};
 use onlyne_frame::{read_frame, write_frame};
 use onlyne_layout::{RoleWorkspace, connect_local};
 use onlyne_net::NetError;
@@ -626,6 +628,204 @@ async fn a_restart_drains_the_work_left_in_flight() {
         cluster.sends
     );
     drop(cluster);
+
+    client.abort();
+    fixture.server.abort();
+}
+
+/// A row the restart re-dispatches runs its turn on the session the kill left a
+/// record of.
+///
+/// This client keeps `client.db` across a restart and a session row is keyed by
+/// its task, so the session a re-dispatch stages is born onto the row the killed
+/// process wrote — its phase, its resource, and its `(generation, seq)` watermark
+/// included. The watermark is the leg that cannot be inherited: the client's own
+/// feeds and the plugin's beats advance one counter, and a plugin is a new process
+/// whose sequence starts at its base again, below whatever a session that lived a
+/// while left. Every frame of the restarted session then reads as a stale duplicate
+/// and moves no dimension, so the turn the restarted agent really ran never reaches
+/// the row the settle door reads.
+///
+/// The first process runs a turn and dies there. The restart claims nothing, so its
+/// hello requeues the row the dead link left in flight, the pull hands it back, and
+/// the agent that mounts on the restarted socket beats and completes for it.
+#[tokio::test]
+async fn a_restart_re_dispatching_a_row_of_its_own_runs_the_task() {
+    let task = onlyne_proto::new_task_id();
+    let mut cluster = Cluster::default();
+    cluster
+        .rows
+        .push(Row::new("msg-reborn", &task, LedgerState::Queued, 0));
+    let fixture = fixture(cluster, |init| init).await;
+
+    // The first process: it takes the row, stages a session, and the plugin mounts
+    // and runs a turn. The process dies there — nothing completes and nothing is
+    // acknowledged — and the row it wrote in `client.db` is what the restart works
+    // from.
+    let first = tokio::spawn(onlyne_client::run(fixture.init.clone()));
+    let (io, mut assigns) = mount_when_ready(&fixture.socket).await;
+    let assigned = tokio::time::timeout(Duration::from_secs(10), assigns.recv())
+        .await
+        .expect("the first process stages the row")
+        .expect("the plugin connection stays open");
+    assert_eq!(assigned, task, "the row reached the first agent");
+    ran_a_turn(&io, &task).await;
+    first.abort();
+    drop(io);
+    // The dead process's socket name outlives it, because the acceptor serving it
+    // was spawned and is not cancelled with the run. Clearing the name is what makes
+    // the restart's own bind the surface the next plugin reaches.
+    std::fs::remove_file(&fixture.socket).expect("the dead client's socket name is cleared");
+
+    // The restart: a fresh process over the same `client.db`, claiming nothing, so
+    // the hello requeues the row the dead link left in flight and the pull is what
+    // brings it back.
+    let second = tokio::spawn(onlyne_client::run(fixture.init.clone()));
+    let (io, mut assigns) = mount_when_ready(&fixture.socket).await;
+    let assigned = tokio::time::timeout(Duration::from_secs(10), assigns.recv())
+        .await
+        .expect("the restart re-dispatches the row")
+        .expect("the plugin connection stays open");
+    assert_eq!(
+        assigned, task,
+        "the re-dispatched row reached the restarted agent"
+    );
+    complete_plugin(&io, &task, Outcome::Done).await;
+
+    let store = ClientStore::open(fixture.workspace.join(".onlyne/client.db")).unwrap();
+    let row = store
+        .get_session(&task)
+        .unwrap()
+        .expect("the re-dispatched session keeps its row");
+    assert_eq!(
+        row.agent_state, "running",
+        "the beat that carried the turn landed on the re-dispatched session: {row:?}"
+    );
+    assert_settled(&store, &task);
+
+    let settled = fixture.cluster.clone();
+    eventually(
+        move || settled.lock().row("msg-reborn").state == LedgerState::Acked,
+        "the re-dispatched row settles acked",
+    )
+    .await;
+
+    second.abort();
+    fixture.server.abort();
+}
+
+/// A task re-offered after its session was swept runs on the row the sweep
+/// closed.
+///
+/// The other shape the same row takes when a task comes back: the plugin that was
+/// serving it never returned, so past `[client] reconnect_grace_secs` the sweep
+/// ended the session — the session's own row at `gone` over a closed resource —
+/// and the delivery row was refused `session_dead`. An operator's `repair retry`
+/// puts that row back on the queue, and the session the retry stages is born onto
+/// the closed row. The attach its dispatch feeds then asks a closed resource to
+/// become attached, which the ledger refuses as `UndefinedTransition`, and no
+/// frame of the retried session can move a tuple that never left the dead
+/// session's shape: the live log of the reported run carries exactly that
+/// rejection, one tick before the second completion it refused.
+///
+/// The watermark is what makes the row this sticky, so the case runs a turn on the
+/// session before its plugin goes: the beats of a session that lived a while stand
+/// above the base a new plugin starts from, and only the rebase this dispatch path
+/// owes the shape puts the retried session's own frames back under a watermark they
+/// can clear.
+///
+/// What this case pins is the session's own row, which is the whole of the
+/// recovery this path owes: the attach lands, the turn's beat lands on it, the
+/// drain closes, and the settle door reads a turn and files no fault. The task's
+/// own record is not part of it — the sweep already filed its verdict there, and
+/// a later verdict against a settled record is the task table's own question.
+#[tokio::test]
+async fn a_task_a_swept_session_left_closed_runs_on_the_row_it_left() {
+    let task = onlyne_proto::new_task_id();
+    let mut cluster = Cluster::default();
+    cluster
+        .rows
+        .push(Row::new("msg-swept", &task, LedgerState::Queued, 0));
+    let fixture = fixture(cluster, |init| init.with_reconnect_grace_secs(1)).await;
+
+    let client = tokio::spawn(onlyne_client::run(fixture.init.clone()));
+    let (io, mut assigns) = mount_when_ready(&fixture.socket).await;
+    let assigned = tokio::time::timeout(Duration::from_secs(10), assigns.recv())
+        .await
+        .expect("the first session takes the row")
+        .expect("the plugin connection stays open");
+    assert_eq!(assigned, task, "the row reached the first agent");
+    ran_a_turn(&io, &task).await;
+    drop(io);
+
+    let refused = fixture.cluster.clone();
+    eventually(
+        move || refused.lock().row("msg-swept").state == LedgerState::Rejected,
+        "the swept session's delivery is refused",
+    )
+    .await;
+    let store = ClientStore::open(fixture.workspace.join(".onlyne/client.db")).unwrap();
+    let row = store
+        .get_session(&task)
+        .unwrap()
+        .expect("the swept session keeps its row");
+    assert_eq!(
+        (row.agent_state.as_str(), row.resource_state.as_str()),
+        ("gone", "closed"),
+        "the sweep ends the session's own row and closes its resource: {row:?}"
+    );
+
+    // The operator's repair retry: the row goes back on the queue and the same
+    // client is offered it again.
+    {
+        let mut cluster = fixture.cluster.lock();
+        let row = cluster
+            .rows
+            .iter_mut()
+            .find(|row| row.msg_id == "msg-swept")
+            .expect("the fixture seeded this row");
+        row.state = LedgerState::Queued;
+        row.armed = false;
+    }
+    let again = fixture.cluster.clone();
+    eventually(
+        move || again.lock().row("msg-swept").handed >= 2,
+        "the retried row is handed out again",
+    )
+    .await;
+    let (io, mut assigns) = mount_when_ready(&fixture.socket).await;
+    let assigned = tokio::time::timeout(Duration::from_secs(10), assigns.recv())
+        .await
+        .expect("the retried row reaches an agent")
+        .expect("the plugin connection stays open");
+    assert_eq!(assigned, task, "the retried row reached a second agent");
+    complete_plugin(&io, &task, Outcome::Done).await;
+
+    let row = store
+        .get_session(&task)
+        .unwrap()
+        .expect("the retried session keeps its row");
+    assert_eq!(
+        row.resource_state, "attached",
+        "the retry's own resource attaches to the row the sweep closed: {row:?}"
+    );
+    assert_eq!(
+        row.agent_state, "running",
+        "and the beat that carried its turn lands on it: {row:?}"
+    );
+    assert_eq!(
+        row.delivery_state, "accepted",
+        "the completion's drain closes against the retried session: {row:?}"
+    );
+    assert!(
+        store
+            .list_faults(&task)
+            .unwrap()
+            .iter()
+            .all(|fault| fault.kind != SETTLE_WITHOUT_TURN),
+        "the settle door reads the turn this session ran: {:?}",
+        store.list_faults(&task).unwrap()
+    );
 
     client.abort();
     fixture.server.abort();

@@ -4,7 +4,8 @@ use super::env::{missing_capability, reject_protocol_command_in_pane, served_soc
 use super::outbound::send_frame;
 use super::projection::{note_verdict, sync_session};
 use super::state::{
-    DispatchState, SessionSlot, live_sessions, note_beat, render_tokens, slot_key_serving_task,
+    DispatchInner, DispatchState, SessionSlot, live_sessions, note_beat, rebase_generation,
+    render_tokens, slot_key_serving_task,
 };
 use super::transport::{is_revived_connection, note_binding_locked, record_revived_connection};
 
@@ -65,6 +66,12 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
     // serving above never reaches this line, so the chain columns are the chain
     // the session opened on; a re-dispatch after retirement refreshes them.
     inner.store.open_task(causality, task_cause(causality))?;
+    // A row this task already carries is the record of the session that served it
+    // before, and the session staged here is born onto it: `rebase_born_session`
+    // moves that row to a generation of its own, and a task with no row keeps the
+    // plain seed below. Either way the row the feeds land on starts at
+    // `Booting`/`Detached`, under a watermark this session's own count can clear.
+    rebase_born_session(&inner, &task_id);
     feed_created(&inner.bridge, &inner.store, &task_id)?;
     feed_dispatched(&inner.bridge, &inner.store, &task_id);
     // A plugin-mode session's liveness is the heartbeat its connection sends and
@@ -108,6 +115,56 @@ fn task_cause(causality: &Causality) -> &'static str {
         "relay"
     } else {
         "root"
+    }
+}
+
+/// Move the row a re-dispatched task already carries onto the generation of the
+/// session this dispatch stages.
+///
+/// This client keeps `client.db` across a restart and a session row is keyed by
+/// its task, so the session staged here is born onto whatever row that task
+/// already carries; a first dispatch is the only shape with none. That row is the
+/// record of the session that served the task before, one no slot of this process
+/// holds any more, and none of what it holds can be inherited. Its phase and its
+/// resource describe a session that no longer exists, and the feeds below would
+/// have to move them from states that refuse them: `resource_attach` from a
+/// closed resource is `UndefinedTransition`, which is how the log reads when a
+/// ghost was swept before the task came back. Its watermark is worse, because a
+/// row it stands on accepts nothing that reads older: the client's own feeds and
+/// the plugin's beats share the one counter, and the plugin is a new process
+/// whose sequence starts at its base again, below anything a session that lived a
+/// while left. Every frame the new session sends is then dropped as a stale
+/// duplicate, the turn its agent really ran never reaches the row, and the settle
+/// door refuses the completion of work that happened.
+///
+/// The new generation itself is [`rebase_generation`]'s; the body here is the
+/// born tuple of any session — the same `Observation::initial` a fresh row is
+/// seeded from, with the role's reconcile policy carried over, so the two ways a
+/// session's row comes into being cannot drift. What attests the old generation
+/// dead is this client's own bookkeeping: this call is reached only because no
+/// slot of this process serves the task, so nothing it holds speaks for that row
+/// any more.
+fn rebase_born_session(inner: &DispatchInner, task_id: &str) {
+    let verdict = rebase_generation(inner, task_id, |stored| {
+        Observation::initial(stored.isolate_after, stored.terminate_after)
+    });
+    match verdict {
+        Ok(Some(Verdict::Applied(next))) => tracing::info!(
+            task = %task_id,
+            generation = next.version.generation,
+            "the row a re-dispatched session is born onto was rebased onto a new generation"
+        ),
+        Ok(Some(verdict)) => tracing::warn!(
+            task = %task_id,
+            ?verdict,
+            "the row of a re-dispatched session was not rebased"
+        ),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
+            task = %task_id,
+            error = %error,
+            "the row of a re-dispatched session was not rebased"
+        ),
     }
 }
 
