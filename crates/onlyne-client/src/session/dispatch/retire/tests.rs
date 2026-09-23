@@ -363,3 +363,61 @@ async fn a_control_close_ends_the_sessions_own_row() {
         "a closed session reads exited on the row its client holds"
     );
 }
+
+/// Both commands' closes answer the row their session was still holding, each
+/// with the word the operator gave.
+///
+/// The close drops the slot, and the delivery handle goes with it. A row this
+/// client never answered is a row the server still reads as owed, so the pull
+/// that would have taken it passes and the release of a session the server
+/// judges gone hands it back to the queue — which dispatches the task again, as
+/// the live run showed, every time the task was already settled. `cancel` and
+/// `recycle` are the two commands whose close reaches this branch, and each
+/// refusal reads the same word the settle fallback writes for the same command.
+#[tokio::test]
+async fn a_control_close_refuses_the_held_delivery_with_the_operators_word() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).expect("client store");
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        Vec::new(),
+        8,
+        Arc::new(FakeBackend::new()),
+        store.clone(),
+    );
+
+    for (key, reason, word) in [
+        ("cancelled", onlyne_session::CloseReason::Cancelled, "operator cancel"),
+        ("recycled", onlyne_session::CloseReason::Operator, "operator recycle"),
+    ] {
+        let task = new_task_id();
+        let msg_id = format!("msg-{key}");
+        {
+            let mut inner = state.inner.lock();
+            let mut held = slot(&task, false, None);
+            held.msg_id = Some(msg_id.clone());
+            inner.sessions.insert(key.to_string(), held);
+        }
+
+        on_recycled(&state, &task, reason).expect("the close runs");
+
+        let acks: Vec<(bool, Option<String>)> = store
+            .flush_order()
+            .expect("read the intent queue")
+            .iter()
+            .map(|row| crate::runtime::intent::op_for_intent(row).expect("queued frame"))
+            .filter_map(|op| match op {
+                onlyne_proto::ClientOp::Ack(ack) if ack.msg_id == msg_id => {
+                    Some((ack.accepted, ack.reason))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            acks,
+            vec![(false, Some(word.to_string()))],
+            "the {key} close refuses the row it still held with the word it was given"
+        );
+    }
+}

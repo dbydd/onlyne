@@ -253,6 +253,34 @@ pub(super) fn release_locked(
                 );
             }
             inner.bridge.untrack_live(task_id);
+            // The delivery row this session is still holding is answered here,
+            // while the slot that holds its handle is still in the map. The close
+            // takes the slot, and the handle goes with it: a row this client
+            // never answered is a row the server still reads as owed, so the
+            // pull that would have taken it passes and the release of a session
+            // the server judges gone hands it back to the queue — which
+            // dispatches the task a second time and runs it again, as the live
+            // run showed for a task whose work the close had already ended.
+            //
+            // The handle is taken, so the row is answered once: the control
+            // settle watchdog and the reconnect sweep refuse the same handle
+            // the same way, and whichever of the three runs first spends it and
+            // the others find nothing left to answer.
+            let held = inner
+                .sessions
+                .get_mut(&key)
+                .and_then(|slot| slot.msg_id.take());
+            if let Some(msg_id) = held {
+                store_ack(
+                    &inner,
+                    AckArgs {
+                        msg_id,
+                        op_id: None,
+                        accepted: false,
+                        reason: Some(close_refusal(reason).to_string()),
+                    },
+                );
+            }
             inner.sessions.remove(&key);
         } else {
             if let Some(session) = inner.sessions.get_mut(&key) {
@@ -269,6 +297,31 @@ pub(super) fn release_locked(
             .note_alert(format!("session recycled {task_id}"));
     }
     Ok(())
+}
+
+/// The operator's word a control close stands for, as the refusal that answers
+/// the row its session was still holding.
+///
+/// The words are the ones the settle fallback already writes for the same
+/// commands ([`ControlWord::refusal`]), so a row reads the same thing whichever
+/// door refused it, and each names the command that was given rather than the
+/// verdict that command left behind.
+fn close_refusal(reason: onlyne_session::CloseReason) -> &'static str {
+    match reason {
+        // The close an operator's `cancel` runs: the `ControlOp::Cancel` arm of
+        // `on_control`, which is also how the server asks for `repair close` and
+        // `repair fail` to reach this client.
+        onlyne_session::CloseReason::Cancelled => ControlWord::Cancel.refusal(),
+        // The close an operator's `recycle` runs: the `ControlOp::Recycle` arm
+        // of `on_control`.
+        onlyne_session::CloseReason::Operator => ControlWord::Recycle.refusal(),
+        // No control command reaches this branch with another reason: a
+        // `completed`, `fault` or `replaced` close retires an idle slot, and a
+        // `shutdown` close runs `close_all`, neither of which comes through
+        // here. The word is the server's own for a close that named no command
+        // — `repair close` without a `--reason` writes it on the task's row.
+        _ => "operator close",
+    }
 }
 
 /// Close every live session's resource with `reason` and forget the slots.

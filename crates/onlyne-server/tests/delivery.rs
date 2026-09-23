@@ -1150,6 +1150,160 @@ fn a_role_level_ticket_releases_when_its_task_publishes_exited() {
     assert_eq!(repulled.deliveries[0].msg_id, msg_id);
 }
 
+/// One task holding two deliveries: the dispatch row the task's own ledger row
+/// reads, and the completion the origin role has yet to take. The dispatch row
+/// is acked when `settled` is set, so the task's own row carries a verdict; the
+/// completion is then claimed by a second session, which is the in-flight row a
+/// release acts on. The answer is the task id, the dispatch msg id, and the held
+/// completion's msg id.
+fn dispatched_task_with_a_held_completion(
+    state: &Arc<onlyne_server::State>,
+    settled: bool,
+) -> (String, String, String) {
+    let dispatch = task("planner", "builder", "build the thing");
+    let task_id = dispatch.task_id().expect("task").to_string();
+    let first = accepted(relay::send(state, &dispatch, false, None).expect("dispatch"));
+    let dispatch_msg = first.receipt.msg_id.clone();
+    relay::pull(state, "builder", Some("sess-1"), &PullArgs::default())
+        .expect("the dispatch is claimed");
+    if settled {
+        relay::ack(
+            state,
+            &AckArgs {
+                msg_id: dispatch_msg.clone(),
+                op_id: None,
+                accepted: true,
+                reason: None,
+            },
+        )
+        .expect("ack")
+        .expect("the dispatch row carries the task's verdict");
+    }
+    let reported = accepted(
+        relay::send(
+            state,
+            &completion("builder", "planner", &task_id, "done"),
+            false,
+            None,
+        )
+        .expect("completion"),
+    );
+    let held = reported.receipt.msg_id;
+    let pulled =
+        relay::pull(state, "planner", Some("sess-super"), &PullArgs::default()).expect("claimed");
+    assert_eq!(
+        pulled.deliveries[0].msg_id, held,
+        "the held row is the completion"
+    );
+    (task_id, dispatch_msg, held)
+}
+
+fn row_of(state: &Arc<onlyne_server::State>, msg_id: &str) -> onlyne_store::LedgerRow {
+    ledger_rows(state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("row")
+}
+
+/// A task whose own ledger row already carries a verdict owes the task's holder
+/// no re-delivery: the held row is refused once, lands rejected with the reason
+/// that says why, spends its ticket, stays out of the requeued count, and is
+/// never offered again.
+#[test]
+fn an_exited_publish_refuses_a_held_row_of_a_task_that_already_settled() {
+    let fixture = fixture();
+    let (task_id, _dispatch, held) = dispatched_task_with_a_held_completion(&fixture.state, true);
+    let before = ledger_state_events(&fixture.state).len();
+
+    let requeued =
+        relay::release_exited_delivery(&fixture.state, &task_id, "sess-super").expect("release");
+    assert_eq!(requeued, 0, "a refused row is no requeue");
+
+    let row = row_of(&fixture.state, &held);
+    assert_eq!(row.state, LedgerState::Rejected, "the row lands terminal");
+    assert_eq!(
+        row.reason.as_deref(),
+        Some(relay::RELEASE_SETTLED_REASON),
+        "the reason says the task already settled"
+    );
+    assert_eq!(row.requeued, 0, "a refusal spends no attempt");
+    assert!(
+        fixture.state.delivery_ticket(&held).is_none(),
+        "the ticket goes with the refused row"
+    );
+    let events = ledger_state_events(&fixture.state);
+    assert_eq!(
+        events.len(),
+        before + 1,
+        "the refusal publishes one ledger_state"
+    );
+    match &events.last().expect("refusal event").event {
+        Event::LedgerState(event) => {
+            assert_eq!(event.msg_id, held);
+            assert_eq!(event.state, LedgerState::Rejected);
+            assert_eq!(event.reason.as_deref(), Some(relay::RELEASE_SETTLED_REASON));
+        }
+        other => panic!("expected ledger_state, got {other:?}"),
+    }
+
+    let again =
+        relay::release_exited_delivery(&fixture.state, &task_id, "sess-super").expect("release");
+    assert_eq!(again, 0, "a spent row has no in-flight row left to release");
+    assert_eq!(
+        row_of(&fixture.state, &held).state,
+        LedgerState::Rejected,
+        "the refused row never returns to queued"
+    );
+    let reoffered = relay::pull(
+        &fixture.state,
+        "planner",
+        Some("sess-next"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    assert!(
+        reoffered.deliveries.is_empty(),
+        "nothing re-offers the refused row"
+    );
+}
+
+/// The open-task path, on the same fixture: a row whose task carries no verdict
+/// still rides the attempts and TTL gates and still requeues.
+#[test]
+fn an_exited_publish_requeues_a_held_row_of_a_task_that_is_still_open() {
+    let fixture = fixture();
+    let (task_id, _dispatch, held) = dispatched_task_with_a_held_completion(&fixture.state, false);
+
+    let requeued =
+        relay::release_exited_delivery(&fixture.state, &task_id, "sess-super").expect("release");
+    assert_eq!(requeued, 1, "the open row is the one requeue");
+
+    let row = row_of(&fixture.state, &held);
+    assert_eq!(
+        row.state,
+        LedgerState::Queued,
+        "the open row goes back on the queue"
+    );
+    assert_eq!(row.reason, None, "a requeue carries no reason");
+    assert_eq!(row.requeued, 1, "the requeue spends one attempt");
+    assert!(
+        fixture.state.delivery_ticket(&held).is_none(),
+        "the dead pane's ticket goes with the row"
+    );
+    let reoffered = relay::pull(
+        &fixture.state,
+        "planner",
+        Some("sess-next"),
+        &PullArgs::default(),
+    )
+    .expect("pull");
+    assert_eq!(reoffered.deliveries.len(), 1);
+    assert_eq!(
+        reoffered.deliveries[0].msg_id, held,
+        "the requeued row reaches the next session"
+    );
+}
+
 #[test]
 fn an_old_hello_json_without_live_tasks_requeues_like_today() {
     let raw = json!({

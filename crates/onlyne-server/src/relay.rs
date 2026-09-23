@@ -7,6 +7,7 @@
 
 use crate::events;
 use crate::gateway_host::{resolve_inbound_route, select_outbound_route};
+use crate::ghosts;
 use crate::state::{DeliveryTicket, State};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -716,6 +717,8 @@ fn control_from_row(kind: MsgKind, body: &Body, task: Option<&str>) -> Option<Co
 pub const REQUEUE_EXHAUSTED_REASON: &str = "requeue_exhausted";
 /// Reason stored when an automatic requeue is past `requeue_ttl_secs`.
 pub const REQUEUE_TTL_REASON: &str = "requeue_ttl";
+/// Reason stored when a released row belongs to a task that already settled.
+pub const RELEASE_SETTLED_REASON: &str = "task_settled";
 
 /// Re-queue a role's in-flight rows and drop the tickets that hold them.
 ///
@@ -773,6 +776,14 @@ pub fn requeue_role_rows(
 /// session the row belongs to. Without that fallback no role-level ticket ever
 /// matched and the row stayed `in_flight` behind a pane that was gone. TTL and
 /// budget run in the same order as [`requeue_role_rows`].
+///
+/// A row whose task's own ledger row already carries a verdict is refused:
+/// [`crate::ghosts::task_ledger_state`] reads that row and
+/// [`crate::ghosts::settled_outcome`] maps its state, the same pair the ghost
+/// sweep asks. The refused row lands `rejected` carrying
+/// [`RELEASE_SETTLED_REASON`], its ticket goes with it, and the refusal is
+/// absent from the requeued count, so the row stays spent and nothing re-offers
+/// it. A task carrying no verdict rides the TTL and budget gates above.
 pub fn release_exited_delivery(
     state: &State,
     task_id: &str,
@@ -784,6 +795,7 @@ pub fn release_exited_delivery(
         limit: 32,
         ..LedgerQuery::default()
     })?;
+    let settled = ghosts::task_ledger_state(state, task_id)?.and_then(ghosts::settled_outcome);
     let mut requeued = 0usize;
     for row in rows {
         let Some(ticket) = state.delivery_ticket(&row.msg_id) else {
@@ -796,7 +808,21 @@ pub fn release_exited_delivery(
         if !released {
             continue;
         }
-        if apply_automatic_requeue(state, &row)? {
+        if settled.is_some() {
+            match state.ledger.fail_one(&row.msg_id, RELEASE_SETTLED_REASON) {
+                Ok(_) => {
+                    state.forget_expiry(&row.msg_id);
+                    tracing::info!(
+                        task = %task_id,
+                        msg_id = %row.msg_id,
+                        reason = RELEASE_SETTLED_REASON,
+                        "a delivery of a settled task is refused, so the row stays spent"
+                    );
+                }
+                Err(onlyne_store::StoreError::InvalidState { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        } else if apply_automatic_requeue(state, &row)? {
             requeued += 1;
         }
         state.take_delivery(&row.msg_id);

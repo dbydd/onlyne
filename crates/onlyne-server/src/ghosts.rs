@@ -59,9 +59,14 @@ pub fn settled_outcome(state: LedgerState) -> Option<Outcome> {
 ///
 /// `ServerLedger::ledger_task` reads in insertion order, so the first `task` row
 /// is the dispatch row that created the work. That is the row
-/// [`crate::relay::task_origin`] reads for its own question. A task with no such
-/// row answers `None`, and the pass then has no evidence to act on.
-fn task_ledger_state(state: &State, task_id: &str) -> anyhow::Result<Option<LedgerState>> {
+/// [`crate::relay::task_origin`] reads for its own question, and
+/// [`crate::relay::release_exited_delivery`] reads it to learn whether a task
+/// already carries a verdict. A task with no such row answers `None`, and the
+/// pass then has no evidence to act on.
+pub(crate) fn task_ledger_state(
+    state: &State,
+    task_id: &str,
+) -> anyhow::Result<Option<LedgerState>> {
     let rows = state.ledger.ledger_task(task_id, TASK_ORIGIN_ROW_LIMIT)?;
     Ok(rows
         .iter()
@@ -94,13 +99,23 @@ pub fn sweep_once(state: &Arc<State>) -> anyhow::Result<Vec<GhostSweepRow>> {
 /// that rewrites `observed_json`, bumps `seq`, persists the row and emits
 /// `session_state`. The audit row names the write the pass made, so a row that
 /// moved between this pass's read and its write records nothing here.
+///
+/// The client owns the task's verdict and the mirror carries it: a client
+/// publishes that verdict with the lifecycle its own tuple reads, and a settled
+/// task beside a live agent projects `working`. A mirror row that already
+/// carries an outcome keeps it, the pass still moves the row out of `working`,
+/// and the ledger's reading is what the row takes where the mirror carries none.
+/// The audit row's `outcome` names what the mirror finally reads.
 fn sweep_row(state: &Arc<State>, row: &ServerSessionRow) -> anyhow::Result<Option<GhostSweepRow>> {
     let Some(ledger_state) = task_ledger_state(state, &row.task_id)? else {
         return Ok(None);
     };
-    let Some(outcome) = settled_outcome(ledger_state) else {
+    let Some(ledger_outcome) = settled_outcome(ledger_state) else {
         return Ok(None);
     };
+    let outcome = crate::projection::projection_from_write(row)
+        .outcome
+        .unwrap_or(ledger_outcome);
     let settled = faults::settle_task(state, &row.task_id, outcome, &sweep_reason(ledger_state))?;
     let Some(settlement) = settled else {
         return Ok(None);

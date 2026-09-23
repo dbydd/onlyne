@@ -2,7 +2,9 @@
 //! reached a verdict, and records the write in `ghost_sweeps`.
 
 use onlyne_net::KeyPair;
-use onlyne_proto::{AckArgs, Body, Causality, Lifecycle, MsgKind, Outcome, Principal, Report};
+use onlyne_proto::{
+    AckArgs, Body, Causality, Lifecycle, MsgKind, Outcome, Principal, Report, SessionProjection,
+};
 use onlyne_server::relay::{self, RelayReply};
 use onlyne_server::state::{Server, ServerInit};
 use onlyne_server::{ghosts, projection};
@@ -128,6 +130,88 @@ fn the_sweep_settles_a_working_row_whose_task_already_acked() {
     assert_eq!(audit[0].id, swept[0].id);
     assert_eq!(audit[0].outcome, Outcome::Done);
     assert_eq!(audit[0].session_id, "sess-ghost");
+}
+
+/// The client owns the task's verdict, and the mirror carries it: a client
+/// publishes that verdict with the lifecycle its own tuple reads, and a settled
+/// task beside a live agent projects `working`. The pass moves the row out of
+/// `working` and the verdict the client published stands.
+#[test]
+fn the_sweep_keeps_the_verdict_the_client_published() {
+    let (_dir, state) = open_server(60);
+    let (task_id, msg_id) = working_task(&state);
+    relay::ack(
+        &state,
+        &AckArgs {
+            msg_id,
+            op_id: None,
+            accepted: true,
+            reason: None,
+        },
+    )
+    .expect("the ack ran")
+    .expect("the ack settled the ledger row");
+    let mut published = SessionProjection::default_working();
+    published.lifecycle = Lifecycle::Working;
+    published.outcome = Some(Outcome::Cancelled);
+    projection::report(
+        &state,
+        "builder",
+        &Report::Heartbeat {
+            task_id: task_id.clone(),
+            session_id: "sess-ghost".into(),
+            generation: 1,
+            seq: 2,
+            observed: serde_json::Value::Null,
+            projection: Some(published),
+            cluster_ref: None,
+        },
+    )
+    .expect("the publish lands");
+
+    let swept = ghosts::sweep_once(&state).expect("one pass");
+    assert_eq!(
+        swept.len(),
+        1,
+        "the row still reads working, so the pass moves it"
+    );
+    assert_eq!(
+        swept[0].outcome,
+        Outcome::Cancelled,
+        "the audit row names what the mirror finally reads"
+    );
+    assert_eq!(
+        swept[0].evidence, "task_settled:acked",
+        "the evidence still names the ledger state behind the pass"
+    );
+
+    let row = state
+        .ledger
+        .get_session_row(&task_id)
+        .expect("the row reads")
+        .expect("the row is present");
+    let projected = projection::row_from_write(&row);
+    assert_eq!(
+        projected.public_lifecycle,
+        Lifecycle::Exited,
+        "the pass moves the row out of working"
+    );
+    assert_eq!(
+        projected.outcome,
+        Some(Outcome::Cancelled),
+        "the verdict the client published stands"
+    );
+    assert_eq!(
+        state.ledger.list_ghost_sweeps(10).expect("the audit reads")[0].outcome,
+        Outcome::Cancelled,
+        "the stored audit row carries the same verdict"
+    );
+    assert!(
+        ghosts::sweep_once(&state)
+            .expect("one more pass")
+            .is_empty(),
+        "a row the pass moved reads exited, and the pass reads working rows"
+    );
 }
 
 /// A `working` row whose own task ledger row is still `in_flight` carries no

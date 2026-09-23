@@ -460,18 +460,28 @@ async fn a_cancel_inside_the_bound_settles_nothing() {
     );
 }
 
-/// The shape the live run left behind: the close took the handle, and the publish
-/// is what answers the row.
+/// The shape a control close now leaves: the close refuses the row it still
+/// held, and the publish is what settles the task.
 ///
 /// The close an operator's command runs ends the session's own row and takes the
-/// slot with it, delivery handle and all, so a word no report answers leaves the
-/// task open with nothing in this client left to refuse that row with. What this
-/// client still holds is its record of the ending — the closed session beside the
-/// verdict the word stands for — and publishing it is the write that moves the
-/// mirror: a row whose session syncs `exited` is the server's own signal, so the
-/// operator no longer has to reach for a `repair` verb.
+/// slot with it, delivery handle and all, so the handle is the close's to spend
+/// and it spends it before the slot leaves the map: the row is refused with the
+/// operator's own word. What this client still holds is its record of the ending
+/// — the closed session beside the verdict the word stands for — and publishing
+/// it is the write that moves the mirror: a row whose session syncs `exited` is
+/// the server's own signal, so the operator no longer has to reach for a
+/// `repair` verb.
+///
+/// The refusal is what this expectation gained, and the shape it lost was the
+/// live run's own: a close whose handle died with the slot refused nothing, and
+/// an unanswered row is not a decision the server can read — the pull that would
+/// have taken it passes, the release of a session the server judges gone hands it
+/// back to the queue, and the task is dispatched again and run again for as long
+/// as the cycle repeats. Exactly one ack is the whole contract: the close spends
+/// the handle, and the sweep that settles the task below finds no handle left to
+/// answer the same row.
 #[tokio::test]
-async fn a_cancel_whose_close_took_the_delivery_settles_and_publishes_alone() {
+async fn a_cancel_whose_close_refused_the_delivery_settles_and_publishes_alone() {
     let (state, store) = test_state(2, Vec::new());
     let task = new_task_id();
     staged_delivery(&state, &task, "msg-cancelled");
@@ -481,7 +491,7 @@ async fn a_cancel_whose_close_took_the_delivery_settles_and_publishes_alone() {
     state
         .dispatch
         .owe_controlled_settle(&task, ControlWord::Cancel, given);
-    // The close the command runs, which is where the delivery handle goes.
+    // The close the command runs, which is where the delivery handle is spent.
     on_recycled(
         &state.dispatch,
         &task,
@@ -503,9 +513,10 @@ async fn a_cancel_whose_close_took_the_delivery_settles_and_publishes_alone() {
         Lifecycle::Exited,
         "and it reads exited, which is the ending the server mirrors: {published:?}"
     );
-    assert!(
-        acks_for(&state, "msg-cancelled").is_empty(),
-        "the handle went with the slot, so no row is refused here: {:?}",
+    assert_eq!(
+        acks_for(&state, "msg-cancelled"),
+        vec![(false, Some("operator cancel".to_string()))],
+        "the close refused the row it still held, with the operator's own word: {:?}",
         queued_ops(&state)
     );
     assert!(
