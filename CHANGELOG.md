@@ -422,6 +422,14 @@ where it is read.
   past the tuple's own embedded version — the exact shape `bump_session_version` leaves behind —
   and asserts a local write is allocated past the columns and lands. Reverting the stamp (a scoped
   `git stash` of `record.rs` alone) fails it; the fix passes.
+- testkit: the `heartbeat` step of `onlyne-agent-fake` reports a whole `Observation`, the shape
+  the pi plugin sends, with a sequence above the plugin's own `SEQ_BASE` so each beat reads as
+  newer than the last. The step used to send `{"state":"running"}`, which the client cannot
+  deserialize, so every heartbeat in every case landed in the branch that treats an unreadable
+  tuple as liveness alone. The write the reducer runs on a readable tuple — the path an agent's
+  unchanged `running` beat travels every ten seconds, and the one whose missing stamp killed a
+  live session — had no coverage anywhere in the suite until this change. `heartbeat-watch`,
+  `running-lights`, `acp-payload-v2` and `reconnect-requeue` pass on it.
 - client: `a_no_op_beat_still_stamps_the_liveness_clock`
   (`crates/onlyne-client/src/session/dispatch/reports/tests.rs`) rewinds one session's stamp
   past the silence threshold and delivers a no-op beat. Without the fix it fails by naming the

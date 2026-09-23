@@ -545,6 +545,7 @@ impl FakeAgent {
         let mut state = FakeAgentState {
             welcome,
             last_assign: None,
+            beats: 0,
         };
         loop {
             for step in &self.script.steps {
@@ -591,8 +592,30 @@ impl FakeAgent {
                             .await?;
                     }
                     "heartbeat" => {
+                        state.beats += 1;
+                        // The shape a real plugin reports: a whole `Observation`,
+                        // whose only optional field is the host binding. A beat that
+                        // omits the dimensions cannot deserialize in the client, and
+                        // the client then treats it as liveness alone — a suite whose
+                        // beats all take that door never reaches the write the reducer
+                        // runs on a readable tuple, which is the path a live agent's
+                        // unchanged `running` beat travels every ten seconds. The
+                        // sequence base matches the pi plugin's `SEQ_BASE`.
                         handle
-                            .report_heartbeat(assign.task_id.clone(), json!({ "state": "running" }))
+                            .report_heartbeat(
+                                assign.task_id.clone(),
+                                json!({
+                                    "version": { "generation": 1, "seq": SEQ_BASE + state.beats },
+                                    "generation_live": true,
+                                    "isolate_after": 1,
+                                    "terminate_after": 3,
+                                    "mismatch_count": 0,
+                                    "agent": "running",
+                                    "delivery": "none",
+                                    "resource": "attached",
+                                    "recovery": "none",
+                                }),
+                            )
                             .await?;
                     }
                     other => bail!("unknown step: report.{other}"),
@@ -772,9 +795,20 @@ impl FakeAgent {
     }
 }
 
+/// The sequence a fake agent's beats start above, matching the pi plugin's
+/// `SEQ_BASE`. The client stamps a beat with the reporter's own sequence, so a
+/// fake starting at one would have its first beats refused as nothing newer than
+/// the row the dispatch path already wrote, and the beat would teach the suite
+/// nothing about the accepted path.
+const SEQ_BASE: u64 = 1000;
+
 struct FakeAgentState {
     welcome: HelloAck,
     last_assign: Option<AssignArgs>,
+    /// Beats this agent has reported, counting from one. The sequence it puts on
+    /// a beat rides on top of this, so each beat is newer than the last and the
+    /// client reads it as a fresh frame rather than a replay.
+    beats: u64,
 }
 
 fn value_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
