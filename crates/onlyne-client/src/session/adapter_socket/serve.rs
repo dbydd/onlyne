@@ -267,6 +267,16 @@ impl AdapterSocket {
                             .map_err(|e| anyhow::anyhow!(e))?;
                     }
                 }
+                AdapterMsg::Plugin(PluginOp::Handoff(args)) => {
+                    // The frame names the task the session hands on, and the
+                    // answer names the child the host minted for the recipient.
+                    // A refused frame answers the same error shape every other
+                    // plugin frame answers with.
+                    let body = self.dispatch.plugin_handoff(&io, args);
+                    if frame.id.is_some() {
+                        io.respond(id, body).await.map_err(|e| anyhow::anyhow!(e))?;
+                    }
+                }
                 _ => {
                     if frame.id.is_some() {
                         io.respond(

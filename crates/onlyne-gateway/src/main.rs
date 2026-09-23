@@ -1198,6 +1198,11 @@ mod tests {
                 reply_to: Some(handle.clone()),
                 hop: 0,
                 attempt: 0,
+                family: None,
+                hop_budget: None,
+                origin: None,
+                deadline: None,
+                labels: None,
             }),
         )
         .unwrap();

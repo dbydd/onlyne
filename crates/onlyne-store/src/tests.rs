@@ -198,6 +198,156 @@ mod ledger_gates {
     }
 
     #[test]
+    fn ledger_rows_round_trip_the_family_metadata() {
+        // The declaration's own five columns, on a file this crate created.
+        let (_dir, fresh_path) = temp_db("server-family.db");
+        let fresh = ServerLedger::open(&fresh_path, 14).unwrap();
+        round_trip_family_metadata(&fresh, 30);
+
+        // The same five columns on a marker-4 ledger built without them, which
+        // is the ALTER branch a live server takes on open. The ordinary insert
+        // names all five, so it lands only when the ALTER matches the
+        // declaration name for name.
+        let (_dir, path) = temp_db("server-family-migrated.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL);
+             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',4,1);
+             CREATE TABLE ledger(
+               msg_id TEXT PRIMARY KEY,
+               op_id TEXT UNIQUE,
+               fingerprint TEXT,
+               kind TEXT NOT NULL,
+               from_json TEXT NOT NULL,
+               to_json TEXT NOT NULL,
+               task TEXT,
+               parent_task TEXT,
+               attempt INTEGER NOT NULL,
+               state TEXT NOT NULL,
+               out_head TEXT,
+               reason TEXT,
+               enqueued_at TEXT NOT NULL,
+               acked_at TEXT,
+               body_json TEXT,
+               hop INTEGER NOT NULL DEFAULT 0,
+               expires_at TEXT,
+               requeued INTEGER NOT NULL DEFAULT 0
+             );",
+        )
+        .unwrap();
+        drop(conn);
+
+        let migrated = ServerLedger::open(&path, 14).unwrap();
+        round_trip_family_metadata(&migrated, 50);
+
+        // A row whose causality names none of the five leaves every column
+        // absent, which the read reports as none.
+        let mut bare = envelope(MsgKind::Note, "no family", None);
+        bare.id = new_uuid(70);
+        let bare_row = LedgerRow::from_envelope(&bare, "fp-bare").unwrap();
+        assert!(matches!(
+            migrated.append_ledger(&bare_row).unwrap(),
+            Append::Accepted(_)
+        ));
+        let stored = migrated
+            .ledger_query(LedgerQuery {
+                msg_id: Some(new_uuid(70)),
+                limit: 1,
+                ..LedgerQuery::default()
+            })
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            (
+                stored[0].family.as_deref(),
+                stored[0].hop_budget,
+                stored[0].origin.as_deref(),
+                stored[0].deadline.as_deref(),
+                stored[0].labels_json.as_deref(),
+            ),
+            (None, None, None, None, None),
+            "a causality that carries no family metadata stores no column text"
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        let marker: (String, i64, i64) = conn
+            .query_row(
+                "SELECT name,version,protocol_version FROM schema_marker",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(marker, ("onlyne-server".to_string(), 4, 1));
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(ledger)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for name in ["family", "hop_budget", "origin", "deadline", "labels_json"] {
+            assert!(
+                columns.iter().any(|column| column == name),
+                "{name} is present after open: {columns:?}"
+            );
+        }
+    }
+
+    /// One row carrying every family field, written through the store's own
+    /// append and read back through its own listing read.
+    fn round_trip_family_metadata(store: &ServerLedger, seed: u8) {
+        let task_id = new_uuid(seed);
+        let parent_task = new_uuid(seed + 1);
+        let family = new_uuid(seed + 2);
+        let deadline = fixed_time(3600);
+        let labels = std::collections::BTreeMap::from([
+            ("ticket".to_string(), "ONL-7".to_string()),
+            ("stage".to_string(), "build".to_string()),
+        ]);
+        let mut env = envelope(MsgKind::Task, "family work", None);
+        env.id = new_uuid(seed + 3);
+        env.causality = Some(Causality {
+            task: task_id.clone(),
+            parent_task: Some(parent_task.clone()),
+            reply_to: None,
+            hop: 2,
+            attempt: 1,
+            family: Some(family.clone()),
+            hop_budget: Some(4),
+            origin: Some("planner".to_string()),
+            deadline: Some(deadline),
+            labels: Some(labels.clone()),
+        });
+        let row = LedgerRow::from_envelope(&env, "fp-family").unwrap();
+        assert!(matches!(
+            store.append_ledger(&row).unwrap(),
+            Append::Accepted(_)
+        ));
+
+        let stored = store
+            .ledger_query(LedgerQuery {
+                task: Some(task_id),
+                limit: 1,
+                ..LedgerQuery::default()
+            })
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        let back = &stored[0];
+        assert_eq!(back.family.as_deref(), Some(family.as_str()));
+        assert_eq!(back.hop_budget, Some(4));
+        assert_eq!(back.origin.as_deref(), Some("planner"));
+        assert_eq!(
+            back.deadline.as_deref(),
+            Some(crate::rfc3339(deadline).as_str())
+        );
+        let read_labels: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(back.labels_json.as_deref().expect("a labels column")).unwrap();
+        assert_eq!(read_labels, labels);
+        assert_eq!((back.hop, back.attempt), (2, 1));
+        assert_eq!(back.parent_task.as_deref(), Some(parent_task.as_str()));
+    }
+
+    #[test]
     fn monotonic_session_gate_accepts_only_newer_watermarks() {
         let (_dir, path) = temp_db("client.db");
         let store = ClientStore::open(&path).unwrap();
@@ -728,6 +878,11 @@ mod ledger_gates {
             reply_to: None,
             hop: 3,
             attempt: 2,
+            family: None,
+            hop_budget: None,
+            origin: None,
+            deadline: None,
+            labels: None,
         };
         assert!(store.open_task(&deeper, "relay").unwrap());
         let again = store.task(&task_id).unwrap().expect("the record");

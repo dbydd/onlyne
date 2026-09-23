@@ -17,6 +17,7 @@ A request carries `id`; its response carries `reply_to`. Operation payloads read
 | plugin → host | `session_register` | `{"id":6,"op":"session_register","args":{"session_id":"s1","pid":4212,"generation":1,"title":"swarm:planner:s1","task_id":"task-1"}}` |
 | plugin → host | `assign_ack` | `{"id":7,"op":"assign_ack","args":{"task_id":"task-1","accepted":true,"reason":null}}` |
 | plugin → host | `send` | `{"id":8,"op":"send","args":{"protocol":1,"id":"3f2504e0-4f89-41d3-9a0c-0305e82c3301","op_id":"o-3f2504e0-4f89-41d3-9a0c-0305e82c3302","kind":"task","from":{"role":{"role":"planner"}},"to":{"role":{"role":"builder"}},"causality":{"task":"3f2504e0-4f89-41d3-9a0c-0305e82c3303","hop":0,"attempt":0},"body":{"text":"build it"},"ts":"2026-01-01T00:00:00Z","admin":false}}` |
+| plugin → host | `handoff` | `{"id":14,"op":"handoff","args":{"task_id":"task-1","to":"builder","text":"carry it on","image":null}}` |
 | host → plugin | `assign` | `{"op":"assign","args":{"envelope":{"protocol":1,"id":"3f2504e0-4f89-41d3-9a0c-0305e82c3301","op_id":"o-3f2504e0-4f89-41d3-9a0c-0305e82c3302","kind":"task","from":{"role":{"role":"planner"}},"to":{"role":{"role":"builder"}},"causality":{"task":"3f2504e0-4f89-41d3-9a0c-0305e82c3303","hop":0,"attempt":0},"body":{"text":"build it"},"ts":"2026-01-01T00:00:00Z","admin":false},"prose":"Read the incoming task","task_id":"task-1","generation":1,"parent":null}}` |
 | host → plugin | `probe` | `{"op":"probe","args":{"task_id":"task-1"}}` |
 | host → plugin | `recycle` | `{"op":"recycle","args":{"task_id":"task-1","reason":"operator","outcome":"cancelled"}}` |
@@ -41,7 +42,9 @@ Pick the mount by `kind`. Agent plugins send `kind: agent` with `mount.role` and
 
 The host matches the payload's field set against the variants in declaration order — agent, gateway, cluster, admin. Every payload denies unknown fields. So adding a field to one payload changes which variant answers, and the new field belongs to the earliest variant that owns it.
 
-An agent connection may send `report`, `session_register`, `assign_ack`, `send`, and `detach`. A gateway connection may send `deliver`, `register_channel`, `health`, `typing`, and `detach`. A forbidden operation returns `forbidden` with an `op` field and a message naming the operation and the mount kind.
+An agent connection may send `report`, `session_register`, `assign_ack`, `send`, `handoff`, and `detach`. A gateway connection may send `deliver`, `register_channel`, `health`, `typing`, and `detach`. A forbidden operation returns `forbidden` with an `op` field and a message naming the operation and the mount kind.
+
+`handoff` submits one child of the family the connection's own session serves. The host reads the task named in `task_id`, mints the child through `Causality::child_of`, queues the envelope for `to`, and answers `{"task_id":"<child uuid>","hop":3,"queued":true,"op_id":"<uuid>"}`. The frame needs a live agent connection: a connection this host holds read-only serves no task, and its `handoff` earns `invalid` on the field `task_id`. `task_id`, `to`, and `text` are required fields; `image` is optional and carries the shape a task body carries. A frame that omits a required field fails the decoder and ends the connection, which is how this socket answers a malformed frame for every operation.
 
 `register` binds the process to a task. `report` pushes lifecycle facts. `inject` declares support for `assign`. `recycle` declares that the plugin tears down its process when asked. `probe` declares that the host may ask for fresh resource observations. `typing` and `conversations` describe gateway features.
 

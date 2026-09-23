@@ -60,7 +60,7 @@ fake_pid=$!
 
 send_out=""
 for _ in $(seq 1 100); do
-  send_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "survive the restart" 2>/dev/null) && break
+  send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "survive the restart" 2>/dev/null) && break
   sleep 0.1
 done
 [ -n "$send_out" ] || blocked "no send answer before the fake plugin registered" "client=$(cat "$tmp/client.log" 2>/dev/null)"

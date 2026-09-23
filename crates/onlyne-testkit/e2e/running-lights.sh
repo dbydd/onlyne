@@ -137,7 +137,7 @@ PY
 
 # A chord inside the ring is refused before the token ever moves: `light1` may
 # not address `light4`, and the refusal names the sender half of the pair.
-denied=$(ONLYNE_ROLE=light1 "$ONLYNE" --workspace "$tmp/light1" send --to light4 --text "shortcut" 2>"$tmp/denied.err") || true
+denied=$(ONLYNE_ROLE=light1 "$ONLYNE" --workspace "$tmp/light1" send "${SUPERVISOR_FLAGS[@]}" --to light4 --text "shortcut" 2>"$tmp/denied.err") || true
 printf '%s\n' "$denied" > "$tmp/denied.json"
 detail="$denied$(cat "$tmp/denied.err")"
 [ "$(json_field "$tmp/denied.json" '.ok' 'str(json.load(sys.stdin).get("ok")).lower()' 2>/dev/null || true)" = "false" ] || fail "a chord send must be refused" "$detail"
@@ -147,7 +147,7 @@ detail="$denied$(cat "$tmp/denied.err")"
 # `light6` is both the ring's last hop and the token's origin: the send that
 # starts the lights is the edge the wrap-around already allows, so the example
 # needs no seventh role, no extra client, and no extra ACL pair.
-send_out=$(ONLYNE_ROLE=light6 "$ONLYNE" --workspace "$tmp/light6" send --to light1 --text "running-lights token, hop 0") \
+send_out=$(ONLYNE_ROLE=light6 "$ONLYNE" --workspace "$tmp/light6" send "${SUPERVISOR_FLAGS[@]}" --to light1 --text "running-lights token, hop 0") \
   || fail "the ring's first send failed" "$send_out"
 printf '%s\n' "$send_out" > "$tmp/send.json"
 [ "$(json_field "$tmp/send.json" '.data.state' 'json.load(sys.stdin)["data"]["state"]')" = "in_flight" ] || fail "the first task must start in_flight" "$send_out"

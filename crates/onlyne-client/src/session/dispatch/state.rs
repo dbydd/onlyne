@@ -89,10 +89,12 @@ pub struct SessionSlot {
     pub(super) msg_id: Option<String>,
     /// Sender of the payload this session serves, kept for its `Completion`.
     pub(super) origin: Option<Principal>,
-    /// How deep the task this slot serves sits in its chain, read off the
-    /// envelope that arrived with it. A handoff the session reports afterwards
-    /// is one hop below this, which is what `onlyne handoff` computes too.
-    pub(super) hop: u32,
+    /// The causality of the task this slot serves, read off the envelope that
+    /// arrived with it. A handoff the session reports afterwards is its child,
+    /// which is what `onlyne handoff` computes too. The whole link is kept here
+    /// so the family id and the family's figures travel with the child, the
+    /// depth included.
+    pub(super) causality: Causality,
     /// When the connection that would have sent this session's next heartbeat
     /// last left it: at birth for a session a plugin still has to mount, and
     /// again each time a connection ends without a `detach` frame or says
@@ -212,16 +214,6 @@ impl Drop for FrameGuard<'_> {
             .in_frame
             .retain(|held| !held.same_connection(&self.io));
     }
-}
-
-/// How deep an inbound task sits in its chain. An envelope that names no
-/// causality is a root, and a relay born from it takes the hop below this.
-pub(super) fn hop_of(envelope: &Envelope) -> u32 {
-    envelope
-        .causality
-        .as_ref()
-        .map(|causality| causality.hop)
-        .unwrap_or(0)
 }
 
 pub(super) fn render_tokens(tokens: &[String], session: &str, task: &str) -> Vec<String> {

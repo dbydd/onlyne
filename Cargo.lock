@@ -2037,6 +2037,7 @@ name = "onlyne-cli"
 version = "1.4.0"
 dependencies = [
  "base64",
+ "chrono",
  "clap",
  "clap_complete",
  "interprocess",

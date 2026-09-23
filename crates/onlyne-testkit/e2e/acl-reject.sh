@@ -45,7 +45,7 @@ done
 
 # Plan line 500: `onlyne --workspace "$tmp/builder" send --to reviewer --text x`.
 # `--from` stays absent, so the client surface takes the sender from ONLYNE_ROLE.
-denied=$(ONLYNE_ROLE=builder "$ONLYNE" --workspace "$tmp/builder" send --to reviewer --text x 2>"$tmp/denied.err") || true
+denied=$(ONLYNE_ROLE=builder "$ONLYNE" --workspace "$tmp/builder" send "${SUPERVISOR_FLAGS[@]}" --to reviewer --text x 2>"$tmp/denied.err") || true
 printf '%s\n' "$denied" > "$tmp/denied.json"
 detail="$denied$(cat "$tmp/denied.err")"
 [ "$(json_field "$tmp/denied.json" '.ok' 'str(json.load(sys.stdin).get("ok")).lower()' 2>/dev/null || true)" = "false" ] || fail "denied send ok must be false" "$detail"
@@ -71,7 +71,7 @@ intents=$(db_count "$client_db" "SELECT COUNT(*) FROM intents")
 
 # Positive control: the same client reaching its own role is accepted, which is the
 # shape plan line 496 depends on. A denial-only run cannot tell wiring from policy.
-control=$(ONLYNE_ROLE=builder "$ONLYNE" --workspace "$tmp/builder" send --to builder --text "self edge" 2>"$tmp/control.err") || fail "self send must be accepted" "$control$(cat "$tmp/control.err")"
+control=$(ONLYNE_ROLE=builder "$ONLYNE" --workspace "$tmp/builder" send "${SUPERVISOR_FLAGS[@]}" --to builder --text "self edge" 2>"$tmp/control.err") || fail "self send must be accepted" "$control$(cat "$tmp/control.err")"
 printf '%s\n' "$control" > "$tmp/control.json"
 [ "$(json_field "$tmp/control.json" '.ok' 'str(json.load(sys.stdin).get("ok")).lower()' 2>/dev/null || true)" = "true" ] || fail "self send ok must be true" "$control"
 [ "$(json_field "$tmp/control.json" '.data.state' 'json.load(sys.stdin).get("data",{}).get("state","")' 2>/dev/null || true)" = "in_flight" ] || fail "self send data.state must be in_flight" "$control"

@@ -6,7 +6,9 @@ use super::retire::{release_locked, retire_idle_locked};
 use super::state::{
     DispatchInner, DispatchState, slot_key_named, slot_key_serving_task, slot_task,
 };
-use super::transport::names_session;
+use super::transport::{names_session, serves_session};
+use onlyne_proto::ErrorCode;
+use onlyne_proto::adapter::HandoffArgs;
 
 /// Fault kind for a completion this client refused for want of a turn. The word
 /// is what `onlyne faults` and `onlyne-client status` carry, so it names the
@@ -137,7 +139,7 @@ pub async fn on_out(
             let slot =
                 slot_key_serving_task(&inner, task_id).and_then(|key| inner.sessions.get_mut(&key));
             let origin = slot.as_ref().and_then(|slot| slot.origin.clone());
-            let hop = slot.as_ref().map(|slot| slot.hop).unwrap_or(0);
+            let causality = slot.as_ref().map(|slot| slot.causality.clone());
             let msg_id = slot.and_then(|slot| slot.msg_id.take());
             if let Some(msg_id) = msg_id {
                 store_ack(
@@ -159,9 +161,15 @@ pub async fn on_out(
 
             Some((
                 verdict,
-                completion_envelope(&inner.role, origin, task_id, head.as_deref()),
+                completion_envelope(
+                    &inner.role,
+                    origin,
+                    task_id,
+                    head.as_deref(),
+                    causality.as_ref(),
+                ),
                 inner.role.clone(),
-                hop,
+                causality,
                 held,
             ))
         }
@@ -180,7 +188,7 @@ pub async fn on_out(
     // the first verdict put it, and its publish still travels, because state
     // committed and left unpublished is the mismatch the ordering above exists to
     // prevent.
-    let Some((verdict, receipt, role, hop, held)) = settled else {
+    let Some((verdict, receipt, role, causality, held)) = settled else {
         return sync_session(state, task_id).await;
     };
     note_verdict(&verdict, task_id);
@@ -193,11 +201,15 @@ pub async fn on_out(
         held.as_deref(),
         head.as_deref().unwrap_or_default(),
     );
+    // A settle can race the retirement of the session it serves, and a task no
+    // slot answers for is still a task the relay may name: the fallback is the
+    // task itself as the root of its own family, which is the child link a
+    // missing chain would have produced for it.
+    let parent = causality.unwrap_or_else(|| Causality::root(task_id));
     let denied = handoff::route(
         state,
         &role,
-        task_id,
-        hop,
+        &parent,
         head_kind,
         head.as_deref().unwrap_or_default(),
         &routed,
@@ -398,11 +410,20 @@ fn record_denials(state: &DispatchState, task_id: &str, denied: &[Denial]) -> Re
 /// Every settled task answers its sender, the role that sent the task included:
 /// §3's `Completion` is the durable record that the work ended, and a role
 /// reading its own receipt ack is what settles the row.
+///
+/// The receipt names the task it answers and carries that task's own family
+/// figures — the family id, the hop budget, the origin, the deadline, and the
+/// labels — so a run's tasks and its completions print the same arc in
+/// `onlyne ledger`. It sits at the depth of the task it answers, and it is no
+/// link in the chain: it names no parent and replies to nothing. A task whose
+/// slot the client no longer holds, which is a row an older build opened, keeps
+/// the shape of a bare receipt.
 fn completion_envelope(
     role: &str,
     origin: Option<Principal>,
     task_id: &str,
     head: Option<&str>,
+    causality: Option<&Causality>,
 ) -> Option<Envelope> {
     let origin = origin?;
     // A turn that left no result line still ends its task, and the sender still
@@ -410,13 +431,12 @@ fn completion_envelope(
     // validator accepts, where an absent body would drop the receipt and leave
     // the origin waiting on a task this role has already retired.
     let body = Body::text(head.unwrap_or_default());
-    let causality = Causality {
-        task: task_id.to_string(),
-        parent_task: None,
-        reply_to: None,
-        hop: 0,
-        attempt: 0,
-    };
+    let mut causality = causality.cloned().unwrap_or_default();
+    causality.task = task_id.to_string();
+    causality.parent_task = None;
+    causality.reply_to = None;
+    // A receipt is written here, so it carries no redelivery count of its own.
+    causality.attempt = 0;
     // `new_envelope` validates every protocol rule on the way out, so a receipt
     // that cannot be addressed to its sender is the only one that goes unsent.
     new_envelope(
@@ -427,6 +447,68 @@ fn completion_envelope(
         Some(causality),
     )
     .ok()
+}
+
+impl DispatchState {
+    /// Take one plugin `handoff` frame and answer what the plugin is told.
+    ///
+    /// The frame names the task the session is handing on and the role it goes
+    /// to. The child is minted here, through the builder the report-driven path
+    /// uses, so the family id and the family's figures ride along and the depth
+    /// grows by one hop. The envelope leaves on the queue the plugin `send` op
+    /// writes to.
+    ///
+    /// The answer names the child:
+    /// `{"task_id": "<uuid>", "hop": 3, "queued": true, "op_id": "<uuid>"}`
+    /// (`onlyne_proto::HandoffArgs`).
+    ///
+    /// A frame is answered only for the connection serving the task it names.
+    /// An unknown task and a foreign connection earn the same code and the same
+    /// field, and their messages say which of the two refused the frame.
+    pub fn plugin_handoff(&self, io: &AdapterIo, args: HandoffArgs) -> ResBody {
+        let (role, parent) = {
+            let inner = self.inner.lock();
+            let found = slot_key_serving_task(&inner, &args.task_id).and_then(|key| {
+                inner
+                    .sessions
+                    .get(&key)
+                    .map(|slot| (key, slot.causality.clone()))
+            });
+            let Some((key, parent)) = found else {
+                return ResBody::err(
+                    ErrorCode::Invalid,
+                    format!("no session serves task {}", args.task_id),
+                    Some("task_id".into()),
+                );
+            };
+            if !serves_session(&inner, &key, io) {
+                return ResBody::err(
+                    ErrorCode::Invalid,
+                    format!("this connection does not serve task {}", args.task_id),
+                    Some("task_id".into()),
+                );
+            }
+            (inner.role.clone(), parent)
+        };
+        let (envelope, child) =
+            match handoff::relay(&role, &parent, &args.to, &args.text, args.image) {
+                Ok(built) => built,
+                Err(message) => return ResBody::err(ErrorCode::Invalid, message, None),
+            };
+        let queued = match self.plugin_send(io, &envelope) {
+            Ok(queued) => queued,
+            Err(error) => return ResBody::err(ErrorCode::Internal, error.to_string(), None),
+        };
+        // The queue path answers with the frame's `op_id`: a connection this
+        // client holds read-only serves no session, and the check above refused
+        // that connection before this line.
+        ResBody::ok(serde_json::json!({
+            "task_id": child.task,
+            "hop": child.hop,
+            "queued": true,
+            "op_id": queued["op_id"],
+        }))
+    }
 }
 
 #[cfg(test)]

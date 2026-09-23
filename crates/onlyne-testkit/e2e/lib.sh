@@ -9,6 +9,13 @@ export ONLYNE_BACKEND=fake
 # receives exactly this string as `assign.prose` (docs/v1-PLAN.md line 498).
 E2E_PROSE='v1 smoke prose'
 
+# The two flags every gated verb takes: `send`, `reply`, `handoff`, `complete`,
+# `ack`, `reject`, and `control` refuse a call that carries either one alone. A
+# role inside a session speaks through its plugin's own tools, so the pair is how
+# a caller says it drives the role from outside the session. Every call this
+# suite makes does exactly that.
+SUPERVISOR_FLAGS=(--force --yes-i-am-supervisor-not-other-role)
+
 fail() {
   echo "FAIL: $1" >&2
   if [ -n "${2:-}" ]; then echo "---- offending output ----" >&2; printf '%s\n' "$2" >&2; fi

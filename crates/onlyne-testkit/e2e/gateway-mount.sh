@@ -113,7 +113,7 @@ done
 echo "$delivered" | grep -q "gw deliver me" || fail "rendered text must match sent text" "$delivered"
 
 # Send a note to an offline role (reviewer is not registered).
-note_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to reviewer --note --text "offline note" 2>"$tmp/note.err") || true
+note_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to reviewer --note --text "offline note" 2>"$tmp/note.err") || true
 printf '%s\n' "$note_out" > "$tmp/note.json"
 [ "$(json_field "$tmp/note.json" '.error.code' 'json.load(sys.stdin)["error"]["code"]')" = "recipient_offline" ] || fail "note to offline role must be recipient_offline" "$note_out$(cat "$tmp/note.err")"
 
@@ -129,7 +129,7 @@ for _ in $(seq 1 150); do
 done
 rows_any "$tmp/sessions.json" public_lifecycle working >/dev/null 2>&1 \
   && fail "the settled gateway session must leave the working state" "$(cat "$tmp/sessions.json")"
-idle_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --note --text "nothing to wake" 2>"$tmp/idle.err") || true
+idle_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --note --text "nothing to wake" 2>"$tmp/idle.err") || true
 printf '%s\n' "$idle_out" > "$tmp/idle.json"
 idle_code=$(json_field "$tmp/idle.json" '.error.code' 'json.load(sys.stdin)["error"]["code"]')
 [ "$idle_code" = "recipient_offline" ] || fail "a note to an idle role must be refused" "code=$idle_code out=$idle_out$(cat "$tmp/idle.err")"
@@ -151,7 +151,7 @@ path.write_text(text.replace("note_queue = false", "note_queue = true"))
 PY
 "$ONLYNE" --server-root "$tmp/server" reload > "$tmp/reload.json" \
   || fail "reload of the note_queue setting failed" "$(cat "$tmp/reload.json")"
-exp_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to reviewer --note --ttl 100 --text "expire me" 2>"$tmp/exp.err") || true
+exp_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to reviewer --note --ttl 100 --text "expire me" 2>"$tmp/exp.err") || true
 printf '%s\n' "$exp_out" > "$tmp/exp.json"
 exp_state=$(json_field "$tmp/exp.json" '.data.state' 'json.load(sys.stdin)["data"]["state"]')
 [ "$exp_state" = "queued" ] || fail "a queued note must answer `queued`" "state=$exp_state out=$exp_out$(cat "$tmp/exp.err")"

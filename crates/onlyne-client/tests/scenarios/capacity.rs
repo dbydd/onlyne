@@ -68,6 +68,11 @@ async fn each_task_gets_its_own_session_and_max_sessions_caps_the_live_ones() {
         reply_to: None,
         hop: 0,
         attempt: 0,
+        family: None,
+        hop_budget: None,
+        origin: None,
+        deadline: None,
+        labels: None,
     });
     let err = dispatch(&state, &overflow).expect_err("the role is at its cap");
     assert_eq!(err.to_string(), "max_sessions reached");

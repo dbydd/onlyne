@@ -24,8 +24,8 @@
 
 use crate::session::dispatch::DispatchState;
 use onlyne_proto::{
-    Body, Causality, ClientOp, Envelope, ErrorCode, Handoff, MsgKind, Principal, new_envelope,
-    new_task_id,
+    Body, Causality, ClientOp, Envelope, ErrorCode, Handoff, ImagePart, MsgKind, Principal,
+    new_envelope,
 };
 use std::time::{Duration, Instant};
 
@@ -63,8 +63,7 @@ pub struct Denial {
 pub async fn route(
     state: &DispatchState,
     role: &str,
-    task_id: &str,
-    hop: u32,
+    parent: &Causality,
     head_kind: Option<&str>,
     head: &str,
     handoffs: &[Handoff],
@@ -74,7 +73,7 @@ pub async fn route(
     }
     if head_kind == Some("blocked") {
         tracing::warn!(
-            task = %task_id,
+            task = %parent.task,
             handoffs = handoffs.len(),
             "a blocked report hands no work on"
         );
@@ -89,8 +88,9 @@ pub async fn route(
             denied.push(denied_for(handoff, text, "the handoff budget ran out"));
             continue;
         }
-        let envelope = match relay(role, task_id, hop, &handoff.to_role, text) {
-            Ok(envelope) => envelope,
+        // A report line carries text alone, so its relay carries no image.
+        let envelope = match relay(role, parent, &handoff.to_role, text, None) {
+            Ok((envelope, _)) => envelope,
             Err(reason) => {
                 denied.push(denied_for(handoff, text, &reason));
                 continue;
@@ -112,22 +112,26 @@ fn denied_for(handoff: &Handoff, text: &str, reason: &str) -> Denial {
     }
 }
 
-/// The task envelope one handoff line becomes: a child of the settled task, one
-/// hop deeper, sent by this role and addressed to the named one.
-fn relay(
+/// The task envelope one handoff becomes: a child of the parent task's causality,
+/// one hop deeper, sent by this role and addressed to the named one.
+///
+/// The child link is [`Causality::child_of`]'s answer, so the family id, the hop
+/// budget, the origin, the deadline, and the labels ride along on every relay
+/// this client writes. The link travels back beside the envelope, which is what
+/// lets a plugin-op answer name the task the host minted and the depth it sits at.
+///
+/// The same builder answers the report-driven path and the agent mount's
+/// `handoff` frame, so one family rule covers both.
+pub(crate) fn relay(
     role: &str,
-    task_id: &str,
-    hop: u32,
+    parent: &Causality,
     to_role: &str,
     text: &str,
-) -> Result<Envelope, String> {
-    let causality = Causality {
-        task: new_task_id(),
-        parent_task: Some(task_id.to_string()),
-        reply_to: None,
-        hop: hop + 1,
-        attempt: 0,
-    };
+    image: Option<ImagePart>,
+) -> Result<(Envelope, Causality), String> {
+    let causality = parent.child_of();
+    let mut body = Body::text(format!("{RELAY_BODY_PREFIX}{text}"));
+    body.image = image;
     // `new_envelope` is the validator, so a recipient this protocol cannot
     // address fails here rather than reaching the server as a frame it must
     // refuse.
@@ -135,9 +139,10 @@ fn relay(
         MsgKind::Task,
         Principal::role(role),
         Principal::role(to_role),
-        Body::text(format!("{RELAY_BODY_PREFIX}{text}")),
-        Some(causality),
+        body,
+        Some(causality.clone()),
     )
+    .map(|envelope| (envelope, causality))
     .map_err(|error| error.to_string())
 }
 

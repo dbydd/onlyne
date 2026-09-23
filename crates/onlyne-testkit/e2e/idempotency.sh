@@ -32,7 +32,7 @@ TASK_ID="22222222-3333-4444-8555-666666666666"
 send_req() {
   local text=$1 op_id=$2 body
   body=$(printf '{"from":"planner","envelope":{"protocol":1,"id":"%s","op_id":"%s","kind":"task","from":{"role":{"role":"planner"}},"to":{"role":{"role":"planner"}},"control":null,"causality":{"task":"%s","parent_task":null,"reply_to":null,"hop":0,"attempt":0},"body":{"text":"%s","image":null},"ts":"2026-01-01T00:00:00Z","ttl_ms":null,"admin":false}}' "$MSG_ID" "$op_id" "$TASK_ID" "$text")
-  "$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "$text" --request "$body" 2>&1
+  "$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "$text" --request "$body" 2>&1
 }
 
 first=$(send_req "hello idem" "$OP_ID") || fail "first send failed" "$first"

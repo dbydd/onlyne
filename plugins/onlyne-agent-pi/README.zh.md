@@ -154,6 +154,15 @@ png/jpeg/gif/webp 的绝对路径：插件读出内容，base64 编码后挂成 
 `terminate` 处理。工作区带接力策略（§5）时，`force: true` 加非空 `reason` 是绕过一个仍欠着的
 接力的正规通道。
 
+### `onlyne_handoff{to, text, image?}`
+
+把本会话手上的任务交给家族的下一跳。插件发一个 `handoff` 帧，帧里点名本会话当前持有的任务，
+宿主据此为 `to` 铸一个该家族的子任务：子任务把本任务记为 `parent_task`，hop 加一，家族 id、
+hop 预算、origin、deadline 与 labels 一并随行。工具结果给出子任务 id 与它的 hop。client 拒绝时
+以工具错误原样抛出。`image` 与 send 工具同一含义：png/jpeg/gif/webp 图片的绝对路径。家族带
+hop 预算时，注入的标题行写明 hop 与预算。`onlyne_send{kind: "task"}` 是触达 role 的另一条路：
+那条 envelope 开一个新家族，hop 从 0 起。
+
 ## 4. outcome 判定规则
 
 `onlyne_complete` 是通向 `done` 的唯一路径。插件每个任务只发一次 completion，取以下四者的先到者：

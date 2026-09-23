@@ -291,7 +291,7 @@ for _ in $(seq 1 150); do
 done
 [ "$online" = true ] || fail "planner must register on the server" "client=$(cat "$tmp/client.log" 2>/dev/null)"
 
-send_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "herdr live task") \
+send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "herdr live task") \
   || fail "send command failed" "$send_out"
 printf '%s\n' "$send_out" >"$tmp/send.json"
 task=$(json_field "$tmp/send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
@@ -395,8 +395,9 @@ printf 'PASS herdr-live ledger in_flight backend_ref.herdr=%s/%s/%s root=%s\n' \
   "$ref_ws" "$ref_tab" "$ref_pane" "$root_pane"
 
 # d. control focus, then pane get result.pane.focused becomes true.
-# `--from` is global on the `control` subcommand, so it follows the verb.
-focus_out=$("$ONLYNE" --server-root "$tmp/server" control --from planner focus --task "$task") \
+# `--from` and the supervisor pair are global on the `control` subcommand, so
+# they follow the verb.
+focus_out=$("$ONLYNE" --server-root "$tmp/server" control "${SUPERVISOR_FLAGS[@]}" --from planner focus --task "$task") \
   || fail "control focus --task failed" "out=$focus_out client=$(cat "$tmp/client.log" 2>/dev/null)"
 focused=false
 for _ in $(seq 1 150); do
@@ -422,7 +423,7 @@ pane_pid=$(python3 "$tmp/herdr_case.py" process-pid "$tmp/process-info.json" 2>/
 kill -0 "$pane_pid" 2>/dev/null \
   || fail "the process reported for the live pane must exist" "pane=$ref_pane pid=$pane_pid"
 
-recycle_out=$("$ONLYNE" --server-root "$tmp/server" control --from planner recycle \
+recycle_out=$("$ONLYNE" --server-root "$tmp/server" control "${SUPERVISOR_FLAGS[@]}" --from planner recycle \
   --task "$task" --reason "herdr live close") \
   || fail "control recycle --task failed" \
     "out=$recycle_out client=$(cat "$tmp/client.log" 2>/dev/null)"

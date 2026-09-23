@@ -40,7 +40,7 @@ fn a_read_only_slot_never_holds_the_handle_of_the_task_it_lost() {
         payload: None,
         msg_id: None,
         origin: None,
-        hop: 0,
+        causality: Causality::root(task.to_string()),
         dropped_at: None,
         last_beat: Some(Instant::now()),
         read_only,

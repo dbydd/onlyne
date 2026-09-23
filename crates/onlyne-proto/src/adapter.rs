@@ -5,7 +5,7 @@
 //! handshake carries a [`MountKind`] and the [`Capability`] set, and every later
 //! frame is answered by whichever side owns that op.
 
-use crate::envelope::{Envelope, Outcome};
+use crate::envelope::{Envelope, ImagePart, Outcome};
 use crate::event::GatewayHealth;
 use crate::frame::ResBody;
 use crate::ops::{Delivery, HealthArgs, RegisterChannelArgs, Report, Welcome};
@@ -226,6 +226,9 @@ pub enum PluginOp {
     AssignAck(AssignAckArgs),
     /// Submit an envelope for routing.
     Send(Box<Envelope>),
+    /// Hand the session's task on: the host mints one child of the family the session
+    /// serves, queues it for `to`, and answers the child's task id and hop.
+    Handoff(HandoffArgs),
     /// Inbound platform event (gateway mounts only).
     Deliver(Delivery),
     /// Channel and conversation declarations (gateway mounts only).
@@ -246,6 +249,7 @@ impl PluginOp {
             PluginOp::SessionRegister(_) => "session_register",
             PluginOp::AssignAck(_) => "assign_ack",
             PluginOp::Send(_) => "send",
+            PluginOp::Handoff(_) => "handoff",
             PluginOp::Deliver(_) => "deliver",
             PluginOp::RegisterChannel(_) => "register_channel",
             PluginOp::Health(_) => "health",
@@ -306,6 +310,29 @@ impl HostOp {
 }
 
 /// `assign` payload: the envelope plus the role prose that frames it.
+/// One session handing its task on, as the plugin asks for it.
+///
+/// The family's own rules stay here: the host reads the task it holds, mints the child
+/// through [`Causality::child_of`], and lets the family id, the hop budget, the origin,
+/// the deadline, and the labels ride along. A plugin that built the child itself would
+/// have to reproduce every one of those rules.
+///
+/// The answer carries the child: `{ "task_id": "<uuid>", "hop": 3, "queued": true,
+/// "op_id": "<uuid>" }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct HandoffArgs {
+    /// The task the session is handing on; the child is minted under it.
+    pub task_id: String,
+    /// Recipient role.
+    pub to: String,
+    /// Handoff text.
+    pub text: String,
+    /// One inline image, the same shape a task body carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImagePart>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct AssignArgs {

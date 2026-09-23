@@ -18,6 +18,7 @@ onlyne-config = { workspace = true }
 onlyne-layout = { workspace = true }
 interprocess = { workspace = true }
 base64 = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 serde = { workspace = true }

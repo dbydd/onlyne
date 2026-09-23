@@ -179,7 +179,7 @@ socket=$(tr -d '[:space:]' <"$marker")
 [ -n "$socket" ] || fail "the published socket path must be non-empty" "$(cat "$marker" 2>/dev/null)"
 [ -S "$socket" ] || fail "the published path must hold a bound socket" "$socket"
 
-send_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "$TASK_PROSE") \
+send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "$TASK_PROSE") \
   || fail "send command failed" "$send_out"
 printf '%s\n' "$send_out" > "$tmp/send.json"
 [ "$(json_field "$tmp/send.json" '.ok' 'str(json.load(sys.stdin).get("ok")).lower()')" = "true" ] \
@@ -419,7 +419,7 @@ done
 # task Failed — reason as head and fault note, receipt still filed, report
 # consumed. The second turn runs on the same client path as the first.
 fail_prose='acp session task: HOPFAIL settle this one from the report'
-send2_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "$fail_prose") \
+send2_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "$fail_prose") \
   || fail "second send command failed" "$send2_out"
 printf '%s\n' "$send2_out" > "$tmp/send2.json"
 [ "$(json_field "$tmp/send2.json" '.ok' 'str(json.load(sys.stdin).get("ok")).lower()')" = "true" ] \

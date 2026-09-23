@@ -90,7 +90,7 @@ done
 [ "$registered" = "true" ] || fail "planner must register before the send" \
   "roles=$(cat "$tmp/roles.json" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
 
-send_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "hello v1") \
+send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "hello v1") \
   || fail "send command failed" "$send_out"
 printf '%s\n' "$send_out" > "$tmp/send.json"
 task=$(json_field "$tmp/send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')

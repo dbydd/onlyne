@@ -86,7 +86,7 @@ for _ in $(seq 1 100); do
 done
 [ "$registered" = "true" ] || fail "planner must register before the send" "roles=$roles_out client=$(cat "$tmp/client.log" 2>/dev/null)"
 
-send_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "hello v1") || fail "send command failed" "$send_out"
+send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "hello v1") || fail "send command failed" "$send_out"
 printf '%s\n' "$send_out" > "$tmp/send.json"
 [ "$(json_field "$tmp/send.json" '.ok' 'json.load(sys.stdin)["ok"]')" = "True" ] || [ "$(json_field "$tmp/send.json" '.ok' 'json.load(sys.stdin)["ok"]')" = "true" ] || fail "send ok must be true" "$send_out"
 task=$(json_field "$tmp/send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')

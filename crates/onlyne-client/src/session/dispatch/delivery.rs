@@ -4,8 +4,7 @@ use super::env::{missing_capability, reject_protocol_command_in_pane, served_soc
 use super::outbound::send_frame;
 use super::projection::{note_verdict, sync_session};
 use super::state::{
-    DispatchState, SessionSlot, hop_of, live_sessions, note_beat, render_tokens,
-    slot_key_serving_task,
+    DispatchState, SessionSlot, live_sessions, note_beat, render_tokens, slot_key_serving_task,
 };
 use super::transport::{is_revived_connection, note_binding_locked, record_revived_connection};
 
@@ -25,7 +24,7 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
         .map(|slot| {
             if slot.payload.is_none() {
                 slot.payload = Some(envelope.clone());
-                slot.hop = hop_of(envelope);
+                slot.causality = causality.clone();
             }
             slot.session.clone()
         })
@@ -89,7 +88,7 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
             payload: Some(envelope.clone()),
             msg_id: None,
             origin: Some(envelope.from.clone()),
-            hop: hop_of(envelope),
+            causality: causality.clone(),
             dropped_at,
             last_beat,
             read_only: false,

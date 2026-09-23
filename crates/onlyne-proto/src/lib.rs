@@ -37,11 +37,13 @@ pub mod text;
 pub use adapter::{
     AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, ByeNotice, Capability, ClusterMount,
     ConfigGetArgs, DetachArgs, GatewayBinding, GatewayMount, HELLO_REQUIRED_MESSAGE,
-    HELLO_TIMEOUT_MS, HelloAck, HelloArgs, HostOp, Mount, MountKind, MsgDirection, PluginOp,
-    RecycleArgs, RenderSendArgs, ServerInfo, SessionRegisterArgs, TypingArgs, WelcomeSlice,
+    HELLO_TIMEOUT_MS, HandoffArgs, HelloAck, HelloArgs, HostOp, Mount, MountKind, MsgDirection,
+    PluginOp, RecycleArgs, RenderSendArgs, ServerInfo, SessionRegisterArgs, TypingArgs,
+    WelcomeSlice,
 };
 pub use envelope::{
-    BODY_TEXT_MAX_BYTES, Body, Causality, ControlOp, Envelope, Error, IMAGE_DATA_MAX_BYTES,
+    BODY_TEXT_MAX_BYTES, Body, CAUSALITY_LABEL_KEY_MAX_BYTES, CAUSALITY_LABEL_MAX_ENTRIES,
+    CAUSALITY_LABEL_VALUE_MAX_BYTES, Causality, ControlOp, Envelope, Error, IMAGE_DATA_MAX_BYTES,
     IMAGE_MIMES, ImagePart, MsgKind, Outcome, Principal, Result, new_envelope, new_id, new_op_id,
     new_task_id, sha256_hex,
 };

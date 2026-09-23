@@ -167,6 +167,18 @@ pi to shut down through `ctx.shutdown()`. pi 0.85.1 has no tool-result `terminat
 handling. When the workspace carries a relay policy (§5), `force: true` with a non-empty
 `reason` is the deliberate way past a handoff the session still owes.
 
+### `onlyne_handoff{to, text, image?}`
+
+Hands this session's task on to the next hop of its family. The plugin sends one `handoff`
+frame naming the task the session currently holds, and the host mints one child task for
+`to` under it: the child names this task as its `parent_task`, sits one hop further along,
+and carries the same family id, hop budget, origin, deadline and labels. The tool's result
+names the child task id and its hop. A client refusal comes back as the tool's error,
+verbatim. `image` is the same absolute png/jpeg/gif/webp path the send tool takes. An
+assignment whose causality names a hop budget states the hop and the budget in its
+injected header line. `onlyne_send{kind: "task"}` is the other way to reach a role: that
+envelope starts a family of its own at hop 0.
+
 ## 4. Outcome rules
 
 `onlyne_complete` is the only path to `done`. The plugin sends one completion per task,

@@ -398,6 +398,24 @@ pub struct LedgerEntry {
     /// `parent_task` names the parent link; this is the depth it sits at, which
     /// is what `onlyne handoff` extends and what `onlyne ledger` shows.
     pub hop: u32,
+    /// The family's root task id, read off the same causality. Every handoff of one run
+    /// carries it unchanged, so a supervisor reads a run's whole arc off this column
+    /// without walking `parent_task` links.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    /// The hops the family may spend, read off the same causality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hop_budget: Option<u32>,
+    /// The role the family reports home to, read off the same causality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// Wall-clock bound for the whole family, read off the same causality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<DateTime<Utc>>,
+    /// Free-form metadata the core carries and never interprets, read off the same
+    /// causality. One handoff inherits the whole map, which is the point of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<std::collections::BTreeMap<String, String>>,
     pub attempt: u32,
     pub state: LedgerState,
     /// Why this row last settled: the receiver's refusal on a rejection, the

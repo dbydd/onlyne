@@ -133,7 +133,7 @@ done
 task_ids=""
 n=1
 while [ "$n" -le 3 ]; do
-  send_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "requeue $n") || fail "send $n failed" "$send_out"
+  send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "requeue $n") || fail "send $n failed" "$send_out"
   printf '%s\n' "$send_out" > "$tmp/send-$n.json"
   id=$(json_field "$tmp/send-$n.json" '.data.task' 'json.load(sys.stdin).get("data",{}).get("task","")' 2>/dev/null || true)
   [ -n "$id" ] || fail "send $n must answer data.task" "$send_out"
@@ -252,7 +252,7 @@ print("ok" if len(rows) == 3 and len(set(tasks)) == 3 else "no")
 # Plan line 503, last sentence: the completion of a task still running when its
 # transport dies is carried by the intent outbox and delivered after the reconnect.
 n=4
-send_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "inflight $n") || fail "send $n failed" "$send_out"
+send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "inflight $n") || fail "send $n failed" "$send_out"
 printf '%s\n' "$send_out" > "$tmp/send-$n.json"
 inflight=$(json_field "$tmp/send-$n.json" '.data.task' 'json.load(sys.stdin).get("data",{}).get("task","")')
 

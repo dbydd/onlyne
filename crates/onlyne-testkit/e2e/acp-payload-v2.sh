@@ -227,7 +227,7 @@ send_and_gate() {
   local prose=$1 out task before
   rm -f "$gate"
   before=$(prompt_count)
-  out=$("$ONLYNE" --server-root "$tmp/server" send --from "$PLANNER" --to "$PLANNER" --text "$prose") \
+  out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from "$PLANNER" --to "$PLANNER" --text "$prose") \
     || fail "the report task send failed" "$out"
   printf '%s\n' "$out" > "$tmp/send.json"
   task=$(json_field "$tmp/send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')

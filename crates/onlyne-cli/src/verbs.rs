@@ -1,10 +1,13 @@
 //! The message verbs: send, reply, complete, handoff, ack, reject, control, who, ping.
 
+use chrono::{DateTime, Utc};
+use onlyne_proto::envelope::CAUSALITY_LABEL_MAX_ENTRIES;
 use onlyne_proto::{
     AckArgs as ProtoAckArgs, AdminControl, AdminOp, AdminSend, Body, Causality, ClientOp,
     ControlArgs, ControlOp, Envelope, ErrorCode, Frame, ImagePart, LedgerQuery, MsgKind, Outcome,
     Principal, QueryRolesArgs, Report, new_envelope, new_id, new_task_id,
 };
+use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -40,6 +43,87 @@ impl SenderArgs {
     }
 }
 
+/// The flags every verb a role speaks through take, spelled as the operator
+/// types them. Both are named in every refusal, and both belong to those seven
+/// verbs alone: `generate` and `skill export` carry a `--force` of their own.
+const SUPERVISOR_FLAGS: &str = "--force and --yes-i-am-supervisor-not-other-role";
+
+/// The plugin tool `send` stands in for, named in its refusal with the arguments
+/// that tool takes and with what each kind does. A `task` send starts a family
+/// of its own, so continuing one goes through `onlyne_handoff`.
+const PLUGIN_SEND: &str = "sends with its plugin's own tool, onlyne_send (to, text, kind, image), where kind=\"task\" \
+     starts a new task family at hop 0, kind=\"note\" leaves free text, and onlyne_handoff \
+     continues the family this session was handed";
+
+/// The plugin tool `handoff` stands in for, which reads the parent row back to
+/// continue the task family the way this verb does.
+const PLUGIN_HANDOFF: &str = "hands work on with its plugin's own tool, onlyne_handoff (task_id, to, text, image), which \
+     names this task as the child's parent_task and carries the family's hop budget, origin, \
+     deadline, and labels";
+
+/// The plugin tool `complete` stands in for, which is the only path a session
+/// has to `done`.
+const PLUGIN_COMPLETE: &str =
+    "reports its ending with its plugin's own tool, onlyne_complete (outcome, text, force, reason)";
+
+/// What a role inside a session does for `reply`, which has no plugin tool of
+/// its own. The plugin carries the session's own connection, so it is what
+/// answers for the act, and a role has no reason to reach for this verb.
+const PLUGIN_REPLY: &str = "replies through its plugin, which answers for its session and offers no reply tool that a \
+     role would reach for";
+
+/// The same for `ack`.
+const PLUGIN_ACK: &str = "settles a delivered envelope through its plugin, which answers for its session and offers \
+     no ack tool that a role would reach for";
+
+/// The same for `reject`.
+const PLUGIN_REJECT: &str = "refuses a delivered envelope through its plugin, which answers for its session and offers \
+     no reject tool that a role would reach for";
+
+/// The same for `control`.
+const PLUGIN_CONTROL: &str = "runs a control op through its plugin, which answers for its session and offers no control \
+     tool that a role would reach for";
+
+/// The two flags a gated verb takes, flattened into every one of them.
+///
+/// Both carry `global = true` so `control` reads them on either side of its op
+/// token, the way its own `--task` and `--from` do. Nothing else in the tree
+/// declares a `--force` above a gated verb, so the pair collides with no
+/// forwarder: `generate --force` and `skill export --force` stay their own.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct SupervisorArgs {
+    /// Acknowledge this verb as a supervisor maintenance command; required with
+    /// `--yes-i-am-supervisor-not-other-role`.
+    #[arg(long, global = true)]
+    pub force: bool,
+    /// Name the caller a supervisor driving this role from outside a session;
+    /// required with `--force`.
+    #[arg(long, global = true)]
+    pub yes_i_am_supervisor_not_other_role: bool,
+}
+
+/// Refuse a verb a role inside a session reaches through its plugin, when the
+/// caller omitted either flag. The refusal is local: it is decided before the
+/// socket resolves and before anything is written.
+///
+/// The plugin keeps the session's own record of the act. A verb that reaches the
+/// daemon from a shell leaves that record untouched: a bash handoff is invisible
+/// to the relay guard, and a bash completion settles a task the plugin still
+/// holds open. These verbs serve an operator or a supervisor driving a role from
+/// outside, and the two flags are how such a caller says so. `tool` is the path
+/// a role reads instead, which is what a caller that reached for the shell by
+/// mistake is meant to take.
+fn supervisor_gate(verb: &str, tool: &str, args: &SupervisorArgs) -> Option<i32> {
+    if args.force && args.yes_i_am_supervisor_not_other_role {
+        return None;
+    }
+    Some(runtime::usage_error(format!(
+        "onlyne: {verb} requires {SUPERVISOR_FLAGS}: a role inside a session {tool}; this verb is \
+         a supervisor maintenance command for an operator or a supervisor driving a role from \
+         outside"
+    )))
+}
+
 /// The outcome of a `complete`, in wire spelling.
 pub fn parse_outcome(raw: &str) -> Result<Outcome, String> {
     match raw {
@@ -61,6 +145,38 @@ pub fn parse_head_from(raw: &str) -> Result<HeadFrom, String> {
             "onlyne: --head-from must be one of local, ledger, got {other}"
         )),
     }
+}
+
+/// One `--label key=value` entry, refused when it carries no key or no `=`.
+fn parse_label(raw: &str) -> Result<(String, String), String> {
+    match raw.split_once('=') {
+        Some((key, value)) if !key.is_empty() => Ok((key.to_string(), value.to_string())),
+        _ => Err(format!("onlyne: --label needs key=value, got {raw}")),
+    }
+}
+
+/// `--deadline` as the RFC 3339 instant the wire carries.
+fn parse_deadline(raw: &str) -> Result<DateTime<Utc>, String> {
+    raw.parse()
+        .map_err(|_| format!("onlyne: --deadline needs an RFC 3339 timestamp, got {raw}"))
+}
+
+/// The label map a send carries, refused past the protocol's own entry ceiling.
+/// The per-key bounds are the protocol's business, and it checks them when the
+/// envelope is validated.
+fn collect_labels(
+    entries: &[(String, String)],
+) -> Result<Option<BTreeMap<String, String>>, String> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    if entries.len() > CAUSALITY_LABEL_MAX_ENTRIES {
+        return Err(format!(
+            "onlyne: --label carries at most {CAUSALITY_LABEL_MAX_ENTRIES} entries, got {}",
+            entries.len()
+        ));
+    }
+    Ok(Some(entries.iter().cloned().collect()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +238,16 @@ struct SendSpec {
     image: Option<ImagePart>,
     causality: Causality,
     ttl_ms: Option<u64>,
+}
+
+/// The role a send speaks as, which is the rule [`build_send`] reads off the
+/// same two inputs to pick the principal: `--from` on the admin surface, and the
+/// local role on the client one.
+fn sender_role(sender: &SenderArgs, target: &SocketTarget) -> String {
+    match (target.surface, sender.from.as_deref()) {
+        (Surface::Admin, Some(role)) => role.to_string(),
+        _ => sender.local_role(),
+    }
 }
 
 fn build_send(
@@ -322,10 +448,24 @@ fn reply_causality(row: &serde_json::Value, to: &str) -> Causality {
         reply_to: Some(to.to_string()),
         hop: ledger::row_hop(row).unwrap_or(0),
         attempt: 0,
+        // A reply answers inside a family it does not describe: it starts none
+        // and carries none of a family's metadata.
+        family: None,
+        hop_budget: None,
+        origin: None,
+        deadline: None,
+        labels: None,
     }
 }
 
 /// Build the send envelope for `handoff`, a child of the parent task.
+///
+/// The child continues the parent row's family, which is what the ledger reads
+/// a run's arc from: it carries the row's `family` column beside the parent
+/// link, the hops that family may spend, the role it reports home to, its
+/// deadline, and its labels. A row that minted before those columns existed
+/// names none of them, and the parent's own task id stands in as the family its
+/// child carries.
 fn handoff_causality(row: &serde_json::Value, parent: &str) -> Causality {
     Causality {
         task: new_task_id(),
@@ -333,6 +473,11 @@ fn handoff_causality(row: &serde_json::Value, parent: &str) -> Causality {
         reply_to: None,
         hop: ledger::row_hop(row).unwrap_or(0) + 1,
         attempt: 0,
+        family: ledger::row_family(row).or_else(|| Some(parent.to_string())),
+        hop_budget: ledger::row_hop_budget(row),
+        origin: ledger::row_origin(row),
+        deadline: ledger::row_deadline(row),
+        labels: ledger::row_labels(row),
     }
 }
 
@@ -347,6 +492,9 @@ fn reply_target(row: &serde_json::Value) -> Option<String> {
 }
 
 pub fn send(flags: &GlobalFlags, sender: &SenderArgs, args: SendArgs) -> i32 {
+    if let Some(code) = supervisor_gate("send", PLUGIN_SEND, &args.supervisor) {
+        return code;
+    }
     let Some(target) = runtime::target(flags) else {
         return EXIT_NO_SOCKET;
     };
@@ -382,13 +530,19 @@ async fn send_inner(
         MsgKind::Task
     };
     let ttl_ms = if args.note { args.ttl } else { None };
-    let causality = Causality {
-        task: args.task.unwrap_or_else(new_task_id),
-        parent_task: None,
-        reply_to: None,
-        hop: 0,
-        attempt: 0,
+    let labels = match collect_labels(&args.label) {
+        Ok(labels) => labels,
+        Err(message) => return runtime::usage_error(message),
     };
+    // A send with no task of its own starts a family, and the task it mints is
+    // that family's root. The family's own figures ride with it: the role it
+    // reports home to, the hops it may spend, its wall-clock bound, and its
+    // labels.
+    let mut causality = Causality::root(args.task.unwrap_or_else(new_task_id));
+    causality.origin = Some(sender_role(sender, target));
+    causality.hop_budget = args.hop_budget;
+    causality.deadline = args.deadline;
+    causality.labels = labels;
     let payload = match build_send(
         flags,
         target,
@@ -413,6 +567,9 @@ async fn send_inner(
 }
 
 pub fn reply(flags: &GlobalFlags, sender: &SenderArgs, args: ReplyArgs) -> i32 {
+    if let Some(code) = supervisor_gate("reply", PLUGIN_REPLY, &args.supervisor) {
+        return code;
+    }
     let Some(target) = runtime::target(flags) else {
         return EXIT_NO_SOCKET;
     };
@@ -482,6 +639,9 @@ async fn reply_inner(
 }
 
 pub fn complete(flags: &GlobalFlags, sender: &SenderArgs, args: CompleteArgs) -> i32 {
+    if let Some(code) = supervisor_gate("complete", PLUGIN_COMPLETE, &args.supervisor) {
+        return code;
+    }
     let Some(target) = runtime::target(flags) else {
         return EXIT_NO_SOCKET;
     };
@@ -544,12 +704,15 @@ async fn complete_inner(
             }
         }
     };
+    // The completion names the task it settles and claims nothing about the family.
+    // This door holds no family in hand: it reads a row only on the `--head-from
+    // ledger` branch, and a completion of a downstream task would otherwise name that
+    // task as the root of a family it sits inside. The session that settles its own
+    // task writes the family off the causality it holds, so a run's receipts reach
+    // the ledger with their figures from that path.
     let causality = Causality {
         task: args.task.clone(),
-        parent_task: None,
-        reply_to: None,
-        hop: 0,
-        attempt: 0,
+        ..Default::default()
     };
     let to = args.to.unwrap_or_else(|| sender.local_role());
     let payload = match build_send(
@@ -600,6 +763,9 @@ async fn complete_inner(
 }
 
 pub fn handoff(flags: &GlobalFlags, sender: &SenderArgs, args: HandoffArgs) -> i32 {
+    if let Some(code) = supervisor_gate("handoff", PLUGIN_HANDOFF, &args.supervisor) {
+        return code;
+    }
     let Some(target) = runtime::target(flags) else {
         return EXIT_NO_SOCKET;
     };
@@ -664,6 +830,9 @@ async fn handoff_inner(
 }
 
 pub fn control(flags: &GlobalFlags, sender: &SenderArgs, args: ControlVerbArgs) -> i32 {
+    if let Some(code) = supervisor_gate("control", PLUGIN_CONTROL, &args.supervisor) {
+        return code;
+    }
     if flags.request.is_some() {
         return runtime::usage_error("onlyne: --request is not supported by control");
     }
@@ -714,14 +883,17 @@ async fn control_inner(
 }
 
 pub fn ack(flags: &GlobalFlags, args: AckArgs) -> i32 {
-    ack_decision(flags, args, true, "ack")
+    ack_decision(flags, args, true, "ack", PLUGIN_ACK)
 }
 
 pub fn reject(flags: &GlobalFlags, args: AckArgs) -> i32 {
-    ack_decision(flags, args, false, "reject")
+    ack_decision(flags, args, false, "reject", PLUGIN_REJECT)
 }
 
-fn ack_decision(flags: &GlobalFlags, args: AckArgs, accepted: bool, verb: &str) -> i32 {
+fn ack_decision(flags: &GlobalFlags, args: AckArgs, accepted: bool, verb: &str, tool: &str) -> i32 {
+    if let Some(code) = supervisor_gate(verb, tool, &args.supervisor) {
+        return code;
+    }
     if flags.request.is_some() {
         return runtime::usage_error(format!("onlyne: --request is not supported by {verb}"));
     }
@@ -831,6 +1003,19 @@ pub struct SendArgs {
     /// Expiry in milliseconds; requires `--note`.
     #[arg(long)]
     pub ttl: Option<u64>,
+    /// Hops the family this send starts may spend; every hop of the family
+    /// carries the number, so the role that meets it can decide to keep the
+    /// task instead of handing it on.
+    #[arg(long)]
+    pub hop_budget: Option<u32>,
+    /// Family metadata as `key=value`; repeatable, at most 8 entries.
+    #[arg(long = "label", value_parser = parse_label)]
+    pub label: Vec<(String, String)>,
+    /// Wall-clock bound for the whole family, as an RFC 3339 timestamp.
+    #[arg(long, value_parser = parse_deadline)]
+    pub deadline: Option<DateTime<Utc>>,
+    #[command(flatten)]
+    pub supervisor: SupervisorArgs,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -841,6 +1026,8 @@ pub struct ReplyArgs {
     /// Reply text.
     #[arg(long)]
     pub text: String,
+    #[command(flatten)]
+    pub supervisor: SupervisorArgs,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -861,6 +1048,8 @@ pub struct CompleteArgs {
     /// Head source: local, or ledger. Omitted means `local`.
     #[arg(long, value_parser = parse_head_from, default_value = "local")]
     pub head_from: HeadFrom,
+    #[command(flatten)]
+    pub supervisor: SupervisorArgs,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -874,6 +1063,8 @@ pub struct HandoffArgs {
     /// Handoff text.
     #[arg(long)]
     pub text: String,
+    #[command(flatten)]
+    pub supervisor: SupervisorArgs,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -887,6 +1078,8 @@ pub struct AckArgs {
     /// Reason recorded with the decision.
     #[arg(long)]
     pub reason: String,
+    #[command(flatten)]
+    pub supervisor: SupervisorArgs,
 }
 
 #[derive(Debug, Clone)]
@@ -894,4 +1087,5 @@ pub struct ControlVerbArgs {
     pub to: Option<String>,
     pub reason: Option<String>,
     pub op: ControlOp,
+    pub supervisor: SupervisorArgs,
 }

@@ -50,6 +50,9 @@ use onlyne_proto::{
     ImagePart, Outcome, PluginOp, Principal, Receipt, RegisterChannelArgs, RenderSendArgs, Report,
     ResBody, SessionRegisterArgs, TypingArgs,
 };
+// The crate root names `PluginOp` and its siblings; `HandoffArgs` is reached by
+// its module because the root list does not carry it.
+use onlyne_proto::adapter::HandoffArgs;
 pub use onlyne_proto::{Capability, HelloAck, HelloArgs, Mount, MountKind, PROTOCOL_VERSION};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf, split};
@@ -881,6 +884,21 @@ pub trait Host: Send + Sync {
         Err((ErrorCode::UnknownOp, "send is unsupported".to_string()))
     }
 
+    /// Mint one child of a session's task family and queue it for `args.to`, as
+    /// the session's `handoff` frame asks.
+    ///
+    /// The family's rules stay on the host side: it reads the causality of the
+    /// task the session serves and mints the child through `Causality::child_of`,
+    /// so the family id, the hop budget, the origin, the deadline, and the labels
+    /// ride along. The answer carries the child as
+    /// `{"task_id":"<uuid>","hop":3,"queued":true,"op_id":"<uuid>"}`.
+    async fn handoff(
+        &self,
+        _args: &HandoffArgs,
+    ) -> std::result::Result<Value, (ErrorCode, String)> {
+        Err((ErrorCode::UnknownOp, "handoff is unsupported".to_string()))
+    }
+
     async fn deliver(&self, _delivery: &Delivery) -> std::result::Result<(), (ErrorCode, String)> {
         Err((ErrorCode::UnknownOp, "deliver is unsupported".to_string()))
     }
@@ -946,6 +964,7 @@ where
                     );
                 }
             },
+            PluginOp::Handoff(args) => self.host.handoff(&args).await,
             PluginOp::Deliver(delivery) => self.host.deliver(&delivery).await.map(|_| Value::Null),
             PluginOp::RegisterChannel(args) => {
                 self.host.register_channel(&args).await.map(|_| Value::Null)
@@ -982,6 +1001,7 @@ where
                     | PluginOp::SessionRegister(_)
                     | PluginOp::AssignAck(_)
                     | PluginOp::Send(_)
+                    | PluginOp::Handoff(_)
                     | PluginOp::Detach(_)
             ),
             MountKind::Gateway => matches!(
@@ -1607,5 +1627,25 @@ mod tests {
         let error = body.error.expect("error");
         assert_eq!(error.code, ErrorCode::Forbidden);
         assert!(error.message.contains("health"));
+    }
+
+    /// `handoff` belongs to an agent mount, and a gateway mount is refused it
+    /// with the shape every other misdirected operation answers with.
+    #[tokio::test]
+    async fn handoff_is_an_agent_op_a_gateway_mount_is_refused() {
+        let dispatcher = HostDispatcher::new(MountKind::Gateway, Arc::new(SendHost));
+        let body = dispatcher
+            .dispatch(PluginOp::Handoff(HandoffArgs {
+                task_id: "task-1".into(),
+                to: "reviewer".into(),
+                text: "carry it on".into(),
+                image: None,
+            }))
+            .await;
+        assert!(!body.ok);
+        let error = body.error.expect("error");
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        assert_eq!(error.field.as_deref(), Some("op"));
+        assert!(error.message.contains("handoff"));
     }
 }

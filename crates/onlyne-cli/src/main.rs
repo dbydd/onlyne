@@ -37,9 +37,11 @@ const LEDGER_LONG_ABOUT: &str = "\
 List ledger rows, one row per recorded send.
 
 The keys this CLI reads off a row are `msg_id`, `task`, `state`, `reason`, \
-`out_head`, and the row's body; the answer projects every field of the durable \
-row, so `op_id`, `kind`, `from`, `to`, `parent_task`, `hop`, `attempt`, \
-`enqueued_at`, and `acked_at` travel with it.
+`out_head`, `family`, `hop_budget`, and the row's body; the answer projects every \
+field of the durable row, so `op_id`, `kind`, `from`, `to`, `parent_task`, `hop`, \
+`origin`, `deadline`, `labels`, `attempt`, `enqueued_at`, and `acked_at` travel \
+with it. A row that carries no value for one of them omits the key, so a row \
+written before a column existed renders as it always did.
 
 `reason` names why the row last settled. A refusal arrives with the receiver's \
 whole sentence, as when a pane backend rejects a session command that speaks \
@@ -281,6 +283,8 @@ struct ControlCmd {
     /// Role the control op targets; omitted means the role that owns the task.
     #[arg(long, global = true)]
     to: Option<String>,
+    #[command(flatten)]
+    supervisor: verbs::SupervisorArgs,
     /// The control op to drive.
     #[command(subcommand)]
     verb: ControlVerb,
@@ -494,6 +498,7 @@ fn run() -> i32 {
                     to: cmd.to,
                     reason,
                     op,
+                    supervisor: cmd.supervisor,
                 },
             )
         }

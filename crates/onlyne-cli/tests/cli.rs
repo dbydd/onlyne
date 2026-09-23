@@ -108,6 +108,8 @@ fn from_is_rejected_on_client_and_required_on_admin() {
             "--as",
             "client",
             "send",
+            "--force",
+            SUPERVISOR_FLAG,
             "--from",
             "ops",
             "--to",
@@ -131,6 +133,8 @@ fn from_is_rejected_on_client_and_required_on_admin() {
             "--as",
             "admin",
             "send",
+            "--force",
+            SUPERVISOR_FLAG,
             "--to",
             "worker",
             "--text",
@@ -163,6 +167,8 @@ fn image_over_the_ceiling_is_refused_before_the_socket_is_opened() {
             "--as",
             "admin",
             "send",
+            "--force",
+            SUPERVISOR_FLAG,
             "--from",
             "ops",
             "--to",
@@ -525,6 +531,8 @@ fn file_dash_reads_the_body_from_stdin() {
             "--server-root",
             root.to_str().unwrap(),
             "send",
+            "--force",
+            SUPERVISOR_FLAG,
             "--from",
             "planner",
             "--to",
@@ -629,6 +637,8 @@ fn complete_without_head_from_files_a_local_head() {
             "--workspace",
             workspace.to_str().unwrap(),
             "complete",
+            "--force",
+            SUPERVISOR_FLAG,
             "--task",
             TEST_TASK,
             "--text",
@@ -688,6 +698,8 @@ fn complete_with_ledger_head_omits_text_without_a_flag_error() {
             "--workspace",
             workspace.to_str().unwrap(),
             "complete",
+            "--force",
+            SUPERVISOR_FLAG,
             "--task",
             TEST_TASK,
             "--head-from",
@@ -733,6 +745,8 @@ fn complete_local_head_without_text_names_the_flag() {
             "--as",
             "admin",
             "complete",
+            "--force",
+            SUPERVISOR_FLAG,
             "--task",
             TEST_TASK,
             "--outcome",
@@ -750,6 +764,581 @@ fn complete_local_head_without_text_names_the_flag() {
         output.stdout.is_empty(),
         "a local refusal must not print an answer body"
     );
+}
+
+/// The long half of the supervisor gate, spelled as the operator types it.
+const SUPERVISOR_FLAG: &str = "--yes-i-am-supervisor-not-other-role";
+
+/// Every verb a role speaks or acts through, and so every verb behind the gate.
+const GATED_VERBS: [&str; 7] = [
+    "send", "reply", "complete", "handoff", "ack", "reject", "control",
+];
+
+/// The line a gated verb prints when a call arrives without both flags: both
+/// flag names, the path a role reads instead, and why the verb exists.
+fn supervisor_refusal(verb: &str) -> String {
+    let tool = match verb {
+        "send" => {
+            "sends with its plugin's own tool, onlyne_send (to, text, kind, image), where \
+             kind=\"task\" starts a new task family at hop 0, kind=\"note\" leaves free text, and \
+             onlyne_handoff continues the family this session was handed"
+        }
+        "handoff" => {
+            "hands work on with its plugin's own tool, onlyne_handoff (task_id, to, text, image), \
+             which names this task as the child's parent_task and carries the family's hop \
+             budget, origin, deadline, and labels"
+        }
+        "complete" => {
+            "reports its ending with its plugin's own tool, onlyne_complete (outcome, text, \
+             force, reason)"
+        }
+        "reply" => {
+            "replies through its plugin, which answers for its session and offers no reply tool \
+             that a role would reach for"
+        }
+        "ack" => {
+            "settles a delivered envelope through its plugin, which answers for its session and \
+             offers no ack tool that a role would reach for"
+        }
+        "reject" => {
+            "refuses a delivered envelope through its plugin, which answers for its session and \
+             offers no reject tool that a role would reach for"
+        }
+        "control" => {
+            "runs a control op through its plugin, which answers for its session and offers no \
+             control tool that a role would reach for"
+        }
+        other => panic!("{other} is not a gated verb"),
+    };
+    format!(
+        "onlyne: {verb} requires --force and {SUPERVISOR_FLAG}: a role inside a session {tool}; \
+         this verb is a supervisor maintenance command for an operator or a supervisor driving a \
+         role from outside\n"
+    )
+}
+
+/// The argv one gated verb needs to be otherwise valid, so a flagless call is
+/// decided by the gate alone. The socket path is one nothing serves: a call that
+/// reached socket work answers the canonical hint and exits 3.
+fn gated_argv<'a>(verb: &'a str, socket: &'a str) -> Vec<&'a str> {
+    let mut args = vec!["--socket", socket, "--as", "admin", verb];
+    let tail: &[&str] = match verb {
+        "send" => &["--from", "ops", "--to", "worker", "--text", "gate check"],
+        "reply" => &["--from", "ops", "--to", ACK_MSG_ID, "--text", "gate check"],
+        "complete" => &[
+            "--from",
+            "ops",
+            "--task",
+            TEST_TASK,
+            "--text",
+            "gate check",
+            "--outcome",
+            "done",
+        ],
+        "handoff" => &[
+            "--from",
+            "ops",
+            "--task",
+            TEST_TASK,
+            "--to",
+            "worker",
+            "--text",
+            "gate check",
+        ],
+        // `ack` and `reject` carry `AckArgs` alone: they take no sender.
+        "ack" | "reject" => &["--msg-id", ACK_MSG_ID, "--reason", "gate check"],
+        "control" => &["--from", "ops", "--task", CONTROL_TASK, "probe"],
+        other => panic!("{other} is not a gated verb"),
+    };
+    args.extend_from_slice(tail);
+    args
+}
+
+/// Every gated verb refuses a call missing either flag, and the refusal is
+/// local: exit 2, both flag names on stderr, and nothing on stdout. The socket
+/// path is one nothing serves, so a call that reached it would answer the
+/// canonical no-socket hint and exit 3 — the message here is the gate's.
+#[test]
+fn every_gated_verb_refuses_without_both_supervisor_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("run").join("s");
+    let socket = socket.to_str().unwrap();
+
+    let partial: [&[&str]; 3] = [&[], &["--force"], &[SUPERVISOR_FLAG]];
+    for verb in GATED_VERBS {
+        for flags in partial {
+            let output = Command::new(bin())
+                .current_dir(dir.path())
+                .args(gated_argv(verb, socket))
+                .args(flags)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(EXIT_VALIDATION),
+                "an otherwise valid `{verb}` missing {flags:?} is refused locally: {}",
+                stderr_of(&output)
+            );
+            assert_eq!(stderr_of(&output), supervisor_refusal(verb));
+            assert!(
+                output.stdout.is_empty(),
+                "a local refusal must not print an answer body"
+            );
+        }
+    }
+}
+
+/// Both flags together open the gate, so each verb runs on to the check it
+/// already had. Every one of them reaches socket resolution and meets the absent
+/// socket; `ack` and `reject` stop one step earlier, at their own surface rule.
+#[test]
+fn both_supervisor_flags_open_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("run").join("s");
+    let socket = socket.to_str().unwrap();
+
+    for verb in GATED_VERBS {
+        let output = Command::new(bin())
+            .current_dir(dir.path())
+            .args(gated_argv(verb, socket))
+            .args(["--force", SUPERVISOR_FLAG])
+            .output()
+            .unwrap();
+        let stderr = stderr_of(&output);
+        assert_ne!(
+            stderr,
+            supervisor_refusal(verb),
+            "`{verb}` must pass the gate"
+        );
+        let (code, expected) = match verb {
+            "ack" | "reject" => (
+                EXIT_VALIDATION,
+                format!("onlyne: {verb} requires a role workspace or client socket\n"),
+            ),
+            _ => (EXIT_NO_SOCKET, format!("{NO_SOCKET_MESSAGE}\n")),
+        };
+        assert_eq!(output.status.code(), Some(code), "`{verb}`: {stderr}");
+        assert_eq!(stderr, expected, "`{verb}` reached its own next check");
+    }
+
+    // `complete`'s head rule is one step past the gate, so a call that opens the
+    // gate with no `--text` is answered by that rule.
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--socket",
+            socket,
+            "--as",
+            "admin",
+            "complete",
+            "--force",
+            SUPERVISOR_FLAG,
+            "--from",
+            "ops",
+            "--task",
+            TEST_TASK,
+            "--outcome",
+            "done",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+    assert_eq!(
+        stderr_of(&output),
+        "onlyne: --text is required with --head-from local\n",
+        "`complete` reaches its own head rule once the gate is open"
+    );
+}
+
+/// A task id the handoff tests hand inside a family: the envelope validator
+/// requires every task id to be a uuid.
+const FAMILY_TASK: &str = "55555555-5555-4555-8555-555555555555";
+
+/// A handoff child continues the family its parent row carries: the child
+/// envelope names the row's task as `parent_task`, sits one hop below it, and
+/// carries the row's `family`, `hop_budget`, `origin`, `deadline`, and `labels`.
+#[test]
+fn handoff_continues_the_family_the_parent_row_carries() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("role");
+    let listener = role_listener(&workspace);
+    let server = serve_sequence(
+        listener,
+        vec![
+            serde_json::json!({
+                "f": "res",
+                "id": "r1",
+                "ok": true,
+                "data": {"rows": [{
+                    "msg_id": ACK_MSG_ID,
+                    "task": TEST_TASK,
+                    "state": "acked",
+                    "hop": 3,
+                    "family": FAMILY_TASK,
+                    "hop_budget": 11,
+                    "origin": "planner",
+                    "deadline": "2030-01-01T00:00:00Z",
+                    "labels": {"run": "lights"}
+                }]}
+            }),
+            serde_json::json!({"f": "res", "id": "r2", "ok": true, "data": {}}),
+        ],
+    );
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .env("ONLYNE_ROLE", "planner")
+        .args([
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "handoff",
+            "--force",
+            SUPERVISOR_FLAG,
+            "--task",
+            TEST_TASK,
+            "--to",
+            "worker",
+            "--text",
+            "carry the token",
+        ])
+        .output()
+        .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_OK),
+        "the handoff must land: {}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        requests.len(),
+        2,
+        "the parent row is read back before the child is sent"
+    );
+    assert_eq!(requests[0]["op"], "query_ledger");
+    assert_eq!(requests[1]["op"], "send");
+    let causality = &requests[1]["args"]["causality"];
+    assert_eq!(causality["parent_task"], TEST_TASK);
+    assert_eq!(causality["hop"], 4, "the child sits one hop below the row");
+    assert_eq!(causality["family"], FAMILY_TASK);
+    assert_eq!(causality["hop_budget"], 11);
+    assert_eq!(causality["origin"], "planner");
+    assert_eq!(causality["deadline"], "2030-01-01T00:00:00Z");
+    assert_eq!(causality["labels"]["run"], "lights");
+}
+
+/// A row written before the family columns existed names no family, so the child
+/// carries the task it hangs under as the family it continues, and no more.
+#[test]
+fn handoff_roots_the_family_when_the_row_names_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("role");
+    let listener = role_listener(&workspace);
+    let server = serve_sequence(
+        listener,
+        vec![
+            serde_json::json!({
+                "f": "res",
+                "id": "r1",
+                "ok": true,
+                "data": {"rows": [{
+                    "msg_id": ACK_MSG_ID,
+                    "task": TEST_TASK,
+                    "state": "acked",
+                    "hop": 0
+                }]}
+            }),
+            serde_json::json!({"f": "res", "id": "r2", "ok": true, "data": {}}),
+        ],
+    );
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .env("ONLYNE_ROLE", "planner")
+        .args([
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "handoff",
+            "--force",
+            SUPERVISOR_FLAG,
+            "--task",
+            TEST_TASK,
+            "--to",
+            "worker",
+            "--text",
+            "carry the token",
+        ])
+        .output()
+        .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_OK),
+        "the handoff must land: {}",
+        stderr_of(&output)
+    );
+    let causality = &requests[1]["args"]["causality"];
+    assert_eq!(causality["family"], TEST_TASK);
+    assert_eq!(causality["hop"], 1);
+    for absent in ["hop_budget", "origin", "deadline", "labels"] {
+        assert!(
+            causality.get(absent).is_none(),
+            "a row that names no {absent} hands none down: {causality}"
+        );
+    }
+}
+
+/// The three family flags reach the envelope a `send` mints, beside the origin
+/// role the send speaks as and the family the minted task roots.
+#[test]
+fn send_starts_a_family_with_the_figures_it_was_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("srv");
+    let listener = admin_listener(&root);
+    let server = serve_once(
+        listener,
+        serde_json::json!({"f": "res", "id": "r1", "ok": true, "data": {}}),
+    );
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--server-root",
+            root.to_str().unwrap(),
+            "send",
+            "--force",
+            SUPERVISOR_FLAG,
+            "--from",
+            "planner",
+            "--to",
+            "worker",
+            "--text",
+            "a bounded run",
+            "--hop-budget",
+            "7",
+            "--label",
+            "run=lights",
+            "--label",
+            "lap=2",
+            "--deadline",
+            "2030-01-01T00:00:00Z",
+        ])
+        .output()
+        .unwrap();
+    let request = server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the socket");
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_OK),
+        "the send must land: {}",
+        stderr_of(&output)
+    );
+    let causality = &request["args"]["envelope"]["causality"];
+    assert_eq!(causality["origin"], "planner");
+    assert_eq!(causality["hop_budget"], 7);
+    assert_eq!(causality["deadline"], "2030-01-01T00:00:00Z");
+    assert_eq!(causality["labels"]["run"], "lights");
+    assert_eq!(causality["labels"]["lap"], "2");
+    assert_eq!(
+        causality["family"], causality["task"],
+        "a fresh send roots the family it starts"
+    );
+    assert_eq!(causality["hop"], 0);
+}
+
+/// A send on a role workspace speaks as the role that owns it: `--from` is the
+/// admin surface's flag, so the origin a family reports home to is the local
+/// role here, which is the shape a ring's own hop reads.
+#[test]
+fn send_roots_the_family_with_the_local_role_as_its_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("role");
+    let listener = role_listener(&workspace);
+    let server = serve_once(
+        listener,
+        serde_json::json!({"f": "res", "id": "r1", "ok": true, "data": {}}),
+    );
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .env("ONLYNE_ROLE", "light6")
+        .args([
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "send",
+            "--force",
+            SUPERVISOR_FLAG,
+            "--to",
+            "light1",
+            "--text",
+            "running-lights token",
+        ])
+        .output()
+        .unwrap();
+    let request = server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the socket");
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_OK),
+        "the send must land: {}",
+        stderr_of(&output)
+    );
+    let causality = &request["args"]["causality"];
+    assert_eq!(causality["origin"], "light6");
+    assert_eq!(causality["family"], causality["task"]);
+    assert_eq!(causality["hop"], 0);
+}
+
+/// The family flags are refused locally when they cannot be carried: past the
+/// protocol's entry ceiling, without a `key=value`, or as a stamp that is not an
+/// RFC 3339 instant. Each one exits 2, names its flag, and opens no socket.
+#[test]
+fn send_refuses_the_family_flags_it_cannot_carry() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("run").join("s");
+    let base: Vec<String> = [
+        "--socket",
+        socket.to_str().unwrap(),
+        "--as",
+        "admin",
+        "send",
+        "--force",
+        SUPERVISOR_FLAG,
+        "--from",
+        "ops",
+        "--to",
+        "worker",
+        "--text",
+        "a bounded run",
+    ]
+    .iter()
+    .map(|value| value.to_string())
+    .collect();
+
+    let ceiling = onlyne_proto::envelope::CAUSALITY_LABEL_MAX_ENTRIES;
+    let mut over = base.clone();
+    for index in 1..=ceiling + 1 {
+        over.push("--label".to_string());
+        over.push(format!("k{index}=v"));
+    }
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args(&over)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+    assert_eq!(
+        stderr_of(&output),
+        format!(
+            "onlyne: --label carries at most {ceiling} entries, got {}\n",
+            ceiling + 1
+        )
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a local refusal must not print an answer body"
+    );
+
+    for (flag, value) in [("--label", "no-equals"), ("--deadline", "next tuesday")] {
+        let mut args = base.clone();
+        args.push(flag.to_string());
+        args.push(value.to_string());
+        let output = Command::new(bin())
+            .current_dir(dir.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(EXIT_VALIDATION), "{flag}");
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains(flag), "the refusal names {flag}: {stderr}");
+        assert!(
+            output.stdout.is_empty(),
+            "a refused flag prints a hint, not an answer"
+        );
+    }
+}
+
+/// `onlyne ledger` prints the family keys a row carries, and a row written
+/// before those columns existed renders without them.
+#[test]
+fn ledger_prints_the_family_keys_and_omits_absent_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("srv");
+    let listener = admin_listener(&root);
+    let server = serve_once(
+        listener,
+        serde_json::json!({
+            "f": "res",
+            "id": "r1",
+            "ok": true,
+            "data": {"rows": [
+                {
+                    "msg_id": ACK_MSG_ID,
+                    "task": TEST_TASK,
+                    "state": "acked",
+                    "hop": 3,
+                    "family": FAMILY_TASK,
+                    "hop_budget": 11
+                },
+                {"msg_id": ACK_MSG_ID, "task": TEST_TASK, "state": "acked", "hop": 3}
+            ]}
+        }),
+    );
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--server-root",
+            root.to_str().unwrap(),
+            "ledger",
+            "--task",
+            TEST_TASK,
+        ])
+        .output()
+        .unwrap();
+    server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the socket");
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_OK),
+        "the ledger read must land: {}",
+        stderr_of(&output)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = &body["data"]["rows"];
+    assert_eq!(rows[0]["family"], FAMILY_TASK);
+    assert_eq!(rows[0]["hop_budget"], 11);
+    for absent in ["family", "hop_budget"] {
+        assert!(
+            rows[1].get(absent).is_none(),
+            "a row without {absent} renders without the key: {}",
+            rows[1]
+        );
+    }
+
+    let help = Command::new(bin())
+        .current_dir(dir.path())
+        .args(["ledger", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+    for key in ["family", "hop_budget", "origin", "deadline", "labels"] {
+        assert!(
+            help.contains(key),
+            "`onlyne ledger --help` names the key it prints: {key}"
+        );
+    }
 }
 
 /// `completions zsh` prints one zsh script on stdout, and nothing on stderr.
@@ -901,6 +1490,8 @@ fn request_replaces_the_constructed_args_wholesale() {
             "--request",
             &given.to_string(),
             "send",
+            "--force",
+            SUPERVISOR_FLAG,
             "--from",
             "planner",
             "--to",
@@ -943,6 +1534,8 @@ fn request_without_op_id_is_refused_locally() {
             "--request",
             &given.to_string(),
             "send",
+            "--force",
+            SUPERVISOR_FLAG,
             "--from",
             "planner",
             "--to",
@@ -976,6 +1569,8 @@ fn request_is_refused_on_control() {
             "--request",
             "{}",
             "control",
+            "--force",
+            SUPERVISOR_FLAG,
             "--task",
             "22222222-2222-4222-8222-222222222222",
             "recycle",
@@ -1040,6 +1635,8 @@ fn request_is_refused_on_ack_and_reject() {
                 "--request",
                 "{}",
                 verb,
+                "--force",
+                SUPERVISOR_FLAG,
                 "--msg-id",
                 ACK_MSG_ID,
                 "--reason",
@@ -1091,6 +1688,8 @@ fn ack_and_reject_write_client_ack_decisions() {
                 "--workspace",
                 workspace.to_str().unwrap(),
                 verb,
+                "--force",
+                SUPERVISOR_FLAG,
                 "--msg-id",
                 ACK_MSG_ID,
                 "--op-id",
@@ -1147,6 +1746,8 @@ fn reject_passes_server_error_through() {
             "--workspace",
             workspace.to_str().unwrap(),
             "reject",
+            "--force",
+            SUPERVISOR_FLAG,
             "--msg-id",
             ACK_MSG_ID,
             "--reason",
@@ -1228,6 +1829,8 @@ fn control_reason_passes_clap_on_cancel_and_recycle() {
             .current_dir(dir.path())
             .args([
                 "control",
+                "--force",
+                SUPERVISOR_FLAG,
                 "--task",
                 CONTROL_TASK,
                 verb,
@@ -1256,7 +1859,14 @@ fn control_probe_does_not_require_reason() {
     let dir = tempfile::tempdir().unwrap();
     let output = Command::new(bin())
         .current_dir(dir.path())
-        .args(["control", "--task", CONTROL_TASK, "probe"])
+        .args([
+            "control",
+            "--force",
+            SUPERVISOR_FLAG,
+            "--task",
+            CONTROL_TASK,
+            "probe",
+        ])
         .output()
         .unwrap();
     assert_eq!(
@@ -1285,6 +1895,8 @@ fn control_focus_sends_the_named_op() {
             "--workspace",
             workspace.to_str().unwrap(),
             "control",
+            "--force",
+            SUPERVISOR_FLAG,
             "--task",
             CONTROL_TASK,
             "focus",
@@ -1308,7 +1920,8 @@ fn control_focus_sends_the_named_op() {
 }
 
 /// Operators type the task on the verb's tail: `control cancel --task X`. clap
-/// carries `--task` and `--from` as globals, so both readings parse.
+/// carries `--task`, `--from`, and the supervisor pair as globals, so both
+/// readings parse, and the pair reads on either side of the op token.
 #[test]
 fn control_flags_read_after_the_verb() {
     let dir = tempfile::tempdir().unwrap();
@@ -1323,6 +1936,8 @@ fn control_flags_read_after_the_verb() {
             "rotate",
             "--from",
             "bench",
+            "--force",
+            SUPERVISOR_FLAG,
         ])
         .output()
         .unwrap();

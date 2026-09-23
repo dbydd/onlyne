@@ -715,10 +715,16 @@ impl FakeAgent {
                 let values = self.template_values(assign);
                 let to = expand_placeholders(&step.to, &values)?;
                 let text = expand_placeholders(&step.text, &values)?;
+                // The two supervisor flags travel with this call because the
+                // fixture drives the shipped CLI the way a supervisor does, from
+                // outside the session. A role inside a session hands work on
+                // with its plugin's own tool.
                 let output = tokio::process::Command::new(cli_binary()?)
                     .arg("--workspace")
                     .arg(&self.workspace)
                     .arg("handoff")
+                    .arg("--force")
+                    .arg("--yes-i-am-supervisor-not-other-role")
                     .arg("--task")
                     .arg(&assign.task_id)
                     .arg("--to")
@@ -999,13 +1005,9 @@ impl FakeGateway {
         text: impl Into<String>,
     ) -> Result<Delivery> {
         let conversation = conversation.into();
-        let causality = Causality {
-            task: onlyne_proto::new_task_id(),
-            parent_task: None,
-            reply_to: None,
-            hop: 0,
-            attempt: 0,
-        };
+        // The message starts a family of its own, and the task it mints is that
+        // family's root.
+        let causality = Causality::root(onlyne_proto::new_task_id());
         let envelope = new_envelope(
             MsgKind::Task,
             Principal::Gateway {

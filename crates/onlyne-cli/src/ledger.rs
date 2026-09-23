@@ -3,10 +3,16 @@
 //! `hop` is the counter this module reads; a row's `attempt` is the server's
 //! delivery counter and `causality.attempt` on an envelope is the sender's view
 //! through the transport, which reply and handoff never read back.
+//!
+//! The family metadata a handoff carries forward — `family`, `hop_budget`,
+//! `origin`, `deadline`, `labels` — is read straight off the columns the server
+//! writes, so a child continues whatever its parent row holds.
 
+use chrono::{DateTime, Utc};
 use onlyne_layout::LocalStream;
 use onlyne_proto::{AdminOp, ClientOp, ErrorCode, LedgerQuery};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::socket::{SocketTarget, Surface};
 use crate::wire::{self, ExchangeError};
@@ -15,7 +21,16 @@ use crate::wire::{self, ExchangeError};
 /// expected, from the most complete down to a bare row.
 const ROW_LIST_KEYS: [&str; 4] = ["rows", "results", "ledger", "items"];
 
-const ROW_FIELD_KEYS: [&str; 6] = ["msg_id", "task", "state", "reason", "out_head", "body"];
+const ROW_FIELD_KEYS: [&str; 8] = [
+    "msg_id",
+    "task",
+    "state",
+    "reason",
+    "out_head",
+    "body",
+    "family",
+    "hop_budget",
+];
 
 /// Rows returned by one `query_ledger` answer.
 pub fn rows_of(data: &Value) -> Vec<Value> {
@@ -52,6 +67,46 @@ pub fn row_principal(row: &Value, key: &str) -> Option<onlyne_proto::Principal> 
 
 pub fn row_text<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
     row.get(key).and_then(Value::as_str)
+}
+
+/// The task family the row belongs to, read from the column the server writes.
+/// A row minted before the column existed names none, and a caller that links a
+/// child to it carries that row's own task id as the family instead.
+pub fn row_family(row: &Value) -> Option<String> {
+    row_text(row, "family").map(str::to_string)
+}
+
+/// The hops the row's family may spend, read from the column the server writes.
+/// A hop that reads none leaves the budget to whoever started the family.
+pub fn row_hop_budget(row: &Value) -> Option<u32> {
+    row_u32(row, "hop_budget")
+}
+
+/// The role the row's family reports home to, read from the column the server
+/// writes. A family whose starter named no origin reports to whoever reads it.
+pub fn row_origin(row: &Value) -> Option<String> {
+    row_text(row, "origin").map(str::to_string)
+}
+
+/// The wall-clock bound the row's family carries, read from the column the
+/// server writes. A stamp the row cannot parse counts as no bound at all.
+pub fn row_deadline(row: &Value) -> Option<DateTime<Utc>> {
+    row_text(row, "deadline").and_then(|raw| raw.parse().ok())
+}
+
+/// The free-form labels the row's family carries, read from the column the
+/// server writes. The protocol's bounds on them were checked when the envelope
+/// carrying them was validated.
+pub fn row_labels(row: &Value) -> Option<BTreeMap<String, String>> {
+    serde_json::from_value(row.get("labels")?.clone()).ok()
+}
+
+/// One unsigned column of a row, absent when the column is absent or too wide
+/// for a `u32`.
+fn row_u32(row: &Value, key: &str) -> Option<u32> {
+    row.get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
 }
 
 /// Hop count of a row, read from the stored envelope when the column is absent.

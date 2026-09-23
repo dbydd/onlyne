@@ -76,7 +76,7 @@ for _ in $(seq 1 100); do
   fi
   sleep 0.1
 done
-send_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "beat then go quiet")
+send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "beat then go quiet")
 printf '%s\n' "$send_out" > "$tmp/send.json"
 task=$(json_field "$tmp/send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
 

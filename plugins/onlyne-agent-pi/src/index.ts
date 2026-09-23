@@ -198,6 +198,36 @@ export default function onlyne(pi: ExtensionAPI) {
       log(`registerTool(onlyne_complete) refused: ${error instanceof Error ? error.message : String(error)}`);
     }
     try {
+      pi.registerTool(defineTool({
+        name: "onlyne_handoff",
+        label: "Onlyne handoff",
+        description:
+          "Hand this session's task on to the next hop of its family. The host mints one child task for the named role, names this task as the child's parent_task, raises the hop by one, and lets the family's budget, labels, origin and deadline ride along, so the child continues the run this session serves. Use it for the next slot of a ring or a chain; onlyne_send{kind:\"task\"} starts a new family at hop 0, and onlyne_send{kind:\"note\"} is free text.",
+        promptSnippet: "Hand this task on to the next role of its family",
+        promptGuidelines: [
+          "Use onlyne_handoff when the work goes on to the next role of the run this session serves: the child the host mints carries the same family id, hop budget, labels, origin and deadline, and this task becomes its parent_task.",
+          "Use onlyne_send with kind=\"task\" when a role should get work of its own: that child is hop 0 of a family this session starts.",
+          "Use onlyne_send with kind=\"note\" for free text to a role, which carries no task and no hop.",
+        ],
+        parameters: Type.Object({
+          to: Type.String({ description: "target role name, e.g. builder" }),
+          text: Type.String({ description: "handoff text for the next role of the run" }),
+          image: Type.Optional(Type.String({ description: "absolute path to a png/jpeg/gif/webp image to attach" })),
+        }),
+        async execute(_toolCallId, params) {
+          if (!agent) throw new Error("onlyne: session is not connected");
+          const result = await agent.handoffFromTool({
+            to: params.to,
+            text: params.text,
+            imagePath: params.image ?? null,
+          });
+          return textResult(`handed on to ${result.to} as ${result.taskId} at hop ${result.hop}`, result);
+        },
+      }));
+    } catch (error) {
+      log(`registerTool(onlyne_handoff) refused: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
       pi.registerCommand("onlyne", {
         description: "Onlyne session status: connection, task, reports",
         handler: async (argLine, commandContext) => {

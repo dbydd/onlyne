@@ -3,7 +3,7 @@
 // wire vector, so the input side is byte-identical to what the client sends.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +23,15 @@ const ASSIGN_FRAME = existsSync(VECTOR_DIR)
   ? JSON.parse(JSON.parse(readFileSync(`${VECTOR_DIR}adapter_host_assign.json`, "utf8")).frame)
   : null;
 const TASK_ID = "11111111-1111-4111-8111-111111111111";
+/** A task the host hands this session, distinct from the id it was spawned with. */
+const ASSIGNED_TASK_ID = "33333333-3333-4333-8333-333333333333";
+/**
+ * The answer a real host gives one `handoff`: the child it minted, and the hop
+ * that child sits at. The hop is a figure no client can derive — it comes off
+ * the parent's causality — so a test asserting it reads the host's own number.
+ */
+const CHILD_TASK_ID = "22222222-2222-4222-8222-222222222222";
+const HANDOFF_ANSWER = { task_id: CHILD_TASK_ID, hop: 3, queued: true, op_id: `o-${CHILD_TASK_ID}` };
 const SESSION_ID = "8b1c";
 const PANE_KEY = "45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560";
 const PANE_TAB = "45e603f7-0772-48aa-bcf6-832272747713";
@@ -92,9 +101,12 @@ async function waitFor(predicate, { timeoutMs = 2_000, stepMs = 5 } = {}) {
  * the client has acknowledged the outcome. `failSend` refuses every `send` the
  * way a client with no route to the target would. The ready and heartbeat
  * reports are never held: the handshake waits on them.
+ * `handoffError` refuses every `handoff` with that error body, the way a client
+ * that cannot find the task the session names would; with none, the fake answers
+ * the child the proto documents.
  */
 class FakeHost {
-  constructor({ coalesceAssign = null, holdCompletion = false, failSend = false } = {}) {
+  constructor({ coalesceAssign = null, holdCompletion = false, failSend = false, handoffError = null } = {}) {
     this.server = createServer((socket) => this.onConnection(socket));
     this.frames = [];
     this.sockets = new Set();
@@ -102,6 +114,7 @@ class FakeHost {
     this.coalesceAssign = coalesceAssign;
     this.holdCompletion = holdCompletion;
     this.failSend = failSend;
+    this.handoffError = handoffError;
     this.held = [];
   }
 
@@ -154,6 +167,11 @@ class FakeHost {
         error: { code: "no_route", message: "no route to that role" },
       }));
       return;
+    }
+    if (frame.op === "handoff") {
+      body = this.handoffError
+        ? { ok: false, error: this.handoffError }
+        : { ok: true, data: HANDOFF_ANSWER };
     }
     const reply = encodeFrame({ reply_to: frame.id, ...body });
     const push = frame.op === "hello" && this.coalesceAssign
@@ -231,11 +249,12 @@ async function startAgent({
   coalesceAssign = null,
   holdCompletion = false,
   failSend = false,
+  handoffError = null,
   relay = null,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "pi-onlyne-agent-"));
   const socketPath = join(dir, "s");
-  const host = new FakeHost({ coalesceAssign, holdCompletion, failSend });
+  const host = new FakeHost({ coalesceAssign, holdCompletion, failSend, handoffError });
   await host.listen(socketPath);
   const logs = [];
   const agent = new OnlyneAgent({
@@ -1237,6 +1256,90 @@ test("the handoff ledger belongs to the session, not to one task", async () => {
   const result = await agent.completeFromTool({ outcome: "done", text: "wrote the notes" });
   assert.equal(result.outcome, "done");
   assert.equal(completions(host).length, 1);
+});
+
+// ------------------------------------------------------------ the handoff tool
+
+test("a handoff names the task this session holds and hands the answer back", async () => {
+  const { agent, host } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  // The task the host handed this session is the family's parent, so that id is
+  // the one the request names: the spawn id stays behind it.
+  const args = structuredClone(assignArgs());
+  args.task_id = ASSIGNED_TASK_ID;
+  args.envelope.causality.task = ASSIGNED_TASK_ID;
+  host.notify("assign", args);
+  await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
+
+  const result = await agent.handoffFromTool({ to: "builder", text: "take it from here" });
+  assert.deepEqual(host.of("handoff"), [
+    { task_id: ASSIGNED_TASK_ID, to: "builder", text: "take it from here", image: null },
+  ]);
+  assert.deepEqual(result, {
+    taskId: CHILD_TASK_ID,
+    hop: HANDOFF_ANSWER.hop,
+    queued: true,
+    opId: `o-${CHILD_TASK_ID}`,
+    to: "builder",
+  });
+});
+
+test("a handoff reads the image the model named and types it from its path", async () => {
+  const { agent, host, dir } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  const shot = join(dir, "shot.png");
+  writeFileSync(shot, bytes);
+  await agent.handoffFromTool({ to: "builder", text: "the shot", imagePath: shot });
+  assert.deepEqual(host.of("handoff")[0].image, {
+    data_base64: bytes.toString("base64"),
+    mime: "image/png",
+    name: "shot.png",
+  });
+
+  // A path this plugin cannot type is refused here, so no half-typed handoff
+  // reaches the wire.
+  const bad = join(dir, "shot.bmp");
+  writeFileSync(bad, bytes);
+  await assert.rejects(
+    () => agent.handoffFromTool({ to: "builder", text: "the shot", imagePath: bad }),
+    /unsupported image type/,
+  );
+  assert.equal(host.of("handoff").length, 1);
+});
+
+test("a send types its image from the path too", async () => {
+  const { agent, host, dir } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  const path = join(dir, "diagram.webp");
+  writeFileSync(path, Buffer.from([1, 2, 3]));
+  await agent.sendFromTool({ to: "writer", text: "the diagram", imagePath: path });
+
+  assert.deepEqual(host.of("send")[0].body.image, {
+    data_base64: "AQID",
+    mime: "image/webp",
+    name: "diagram.webp",
+  });
+});
+
+test("a handoff the client refuses throws the client's own reason", async () => {
+  const { agent, host } = await startAgent({
+    handoffError: { code: "no_family", message: "no task family for that id" },
+  });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  await assert.rejects(
+    () => agent.handoffFromTool({ to: "builder", text: "take it" }),
+    /no_family: no task family for that id/,
+  );
+  assert.equal(host.of("handoff").length, 1, "a refusal is not retried");
 });
 
 // ---------------------------------------------------------------- the panel

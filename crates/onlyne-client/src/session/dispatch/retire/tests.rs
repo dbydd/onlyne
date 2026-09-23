@@ -23,7 +23,7 @@ fn slot(task: &str, read_only: bool, dropped_at: Option<Instant>) -> SessionSlot
         payload: None,
         msg_id: None,
         origin: None,
-        hop: 0,
+        causality: Causality::root(task.to_string()),
         dropped_at,
         last_beat: Some(Instant::now()),
         read_only,
@@ -327,8 +327,12 @@ async fn a_control_close_ends_the_sessions_own_row() {
     }
     {
         let mut inner = state.inner.lock();
-        inner.sessions.insert("live".into(), slot(&task, false, None));
-        inner.transports.insert("live".into(), (io.clone(), Vec::new()));
+        inner
+            .sessions
+            .insert("live".into(), slot(&task, false, None));
+        inner
+            .transports
+            .insert("live".into(), (io.clone(), Vec::new()));
     }
     store
         .settle_task(&task, TaskState::Cancelled)
@@ -338,7 +342,11 @@ async fn a_control_close_ends_the_sessions_own_row() {
     // agent may still be running in its resource.
     {
         let inner = state.inner.lock();
-        let row = inner.store.get_session(&task).unwrap().expect("the session row");
+        let row = inner
+            .store
+            .get_session(&task)
+            .unwrap()
+            .expect("the session row");
         assert_eq!(
             crate::session::dispatch::projection_of(&row, TaskState::Cancelled).lifecycle,
             onlyne_proto::Lifecycle::Working,

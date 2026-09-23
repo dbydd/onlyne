@@ -102,7 +102,7 @@ for _ in $(seq 1 100); do
 done
 [ "$registered" = "true" ] || fail "the relocated role must register" "roles=$roles_out client=$(cat "$tmp/client.log" 2>/dev/null)"
 
-send_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to builder --text "relocated") || fail "send failed" "$send_out"
+send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to builder --text "relocated") || fail "send failed" "$send_out"
 printf '%s\n' "$send_out" > "$tmp/send.json"
 task=$(json_field "$tmp/send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
 [ -n "$task" ] || fail "the send answer carried no task" "$send_out"

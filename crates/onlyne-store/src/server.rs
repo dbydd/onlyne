@@ -26,6 +26,10 @@ use crate::transition_allowed;
 /// mirror row whose task ledger row already reached a terminal state, and each
 /// settlement writes one row there. A marker-3 file carries no such table, so it
 /// stops at the door on the same string every other mismatch prints.
+/// The ledger's five family-metadata columns — `family`, `hop_budget`,
+/// `origin`, `deadline`, `labels_json` — were applied in place beside
+/// `expires_at` and `requeued`, so a file at the current marker keeps opening
+/// and the marker stays 4.
 /// The client store keeps its own revision.
 const SERVER_SCHEMA_VERSION: i64 = 4;
 const PROTOCOL_VERSION: i64 = 1;
@@ -92,7 +96,20 @@ CREATE TABLE IF NOT EXISTS ledger(
   expires_at TEXT,
   -- Times this row has moved from in_flight back to queued. Applied in place
   -- so the marker stays 2.
-  requeued INTEGER NOT NULL DEFAULT 0
+  requeued INTEGER NOT NULL DEFAULT 0,
+  -- The family's root task id, read off the envelope's causality. `parent_task`
+  -- gives the chain's shape, and this names the arc every hop of one run
+  -- belongs to, which `onlyne ledger` prints beside the hop.
+  family TEXT,
+  -- The hops the family may spend, set by whoever started the run.
+  hop_budget INTEGER,
+  -- The role the family reports home to, carried on every row of the run.
+  origin TEXT,
+  -- Wall-clock bound for the whole family, in the RFC 3339 shape `expires_at`
+  -- uses.
+  deadline TEXT,
+  -- The causality's free-form labels as JSON text.
+  labels_json TEXT
 );
 CREATE INDEX IF NOT EXISTS ledger_state_enqueued_idx ON ledger(state,enqueued_at);
 CREATE INDEX IF NOT EXISTS ledger_task_idx ON ledger(task);
@@ -211,6 +228,25 @@ pub struct LedgerRow {
     /// Times this row has moved from in_flight back to queued.
     #[serde(default)]
     pub requeued: i64,
+    /// The family's root task id, read off the envelope's causality. Every row
+    /// of one run carries it unchanged, and `onlyne handoff` reads it back to
+    /// mint the next hop into the same family.
+    #[serde(default)]
+    pub family: Option<String>,
+    /// The hops the family may spend, carried on every row of the run.
+    #[serde(default)]
+    pub hop_budget: Option<i64>,
+    /// The role the family reports home to, carried on every row of the run.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// Wall-clock bound for the whole family, in the RFC 3339 text this
+    /// crate's helpers produce.
+    #[serde(default)]
+    pub deadline: Option<String>,
+    /// The causality's labels as JSON text, so the column keeps whatever map
+    /// the sender attached.
+    #[serde(default)]
+    pub labels_json: Option<String>,
 }
 
 impl LedgerRow {
@@ -242,6 +278,14 @@ impl LedgerRow {
             body_json: Some(body_json),
             expires_at,
             requeued: 0,
+            family: causality.and_then(|c| c.family.clone()),
+            hop_budget: causality.and_then(|c| c.hop_budget).map(i64::from),
+            origin: causality.and_then(|c| c.origin.clone()),
+            deadline: causality.and_then(|c| c.deadline).map(rfc3339),
+            labels_json: match causality.and_then(|c| c.labels.as_ref()) {
+                Some(labels) => Some(serde_json::to_string(labels)?),
+                None => None,
+            },
         })
     }
 }
@@ -1004,6 +1048,7 @@ fn ensure_schema(
     conn.execute_batch(ddl)?;
     ensure_ledger_expires_at(conn)?;
     ensure_ledger_requeued(conn)?;
+    ensure_ledger_causality_columns(conn)?;
     Ok(())
 }
 
@@ -1039,6 +1084,35 @@ fn ensure_ledger_requeued(conn: &Connection) -> StoreResult<()> {
         "ALTER TABLE ledger ADD COLUMN requeued INTEGER NOT NULL DEFAULT 0",
         [],
     )?;
+    Ok(())
+}
+
+/// Add the five ledger columns the envelope's causality feeds to a file whose
+/// ledger lacks them: `family`, `hop_budget`, `origin`, `deadline`,
+/// `labels_json`.
+///
+/// The columns landed in place, so an existing database keeps its rows and a
+/// file at the current marker keeps opening.
+fn ensure_ledger_causality_columns(conn: &Connection) -> StoreResult<()> {
+    let columns = conn
+        .prepare("PRAGMA table_info(ledger)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns.is_empty() {
+        return Ok(());
+    }
+    for (name, kind) in [
+        ("family", "TEXT"),
+        ("hop_budget", "INTEGER"),
+        ("origin", "TEXT"),
+        ("deadline", "TEXT"),
+        ("labels_json", "TEXT"),
+    ] {
+        if columns.iter().any(|column| column == name) {
+            continue;
+        }
+        conn.execute(&format!("ALTER TABLE ledger ADD COLUMN {name} {kind}"), [])?;
+    }
     Ok(())
 }
 
@@ -1119,7 +1193,7 @@ fn ensure_transition_allowed(from: LedgerState, to: LedgerState) -> StoreResult<
 
 fn insert_ledger_row(conn: &Connection, row: &LedgerRow) -> StoreResult<()> {
     conn.execute(
-        "INSERT INTO ledger(msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,hop,state,out_head,reason,enqueued_at,acked_at,body_json,expires_at,requeued) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ledger(msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,hop,state,out_head,reason,enqueued_at,acked_at,body_json,expires_at,requeued,family,hop_budget,origin,deadline,labels_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         params![
             row.msg_id,
             row.op_id,
@@ -1138,7 +1212,12 @@ fn insert_ledger_row(conn: &Connection, row: &LedgerRow) -> StoreResult<()> {
             row.acked_at,
             row.body_json,
             row.expires_at,
-            row.requeued
+            row.requeued,
+            row.family,
+            row.hop_budget,
+            row.origin,
+            row.deadline,
+            row.labels_json
         ],
     )?;
     Ok(())
@@ -1154,7 +1233,7 @@ fn ledger_by_op_id(conn: &Connection, op_id: &str) -> StoreResult<Option<LedgerR
         .optional()?)
 }
 
-const LEDGER_COLUMNS: &str = "msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json,hop,expires_at,requeued";
+const LEDGER_COLUMNS: &str = "msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json,hop,expires_at,requeued,family,hop_budget,origin,deadline,labels_json";
 const FAULT_COLUMNS: &str = "id,task_id,role,session_id,generation,seq,desired_json,observed_json,intent,attempt,backend_ref,kind,reason,state,created_at";
 const GHOST_SWEEP_COLUMNS: &str =
     "id,task_id,role,session_id,generation,seq_before,seq_after,outcome,evidence,swept_at";
@@ -1211,6 +1290,11 @@ fn ledger_row(r: &Row<'_>) -> rusqlite::Result<LedgerRow> {
         hop: r.get(15)?,
         expires_at: r.get(16)?,
         requeued: r.get(17)?,
+        family: r.get(18)?,
+        hop_budget: r.get(19)?,
+        origin: r.get(20)?,
+        deadline: r.get(21)?,
+        labels_json: r.get(22)?,
     })
 }
 

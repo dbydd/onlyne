@@ -311,13 +311,25 @@ export function normalizeOutcome(value) {
  * session transcript shows where the instruction came from; the role prose
  * (identical in `welcome` and `assign`) is folded in only when it has not
  * already been delivered.
+ *
+ * The header also carries the family's own figures — the hop this assignment
+ * sits at and the hops the family may spend — so a role reads its position off
+ * the instruction. Both appear only when the causality names a hop budget: the
+ * budget is what marks a payload as a member of a bounded family, and a payload
+ * that names none injects exactly the bytes it produced before this header
+ * carried them.
  * @param {{ assign: any, proseIsNew: boolean, attachmentPaths?: string[] }} options
  */
 export function injectionText({ assign, proseIsNew, attachmentPaths = [] }) {
   const envelope = assign.envelope ?? {};
+  const causality = envelope.causality ?? {};
   const taskId = assign.task_id ?? envelope.causality?.task ?? "unknown";
+  const position =
+    typeof causality.hop_budget === "number"
+      ? `, hop ${causality.hop ?? 0}, hop budget ${causality.hop_budget}`
+      : "";
   const lines = [
-    `[onlyne] task ${taskId} from ${describePrincipal(envelope.from)} (kind ${envelope.kind ?? "task"})`,
+    `[onlyne] task ${taskId} from ${describePrincipal(envelope.from)} (kind ${envelope.kind ?? "task"}${position})`,
   ];
   const prose = typeof assign.prose === "string" ? assign.prose.trim() : "";
   if (prose && proseIsNew) {

@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fmt;
 use uuid::Uuid;
 
@@ -21,6 +22,15 @@ pub const IMAGE_DATA_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// The image types the core accepts, in stable order.
 pub const IMAGE_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// Ceiling on the entries a family's [`Causality::labels`] may carry.
+pub const CAUSALITY_LABEL_MAX_ENTRIES: usize = 8;
+
+/// Ceiling on one label key's bytes.
+pub const CAUSALITY_LABEL_KEY_MAX_BYTES: usize = 32;
+
+/// Ceiling on one label value's bytes.
+pub const CAUSALITY_LABEL_VALUE_MAX_BYTES: usize = 256;
 
 /// Process-local identity of a message sender.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -314,20 +324,54 @@ pub struct Causality {
     pub hop: u32,
     /// Redelivery count for this envelope.
     pub attempt: u32,
+    /// The family's root task id. Every task handed on from one root carries the same
+    /// family, which is what lets a supervisor read a whole run as one arc instead of
+    /// walking `parent_task` links, and what `onlyne ledger` prints beside the hop. A
+    /// root minted before this field existed names none, and the first child mints the
+    /// family from its own parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    /// The hops this family may spend, set by whoever started it. A role reads it to
+    /// learn whether it is the hop that keeps the task, which keeps that budget out of
+    /// the task text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hop_budget: Option<u32>,
+    /// The role this family reports home to, when the sender is not that role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// Wall-clock bound for the whole family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<DateTime<Utc>>,
+    /// Free-form metadata the core carries and never interprets. Bounded by
+    /// [`CAUSALITY_LABEL_MAX_ENTRIES`], [`CAUSALITY_LABEL_KEY_MAX_BYTES`], and
+    /// [`CAUSALITY_LABEL_VALUE_MAX_BYTES`] at [`Envelope::validate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
 }
 
 impl Causality {
     pub fn root(task: impl Into<String>) -> Self {
+        let task = task.into();
         Causality {
-            task: task.into(),
+            family: Some(task.clone()),
+            task,
             parent_task: None,
             reply_to: None,
             hop: 0,
             attempt: 0,
+            hop_budget: None,
+            origin: None,
+            deadline: None,
+            labels: None,
         }
     }
 
     /// Derive the child task link for a downstream send.
+    ///
+    /// The family's metadata rides along: the child inherits the root id, the hop
+    /// budget, the origin, the deadline, and the labels, so every hop of one run reads
+    /// the same figures. A parent that names no family — a root minted before the field
+    /// existed — hands its own task id down as the family its children carry.
     pub fn child_of(&self) -> Causality {
         Causality {
             task: new_task_id(),
@@ -335,7 +379,46 @@ impl Causality {
             reply_to: None,
             hop: self.hop + 1,
             attempt: 0,
+            family: Some(self.family.clone().unwrap_or_else(|| self.task.clone())),
+            hop_budget: self.hop_budget,
+            origin: self.origin.clone(),
+            deadline: self.deadline,
+            labels: self.labels.clone(),
         }
+    }
+
+    /// Validate the family metadata's bounds, naming the offending field.
+    pub fn validate(&self) -> Result<()> {
+        let Some(labels) = &self.labels else {
+            return Ok(());
+        };
+        if labels.len() > CAUSALITY_LABEL_MAX_ENTRIES {
+            return Err(Error::invalid(
+                "causality.labels",
+                format!(
+                    "{} labels carried, at most {CAUSALITY_LABEL_MAX_ENTRIES}",
+                    labels.len()
+                ),
+            ));
+        }
+        for (key, value) in labels {
+            if key.is_empty() || key.len() > CAUSALITY_LABEL_KEY_MAX_BYTES {
+                return Err(Error::invalid(
+                    "causality.labels",
+                    format!("label key {key:?} must be 1..={CAUSALITY_LABEL_KEY_MAX_BYTES} bytes"),
+                ));
+            }
+            if value.len() > CAUSALITY_LABEL_VALUE_MAX_BYTES {
+                return Err(Error::invalid(
+                    "causality.labels",
+                    format!(
+                        "label {key:?} carries {} bytes, at most {CAUSALITY_LABEL_VALUE_MAX_BYTES}",
+                        value.len()
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -452,6 +535,9 @@ impl Envelope {
             ));
         }
         self.body.validate()?;
+        if let Some(causality) = &self.causality {
+            causality.validate()?;
+        }
         match self.kind {
             MsgKind::Control => {
                 if self.control.is_none() {
@@ -794,5 +880,108 @@ mod tests {
         let err = env.validate().unwrap_err();
         assert_eq!(err.field(), "protocol");
         assert_eq!(err.message(), "protocol 0 unsupported, expected 1");
+    }
+
+    #[test]
+    fn a_child_inherits_the_family_and_its_budget() {
+        let mut root = Causality::root("root-task");
+        root.hop_budget = Some(12);
+        root.origin = Some("_supervisor".into());
+        root.deadline = Some(Utc::now());
+        root.labels = Some(std::collections::BTreeMap::from([(
+            "run".to_string(),
+            "ring".to_string(),
+        )]));
+
+        let child = root.child_of();
+        assert_eq!(child.family.as_deref(), Some("root-task"));
+        assert_eq!(child.parent_task.as_deref(), Some("root-task"));
+        assert_eq!(child.hop, 1);
+        assert_eq!(child.hop_budget, Some(12));
+        assert_eq!(child.origin.as_deref(), Some("_supervisor"));
+        assert_eq!(child.deadline, root.deadline);
+        assert_eq!(child.labels, root.labels);
+
+        let grandchild = child.child_of();
+        assert_eq!(
+            grandchild.family.as_deref(),
+            Some("root-task"),
+            "every hop names the same family"
+        );
+        assert_eq!(grandchild.hop, 2);
+        assert_eq!(grandchild.hop_budget, Some(12));
+    }
+
+    #[test]
+    fn a_parent_that_names_no_family_hands_its_own_task_down_as_one() {
+        let legacy = Causality {
+            task: "old-root".into(),
+            parent_task: None,
+            reply_to: None,
+            hop: 0,
+            attempt: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            legacy.child_of().family.as_deref(),
+            Some("old-root"),
+            "a chain minted before the field still lands on one family"
+        );
+    }
+
+    #[test]
+    fn a_causality_that_names_no_family_serializes_as_it_did() {
+        let causality = Causality {
+            task: "t".into(),
+            parent_task: Some("p".into()),
+            hop: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&causality).expect("json"),
+            r#"{"task":"t","parent_task":"p","hop":2,"attempt":0}"#,
+            "an envelope written before the family metadata reads back byte for byte"
+        );
+    }
+
+    #[test]
+    fn label_bounds_are_enforced() {
+        let mut causality = Causality::root("t");
+        causality.labels = Some(
+            (0..=CAUSALITY_LABEL_MAX_ENTRIES)
+                .map(|i| (format!("k{i}"), "v".to_string()))
+                .collect(),
+        );
+        let error = causality
+            .validate()
+            .expect_err("one label past the ceiling");
+        assert!(
+            error.to_string().contains("causality.labels"),
+            "the refusal names the field: {error}"
+        );
+
+        causality.labels = Some(std::collections::BTreeMap::from([(
+            "k".repeat(CAUSALITY_LABEL_KEY_MAX_BYTES + 1),
+            "v".to_string(),
+        )]));
+        assert!(causality.validate().is_err(), "a long key is refused");
+
+        causality.labels = Some(std::collections::BTreeMap::from([(
+            "k".to_string(),
+            "v".repeat(CAUSALITY_LABEL_VALUE_MAX_BYTES + 1),
+        )]));
+        assert!(causality.validate().is_err(), "a long value is refused");
+
+        causality.labels = Some(std::collections::BTreeMap::from([(
+            String::new(),
+            "v".to_string(),
+        )]));
+        assert!(causality.validate().is_err(), "an empty key is refused");
+
+        causality.labels = Some(std::collections::BTreeMap::from([(
+            "k".to_string(),
+            "v".to_string(),
+        )]));
+        assert!(causality.validate().is_ok(), "one short label passes");
     }
 }

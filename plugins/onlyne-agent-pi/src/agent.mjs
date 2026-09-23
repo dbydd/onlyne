@@ -1014,17 +1014,28 @@ export class OnlyneAgent {
   }
 
   /**
+   * One inline image read off the path the model named, in the wire's
+   * `ImagePart` shape. `mimeForPath` refuses an extension outside the core's
+   * four mime types, and `imagePart` refuses a payload above the byte ceiling.
+   * @param {string | null | undefined} path
+   */
+  imageFromPath(path) {
+    if (!path) return null;
+    return imagePart({
+      data: readFileSync(path),
+      mime: mimeForPath(path),
+      name: path.split("/").pop() ?? null,
+    });
+  }
+
+  /**
    * `onlyne_send`: submit one envelope.
    * @param {{ to: string, text?: string, kind?: string, imagePath?: string | null }} input
    */
   async sendFromTool(input) {
     if (!this.connected) throw new Error("onlyne: client socket is not connected");
     const kind = input.kind === "task" ? "task" : "note";
-    let image = null;
-    if (input.imagePath) {
-      const bytes = readFileSync(input.imagePath);
-      image = imagePart({ data: bytes, mime, name: input.imagePath.split("/").pop() ?? null });
-    }
+    const image = this.imageFromPath(input.imagePath);
     const envelope = sendEnvelope({ from: this.role, to: input.to, kind, text: input.text ?? "", image });
     const data = await this.request("send", envelope);
     // Recorded only after the client answered the `send`: a refused envelope was
@@ -1032,6 +1043,36 @@ export class OnlyneAgent {
     // kind counts — `note` and `task` are both the session reaching that role.
     this.deliveredTo.add(String(input.to));
     return { queued: true, op_id: envelope.op_id ?? null, kind, to: input.to, data };
+  }
+
+  /**
+   * `onlyne_handoff`: hand this session's task on to the next hop of its family.
+   *
+   * The task named in the request is the session's own current one, so the child
+   * the host mints under it is a continuation of the family this session serves:
+   * the host reads the parent's causality, derives the child through
+   * `Causality::child_of`, and answers the child's task id and hop. The client's
+   * own refusal is raised out of here as it arrived.
+   * @param {{ to: string, text?: string, imagePath?: string | null }} input
+   */
+  async handoffFromTool(input) {
+    if (!this.connected) throw new Error("onlyne: client socket is not connected");
+    const taskId = this.activeTaskId();
+    if (!taskId) throw new Error("onlyne: no task is assigned to this session");
+    const data = await this.request("handoff", {
+      task_id: taskId,
+      to: input.to,
+      text: input.text ?? "",
+      image: this.imageFromPath(input.imagePath),
+    });
+    const answer = data ?? {};
+    return {
+      taskId: answer.task_id ?? null,
+      hop: answer.hop ?? null,
+      queued: answer.queued ?? false,
+      opId: answer.op_id ?? null,
+      to: input.to,
+    };
   }
 
   // ------------------------------------------------------------ attachments

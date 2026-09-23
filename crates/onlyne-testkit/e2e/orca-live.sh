@@ -248,7 +248,7 @@ for _ in $(seq 1 150); do
 done
 [ "$online" = true ] || fail "planner must register on the server" "client=$(cat "$tmp/client.log" 2>/dev/null)"
 
-send_out=$("$ONLYNE" --server-root "$tmp/server" send --from planner --to planner --text "orca live probe") \
+send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "orca live probe") \
   || fail "send command failed" "$send_out"
 printf '%s\n' "$send_out" > "$tmp/send.json"
 task=$(json_field "$tmp/send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')

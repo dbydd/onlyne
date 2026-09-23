@@ -254,13 +254,47 @@ test("the ledger head is capped at the plan's 200 characters", () => {
 test("an assignment becomes one message naming its origin and payload", { skip: !hasVectors }, () => {
   const assign = ASSIGN().args;
   const text = injectionText({ assign, proseIsNew: true });
-  assert.match(text, /^\[onlyne\] task 11111111-1111-4111-8111-111111111111 from role:planner \(kind task\)/);
+  // The vector's causality names no hop budget, and the header is byte for byte
+  // the line this plugin has always injected.
+  assert.equal(
+    text.split("\n")[0],
+    "[onlyne] task 11111111-1111-4111-8111-111111111111 from role:planner (kind task)",
+  );
   assert.match(text, /\[onlyne\] role prose from the spec:\nRead the incoming task/);
   assert.match(text, /\nbuild it\n?$/);
 
   const repeat = injectionText({ assign, proseIsNew: false });
   assert.doesNotMatch(repeat, /role prose from the spec/);
   assert.match(repeat, /build it/);
+});
+
+test("the header names the hop and the budget once the family names a budget", () => {
+  const header = (causality) =>
+    injectionText({
+      assign: {
+        task_id: "t9",
+        envelope: {
+          id: "e9",
+          kind: "task",
+          from: { role: { role: "planner" } },
+          causality,
+          body: { text: "pass it on" },
+        },
+      },
+      proseIsNew: false,
+    }).split("\n")[0];
+
+  assert.equal(
+    header({ task: "t9", hop: 2, attempt: 0, family: "t1", hop_budget: 5 }),
+    "[onlyne] task t9 from role:planner (kind task, hop 2, hop budget 5)",
+  );
+  // A family may spend no further hop: zero is a figure the header carries.
+  assert.equal(
+    header({ task: "t9", hop: 0, attempt: 0, family: "t1", hop_budget: 0 }),
+    "[onlyne] task t9 from role:planner (kind task, hop 0, hop budget 0)",
+  );
+  // No budget named: the compat rule holds, hop or no hop.
+  assert.equal(header({ task: "t9", hop: 2, attempt: 0 }), "[onlyne] task t9 from role:planner (kind task)");
 });
 
 test("an empty-bodied assignment still produces an instruction", () => {

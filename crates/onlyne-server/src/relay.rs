@@ -19,7 +19,7 @@ use onlyne_proto::{
 };
 use onlyne_store::{Append, LedgerRow};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 /// How often [`spawn_expiry_sweep`] settles queued notes past their deadline.
 ///
@@ -639,6 +639,11 @@ pub fn delivery_from(row: &LedgerRow) -> anyhow::Result<Delivery> {
         reply_to: None,
         hop: row.hop.max(0) as u32,
         attempt: row.attempt.max(0) as u32,
+        family: row.family.clone(),
+        hop_budget: row.hop_budget.map(|budget| budget.max(0) as u32),
+        origin: row.origin.clone(),
+        deadline: row_deadline(row),
+        labels: row_labels(row),
     });
     Ok(Delivery {
         msg_id: row.msg_id.clone(),
@@ -926,6 +931,11 @@ pub fn entry_from_row(row: &LedgerRow) -> onlyne_proto::LedgerEntry {
         task: row.task.clone(),
         parent_task: row.parent_task.clone(),
         hop: row.hop.max(0) as u32,
+        family: row.family.clone(),
+        hop_budget: row.hop_budget.map(|budget| budget.max(0) as u32),
+        origin: row.origin.clone(),
+        deadline: row_deadline(row),
+        labels: row_labels(row),
         attempt: row.attempt.max(0) as u32,
         state: row.state,
         reason: row.reason.clone(),
@@ -965,6 +975,27 @@ fn parse_time(text: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(text)
         .map(|value| value.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
+}
+
+/// The family deadline a stored row carried, read from its RFC 3339 column.
+///
+/// An empty or unreadable column names no deadline, which is what a row written
+/// before the column existed carries.
+fn row_deadline(row: &LedgerRow) -> Option<DateTime<Utc>> {
+    row.deadline
+        .as_deref()
+        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+        .map(|value| value.with_timezone(&Utc))
+}
+
+/// The labels a stored row carried, read from its JSON column.
+///
+/// An empty or unreadable column names no labels, which is what a row written
+/// before the column existed carries.
+fn row_labels(row: &LedgerRow) -> Option<BTreeMap<String, String>> {
+    row.labels_json
+        .as_deref()
+        .and_then(|text| serde_json::from_str(text).ok())
 }
 
 /// The role that owns a task, used as the ACL owner for control ops.
@@ -1095,5 +1126,49 @@ mod tests {
             control_from_row(MsgKind::Task, &envelope.body, Some(task().as_str())),
             None
         );
+    }
+
+    /// The family metadata a stored row carried reaches both of its readers:
+    /// the delivery the pull path rebuilds, and the ledger entry
+    /// `query_ledger` answers with.
+    #[test]
+    fn a_stored_row_hands_its_family_metadata_to_both_readers() {
+        let family = "11111111-2222-4222-8222-000000000003";
+        let parent_task = "11111111-2222-4222-8222-000000000002";
+        let deadline = DateTime::from_timestamp(1_789_000_000, 0).expect("a moment");
+        let labels = BTreeMap::from([("ticket".to_string(), "ONL-7".to_string())]);
+        let mut envelope = control("real work", None);
+        envelope.kind = MsgKind::Task;
+        envelope.causality = Some(Causality {
+            task: task(),
+            parent_task: Some(parent_task.to_string()),
+            reply_to: None,
+            hop: 3,
+            attempt: 1,
+            family: Some(family.to_string()),
+            hop_budget: Some(7),
+            origin: Some("planner".to_string()),
+            deadline: Some(deadline),
+            labels: Some(labels.clone()),
+        });
+        let row = LedgerRow::from_envelope(&envelope, "fp-family").unwrap();
+
+        let rebuilt = delivery_from(&row)
+            .unwrap()
+            .envelope
+            .causality
+            .expect("the rebuilt causality");
+        assert_eq!(rebuilt.family.as_deref(), Some(family));
+        assert_eq!(rebuilt.hop_budget, Some(7));
+        assert_eq!(rebuilt.origin.as_deref(), Some("planner"));
+        assert_eq!(rebuilt.deadline, Some(deadline));
+        assert_eq!(rebuilt.labels, Some(labels.clone()));
+
+        let entry = entry_from_row(&row);
+        assert_eq!(entry.family.as_deref(), Some(family));
+        assert_eq!(entry.hop_budget, Some(7));
+        assert_eq!(entry.origin.as_deref(), Some("planner"));
+        assert_eq!(entry.deadline, Some(deadline));
+        assert_eq!(entry.labels, Some(labels));
     }
 }

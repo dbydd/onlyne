@@ -129,7 +129,7 @@ done
 echo "$gw_out" | grep -q '"fg1"' || fail "parent status must report gateway id fg1" "$gw_out"
 
 # --- child cluster round trip: builder works inside its own cluster ----------
-child_send=$("$ONLYNE" --server-root "$tmp/child" send --from builder --to builder --text "B1 builder round trip") || fail "child send failed" "$child_send"
+child_send=$("$ONLYNE" --server-root "$tmp/child" send "${SUPERVISOR_FLAGS[@]}" --from builder --to builder --text "B1 builder round trip") || fail "child send failed" "$child_send"
 printf '%s\n' "$child_send" > "$tmp/child-send.json"
 child_task=$(json_field "$tmp/child-send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
 wait_acked "$tmp/child" "$child_task" "$tmp/child-task.json" || fail "child ledger never reached acked" "$(cat "$tmp/child-task.json" 2>/dev/null) fake=$(cat "$tmp/builder-fake.log" 2>/dev/null)"
@@ -139,7 +139,7 @@ cut -f4,5 "$tmp/child-task.json.tsv" > "$tmp/child-text.txt"
 grep -q 'builder' "$tmp/child-text.txt" || fail "child ledger must name its own builder role" "$(cat "$tmp/child-text.txt")"
 
 # --- parent round trip through the aggregate role ----------------------------
-parent_send=$("$ONLYNE" --server-root "$tmp/parent" send --from planner --to cluster-b --text "P1 round trip") || fail "parent send failed" "$parent_send"
+parent_send=$("$ONLYNE" --server-root "$tmp/parent" send "${SUPERVISOR_FLAGS[@]}" --from planner --to cluster-b --text "P1 round trip") || fail "parent send failed" "$parent_send"
 printf '%s\n' "$parent_send" > "$tmp/parent-send.json"
 [ "$(json_field "$tmp/parent-send.json" '.ok' 'json.load(sys.stdin)["ok"]')" = "True" ] || [ "$(json_field "$tmp/parent-send.json" '.ok' 'json.load(sys.stdin)["ok"]')" = "true" ] || fail "parent send ok must be true" "$parent_send"
 parent_task=$(json_field "$tmp/parent-send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
