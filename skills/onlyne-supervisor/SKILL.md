@@ -148,6 +148,12 @@ A command on this surface speaks as a role, so `control` and the four message ve
 reach, so the CLI reads that row and addresses the op there, and an explicit `--to <role>` still
 wins. A task no session owns is refused before anything is written, and the refusal names `--to`.
 
+`recycle` and `cancel` end the task on your word: the client asks the plugin for its ending and
+closes the host resource, and the plugin's own report settles the task. A word the plugin never
+answers is settled by this client after three heartbeat intervals, so a cancel landing before an
+agent has written anything still ends its task rather than leaving a row no sweep may take; the
+delivery row the client still holds is refused with `operator cancel` or `operator recycle`.
+
 Heartbeat faults carry the liveness verdict, and the row keeps its state through them.
 `heartbeat_missing` says the pane's beats stopped and the role link stayed up: the row is
 `working`, `onlyne sessions` answers `heartbeat_stale` on it, and the TUI shows `working+stale`.

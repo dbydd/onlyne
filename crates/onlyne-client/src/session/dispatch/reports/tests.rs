@@ -1087,6 +1087,66 @@ async fn a_completion_that_answers_the_clients_own_recycle_settles_with_no_turn(
     );
 }
 
+/// The two commands that note a word note the word they give.
+///
+/// The note is what this client settles a task by once no report answers the
+/// command, and the word it carries is the whole of what that fallback writes: a
+/// `cancel` stands for the `cancelled` it names, and a `recycle` — which asks the
+/// plugin for its own ending and prescribes it nothing — stands for the `failed` a
+/// session that died holding the task leaves behind.
+#[tokio::test]
+async fn a_control_command_notes_the_word_it_gives() {
+    let cancelled_dir = tempdir().expect("temp dir");
+    let cancelled = new_task_id();
+    let state = staged_state(&cancelled_dir, &cancelled);
+    seeded_ready(&state, &cancelled);
+    serving_slot(&state, &cancelled, "msg-cancelled");
+    on_control(
+        &state,
+        &ControlOp::Cancel {
+            task_id: cancelled.clone(),
+            reason: "operator cancel".into(),
+        },
+    )
+    .await
+    .expect("the command is applied");
+
+    let recycled_dir = tempdir().expect("temp dir");
+    let recycled = new_task_id();
+    let second = staged_state(&recycled_dir, &recycled);
+    seeded_ready(&second, &recycled);
+    serving_slot(&second, &recycled, "msg-recycled");
+    on_control(
+        &second,
+        &ControlOp::Recycle {
+            task_id: recycled.clone(),
+            reason: "workspace moved".into(),
+        },
+    )
+    .await
+    .expect("the command is applied");
+
+    // A reading an hour on: the notes were written just now, and a sweep that ran
+    // at once would be reading a command an operator had this instant given.
+    let later = Instant::now() + Duration::from_secs(3600);
+    let notes = state.control_settles_due(later);
+    assert_eq!(notes.len(), 1, "one note per task: {notes:?}");
+    assert_eq!(notes[0].task_id, cancelled);
+    assert_eq!(
+        notes[0].word,
+        ControlWord::Cancel,
+        "a cancel notes the word it is"
+    );
+    let notes = second.control_settles_due(later);
+    assert_eq!(notes.len(), 1, "one note per task: {notes:?}");
+    assert_eq!(notes[0].task_id, recycled);
+    assert_eq!(
+        notes[0].word,
+        ControlWord::Recycle,
+        "a recycle notes the word it is, which prescribes the plugin no outcome"
+    );
+}
+
 /// A row the client closed is a row that ran nothing. `AgentGone` and
 /// `ResourceClosed` both write `Gone`, and either one reaches it from a session that
 /// never passed its ready barrier, so the death of an agent that never started reads

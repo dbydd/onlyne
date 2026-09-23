@@ -1,6 +1,8 @@
 use super::config::{ClientInit, FLUSH_PAUSE_MS, READINESS_POLL_MS, RunState, reconnect_backoff};
 use super::run::pull_ack_loop;
-use super::sessions::{refresh_role_slice, scan_reconnect_grace, scan_stalls};
+use super::sessions::{
+    refresh_role_slice, scan_control_settles, scan_reconnect_grace, scan_stalls,
+};
 use crate::runtime::intent::op_for_intent;
 use crate::session::dispatch::{self, ClientLink};
 use anyhow::{Result, anyhow};
@@ -92,6 +94,11 @@ pub(super) async fn watch_readiness(link: ClientLink, state: RunState) -> Result
         state.dispatch.reclaim_exited_resources();
         scan_stalls(&state).await;
         scan_reconnect_grace(&state).await;
+        // Behind the reconnect sweep, which settles the work a session that died
+        // took with it and drops any note on that task: what is left for this
+        // step is the word of a command whose session is gone while its task is
+        // still open, and no report is coming to answer it.
+        scan_control_settles(&state).await;
         match link.readiness() {
             ConnReadiness::Ready => {
                 if !ready {

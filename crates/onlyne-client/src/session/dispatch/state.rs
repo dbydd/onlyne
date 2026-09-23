@@ -68,7 +68,11 @@ pub(super) struct DispatchInner {
     /// (`settle.rs`) takes the note as its `SettleAuthority::ControlDriven`.
     /// `on_out` consumes it, and the reconnect sweep drops the note of every task
     /// it settles — the other way a command's answer stops coming.
-    pub(super) control_settles: Vec<String>,
+    ///
+    /// A note nothing answers is the watchdog's, and it is the same note: the
+    /// record of the word, held to [`CONTROL_SETTLE_BOUND`] and settled by the
+    /// tick's own sweep when no report has come to settle it instead.
+    pub(super) control_settles: Vec<ControlNote>,
     /// Connections inside one of their own inbound frames right now.
     ///
     /// A frame handler runs to completion before `adapter_socket` answers the
@@ -118,6 +122,105 @@ pub struct SessionSlot {
     /// slot is handed no assignment and no note, and what its agent sends is
     /// held for the completion that merges it.
     pub(super) read_only: bool,
+}
+
+/// One operator's word this client is still waiting to see answered.
+///
+/// The command is a `notify` the plugin may or may not live to answer, so the
+/// note is what this client knows on its own: which task the word named, when it
+/// was given, and what the operator said. It is not a second settle path — the
+/// note is the authority of the one settle door, which `settle.rs` reads as
+/// `SettleAuthority::ControlDriven` — and it is the record the watchdog holds a
+/// word to once no report arrives at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlNote {
+    /// The task the word named.
+    pub task_id: String,
+    /// When the word was given. The watchdog's bound runs from here.
+    pub noted_at: Instant,
+    /// What the operator said.
+    pub word: ControlWord,
+}
+
+/// The operator's word one note is the record of.
+///
+/// `cancel` and `recycle` are the two commands that reach a live task, and each
+/// word carries both halves of what a note is for: the ending it gives the work,
+/// and the string a refusal of that task's delivery row is written with. The note
+/// holds the word rather than the verdict it stands for, because the verdict does
+/// not name the word back — `failed` is only the fallback a `recycle` leaves when
+/// nothing answers it — and the column the refusal lands in has to read what the
+/// operator actually said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlWord {
+    /// `cancel`: the work ends now, and the task reads `cancelled`.
+    Cancel,
+    /// `recycle`: the plugin is asked for its own ending. It prescribes no
+    /// outcome, so a word nothing answers leaves the task `failed`.
+    Recycle,
+}
+
+impl ControlWord {
+    /// The outcome this word stands for: the verdict a settle answering the note
+    /// files when the plugin reports none of its own.
+    pub fn outcome(self) -> Outcome {
+        match self {
+            Self::Cancel => Outcome::Cancelled,
+            Self::Recycle => Outcome::Failed,
+        }
+    }
+
+    /// The word as the refusal that names it reads on the wire.
+    ///
+    /// `operator cancel` and `operator recycle` stand in the same column as the
+    /// `operator close` and `operator ack` an operator's other verbs already wrote
+    /// there, and each names the command that was given rather than the verdict it
+    /// left behind.
+    pub fn refusal(self) -> &'static str {
+        match self {
+            Self::Cancel => "operator cancel",
+            Self::Recycle => "operator recycle",
+        }
+    }
+}
+
+/// How long this client holds an operator's word open before settling it.
+///
+/// The words this bounds are `cancel` and `recycle`, and each one is a `notify`
+/// the plugin answers with a frame on the connection it already serves: a plugin
+/// that ends its turn to answer has answered inside one
+/// [`HEARTBEAT_INTERVAL`](crate::session::dispatch::HEARTBEAT_INTERVAL), and the
+/// request round trip the adapter bounds itself with
+/// ([`REQUEST_TIMEOUT`](crate::session::dispatch::REQUEST_TIMEOUT)) is well past
+/// that. Three intervals leaves a plugin that is stalled but still alive two
+/// missed beats before this client decides the word went unanswered — it is the
+/// window the reconnect sweep reads an agent's silence through, so the two
+/// readings agree — and it is half the sixty-second default of `[client]
+/// reconnect_grace_secs`. An operator watching a stuck row gave up on the live
+/// run in seconds and reached for `onlyne repair fail`; a minute would lose to
+/// that, and this does not.
+///
+/// A constant rather than a config key on purpose: what it bounds is not a policy
+/// an operator tunes, it is the point past which this client's own record of the
+/// word outlives the plugin that was asked to answer it.
+pub const CONTROL_SETTLE_BOUND: Duration = Duration::from_secs(HEARTBEAT_INTERVAL.as_secs() * 3);
+
+/// The notes whose operator's word has gone unanswered past
+/// [`CONTROL_SETTLE_BOUND`].
+///
+/// The reading consumes nothing. The caller settles each note through
+/// [`take_controlled_settle`](DispatchState::take_controlled_settle), the one
+/// door that spends a note, so a completion that answers a word between this read
+/// and that call takes the note first and the task needs no verdict from the
+/// sweep. A note stamped ahead of `now` is not due: an elapsed window is the only
+/// reading this makes.
+pub(super) fn due_control_settles(inner: &DispatchInner, now: Instant) -> Vec<ControlNote> {
+    inner
+        .control_settles
+        .iter()
+        .filter(|note| now.saturating_duration_since(note.noted_at) >= CONTROL_SETTLE_BOUND)
+        .cloned()
+        .collect()
 }
 
 /// Stamp the moment one session last had a frame of its own accepted.

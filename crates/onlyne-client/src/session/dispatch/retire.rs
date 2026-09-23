@@ -498,7 +498,9 @@ impl DispatchState {
                 // `control` command that is still waiting for its plugin's report
                 // has nothing left to authorise: the note goes with the verdict
                 // that outranks it.
-                inner.control_settles.retain(|noted| noted != &owed);
+                inner
+                    .control_settles
+                    .retain(|noted| noted.task_id != owed);
                 if let Err(error) = inner.store.settle_task(&owed, TaskState::Failed) {
                     tracing::warn!(
                         task = %owed,

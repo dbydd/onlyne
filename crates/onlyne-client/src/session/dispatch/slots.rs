@@ -1,10 +1,11 @@
 use super::*;
 
 use super::outbound::store_ack;
-use super::projection::stored_task_state;
+use super::projection::{stored_task_state, task_state_of};
 use super::retire::stored_close_reason;
 use super::state::{
-    DispatchInner, DispatchState, live_sessions, session_exited, slot_key_serving_task,
+    ControlNote, ControlWord, DispatchInner, DispatchState, due_control_settles, live_sessions,
+    session_exited, slot_key_serving_task,
 };
 use super::transport::names_session;
 
@@ -116,10 +117,23 @@ impl DispatchState {
     /// the retirement that command triggers race over the session's row, and a
     /// guard that read the row would answer the same operator action two ways. One
     /// note per task is kept, so a command issued twice waits for one answer.
-    pub fn owe_controlled_settle(&self, task_id: &str) {
+    ///
+    /// `word` is what the operator said and `now` is when they said it, and both
+    /// are the caller's to name rather than this call's to invent: the command is
+    /// the authority on the ending it asked for, and the instant it reads is the
+    /// one the watchdog's bound runs from.
+    pub fn owe_controlled_settle(&self, task_id: &str, word: ControlWord, now: Instant) {
         let mut inner = self.inner.lock();
-        if !inner.control_settles.iter().any(|owed| owed == task_id) {
-            inner.control_settles.push(task_id.to_string());
+        if !inner
+            .control_settles
+            .iter()
+            .any(|owed| owed.task_id == task_id)
+        {
+            inner.control_settles.push(ControlNote {
+                task_id: task_id.to_string(),
+                noted_at: now,
+                word,
+            });
         }
     }
 
@@ -134,11 +148,103 @@ impl DispatchState {
         let Some(at) = inner
             .control_settles
             .iter()
-            .position(|owed| owed == task_id)
+            .position(|owed| owed.task_id == task_id)
         else {
             return false;
         };
         inner.control_settles.swap_remove(at);
+        true
+    }
+
+    /// The notes whose operator's word has gone unanswered past the bound.
+    ///
+    /// The reading a sweep takes before it acts, and it spends nothing: the
+    /// settle below goes through [`take_controlled_settle`], so a completion that
+    /// answers a word between this read and that call takes the note first.
+    ///
+    /// [`take_controlled_settle`]: DispatchState::take_controlled_settle
+    pub fn control_settles_due(&self, now: Instant) -> Vec<ControlNote> {
+        due_control_settles(&self.inner.lock(), now)
+    }
+
+    /// Settle the work one operator's word left open, with no report behind it.
+    ///
+    /// The word asks a plugin for its own ending and the completion that answers
+    /// it is a frame of the plugin's, so a plugin that never sends one — it left
+    /// with the command's frame, or implements no `recycle` at all — leaves the
+    /// task open and the delivery row this client was handed in flight, with no
+    /// later caller to answer either. This is that caller.
+    ///
+    /// The writes are the ones `retire_dropped_ghosts` makes for the task its
+    /// owed session left: the verdict through the task's own record, which
+    /// refuses to overwrite one that landed first, and the still-held delivery row
+    /// refused with the operator's word, which is terminal for that row the way
+    /// every refusal is. The publish is the caller's, because it cannot run under
+    /// this lock.
+    ///
+    /// Answers `false` when this call is not the settle: the note is already spent
+    /// by a completion that answered the word, or the task's record carries a
+    /// verdict already, and either way nothing here is written and nothing is for
+    /// the caller to publish.
+    ///
+    /// [`retire_dropped_ghosts`]: DispatchState::retire_dropped_ghosts
+    pub fn settle_unanswered_control(&self, note: &ControlNote) -> bool {
+        // The note is taken first and at once: a report that answers the word
+        // while this call waits for the lock spends it, and the task then needs no
+        // verdict from here.
+        if !self.take_controlled_settle(&note.task_id) {
+            return false;
+        }
+        let mut inner = self.inner.lock();
+        // The verdict goes through the task's own record, which keeps the first
+        // one it was handed: a row an earlier settle answered stays as that settle
+        // left it. A verdict that was not this call's is a settle that already
+        // happened — every door that writes one answers the delivery row in the
+        // same breath — so there is nothing left here to refuse or to publish.
+        let verdict = task_state_of(note.word.outcome());
+        match inner.store.settle_task(&note.task_id, verdict) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    task = %note.task_id,
+                    ?verdict,
+                    "an unanswered control command's task was already settled; the first verdict stands"
+                );
+                return false;
+            }
+            Err(error) => {
+                // A store that refused the write must not cost the word its
+                // answer: the note goes back where it came from — through the door
+                // that records one, stamped where it was — and the next tick tries
+                // again rather than leaving the task open forever.
+                tracing::warn!(
+                    task = %note.task_id,
+                    error = %error,
+                    "the task of an unanswered control command was not settled; the word stays owed"
+                );
+                drop(inner);
+                self.owe_controlled_settle(&note.task_id, note.word, note.noted_at);
+                return false;
+            }
+        }
+        // The delivery row this client is still holding is refused, and the
+        // reason is the operator's own word: the row is answered once, by whoever
+        // still holds its handle, and a plugin's report arriving later finds no
+        // handle left to spend.
+        let held = slot_key_serving_task(&inner, &note.task_id)
+            .and_then(|key| inner.sessions.get_mut(&key))
+            .and_then(|slot| slot.msg_id.take());
+        if let Some(msg_id) = held {
+            store_ack(
+                &inner,
+                AckArgs {
+                    msg_id,
+                    op_id: None,
+                    accepted: false,
+                    reason: Some(note.word.refusal().to_string()),
+                },
+            );
+        }
         true
     }
 

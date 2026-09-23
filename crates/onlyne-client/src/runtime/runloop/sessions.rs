@@ -251,6 +251,54 @@ pub(super) async fn scan_reconnect_grace(state: &RunState) {
     }
 }
 
+/// Settle the work an operator's word left open unanswered, and publish each
+/// one's exit.
+///
+/// `recycle` and `cancel` ask a session's plugin for its own ending, and the
+/// completion that answers the command is a frame of the plugin's. A plugin that
+/// never sends one — it left with the command's frame, or implements no
+/// `recycle` at all — leaves the task open, the mirrored row reading `working`,
+/// and the delivery row this client was handed in flight, and nothing in this
+/// process is left to answer any of the three: the close the command ran is what
+/// ended the session's own row already, so the sweep above finds no window left
+/// open on it and no work of it to settle.
+///
+/// What answers the word is the client's own record of it, held past
+/// `dispatch::CONTROL_SETTLE_BOUND`. The note is read under the dispatch lock and
+/// spent one at a time behind it, so a completion that arrives in between
+/// settles the task through the report it came on and this sweep writes nothing;
+/// the verdict, the refusal of the delivery row and the report behind it are
+/// [`DispatchState::settle_unanswered_control`]'s. The publish is this sweep's,
+/// for the reason the retirement above publishes: the server mirrors what this
+/// client reports, and that is what moves the row an operator is reading.
+///
+/// [`DispatchState::settle_unanswered_control`]:
+///     crate::session::dispatch::DispatchState::settle_unanswered_control
+pub(super) async fn scan_control_settles(state: &RunState) {
+    let now = Instant::now();
+    for note in state.dispatch.control_settles_due(now) {
+        // The note is spent through the one door that spends it: a completion
+        // that answered this word between the reading above and this call takes
+        // the note first, and its verdict is the one that stands.
+        if !state.dispatch.settle_unanswered_control(&note) {
+            continue;
+        }
+        tracing::info!(
+            task = %note.task_id,
+            outcome = ?note.word.outcome(),
+            waited_secs = now.saturating_duration_since(note.noted_at).as_secs(),
+            "a task was settled on an operator's word no plugin answered"
+        );
+        if let Err(error) = dispatch::sync_session(&state.dispatch, &note.task_id).await {
+            tracing::warn!(
+                task = %note.task_id,
+                error = %error,
+                "a settled task's exit was not published"
+            );
+        }
+    }
+}
+
 pub(super) async fn refresh_role_slice(link: &ClientLink, state: &RunState) -> Result<()> {
     let role = state.dispatch.role();
     let reply = link

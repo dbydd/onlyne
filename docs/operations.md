@@ -147,7 +147,7 @@ role link 死亡时，服务端把该 role 的 `in_flight` 投递行重投回 `q
 
 先判 TTL，再判次数，两者都各发一条 `ledger_state` 事件。
 
-`reason` 的读法：`onlyne ledger` 的行键为 `msg_id`、`task`、`state`、`reason`、`out_head`、`body`、`family`、`hop_budget`；该键只在这一行有值时出现，无值的行与列加入之前逐字节一致。TUI 第二页的 task 详情面板在账本行尾追加 `reason=<text>`。落进这一列的取值：`requeue_exhausted` 与 `requeue_ttl` 来自上面两道闸，`expired` 来自到期扫描，`session_dead` 来自 client 结清掉线 session 时写下的拒收（见「会话残影与属主判定」一节），pane 后端（`herdr` / `orca` / `zellij`）在开页前拒收协议 `session_command` 时整句拒收文案落 `rejected` 行（见「Headless（exec）会话」一节末段）；操作者经 `onlyne reject --reason` 或 `onlyne repair fail --reason` 自填的文本原样进这一列，`onlyne ack` 收下时该文本随结清事件走，行上的 `reason` 保持原样。字符串 `operator ack` 是 faults 表 `reason` 列的用例数据（`crates/onlyne-store/src/tests.rs` 的 `update_fault_state` 用例），账本列没有它的记录。
+`reason` 的读法：`onlyne ledger` 的行键为 `msg_id`、`task`、`state`、`reason`、`out_head`、`body`、`family`、`hop_budget`；该键只在这一行有值时出现，无值的行与列加入之前逐字节一致。TUI 第二页的 task 详情面板在账本行尾追加 `reason=<text>`。落进这一列的取值：`requeue_exhausted` 与 `requeue_ttl` 来自上面两道闸，`expired` 来自到期扫描，`session_dead` 来自 client 结清掉线 session 时写下的拒收（见「会话残影与属主判定」一节），`operator cancel` 与 `operator recycle` 来自 client 在操作者的词无人作答时自行结账、并拒收仍握在手里的投递行（见下方 control 一节），pane 后端（`herdr` / `orca` / `zellij`）在开页前拒收协议 `session_command` 时整句拒收文案落 `rejected` 行（见「Headless（exec）会话」一节末段）；操作者经 `onlyne reject --reason` 或 `onlyne repair fail --reason` 自填的文本原样进这一列，`onlyne ack` 收下时该文本随结清事件走，行上的 `reason` 保持原样。字符串 `operator ack` 是 faults 表 `reason` 列的用例数据（`crates/onlyne-store/src/tests.rs` 的 `update_fault_state` 用例），账本列没有它的记录。
 
 push 投递与 pull 投递的 `in_flight` 翻面都各有一条 `ledger_state` 事件；离线读账的 ledger 状态与会话投影在任何采样点互相对得上。
 
@@ -319,6 +319,10 @@ supervisor 角色使用 control 动词执行恢复动作。
 admin 面的 `onlyne control` 不要求 `--to`：缺省时 CLI 先读该任务的 session 行，把控制送到属主 role 那里；显式给出 `--to <role>` 时直接用它，不再多读一帧。
 
 任务没有任何 session 属于某个 role 时，命令在写任何东西之前拒收，退出码 4，stderr 逐字 `onlyne: no session owns task <id>; pass --to <role> to say where the control goes`。
+
+`recycle` 与 `cancel` 以操作者的词结掉任务：client 请插件收尾并关掉宿主资源，插件的报告落地即结账。插件始终不回答时，client 在三个心跳间隔（`CONTROL_SETTLE_BOUND`）之后按操作者的词自行结账，`cancel` 落 `cancelled`、`recycle` 落 `failed`，并把仍握在手里的投递行以 `operator cancel` / `operator recycle` 拒收。
+
+超时结账只写第一个判定：任务已被别的门结定时它什么都不写、也不发布；store 拒写时该词按原时刻重新记账，下一拍重试。
 
 supervisor 角色的 control 动词需要 spec 授权。
 

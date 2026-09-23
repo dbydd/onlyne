@@ -3,7 +3,7 @@ use super::*;
 use super::projection::{note_verdict, sync_session};
 use super::retire::on_recycled;
 use super::settle::{SettleAuthority, on_out};
-use super::state::note_beat;
+use super::state::{ControlWord, note_beat};
 use super::transport::serves_session;
 
 /// Act on one control command that arrived as a delivery.
@@ -29,15 +29,17 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
             // completion that answers it travels the plugin's door carrying the
             // client's authority. The note goes on before the frame leaves: the
             // report and the retirement below race over the row, and the note is
-            // the half of that race this client decides.
-            state.owe_controlled_settle(task_id);
+            // the half of that race this client decides. A recycle prescribes the
+            // plugin no outcome, so the verdict the note stands for is the one a
+            // session that died holding a task leaves: `failed`.
+            state.owe_controlled_settle(task_id, ControlWord::Recycle, Instant::now());
             state.recycle_plugin(task_id, reason, None).await;
             on_recycled(state, task_id, onlyne_session::CloseReason::Operator)?;
         }
         ControlOp::Cancel { reason, .. } => {
             // The same note for the same reason: a cancel ends the task on the
             // operator's word, and the plugin's `cancelled` report answers it.
-            state.owe_controlled_settle(task_id);
+            state.owe_controlled_settle(task_id, ControlWord::Cancel, Instant::now());
             state
                 .recycle_plugin(task_id, reason, Some(Outcome::Cancelled))
                 .await;
