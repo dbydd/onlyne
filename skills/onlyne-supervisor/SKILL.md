@@ -138,11 +138,15 @@ another session id and bumps its generation, and `repair inspect` prints the ses
 projection with every fault recorded against the task. Task control runs beside repair:
 `onlyne control recycle|probe|snapshot|cancel|focus --task <id> --from <role> --force
 --yes-i-am-supervisor-not-other-role`, where `recycle` and `cancel` carry a required `--reason`
-and `focus` brings the task's live session to the front of its host. A client holding `max_sessions` sessions pulls with `control_only`, so those
+and the other three take none — a `--reason` on `probe` is refused by the parser. `focus` brings
+the task's live session to the front of its host. A client holding `max_sessions` sessions pulls with `control_only`, so those
 commands reach the session that holds the last slot; work for that role waits until a slot
 frees. `DeliveryState::Exhausted` is terminal — retry only after an explicit decision here.
 A command on this surface speaks as a role, so `control` and the four message verbs name it with
 `--from <role>`; the reads resolve everything from the row they name and take no such flag.
+`control` needs no `--to` on this surface: the task's own session row names the role the op has to
+reach, so the CLI reads that row and addresses the op there, and an explicit `--to <role>` still
+wins. A task no session owns is refused before anything is written, and the refusal names `--to`.
 
 Heartbeat faults carry the liveness verdict, and the row keeps its state through them.
 `heartbeat_missing` says the pane's beats stopped and the role link stayed up: the row is

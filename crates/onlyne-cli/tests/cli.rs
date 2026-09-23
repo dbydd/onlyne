@@ -1919,6 +1919,179 @@ fn control_focus_sends_the_named_op() {
     assert_eq!(request["args"]["op"]["task_id"], CONTROL_TASK);
 }
 
+/// An admin `control` with no `--to` reads the task's session row and addresses
+/// the op to the role that row names, which is the role the server itself reads
+/// when it resolves a control op's owner.
+#[test]
+fn control_without_to_addresses_the_role_that_owns_the_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("srv");
+    let listener = admin_listener(&root);
+    let server = serve_sequence(
+        listener,
+        vec![
+            serde_json::json!({
+                "f": "res",
+                "id": "r1",
+                "ok": true,
+                "data": {
+                    "sessions": [{
+                        "task_id": CONTROL_TASK,
+                        "role": "scriber",
+                    }],
+                },
+            }),
+            serde_json::json!({"f": "res", "id": "r2", "ok": true, "data": {}}),
+        ],
+    );
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--server-root",
+            root.to_str().unwrap(),
+            "control",
+            "--force",
+            SUPERVISOR_FLAG,
+            "--from",
+            "_supervisor",
+            "--task",
+            CONTROL_TASK,
+            "cancel",
+            "--reason",
+            "operator close",
+        ])
+        .output()
+        .unwrap();
+    let frames = server.join().unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_OK),
+        "a control op addressed to the owner must be accepted: {}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        frames.len(),
+        2,
+        "one session read resolves the owner, then the control goes out"
+    );
+    assert_eq!(frames[0]["op"], "sessions");
+    assert_eq!(frames[0]["args"]["task_id"], CONTROL_TASK);
+    assert_eq!(frames[1]["op"], "control");
+    assert_eq!(frames[1]["args"]["to"], "scriber");
+    assert_eq!(
+        frames[1]["args"]["from"], "_supervisor",
+        "the sender stays the role the operator named"
+    );
+    assert_eq!(frames[1]["args"]["op"]["op"], "cancel");
+    assert_eq!(frames[1]["args"]["op"]["task_id"], CONTROL_TASK);
+}
+
+/// An explicit `--to` is the whole answer: the op is addressed where it says
+/// with no session read in front of it.
+#[test]
+fn control_with_an_explicit_to_wins_over_the_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("srv");
+    let listener = admin_listener(&root);
+    let server = serve_once(
+        listener,
+        serde_json::json!({"f": "res", "id": "r1", "ok": true, "data": {}}),
+    );
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--server-root",
+            root.to_str().unwrap(),
+            "control",
+            "--force",
+            SUPERVISOR_FLAG,
+            "--from",
+            "_supervisor",
+            "--to",
+            "scriber",
+            "--task",
+            CONTROL_TASK,
+            "cancel",
+            "--reason",
+            "operator close",
+        ])
+        .output()
+        .unwrap();
+    let request = server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the admin socket");
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_OK),
+        "an explicit --to must reach the socket: {}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        request["op"], "control",
+        "an explicit --to needs no session read, so the control is the only frame"
+    );
+    assert_eq!(request["args"]["to"], "scriber");
+}
+
+/// A task whose session row names no role has nobody to answer the op: the
+/// admin surface refuses after the read and before the control frame, naming
+/// the task and the flag that states the destination.
+#[test]
+fn control_without_a_session_refuses_and_names_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("srv");
+    let listener = admin_listener(&root);
+    let server = serve_once(
+        listener,
+        serde_json::json!({"f": "res", "id": "r1", "ok": true, "data": {"sessions": []}}),
+    );
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--server-root",
+            root.to_str().unwrap(),
+            "control",
+            "--force",
+            SUPERVISOR_FLAG,
+            "--from",
+            "_supervisor",
+            "--task",
+            CONTROL_TASK,
+            "cancel",
+            "--reason",
+            "operator close",
+        ])
+        .output()
+        .unwrap();
+    let request = server
+        .join()
+        .unwrap()
+        .expect("the CLI must reach the admin socket");
+
+    assert_eq!(output.status.code(), Some(EXIT_REFUSAL));
+    assert_eq!(
+        stderr_of(&output),
+        format!(
+            "onlyne: no session owns task {CONTROL_TASK}; pass --to <role> to say where the \
+             control goes\n"
+        )
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a refusal prints a hint, not an answer"
+    );
+    assert_eq!(
+        request["op"], "sessions",
+        "the refusal leaves the session read as the only frame written"
+    );
+}
+
 /// Operators type the task on the verb's tail: `control cancel --task X`. clap
 /// carries `--task`, `--from`, and the supervisor pair as globals, so both
 /// readings parse, and the pair reads on either side of the op token.

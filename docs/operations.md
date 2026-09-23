@@ -316,6 +316,10 @@ supervisor 角色使用 control 动词执行恢复动作。
 
 `onlyne control --task <id> recycle --reason <text> --force --yes-i-am-supervisor-not-other-role` 与 `onlyne control --task <id> cancel --reason <text> --force --yes-i-am-supervisor-not-other-role` 的 reason 是必填。
 
+admin 面的 `onlyne control` 不要求 `--to`：缺省时 CLI 先读该任务的 session 行，把控制送到属主 role 那里；显式给出 `--to <role>` 时直接用它，不再多读一帧。
+
+任务没有任何 session 属于某个 role 时，命令在写任何东西之前拒收，退出码 4，stderr 逐字 `onlyne: no session owns task <id>; pass --to <role> to say where the control goes`。
+
 supervisor 角色的 control 动词需要 spec 授权。
 
 spec 未声明 `admin = true` 的角色时，admin 身份不存在。

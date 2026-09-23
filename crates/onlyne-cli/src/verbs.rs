@@ -5,7 +5,8 @@ use onlyne_proto::envelope::CAUSALITY_LABEL_MAX_ENTRIES;
 use onlyne_proto::{
     AckArgs as ProtoAckArgs, AdminControl, AdminOp, AdminSend, Body, Causality, ClientOp,
     ControlArgs, ControlOp, Envelope, ErrorCode, Frame, ImagePart, LedgerQuery, MsgKind, Outcome,
-    Principal, QueryRolesArgs, Report, new_envelope, new_id, new_task_id,
+    Principal, QueryRolesArgs, QuerySessionsArgs, Report, ResBody, new_envelope, new_id,
+    new_task_id,
 };
 use std::collections::BTreeMap;
 use std::io::{self, Read};
@@ -15,7 +16,7 @@ use crate::flags::GlobalFlags;
 use crate::ledger;
 use crate::media;
 use crate::render;
-use crate::runtime::{self, EXIT_ANSWER_FAILED, EXIT_NO_SOCKET, EXIT_OK};
+use crate::runtime::{self, EXIT_ANSWER_FAILED, EXIT_NO_SOCKET, EXIT_OK, EXIT_REFUSAL};
 use crate::socket::{SocketTarget, Surface};
 use crate::wire::{self, ExchangeError, Outbound};
 
@@ -383,7 +384,16 @@ async fn run_one(flags: &GlobalFlags, target: &SocketTarget, request: &Outbound)
         Ok(stream) => stream,
         Err(code) => return code,
     };
-    match wire::request_res(&mut stream, request, flags.timeout_ms).await {
+    run_on(&mut stream, flags, request).await
+}
+
+/// Send one request on an open stream, print the answer, and return its exit code.
+async fn run_on(
+    stream: &mut onlyne_layout::LocalStream,
+    flags: &GlobalFlags,
+    request: &Outbound,
+) -> i32 {
+    match wire::request_res(stream, request, flags.timeout_ms).await {
         Ok(body) => runtime::finish(&body, flags),
         Err(error) => runtime::exchange_error(&error, flags.timeout_ms),
     }
@@ -863,23 +873,101 @@ async fn control_inner(
     {
         return runtime::usage_error(format!("onlyne: --reason is required for {op_name}"));
     }
-    let request = match target.surface {
+    match target.surface {
         Surface::Client => {
-            Outbound::client(new_id(), ClientOp::Control(ControlArgs { to: args.to, op }))
+            let request =
+                Outbound::client(new_id(), ClientOp::Control(ControlArgs { to: args.to, op }));
+            run_one(flags, target, &request).await
         }
         Surface::Admin => match sender.from.clone() {
-            Some(from) => Outbound::admin(
-                new_id(),
-                AdminOp::Control(AdminControl {
-                    from,
-                    op,
-                    to: args.to,
-                }),
-            ),
-            None => return runtime::usage_error("onlyne: --from is required on the admin surface"),
+            Some(from) => admin_control(flags, target, from, args.to, op).await,
+            None => runtime::usage_error("onlyne: --from is required on the admin surface"),
+        },
+    }
+}
+
+/// Drive one control op on the admin surface.
+///
+/// Without `--to` the op goes to the role that owns the task, read out of the
+/// task's own session row before anything is written: the row already names the
+/// role a control op has to reach, so no caller has to state it twice. A task
+/// whose session row names no role has nobody to answer the op, and the verb
+/// refuses with nothing written.
+async fn admin_control(
+    flags: &GlobalFlags,
+    target: &SocketTarget,
+    from: String,
+    to: Option<String>,
+    op: ControlOp,
+) -> i32 {
+    let mut stream = match runtime::open(flags, target).await {
+        Ok(stream) => stream,
+        Err(code) => return code,
+    };
+    let to = match to {
+        // An explicit `--to` is the whole answer, so nothing is read to reach it.
+        Some(to) => to,
+        None => match owning_role(&mut stream, flags, op.task_id()).await {
+            Ok(Some(role)) => role,
+            Ok(None) => {
+                eprintln!(
+                    "onlyne: no session owns task {}; pass --to <role> to say where the control goes",
+                    op.task_id()
+                );
+                return EXIT_REFUSAL;
+            }
+            Err(code) => return code,
         },
     };
-    run_one(flags, target, &request).await
+    let request = Outbound::admin(
+        new_id(),
+        AdminOp::Control(AdminControl {
+            from,
+            op,
+            to: Some(to),
+        }),
+    );
+    run_on(&mut stream, flags, &request).await
+}
+
+/// The role that owns `task`, read through `query_sessions`.
+///
+/// The read is the one `onlyne sessions --task` answers with, and the column is
+/// the one the server reads when it resolves a control op's owner. `Ok(None)` is
+/// an answer that names no owner: no session row for the task, or a row carrying
+/// no role. `Err` carries the exit code of an exchange that has already reported
+/// itself.
+async fn owning_role(
+    stream: &mut onlyne_layout::LocalStream,
+    flags: &GlobalFlags,
+    task: &str,
+) -> Result<Option<String>, i32> {
+    let filter = QuerySessionsArgs {
+        task_id: Some(task.to_string()),
+        limit: 1,
+        ..QuerySessionsArgs::default()
+    };
+    let request = Outbound::admin(new_id(), AdminOp::Sessions(filter));
+    let body = match wire::request_res(stream, &request, flags.timeout_ms).await {
+        Ok(body) => body,
+        Err(error) => return Err(runtime::exchange_error(&error, flags.timeout_ms)),
+    };
+    if !body.ok {
+        return Err(runtime::finish(&body, flags));
+    }
+    Ok(owner_of(&body))
+}
+
+/// The owning role out of a `query_sessions` answer.
+fn owner_of(body: &ResBody) -> Option<String> {
+    body.data
+        .as_ref()?
+        .get("sessions")?
+        .as_array()?
+        .first()?
+        .get("role")?
+        .as_str()
+        .map(str::to_string)
 }
 
 pub fn ack(flags: &GlobalFlags, args: AckArgs) -> i32 {

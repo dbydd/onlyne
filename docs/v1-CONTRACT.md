@@ -63,8 +63,8 @@ onlyne complete --task <id> [--outcome done|failed|cancelled] [--head-from local
 onlyne handoff --to <role> --task <id> --text ... --force --yes-i-am-supervisor-not-other-role
 onlyne ack --msg-id <id> [--op-id <id>] --reason <text> --force --yes-i-am-supervisor-not-other-role     # role surface only
 onlyne reject --msg-id <id> [--op-id <id>] --reason <text> --force --yes-i-am-supervisor-not-other-role  # role surface only
-onlyne control --task <id> probe|snapshot --force --yes-i-am-supervisor-not-other-role
-onlyne control --task <id> recycle|cancel --reason <text> --force --yes-i-am-supervisor-not-other-role
+onlyne control --task <id> [--to <role>] probe|snapshot --force --yes-i-am-supervisor-not-other-role
+onlyne control --task <id> [--to <role>] recycle|cancel --reason <text> --force --yes-i-am-supervisor-not-other-role
 onlyne gateway run <telegram|feishu|qqbot|weixin> --server-root <dir> [--token ...]
 onlyne gateway list|status|auth <platform> [...]
 onlyne who|ping|version|completions <bash|elvish|fish|powershell|zsh>

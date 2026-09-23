@@ -280,7 +280,9 @@ struct ControlCmd {
     /// is checked at runtime, where a missing one still exits 2.
     #[arg(long, global = true)]
     task: Option<String>,
-    /// Role the control op targets; omitted means the role that owns the task.
+    /// Role the control op targets. Optional on the admin surface: omitting it
+    /// addresses the role that owns the task, which is the role the task's
+    /// session row names.
     #[arg(long, global = true)]
     to: Option<String>,
     #[command(flatten)]
