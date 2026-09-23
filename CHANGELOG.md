@@ -318,6 +318,38 @@ where it is read.
   `heartbeat_missing` fault beside a `stale working sessions observed` line on every scan. The
   reconnect sweep fed the agent's exit for the same ending; the control-close path feeds it now,
   before the slot leaves the map.
+- cli: an admin control reaches the role that owns the task. `onlyne control` built its
+  `AdminControl` with `to: args.to`, so a call without `--to` addressed the op to its own sender;
+  a supervisor role runs no client process, so six live runs left `from _supervisor → to
+  _supervisor` rows `queued` with no `control command applied` anywhere, while the same command
+  with an explicit `--to` applied in under a second. Without `--to` the verb now reads the task's
+  own session row — the read `onlyne sessions --task` answers with — and addresses the op to the
+  role that row names; an explicit `--to` short-circuits before that read. A task no session owns
+  is refused before anything is written: exit 4, `onlyne: no session owns task <id>; pass --to
+  <role> to say where the control goes`.
+- client: a re-dispatched session opens a generation of its own. A session staged for a task this
+  role served before is born onto the row the dead process left, which carries the old
+  `(generation, seq)` watermark; a re-spawned plugin's sequence starts at its own base again, so
+  the beat carrying the new turn was dropped as `StaleOrDuplicateSeq`, the phase stayed `ready`,
+  and the settle door refused the completion of work that had happened. A live run showed it whole:
+  `phase=ready`, `resource_attach` refused `UndefinedTransition` at the row's own generation, the
+  session retired past its reconnect window, and the task landed `rejected: session_dead` with its
+  output on disk. `dispatch` rebases that row onto a new generation before the feeds land on it,
+  through the same `rebase_generation` the returning-reporter path already used. The settle guard
+  stays as it is, and a real completion passes it on its own once the beat reaches the row.
+- client: a control word no plugin answered still settles its task. `recycle` and `cancel` note the
+  task, ask the plugin to end, and close the host resource; the plugin's own report is what settles
+  the task, so a session young enough that no report came — a live run put a cancel eight seconds
+  into a session — left the task `in_flight` beside a stale mirror, a row the ghost sweep refuses by
+  design. The note now carries the operator's word and the instant it was given, and a tick step
+  settles an unanswered word past three heartbeat intervals: the verdict goes through the task's own
+  record, which keeps the first verdict it was handed, the delivery row the client still holds is
+  refused with `operator cancel` or `operator recycle`, and the settlement publishes. A store that
+  refuses the verdict re-owes the note at its original instant.
+- `skills/onlyne-supervisor/SKILL.md`: the `control` example stopped at `--task <id>`, and the admin
+  surface requires `--from <role>`, so a reader copying it hit `onlyne: --from is required on the
+  admin surface`. The form names the flag now, one sentence says which verbs take it and that the
+  reads take none, and the `--to` rule and the unanswered-word fallback stand beside it.
 - session: the reducer's `AdoptNewGeneration` and `Supersede` have a producer, and the
   rebase they exist for is reachable from a re-mount.
 - store: both listing reads stop spilling a sorter into a temporary file. Their
