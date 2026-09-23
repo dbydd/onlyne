@@ -161,25 +161,28 @@ Cases 1-7, 9, 12, and 14-17 run on `ONLYNE_BACKEND=fake`, and cases 18 and 19 na
 `backend = "acp"` with that scripted agent. Case 8 of the plan is the static gate above, which
 is why no script carries its number.
 
-Measured on 2026-09-23 from the repository root, `BIN_DIR=target/release` with
-`ONLYNE_BIN_DIR=target/release` (`lib.sh` derives `BIN_DIR` from `ONLYNE_BIN_DIR`, and
-`target/debug` is its default), on release binaries built from `9b5c602` earlier that day, one
+Measured on 2026-09-23 from the repository root with `ONLYNE_BIN_DIR=target/release`
+(`lib.sh` derives `BIN_DIR` from `ONLYNE_BIN_DIR`, and `target/debug` is its default), one
 script after another:
 
 ```text
 local-task 0            acl-reject 0          idempotency 0       reconnect-requeue 0
 two-cluster 0           gateway-mount 0       legacy-layout 0     generate-relocate 0
 heartbeat-watch 0       requeue-claim 0       exec-headless 0     socket-path-length 0
-acp-session 0           orca-live 0           pi-live 1           running-lights 1
-acp-payload-v2 1        herdr-live 0 (SKIP)
+acp-session 0           orca-live 0           pi-live 1           running-lights 0
+acp-payload-v2 0        herdr-live 0 (SKIP)
 ```
 
-Fourteen exited 0. Three exited 1 on a red assertion, and a second run of each reproduced its
-code: `acp-payload-v2` (a child task settled `rejected`), `running-lights` (the chain stopped at
-six of its twelve `acked` task rows), and `pi-live` (the session stayed `working` after its task
-settled `done`). `herdr-live` printed `SKIP herdr-live: no reachable herdr session onlyne-test`,
-its default session name on this host, and exited 0. `orca-live` ran against the live Orca app
-and exited 0.
+Sixteen exited 0. `pi-live` exited 1 on a red assertion: its task settles `acked` while its
+session projects `working` for the rest of its life, because a completion's settle write loses
+the session watermark to a plugin beat that landed between its read and its write (`session
+write lost to a newer watermark`, `crates/onlyne-session/src/reconcile/bridge.rs`), and the
+public lifecycle needs `delivery == Accepted` to read `exited`. `running-lights` and
+`acp-payload-v2` were red earlier the same day for one fixture assumption — a single
+`onlyne-agent-fake` serving a role's second session — and both mount one agent per session now
+(13 s and 5 s on this tree). `herdr-live` printed `SKIP herdr-live: no reachable herdr session
+onlyne-test`, its default session name on this host, and exited 0. `orca-live` ran against the
+live Orca app and exited 0.
 
 A bug fix needs its reproduction as an e2e or a table test:
 red before the fix, green after. The live ring demo

@@ -11,6 +11,13 @@ set -euo pipefail
 # The ACP fixture is gated so the case can write the report while the turn is
 # provably still open. The report file is the only settlement input; the agent
 # never calls an `onlyne` command to close its own task.
+#
+# One `onlyne-agent-fake` process serves one session: the client hands a
+# mounting plugin the next session it stages, and that connection serves nothing
+# after it. The valid report routes two child tasks to the worker, so the
+# worker's client stages two sessions and needs one agent process for each — the
+# second mounts once the first child has settled and the agent that served it has
+# taken its session off the client's one parked slot.
 SRC=$(pwd)
 tmp=$(mktemp -d /tmp/onlyne-acp-payload-v2.XXXXXX)
 pids=""
@@ -119,12 +126,19 @@ fi
 env ONLYNE_BACKEND=acp "$CLIENT" run --workspace "$planner_ws" >"$tmp/planner-client.log" 2>&1 &
 planner_client_pid=$!
 track "$planner_client_pid"
+# `mount_worker` starts one agent process for one of the worker's sessions. A
+# second unnamed mount replaces the one parked slot a client holds, so a later
+# call may run only after the agent before it has taken the session it came for.
+mount_worker() {
+  "$FAKE" --workspace "$worker_ws" --script "$SCRIPT" >>"$tmp/worker-fake.log" 2>&1 &
+  worker_fake_pid=$!
+  track "$worker_fake_pid"
+}
+
 env ONLYNE_BACKEND=fake "$CLIENT" run --workspace "$worker_ws" >"$tmp/worker-client.log" 2>&1 &
 worker_client_pid=$!
 track "$worker_client_pid"
-"$FAKE" --workspace "$worker_ws" --script "$SCRIPT" >"$tmp/worker-fake.log" 2>&1 &
-worker_fake_pid=$!
-track "$worker_fake_pid"
+mount_worker
 
 online=0
 for _ in $(seq 1 200); do
@@ -353,6 +367,31 @@ for row in rows:
 PY
 }
 
+# `wait_first_child_acked <parent>` waits for one child of the report to reach
+# `acked`. Both children are delivered together, so the first one to settle is
+# the proof that the worker's first agent took the session it mounted for and the
+# client's parked slot is free for the second agent.
+wait_first_child_acked() {
+  local parent=$1 attempt
+  for attempt in $(seq 1 240); do
+    "$ONLYNE" --server-root "$tmp/server" ledger > "$tmp/first-child.json" 2>/dev/null || true
+    if data_rows "$tmp/first-child.json" | python3 -c '
+import json, sys
+rows = [json.loads(line) for line in sys.stdin]
+sys.exit(0 if any(row.get("kind") == "task" and row.get("parent_task") == sys.argv[1] and row.get("state") == "acked" for row in rows) else 1)
+' "$parent"; then
+      return 0
+    fi
+    if rows_any "$tmp/first-child.json" reason session_dead; then
+      fail "a child session was refused session_dead instead of being served" \
+        "$(cat "$tmp/first-child.json" 2>/dev/null) worker=$(cat "$tmp/worker-client.log" 2>/dev/null)"
+    fi
+    sleep 0.5
+  done
+  fail "the report's first child never settled, so the worker's second agent has no session to take" \
+    "children=$(cat "$tmp/first-child.json" 2>/dev/null) worker=$(cat "$tmp/worker-client.log" 2>/dev/null)"
+}
+
 validate_no_children() {
   local file=$1 parent=$2
   python3 - "$file" "$parent" <<'PY'
@@ -414,6 +453,13 @@ wait_root_acked "$TASK" "$HEAD"
 grep -Fq 'payload skipped: caller owns the report file' "$trace" \
   || fail "the ACP fixture must preserve a caller-owned report" "$(cat "$trace" 2>/dev/null)"
 wait_session_outcome "$TASK" done
+
+# The second child's session is the worker's second one, and it needs an agent
+# process of its own: the one parked slot a client holds is the first agent's
+# until that agent has taken its session, which is what the first child settling
+# shows.
+wait_first_child_acked "$TASK"
+mount_worker
 
 children_ok=false
 children_report=""

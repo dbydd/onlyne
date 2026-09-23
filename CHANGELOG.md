@@ -490,15 +490,25 @@ with them.
   `crates/onlyne-client`, `crates/onlyne-session` or the plugin names either key, so the
   budgets describe a promise this tree does not keep. Removing the table is a breaking
   config change and stays with the operator.
-- Two of the eighteen case scripts fail for one measured reason: `running-lights` and
-  `acp-payload-v2` mount one `onlyne-agent-fake` per role and then hand that role two tasks,
-  and one agent process serves one session, so the second task's session waits out
-  `[client] reconnect_grace_secs` and the sweep retires it — the ring reads `acked=6` of its
-  twelve rows, and the payload case leaves a child row refused `session_dead` (its kept
-  scratch directory carries the logs).
-- `crates/onlyne-testkit/e2e/pi-live.sh` (case 11) fails on a live `pi` host: its task
-  settles `acked` and its session stays `working`, with `a plugin mounted a session this
-  client already serves; it is held read-only` in the client's log.
+- `crates/onlyne-testkit/e2e/running-lights.sh` (case 12) and `acp-payload-v2.sh` (case 19)
+  mounted one `onlyne-agent-fake` per role and then handed that role two tasks, and one agent
+  process serves one session: the second task's session waited out `[client]
+  reconnect_grace_secs` and the sweep retired it, which read `acked=6` of the ring's twelve
+  rows and left a child row refused `session_dead`. Both now mount one agent per session,
+  waiting on the ledger's own settle for a role's next hop and on the first child's ack for the
+  worker's second agent, and both pass (13 s and 5 s).
+- `crates/onlyne-testkit/e2e/pi-live.sh` (case 11) fails on a live `pi` host, and the
+  mechanism is a client-side race. A local transition's version is allocated one past the
+  stored watermark (`next_version`, `crates/onlyne-session/src/reconcile/bridge.rs:254`), and
+  that write is refused when a plugin beat lands between the read and the write:
+  `record_verdict` sees `upsert_session` answer false, logs `session write lost to a newer
+  watermark; left the row alone`, and returns. A completion's settle is one such write, and
+  the tuple it would have moved is the one the public lifecycle reads (`task_state == Done
+  && delivery == Accepted`, `crates/onlyne-session/src/lifecycle/project.rs:33`), so the
+  session of a task whose ledger row reads `acked` projects `working` for the rest of its
+  life. Measured live: `agent idle, delivery none, outcome done, lifecycle working, seq
+  1004`, after the settle's write at `stored + 1` lost to a beat carrying the reporter's own
+  higher sequence.
 
 ## [1.3.1] - 2026-09-20
 

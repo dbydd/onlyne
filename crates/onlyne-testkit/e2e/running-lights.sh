@@ -9,7 +9,9 @@ set -euo pipefail
 # budget (`max_hop`), keeps the task, and answers `done`.
 #
 # Nothing here is a model, a network peer, or the Orca app: one server, six
-# fake-backend clients, and six scripted agents, all on the loopback socket.
+# fake-backend clients, and one scripted agent process per session — twelve over
+# the run, because the token travels the ring twice and one process serves one
+# session — all on the loopback socket.
 SRC=$(pwd)
 tmp=$(mktemp -d)
 pids=""
@@ -79,12 +81,37 @@ for i in 1 2 3 4 5 6; do
   "$CLIENT" run --workspace "$tmp/light$i" >"$tmp/light$i-client.log" 2>&1 &
   track $!
 done
-for i in 1 2 3 4 5 6; do
+
+# One agent process serves one session: the client binds a mounting plugin to the
+# one session it hands it — the process parks naming no session, takes this
+# role's next staged session, and that connection serves nothing after it. The
+# token walks the ring twice, so every role carries two hops over the run and
+# needs one agent process for each of them. A second unnamed mount replaces the
+# one parked slot a client holds, so a role's next agent may start only after the
+# one before it took the session it came for: the role's hop reading `acked` in
+# the ledger is that proof.
+mount_light() {
+  local i=$1
   # `{next_role}` is the one value the script cannot name itself, so it arrives
   # in the spawn environment: each agent knows the ring only through it.
   ONLYNE_NEXT_ROLE="light$(ring_next "$i")" \
-    "$FAKE" --workspace "$tmp/light$i" --script "$SCRIPT" >"$tmp/light$i-fake.log" 2>&1 &
+    "$FAKE" --workspace "$tmp/light$i" --script "$SCRIPT" >>"$tmp/light$i-fake.log" 2>&1 &
   track $!
+}
+
+# `hop_acked <hop>` prints 1 while the ledger's task row for that hop reads
+# `acked`, and 0 otherwise, leaving the ledger it read in `$tmp/hop.json`. The
+# ring delivers one hop at a time, so this is how the second lap's agents keep
+# step with it rather than with a clock.
+hop_acked() {
+  "$ONLYNE" --server-root "$tmp/server" ledger > "$tmp/hop.json" 2>/dev/null || true
+  json_field "$tmp/hop.json" x \
+    "int(any(r.get('kind') == 'task' and r.get('hop') == $1 and r.get('state') == 'acked' for r in json.load(sys.stdin)['data']['ledger']))" \
+    2>/dev/null || true
+}
+
+for i in 1 2 3 4 5 6; do
+  mount_light "$i"
 done
 
 online=0
@@ -125,6 +152,34 @@ send_out=$(ONLYNE_ROLE=light6 "$ONLYNE" --workspace "$tmp/light6" send --to ligh
 printf '%s\n' "$send_out" > "$tmp/send.json"
 [ "$(json_field "$tmp/send.json" '.data.state' 'json.load(sys.stdin)["data"]["state"]')" = "in_flight" ] || fail "the first task must start in_flight" "$send_out"
 first_task=$(json_field "$tmp/send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
+
+# The token's second lap — hops 6..11 — is served by a second set of agents: the
+# one each role's first hop claimed has finished with its session, so the role's
+# client can hand its next session to a new one. The mount waits for the role's
+# first hop to read `acked`, the moment that client's parked slot is free again;
+# starting every second agent on a timer instead would risk mounting into an
+# occupied slot, and a session left without its agent is refused `session_dead`
+# once the reconnect grace expires rather than waited for.
+for hop in 0 1 2 3 4 5; do
+  settled=false
+  # The wait outlasts `[client] reconnect_grace_secs` (60 s by default), so a
+  # session the sweep refused is reported as the refusal it earned rather than
+  # as a silence: eight hundred tenths of a second.
+  for _ in $(seq 1 800); do
+    if [ "$(hop_acked "$hop")" = "1" ]; then
+      settled=true
+      break
+    fi
+    if rows_any "$tmp/hop.json" reason session_dead; then
+      fail "hop $hop's session was refused session_dead instead of being served" \
+        "$(cat "$tmp/hop.json" 2>/dev/null)"
+    fi
+    sleep 0.1
+  done
+  [ "$settled" = true ] || fail "hop $hop never settled, so light$((hop + 1)) has no agent for its second hop" \
+    "$(cat "$tmp/hop.json" 2>/dev/null)"
+  mount_light $((hop + 1))
+done
 
 # --- two frames of the moving light -----------------------------------------
 # The scripted frame the case reads is page 2: its graph is a table of
