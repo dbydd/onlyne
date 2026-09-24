@@ -3,8 +3,9 @@
 ## 1.4.1 release index (English)
 
 **Release:** 1.4.1, dated 2026-09-24. Nineteen workspace crates move to 1.4.1, and
-`pi-onlyne` is on npm at 1.2.1. The registry upload runs from tag `v1.4.1`; its receipt
-is recorded in the commit that follows this section.
+`pi-onlyne` is on npm at 1.2.1. Tag `v1.4.1` carries the first GitHub binary release:
+five platform archives with their checksums, plus `packaging/homebrew/onlyne.rb` rendered
+from them and committed to `main`. The crates.io upload for 1.4.1 has not run.
 
 **Operator-visible changes:**
 
@@ -30,8 +31,9 @@ client with no migration.
 ## 1.4.1 版本索引（中文）
 
 **发布信息：** 1.4.1 发布于 2026-09-24。工作区全部十九个 crate 升到 1.4.1，`pi-onlyne`
-在 npm 上的版本为 1.2.1。registry 上传从 tag `v1.4.1` 执行，其回执记录在本节之后的那个
-提交里。
+在 npm 上的版本为 1.2.1。tag `v1.4.1` 承载第一个 GitHub 二进制发行版：五个平台的归档及
+其 checksum，以及据此渲染并提交到 `main` 的 `packaging/homebrew/onlyne.rb`。1.4.1 的
+crates.io 上传尚未执行。
 
 **操作员可见的变化：**
 

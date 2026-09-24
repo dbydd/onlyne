@@ -167,6 +167,9 @@ jobs:
           else
             gh release create "$TAG" dist/* --title "$TAG" --generate-notes
           fi
+          # A tag that was deleted and pushed again leaves its release a draft, and a
+          # draft serves no asset URL. The step ends on a published release either way.
+          gh release edit "$TAG" --draft=false
       - name: notes
         run: |
           {

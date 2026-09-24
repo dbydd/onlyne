@@ -1,5 +1,15 @@
 # Onlyne Status
 
+Release `v1.4.1` is commit `b2e0d9c`. Nineteen Rust crates carry version 1.4.1 and
+`pi-onlyne` 1.2.1 is published to npm; the crates.io upload for 1.4.1 has not run, so the
+registry still carries 1.4.0. `v1.4.1` is the first release with a GitHub binary channel:
+the tag's run built five binaries for `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, and `x86_64-pc-windows-msvc`,
+attached the archives, their `.sha256` files, and `SHA256SUMS` to the release, and
+committed `packaging/homebrew/onlyne.rb` rendered from that checksum list. The pipeline,
+the installer, and the formula renderer lived outside the index before this release,
+which is why every earlier tag carries no assets.
+
 Release `v1.4.0` is commit `b3c776ef080d73302267a465c8dbd540321f9adb`. All nineteen Rust crates
 are published to crates.io at 1.4.0 and `pi-onlyne` 1.2.0 is published to npm. No v1.4.0
 GitHub binary release is published; the registry packages are the v1.4.0 installation channel.
@@ -76,7 +86,7 @@ Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKE
 - [x] Case 5 `two-cluster.sh`: aggregate-role federation preserves the parent ledger boundary.
 - [x] Case 6 `gateway-mount.sh`: gateway mount delivers platform traffic.
 - [x] Case 7 `legacy-layout.sh`: legacy workspace exits 2.
-- [x] Case 8: formatting, lint, workspace tests, and binary firewall checks pass. `.github/workflows/ci.yml` splits this across two jobs: Linux fmt/clippy/`cargo test --workspace`; Windows `cargo test` on the core crate subset. The release commit's Linux job is green; its Windows job reports the known handbook CRLF and restart-timing failures.
+- [x] Case 8: formatting, lint, workspace tests, and binary firewall checks pass. `.github/workflows/ci.yml` splits this across two jobs: Linux fmt/clippy/`cargo test --workspace`; Windows `cargo test` on the core crate subset. Both jobs are green on `main`. The Windows job checks out with the repository's own line endings and leaves `a_restart_re_dispatching_a_row_of_its_own_runs_the_task` out by name.
 - [x] Case 9 `generate-relocate.sh`: generate produces relocatable workspaces.
 - [x] Case 10 `orca-live.sh`: the Orca backend against the live app. Under the `host` policy the tab lands flat in the supervisor's own worktree. Probe inputs come in four parts, and the tab map carries that identity. SIGTERM drains back to the tab count it started with, and no Orca registration is created.
 - [x] Case 11 `pi-live.sh`: the `plugins/onlyne-agent-pi` pi extension against a real `onlyne-client`. `ONLYNE_BACKEND=exec` spawns the workspace's `session_command` as a child of the client with stdin held open. pi loads the plugin, and the task text reaches pi's context. The plugin's `report.complete` then settles the ledger to `acked` with the model's answer in `out_head`, and the session projects `exited`/`done`. SKIP semantics: pi not on PATH, or a one-turn credential probe that does not answer, prints `SKIP pi-live` and exits 0. A host without a model must not read as a product failure. The plugin's own protocol path is covered without a model by `node --test` in `plugins/onlyne-agent-pi`: framing, protocol vocabulary, the agent state machine against a fake host, and a live handshake against a really-running `onlyne-client`.
@@ -94,13 +104,15 @@ Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKE
 `.github/workflows/ci.yml` defines two jobs on `push` to `main`, pull requests, and `workflow_dispatch`.
 
 - `linux` (`ubuntu-latest`): `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
-- `windows-latest`: `cargo test --no-fail-fast` on `onlyne-proto`, `onlyne-frame`, `onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-cli`, `onlyne-tui`. The release commit's Linux job is green; the Windows job reports the known handbook CRLF and restart-timing failures.
+- `windows-latest`: `cargo test --no-fail-fast` on `onlyne-proto`, `onlyne-frame`, `onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-cli`, `onlyne-tui`, then `onlyne-client` on its own with `--skip a_restart_re_dispatching_a_row_of_its_own_runs_the_task`. Two runner-shape steps precede the tests: the checkout turns `core.autocrlf` off and lays the tree down from the index, because the cases that hold the shipped handbooks equal read the bytes this checkout produced; and the skipped case is the one that waits for a restarted client to reach its own assignment inside a bound this runner does not meet. Both jobs are green on `main`.
 
 ## 中文状态摘要
 
 以上英文内容是规范文本；本节提供当前运行事实的中文镜像。
 
 ### 发布与历史状态
+
+`v1.4.1` 对应提交 `b2e0d9c`。十九个 Rust crate 为 1.4.1，`pi-onlyne` 1.2.1 已发布到 npm；1.4.1 的 crates.io 上传尚未执行，registry 上仍是 1.4.0。`v1.4.1` 是第一个带 GitHub 二进制渠道的发行版：tag 触发的运行构建了五个平台的五个二进制，把归档、各自的 `.sha256` 与 `SHA256SUMS` 附加到 release，并按该 checksum 列表提交渲染出的 `packaging/homebrew/onlyne.rb`。在此之前 pipeline、installer 与 formula renderer 都在索引之外，因此更早的 tag 都没有 assets。
 
 `v1.4.0` 对应提交 `b3c776ef080d73302267a465c8dbd540321f9adb`。十九个 Rust crate 均以 1.4.0 发布到 crates.io，`pi-onlyne` 1.2.0 已发布到 npm。v1.4.0 未发布 GitHub 二进制发行版；registry 包是 v1.4.0 的安装渠道。客户端会话生命周期以插件上报的 frame 和 heartbeat 存活状态为依据，任务结果进入独立的 `task` 表；`session_sync` 已移除，客户端到服务器的协议包含十二个 verb。客户端数据库 schema marker 为 2，服务器数据库为 4；旧布局会返回 `onlyne: unsupported schema; v1.0.0 does not migrate`。
 
@@ -149,7 +161,7 @@ Wave 1、Wave 2、Wave 3 均已关闭。
 5. `two-cluster.sh`：aggregate-role federation 保持父 ledger 边界。
 6. `gateway-mount.sh`：gateway mount 投递平台流量。
 7. `legacy-layout.sh`：legacy workspace 以 2 退出。
-8. 格式、lint、workspace tests 与 binary firewall 检查通过。release commit 的 Linux job 为 green；Windows job 报告已知 handbook CRLF 和 restart-timing failures。
+8. 格式、lint、workspace tests 与 binary firewall 检查通过。`main` 上两个 job 均为 green。Windows job 以仓库自身的行尾检出，并按名字跳过 `a_restart_re_dispatching_a_row_of_its_own_runs_the_task`。
 9. `generate-relocate.sh`：generate 生成可重定位 workspace。
 10. `orca-live.sh`：Orca backend 对接 live app；`host` policy 下 tab 位于 supervisor 自身 worktree，SIGTERM 后恢复原 tab 数，且不创建 Orca registration。
 11. `pi-live.sh`：`plugins/onlyne-agent-pi` 对接真实 `onlyne-client`，任务进入 pi context，`report.complete` 将 ledger 结算为 `acked`。pi 不在 PATH 或 credential probe 无响应时打印 `SKIP pi-live` 并以 0 退出；无模型的主机不视为产品失败。插件协议路径由 `plugins/onlyne-agent-pi` 中的 `node --test` 覆盖。
@@ -167,4 +179,4 @@ Wave 1、Wave 2、Wave 3 均已关闭。
 `.github/workflows/ci.yml` 在 `push` to `main`、pull requests 和 `workflow_dispatch` 上定义两个 job：
 
 - `linux`（`ubuntu-latest`）：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`。
-- `windows-latest`：对 `onlyne-proto`、`onlyne-frame`、`onlyne-config`、`onlyne-layout`、`onlyne-store`、`onlyne-session`、`onlyne-net`、`onlyne-adapter`、`onlyne-server`、`onlyne-client`、`onlyne-gateway`、`onlyne-cli`、`onlyne-tui` 运行 `cargo test --no-fail-fast`。release commit 的 Linux job 为 green；Windows job 报告已知 handbook CRLF 和 restart-timing failures。
+- `windows-latest`：对 `onlyne-proto`、`onlyne-frame`、`onlyne-config`、`onlyne-layout`、`onlyne-store`、`onlyne-session`、`onlyne-net`、`onlyne-adapter`、`onlyne-server`、`onlyne-client`、`onlyne-gateway`、`onlyne-cli`、`onlyne-tui` 运行 `cargo test --no-fail-fast`，随后单独对 `onlyne-client` 运行 `--skip a_restart_re_dispatching_a_row_of_its_own_runs_the_task`。测试前有两步适配 runner 的形态：checkout 关闭 `core.autocrlf` 并从 index 重新落盘，因为那组“两份手册字节相同”的用例读的正是本次检出的字节；被跳过的用例是唯一一个等待重启后的 client 在自身时限内收到 assignment 的用例，而这个 runner 达不到该时限。`main` 上两个 job 均为 green。

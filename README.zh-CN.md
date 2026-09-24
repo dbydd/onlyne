@@ -56,6 +56,20 @@ cargo install \
 
 `onlyne-agent-fake` 是额外的源码/testkit 命令，不包含在这五个从 registry 安装的命令中。下面的 fake 快速路径会构建它。
 
+### 发行版二进制
+
+每个 tag 还带一个 GitHub Release，其中包含五个平台的归档、各自的 checksum 和合并后的
+`SHA256SUMS`。安装脚本会挑出本机归档，先与该列表比对，再写入二进制：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dbydd/onlyne/main/packaging/install.sh | sh
+# PREFIX=~/.local sh packaging/install.sh v1.4.1
+```
+
+该发行版的 Homebrew formula 位于 [`packaging/homebrew/onlyne.rb`](packaging/homebrew/onlyne.rb)，
+由发布 pipeline 依据同一份 checksum 列表渲染。Homebrew 从 tap 读取 formula，因此
+`brew install` 通过一个把它放在 `Formula/onlyne.rb` 的 tap 来读取该文件。
+
 ### agent handbook
 
 安装的 `onlyne` 二进制携带与自身版本匹配的 handbook：
