@@ -18,8 +18,19 @@ set -euo pipefail
 # worker's client stages two sessions and needs one agent process for each — the
 # second mounts once the first child has settled and the agent that served it has
 # taken its session off the client's one parked slot.
+# The planner runs one ACP slot. Before the refused-verdict path in
+# `crates/onlyne-client/src/session/dispatch/settle.rs` returned a replay's task
+# binding, a blocked replay retained that slot. The live planner then pulled
+# control rows exclusively, and its completion receipt stayed in_flight; five
+# runs passed 3/5, including one 64-second pass. The client now returns the
+# binding and capacity for that replay, so the case remains at one slot. A queued
+# or in_flight receipt also describes an offline recipient with no consumer;
+# recipient liveness and load belong beside the receipt state.
 SRC=$(pwd)
 tmp=$(mktemp -d /tmp/onlyne-acp-payload-v2.XXXXXX)
+# Every run owns this scratch tree and a fresh loopback port. Cleanup drains the
+# clients and their ACP children before removing the tree; a later run receives
+# a separate path and reads only its own sockets, databases, gate, and trace.
 pids=""
 track() { pids="$pids $1"; }
 
@@ -67,6 +78,7 @@ SCRIPT="$SRC/crates/onlyne-testkit/scripts/echo-complete-generic.json"
 PLANNER=planner
 RECEIVER=worker
 DENIED_ROLE=ghost
+PLANNER_MAX_SESSIONS=1
 CALLER_MARKER='PAYLOAD-V2-CALLER-REPORT'
 HANDOFF_PREFIX='handoff: '
 
@@ -81,6 +93,7 @@ worker_ws="$tmp/worker"
 gate="$tmp/gate"
 trace="$tmp/agent.trace"
 db="$planner_ws/.onlyne/client.db"
+server_db="$tmp/server/.onlyne/state.db"
 
 # The fixture receives the report path from the client directive but yields file
 # ownership to this case. Without the argv marker it preserves payload-v1 and
@@ -88,8 +101,8 @@ db="$planner_ws/.onlyne/client.db"
 session_command=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' \
   python3 -u "$AGENT" --acp --gate "$gate" --trace "$trace" \
   --caller-report-marker "$CALLER_MARKER")
-planner_acl=$(printf 'allowed_senders = ["*", "%s"]\nallowed_targets = ["%s", "%s"]\nsession_command = %s\n' \
-  "$PLANNER" "$PLANNER" "$RECEIVER" "$session_command")
+planner_acl=$(printf 'max_sessions = %s\nallowed_senders = ["*", "%s"]\nallowed_targets = ["%s", "%s"]\nsession_command = %s\n' \
+  "$PLANNER_MAX_SESSIONS" "$PLANNER" "$PLANNER" "$RECEIVER" "$session_command")
 receiver_acl=$(printf 'allowed_senders = ["*", "%s"]\nallowed_targets = ["%s", "%s"]\n' \
   "$RECEIVER" "$RECEIVER" "$PLANNER")
 
@@ -152,22 +165,66 @@ for _ in $(seq 1 200); do
 done
 [ "$online" = 2 ] || fail "both payload roles must come online" "$(cat "$tmp/roles.json" 2>/dev/null)"
 
-prompt_count() {
-  local count
-  count=$(grep -c 'session/prompt id=' "$trace" 2>/dev/null || true)
-  printf '%s\n' "${count:-0}"
+client_session_state() {
+  local task=$1
+  python3 - "$db" "$task" <<'PY' 2>/dev/null || true
+import sqlite3
+import sys
+
+try:
+    row = sqlite3.connect(sys.argv[1]).execute(
+        "SELECT generation,agent_state,resource_state FROM sessions WHERE task_id=?",
+        (sys.argv[2],),
+    ).fetchone()
+    if row is not None:
+        print("generation=%s agent=%s resource=%s" % row)
+except Exception:
+    pass
+PY
 }
 
-wait_for_prompt() {
-  local before=$1 attempt
-  for attempt in $(seq 1 300); do
-    if [ "$(prompt_count)" -gt "$before" ]; then
+planner_attached_count() {
+  python3 - "$db" <<'PY' 2>/dev/null || true
+import sqlite3
+import sys
+
+try:
+    count = sqlite3.connect(sys.argv[1]).execute(
+        "SELECT count(*) FROM sessions WHERE backend='acp' AND resource_state='attached'"
+    ).fetchone()[0]
+    print(count)
+except Exception:
+    print(0)
+PY
+}
+
+# The client stores the ACP session reference after initialize/session-new and
+# before it releases the staged prompt. The count is the planner's live ACP
+# resource state, so this wait names the capacity the next send needs.
+wait_for_planner_capacity() {
+  local attached
+  for _ in $(seq 1 300); do
+    attached=$(planner_attached_count)
+    if [ "$attached" -lt "$PLANNER_MAX_SESSIONS" ]; then
       return 0
     fi
     sleep 0.1
   done
-  fail "the ACP fixture never received the gated prompt" \
-    "trace=$(cat "$trace" 2>/dev/null) planner=$(cat "$tmp/planner-client.log" 2>/dev/null)"
+  fail "the planner retained every ACP slot before the next dispatch" \
+    "attached=$attached max=$PLANNER_MAX_SESSIONS planner=$(cat "$tmp/planner-client.log" 2>/dev/null)"
+}
+
+wait_for_prompt() {
+  local task=$1 attempt state
+  for attempt in $(seq 1 300); do
+    if grep -Fq "/$task.md" "$trace" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  state=$(client_session_state "$task")
+  fail "the ACP fixture never received the gated prompt for its task" \
+    "task=$task session=${state:-missing} trace=$(cat "$trace" 2>/dev/null) planner=$(cat "$tmp/planner-client.log" 2>/dev/null)"
 }
 
 capture_acp_pid() {
@@ -202,8 +259,47 @@ PY
     fi
     sleep 0.1
   done
-  fail "the ACP child must store its session reference before the report lands" \
+  fail "the ACP child must store its session reference before its prompt is released" \
     "task=$task trace=$(cat "$trace" 2>/dev/null) planner=$(cat "$tmp/planner-client.log" 2>/dev/null)"
+}
+
+# A failed or cancelled report is eligible for at-least-once redelivery. This
+# wait accepts the replay's named second verdict or the original resource's
+# closed state when the requeued row lost the pull race. Both states leave the
+# shared ACP process ready for the next task.
+wait_for_replay_or_release() {
+  local task=$1 attempt requeued state
+  for attempt in $(seq 1 300); do
+    requeued=$(python3 - "$server_db" "$task" <<'PY' 2>/dev/null || true
+import sqlite3
+import sys
+
+try:
+    row = sqlite3.connect(sys.argv[1]).execute(
+        "SELECT requeued FROM ledger WHERE kind='task' AND task=?", (sys.argv[2],)
+    ).fetchone()
+    if row is not None:
+        print(row[0])
+except Exception:
+    pass
+PY
+)
+    if [ "$requeued" = 0 ]; then
+      return 0
+    fi
+    if [ "$requeued" = 1 ] && grep -Fq \
+      "a second verdict arrived for a settled task; the first one stands task=$task" \
+      "$tmp/planner-client.log" 2>/dev/null; then
+      return 0
+    fi
+    state=$(client_session_state "$task")
+    case "$state" in
+      *resource=closed*|*resource=detached*) return 0 ;;
+    esac
+    sleep 0.1
+  done
+  fail "the terminal report replay did not reach a client-visible handoff state" \
+    "task=$task requeued=${requeued:-missing} session=$(client_session_state "$task") planner=$(cat "$tmp/planner-client.log" 2>/dev/null)"
 }
 
 report_path_for() {
@@ -224,17 +320,17 @@ PY
 }
 
 send_and_gate() {
-  local prose=$1 out task before
+  local prose=$1 out task
+  wait_for_planner_capacity
   rm -f "$gate"
-  before=$(prompt_count)
   out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from "$PLANNER" --to "$PLANNER" --text "$prose") \
     || fail "the report task send failed" "$out"
   printf '%s\n' "$out" > "$tmp/send.json"
   task=$(json_field "$tmp/send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
   [ "$(json_field "$tmp/send.json" '.data.state' 'json.load(sys.stdin)["data"]["state"]')" = "in_flight" ] \
     || fail "the ACP task must start in_flight" "$out"
-  wait_for_prompt "$before"
   capture_acp_pid "$task"
+  wait_for_prompt "$task"
   report_path_for "$task"
   TASK="$task"
 }
@@ -271,18 +367,25 @@ for row in rows:
 }
 
 wait_root_acked() {
-  local task=$1 head=$2 ledger_out="" root_head=""
+  local task=$1 head=$2 ledger_out="" root_head="" task_state="" receipt_state=""
   for _ in $(seq 1 120); do
     ledger_out=$("$ONLYNE" --server-root "$tmp/server" ledger --task "$task" 2>/dev/null) || true
     printf '%s\n' "$ledger_out" > "$tmp/root-ledger.$task.json"
+    # The receipt's own recipient is a live client in this case, so a receipt that
+    # has not reached `acked` inside the window is a real signal — a claimant
+    # holding it, or a client at capacity pulling control rows only. A role with
+    # no client has no claimant at all and its receipts wait by design, which is
+    # why the two shapes are not interchangeable.
     root_head=$(ledger_field "$tmp/root-ledger.$task.json" out_head kind completion state acked)
-    if [ "$root_head" = "$head" ]; then
+    task_state=$(ledger_field "$tmp/root-ledger.$task.json" state kind task)
+    receipt_state=$(ledger_field "$tmp/root-ledger.$task.json" state kind completion)
+    if [ "$root_head" = "$head" ] && [ "$task_state" = "acked" ]; then
       return 0
     fi
     sleep 0.5
   done
   fail "the root task must settle its verdict in out_head" \
-    "head=$root_head expected=$head ledger=$ledger_out trace=$(cat "$trace" 2>/dev/null) planner=$(cat "$tmp/planner-client.log" 2>/dev/null)"
+    "head=$root_head expected=$head task=$task_state receipt=$receipt_state ledger=$ledger_out trace=$(cat "$trace" 2>/dev/null) planner=$(cat "$tmp/planner-client.log" 2>/dev/null)"
 }
 
 wait_session_outcome() {
@@ -523,6 +626,9 @@ wait_session_outcome "$TASK" failed
 "$ONLYNE" --server-root "$tmp/server" ledger >"$tmp/blocked-ledger.json" 2>/dev/null || true
 validate_no_children "$tmp/blocked-ledger.json" "$TASK" \
   || fail "a blocked report must create no child task" "$(cat "$tmp/blocked-ledger.json")"
+# The blocked report is retryable. Waiting for its named replay makes the shared
+# ACP process's handoff visible before the next task claims the other slot.
+wait_for_replay_or_release "$TASK"
 
 # --- an invalid report stays fixable and cancels its turn -------------------
 INVALID_PROSE="payload-v2 author rejected the grammar $CALLER_MARKER"
