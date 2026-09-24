@@ -238,25 +238,35 @@ edge_seen() {
     '{ for (i = 1; i <= NF; i++) if ($i == want) found = 1 } END { print found + 0 }'
 }
 
-capture_light() {
-  local want=$1 frame=$2 ledger=$3 attempt seen edge
+capture_any_light() {
+  local exclude=$1 frame=$2 ledger=$3 attempt seen edge role roles_seen= caught=none
   for attempt in $(seq 1 300); do
     "$ONLYNE" --server-root "$tmp/server" ledger --state in_flight > "$ledger.cand" 2>/dev/null || true
     "$TUI" --server-root "$tmp/server" --page 2 --once > "$frame.cand" 2>/dev/null || true
-    seen=$(sighting "$frame.cand" "$want")
-    edge=$(edge_seen "$ledger.cand" "$(light_edge "$want")")
-    if [ "$seen" = "1" ] && [ "$edge" = "1" ]; then
-      mv "$ledger.cand" "$ledger"
-      mv "$frame.cand" "$frame"
-      return 0
-    fi
+    while read -r role; do
+      [ -n "$role" ] || continue
+      [ "$role" != "$exclude" ] || continue
+      roles_seen="${roles_seen:+$roles_seen,}$role"
+      caught=$role
+      seen=$(sighting "$frame.cand" "$role")
+      edge=$(edge_seen "$ledger.cand" "$(light_edge "$role")")
+      if [ "$seen" = "1" ] && [ "$edge" = "1" ]; then
+        mv "$ledger.cand" "$ledger"
+        mv "$frame.cand" "$frame"
+        printf '%s\n' "$role"
+        return 0
+      fi
+    done < <(working_rows "$frame.cand" | awk '$2 == "working" { print $1 }' | sort -u)
     sleep 0.05
   done
-  fail "no TUI frame caught the light on $want" "$(cat "$frame.cand" 2>/dev/null)$(cat "$ledger.cand" 2>/dev/null)"
+  fail "no TUI frame caught a working light (caught role: $caught; roles saw: ${roles_seen:-none})" \
+    "$(cat "$frame.cand" 2>/dev/null)$(cat "$ledger.cand" 2>/dev/null)"
 }
 
-capture_light light2 "$tmp/frame-a.txt" "$tmp/frame-a-ledger.json"
-capture_light light5 "$tmp/frame-b.txt" "$tmp/frame-b-ledger.json"
+first_role=$(capture_any_light "" "$tmp/frame-a.txt" "$tmp/frame-a-ledger.json")
+second_role=$(capture_any_light "$first_role" "$tmp/frame-b.txt" "$tmp/frame-b-ledger.json")
+[ "$first_role" != "$second_role" ] \
+  || fail "the two captures must catch the light on different roles" "$first_role"
 
 # The two sightings are of different lights: another role holds the working
 # session, the active edge is another role pair, and the frames differ.

@@ -98,6 +98,10 @@ printf '{"enabled":true,"watch":{"autoStart":true}}\n' > "$ws/.pi/onlyne.json"
 # started the command in (measured 2026-09-11 on Orca 1.4.198), the client
 # passes its environment to the session command, and the plugin reads them from
 # there. Step 2b asserts the pane that comes back out of the session axis.
+# `hostBinding` prefers ambient `ORCA_TAB_ID` and `ORCA_LEAF_ID` over the two
+# halves of the pinned pane key, so an interactive Orca shell would otherwise
+# win with its own ids. The terminal handle below remains the pinned value.
+unset ORCA_TAB_ID ORCA_LEAF_ID
 ORCA_PANE_KEY="45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560"
 ORCA_TERMINAL_HANDLE="term_e2e_pi_live"
 export ORCA_PANE_KEY ORCA_TERMINAL_HANDLE
