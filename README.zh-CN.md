@@ -1,5 +1,11 @@
 # Onlyne
 
+> **English version:** [README.md](README.md) is the complete, default documentation. This page is the complete Chinese mirror. Use the section links below to compare the two documents directly.
+
+**English navigation:** [Overview](README.md#onlyne) · [Choose a starting path](README.md#choose-a-starting-path) · [Install](README.md#install) · [Fake quickstart](README.md#shortest-local-task-fake-backend) · [Real pi + Orca demo](README.md#real-pi--orca-demo) · [Task flow](README.md#follow-one-task-end-to-end) · [Configuration and stored data](README.md#configuration-and-stored-data) · [Operate a cluster](README.md#operate-a-cluster) · [Architecture](README.md#architecture) · [Further reading](README.md#further-reading)
+
+**中文导航：** [概览](#onlyne) · [选择起点](#选择起点) · [安装](#安装) · [fake 快速开始](#最短本地任务fake-backend) · [真实 pi + Orca 演示](#真实-pi--orca-演示) · [任务流程](#跟随一个任务) · [配置与存储](#配置与存储) · [操作集群](#操作集群) · [架构](#架构) · [继续阅读](#继续阅读)
+
 **给 coding-agent 团队用的消息与传输层，跑在你自己的机器上。**
 
 Onlyne 把 coding agent 组织成持久的工作角色。**server** 在角色之间路由消息，并把每次投递记录进持久账本。每个角色工作区运行一个 **client**，负责该角色的 coding-agent 会话。可选的 **gateway** 进程把 Telegram、飞书、QQ、微信接入同一套消息模型。agent 保留自己的运行时并负责决策；Onlyne 提供路由、排队、会话传输、回执和可审计记录。
@@ -61,7 +67,7 @@ onlyne skill export --set supervisor        # supervisor handbook
 onlyne skill export --dest /path/to/skills
 ```
 
-内容相同的文件会保持不变；已有文件内容不同会停止导出，传 `--force` 才会替换。`npx skills add dbydd/onlyne` 和 `npx skills add ./` 通过 skills CLI 安装同一套仓库文档。
+`skill export` 把每份 handbook 写成普通 regular file。仓库中的编译副本也采用这一形式，并由 repository test 保证四份文件与各自源码手册逐字节相同。内容相同的文件会保持不变；已有文件内容不同会停止导出，传 `--force` 才会替换。`npx skills add dbydd/onlyne` 和 `npx skills add ./` 通过 skills CLI 安装同一套仓库文档。
 
 ## 最短本地任务：fake backend
 
@@ -202,13 +208,13 @@ sequenceDiagram
   R->>S: ack receipt
 ```
 
-1. **发送。** `onlyne send` 打开 server 的本地 admin socket，指定发送者和目标，并携带 `op_id` 幂等键。相同操作重复发送会得到持久回执；同一个键配不同正文则是 conflict。
+1. **发送。** 带门禁的 `send` 动词打开 server 的本地 admin socket，指定发送者和目标，并携带 `op_id` 幂等键。相同操作重复发送会得到持久回执；同一个键配不同正文则是 conflict。
 2. **接受并记录。** server 在写账本前验证 envelope、发送者、目标和 ACL。接受后追加一行并发布回执；可立即投递时状态为 `in_flight`，角色离线或达到容量时为 `queued`。
 3. **拉取并分配。** role client 拉取最老的可用任务，server 将其标记为 `in_flight` 并绑定 delivery ticket。client 检查容量、启动所选 backend，等待 session 的 `ready` barrier，再发送 `assign`。任务正文随 assignment frame 传递；`session_command` 中的 `{task}` 渲染为任务 id，不是正文。
 4. **完成。** adapter 报告终态和摘要；pi 插件的 `onlyne_complete` 工具提供这两项。client 记录本地任务结论，排队原始 delivery 的 acknowledgement，释放 session slot，并为账本记录的 origin 创建 completion envelope。
 5. **回执。** client 的持久 intent 在重连后按顺序通过 TLS 发出。原任务行变为 `acked`；completion receipt 在 origin client 拉取前保持 `queued`，拉取后结清，不会启动新的 session。
 
-角色可以用 `onlyne_handoff` 延续任务家族。server 会创建挂在父任务下的子任务，并传递 family id、hop budget、origin、deadline 和 labels。即使普通角色 ACL 没有返回边，completion 也会回到任务的 origin。
+任务家族起跑时，带门禁的 `send` 形式接受 `--hop-budget <n>`、`--deadline <rfc3339>`，以及最多重复 8 次的 `--label <key=value>`。server 记录新建的 family 与根 task id、hop budget、origin、RFC3339 deadline 和 labels。角色可以用 `onlyne_handoff` 延续这个家族；server 会创建挂在父任务下的子任务，每次 handoff 都继承完整的家族元信息。即使普通角色 ACL 没有返回边，completion 也会回到任务的 origin。
 
 ### 四种核心消息
 
@@ -226,6 +232,8 @@ sequenceDiagram
 ### Server root
 
 `<server-root>/.onlyne/spec.toml` 是协议的 source of truth：server endpoint 和证书 pin、注册角色密钥、ACL 边、角色 prose、并发、超时、relay policy、`session_command`、路由和 gateway 配置都在这里。Onlyne 不会通过运行时 API 修改它。追加 `onlyne-client init` 片段或使用 `onlyne server generate`，然后运行 `onlyne reload`。
+
+自动重投的年龄闸是 `[server].requeue_ttl_secs`。默认值为 `0`，表示关闭这道闸；启用后从 `enqueued_at` 计算排队行龄。自动重投发生时若已经超过这个年龄，该行会结清为 `expired`，reason 为 `requeue_ttl`；操作员发起的 `repair retry` 不经过这道年龄闸。
 
 ```text
 <server-root>/.onlyne/
@@ -308,11 +316,11 @@ onlyne --server-root <root> reload
 
 # TUI：交互面板或单帧文本
 onlyne tui --server-root <root>
-onlyne tui --server-root <root> --once --page 1
-onlyne tui --server-root <root> --once --page 2
+onlyne tui --server-root <root> --once --page 1 --state active
+onlyne tui --server-root <root> --once --page 2 --state all
 ```
 
-TUI 第 1 页是角色网络和活动 session，第 2 页是 task/session 图、fault、历史、账本行和任务详情。它只通过 admin socket 观测，不承载消息。
+TUI 第 1 页是角色网络和活动 session，第 2 页是 task/session 图、fault、历史、账本行和任务详情。单帧快照会明确写出状态过滤：`active` 是默认值并保留活动视图，`all` 还会包含已结清的 session 与账本行。在第 2 页使用 `--state all`，就能看到已结清行的 `reason=<text>`。TUI 只通过 admin socket 观测，不承载消息。
 
 ### 七个 supervisor 动词的门禁
 
@@ -322,7 +330,7 @@ TUI 第 1 页是角色网络和活动 session，第 2 页是 task/session 图、
 --force --yes-i-am-supervisor-not-other-role
 ```
 
-这对 flag 表示命令是在 plugin session 之外代表该角色操作。缺少任意一个都会在解析 socket 之前以退出码 2 拒绝。pi session 内应使用 adapter 工具 `onlyne_send`、`onlyne_handoff` 和 `onlyne_complete`，让 session 自己的记录保持权威。
+这对 flag 表示命令是在 plugin session 之外代表该角色操作。缺少任意一个都会在解析 socket 之前以退出码 2 拒绝。pi session 内的插件工具映射是 `send` → `onlyne_send`、`handoff` → `onlyne_handoff`、`complete` → `onlyne_complete`；通过这些工具发言，session 自己的记录才会保持权威。
 
 `ack` 和 `reject` 需要 `--msg-id` 与 `--reason`；`control` 的 `recycle`、`cancel` 需要 `--reason`，而 `probe`、`snapshot`、`focus` 不接受 reason。
 
@@ -410,8 +418,7 @@ hello → welcome → report.ready → assign → assign_ack
 - task、completion 和 control 携带幂等键，至少投递一次；观测事件使用游标补发，慢观察者不会拖慢 worker。
 - 每个注册角色拥有 ed25519 身份；client 固定 server 证书并通过 TLS 1.3 认证。
 - 被拒绝的消息不写账本行。completion 有一条内建的返回路径，始终回到账本记录的 origin。
-- 一个 client session 服务一个 task。`max_sessions` 限制并发 task session；即使角色已满，control 消息仍能送达。
-- session 完成后释放 slot 和宿主资源。plugin 连接可以在配置的 grace window 内重连，超时后才回收其 task 与资源。
+- 一个 client session 服务一个 task。task 结清后，该 session 不再占用 `max_sessions` 容量；只要 plugin transport 仍挂着，client 会保留这个已结清 slot，transport 结束后才退役 slot 与宿主资源。仍绑定且未结清的 task session 若 transport 断开超过宽限窗口，或 transport 仍在线但连续三个心跳周期没有新帧，也会退役；client 随后把 task 结清为 `failed`，以 `session_dead` 拒收其持有的投递行，并发布 session 的退出投影。
 - aggregate role 把子集群暴露给父 server，不需要把子角色名或联邦操作加入 wire protocol。
 
 更深的 crate 地图、session 生命周期和形式化设计理由见 [`docs/v1-ARCHITECTURE.md`](docs/v1-ARCHITECTURE.md) 与 [`proofs/BRIEF.md`](proofs/BRIEF.md)。

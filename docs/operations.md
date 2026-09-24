@@ -1,5 +1,526 @@
 # Operations
 
+**English**
+
+Onlyne operations are bounded by the server ledger, the client workspace, and the admin local socket (canonical name `.onlyne/run/s`; bind to this path when it is no more than 103 bytes, and to a short derived path under the system temporary directory when the limit is exceeded; record the actually served path in the `run/socket` marker in that same directory).
+
+## Duty and operations entry points
+
+`onlyne status` reads server status through the admin local socket.
+
+`onlyne roles` reads the role registry and online state.
+
+`onlyne sessions` reads the session projection. The answer is the mirror row written by the heartbeat, and `updated_at` is its age.
+
+`onlyne sessions --fresh --task <task>` obtains ground truth on the spot: the server sends the existing `control` op `probe` to the client that owns the task, waits for that row to advance past the `(generation, seq)` from the start of the read, and then answers from that row. The admin vocabulary gains no verb, and the client side gains no code.
+
+The upper bound for the wait is this read's own `--timeout` minus the 250ms reserved for frame round trips. If the probe does not land, the read answers from the stored mirror as usual; it neither exceeds this bound nor relaxes the bound to wait longer.
+
+The answer to `--fresh` carries a `fresh` field on the row: `probed` is the observation after the probe lands, `offline` means there is no object to ask (no `--task` was given, the task has no row, no client owns it, or the owner is offline), and `unanswered` means the probe went out but nothing was republished within the bound. All three cases answer with that row; they do not report an error or hang.
+
+`--fresh` must include `--task`: a fresh read asks the client for a named task.
+
+A read without `--fresh` is byte-for-byte identical to the previous behavior: it sends no control frame, performs no wait, and its answer has no `fresh` key.
+
+`onlyne ledger` reads the delivery ledger.
+
+`onlyne faults` reads the faults table.
+
+`onlyne watch` reads the durable and advisory event streams.
+
+`onlyne history` replays the event log.
+
+`onlyne spec_diff` compares the running spec with the spec on disk.
+
+`onlyne tui --server-root <root> --once --page <1|2> --state <active|all>` renders one plain-text frame and exits. `active` is the default filter and keeps only the active view; `all` also includes settled sessions and ledger rows. Page 2 with `--state all` shows the `reason=<text>` of settled rows directly.
+
+## Reading the service path
+
+When each daemon binds its socket, it publishes the actually served path at `<owner>/.onlyne/run/socket` (mode `0600`, one absolute path followed by a newline). An operator can read this path in three ways:
+
+`onlyne-client status --workspace <dir>` prints `socket <path>`; the field value is the served path.
+
+The client log names this path at startup: in the short-path case, one line gives the canonical path, its byte length, the served path, and the marker (`adapter socket moved to the short path`); in the canonical-path case, one line gives the socket path (`adapter socket serving`). The server follows the same convention: in the short-path case, one line gives the served and canonical paths and their lengths (`the run socket is served from a short path; the marker names it`), while the normal case logs `the run socket is open`.
+
+`cat <workspace>/.onlyne/run/socket` reads the marker file directly.
+
+A session process starts with `ONLYNE_SOCKET` set to this served path; the `onlyne` command in a role pane uses it to reach the socket directly. The CLI resolution order is `--socket` > `ONLYNE_SOCKET` > `--server-root` > upward lookup from `--workspace`/cwd. The lookup recognizes the owner directory by `.onlyne/run/s` or `.onlyne/run/socket`, and resolves the path through `socket_path()`.
+
+A client whose bind fails exits with code 1 and writes one stderr line, `onlyne-client: bind the workspace socket <规范路径>: <明细>`; the detail gives the served path, the byte length of each path, and the OS reason. A client that cannot bind its socket chooses to exit; the loop that kept the TLS link alive for silent retries has been removed. An `accept` error after a successful bind is logged at `error` level (`adapter socket accept failed; retrying`), retried every 100 milliseconds, with the listener retained.
+
+The verification chain is pinned by `crates/onlyne-testkit/e2e/socket-path-length.sh`: a deeply padded workspace, a short served path, marker publication, the canonical path remaining unused, and end-to-end task completion.
+
+## Configuration loading
+
+Unrecognized keys in spec.toml or a role workspace's config.toml are ignored and the process starts normally; each ignored key produces one `tracing` warning line in the daemon log when it is loaded. An invalid value for a real key remains a hard error that prevents startup. Consequently, a misspelled key silently falls back to its default, with no signal other than that warning line.
+
+After a version upgrade, a role client and its server must run the same build: if the `hello` reply is missing a field, the two cannot connect. During an upgrade, restart the server and every `onlyne-client` together.
+
+## Concurrency
+
+The knob for running multiple sessions concurrently for the same role is `[[client]].max_sessions`.
+
+The meaning of `max_sessions` is the maximum number of sessions in flight at the same time.
+
+Each task has its own session.
+
+After a role reaches `max_sessions`, it stops pulling new tasks.
+
+A full-capacity role replaces `pull` with `control_only = true` and keeps receiving.
+
+Control rows and task rows share one pull queue, but the capacity gate stops tasks.
+
+`recycle`, `cancel`, and `focus` are commands used to free capacity and inspect the current state, and they must arrive exactly when the role is full. Therefore, the server delivers only control rows on this path; the task row's `queued` state and ticket remain unchanged.
+
+The server retains the pending accounting entry and offers it again on the next pull.
+
+The seed value for `onlyne-client init` is `max_sessions = 1`.
+
+The seed value protects a single-pane manual environment.
+
+Set concurrency explicitly for each role in the spec.
+
+After changing the spec, run `onlyne reload` to make it effective.
+
+An existing client automatically refreshes its role slice after receiving a `SpecReloaded` event.
+
+After an existing client refreshes its role slice, it immediately uses the new `max_sessions` gate.
+
+An existing client does not need to restart.
+
+`crates/onlyne-testkit/e2e/reconnect-requeue.sh` covers the pending-then-offer-again path with `max_sessions = 2` and three tasks.
+
+Control still reaches the role at full capacity. `a_control_only_pull_hands_the_command_and_leaves_the_work_queued` in `crates/onlyne-server/tests/delivery.rs` pins this at the protocol level, and step d of `crates/onlyne-testkit/e2e/herdr-live.sh` verifies it once on a live host: the case's role uses the seed value `max_sessions = 1`, its only slot is occupied by a `sleep`, and `control focus` still reaches the session's pane.
+
+## Focus
+
+`onlyne control --from <role> focus --task <id> --force --yes-i-am-supervisor-not-other-role` brings a session's pane to the foreground. The TUI entry point is `F`, and it acts on the selected row.
+
+The control plane uses `ControlOp::Focus{task_id}`, with ledger row `kind = control`. The command reaches the session's `backend_ref`. The herdr backend follows a three-stage chain: `herdr workspace focus <W>`, `herdr tab focus <T>`, and then a third stage that branches according to the pane's origin. A managed agent uses `herdr agent focus <pane_id>`; a shell pane launched by `herdr pane run` uses `herdr pane focus --pane <base_pane> --direction <split_direction>`. Those two values were recorded when the pane was split. `base_pane` and `split_direction` are stored in `backend_ref`, so the anchors live with the pane.
+
+`herdr pane get <pane_id>` confirms the final step. Delivery succeeds only when `result.pane.focused` is true. If focus lands elsewhere, the command reports an error and names the pane that currently holds focus. A `focus()` failure records a `Report::Fault{kind:"focus"}`, and the TUI prints the backend's original text in that row's feedback field.
+
+`--from` is a global flag on the admin plane and is written after `control`. The ACL for the focus command follows the same rule as delivery: a role with a `send` edge to the target controls the target session, while `ControlOp::Broadcast` requires a global edge.
+
+The herdr backend recognizes a workspace by label (`onlyne:<cluster>`) and a tab by name (the role's own name). To place a session in the workspace and role tab currently at hand, rename them before launching the session: `herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>` and `herdr tab rename <TAB_ID> <role>`. A workspace with a mismatched label receives a second workspace, and a mismatched tab name receives a second tab. The client then logs a warning naming the label and the newly created workspace.
+
+## Fault recovery
+
+A fault is an auditable fact recorded by the server.
+
+A fault enters the `faults` table.
+
+A fault is pushed to observers through advisory `Event::Fault`.
+
+`onlyne repair inspect --task <id>` reads the recovery context for a task.
+
+`onlyne repair adopt --task <id> --backend <backend> [--backend-ref <值>] --reason <reason>` replaces the backend binding in that row's desired state, while leaving the row's session id and generation unchanged and advancing seq by one. To move a task to another session, use `rebind` below.
+
+`onlyne repair rebind --task <id> --session-id <session> --backend <backend> [--backend-ref <值>] --reason <reason>` rewrites the task's backend binding, replaces the row's session id with the supplied value, increments generation, resets seq to zero, and causes reports for the old generation to be ignored from then on.
+
+Both verbs follow the same rule for `--backend-ref`: a value that parses entirely as JSON goes live as the parsed result (so an object-shaped value such as a pane reference can be written directly as `--backend-ref '{"id":"p-7"}'`); all other text goes live as a JSON string; and an omitted flag goes live as null. The server and client consume the value as an object (`crates/onlyne-server/src/faults.rs:253-257,273-277`, `crates/onlyne-client/src/session/dispatch.rs`).
+
+`onlyne repair retry --task <id> --reason <reason>` sends a retryable task back to the queue.
+
+`onlyne repair fail --task <id> --reason <reason>` converges the task to failed.
+
+`onlyne repair close --task <id> --reason <reason>` closes recovery work.
+
+`onlyne repair ack --fault-id <fault-id> --reason <reason>` acknowledges a fault.
+
+The repair family uses the admin plane at `<server-root>/.onlyne/run/s`; when the tree exceeds the 103-byte limit, it uses the short served path recorded in `run/socket`.
+
+The repair family does not pass through the role workspace's adapter socket.
+
+## Delivery and requeueing
+
+Onlyne's SQLite databases must be placed on a local filesystem. Do not put the server root or role workspace in OneDrive, Dropbox, iCloud, a network drive, or any other synchronized directory. SQLite depends on WAL files and local file locks; Onlyne does not run `quick_check` or `integrity_check` at startup, so a corrupt `state.db` / `client.db` makes the daemon fail on its first database operation. First stop every client/server, then copy the entire root unchanged to a local directory and inspect the databases on the copy; do not run checkpoint, VACUUM, or repair on the original database.
+
+When a role link dies, the server requeues that role's `in_flight` delivery rows to `queued`, where they wait for the next pull before delivery.
+
+Takeover requeueing when a new link lands follows the same path. The `live_tasks` field of `hello` declares the session tasks still alive in that client's memory; declared rows remain `in_flight`, and their delivery tickets are reattached to the new link's generation, so they are requeued normally if that link later terminates.
+
+If a declared session dies before completion, the client publishes an `exited` projection. When the server sees an `in_flight` row with the same `session_id` as that session ticket, it requeues the row, again through the gates below.
+
+Automatic requeueing is governed by two budget knobs; manual `onlyne repair retry` does not pass through the gates. An `in_flight` row returned to `queued` is evaluated first by `requeue_ttl_secs`, then by `requeue_max_attempts`. A task, completion, or control row for a receiving role with no live connection that has never been pulled expires after the same TTL when `requeue_ttl_secs` is nonzero; with the default value of 0, it remains queued.
+
+| Configuration file | Field | Default | Effect |
+|---|---|---|---|
+| `[server]` in `<server-root>/.onlyne/spec.toml` | `requeue_max_attempts` | 0 | Maximum automatic requeue attempts allowed for a row; 0 means unlimited. A row that exceeds the limit becomes `rejected` with reason `requeue_exhausted` |
+| `[server]` in `<server-root>/.onlyne/spec.toml` | `requeue_ttl_secs` | 0 | TTL allowed for rows returned to the queue and unpulled rows whose receiving role has no live connection, measured from enqueue time; 0 disables it. An over-age row becomes `expired` with reason `requeue_ttl` |
+
+Evaluate TTL first, then attempt count; each produces one `ledger_state` event.
+
+How to read `reason`: the row keys printed by `onlyne ledger` are `msg_id`, `task`, `state`, `reason`, `out_head`, `body`, `family`, and `hop_budget`. A key appears only when that row has a value; rows and columns without values remain byte-for-byte identical to before. The task detail panel on TUI page 2 appends `reason=<text>` to the end of the ledger row. Values that enter this column include `requeue_exhausted` and `requeue_ttl` from the two gates above; `expired` from the expiration sweep; `session_dead` from the rejection written when a client settles a disconnected session (see “Session ghosts and ownership determination”); `operator cancel` and `operator recycle` from a client settling by itself and rejecting the delivery row it still holds when no one answers the operator's word (see the control section below); and the full rejection text when a pane backend (`herdr` / `orca` / `zellij`) rejects a protocol `session_command` before opening the page (see the final paragraph of “Headless (`exec`) sessions”). Text entered by an operator through `onlyne reject --reason` or `onlyne repair fail --reason` enters this column unchanged. When `onlyne ack` accepts it, that text travels with the settlement event and the row's `reason` remains unchanged. The string `operator ack` is test data in the faults table's `reason` column (the `update_fault_state` case in `crates/onlyne-store/src/tests.rs`); the ledger column has no record of it.
+
+Both the push-delivery and pull-delivery transitions of `in_flight` emit a `ledger_state` event; at every sampling point, ledger state read offline and the session projection agree with each other.
+
+The complete chain (the server dies with a live link, the client reconnects and takes over, and a single session completes normally) is verified against real processes by `crates/onlyne-testkit/e2e/requeue-claim.sh`.
+
+When a task that this role has already completed as `Done` is delivered again, the client recognizes it. The decision reads the session terminal state from `client.db`, with the entry point `DispatchState::task_completed_here` in `onlyne-client`, and acts before the capacity gate in `accept_delivery`: it acknowledges the row in place, sets `accepted = true`, uses reason `task already completed by this role`, does not stage a session, and consumes no capacity. That reason enters the `ledger_state` event, and the row itself becomes `acked`. At the same time, the log records `redelivery of a finished task settled without running it`, with `msg_id` and `task`.
+
+This decision reads `Done`. A task whose session was terminated, crashed, or was recorded locally as `Failed` can be requeued by `onlyne repair retry` only while it still has eligible `queued` / `in_flight` delivery rows. To rerun a task already rejected by a terminal state such as `session_dead`, the operator sends a new task with the guarded `send` verb. A row already `Done` waits for that acknowledgment and an empty run.
+
+## Rejection surface
+
+`onlyne ack --msg-id <id> --reason <text> --force --yes-i-am-supervisor-not-other-role` settles a delivery as `acked`.
+
+`onlyne reject --msg-id <id> --reason <text> --force --yes-i-am-supervisor-not-other-role` settles a delivery as `rejected`.
+
+`--reason` is required for both verbs.
+
+`--op-id` is optional for both verbs.
+
+The rejection reason is stored on the ledger row.
+
+Both verbs use the role workspace's adapter socket.
+
+`--request` is rejected by both verbs.
+
+When a plugin returns `accepted = false` for an `assign`, the client queues a rejection acknowledgment with the same `msg_id`.
+
+That rejection acknowledgment shares the durable intent queue with completion and is sent after reconnection if the connection drops.
+
+The rejection reason comes from the plugin; when the plugin supplies none, record `assign rejected`.
+
+When an already settled delivery receives another acknowledgment or rejection, the server returns the same state event.
+
+## Session ghosts and ownership determination
+
+The lifecycle owner is the role's own client process.
+
+While the client is dead, nobody determines session lifecycle on behalf of that role.
+
+While the owner process is alive, the client settles a disconnected session: after the plugin connection drops and `reconnect_grace_secs` expires, it retires the session it left behind.
+
+Settlement writes two records: the task becomes `failed`, and the delivery row it holds is rejected with `session_dead`. The same retirement pass then sends that session's own projection with a heartbeat report, so the server row immediately reads `exited`, without waiting for the observer's `stale_working` or `heartbeat_missing`.
+
+That rejection is terminal. To perform the work again, create a new task. `repair retry` handles only eligible `queued` / `in_flight` rows and returns `conflict` when the task row is already settled.
+
+Ledger decisions use `kind=task` rows. A `kind=completion` row records receipt transport and `out_head` and does not reopen a task already `rejected`. The projection's `(generation, seq)` is each writer's own watermark; the client and server do not require them to match. Terminal-state reads compare task outcome, lifecycle, resource, and generation.
+
+A restarted client does not make terminal-state decisions for old ledger entries: an `Acked` row is one it answered itself, so the restart does not report its death or decide for another owner.
+
+Ghost detection and stall reporting have five knobs:
+
+| Configuration file | Field | Default | Effect |
+|---|---|---|---|
+| `<workspace>/.onlyne/config.toml` | `stall_report_secs` | 1800 | Maximum duration for a frozen session projection tuple, in seconds, after which the client reports a `stalled` fault; 0 disables it |
+| `<workspace>/.onlyne/config.toml` | `reconnect_grace_secs` | 60 | Time in seconds allowed for a plugin connection to be absent after disconnect; after expiry the client retires the session it left behind and settles what that session owed. A session still bound to a task makes that task `failed` and rejects its delivery row with `session_dead`; 0 disables it |
+| `[server]` in `<server-root>/.onlyne/spec.toml` | `stale_watch_secs` | 60 | Server observer scan interval in seconds; 0 disables the observer |
+| `[server]` in `<server-root>/.onlyne/spec.toml` | `heartbeat_grace_secs` | 90 | Heartbeat silence allowed for a `working` row when its owner is online, in seconds |
+| `[server]` in `<server-root>/.onlyne/spec.toml` | `ghost_sweep_secs` | 60 | Server ghost sweep scan interval in seconds; 0 disables the sweep |
+
+The server-side observer scans at `[server].stale_watch_secs` intervals, running two detectors on each scan.
+
+Detector one scans `working` rows whose owner is offline.
+
+The offline detector records a fault with kind `stale_working` after 600 seconds.
+
+Detector two scans `working` rows whose owner is online, using heartbeat freshness as its criterion.
+
+The pi plugin sends a heartbeat packet every 10 seconds. Each time the client receives a beat, it resends the complete projection in its own heartbeat report, and the server row's `updated_at` advances with the heartbeat.
+
+When you need an immediate observation without waiting for the next heartbeat, use `onlyne sessions --fresh --task <task>`: it sends `probe` to the owner client, waits for the row to advance past the watermark from the start of the read, and the plugin answers that `probe` with a heartbeat.
+
+A no-op heartbeat that advances a silent beat also carries a liveness fact. The client increments its local version and resends it, keeping `updated_at` fresh for a healthy session.
+
+When the owner is online, the row age exceeds `[server].heartbeat_grace_secs` (default 90 seconds), and this process has seen a write to that row, detector two records a fault with kind `heartbeat_missing`.
+
+A `heartbeat_missing` row also appears in the `heartbeat_stale` field of the `sessions` answer, and the TUI presents it as `working+stale`.
+
+When the same task already has an unacknowledged fault of the same kind, detector two does not record another one.
+
+At server startup, every row that is `working` at that moment is registered as seen, including silent rows left by the previous process.
+
+When a heartbeat in the same generation raises a row from its settled `exited` completion back to `working`, the observer records a fault with kind `heartbeat_after_complete` and applies the projection normally.
+
+Both detectors only record faults and push advisory `Event::Fault`.
+
+Separate from the observer, a ghost sweep runs at `[server].ghost_sweep_secs` intervals, with its first tick at half an interval.
+
+It reads `working` rows from the mirror and aligns each row with that task's own ledger row.
+
+A `working` mirror whose ledger row has reached a terminal state is a fossil: the ledger has settled, but the mirror still holds the old bytes.
+
+A sweep uses the task ledger decision only when the mirror has no outcome: `acked` reads as `done`, while `rejected` and `expired` read as `failed`. An outcome already published by the mirror remains unchanged.
+
+Writes use the same settlement path shared by the `repair` family: rewrite `observed_json`, increment `seq`, persist, and push durable `session_state`.
+
+When the ledger row is still `queued` or `in_flight`, the sweep leaves it unchanged.
+
+Every moved row produces one row in the `ghost_sweeps` audit table. Every field in that row comes from the row the server already holds: task, role, session, generation, `seq_before`, `seq_after`, outcome, evidence, and `swept_at`.
+
+The `evidence` text is a label plus the ledger state that proves this write, for example `task_settled:acked`.
+
+`onlyne ghosts [--limit N]` reads this table with the newest sweep first. It is an admin-plane read and is rejected on the client plane.
+
+The client reports `stalled` through the role's `report` plane: if the session projection tuple has no `Applied` change for more than `stall_report_secs`, the client sends a `Report::Fault` with kind `stalled`, including the task and session identities.
+
+A no-op heartbeat advances the liveness watermark, not the progress watermark; `stalled` watches only the latter.
+
+The reason text for `stalled` is `no applied progress`.
+
+A settled task cannot enter this criterion: only task assignment establishes the progress clock, and `note_applied` only refreshes an established clock. The final `agent: "idle"` heartbeat sent by the plugin after its completion receipt lands on nothing. Expiration scans and send boundaries each derive lifecycle once—the stored tuple and the task's settled value in the `task` table pass through `project` together—and a task that resolves to `exited` is suppressed and forgotten; releasing the connection also forgets the clock for every session it served.
+
+The same frozen episode is reported only once, and the next `Applied` clears deduplication. `stall_report_secs = 0` disables this criterion.
+
+The row does not transition: `stalled` only enters the faults table and pushes an event; recovery decisions remain with the supervisor and repair family. Only the ghost sweep moves projections, under the rule at the end of this section.
+
+Disconnection grace uses another knob. When a plugin connection ends without a `detach` frame, the client retains its session and host resources, and `reconnect_grace_secs` starts at that moment.
+
+A reconnection within the window clears this clock: the agent returns to its original session and receives its next task normally.
+
+If it has not returned after the window expires, the client retires it: it closes the host resources and releases the capacity slot.
+
+Before retirement, first settle what the session owed: if it is still bound to a task, that task becomes `failed` and the delivery row it holds is rejected with `session_dead`. The same retirement pass then sends that session's own projection, so the server row immediately reads `exited`. A slot with no bound task is only retired.
+
+The retirement reason is the terminal state already recorded for the task under that session; when no terminal state is available, record `Fault`. `reconnect_grace_secs = 0` disables the disconnection-grace criterion.
+
+Disconnection grace and attached-but-silent are two retirement paths. A disconnected connection uses `reconnect_grace_secs`; a connection that remains present is also retired when its bound unsettled task has no accepted frame for three consecutive heartbeat intervals. Both paths settle the task as `failed`, reject the held delivery with `session_dead`, close resources, and publish exit.
+
+When a newer session is already serving the same task, a connection returning with the old id is downgraded to read-only: it no longer receives `assign`, `deliver`, or `render_send`, and it does not occupy that session's delivery plane.
+
+The read-only connection is still admitted. The `send` frames it sends do not enter the durable queue or go to the server; they accumulate in that task's buffer until one merge.
+
+The downgrade lasts only while that newer connection is online. When it ends, the first connection accumulated for that session is promoted to its transport and its read-only flag is cleared, so a plugin that reattaches before the client notices that the old socket is dead is not permanently silenced.
+
+When the retrying session completes, its buffer and its own handoff are merged by downstream role into one entry: one envelope per role, with every body line labeled by source. `[retry]` was written by the completing session, and `[zombie]` was written by the accumulated old connection.
+
+After merged delivery, the read-only connection receives `bye` and is removed. If it still holds its own slot, that slot is retired as `Replaced`. The completion is settled only once; this step neither settles nor releases again.
+
+There is one exception: if the report that caused this merge arrived on this read-only connection, it receives no `bye` during this round. The client first writes the response to that report, and connection teardown is left to its own `detach` frame or socket closure. The plugin handles `bye` by disconnecting the socket and marking every in-flight request as failed. A `bye` that arrives before the response makes an already recorded completion read as failed, so the agent resends its terminal state. `a_read_only_completion_is_answered_before_any_bye` in `crates/onlyne-client/tests/scenarios/reconnect.rs` pins the order.
+
+The kind field in the faults table stores the text `stale_working`, `heartbeat_missing`, `heartbeat_after_complete`, and `stalled`.
+
+The server-side observer does not change ledger state.
+
+The server-side observer does not trigger retry.
+
+The server-side observer does not trigger fail.
+
+The server-side observer obeys the zero-policy red line in §8.
+
+Within that red line, the ghost sweep moves one class of row: rows whose mirror still reads `working` while that task's own ledger row has reached a terminal state.
+
+The decision written to the mirror comes from that ledger row. The same pass also settles the task's still-unsettled delivery rows, except `kind = completion` receipts: a receipt records this settlement itself, its result is written in its `out_head`, and rejecting it would erase the result from the ledger. The recipient's client acknowledges it when it returns; a role without a client retains it under the “receipts stay queued” rule (see “Rejection surface”).
+
+The class of row eligible for this sweep depends on the backend. The server synthesizes **bare heartbeats without a projection** as `working` / `running` / `attached` (`crates/onlyne-server/src/projection.rs`), so only a backend that continues sending bare heartbeats after settlement can slide the mirror from `exited` back to `working`. Observation: pi + orca sends no bare heartbeat after task settlement. The completion path itself publishes once (lifecycle moves from `Done` + `Accepted` to `exited`), then retirement publishes again (`agent` becomes `gone` and the resource becomes `closed`), with no third frame between them. An agent process for a long-lived backend such as acp can outlive the session, and only then does this shape occur.
+
+It does not touch another class of `working` row: one whose owner is offline while the task is still unsettled.
+
+Writing a decision for such a row would assign a terminal outcome to work that is still alive and would swallow the requeue it deserves.
+
+`stale_working` remains the only output for such a row, and recovery decisions still belong to the supervisor and the `repair_*` family.
+
+The source of truth for liveness is the pi-onlyne heartbeat packet itself; pane and host-terminal liveness are outside the server's decision plane.
+
+Recovery decisions belong to people and supervisor roles.
+
+People use the repair family to perform `inspect`, `adopt`, `rebind`, `retry`, `fail`, `close`, and `ack`.
+
+Supervisor roles use the control verb to perform recovery actions.
+
+The reason is required for both `onlyne control --task <id> recycle --reason <text> --force --yes-i-am-supervisor-not-other-role` and `onlyne control --task <id> cancel --reason <text> --force --yes-i-am-supervisor-not-other-role`.
+
+`onlyne control` on the admin plane does not require `--to`: by default the CLI first reads the task's session row and sends control to the owning role. When `--to <role>` is supplied explicitly, it is used directly without another frame read.
+
+When no session for a task belongs to any role, the command rejects before writing anything, exits with code 4, and writes this exact stderr text: `onlyne: no session owns task <id>; pass --to <role> to say where the control goes`.
+
+`recycle` and `cancel` settle a task with the operator's word: the client asks the plugin to finish and close the host resources, and settlement occurs when the plugin report lands. If the plugin never answers, after three heartbeat intervals (`CONTROL_SETTLE_BOUND`) the client settles by itself using the operator's word, records `cancelled` for `cancel` and `failed` for `recycle`, and rejects the delivery row it still holds with `operator cancel` / `operator recycle`.
+
+Timeout settlement writes only the first decision: when another gate has already settled the task, it writes and publishes nothing; when the store rejects the write, the word is recorded again at the original time and retried on the next beat. If another gate has already settled the task while the mirror is still nonterminal, the later ghost sweep moves that old mirror according to the task's terminal ledger state.
+
+The supervisor role's control verbs require spec authorization.
+
+If the spec declares no role with `admin = true`, the admin identity does not exist.
+
+Control by an admin identity bypasses role-edge-table checks.
+
+`onlyne control` on the admin socket executes as the admin identity.
+
+`control` for a non-admin role still requires the owner identity or an edge with `admin = true`.
+
+When roles have no control authorization, a proxy-hop `control cancel` returns `forbidden`.
+
+`control cancel` returning `forbidden` is by design.
+
+In that case, the recovery entry point is the repair family on the admin local socket.
+
+```bash
+onlyne --server-root <server-root> repair inspect --task <id>
+onlyne --server-root <server-root> repair fail --task <id> --reason session_dead
+```
+
+The first command reads the residual ledger and session projection.
+
+The second command converges the task to failed while preserving the `session_dead` reason.
+
+## supervisor maintenance command set
+
+The seven verbs `send`, `reply`, `handoff`, `complete`, `ack`, `reject`, and `control` require both `--force` and `--yes-i-am-supervisor-not-other-role`.
+
+If either flag is missing, the command exits 2 before resolving the socket.
+
+The rejection text names the plugin tool the role should use in a session: `send` uses `onlyne_send`, `handoff` uses `onlyne_handoff`, and `complete` uses `onlyne_complete`; the plugin answers for the other four verbs itself.
+
+The CLI gate belongs to supervisors and to `exec` roles whose sessions have no plugin.
+
+An `exec` role uses the CLI form and identifies itself with those two flags.
+
+The read verbs `repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, and `status`, plus `reload` and `shutdown`, do not carry those two flags.
+
+## Task families and metadata
+
+A task family carries its own metadata, written at its origin through the guarded `send` verb:
+
+```bash
+onlyne send --hop-budget <n> --label <k=v> --deadline <rfc3339> \
+  --force --yes-i-am-supervisor-not-other-role
+```
+
+`--hop-budget <n>` records how many hops the family may spend, `--label <k=v>` records arbitrary key/value pairs for scripts to read and may be repeated up to 8 times, and `--deadline <rfc3339>` records the family's wall-clock deadline.
+
+`family` is the id of the family's root task; it passes unchanged through every hop. A child task inherits `hop_budget`, `origin` (the role that started the root task), `deadline`, and all `labels`, while `hop` is the parent row plus one.
+
+Inheritance occurs in exactly one place, `Causality::child_of`: both the CLI's `handoff` and the plugin's `onlyne_handoff` use it, so both entry points produce the same chain shape.
+
+`onlyne ledger` prints two additional keys, `family` and `hop_budget`; rows without values do not contain those keys, and old rows and columns remain byte-for-byte identical to before.
+
+`labels` is the only core field the system does not interpret: at most 8 entries, keys no longer than 32 bytes, and values no longer than 256 bytes. `Envelope::validate` rejects an out-of-bounds value and names the field.
+
+New ledger-table columns are added in place, like `expires_at` and `requeued`, so the server's schema marker remains 4 and an existing state.db need not be rebuilt.
+
+## Host resource reclamation
+
+When a session ends, its host resources are reclaimed: the client closes the herdr pane, Orca tab, zellij session, or exec child process when the session holds no task and has no plugin transport attached. After settlement, an empty shell left in a role tab is removed by these three paths; manual `herdr pane close` is the fallback.
+
+There are three trigger paths:
+
+- Graceful plugin `detach`: close the resources of every idle session served by that connection in place.
+- Settled with no agent attached: closure happens at the moment of settlement.
+- 250 ms readiness tick: scan tracked sessions. Whether a session has ended is derived: the stored tuple and the task's settled value in the `task` table pass through `project` together, and the session is closed only when the result is `exited`. The reason is derived from that settled value in the task table (`done` gives `Completed`, `failed` gives `Fault`, and `cancelled` gives `Cancelled`; `pending` or no record produces no reason). The session row itself no longer stores lifecycle and no longer reports its task result.
+
+After settlement, a session accepts no new task: one task uses one session, the slot is returned immediately and no longer occupies `max_sessions`, and host resources are reclaimed through the three paths above. There is one retention path: if the connection drops without a plugin `detach`, that agent may still reconnect.
+
+Each reclamation first refreshes a stale ref through `backend.attach` while the stored resource state remains open, projects `resource_closed`, and writes one `retiring idle session resource` line in the client log with the fields `task`, `backend`, `resource`, and `reason`; the slot is then removed from the tracking table. A close failure records a warning, and the run continues normally.
+
+Closure in herdr is idempotent: a `pane_not_found` response to `herdr pane close` is recorded as success, and the log records one debug line, `herdr pane already closed`, with the fields `task` and `pane`. A workspace that has already disappeared reads as closed afterward.
+
+The meaning of `stalled` therefore narrows to true silence: a `stalled` with `no applied progress` for a completed task disappears from this surface, and `stalled` in the fault table now describes only sessions that are still running. See the progress-clock entry in the previous section for the criterion.
+
+### Orca sessions
+
+Each task creates a new Orca terminal. `attach` only refreshes the saved terminal handle; it does not forward messages to any existing session. Before startup, check that `orca status --json` points to the expected running Orca app, verify the `ORCA_WORKTREE_ID` inherited by the client from the expected Orca tab, and confirm that `orca` resolves to the expected CLI and can connect to that app. A CLI return of `[single-instance]` means terminal creation is refused at that moment. `session_dead` appears only later, during the client's retirement sweep, after the slot exists. Once delivery has entered a terminal state because of `session_dead`, a new task must be created to run the work after repairing the host.
+
+## Headless (`exec`) sessions
+
+`exec` is the canonical name of the headless backend; `headless` is only a parse alias, while the backend string in projections and events remains `exec`. The selection chain is env `ONLYNE_BACKEND` (nonempty) > `backend` in the workspace's `config.toml` > auto. `exec` / `acp` / `fake` are not selected by host detection and must be enabled by name; `headless` behaves the same way as `exec`.
+
+The session child's stdout/stderr is merged into `<workspace>/.onlyne/logs/session-<task>.log`. When the process exits, the held `probe` writes at most the last 200 lines of that file (truncated to approximately 16KiB first, then split on whole lines) into `ResourceProbe.detail.output_tail`; if the log is missing or cannot be read, the key is omitted while the `exit` code remains.
+
+The closure ladder is:
+
+- unix: the session is an independent process group. `close` uses `kill(2)` to signal only the recorded pgid (`backend_ref.pgid`, identical to the leader pid), sends `SIGTERM` first, waits 5 seconds, then sends `SIGKILL`, and finally uses `child.kill` to reap the process. If signaling the group fails, it falls back to the same signal for the leader pid. It refuses to send to pid 0/`-1` (those mean “this process group / every killable process,” not the session). It never kills processes by a cmdline wildcard.
+- windows: spawn uses `CREATE_NEW_PROCESS_GROUP`; shutdown first sends `GenerateConsoleCtrlEvent(CTRL_BREAK)`, waits for the grace period, then calls `child.kill()` (TerminateProcess). CTRL_BREAK fails when the client has no console, so termination proceeds directly. Windows has no SIGTERM; the supervisor performs shutdown by running `onlyne server stop` on the host containing the server root.
+
+`pi --mode rpc` is a typical `session_command` for this backend: the client holds stdin open (EOF means operator departure for rpc), stdout goes to the session log, and the message plane uses the adapter socket rather than the child's stdio.
+
+```toml
+# <workspace>/.onlyne/config.toml
+backend = "headless"
+
+# <server-root>/.onlyne/spec.toml [[client]]
+session_command = ["pi", "--mode", "rpc", "--session-id", "{session}"]
+```
+
+Protocol-oriented `session_command` values (commands such as `pi --mode rpc` or `agent --acp` that speak JSON-RPC over their own stdio) recognize only the `backend = "exec"` and `backend = "acp"` configurations. When written as `herdr` / `orca` / `zellij`, the client rejects them at delivery and stores the rejection text as the reason in the ledger. To change it, change `backend` in the workspace configuration; the system does not switch it at runtime.
+
+## ACP session backend
+
+`acp` is an explicitly selected backend: it is not in the host-detection candidate set and is selected by env `ONLYNE_BACKEND=acp` or `backend = "acp"` in the workspace's `config.toml`. `session_command` is that agent's ACP launch command, for example `qoderclicn --acp`.
+
+One agent process hosts every session for the role. The process is reused according to the rendered command, and sessions are distinguished by ids assigned by the agent.
+
+The configuration surface is the `[acp]` table in the workspace's `config.toml`:
+
+| Configuration file | Field | Default | Effect |
+|---|---|---|---|
+| `[acp]` in `<workspace>/.onlyne/config.toml` | `mode` | empty | Session mode passed to the agent through `session/set_mode`; an empty value uses the agent's own default |
+| `[acp]` in `<workspace>/.onlyne/config.toml` | `model` | empty | Value of the model configuration setting; an empty value uses the agent's own default |
+| `[acp]` in `<workspace>/.onlyne/config.toml` | `reasoning_effort` | empty | Value of the reasoning-level configuration setting; an empty value uses the agent's own default |
+| `[acp]` in `<workspace>/.onlyne/config.toml` | `permission` | `deny` | The local response when the agent requests permission: `deny` rejects and records a fault, while `allow` permits |
+
+A rejected permission request records a `permission` fault whose reason lists the rejected tool call and local policy; the same task's terminal state still enters the ledger normally.
+
+### Completion reports (payload-v2)
+
+The client completes ACP sessions. There is no `onlyne` CLI inside the agent session, and none is needed. `deliver` injects report instructions at the end of the prompt for every delivery. The first line of those instructions gives the absolute path `<workspace>/.onlyne/out/<task-id>.md` and prints the complete grammar verbatim. The instructions require the agent to write its result to that file before stopping: first write to a temporary name in the same directory, then rename it into place. Report body text follows the existing `out_head` rules: one line, collapsed whitespace, and a 200-character truncation.
+
+Grammar v2 specifies that a report file contains one verdict line plus zero or more handoff lines (a single-line v1 file is also valid):
+
+| Line | Meaning |
+|---|---|
+| `hop-done: <one-line result>` | verdict: the task is complete, and the body is the conclusion |
+| `hop-failed: <one-sentence reason>` | verdict: the task failed, and the body is the reason |
+| `hop-blocked: <one-line blocker>` | verdict: the task is blocked on an external dependency, and the body is what it is waiting for |
+| `handoff: <target role> \| <one sentence for that role>` | One handoff line; zero to eight may appear. The text after `\|` is optional, and when omitted the verdict body is the delivered content |
+
+A line beginning with `#` is a comment, and blank lines are ignored. Any other line that violates the grammar means the entire file is Invalid (fail closed: zero handoffs, zero routes). A single file may contain at most 16 lines and at most 8 handoffs; exceeding either limit is also Invalid. CRLF and bare CR are first normalized to LF, then lines are classified.
+
+The client creates the report directory before delivery. If creation fails, that prompt has no instruction block, and the round settles normally as if the file were absent; the journal adds a `warning` record beside the `dispatch` record.
+
+After the turn ends and every `session/update` for that round has been recorded, the client reads the report file once: it parses first, routes handoffs second, and deletes the file last. Completion values are:
+
+| Report case | Result |
+|---|---|
+| File absent or unreadable | Preserve pre-contract behavior: outcome and head are derived from stopReason and the round's final assistant text |
+| `hop-done: <nonempty>` | The report text becomes head; outcome is still determined by stopReason, and a round classified as an abnormal termination by stopReason keeps that classification; handoff lines are routed normally |
+| `hop-failed: <nonempty>` | Outcome is failed; the report text is both head and fault reason; even a normal `end_turn` is downgraded; handoff lines are routed normally |
+| `hop-blocked: <nonempty>` | Outcome and head come from the report's blocked body, but the task is not handed off: the work is unfinished and there is nothing to pass to the next role |
+| Invalid (extra line, unknown prefix, over limit, empty file, bad UTF-8) | Outcome is cancelled; the fault reason begins with `acp payload invalid:` and states the category and line number; head is empty and there are zero handoffs. The file remains in place, so redelivering the same task after rewriting it can consume it |
+
+The three verdicts `done|failed|blocked` reach the payload layer through the `head_kind` field of `Outcome::Finalized`, allowing the client to distinguish blocked from the other two.
+
+The client routes handoffs over that role's existing server connection without impersonating a human request. A single routing failure (ACL rejection or target role absent from the local connection plane) records one `handoff_denied`: the journal records a `handoff_denied` event with `to_role` and the rejection reason, and the faults plane reports a fault with the same name. The verdict is not removed, the Outcome kind is unchanged, and the remaining handoffs continue.
+
+One report can go to at most eight roles at once, and each role receives the body belonging to its own line: when the line contains `| <one line>`, the recipient reads that sentence; otherwise it reads the verdict body (`Handoff::text_or`, `crates/onlyne-proto/src/payload.rs:29`).
+
+A hop records a handoff's depth in the chain. Handoff-chain depth remains open by product intent: neither the protocol nor the server imposes a hop-count limit, and hop travels with the envelope solely as causal history (`crates/onlyne-proto/src/envelope.rs:331-339`, `crates/onlyne-server/src/relay.rs:640`). The `allowed_targets` edges in `spec.toml` determine which roles can receive a handoff, and the server's ACL gate answers every send according to those edges (`crates/onlyne-server/src/relay.rs:379-393`).
+
+There is one way for an operator to bound the chain: remove the corresponding `allowed_targets` edge and run `onlyne reload`.
+
+Every read appends a `payload` record to that task's journal with the fields `task_id`, `path`, `payload_kind` (one of `done`, `failed`, `blocked`, `invalid`, or `absent`), `head`, and `handoffs` (the number of readable handoff lines in this round). A rejected report record also has an `error` field stating the rejection reason and line number. An absent report is recorded too, so the ledger shows whether that round reported anything.
+
+Before the completion file is deleted, every handoff line worth routing gets a separate `handoff` record with the fields `task_id`, `to_role`, and `head`; a rejected handoff line becomes `handoff_denied` on the client side.
+
+Completion facts enter the ledger through the single `dispatch::on_out` path: settle, `out_head`, acknowledgment, and the completion receipt are all emitted there. Every terminal task sends a receipt; when both the report and final text are absent, a `completion` row with empty body text is recorded.
+
+### Local validation command family (`onlyne report`)
+
+The same grammar parser (`onlyne_proto::payload`) is exposed as local CLI verbs that only read and write workspace files and open no socket:
+
+| Verb | Behavior |
+|---|---|
+| `onlyne report path --task <id>` | Print the absolute completion-file path for the task, together with the three on-disk session paths `log:`, `events:`, and `content:` |
+| `onlyne report check --task <id>` (or `--path <file>`) | Valid: print the verdict kind, head/reason, and every handoff line, then exit 0. Invalid: print `onlyne: <精确原因（含行号）>` plus the complete grammar to stderr and exit 2. File absent or unreadable: report `absent` or the read-failure reason to stderr and exit 2 (3 is reserved only for socket resolution) |
+| `onlyne report write --task <id> --verdict <done\|failed\|blocked> --head <text> [--handoff <role\|text>]...` | Construct a valid report from its parts, write it atomically using a temporary name plus rename, and print the final path |
+| `onlyne report validate --text <s>` (or `--from -` to read stdin) | Run the same parser on the string without touching a file |
+
+`--workspace` uses the same location convention as socket resolution: start at the supplied directory and search its ancestors for `.onlyne/config.toml`; if none is found, use the supplied directory itself. The full grammar is embedded in `onlyne report --help` and `onlyne report check --help`, so an installed user can check the format without consulting documentation.
+
+## Session content
+
+ACP sessions have no terminal: the agent is a child process held by the client, and its session is invisible to processes outside the client. What remains is the on-disk journal. `<workspace>/.onlyne/logs/session-<task>.events.jsonl` has one JSON object per line, containing that agent's `session/update` notifications plus the client's own `dispatch`, `payload`, and `turn` records; `<workspace>/.onlyne/logs/session-<task>.log` is the human-readable rendering. `<workspace>/.onlyne/logs/content.index.jsonl` has one metadata line per record, recording its offset and length in the task journal, so role-level content sequence numbers continue after a client restart. All three are ordinary files, local permissions determine who may read or write them, and the client does not provide a live stream to any process outside the session.
+
+## Windows shutdown
+
+Windows has no SIGTERM / SIGHUP. `tokio::signal::windows::ctrl_c` connects to the existing SIGINT shutdown path. The supervisor performs shutdown by running `onlyne server stop` on the host containing the server root; spec hot reload uses `onlyne reload`. See the previous section for the exec-session child-process kill ladder.
+
+On Windows, `.onlyne/run/s` is a marker file (content `v1:onlyne-<32hex>`), and the named-pipe name is derived from the lowercase sha256 of the path's lexical-absolute form. `--socket \\.\pipe\` passes through unchanged. `ERROR_PIPE_BUSY` is retried within the CLI `--timeout`. On Unix, AF_UNIX remains a filesystem UDS.
+
+**中文**
+
 Onlyne 运维以 server 账本、client 工作区、admin 本地 socket（规范名 `.onlyne/run/s`；路径不超过 103 字节时绑在这一条，超限时绑到系统临时目录下的短派生路径，实际服务的路径记在同目录的 `run/socket` 标记里）为边界。
 
 ## 值守入口

@@ -1,6 +1,9 @@
 # Onlyne Status
 
-v1.4.0 is on this tree and all nineteen crates are on crates.io at 1.4.0. It rebuilds the client's session
+Release `v1.4.0` is commit `b3c776ef080d73302267a465c8dbd540321f9adb`. All nineteen Rust crates
+are published to crates.io at 1.4.0 and `pi-onlyne` 1.2.0 is published to npm. No v1.4.0
+GitHub binary release is published; the registry packages are the v1.4.0 installation channel.
+The release rebuilds the client's session
 lifecycle around one rule: in plugin mode a session's state comes from the frames the
 mounted plugin reports and from heartbeat liveness. Three sources competed before it —
 the adapter frames, a backend probe that read a pane or a tab, and stored rows read as
@@ -18,7 +21,7 @@ reads it takes every session, settles the task a dead session owed, and closes t
 resource with the reason that task's state earns. The receipt reaches the reducer at
 last, so a completed task exits through `Done` beside `Accepted`, which is the exit the
 adapter protocol promises. Two databases move: the client's schema marker to 2 with the
-new `task` table, the server's to 3 with `public_lifecycle` dropped and the lifecycle
+new `task` table, the server's to 4 with `public_lifecycle` dropped and the lifecycle
 read out of the stored projection, and a database from the previous layout is refused
 with `onlyne: unsupported schema; v1.0.0 does not migrate`.
 
@@ -35,7 +38,9 @@ v1.3.0 (tag `v1.3.0`, `5fadaa8`) shipped nineteen crates at 1.3.0. The release t
 
 ## Crate state
 
-Counts come from `cargo test --workspace --no-fail-fast -j 4 --lib --tests` on 2026-09-20 at `9d72e50` (970 passed, 0 failed, 1 ignored: `herdr_live_probe`, across 50 suites). The earlier 2026-09-19 count of 962 across 68 suites came from a plain `cargo test --workspace`, whose extra targets are the doc tests. Each line below covers one crate, with its libraries and integration targets summed.
+Counts come from the release-window verification recorded in `Devlogs.md`: 1101 passed, 0 failed,
+and 1 ignored across 69 targets. The release commit's Linux gate is green. Each line below covers
+one crate, with its libraries and integration targets summed.
 
 - [x] `onlyne-proto` green with envelope, frame variants, ops, errors, events, and the payload-v2 report grammar: 76 unit + 5 wire vectors (86 fixtures) + 2 sizes, where a wire vector is a recorded protocol fixture.
 - [x] `onlyne-acp` green with the ACP v1 client, its stdio transport, and the protocol fixtures: 40 unit + 14 scripted-peer + 1 doc example.
@@ -62,7 +67,7 @@ Counts come from `cargo test --workspace --no-fail-fast -j 4 --lib --tests` on 2
 
 ## Verification cases
 
-Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root. The directory holds eighteen case scripts besides `lib.sh`, the shared harness, and `acp-agent.py`, the scripted ACP peer cases 18 and 19 drive. Fifteen exited 0 in one sweep on 2026-09-19 at `86d34ff`, with this round's repair, secret-resolution, and CLI-surface edits on top of it. Those fifteen are the thirteen fake-backend cases (1-7, 9, 12, 14, 15, 16, 17) plus cases 18 and 19. `running-lights` is the long one, and `gateway-mount` the quick one. Case 16 `exec-headless` joined the set for 1.1.0, and case 17 `socket-path-length` joined on 2026-09-17 as the field fix for the deep-workspace socket. Case 18 `acp-session` joins as the ACP backend proof: a real server and client against a scripted ACP agent as the role's `session_command`, so the case stands apart from the fake-backend set and from the live set. Case 19 `acp-payload-v2` joins beside it as the closing-report proof, where the closing report is the one file a settled task leaves. One acp role authors its report through the shipped `onlyne report` verbs, and a fake role receives what the client routes. The case asserts the routed child rows' `parent_task`, `hop + 1` (one hop deeper, where a hop is one step along the chain of handed-on tasks), literal `handoff: ` body prefix, and completion receipts. It then covers the three endings that must invent nothing: a relay (one handoff the client sends) to a role the ACL cannot reach records `handoff_denied` and creates no task; a `hop-blocked:` report settles failed with zero relays; and a malformed report cancels its turn while leaving the file for a rewrite that then checks valid. On 2026-09-19 at `86d34ff` cases 12, 18, and 19 each exited 0, case 19 twice in a row. Cases 10 and 11 are live and last exited 0 on 2026-09-11 (2 seconds and 9 seconds). Case 13 is live against herdr session `onlyne-test` and exited 0 on 2026-09-14 in 3 seconds, its workspace closed and the session's workspace list back to the single `~` entry it started with. The pane-reclaim step that case 13 gained on 2026-09-17 is operator-pending: the script passed `bash -n`, and the next live run on a host with a reachable `onlyne-test` records its own green line. Cases 10, 11, and 13 override the backend: case 10 needs a shell inside an Orca tab with the app answering, case 11 needs a `pi` that answers a credential probe, and case 13 needs a reachable herdr session `onlyne-test`. On a host without its requirement, a live case prints `SKIP` and exits 0, so a green line says "passed here" and a skip says "not exercised here".
+Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root. The directory holds eighteen case scripts besides `lib.sh`, the shared harness, and `acp-agent.py`, the scripted ACP peer cases 18 and 19 drive. The 2026-09-19 sweep is historical. The final release-window record in `docs/live-evidence-1.4.0.md` reports 19/19 scripts green; the release commit's local workspace gate in `Devlogs.md` reports 1101 passed, 0 failed, and 1 ignored across 69 targets. `running-lights` is the long one, and `gateway-mount` the quick one. Case 16 `exec-headless` joined the set for 1.1.0, and case 17 `socket-path-length` joined on 2026-09-17 as the field fix for the deep-workspace socket. Case 18 `acp-session` joins as the ACP backend proof: a real server and client against a scripted ACP agent as the role's `session_command`, so the case stands apart from the fake-backend set and from the live set. Case 19 `acp-payload-v2` joins beside it as the closing-report proof, where the closing report is the one file a settled task leaves. One acp role authors its report through the shipped `onlyne report` verbs, and a fake role receives what the client routes. The case asserts the routed child rows' `parent_task`, `hop + 1` (one hop deeper, where a hop is one step along the chain of handed-on tasks), literal `handoff: ` body prefix, and completion receipts. It then covers the three endings that must invent nothing: a relay (one handoff the client sends) to a role the ACL cannot reach records `handoff_denied` and creates no task; a `hop-blocked:` report settles failed with zero relays; and a malformed report cancels its turn while leaving the file for a rewrite that then checks valid. On a host without a live-case requirement, that case prints `SKIP` and exits 0, so a green line says "passed here" and a skip says "not exercised here".
 
 - [x] Case 1 `local-task.sh`: single-machine fake-backend task reaches `acked`.
 - [x] Case 2 `acl-reject.sh`: ACL refusal emits `acl_denied`.
@@ -71,7 +76,7 @@ Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKE
 - [x] Case 5 `two-cluster.sh`: aggregate-role federation preserves the parent ledger boundary.
 - [x] Case 6 `gateway-mount.sh`: gateway mount delivers platform traffic.
 - [x] Case 7 `legacy-layout.sh`: legacy workspace exits 2.
-- [x] Case 8: formatting, lint, workspace tests, and binary firewall checks pass. `.github/workflows/ci.yml` splits this across two jobs: linux fmt/clippy/`cargo test --workspace`; windows `cargo test` on the core crate subset. The release commit's linux job is green; its windows job reports the known handbook CRLF and restart-timing failures.
+- [x] Case 8: formatting, lint, workspace tests, and binary firewall checks pass. `.github/workflows/ci.yml` splits this across two jobs: Linux fmt/clippy/`cargo test --workspace`; Windows `cargo test` on the core crate subset. The release commit's Linux job is green; its Windows job reports the known handbook CRLF and restart-timing failures.
 - [x] Case 9 `generate-relocate.sh`: generate produces relocatable workspaces.
 - [x] Case 10 `orca-live.sh`: the Orca backend against the live app. Under the `host` policy the tab lands flat in the supervisor's own worktree. Probe inputs come in four parts, and the tab map carries that identity. SIGTERM drains back to the tab count it started with, and no Orca registration is created.
 - [x] Case 11 `pi-live.sh`: the `plugins/onlyne-agent-pi` pi extension against a real `onlyne-client`. `ONLYNE_BACKEND=exec` spawns the workspace's `session_command` as a child of the client with stdin held open. pi loads the plugin, and the task text reaches pi's context. The plugin's `report.complete` then settles the ledger to `acked` with the model's answer in `out_head`, and the session projects `exited`/`done`. SKIP semantics: pi not on PATH, or a one-turn credential probe that does not answer, prints `SKIP pi-live` and exits 0. A host without a model must not read as a product failure. The plugin's own protocol path is covered without a model by `node --test` in `plugins/onlyne-agent-pi`: framing, protocol vocabulary, the agent state machine against a fake host, and a live handshake against a really-running `onlyne-client`.
@@ -89,4 +94,77 @@ Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKE
 `.github/workflows/ci.yml` defines two jobs on `push` to `main`, pull requests, and `workflow_dispatch`.
 
 - `linux` (`ubuntu-latest`): `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
-- `windows` (`windows-latest`): `cargo test --no-fail-fast` on `onlyne-proto`, `onlyne-frame`, `onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-cli`, `onlyne-tui`. The release commit's linux job is green; the windows job reports the known handbook CRLF and restart-timing failures.
+- `windows-latest`: `cargo test --no-fail-fast` on `onlyne-proto`, `onlyne-frame`, `onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-cli`, `onlyne-tui`. The release commit's Linux job is green; the Windows job reports the known handbook CRLF and restart-timing failures.
+
+## 中文状态摘要
+
+以上英文内容是规范文本；本节提供当前运行事实的中文镜像。
+
+### 发布与历史状态
+
+`v1.4.0` 对应提交 `b3c776ef080d73302267a465c8dbd540321f9adb`。十九个 Rust crate 均以 1.4.0 发布到 crates.io，`pi-onlyne` 1.2.0 已发布到 npm。v1.4.0 未发布 GitHub 二进制发行版；registry 包是 v1.4.0 的安装渠道。客户端会话生命周期以插件上报的 frame 和 heartbeat 存活状态为依据，任务结果进入独立的 `task` 表；`session_sync` 已移除，客户端到服务器的协议包含十二个 verb。客户端数据库 schema marker 为 2，服务器数据库为 4；旧布局会返回 `onlyne: unsupported schema; v1.0.0 does not migrate`。
+
+`v1.3.1` 标记为 `v1.3.1`（`9d72e50`），十九个 crate 版本为 1.3.1。该版本处理已在此角色完成的任务被再次投递的问题，并修复 `onlyne server generate` 漏写模板文件的问题。当时完整工作区检查为 970 cases、50 suites、1 ignored。
+
+`v1.3.0` 标记为 `v1.3.0`（`5fadaa8`），十九个 crate 版本为 1.3.0。它增加 `[client] reconnect_grace_secs`（默认六十秒，设为 `0` 时关闭），支持重连期间保留会话，移除 `[client.timeout] running_ms`，并为 `onlyne server generate` 增加逐文件内容保护。更早版本的记录在 `CHANGELOG.md`，规范见 `docs/v1-PLAN.md`，工作拆分见 `docs/v1-CONTRACT.md`。
+
+### 三进程结构
+
+- `onlyne-server` 路由 envelope 并持有 ledger。
+- `onlyne-client` 拥有一个角色 workspace 及其 session 执行。
+- `onlyne-gateway` 通过 feature-gated plugin 转换一个聊天平台。
+- Agent plugin 与 gateway plugin 通过同一 adapter protocol 使用两种 mount kind。
+
+### Crate 状态
+
+`Devlogs.md` 记录的 release-window 检查为：1101 passed、0 failed、1 ignored，分布于 69 targets。release commit 的 Linux gate 为 green。
+
+- `onlyne-proto`：76 unit + 5 wire vectors（86 fixtures）+ 2 sizes。
+- `onlyne-acp`：40 unit + 14 scripted-peer + 1 doc example。
+- `onlyne-frame`：9。
+- `onlyne-config`：11 template + 39 config contract + 17 ACL table + 3 spec example。
+- `onlyne-layout`：30。
+- `onlyne-store`：31 unit + 2 schema statements。
+- `onlyne-session`：131 unit + 18 herdr。
+- `onlyne-net`：25。
+- `onlyne-adapter`：5 unit + 3 conformance + 1 protocol doc。
+- `onlyne-server`：14 unit + 84 delivery + 29 generate + 2 stale。
+- `onlyne-client`：82 unit + 1 binary + 53 scenarios + 4 init-template。
+- `onlyne-tui`：74 unit + 2 one-shot snapshots。
+- `onlyne-gateway`：47。
+- `onlyne-cli`：8 unit + 40 cli + 8 report。
+- `onlyne-testkit`：3 unit + 2 binaries + 11 conformance。
+- 四个 gateway plugin：11、10、10、13，分别对应 `telegram`、`feishu`、`qqbot`、`weixin`。
+
+Wave 1、Wave 2、Wave 3 均已关闭。
+
+### 验证用例
+
+用例位于 `crates/onlyne-testkit/e2e/`，从仓库根目录以 `ONLYNE_BACKEND=fake BIN_DIR=target/debug` 运行。2026-09-19 的 sweep 属于历史记录；`docs/live-evidence-1.4.0.md` 的最终 release-window 记录为 19/19 scripts green，release commit 的本地 workspace gate 为 1101 passed、0 failed、1 ignored、69 targets。缺少所需 live 条件时，相应 case 打印 `SKIP` 并以 0 退出。
+
+1. `local-task.sh`：单机 fake-backend task 到达 `acked`。
+2. `acl-reject.sh`：ACL 拒绝产生 `acl_denied`。
+3. `idempotency.sh`：重复 `op_id` 产生 `duplicate`，请求体变化产生 `conflict`。
+4. `reconnect-requeue.sh`：断线保留队列状态，重连后按序 flush。
+5. `two-cluster.sh`：aggregate-role federation 保持父 ledger 边界。
+6. `gateway-mount.sh`：gateway mount 投递平台流量。
+7. `legacy-layout.sh`：legacy workspace 以 2 退出。
+8. 格式、lint、workspace tests 与 binary firewall 检查通过。release commit 的 Linux job 为 green；Windows job 报告已知 handbook CRLF 和 restart-timing failures。
+9. `generate-relocate.sh`：generate 生成可重定位 workspace。
+10. `orca-live.sh`：Orca backend 对接 live app；`host` policy 下 tab 位于 supervisor 自身 worktree，SIGTERM 后恢复原 tab 数，且不创建 Orca registration。
+11. `pi-live.sh`：`plugins/onlyne-agent-pi` 对接真实 `onlyne-client`，任务进入 pi context，`report.complete` 将 ledger 结算为 `acked`。pi 不在 PATH 或 credential probe 无响应时打印 `SKIP pi-live` 并以 0 退出；无模型的主机不视为产品失败。插件协议路径由 `plugins/onlyne-agent-pi` 中的 `node --test` 覆盖。
+12. `running-lights.sh`：六个角色组成闭环，一个 token 从 `light1` 开始，最终在 hops `0..11` 产生十二条 `acked` `task` row 和十二条 `completion` receipt；`onlyne-tui --page 2 --once` 采样显示工作 session 在不同角色间移动。
+13. `herdr-live.sh`：herdr backend 对接 live session `onlyne-test`，验证 workspace/tab/pane、focus、recycle、资源释放与清理。缺少 herdr binary 或 `HERDR_SESSION` 不可达时打印 `SKIP herdr-live` 并以 0 退出。
+14. `heartbeat-watch.sh`：验证 `stale_watch_secs = 2`、`heartbeat_grace_secs = 4` 与 `heartbeat_missing` fault；server 标记，supervisor 决定。
+15. `requeue-claim.sh`：server 被 `kill -9` 后，client 重连并在 `hello` 声明 live slot；任务保持一次 delivery、零 requeue，最终 `acked`。
+16. `exec-headless.sh`：验证 `backend = "headless"`、`ONLYNE_BACKEND=exec`、日志写入、ledger 结算及 `client.db` 中的 backend `exec`。
+17. `socket-path-length.sh`：验证深 workspace 下 `<workspace>/.onlyne/run/s` 超过 103 bytes 时使用短 socket，`onlyne --workspace <deep ws> who` 可用。
+18. `acp-session.sh`：ACP v1 scripted agent 验证 mode、model、reasoning effort、日志一致性以及 `acked`、`exited`/`done` 状态。
+19. `acp-payload-v2.sh`：验证 `onlyne report write`/`onlyne report check`、child task 的 `parent_task`、`hop + 1`、`handoff: ` 前缀、completion receipt、`handoff_denied`、`hop-blocked:` 与 malformed report 行为。
+
+### CI
+
+`.github/workflows/ci.yml` 在 `push` to `main`、pull requests 和 `workflow_dispatch` 上定义两个 job：
+
+- `linux`（`ubuntu-latest`）：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`。
+- `windows-latest`：对 `onlyne-proto`、`onlyne-frame`、`onlyne-config`、`onlyne-layout`、`onlyne-store`、`onlyne-session`、`onlyne-net`、`onlyne-adapter`、`onlyne-server`、`onlyne-client`、`onlyne-gateway`、`onlyne-cli`、`onlyne-tui` 运行 `cargo test --no-fail-fast`。release commit 的 Linux job 为 green；Windows job 报告已知 handbook CRLF 和 restart-timing failures。

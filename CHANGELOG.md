@@ -1,9 +1,97 @@
 # Changelog
 
-## [1.4.0] - 2026-09-21
+## 1.4.0 release index (English)
 
-Status: **published.** The Git tag is `v1.4.0`; all nineteen workspace crates publish to
-crates.io at 1.4.0, and `pi-onlyne` publishes to npm at 1.2.0.
+**Release:** 1.4.0, dated 2026-09-24. The registry release is published at
+`b3c776ef080d73302267a465c8dbd540321f9adb`; tag `v1.4.0` points to that commit. All
+nineteen workspace crates are on crates.io at 1.4.0, and `pi-onlyne` is on npm at
+1.2.0. GitHub binary archives, a rendered Homebrew formula, and the `install.sh`
+release channel were not produced for this release.
+
+**Before upgrading:**
+
+- Restart the server and every client of a role together on one build. `reuse`,
+  `session_sync`, and the `public_lifecycle`, `outcome`, and `public` heartbeat
+  fields were removed, and both database layouts changed. Existing client and
+  server databases are refused; migrate the workspace data or start from fresh
+  state.
+- The seven role-facing CLI verbs—`send`, `reply`, `handoff`, `complete`, `ack`,
+  `reject`, and `control`—require both `--force` and
+  `--yes-i-am-supervisor-not-other-role`.
+- A turn that ends without `onlyne_complete` is reminded and then fails after
+  `idleReminders` attempts, which default to 2.
+
+**Operator-visible changes:**
+
+- Session state now follows plugin frames and heartbeat liveness. Delivery and
+  recovery stay client-owned, task results move to their own record, and one
+  reconnect clock settles dead sessions and their owed tasks.
+- The server adds the ghost sweep and `onlyne ghosts [--limit N]`. Queued
+  deliveries can expire through `[server].requeue_ttl_secs`, and
+  `onlyne sessions --fresh --task T` probes a task's owning client.
+- The CLI adds `onlyne skill export`. Role templates preserve top-level
+  dot-directories, the `_supervisor` role reaches every registered role unless
+  `allowed_targets` narrows it, and shipped handbooks now lead operators through
+  plugin tools.
+- The TUI adds queued-depth counts, deterministic role-map ordering, detailed
+  retirement logging, settlement reasons, full-list scrolling and one-shot dumps,
+  consistent state visibility, hidden `_supervisor` presentation, and detail
+  rendering that remains stable across repeated snapshots.
+- Protocol and client reliability changes include heartbeat-carried state,
+  accepted-delivery receipts, silent-session detection, sender-bound state
+  frames, replayed-verdict slot release, task-family metadata, and
+  `PluginOp::Handoff`.
+
+The complete release record begins at [1.4.0](#140---2026-09-24). The live
+acceptance record is `docs/live-evidence-1.4.0.md`.
+
+## 1.4.0 版本索引（中文）
+
+**发布信息：** 1.4.0 发布于 2026-09-24。registry 发布对应的提交为
+`b3c776ef080d73302267a465c8dbd540321f9adb`；tag `v1.4.0` 指向该提交。工作区全部
+十九个 crate 均以 1.4.0 发布到 crates.io，`pi-onlyne` 以 1.2.0 发布到 npm。
+本次发布没有生成 GitHub 二进制归档、渲染后的 Homebrew formula 或
+`install.sh` 发布通道。
+
+**升级前须知：**
+
+- 请将 server 和某一角色的所有 client 一起重启到同一构建。`reuse`、
+  `session_sync` 以及 heartbeat 中的 `public_lifecycle`、`outcome`、`public`
+  字段已移除，两种数据库布局也已改变。现有 client 和 server 数据库会被拒绝；
+  请迁移工作区数据，或从全新状态开始。
+- 七个面向角色的 CLI verb——`send`、`reply`、`handoff`、`complete`、`ack`、
+  `reject` 和 `control`——必须同时提供 `--force` 与
+  `--yes-i-am-supervisor-not-other-role`。
+- 未调用 `onlyne_complete` 就结束的 turn 会收到提醒；达到 `idleReminders`
+  次后失败，默认值为 2。
+
+**操作员可见的变化：**
+
+- session 状态现在以 plugin frame 和 heartbeat liveness 为依据。delivery 与
+  recovery 仍由 client 管理，task 结果移到独立记录中，并由同一个 reconnect
+  clock 处理死亡 session 及其尚未完成的 task。
+- server 新增 ghost sweep 和 `onlyne ghosts [--limit N]`。排队 delivery 可通过
+  `[server].requeue_ttl_secs` 过期，`onlyne sessions --fresh --task T` 可探测
+  task 所属的 client。
+- CLI 新增 `onlyne skill export`。role template 保留顶层 dot-directory；
+  `_supervisor` 默认可访问所有已注册角色，也可由 `allowed_targets` 缩小范围；
+  随包 handbook 现在优先引导操作员使用 plugin 工具。
+- TUI 新增排队深度计数、确定性的 role map 排序、详细的 retirement 日志、
+  settlement reason、完整列表滚动与一次性 dump、一致的状态可见性、隐藏的
+  `_supervisor` 展示，以及在重复 snapshot 间保持稳定的 detail 渲染。
+- protocol 与 client 的可靠性变化包括由 heartbeat 携带状态、accepted-delivery
+  receipt、沉默 session 检测、绑定发送方的 state frame、replayed-verdict slot
+  释放、task-family metadata 和 `PluginOp::Handoff`。
+
+完整发布记录从 [1.4.0](#140---2026-09-24) 开始。实际验收记录位于
+`docs/live-evidence-1.4.0.md`。
+
+## [1.4.0] - 2026-09-24
+
+Status: **registry-published at `b3c776ef080d73302267a465c8dbd540321f9adb`.** Tag `v1.4.0`
+points to that commit; all nineteen workspace crates publish to crates.io at 1.4.0, and
+`pi-onlyne` publishes to npm at 1.2.0. The GitHub binary-release pipeline did not run, so v1.4.0
+has no GitHub archives, rendered Homebrew formula, or install.sh release channel.
 
 Receipt: all nineteen crates passed Cargo's packaging sandbox build and reached crates.io on
 their first upload attempt. A registry search from outside this workspace answers 1.4.0 for
@@ -263,8 +351,8 @@ Every live reading quoted in this section comes from one deployment's acceptance
   with exit 4 and `onlyne: refusing to overwrite <path>; pass --force`, which is the rule
   `generate` follows for template files, and the run writes nothing in that case. The bytes
   are compiled into the binary (`crates/onlyne-cli/src/skill.rs`, `include_str!` over
-  `crates/onlyne-cli/skills/<name>/SKILL.md`, symlinks to the canonical `skills/**` and
-  `.agents/skills/onlyne/SKILL.md`), so an installed `onlyne` answers with the skills of its
+  `crates/onlyne-cli/skills/<name>/SKILL.md`, ordinary regular files kept byte-identical to
+  their source manuals), so an installed `onlyne` answers with the skills of its
   own version, with no network and no source checkout, and `cargo package` materializes the
   copies it archives. The three groups are `role` (`onlyne-role` and
   `onlyne-role-payload-v2`), `supervisor` (`onlyne-supervisor`) and `dev` (the repository
@@ -732,6 +820,10 @@ Every live reading quoted in this section comes from one deployment's acceptance
 
 ### Check on this tree
 
+The release commit's local gate is recorded in `Devlogs.md`: 1101 passed, 0 failed, and 1 ignored
+across 69 targets. The final live acceptance record reports 19/19 e2e scripts green. The dated
+2026-09-23 run below remains historical evidence from before the final fixes.
+
 Run 2026-09-23, after the restart-path window: `cargo fmt --all --check`, `cargo clippy
 --workspace --all-targets -- -D warnings`, and `cargo test --workspace` pass at 1011 cases
 across 68 result blocks with 0 failures and 1 ignored (`herdr_live_probe`). The window
@@ -875,15 +967,6 @@ with them.
   `crates/onlyne-client`, `crates/onlyne-session` or the plugin names either key, so the
   budgets describe a promise this tree does not keep. Removing the table is a breaking
   config change and stays with the operator.
-- Two live-run findings are open as decisions for the operator, recorded here rather than patched
-  on guesswork. First, a task that never ran can still be settled `done`: the honest gate is a
-  completion arriving for a session that never passed `ready`/`turn-start` being refused and
-  faulted, and an empty `head` is not the anomaly on its own, since the plugin's own
-  `head = explicit || task?.head || ""` and `onlyne complete --head-from ledger` both reach a
-  legitimate empty head. Second, `repair close` leaves the session's projection row where it
-  stood, which is the design's own rule (`stale.rs` records a fault and moves no row, and
-  `docs/operations.md` says so), and it is why a dead session keeps reading `working` in
-  `onlyne sessions` and on the board until an operator clears it.
 - The read path holds three accounts of one session — the client's tuple, the server's mirrored
   row, and the two ends' separate death clocks — and the fixes above close holes in that shape.
   Whether the public view moves to one source derived at read time is a structure decision.

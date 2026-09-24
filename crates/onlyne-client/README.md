@@ -157,3 +157,165 @@ Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind
 ## Role prose
 
 `welcome.prose` is cached in `prose_cache`, keyed by role with `spec_hash`. `roles` and the cluster prose export read that record.
+
+---
+
+# onlyne-client（中文版 / Chinese Mirror）
+
+一个工作区、一个角色、一个守护进程。该角色可同时运行多个会话。
+
+## 动词
+
+| 动词 | 一句话说明 |
+| --- | --- |
+| `run --workspace <dir>` | 前台角色运行时：连接、握手、拉取、分派、报告。后台运行由操作者负责，客户端自身不负责。 |
+| `status --workspace <dir>` | 打印运行时长、socket 路径、已记录故障数以及服务器链接是否可用。 |
+| `doctor` | 打印主机检测 JSON。无需工作区或 socket。退出码为 0。 |
+| `init --workspace <dir> --role <r> --server-root <dir>` | 构建最小角色工作区并打印 `[[client]]` spec 片段。 |
+| `roles --workspace <dir>` | 从本地缓存回答角色 prose。 |
+| `sessions --workspace <dir>` | 为实时角色运行时保留。 |
+| `watch --workspace <dir>` | 为实时角色运行时保留。 |
+| `history --workspace <dir>` | 为实时角色运行时保留。 |
+
+`run` 是唯一的启动动词，并始终留在前台。`--workspace` 接受相对路径，并在使用前将其解析为绝对路径，因此守护进程、它所生成的会话以及 herdr 的 `--cwd` 都会读取同一位置。需要让客户端在后台运行的管理器负责这一决定——可见终端标签页、`launchd`、`nohup`——客户端自身不会分离、不写 pid 文件，也没有东西按编号向其发送信号。无法绑定适配器 socket 的 `run` 会就此结束，退出码为 1，并在 stderr 指明失败原因；成功绑定后出现 `accept` 错误时，会以 `error` 级别记录（`adapter socket accept failed; retrying`），并保持监听器、每 100 ms 重试一次。
+`status` 打印 `onlyne: client running uptime <n>s socket <path> faults <n>`。`<path>` 是通过所有者树读取的已提供服务 socket 路径——可以是规范的 `run/s`，也可以是深层工作区实际服务所用的短派生路径；回答 `<workspace>/.onlyne/run/socket` 也包含该信息。运行时长取自 socket 文件的存续时间；只有该 socket 回应 `admin` `hello` 时，客户端才计为运行中，因此异常退出遗留的 socket 文件会显示为未运行。作出响应的客户端若没有服务器链接，会在 stderr 附加 `onlyne: client not connected`。
+
+打印出的 `[[client]]` 片段是完整的角色条目：其中包含 `role`、`key`、`admin`、`max_sessions`、ACL 列表、`prose` 和 `session_command`。将其粘贴到 `spec.toml` 并重新加载后，客户端便可为该角色生成会话。
+
+## 工作区布局
+
+`init` 和 `run` 都会在 `--workspace` 下创建以下路径：
+
+| 路径 | 模式 | 内容 |
+| --- | --- | --- |
+| `.onlyne/config.toml` | | 角色、`cert_pin`、`key_path`、`plugins = [...]`、`[server]` 主机和端口、`[orca]` 工作树 |
+| `.onlyne/client.db` | | SQLite：`intents`、`sessions`、`faults`、`prose_cache`、`config_cache`、`events` |
+| `.onlyne/keys/role.key` | `0600` | 32 个原始 ed25519 字节，只生成一次 |
+| `.onlyne/run/` | `0700` | 运行时目录 |
+| `.onlyne/run/s` | `0600` | 适配器 socket 的规范拼写；路径不超过 103 字节时，`run` 将其绑定 |
+| `.onlyne/run/socket` | `0600` | 一行内容，指明实际提供服务的路径——规范路径 `run/s`，或者树比绑定路径更深时位于系统临时目录下的短派生路径 |
+| `.onlyne/logs/client.log` | | 操作者通过会重定向输出的 shell 启动 `run` 时的 stdout 和 stderr |
+| `.onlyne/agent/<id>/` | | 包含 `plugin.toml` 的已安装插件包 |
+| `.onlyne/cache/orca-tabs.jsonl` | | 仅追加的 Orca 标签页到会话映射：供管理器/显示使用的旁路信息，不是身份来源（身份由适配器协议管理） |
+
+`init` 绝不会写入 `spec.toml`。如果工作区采用 v1 之前的布局，程序会在任何写入之前拒绝处理：退出码为 2，并逐字节输出 `onlyne: legacy workspace layout; v1.0.0 does not migrate`。
+
+三个配置值支持 `$NAME` 写法：`cert_pin`、`key_path` 和 `[server] host`。启动时，`run` 读取以 `$` 之后名称命名的环境变量，再把其值填入配置行所在位置。网关插件也以相同方式处理平台令牌。如果某个名称对应的环境变量没有值——不存在，或存在但为空白——启动会停止，退出码为 1，并在 stderr 输出一行，同时指明字段和变量：`onlyne-client: missing secret $ONLYNE_CERT for cert_pin; set the environment variable`。不以 `$` 开头的值会原样传递，因此值中的字面量 `$` 仍是字符串的一部分。
+
+## 退出码
+
+| 代码 | 含义 |
+| --- | --- |
+| 0 | 动词已完成 |
+| 1 | 动词失败；原因以一行形式写入 stderr |
+| 1 | `run` 无法绑定适配器 socket；stderr 为 `onlyne-client: bind the workspace socket <canonical path>: <detail>`，详情指明所服务的路径、两个字节长度和 OS 原因 |
+| 2 | `status` 未发现客户端回应其 socket，打印 `onlyne: client not running` |
+| 2 | `status` 发现客户端没有服务器链接，打印 `onlyne: client not connected` |
+| 2 | 工作区采用旧版布局 |
+| 5 | `run` 未选择主机；stderr 为 `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND` |
+
+只有客户端正在运行且已连接到服务器时，`status` 才退出 0。脚本读取的就是这一事实。
+`doctor` 对每一种主机检测结果（包括 `host: null`）都退出 0。
+
+## 后端
+
+选择优先级为环境变量 `ONLYNE_BACKEND`（非空）> 工作区 `config.toml` 的 `backend` > auto。
+
+| 名称 | 解析别名 | 选择方式 | 备注 |
+| --- | --- | --- | --- |
+| `herdr` | | 环境变量、配置或 auto 探测（首个） | 窗格主机 |
+| `orca` | | 环境变量、配置或 auto 探测 | 标签页主机 |
+| `zellij` | | 环境变量、配置或 auto 探测 | 窗格主机；探测会映射 EXITED / `exit_status` |
+| `exec` | `headless` | 仅环境变量或配置 | 投影将后端记录为 `exec` |
+| `fake` | | 仅环境变量或配置 | 进程内运行，用于测试 |
+| `auto` | 空字符串 | 环境变量和配置均为空时的默认值 | 依次探测 herdr、orca、zellij |
+
+非空值若为 `herdr`、`orca`、`zellij`、`exec`/`headless` 或 `fake`，就会选择相应后端。auto 从不发现 `exec` 和 `fake`。没有匹配项时，`onlyne-client run` 退出 5，并写入 `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`。
+
+`fake` 在进程内运行会话，无需外部工具；端到端脚本会设置 `ONLYNE_BACKEND=fake`。`exec` 将角色的 `session_command` 作为客户端的子进程生成，保持 stdin 打开，并把子进程输出追加到 `.onlyne/logs/session-<task>.log`。子进程退出时，`probe` 可以填充 `detail.output_tail`（最多 200 行 / 16 KiB）。`crates/onlyne-testkit/e2e/pi-live.sh` 和 `exec-headless.sh` 会设置此路径。在 Windows 上关闭时，使用 `CREATE_NEW_PROCESS_GROUP` 加 `CTRL_BREAK`，然后 `kill`；没有控制台的进程会直接终止子进程。面向操作者、用于优雅停止守护进程的命令是 `onlyne shutdown`。
+
+### herdr
+
+herdr 会话从客户端进程环境继承；在窗格中运行的 pi 子进程也会继承它。一个服务器根节点/拓扑对应一个标签为 `onlyne:<cluster>` 的 herdr 工作区。`<cluster>` 是服务器自身的 `[server] name`；客户端从 `welcome.cluster` 读取它，并作为 `ONLYNE_CLUSTER` 传给所创建的每个窗格。一个角色对应一个标签页。一个 onlyne 会话对应一个窗格。关闭方式是 `herdr pane close`；收到 `pane_not_found` 表示关闭成功，并以 debug 级别记录 `herdr pane already closed`。Id 形如 `wF`、`wF:t1`、`wF:p1`。诸如 `onlyne-test` 的命名会话就是客户端环境中已有的 `HERDR_SESSION` 值。后端以标签 `onlyne:<cluster>` 寻址工作区，以角色自身名称寻址标签页。需要使用特定工作区或标签页的操作者，应在客户端生成会话前重命名它：`herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>` 和 `herdr tab rename <TAB_ID> <role>`。工作区标签不同会创建第二个工作区，标签页名称不同会创建第二个标签页；每次走创建路径时，客户端都会记录警告，指明该标签和所创建的工作区。
+
+客户端将该地址作为 `backend_ref` 持久化在 `sessions` 行上：
+
+```json
+{"herdr":{"workspace_id":"wF","tab_id":"wF:t1","pane_id":"wF:p1","agent":"onlyne-planner-abcd1234","workspace_label":"onlyne:lab","base_pane":"wF:p1","split_direction":"right"}}
+```
+
+生成进程使用两条路径。当 `session_command` 的第一个词元与已知代理名称（`pi`、`omp` 以及 herdr `--kind` 表中的其余名称）匹配时，后端运行 `herdr agent start <name> --kind <k> --pane <id> --timeout 25000 -- --session-id <id> --session-dir .pi/sessions`：`--kind` 选择词元 0 指定的可执行文件，`session_command` 的其余词元位于 `--` 分隔符之后；这是 herdr 0.9.0 记录的调用形式。第一个词元不在该表中的命令会运行 `herdr pane run <pane_id> '<one shell line>'`。`pane run` 不发出 JSON。命令经 `shell_quote` 处理，成为单个 argv 词元。客户端会把自己生成的每个会话都注入 `ONLYNE_SOCKET`（所提供服务的适配器 socket 路径），这样角色窗格内的 shell 无需写明 socket 路径即可调用 `onlyne` 动词。`workspace create`、`tab create` 和 `pane split` 接收绝对路径形式的 `--cwd`，herdr 会相对于自身工作目录解析它。
+
+拆分方向由 `PanePlacement::from_pane_count` 决定。`(count + 1).is_power_of_two()` 对应 `right`，其余计数对应 `down`。比例为 `0.5`。`count` 来自 `herdr tab list --workspace W` 的 `result.tabs[].pane_count`。字段缺失时取 `0`。生产环境中的生成路径传入 `placement: None`，因此后端会读取实时计数。
+
+聚焦会依次发出 `herdr workspace focus <workspace_id>` 和 `herdr tab focus <tab_id>`（位置参数；标签页会恢复上次聚焦的窗格）。对于托管代理窗格，接着执行 `herdr agent focus <pane_id>`。`agent focus` 接受托管代理。由 `pane run` 创建的 shell 窗格会回答 `agent_not_found`，因此该路径执行 `herdr pane focus --pane <base_pane> --direction <split_direction>`：沿拆分时记录的锚点方向移动到相邻窗格。`herdr pane get <pane_id>` 是确认步骤；`result.pane.focused` 必须为 true，如果跳转落在其他位置，则报告当前持有焦点的窗格。控制面是 `ControlOp::Focus{task_id}`；后端 `focus()` 失败会记录 `Report::Fault{kind:"focus"}`。CLI：`onlyne control --from <role> focus --task <id>`。TUI：`F`。
+
+角色达到 `max_sessions` 后，仍会通过 `control_only` 拉取；这条路径可让 `focus`、`recycle` 和 `cancel` 到达占用最后一个空槽位的会话。
+
+挂载时未指定会话的代理——即始终运行的插件——会作为下一个待定会话的连接等待。认领会把该 socket 绑定到所接管的会话；工作项之后才到达的挂载会立即移交给该工作项。未指定会话名称的连接只释放共享其 socket 的传输。
+
+### doctor
+
+`onlyne-client doctor` 是只读动词。它打印一个 JSON 对象并退出 0。字段如下：
+
+| 字段 | 含义 |
+| --- | --- |
+| `host` | 所选后端名称，或 `null` |
+| `backend_selection` | `explicit`、`env` 或 `none` |
+| `explicit` | 非空时的原始 `ONLYNE_BACKEND` |
+| `binary` | herdr/orca/zellij 的 CLI 路径或名称；对于 exec、fake 和无主机情况为 `null` |
+| `session` | `HERDR_SESSION` |
+| `workspace_id` | `HERDR_WORKSPACE_ID` |
+| `tab_id` | `HERDR_TAB_ID` |
+| `pane_id` | `HERDR_PANE_ID` |
+| `refusal` | `NO_SUPPORTED_HOST` 行；当 `host` 为 `null` 时存在 |
+
+未检测到主机会得到 `host: null` 和 `refusal`，并退出 0。该动词用于部署前检查。
+
+`config.toml` 中的 `[orca] worktree` 决定会话标签页加入哪个 Orca 标签页列表。三种状态为：
+
+* `host`（默认）读取 `ORCA_WORKTREE_ID`，即 Orca 导出到管理器启动客户端所在标签页、并由守护进程继承的工作树 id。每个会话标签页都会平铺到该工作树的标签页列表中，与管理器自身的标签页并列。如果在 Orca 标签页外启动客户端，该变量不存在，因此此策略的行为与 `inherit` 相同。
+* `inherit` 不传选择器，将选择交给 Orca 的活动工作树。
+* 任何其他值都会原样用作 Orca 工作树选择器（`id:<…>`、`path:<abs>`、`name:<…>`、`branch:<…>`）。
+
+标签页归属与工作目录彼此独立。选择器决定标签页加入哪个标签页列表；所生成命令自身的 `cd` 决定代理的运行位置。因此，角色工作区从不需要存在于 Orca：它不会被注册、打开或清理。这正是生成式（非 git）角色工作区能够工作的原因。Orca 的公共注册命令只接受 git 检出，所以 `path:<workspace>` 选择器恰好会因本客户端分发的目录而失败。
+
+## 会话
+
+角色 spec 条目中的 `max_sessions` 限制该角色同时运行的会话数量。存储的 lifecycle 状态为 `exited` 的会话不占该配额：角色已结束会话对应的行作为历史保留在 `client.db` 中，仍可查询。只要尚未退出的会话少于 `max_sessions`，客户端就会继续拉取。每个任务都有自己的会话和自己的生成过程。完成一个任务的会话不再接收任务；其槽位释放，主机资源关闭，并且不再计入 `max_sessions`。
+
+主机资源随会话退役：当会话不再持有任务且没有插件传输连接时，窗格、标签页、zellij 会话或 exec 子进程就会关闭。共有三条关闭路径——插件正常 `detach` 会关闭该连接服务过的每个空闲会话；结算时没有已连接代理，则在结算时关闭；250 ms 就绪检查则在代理消失且存储的 lifecycle 投影为 `exited`、并带有存储 outcome 时，关闭任何被跟踪的会话，原因取自该 outcome（`Completed`、`Fault` 或 `Cancelled`）。有一种情况会保留资源：连接在未执行 `detach` 的情况下中断，因为该代理可能重连。超过 `[client] reconnect_grace_secs` 后，即认为该代理已经消失；清理流程会将会话仍欠下的任务结算为 `failed`，并以 `session_dead` 为原因拒绝对应任务交付：该行会离开 `in_flight`，因此账本保留了操作者可见的结束结果，而工作只能由 `repair retry` 重新带回。同一次处理还会发布会话自身的投影——每次正常结束都会发送的心跳报告——因此服务器上镜像的行会立即读取为 `exited`，无需在服务器的过期观察器记录 `stale_working` 或 `heartbeat_missing` 故障之前一直读取为 `working`。如果退役时存储的资源仍处于打开状态，会通过 `attach` 刷新过期的 `backend_ref`，投影 `resource_closed`，以任务、后端、资源和原因为由记录 `retiring idle session resource`，然后关闭资源并释放槽位；关闭失败只产生警告。
+
+## 服务器链接
+
+客户端按 1、2、4、8、16、32、60 秒的阶梯重连；之后每次尝试都重复 60 秒间隔。重连后的顺序为握手、welcome、intent 刷新、恢复拉取。
+
+链接失败或收到 `bye` 帧会设置 `accept_new = false`。队列中的交付会在服务器等待，正在运行的会话继续到达终态，这些会话产生的完成事件则进入 intent 队列。`accept_new = false` 会阻止生成新会话和执行新拉取。此开关跟随连接，而非某一个帧：运行循环根据链接就绪状态设置它；无法发出的帧——请求超过自身期限但链接仍在时——只进入 intent 队列。
+
+开关关闭时，拉取已经持有的交付不会得到回答：该行保持飞行状态，下一次 `hello` 会重新入队。拒绝会将该行结算为 `rejected`，这是终态，因此工作只能通过操作者执行 `repair retry` 再次返回。
+
+## Intent 队列
+
+每个出站 envelope 都会以 `op_id` 为键，在首次 socket 写入之前落入 `client.db` 的 `intents`。
+
+| 状态 | 含义 | 下一状态 |
+| --- | --- | --- |
+| `pending` | 已入队，尚需首次尝试 | `accepted`、`retrying`、`exhausted` |
+| `retrying` | 等待后续尝试 | `accepted`、`retrying`、`exhausted` |
+| `accepted` | 已存储回执 | 终态 |
+| `exhausted` | 达到尝试次数上限并记录故障 | 终态 |
+
+角色 spec 通过 `intent.attempts` 设置尝试次数上限，通过 `intent.backoff_ms` 设置尝试之间的延迟。队列位于客户端数据库中，因此重启后会恢复。
+
+| 回答 | 规则 |
+| --- | --- |
+| `ok = true` | 存储回执，标记为 `accepted` |
+| `duplicate` | 重放首次尝试时存储的回执 |
+| `acl_denied`、`invalid`、`conflict`、`forbidden`、`unknown_role`、`not_admin`、`bad_frame`、`frame_too_large`、`protocol_version` | 删除该行，不重试 |
+| `internal`、连接丢失 | 计入此次尝试，并按阶梯延迟后重试 |
+
+达到上限会记录 `intent_exhausted` 故障类型，并在服务器链接存在后发送一次 `report{kind:"fault"}`。已耗尽的行绝不会被静默丢弃。
+
+## 角色 prose
+
+`welcome.prose` 会缓存在 `prose_cache` 中，以角色为键，并带有 `spec_hash`。`roles` 和集群 prose 导出会读取该记录。

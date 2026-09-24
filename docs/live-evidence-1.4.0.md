@@ -1,3 +1,91 @@
+# Reading guide / 阅读指南
+
+## English
+
+### Scope
+
+This file preserves one live 1.4.0 acceptance run on the Alexandria workspace. It is a historical
+evidence record, not a current status report or a replacement for the repository gates. The
+readings below come from real product processes running in real Orca panes.
+
+### Provenance and authority
+
+The original English provenance note immediately below this guide identifies the cluster, author,
+and relationship to `CHANGELOG.md`, `docs/STATUS.md`, and `packaging/README.md`. The detailed record
+that follows is reproduced verbatim and is authoritative. This guide and its Chinese translation
+are non-normative reading aids; when wording differs, the record governs.
+
+### How to read the rounds
+
+The rounds are chronological evidence, so their forms vary. A round may contain an initial action
+sequence, failures found during live operation, source pointers, repair builds, retesting, measured
+timings, and a final disposition. Read each timestamp, command, task id, path, log line, and reading
+as an observation from that particular run. A later round may revise an earlier interpretation,
+but it does not rewrite the earlier evidence.
+
+### Key acceptance topics
+
+- supervisor-only command gates and their negative cases;
+- task-family handoff and re-dispatch generations;
+- admin control addressing, cancellation, recycling, and close publication;
+- control-settle fallback and immediate terminal publication;
+- task-ledger and session-mirror settlement;
+- ghost sweeps and completion receipts;
+- live configuration reload, marker 4, `spec_diff`, and repair commands;
+- end-to-end regression results and disposition of remaining issues.
+
+## 中文
+
+### 范围
+
+本文件保存 Alexandria 工作区上的一次 1.4.0 换机现场验收过程。它是历史证据记录，不是当前
+状态报告，也不能替代仓库内的门禁。以下读数来自运行在真实 Orca pane 中的产品真实进程。
+
+### 出处与权威性
+
+本指南之后的英文出处说明标明了集群、作者，以及本文件与 `CHANGELOG.md`、`docs/STATUS.md` 和
+`packaging/README.md` 的关系。后文详细记录逐字保存，具有权威性。本指南及其中文翻译仅供阅读；
+如措辞存在差异，以详细记录为准。
+
+### 如何阅读各轮记录
+
+各轮内容按时间顺序构成证据，因此形式并不完全相同。一轮可能包含初始动作序列、现场操作中
+发现的缺陷、源码指针、修复版本、复验、计时读数和最终处置。请把每个时间戳、命令、task id、
+路径、日志行和读数视为该轮现场的一次观察。后续轮次可能修正此前的判断，但不会改写已经留下
+的证据。
+
+### 关键验收主题
+
+- supervisor 专用命令门禁及其负例；
+- task family 交接与重投世代；
+- admin control 寻址、cancel、recycle 与 close 发布；
+- control-settle 兜底与立即终态发布；
+- 任务账与会话镜像的结清；
+- ghost sweep 与完成回执；
+- 配置热生效、marker 4、`spec_diff` 与 repair 命令；
+- e2e 回归结果及遗留问题的处置。
+
+## Bilingual section index / 双语章节索引
+
+- Round 4 live acceptance / round4 换机验收现场
+  - Machine-swap actions and results / 换机动作与结果
+  - Gate negative cases / 门禁负例
+  - Acceptance checks 1–5, ghost-sweep samples, configuration experiment, and status / 验收单 1–5、sweep 活体样本、临时配置实验与结论状态
+  - Post-fix verification and closing state / 修复后复验与收尾状态
+- 1.4.0 acceptance checklist / 1.4.0 验收清单
+- Verification 6: recycle and close publication / 复验六：recycle 与 close 补发布
+- Verification 7: acknowledgement before publication and done-then-recycle / 复压七：ack 先于发布与 done-then-recycle
+- Observations A and B, including the completion-receipt topology / 观察 A、观察 B与完成回执拓扑
+- Verification 8: repair of observation A / 复压八：观察 A 的修复
+- Verification 9: post-retirement publication / 复压九：退休之后补发布
+- Verification 10: TUI positions and snapshot clocks / 复压十：TUI 目视位与快照时钟
+- Developer e2e rerun, final results, and disposition / dev 侧 e2e 复跑、全套结果与处置
+- Verification 11: ghost sweep and completion receipts / 复压十一：清扫与完成回执
+- Verification 12: two states and slot release / 复压十二：两态与槽位释放
+- Reusable operational pitfalls / 本轮踩坑（可复用）
+
+---
+
 # 1.4.0 live acceptance evidence
 
 One live deployment's acceptance record, kept here because the CHANGELOG quotes its readings. The
@@ -391,8 +479,8 @@ ghosts 无新行 ｜ gen 1 ｜ 产物 r9-done.md 恰好一份
 ### 出处（按 dev 纠正口径写）
 `acp-payload-v2` 这条竞态怎么处理，**是 dev 的建议、尚未定**：他建议「记后发、如实记为已知未修竞态」。选另一条路（再修一轮）或改主意都由**人**拍板；人若另判，本档案以人的判语为准并留下这是人定的痕迹。1.4.0 的账上这条记 **FAIL**，不记通过。
 
-### 两拍的处置（2026-09-24 下午）
-- **发版：人说「不发」**。`packaging/release.sh` 与 `publish.sh` 继续不碰，tag、GitHub release、Homebrew tap、install.sh 一律不动；本仓继续 0 提交 0 push。
+### 两拍的处置（2026-09-24 下午，当时）
+- **当时的发版决定：人说「不发」**。`packaging/release.sh` 与 `publish.sh` 继续不碰，tag、GitHub release、Homebrew tap、install.sh 一律不动；本仓继续 0 提交 0 push。随后 1.4.0 完成正式发布，当前发布回执见 `CHANGELOG.md`。
 - **竞态那拍：人给了口径「别拿去问人，反馈和疑惑都给 dev」** ⇒ 处置回到 dev 手上，他已在改 case（见下），我不再把这条挂成人的选择题。
 - **dev 的 case 侧改动（脚本，非产品）**：`wait_root_acked` 从「要求 completion 行 `state=acked`」改成「任务行 `acked` 且该 completion 行 `out_head` 读得出判定」，回执自身 state 打成一行 note。契约取向正确：该 case 承诺的是「合法 `hop-done:` 报告结清本轮并造出子任务」，回执投递本身是 at-least-once。他正连跑 5 次验稳定。
 - **claim 语义**（确定性 ack，或退回队列时带「别用同一 verdict 再投」标记）：dev 判它是行为面取舍（今天的语义允许同一次工作跑两遍、账上保住第一个结局），**列为待人拍板的设计项**，不夹进本次修复。我按此挂账一条，不催。
@@ -403,7 +491,7 @@ ghosts 无新行 ｜ gen 1 ｜ 产物 r9-done.md 恰好一份
 - **前提成立**：`in_flight` **恒等于有当前持票的认领方**——`pull` 交出行的那一刻才 `mark_in_flight` 并 arm `DeliveryTicket`（带拉取方 role 与 session）；三条退回路径（`apply_automatic_requeue`、`release_exited_delivery`、重连 `hello` 处理无主票）都把行退回 `queued`。**不存在服务端自占位的 `in_flight`。**
 - **dev 据此撤回放宽**：`acp-payload-v2` 的断言退回严格形态（要求回执到 `acked`），只保留失败文本增强（`task=` / `receipt=` / trace / client 日志），并在代码里写明两种形态为何不可互换。
 - **那条 case 卡住的机理（dev 读出，我方认可）**：单槽 client 满载时拉取走 `control_only` ⇒ **`completion` 行不被取走** ⇒ 严格等待必然超时。满载的源头是阻塞子场景的迟到重投占掉 planner 唯一槽位（client 侧复现：第五次派活收到了、没开 ACP 会话）。**这条失败是「容量把回执挡在拉取之外」，不是 at-least-once 语义问题**；在无 client 拓扑里不可能发生。
-- **处置（dev 自定，经人放行「反馈和疑惑都给你」）**：`acp-payload-v2` 选 **修**（放宽断言不做，修容量那条链）；claim 语义仍挂**待人拍板的设计项**；发版按人判「不发」继续按兵不动。
+- **处置（dev 自定，经人放行「反馈和疑惑都给你」）**：`acp-payload-v2` 选 **修**（放宽断言不做，修容量那条链）；claim 语义仍挂**待人拍板的设计项**。这条记录保留当时的发版暂停状态，后续 1.4.0 发布回执见 `CHANGELOG.md`。
 - **我回给 dev 的两件**：① 综合口径——「回执停在 `queued`」有两个方向相反的成因（无 client ⇒ 消费者对投递不可见，常态；有 client 但满载 ⇒ `control_only` 主动排除 completion，缺陷信号），故分档断言要按「有无活 client × 是否满载」两维定；② 判别实验——把该 role 的 `max_sessions` 从 1 抬到 2、断言保持严格，若直接变绿即证成因在容量，若仍红则卡在票证生命周期或回执投递语义。附一条我方旁证：复验三（`becbd03c`）单槽满员时 `probe`/`cancel` 确实落到占最后槽的那一代、该族的活整段排队等槽，与 `control_only` 那句文档逐字对得上。
 
 ## 复压十二：`39408cb` 两态与 `ffa6d1a` 槽位释放（15:14 三进制；dev 报全套 19/19 绿、1100 通过）

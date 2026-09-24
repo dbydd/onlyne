@@ -2,11 +2,13 @@
 
 **Message plumbing for coding-agent teams, running on your own machines.**
 
-Onlyne connects coding agents as durable roles. A **server** routes messages between roles and records every delivery in an append-only ledger. A **client** in each role workspace runs that role's coding-agent sessions. Optional **gateway** processes connect Telegram, Feishu, QQ, or WeChat through the same message model. Agents keep their own runtimes and make the decisions; Onlyne provides routing, queueing, session transport, receipts, and an auditable record.
+Onlyne ties a fleet of coding agents into a durable cluster. A **server** routes messages between roles and records every delivery in an append-only ledger. A **client** in each role workspace runs that role's coding-agent sessions. Optional **gateway** processes connect Telegram, Feishu, QQ, or WeChat through the same message model. Agents keep their own runtimes and make the decisions; Onlyne provides routing, queueing, session transport, receipts, and an auditable record.
+
+[中文文档](README.zh-CN.md) · English is the default reading copy.
 
 Clients can run on different machines over TLS. Generated workspaces are relocatable, and a supervisor client can expose a child cluster to a parent server as one aggregate role.
 
-![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
+![version](https://img.shields.io/badge/version-v1.4.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
 ![Onlyne — a supervisor dispatches a ten-hop ring task to five pi agents; ledger receipts settle every hop](assets/promo/onlyne-hero.png)
 
 ## Choose a starting path
@@ -61,7 +63,7 @@ onlyne skill export --set supervisor        # supervisor handbook
 onlyne skill export --dest /path/to/skills
 ```
 
-Matching files are left unchanged. A differing file stops the export; pass `--force` to replace it. `npx skills add dbydd/onlyne` and `npx skills add ./` install the same repository documents through the skills CLI.
+`skill export` writes every handbook as an ordinary regular file. The repository's compiled copies use the same rule, and a repository test keeps all four byte-identical to their source manuals. Matching files are left unchanged. A differing file stops the export; pass `--force` to replace it. `npx skills add dbydd/onlyne` and `npx skills add ./` install the same repository documents through the skills CLI.
 
 ## Shortest local task: fake backend
 
@@ -202,13 +204,13 @@ sequenceDiagram
   R->>S: ack receipt
 ```
 
-1. **Send.** `onlyne send` opens the server's local admin socket, names the sender and target, and carries an `op_id` idempotency key. A repeat of the same operation returns the durable receipt; a different body under the same key is a conflict.
+1. **Send.** The gated `send` verb opens the server's local admin socket, names the sender and target, and carries an `op_id` idempotency key. A repeat of the same operation returns the durable receipt; a different body under the same key is a conflict.
 2. **Accept and record.** The server validates the envelope, sender, target, and ACL before touching the ledger. An accepted send appends one row and publishes its receipt. The row is `in_flight` when immediately deliverable and `queued` while the role is offline or at capacity.
 3. **Pull and assign.** The role client pulls the oldest eligible task, so the server marks it `in_flight` and binds a delivery ticket. The client accepts capacity, starts the selected backend, and waits for the session's `ready` barrier before sending `assign`. The task text travels in the assignment frame; `{task}` in `session_command` renders the task id, not the message body.
 4. **Complete.** An adapter reports a terminal outcome and summary. The pi plugin's `onlyne_complete` tool supplies both. The client records the local task verdict, queues an acknowledgement of the original delivery, releases the session slot, and builds a separate completion envelope for the task's recorded origin.
 5. **Receipt.** Durable client intents flush over TLS in order. The original task row becomes `acked`; the completion receipt is `queued` until the origin client pulls it, then acked without starting another session.
 
-A role can continue a task family with `onlyne_handoff`; the server mints a child task under the parent and carries the family id, hop budget, origin, deadline, and labels. Completion receipts always return to the task origin even when ordinary role-to-role ACL has no return edge.
+At family start, the gated `send` form accepts `--hop-budget <n>`, `--deadline <rfc3339>`, and repeatable `--label <key=value>` for up to eight labels. The server records the minted family and root task id, hop budget, origin, RFC3339 deadline, and labels. A role can continue that family with `onlyne_handoff`; the server mints a child task under the parent, and every handoff inherits the complete family metadata. Completion receipts always return to the task origin even when ordinary role-to-role ACL has no return edge.
 
 Onlyne's four core message kinds are:
 
@@ -224,6 +226,8 @@ Onlyne's four core message kinds are:
 ### Server root
 
 `<server-root>/.onlyne/spec.toml` is the protocol source of truth: server endpoint and certificate pin, registered role keys, ACL edges, prose, concurrency, timeouts, relay policy, session commands, routes, and gateways. Onlyne never edits this file through a runtime API. Append `onlyne-client init` fragments or use `onlyne server generate`, then run `onlyne reload`.
+
+The automatic requeue age gate is `[server].requeue_ttl_secs`. It defaults to `0`, which leaves the gate off, and measures queued-row age from `enqueued_at`. When an automatic requeue would happen after that age, the row settles as `expired` with reason `requeue_ttl`; operator-led `repair retry` bypasses the age gate.
 
 ```text
 <server-root>/.onlyne/
@@ -306,21 +310,23 @@ onlyne --server-root <root> reload
 
 # TUI: interactive board, or one plain-text frame
 onlyne tui --server-root <root>
-onlyne tui --server-root <root> --once --page 1
-onlyne tui --server-root <root> --once --page 2
+onlyne tui --server-root <root> --once --page 1 --state active
+onlyne tui --server-root <root> --once --page 2 --state all
 ```
 
-TUI page 1 is the role network and live sessions. Page 2 is the task/session graph with faults, history, ledger rows, and task detail. It observes the admin socket and does not carry messages.
+TUI page 1 is the role network and live sessions. Page 2 is the task/session graph with faults, history, ledger rows, and task detail. A one-frame snapshot names its state filter explicitly: `active` is the default and keeps the live view, while `all` also includes settled sessions and ledger rows. On page 2, `--state all` makes a settled row's `reason=<text>` visible. The TUI observes the admin socket and does not carry messages.
 
 ### Supervisor gate
 
-The shell forms of `send`, `reply`, `complete`, `handoff`, `ack`, `reject`, and `control` require both flags:
+The shell forms of `send`, `reply`, `handoff`, `complete`, `ack`, `reject`, and `control` require both flags:
 
 ```text
 --force --yes-i-am-supervisor-not-other-role
 ```
 
-The pair declares that the command is operating a role from outside its plugin session. A missing flag exits 2 before socket resolution. Inside a pi session, use the adapter tools—`onlyne_send`, `onlyne_complete`, and `onlyne_handoff`—so the session's own record remains authoritative.
+The pair declares that the command is operating a role from outside its plugin session. A missing flag exits 2 before socket resolution. Inside a pi session, the plugin mapping is `send` → `onlyne_send`, `handoff` → `onlyne_handoff`, and `complete` → `onlyne_complete`; those tools keep the session's own record authoritative.
+
+`ack` and `reject` require `--msg-id` and `--reason`; `control recycle` and `control cancel` require `--reason`, while `probe`, `snapshot`, and `focus` reject it.
 
 `repair` is the operator recovery surface. It records operator decisions without silently changing delivery policy:
 
@@ -406,8 +412,7 @@ External adapters implement [`crates/onlyne-adapter/PROTOCOL.md`](crates/onlyne-
 - Tasks, completions, and control operations carry idempotency keys and are delivered at least once. Observation events use cursor resync and never slow a worker.
 - Each registered role owns an ed25519 identity. Clients pin the server certificate and authenticate over TLS 1.3.
 - A denied message writes no ledger row. A completion has one built-in return path to the task's durable origin.
-- One client session serves one task. `max_sessions` limits concurrent task sessions; control messages still reach a saturated role.
-- A finished session releases its slot and host resource. A plugin connection may reconnect for the configured grace window before its task and resource are retired.
+- One client session serves one task. Once the task settles, the session stops consuming `max_sessions` capacity; the client keeps a settled slot only while its plugin transport is attached, then retires the slot and host resource. An unsettled task-bound session is also retired when its transport disconnects past the grace window or remains attached but silent for three heartbeat intervals; the client then settles the task `failed`, refuses its held delivery with `session_dead`, and publishes the exit.
 - Aggregate roles expose a child cluster to a parent without adding child role names or federation operations to the wire protocol.
 
 The deeper crate map, lifecycle model, and formal design rationale live in [`docs/v1-ARCHITECTURE.md`](docs/v1-ARCHITECTURE.md) and [`proofs/BRIEF.md`](proofs/BRIEF.md).

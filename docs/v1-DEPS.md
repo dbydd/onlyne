@@ -309,3 +309,47 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["c
 One correction to the consolidation brief, grounded in the manifests on disk. `reqwest` stays in the block: `plugins/onlyne-gateway-feishu/Cargo.toml:17` declares it with the `multipart` feature and `plugins/onlyne-gateway-feishu/src/lib.rs:762` holds a `reqwest::Client`, while `plugins/onlyne-gateway-qqbot/Cargo.toml:17` declares it for `plugins/onlyne-gateway-qqbot/src/lib.rs:21`. Dropping it breaks both plugins. `tokio` carries `signal` because `docs/v1-PLAN.md` §5 line 270 names `onlyne reload` and `SIGHUP` as the reload triggers, and `crates/onlyne-server/Cargo.toml` requests the feature on its own `tokio` line.
 
 Entries removed as unused: no crate on disk declares `signature`, `tracing-appender`, `tracing-subscriber`, or `url`.
+
+---
+
+# v1 依赖清单（中文镜像）
+
+本清单读取 `crates/` 下的每个 `Cargo.toml`，但不包括 `crates/onlyne-legacy/`，并读取 `plugins/` 下的每个插件清单。表中的行涵盖普通依赖、开发依赖和构建依赖。`workspace` 表示该要求继承自根清单。功能列表列出声明该清单中写入的功能。`default-features=false` 会明确显示。
+
+## 外部依赖
+
+表格列名依次为：**依赖（dependency） | 版本要求（version requirement） | 功能列表（feature list） | 声明该依赖的 crate（declaring crates）**。上方的英文表格保留全部依赖名、版本要求、功能列表和 crate 列表，作为逐字保留的技术数据；中文读者可使用同一组行。
+
+括号表示该 crate 在 `[dev-dependencies]` 或 `[build-dependencies]` 中声明此依赖。没有括号的普通 crate 名称表示它在 `[dependencies]` 中声明此依赖。
+
+## 内部边
+
+表格列名依次为：**声明方 crate（declaring crate） | 依赖（dependency） | 部分（section） | 版本要求（version requirement） | 路径/引用（path/reference）**。上方的英文表格保留全部 crate 名称、部分名称、版本要求和路径/引用，作为逐字保留的技术数据。
+
+根据 `docs/v1-PLAN.md` §1 第 74–77 行进行防火墙检查：
+
+- `onlyne-proto` 不声明 `tokio` 依赖（已在上方的外部依赖行中检查）。
+- `onlyne-session` 的边为：；没有任何边指向 `onlyne-store`、`onlyne-net` 或 `onlyne-proto`。
+- `onlyne-client` 不声明 `onlyne-server`；`onlyne-server` 不声明 `onlyne-client`。
+- 插件的内部边是 `onlyne-adapter`、`onlyne-proto`；没有插件声明服务器内部 crate。
+- 在所检查的清单中未发现防火墙违规。
+
+## 冲突
+
+冲突是指某个依赖在清单级别存在多个版本要求、功能集合或默认功能设置。workspace 要求在此逐字保留，因为本清单读取的是声明方清单。
+
+表格列名依次为：**依赖（dependency） | 变体 A（variant A） | crate（crates） | 变体 B 或其他变体（variant B or additional variant） | crate（crates）**。上方的英文表格保留全部依赖名、变体和 crate 列表，作为逐字保留的技术数据。
+
+按名称列出的冲突依赖见上方表格；每行中的版本要求、功能列表和 `default-features=false` 均保持原样。
+
+## 清单来源集合
+
+表格列名依次为：**清单（manifest） | package（package）**。上方的英文表格保留每个路径和 package 名称，作为逐字保留的技术数据。
+
+## 推荐的 workspace.dependencies
+
+下面的 TOML 代码块满足磁盘上各 crate 声明的功能集合的并集。条目上的注释指出造成非显然要求的 crate。代码块中的注释、依赖名、版本、功能、路径和标识符均保持原样。
+
+关于整合方案的更正以磁盘上的清单为依据。`reqwest` 保留在此代码块中：`plugins/onlyne-gateway-feishu/Cargo.toml:17` 声明了它并启用 `multipart` 功能，`plugins/onlyne-gateway-feishu/src/lib.rs:762` 持有一个 `reqwest::Client`；同时 `plugins/onlyne-gateway-qqbot/Cargo.toml:17` 为 `plugins/onlyne-gateway-qqbot/src/lib.rs:21` 声明了它。移除它会破坏这两个插件。`tokio` 带有 `signal`，因为 `docs/v1-PLAN.md` §5 第 270 行将 `onlyne reload` 和 `SIGHUP` 指定为重载触发器，并且 `crates/onlyne-server/Cargo.toml` 在自己的 `tokio` 行请求该功能。
+
+作为未使用项移除的条目：磁盘上没有任何 crate 声明 `signature`、`tracing-appender`、`tracing-subscriber` 或 `url`。

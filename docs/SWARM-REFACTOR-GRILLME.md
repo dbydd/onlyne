@@ -1,6 +1,380 @@
-This file documents the pre-plan design discussion. `docs/v1-PLAN.md` is the settled spec. The file stays for provenance.
+This file documents the pre-plan design discussion. `docs/v1-PLAN.md` is the settled specification. The file remains for provenance.
 
-# Swarm 生命周期重构 Grillme 实施细则
+# Swarm Lifecycle Refactor Grillme Implementation Rules
+
+## 1. Goals and Boundaries
+
+Onlyne-swarm manages workspace-local tasks, Pi logical sessions, message delivery, state convergence, and failure closure.
+
+A Pi logical session uses `task_id == session_id`. Its native launch arguments use `pi --session-id <task_id>`. The backend stores an opaque ref for process, pane, tab, terminal, and other hosting resources.
+
+The upper workspace backend owns the Pi process and layout resources. The swarm core owns task/session bindings, desired state, observed state, intents, faults, and lineage. Pi and pi-onlyne provide session lifecycle facts. When a Pi snapshot is unreachable, the backend supplies a resource-liveness probe.
+
+Orca, Herdr, and Zellij connect through the narrow `SessionBackend` interface. Core scheduling reads capabilities and session refs. Core logic does not read backend-private concepts such as tab, focus, or pane trees.
+
+TUI refactoring remains a later phase. The TUI only reads persisted state and events.
+
+## 2. Locked Decisions
+
+### 2.1 Engineering Principles
+
+- Follow Unix/KISS. Keep components small, composable, available, and cohesive.
+- Each component owns inputs, state, and resources within its boundary.
+- Invalid input outside the boundary is exposed through a controlled crash path. The supervisor owns restarts, retries, and manual repair.
+- Breached core invariants and backend management errors trigger a controlled scheduler exit.
+- Protocol errors, exhausted delivery, or failed recovery for one task/session end the current work, generate a fault and recovery task, and let sibling tasks continue.
+- Process state, message state, resource state, and task outcome each have a clear owner.
+- Persist every recoverable transition before acknowledging it externally.
+
+### 2.2 Lifecycle
+
+Public lifecycle projections: `created`, `working`, `idle`, `exited`.
+
+Persisted facts are layered as follows:
+
+- task outcome: `pending`, `done`, `failed`, `cancelled`.
+- agent state: `booting`, `ready`, `running`, `idle`, `gone`.
+- delivery state: `none`, `pending`, `retrying`, `accepted`, `exhausted`.
+- resource state: `detached`, `attached`, `closing`, `closed`.
+- recovery substate: `idle_waiting`, `idle_fault`, `draining`.
+
+`idle_waiting` means an active task reaches the end of an agent turn without a completion exit. pi-onlyne sends one reinforcement prompt. The next agent turn returns to `working`.
+
+`idle_fault` means heartbeat, snapshot, generation, resource, or delivery facts disagree. The state returns to `working` after the supervisor or backend adoption provides evidence. Insufficient evidence starts termination and recovery.
+
+`draining` means the agent turn has ended while completion or another intent is being sent asynchronously. The public projection remains `working`, then becomes `exited` after receipt.
+
+The normal idle ready pool contains only clean sessions without task bindings. An idle session with a task always retains its original task/context binding.
+
+### 2.3 State Sources and Synchronization
+
+- Pi and pi-onlyne are the sources of session lifecycle facts.
+- pi-onlyne sends `swarm_heartbeat` every 10 seconds.
+- The core reduces lifecycle events immediately.
+- The core performs a full reconcile of active sessions every 30 seconds.
+- At startup, the core performs one full reconcile and scans workspace history.
+- When a snapshot is unreachable, it calls the backend liveness probe.
+- Every session event carries `(generation, seq)`.
+- Older generations and sequences are dropped directly and recorded diagnostically.
+- Events with the same version are handled idempotently.
+- A newer event is reduced and persisted atomically.
+- Reconcile uses `isolate_after` and `terminate_after`. Defaults are `1` and `3`; the inspection interval defaults to 30 seconds.
+- The `m`th consecutive mismatch enters `idle_fault`.
+- The `n`th consecutive mismatch terminates or releases the work, writes a fault, and creates a recovery task.
+- A probe timeout for one session is recorded independently. One session cannot block inspection of others.
+
+### 2.4 Intent
+
+`swarm_send`, `swarm_complete`, recycle, and fault report use persisted intents.
+
+Each intent retries independently. The default maximum is 3 attempts with backoff of 1, 2, and 4 seconds. An exhausted intent enters the supervisor fault queue.
+
+A session may exit after the `swarm_complete` receipt arrives. An unfinished independent send intent enters the supervisor queue and produces a fault. Completion does not wait for other send intents.
+
+The Pi session JSONL custom entry stores task identity, generation, seq, lifecycle snapshot, pending intents, attempts, receipts, and last errors. Session restore reads custom entries and restores the slot and intent worker.
+
+### 2.5 Recovery and Faults
+
+Failure to recover a normal task creates one recovery task. The recovery task records `failure_of`. It prefers the direct parent role as its target; if the parent role is missing or unschedulable, it uses the root supervisor.
+
+Failure of a recovery task itself is written to the root fault queue. The system does not automatically create a second-level recovery task.
+
+A fault payload stores task, session, generation, seq, desired, observed, intent, attempt, a backend ref summary, and the error reason.
+
+Sibling tasks remain independent. Termination, retry, rebind, or ack of a faulted task does not change sibling task state.
+
+The supervisor may maintain SQLite tables directly. A CLI repair command provides transaction wrappers. Table structure, field meaning, state invariants, and repair order form a stable management contract.
+
+## 3. Lifecycle Middle Layer
+
+### 3.1 File Layout
+
+```text
+harness/onlyne-swarm/src/
+  lifecycle.rs          # pure state enums, event enums, reducer, projections, table-driven tests
+  runtime/mod.rs        # SessionBackend trait, opaque ref, capabilities
+  runtime/herdr.rs      # Herdr backend
+  runtime/zellij.rs     # Zellij backend
+  runtime/orca.rs       # Orca backend
+  runtime/fake.rs       # test backend; may live in the tests module
+  sched.rs              # task graph, dispatch, reconcile, recovery
+  db.rs                 # tasks, sessions, intents, faults persistence
+  events.rs             # Onlyne event subscription, history scan, event reduction
+```
+
+Direct calls in the existing `orca_term.rs` migrate incrementally to `runtime/orca.rs`. After migration, the scheduler does not directly reference the Orca CLI.
+
+### 3.2 SessionBackend
+
+```rust
+trait SessionBackend: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn capabilities(&self) -> Capabilities;
+    fn available(&self) -> anyhow::Result<bool>;
+    fn spawn(&self, spec: SpawnSpec) -> anyhow::Result<SessionRef>;
+    fn attach(&self, session: &SessionRef) -> anyhow::Result<SessionRef>;
+    fn probe(&self, session: &SessionRef) -> anyhow::Result<ResourceProbe>;
+    fn close(&self, session: &SessionRef, reason: CloseReason, force: bool)
+        -> anyhow::Result<()>;
+}
+```
+
+`SessionRef` fields: `task_id`, `backend`, `backend_ref`, `created_generation`.
+
+`backend_ref` uses a JSON opaque descriptor. It contains the Orca terminal handle, Herdr agent/pane ref, and Zellij session/pane ref.
+
+`Capabilities` describes only capabilities such as `spawn`, `attach`, `probe`, `close`, `focus`, and `rename`. `focus` and `rename` are optional UI capabilities. The core state machine depends on spawn, attach, probe, and close.
+
+Backend auto-detection priority: `herdr`, `zellij`, `orca`. The first available backend satisfying the core capabilities remains fixed for the scheduler lifetime. Backend probe failure, spawn management-interface failure, or attach management-interface failure triggers a controlled scheduler exit. Task-level Pi/session failures enter that task's recovery flow.
+
+### 3.3 Exit and Adoption
+
+Normal SIGTERM: stop new dispatch, send recycle intents to active sessions, await bounded acks, call backend close, write resource state, and exit the scheduler.
+
+After a scheduler crash or machine restart, Pi/backend sessions preserve the scene. A new scheduler loads session refs, performs attach and Pi snapshot reconcile, and adopts them after proving the same task/context. It enters `idle_fault` when the backend ref cannot prove identity, the Pi snapshot is unreachable, or the context version mismatches.
+
+If a second Pi process appears for the same task, reject the new generation while the known first generation remains alive. The new process enters `idle_fault` and exits in a controlled manner after a targeted recycle. The core retains the first generation. New-generation adoption is allowed after the old generation has disappeared.
+
+## 4. Pi / pi-onlyne Protocol
+
+### 4.1 Pi Ready Barrier
+
+pi-onlyne startup order:
+
+1. `session_start` completes extension binding and configuration loading.
+2. Establish the Onlyne daemon socket.
+3. Wait for confirmation of the `subscribe_events` response.
+4. Restore task, generation, seq, and intents from session JSONL custom entries.
+5. Use `ctx.isIdle()`, `ctx.hasPendingMessages()`, and queue state to confirm Pi is waiting for input.
+6. Send `swarm_ready` with task, generation, seq, workspace, and backend handle.
+7. Receive the scheduler's exact task loopback delivery.
+8. Call `sendUserMessage(..., { deliverAs: "followUp" })`.
+9. Observe `queue_update`, `message_start`, `turn_start`, or `agent_start`, then send `swarm_turn_started`.
+10. After receiving `swarm_turn_started`, the core sets public lifecycle to `working`.
+
+`swarm_ready` means Pi has completed the input-wait barrier. Daemon acceptance means the control plane received the event. `swarm_turn_started` means actual work has started.
+
+The Pi API's `sendMessage` and `sendUserMessage` return void. pi-onlyne infers receipt from queue, turn, and agent lifecycle events. An enqueue intent first writes a custom entry. Without turn-start evidence, delivery remains pending/retrying.
+
+### 4.2 Agent Turn
+
+When an active task's agent turn ends after `agent_end` without a completion receipt, it enters `idle_waiting`. pi-onlyne sends one reinforcement prompt through the existing idle reminder mechanism.
+
+The next `agent_start` sends `swarm_turn_started` and returns to `working`.
+
+After a successful `swarm_complete` receipt, clear the active task slot, write the completion custom entry, and enter the draining/exited flow. If the completion receipt fails, retain the intent and retry in the background.
+
+### 4.3 Heartbeat and Snapshot
+
+Heartbeat body:
+
+```json
+{
+  "protocol": 2,
+  "task_id": "...",
+  "generation": 2,
+  "seq": 41,
+  "agent_state": "idle",
+  "delivery_state": "retrying",
+  "resource_state": "attached",
+  "lifecycle": "working",
+  "pending_intents": ["..."],
+  "at": "..."
+}
+```
+
+When a heartbeat is missing or a snapshot mismatches desired state, the core requests `swarm_snapshot` through the loopback control wire. Pi returns a complete snapshot. The backend probe handles resource-layer facts when the Pi snapshot is unreachable.
+
+### 4.4 Protocol Version
+
+The swarm wire uses `protocol: 2`. `---swarm-ctl` also carries the protocol. Missing, unknown, or structurally invalid swarm wire enters protocol fault. Ordinary text remains on the ordinary Onlyne message path. Invalid wire with a swarm prefix does not fall back to an ordinary task.
+
+A protocol error associated with the current task terminates current work and creates a recovery task. A core invariant error triggers a controlled scheduler exit.
+
+## 5. Onlyne Transport and FIFO
+
+### 5.1 RPC Division
+
+- Scheduler task delivery: the target workspace daemon's `loopback` op.
+- pi-onlyne `swarm_send`: the target workspace daemon's `loopback` op.
+- Scheduler recycle/control: the current workspace daemon's `loopback` op.
+- pi-onlyne `swarm_complete`: the current workspace daemon's `send_message`, with channel set to loopback.
+- Lifecycle reports: a dedicated state notification op published on the existing daemon event stream.
+- History: the Onlyne store records inbound, outbound, and state notifications.
+
+The `loopback` op must support `op_id`/idempotency key. A duplicate request returns the existing message receipt. A timed-out request may be retried. Repeated retries do not create duplicate tasks.
+
+After a core restart, scan each workspace's loopback history, deduplicate by `task_id` and `op_id`, and recreate missing tasks. Historical scans use complete paginated results. The existing fixed 30/100-item window is upgraded to a complete scan interface.
+
+### 5.2 FIFO Policy
+
+A swarm workspace configures loopback transport as RPC. The daemon does not create swarm loopback `in/out` FIFO files. Ordinary Onlyne workspaces continue to use FIFO.
+
+Remove the scheduler's `write_loopback_in`. Remove the `onlyne_in` write from pi-onlyne `swarm_send`. Remove FIFO writes from recycle control. Generated swarm workspaces do not depend on an `onlyne_in` symlink.
+
+Sync reports historical `.onlyne_in` links as legacy artifacts. New workspaces do not create such links.
+
+## 6. Workspace Bootstrap
+
+### 6.1 Initial Creation
+
+Creating a role workspace generates all of the following at once:
+
+- `.onlyne/config.toml`: loopback RPC, swarm enabled, external adapters disabled.
+- `.onlyne/swarm.workspace.jsonc`: effective snapshot.
+- `.pi/onlyne.json`: `watch.autoStart = true` and swarm defaults.
+- `.pi/settings.json`: inherit packages from root settings, preserve other packages, rewrite relative paths so every workspace points to the same `pi-onlyne` source.
+- Runtime directories, logs, and state files.
+
+Root settings must contain a resolvable `pi-onlyne` package entry. If it is missing, bootstrap fails fast and reports the source path. Bootstrap performs no network installation.
+
+Package path rewriting uses workspace-relative paths. The resolved path must point to a directory or package containing `package.json` whose package name is `pi-onlyne`.
+
+### 6.2 Later Sync
+
+Later sync only validates configuration and readiness, reports drift, and preserves supervisor modifications. Sync does not automatically rewrite existing `.pi/settings.json`, `.pi/onlyne.json`, or `.onlyne/config.toml` content.
+
+Run, submit, and session spawn fail fast when a readiness gap exists. Readiness gaps include at least the swarm flag, RPC transport, watch autoStart, pi-onlyne package, settings JSON validity, and Onlyne JSON validity.
+
+## 7. SQLite Contract
+
+### 7.1 tasks
+
+Preserve the existing task lineage and outcome fields, and add:
+
+- `kind`: `normal | recovery`.
+- `failure_of`: failed task id, nullable.
+- `protocol_version`.
+- `operator_revision`.
+
+`task_id` is unique. `transfer_send_to` identifies the task id that created this task. A recovery task uses an independent UUID.
+
+### 7.2 sessions
+
+```text
+sessions(
+  task_id PRIMARY KEY,
+  agent_state,
+  delivery_state,
+  resource_state,
+  public_lifecycle,
+  recovery_substate,
+  desired_json,
+  observed_json,
+  generation,
+  last_seq,
+  heartbeat_at,
+  mismatch_count,
+  backend,
+  backend_ref_json,
+  last_error,
+  created_at,
+  updated_at,
+  operator_revision
+)
+```
+
+### 7.3 intents
+
+```text
+intents(
+  op_id PRIMARY KEY,
+  task_id,
+  kind,
+  payload_json,
+  status,
+  attempts,
+  next_retry_at,
+  last_error,
+  accepted_receipt_json,
+  created_at,
+  updated_at
+)
+```
+
+### 7.4 faults
+
+```text
+faults(
+  fault_id PRIMARY KEY,
+  task_id,
+  failure_of,
+  class,
+  desired_json,
+  observed_json,
+  generation,
+  seq,
+  intent_id,
+  attempts,
+  reason,
+  recovery_task_id,
+  acknowledged_at,
+  created_at
+)
+```
+
+### 7.5 Direct Repair Contract
+
+The supervisor may execute transactional SQL directly. Core operations:
+
+- adopt/rebind: write backend, backend ref, generation, desired/observed.
+- retry: change intent/status or task outcome to a schedulable value and increment operator revision.
+- fail: write outcome, fault, reason, and resource close.
+- close: write resource closed and complete ledger.
+- ack: write fault acknowledged_at.
+
+Every core reconcile validates the tuple, operator revision, and version sequence. An illegal tuple enters controlled fault. SQLite corruption triggers core exit and preserves the original error.
+
+## 8. State-Machine Tests
+
+`lifecycle.rs` uses a pure reducer and table-driven exhaustive tests.
+
+Coverage:
+
+- Legal projections for Agent × Delivery × Resource combinations.
+- created → ready → working.
+- working → idle_waiting → working.
+- working → idle_fault → working.
+- working + completion intent → draining/working → exited.
+- Intent retry, receipt, and exhaustion.
+- Version ordering for heartbeat, snapshot, and probe.
+- Old generation, old seq, duplicate events, and new events.
+- Duplicate Pi generation rejection.
+- Explicit exit, cancel, fault, and operator repair.
+- Mismatch m/n configuration and count reset.
+- Single-level recovery-task limit and root fault queue.
+- Persistence order and idempotence for every failure path.
+
+## 9. Implementation Order
+
+1. `lifecycle.rs`: pure enums, events, reducer, projections, SQLite state types, and exhaustive table tests.
+2. `runtime/mod.rs`: SessionBackend, SessionRef, ResourceProbe, capabilities, and fake backend.
+3. Herdr backend: spawn, attach, probe, close, task-id naming, and Pi `--session-id`.
+4. Onlyne daemon: loopback RPC idempotency, history full scan, and swarm FIFO disable.
+5. pi-onlyne: session custom entries, generation/seq, ready barrier, heartbeat, snapshot, intent worker, and turn receipt.
+6. Orca adapter: migrate existing `orca_term` capabilities and remove direct Orca calls from the scheduler.
+7. Scheduler: dispatch, adopt, reconcile, recovery, fault, and repair CLI.
+8. Bootstrap: settings package-path rewrite, initial materialization, and drift validation.
+9. Protocol v2: wire parser, control wire, error classification, and one-time legacy-data migration.
+10. End-to-end: fake backend, Herdr smoke, real loopback delivery, completion, recycle, cancel, and restart adoption.
+
+## 10. Completion Conditions
+
+- Scheduler code does not directly depend on Orca terminal/tab APIs.
+- task/session bindings agree in the scheduler, Pi session JSONL, SQLite, and backend ref.
+- The core view converges to Pi observed state after events and 30-second inspection.
+- An active task does not remain projected as running while actually idle, faulted, gone, or exited.
+- Swarm task/control/send paths do not open FIFO files.
+- A new workspace can directly start a Pi session with pi-onlyne.
+- Configuration drift has explicit diagnostics and fail-fast behavior.
+- Intent, fault, recovery, and operator repair state can be serialized and recovered.
+- Failure of one piece of work does not block a sibling role.
+- Core invariant and backend management errors reach the supervisor through controlled exit paths.
+- State-machine, recovery, bootstrap, and end-to-end tests all pass.
+
+---
+
+# 中文镜像：Swarm 生命周期重构 Grillme 实施细则
 
 ## 1. 目标与边界
 
@@ -204,7 +578,7 @@ swarm wire 使用 `protocol: 2`。`---swarm-ctl` 同样携带 protocol。缺失�
 
 `loopback` op 必须支持 `op_id`/idempotency key。重复请求返回已有 message receipt。请求超时允许重试。重复重试不会生成重复 task。
 
-core 重启后扫描各 workspace loopback history，按 task_id、op_id 去重并补建缺失 task。历史扫描使用完整分页结果。现有固定 30/100 条窗口升级为完整扫描接口。
+core 重启后扫描各 workspace loopback history，按 `task_id`、`op_id` 去重并补建缺失 task。历史扫描使用完整分页结果。现有固定 30/100 条窗口升级为完整扫描接口。
 
 ### 5.2 FIFO 策略
 
