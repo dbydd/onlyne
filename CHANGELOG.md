@@ -2,9 +2,13 @@
 
 ## [1.4.0] - 2026-09-21
 
-Status: **unreleased.** Every fix this window produced is folded into this section, and
-no separate version number is cut for it; 1.3.1 stays the newest published release until the
-operator publishes.
+Status: **published.** The Git tag is `v1.4.0`; all nineteen workspace crates publish to
+crates.io at 1.4.0, and `pi-onlyne` publishes to npm at 1.2.0.
+
+Receipt: all nineteen crates passed Cargo's packaging sandbox build and reached crates.io on
+their first upload attempt. A registry search from outside this workspace answers 1.4.0 for
+`onlyne-cli`, `onlyne-server`, `onlyne-client`, and `onlyne-tui`; the other fifteen packages
+were accepted in the same dependency-ordered run recorded by `scripts/publish.py`.
 
 Scope: three changes in one window. Two close session-bookkeeping holes read out of
 one field report, and the third removes the mechanism the second hole lived in.

@@ -6,6 +6,9 @@ This file records engineering history and release evidence. User-facing installa
 
 - The workspace version is 1.4.0 across nineteen Rust crates.
 - Git tag `v1.4.0` points to the release commit.
+- All nineteen crates are on crates.io at 1.4.0. Each package passed Cargo's packaging sandbox
+  build and reached the registry on its first upload attempt, in the order recorded by
+  `scripts/publish.py`.
 - The npm package `pi-onlyne` is version 1.2.0.
 - The local gate passed: formatting, clippy, and workspace tests. The test run recorded 1101 passed, 0 failed, and 1 ignored across 69 targets.
 - The Windows CI job on the release commit reports handbook line-ending failures and a restart timing failure. The Linux job is green.

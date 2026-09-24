@@ -1,6 +1,6 @@
 # Onlyne Status
 
-v1.4.0 is on this tree, nineteen crates at 1.4.0, and it rebuilds the client's session
+v1.4.0 is on this tree and all nineteen crates are on crates.io at 1.4.0. It rebuilds the client's session
 lifecycle around one rule: in plugin mode a session's state comes from the frames the
 mounted plugin reports and from heartbeat liveness. Three sources competed before it —
 the adapter frames, a backend probe that read a pane or a tab, and stored rows read as
@@ -71,7 +71,7 @@ Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKE
 - [x] Case 5 `two-cluster.sh`: aggregate-role federation preserves the parent ledger boundary.
 - [x] Case 6 `gateway-mount.sh`: gateway mount delivers platform traffic.
 - [x] Case 7 `legacy-layout.sh`: legacy workspace exits 2.
-- [x] Case 8: formatting, lint, workspace tests, and binary firewall checks pass. `.github/workflows/ci.yml` splits this across two jobs: linux fmt/clippy/`cargo test --workspace`; windows `cargo test` on the core crate subset. Dual-platform CI is green (run 34977562567).
+- [x] Case 8: formatting, lint, workspace tests, and binary firewall checks pass. `.github/workflows/ci.yml` splits this across two jobs: linux fmt/clippy/`cargo test --workspace`; windows `cargo test` on the core crate subset. The release commit's linux job is green; its windows job reports the known handbook CRLF and restart-timing failures.
 - [x] Case 9 `generate-relocate.sh`: generate produces relocatable workspaces.
 - [x] Case 10 `orca-live.sh`: the Orca backend against the live app. Under the `host` policy the tab lands flat in the supervisor's own worktree. Probe inputs come in four parts, and the tab map carries that identity. SIGTERM drains back to the tab count it started with, and no Orca registration is created.
 - [x] Case 11 `pi-live.sh`: the `plugins/onlyne-agent-pi` pi extension against a real `onlyne-client`. `ONLYNE_BACKEND=exec` spawns the workspace's `session_command` as a child of the client with stdin held open. pi loads the plugin, and the task text reaches pi's context. The plugin's `report.complete` then settles the ledger to `acked` with the model's answer in `out_head`, and the session projects `exited`/`done`. SKIP semantics: pi not on PATH, or a one-turn credential probe that does not answer, prints `SKIP pi-live` and exits 0. A host without a model must not read as a product failure. The plugin's own protocol path is covered without a model by `node --test` in `plugins/onlyne-agent-pi`: framing, protocol vocabulary, the agent state machine against a fake host, and a live handshake against a really-running `onlyne-client`.
@@ -89,4 +89,4 @@ Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKE
 `.github/workflows/ci.yml` defines two jobs on `push` to `main`, pull requests, and `workflow_dispatch`.
 
 - `linux` (`ubuntu-latest`): `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
-- `windows` (`windows-latest`): `cargo test --no-fail-fast` on `onlyne-proto`, `onlyne-frame`, `onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-cli`, `onlyne-tui`. Dual-platform CI is green (run 34977562567 @ `e2d0e15`).
+- `windows` (`windows-latest`): `cargo test --no-fail-fast` on `onlyne-proto`, `onlyne-frame`, `onlyne-config`, `onlyne-layout`, `onlyne-store`, `onlyne-session`, `onlyne-net`, `onlyne-adapter`, `onlyne-server`, `onlyne-client`, `onlyne-gateway`, `onlyne-cli`, `onlyne-tui`. The release commit's linux job is green; the windows job reports the known handbook CRLF and restart-timing failures.
