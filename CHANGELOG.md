@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.4.1 release index (English)
+
+**Release:** 1.4.1, dated 2026-09-24. Nineteen workspace crates move to 1.4.1, and
+`pi-onlyne` is on npm at 1.2.1. The registry upload runs from tag `v1.4.1`; its receipt
+is recorded in the commit that follows this section.
+
+**Operator-visible changes:**
+
+- The pi plugin reports `agent: "idle"` only while the session waits for user input.
+  Every other moment reads `running`: a turn in flight, a queued steering or follow-up
+  message, a retry, a compaction, and work a background-task extension took off the
+  agent loop. A turn-end boundary re-derives the phase from pi, the ten-second beat
+  re-derives it again on every tick, and `agent_settled` is where the claim lands.
+- The idle ladder counts one idle episode. A turn of the session's own zeroes the
+  reminder count, so work that resumed and ran again starts the bound over.
+- The plugin sends no observation after its completion report. The client's detach path
+  writes the terminal agent state and publishes the row.
+- The supervisor handbook carries three facts it previously left in the repository:
+  `[server].agent_package` takes the absolute path of a real package, a template's
+  `.pi/settings.json` is where `{{agent_package}}` goes and renders as the
+  `../.onlyne/agent/<pkg>` form pi loads, and `onlyne schema spec|client` prints the
+  compiled JSON Schema of both TOML surfaces.
+
+No database marker, wire vocabulary, config key, or exit code changed. Both stores stay
+at their current revisions, and a workspace from 1.4.0 runs against a 1.4.1 server or
+client with no migration.
+
+## 1.4.1 版本索引（中文）
+
+**发布信息：** 1.4.1 发布于 2026-09-24。工作区全部十九个 crate 升到 1.4.1，`pi-onlyne`
+在 npm 上的版本为 1.2.1。registry 上传从 tag `v1.4.1` 执行，其回执记录在本节之后的那个
+提交里。
+
+**操作员可见的变化：**
+
+- pi 插件只在会话等待用户输入时报告 `agent: "idle"`。其余时刻一律读作 `running`：
+  正在运行的轮次、已排队的 steer 或 follow-up 消息、重试、压缩，以及被后台任务扩展
+  移出 agent 循环的工作。轮次结束处向 pi 重新推导阶段，每 10 秒的心跳每次触发都再
+  推导一次，空闲声明落在 `agent_settled`。
+- 空闲阶梯统计一次空闲期。会话自己启动的任何一轮都会把提醒计数清零，因此恢复运行、
+  继续干活之后上限重新开始。
+- 插件在完成报告之后不再发送观测。终态的 agent 维度由客户端的 detach 路径写入并发布。
+- 监管者手册补进三条原先只存在于仓库的事实：`[server].agent_package` 要填本机真实
+  插件包的绝对路径；模板的 `.pi/settings.json` 是 `{{agent_package}}` 的落点，渲染成 pi
+  加载的 `../.onlyne/agent/<pkg>` 形式；`onlyne schema spec|client` 打印两个 TOML 面的
+  编译期 JSON Schema。
+
+数据库标记、wire 词汇、配置键与退出码均未变化。两个 store 保持当前修订号，1.4.0 的
+工作区可以直接对接 1.4.1 的 server 或 client，无需迁移。
+
 ## 1.4.0 release index (English)
 
 **Release:** 1.4.0, dated 2026-09-24. The registry release is published at
