@@ -550,7 +550,7 @@ async fn periodic_reclaim_closes_an_exited_session_after_connection_loss() {
 
     assert_eq!(
         reclaimed,
-        [task_id.clone()],
+        vec![task_id.clone()],
         "the sweep answers with the session whose row it wrote"
     );
     assert_eq!(backend.closed_sessions.lock()[0].task_id, task_id);
