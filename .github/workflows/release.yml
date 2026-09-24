@@ -189,6 +189,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # The per-archive `.sha256` files are the artifacts; the combined list is
+      # assembled here the same way the publish job assembles it, because an
+      # artifact does not travel between jobs.
+      - name: collect checksums
+        run: cat dist/*.sha256 > dist/SHA256SUMS
       - name: render
         run: |
           python3 scripts/render-formula.py \
