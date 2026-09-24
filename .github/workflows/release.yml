@@ -85,6 +85,7 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install protoc -y
       - name: build
+        shell: bash
         run: |
           for bin in $BINS; do
             cargo build --release --locked --target ${{ matrix.target }} --bin "$bin"
