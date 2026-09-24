@@ -31,14 +31,12 @@ to you and the spec file.
   `skill export` declining to overwrite a file), 5 `client run` found no session host,
   127 missing sibling.
 
-## Release 1.4.0 operating facts
+## Current operating facts
 
-- The published release is `v1.4.0`. All nineteen Rust crates are on crates.io at 1.4.0;
-  the published pi adapter is `pi-onlyne` 1.2.0.
-- Install the matching registry set with:
+- Install the current published registry set with:
 
   ```bash
-  cargo install --locked --version 1.4.0 \
+  cargo install --locked \
     onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui onlyne-testkit
   ```
 
@@ -47,7 +45,7 @@ to you and the spec file.
   package inventory.
 - Re-export the role and supervisor handbooks from the installed binary with
   `onlyne skill export --set role --set supervisor --force`.
-- The live release acceptance shape is completion followed by handoff and client kill. Read
+- The live acceptance shape is completion followed by handoff and client kill. Read
   the task ledger, session projection, both sequence numbers, and the ghost audit after the
   task settles. The expected readings are `acked`, `exited`, and no new ghost row for that task.
 

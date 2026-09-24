@@ -167,8 +167,8 @@ Cases 1-7, 9, 12, and 14-17 run on `ONLYNE_BACKEND=fake`, and cases 18 and 19 na
 `backend = "acp"` with that scripted agent. Case 8 of the plan is the static gate above, which
 is why no script carries its number.
 
-The final release-window e2e record in `docs/live-evidence-1.4.0.md` reports 19/19 scripts
-green. The release commit's local workspace gate in `Devlogs.md` reports 1101 passed, 0 failed,
+The live acceptance record under `docs/` reports 19/19 scripts green.
+The release commit's local workspace gate in `Devlogs.md` reports 1101 passed, 0 failed,
 and 1 ignored across 69 targets.
 
 The earlier 2026-09-23 sweep from the repository root with `ONLYNE_BIN_DIR=target/release`

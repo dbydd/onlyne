@@ -12,7 +12,7 @@ Onlyne 把 coding agent 组织成持久的工作角色。**server** 在角色之
 
 client 可以通过 TLS 在不同机器上运行。生成的工作区可以整体搬移；supervisor client 也可以把一个子集群作为 aggregate role 暴露给父 server。
 
-![version](https://img.shields.io/badge/version-v1.4.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
+![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
 ![Onlyne — supervisor 向五个 pi agent 派十跳环任务，账本逐跳结清](assets/promo/onlyne-hero.png)
 
 ## 选择起点
@@ -32,15 +32,15 @@ client 可以通过 TLS 在不同机器上运行。生成的工作区可以整�
 - **从 crates.io 安装：** Cargo 和 Rust 1.85 或更新版本。
 - **构建默认功能的 gateway：** 安装 `protoc` 并把它放在 `PATH` 中。server、client、CLI 和 TUI 不需要 `protoc`。
 - **运行时：** 每个 role client 都能访问的地址和端口；本地 admin socket 与 adapter socket 需要一个可写的 owner tree。
-- **agent 宿主：** 一个受支持的 backend 和对应 adapter。真实 pi 路径需要 [pi coding agent](https://github.com/badlogic/pi-mono)；本文路径使用 pi 0.85.1。
+- **agent 宿主：** 一个受支持的 backend 和对应 adapter。真实 pi 路径需要 [pi coding agent](https://github.com/badlogic/pi-mono)。
 - **服务：** 安装不会自动注册服务。可以在前台运行 daemon，或使用 `onlyne server start`。
 
 ### crates.io 安装
 
-当前仓库版本为 **1.4.0**。让 CLI、daemon 和 TUI 使用同一版本：
+从当前发布的软件包安装 CLI、daemon 和 TUI。整套包一起安装，保证兄弟二进制来自同一构建：
 
 ```bash
-cargo install --version 1.4.0 \
+cargo install \
   onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui
 ```
 
@@ -441,7 +441,7 @@ hello → welcome → report.ready → assign → assign_ack
 
 - [`CHANGELOG.md`](CHANGELOG.md) — 按版本记录的产品变化。
 - [`docs/STATUS.md`](docs/STATUS.md) — 当前实现与验证状态。
-- [`docs/live-evidence-1.4.0.md`](docs/live-evidence-1.4.0.md) — 现场验收证据。
+- `docs/` — 现场验收证据。
 - [`Devlogs.md`](Devlogs.md) — 按时间记录的开发日志。
 
 MIT © dbydd

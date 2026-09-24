@@ -8,7 +8,7 @@ Onlyne ties a fleet of coding agents into a durable cluster. A **server** routes
 
 Clients can run on different machines over TLS. Generated workspaces are relocatable, and a supervisor client can expose a child cluster to a parent server as one aggregate role.
 
-![version](https://img.shields.io/badge/version-v1.4.0-blue) ![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
+![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
 ![Onlyne — a supervisor dispatches a ten-hop ring task to five pi agents; ledger receipts settle every hop](assets/promo/onlyne-hero.png)
 
 ## Choose a starting path
@@ -33,10 +33,10 @@ The fake and Orca examples below intentionally use `target/debug/...`; the launc
 
 ### Registry packages
 
-Install the CLI, daemons, and TUI at one matching version. This repository is currently version 1.4.0:
+Install the CLI, daemons, and TUI from the current published packages. Keep the package set together so the sibling binaries share one build:
 
 ```bash
-cargo install --version 1.4.0 \
+cargo install \
   onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui
 ```
 
@@ -434,7 +434,7 @@ README stays on deployment and operation. Release history, development status, l
 
 - [`CHANGELOG.md`](CHANGELOG.md) — release-by-release product changes.
 - [`docs/STATUS.md`](docs/STATUS.md) — current implementation and verification status.
-- [`docs/live-evidence-1.4.0.md`](docs/live-evidence-1.4.0.md) — recorded live acceptance evidence.
+- `docs/` — recorded live acceptance evidence.
 - [`Devlogs.md`](Devlogs.md) — chronological development log.
 
 MIT © dbydd
