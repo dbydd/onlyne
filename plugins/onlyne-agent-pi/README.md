@@ -24,12 +24,13 @@ hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{r
   ◀── assign{envelope, prose, task_id, generation}
   ├─ task text (+ image path) ──► pi user message (deliverAs:"followUp")
   ├─ assign_ack{accepted:true}
-  ├─ report.heartbeat{running|idle} — per turn, and every 10s while a task is live
-  ├─ a turn that ends without `onlyne_complete` ──► the idle ladder: the same
-  │    message again (at most `idleReminders` times), then `failed` and out
-  ├─ report.complete{outcome, head} — the ledger's terminal fact
-  │    └─ then one report.heartbeat{agent:"idle"} stating the agent only
-  │       └─ the client's answer is the handover: pi is asked to shut down, then detaches
+  ├─ report.heartbeat{agent} — `running` per turn and every 10s while a task is live,
+  │    `idle` only while pi waits for input; every beat re-derives it from pi
+  ├─ the session waits for input with the task open and no `onlyne_complete` ──►
+  │    the idle ladder: the same message again (at most `idleReminders` times),
+  │    then `failed` and out
+  ├─ report.complete{outcome, head} — the ledger's terminal fact, and the last report
+  │    └─ the client's answer is the handover: pi is asked to shut down, then detaches
   ├─ probe ──► one heartbeat
   ◀── recycle ──► complete (if unsettled) → stop → pi exits
   └─ detach{reason} when pi shuts down
@@ -104,7 +105,7 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | --- | --- | --- |
 | `enabled` | `true` | `false` turns the extension off for this workspace |
 | `watch.autoStart` | `true` | `false` registers the tools but opens no socket until `/onlyne connect` |
-| `idleReminders` | `2` | how many times an idle turn end re-sends the assignment before the task fails (§4); 0 means the first idle without a completion fails it |
+| `idleReminders` | `2` | how many times one idle episode re-sends the assignment before the task fails (§4); 0 means the first idle without a completion fails it |
 
 A missing file means every default. A malformed file prints one warning on stderr and
 keeps the defaults: a typo must not silently disable a role. The client does not read
@@ -190,11 +191,11 @@ at the first of these events:
 2. **An errored turn** — the turn ended with a provider error (`stopReason: "error"`).
    That is proof on its own, so the plugin reports `failed` at once, with the error as
    the head.
-3. **The idle ladder** — the turn ended cleanly without a completion, and the task is
-   still open. The plugin re-sends the assignment and counts the rung. The idle that
-   finds the bound `idleReminders` names already spent reports `failed` — head
-   `no completion after <n> idle reminders` — and the session exits the way any
-   completion makes it exit.
+3. **The idle ladder** — a turn ended cleanly without a completion, pi is waiting for
+   input, and the task is still open. The plugin re-sends the assignment and counts the
+   rung. The idle that finds the bound `idleReminders` names already spent reports
+   `failed` — head `no completion after <n> idle reminders` — and the session exits the
+   way any completion makes it exit.
 4. **`recycle{outcome}`** — the host is tearing the session down. The plugin settles an
    unsettled task with the host's outcome first, then stops and exits pi.
 
@@ -205,7 +206,8 @@ assignment the task arrived with — the same header, task text and attachment p
 injection carried, under one line saying the previous turn ended without a completion —
 and never the role prose, which is already in the session's context. Its images are not
 re-attached: the paths travel as text, so the same bytes are not put into the context
-twice. A new envelope for the same task restarts the count.
+twice. A new envelope for the same task restarts the count, and so does any turn of the
+session's own (see the idle claim below).
 
 `head` is a single line, capped at 200 characters; it matches what the client puts in
 `out_head` and what the receipt carries. Each task has one source for it: the `text` of
@@ -221,13 +223,39 @@ outcome the socket could not carry is queued and flushed after the next `hello`,
 flush's answer is the handover that ends the process. A completion the host refused leaves
 the process running, so an exit never loses the task.
 
-The last report is one observation with `agent: "idle"`, sent
-after the completion is acknowledged and before the process leaves. The completion settles
-the row from the tuple the client holds, and that tuple still reads `running` when the
-finishing turn was the last heartbeat. Nothing observes the process afterwards, so without
-this report an exited session keeps saying `running`. The plugin skips it when the last
-beat was already idle, and a refused settled observation does not hold up the exit the
-completion earned.
+The completion is the plugin's last report, and a session that has completed one answers
+no further beat and no `probe`. The terminal agent state is the client's own write: the
+`detach` frame that follows retires the task-free session, and that path feeds
+`AgentGone` and publishes the row (`retire_idle_locked`,
+`crates/onlyne-client/src/session/dispatch/retire.rs`). A process on its way out states
+no phase for itself.
+
+### The idle claim
+
+A session is idle only while it waits for user input. Every other moment reads
+`running`: a turn in flight, a queued steering or follow-up message, a retry, a
+compaction, and work a background-task extension took off the agent loop.
+
+The plugin asks pi instead of assuming. `ctx.isIdle()` answers whether a run, a
+compaction or a queued continuation is still open, `ctx.hasPendingMessages()` answers
+whether input is already on its way, and a probe that is missing or throws reads as
+`running`. `agent_settled` is where the claim normally lands, because pi fires that
+event only after a run has fully settled; the end of one turn is a different moment, and
+the 10-second beat re-derives the phase from pi on every tick, so a stale one cannot
+survive a run that started again.
+
+A background-task extension changes the question. `bg_run` and its siblings return at
+once and the work continues in a child process, so pi waits for input while the session's
+task is still in flight. The plugin recognises the extension by the tools it registered
+and asks its EventBus service for the live task list; a task in `running` status holds
+the session at `running` and holds the ladder off until that task reports a terminal
+state. On a session without the extension there is no tool to recognise, no query, and
+nothing to wait for.
+
+The ladder counts one idle episode, not a task's whole life. Any turn of the session's
+own zeroes the count, so work that resumed and ran again starts the bound over; the one
+turn the ladder's own reminder wakes belongs to the episode that reminder belongs to,
+and the bound stays reachable.
 
 ## 5. Relay guard
 
@@ -391,7 +419,7 @@ path the client's daemon bound, read when the environment carried none, §8).
 | `hello … forbidden` / connection closed right after `hello` | the mount role does not match the client's role | `hello.args.mount.role` vs the workspace's role |
 | `frame_too_large` | a body above 8 MiB | only reachable through an oversize outbound image; the ceiling is the core's |
 | tools missing | `pi.registerTool` is absent in that pi version | `/onlyne status`; the capability table above |
-| session reads `idle` again after `exited` | a turn-end heartbeat landed after the completion, moving the agent dimension back | the session log for the report order after `completion`; the plugin stops reporting for a completed task, and the client's own `delivery` survives either way |
+| session reads `idle` while a background task still runs | the background-task extension is absent, or its EventBus service did not answer the status query in time, so the plugin cannot see the work it left running | the `[pi-onlyne]` log line for the background probe; `bg_status` in that same pi session names the live task |
 | the supervisor board lists no tabs | no live session reported a pane: the adapter predates the report, or this pi is not inside an Orca pane | `onlyne --server-root … sessions --json` for `projection.observed.host.orca.pane_key`; `env \| grep ORCA_` inside the pane |
 
 `/onlyne status` prints the live state (`connected`, `socket`, `role`, `sessionId`,
@@ -439,12 +467,13 @@ hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{r
   ◀── assign{envelope, prose, task_id, generation}
   ├─ task text (+ image path) ──► pi user message (deliverAs:"followUp")
   ├─ assign_ack{accepted:true}
-  ├─ report.heartbeat{running|idle} — per turn, and every 10s while a task is live
-  ├─ a turn that ends without `onlyne_complete` ──► the idle ladder: the same
-  │    message again (at most `idleReminders` times), then `failed` and out
-  ├─ report.complete{outcome, head} — the ledger's terminal fact
-  │    └─ then one report.heartbeat{agent:"idle"} stating the agent only
-  │       └─ the client's answer is the handover: pi is asked to shut down, then detaches
+  ├─ report.heartbeat{agent} — `running` per turn and every 10s while a task is live,
+  │    `idle` only while pi waits for input; every beat re-derives it from pi
+  ├─ the session waits for input with the task open and no `onlyne_complete` ──►
+  │    the idle ladder: the same message again (at most `idleReminders` times),
+  │    then `failed` and out
+  ├─ report.complete{outcome, head} — the ledger's terminal fact, and the last report
+  │    └─ the client's answer is the handover: pi is asked to shut down, then detaches
   ├─ probe ──► one heartbeat
   ◀── recycle ──► complete (if unsettled) → stop → pi exits
   └─ detach{reason} when pi shuts down
@@ -505,7 +534,7 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | --- | --- | --- |
 | `enabled` | `true` | `false` 会为此工作区关闭扩展 |
 | `watch.autoStart` | `true` | `false` 会注册工具，但在 `/onlyne connect` 前不打开套接字 |
-| `idleReminders` | `2` | 空闲轮次结束前重新发送任务分配信息的次数，随后任务失败（§4）；`0` 表示第一次没有完成的空闲轮次就会使任务失败 |
+| `idleReminders` | `2` | 一次空闲期内重新发送任务分配信息的次数，随后任务失败（§4）；`0` 表示第一次没有完成的空闲就会使任务失败 |
 
 文件缺失时，所有项均使用默认值。文件格式错误时，会在 stderr 打印一条警告并保留默认值：拼写错误不能使角色在无提示的情况下停用。客户端不读取此文件（计划 §11 已将旧的就绪门控降级为生成时模板建议），因此只有此扩展会读取它；键结构仍采用模板所带的结构。
 
@@ -560,7 +589,7 @@ pi API 缺失时会发生什么，以及主机随后如何处理：
 
 1. **`onlyne_complete`**——模型给出明确结果（默认为 `done`，或为 `failed` / `cancelled`）。同一任务后续的完成调用会被拒绝，不会再次报告。其非空 `text` 就是 head。
 2. **出错的轮次**——该轮次以模型提供方错误结束（`stopReason: "error"`）。这本身即可证明出错，因此插件立即报告 `failed`，并将错误作为 head。
-3. **空闲阶梯**——该轮次正常结束但未完成，且任务仍处于打开状态。插件重新发送任务分配信息，并计入当前级数。当某次空闲发现 `idleReminders` 指定的上限已经用尽时，会报告 `failed`——head 为 `no completion after <n> idle reminders`——并以完成时相同的方式退出会话。
+3. **空闲阶梯**——某轮次正常结束但未完成，pi 正在等待输入，且任务仍处于打开状态。插件重新发送任务分配信息，并计入当前级数。当某次空闲发现 `idleReminders` 指定的上限已经用尽时，会报告 `failed`——head 为 `no completion after <n> idle reminders`——并以完成时相同的方式退出会话。
 4. **`recycle{outcome}`**——主机正在拆除会话。插件先使用主机给出的结果确定尚未确定状态的任务，然后停止并退出 pi。
 
 有两种情况不会确定最终状态：任务已经分配，但其轮次尚未运行，此时注入消息尚未执行，立即完成会声称完成了从未发生的工作；以及阶梯仍有下一级可走的空闲。阶梯重新发送任务最初到达时的分配信息，使用与注入时相同的页眉、任务文本和附件路径，并附上一行说明上一轮次结束时没有完成。阶梯不会重新发送角色说明，因为角色说明已存在于会话上下文中。其图像不会再次附加：路径以文本形式传递，因此相同的字节不会两次进入上下文。同任务的新信封会重新开始计数。
@@ -569,7 +598,17 @@ pi API 缺失时会发生什么，以及主机随后如何处理：
 
 已报告的完成会结束会话进程。`report.complete` 以请求形式发出；客户端仅在完成会话记录的处理、确认投递并写入 `Completion` 信封后才回复。插件在该回复到达时请求 pi 关闭。套接字无法传输的结果会进入队列，并在下一次 `hello` 之后刷新；该次刷新收到的回复即为结束进程的交接。主机拒绝的完成会让进程继续运行，因此进程退出不会导致任务丢失。
 
-最后一次报告是带有 `agent: "idle"` 的一次观测，在完成报告获得确认后、进程退出前发送。完成报告根据客户端持有的元组完成会话记录的状态；如果结束轮次同时也是最后一次心跳，该元组仍为 `running`。之后没有组件观察此进程，因此缺少这份报告时，已退出的会话会持续显示 `running`。如果最后一次心跳已经是 idle，插件会跳过此报告；已被拒绝且状态已经确定的观测不会延迟此完成操作促成的退出。
+完成报告是插件发出的最后一份报告；已经完成任务的会话不再回应心跳，也不再回应 `probe`。终态的 agent 维度由客户端自己写入：随后到达的 `detach` 会退役这个已无任务的会话，该路径会喂入 `AgentGone` 并发布这一行（`retire_idle_locked`，`crates/onlyne-client/src/session/dispatch/retire.rs`）。正在离开的进程不为自己声明阶段。
+
+### 空闲判定
+
+只有会话正在等待用户输入时，它才是空闲的。其余时刻一律读作 `running`：正在运行的轮次、已排队的 steer 或 follow-up 消息、重试、压缩，以及被后台任务扩展移出 agent 循环的工作。
+
+插件向 pi 查询，而不是自行假设。`ctx.isIdle()` 回答是否还有运行、压缩或排队中的续跑，`ctx.hasPendingMessages()` 回答输入是否已经在路上；缺失或抛错的探针一律读作 `running`。`agent_settled` 通常是空闲声明落地的时刻，因为 pi 只在一次运行彻底结算之后才触发该事件；单个轮次的结束是另一个时刻。每 10 秒的心跳会在每次触发时重新向 pi 推导阶段，因此重新开始的运行不会留下过期的空闲读数。
+
+后台任务扩展改变了这个问题。`bg_run` 及其同类工具立即返回，工作继续在子进程中运行，于是 pi 在会话任务仍在进行时等待输入。插件通过该扩展注册的工具识别它，并向它的 EventBus 服务查询存活任务列表；处于 `running` 状态的任务会让会话保持 `running`，并让阶梯退后，直到该任务报告终态。没有安装该扩展的会话没有可识别的工具、没有查询，也就没有可等待的东西。
+
+阶梯统计的是一次空闲期，而不是任务的整个生命。会话自己启动的任何一轮次都会把计数清零，因此恢复运行并继续工作之后，上限重新开始；阶梯自己的提醒唤醒的那一轮次属于该提醒所属的空闲期，上限依然可以达到。
 
 ## 5. 中继守卫
 
@@ -661,7 +700,7 @@ relay_required = ["writer"]        # these roles must have received a handoff
 | `hello … forbidden`／在 `hello` 后立即关闭连接 | 挂载角色与客户端角色不匹配 | `hello.args.mount.role` 与工作区角色 |
 | `frame_too_large` | 正文超过 8 MiB | 仅可通过超大的出站图像达到；此上限来自核心 |
 | 工具缺失 | 该 pi 版本中不存在 `pi.registerTool` | `/onlyne status`；上方的能力表 |
-| 会话在 `exited` 之后再次显示 `idle` | 轮次结束时的心跳在完成报告之后到达，将 agent 维度移回 | 在会话日志中查看 `completion` 之后的报告顺序；插件会停止为已完成的任务进行报告，无论哪种顺序，客户端自身的 `delivery` 都会保留 |
+| 后台任务仍在运行时，会话显示 `idle` | 未安装后台任务扩展，或其 EventBus 服务未在时限内回应状态查询，插件看不到自己留下的运行中工作 | `[pi-onlyne]` 日志中关于后台探针的行；同一 pi 会话中的 `bg_status` 会列出存活任务 |
 | 监管器面板未列出任何标签页 | 没有活动会话报告窗格：适配器早于该报告功能，或此 pi 不在 Orca 窗格内 | `onlyne --server-root … sessions --json` 中的 `projection.observed.host.orca.pane_key`；在窗格内执行 `env \| grep ORCA_` |
 
 `/onlyne status` 会打印实时状态（`connected`、`socket`、`role`、`sessionId`、`generation`、`agentState`、`tasks`、`pendingCompletion`、`lastError`、计数器），`/onlyne connect` / `/onlyne disconnect` 可手动打开和关闭套接字。

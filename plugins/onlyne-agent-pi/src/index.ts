@@ -9,9 +9,11 @@
 //
 //   session_start    -> read env + .pi/onlyne.json, connect, register tools
 //   turn_start       -> heartbeat{running}
-//   turn_end         -> heartbeat{idle}; the settle window opens
+//   turn_end         -> one turn of a run ended; the phase is re-derived from pi
+//                       and the settle window opens
 //   message_end      -> keep the last assistant text; a failed turn is `failed`
-//   agent_settled    -> settle decision: the idle ladder, or `failed` at once
+//   agent_settled    -> heartbeat{idle} when the session waits for input, then
+//                       the settle decision: the idle ladder, or `failed` at once
 //   session_shutdown -> detach{reason}
 
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -68,6 +70,10 @@ interface PiSurface {
   status(text: string): void;
   welcome(welcome: WelcomeLike): void;
   isIdle(): boolean;
+  /** The phase rule: true only while the session waits for user input. */
+  waitingForInput(): Promise<boolean>;
+  /** Drops the background-task probe's EventBus subscription. */
+  closeBackground?(): void;
   exit(reason: string): void;
 }
 
@@ -326,6 +332,7 @@ export default function onlyne(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (event) => {
     agent?.stop(`pi:${event.reason ?? "quit"}`);
+    surface?.closeBackground?.();
     surface?.widget?.(undefined);
     agent = null;
     surface = null;

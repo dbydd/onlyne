@@ -10,9 +10,13 @@
 //   status        ctx.ui.setStatus("onlyne", text)
 //   exit          ctx.shutdown()
 //   isIdle        ctx.isIdle()
+//   pending       ctx.hasPendingMessages()
+//   toolNames     pi.getAllTools()          (background-work.mjs)
+//   eventBus      pi.events                 (background-work.mjs)
 //   registerTool / registerCommand are probed by index.ts itself.
 
 import { WIDGET_KEY } from "./activity.mjs";
+import { createBackgroundProbe } from "./background-work.mjs";
 
 /**
  * @param {{ pi: any, log: (line: string) => void, context: () => any }} options
@@ -26,6 +30,30 @@ export function createSurface({ pi, log, context }) {
       return null;
     }
   };
+
+  /**
+   * The one question behind every phase the plugin reports. pi answers it; a
+   * probe that is missing, throws, or arrives without a context answers `false`
+   * because an unwitnessed session is a running one as far as this plugin can
+   * prove (`background-work.mjs` carries the second half of the question).
+   */
+  const piWaitsForInput = () => {
+    const current = ctx();
+    if (!current) return false;
+    try {
+      if (!has(current.isIdle) || !current.isIdle()) return false;
+      if (has(current.hasPendingMessages) && current.hasPendingMessages()) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const background = createBackgroundProbe({
+    events: pi.events ?? null,
+    getToolNames: has(pi.getAllTools) ? () => (pi.getAllTools() ?? []).map((tool) => tool?.name) : null,
+    log,
+  });
 
   const available = {
     wakeUser: has(pi.sendUserMessage),
@@ -138,6 +166,18 @@ export function createSurface({ pi, log, context }) {
       } catch {
         return true;
       }
+    },
+    /**
+     * The phase rule in one place: idle means waiting for user input, and a
+     * background-task extension holding live work keeps the session running
+     * even while pi itself waits.
+     */
+    async waitingForInput() {
+      if (!piWaitsForInput()) return false;
+      return !(await background.running());
+    },
+    closeBackground() {
+      background.close();
     },
     exit(reason) {
       log(`exiting pi: ${reason}`);

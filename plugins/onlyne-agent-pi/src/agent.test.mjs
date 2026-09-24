@@ -206,6 +206,7 @@ class FakeHost {
 /** The effect surface the agent drives, recorded for assertions. */
 function fakeSurface(options = {}) {
   const calls = { wakeUser: [], prose: [], entries: [], status: [], exits: [], widget: [] };
+  const flag = (value, fallback) => (value === undefined ? fallback : typeof value === "function" ? value() : value);
   return {
     calls,
     available: {
@@ -237,6 +238,9 @@ function fakeSurface(options = {}) {
     widget: (lines) => calls.widget.push(lines),
     welcome: () => {},
     isIdle: () => (options.idle === undefined ? true : options.idle()),
+    async waitingForInput() {
+      return Boolean(flag(options.waiting, true) && !flag(options.backgroundWork, false));
+    },
     exit: (reason) => calls.exits.push(reason),
   };
 }
@@ -345,7 +349,7 @@ test("every heartbeat names the Orca pane this process was spawned in", async ()
       orca: { pane_key: PANE_KEY, tab_id: PANE_TAB, leaf_id: PANE_LEAF, handle: "term_1" },
     });
     // The binding rides beside the state dimensions instead of replacing them.
-    assert.equal(observed.agent, "running");
+    assert.equal(observed.agent, "idle", "the default fake surface is waiting for input");
     assert.equal(observed.resource, "attached");
     assert.deepEqual(Object.keys(observed), [...OBSERVED_KEYS, "host"]);
     assert.equal(observed.version.generation, 1);
@@ -397,7 +401,7 @@ test("a pi outside an Orca pane reports no host at all", async () => {
 
     const [observed] = await waitFor(() => (heartbeats(host).length ? heartbeats(host) : null));
     assert.equal("host" in observed, false, "no pane, no binding");
-    assert.equal(observed.agent, "running", "the tuple is still a full observation");
+    assert.equal(observed.agent, "idle", "the tuple is still a full observation");
   });
 });
 
@@ -584,7 +588,7 @@ test("an assign sharing the hello reply's chunk waits for the welcome", async ()
   assert.deepEqual(acks[0], { task_id: TASK_ID, accepted: true });
 });
 
-test("turn hooks report running then idle, and the settle after them re-sends the assignment", async () => {
+test("a waiting turn end reports idle, and the settle after it re-sends the assignment", async () => {
   const { agent, host, surface } = await startAgent();
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
@@ -616,6 +620,29 @@ test("turn hooks report running then idle, and the settle after them re-sends th
   assert.deepEqual(surface.calls.exits, [], "a task with a rung left is not failed");
 });
 
+test("a busy turn end reports no idle beat and does not settle the ladder", async () => {
+  const surface = fakeSurface({ waiting: false });
+  const { agent, host } = await startAgent({ surface });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+
+  agent.onTurnStart();
+  await waitFor(() => host.of("report").find((report) => report.data?.observed?.agent === "running"));
+  agent.onTurnEnd();
+  agent.onSettled();
+  await waitFor(() => heartbeats(host).length >= 3);
+
+  assert.equal(
+    heartbeats(host).some((observed) => observed.agent === "idle"),
+    false,
+    "the turn-end beat follows the busy surface rather than assuming the hook means idle",
+  );
+  assert.equal(surface.calls.wakeUser.length, 1, "the ladder waits while the turn is still running");
+  assert.deepEqual(surface.calls.exits, []);
+});
+
 // The live case found this ordering too: pi's turn-end hook fires in the same
 // millisecond as the settle that reports the completion, so the turn-end
 // heartbeat lands after the completion report. The beat no longer carries a
@@ -640,9 +667,9 @@ test("a turn-end heartbeat after the completion never leaves the plugin", async 
   assert.deepEqual(host.of("report").slice(reports), [], "the completion is the last report");
 });
 
-test("a busy pi holds the settle decision until it is idle", async () => {
-  let idle = false;
-  const surface = fakeSurface({ idle: () => idle });
+test("a busy pi holds the settle decision until it is waiting for input", async () => {
+  let waiting = false;
+  const surface = fakeSurface({ waiting: () => waiting });
   const { agent, host } = await startAgent({ surface, options: { settleFallbackMs: 40 } });
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
@@ -653,11 +680,55 @@ test("a busy pi holds the settle decision until it is idle", async () => {
   await new Promise((resolve) => setTimeout(resolve, 80));
   assert.equal(surface.calls.wakeUser.length, 1, "a busy pi is not reminded");
 
-  idle = true;
+  waiting = true;
   const reminded = await waitFor(() =>
     surface.calls.wakeUser.length === 2 ? surface.calls.wakeUser : null,
   );
   assert.match(reminded[1].text, /build it/, "the decision waits for the idle it is about");
+});
+
+test("queued input keeps the session non-idle and holds the ladder off", async () => {
+  let queued = false;
+  const surface = fakeSurface({ waiting: () => !queued });
+  const { agent, host } = await startAgent({ surface, options: { settleFallbackMs: 40 } });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+
+  agent.onTurnStart();
+  queued = true;
+  agent.onTurnEnd();
+  agent.onSettled();
+  await waitFor(() => heartbeats(host).at(-1)?.agent === "running");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+
+  assert.equal(surface.calls.wakeUser.length, 1, "a queued continuation is not an idle episode");
+  assert.deepEqual(surface.calls.exits, []);
+});
+
+test("a live background task holds the ladder off until its task is terminal", async () => {
+  let backgroundWork = true;
+  const surface = fakeSurface({ backgroundWork: () => backgroundWork });
+  const { agent, host } = await startAgent({ surface, options: { settleFallbackMs: 40 } });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+
+  agent.onTurnStart();
+  agent.onTurnEnd();
+  agent.onSettled();
+  await waitFor(() => heartbeats(host).at(-1)?.agent === "running");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(surface.calls.wakeUser.length, 1, "work off the agent loop keeps the ladder off");
+
+  backgroundWork = false;
+  agent.onSettled();
+  const reminded = await waitFor(() =>
+    surface.calls.wakeUser.length === 2 ? surface.calls.wakeUser : null,
+  );
+  assert.match(reminded[1].text, /build it/, "the terminal task releases the idle ladder");
 });
 
 // The idle ladder (`docs/SWARM-REFACTOR-GRILLME.md` §4.2): a turn that ends
@@ -666,7 +737,7 @@ test("a busy pi holds the settle decision until it is idle", async () => {
 // workspace's (`config.mjs`, two by default) and the count lives on the record
 // `onAssign` wrote for the task, which is why a task can be reminded twice and
 // failed on the third idle without the tool ever being called.
-test("an idle without a completion is reminded, the idle past the bound fails the task, and a completed turn is not reminded", async () => {
+test("only settled idles spend ladder rungs, ordinary turns reset them, and the bound fails the task", async () => {
   const { agent, host, surface } = await startAgent();
   assert.equal(agent.idleReminders, DEFAULT_IDLE_REMINDERS, "the bound is the workspace's, two by default");
   agent.start();
@@ -683,35 +754,59 @@ test("an idle without a completion is reminded, the idle past the bound fails th
   await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
   assert.equal(surface.calls.wakeUser[0].parts.length, 1, "the injection carries the image");
 
-  // Two idles, two reminders: the assignment comes back whole — header, task
-  // text and all — and the model is told why it is seeing it again.
-  for (const rung of [1, 2]) {
-    agent.onTurnStart();
-    agent.onTurnEnd();
-    agent.onSettled();
-    const sent = await waitFor(() =>
-      surface.calls.wakeUser.length === 1 + rung ? surface.calls.wakeUser : null,
-    );
-    const reminder = sent.at(-1);
-    assert.match(reminder.text, new RegExp(`reminder ${rung} of 2`));
-    assert.match(reminder.text, /build it/, "the reminder carries the task text");
-    assert.match(
-      reminder.text,
-      /\[onlyne\] task 11111111-1111-4111-8111-111111111111 from role:planner \(kind task\)/,
-      "and the identity and source the injection named",
-    );
-    assert.match(reminder.text, /\[onlyne\] attachment saved to: .*shot\.png/, "the path travels as text");
-    assert.deepEqual(reminder.parts, [], "and the image itself is not handed over twice");
-    assert.doesNotMatch(reminder.text, /Read the incoming task/, "the role prose is already in the context");
-    assert.deepEqual(
-      host.of("report").filter((report) => report.kind === "complete"),
-      [],
-      `rung ${rung}: an open task is not settled while it has a rung left`,
-    );
-  }
+  // The first turn belongs to the session itself. Its settled idle spends rung
+  // one. The turn that reminder wakes does not reset the episode, so its own
+  // settled idle spends rung two rather than starting over.
+  agent.onTurnStart();
+  agent.onTurnEnd();
+  agent.onSettled();
+  const first = await waitFor(() =>
+    surface.calls.wakeUser.length === 2 ? surface.calls.wakeUser : null,
+  );
+  const firstReminder = first.at(-1);
+  assert.match(firstReminder.text, /reminder 1 of 2/);
+  assert.match(firstReminder.text, /build it/, "the reminder carries the task text");
+  assert.match(
+    firstReminder.text,
+    /\[onlyne\] task 11111111-1111-4111-8111-111111111111 from role:planner \(kind task\)/,
+    "and the identity and source the injection named",
+  );
+  assert.match(firstReminder.text, /\[onlyne\] attachment saved to: .*shot\.png/, "the path travels as text");
+  assert.deepEqual(firstReminder.parts, [], "and the image itself is not handed over twice");
+  assert.doesNotMatch(firstReminder.text, /Read the incoming task/, "the role prose is already in the context");
 
-  // The third idle: the bound is spent, so the open task fails and the session
-  // leaves — the tool was never called, and no completion was ever reported.
+  agent.onTurnStart();
+  agent.onTurnEnd();
+  agent.onSettled();
+  const secondRung = await waitFor(() =>
+    surface.calls.wakeUser.length === 3 ? surface.calls.wakeUser : null,
+  );
+  assert.match(secondRung.at(-1).text, /reminder 2 of 2/, "the reminder-woken turn keeps the episode's count");
+  assert.deepEqual(host.of("report").filter((report) => report.kind === "complete"), []);
+
+  // The next turn is the one the second reminder wakes, so it does not reset
+  // the episode. Let that turn end without a settle, then start a turn of the
+  // session's own: that ordinary turn begins a fresh episode.
+  agent.onTurnStart();
+  agent.onTurnEnd();
+  agent.onTurnStart();
+  agent.onTurnEnd();
+  agent.onSettled();
+  const reset = await waitFor(() =>
+    surface.calls.wakeUser.length === 4 ? surface.calls.wakeUser : null,
+  );
+  assert.match(reset.at(-1).text, /reminder 1 of 2/, "an ordinary turn clears the episode's rung count");
+
+  agent.onTurnStart();
+  agent.onTurnEnd();
+  agent.onSettled();
+  const secondFresh = await waitFor(() =>
+    surface.calls.wakeUser.length === 5 ? surface.calls.wakeUser : null,
+  );
+  assert.match(secondFresh.at(-1).text, /reminder 2 of 2/);
+
+  // The third idle in the fresh episode spends the bound, so the open task
+  // fails and the session leaves — the tool was never called.
   agent.onTurnStart();
   agent.onTurnEnd();
   agent.onSettled();
@@ -722,22 +817,22 @@ test("an idle without a completion is reminded, the idle past the bound fails th
     head: "no completion after 2 idle reminders",
   });
   assert.deepEqual(surface.calls.exits, ["failed"], "the ladder's failure leaves the session");
-  assert.equal(surface.calls.wakeUser.length, 3, "the bound is spent: no third reminder");
+  assert.equal(surface.calls.wakeUser.length, 5, "the bound is spent: no third reminder");
 
   // A turn that hands the outcome over is never reminded: the tool call is the
   // exit the ladder exists to get.
-  const second = await startAgent();
-  second.agent.start();
-  await waitFor(() => second.host.of("report").length >= 1);
-  second.host.notify("assign", assignArgs());
-  await waitFor(() => (second.surface.calls.wakeUser.length === 1 ? true : null));
-  second.agent.onTurnStart();
-  second.agent.onTurnEnd();
-  await second.agent.completeFromTool({ outcome: "done", text: "built it" });
-  second.agent.onSettled();
+  const completed = await startAgent();
+  completed.agent.start();
+  await waitFor(() => completed.host.of("report").length >= 1);
+  completed.host.notify("assign", assignArgs());
+  await waitFor(() => (completed.surface.calls.wakeUser.length === 1 ? true : null));
+  completed.agent.onTurnStart();
+  completed.agent.onTurnEnd();
+  await completed.agent.completeFromTool({ outcome: "done", text: "built it" });
+  completed.agent.onSettled();
   await new Promise((resolve) => setTimeout(resolve, 60));
-  assert.equal(second.surface.calls.wakeUser.length, 1, "the completion is the exit: no reminder follows it");
-  assert.deepEqual(second.surface.calls.exits, ["done"]);
+  assert.equal(completed.surface.calls.wakeUser.length, 1, "the completion is the exit: no reminder follows it");
+  assert.deepEqual(completed.surface.calls.exits, ["done"]);
 });
 
 test("an assigned task that never ran is not completed", async () => {
@@ -873,12 +968,7 @@ test("the exit waits for the client's acknowledgement of the completion report",
   assert.deepEqual(surface.calls.exits, ["done"]);
 });
 
-// A session that only ever reported `running` and then completed leaves the
-// ledger saying `running` forever: the client settles the row from the
-// completion report and hears nothing more. One final observation, sent after
-// the completion is acknowledged and before the process leaves, is what makes
-// an exited session read idle.
-test("a completion after a running beat publishes the settled observation before the exit", async () => {
+test("the completion report is the last frame the host receives before the exit", async () => {
   const { agent, host, surface } = await startAgent();
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
@@ -892,20 +982,14 @@ test("a completion after a running beat publishes the settled observation before
 
   await agent.complete(TASK_ID, "done", "OK");
   const reports = host.of("report").filter((report) => report.kind !== "ready");
-  const kinds = reports.map((report) => report.kind);
-  assert.deepEqual(
-    kinds.slice(-2),
-    ["complete", "heartbeat"],
-    "the settled observation follows the completion: " + JSON.stringify(kinds),
-  );
-  const settled = reports.at(-1).data.observed;
-  assert.equal(settled.agent, "idle");
-  assert.deepEqual(dimensionKeys(settled), OBSERVED_KEYS, "the last observation states the agent and nothing else");
+  assert.equal(reports.at(-1).kind, "complete", "a running beat is not followed by a settled observation");
   assert.deepEqual(surface.calls.exits, ["done"]);
 });
 
-test("a session whose last beat was idle publishes no extra observation", async () => {
-  const { agent, host, surface } = await startAgent();
+test("a reconnect beat re-derives the phase from the surface", async () => {
+  let waiting = true;
+  const surface = fakeSurface({ waiting: () => waiting });
+  const { agent, host } = await startAgent({ surface });
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
   host.notify("assign", assignArgs());
@@ -913,45 +997,21 @@ test("a session whose last beat was idle publishes no extra observation", async 
   agent.onTurnStart();
   agent.onTurnEnd();
   await waitFor(() => host.of("report").find((report) => report.data?.observed?.agent === "idle"));
-  agent.noteAssistantText("OK");
-  const before = host.of("report").filter((report) => report.kind === "heartbeat").length;
 
-  await agent.complete(TASK_ID, "done", "OK");
-  assert.equal(
-    host.of("report").filter((report) => report.kind === "heartbeat").length,
-    before,
-    "an already-idle session needs no second idle observation",
-  );
-  assert.deepEqual(surface.calls.exits, ["done"]);
-});
-
-test("a queued completion and its settled observation flush in order after reconnect", async () => {
-  const { agent, host, surface } = await startAgent();
-  agent.start();
-  await waitFor(() => host.of("report").length >= 1);
-  host.notify("assign", assignArgs());
-  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
-  agent.onTurnStart();
-  agent.onTurnEnd();
-  agent.noteAssistantText("done offline");
-
+  const beforeReconnect = host.frames.length;
+  waiting = false;
   for (const socket of [...host.sockets]) socket.destroy();
   await waitFor(() => (agent.status().connected === false ? true : null));
-  await agent.completeFromTool({ outcome: "done" });
-  assert.deepEqual(surface.calls.exits, [], "nothing exits before the report lands");
-
-  await waitFor(() => (host.connections >= 2 ? true : null));
-  await waitFor(() => (surface.calls.exits.length === 1 ? true : null));
-  const reports = host.of("report").filter((report) => report.kind !== "ready");
-  assert.deepEqual(
-    reports.slice(-2).map((report) => [report.kind, report.data.observed?.agent ?? null]),
-    [
-      ["complete", null],
-      ["heartbeat", "idle"],
-    ],
-    "the settled observation rides after the flushed completion: " + JSON.stringify(reports),
+  const beat = await waitFor(() => host.frames
+    .slice(beforeReconnect)
+    .map((entry) => entry.frame)
+    .find((frame) => frame.op === "report" && frame.args?.kind === "heartbeat"));
+  assert.equal(beat.args.data.observed.agent, "running", "the reconnect asks the surface again");
+  assert.equal(
+    heartbeats(host).at(-1).agent,
+    "running",
+    "the old idle beat does not survive the reconnect",
   );
-  assert.deepEqual(dimensionKeys(reports.at(-1).data.observed), OBSERVED_KEYS, "the flushed tail states the agent and nothing else");
 });
 
 test("an inbound image is written under the workspace and handed to pi", async () => {
@@ -986,7 +1046,7 @@ test("a probe is answered with a heartbeat for the live task", async () => {
   const heartbeat = await waitFor(() =>
     host.of("report").find((report) => report.kind === "heartbeat" && report.data.task_id === TASK_ID),
   );
-  assert.equal(heartbeat.data.observed.agent, "running");
+  assert.equal(heartbeat.data.observed.agent, "idle", "the probe re-derives a waiting session");
   assert.ok(heartbeat.data.seq > SEQ_BASE, "each heartbeat advances the plugin's own sequence");
 });
 

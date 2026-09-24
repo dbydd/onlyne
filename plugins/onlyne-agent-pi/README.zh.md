@@ -19,12 +19,13 @@ hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{r
   ├─ prose ──► 注入 pi 上下文一次（custom message，不触发 turn）
   ├─ report.ready ──► 载荷等待的那道 barrier
   ◀── assign{envelope, prose, task_id, generation}
-  ├─ 任务文本（含图片路径）──► pi user message（deliverAs:"followUp"）
+  ├─ task text (+ image path) ──► pi user message（deliverAs:"followUp"）
   ├─ assign_ack{accepted:true}
-  ├─ report.heartbeat{running|idle} —— 每个 turn，以及任务存续期间每 10 秒
-  ├─ turn 结束却没有 `onlyne_complete` ──► idle 阶梯：同一条消息再注入
-  │    （最多 `idleReminders` 次），之后 `failed` 并退出
-  ├─ report.complete{outcome, head} —— ledger 的终态事实
+  ├─ report.heartbeat{agent} —— 每个 turn 以及任务存续期间每 10 秒发 `running`，
+  │    只有 pi 等待输入时才发 `idle`；每次心跳都重新向 pi 推导
+  ├─ 任务仍开着、pi 正在等待输入却没有 `onlyne_complete` ──► idle 阶梯：
+  │    同一条消息再注入（最多 `idleReminders` 次），之后 `failed` 并退出
+  ├─ report.complete{outcome, head} —— ledger 的终态事实，也是最后一份报告
   │    └─ client 的应答就是交接点：插件据此让 pi 退出，随后 detach
   ├─ probe ──► 一条 heartbeat
   ◀── recycle ──► （未终态则先 complete）→ 停插件 → pi 退出
@@ -97,7 +98,7 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | --- | --- | --- |
 | `enabled` | `true` | `false` 时该工作区禁用扩展 |
 | `watch.autoStart` | `true` | `false` 时注册工具但不建连接，需 `/onlyne connect` |
-| `idleReminders` | `2` | turn 结束却空闲时重发任务的次数上限（§4）；`0` 表示第一次空闲就判失败 |
+| `idleReminders` | `2` | 一次空闲期内重发任务的次数上限（§4）；`0` 表示第一次空闲就判失败 |
 
 文件缺失即取各自默认值。文件格式错误时打印一行警告，并保留默认值：一个笔误不该静默关掉一个
 role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 generate 期模板提示），所以
@@ -171,16 +172,17 @@ hop 预算时，注入的标题行写明 hop 与预算。`onlyne_send{kind: "tas
    任务的第二次 completion 被拒（不重报）。`text` 非空时即 head，原样写出。
 2. **turn 出错** —— turn 以 provider 错误告终（`stopReason: "error"`）。这本身就是证据，插件立即
    报 `failed`，错误信息当 head。
-3. **idle 阶梯** —— turn 干净结束却没有 completion，任务还开着。插件重发任务并记一次；当空闲发现
-   `idleReminders` 给的次数已经用完，就报 `failed`（head 为 `no completion after <n> idle
-   reminders`），并像任何一次 completion 一样退出 session。
+3. **idle 阶梯** —— 某轮干净结束却没有 completion，pi 正在等待输入，任务还开着。插件重发任务并
+   记一次；当空闲发现 `idleReminders` 给的次数已经用完，就报 `failed`（head 为 `no completion
+   after <n> idle reminders`），并像任何一次 completion 一样退出 session。
 4. **`recycle{outcome}`** —— 宿主拆 session。插件先按宿主给的 outcome 结算未终态的任务，再停
    插件并退出 pi。
 
 两种情况都不结算：任务已投递但还没跑过任何 turn（注入的消息尚未执行，这时报终态就是撒谎），
 以及阶梯还有余额的那次空闲。阶梯重发的是任务到手时的那条消息——同样的头部、任务文本和附件路径，
 外加一行说明上一轮没有 completion——但不重发 role prose，它已经在上下文里；图片也不重挂，
-路径以文本出现，同样的字节不会进上下文两次。同一任务收到新 envelope 时计数重来。
+路径以文本出现，同样的字节不会进上下文两次。同一任务收到新 envelope 时计数重来；session 自己
+跑起来的任何一轮也把计数清零（见下面的空闲判定）。
 
 `head` 恒为单行、上限 200 字符，与 client 写入 `out_head` 和回执携带的内容一致。每个任务的 head
 只有一个来源：显式 `onlyne_complete` 带的 `text`（有则原样采用）、出错 turn 报的错误，或阶梯自己
@@ -192,11 +194,28 @@ hop 预算时，注入的标题行写明 hop 与预算。`onlyne_send{kind: "tas
 让 pi 退出。socket 当时送不出去的 outcome 会被记住，并在下一次 `hello` 后补发，那次补发的
 应答就是结束进程的交接点。被宿主拒掉的 completion 不会让进程退出，任务不会因为退出而丢失。
 
-最后一条上报只说 agent 这一维：`agent: "idle"` 的观测，发在 completion 被
-ack 之后、进程退出之前。completion 是按 client 手里的元组结算 session 行的，而收尾那一轮
-就是最后一次 heartbeat 时，这个元组读到的仍是 `running`；此后没有任何东西再观测这个进程，
-所以缺了这条上报，已退出的 session 会一直说 `running`。最后一次心跳本来就是 idle 时，插件
-跳过这条；已结算的观测被拒，也不拖着 completion 挣来的那次退出不走。
+completion 是插件最后一份上报；已经交掉任务的 session 不再发心跳，也不再应答 `probe`。终态的
+agent 维度由 client 自己写：随后到达的 `detach` 会退役这个已无任务的 session，该路径会喂入
+`AgentGone` 并发布这一行（`retire_idle_locked`，
+`crates/onlyne-client/src/session/dispatch/retire.rs`）。正在离开的进程不给自己声明阶段。
+
+### 空闲判定
+
+只有 session 在等待用户输入时才算空闲。其余时刻一律读作 `running`：正在跑的 turn、已排队的
+steer 或 follow-up 消息、重试、压缩，以及被后台任务扩展移出 agent 循环的工作。
+
+插件向 pi 查询，不自行假设。`ctx.isIdle()` 回答是否还有运行、压缩或排队中的续跑，
+`ctx.hasPendingMessages()` 回答输入是否已经在路上；探针缺失或抛错一律读作 `running`。空闲声明通常
+落在 `agent_settled`，因为 pi 只在一次运行彻底结算之后才触发它；单轮 turn 结束是另一件事。每
+10 秒的心跳每次触发都重新向 pi 推导阶段，因此重新开始的运行不会留下过期的空闲读数。
+
+后台任务扩展改变了这个问题。`bg_run` 与同类工具立即返回，工作继续在子进程里跑，于是 pi 在任务
+仍在进行时就等待输入。插件通过该扩展注册的工具认出它，再向它的 EventBus 服务查存活任务列表；
+处于 `running` 的任务会把 session 按在 `running` 上，也让阶梯退后，直到该任务报出终态。没有装
+这个扩展的 session 没有工具可认、没有查询，也没有东西要等。
+
+阶梯算的是一次空闲期，不是任务的一生。session 自己跑起来的任何一轮都把计数清零，于是恢复运行、
+继续干活之后，上限重新开始；阶梯自己的提醒唤醒的那一轮属于该提醒所属的空闲期，上限依然能达到。
 
 ## 5. 接力守卫
 
@@ -335,7 +354,7 @@ stderr 告警并忽略，把机会让回文件。
 | `hello` 后立刻 `forbidden` / 断连 | mount role 与 client 的 role 不一致 | `hello.args.mount.role` 对该工作区的 role |
 | `frame_too_large` | 正文超过 8 MiB | 只会由超限的出站图片触发；上限来自核心 |
 | 工具缺失 | 该 pi 版本没有 `pi.registerTool` | `/onlyne status`；对照上面的能力表 |
-| 会话在 `exited` 之后又回到 `idle` | completion 之后又落进一条 turn-end heartbeat，把 agent 维搬了回去 | 看 session 日志里 `completion` 之后的 report 顺序；插件对已完成任务不再上报，而 client 自己的 `delivery` 两条都会保住 |
+| 后台任务还在跑，会话却显示 `idle` | 没装后台任务扩展，或它的 EventBus 服务没在时限内回答状态查询，插件看不到自己留下的运行中工作 | `[pi-onlyne]` 日志里后台探针那一行；同一个 pi session 里的 `bg_status` 会列出存活任务 |
 | supervisor 看板一个 tab 都不列 | 没有 live session 上报过 pane：适配器版本早于这条上报，或这个 pi 不在 Orca pane 里 | `onlyne --server-root … sessions --json` 看 `projection.observed.host.orca.pane_key`；在 pane 里跑 `env \| grep ORCA_` |
 
 `/onlyne status` 打印实时状态（`connected`、`socket`、`role`、`sessionId`、`generation`、

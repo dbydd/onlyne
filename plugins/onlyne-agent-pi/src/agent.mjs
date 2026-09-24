@@ -175,8 +175,6 @@ export class OnlyneAgent {
     this.lastError = null;
     /** Whether pi has already been asked to end this process (`exitSession`). */
     this.exitRequested = false;
-    /** Agent phase of the last heartbeat this connection sent, if any. */
-    this.lastPhase = null;
     this.stats = { assigns: 0, duplicates: 0, injections: 0, completions: 0, reports: 0, reconnects: 0, recycles: 0 };
   }
 
@@ -325,9 +323,10 @@ export class OnlyneAgent {
     }
     this.welcome = welcome;
     this.connected = true;
-    // A fresh connection has reported nothing: the next beat is news.
-    this.lastPhase = null;
-    this.agentState = this.tasks.size > 0 ? "idle" : "ready";
+    // A fresh connection has reported nothing, so the phase is a question, not
+    // an answer: the first beat below re-derives it from pi. A taskless session
+    // is the ready pool, and ready is its own state.
+    this.agentState = this.tasks.size > 0 ? await this.derivedPhase() : "ready";
     this.activity.set({
       role: welcome.role,
       connection: "connected",
@@ -500,7 +499,10 @@ export class OnlyneAgent {
   }
 
   /**
-   * One heartbeat for the task this connection serves.
+   * One heartbeat for the task this connection serves. The phase is the one the
+   * rule names: `idle` only while the session waits for user input, `running`
+   * for everything else, re-derived from pi on every beat so a phase that went
+   * stale when a run started again cannot survive a tick.
    *
    * A task this plugin already completed gets none: the beat is a full
    * snapshot of what the plugin can see, and after the completion the agent's
@@ -512,22 +514,40 @@ export class OnlyneAgent {
    * heartbeat left over from the finishing turn landed three milliseconds
    * behind the completion.
    */
-  async heartbeat(agent = this.agentState) {
+  async heartbeat(agent = null) {
     if (!this.connected) return;
     const taskId = this.activeTaskId();
     if (!taskId) return;
     if (this.tasks.get(taskId)?.completed) return;
-    this.agentState = agent;
+    const phase = agent ?? (await this.derivedPhase());
+    this.agentState = phase;
     this.seq += 1;
     await this.request("report", heartbeatReport({
       taskId,
       generation: this.generation,
       seq: this.seq,
-      agent,
+      agent: phase,
       host: this.host,
     }));
     this.stats.reports += 1;
-    this.lastPhase = agent;
+  }
+
+  /**
+   * Where the session actually is, in the only two words the wire has for it.
+   * The surface asks pi, and adds the one case pi cannot see: work a
+   * background-task extension took off the agent loop.
+   * @returns {Promise<"idle"|"running">}
+   */
+  async derivedPhase() {
+    try {
+      const waiting = await this.surface.waitingForInput?.();
+      return waiting === true ? "idle" : "running";
+    } catch (error) {
+      // A surface that cannot answer has not witnessed a session waiting for
+      // input, and the rule reads that as running.
+      this.log(`input-waiting probe failed: ${error.message}`);
+      return "running";
+    }
   }
 
   /** Tasks still owing a completion; a finished task keeps its record. */
@@ -619,6 +639,7 @@ export class OnlyneAgent {
       held.turnsSinceAssign = 0;
       held.reminders = 0;
       held.remindedAt = 0;
+      held.reminderWokeTurn = false;
       held.errored = false;
       held.envelopeId = envelope.id ?? held.envelopeId;
       held.assignment = assignment;
@@ -640,6 +661,8 @@ export class OnlyneAgent {
         reminders: 0,
         /** The `turnsSinceAssign` the last reminder was charged to. */
         remindedAt: 0,
+        /** Whether the next turn is the one this plugin's own reminder woke. */
+        reminderWokeTurn: false,
       });
     }
     this.agentState = "running";
@@ -702,42 +725,65 @@ export class OnlyneAgent {
 
   // ------------------------------------------------------------ pi → plugin
 
-  /** A turn started: the plugin's own agent fact is `running`. */
+  /**
+   * A turn started: the plugin's own agent fact is `running`, and the idle
+   * ladder starts over. The count belongs to one idle episode, so a session
+   * that ran again owns a fresh bound; the one turn this plugin's own reminder
+   * woke belongs to the episode that reminder belongs to, and keeps it.
+   */
   onTurnStart() {
-    const task = [...this.tasks.values()].find((item) => !item.completed);
-    if (task) task.turns += 1;
+    for (const task of this.tasks.values()) {
+      if (task.completed) continue;
+      task.turns += 1;
+      if (task.reminderWokeTurn) {
+        task.reminderWokeTurn = false;
+        continue;
+      }
+      task.turnsSinceAssign = 0;
+      task.reminders = 0;
+      task.remindedAt = 0;
+    }
     void this.heartbeat("running").catch((error) => this.log(`heartbeat refused: ${error.message}`));
   }
 
-  /** A turn ended: the agent is idle, and the settle window starts. */
+  /**
+   * A turn ended: one turn of a run that may still have more, and the settle
+   * window starts. The phase is re-derived, so the beat says `running` while pi
+   * keeps working and says `idle` only once the session waits for input.
+   */
   onTurnEnd() {
     for (const task of this.tasks.values()) {
       if (!task.completed) task.turnsSinceAssign += 1;
     }
-    void this.heartbeat("idle").catch((error) => this.log(`heartbeat refused: ${error.message}`));
+    void this.heartbeat().catch((error) => this.log(`heartbeat refused: ${error.message}`));
     this.armSettleFallback();
   }
 
-  /** pi will not continue on its own: take the settle decision for this idle. */
+  /**
+   * pi has settled: this is the moment the rule names as waiting for input, and
+   * the settle decision belongs to it.
+   */
   onSettled() {
     this.clearSettleFallback();
-    this.trySettle();
+    void this.heartbeat().catch((error) => this.log(`heartbeat refused: ${error.message}`));
+    void this.trySettle().catch((error) => this.log(`settle decision failed: ${error.message}`));
   }
 
   /**
    * The one settle decision. pi keeps `isIdle()` false while it is running,
-   * retrying, compacting, or holding a queued continuation, so a settle signal
-   * that arrives during any of those waits instead of deciding on a session
+   * retrying, compacting, or holding a queued continuation, and a background task
+   * keeps work running after pi itself has settled, so a settle signal that
+   * arrives during any of those waits re-arms instead of deciding on a session
    * that is still busy. The fallback timer and `agent_settled` both land here,
    * and `settleNow` makes the decision idempotent for one idle episode.
    */
-  trySettle() {
+  async trySettle() {
     if (this.closed || this.activeTasks().length === 0) return;
-    if (this.surface.isIdle?.() === false) {
+    if (await this.derivedPhase() !== "idle") {
       this.armSettleFallback();
       return;
     }
-    void this.settleNow().catch((error) => this.log(`settle decision failed: ${error.message}`));
+    await this.settleNow().catch((error) => this.log(`settle decision failed: ${error.message}`));
   }
 
   /** A failed turn: the task's outcome is `failed`, with the error as its head. */
@@ -747,7 +793,7 @@ export class OnlyneAgent {
       task.errored = true;
       if (text) task.head = headOf(text);
     }
-    this.trySettle();
+    void this.trySettle().catch((error) => this.log(`settle decision failed: ${error.message}`));
   }
 
   /**
@@ -774,7 +820,7 @@ export class OnlyneAgent {
     if (this.closed || this.activeTasks().length === 0) return;
     this.settleHandle = this.timer.set(() => {
       this.settleHandle = null;
-      this.trySettle();
+      void this.trySettle().catch((error) => this.log(`settle decision failed: ${error.message}`));
     }, this.settleFallbackMs);
   }
 
@@ -844,6 +890,9 @@ export class OnlyneAgent {
    */
   remind(task) {
     task.reminders += 1;
+    // The turn this reminder is about to wake belongs to the same episode, so
+    // `onTurnStart` spends no reset on it and the bound stays reachable.
+    task.reminderWokeTurn = true;
     const rung = `reminder ${task.reminders} of ${this.idleReminders}`;
     const text = [
       `[onlyne] your turn ended without a completion exit; this task is still open (${rung}). Call onlyne_complete when it is finished.`,
@@ -935,11 +984,6 @@ export class OnlyneAgent {
     this.activity.set({ taskId: this.activeTaskId() ?? null, phase: normalized });
     this.notice("out", `complete ${taskId.slice(0, 8)} ${normalized}${summary ? `: ${summary}` : ""}`);
     if (this.activeTasks().length === 0) {
-      if (exitProcess) {
-        await this.reportSettled(taskId).catch((error) =>
-          this.log(`settled observation refused: ${error.message}`),
-        );
-      }
       this.stopHeartbeat();
       if (exitProcess) this.exitSession(normalized);
     }
@@ -961,37 +1005,6 @@ export class OnlyneAgent {
     this.surface.exit?.(reason);
   }
 
-  /**
-   * One last observation before the process leaves: the agent dimension at
-   * `idle`.
-   *
-   * The completion settles the row from the tuple the client holds, which still
-   * says `running` when the turn that finished was the last report sent, and
-   * nothing observes the process afterwards. This report is what makes an
-   * exited session read idle. It is skipped when the last beat was already
-   * idle — the agent dimension is already right — and it is a request for
-   * the same reason the completion is: the answer is the handover, and a
-   * failure here must not stop the exit that the durable completion earned.
-   *
-   * It carries no completion fact. The outcome belongs to `report.complete`, and
-   * the drain the completion opens belongs to the client: an observation states
-   * where the agent is, not what the session's intent has done.
-   */
-  async reportSettled(taskId) {
-    if (!this.connected || this.lastPhase === "idle") return false;
-    this.seq += 1;
-    await this.request("report", heartbeatReport({
-      taskId,
-      generation: this.generation,
-      seq: this.seq,
-      agent: "idle",
-      host: this.host,
-    }));
-    this.stats.reports += 1;
-    this.lastPhase = "idle";
-    return true;
-  }
-
   async flushPendingCompletion() {
     const pending = this.pendingCompletion;
     if (!pending || !this.connected) return;
@@ -1002,9 +1015,6 @@ export class OnlyneAgent {
       this.activity.set({ taskId: this.activeTaskId() ?? null, phase: pending.outcome });
       this.notice("out", `complete ${pending.taskId.slice(0, 8)} ${pending.outcome} flushed after reconnect`);
       if (pending.exitProcess && this.activeTasks().length === 0) {
-        await this.reportSettled(pending.taskId).catch((error) =>
-          this.log(`settled observation refused: ${error.message}`),
-        );
         this.exitSession(pending.outcome);
       }
     } catch (error) {

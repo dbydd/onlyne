@@ -65,6 +65,7 @@ test("a real onlyne-client answers hello with a welcome", { skip: !hasBinaries }
     status: () => {},
     welcome: () => {},
     isIdle: () => true,
+    waitingForInput: async () => true,
     exit: () => {},
   };
   const logs = [];

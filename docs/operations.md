@@ -274,7 +274,7 @@ A no-op heartbeat advances the liveness watermark, not the progress watermark; `
 
 The reason text for `stalled` is `no applied progress`.
 
-A settled task cannot enter this criterion: only task assignment establishes the progress clock, and `note_applied` only refreshes an established clock. The final `agent: "idle"` heartbeat sent by the plugin after its completion receipt lands on nothing. Expiration scans and send boundaries each derive lifecycle once—the stored tuple and the task's settled value in the `task` table pass through `project` together—and a task that resolves to `exited` is suppressed and forgotten; releasing the connection also forgets the clock for every session it served.
+A settled task cannot enter this criterion: only task assignment establishes the progress clock, and `note_applied` only refreshes an established clock. The plugin's completion report is the last report it sends, so it lands on nothing either. Expiration scans and send boundaries each derive lifecycle once—the stored tuple and the task's settled value in the `task` table pass through `project` together—and a task that resolves to `exited` is suppressed and forgotten; releasing the connection also forgets the clock for every session it served.
 
 The same frozen episode is reported only once, and the next `Applied` clears deduplication. `stall_report_secs = 0` disables this criterion.
 
@@ -810,7 +810,7 @@ no-op 心跳抬存活水位，不抬进展水位；`stalled` 只看后者。
 
 `stalled` 的 reason 文本是 `no applied progress`。
 
-一条已结清的任务走不进这条判据：进展时钟只由 task 分配建立，`note_applied` 只刷新已经建立的时钟，plugin 在完成回执之后送出的最后一拍 `agent: "idle"` 心跳落在空处。到期扫描与发送边界各派生一次 lifecycle——存储元组与 `task` 表里该任务的结清值一起过 `project`——得出 `exited` 的 task 被抑制并被遗忘；连接释放顺手忘掉它服务过的每个 session 的时钟。
+一条已结清的任务走不进这条判据：进展时钟只由 task 分配建立，`note_applied` 只刷新已经建立的时钟；plugin 的完成报告就是它最后一份报告，同样落在空处。到期扫描与发送边界各派生一次 lifecycle——存储元组与 `task` 表里该任务的结清值一起过 `project`——得出 `exited` 的 task 被抑制并被遗忘；连接释放顺手忘掉它服务过的每个 session 的时钟。
 
 同一冻结 episode 只报一次，下一次 `Applied` 解除去重。`stall_report_secs = 0` 关闭这条判定。
 
