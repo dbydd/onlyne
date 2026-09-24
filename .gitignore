@@ -11,10 +11,3 @@ __pycache__/
 *.pyc
 # Runtime trees of the in-repo examples (server roots and generated workspaces).
 examples/*/cluster/
-# The release pipeline and the packaging it feeds stay out of the index: the workflow,
-# the Homebrew formula, the installer and the formula renderer are local work, and the
-# repo's own release story is not decided by them yet.
-/.github/workflows/release.yml
-/packaging/homebrew/
-/packaging/install.sh
-/scripts/render-formula.py
