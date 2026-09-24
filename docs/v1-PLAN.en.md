@@ -1,4 +1,4 @@
-> **English default.** This document is the default reading copy of the v1 plan. The Chinese source at `docs/v1-PLAN.md` is the parallel Chinese reference; both versions describe the same plan.
+> **English reading copy.** This document is the English reading copy of the v1 plan. `docs/v1-PLAN.md` remains the authoritative Chinese detailed reference; both versions describe the same plan.
 
 # Onlyne v1.0.0 — Three-Process server / client / gateway Refactoring Execution Plan
 
