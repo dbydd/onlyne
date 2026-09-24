@@ -269,6 +269,21 @@ where it is read.
   supervisor and the `repair_*` verbs.
 - cli: `onlyne ghosts [--limit N]` reads the sweep's audit rows, newest first, on the admin
   surface.
+- tui: the page-2 detail pane reaches its ends, and a one-shot dump can show every row. The pane's
+  scroll is now pinned where an operator can see it: a test drives the crate's own text-render path
+  and watches the footer counter move `1-9/90` → `10-18/90` under the default Graph focus, and
+  `1-9/90` → `2-10/90` under the History focus, where `PgUp`/`PgDn` page the list instead; no focus
+  gate stands between a keystroke and the scroll. That dual meaning was also the report: the legend
+  named `PgUp/PgDn page` once and unqualified, so an operator who pressed `h` and then `PgDn` watched
+  the list turn and the detail stand still. The binding is unchanged and the legend now names both
+  targets (`PgUp/PgDn list·detail`). The counter prints only when the detail is longer than the pane,
+  so a short detail gives no feedback at all, and a long subject title can still clip the counter —
+  width itself is not the cause, and the counter survives 120, 100, 80, and 60 columns. `Home`,
+  `End`, and `G` jump the detail to its first and last offset, clamped the way a stepped scroll is and
+  bound on the swarm page only. And `--once` takes `--state active|all` (default `active`, so today's
+  dump is byte-identical), reusing the filter the interactive `a` toggles:
+  `onlyne-tui --server-root <root> --once --page 2 --state all` prints a plain-text frame, so an
+  operator can read a settled row's `reason` in one command. That frame renders at a fixed 120x36.
 - `skills/onlyne-role-payload-v2/SKILL.md`: its `description` value is quoted. The line was
   an unquoted YAML scalar carrying `handoff:` and `Triggers:` inside its prose, and a reader
   takes each `": "` for the start of a nested mapping: `npx skills add` skipped this file

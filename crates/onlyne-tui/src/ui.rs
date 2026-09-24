@@ -1,10 +1,10 @@
 use crate::force::Vec2;
 use crate::layout::{self, Camera, CellKind, LayoutEdge, LayoutNode, RoleMap};
 use crate::model::{
-    Alert, AlertKind, Detail, Focus, Page, RoleDetail, Snapshot, TaskDetail, UiState, alerts,
-    event_task, layout_edges, layout_nodes, ledger_state_label, live_sessions, page_history,
-    principal_label, role_edges, selected_graph_task, selected_history_task, selected_role,
-    visible_sessions,
+    Alert, AlertKind, Detail, DetailJump, Focus, Page, RoleDetail, Snapshot, TaskDetail, UiState,
+    alerts, event_task, layout_edges, layout_nodes, ledger_state_label, live_sessions,
+    page_history, principal_label, role_edges, selected_graph_task, selected_history_task,
+    selected_role, visible_sessions,
 };
 use chrono::{DateTime, Local};
 use onlyne_proto::{Event, EventRow, FaultEvent, LedgerState, Lifecycle, SessionRow};
@@ -635,6 +635,31 @@ pub fn clamp_detail_scroll(state: &mut UiState, pane: Rect) {
         .min(u16::try_from(max).unwrap_or(u16::MAX));
 }
 
+/// Step the detail pane's scroll by `delta` lines and stop it where the text
+/// does: what `J`/`K` and `PgUp`/`PgDn` do on page 2.
+pub fn scroll_detail(state: &mut UiState, delta: i16, pane: Rect) {
+    if delta >= 0 {
+        state.detail_scroll = state.detail_scroll.saturating_add(delta as u16);
+    } else {
+        state.detail_scroll = state.detail_scroll.saturating_sub(delta.unsigned_abs());
+    }
+    clamp_detail_scroll(state, pane);
+}
+
+/// Land the detail pane on its first or last line. The bottom is the same
+/// offset [`clamp_detail_scroll`] stops a long step at, so a pane with nothing
+/// more to show stays put on both keys.
+pub fn jump_detail(state: &mut UiState, jump: DetailJump, pane: Rect) {
+    state.detail_scroll = match jump {
+        DetailJump::Top => 0,
+        DetailJump::Bottom => {
+            let max = detail_extent(&detail_body(state), pane).max;
+            u16::try_from(max).unwrap_or(u16::MAX)
+        }
+    };
+    clamp_detail_scroll(state, pane);
+}
+
 /// The rows one line of the panel needs once wrapped to `width` columns, the
 /// way the panel wraps it: on spaces where it can, mid-word where it must.
 fn wrapped_rows(line: &str, width: usize) -> usize {
@@ -1109,8 +1134,9 @@ fn short(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{RoleView, SUPERVISOR_ROLE, cycle_role, hidden_role};
+    use crate::model::{KeyCmd, RoleView, SUPERVISOR_ROLE, cycle_role, hidden_role, interpret_key};
     use chrono::Utc;
+    use crossterm::event::{KeyCode, KeyModifiers};
     use onlyne_proto::{
         AgentPhase, DeliveryPhase, LedgerEntry, LedgerStateEvent, Lifecycle, MsgKind, Presence,
         Principal, RecoveryPhase, ResourcePhase, SessionProjection,
@@ -1927,19 +1953,216 @@ mod tests {
         assert_eq!(short.detail_scroll, 0);
     }
 
+    /// The `from-to/total` the detail panel prints in its own title, read out
+    /// of a rendered frame.
+    fn detail_counter(text: &str, pane: Rect) -> String {
+        let row = text
+            .lines()
+            .nth(pane.y as usize)
+            .expect("the detail panel's top border row");
+        let title: String = row.chars().skip(pane.x as usize + 1).collect();
+        let mark = title
+            .find('▲')
+            .unwrap_or_else(|| panic!("the panel title carries no scroll counter: {title}"));
+        title[..mark]
+            .split_whitespace()
+            .last()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// The line of text the detail panel is showing at the top of its pane.
+    fn detail_first_line(text: &str, pane: Rect) -> String {
+        let row = text
+            .lines()
+            .nth(pane.y as usize + 1)
+            .expect("the detail panel's first text row");
+        row.chars()
+            .skip(pane.x as usize + 1)
+            .take((pane.width - 2) as usize)
+            .collect()
+    }
+
+    /// The proof the bound keys do their job: two frames of one detail, with
+    /// the keys page 2 answers to applied between them. Both list foci are
+    /// driven, because a key can belong to the list under one and the detail
+    /// under the other.
     #[test]
-    fn a_scrollable_detail_panel_reports_where_it_stands() {
+    fn the_bound_scroll_keys_move_the_detail_panel_and_its_counter() {
+        let size = (120, 30);
+        let pane = detail_pane_size(size);
+        let snapshot = linked_snapshot();
+
+        // `PgDn` pages the history once focus is there, so each focus gets the
+        // keys that are the detail's own under that focus.
+        let cases: [(Focus, &[(KeyCode, KeyModifiers)]); 2] = [
+            (
+                Focus::Graph,
+                &[
+                    (KeyCode::Char('J'), KeyModifiers::SHIFT),
+                    (KeyCode::Char('J'), KeyModifiers::SHIFT),
+                    (KeyCode::PageDown, KeyModifiers::NONE),
+                    (KeyCode::Char('K'), KeyModifiers::SHIFT),
+                ],
+            ),
+            (
+                Focus::History,
+                &[
+                    (KeyCode::Char('J'), KeyModifiers::SHIFT),
+                    (KeyCode::Char('J'), KeyModifiers::SHIFT),
+                    (KeyCode::Char('K'), KeyModifiers::SHIFT),
+                ],
+            ),
+        ];
+        for (focus, keys) in cases {
+            let mut state = UiState {
+                page: Page::Swarm,
+                focus,
+                detail: Some(Detail::Role(long_role_detail())),
+                ..UiState::default()
+            };
+            let extent = detail_extent(&detail_body(&state), pane);
+            assert!(extent.lines > extent.view, "{extent:?}");
+
+            let before = render_once_text(&snapshot, &state, size.0, size.1);
+            let stood = detail_counter(&before, pane);
+            assert_eq!(
+                stood,
+                format!("1-{}/{}", extent.view, extent.lines),
+                "the panel opens at the top of its own text\n{before}"
+            );
+            let line_before = detail_first_line(&before, pane);
+
+            for &(code, modifiers) in keys {
+                match interpret_key(code, modifiers, state.page, state.focus) {
+                    KeyCmd::DetailScroll(delta) => scroll_detail(&mut state, delta, pane),
+                    other => panic!("{code:?} mapped to {other:?}, not a detail scroll"),
+                }
+            }
+            assert!(state.detail_scroll > 0, "the keys moved the pane");
+
+            let after = render_once_text(&snapshot, &state, size.0, size.1);
+            let moved = detail_counter(&after, pane);
+            assert_eq!(
+                moved,
+                format!(
+                    "{}-{}/{}",
+                    state.detail_scroll + 1,
+                    (usize::from(state.detail_scroll) + extent.view).min(extent.lines),
+                    extent.lines
+                ),
+                "the title counts the offset the keys reached under {focus:?}\n{after}"
+            );
+            assert_ne!(stood, moved, "the counter moved: {stood} -> {moved}");
+            assert_ne!(
+                detail_first_line(&after, pane),
+                line_before,
+                "the panel shows different text at the top under {focus:?}\n{after}"
+            );
+        }
+    }
+
+    /// The counter is the pane's only on-screen evidence that it scrolls, and
+    /// it sits at the tail of the title. A narrow terminal must keep it, or a
+    /// working key leaves no trace on screen.
+    #[test]
+    fn the_scroll_counter_survives_a_narrow_terminal() {
         let state = UiState {
             page: Page::Swarm,
             detail: Some(Detail::Role(long_role_detail())),
             ..UiState::default()
         };
-        let text = render_once_text(&linked_snapshot(), &state, 120, 30);
-        assert!(
-            text.contains("▲▼"),
-            "the panel says there is more text below\n{text}"
+        for (width, height) in [(120, 30), (100, 30), (80, 30), (60, 30)] {
+            let text = render_once_text(&linked_snapshot(), &state, width, height);
+            assert!(
+                text.contains('▲') && text.contains('▼'),
+                "the counter survives {width}x{height}\n{text}"
+            );
+        }
+    }
+
+    /// `Home`, `End`, and `G` reach the ends the stepping keys walk between.
+    #[test]
+    fn the_jump_keys_land_the_detail_panel_on_its_first_and_last_line() {
+        let size = (120, 30);
+        let pane = detail_pane_size(size);
+        let snapshot = linked_snapshot();
+        let mut state = UiState {
+            page: Page::Swarm,
+            detail: Some(Detail::Role(long_role_detail())),
+            ..UiState::default()
+        };
+        let extent = detail_extent(&detail_body(&state), pane);
+        let bottom = u16::try_from(extent.max).expect("the fixture fits a u16 offset");
+
+        for (code, lands) in [
+            (KeyCode::End, bottom),
+            (KeyCode::Home, 0),
+            (KeyCode::Char('G'), bottom),
+        ] {
+            scroll_detail(&mut state, 4, pane);
+            match interpret_key(code, KeyModifiers::NONE, state.page, state.focus) {
+                KeyCmd::DetailJump(jump) => jump_detail(&mut state, jump, pane),
+                other => panic!("{code:?} mapped to {other:?}, not a detail jump"),
+            }
+            assert_eq!(state.detail_scroll, lands, "{code:?}");
+        }
+
+        let frame = render_once_text(&snapshot, &state, size.0, size.1);
+        assert_eq!(
+            detail_counter(&frame, pane),
+            format!("{}-{}/{}", bottom + 1, extent.lines, extent.lines),
+            "the last offset leaves the panel showing its final line\n{frame}"
         );
-        assert!(text.contains("role builder  1-"), "{text}");
+
+        // A detail the pane already shows whole has no ends to reach, and a
+        // step can never pass the one `End` stops on.
+        let mut short = UiState {
+            page: Page::Swarm,
+            ..UiState::default()
+        };
+        jump_detail(&mut short, DetailJump::Bottom, pane);
+        assert_eq!(
+            short.detail_scroll, 0,
+            "nothing below the fold, nothing to jump"
+        );
+        scroll_detail(&mut state, 8, pane);
+        assert_eq!(
+            state.detail_scroll, bottom,
+            "the step stops where the jump landed"
+        );
+    }
+
+    /// The rectangle the key handler clamps against is the one the frame draws
+    /// its detail title into, so a test of one is a test of the live app.
+    #[test]
+    fn the_detail_pane_the_keys_clamp_against_is_the_one_the_frame_draws() {
+        let size = (120, 36);
+        let pane = detail_pane_size(size);
+        let state = UiState {
+            page: Page::Swarm,
+            detail: Some(Detail::Role(long_role_detail())),
+            ..UiState::default()
+        };
+        let text = render_once_text(&linked_snapshot(), &state, size.0, size.1);
+        let corners = |y: usize| -> (char, char) {
+            let row: Vec<char> = text
+                .lines()
+                .nth(y)
+                .unwrap_or_else(|| panic!("no row {y} in the frame"))
+                .chars()
+                .collect();
+            (
+                row[pane.x as usize],
+                row[pane.x as usize + pane.width as usize - 1],
+            )
+        };
+        assert_eq!(corners(pane.y as usize), ('┌', '┐'), "{pane:?}");
+        assert_eq!(
+            corners((pane.y + pane.height - 1) as usize),
+            ('└', '┘'),
+            "{pane:?}"
+        );
     }
 
     #[test]

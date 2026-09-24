@@ -196,7 +196,7 @@ impl Page {
                 "1/2·Tab switch  hjkl navigate  ←→↑↓ pan  +/- repel  0 recentre  wheel zoom  drag pan  Enter detail  F session  a all/active  r refresh  q quit"
             }
             Page::Swarm => {
-                "1/2·Tab switch  g/h focus  ↑↓ select  ^p/^n back/forward  Enter detail  J/K scroll  / search  f state  F session  t window  o role  e edge  a all/active  PgUp/PgDn page  r refresh  q quit"
+                "1/2·Tab switch  g/h focus  ↑↓ select  ^p/^n back/forward  Enter detail  J/K scroll  Home/End/G top/bottom  / search  f state  F session  t window  o role  e edge  a all/active  PgUp/PgDn list·detail  r refresh  q quit"
             }
         }
     }
@@ -323,6 +323,49 @@ impl HistoryFilter {
     pub fn reset_page(&mut self) {
         self.offset = 0;
     }
+}
+
+/// The half of the `all/active` pair a view shows. `a` flips between the two on
+/// the interactive page, and `--state` names one from the command line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StateView {
+    Active,
+    All,
+}
+
+impl StateView {
+    /// The accepted words, in the order the filter's own [`STATES`] table
+    /// lists them, so a caller can never spell a state the history filter
+    /// would not.
+    pub const WORDS: [&'static str; 2] = ["active", "all"];
+
+    /// The word this view puts in [`HistoryFilter::state`].
+    pub fn word(self) -> &'static str {
+        match self {
+            StateView::Active => Self::WORDS[0],
+            StateView::All => Self::WORDS[1],
+        }
+    }
+
+    /// Read one of [`Self::WORDS`] back. Anything else is not a view.
+    pub fn from_word(word: &str) -> Option<Self> {
+        Self::WORDS
+            .iter()
+            .position(|accepted| *accepted == word)
+            .map(|index| match index {
+                0 => StateView::Active,
+                _ => StateView::All,
+            })
+    }
+}
+
+/// Seed a view with one half of the pair. The pull reads the filter and the
+/// session views read `active_only`, so both halves move together and the
+/// dump lists exactly what the word names.
+pub fn select_state_view(state: &mut UiState, view: StateView) {
+    state.active_only = view == StateView::Active;
+    state.filter.state = view.word().to_string();
+    state.filter.reset_page();
 }
 
 #[derive(Clone, Debug)]
@@ -1211,13 +1254,18 @@ pub enum KeyCmd {
     TogglePage,
     Enter,
     DetailScroll(i16),
+    /// Where `Home`/`End`/`G` land the detail pane, in its own text.
+    DetailJump(DetailJump),
     Refresh,
     Spacing(i8),
     Recentre,
     RoleEdge(isize),
     FollowEdge,
     RoleBack,
-    Pan { dx: isize, dy: isize },
+    Pan {
+        dx: isize,
+        dy: isize,
+    },
     HistoryWalk(isize),
     SetListFocus(Focus),
     MoveCursor(isize),
@@ -1230,6 +1278,15 @@ pub enum KeyCmd {
     ToggleActive,
     SessionFocus,
     Ignore,
+}
+
+/// The end of the detail pane a jump key aims at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetailJump {
+    /// `Home`: the pane's first line.
+    Top,
+    /// `End`/`G`: the last offset that still has text on screen.
+    Bottom,
 }
 
 /// Map one key press onto a [`KeyCmd`]. `page` and `list_focus` select the
@@ -1251,6 +1308,7 @@ pub fn interpret_key(
         KeyCode::Enter => KeyCmd::Enter,
         KeyCode::Char('J') => KeyCmd::DetailScroll(1),
         KeyCode::Char('K') => KeyCmd::DetailScroll(-1),
+        KeyCode::Char('G') if page == Page::Swarm => KeyCmd::DetailJump(DetailJump::Bottom),
         KeyCode::Char('r') => KeyCmd::Refresh,
         KeyCode::Char('F') => KeyCmd::SessionFocus,
         KeyCode::Char(c) if page == Page::RoleMap && (c == '+' || c == '=') => KeyCmd::Spacing(1),
@@ -1284,6 +1342,8 @@ pub fn interpret_key(
         KeyCode::Char('a') => KeyCmd::ToggleActive,
         KeyCode::PageDown => KeyCmd::DetailScroll(8),
         KeyCode::PageUp => KeyCmd::DetailScroll(-8),
+        KeyCode::Home if page == Page::Swarm => KeyCmd::DetailJump(DetailJump::Top),
+        KeyCode::End if page == Page::Swarm => KeyCmd::DetailJump(DetailJump::Bottom),
         _ => KeyCmd::Ignore,
     }
 }
@@ -1641,6 +1701,131 @@ mod tests {
                 Focus::Graph
             ),
             KeyCmd::CycleState
+        );
+    }
+
+    /// Page 2's legend has to name what page 2 actually answers to: the keys
+    /// that reach the ends, the two panes `PgUp`/`PgDn` moves between, and
+    /// lowercase `g` keeping the focus binding `G` stands beside.
+    #[test]
+    fn the_page_two_legend_names_what_page_two_answers_to() {
+        assert_eq!(
+            interpret_key(KeyCode::Home, KeyModifiers::NONE, Page::Swarm, Focus::Graph),
+            KeyCmd::DetailJump(DetailJump::Top)
+        );
+        assert_eq!(
+            interpret_key(KeyCode::End, KeyModifiers::NONE, Page::Swarm, Focus::Graph),
+            KeyCmd::DetailJump(DetailJump::Bottom)
+        );
+        assert_eq!(
+            interpret_key(
+                KeyCode::Char('G'),
+                KeyModifiers::SHIFT,
+                Page::Swarm,
+                Focus::Graph
+            ),
+            KeyCmd::DetailJump(DetailJump::Bottom),
+            "`G` lands where `End` does"
+        );
+        assert_eq!(
+            interpret_key(
+                KeyCode::Char('g'),
+                KeyModifiers::NONE,
+                Page::Swarm,
+                Focus::History
+            ),
+            KeyCmd::SetListFocus(Focus::Graph),
+            "lowercase `g` still moves the focus"
+        );
+        for code in [KeyCode::Home, KeyCode::End, KeyCode::Char('G')] {
+            assert_eq!(
+                interpret_key(code, KeyModifiers::NONE, Page::RoleMap, Focus::Graph),
+                KeyCmd::Ignore,
+                "page 1 advertises none of them: {}",
+                Page::RoleMap.keys()
+            );
+        }
+        // Which pane a key answers is the one thing an operator cannot read off
+        // the legend, so pin it: the detail keys reach the detail under either
+        // list focus, while the page keys belong to the list once focus is on
+        // the history.
+        for focus in [Focus::Graph, Focus::History] {
+            assert_eq!(
+                interpret_key(KeyCode::Char('J'), KeyModifiers::SHIFT, Page::Swarm, focus),
+                KeyCmd::DetailScroll(1),
+                "`J` scrolls the detail with the list focus on {focus:?}"
+            );
+            assert_eq!(
+                interpret_key(KeyCode::Char('K'), KeyModifiers::SHIFT, Page::Swarm, focus),
+                KeyCmd::DetailScroll(-1),
+                "`K` scrolls the detail with the list focus on {focus:?}"
+            );
+        }
+        assert_eq!(
+            interpret_key(
+                KeyCode::PageDown,
+                KeyModifiers::NONE,
+                Page::Swarm,
+                Focus::History
+            ),
+            KeyCmd::HistoryPage(1),
+            "`PgDn` pages the history once focus is there, as the legend says"
+        );
+        assert_eq!(
+            interpret_key(
+                KeyCode::PageDown,
+                KeyModifiers::NONE,
+                Page::Swarm,
+                Focus::Graph
+            ),
+            KeyCmd::DetailScroll(8),
+            "`PgDn` is a detail step until the history takes focus"
+        );
+        let legend = Page::Swarm.keys();
+        assert!(legend.contains("J/K scroll"), "{legend}");
+        assert!(
+            legend.contains("Home/End/G top/bottom"),
+            "the legend names the keys that reach the ends: {legend}"
+        );
+        assert!(
+            legend.contains("PgUp/PgDn list·detail"),
+            "one key, two panes: the legend has to name both, or a user who \
+             takes the list's focus and reaches for PgDn watches the detail \
+             stand still: {legend}"
+        );
+    }
+
+    /// The words `--state` takes are the filter's own table, and the pair
+    /// seeds both halves of the view the `a` toggle walks.
+    #[test]
+    fn the_state_words_seed_the_filter_and_the_session_views() {
+        assert_eq!(StateView::WORDS, [STATES[0], STATES[1]], "{STATES:?}");
+        assert_eq!(
+            StateView::Active.word(),
+            HistoryFilter::default().state,
+            "`active` is the word a default pull already answers to"
+        );
+        assert_eq!(
+            StateView::from_word("queued"),
+            None,
+            "the pair is two words"
+        );
+
+        let mut state = UiState::default();
+        select_state_view(&mut state, StateView::All);
+        assert_eq!(state.filter.state, StateView::All.word());
+        let mut toggled = UiState::default();
+        toggled.active_only = !toggled.active_only;
+        assert_eq!(
+            state.active_only, toggled.active_only,
+            "`all` lists the sessions one `a` shows"
+        );
+
+        select_state_view(&mut state, StateView::Active);
+        assert_eq!(state.filter.state, StateView::Active.word());
+        assert!(
+            state.active_only,
+            "the default view holds only the busy rows"
         );
     }
 

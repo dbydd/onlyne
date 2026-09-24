@@ -3,16 +3,17 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use onlyne_tui::model::{
-    Detail, Focus, FocusOutcome, KeyCmd, MAX_SPACING, MIN_SPACING, Page, Snapshot, UiState,
-    cycle_edge, cycle_role, cycle_state, detail, focus_from, focus_message, interpret_key,
-    location, nav_after, nav_step, pull, role_detail, role_edges, selected_role, send_focus,
+    Detail, Focus, FocusOutcome, KeyCmd, MAX_SPACING, MIN_SPACING, Page, Snapshot, StateView,
+    UiState, cycle_edge, cycle_role, cycle_state, detail, focus_from, focus_message, interpret_key,
+    location, nav_after, nav_step, pull, role_detail, role_edges, select_state_view, selected_role,
+    send_focus,
 };
 use onlyne_tui::socket::{NO_SOCKET_MESSAGE, SocketArgs, resolve_socket};
 use onlyne_tui::ui::{
-    apply_page_history, clamp_cursor, clamp_detail_scroll, detail_pane_size, drag_role_view,
-    follow_role_edge, graph_len, history_len, history_page_size, map_view_size, move_cursor,
-    move_role_edge, pan_role_view, render, render_once_text, role_back, selected_task, sync_map,
-    zoom_role_view,
+    apply_page_history, clamp_cursor, detail_pane_size, drag_role_view, follow_role_edge,
+    graph_len, history_len, history_page_size, jump_detail, map_view_size, move_cursor,
+    move_role_edge, pan_role_view, render, render_once_text, role_back, scroll_detail,
+    selected_task, sync_map, zoom_role_view,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -45,6 +46,14 @@ struct Cli {
     /// Page `--once` renders: 1 is the role network, 2 is the swarm view.
     #[arg(long, value_parser = clap::value_parser!(u8).range(1..=2), default_value_t = 1)]
     page: u8,
+    /// Rows the first pull keeps: `active` is the view `a` opens on, `all` the
+    /// view it toggles to.
+    #[arg(
+        long,
+        value_parser = clap::builder::PossibleValuesParser::new(StateView::WORDS),
+        default_value = StateView::Active.word(),
+    )]
+    state: String,
     /// Role-map spacing/repulsion: 1 is compact, 4 is widest.
     #[arg(long, value_parser = clap::value_parser!(u8).range(1..=4), default_value_t = 2)]
     spacing: u8,
@@ -82,6 +91,9 @@ fn run() -> anyhow::Result<i32> {
         state.page = Page::Swarm;
     }
     state.spacing = cli.spacing as usize;
+    // Read back the word clap already checked.
+    let view = StateView::from_word(&cli.state).expect("clap accepted the word");
+    select_state_view(&mut state, view);
     let mut snapshot = runtime.block_on(pull(&socket, &state.filter, 30));
     if cli.once {
         sync_selection_and_detail(&runtime, &socket, &snapshot, &mut state);
@@ -197,14 +209,8 @@ fn handle_key(
             sync_selection_and_detail(runtime, socket, snapshot, state);
         }
         KeyCmd::Enter => sync_selection_and_detail(runtime, socket, snapshot, state),
-        KeyCmd::DetailScroll(delta) => {
-            if delta >= 0 {
-                state.detail_scroll = state.detail_scroll.saturating_add(delta as u16);
-            } else {
-                state.detail_scroll = state.detail_scroll.saturating_sub(delta.unsigned_abs());
-            }
-            clamp_detail_scroll(state, panel);
-        }
+        KeyCmd::DetailScroll(delta) => scroll_detail(state, delta, panel),
+        KeyCmd::DetailJump(jump) => jump_detail(state, jump, panel),
         KeyCmd::Refresh => refresh_now(runtime, socket, terminal, snapshot, state, refreshed),
         KeyCmd::Spacing(delta) => {
             if delta >= 0 {

@@ -65,12 +65,22 @@ fn accepted(reply: relay::RelayReply) -> relay::SendOutcome {
 }
 
 fn once(root: &std::path::Path, page: Option<&str>) -> String {
+    let mut extra = Vec::new();
+    if let Some(page) = page {
+        extra.push("--page");
+        extra.push(page);
+    }
+    once_with(root, &extra)
+}
+
+/// `--once` over the same socket, with extra flags. The flag name and its
+/// accepted words come from the binary's own parser, so a test asserts the
+/// command line an operator would type.
+fn once_with(root: &std::path::Path, extra: &[&str]) -> String {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_onlyne-tui"));
     command.args(["--once", "--server-root"]);
     command.arg(root);
-    if let Some(page) = page {
-        command.args(["--page", page]);
-    }
+    command.args(extra);
     let output = command.output().expect("run onlyne-tui --once");
     assert!(
         output.status.success(),
@@ -79,6 +89,166 @@ fn once(root: &std::path::Path, page: Option<&str>) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The footer carries the wall clock, which part two runs of one fixture on a
+/// second boundary for reasons no filter has anything to do with.
+fn without_clock(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.contains("+ refresh "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The fixture the `--state` test plants rows in: one settled task the ledger
+/// has acked, one task still in flight, a live session on the sender, and a
+/// session that has left its slot on the receiver. The acked ledger row and the
+/// exited session are the two rows the `all` view names and the `active` view
+/// leaves out.
+fn state_filter_server(root: &std::path::Path) {
+    std::fs::create_dir_all(root.join(".onlyne")).expect("create the server root");
+    std::fs::write(root.join(".onlyne/spec.toml"), spec_text()).expect("write the spec");
+    let state = Server::open(&ServerInit {
+        root: root.to_path_buf(),
+        listen: None,
+    })
+    .expect("open the server");
+    let listener = admin::bind(&state).expect("bind the admin socket");
+    tokio::spawn(admin::serve_socket(state.clone(), listener));
+
+    // A connected recipient turns an accepted task into an in-flight hop.
+    let (sender, _receiver) = tokio::sync::mpsc::channel(8);
+    state.register_role(RoleConnection {
+        role: "builder".to_string(),
+        sender,
+        last_seq: 0,
+        connected_at: Utc::now(),
+        draining: false,
+        generation: 0,
+    });
+    let settled = accepted(relay::send(&state, &task("settled"), false, None).expect("relay"));
+    relay::ack(
+        &state,
+        &AckArgs {
+            msg_id: settled.receipt.msg_id.clone(),
+            op_id: None,
+            accepted: true,
+            reason: None,
+        },
+    )
+    .expect("ack")
+    .expect("an accepted ack");
+    let in_flight = accepted(relay::send(&state, &task("in flight"), false, None).expect("relay"));
+    let task_id = in_flight
+        .receipt
+        .task
+        .clone()
+        .expect("the receipt names its task");
+
+    let mut live = SessionProjection::default_working();
+    live.lifecycle = Lifecycle::Working;
+    live.agent = onlyne_proto::AgentPhase::Running;
+    projection::report(
+        &state,
+        "planner",
+        &Report::Heartbeat {
+            task_id: task_id.clone(),
+            session_id: "sess-live".to_string(),
+            generation: 1,
+            seq: 1,
+            observed: serde_json::Value::Null,
+            projection: Some(live),
+            cluster_ref: None,
+        },
+    )
+    .expect("publish the live projection");
+
+    let mut gone = SessionProjection::default_working();
+    gone.lifecycle = Lifecycle::Exited;
+    gone.agent = onlyne_proto::AgentPhase::Idle;
+    // The session table holds one row per task, so the session that has left
+    // its slot needs a task of its own to sit on.
+    let finished = accepted(relay::send(&state, &task("finished"), false, None).expect("relay"));
+    let finished_task = finished
+        .receipt
+        .task
+        .clone()
+        .expect("the receipt names its task");
+    projection::report(
+        &state,
+        "planner",
+        &Report::Heartbeat {
+            task_id: finished_task,
+            session_id: "sess-gone".to_string(),
+            generation: 1,
+            seq: 1,
+            observed: serde_json::Value::Null,
+            projection: Some(gone),
+            cluster_ref: None,
+        },
+    )
+    .expect("publish the exited projection");
+}
+
+/// `--state` is the `all`/`active` pair the interactive `a` key walks, applied
+/// to the one pull `--once` makes before it draws. The default is the dump that
+/// ran before the flag existed, and `all` lists the rows `a` opens on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_state_flag_widens_the_once_dump_to_the_rows_the_word_names() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("server");
+    state_filter_server(&root);
+
+    let plain = without_clock(&once_with(&root, &["--page", "2"]));
+    let active = without_clock(&once_with(&root, &["--page", "2", "--state", "active"]));
+    assert_eq!(
+        plain, active,
+        "`--state active` draws the dump the flag-less run draws"
+    );
+    assert!(
+        active.contains("history state=active"),
+        "the history pane names the filter the pull answered with\n{active}"
+    );
+    assert!(
+        !active.contains("acked"),
+        "the settled task's acked row is not active work\n{active}"
+    );
+    assert!(
+        !active.contains("exited"),
+        "the session that left its slot is not active\n{active}"
+    );
+
+    let all = without_clock(&once_with(&root, &["--page", "2", "--state", "all"]));
+    assert!(
+        all.contains("history state=all"),
+        "the history pane names the filter the pull answered with\n{all}"
+    );
+    assert!(
+        all.contains("acked"),
+        "`all` lists the settled task's acked row\n{all}"
+    );
+    assert!(
+        all.contains("exited"),
+        "`all` lists the session that left its slot\n{all}"
+    );
+}
+
+/// An unknown word is the parser's refusal, and it has to name the flag and
+/// both words a caller may pass.
+#[test]
+fn the_state_flag_refuses_an_unknown_word_with_its_accepted_words() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_onlyne-tui"))
+        .args(["--once", "--state", "queued"])
+        .output()
+        .expect("run onlyne-tui --once --state queued");
+    assert!(
+        !output.status.success(),
+        "an unknown state word is refused before any socket is opened"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--state"), "{stderr}");
+    assert!(stderr.contains("active"), "{stderr}");
+    assert!(stderr.contains("all"), "{stderr}");
 }
 
 #[test]
