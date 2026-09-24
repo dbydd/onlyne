@@ -78,6 +78,11 @@ impl AdapterSocket {
                     "roles": [{"name": role, "role": role, "prose": prose}]
                 }))
             }
+            ClientOp::Report(report @ Report::Complete { .. }) => result_to_body(
+                on_plugin_report(&self.dispatch, None, report)
+                    .await
+                    .map(|()| serde_json::Value::Null),
+            ),
             other => match self.dispatch.request(other).await {
                 Ok(body) => body,
                 Err(error) => ResBody::err(ErrorCode::Internal, error.to_string(), None),

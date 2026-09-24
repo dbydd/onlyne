@@ -2,7 +2,7 @@ use super::*;
 use onlyne_proto::MountKind;
 
 #[cfg(unix)]
-use crate::session::dispatch::{DispatchState, dispatch};
+use crate::session::dispatch::{DispatchState, Outbox, dispatch};
 #[cfg(unix)]
 use onlyne_adapter::{AdapterIo, IncomingFrame};
 #[cfg(unix)]
@@ -11,9 +11,14 @@ use onlyne_layout::RoleWorkspace;
 use onlyne_proto::adapter::HandoffArgs;
 #[cfg(unix)]
 use onlyne_proto::{
-    AdapterMsg, AgentMount, Body, Capability, Causality, Envelope, ErrorCode, HelloArgs, Mount,
-    MsgKind, PROTOCOL_VERSION, PluginOp, Principal, new_envelope, new_task_id,
+    AdapterMsg, AgentMount, Body, Capability, Causality, ClientOp, Envelope, ErrorCode, Frame,
+    HelloArgs, Mount, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp, Principal, Report, ResBody,
+    new_envelope, new_task_id,
 };
+#[cfg(unix)]
+use onlyne_net::NetError;
+#[cfg(unix)]
+use onlyne_session::TaskState;
 #[cfg(unix)]
 use onlyne_session::backend::fake::FakeBackend;
 #[cfg(unix)]
@@ -21,7 +26,13 @@ use onlyne_store::ClientStore;
 #[cfg(unix)]
 use std::collections::BTreeMap;
 #[cfg(unix)]
+use std::future::Future;
+#[cfg(unix)]
+use std::pin::Pin;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::Arc;
 #[cfg(unix)]
 use std::time::Duration;
 #[cfg(unix)]
@@ -128,6 +139,7 @@ fn terminated_register_requests_bye() {
 struct Staged {
     socket: PathBuf,
     store: ClientStore,
+    state: DispatchState,
     task: String,
     causality: Causality,
 }
@@ -191,9 +203,134 @@ async fn staged(workspace: &Path) -> Staged {
     Staged {
         socket,
         store,
+        state,
         task,
         causality,
     }
+}
+
+#[cfg(unix)]
+#[derive(Clone)]
+struct CaptureOutbox {
+    frames: Arc<parking_lot::Mutex<Vec<ClientOp>>>,
+}
+
+#[cfg(unix)]
+impl Outbox for CaptureOutbox {
+    fn send(
+        &self,
+        op: ClientOp,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), NetError>> + Send + '_>> {
+        let frames = Arc::clone(&self.frames);
+        Box::pin(async move {
+            frames.lock().push(op);
+            Ok(())
+        })
+    }
+
+    fn request(
+        &self,
+        _op: ClientOp,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<ResBody, NetError>> + Send + '_>> {
+        Box::pin(async { Ok(ResBody::ok(serde_json::Value::Null)) })
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_local_completion_settles_the_task_and_publishes_only_its_projection() {
+    let dir = tempdir().unwrap();
+    let staged = staged(dir.path()).await;
+    staged.state.attach_msg_id(&staged.task, "msg-local");
+    let frames = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    staged
+        .state
+        .attach_outbox(Arc::new(CaptureOutbox {
+            frames: Arc::clone(&frames),
+        }));
+
+    let (io, _inbound) = mounted(&staged.socket, &staged.task).await;
+    let beat = io
+        .request(AdapterMsg::Plugin(PluginOp::Report(Report::Heartbeat {
+            task_id: staged.task.clone(),
+            session_id: String::new(),
+            generation: 1,
+            seq: 1005,
+            observed: serde_json::json!({
+                "version": {"generation": 1, "seq": 1005},
+                "generation_live": true,
+                "isolate_after": 1,
+                "terminate_after": 3,
+                "mismatch_count": 0,
+                "agent": "running",
+                "delivery": "none",
+                "resource": "attached",
+                "recovery": "none",
+            }),
+            projection: None,
+            cluster_ref: None,
+        })))
+        .await
+        .expect("the turn heartbeat is answered");
+    assert!(beat.ok, "the turn heartbeat is accepted: {beat:?}");
+    frames.lock().clear();
+
+    let mut stream = onlyne_layout::connect_local(&staged.socket)
+        .await
+        .expect("the local surface accepts the completion");
+    let request = Frame::<ClientOp>::req(
+        "local-complete",
+        ClientOp::Report(Report::Complete {
+            task_id: staged.task.clone(),
+            outcome: Outcome::Done,
+            head: Some("done".into()),
+            reply_to: Some("completion-message".into()),
+            cluster_ref: Some("origin-cluster".into()),
+        }),
+    );
+    onlyne_frame::write_frame(&mut stream, &request)
+        .await
+        .expect("write the local completion");
+    let response: Frame<ClientOp> = onlyne_frame::read_frame(&mut stream)
+        .await
+        .expect("read the local completion answer")
+        .expect("the local surface answers");
+    let response = match response {
+        Frame::Res { body, .. } => body,
+        other => panic!("the local completion is answered by a response: {other:?}"),
+    };
+    assert!(response.ok, "the local completion is accepted: {response:?}");
+
+    let task = staged
+        .store
+        .task(&staged.task)
+        .expect("read the local task")
+        .expect("the local task was opened");
+    assert_eq!(task.task_state, TaskState::Done);
+
+    let queued = staged.store.flush_order().expect("read the local intents");
+    let queued: Vec<ClientOp> = queued
+        .iter()
+        .map(|row| crate::runtime::intent::op_for_intent(row).expect("decode local intent"))
+        .collect();
+    assert!(queued.iter().any(|op| matches!(
+        op,
+        ClientOp::Ack(ack) if ack.msg_id == "msg-local" && ack.accepted
+    )));
+
+    let sent = frames.lock().clone();
+    assert!(
+        !sent.iter().any(|op| matches!(op, ClientOp::Report(Report::Complete { .. }))),
+        "the local surface never forwards a raw completion report: {sent:?}"
+    );
+    assert!(sent.iter().any(|op| matches!(
+        op,
+        ClientOp::Report(Report::Heartbeat {
+            task_id,
+            projection: Some(_),
+            ..
+        }) if task_id == &staged.task
+    )));
 }
 
 /// Mount one plugin for one session, the way the client spawns one: the mount

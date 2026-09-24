@@ -5,8 +5,10 @@ description: Use when operating an Onlyne cluster as _supervisor — starting wo
 
 # Onlyne Supervisor
 
-You run the cluster. The server makes no decisions of its own: routing, the ledger,
-queueing, and ACL are mechanics. Every call is yours, together with the spec file.
+You own orchestration and recovery. The server routes, queues, records, and enforces ACL.
+One narrow automatic rule can move a stale `working` mirror only after that task's own ledger
+row is terminal; the server never settles an open task. Every other recovery choice belongs
+to you and the spec file.
 
 ## Mount points
 
@@ -28,6 +30,26 @@ queueing, and ACL are mechanics. Every call is yours, together with the spec fil
   validation, 3 no socket, 4 the operator's input was refused (`generate`, and
   `skill export` declining to overwrite a file), 5 `client run` found no session host,
   127 missing sibling.
+
+## Release 1.4.0 operating facts
+
+- The published release is `v1.4.0`. All nineteen Rust crates are on crates.io at 1.4.0;
+  the published pi adapter is `pi-onlyne` 1.2.0.
+- Install the matching registry set with:
+
+  ```bash
+  cargo install --locked --version 1.4.0 \
+    onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui onlyne-testkit
+  ```
+
+- `onlyne version` reports the CLI package, protocol, and sibling binary paths. The gateway
+  and testkit commands do not accept `--version`; read `onlyne version` for the installed
+  package inventory.
+- Re-export the role and supervisor handbooks from the installed binary with
+  `onlyne skill export --set role --set supervisor --force`.
+- The live release acceptance shape is completion followed by handoff and client kill. Read
+  the task ledger, session projection, both sequence numbers, and the ghost audit after the
+  task settles. The expected readings are `acked`, `exited`, and no new ghost row for that task.
 
 ## Onboard a cluster
 
@@ -130,12 +152,16 @@ onlyne --server-root <root> repair rebind --task <id> --session-id <id> --backen
 onlyne --server-root <root> repair ack --fault-id <n> --reason <text>
 ```
 
-The core detects and records; recovery is your call. `repair retry` puts the task's
-in-flight rows back on the queue and drops their tickets, `repair fail` settles the task
-failed and rejects its undelivered rows, `repair close` settles it cancelled the same way,
+The core detects and records; recovery is your call. `repair retry` handles eligible `queued`
+or `in_flight` work; a task whose rows are settled returns `conflict`. `repair fail` settles the
+task failed and rejects its undelivered rows, `repair close` settles it cancelled the same way,
 `repair adopt` re-points the row's desired backend binding, `repair rebind` moves the row to
 another session id and bumps its generation, and `repair inspect` prints the session
-projection with every fault recorded against the task. Task control runs beside repair:
+projection with every fault recorded against the task. The `kind=task` row is authoritative for
+the task outcome. A `kind=completion` row records receipt transport and `out_head`; its state
+never reopens a rejected task. Client and server `(generation, seq)` values are per-writer
+watermarks, so compare the terminal outcome, lifecycle, resource, and generation rather than
+requiring equal sequence numbers. Task control runs beside repair:
 `onlyne control recycle|probe|snapshot|cancel|focus --task <id> --from <role> --force
 --yes-i-am-supervisor-not-other-role`, where `recycle` and `cancel` carry a required `--reason`
 and the other three take none — a `--reason` on `probe` is refused by the parser. `focus` brings
@@ -176,9 +202,10 @@ writes it. `[server].stale_watch_secs` (60 default) is the scan cadence for both
 
 A row no client will ever write again is the ghost sweep's work. A mirror row still reading
 `working` whose task's own ledger row has already reached a terminal state is rewritten by the
-server on its own interval, `[server].ghost_sweep_secs` (60 default, `0` disables the pass), and
-the outcome comes off that ledger row: `acked` settles `done`, `rejected` and `expired` settle
-`failed`. The sequence advances, a `session_state` event travels, and one row lands in
+server on its own interval, `[server].ghost_sweep_secs` (60 default, `0` disables the pass).
+When the mirror has no outcome, the task ledger supplies it: `acked` settles `done`, `rejected`
+and `expired` settle `failed`; an outcome already present in the mirror is preserved. The sequence
+advances, a `session_state` event travels, and one row lands in
 `ghost_sweeps` naming the session, both sequences, the outcome, and the evidence it acted on
 (`task_settled:acked` and the like). `onlyne ghosts [--limit N]` reads that audit, newest first.
 One class stays out of its reach: a `working` row whose owner role is offline while the task is
@@ -186,11 +213,12 @@ still open, where an ending would decide live work and swallow the requeue that 
 `stale_working` remains that class's only output, and its recovery stays yours through
 `repair_*`.
 
-A session whose plugin connection drops is retired past `[client] reconnect_grace_secs`
-(60 default, 0 disables that sweep). The retirement settles the task `failed`, refuses the
-session's delivery row with reason `session_dead`, and publishes the session's own exit, so
-the server's mirrored row reads `exited` in the same tick. That refusal is terminal: the
-work comes back through `repair retry` alone.
+A task-bound unsettled session is retired after either a dropped connection exceeds
+`[client] reconnect_grace_secs` (60 default, 0 disables that arm), or an attached transport
+accepts no frame for three heartbeat intervals. Both arms settle the task `failed`, refuse the
+held delivery with reason `session_dead`, close the host resource, and publish the exit. That
+refusal is terminal: create a new task to run the work again. `repair retry` only requeues
+eligible queued or in-flight rows and returns `conflict` for a settled task.
 
 A delivery that arrives with the client's accept gate closed is left unanswered: the row
 stays `in_flight`, and the next `hello` that does not claim it puts it back on the queue. A
@@ -203,10 +231,21 @@ session, or exec child once that session holds no task and no plugin connection 
 and the client log records the closure with `retiring idle session resource`. An idle pane
 still open in front of you means the owning client is down.
 
+### Orca sessions
+
+Orca creates one new terminal for each task. `attach` refreshes a persisted terminal handle; it
+does not relay into an arbitrary existing session. Spawning requires a running Orca app, an
+`orca` CLI that resolves to and reaches that app, and a client launched from the intended Orca
+tab with the matching worktree environment (`ORCA_WORKTREE_ID` under the host policy). A
+`[single-instance]` CLI error is the immediate spawn refusal. The exact `session_dead` rejection
+comes later from the client's retirement sweep after a slot exists.
+
 Automatic re-delivery rides two spec gates: `[server].requeue_max_attempts` (0 unlimited) lands
-a starving row as `rejected` with reason `requeue_exhausted`, and `[server].requeue_ttl_secs`
-(0 off) lands it as `expired` with reason `requeue_ttl`. `repair retry` always rides outside
-the gates. A reconnecting client now also declares its live sessions at `hello`, so a link flap
+a returned in-flight row as `rejected` with reason `requeue_exhausted`, and
+`[server].requeue_ttl_secs` (0 off) lands returned rows as `expired` with reason `requeue_ttl`.
+The TTL also expires never-pulled task, completion, and control rows while their recipient role
+has no live connection. `repair retry` always rides outside the gates. A reconnecting client now
+also declares its live sessions at `hello`, so a link flap
 leaves a running task's row `in_flight` and un-duplicated; a claimed session that dies without
 completing gets its row requeued the moment the client reports it exited, and `repair inspect`
 keeps the whole trail either way.
@@ -273,8 +312,10 @@ its sessions, and its faults; a settled row's reason joins the row's tail there 
 `reason=<text>`. Page 2's own keys are `↑`/`↓` to select, `g`/`h` for the focus, `^p`/`^n`
 to walk back and forward, `J`/`K` to scroll, `/` to search, `f`, `F`, `t`, `o`, `e`, and
 `a` for the filters and jumps, `PgUp`/`PgDn` to page, `r` to refresh, and `q` to quit.
-`onlyne tui --server-root <root> --once --page 1|2` renders one frame as plain text and
-exits.
+`onlyne tui --server-root <root> --once --page 1|2 --state active|all` renders one frame as
+plain text and exits. `active` is the default state filter and keeps the live view; `all` also
+includes settled sessions and ledger rows. On page 2, `--state all` makes a settled row's
+`reason=<text>` visible in the snapshot.
 
 ## Clusters under clusters
 

@@ -30,6 +30,8 @@ Onlyne 运维以 server 账本、client 工作区、admin 本地 socket（规范
 
 `onlyne spec_diff` 对比运行中 spec 与磁盘 spec。
 
+`onlyne tui --server-root <root> --once --page <1|2> --state <active|all>` 渲染一帧纯文本后退出。`active` 是默认过滤，只保留活动视图；`all` 还包含已结清的 session 与账本行。第 2 页配合 `--state all` 可以直接读到已结清行的 `reason=<text>`。
+
 ## 服务路径的读法
 
 每个守护进程绑定 socket 时把实际服务的路径发布在 `<owner>/.onlyne/run/socket`（mode `0600`，一条绝对路径加一个换行）。操作者读这条路径有三个入口：
@@ -130,20 +132,23 @@ repair 族不经过 role 工作区的 adapter socket。
 
 ## 投递与重投
 
+Onlyne 的 SQLite 数据库要放在本地文件系统。不要把 server root 或 role workspace 放在 OneDrive、Dropbox、iCloud、网盘或其他同步目录。SQLite 依赖 WAL 文件与本地文件锁；Onlyne 启动时不运行 `quick_check` 或 `integrity_check`，损坏的 `state.db` / `client.db` 会让 daemon 在首个数据库操作失败。先停止所有 client/server，再把整个 root 原样复制到本地目录，在副本上检查数据库；原库不要执行 checkpoint、VACUUM 或 repair。
+
 role link 死亡时，服务端把该 role 的 `in_flight` 投递行重投回 `queued`，等待下一次 pull 再交付。
 
 新 link 落地时的接管重投走同一条路。`hello` 的 `live_tasks` 字段申报该 client 内存里仍活着的会话任务；被申报的行保持 `in_flight`，其 delivery ticket 改挂新 link 的 generation，此后该 link 终止时照常被重投。
 
-旧版 client 的 `hello` 没有 `live_tasks` 字段，行为与 1.0.8 一致：全部重投。
-
 被申报的会话若在结清之前死亡，client 发布 `exited` 投影，服务端见到与该会话 ticket 同 `session_id` 的 `in_flight` 行时把该行重投回队列，同样经过下面的闸。
 
-自动重投受两个预算旋钮约束；手动 `onlyne repair retry` 不经过闸。
+自动重投受两个预算旋钮约束；手动 `onlyne repair retry` 不经过闸。回到 `queued` 的
+`in_flight` 行按 `requeue_ttl_secs` 再按 `requeue_max_attempts` 判定。收件 role 没有
+live connection、且从未被 pull 的 task、completion、control 行，在 `requeue_ttl_secs`
+非零时按同一 TTL 过期；默认值为 0 时保持排队。
 
 | 配置文件 | 字段 | 默认 | 作用 |
 |---|---|---|---|
 | `<server-root>/.onlyne/spec.toml` 的 `[server]` | `requeue_max_attempts` | 0 | 一条行允许的自动重投次数上限，0 为不限；超限的行落 `rejected`，reason 为 `requeue_exhausted` |
-| `<server-root>/.onlyne/spec.toml` 的 `[server]` | `requeue_ttl_secs` | 0 | 自动重投允许的行龄上限，按入队时间计，0 为关闭；超龄的行落 `expired`，reason 为 `requeue_ttl` |
+| `<server-root>/.onlyne/spec.toml` 的 `[server]` | `requeue_ttl_secs` | 0 | 回到队列的行与收件 role 无 live connection 的未拉取行允许的 TTL，按入队时间计，0 为关闭；超龄的行落 `expired`，reason 为 `requeue_ttl` |
 
 先判 TTL，再判次数，两者都各发一条 `ledger_state` 事件。
 
@@ -155,7 +160,7 @@ push 投递与 pull 投递的 `in_flight` 翻面都各有一条 `ledger_state` �
 
 本角色已经以 `Done` 结项的 task 再次投来时，client 认得它。判定读 `client.db` 的会话终态，入口是 `onlyne-client` 的 `DispatchState::task_completed_here`，动作在 `accept_delivery` 的容量闸之前：这一行就地 ack，`accepted = true`，reason 为 `task already completed by this role`，会话不 stage，容量不占。该 reason 进 `ledger_state` 事件，行本身落 `acked`。日志面同一时刻记一条 `redelivery of a finished task settled without running it`，带 `msg_id` 与 `task`。
 
-这道判定读的是 `Done`。会话被终止、崩溃、`Failed` 的 task 保持可重投，`onlyne repair retry` 与 `control retry` 对这一类行照常生效。要重跑一个已完成的 task，操作者发新 task（`onlyne send`）。已 `Done` 的行等到的是这条 ack 和一次空跑。
+这道判定读的是 `Done`。会话被终止、崩溃或本地记为 `Failed` 的 task，只有仍有符合条件的 `queued` / `in_flight` 投递行时才可由 `onlyne repair retry` 重投；已被 `session_dead` 等终态拒收的 task 要重跑，操作者用带门禁的 `send` 动词发新 task。已 `Done` 的行等到的是这条 ack 和一次空跑。
 
 ## 拒收面
 
@@ -191,7 +196,9 @@ client 死亡期间无人代该 role 判定 session 生命周期。
 
 结清写两条：该 task 落 `failed`，它占着的投递行以 `session_dead` 拒收；退役的同一趟再把该 session 自己的投影随一条 heartbeat 报告发出，server 行随即读 `exited`，不必等观察器的 `stale_working` 或 `heartbeat_missing`。
 
-该拒收是终态，工作只由 operator 的 `repair retry` 唤回。
+该拒收是终态；要再次执行这项工作，创建新 task。`repair retry` 只处理符合条件的 `queued` / `in_flight` 行，task 行已结算时返回 `conflict`。
+
+账本判定以 `kind=task` 行为准；`kind=completion` 行记录回执传输与 `out_head`，不会重开已 `rejected` 的 task。投影的 `(generation, seq)` 是各写入方自己的水位，client 与 server 不要求相同；终态读取比较 task outcome、lifecycle、resource 和 generation。
 
 重启的 client 不对旧账做终态判定：`Acked` 的行是它自己已经答过的，重启不上报它们的死，也不替别的属主判定。
 
@@ -237,7 +244,8 @@ completion 落定为 `exited` 之后同 generation 的 heartbeat 把行抬回 `w
 
 ledger 行已落终态的那一行 `working` 镜像是化石：账已结清，镜像还留着旧字节。
 
-一趟扫描把该行 ledger 已经载明的判定写进镜像：`acked` 读作 `done`，`rejected` 与 `expired` 读作 `failed`。
+一趟扫描只在镜像没有 outcome 时采用 task ledger 的判定：`acked` 读作 `done`，`rejected`
+与 `expired` 读作 `failed`。镜像已经发布的 outcome 保持原值。
 
 写入走 `repair` 族共用的那条结清路径：重写 `observed_json`、抬升 `seq`、落库、推送 durable `session_state`。
 
@@ -269,9 +277,9 @@ no-op 心跳抬存活水位，不抬进展水位；`stalled` 只看后者。
 
 退役前先结清这个 session 欠的那件事：仍绑着 task 时，该 task 落 `failed`，它占着的投递行以 `session_dead` 拒收；退役的同一趟再发出该 session 自己的投影，server 行随即读 `exited`。未绑 task 的 slot 只退役。
 
-退役的 reason 取该 session 名下 task 已落的终态，无终态可取时记 `Fault`。`reconnect_grace_secs = 0` 关闭这条判定。
+退役的 reason 取该 session 名下 task 已落的终态，无终态可取时记 `Fault`。`reconnect_grace_secs = 0` 关闭断连宽限这条判定。
 
-退役面只此一类。「重试 session 永不到来」不另设计时器或缓冲超时：仍活着的 task 的静默由 `stalled` 与服务端心跳两个面兜底，这是这轮运维定的边界。
+断连宽限与 attached-but-silent 是两条退役路径。连接断开使用 `reconnect_grace_secs`；连接仍在但绑定的未结清 task 连续三个 heartbeat interval 没有 accepted frame 时也退役。两条路径都结清 task 为 `failed`、以 `session_dead` 拒收持有投递、关闭资源并发布退出。
 
 一个更新的 session 已经在服务同一 task 时，旧 id 的连接回来即降级为只读：它不再收到 `assign`、`deliver`、`render_send`，也不占该 session 的投递面。
 
@@ -324,7 +332,7 @@ admin 面的 `onlyne control` 不要求 `--to`：缺省时 CLI 先读该任务�
 
 `recycle` 与 `cancel` 以操作者的词结掉任务：client 请插件收尾并关掉宿主资源，插件的报告落地即结账。插件始终不回答时，client 在三个心跳间隔（`CONTROL_SETTLE_BOUND`）之后按操作者的词自行结账，`cancel` 落 `cancelled`、`recycle` 落 `failed`，并把仍握在手里的投递行以 `operator cancel` / `operator recycle` 拒收。
 
-超时结账只写第一个判定：任务已被别的门结定时它什么都不写、也不发布；store 拒写时该词按原时刻重新记账，下一拍重试。
+超时结账只写第一个判定：任务已被别的门结定时它什么都不写、也不发布；store 拒写时该词按原时刻重新记账，下一拍重试。若另一个门已经结清 task 而镜像仍是非终态，ghost sweep 后续按 task 的终态账本移动这条旧镜像。
 
 supervisor 角色的 control 动词需要 spec 授权。
 
@@ -367,7 +375,14 @@ CLI 门属于 supervisor，也属于会话不挂插件的 `exec` 角色。
 
 ## 任务家族与元信息
 
-一个任务家族带着自己的元信息，在起跑处写入：`onlyne send --hop-budget <n>` 记下这一族能花的跳数，`--label <k=v>`（可重复到 8 条）记下脚本要读的自由键值，`--deadline <rfc3339>` 记下整族的墙钟期限。
+一个任务家族带着自己的元信息，在起跑处通过带门禁的 `send` 动词写入：
+
+```bash
+onlyne send --hop-budget <n> --label <k=v> --deadline <rfc3339> \
+  --force --yes-i-am-supervisor-not-other-role
+```
+
+`--hop-budget <n>` 记下这一族能花的跳数，`--label <k=v>`（可重复到 8 条）记下脚本要读的自由键值，`--deadline <rfc3339>` 记下整族的墙钟期限。
 
 `family` 是家族根任务的 id，一跳一传、永不改变。子任务继承 `hop_budget`、`origin`（发起根任务的角色）、`deadline` 与全部 `labels`，`hop` 取父行加一。
 
@@ -396,6 +411,10 @@ ledger 表新增的列走 in-place 加列，与 `expires_at`、`requeued` 同样
 herdr 的关闭是幂等的：`herdr pane close` 回 `pane_not_found` 记为成功，日志落一行 debug `herdr pane already closed`，字段 `task` 与 `pane`。一个已经消失的 workspace 在此之后读作已关闭。
 
 `stalled` 的含义因此收窄到真实静默：一条已完成的任务带 `no applied progress` 的 `stalled` 从这条面上消失，fault 表里的 `stalled` 只描述仍在跑的会话。判据细节见上一节的进展时钟条目。
+
+### Orca 会话
+
+每个 task 新建一个 Orca terminal。`attach` 只刷新已保存的 terminal handle，不把消息转发到任意已有 session。启动前检查 `orca status --json` 指向预期运行中的 Orca app，核对 client 从预期 Orca tab 继承的 `ORCA_WORKTREE_ID`，并确认 `orca` 解析到预期 CLI 且能连到该 app。CLI 返回 `[single-instance]` 时，这是启动当下拒绝创建 terminal。`session_dead` 在 client 后续 retirement sweep、slot 已存在时才会出现。投递已经因 `session_dead` 进入终态时，修复宿主后要运行这项工作必须创建新 task。
 
 ## Headless（exec）会话
 
