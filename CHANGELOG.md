@@ -305,6 +305,11 @@ where it is read.
   refused branch now hands the task binding back and retires the session's resource, keeping the
   refusal as it was: the first verdict stands, no second `out_head`, no second receipt, no re-relay
   of the replayed report's handoffs, and the publish carries the stored post-release row.
+- cli: `repair retry` says what it refuses. Its help already scoped the verb to a task's still in-flight
+  rows, while the verb's own name and its `--task` flag read as "run it again", and a live run spent a
+  round on it: `repair retry --task <settled>` answers `conflict`, because the frozen transition table
+  keeps no edge from a terminal state. That refusal is the design — a settled task is finished, and
+  re-running work means sending a new task — and the help now says so next to the verb.
 - server: the ghost sweep leaves a task's completion receipts alone. The pass settles the open rows of
   a task whose ledger row already carries a verdict, and a completion is one of them: the sweep's
   refusal turned the receipt into `rejected`, and the verdict a reader looks for lives in that row's

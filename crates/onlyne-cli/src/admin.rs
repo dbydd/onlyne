@@ -41,6 +41,8 @@ pub enum RepairVerb {
     /// Move the row to another session id, bumping its generation and resetting seq.
     Rebind(RepairRebindArgs),
     /// Put the task's still in flight rows back in the queue, dropping their tickets.
+    /// A task whose own row has settled is refused: the ledger keeps no edge from a
+    /// terminal state, and re-running finished work means sending a new task.
     Retry(RepairTargetArgs),
     /// Settle the task as failed, rejecting its undelivered rows and cancelling its owner.
     Fail(RepairFailArgs),
