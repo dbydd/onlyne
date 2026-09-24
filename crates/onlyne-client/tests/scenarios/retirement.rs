@@ -144,6 +144,130 @@ async fn a_completed_sessions_goodbye_publishes_the_row_its_retirement_wrote() {
     host.abort();
 }
 
+/// A replayed delivery for a settled task returns the one slot it took.
+///
+/// Delivery is at-least-once, so a row can arrive after this client has already
+/// filed the task's first verdict. The replay receives a session and a turn. Its
+/// completion reaches the same settlement door, where the standing verdict makes
+/// the second answer a refusal. The refusal owns the session release and the
+/// client-row publish. The first settlement keeps the task account.
+#[tokio::test]
+async fn a_replayed_settled_task_returns_the_one_slot_it_took() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        backend.clone(),
+        store.clone(),
+    );
+    let outbox = Arc::new(RecordingOutbox::default());
+    state.attach_outbox(outbox.clone());
+
+    let first_delivery = task_delivery("task A");
+    let task = deliver(&state, &first_delivery).await;
+    run_a_turn(&state, &task).await;
+    on_plugin_report(
+        &state,
+        None,
+        Report::Complete {
+            task_id: task.clone(),
+            outcome: Outcome::Done,
+            head: Some("first verdict".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_settled(&store, &task);
+    let first_settled_at = store.task(&task).unwrap().unwrap().settled_at;
+    assert_eq!(
+        store.out_head(&task).unwrap().as_deref(),
+        Some("first verdict")
+    );
+    assert_eq!(state.session_count(), 0);
+    assert_eq!(backend.closed_sessions.lock().len(), 1);
+    assert!(backend.inner.sessions().is_empty());
+
+    outbox.clear().await;
+    let mut replay = first_delivery.clone();
+    replay.msg_id = "msg-replay".into();
+    assert_eq!(deliver(&state, &replay).await, task);
+    assert_eq!(state.session_count(), 1, "the replay takes the one slot");
+    assert_eq!(backend.inner.sessions().len(), 1);
+
+    run_a_turn(&state, &task).await;
+    on_plugin_report(
+        &state,
+        None,
+        Report::Complete {
+            task_id: task.clone(),
+            outcome: Outcome::Failed,
+            head: Some("replayed verdict".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        state.session_count(),
+        0,
+        "the refused replay returns the one slot"
+    );
+    assert!(
+        backend.inner.sessions().is_empty(),
+        "the replay resource closes"
+    );
+    assert_eq!(backend.closed_sessions.lock().len(), 2);
+    assert_eq!(
+        backend.reasons.lock().as_slice(),
+        [
+            onlyne_session::CloseReason::Completed,
+            onlyne_session::CloseReason::Completed,
+        ]
+    );
+    let record = store.task(&task).unwrap().unwrap();
+    assert_eq!(record.task_state, onlyne_session::TaskState::Done);
+    assert_eq!(record.settled_at, first_settled_at);
+    assert_eq!(
+        store.out_head(&task).unwrap().as_deref(),
+        Some("first verdict")
+    );
+
+    let row = store.get_session(&task).unwrap().unwrap();
+    assert_eq!(
+        (row.agent_state.as_str(), row.resource_state.as_str()),
+        ("gone", "closed")
+    );
+    let publishes = outbox.projection_publishes().await;
+    let publish = publishes.last().expect("the refused path publishes");
+    assert_eq!(publish.projection, published_projection(&store, &task));
+    assert_eq!(publish.projection.lifecycle, Lifecycle::Exited);
+    assert_eq!(publish.projection.agent, onlyne_proto::AgentPhase::Gone);
+    assert_eq!(
+        publish.projection.resource,
+        onlyne_proto::ResourcePhase::Closed
+    );
+    assert_eq!(
+        publish.projection.delivery,
+        onlyne_proto::DeliveryPhase::Accepted
+    );
+    assert_eq!(
+        publish.projection.recovery,
+        onlyne_proto::RecoveryPhase::NoRecovery
+    );
+    assert_eq!(publish.projection.outcome, Some(Outcome::Done));
+    assert_eq!(publish.generation, row.generation as u64);
+    assert_eq!(publish.seq, row.seq.max(0) as u64);
+}
+
 /// The settle turn's own publish already carries the row its retirement left.
 ///
 /// The release runs inside the dispatch lock and the turn's publish runs after

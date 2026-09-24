@@ -70,9 +70,11 @@ fn turn_recorded(inner: &DispatchInner, task_id: &str) -> (bool, String) {
 /// arrives, and a handoff that outlives this call has no caller left to record
 /// its refusal.
 ///
-/// A second verdict for a task whose record is already settled is refused whole:
-/// the first verdict stands and this one leaves no receipt, no delivery ack and
-/// no binding hand-back behind.
+/// A replayed delivery for work whose first verdict already settled is ordinary
+/// at-least-once traffic. The first verdict stands. The replay returns the task
+/// binding. The session that took the replay lets go of its slot.
+/// The first receipt, `out_head`, and handoff relay remain attached to that
+/// first settlement.
 ///
 /// A plugin report with no turn behind it is refused whole the same way, ahead of
 /// every write this call makes: the drain opens over work that never ran, so the
@@ -129,6 +131,10 @@ pub async fn on_out(
                 "a second verdict arrived for a settled task; the first one stands"
             );
             note_verdict(&verdict, task_id);
+            // The replayed session still owns the task binding until this
+            // release, so the standing verdict travels with the client's own
+            // post-release tuple and capacity returns to the role.
+            release_locked(&mut inner, task_id, None)?;
             None
         } else {
             inner
@@ -174,20 +180,9 @@ pub async fn on_out(
             ))
         }
     };
-    // A refused verdict refuses everything else this call would do, and that is
-    // what the `None` above carries out of the lock. The receipt would answer the
-    // origin for work the first verdict already answered; the delivery handle
-    // would be spent from the session that is still serving the task; and
-    // `release_locked` resolves through `slot_key_serving_task`, so it would hand
-    // back that session's binding and leave its own later completion with no
-    // handle to ack — the server's row would stay in flight. A refused verdict
-    // does none of it.
-    //
-    // The one write that did happen is `settle`'s above, and on a task already
-    // settled it reduces the tuple to what is already stored: the row stays where
-    // the first verdict put it, and its publish still travels, because state
-    // committed and left unpublished is the mismatch the ordering above exists to
-    // prevent.
+    // The refused branch carries the release result out of the lock. The task
+    // account remains the first verdict. The client row is published after the
+    // replay session has returned its binding and completed its retirement.
     let Some((verdict, receipt, role, causality, held)) = settled else {
         return sync_session(state, task_id).await;
     };

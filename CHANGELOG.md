@@ -296,6 +296,15 @@ where it is read.
   and lands `expired` with reason `requeue_ttl` and one log line naming the row, its task, the role
   that never came, and the age it waited. `0` leaves today's behaviour as it is. Notes stay with the
   sender's own `ttl_ms` deadline, and a returned delivery keeps its existing attempts-and-TTL path.
+- client: a replayed verdict lets go of the slot it took. A one-slot client served a task that had
+  already ended; the replayed delivery is ordinary at-least-once traffic, so its session's completion
+  was refused for a standing verdict, and that refusal returned before the settlement's release work
+  while the retirement declines a slot still bound to a task. The role's capacity stayed spent for
+  good — a preserved row held `generation=2 ready/attached` through a sixty-second wait, and an e2e
+  case that hits the path failed two of five runs at one slot while passing five of five at two. The
+  refused branch now hands the task binding back and retires the session's resource, keeping the
+  refusal as it was: the first verdict stands, no second `out_head`, no second receipt, no re-relay
+  of the replayed report's handoffs, and the publish carries the stored post-release row.
 - server: the ghost sweep leaves a task's completion receipts alone. The pass settles the open rows of
   a task whose ledger row already carries a verdict, and a completion is one of them: the sweep's
   refusal turned the receipt into `rejected`, and the verdict a reader looks for lives in that row's
