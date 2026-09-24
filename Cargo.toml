@@ -33,7 +33,7 @@ license = "MIT"
 authors = ["dbydd <1992003927@qq.com>"]
 repository = "https://github.com/dbydd/onlyne"
 homepage = "https://github.com/dbydd/onlyne"
-publish = false
+
 
 [workspace.dependencies]
 # internal
