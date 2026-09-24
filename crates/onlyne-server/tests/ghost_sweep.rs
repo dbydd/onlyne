@@ -132,6 +132,70 @@ fn the_sweep_settles_a_working_row_whose_task_already_acked() {
     assert_eq!(audit[0].session_id, "sess-ghost");
 }
 
+/// A completion is the settlement's own receipt, so the pass leaves it queued.
+///
+/// The pass settles the open rows of a task whose ledger row already carries a
+/// verdict, and a receipt is one of those rows. Refusing it takes the verdict
+/// out of the ledger a reader looks at — `out_head` lives on that row — while the
+/// recipient's own client acks it whenever it comes back, and a role with no
+/// client is entitled to keep its receipts queued. The ACP closure case read an
+/// acked completion row; the sweep's refusal turned it into a rejected one.
+#[test]
+fn the_sweep_leaves_a_queued_completion_receipt_alone() {
+    let (_dir, state) = open_server(60);
+    let (task_id, msg_id) = working_task(&state);
+    relay::ack(
+        &state,
+        &AckArgs {
+            msg_id,
+            op_id: None,
+            accepted: true,
+            reason: None,
+        },
+    )
+    .expect("the ack ran")
+    .expect("the ack settled the ledger row");
+    let receipt = onlyne_proto::new_envelope(
+        MsgKind::Completion,
+        Principal::role("builder"),
+        Principal::role("supervisor"),
+        Body::text("the thing is built"),
+        Some(Causality::root(task_id.clone())),
+    )
+    .expect("valid completion");
+    let receipt_id = match relay::send(&state, &receipt, false, Some("builder"))
+        .expect("the send ran")
+    {
+        RelayReply::Accepted(outcome) => outcome.receipt.msg_id,
+        other => panic!("the receipt was refused: {other:?}"),
+    };
+
+    let swept = ghosts::sweep_once(&state).expect("one pass");
+    assert_eq!(swept.len(), 1, "the fossil is still the row the pass moves");
+
+    let row = state
+        .ledger
+        .ledger_query(onlyne_proto::LedgerQuery {
+            task: Some(task_id),
+            limit: 32,
+            ..onlyne_proto::LedgerQuery::default()
+        })
+        .expect("the ledger reads")
+        .into_iter()
+        .find(|row| row.msg_id == receipt_id)
+        .expect("the receipt is present");
+    assert_eq!(
+        row.state,
+        onlyne_proto::LedgerState::Queued,
+        "a receipt waits for its recipient; refusing it would hide the verdict"
+    );
+    assert_eq!(
+        row.out_head.as_deref(),
+        Some("the thing is built"),
+        "the verdict is still readable on the row"
+    );
+}
+
 /// The client owns the task's verdict, and the mirror carries it: a client
 /// publishes that verdict with the lifecycle its own tuple reads, and a settled
 /// task beside a live agent projects `working`. The pass moves the row out of

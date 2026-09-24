@@ -6,7 +6,7 @@
 use crate::relay::RelayReject;
 use crate::state::State;
 use chrono::Utc;
-use onlyne_proto::{AdminOp, ErrorCode, Event, FaultEvent, Outcome, QueryFaultsArgs};
+use onlyne_proto::{AdminOp, ErrorCode, Event, FaultEvent, MsgKind, Outcome, QueryFaultsArgs};
 use onlyne_store::{FaultQuery, ServerFaultRow};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -490,6 +490,14 @@ pub(crate) fn settle_task(
         limit: 32,
         ..onlyne_proto::LedgerQuery::default()
     })? {
+        // A completion is the settlement's own receipt, so it is left where it
+        // stands: refusing it would take the verdict out of the ledger a reader
+        // looks at — `out_head` lives on that row — while the recipient's own
+        // client acks it as soon as it is there to pull, and a role with no
+        // client is entitled to keep its receipts queued.
+        if row.kind == MsgKind::Completion {
+            continue;
+        }
         match row.state {
             onlyne_proto::LedgerState::Queued => {
                 state.ledger.mark_rejected(&row.msg_id, reason)?;

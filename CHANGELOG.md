@@ -284,6 +284,14 @@ where it is read.
   dump is byte-identical), reusing the filter the interactive `a` toggles:
   `onlyne-tui --server-root <root> --once --page 2 --state all` prints a plain-text frame, so an
   operator can read a settled row's `reason` in one command. That frame renders at a fixed 120x36.
+- server: the ghost sweep leaves a task's completion receipts alone. The pass settles the open rows of
+  a task whose ledger row already carries a verdict, and a completion is one of them: the sweep's
+  refusal turned the receipt into `rejected`, and the verdict a reader looks for lives in that row's
+  `out_head` — the ACP closure case asserted exactly that and caught it. A completion is the
+  settlement's own receipt, so it stays queued for its recipient, whose client acks it whenever it
+  comes back; a live census on a peer cluster shows seventeen such receipts to a supervisor role
+  with no client behind it, and the pass must not be what changes them. The mirror still moves and
+  the task's undeliverable rows still settle.
 - tui: a session's age reads the snapshot's clock instead of the wall clock, so drawing one snapshot
   twice draws the same bytes whenever it happens. `age_from` computed ages from `Utc::now()`; under a
   loaded workspace run two page-1 render tests straddled a second and differed, while passing in
