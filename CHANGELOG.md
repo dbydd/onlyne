@@ -305,6 +305,13 @@ where it is read.
   refused branch now hands the task binding back and retires the session's resource, keeping the
   refusal as it was: the first verdict stands, no second `out_head`, no second receipt, no re-relay
   of the replayed report's handoffs, and the publish carries the stored post-release row.
+  A peer cluster's live counterpart, on a backend that can no longer reach the refused branch: a
+  first task finishes and retires, the mirror reads `exited` with `gone` and `closed`, the cluster
+  holds zero working sessions, and the role's next task starts **4.0 seconds** later — a session
+  still holding that slot is what the symptom looks like, so the timing is the reading. The refused
+  branch itself needs a backend that re-runs a settled task, and the replay gate has since settled
+  those before a second generation can run: two live catches of the old build's warning were exactly
+  those generations, and an e2e case with a scripted agent covers the branch now.
 - cli: `repair retry` says what it refuses. Its help already scoped the verb to a task's still in-flight
   rows, while the verb's own name and its `--task` flag read as "run it again", and a live run spent a
   round on it: `repair retry --task <settled>` answers `conflict`, because the frozen transition table
