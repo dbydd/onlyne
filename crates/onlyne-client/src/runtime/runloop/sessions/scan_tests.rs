@@ -1,4 +1,4 @@
-use super::{apply_role_info, scan_control_settles, scan_stalls};
+use super::{apply_role_info, scan_control_settles, scan_reclaimed_resources, scan_stalls};
 use crate::runtime::intent::op_for_intent;
 use crate::runtime::runloop::RunState;
 use crate::runtime::runloop::test_support::{role_info, test_state};
@@ -6,9 +6,10 @@ use crate::session::dispatch::{
     CONTROL_SETTLE_BOUND, ControlWord, dispatch, on_plugin_report, on_recycled,
 };
 use anyhow::Result;
+use onlyne_adapter::AdapterIo;
 use onlyne_proto::{
-    Body, Causality, ClientOp, Lifecycle, MsgKind, Outcome, Principal, Report, SessionProjection,
-    new_envelope, new_task_id,
+    AgentPhase, Body, Capability, Causality, ClientOp, Lifecycle, MsgKind, Outcome, Principal,
+    Report, ResourcePhase, SessionProjection, new_envelope, new_task_id,
 };
 use onlyne_session::{SessionLedger, TaskState, VersionedSession};
 use std::time::{Duration, Instant};
@@ -258,6 +259,179 @@ fn published_projection(state: &RunState, task: &str) -> Option<SessionProjectio
 /// Whether the queue holds this client's own report of one session's state.
 fn published(state: &RunState, task: &str) -> bool {
     published_projection(state, task).is_some()
+}
+
+/// The last frame this client published for one session, as the queue holds it.
+fn last_published(state: &RunState, task: &str) -> SessionProjection {
+    queued_ops(state)
+        .into_iter()
+        .rev()
+        .find_map(|op| match op {
+            ClientOp::Report(Report::Heartbeat {
+                task_id,
+                projection: Some(projection),
+                ..
+            }) if task_id == task => Some(projection),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the session's own last publish"))
+}
+
+/// The version the last frame for one session carried, off the same queued frame.
+fn last_published_seq(state: &RunState, task: &str) -> u64 {
+    queued_ops(state)
+        .into_iter()
+        .rev()
+        .find_map(|op| match op {
+            ClientOp::Report(Report::Heartbeat {
+                task_id,
+                seq,
+                projection: Some(_),
+                ..
+            }) if task_id == task => Some(seq),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the session's own last publish"))
+}
+
+/// One plugin beat reporting a running agent, in the tuple shape the reducer reads.
+fn running_beat(task: &str) -> Report {
+    let seq = 1005;
+    Report::Heartbeat {
+        task_id: task.to_string(),
+        session_id: String::new(),
+        generation: 1,
+        seq,
+        observed: serde_json::json!({
+            "version": { "generation": 1, "seq": seq },
+            "generation_live": true,
+            "isolate_after": 1,
+            "terminate_after": 3,
+            "mismatch_count": 0,
+            "agent": "running",
+            "delivery": "none",
+            "resource": "attached",
+            "recovery": "none",
+        }),
+        projection: None,
+        cluster_ref: None,
+    }
+}
+
+/// One completed session whose plugin left without a goodbye, staged the way the
+/// census found ten of them: the work is settled over a connection this client
+/// still holds, and then that connection's socket ends.
+///
+/// The settle turn's release declines the retirement while the connection serves
+/// the session — the agent is still reachable, and its resource stays open for
+/// it — so the turn publishes the row as it reads then: `exited` beside an agent
+/// still `running` and a resource still `attached`. A socket that ends without a
+/// `detach` frame leaves that idle session and its open resource behind, and the
+/// reclaim is the sweep that ends it.
+async fn lingering_completed_session(state: &RunState, task: &str) {
+    let (stream, _peer) = tokio::io::duplex(1024);
+    let io = AdapterIo::new(stream, Duration::from_secs(5), Duration::from_secs(5));
+    staged_delivery(state, task, "msg-lingering");
+    state.dispatch.bind_adapter(
+        task,
+        io.clone(),
+        vec![Capability::Report, Capability::Inject],
+    );
+    on_plugin_report(&state.dispatch, Some(&io), running_beat(task))
+        .await
+        .expect("the turn behind the completion is handled");
+    on_plugin_report(
+        &state.dispatch,
+        Some(&io),
+        Report::Complete {
+            task_id: task.to_string(),
+            outcome: Outcome::Done,
+            head: Some("done".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .expect("the completion settles the task");
+    // The socket ends, and no `detach` frame says the agent meant to go.
+    state.dispatch.release_connection(Some(task), &io, false);
+}
+
+/// The reclaim of a lingering completed resource publishes the row it wrote.
+///
+/// The reclaim runs on every readiness tick, ahead of the reconnect window, so a
+/// completed session whose plugin left is its work: the resource closes, the
+/// agent goes, and both writes move the row the settle turn had already reported
+/// one version earlier. The server mirrors only what this client reports, and
+/// this client had reported that row as `exited` beside an agent still `running`
+/// and a resource still `attached` — the reading a peer's census found on every
+/// completed session, with the client's own row one version ahead of the mirror.
+/// The frame that carries the retired row is what this reads, off the queue this
+/// client sends on. Two of them linger at once, because the sweep answers with
+/// every session it retired and one tick's answer reaches the server whole.
+#[tokio::test]
+async fn the_reclaim_publishes_the_exit_of_a_lingering_completed_resource() {
+    let (state, store) = test_state(3, Vec::new());
+    let tasks = [new_task_id(), new_task_id()];
+    for task in &tasks {
+        lingering_completed_session(&state, task).await;
+        let settled = last_published(&state, task);
+        assert_eq!(
+            (settled.lifecycle, settled.agent, settled.resource),
+            (
+                Lifecycle::Exited,
+                AgentPhase::Running,
+                ResourcePhase::Attached
+            ),
+            "the settle turn published the row while the connection still served it: {settled:?}"
+        );
+    }
+    assert_eq!(
+        state.dispatch.session_count(),
+        tasks.len(),
+        "both idle slots linger with their resources open"
+    );
+
+    scan_reclaimed_resources(&state).await;
+
+    assert_eq!(
+        state.dispatch.session_count(),
+        0,
+        "the retired slot left the map"
+    );
+    for task in &tasks {
+        let published = last_published(&state, task);
+        assert_eq!(
+            published.lifecycle,
+            Lifecycle::Exited,
+            "the exit the reclaim wrote: {published:?}"
+        );
+        assert_eq!(
+            published.agent,
+            AgentPhase::Gone,
+            "the reclaim fed the agent's exit, and the frame says so: {published:?}"
+        );
+        assert_eq!(
+            published.resource,
+            ResourcePhase::Closed,
+            "and the resource close beside it: {published:?}"
+        );
+        assert_eq!(
+            published.outcome,
+            Some(Outcome::Done),
+            "with the outcome the task settled: {published:?}"
+        );
+        let row = store
+            .get_session(task)
+            .expect("read the row")
+            .expect("the session keeps its row");
+        assert_eq!(
+            last_published_seq(&state, task),
+            row.seq.max(0) as u64,
+            "the frame carries the version the reclaim left behind, so the mirror and the \
+             client's own row read one version apart no more"
+        );
+    }
 }
 
 /// A cancel no plugin ever answered settles the task on the operator's word.

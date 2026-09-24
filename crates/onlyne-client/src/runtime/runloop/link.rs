@@ -1,7 +1,8 @@
 use super::config::{ClientInit, FLUSH_PAUSE_MS, READINESS_POLL_MS, RunState, reconnect_backoff};
 use super::run::pull_ack_loop;
 use super::sessions::{
-    refresh_role_slice, scan_control_settles, scan_reconnect_grace, scan_stalls,
+    refresh_role_slice, scan_control_settles, scan_reclaimed_resources, scan_reconnect_grace,
+    scan_stalls,
 };
 use crate::runtime::intent::op_for_intent;
 use crate::session::dispatch::{self, ClientLink};
@@ -91,7 +92,7 @@ pub(super) async fn watch_readiness(link: ClientLink, state: RunState) -> Result
     let mut ready = true;
     loop {
         sleep(Duration::from_millis(READINESS_POLL_MS)).await;
-        state.dispatch.reclaim_exited_resources();
+        scan_reclaimed_resources(&state).await;
         scan_stalls(&state).await;
         scan_reconnect_grace(&state).await;
         // Behind the reconnect sweep, which settles the work a session that died

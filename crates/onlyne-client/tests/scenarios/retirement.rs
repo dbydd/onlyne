@@ -2,18 +2,226 @@
 //! stays attached, the stall clock of an ended connection, and the periodic reclaim.
 
 use crate::common::{
-    ReasonBackend, RecordingOutbox, assert_settled, complete_plugin, complete_raw_plugin, deliver,
-    eventually, mount_plugin, mount_raw_plugin, published_projection, run_a_turn, sample_envelope,
-    serve_role_socket, task_delivery,
+    Published, ReasonBackend, RecordingOutbox, assert_settled, complete_plugin,
+    complete_raw_plugin, deliver, eventually, mount_plugin, mount_raw_plugin, published_projection,
+    run_a_turn, sample_envelope, serve_role_socket, task_delivery,
 };
 use onlyne_client::session::dispatch::{DispatchState, dispatch, on_plugin_report};
-use onlyne_proto::{AdapterMsg, DetachArgs, Lifecycle, Outcome, PluginOp, Report};
+use onlyne_proto::{
+    AdapterMsg, AgentPhase, DetachArgs, Lifecycle, Outcome, PluginOp, Report, ResourcePhase,
+};
 use onlyne_session::SessionLedger;
 use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
+
+/// The projection publishes this client has sent, once that many have left or the
+/// wait is spent.
+///
+/// A goodbye runs on the plugin's own task, so its frame can land a moment after
+/// the retirement this test just watched. The wait hands back whatever the queue
+/// holds either way, so a frame that never comes fails on the assertion below
+/// with the whole list in its message.
+async fn published_within(outbox: &RecordingOutbox, want: usize) -> Vec<Published> {
+    for _ in 0..400 {
+        let frames = outbox.projection_publishes().await;
+        if frames.len() >= want {
+            return frames;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    outbox.projection_publishes().await
+}
+
+/// The last frame this client published for one session.
+fn last_publish<'a>(frames: &'a [Published], task_id: &str) -> &'a Published {
+    frames
+        .iter()
+        .rev()
+        .find(|frame| frame.task_id == task_id)
+        .expect("the session's own last publish")
+}
+
+/// A completed session's goodbye publishes the row its retirement wrote.
+///
+/// This is the census shape: the plugin completes its work over a connection
+/// that is still up, which is where the settle turn publishes, and says goodbye
+/// when it is done. That turn's publish is true while its own connection serves
+/// the session — the row reads `exited` beside an agent still `running` and a
+/// resource still `attached` — and the goodbye then closes the resource and
+/// feeds the agent's exit, moving the row one version ahead of everything the
+/// server was told. The exit that retirement wrote is what has to travel, and it
+/// travels as the report an ordinary ending travels: this client's own frame,
+/// read here off the queue and never off the stored row.
+///
+/// A peer's census of completed sessions read `exited` beside `running` and
+/// `attached` on every one of them, with the client's own row one version ahead
+/// of the mirror: the goodbye's writes, the only writes this client has of the
+/// agent's end, reaching nobody.
+#[tokio::test]
+async fn a_completed_sessions_goodbye_publishes_the_row_its_retirement_wrote() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let backend = Arc::new(ReasonBackend::default());
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        1,
+        backend.clone(),
+        store.clone(),
+    );
+    let outbox = Arc::new(RecordingOutbox::default());
+    state.attach_outbox(outbox.clone());
+    let (socket, host) = serve_role_socket(&state, dir.path()).await;
+
+    let task_id = deliver(&state, &task_delivery("task A")).await;
+    let (io, mut assigns) = mount_plugin(&socket, Some(&task_id)).await;
+    assert_eq!(assigns.recv().await.as_deref(), Some(task_id.as_str()));
+    complete_plugin(&io, &task_id, Outcome::Done).await;
+    let before = outbox.projection_publishes().await;
+    let settled = last_publish(&before, &task_id);
+    assert_eq!(
+        (
+            settled.projection.lifecycle,
+            settled.projection.agent,
+            settled.projection.resource
+        ),
+        (
+            Lifecycle::Exited,
+            AgentPhase::Running,
+            ResourcePhase::Attached
+        ),
+        "the settle turn publishes the row while its own connection serves the session: \
+         {settled:?}"
+    );
+
+    io.notify(AdapterMsg::Plugin(PluginOp::Detach(DetachArgs {
+        reason: "session complete".into(),
+    })))
+    .await
+    .unwrap();
+    eventually(
+        || state.session_count() == 0,
+        "the detached session to leave the map",
+    )
+    .await;
+    let frames = published_within(&outbox, before.len() + 1).await;
+
+    let published = last_publish(&frames, &task_id);
+    assert_eq!(
+        published.projection.lifecycle,
+        Lifecycle::Exited,
+        "the exit the retirement wrote: {published:?}"
+    );
+    assert_eq!(
+        published.projection.agent,
+        AgentPhase::Gone,
+        "the goodbye fed the agent's exit, and the frame says so: {published:?}"
+    );
+    assert_eq!(
+        published.projection.resource,
+        ResourcePhase::Closed,
+        "and the retirement closed the resource: {published:?}"
+    );
+    assert_eq!(
+        published.projection.outcome,
+        Some(Outcome::Done),
+        "beside the outcome the task settled: {published:?}"
+    );
+    let row = store
+        .get_session(&task_id)
+        .unwrap()
+        .expect("the session keeps its row");
+    assert_eq!(
+        published.seq,
+        row.seq.max(0) as u64,
+        "the frame carries the version the retirement left behind, so the mirror and the \
+         client's own row read one version apart no more"
+    );
+    host.abort();
+}
+
+/// The settle turn's own publish already carries the row its retirement left.
+///
+/// The release runs inside the dispatch lock and the turn's publish runs after
+/// it, so the frame leaves already carrying the agent's exit and the closed
+/// resource, at the version the row now holds. A second publish inside the turn
+/// would repeat that frame verbatim, and this is what says so: one frame carries
+/// the retired row, and it carries the stored row's own version. The deferred
+/// retirement — the shape above, where the row moves after the turn has
+/// published — is the case that needs a publish of its own.
+#[tokio::test]
+async fn the_settles_own_publish_already_carries_its_retirement() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["agent".into()],
+        2,
+        Arc::new(FakeBackend::new()),
+        store.clone(),
+    );
+    let outbox = Arc::new(RecordingOutbox::default());
+    state.attach_outbox(outbox.clone());
+
+    let envelope = sample_envelope("planner", "task A");
+    let task_id = envelope.task_id().unwrap().to_string();
+    dispatch(&state, &envelope).unwrap();
+    run_a_turn(&state, &task_id).await;
+    on_plugin_report(
+        &state,
+        None,
+        Report::Complete {
+            task_id: task_id.clone(),
+            outcome: Outcome::Done,
+            head: Some("done".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let frames = outbox.projection_publishes().await;
+    let retired: Vec<&Published> = frames
+        .iter()
+        .filter(|frame| {
+            frame.projection.agent == AgentPhase::Gone
+                && frame.projection.resource == ResourcePhase::Closed
+        })
+        .collect();
+    assert_eq!(
+        retired.len(),
+        1,
+        "the turn's own publish carries the retirement, and it is the one frame that does: \
+         {frames:?}"
+    );
+    let published = retired[0];
+    assert_eq!(
+        published.projection.lifecycle,
+        Lifecycle::Exited,
+        "the retired session reads exited: {published:?}"
+    );
+    assert_eq!(
+        published.projection.outcome,
+        Some(Outcome::Done),
+        "with the task's own outcome beside it: {published:?}"
+    );
+    let row = store
+        .get_session(&task_id)
+        .unwrap()
+        .expect("the session keeps its row");
+    assert_eq!(
+        published.seq,
+        row.seq.max(0) as u64,
+        "and the frame carries the row the retirement wrote, so no write the turn made is \
+         left unpublished"
+    );
+}
 
 /// A settled session lives only as long as its agent is attached. A plugin
 /// that detached — the shape a session process that exited itself leaves
@@ -338,8 +546,13 @@ async fn periodic_reclaim_closes_an_exited_session_after_connection_loss() {
     .await;
     assert!(backend.closed_sessions.lock().is_empty());
 
-    state.reclaim_exited_resources();
+    let reclaimed = state.reclaim_exited_resources();
 
+    assert_eq!(
+        reclaimed,
+        [task_id.clone()],
+        "the sweep answers with the session whose row it wrote"
+    );
     assert_eq!(backend.closed_sessions.lock()[0].task_id, task_id);
     assert_eq!(
         backend.reasons.lock().as_slice(),

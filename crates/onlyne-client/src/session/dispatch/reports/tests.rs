@@ -1013,6 +1013,54 @@ async fn a_completion_after_a_running_beat_settles_with_an_empty_head() {
     );
 }
 
+/// The delivery answer is enqueued before the exit publish leaves.
+///
+/// A published `exited` runs the server's `release_exited_delivery`, and every
+/// row of that task still in flight is one it hands back to the queue. The
+/// completion's own delivery row is in flight until the ack is enqueued, and a
+/// row the server re-offers is work dispatched a second time — what a live
+/// `recycle` run did before `42fc685` fixed the control door's order. The
+/// settle spends the handle inside the dispatch lock and publishes after the
+/// relay and the receipt, so the queue reads the answer first and the exit
+/// second, whichever of the two frames the link takes live.
+#[tokio::test]
+async fn the_settle_queues_the_delivery_answer_before_the_exit_publish() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    opened_task(&state, &task);
+    serving_slot(&state, &task, "msg-worked");
+    beat(&state, &task, "running", 1005).await;
+
+    complete_report(&state, &task, Outcome::Done, Some("done".into())).await;
+
+    let queued = queued_ops(&state);
+    let answer = queued
+        .iter()
+        .position(
+            |op| matches!(op, ClientOp::Ack(ack) if ack.msg_id == "msg-worked" && ack.accepted),
+        )
+        .expect("the settle answers the delivery row it found");
+    let publish = queued
+        .iter()
+        .position(|op| {
+            matches!(
+                op,
+                ClientOp::Report(Report::Heartbeat {
+                    task_id,
+                    projection: Some(projection),
+                    ..
+                }) if task_id == &task && projection.lifecycle == Lifecycle::Exited
+            )
+        })
+        .expect("the settle publishes the exit");
+    assert!(
+        answer < publish,
+        "the delivery answer is enqueued before the exit publish: {queued:?}"
+    );
+}
+
 /// The idle ladder's own exit: the agent ended its turn, the rungs were spent, and
 /// the plugin files `failed` for the work it never completed. That report travels the
 /// same door as a `done`, and the turn that ended is in the row — so the ladder's

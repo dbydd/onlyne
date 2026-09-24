@@ -421,7 +421,14 @@ impl DispatchState {
     /// The periodic readiness tick calls this after completed work becomes an
     /// idle slot. Task-free sessions with an attached transport stay bound to
     /// their host resource, and task-free sessions whose agent has left release it.
-    pub fn reclaim_exited_resources(&self) {
+    ///
+    /// The session ids come back because the retirement wrote each one of those
+    /// rows and the server mirrors only what this client reports: the resource
+    /// close and, for a completed session, the agent's exit both moved the row
+    /// this tick found, and a publish cannot run under this lock. The caller is
+    /// handed what to publish, the same answer [`DispatchState::retire_dropped_ghosts`]
+    /// gives the sweep above.
+    pub fn reclaim_exited_resources(&self) -> Vec<String> {
         let mut inner = self.inner.lock();
         let candidates: Vec<(String, onlyne_session::CloseReason)> = inner
             .sessions
@@ -436,9 +443,22 @@ impl DispatchState {
                     .map(|reason| (key.clone(), reason))
             })
             .collect();
+        let mut retired: Vec<String> = Vec::new();
         for (key, reason) in candidates {
-            retire_idle_locked(&mut inner, &key, reason);
+            // The id that travels is the session's own, the one whose row the
+            // retirement below is about to write.
+            let Some(task_id) = inner
+                .sessions
+                .get(&key)
+                .map(|slot| slot.session.task_id.clone())
+            else {
+                continue;
+            };
+            if retire_idle_locked(&mut inner, &key, reason) {
+                retired.push(task_id);
+            }
         }
+        retired
     }
 
     /// Retire the sessions whose plugin connection dropped and never came back, or

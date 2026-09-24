@@ -486,12 +486,18 @@ impl DispatchState {
     /// lifecycle ownership, and it carries that same clock: a goodbye and a
     /// silent drop both leave no heartbeat coming for the task it owes, and the
     /// window is what ends a session whose agent never returns.
+    ///
+    /// The session ids a goodbye retired come back, because that retirement wrote
+    /// their rows: the resource close and, for a completed session, the agent's
+    /// exit. The server mirrors only what this client reports, and a publish
+    /// cannot run under this lock, so the caller is handed what to publish — the
+    /// same answer [`DispatchState::retire_dropped_ghosts`] gives its sweep.
     pub fn release_connection(
         &self,
         session_id: Option<&str>,
         io: &AdapterIo,
         graceful_detach: bool,
-    ) {
+    ) -> Vec<String> {
         let mut inner = self.inner.lock();
         // A read-only connection ending is not the session losing its agent: the
         // live connection still serves it, and its drop clock stays untouched.
@@ -568,6 +574,7 @@ impl DispatchState {
                 promote_held_connection(&mut inner, &key);
             }
         }
+        let mut retired: Vec<String> = Vec::new();
         if graceful_detach {
             let idle: Vec<String> = released
                 .iter()
@@ -582,14 +589,26 @@ impl DispatchState {
                 })
                 .collect();
             for key in idle {
+                // The id that travels is the session's own, the one whose row the
+                // retirement below is about to write.
+                let Some(task_id) = inner
+                    .sessions
+                    .get(&key)
+                    .map(|slot| slot.session.task_id.clone())
+                else {
+                    continue;
+                };
                 let reason = inner
                     .sessions
                     .get(&key)
                     .and_then(|slot| stored_close_reason(&inner, &slot.session.task_id))
                     .unwrap_or(onlyne_session::CloseReason::Completed);
-                retire_idle_locked(&mut inner, &key, reason);
+                if retire_idle_locked(&mut inner, &key, reason) {
+                    retired.push(task_id);
+                }
             }
         }
+        retired
     }
 }
 

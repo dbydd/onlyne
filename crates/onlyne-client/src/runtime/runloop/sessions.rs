@@ -199,6 +199,37 @@ pub(super) async fn scan_stalls(state: &RunState) {
     }
 }
 
+/// Reclaim the resources of sessions this client has already put past their work,
+/// and publish each one's exit.
+///
+/// The reclaim runs on every readiness tick, ahead of the reconnect window, so a
+/// completed session whose plugin left without a goodbye is this sweep's to end:
+/// its resource is still open, its stored lifecycle already reads `Exited`, and
+/// the sweep below waits out a grace the completion itself did not ask for. What
+/// the reclaim writes is the agent's exit and the resource close, and the server
+/// mirrors only what this client reports — so each session it retired travels the
+/// report an ordinary ending travels, once the lock has been given back and the
+/// stored row is final. Without it the mirror keeps the reading the settle
+/// published, `exited` beside an agent still `running` and a resource still
+/// `attached`, which is what a peer's census of completed sessions found.
+///
+/// A published exit runs the server's `release_exited_delivery` for that task, and
+/// the task's own delivery row was answered when the completion settled it, so
+/// there is no in-flight row of that task for the release to hand back. The
+/// publish is also after the reclaim rather than around it because the row the
+/// server mirrors is the row the reclaim writes.
+pub(super) async fn scan_reclaimed_resources(state: &RunState) {
+    for session_id in state.dispatch.reclaim_exited_resources() {
+        if let Err(error) = dispatch::sync_session(&state.dispatch, &session_id).await {
+            tracing::warn!(
+                session = %session_id,
+                error = %error,
+                "a reclaimed session's exit was not published"
+            );
+        }
+    }
+}
+
 /// Retire the sessions whose plugin connection dropped and did not come back
 /// within `[client] reconnect_grace_secs`, and publish each one's exit. The tick
 /// sweeps every session the window expired on, bound to a task or not: a plugin

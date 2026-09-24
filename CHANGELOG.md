@@ -408,6 +408,21 @@ where it is read.
   left the map and the completion path did not, and both reach the same retirement. A completed
   session's retirement now feeds that event too — after the resource close, before the slot leaves
   the map, warning and continuing when the projection write fails — so the mirror's two fields agree.
+- client: a completed session's retirement reaches the mirror. `on_out` publishes the projection
+  before the retirement, and at that moment the tuple still reads `agent: running` and
+  `resource: attached` while `project` derives `exited` from the pair `Done` with `Accepted`, so the
+  server legitimately mirrors `exited + running + attached`; the retirement then closes the resource
+  and feeds the agent's exit, and nobody published that. A census of ten completed sessions on a live
+  cluster found every local row exactly one version ahead of its mirror, local `(gone, closed)` against
+  mirror `(running, attached)`. The two doors that retire and tell nobody now publish — the plugin's
+  goodbye and the readiness tick's reclaim of a lingering completed resource — each answering the
+  sessions it retired, because a publish cannot run under the dispatch lock. `on_out` is untouched: its
+  own publish already carries the row when its release retires, which a test now proves.
+  **The assertion belongs on the published frame.** The earlier fix in this window tested the local
+  stored row, read `gone` there, and left every external reader on the old bytes; the census-shape
+  test now reads the queued heartbeat frame and fails on the code before this change with the frame it
+  saw — the settle turn's `Exited / Running / Accepted / Attached / Some(Done)` — beside a stored row
+  reading `gone` and `closed` one version later.
 - server: the ghost sweep keeps a verdict the client published. It read a delivery row's rejection
   as `failed` and overwrote a mirror the client had already published as `cancelled`, so
   `onlyne ghosts` reported a verdict nobody gave. The pass still moves a row that reads `working` —

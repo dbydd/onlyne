@@ -1,5 +1,5 @@
 use super::socket::AdapterSocket;
-use crate::session::dispatch::{ReadyNotice, on_plugin_report, on_ready};
+use crate::session::dispatch::{ReadyNotice, on_plugin_report, on_ready, sync_session};
 use anyhow::{Context, Result};
 use onlyne_adapter::{AdapterIo, AdapterServer, ServerConnection};
 use onlyne_layout::LocalStream;
@@ -296,8 +296,29 @@ impl AdapterSocket {
         if agent {
             // The ended connection releases its bindings. A detach frame also
             // retires each idle resource served by this agent.
-            self.dispatch
-                .release_connection(mounted.as_deref(), &io, graceful_detach);
+            let retired =
+                self.dispatch
+                    .release_connection(mounted.as_deref(), &io, graceful_detach);
+            // Each retirement wrote that session's own row — the resource close
+            // and, for a completed session, the agent's exit — and the server
+            // mirrors only what this client reports, so the exit travels here,
+            // where the lock is back and the stored row is final. A session the
+            // completion already settled had its delivery row answered before
+            // the publish, and a published exit runs the server's
+            // `release_exited_delivery`, which after 200c88d refuses a released
+            // row whose task already carries a verdict rather than handing the
+            // work back. That is the second reason this publish sits after the
+            // close: the mirror moves the row the close wrote, and a close
+            // already answered is a row the release cannot re-offer.
+            for session in retired {
+                if let Err(error) = sync_session(&self.dispatch, &session).await {
+                    tracing::warn!(
+                        session = %session,
+                        error = %error,
+                        "a retired session's exit was not published"
+                    );
+                }
+            }
         }
         Ok(())
     }
