@@ -284,6 +284,11 @@ where it is read.
   dump is byte-identical), reusing the filter the interactive `a` toggles:
   `onlyne-tui --server-root <root> --once --page 2 --state all` prints a plain-text frame, so an
   operator can read a settled row's `reason` in one command. That frame renders at a fixed 120x36.
+- tui: a session's age reads the snapshot's clock instead of the wall clock, so drawing one snapshot
+  twice draws the same bytes whenever it happens. `age_from` computed ages from `Utc::now()`; under a
+  loaded workspace run two page-1 render tests straddled a second and differed, while passing in
+  isolation. The layout was never the cause — it settles on an epoch count — and the regression test
+  now renders, sleeps a little over a second, renders again, and compares the whole picture.
 - `skills/onlyne-role-payload-v2/SKILL.md`: its `description` value is quoted. The line was
   an unquoted YAML scalar carrying `handoff:` and `Triggers:` inside its prose, and a reader
   takes each `": "` for the start of a nested mapping: `npx skills add` skipped this file

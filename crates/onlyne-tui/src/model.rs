@@ -837,6 +837,10 @@ pub fn role_name(principal: &Principal) -> Option<&str> {
 }
 
 pub fn layout_nodes(snapshot: &Snapshot, active_only: bool) -> Vec<LayoutNode> {
+    let now = snapshot
+        .refreshed_at
+        .map(DateTime::<Utc>::from)
+        .unwrap_or_else(Utc::now);
     let mut sessions_by_role: BTreeMap<String, Vec<&SessionRow>> = BTreeMap::new();
     for session in visible_sessions(snapshot, active_only) {
         if let Some(role) = &session.role {
@@ -868,7 +872,7 @@ pub fn layout_nodes(snapshot: &Snapshot, active_only: bool) -> Vec<LayoutNode> {
                         Lifecycle::Idle => SessionState::Idle,
                         Lifecycle::Exited => SessionState::Exited,
                     },
-                    age: age_from(session.updated_at.as_deref()),
+                    age: age_from(session.updated_at.as_deref(), now),
                 })
                 .collect(),
             aggregate: role.aggregate.clone(),
@@ -1174,7 +1178,7 @@ pub fn event_task(row: &EventRow) -> Option<String> {
     }
 }
 
-pub fn age_from(updated_at: Option<&str>) -> String {
+pub fn age_from(updated_at: Option<&str>, now: DateTime<Utc>) -> String {
     let Some(raw) = updated_at else {
         return "--".to_string();
     };
@@ -1190,7 +1194,7 @@ pub fn age_from(updated_at: Option<&str>) -> String {
     let Some(then) = then else {
         return "--".to_string();
     };
-    let secs = (Utc::now() - then).num_seconds().max(0) as u64;
+    let secs = (now - then).num_seconds().max(0) as u64;
     format_age(secs)
 }
 

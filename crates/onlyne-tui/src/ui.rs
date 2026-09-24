@@ -1563,6 +1563,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_snapshot_clock_keeps_two_renders_identical_across_wall_time() {
+        let refreshed_at = SystemTime::now();
+        let mut session = session("aaaaaaaa-1", Lifecycle::Working, AgentPhase::Running);
+        session.updated_at = Some(
+            (DateTime::<Utc>::from(refreshed_at) - chrono::Duration::seconds(59))
+                .timestamp()
+                .to_string(),
+        );
+        let snapshot = Snapshot {
+            status: serde_json::json!({"cluster": "local"}),
+            roles: vec![role("planner", &[])],
+            sessions: vec![session],
+            server_online: true,
+            refreshed_at: Some(refreshed_at),
+            ..Snapshot::default()
+        };
+        let first = render_once_text(&snapshot, &UiState::default(), 120, 36);
+
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+        assert_eq!(
+            first,
+            render_once_text(&snapshot, &UiState::default(), 120, 36),
+            "the snapshot clock moved between renders"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_without_a_clock_still_renders() {
+        let snapshot = Snapshot {
+            status: serde_json::json!({"cluster": "local"}),
+            roles: vec![role("planner", &[])],
+            sessions: vec![session(
+                "aaaaaaaa-1",
+                Lifecycle::Working,
+                AgentPhase::Running,
+            )],
+            server_online: true,
+            refreshed_at: None,
+            ..Snapshot::default()
+        };
+
+        let text = render_once_text(&snapshot, &UiState::default(), 120, 36);
+        assert!(text.contains("role network"), "{text}");
+        assert!(text.contains("planner"), "{text}");
+    }
+
     /// The board draws the cluster, and `_supervisor` is the operator's own
     /// seat on it: a registry entry whose key registers the operator identity,
     /// with no client behind it (decision D15). Nothing of it reaches the
