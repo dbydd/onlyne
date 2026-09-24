@@ -43,6 +43,10 @@ to you and the spec file.
 - `onlyne version` reports the CLI package, protocol, and sibling binary paths. The gateway
   and testkit commands do not accept `--version`; read `onlyne version` for the installed
   package inventory.
+- `onlyne schema spec` and `onlyne schema client` print the compiled JSON Schema of
+  `<server-root>/.onlyne/spec.toml` and `<workspace>/.onlyne/config.toml`; `--pretty` indents
+  the same document. The keys, their types, and which of them are required come out of the
+  build, so an installed binary answers the whole vocabulary without a source checkout.
 - Re-export the role and supervisor handbooks from the installed binary with
   `onlyne skill export --set role --set supervisor --force`.
 - The live acceptance shape is completion followed by handoff and client kill. Read
@@ -57,6 +61,19 @@ to you and the spec file.
 2. Put role content in `<root>/.onlyne/templates/<topo>/<role>/`. The basename is the spec
    role name. Templates hold AGENTS.md, prompts, and `.pi/` settings — opaque bytes, plus a
    closed set of placeholders: `{{role}} {{cluster}} {{server_name}} {{listen}} {{cert_pin}} {{admin}} {{max_sessions}} {{agent_package}}`.
+   The coding-agent package travels on that last placeholder, and one appearance is what
+   makes it happen: set `[server].agent_package` to the absolute path of a real package (the
+   spec `onlyne server init` writes leaves it an empty string), and give the template a
+   `.pi/settings.json` holding `{"packages": ["{{agent_package}}"]}`. `generate` then vendors
+   the whole package into `<ws>/.onlyne/agent/<pkg-name>/` and renders that entry as
+   `../.onlyne/agent/<pkg-name>`. The `../` form is the one pi 0.85.1 loads: a project
+   `packages` path resolves against the directory holding the settings file, so a bare
+   `.onlyne/agent/<pkg-name>` lists the package and starts nothing. Anywhere else in a
+   template the same placeholder renders as the workspace-relative
+   `.onlyne/agent/<pkg-name>`. A template that uses it while `agent_package` is empty exits 4
+   with `onlyne: agent_package not set in spec.toml [server]`; a template that never names the
+   directory gets a workspace carrying no package at all, and its sessions start with no
+   plugin tools registered.
    The skill a workspace carries comes out of the binary:
    `onlyne skill export --dest <workspace>/.agents/skills --set role` writes `onlyne-role`
    and `onlyne-role-payload-v2`, `--set supervisor` writes `onlyne-supervisor` for your own
