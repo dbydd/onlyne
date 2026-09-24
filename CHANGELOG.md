@@ -49,6 +49,9 @@ for a record of its own, so a session row describes a session and the task table
 answers for a task. The public lifecycle left the tuple as well and is derived
 where it is read.
 
+Every live reading quoted in this section comes from one deployment's acceptance record,
+`docs/live-evidence-1.4.0.md`, kept here so the evidence outlives the machine it was collected on.
+
 ### Breaking
 
 - client and server: `reuse` is gone. Every task runs in a session of its own, so
