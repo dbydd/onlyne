@@ -136,6 +136,19 @@ The repair family does not pass through the role workspace's adapter socket.
 
 Onlyne's SQLite databases must be placed on a local filesystem. Do not put the server root or role workspace in OneDrive, Dropbox, iCloud, a network drive, or any other synchronized directory. SQLite depends on WAL files and local file locks; Onlyne does not run `quick_check` or `integrity_check` at startup, so a corrupt `state.db` / `client.db` makes the daemon fail on its first database operation. First stop every client/server, then copy the entire root unchanged to a local directory and inspect the databases on the copy; do not run checkpoint, VACUUM, or repair on the original database.
 
+### Moving an existing root out of synchronized storage
+
+On macOS and Linux, an existing server root or role workspace can keep its configuration, templates, notes, and tracked files in synchronized storage while its runtime data lives on a local filesystem. Use this layout when the workspace itself must remain in the synchronized tree.
+
+1. Stop every client and the server. Verify that no process holds the SQLite files or sockets.
+2. Create a local runtime directory outside the synchronized tree. Preserve the original tree and the original file modes.
+3. Move the server `state.db`, `state.db-wal`, and `state.db-shm` files when present. Move each role's `client.db`, `client.db-wal`, and `client.db-shm` files when present. Move the `run/`, `logs/`, `keys/`, and `cache/` runtime subtrees.
+4. Leave `spec.toml`, `templates/`, `ws/`, notes, and tracked workspace files as real files and directories in the original tree. Create one symlink at each original runtime path, pointing to its local destination. Keep workspace directories real; a directory-level symlink for a tracked `ws/` tree makes Git report the tracked files as deleted.
+5. Start the daemons with the original root and workspace paths. The runtime paths resolve through the symlinks, while configuration and workspace content remain in place.
+6. Verify the local database copies and the live server/client status. Keep any corrupt database trio unchanged as evidence; run checkpoint, VACUUM, repair, and integrity inspection on a separate copy only.
+
+This layout keeps SQLite files and file locks on a local filesystem. It also keeps the synchronized repository usable for configuration, templates, notes, and tracked workspace content.
+
 When a role link dies, the server requeues that role's `in_flight` delivery rows to `queued`, where they wait for the next pull before delivery.
 
 Takeover requeueing when a new link lands follows the same path. The `live_tasks` field of `hello` declares the session tasks still alive in that client's memory; declared rows remain `in_flight`, and their delivery tickets are reattached to the new link's generation, so they are requeued normally if that link later terminates.
@@ -654,6 +667,19 @@ repair 族不经过 role 工作区的 adapter socket。
 ## 投递与重投
 
 Onlyne 的 SQLite 数据库要放在本地文件系统。不要把 server root 或 role workspace 放在 OneDrive、Dropbox、iCloud、网盘或其他同步目录。SQLite 依赖 WAL 文件与本地文件锁；Onlyne 启动时不运行 `quick_check` 或 `integrity_check`，损坏的 `state.db` / `client.db` 会让 daemon 在首个数据库操作失败。先停止所有 client/server，再把整个 root 原样复制到本地目录，在副本上检查数据库；原库不要执行 checkpoint、VACUUM 或 repair。
+
+### 将现有 root 移出同步存储
+
+在 macOS 和 Linux 上，现有 server root 或 role workspace 可以把配置、模板、笔记和已跟踪文件留在同步存储，同时把运行时数据放在本地文件系统。工作区必须留在同步目录时采用这个布局。
+
+1. 停止所有 client 和 server，确认没有进程持有 SQLite 文件或 socket。
+2. 在同步目录之外创建本地运行目录，保留原目录和原文件权限。
+3. 存在时移动 server 的 `state.db`、`state.db-wal`、`state.db-shm`。存在时移动每个 role 的 `client.db`、`client.db-wal`、`client.db-shm`。移动 `run/`、`logs/`、`keys/` 和 `cache/` 运行时子树。
+4. 让 `spec.toml`、`templates/`、`ws/`、笔记和已跟踪 workspace 文件继续作为原目录中的真实文件和目录。每个原运行时路径建立一個指向本地目标的软链。workspace 目录保持真实目录；给已跟踪的 `ws/` 树建立目录级软链会让 Git 把已跟踪文件报成删除。
+5. 使用原 root 和 workspace 路径启动 daemon。运行时路径通过软链解析，配置和 workspace 内容保持在原位。
+6. 检查本地数据库副本和在线 server/client 状态。损坏的数据库三件套保持原样作为证据；checkpoint、VACUUM、repair 和完整性检查只在另一份副本上执行。
+
+这个布局让 SQLite 文件和文件锁位于本地文件系统，同时让同步仓库继续保存配置、模板、笔记和已跟踪 workspace 内容。
 
 role link 死亡时，服务端把该 role 的 `in_flight` 投递行重投回 `queued`，等待下一次 pull 再交付。
 
