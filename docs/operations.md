@@ -298,7 +298,9 @@ server 侧观察器遵守 §8 的零政策红线。
 
 ghost sweep 在这条红线内移动一类行：镜像仍读 `working`、而该任务自己的 ledger 行已落终态的那一类。
 
-它写进镜像的判定来自那条 ledger 行，同一趟把该任务名下仍未结清的投递行一并结清。
+它写进镜像的判定来自那条 ledger 行，同一趟把该任务名下仍未结清的投递行一并结清——`kind = completion` 的回执除外：回执是这次结算自己的记录，结局就写在它的 `out_head` 上，拒它等于把结局从账面上抹掉；收件人的 client 回来就会 ack 它，没有 client 的 role 按「回执照排队」的口径留着（见「拒收面」）。
+
+哪一类行会落进这趟的范围，取决于后端。服务端把**不带投影的裸心跳**合成成 `working` / `running` / `attached`（`crates/onlyne-server/src/projection.rs`），所以只有在结算之后仍有裸心跳上行的后端，才可能把镜像从 `exited` 滑回 `working`。实测：pi + orca 在任务结算后不再送裸心跳——完成路径本身会发布一次（lifecycle 由 `Done` + `Accepted` 推成 `exited`），随后退休再发布一次（`agent` 走 `gone`、资源走 `closed`），两次之间没有第三帧；而 acp 这类长命后端的 agent 进程可以活过会话，形状在那里才成立。
 
 另一类 `working` 行它不动：属主离线、而任务仍未结清的那一类。
 
