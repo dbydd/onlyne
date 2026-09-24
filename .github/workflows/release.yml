@@ -85,7 +85,10 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install protoc -y
       - name: build
-        run: cargo build --release --locked --target ${{ matrix.target }} ${{ format('--bin {0}', env.BINS) }}
+        run: |
+          for bin in $BINS; do
+            cargo build --release --locked --target ${{ matrix.target }} --bin "$bin"
+          done
       - name: stage
         shell: bash
         run: |
@@ -101,18 +104,33 @@ jobs:
           cp LICENSE "stage/$root/"
           # The CLI emits its own completions, so the archive ships what the
           # operator's shell actually reads rather than a hand-written script.
+          cli="target/${{ matrix.target }}/release/onlyne"
+          if [ "${{ runner.os }}" = "Windows" ]; then cli="$cli.exe"; fi
           for shell in bash zsh fish; do
-            "target/${{ matrix.target }}/release/onlyne" completions "$shell" > "stage/$root/onlyne.$shell"
+            "$cli" completions "$shell" > "stage/$root/onlyne.$shell"
           done
           (cd stage && tar -czf "../onlyne-$version-${{ matrix.target }}.tar.gz" "$root")
-          (cd stage && zip -qr "../onlyne-$version-${{ matrix.target }}.zip" "$root")
+          # Git Bash has no `zip`, and PowerShell's archiver is on every Windows
+          # runner, so the Windows archive is written there.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -NoProfile -Command "Compress-Archive -Path 'stage/$root' -DestinationPath 'onlyne-$version-${{ matrix.target }}.zip' -Force"
+          else
+            (cd stage && zip -qr "../onlyne-$version-${{ matrix.target }}.zip" "$root")
+          fi
       - name: checksum
         shell: bash
         run: |
+          set -euo pipefail
           version="${{ inputs.tag || github.ref_name }}"; version="${version#v}"
-          sha256sum "onlyne-$version-${{ matrix.target }}.${{ matrix.asset_ext }}" \
-            | sed "s# .*/# #" > "onlyne-$version-${{ matrix.target }}.${{ matrix.asset_ext }}.sha256"
-          cat "onlyne-$version-${{ matrix.target }}.${{ matrix.asset_ext }}.sha256"
+          archive="onlyne-$version-${{ matrix.target }}.${{ matrix.asset_ext }}"
+          # macOS ships `shasum`; the Linux and Windows runners ship `sha256sum`.
+          if command -v sha256sum >/dev/null 2>&1; then
+            digest=$(sha256sum "$archive" | cut -d' ' -f1)
+          else
+            digest=$(shasum -a 256 "$archive" | cut -d' ' -f1)
+          fi
+          printf '%s  %s\n' "$digest" "$archive" > "$archive.sha256"
+          cat "$archive.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
