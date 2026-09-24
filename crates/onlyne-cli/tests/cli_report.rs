@@ -25,6 +25,12 @@ fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn root_before_suffix(path: &Path, suffix: &Path) -> PathBuf {
+    let components: Vec<_> = path.components().collect();
+    let suffix_len = suffix.components().count();
+    components[..components.len() - suffix_len].iter().collect()
+}
+
 /// Run one `report` verb inside a directory of its own. `ONLYNE_SOCKET` is
 /// stripped because a session inheriting one from a running client gets the same
 /// local answer: the family resolves no socket, and a verb that began to depend on
@@ -348,9 +354,10 @@ fn validate_reads_standard_input_and_prints_the_verdict() {
 /// these four lines are the whole visible surface of a task for both the agent and
 /// the operator. This case pins everything a caller can observe: the four labels in
 /// order, the relative shape of each path under the workspace, and the fact that all
-/// four hang off one workspace root. Paths are compared by their trailing shape
-/// because a temporary tree is reachable on macOS through both `/var` and
-/// `/private/var`, and the verb prints the canonical spelling.
+/// four hang off one workspace root. Paths are compared as platform paths by their
+/// trailing components because a temporary tree is reachable on macOS through both
+/// `/var` and `/private/var`, and the verb prints the canonical spelling. Windows
+/// canonical paths retain their verbatim prefix in those components.
 #[test]
 fn path_prints_the_four_labeled_surfaces_of_one_task() {
     let dir = tempfile::tempdir().unwrap();
@@ -395,48 +402,47 @@ fn path_prints_the_four_labeled_surfaces_of_one_task() {
         "the fourth line is the content index"
     );
 
-    let tail_report = format!("/.onlyne/out/{task}.md");
-    let tail_log = format!("/.onlyne/logs/session-{task}.log");
-    let tail_events = format!("/.onlyne/logs/session-{task}.events.jsonl");
-    let tail_content = "/.onlyne/logs/content.index.jsonl".to_string();
+    let tail_report = Path::new(".onlyne").join("out").join(format!("{task}.md"));
+    let tail_log = Path::new(".onlyne")
+        .join("logs")
+        .join(format!("session-{task}.log"));
+    let tail_events = Path::new(".onlyne")
+        .join("logs")
+        .join(format!("session-{task}.events.jsonl"));
+    let tail_content = Path::new(".onlyne")
+        .join("logs")
+        .join("content.index.jsonl");
     assert!(
-        report_path.ends_with(&tail_report),
+        Path::new(report_path).ends_with(&tail_report),
         "the report line names the task's closing file: {report_path}"
     );
     assert!(
-        log_path.ends_with(&tail_log),
+        Path::new(log_path).ends_with(&tail_log),
         "the log line names the rendered transcript: {log_path}"
     );
     assert!(
-        events_path.ends_with(&tail_events),
+        Path::new(events_path).ends_with(&tail_events),
         "the events line names the raw journal: {events_path}"
     );
     assert!(
-        content_path.ends_with(&tail_content),
+        Path::new(content_path).ends_with(&tail_content),
         "the content line names the role-wide index: {content_path}"
     );
 
-    let root_report = report_path
-        .strip_suffix(tail_report.as_str())
-        .expect("the report line carries its full relative tail");
-    let root_log = log_path
-        .strip_suffix(tail_log.as_str())
-        .expect("the log line carries its full relative tail");
-    let root_events = events_path
-        .strip_suffix(tail_events.as_str())
-        .expect("the events line carries its full relative tail");
-    let root_content = content_path
-        .strip_suffix(tail_content.as_str())
-        .expect("the content line carries its full relative tail");
+    let root_report = root_before_suffix(Path::new(report_path), &tail_report);
+    let root_log = root_before_suffix(Path::new(log_path), &tail_log);
+    let root_events = root_before_suffix(Path::new(events_path), &tail_events);
+    let root_content = root_before_suffix(Path::new(content_path), &tail_content);
     assert!(
-        !root_report.is_empty(),
+        !root_report.as_os_str().is_empty(),
         "the shared workspace root is a real directory path"
     );
     assert!(
         [root_log, root_events, root_content]
             .iter()
-            .all(|&r| r == root_report),
-        "all four paths hang off one workspace root: {root_report}"
+            .all(|r| *r == root_report),
+        "all four paths hang off one workspace root: {}",
+        root_report.display()
     );
 }
 

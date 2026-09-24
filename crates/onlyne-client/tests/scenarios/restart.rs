@@ -505,6 +505,31 @@ async fn mount_when_ready(socket: &Path) -> (AdapterIo, UnboundedReceiver<String
     panic!("the role socket never admitted a plugin: {socket:?}");
 }
 
+/// Mount the restarted client and wait for the assignment this scenario owns.
+///
+/// A connection that closes before the assignment arrives cannot prove which
+/// client owns the task, so it is released and another mount is attempted. The
+/// bound gives a slower Windows runner time to dispatch after the restarted
+/// client's handshake and link setup.
+async fn mount_for_assignment(socket: &Path, task: &str) -> (AdapterIo, String) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Ok((io, mut assigns)) = try_mount(socket).await {
+                if let Some(assigned) = assigns.recv().await {
+                    assert_eq!(
+                        assigned, task,
+                        "the mounted client received the expected task"
+                    );
+                    return (io, assigned);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the restarted client did not assign task {task}"))
+}
+
 async fn try_mount(socket: &Path) -> Result<(AdapterIo, UnboundedReceiver<String>), ()> {
     let stream = connect_local(socket).await.map_err(|_| ())?;
     let (io, mut inbound) =
@@ -648,7 +673,9 @@ async fn a_restart_drains_the_work_left_in_flight() {
 ///
 /// The first process runs a turn and dies there. The restart claims nothing, so its
 /// hello requeues the row the dead link left in flight, the pull hands it back, and
-/// the agent that mounts on the restarted socket beats and completes for it.
+/// the agent that mounts on the restarted socket beats and completes for it. The
+/// assignment is the live proof that the re-dispatched row reached the new client;
+/// its completion, stored turn, and settled server row are the durable proof.
 #[tokio::test]
 async fn a_restart_re_dispatching_a_row_of_its_own_runs_the_task() {
     let task = onlyne_proto::new_task_id();
@@ -671,6 +698,7 @@ async fn a_restart_re_dispatching_a_row_of_its_own_runs_the_task() {
     assert_eq!(assigned, task, "the row reached the first agent");
     ran_a_turn(&io, &task).await;
     first.abort();
+    first.await.expect_err("the first client was aborted");
     drop(io);
     // The dead process's socket name outlives it, because the acceptor serving it
     // was spawned and is not cancelled with the run. Clearing the name is what makes
@@ -681,11 +709,7 @@ async fn a_restart_re_dispatching_a_row_of_its_own_runs_the_task() {
     // the hello requeues the row the dead link left in flight and the pull is what
     // brings it back.
     let second = tokio::spawn(onlyne_client::run(fixture.init.clone()));
-    let (io, mut assigns) = mount_when_ready(&fixture.socket).await;
-    let assigned = tokio::time::timeout(Duration::from_secs(10), assigns.recv())
-        .await
-        .expect("the restart re-dispatches the row")
-        .expect("the plugin connection stays open");
+    let (io, assigned) = mount_for_assignment(&fixture.socket, &task).await;
     assert_eq!(
         assigned, task,
         "the re-dispatched row reached the restarted agent"

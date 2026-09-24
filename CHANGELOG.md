@@ -51,6 +51,14 @@ where it is read.
 
 Every live reading quoted in this section comes from one deployment's acceptance record,
 `docs/live-evidence-1.4.0.md`, kept here so the evidence outlives the machine it was collected on.
+- cli: the four shipped handbooks are regular files, not symlinks. They pointed into this
+  repository's own `skills/` and `.agents/skills/` trees, which keeps one copy per document on a
+  Unix checkout; a checkout without symlink support writes the link target's path into a plain file,
+  so the Windows build exported a "handbook" that was one line of relative path. Each document now
+  ships as its own file, and a test reads the repository's copy and asserts the two are identical, so
+  the single source survives as a rule rather than as a link.
+- plugin: `pi-onlyne` 1.2.0, carrying the `onlyne_handoff` tool and the assignment header's hop and
+  budget from this window.
 
 ### Breaking
 
