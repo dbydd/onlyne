@@ -22,12 +22,18 @@ use onlyne_store::{Append, LedgerRow};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 
-/// How often [`spawn_expiry_sweep`] settles queued notes past their deadline.
+/// How often [`spawn_expiry_sweep`] settles queued rows past their time budget.
 ///
-/// A note carries its lifetime in `Envelope::ttl_ms`, a millisecond budget, and
-/// the plan settles an elapsed one as `expired` (plan line 505). One second
-/// bounds the overshoot of the shortest ttl a sender can usefully express.
+/// A note carries its lifetime in `Envelope::ttl_ms`. A deliverable queued for
+/// an offline role carries the requeue TTL. One second bounds the overshoot of
+/// the shortest note lifetime a sender can usefully express.
 pub const SWEEP_INTERVAL_MS: u64 = 1000;
+
+/// Deliverable kinds whose queued rows wait for a role pull.
+///
+/// A note is absent because `pull` never returns one and the sender's
+/// `ttl_ms` deadline owns its lifetime.
+const PULLABLE_KINDS: [MsgKind; 3] = [MsgKind::Task, MsgKind::Completion, MsgKind::Control];
 
 /// the `[[route]]` key set, appended to every route miss so the answer states
 /// the row shape the matcher wanted beside the row it could not find.
@@ -905,10 +911,12 @@ pub fn disconnect(state: &State, role: &str) -> anyhow::Result<usize> {
     Ok(requeued)
 }
 
-/// Settle every queued note whose deadline passed.
+/// Settle queued rows whose time budget elapsed.
 ///
 /// `ServerLedger::expire_one` writes the row and its `ledger_state` event in one
-/// transaction, so the observation plane sees each expiry exactly once.
+/// transaction, so the observation plane sees each expiry exactly once. Notes
+/// use their sender's deadline. Deliverables use the requeue TTL and expire
+/// only while their recipient role has no live connection.
 pub fn sweep_expired(state: &State, now: DateTime<Utc>) -> anyhow::Result<Vec<String>> {
     let mut expired = Vec::new();
     for msg_id in state.due_expiries(now) {
@@ -921,6 +929,59 @@ pub fn sweep_expired(state: &State, now: DateTime<Utc>) -> anyhow::Result<Vec<St
                 state.forget_expiry(&msg_id);
             }
             Err(error) => return Err(error.into()),
+        }
+    }
+    expired.extend(expire_undeliverable_rows(state, now)?);
+    Ok(expired)
+}
+
+/// Expire deliverable rows that reached the queue without a puller.
+fn expire_undeliverable_rows(state: &State, now: DateTime<Utc>) -> anyhow::Result<Vec<String>> {
+    let spec = state.spec_snapshot().context("the spec is unavailable")?;
+    let ttl_secs = spec.server.requeue_ttl_secs;
+    if ttl_secs == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut expired = Vec::new();
+    for entry in &spec.client {
+        let role = &entry.role;
+        if state.is_connected(role) {
+            continue;
+        }
+        let rows = state.ledger.queued_for(role, 500)?;
+        for row in rows {
+            if !PULLABLE_KINDS.contains(&row.kind) {
+                continue;
+            }
+            // A positive count means the row was handed out and came back. Its
+            // automatic-requeue gate owns that row.
+            if row.requeued != 0 {
+                continue;
+            }
+            let Some(age_secs) = row_age_secs(&row.enqueued_at, now) else {
+                continue;
+            };
+            if age_secs <= ttl_secs
+                || state.is_connected(role)
+                || state.delivery_ticket(&row.msg_id).is_some()
+            {
+                continue;
+            }
+            match state.ledger.expire_one(&row.msg_id, REQUEUE_TTL_REASON) {
+                Ok(_) => {
+                    tracing::info!(
+                        msg_id = %row.msg_id,
+                        task = %row.task.as_deref().unwrap_or("<none>"),
+                        role = %role,
+                        age_secs,
+                        "queued delivery expired after its recipient role stayed offline"
+                    );
+                    expired.push(row.msg_id);
+                }
+                Err(onlyne_store::StoreError::InvalidState { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
     }
     Ok(expired)

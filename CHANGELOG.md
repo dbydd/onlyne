@@ -284,6 +284,18 @@ where it is read.
   dump is byte-identical), reusing the filter the interactive `a` toggles:
   `onlyne-tui --server-root <root> --once --page 2 --state all` prints a plain-text frame, so an
   operator can read a settled row's `reason` in one command. That frame renders at a fixed 120x36.
+- tui: `a` is the board's whole view. The key moved the session-visibility half while the history feed
+  kept the state it already had, so the two could sit at different answers — reachable by pressing `a`
+  after a `--state all` dump's view, or after `f` moved the history on its own. One press now lands both
+  halves on the other view, and `f` stays the history feed's own state control. The words `--state`
+  accepts are unchanged and a flagless dump is unchanged.
+- server: a queued delivery ages out when its role stays offline. A `Task`, `Completion`, or `Control`
+  row that reached the queue without a puller — its recipient role has no live connection, and no
+  attempt ever accrued on it — waited forever, because the delivery budget only covers rows that were
+  handed out and came back. Such a row now passes the operator's budget, `[server].requeue_ttl_secs`,
+  and lands `expired` with reason `requeue_ttl` and one log line naming the row, its task, the role
+  that never came, and the age it waited. `0` leaves today's behaviour as it is. Notes stay with the
+  sender's own `ttl_ms` deadline, and a returned delivery keeps its existing attempts-and-TTL path.
 - server: the ghost sweep leaves a task's completion receipts alone. The pass settles the open rows of
   a task whose ledger row already carries a verdict, and a completion is one of them: the sweep's
   refusal turned the receipt into `rejected`, and the verdict a reader looks for lives in that row's

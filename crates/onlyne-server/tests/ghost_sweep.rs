@@ -163,12 +163,11 @@ fn the_sweep_leaves_a_queued_completion_receipt_alone() {
         Some(Causality::root(task_id.clone())),
     )
     .expect("valid completion");
-    let receipt_id = match relay::send(&state, &receipt, false, Some("builder"))
-        .expect("the send ran")
-    {
-        RelayReply::Accepted(outcome) => outcome.receipt.msg_id,
-        other => panic!("the receipt was refused: {other:?}"),
-    };
+    let receipt_id =
+        match relay::send(&state, &receipt, false, Some("builder")).expect("the send ran") {
+            RelayReply::Accepted(outcome) => outcome.receipt.msg_id,
+            other => panic!("the receipt was refused: {other:?}"),
+        };
 
     let swept = ghosts::sweep_once(&state).expect("one pass");
     assert_eq!(swept.len(), 1, "the fossil is still the row the pass moves");

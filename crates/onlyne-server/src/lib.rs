@@ -82,7 +82,7 @@ pub async fn serve(state: Arc<crate::state::State>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Settle queued notes whose deadline passed, one tick per interval.
+/// Settle queued rows whose time budget elapsed, one tick per interval.
 ///
 /// A failed sweep is logged and the next tick retries it (plan §5 line 270's
 /// failure rule for periodic work): the armed deadlines stay in place until
@@ -96,7 +96,7 @@ pub fn spawn_expiry_sweep(state: Arc<crate::state::State>) -> tokio::task::JoinH
             ticker.tick().await;
             match relay::sweep_expired(&state, chrono::Utc::now()) {
                 Ok(expired) if !expired.is_empty() => {
-                    tracing::info!(count = expired.len(), "expired queued notes");
+                    tracing::info!(count = expired.len(), "expired queued rows");
                 }
                 Ok(_) => {}
                 Err(error) => tracing::warn!(error = %error, "the expiry sweep failed"),

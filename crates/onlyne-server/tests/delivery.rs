@@ -14,7 +14,7 @@ use onlyne_proto::{
 use onlyne_server::state::{ChannelBinding, DeliveryTicket, RoleConnection, Server, ServerInit};
 use onlyne_server::{events, faults, gateway_host, projection, relay, router, stale};
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 const CERT_PIN: &str = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -249,6 +249,38 @@ fn ledger_state_events(state: &Arc<onlyne_server::State>) -> Vec<onlyne_proto::E
         .into_iter()
         .filter(|row| row.event.type_name() == "ledger_state")
         .collect()
+}
+
+#[derive(Clone, Default)]
+struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("log capture lock")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogCapture {
+    type Writer = Self;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl LogCapture {
+    fn contents(&self) -> String {
+        String::from_utf8(self.0.lock().expect("log capture lock").clone())
+            .expect("captured logs are utf-8")
+    }
 }
 
 fn assert_not_internal(body: &ResBody) {
@@ -1809,6 +1841,127 @@ fn sweep_expired_settles_a_queued_note_and_emits() {
     assert_eq!(expired, vec![outcome.receipt.msg_id.clone()]);
     assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Expired);
     assert!(fixture.state.event_head() > head_before);
+}
+
+#[test]
+fn sweep_expires_an_over_age_task_for_an_offline_role_and_logs_it() {
+    let fixture = fixture_with(&spec_text_with_requeue(0, 1));
+    let queued_at = chrono::DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("a timestamp");
+    let mut envelope = task("planner", "builder", "work");
+    envelope.ts = queued_at;
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id;
+    let task_id = outcome.receipt.task.expect("task id");
+    let before = ledger_state_events(&fixture.state).len();
+    let capture = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .without_time()
+        .with_target(false)
+        .with_writer(capture.clone())
+        .finish();
+    let _default = tracing::subscriber::set_default(subscriber);
+
+    let expired = relay::sweep_expired(&fixture.state, queued_at + chrono::Duration::seconds(2))
+        .expect("sweep");
+
+    assert_eq!(expired, vec![msg_id.clone()]);
+    let row = ledger_rows(&fixture.state)
+        .into_iter()
+        .find(|row| row.msg_id == msg_id)
+        .expect("row");
+    assert_eq!(row.state, LedgerState::Expired);
+    assert_eq!(row.reason.as_deref(), Some(relay::REQUEUE_TTL_REASON));
+    let events = ledger_state_events(&fixture.state);
+    assert_eq!(events.len(), before + 1);
+    match &events.last().expect("expiry event").event {
+        Event::LedgerState(event) => {
+            assert_eq!(event.msg_id, msg_id);
+            assert_eq!(event.state, LedgerState::Expired);
+            assert_eq!(event.reason.as_deref(), Some(relay::REQUEUE_TTL_REASON));
+        }
+        other => panic!("expected ledger_state, got {other:?}"),
+    }
+    let logs = capture.contents();
+    assert!(
+        logs.contains("queued delivery expired after its recipient role stayed offline"),
+        "{logs}"
+    );
+    assert!(
+        logs.contains(&format!(
+            "msg_id={msg_id} task={task_id} role=builder age_secs=2"
+        )),
+        "{logs}"
+    );
+}
+
+#[test]
+fn sweep_keeps_a_task_for_an_offline_role_inside_the_requeue_ttl() {
+    let fixture = fixture_with(&spec_text_with_requeue(0, 2));
+    let queued_at = chrono::DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("a timestamp");
+    let mut envelope = task("planner", "builder", "work");
+    envelope.ts = queued_at;
+    accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+
+    let expired = relay::sweep_expired(&fixture.state, queued_at + chrono::Duration::seconds(2))
+        .expect("sweep");
+
+    assert!(expired.is_empty());
+    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Queued);
+}
+
+#[test]
+fn sweep_with_zero_requeue_ttl_leaves_a_queued_task_for_an_offline_role() {
+    let fixture = fixture_with(&spec_text_with_requeue(0, 0));
+    let queued_at = chrono::DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("a timestamp");
+    let mut envelope = task("planner", "builder", "work");
+    envelope.ts = queued_at;
+    accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+
+    let expired = relay::sweep_expired(&fixture.state, queued_at + chrono::Duration::seconds(60))
+        .expect("sweep");
+
+    assert!(expired.is_empty());
+    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Queued);
+}
+
+#[test]
+fn sweep_leaves_a_queued_note_for_an_offline_role_to_its_ttl() {
+    let fixture = fixture_with(&spec_text_with_requeue(0, 1));
+    let mut envelope = note("planner", "builder", "fyi");
+    envelope.ts = chrono::DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("a timestamp");
+    accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+
+    let expired = relay::sweep_expired(&fixture.state, envelope.ts + chrono::Duration::seconds(60))
+        .expect("sweep");
+
+    assert!(expired.is_empty());
+    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Queued);
+}
+
+#[test]
+fn sweep_leaves_an_over_age_task_for_a_connected_role() {
+    let fixture = fixture_with(&spec_text_with_requeue(0, 1));
+    let queued_at = chrono::DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("a timestamp");
+    let mut envelope = task("planner", "builder", "work");
+    envelope.ts = queued_at;
+    accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let (sender, _outbound) = tokio::sync::mpsc::channel(1);
+    fixture.state.register_role(RoleConnection {
+        role: "builder".to_string(),
+        sender,
+        last_seq: 0,
+        connected_at: queued_at,
+        draining: false,
+        generation: 0,
+    });
+
+    let expired = relay::sweep_expired(&fixture.state, queued_at + chrono::Duration::seconds(60))
+        .expect("sweep");
+
+    assert!(expired.is_empty());
+    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Queued);
 }
 
 #[test]
