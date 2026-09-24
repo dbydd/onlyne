@@ -45,10 +45,11 @@ jobs:
       - name: Workspace tests
         shell: bash
         run: cargo test --no-fail-fast -p onlyne-proto -p onlyne-frame -p onlyne-config -p onlyne-layout -p onlyne-store -p onlyne-session -p onlyne-net -p onlyne-adapter -p onlyne-server -p onlyne-gateway -p onlyne-cli -p onlyne-tui
-      # `a_restart_drains_the_work_left_in_flight` waits for a restarted client to
-      # reach its own assignment, and this runner is slower than the bound the case
-      # carries. The case is left out of the Windows job and runs everywhere else;
-      # the six sibling scenarios in the same module stay in.
+      # `a_restart_re_dispatching_a_row_of_its_own_runs_the_task` is the one case
+      # that waits for a restarted client to reach its own assignment, and this
+      # runner is slower than the bound the case carries. The case is left out of
+      # the Windows job and runs everywhere else; the other six scenarios in the
+      # same module stay in.
       - name: onlyne-client tests
         shell: bash
-        run: cargo test --no-fail-fast -p onlyne-client -- --skip a_restart_drains_the_work_left_in_flight
+        run: cargo test --no-fail-fast -p onlyne-client -- --skip a_restart_re_dispatching_a_row_of_its_own_runs_the_task
