@@ -8,6 +8,8 @@ use onlyne_adapter::{AdapterIo, IncomingFrame};
 #[cfg(unix)]
 use onlyne_layout::RoleWorkspace;
 #[cfg(unix)]
+use onlyne_net::NetError;
+#[cfg(unix)]
 use onlyne_proto::adapter::HandoffArgs;
 #[cfg(unix)]
 use onlyne_proto::{
@@ -15,8 +17,6 @@ use onlyne_proto::{
     HelloArgs, Mount, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp, Principal, Report, ResBody,
     new_envelope, new_task_id,
 };
-#[cfg(unix)]
-use onlyne_net::NetError;
 #[cfg(unix)]
 use onlyne_session::TaskState;
 #[cfg(unix)]
@@ -28,9 +28,9 @@ use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::future::Future;
 #[cfg(unix)]
-use std::pin::Pin;
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::pin::Pin;
 #[cfg(unix)]
 use std::sync::Arc;
 #[cfg(unix)]
@@ -243,11 +243,9 @@ async fn a_local_completion_settles_the_task_and_publishes_only_its_projection()
     let staged = staged(dir.path()).await;
     staged.state.attach_msg_id(&staged.task, "msg-local");
     let frames = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    staged
-        .state
-        .attach_outbox(Arc::new(CaptureOutbox {
-            frames: Arc::clone(&frames),
-        }));
+    staged.state.attach_outbox(Arc::new(CaptureOutbox {
+        frames: Arc::clone(&frames),
+    }));
 
     let (io, _inbound) = mounted(&staged.socket, &staged.task).await;
     let beat = io
@@ -299,7 +297,10 @@ async fn a_local_completion_settles_the_task_and_publishes_only_its_projection()
         Frame::Res { body, .. } => body,
         other => panic!("the local completion is answered by a response: {other:?}"),
     };
-    assert!(response.ok, "the local completion is accepted: {response:?}");
+    assert!(
+        response.ok,
+        "the local completion is accepted: {response:?}"
+    );
 
     let task = staged
         .store
@@ -320,7 +321,9 @@ async fn a_local_completion_settles_the_task_and_publishes_only_its_projection()
 
     let sent = frames.lock().clone();
     assert!(
-        !sent.iter().any(|op| matches!(op, ClientOp::Report(Report::Complete { .. }))),
+        !sent
+            .iter()
+            .any(|op| matches!(op, ClientOp::Report(Report::Complete { .. }))),
         "the local surface never forwards a raw completion report: {sent:?}"
     );
     assert!(sent.iter().any(|op| matches!(
