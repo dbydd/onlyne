@@ -235,6 +235,41 @@ mod tests {
         }
     }
 
+    /// The crate carries a real copy of every document, and the repository's own
+    /// copy is the same bytes.
+    ///
+    /// The documents used to be symlinks into the repository tree, and a checkout
+    /// without symlink support writes the link target's path into a plain file — so
+    /// a Windows build compiled a "document" that was one line of relative path,
+    /// and three tests failed on the bytes it carried. A regular file per document
+    /// fixes that, and this test keeps the two copies from drifting. It reads the
+    /// repository's path, so a packaged crate without the tree beside it has
+    /// nothing to compare and says so.
+    #[test]
+    fn the_crate_copies_are_the_repository_copies() {
+        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for skill in &SHIPPED {
+            let relative = match skill.name {
+                "onlyne" => "../../.agents/skills/onlyne/SKILL.md".to_string(),
+                other => format!("../../skills/{other}/SKILL.md"),
+            };
+            let repository = crate_dir.join(relative);
+            let Ok(expected) = std::fs::read_to_string(&repository) else {
+                eprintln!(
+                    "{} has no repository copy at {}; the crate's bytes stand alone here",
+                    skill.name,
+                    repository.display()
+                );
+                continue;
+            };
+            assert_eq!(
+                skill.body, expected,
+                "{} differs from the repository's copy; the two are one document",
+                skill.name
+            );
+        }
+    }
+
     /// `--dest` wins over the working directory.
     #[test]
     fn a_named_destination_stands() {
