@@ -25,17 +25,16 @@ id，handoff 时要用它。
 
 ## 3. K 小于 TOTAL：交给下一个字母
 
-任务文本一字不改，只把 `K=` 的数字加一。照抄下面这条命令，把三个值换成实际值：
+任务文本一字不改，只把 `K=` 的数字加一。调用 pi 插件工具 `onlyne_handoff`，把下一个字母和
+新的任务文本填入：
 
-    {{onlyne_cli}} --workspace "$PWD" handoff --to <NEXT> --task <ID> \
-        --text "RING=<原文> FILE=<原文> K=<K+1> TOTAL=<原文>" \
-        --force --yes-i-am-supervisor-not-other-role
+    onlyne_handoff{to: "<NEXT>", text: "RING=<原文> FILE=<原文> K=<K+1> TOTAL=<原文>"}
 
-`<NEXT>` 是下一个字母，`<ID>` 是第 1 步那个任务 id，`<K+1>` 是加一后的数字，
-`<原文>` 是任务文本里对应字段等号后面的值。看到 `queued task` 或 `task` 的 JSON 回答
-就算派完，本轮结束。不要再输出别的文字。
+`<NEXT>` 是下一个字母，`<K+1>` 是加一后的数字，`<原文>` 是任务文本里对应字段等号后面的值。
+工具回答 `queued task` 或 `task` 后，本轮结束。不要再输出别的文字。
 
-两个旗标是这句话的声明：这一跳走 CLI 门，那道门立在插件会话之外。
+`onlyne_handoff` 延续当前任务家族，插件从任务头读取 parent task、hop、budget、origin、deadline
+和 labels。
 
 ## 4. K 等于 TOTAL：收尾
 

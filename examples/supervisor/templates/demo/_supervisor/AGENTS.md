@@ -15,6 +15,8 @@
 - 运维：`server status`、`server reload`、`server stop`。环上的 client 进程由 driver
   前台拉起（`onlyne-client run --workspace <角色 workspace>`，日志在
   `<角色 workspace>/.onlyne/logs/`），你不开关它们。
+- TUI 单帧：`onlyne tui --server-root <root> --once --page 1 --state active` 查看活动网络，
+  `--page 2 --state all` 查看已结清 session、账本行和 `reason` 字段。
 
 ## 一轮流水灯
 

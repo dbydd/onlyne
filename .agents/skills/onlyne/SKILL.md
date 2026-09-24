@@ -13,10 +13,12 @@ working on the repo.
 shipped documents to `<dest>/<name>/SKILL.md`, and `<dest>` defaults to `.agents/skills` under
 the working directory: `onlyne-supervisor`, `onlyne-role`, `onlyne-role-payload-v2`, and
 `onlyne`, this file, which `--set dev` selects. The bytes are compiled into `onlyne-cli`
-(`include_str!` in `crates/onlyne-cli/src/skill.rs`, over the four symlinks under
+(`include_str!` in `crates/onlyne-cli/src/skill.rs`, over the four regular files under
 `crates/onlyne-cli/skills/`), so an installed binary answers with the skills of its own version,
-over no network and with no checkout. A file whose bytes already match is reported `unchanged`
-and left alone; a differing file stops the run before any write, with exit 4 and
+over no network and with no checkout. Regular files keep the packaged manuals intact across
+checkout and archive tools, and `the_crate_copies_are_the_repository_copies` asserts that every
+compiled copy is byte-identical to its source manual. A destination file whose bytes already
+match is reported `unchanged` and left alone; a differing file stops the run before any write, with exit 4 and
 `onlyne: refusing to overwrite <path>; pass --force`; `--force` rewrites it.
 
 ## Product boundary (AGENTS.md §0)
@@ -136,7 +138,11 @@ Retirement invariant an editor keeps: a session's host resource (pane, tab, zell
 
 The accept gate decides what a delivery the pull brought meets. A gate shut because the link left `Ready` leaves that row in flight: the client answers nothing, and the next `hello` that does not claim the row is what puts it back on the server's queue (`accept_delivery` in `onlyne-client/src/runtime/runloop/sessions.rs`). The client's own refusal (`accepted: false`) settles a row `rejected`, and that terminal answer is kept for work this client cannot serve at all, such as a pane backend meeting a protocol-speaking command.
 
-A plugin connection that drops gets `[client] reconnect_grace_secs` to come back, and a session still gone when the window closes is retired by the sweep: its bound task settles `failed`, its delivery row takes the refusal `session_dead` (`SESSION_DEAD`, `onlyne-client/src/session/dispatch/retire.rs`), and the session's own exit travels the report an ordinary ending travels, so the server's mirrored row reads `exited` in the same tick.
+A task-bound unsettled session is retired after either a dropped connection exceeds
+`[client] reconnect_grace_secs` or an attached transport accepts no frame for three heartbeat
+intervals. Both arms settle the bound task `failed`, refuse its delivery row with
+`session_dead` (`SESSION_DEAD`, `onlyne-client/src/session/dispatch/retire.rs`), close the host
+resource, and publish the exit, so the server's mirrored row reads `exited` in the same tick.
 
 A pane backend refuses a protocol-speaking command before it spawns: `reject_protocol_command_in_pane` runs on `herdr`, `orca`, and `zellij` once the `{session}`/`{task}` tokens are rendered and before `backend.spawn`, and it fires when the argv holds `--acp`, `--mode=rpc`, or `--mode` followed by `rpc`. The correction belongs in the workspace config; an editor that swaps the backend at spawn time hides a mis-set config behind a silent drift, so the delivery fails and the reason reaches the ledger. Nothing opens: no pane, no process, the task row lands `rejected`, and the row's `reason` carries the whole sentence, byte for byte — `{backend} backend cannot host a protocol session: {token} speaks JSON-RPC on its own stdio and the pane would print the frames; set backend = "exec" or backend = "acp" in the workspace config`. The client hands that text to the server as the refusal reason on the delivery's settle intent (`push_settled` in `onlyne-client/src/session/dispatch/slots.rs` → `store_ack` in `onlyne-client/src/session/dispatch/outbound.rs`, answered by `relay::ack`), and the server writes it into the row through `mark_rejected` (`onlyne-store/src/server.rs`), which is where the operator reads it.
 
@@ -161,9 +167,12 @@ Cases 1-7, 9, 12, and 14-17 run on `ONLYNE_BACKEND=fake`, and cases 18 and 19 na
 `backend = "acp"` with that scripted agent. Case 8 of the plan is the static gate above, which
 is why no script carries its number.
 
-Measured on 2026-09-23 from the repository root with `ONLYNE_BIN_DIR=target/release`
-(`lib.sh` derives `BIN_DIR` from `ONLYNE_BIN_DIR`, and `target/debug` is its default), one
-script after another:
+The final release-window e2e record in `docs/live-evidence-1.4.0.md` reports 19/19 scripts
+green. The release commit's local workspace gate in `Devlogs.md` reports 1101 passed, 0 failed,
+and 1 ignored across 69 targets.
+
+The earlier 2026-09-23 sweep from the repository root with `ONLYNE_BIN_DIR=target/release`
+(`lib.sh` derives `BIN_DIR` from `ONLYNE_BIN_DIR`, and `target/debug` is its default) was:
 
 ```text
 local-task 0            acl-reject 0          idempotency 0       reconnect-requeue 0
@@ -173,16 +182,8 @@ acp-session 0           orca-live 0           pi-live 1           running-lights
 acp-payload-v2 0        herdr-live 0 (SKIP)
 ```
 
-Sixteen exited 0. `pi-live` exited 1 on a red assertion: its task settles `acked` while its
-session projects `working` for the rest of its life, because a completion's settle write loses
-the session watermark to a plugin beat that landed between its read and its write (`session
-write lost to a newer watermark`, `crates/onlyne-session/src/reconcile/bridge.rs`), and the
-public lifecycle needs `delivery == Accepted` to read `exited`. `running-lights` and
-`acp-payload-v2` were red earlier the same day for one fixture assumption — a single
-`onlyne-agent-fake` serving a role's second session — and both mount one agent per session now
-(13 s and 5 s on this tree). `herdr-live` printed `SKIP herdr-live: no reachable herdr session
-onlyne-test`, its default session name on this host, and exited 0. `orca-live` ran against the
-live Orca app and exited 0.
+This dated sweep preceded the final release fixes. Its result remains historical evidence; the
+final 19/19 record and the separate 1101/69 release gate above are the current readings.
 
 A bug fix needs its reproduction as an e2e or a table test:
 red before the fix, green after. The live ring demo

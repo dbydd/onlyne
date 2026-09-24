@@ -29,7 +29,7 @@ onlyne_complete{outcome, text}
 ```
 
 The CLI verbs that speak for a role — `send`, `reply`, `handoff`, `complete`, `ack`, `reject`,
-`control` — refuse a call that carries neither `--force` nor
+`control` — refuse a call missing either `--force` or
 `--yes-i-am-supervisor-not-other-role`, because that door stands outside a plugin session and a
 verdict written there answers for a session the plugin is still serving. An `exec` session mounts
 no plugin, so it runs the CLI form and declares itself with both flags:

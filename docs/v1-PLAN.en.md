@@ -528,12 +528,11 @@ Prerequisites: `cargo build --workspace`; `cd crates/onlyne-testkit && cargo bui
 - Real platform credentials do not enter the repository: end-to-end verification for the four platform gateways follows S9 with `FakeGateway` + the platform `check()` dry-run.
 - The `onlyne-agent-fake` binary is not counted in D17: it is a testkit artifact and is not released (exclude it with `--exclude` before `cargo publish`).
 - If removing automatic redelivery from the migrated `lifecycle.rs` in S3 leaves a dead state (for example, `DeliveryState::Exhausted` has no exit), do not add an automatic transition: retain `Exhausted` as a terminal state and have the supervisor explicitly `retry` it through `control`.
-
 ---
 
 # English executive mirror
 
-This section is an English overview of the detailed design plan above. The Chinese source at `docs/v1-PLAN.md` is the authoritative detailed reference; if wording differs, follow that Chinese source.
+This section is an English overview of the Chinese design plan above. The Chinese plan is the authoritative detailed reference; if wording differs, follow the Chinese plan.
 
 ## Purpose
 
@@ -574,10 +573,10 @@ The server ledger is keyed by message and `op_id`, with a fingerprint, causal fi
 
 ## Verification and compatibility
 
-The exact executable evidence is in the `## Verification` section above. Its cases cover single-machine task completion, ACL rejection, idempotency, disconnect recovery, two-cluster federation, gateway mounting, legacy-layout refusal, the static gate, generation/relocation, and headless e2e. The original commands, expected states, error strings, paths, and numeric readings are unchanged there.
+The exact executable evidence is in the Chinese `## Verification` section. Its cases cover single-machine task completion, ACL rejection, idempotency, disconnect recovery, two-cluster federation, gateway mounting, legacy-layout refusal, the static gate, generation/relocation, and headless e2e. The original commands, expected states, error strings, paths, and numeric readings are unchanged there.
 
 This is a clean cutover. A legacy workspace exits 2 with `onlyne: legacy workspace layout; v1.0.0 does not migrate`; an old schema marker is refused with `onlyne: unsupported schema; v1.0.0 does not migrate`. Old configuration keys, old wire versions, removed operations, and legacy layouts are not read as alternate forms. Protocol revision and schema changes use their version gates and explicit refusal behavior.
 
 ## English-to-Chinese navigation
 
-Use `## Context` for the current boundary, `## Locked decisions` for D1–D20, `## Target architecture` for process and data semantics, `## Approach` for implementation order, `## Verification` for executable cases, and `## Assumptions & contingencies` for explicit contingencies. The Chinese plan at `docs/v1-PLAN.md` remains the authoritative detailed design reference.
+Use `## Context` for the current boundary, `## Locked decisions` for D1–D20, `## Target architecture` for process and data semantics, `## Approach` for implementation order, `## Verification` for executable cases, and `## Assumptions & contingencies` for explicit contingencies. The Chinese plan remains the detailed design reference.
