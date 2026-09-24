@@ -6,7 +6,7 @@ use onlyne_tui::model::{
     Detail, Focus, FocusOutcome, KeyCmd, MAX_SPACING, MIN_SPACING, Page, Snapshot, StateView,
     UiState, cycle_edge, cycle_role, cycle_state, detail, focus_from, focus_message, interpret_key,
     location, nav_after, nav_step, pull, role_detail, role_edges, select_state_view, selected_role,
-    send_focus,
+    send_focus, toggle_state_view,
 };
 use onlyne_tui::socket::{NO_SOCKET_MESSAGE, SocketArgs, resolve_socket};
 use onlyne_tui::ui::{
@@ -267,7 +267,7 @@ fn handle_key(
             refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
         }
         KeyCmd::ToggleActive => {
-            state.active_only = !state.active_only;
+            toggle_state_view(state);
             clamp_cursor(
                 &mut state.graph_cursor,
                 graph_len(snapshot, state.active_only),

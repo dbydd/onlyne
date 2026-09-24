@@ -368,6 +368,24 @@ pub fn select_state_view(state: &mut UiState, view: StateView) {
     state.filter.reset_page();
 }
 
+/// The interactive `a` key: the whole board's view, both halves at once.
+///
+/// `a` is the one all/active control on this board, so it moves the history
+/// filter and the session views together; a reader who presses it after a
+/// `--state all` run, or after `f` left the history on another state, gets the
+/// view the key's name promises rather than half a change. `f` stays the history
+/// feed's own state control, which is the finer grain it has always been.
+/// Answers the view it selected.
+pub fn toggle_state_view(state: &mut UiState) -> StateView {
+    let next = if state.active_only {
+        StateView::All
+    } else {
+        StateView::Active
+    };
+    select_state_view(state, next);
+    next
+}
+
 #[derive(Clone, Debug)]
 pub struct UiState {
     pub page: Page,
@@ -1819,7 +1837,7 @@ mod tests {
         select_state_view(&mut state, StateView::All);
         assert_eq!(state.filter.state, StateView::All.word());
         let mut toggled = UiState::default();
-        toggled.active_only = !toggled.active_only;
+        toggle_state_view(&mut toggled);
         assert_eq!(
             state.active_only, toggled.active_only,
             "`all` lists the sessions one `a` shows"
@@ -1833,6 +1851,40 @@ mod tests {
         );
     }
 
+    /// `a` is the whole board's view: it moves the history filter and the
+    /// session views together, so the halves cannot sit at different answers.
+    ///
+    /// The shape that matters is a board whose halves disagree: `--state all`
+    /// at startup followed by `a`, or `f` leaving the history on another state
+    /// and then `a`. Either way one press lands both halves on the other view.
+    #[test]
+    fn the_a_key_moves_both_halves_of_the_view() {
+        let mut state = UiState::default();
+        assert_eq!(toggle_state_view(&mut state), StateView::All);
+        assert_eq!(state.filter.state, StateView::All.word());
+        assert!(
+            !state.active_only,
+            "one press past the default view lists every session"
+        );
+
+        assert_eq!(toggle_state_view(&mut state), StateView::Active);
+        assert_eq!(state.filter.state, StateView::Active.word());
+        assert!(
+            state.active_only,
+            "and the next press is back to the busy rows"
+        );
+
+        // The halves diverged: the history filter was moved on its own, which is
+        // what `f` does. The key answers the session half's next view, and the
+        // history half goes with it, so one press reconciles the two.
+        state.filter.state = "settled".to_string();
+        assert_eq!(toggle_state_view(&mut state), StateView::All);
+        assert_eq!(
+            state.filter.state,
+            StateView::All.word(),
+            "the key carries the history filter with it"
+        );
+    }
     #[test]
     fn focus_message_names_a_missing_socket() {
         assert_eq!(focus_message(&FocusOutcome::NoSocket), "focus: no socket");
