@@ -14,6 +14,9 @@ This file records engineering history and release evidence. User-facing installa
 - The npm package `pi-onlyne` is version 1.2.1. The crates.io upload for 1.4.1 has not run; the registry carries 1.4.0.
 - The local gate passed: formatting, clippy, and the workspace suite. The Linux and Windows CI jobs are both green on `main`.
 - The Windows CI job checks out with the repository's own line endings and skips `a_restart_re_dispatching_a_row_of_its_own_runs_the_task`, the one client scenario that waits for a restarted client to reach its own assignment inside a bound this runner does not meet.
+- A redundancy pass over the suite removed 92 cases: 73 Rust test functions, 6 pi-plugin cases, and 13 rows inside table-driven cases that re-covered a neighbouring row's path. The categories were tautologies (a pure function called twice, a compile-time constant asserted non-empty), declaration echoes (a constructor copying its argument, a default equalling what the struct already said), weaker twins of a case that pins the same contract on exact vectors, and duplicate rows. Everything that pins behaviour, a boundary, an invariant, a transition, precedence, or a real error shape stayed, and the verification cases, the wire-vector fixtures, the adapter conformance suite, and the areas `AGENTS.md` §14 names were protected outright. Seven read-only audits judged all 1034 cases one by one, with no sampling.
+- The current tree's local gate records 1029 passed, 0 failed, and 1 ignored across 68 targets, with `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- The herdr test binary's two warning-capture cases read a process-wide collector now. Each case used `tracing::subscriber::with_default`, a thread-local subscriber, while sibling tests in the same binary reached the same `tracing::warn!` callsite with no subscriber in place, and tracing caches a callsite's interest globally, so a parallel run could drop the rename-remedy line while the backend emitted it unconditionally. One global subscriber is installed once now, every collected line carries the thread that emitted it, and the empty capture that could let `a_found_workspace_emits_no_rename_remedy` pass for the wrong reason is gone. Forty consecutive runs of that target are green.
 
 ## v1.4.0 release window
 
@@ -64,6 +67,9 @@ The live acceptance record is `docs/live-evidence-1.4.0.md`. It contains the rea
 - npm package `pi-onlyne` 版本为 1.2.1。1.4.1 的 crates.io 上传尚未执行；registry 上仍是 1.4.0。
 - local gate 通过：formatting、clippy 和 workspace suite。`main` 上 Linux 与 Windows 两个 CI job 均为 green。
 - Windows CI job 以仓库自身的行尾检出，并跳过 `a_restart_re_dispatching_a_row_of_its_own_runs_the_task`：这是唯一一个等待重启后的 client 在自身时限内收到 assignment 的 client scenario，而这个 runner 达不到该时限。
+- 对测试套件做了一次冗余清理，删除 92 个用例：73 个 Rust test function、6 个 pi-plugin case，以及 13 行重复覆盖相邻行路径的表驱动行。删除对象分四类：同义反复（同一个纯函数被调用两次、编译期常量被断言非空）、声明回声（构造函数复制参数、默认值等于结构体已说明的内容）、某个用例的弱化孪生（后者在精确向量上钉住同一契约）、重复行。钉住行为、边界、不变量、状态迁移、优先级或真实错误形状的用例全部保留；verification cases、wire vector fixtures、adapter conformance suite 以及 `AGENTS.md` §14 点名的区域整类受保护。七个只读审计逐个判定全部 1034 个用例，没有抽样。
+- 当前 tree 的本地 gate 记录为 1029 passed、0 failed、1 ignored，分布于 68 targets；`cargo fmt --all --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 均干净。
+- herdr test binary 里两个读取告警的用例改为读取进程级收集器。两个用例原先用 `tracing::subscriber::with_default`（线程级 subscriber），而同一 binary 里的其他测试在无 subscriber 状态下触达同一个 `tracing::warn!` callsite，tracing 对 callsite 的 interest 缓存是全局的，于是并行运行时 rename remedy 那一行可能丢失，而 backend 本身无条件发出该告警。现在只安装一次全局 subscriber，每行记录同时带上发出它的线程，`a_found_workspace_emits_no_rename_remedy` 可能因空捕获而错误通过的问题随之消失。该 target 连续 40 次运行全绿。
 
 ### v1.4.0 发布窗口
 

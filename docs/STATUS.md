@@ -51,7 +51,9 @@ v1.3.0 (tag `v1.3.0`, `5fadaa8`) shipped nineteen crates at 1.3.0. The release t
 
 Counts come from the release-window verification recorded in `Devlogs.md`: 1101 passed, 0 failed,
 and 1 ignored across 69 targets. The release commit's Linux gate is green. Each line below covers
-one crate, with its libraries and integration targets summed.
+one crate, with its libraries and integration targets summed. The 2026-09-26 redundancy pass
+removed 92 cases from the tree after that reading; the current tree's gate records 1029 passed,
+0 failed, and 1 ignored across 68 targets.
 
 - [x] `onlyne-proto` green with envelope, frame variants, ops, errors, events, and the payload-v2 report grammar: 76 unit + 5 wire vectors (86 fixtures) + 2 sizes, where a wire vector is a recorded protocol fixture.
 - [x] `onlyne-acp` green with the ACP v1 client, its stdio transport, and the protocol fixtures: 40 unit + 14 scripted-peer + 1 doc example.
@@ -78,7 +80,7 @@ one crate, with its libraries and integration targets summed.
 
 ## Verification cases
 
-Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root. The directory holds eighteen case scripts besides `lib.sh`, the shared harness, and `acp-agent.py`, the scripted ACP peer cases 18 and 19 drive. The 2026-09-19 sweep is historical. The final release-window record in `docs/live-evidence-1.4.0.md` reports 19/19 scripts green; the release commit's local workspace gate in `Devlogs.md` reports 1101 passed, 0 failed, and 1 ignored across 69 targets. `running-lights` is the long one, and `gateway-mount` the quick one. Case 16 `exec-headless` joined the set for 1.1.0, and case 17 `socket-path-length` joined on 2026-09-17 as the field fix for the deep-workspace socket. Case 18 `acp-session` joins as the ACP backend proof: a real server and client against a scripted ACP agent as the role's `session_command`, so the case stands apart from the fake-backend set and from the live set. Case 19 `acp-payload-v2` joins beside it as the closing-report proof, where the closing report is the one file a settled task leaves. One acp role authors its report through the shipped `onlyne report` verbs, and a fake role receives what the client routes. The case asserts the routed child rows' `parent_task`, `hop + 1` (one hop deeper, where a hop is one step along the chain of handed-on tasks), literal `handoff: ` body prefix, and completion receipts. It then covers the three endings that must invent nothing: a relay (one handoff the client sends) to a role the ACL cannot reach records `handoff_denied` and creates no task; a `hop-blocked:` report settles failed with zero relays; and a malformed report cancels its turn while leaving the file for a rewrite that then checks valid. On a host without a live-case requirement, that case prints `SKIP` and exits 0, so a green line says "passed here" and a skip says "not exercised here".
+Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root. The directory holds eighteen case scripts besides `lib.sh`, the shared harness, and `acp-agent.py`, the scripted ACP peer cases 18 and 19 drive. The 2026-09-19 sweep is historical. The final release-window record in `docs/live-evidence-1.4.0.md` reports 19/19 scripts green; the release commit's local workspace gate in `Devlogs.md` reports 1101 passed, 0 failed, and 1 ignored across 69 targets, and the tree after the 2026-09-26 redundancy pass reports 1029 passed, 0 failed, and 1 ignored across 68 targets. `running-lights` is the long one, and `gateway-mount` the quick one. Case 16 `exec-headless` joined the set for 1.1.0, and case 17 `socket-path-length` joined on 2026-09-17 as the field fix for the deep-workspace socket. Case 18 `acp-session` joins as the ACP backend proof: a real server and client against a scripted ACP agent as the role's `session_command`, so the case stands apart from the fake-backend set and from the live set. Case 19 `acp-payload-v2` joins beside it as the closing-report proof, where the closing report is the one file a settled task leaves. One acp role authors its report through the shipped `onlyne report` verbs, and a fake role receives what the client routes. The case asserts the routed child rows' `parent_task`, `hop + 1` (one hop deeper, where a hop is one step along the chain of handed-on tasks), literal `handoff: ` body prefix, and completion receipts. It then covers the three endings that must invent nothing: a relay (one handoff the client sends) to a role the ACL cannot reach records `handoff_denied` and creates no task; a `hop-blocked:` report settles failed with zero relays; and a malformed report cancels its turn while leaving the file for a rewrite that then checks valid. On a host without a live-case requirement, that case prints `SKIP` and exits 0, so a green line says "passed here" and a skip says "not exercised here".
 
 - [x] Case 1 `local-task.sh`: single-machine fake-backend task reaches `acked`.
 - [x] Case 2 `acl-reject.sh`: ACL refusal emits `acl_denied`.
@@ -130,7 +132,7 @@ Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKE
 
 ### Crate 状态
 
-`Devlogs.md` 记录的 release-window 检查为：1101 passed、0 failed、1 ignored，分布于 69 targets。release commit 的 Linux gate 为 green。
+`Devlogs.md` 记录的 release-window 检查为：1101 passed、0 failed、1 ignored，分布于 69 targets。release commit 的 Linux gate 为 green。2026-09-26 的冗余清理在该读数之后从 tree 中删除 92 个用例；当前 tree 的 gate 记录为 1029 passed、0 failed、1 ignored，分布于 68 targets。
 
 - `onlyne-proto`：76 unit + 5 wire vectors（86 fixtures）+ 2 sizes。
 - `onlyne-acp`：40 unit + 14 scripted-peer + 1 doc example。
@@ -153,7 +155,7 @@ Wave 1、Wave 2、Wave 3 均已关闭。
 
 ### 验证用例
 
-用例位于 `crates/onlyne-testkit/e2e/`，从仓库根目录以 `ONLYNE_BACKEND=fake BIN_DIR=target/debug` 运行。2026-09-19 的 sweep 属于历史记录；`docs/live-evidence-1.4.0.md` 的最终 release-window 记录为 19/19 scripts green，release commit 的本地 workspace gate 为 1101 passed、0 failed、1 ignored、69 targets。缺少所需 live 条件时，相应 case 打印 `SKIP` 并以 0 退出。
+用例位于 `crates/onlyne-testkit/e2e/`，从仓库根目录以 `ONLYNE_BACKEND=fake BIN_DIR=target/debug` 运行。2026-09-19 的 sweep 属于历史记录；`docs/live-evidence-1.4.0.md` 的最终 release-window 记录为 19/19 scripts green，release commit 的本地 workspace gate 为 1101 passed、0 failed、1 ignored、69 targets，2026-09-26 冗余清理之后的 tree 为 1029 passed、0 failed、1 ignored、68 targets。缺少所需 live 条件时，相应 case 打印 `SKIP` 并以 0 退出。
 
 1. `local-task.sh`：单机 fake-backend task 到达 `acked`。
 2. `acl-reject.sh`：ACL 拒绝产生 `acl_denied`。
