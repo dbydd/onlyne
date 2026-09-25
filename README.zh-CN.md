@@ -56,19 +56,28 @@ cargo install \
 
 `onlyne-agent-fake` 是额外的源码/testkit 命令，不包含在这五个从 registry 安装的命令中。下面的 fake 快速路径会构建它。
 
-### 发行版二进制
+### 预编译二进制
 
-每个 tag 还带一个 GitHub Release，其中包含五个平台的归档、各自的 checksum 和合并后的
-`SHA256SUMS`。安装脚本会挑出本机归档，先与该列表比对，再写入二进制：
+发行 tag 带五个平台的归档、各自的 `.sha256`，以及合并后的 `SHA256SUMS`。安装脚本挑出本机
+归档，先与该列表比对，再写入二进制：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dbydd/onlyne/main/packaging/install.sh | sh
-# PREFIX=~/.local sh packaging/install.sh v1.4.1
+# PREFIX=~/.local sh packaging/install.sh v1.4.1   # 指定 tag，指定 prefix
 ```
 
-该发行版的 Homebrew formula 位于 [`packaging/homebrew/onlyne.rb`](packaging/homebrew/onlyne.rb)，
-由发布 pipeline 依据同一份 checksum 列表渲染。Homebrew 从 tap 读取 formula，因此
-`brew install` 通过一个把它放在 `Formula/onlyne.rb` 的 tap 来读取该文件。
+Homebrew 装的是同一批归档。发布 pipeline 依据该 release 自带的 checksum 渲染
+[`Formula/onlyne.rb`](Formula/onlyne.rb) 并提交回本仓库，所以本仓库就是 tap：
+
+```bash
+brew tap dbydd/onlyne https://github.com/dbydd/onlyne.git
+brew install dbydd/onlyne/onlyne
+```
+
+clone URL 是 tap 命令的一部分：Homebrew 会把短名 `dbydd/onlyne` 读成一个叫
+`homebrew-onlyne` 的仓库，那不是本仓库。
+
+五个二进制装进 Homebrew 的 prefix，`onlyne-gateway` 也在内，安装机上不需要 Rust toolchain。
 
 ### agent handbook
 

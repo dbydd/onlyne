@@ -40,11 +40,9 @@ The client unit is a template. `systemctl start onlyne-client@planner` runs the 
 
 ## Releases
 
-`github.com/dbydd/onlyne/.github/workflows/release.yml` describes a planned binary-release
-pipeline. It did not run for v1.4.0, so the registry packages are the current installation channel.
-For a future binary release, push a tag that names the workspace version — for example
-`git tag v1.4.0 && git push origin v1.4.0` — or run the workflow by hand with a `tag` input. Four
-jobs run in order:
+`.github/workflows/release.yml` is the binary-release pipeline, and it runs on every `v*` tag:
+push the tag that names the workspace version — `git tag v1.4.1 && git push origin v1.4.1` — or
+dispatch the workflow by hand with a `tag` input. Four jobs run in order:
 
 1. `verify` — the same gate as `ci.yml` (`cargo fmt --all --check`,
    `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`), plus a check
@@ -57,29 +55,32 @@ jobs run in order:
    emits itself, and writes a `.sha256` beside each archive. Every job installs `protoc`: the
    gateway plugins' default features pull `openlark`, whose build runs prost.
 3. `release` — publishes every archive, its checksum, and a combined `SHA256SUMS` to the GitHub
-   Release, creating it with generated notes when the tag has none.
-4. `formula` — renders `packaging/homebrew/onlyne.rb` from that release's checksums and commits it
-   back to `main`, so the committed formula always describes a release that exists.
+   Release, creating it with generated notes when the tag has none, and ends on a published
+   release: a tag that was deleted and pushed again leaves its release a draft, and a draft serves
+   no asset URL.
+4. `formula` — renders `Formula/onlyne.rb` from that release's checksums and commits it back to
+   `main`, so the committed formula always describes a release that exists.
 
 ## Homebrew
 
-The formula installs the prebuilt binaries, so a user needs no Rust toolchain. `onlyne-gateway` is
-one of the five, which is what makes `brew install onlyne` a complete install rather than a partial
-one. After the first release:
+The formula installs the prebuilt archives, so a machine needs no Rust toolchain. `onlyne-gateway`
+is one of the five, which is what makes the install complete rather than partial. This repository
+is the tap — `Formula/` is where Homebrew looks — and the clone URL is part of the tap command
+because the repository is not named `homebrew-onlyne`:
 
 ```sh
-brew install dbydd/onlyne/packaging/homebrew/onlyne.rb   # or a tap that carries the same file
+brew tap dbydd/onlyne https://github.com/dbydd/onlyne.git
+brew install dbydd/onlyne/onlyne
 ```
 
-The local `packaging/homebrew/onlyne.rb` still targets v1.3.1 and carries
-`REPLACE_ON_FIRST_RELEASE`; it is not a v1.4.0 installation source. A real release workflow run
-would render it from that release's checksums. `scripts/render-formula.py` is the only writer and
-refuses to write a formula when a brew platform's archive is missing from the `SHA256SUMS` input.
+`scripts/render-formula.py` is the formula's only writer, and it refuses to write when a brew
+platform's archive is missing from the `SHA256SUMS` it reads.
 
 ## Install script
 
 `packaging/install.sh` is the no-Homebrew path. It resolves this machine's target, downloads the
 matching archive and `SHA256SUMS`, refuses to install anything whose checksum is absent or wrong,
 and puts the five binaries in `PREFIX/bin` (`/usr/local` by default). It writes nothing else and
-starts no service. `sh packaging/install.sh <tag>` pins one future binary-release tag; v1.4.0
-registry installation uses the Cargo command in the root README.
+starts no service. `sh packaging/install.sh <tag>` pins one release tag. The registry path, for
+an operator who wants the binaries built on the machine that runs them, is the Cargo command in
+the root README.

@@ -52,20 +52,31 @@ That produces five commands:
 
 `onlyne-agent-fake` is an additional source/testkit-only command. It is absent from the five registry-installed binaries and is built by the fake quickstart below.
 
-### Release binaries
+### Prebuilt binaries
 
-Every tag also carries a GitHub Release with five platform archives, their checksums, and a
-combined `SHA256SUMS`. The installer picks the archive for this machine and verifies it against
-that list before it writes a binary:
+A release tag carries five platform archives, their `.sha256` files, and a combined
+`SHA256SUMS`. The installer picks the archive for this machine and verifies it against that
+list before it writes a binary:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dbydd/onlyne/main/packaging/install.sh | sh
-# PREFIX=~/.local sh packaging/install.sh v1.4.1
+# PREFIX=~/.local sh packaging/install.sh v1.4.1   # one tag, another prefix
 ```
 
-The release's Homebrew formula lives at [`packaging/homebrew/onlyne.rb`](packaging/homebrew/onlyne.rb),
-rendered from the same checksum list by the release pipeline. Homebrew takes formulae from a tap,
-so `brew install` reads that file through a tap that carries it as `Formula/onlyne.rb`.
+The same archives are what Homebrew installs. The release pipeline renders
+[`Formula/onlyne.rb`](Formula/onlyne.rb) from the release's own checksums and commits it here,
+so this repository is the tap:
+
+```bash
+brew tap dbydd/onlyne https://github.com/dbydd/onlyne.git
+brew install dbydd/onlyne/onlyne
+```
+
+The clone URL belongs in the tap command: Homebrew reads the short name `dbydd/onlyne` as a
+repository called `homebrew-onlyne`, and that is not this one.
+
+The five binaries land in Homebrew's prefix, `onlyne-gateway` included, so no Rust toolchain
+is needed on the installing machine.
 
 ### Agent handbooks
 

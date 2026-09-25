@@ -9,7 +9,7 @@ formula and the published release from drifting.
 Usage:
     python3 scripts/render-formula.py --version 1.3.1 \
         --repository dbydd/onlyne --checksums dist/SHA256SUMS \
-        --output packaging/homebrew/onlyne.rb
+        --output Formula/onlyne.rb
 """
 
 from __future__ import annotations
