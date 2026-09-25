@@ -16,13 +16,18 @@ produces. The operator keeps it, so it stays a first-class selection: `herdr` st
 - **`orca` carries the same shape with the fuller resource surface** — attach, probe,
   focus, rename, the worktree policy. `zellij` and `exec` cover the terminal cases,
   `acp` covers an agent that speaks the protocol on a pipe, and `fake` covers tests.
-- The known flake in this tree is
-  `workspace_create_warns_with_the_rename_remedy`. It fails only under a full-workspace
-  parallel load, and it is a test defect: that test captures one warning through
-  `tracing::subscriber::with_default`, a thread-local subscriber, while sibling tests in
-  the same binary reach the same `tracing::warn!` callsite (`policy.rs`,
+- **The warning capture is deterministic, and the fix is worth knowing about.**
+  `workspace_create_warns_with_the_rename_remedy` failed only under a full-workspace
+  parallel load, and the miss was the capture's, not the code's: the case reads one warning
+  through `tracing::subscriber::with_default`, a thread-local subscriber, while sibling
+  tests in the same binary reach the same `tracing::warn!` callsite (`policy.rs`,
   `find_or_create_workspace`) with no subscriber installed, which caches that callsite as
-  never enabled. The backend itself is synchronous and emits the warning unconditionally
-  on the create path, so the missing line is the capture's, not the code's.
+  never enabled. The backend is synchronous and emits the warning unconditionally on the
+  create path. Both capture cases now read a process-wide collector
+  (`tests/herdr.rs`, `warn_capture`), one global subscriber installed once, whose lines
+  carry the thread that emitted them; the cache has no thread-local dispatcher to miss and
+  two parallel cases still read only their own warnings. The empty capture had also let
+  `a_found_workspace_emits_no_rename_remedy` pass for the wrong reason. Rebuilding the
+  interest cache inside a thread-local scope was tried first and left the flake in place.
 
 This file exists so a reader knows the tree's standing before spending a day on it.

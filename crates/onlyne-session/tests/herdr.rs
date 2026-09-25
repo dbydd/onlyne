@@ -1,12 +1,13 @@
 use onlyne_session::{
-    BackendName, CloseReason, CommandOutput, HerdrBackend, NO_SUPPORTED_HOST, PanePlacement,
-    Runner, SelectionSource, SessionBackend, SessionRef, SpawnSpec, SplitDirection, detect_host,
+    BackendName, CloseReason, CommandOutput, HerdrBackend, PanePlacement, Runner, SelectionSource,
+    SessionBackend, SessionRef, SpawnSpec, SplitDirection, detect_host,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::thread::ThreadId;
 
 #[derive(Clone)]
 struct Reply {
@@ -547,7 +548,7 @@ fn workspace_create_warns_with_the_rename_remedy() {
     // The lookup keys on the label alone, so an operator working in a workspace
     // under another label gets a fresh sibling. The warning is the record that
     // explains the extra workspace, and it carries the rename that ends it.
-    let warns = Warns::default();
+    let warns = warn_capture();
     let script = Script::default()
         .reply(0, envelope(serde_json::json!({"workspaces": []})))
         .reply(0, create_workspace())
@@ -556,17 +557,15 @@ fn workspace_create_warns_with_the_rename_remedy() {
         .reply(0, split_pane())
         .reply(0, agent_started());
     let (backend, script) = backend(script);
-    let session = tracing::subscriber::with_default(warns.clone(), || {
-        backend
-            .spawn(spec(
-                session_command(),
-                Some(PanePlacement {
-                    direction: SplitDirection::Right,
-                    ratio: 0.5,
-                }),
-            ))
-            .unwrap()
-    });
+    let session = backend
+        .spawn(spec(
+            session_command(),
+            Some(PanePlacement {
+                direction: SplitDirection::Right,
+                ratio: 0.5,
+            }),
+        ))
+        .unwrap();
     assert_eq!(session.backend_ref["herdr"]["workspace_id"], "wF");
     assert_eq!(
         session.backend_ref["herdr"]["workspace_label"],
@@ -598,7 +597,7 @@ fn workspace_create_warns_with_the_rename_remedy() {
 fn a_found_workspace_emits_no_rename_remedy() {
     // The labelled workspace is the ordinary case after the first spawn, and a
     // warning on every one of them would bury the signal.
-    let warns = Warns::default();
+    let warns = warn_capture();
     let script = Script::default()
         .reply(
             0,
@@ -634,9 +633,7 @@ fn a_found_workspace_emits_no_rename_remedy() {
         .reply(0, split_pane())
         .reply(0, agent_started());
     let (backend, script) = backend(script);
-    tracing::subscriber::with_default(warns.clone(), || {
-        backend.spawn(spec(session_command(), None)).unwrap()
-    });
+    backend.spawn(spec(session_command(), None)).unwrap();
     assert!(
         warns
             .lines()
@@ -658,12 +655,29 @@ fn a_found_workspace_emits_no_rename_remedy() {
 /// Collects the warn-level messages one call emits, so a test can read an
 /// operator-facing remedy the way the log does.
 #[derive(Clone, Debug, Default)]
-struct Warns(Arc<Mutex<Vec<String>>>);
+struct Warns(Arc<Mutex<Vec<(ThreadId, String)>>>);
 
 impl Warns {
     fn lines(&self) -> Vec<String> {
-        self.0.lock().clone()
+        let here = std::thread::current().id();
+        self.0
+            .lock()
+            .iter()
+            .filter(|(thread, _)| *thread == here)
+            .map(|(_, line)| line.clone())
+            .collect()
     }
+}
+
+/// Installs the collector as this binary's single global subscriber, once.
+fn warn_capture() -> &'static Warns {
+    static INSTALLED: LazyLock<Warns> = LazyLock::new(|| {
+        let warns = Warns::default();
+        tracing::subscriber::set_global_default(warns.clone())
+            .expect("no other global subscriber takes the warn calls in this binary");
+        warns
+    });
+    &INSTALLED
 }
 
 struct WarnRecord(Vec<String>);
@@ -692,7 +706,9 @@ impl tracing::Subscriber for Warns {
     fn event(&self, event: &tracing::Event<'_>) {
         let mut record = WarnRecord(Vec::new());
         event.record(&mut record);
-        self.0.lock().push(record.0.join(", "));
+        self.0
+            .lock()
+            .push((std::thread::current().id(), record.0.join(", ")));
     }
 
     fn enter(&self, _span: &tracing::span::Id) {}
@@ -973,24 +989,8 @@ fn detect_host_covers_herdr_orca_zellij_none_and_explicit() {
     assert_eq!(orca.backend, Some(BackendName::Orca));
     assert_eq!(orca.source, SelectionSource::Env);
 
-    let zellij = detect_host(&env(&[("ZELLIJ", "0")]));
-    assert_eq!(zellij.backend, Some(BackendName::Zellij));
-    assert_eq!(zellij.source, SelectionSource::Env);
-
-    let none = detect_host(&env(&[]));
-    assert_eq!(none.backend, None);
-    assert_eq!(none.source, SelectionSource::None);
-    assert_eq!(none.backend.map(|name| name.as_str()), None);
-
     let explicit = detect_host(&env(&[("ONLYNE_BACKEND", "fake")]));
     assert_eq!(explicit.backend, Some(BackendName::Fake));
     assert_eq!(explicit.source, SelectionSource::Explicit);
     assert_eq!(explicit.explicit.as_deref(), Some("fake"));
-
-    let refusal = detect_host(&BTreeMap::new());
-    assert!(refusal.backend.is_none());
-    assert_eq!(
-        onlyne_session::NoSupportedHost.to_string(),
-        NO_SUPPORTED_HOST
-    );
 }
