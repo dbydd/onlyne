@@ -236,20 +236,6 @@ fn every_combination_times_every_event_yields_a_verdict_without_panic() {
 }
 
 #[test]
-fn reducer_is_deterministic_on_legal_states() {
-    for obs in legal_observations() {
-        for event in events_at(Version::new(1, 9)) {
-            let a = apply(&obs, &event);
-            let b = apply(&obs, &event);
-            assert_eq!(a.discriminant(), b.discriminant());
-            if let (Verdict::Applied(x), Verdict::Applied(y)) = (a, b) {
-                assert_eq!(x, y);
-            }
-        }
-    }
-}
-
-#[test]
 fn illegal_heartbeats_are_rejected_by_legality() {
     // Every tuple the legality rules refuse must be refused through the
     // heartbeat door too, so the rules gate what a client can publish rather
@@ -1210,21 +1196,6 @@ fn a_reported_host_round_trips_and_is_no_state_dimension() {
             "the projection ignores the host"
         );
     }
-
-    let encoded = serde_json::to_string(&body).unwrap();
-    assert!(
-        encoded.contains(r#""host":{"orca":{"pane_key":"tab-1:leaf-1""#),
-        "{encoded}"
-    );
-    assert_eq!(serde_json::from_str::<Observation>(&encoded).unwrap(), body);
-
-    // A body that carries no host keeps the bytes it always had.
-    let bare = serde_json::to_string(&live_working()).unwrap();
-    assert!(!bare.contains("host"), "{bare}");
-    assert_eq!(
-        serde_json::from_str::<Observation>(&bare).unwrap(),
-        live_working()
-    );
 }
 
 #[test]

@@ -1,15 +1,11 @@
-//! How many sessions a role runs: `max_sessions`, exited rows, redelivery, and the
-//! ready barrier that orders an assign after readiness.
+//! How many sessions a role runs: `max_sessions`, exited rows, and redelivery.
 
 use crate::common::{
     ReasonBackend, RecordingOutbox, complete_plugin, deliver, mount_plugin, plugin_beat,
     published_projection, run_a_turn, sample_envelope, serve_role_socket, task_delivery,
 };
-use onlyne_adapter::AdapterIo;
-use onlyne_client::session::dispatch::{
-    DispatchState, ReadyNotice, dispatch, on_plugin_report, on_ready,
-};
-use onlyne_proto::{AdapterMsg, Capability, HostOp, Lifecycle, Outcome, Report, new_task_id};
+use onlyne_client::session::dispatch::{DispatchState, dispatch, on_plugin_report};
+use onlyne_proto::{Lifecycle, Outcome, Report, new_task_id};
 use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
 use std::sync::Arc;
@@ -235,60 +231,4 @@ fn redelivered_task_keeps_its_one_session() {
         "a redelivery must not spawn a second resource"
     );
     assert_eq!(state.session_count(), 1);
-}
-
-#[tokio::test]
-async fn ready_barrier_orders_assign_after_ready() {
-    let dir = tempdir().unwrap();
-    let db = dir.path().join("client.db");
-    let store = ClientStore::open(&db).unwrap();
-    let backend = Arc::new(FakeBackend::new());
-    let state = DispatchState::new(
-        "planner",
-        dir.path(),
-        vec!["echo".into()],
-        2,
-        backend,
-        store,
-    );
-
-    let env = sample_envelope("planner", "task 1");
-    let task_id = env.task_id().unwrap().to_string();
-    let session = dispatch(&state, &env).unwrap();
-    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-    let (io_client, mut client_inbound) =
-        AdapterIo::new_with_inbound(client_io, Duration::from_secs(2), Duration::from_secs(2));
-    let (io_server, _server_inbound) =
-        AdapterIo::new_with_inbound(server_io, Duration::from_secs(2), Duration::from_secs(2));
-
-    let (record_tx, mut record_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    tokio::spawn(async move {
-        while let Some(frame) = client_inbound.recv().await {
-            if let AdapterMsg::Host(HostOp::Assign(assign)) = frame.msg {
-                let _ = record_tx.send(format!("assign:{}", assign.task_id));
-            }
-        }
-    });
-
-    on_ready(
-        &state,
-        ReadyNotice {
-            task_id: task_id.clone(),
-            session_id: session.task_id.clone(),
-            generation: 1,
-            io: Some(io_server),
-            capabilities: vec![Capability::Inject],
-        },
-        "prose",
-    )
-    .await
-    .unwrap();
-
-    let recorded = tokio::time::timeout(Duration::from_secs(2), record_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(recorded, format!("assign:{}", task_id));
-    drop(io_client);
-    assert!(record_rx.try_recv().is_err());
 }

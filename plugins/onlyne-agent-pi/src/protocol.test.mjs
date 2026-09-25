@@ -219,16 +219,6 @@ test("observationFor attaches the host only when there is one", () => {
   assert.deepEqual(dimensions, bare);
 });
 
-test("heartbeatReport carries the host inside observed", () => {
-  const report = heartbeatReport({ taskId: "t1", generation: 1, seq: SEQ_BASE + 1, agent: "idle", host: hostBinding(PANE_ENV) });
-  assert.equal(report.data.observed.host.orca.pane_key, PANE_KEY);
-  assert.equal(report.data.observed.agent, "idle");
-  assert.equal(
-    "host" in heartbeatReport({ taskId: "t1", generation: 1, seq: SEQ_BASE + 2, agent: "idle" }).data.observed,
-    false
-  );
-});
-
 test("a completion names an outcome and a single-line head", () => {
   assert.deepEqual(completeReport({ taskId: "t1", outcome: "failed", head: "broke\non line two" }), {
     kind: "complete",

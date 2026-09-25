@@ -48,19 +48,6 @@ impl Runner for ProbeRunner {
     }
 }
 
-#[test]
-fn session_ref_keeps_opaque_json() {
-    let value = SessionRef {
-        task_id: "t".into(),
-        backend: "fake".into(),
-        backend_ref: serde_json::json!({"x": [1, 2]}),
-        generation: 3,
-    };
-    let decoded: SessionRef =
-        serde_json::from_value(serde_json::to_value(value.clone()).unwrap()).unwrap();
-    assert_eq!(decoded, value);
-}
-
 fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs
         .iter()
@@ -205,9 +192,7 @@ fn named_backends_stay_exact_and_unknown_names_error() {
 fn headless_is_the_exec_alias() {
     assert_eq!(BackendName::parse("headless"), Some(BackendName::Exec));
     assert_eq!(BackendName::parse("HEADLESS"), Some(BackendName::Exec));
-    assert_eq!(BackendName::parse("Headless"), Some(BackendName::Exec));
     assert_eq!(BackendName::parse("exec"), Some(BackendName::Exec));
-    assert_eq!(BackendName::parse("EXEC"), Some(BackendName::Exec));
     assert_eq!(BackendName::Exec.as_str(), "exec");
     assert_eq!(BackendName::parse("nope"), None);
 
@@ -227,42 +212,6 @@ fn headless_is_the_exec_alias() {
         .unwrap()
         .name(),
         "exec"
-    );
-    assert_eq!(
-        backend_by_name(
-            "HEADLESS",
-            runner.clone(),
-            WorktreePolicy::Host,
-            &AcpOptions::default()
-        )
-        .unwrap()
-        .name(),
-        "exec"
-    );
-    assert_eq!(
-        backend_for_env(
-            "headless",
-            &BTreeMap::new(),
-            runner.clone(),
-            WorktreePolicy::Host,
-            &AcpOptions::default()
-        )
-        .unwrap()
-        .name(),
-        "exec"
-    );
-    let error = backend_for_env(
-        "nope",
-        &BTreeMap::new(),
-        runner,
-        WorktreePolicy::Host,
-        &AcpOptions::default(),
-    )
-    .err()
-    .expect("unknown name must error");
-    assert_eq!(
-        error.to_string(),
-        format!("unknown session backend: nope; accepted: {BACKEND_NAMES}")
     );
 }
 

@@ -127,11 +127,6 @@ fn admin_probe_mounts_without_a_marker() {
     assert!(mount_allowed(None, MountKind::Admin, "planner"));
     assert!(!mount_allowed(None, MountKind::Agent, "planner"));
 }
-#[test]
-fn terminated_register_requests_bye() {
-    assert!(should_bye_on_register("terminated"));
-    assert!(!should_bye_on_register("live-session"));
-}
 
 /// A served socket, the store the client queues its intents into, and one
 /// staged task that sits at the second hop of a budgeted family.

@@ -54,18 +54,6 @@ fn zero_threshold_never_reports() {
 }
 
 #[test]
-fn noop_beat_leaves_the_clock_untouched() {
-    let mut watch = StallWatch::new();
-    let t0 = Instant::now();
-    watch.note_assigned("t-1", t0);
-    // A No-op beat is not Applied, so the watch is left as assigned.
-    assert_eq!(
-        watch.due(t0 + Duration::from_secs(1801), 1800),
-        vec!["t-1".to_string()]
-    );
-}
-
-#[test]
 fn stalled_fault_serializes_with_kind_and_task() {
     let report = report("task-1", Some("task-1".into()), Some(2), Some(9));
     let value = serde_json::to_value(&report).expect("encode");

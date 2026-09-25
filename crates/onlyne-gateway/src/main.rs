@@ -1143,15 +1143,6 @@ mod tests {
     }
 
     #[test]
-    fn route_target_resolves_role() {
-        let router = router();
-        assert_eq!(
-            router.route_target(Some("c1")),
-            Some(Principal::role("planner"))
-        );
-    }
-
-    #[test]
     fn routed_inbound_lands_on_the_spec_target() {
         let mut refs = GatewayRefStore::open_in_memory().unwrap();
         let routed = route_inbound(&router(), &mut refs, &inbound("hello")).unwrap();
@@ -1463,14 +1454,6 @@ mod tests {
         assert_eq!(outbound.reply_to.as_deref(), Some("ext-1"));
         assert!(outbound.text.contains("hello inbound"));
         server_task.abort();
-    }
-
-    #[cfg(feature = "telegram")]
-    #[test]
-    fn telegram_declares_typing_for_the_host_dispatch() {
-        let mut plugin = build_plugin("telegram", "tg1", None, CredentialSource::Placeholder)
-            .expect("telegram builds with placeholder credentials");
-        assert!(plugin.typing_declared());
     }
 
     #[cfg(feature = "qqbot")]

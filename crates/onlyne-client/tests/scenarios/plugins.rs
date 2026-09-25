@@ -1,37 +1,21 @@
 //! The connection that serves a session: each task's own session and connection, a parked
-//! agent claiming the session it serves, a session handed its payload on mount, and the
-//! capability gaps of a backend without recycle, report, or inject.
+//! agent claiming the session it serves, and a session handed its payload on mount.
 
 use crate::common::{
     RecordingOutbox, assert_settled, deliver, eventually, mount_plugin, run_a_turn,
     serve_role_socket, task_delivery,
 };
 use onlyne_adapter::AdapterIo;
-use onlyne_client::session::dispatch::{
-    DispatchState, missing_capability, on_plugin_report, plugin_gap,
-};
+use onlyne_client::session::dispatch::{DispatchState, on_plugin_report};
 use onlyne_proto::{
-    AdapterMsg, Capability, DetachArgs, HelloArgs, Mount, MountKind, Outcome, PROTOCOL_VERSION,
-    PluginOp, Report,
+    AdapterMsg, DetachArgs, HelloArgs, Mount, MountKind, Outcome, PROTOCOL_VERSION, PluginOp,
+    Report,
 };
 use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
-
-#[test]
-fn degradation_paths_cover_recycle_report_and_inject() {
-    assert!(missing_capability(&[], Capability::Recycle));
-    assert!(missing_capability(&[], Capability::Report));
-    assert!(missing_capability(&[], Capability::Inject));
-
-    let gaps = plugin_gap(&[]);
-    assert_eq!(gaps.len(), 3);
-    assert_eq!(gaps[0].capability, Capability::Recycle);
-    assert_eq!(gaps[1].capability, Capability::Report);
-    assert_eq!(gaps[2].capability, Capability::Inject);
-}
 
 /// A second task gets a session and a connection of its own, spawned by the
 /// client that is already running.

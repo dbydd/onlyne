@@ -1,5 +1,5 @@
 use super::HerdrBackend;
-use super::cli::{absolute_cwd, cmd_quote, pane_run_line, posix_shell_quote};
+use super::cli::{cmd_quote, pane_run_line, posix_shell_quote};
 use super::policy::{agent_name, is_agent_name};
 use crate::backend::*;
 use parking_lot::Mutex;
@@ -64,42 +64,8 @@ fn envelope(result: Value) -> String {
     serde_json::json!({"id": "cli:test", "result": result}).to_string()
 }
 
-/// The `session_command` shape a generated role workspace carries: the
-/// agent binary plus the flags that tie the pane to its client's session.
-fn session_command() -> Vec<&'static str> {
-    vec!["pi", "--session-id", "s-1", "--session-dir", ".pi/sessions"]
-}
-
-fn spec(command: Vec<&str>) -> SpawnSpec {
-    spec_at(command, "/tmp/ws")
-}
-
-fn spec_at(command: Vec<&str>, cwd: &str) -> SpawnSpec {
-    let mut env = BTreeMap::new();
-    env.insert("ONLYNE_ROLE".into(), "planner".into());
-    env.insert("ONLYNE_CLUSTER".into(), "lab".into());
-    env.insert("ONLYNE_TASK_ID".into(), "abcd1234ffff".into());
-    SpawnSpec {
-        cwd: PathBuf::from(cwd),
-        task_id: "abcd1234-ffff-4000-8000-000000000001".into(),
-        command: command.into_iter().map(str::to_string).collect(),
-        env,
-        focus: None,
-        placement: Some(PanePlacement {
-            direction: SplitDirection::Right,
-            ratio: 0.5,
-        }),
-        rename: None,
-    }
-}
-
 fn session_ref(pane: &str) -> SessionRef {
     session_ref_with(pane, "onlyne-planner-abcd1234", "wF:p1", "right")
-}
-
-/// The ref a `pane run` session gets: a pane, an anchor, no managed agent.
-fn shell_session_ref(pane: &str) -> SessionRef {
-    session_ref_with(pane, "", "wF:p1", "right")
 }
 
 fn session_ref_with(pane: &str, agent: &str, base_pane: &str, direction: &str) -> SessionRef {
@@ -147,55 +113,4 @@ fn backend(script: Script) -> (HerdrBackend, Arc<Script>) {
     env.insert("HERDR_ENV".into(), "1".into());
     env.insert("HERDR_SESSION".into(), "onlyne-test".into());
     (HerdrBackend::with_env(script.clone(), env), script)
-}
-
-fn create_workspace() -> String {
-    envelope(serde_json::json!({
-        "type": "workspace_created",
-        "workspace": {"workspace_id": "wF"},
-        "tab": {"tab_id": "wF:t0"},
-        "root_pane": {"pane_id": "wF:p0"},
-    }))
-}
-
-fn create_tab() -> String {
-    envelope(serde_json::json!({
-        "type": "tab_created",
-        "tab": {
-            "tab_id": "wF:t1",
-            "label": "planner",
-            "number": 1,
-            "pane_count": 1,
-            "workspace_id": "wF"
-        },
-        "root_pane": {"pane_id": "wF:p1"},
-    }))
-}
-
-fn split_pane() -> String {
-    envelope(serde_json::json!({
-        "type": "pane_info",
-        "pane": {
-            "pane_id": "wF:p2",
-            "tab_id": "wF:t1",
-            "workspace_id": "wF",
-            "agent_status": "unknown",
-            "focused": false,
-            "revision": 1
-        }
-    }))
-}
-
-fn agent_started() -> String {
-    envelope(serde_json::json!({
-        "type": "agent_started",
-        "agent": {
-            "name": "onlyne-planner-abcd1234",
-            "agent": "pi",
-            "agent_status": "idle",
-            "interactive_ready": true,
-            "pane_id": "wF:p2"
-        },
-        "argv": ["pi"]
-    }))
 }

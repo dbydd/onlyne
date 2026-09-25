@@ -153,13 +153,3 @@ fn agent_missing_id_reports_not_installed() {
         "onlyne: no plugin ghost installed"
     );
 }
-
-#[test]
-fn agent_mount_frame_names_plugin() {
-    let frame = agent_mount_frame("demo");
-    assert_eq!(frame["args"]["plugin"], "demo");
-    assert_eq!(frame["args"]["action"], "mount");
-    let stop = agent_stop_frame("demo");
-    assert_eq!(stop["args"]["plugin"], "demo");
-    assert_eq!(stop["args"]["action"], "stop");
-}

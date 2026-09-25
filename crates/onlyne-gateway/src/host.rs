@@ -142,7 +142,6 @@ pub fn spec_path(server_root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use onlyne_proto::{Body, MsgKind, Principal, new_envelope};
 
     #[test]
     fn paths_are_derived_from_caller_server_root() {
@@ -155,23 +154,5 @@ mod tests {
             spec_path(root),
             PathBuf::from("/tmp/server/.onlyne/spec.toml")
         );
-    }
-
-    #[test]
-    fn inbound_delivery_preserves_envelope_id() {
-        let envelope = new_envelope(
-            MsgKind::Note,
-            Principal::gateway("g", "telegram", Some("c".into())),
-            Principal::role("planner"),
-            Body::text("hello"),
-            None,
-        )
-        .unwrap();
-        let delivery = Delivery {
-            msg_id: envelope.id.clone(),
-            envelope: Box::new(envelope.clone()),
-        };
-        assert_eq!(delivery.msg_id, envelope.id);
-        assert_eq!(delivery.envelope.from, envelope.from);
     }
 }

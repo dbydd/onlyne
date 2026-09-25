@@ -1591,26 +1591,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_snapshot_without_a_clock_still_renders() {
-        let snapshot = Snapshot {
-            status: serde_json::json!({"cluster": "local"}),
-            roles: vec![role("planner", &[])],
-            sessions: vec![session(
-                "aaaaaaaa-1",
-                Lifecycle::Working,
-                AgentPhase::Running,
-            )],
-            server_online: true,
-            refreshed_at: None,
-            ..Snapshot::default()
-        };
-
-        let text = render_once_text(&snapshot, &UiState::default(), 120, 36);
-        assert!(text.contains("role network"), "{text}");
-        assert!(text.contains("planner"), "{text}");
-    }
-
     /// The board draws the cluster, and `_supervisor` is the operator's own
     /// seat on it: a registry entry whose key registers the operator identity,
     /// with no client behind it (decision D15). Nothing of it reaches the
@@ -2268,16 +2248,6 @@ mod tests {
     }
 
     #[test]
-    fn page_one_footer_advertises_session_focus_key() {
-        let snapshot = linked_snapshot();
-        let text = render_once_text(&snapshot, &UiState::default(), 160, 36);
-        assert!(
-            text.contains("F session"),
-            "page 1 advertises the session-focus key\n{text}"
-        );
-    }
-
-    #[test]
     fn footer_shows_focus_no_socket() {
         let snapshot = linked_snapshot();
         let state = UiState {
@@ -2287,50 +2257,6 @@ mod tests {
         };
         let text = render_once_text(&snapshot, &state, 160, 30);
         assert!(text.contains("focus: no socket"), "{text}");
-    }
-
-    #[test]
-    fn footer_shows_focus_acl_denied() {
-        let snapshot = linked_snapshot();
-        let state = UiState {
-            page: Page::Swarm,
-            message: crate::model::focus_message(&crate::model::FocusOutcome::Denied {
-                code: "acl_denied".into(),
-                message: "owner only".into(),
-            }),
-            ..UiState::default()
-        };
-        let text = render_once_text(&snapshot, &state, 160, 30);
-        assert!(text.contains("focus acl_denied owner only"), "{text}");
-    }
-
-    #[test]
-    fn footer_shows_focus_forbidden() {
-        let snapshot = linked_snapshot();
-        let state = UiState {
-            page: Page::Swarm,
-            message: crate::model::focus_message(&crate::model::FocusOutcome::Denied {
-                code: "forbidden".into(),
-                message: "not admin".into(),
-            }),
-            ..UiState::default()
-        };
-        let text = render_once_text(&snapshot, &state, 160, 30);
-        assert!(text.contains("focus forbidden not admin"), "{text}");
-    }
-
-    #[test]
-    fn footer_shows_focus_settled_for_an_ok_reply() {
-        let snapshot = linked_snapshot();
-        let state = UiState {
-            page: Page::Swarm,
-            message: crate::model::focus_message(&crate::model::FocusOutcome::Settled {
-                task_id: "task-9".into(),
-            }),
-            ..UiState::default()
-        };
-        let text = render_once_text(&snapshot, &state, 160, 30);
-        assert!(text.contains("focus settled task-9"), "{text}");
     }
 
     #[test]

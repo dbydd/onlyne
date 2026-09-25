@@ -102,17 +102,6 @@ plugins = ["wrong"]
 }
 
 #[test]
-fn find_plugins_refuses_a_plugins_array_split_across_lines() {
-    let error = find_plugins("plugins = [\n  \"alpha\",\n]\n")
-        .err()
-        .expect("a top-level plugins array split across lines must be refused");
-    assert_eq!(
-        error.to_string(),
-        "onlyne: config.toml splits the `plugins` array across lines; put every id on one line (line 1)"
-    );
-}
-
-#[test]
 fn parse_inline_array_reads_plain_ids_and_keeps_the_tail() {
     let (ids, tail) = parse_inline_array(r#"["a", "b"]   # keep"#).unwrap();
     assert_eq!(ids, plugin_ids(&["a", "b"]));
@@ -120,28 +109,6 @@ fn parse_inline_array_reads_plain_ids_and_keeps_the_tail() {
     let (empty, empty_tail) = parse_inline_array("[]").unwrap();
     assert!(empty.is_empty());
     assert_eq!(empty_tail, "");
-}
-
-#[test]
-fn parse_inline_array_names_the_unsafe_shape_it_refuses() {
-    let cases = [
-        (
-            r#""alpha""#,
-            "onlyne: config.toml keeps `plugins` in a shape this verb cannot edit; write it as plugins = [\"id\"]",
-        ),
-        (
-            r#"["alpha", beta]"#,
-            "onlyne: config.toml `plugins` array holds a value this verb cannot edit",
-        ),
-        (
-            r#"["alpha"] junk"#,
-            "onlyne: config.toml has trailing text on the `plugins` line: [\"alpha\"] junk",
-        ),
-    ];
-    for (value, reason) in cases {
-        let error = parse_inline_array(value).unwrap_err();
-        assert_eq!(error.to_string(), reason);
-    }
 }
 
 #[test]

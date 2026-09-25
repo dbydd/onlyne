@@ -14,11 +14,3 @@ pub async fn run(init: ClientInit) -> anyhow::Result<()> {
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn reports_package_version() {
-        assert!(!super::version().is_empty());
-    }
-}

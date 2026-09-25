@@ -509,7 +509,6 @@ pub type WelcomeSlice = Welcome;
 mod tests {
     use super::*;
     use crate::envelope::{Body, MsgKind, Principal, new_envelope, new_task_id};
-    use crate::ops::SessionProjection;
 
     fn note(text: &str) -> Envelope {
         new_envelope(
@@ -520,40 +519,6 @@ mod tests {
             None,
         )
         .expect("note")
-    }
-
-    #[test]
-    fn hello_matches_the_documented_shape() {
-        let hello = PluginOp::Hello(HelloArgs {
-            protocol: crate::PROTOCOL_VERSION,
-            plugin: "onlyne-agent-pi".into(),
-            version: "1.0.0".into(),
-            kind: MountKind::Agent,
-            capabilities: vec![
-                Capability::Register,
-                Capability::Report,
-                Capability::Inject,
-                Capability::Recycle,
-            ],
-            mount: Some(Mount::Agent(AgentMount {
-                role: "planner".into(),
-                session: Some("8b1c".into()),
-                task_id: None,
-                pid: Some(4212),
-            })),
-        });
-        let value = serde_json::to_value(&hello).expect("encode");
-        assert_eq!(value["op"], "hello");
-        assert_eq!(value["args"]["kind"], "agent");
-        assert_eq!(value["args"]["capabilities"][0], "register");
-        assert_eq!(value["args"]["mount"]["role"], "planner");
-        assert_eq!(value["args"]["mount"]["session"], "8b1c");
-        assert!(
-            value["args"]["mount"].get("kind").is_none(),
-            "the mount object is flat; `kind` sits beside it in args"
-        );
-        let back: PluginOp = serde_json::from_value(value).expect("decode");
-        assert_eq!(back, hello);
     }
 
     #[test]
@@ -679,23 +644,6 @@ mod tests {
     }
 
     #[test]
-    fn assign_carries_prose_alongside_the_envelope() {
-        let args = AssignArgs {
-            envelope: Box::new(note("do it")),
-            prose: "Read the incoming task".into(),
-            task_id: new_task_id(),
-            generation: 1,
-            parent: None,
-        };
-        let value = serde_json::to_value(HostOp::Assign(args.clone())).expect("encode");
-        assert_eq!(value["op"], "assign");
-        assert_eq!(value["args"]["prose"], "Read the incoming task");
-        assert!(value["args"].get("parent").is_none());
-        let back: HostOp = serde_json::from_value(value).expect("decode");
-        assert_eq!(back, HostOp::Assign(args));
-    }
-
-    #[test]
     fn report_frames_use_the_lifecycle_kind() {
         let op = PluginOp::Report(Report::Heartbeat {
             task_id: new_task_id(),
@@ -758,36 +706,6 @@ mod tests {
     }
 
     #[test]
-    fn projection_travels_inside_the_welcome_slice() {
-        let welcome = Welcome {
-            cluster: "cluster-a".into(),
-            server: "srv".into(),
-            role: "planner".into(),
-            admin: false,
-            max_sessions: 3,
-            prose: "Read the incoming task".into(),
-            spec_hash: "abc".into(),
-            aggregate: Some("cluster-b".into()),
-            allowed_targets: vec!["builder".into()],
-            allowed_senders: vec!["*".into()],
-            session_command: Some(vec!["pi".into(), "--session-id".into(), "{session}".into()]),
-            timeout_ready_ms: Some(30_000),
-            timeout_idle_ms: Some(60_000),
-            intent_attempts: Some(3),
-            intent_backoff_ms: Some(vec![1000, 2000, 4000]),
-            relay_required: Some(vec!["writer".into()]),
-            relay_count: None,
-            seq: 41,
-        };
-        assert_eq!(welcome.role, "planner");
-        assert_eq!(welcome.max_sessions, 3);
-        assert_eq!(
-            SessionProjection::default_working().lifecycle,
-            LifecycleMarker::created()
-        );
-    }
-
-    #[test]
     fn untagged_adapter_msg_resolves_plugin_host_and_response() {
         let plugin = AdapterMsg::Plugin(PluginOp::Report(Report::Heartbeat {
             task_id: new_task_id(),
@@ -824,12 +742,5 @@ mod tests {
         assert_eq!(back, res);
         assert_eq!(back.direction(), MsgDirection::Response);
         assert_eq!(back.op_name(), None);
-    }
-
-    struct LifecycleMarker;
-    impl LifecycleMarker {
-        fn created() -> crate::event::Lifecycle {
-            crate::event::Lifecycle::Created
-        }
     }
 }

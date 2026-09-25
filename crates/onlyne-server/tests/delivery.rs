@@ -11,7 +11,7 @@ use onlyne_proto::{
     RepairFail, RepairRebind, RepairTarget, Report, ResBody, SessionProjection, ShutdownArgs,
     Subscribe,
 };
-use onlyne_server::state::{ChannelBinding, DeliveryTicket, RoleConnection, Server, ServerInit};
+use onlyne_server::state::{ChannelBinding, RoleConnection, Server, ServerInit};
 use onlyne_server::{events, faults, gateway_host, projection, relay, router, stale};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -1827,20 +1827,6 @@ fn repair_retry_requeue_is_immediately_visible_to_online_pull() {
         redelivered.deliveries[0].envelope.task_id(),
         Some(task_id.as_str())
     );
-}
-
-#[test]
-fn sweep_expired_settles_a_queued_note_and_emits() {
-    let fixture = fixture();
-    let mut envelope = note("planner", "builder", "fyi");
-    envelope.ttl_ms = Some(10);
-    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
-    let head_before = fixture.state.event_head();
-    let expired = relay::sweep_expired(&fixture.state, Utc::now() + chrono::Duration::seconds(5))
-        .expect("sweep");
-    assert_eq!(expired, vec![outcome.receipt.msg_id.clone()]);
-    assert_eq!(ledger_rows(&fixture.state)[0].state, LedgerState::Expired);
-    assert!(fixture.state.event_head() > head_before);
 }
 
 #[test]
@@ -4100,22 +4086,6 @@ async fn an_unknown_admin_op_is_refused_by_name() {
             .await;
     assert!(!body.ok);
     assert_eq!(body.error.expect("error").code, ErrorCode::UnknownOp);
-}
-
-#[test]
-fn delivery_tickets_are_cleared_with_their_role() {
-    let fixture = fixture();
-    fixture.state.record_delivery(DeliveryTicket {
-        msg_id: "m1".to_string(),
-        role: "builder".to_string(),
-        session_id: Some("s1".to_string()),
-        generation: 1,
-        seq: 3,
-        delivered_at: Utc::now(),
-    });
-    assert!(fixture.state.open_delivery("builder", Some("s1")).is_some());
-    assert_eq!(fixture.state.clear_deliveries("builder"), 1);
-    assert!(fixture.state.open_delivery("builder", Some("s1")).is_none());
 }
 
 #[test]

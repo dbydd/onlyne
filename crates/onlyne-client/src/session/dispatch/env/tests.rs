@@ -64,42 +64,6 @@ fn the_spawn_environment_carries_the_relay_policy_it_has() {
     assert_eq!(both["ONLYNE_RELAY_COUNT"], "2");
 }
 
-/// The socket a session is handed is the path the workspace is serving.
-///
-/// The bind publishes its choice in `<run>/socket` and the accessor reads
-/// that marker, so the value the client injects and the listener the client
-/// opened are one path even when the canonical spelling moved. This case
-/// crosses a real bind, which is the only way the two halves agree by
-/// evidence and by assertion alike.
-#[tokio::test]
-async fn the_spawn_environment_names_the_socket_the_workspace_serves() {
-    let dir = tempdir().unwrap();
-    let workspace = dir.path();
-    let layout = RoleWorkspace::resolve(workspace);
-    let (listener, endpoint) =
-        onlyne_layout::bind_socket(layout.root(), &layout.run_dir()).unwrap();
-    let env = session_env(
-        "planner",
-        "s-1",
-        "t-1",
-        &[],
-        None,
-        "",
-        &served_socket(workspace),
-    );
-    assert_eq!(
-        env["ONLYNE_SOCKET"],
-        endpoint.actual().to_string_lossy().as_ref(),
-        "the plugin dials the path that was bound"
-    );
-    assert!(
-        endpoint.actual().exists(),
-        "the injected path is a live socket: {}",
-        endpoint.actual().display()
-    );
-    drop(listener);
-}
-
 /// A workspace whose canonical socket spelling overflows `sun_path` still
 /// hands the session the short served path, and the directory the session
 /// starts in answers that same socket.

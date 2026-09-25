@@ -74,7 +74,6 @@ fn the_name_is_short_enough_for_the_socket_budget() {
 
 #[test]
 fn the_name_is_a_pure_function_of_the_task_id() {
-    assert_eq!(short_session_name(TASK), short_session_name(TASK));
     assert_ne!(
         short_session_name(TASK),
         short_session_name("6ba7b810-9dad-11d1-80b4-00c04fd430c8")

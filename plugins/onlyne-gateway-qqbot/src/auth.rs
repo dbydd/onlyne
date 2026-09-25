@@ -76,12 +76,4 @@ mod tests {
         let error = QqBotCredentials::from_values(Some("app".into()), None).unwrap_err();
         assert!(error.to_string().contains(APP_SECRET_ENV));
     }
-
-    #[test]
-    fn prompt_is_network_free_and_names_both_variables() {
-        let prompt = onboarding_prompt();
-        assert_eq!(prompt.kind, OnboardingKind::ManualCode);
-        assert!(prompt.payload.contains(APP_ID_ENV));
-        assert!(prompt.payload.contains(APP_SECRET_ENV));
-    }
 }

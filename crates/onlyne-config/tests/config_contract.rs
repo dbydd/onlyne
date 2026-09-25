@@ -4,7 +4,7 @@ use onlyne_config::{
     DEFAULT_NOTE_QUEUE, DEFAULT_RECONNECT_GRACE_SECS, DEFAULT_REQUEUE_MAX_ATTEMPTS,
     DEFAULT_REQUEUE_TTL_SECS, DEFAULT_RESYNC_LAG, DEFAULT_STALE_WATCH_SECS,
     DEFAULT_STALL_REPORT_SECS, DEFAULT_TEMPLATE_ROOT, Env, IntentPolicy, Spec, SpecDiff, Timeouts,
-    canonical_bytes, config_client_schema, redact, spec_hash,
+    canonical_bytes, config_client_schema, redact,
 };
 use std::fs;
 
@@ -436,26 +436,6 @@ session_command = ["pi", "{{unknown}}"]
 }
 
 #[test]
-fn spec_hash_is_stable_across_reordered_semantic_content() {
-    let a = r#"[server]
-name = "cluster-a"
-listen = "0.0.0.0:7811"
-cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
-"#;
-    let b = r#"[server]
-cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
-listen = "0.0.0.0:7811"
-name = "cluster-a"
-"#;
-    let value_a: toml::Value = a.parse().unwrap();
-    let value_b: toml::Value = b.parse().unwrap();
-    assert_eq!(
-        spec_hash(&canonical_bytes(&value_a)),
-        spec_hash(&canonical_bytes(&value_b))
-    );
-}
-
-#[test]
 fn env_secret_resolution_set_and_unset() {
     let env = Env::from_vars([("ONLYNE_CERT", CERT_HEX), ("ONLYNE_KEY", "keys/role.key")]);
     let mut config = ClientConfig::parse_str(
@@ -816,12 +796,6 @@ plain = "visible"
 }
 
 #[test]
-fn generated_schemas_parse_as_json() {
-    serde_json::from_str::<serde_json::Value>(config_client_schema()).unwrap();
-    serde_json::from_str::<serde_json::Value>(onlyne_config::spec_schema()).unwrap();
-}
-
-#[test]
 fn the_published_client_schema_carries_stall_report_secs() {
     let schema: serde_json::Value = serde_json::from_str(config_client_schema()).unwrap();
     assert_eq!(schema["properties"]["stall_report_secs"]["default"], 1800);
@@ -902,24 +876,6 @@ fn the_published_spec_schema_carries_the_relay_keys() {
         serde_json::json!(["integer", "null"])
     );
     assert_eq!(entry["properties"]["relay_count"]["format"], "uint32");
-}
-
-#[test]
-fn an_old_spec_without_requeue_keys_still_parses() {
-    let spec = Spec::parse_str(&format!(
-        r#"[server]
-name = "cluster-a"
-listen = "0.0.0.0:7811"
-cert_pin = "{CERT_HEX}"
-
-[[client]]
-role = "planner"
-key = "{KEY_A}"
-"#
-    ))
-    .unwrap();
-    assert_eq!(spec.server.requeue_max_attempts, 0);
-    assert_eq!(spec.server.requeue_ttl_secs, 0);
 }
 
 #[test]

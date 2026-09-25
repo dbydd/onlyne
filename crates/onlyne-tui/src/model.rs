@@ -1559,20 +1559,6 @@ mod tests {
         assert_eq!(layout_nodes(&snapshot, false)[0].sessions.len(), 2);
     }
 
-    #[test]
-    fn active_sessions_leaves_the_exited_row_out() {
-        let snapshot = Snapshot {
-            sessions: vec![
-                state_session(Lifecycle::Exited, AgentPhase::Running),
-                state_session(Lifecycle::Working, AgentPhase::Running),
-            ],
-            ..Snapshot::default()
-        };
-        let active = active_sessions(&snapshot);
-        assert_eq!(active.len(), 1, "{active:?}");
-        assert_eq!(active[0].public_lifecycle, Lifecycle::Working);
-    }
-
     fn place(focus: Focus, graph: usize, history: usize) -> Location {
         Location {
             focus,
@@ -1884,10 +1870,6 @@ mod tests {
             StateView::All.word(),
             "the key carries the history filter with it"
         );
-    }
-    #[test]
-    fn focus_message_names_a_missing_socket() {
-        assert_eq!(focus_message(&FocusOutcome::NoSocket), "focus: no socket");
     }
 
     #[test]

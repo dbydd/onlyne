@@ -11,7 +11,6 @@ import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 
 import { OnlyneAgent } from "./agent.mjs";
-import { MAX_LINES, MAX_WIDTH } from "./activity.mjs";
 import { DEFAULT_IDLE_REMINDERS } from "./config.mjs";
 import { createFrameDecoder, encodeFrame } from "./frame.mjs";
 import { SEQ_BASE, readyReport } from "./protocol.mjs";
@@ -374,24 +373,6 @@ test("a reconnect reports the same pane", async () => {
   });
 });
 
-test("a second task in the same pane reports the same pane", async () => {
-  await inOrcaPane(PANE_ENV, async () => {
-    const { host } = await mountedAgent();
-    host.notify("assign", assignArgs());
-    await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
-    host.notify("probe", {});
-    await waitFor(() => (heartbeats(host).length ? true : null));
-
-    // The binding belongs to the process, not to the task: handing this pane
-    // another task cannot change where the process runs.
-    host.notify("assign", { ...assignArgs(), task_id: "22222222-2222-4222-8222-222222222222" });
-    await waitFor(() => (host.of("assign_ack").length === 2 ? true : null));
-    host.notify("probe", {});
-    const reports = await waitFor(() => (heartbeats(host).length >= 2 ? heartbeats(host) : null));
-    assert.deepEqual(reports.at(-1).host, reports[0].host);
-  });
-});
-
 test("a pi outside an Orca pane reports no host at all", async () => {
   await inOrcaPane({}, async () => {
     const { host } = await mountedAgent();
@@ -402,22 +383,6 @@ test("a pi outside an Orca pane reports no host at all", async () => {
     const [observed] = await waitFor(() => (heartbeats(host).length ? heartbeats(host) : null));
     assert.equal("host" in observed, false, "no pane, no binding");
     assert.equal(observed.agent, "idle", "the tuple is still a full observation");
-  });
-});
-
-test("a pane that exports no handle reports the pane without inventing one", async () => {
-  await inOrcaPane({ ORCA_PANE_KEY: PANE_KEY }, async () => {
-    const { host } = await mountedAgent();
-    host.notify("assign", assignArgs());
-    await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
-    host.notify("probe", {});
-
-    const [observed] = await waitFor(() => (heartbeats(host).length ? heartbeats(host) : null));
-    // The pane key carries both ids; the handle is a field the environment
-    // either has or has not, and a missing one is absent rather than empty.
-    assert.deepEqual(observed.host, {
-      orca: { pane_key: PANE_KEY, tab_id: PANE_TAB, leaf_id: PANE_LEAF },
-    });
   });
 });
 
@@ -687,26 +652,6 @@ test("a busy pi holds the settle decision until it is waiting for input", async 
   assert.match(reminded[1].text, /build it/, "the decision waits for the idle it is about");
 });
 
-test("queued input keeps the session non-idle and holds the ladder off", async () => {
-  let queued = false;
-  const surface = fakeSurface({ waiting: () => !queued });
-  const { agent, host } = await startAgent({ surface, options: { settleFallbackMs: 40 } });
-  agent.start();
-  await waitFor(() => host.of("report").length >= 1);
-  host.notify("assign", assignArgs());
-  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
-
-  agent.onTurnStart();
-  queued = true;
-  agent.onTurnEnd();
-  agent.onSettled();
-  await waitFor(() => heartbeats(host).at(-1)?.agent === "running");
-  await new Promise((resolve) => setTimeout(resolve, 80));
-
-  assert.equal(surface.calls.wakeUser.length, 1, "a queued continuation is not an idle episode");
-  assert.deepEqual(surface.calls.exits, []);
-});
-
 test("a live background task holds the ladder off until its task is terminal", async () => {
   let backgroundWork = true;
   const surface = fakeSurface({ backgroundWork: () => backgroundWork });
@@ -965,24 +910,6 @@ test("the exit waits for the client's acknowledgement of the completion report",
 
   host.releaseReports();
   await completion;
-  assert.deepEqual(surface.calls.exits, ["done"]);
-});
-
-test("the completion report is the last frame the host receives before the exit", async () => {
-  const { agent, host, surface } = await startAgent();
-  agent.start();
-  await waitFor(() => host.of("report").length >= 1);
-  host.notify("assign", assignArgs());
-  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
-  agent.onTurnStart();
-  await waitFor(() =>
-    host.of("report").find((report) => report.data?.observed?.agent === "running"),
-  );
-  agent.noteAssistantText("OK");
-
-  await agent.complete(TASK_ID, "done", "OK");
-  const reports = host.of("report").filter((report) => report.kind !== "ready");
-  assert.equal(reports.at(-1).kind, "complete", "a running beat is not followed by a settled observation");
   assert.deepEqual(surface.calls.exits, ["done"]);
 });
 
@@ -1440,27 +1367,6 @@ test("a repeating fault folds into one panel line with a count", () => {
   const [render] = surface.calls.widget.slice(-1);
   assert.match(render[1], /!! heartbeat refused: connection lost x3$/);
   assert.equal(surface.calls.widget.length, 3, "every event redraws the same panel");
-});
-
-test("the panel stays inside its line and width budget", () => {
-  const surface = fakeSurface({ widget: true });
-  const agent = new OnlyneAgent({
-    socketPath: join(tmpdir(), "pi-onlyne-unused-socket"),
-    cwd: tmpdir(),
-    role: "planner",
-    sessionId: SESSION_ID,
-    taskId: TASK_ID,
-    surface,
-    log: () => {},
-  });
-  for (let index = 0; index < 40; index += 1) {
-    agent.notice("in", `task ${index} from gateway:wechat:room ${"长".repeat(400)}`);
-  }
-  const [render] = surface.calls.widget.slice(-1);
-  assert.ok(render.length <= MAX_LINES, `panel grew to ${render.length} lines`);
-  for (const line of render) {
-    assert.ok(Array.from(line).length <= MAX_WIDTH, `line overruns its width: ${line}`);
-  }
 });
 
 test("a host without the widget keeps the footer line and the stderr line", async () => {

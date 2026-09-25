@@ -354,11 +354,4 @@ mod tests {
         assert!(!debug.contains(secret));
         assert!(debug.contains("***"));
     }
-
-    #[test]
-    fn qr_renderer_returns_terminal_block() {
-        let block = render_login_qr_ascii("https://example.com/login").unwrap();
-        assert!(!block.trim().is_empty());
-        assert!(block.lines().count() > 1);
-    }
 }

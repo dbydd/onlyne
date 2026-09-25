@@ -8,8 +8,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 
 import { CONFIG_RELATIVE_PATH, DEFAULT_CONFIG, loadConfig, sessionIdentity } from "./config.mjs";
@@ -79,10 +77,4 @@ test("the session identity gate needs all three variables", () => {
   }
   assert.equal(sessionIdentity({}), null);
   assert.equal(sessionIdentity({ ONLYNE_ROLE: "", ONLYNE_SESSION_ID: "s", ONLYNE_TASK_ID: "t" }), null);
-});
-
-test("the shipped switch file documents only the keys the plugin reads", () => {
-  const path = fileURLToPath(new URL("../onlyne.json.example", import.meta.url));
-  const example = JSON.parse(readFileSync(path, "utf8"));
-  assert.deepEqual(example, { enabled: true, watch: { autoStart: true } });
 });

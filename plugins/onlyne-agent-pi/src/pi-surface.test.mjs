@@ -113,3 +113,48 @@ test("delivery asks for followUp and a refusal of that option retries with the s
   assert.deepEqual(refusing.calls[1].content, PNG_CONTENT);
   assert.deepEqual(refusing.lines, [], "a delivery that landed on the retry is not a failure");
 });
+
+/**
+ * A surface over a fake pi that answers the two questions the phase is read
+ * from, plus the cases where pi answers neither.
+ * @param {{ isIdle?: () => boolean, hasPendingMessages?: () => boolean, throwOn?: "idle" | "pending" }} [pi]
+ */
+function idleSurface(pi = {}) {
+  const lines = [];
+  return {
+    lines,
+    surface: createSurface({ pi, log: (line) => lines.push(line), context: () => pi }),
+  };
+}
+
+test("only a session waiting on its next message reads as idle", async () => {
+  const waiting = idleSurface({ isIdle: () => true, hasPendingMessages: () => false });
+  assert.equal(await waiting.surface.waitingForInput(), true);
+
+  // A queued continuation is input already on its way, so the session is not
+  // waiting for the user even though no turn is running.
+  const queued = idleSurface({ isIdle: () => true, hasPendingMessages: () => true });
+  assert.equal(await queued.surface.waitingForInput(), false);
+
+  // A turn in flight, a retry, and a compaction all read as not idle here.
+  const busy = idleSurface({ isIdle: () => false, hasPendingMessages: () => false });
+  assert.equal(await busy.surface.waitingForInput(), false);
+});
+
+test("a phase pi was never asked about reads as running, not idle", async () => {
+  // The probes are optional members of an older pi, and a session with no
+  // context yet has witnessed nothing: both answer `false` rather than guess.
+  const noProbes = idleSurface({});
+  assert.equal(await noProbes.surface.waitingForInput(), false);
+
+  const noContext = createSurface({ pi: { isIdle: () => true }, log: () => {}, context: () => null });
+  assert.equal(await noContext.waitingForInput(), false);
+
+  const throwing = idleSurface({
+    isIdle: () => true,
+    hasPendingMessages: () => {
+      throw new Error("pi is mid-replay");
+    },
+  });
+  assert.equal(await throwing.surface.waitingForInput(), false);
+});

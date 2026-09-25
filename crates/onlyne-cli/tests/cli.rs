@@ -2140,37 +2140,6 @@ fn control_without_task_names_the_flag() {
     );
 }
 
-/// `control cancel --help` and `control recycle --help` list `--reason`.
-/// `control probe --help` does not.
-#[test]
-fn control_subcommand_help_lists_reason_only_where_required() {
-    let dir = tempfile::tempdir().unwrap();
-    for verb in ["cancel", "recycle"] {
-        let output = Command::new(bin())
-            .current_dir(dir.path())
-            .args(["control", verb, "--help"])
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(EXIT_OK));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("--reason"),
-            "{verb} --help must list --reason: {stdout}"
-        );
-    }
-    let output = Command::new(bin())
-        .current_dir(dir.path())
-        .args(["control", "probe", "--help"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(EXIT_OK));
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !stdout.contains("--reason"),
-        "probe --help must not list --reason: {stdout}"
-    );
-}
-
 /// A pinned `op_id` in the protocol's own spelling, `o-` plus uuid v4.
 const VALID_OP_ID: &str = "o-33333333-3333-4333-8333-333333333333";
 

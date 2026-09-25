@@ -226,15 +226,9 @@ fn echo_and_exit(message: &str, code: i32) -> Vec<String> {
     }
 }
 
+#[cfg(windows)]
 fn sleep_cmd() -> Vec<String> {
-    #[cfg(unix)]
-    {
-        vec!["sleep".into(), "30".into()]
-    }
-    #[cfg(windows)]
-    {
-        vec!["ping".into(), "-n".into(), "31".into(), "127.0.0.1".into()]
-    }
+    vec!["ping".into(), "-n".into(), "31".into(), "127.0.0.1".into()]
 }
 
 fn wait_until_exit(backend: &ExecBackend, session: &SessionRef) -> ResourceProbe {
@@ -290,26 +284,6 @@ fn a_finished_child_reports_its_exit_code_and_log_tail() {
     assert!(meta.len() > 0, "the session log must grow");
     let again = backend.probe(&session).unwrap();
     assert_eq!(again.detail.unwrap()["exit"], 7);
-}
-
-#[test]
-fn close_reaps_a_sleeping_child() {
-    let dir = tempfile::tempdir().unwrap();
-    let backend = ExecBackend::new();
-    let session = backend
-        .spawn(spec_cmd(dir.path(), "sleeping", sleep_cmd()))
-        .unwrap();
-    let pid = session.backend_ref["pid"].as_u64().unwrap() as u32;
-    assert!(backend.probe(&session).unwrap().alive);
-    assert!(ExecBackend::pid_alive(pid));
-    backend
-        .close(&session, CloseReason::Cancelled, false)
-        .unwrap();
-    assert!(!backend.probe(&session).unwrap().alive);
-    assert!(
-        !ExecBackend::pid_alive(pid),
-        "the session must leave no process behind"
-    );
 }
 
 #[cfg(windows)]

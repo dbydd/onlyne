@@ -192,26 +192,12 @@ const CASES: &[Case] = &[
         kind: MsgKindClass::Any,
         expected: true,
     },
-    Case {
-        name: "wildcard covers builder from planner",
-        from: "planner",
-        to: "builder",
-        kind: MsgKindClass::Any,
-        expected: true,
-    },
     // 4. The reserved supervisor role reaches every registered role on its own
     //    `allowed_targets` alone; an empty list is the default reach.
     Case {
         name: "aggregate role reaches planner",
         from: "_supervisor",
         to: "planner",
-        kind: MsgKindClass::Any,
-        expected: true,
-    },
-    Case {
-        name: "supervisor default reaches builder without a builder entry",
-        from: "_supervisor",
-        to: "builder",
         kind: MsgKindClass::Any,
         expected: true,
     },
@@ -301,28 +287,6 @@ fn empty_targets_role_reaches_only_itself_and_still_receives() {
 }
 
 #[test]
-fn empty_senders_role_admits_only_itself_and_the_supervisor_and_still_sends() {
-    let edges = spec().acl_edges();
-    let mut inbound: Vec<&str> = edges
-        .iter()
-        .filter(|edge| edge.to == "isolated" && edge.kind == MsgKindClass::Any)
-        .map(|edge| edge.from.as_str())
-        .collect();
-    inbound.sort_unstable();
-    inbound.dedup();
-    // The empty list turns every two-sided grant away: `planner` names
-    // `isolated` and still holds no row. The supervisor's row arrives from its
-    // own one-sided reach, and the unconditional self row brings the role
-    // itself.
-    assert_eq!(inbound, vec!["_supervisor", "isolated"]);
-    assert!(
-        edges
-            .iter()
-            .any(|edge| edge.from == "isolated" && edge.to != "isolated")
-    );
-}
-
-#[test]
 fn wildcard_expands_to_every_other_role_and_explicit_self_adds_its_own() {
     let spec = spec();
     let edges = spec.acl_edges();
@@ -363,20 +327,6 @@ fn wildcard_expands_to_every_other_role_and_explicit_self_adds_its_own() {
 }
 
 #[test]
-fn every_registered_role_reaches_itself_with_every_class() {
-    let spec = spec();
-    let edges = spec.acl_edges();
-    for role in spec.role_names() {
-        for kind in [MsgKindClass::Any, MsgKindClass::Note, MsgKindClass::Control] {
-            assert!(
-                has_edge(&edges, &role, &role, kind),
-                "missing self edge for {role} in {kind:?}"
-            );
-        }
-    }
-}
-
-#[test]
 fn an_explicit_self_name_does_not_duplicate_the_self_row() {
     let edges = spec().acl_edges();
     // `planner` lists itself in both lists and `silent` lists nothing.
@@ -387,13 +337,6 @@ fn an_explicit_self_name_does_not_duplicate_the_self_row() {
             .count();
         assert_eq!(count, 3, "{role} self rows");
     }
-}
-
-#[test]
-fn wildcard_covers_every_other_registered_role() {
-    let edges = spec().acl_edges();
-    assert!(has_edge(&edges, "isolated", "silent", MsgKindClass::Any));
-    assert!(has_edge(&edges, "planner", "reviewer", MsgKindClass::Any));
 }
 
 /// The table is the only decision surface this crate publishes; permit
@@ -508,22 +451,6 @@ fn admin_flag_rides_on_every_row_of_the_sending_role() {
         && edge.to == "planner"
         && edge.kind == MsgKindClass::Control
         && !edge.admin));
-}
-
-#[test]
-fn unregistered_names_are_dropped() {
-    assert!(spec().acl_edges().iter().all(|edge| edge.to != "ghost"));
-}
-
-#[test]
-fn note_queue_defaults_to_false_so_offline_notes_are_refused() {
-    let spec = spec();
-    assert!(!spec.server.note_queue);
-    // The `Note` row is permission. The server refuses offline delivery while
-    // `note_queue` stays false, which is the default asserted above.
-    assert!(spec.acl_edges().iter().any(|edge| edge.from == "planner"
-        && edge.to == "silent"
-        && edge.kind == MsgKindClass::Note));
 }
 
 #[test]

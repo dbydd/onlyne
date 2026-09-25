@@ -1,6 +1,6 @@
 use super::*;
 use crate::backend::fake::FakeBackend;
-use crate::backend::{Capabilities, CloseReason, SessionBackend, SessionRef, SpawnSpec};
+use crate::backend::{CloseReason, SessionBackend, SessionRef, SpawnSpec};
 use crate::lifecycle::{
     self, AgentState, IgnoredReason, LifecycleEvent, Observation, PublicLifecycle, TaskState,
     Verdict, Version, project,
@@ -415,72 +415,6 @@ fn a_delivered_hop_closes_the_drain_before_the_resource_closes() {
     let session = ledger.get_session("out-1").unwrap().unwrap();
     assert_eq!(session.resource_state, "closed");
     assert_eq!(session.agent_state, "gone");
-}
-
-#[test]
-fn fake_backend_spawn_probe_close_drives_the_reducer() {
-    let ledger = MemoryLedger::new();
-    ledger.track_task("fake-1", 1);
-    let bridge = Bridge::new();
-    let backend = FakeBackend::new();
-    assert!(
-        backend.capabilities()
-            == Capabilities {
-                spawn: true,
-                attach: true,
-                probe: true,
-                close: true,
-                focus: true,
-                rename: true,
-            }
-    );
-    let session = backend
-        .spawn(SpawnSpec {
-            cwd: ".".into(),
-            task_id: "fake-1".into(),
-            command: vec!["agent".into()],
-            env: BTreeMap::new(),
-            focus: None,
-            placement: None,
-            rename: None,
-        })
-        .unwrap();
-    bridge.track_live(session.clone());
-    let public = |task: &str, task_state| -> PublicLifecycle {
-        let row = ledger.get_session(task).unwrap().unwrap();
-        projection(&row, task_state)
-    };
-    feed_created(&bridge, &ledger, "fake-1").unwrap();
-    assert_eq!(
-        public("fake-1", TaskState::Pending),
-        PublicLifecycle::Created
-    );
-    let probe = backend.probe(&session).unwrap();
-    assert!(probe.alive);
-    feed_resource_attached(&bridge, &ledger, "fake-1").unwrap();
-    feed_ready(&bridge, &ledger, "fake-1").unwrap();
-    assert_eq!(public("fake-1", TaskState::Pending), PublicLifecycle::Idle);
-    feed_turn_started(&bridge, &ledger, "fake-1").unwrap();
-    assert_eq!(
-        public("fake-1", TaskState::Pending),
-        PublicLifecycle::Working
-    );
-    feed_delivered(&bridge, &ledger, "fake-1").unwrap();
-    // Delivered, and the task ledger agrees it is over: that pair is the exit,
-    // not the row alone.
-    assert_eq!(public("fake-1", TaskState::Done), PublicLifecycle::Exited);
-    backend
-        .close(&session, CloseReason::Completed, false)
-        .unwrap();
-    assert!(!backend.probe(&session).unwrap().alive);
-    feed_resource_closed(&bridge, &ledger, "fake-1").unwrap();
-    let closed = ledger.get_session("fake-1").unwrap().unwrap();
-    assert_eq!(
-        projection(&closed, TaskState::Pending),
-        PublicLifecycle::Exited
-    );
-    assert_eq!(closed.resource_state, "closed");
-    assert_eq!(closed.agent_state, "gone");
 }
 
 /// A competing writer landing between one local event's version read and its

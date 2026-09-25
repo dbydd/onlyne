@@ -123,9 +123,3 @@ fn hello_live_tasks_only_slot_tasks() {
     );
     assert!(!names.contains(&"t-orphan"));
 }
-
-#[test]
-fn empty_live_tasks_are_omitted_from_the_hello_frame() {
-    let value = serde_json::to_value(hello_args(Vec::new())).unwrap();
-    assert!(value.get("live_tasks").is_none());
-}

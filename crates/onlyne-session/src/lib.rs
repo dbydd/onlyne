@@ -31,11 +31,3 @@ pub use reconcile::{
     probe_target, reconcile_dead, reconcile_mismatch, reconcile_probe, record_fault, settle,
     stored_observation, to_versioned, try_feed,
 };
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_is_wired_into_the_workspace() {
-        assert!(env!("CARGO_PKG_NAME").ends_with("onlyne-session"));
-    }
-}

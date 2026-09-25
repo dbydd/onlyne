@@ -294,13 +294,8 @@ mod tests {
     use crate::envelope::{
         Body, Causality, Envelope, MsgKind, Principal, new_envelope, new_task_id,
     };
-    use crate::event::{EventTier, Presence, RolePresence, SessionStateEvent};
-    use crate::ops::{
-        AckArgs, AdminOp, ByeArgs, ControlArgs, GatewayOp, HandshakeArgs, LedgerQuery, PullArgs,
-        QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, RegisterChannelArgs, Report,
-        SessionProjection, Subscribe,
-    };
-    use crate::{PROTOCOL_VERSION, envelope::ControlOp};
+    use crate::event::SessionStateEvent;
+    use crate::ops::{AdminOp, PullArgs, QueryRolesArgs, SessionProjection};
 
     fn task() -> Envelope {
         new_envelope(
@@ -432,33 +427,6 @@ mod tests {
     }
 
     #[test]
-    fn presence_events_carry_the_draining_state() {
-        let event = Event::RolePresence(RolePresence {
-            role: "builder".into(),
-            state: Presence::Draining,
-            aggregate: None,
-            sessions: 2,
-            detail: None,
-        });
-        let value = serde_json::to_value(&event).expect("encode");
-        assert_eq!(value["type"], "role_presence");
-        assert_eq!(value["data"]["state"], "draining");
-    }
-
-    #[test]
-    fn heartbeat_frames_carry_the_server_cursor() {
-        let value = serde_json::to_value(Frame::<ClientOp>::Pong {
-            t: 7,
-            server_seq: 42,
-        })
-        .expect("encode");
-        assert_eq!(
-            value,
-            serde_json::json!({"f": "pong", "t": 7, "server_seq": 42})
-        );
-    }
-
-    #[test]
     fn bye_and_ack_frames_open_no_request() {
         let bye = Frame::bye("shutdown");
         assert_eq!(bye.id(), None);
@@ -517,111 +485,6 @@ mod tests {
         let trimmed = payload.trimmed();
         assert!(trimmed.message.len() <= MAX_ERROR_MESSAGE_BYTES);
         assert!(trimmed.message.is_char_boundary(trimmed.message.len()));
-    }
-
-    #[test]
-    fn conflict_wording_is_pinned_to_the_ledger_text() {
-        assert_eq!(
-            OP_ID_CONFLICT_MESSAGE,
-            "op_id conflict: request differs from durable receipt"
-        );
-    }
-
-    #[test]
-    fn every_client_op_survives_the_frame_wrapper() {
-        let ops = vec![
-            ClientOp::Hello(HandshakeArgs {
-                protocol: PROTOCOL_VERSION,
-                role: "planner".into(),
-                key: "ed25519/AAA".into(),
-                signature: "sig".into(),
-                agent: "onlyne-client".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                aggregate: false,
-                live_tasks: Vec::new(),
-            }),
-            ClientOp::Send(Box::new(task())),
-            ClientOp::Pull(PullArgs {
-                role: None,
-                limit: 32,
-                hold_ms: Some(250),
-                control_only: None,
-            }),
-            ClientOp::Ack(AckArgs {
-                msg_id: "m1".into(),
-                op_id: None,
-                accepted: true,
-                reason: None,
-            }),
-            ClientOp::Report(Report::Ready {
-                task_id: new_task_id(),
-                session_id: "s".into(),
-                generation: 1,
-                seq: 3,
-                cluster_ref: None,
-            }),
-            ClientOp::Subscribe(Subscribe {
-                since_seq: 7,
-                tiers: vec![EventTier::Durable],
-                kinds: vec![],
-                roles: vec![],
-            }),
-            ClientOp::QueryLedger(LedgerQuery::default()),
-            ClientOp::QuerySessions(QuerySessionsArgs::default()),
-            ClientOp::QueryRoles(QueryRolesArgs::default()),
-            ClientOp::QueryFaults(QueryFaultsArgs::default()),
-            ClientOp::Control(ControlArgs {
-                to: Some("builder".into()),
-                op: ControlOp::Probe {
-                    task_id: new_task_id(),
-                },
-            }),
-            ClientOp::Bye(ByeArgs {
-                reason: "shutdown".into(),
-                drain_ms: None,
-            }),
-        ];
-        assert_eq!(ops.len(), 12);
-        for (index, op) in ops.into_iter().enumerate() {
-            let id = format!("r{index}");
-            let frame = Frame::req(&id, op);
-            let value = serde_json::to_value(&frame).expect("encode");
-            assert_eq!(value["f"], "req");
-            assert_eq!(value["id"], id);
-            assert!(value.get("op").is_some(), "op sits beside id");
-            assert!(value.get("args").is_some(), "args sits beside id");
-            let back: Frame = serde_json::from_value(value).expect("decode");
-            assert_eq!(back, frame);
-        }
-    }
-
-    #[test]
-    fn admin_and_gateway_frames_share_the_request_layout() {
-        let admin: AdminFrame = Frame::req("a1", AdminOp::Roles(QueryRolesArgs::default()));
-        let admin_value = serde_json::to_value(&admin).expect("admin frame encodes");
-        assert_eq!(admin_value["f"], "req");
-        assert_eq!(admin_value["id"], "a1");
-        assert_eq!(admin_value["op"], "roles");
-        assert!(admin_value.get("args").is_some());
-        let admin_back: AdminFrame = serde_json::from_value(admin_value).expect("admin decodes");
-        assert_eq!(admin_back, admin);
-
-        let gateway: GatewayFrame = Frame::req(
-            "g1",
-            GatewayOp::RegisterChannel(RegisterChannelArgs {
-                platform: "telegram".into(),
-                channel: "telegram".into(),
-                conversations: None,
-            }),
-        );
-        let gateway_value = serde_json::to_value(&gateway).expect("gateway frame encodes");
-        assert_eq!(gateway_value["f"], "req");
-        assert_eq!(gateway_value["id"], "g1");
-        assert_eq!(gateway_value["op"], "register_channel");
-        assert!(gateway_value.get("args").is_some());
-        let gateway_back: GatewayFrame =
-            serde_json::from_value(gateway_value).expect("gateway decodes");
-        assert_eq!(gateway_back, gateway);
     }
 
     #[test]

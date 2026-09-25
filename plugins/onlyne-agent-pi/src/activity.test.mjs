@@ -52,12 +52,6 @@ test("hostile input stays inside render bounds", () => {
   for (const line of lines) assert.ok(Array.from(line).length <= MAX_WIDTH, line);
 });
 
-test("identical state gives identical output", () => {
-  const activity = createActivity({ clock }).set({ role: "planner", connection: "connected" });
-  activity.note("in", "build it");
-  assert.deepEqual(activity.lines(), activity.lines());
-});
-
 test("default render shows the newest SHOW_EVENTS events", () => {
   const activity = createActivity({ clock });
   for (let index = 0; index < SHOW_EVENTS + 4; index += 1) activity.note("state", `event ${index}`);

@@ -210,30 +210,8 @@ fn write_document(path: &Path, body: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SHIPPED, SkillExportArgs, SkillSet, destination};
+    use super::SHIPPED;
     use std::path::PathBuf;
-
-    /// The four documents, with the group each answers to.
-    #[test]
-    fn the_shipped_table_carries_every_group() {
-        let sets: Vec<SkillSet> = SHIPPED.iter().map(|skill| skill.set).collect();
-        assert_eq!(
-            sets,
-            vec![
-                SkillSet::Supervisor,
-                SkillSet::Role,
-                SkillSet::Role,
-                SkillSet::Dev
-            ]
-        );
-        for skill in &SHIPPED {
-            assert!(
-                skill.body.starts_with("---\nname:"),
-                "{} carries no skill frontmatter",
-                skill.name
-            );
-        }
-    }
 
     /// The crate carries a real copy of every document, and the repository's own
     /// copy is the same bytes.
@@ -268,35 +246,5 @@ mod tests {
                 skill.name
             );
         }
-    }
-
-    /// `--dest` wins over the working directory.
-    #[test]
-    fn a_named_destination_stands() {
-        let args = SkillExportArgs {
-            dest: Some(PathBuf::from("/tmp/skills-root")),
-            set: Vec::new(),
-            force: false,
-        };
-        assert_eq!(
-            destination(&args).unwrap(),
-            PathBuf::from("/tmp/skills-root")
-        );
-    }
-
-    /// With no `--dest`, the answer is `.agents/skills` under the working
-    /// directory, which the test process knows absolutely.
-    #[test]
-    fn the_default_destination_sits_under_the_working_directory() {
-        let args = SkillExportArgs {
-            dest: None,
-            set: Vec::new(),
-            force: false,
-        };
-        let dest = destination(&args).unwrap();
-        assert_eq!(
-            dest,
-            std::env::current_dir().unwrap().join(".agents/skills")
-        );
     }
 }

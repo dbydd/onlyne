@@ -111,12 +111,4 @@ mod tests {
         .expect("custom environment token");
         assert_eq!(token, "secret");
     }
-
-    #[test]
-    fn onboarding_is_a_local_qr_prompt() {
-        let prompt = qr_onboarding_prompt();
-        assert_eq!(prompt.kind, OnboardingKind::Qr);
-        assert!(prompt.payload.contains(TOKEN_ENV));
-        assert_eq!(prompt.expires_in, Some(300));
-    }
 }

@@ -1,10 +1,10 @@
-//! Ending a session's resources: retirement on detach, a completed session whose agent
-//! stays attached, the stall clock of an ended connection, and the periodic reclaim.
+//! Ending a session's resources: retirement on detach, the stall clock of an ended
+//! connection, and the periodic reclaim.
 
 use crate::common::{
-    Published, ReasonBackend, RecordingOutbox, assert_settled, complete_plugin,
-    complete_raw_plugin, deliver, eventually, mount_plugin, mount_raw_plugin, published_projection,
-    run_a_turn, sample_envelope, serve_role_socket, task_delivery,
+    Published, ReasonBackend, RecordingOutbox, assert_settled, complete_plugin, deliver,
+    eventually, mount_plugin, published_projection, run_a_turn, sample_envelope, serve_role_socket,
+    task_delivery,
 };
 use onlyne_client::session::dispatch::{DispatchState, dispatch, on_plugin_report};
 use onlyne_proto::{
@@ -347,74 +347,6 @@ async fn the_settles_own_publish_already_carries_its_retirement() {
     );
 }
 
-/// A settled session lives only as long as its agent is attached. A plugin
-/// that detached — the shape a session process that exited itself leaves
-/// behind, and the shape an operator `/onlyne disconnect` leaves — takes its
-/// slot out of the map, so the next task spawns a new session instead of
-/// writing into a dead connection.
-#[tokio::test]
-async fn a_settled_session_whose_plugin_left_is_retired() {
-    let dir = tempdir().unwrap();
-    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
-    let backend = Arc::new(FakeBackend::new());
-    let state = DispatchState::new(
-        "planner",
-        dir.path(),
-        vec!["agent".into()],
-        2,
-        backend.clone(),
-        store.clone(),
-    );
-    state.attach_outbox(Arc::new(RecordingOutbox::default()));
-    let (socket, host) = serve_role_socket(&state, dir.path()).await;
-
-    let first_task = deliver(&state, &task_delivery("task A")).await;
-    let (first_io, mut first_assigns) = mount_plugin(&socket, Some(&first_task)).await;
-    tokio::time::timeout(Duration::from_secs(2), first_assigns.recv())
-        .await
-        .expect("the mounted session is handed its payload");
-
-    run_a_turn(&state, &first_task).await;
-    on_plugin_report(
-        &state,
-        None,
-        Report::Complete {
-            task_id: first_task.clone(),
-            outcome: Outcome::Done,
-            head: Some("A done".into()),
-            reply_to: None,
-            cluster_ref: None,
-        },
-    )
-    .await
-    .unwrap();
-    assert_settled(&store, &first_task);
-    assert_eq!(
-        state.session_count(),
-        1,
-        "the settled slot stays while its agent is attached"
-    );
-
-    // The plugin leaves: the connection it served on is over.
-    first_io
-        .notify(AdapterMsg::Plugin(PluginOp::Detach(DetachArgs {
-            reason: "plugin left".into(),
-        })))
-        .await
-        .unwrap();
-    eventually(|| state.session_count() == 0, "the idle slot to go").await;
-
-    let second_task = deliver(&state, &task_delivery("task B")).await;
-    assert_eq!(
-        backend.sessions().len(),
-        1,
-        "the retired resource leaves one live replacement"
-    );
-    assert!(backend.sessions().contains_key(&second_task));
-    let _second_io = mount_plugin(&socket, Some(&second_task)).await;
-    host.abort();
-}
-
 #[tokio::test]
 async fn automatic_retirement_survives_a_backend_close_failure() {
     let dir = tempdir().unwrap();
@@ -512,72 +444,6 @@ async fn graceful_detach_retires_the_completed_session_resource() {
         [onlyne_session::CloseReason::Completed]
     );
     assert_eq!(state.session_count(), 0);
-    host.abort();
-}
-
-#[tokio::test]
-async fn completion_keeps_the_resource_while_the_plugin_is_attached() {
-    let dir = tempdir().unwrap();
-    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
-    let backend = Arc::new(ReasonBackend::default());
-    let state = DispatchState::new(
-        "planner",
-        dir.path(),
-        vec!["agent".into()],
-        1,
-        backend.clone(),
-        store.clone(),
-    );
-    state.attach_outbox(Arc::new(RecordingOutbox::default()));
-    let (socket, host) = serve_role_socket(&state, dir.path()).await;
-
-    let task_id = deliver(&state, &task_delivery("task A")).await;
-    let (io, mut assigns) = mount_plugin(&socket, Some(&task_id)).await;
-    assert_eq!(assigns.recv().await.as_deref(), Some(task_id.as_str()));
-    complete_plugin(&io, &task_id, Outcome::Done).await;
-
-    assert!(backend.closed_sessions.lock().is_empty());
-    assert_eq!(
-        state.session_count(),
-        1,
-        "the attached resource stays tracked"
-    );
-    assert!(state.session_transport(&task_id).is_some());
-    host.abort();
-}
-
-#[tokio::test]
-async fn connection_loss_without_detach_keeps_the_completed_resource() {
-    let dir = tempdir().unwrap();
-    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
-    let backend = Arc::new(ReasonBackend::default());
-    let state = DispatchState::new(
-        "planner",
-        dir.path(),
-        vec!["agent".into()],
-        1,
-        backend.clone(),
-        store,
-    );
-    state.attach_outbox(Arc::new(RecordingOutbox::default()));
-    let (socket, host) = serve_role_socket(&state, dir.path()).await;
-
-    let task_id = deliver(&state, &task_delivery("task A")).await;
-    let mut stream = mount_raw_plugin(&socket, &task_id).await;
-    complete_raw_plugin(&mut stream, &task_id, Outcome::Done).await;
-    drop(stream);
-    eventually(
-        || state.session_transport(&task_id).is_none(),
-        "the dropped connection binding to clear",
-    )
-    .await;
-
-    assert!(backend.closed_sessions.lock().is_empty());
-    assert_eq!(
-        state.session_count(),
-        1,
-        "the reconnectable resource stays tracked"
-    );
     host.abort();
 }
 

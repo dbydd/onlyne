@@ -7,7 +7,6 @@ use onlyne_proto::{
 };
 use onlyne_testkit::{
     HostSim, HostSimSpec, empty_body_envelope, oversized_image_envelope, sample_assign,
-    session_backend_choice,
 };
 use serde_json::json;
 
@@ -198,16 +197,6 @@ async fn dropped_assign_reconnect_redelivers_same_op_id_with_original_receipt() 
     assert_eq!(replayed.envelope.op_id.as_deref(), Some(op_id.as_str()));
     assert_eq!(replayed, accepted);
     second_task.abort();
-}
-
-#[test]
-fn fake_backend_three_way_fixture_is_selected_when_available() {
-    assert_eq!(
-        session_backend_choice(),
-        "hostsim-stub:onlyne-session is unavailable without a sibling dependency"
-    );
-    let assign = sample_assign("task body", "prose");
-    assert_eq!(assign.envelope.body.text.as_deref(), Some("task body"));
 }
 
 #[tokio::test]

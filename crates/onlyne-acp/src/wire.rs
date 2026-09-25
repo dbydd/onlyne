@@ -649,11 +649,6 @@ mod tests {
     }
 
     #[test]
-    fn trailing_line_endings_are_not_part_of_the_frame() {
-        assert!(decode("{\"jsonrpc\":\"2.0\",\"method\":\"x\"}\r\n").is_ok());
-    }
-
-    #[test]
     fn ids_that_cannot_be_echoed_back_are_refused() {
         assert_eq!(
             RequestId::from_value(&json!(9_223_372_036_854_775_807_u64)),

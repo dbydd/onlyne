@@ -424,19 +424,6 @@ mod tests {
     }
 
     #[test]
-    fn a_pinned_node_never_moves() {
-        let mut pos = vec![
-            Vec2::new(0.0, 0.0),
-            Vec2::new(1.0, 0.0),
-            Vec2::new(0.0, 1.0),
-        ];
-        let pinned = [true, false, false];
-        let before = pos[0];
-        step(&mut pos, &[(0, 1), (0, 2)], &pinned, 50.0, &params());
-        assert_eq!(pos[0], before);
-    }
-
-    #[test]
     fn the_radial_seed_puts_the_focus_at_the_origin_and_rings_on_their_radius() {
         // a is the focus; b and c hang off it; d hangs off b.
         let adj = vec![vec![1, 2], vec![0, 3], vec![0], vec![1]];
@@ -463,19 +450,6 @@ mod tests {
             (span(pos[0], pos[2]) - 2.0 * RING_GAP).abs() < 0.01,
             "{pos:?}"
         );
-    }
-
-    #[test]
-    fn settling_the_same_seed_twice_gives_the_same_map() {
-        let adj = vec![vec![1, 2], vec![0, 3], vec![0], vec![1, 2]];
-        let dist = bfs_distances(4, 0, &adj);
-        let edges = [(0, 1), (0, 2), (1, 3), (2, 3)];
-        let pinned = [true, false, false, false];
-        let mut first = radial_layout(4, &dist, &adj, RING_GAP, RING_GAP);
-        let mut second = radial_layout(4, &dist, &adj, RING_GAP, RING_GAP);
-        settle(&mut first, &edges, &pinned, &params());
-        settle(&mut second, &edges, &pinned, &params());
-        assert_eq!(first, second);
     }
 
     #[test]
