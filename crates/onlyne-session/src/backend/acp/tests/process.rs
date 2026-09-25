@@ -148,6 +148,15 @@ fn an_agent_that_dies_mid_turn_fails_its_task_with_the_detail() {
             .to_string()
             .contains("not held"),
     );
-    assert!(backend.state.agents.lock().is_empty());
+    // The reaper drops a dead agent on its own clock, the same way the close path
+    // above is waited for. Read on the runner's schedule, never on the test's.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && !backend.state.agents.lock().is_empty() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        backend.state.agents.lock().is_empty(),
+        "the dead agent left the table within 20s",
+    );
     let _ = backend.close(&session, CloseReason::Fault, false);
 }

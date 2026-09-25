@@ -292,14 +292,18 @@ fn onlyne_records(lines: &[Value], kind: &str) -> Vec<Value> {
 }
 
 fn await_outcome(feed: &OutcomeFeed, task: &str) -> SessionOutcome {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // One turn is a spawned agent and its round trips. The suite runs every crate's
+    // tests over the runner's few cores at once, so this bound belongs to the
+    // machine's schedule: a turn that arrives late is still the turn it was owed,
+    // and a turn that never arrives fails here.
+    let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
         if let Some(outcome) = feed.recv_timeout(Duration::from_millis(500)) {
             assert_eq!(outcome.task_id, task, "a fact arrived for another task");
             return outcome;
         }
     }
-    panic!("no outcome for {task} within 20s");
+    panic!("no outcome for {task} within 90s");
 }
 
 /// Run one turn to its reported ending and hand back the outcome with both
