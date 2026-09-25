@@ -138,6 +138,24 @@ acceptance record is `docs/live-evidence-1.4.0.md`.
 完整发布记录从 [1.4.0](#140---2026-09-24) 开始。实际验收记录位于
 `docs/live-evidence-1.4.0.md`。
 
+## [pi-onlyne 1.2.2] - 2026-09-25
+
+Scope: `plugins/onlyne-agent-pi` only. Every crate stays at 1.4.1.
+
+### Fixed
+
+- plugin: an envelope carrying an image attachment reaches the model. The surface built
+  its image part in Anthropic's nested form, `{type:"image", source:{type:"base64",
+  mediaType, data}}`, and pi 0.87's message path reads the flat `ImageContent` of its own
+  message types — `data` beside `mimeType` — normalizing every image before the message is
+  assembled. With `data` absent, `Buffer.from` threw inside pi, pi caught the rejection as
+  its own extension error, and the delivery was dropped whole: the task text travelled no
+  further than the image, the pane showed one red line, and the ledger row stayed
+  `in_flight` behind a session that went on beating. pi 0.85.1 handed the part to the
+  provider unread, which is where the nested form came from. A part with no base64 data or
+  no media type is now dropped at the surface with one log line naming the drop, so a
+  malformed attachment costs its image and the assignment still arrives.
+
 ## [1.4.0] - 2026-09-24
 
 Status: **registry-published at `b3c776ef080d73302267a465c8dbd540321f9adb`.** Tag `v1.4.0`

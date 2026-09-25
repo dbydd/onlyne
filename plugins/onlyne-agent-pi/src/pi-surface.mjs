@@ -2,7 +2,7 @@
 // through the pi extension API, with a probe for each optional member so an
 // older pi degrades instead of throwing.
 //
-// Probed members (measured against pi 0.85.1):
+// Probed members (measured against pi 0.87.1):
 //   wakeUser      pi.sendUserMessage(content, { deliverAs: "followUp" })
 //   proseContext  pi.sendMessage({customType,...}, { deliverAs:"followUp", triggerTurn:false })
 //   customEntry   pi.appendEntry(customType, data)
@@ -83,19 +83,35 @@ export function createSurface({ pi, log, context }) {
     }
   };
 
-  /** One pi user message; images ride along as pi image content parts. */
+  /**
+   * One pi user message; images ride along as pi image content parts.
+   *
+   * pi reads an image part as the flat `ImageContent` of its message types —
+   * `data` plus `mimeType` — and normalizes every part before the message is
+   * built, so a part missing either string stops the whole delivery inside pi.
+   * pi reports that failure in its own pane and hands nothing back to this
+   * plugin, so an unusable part is dropped here and the assignment still
+   * travels: the injection text already names the file that was written.
+   */
   const wakeUser = (text, parts = []) => {
     if (!available.wakeUser) {
       log("pi has no sendUserMessage; the assignment reached the session log only");
       return false;
     }
-    const content = parts.length === 0
+    const images = parts.filter(
+      (part) => typeof part?.data === "string" && typeof part?.mime === "string" && part.mime,
+    );
+    if (images.length !== parts.length) {
+      log(`attachment carried no base64 data or no media type; ${parts.length - images.length} dropped, the task text still went`);
+    }
+    const content = images.length === 0
       ? text
       : [
           { type: "text", text },
-          ...parts.map((part) => ({
+          ...images.map((part) => ({
             type: "image",
-            source: { type: "base64", mediaType: part.mime, data: part.data },
+            data: part.data,
+            mimeType: part.mime,
           })),
         ];
     try {
