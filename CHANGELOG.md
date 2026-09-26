@@ -3,10 +3,12 @@
 ## 1.4.1 release index (English)
 
 **Release:** 1.4.1, dated 2026-09-24. Nineteen workspace crates move to 1.4.1, and
-`pi-onlyne` is on npm at 1.2.1. Tag `v1.4.1` carries the first GitHub binary release:
+`pi-onlyne` is on npm at 1.2.2. Tag `v1.4.1` carries the first GitHub binary release:
 five platform archives with their checksums, plus the Homebrew formula rendered from them and
 committed to `main` at `Formula/onlyne.rb`, which is the path that makes this repository the tap
-`brew install dbydd/onlyne/onlyne` reads. The crates.io upload for 1.4.1 has not run.
+`brew install dbydd/onlyne/onlyne` reads. All nineteen crates reached crates.io at 1.4.1 on
+2026-09-26, in dependency order through `cargo publish --locked -p onlyne-<crate>` at tag
+`v1.4.1`, each through Cargo's packaging sandbox build.
 
 **Operator-visible changes:**
 
@@ -32,9 +34,11 @@ client with no migration.
 ## 1.4.1 版本索引（中文）
 
 **发布信息：** 1.4.1 发布于 2026-09-24。工作区全部十九个 crate 升到 1.4.1，`pi-onlyne`
-在 npm 上的版本为 1.2.1。tag `v1.4.1` 承载第一个 GitHub 二进制发行版：五个平台的归档及其
+在 npm 上的版本为 1.2.2。tag `v1.4.1` 承载第一个 GitHub 二进制发行版：五个平台的归档及其
 checksum，以及据此渲染、提交到 `main` 的 `Formula/onlyne.rb` —— 就是这个路径让本仓库成为
-`brew install dbydd/onlyne/onlyne` 所读的 tap。1.4.1 的 crates.io 上传尚未执行。
+`brew install dbydd/onlyne/onlyne` 所读的 tap。十九个 crate 已于 2026-09-26 按依赖顺序
+在 tag `v1.4.1` 上以 `cargo publish --locked -p onlyne-<crate>` 全部到达 crates.io 的 1.4.1，
+每个都经过 Cargo 的 packaging sandbox build。
 
 **操作员可见的变化：**
 

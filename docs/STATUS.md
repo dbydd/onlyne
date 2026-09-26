@@ -1,8 +1,8 @@
 # Onlyne Status
 
-Release `v1.4.1` is commit `b2e0d9c`. Nineteen Rust crates carry version 1.4.1 and
-`pi-onlyne` 1.2.1 is published to npm; the crates.io upload for 1.4.1 has not run, so the
-registry still carries 1.4.0. `v1.4.1` is the first release with a GitHub binary channel:
+Release `v1.4.1` is commit `b2e0d9c`. Nineteen Rust crates carry version 1.4.1, all nineteen
+reached crates.io on 2026-09-26 through `cargo publish --locked` at that tag, and `pi-onlyne`
+1.2.2 is published to npm. `v1.4.1` is the first release with a GitHub binary channel:
 the tag's run built five binaries for `aarch64-apple-darwin`, `x86_64-apple-darwin`,
 `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, and `x86_64-pc-windows-msvc`,
 attached the archives, their `.sha256` files, and `SHA256SUMS` to the release, and
@@ -115,7 +115,7 @@ Each case is a script under `crates/onlyne-testkit/e2e/`, run with `ONLYNE_BACKE
 
 ### 发布与历史状态
 
-`v1.4.1` 对应提交 `b2e0d9c`。十九个 Rust crate 为 1.4.1，`pi-onlyne` 1.2.1 已发布到 npm；1.4.1 的 crates.io 上传尚未执行，registry 上仍是 1.4.0。`v1.4.1` 是第一个带 GitHub 二进制渠道的发行版：tag 触发的运行构建了五个平台的五个二进制，把归档、各自的 `.sha256` 与 `SHA256SUMS` 附加到 release，并按该 checksum 列表提交渲染出的 `Formula/onlyne.rb` —— 这个路径让本仓库就是 Homebrew 读的那个 tap。在此之前 pipeline、installer 与 formula renderer 都在索引之外，因此更早的 tag 都没有 assets。
+`v1.4.1` 对应提交 `b2e0d9c`。十九个 Rust crate 为 1.4.1，十九个都已于 2026-09-26 在该 tag 上以 `cargo publish --locked` 到达 crates.io，`pi-onlyne` 1.2.2 已发布到 npm。`v1.4.1` 是第一个带 GitHub 二进制渠道的发行版：tag 触发的运行构建了五个平台的五个二进制，把归档、各自的 `.sha256` 与 `SHA256SUMS` 附加到 release，并按该 checksum 列表提交渲染出的 `Formula/onlyne.rb` —— 这个路径让本仓库就是 Homebrew 读的那个 tap。在此之前 pipeline、installer 与 formula renderer 都在索引之外，因此更早的 tag 都没有 assets。
 
 `v1.4.0` 对应提交 `b3c776ef080d73302267a465c8dbd540321f9adb`。十九个 Rust crate 均以 1.4.0 发布到 crates.io，`pi-onlyne` 1.2.0 已发布到 npm。v1.4.0 未发布 GitHub 二进制发行版；registry 包是 v1.4.0 的安装渠道。客户端会话生命周期以插件上报的 frame 和 heartbeat 存活状态为依据，任务结果进入独立的 `task` 表；`session_sync` 已移除，客户端到服务器的协议包含十二个 verb。客户端数据库 schema marker 为 2，服务器数据库为 4；旧布局会返回 `onlyne: unsupported schema; v1.0.0 does not migrate`。
 
