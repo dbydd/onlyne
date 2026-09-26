@@ -429,3 +429,103 @@ async fn a_control_close_refuses_the_held_delivery_with_the_operators_word() {
         );
     }
 }
+
+/// The backend a retirement test runs on: a fake host whose every close answers
+/// one question — was this client's dispatch lock held at that moment?
+#[derive(Default)]
+struct LockProbe {
+    host: FakeBackend,
+    /// Filled in once the state exists, because the state is built on this
+    /// backend and cannot hand out its own lock before then.
+    state: Mutex<Option<Arc<Mutex<DispatchInner>>>>,
+    closes: Mutex<Vec<bool>>,
+}
+
+impl LockProbe {
+    /// Whether each close this client asked for ran with the dispatch lock off
+    /// it, in the order the asks came.
+    fn closes(&self) -> Vec<bool> {
+        self.closes.lock().clone()
+    }
+}
+
+impl SessionBackend for LockProbe {
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+    fn capabilities(&self) -> onlyne_session::Capabilities {
+        self.host.capabilities()
+    }
+    fn available(&self) -> Result<bool> {
+        self.host.available()
+    }
+    fn spawn(&self, spec: SpawnSpec) -> Result<SessionRef> {
+        self.host.spawn(spec)
+    }
+    fn attach(&self, session: &SessionRef) -> Result<SessionRef> {
+        self.host.attach(session)
+    }
+    fn probe(&self, session: &SessionRef) -> Result<onlyne_session::ResourceProbe> {
+        self.host.probe(session)
+    }
+    fn close(
+        &self,
+        session: &SessionRef,
+        reason: onlyne_session::CloseReason,
+        force: bool,
+    ) -> Result<()> {
+        let held = self
+            .state
+            .lock()
+            .as_ref()
+            .is_some_and(|inner| inner.is_locked());
+        self.closes.lock().push(held);
+        self.host.close(session, reason, force)
+    }
+}
+
+/// A retirement gives the host its resource back with the lock off it.
+///
+/// The dispatch lock is the one lock every adapter frame, report, and slot of
+/// this role queues behind, and a close is a host round trip — a pane kill, a
+/// terminal close — that can take seconds. The reconnect sweep used to close each
+/// session inside that lock, so one slow backend held the whole role up for every
+/// ghost it cleared, and a shutdown did the same for every session the client
+/// held while an operator's budget ran out. Both take the slots down under the
+/// lock now and run the closes after they let go, which is what each recorded
+/// `false` here reads.
+#[test]
+fn a_retirement_closes_the_host_off_the_dispatch_lock() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).expect("client store");
+    let probe = Arc::new(LockProbe::default());
+    let state = DispatchState::new("planner", dir.path(), Vec::new(), 8, probe.clone(), store);
+    *probe.state.lock() = Some(state.inner.clone());
+    let gone = Instant::now()
+        .checked_sub(Duration::from_secs(61))
+        .expect("an instant a minute back");
+    let task = new_task_id();
+    dispatched_ghost(&state, &task, gone);
+
+    assert_eq!(state.retire_dropped_ghosts(Instant::now(), 60).len(), 1);
+    assert_eq!(
+        probe.closes(),
+        vec![false],
+        "the ghost's resource was closed with the dispatch lock let go"
+    );
+
+    let shutdown = new_task_id();
+    dispatched_ghost(&state, &shutdown, Instant::now());
+    close_all(
+        &state,
+        onlyne_session::CloseReason::Shutdown,
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(
+        probe.closes(),
+        vec![false, false],
+        "and so was the one a shutdown took down"
+    );
+    assert_eq!(state.session_count(), 0, "the shutdown left no slot behind");
+}

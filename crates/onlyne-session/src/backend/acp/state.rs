@@ -1,8 +1,10 @@
 //! What an ACP backend holds: the client's options, the handle that owns them,
 //! and the per-process and per-session bookkeeping underneath it. No I/O.
 //!
-//! A session is named by the pair (agent command, agent-chosen id): ACP ids are
-//! unique within one agent process, not across them.
+//! A session is named by the triple (agent command, this client's name for the
+//! process, agent-chosen id): ACP ids are unique within one agent process, and
+//! one command can be served by several processes in turn, so the command alone
+//! does not own an id.
 
 use crate::backend::{OutcomeFeed, OutcomeSink};
 use crate::content::ContentWriter;
@@ -11,7 +13,7 @@ use parking_lot::{Condvar, Mutex};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::time::Duration;
 
 /// The `[client.acp]` table, in the shape this crate can hold without a config
@@ -52,10 +54,19 @@ pub struct AcpBackend {
 pub(super) struct State {
     /// Live agent processes, keyed by the rendered command that started them.
     pub(super) agents: Mutex<BTreeMap<String, Arc<AgentSlot>>>,
-    /// Every session this client holds, keyed by the agent command and the id that
-    /// agent chose for it: ACP ids are unique within a process, not across
-    /// processes, so the pair is the stable name, where a task id is not.
-    pub(super) sessions: Mutex<BTreeMap<(String, String), Arc<SessionEntry>>>,
+    /// Every session this client holds, keyed by the agent command, the process
+    /// of that command the id came from, and the id that process chose for the
+    /// session. ACP ids are unique within a process, not across processes, so
+    /// the pair of command and id is not enough: when a crashed agent is
+    /// replaced under the same command, the replacement is free to hand out
+    /// `sess-1` again, and the session that id names is a different one. A task
+    /// id names none of them stably, which is why it is not in the key.
+    pub(super) sessions: Mutex<BTreeMap<(String, u64, String), Arc<SessionEntry>>>,
+    /// The names handed to agent processes as this client starts them. A process
+    /// keeps its name for as long as this client means the term to cover it, so
+    /// neither its sessions nor its reservations can be mistaken for another
+    /// process's. The pid is not this: the operating system recycles those.
+    pub(super) process: AtomicU64,
     pub(super) sink: OutcomeSink,
     pub(super) feed: OutcomeFeed,
     /// Serializes journal cursors across every task served by this role.
@@ -64,20 +75,29 @@ pub(super) struct State {
 
 pub(super) struct AgentSlot {
     pub(super) agent: Arc<Agent>,
+    /// This client's name for the process behind this slot; see [`State::process`].
+    pub(super) process: u64,
     /// Sessions of this process still held by this client, so the last one to
-    /// leave can take the process with it.
+    /// leave can take the process with it. One reservation is taken for every
+    /// slot [`AcpBackend::agent_for`] hands out and released by exactly one
+    /// [`State::retire`] of the session that took it — including a session whose
+    /// open failed after the process was chosen — and never by a session of the
+    /// process this one replaced.
     pub(super) live: AtomicUsize,
 }
 
 /// One ACP session, plus the turn state this client keeps for it.
 pub(super) struct SessionEntry {
     /// The task this session serves. One session runs one task, and that task
-    /// owns its own journal.
-    pub(super) task_id: Mutex<String>,
+    /// owns its own journal. Bound when the session opens and never rewritten:
+    /// a second task takes a second session.
+    pub(super) task_id: String,
     /// The id the agent gave this session; every later request is keyed by it.
     pub(super) id: String,
     /// The command key of the process serving this session.
     pub(super) agent_key: String,
+    /// The name of that process, of the three that name this session.
+    pub(super) process: u64,
     /// The directory the agent runs in, which is where its journal lives.
     pub(super) workdir: PathBuf,
     pub(super) agent: Arc<Agent>,
@@ -91,7 +111,12 @@ pub(super) struct SessionEntry {
 
 impl SessionEntry {
     pub(super) fn current_task(&self) -> String {
-        self.task_id.lock().clone()
+        self.task_id.clone()
+    }
+
+    /// The key this session holds in [`State::sessions`].
+    pub(super) fn key(&self) -> (String, u64, String) {
+        (self.agent_key.clone(), self.process, self.id.clone())
     }
 }
 

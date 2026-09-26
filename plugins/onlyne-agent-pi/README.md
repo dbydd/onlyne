@@ -328,7 +328,16 @@ the shipped client.
   client stamps its own dispatch events (`created`, resource attach, `ready`) into the
   same `(generation, seq)` watermark, and the reducer silently drops any report at or
   below it (`crates/onlyne-session/src/reconcile/`). A plugin sequence starting at 1
-  would lose its first observations. Everything else about the versioning is per spec.
+  would lose its first observations. **One plugin, one counter:** every task the session
+  holds beats off the same sequence, because the client takes `row.seq + 1` for its own
+  event on a row between two of that task's beats, and a counter that advanced one per
+  task per round would land on exactly that number. The gate is per task row all the
+  same, so each task record also carries the `seq` of its last report (`task.lastSeq`,
+  visible as `taskSeqs` in `/onlyne status`), and an allocation is clamped above it:
+  `A@1001, B@1002, A@1003` is the shape that works, and no task can be handed back a seq
+  its own row has already accepted. Rounds never overlap either — a beat asked for while
+  one is writing folds into it and buys one more pass, not a second snapshot of the same
+  tick. Everything else about the versioning is per spec.
 - **`observed` is a full `Observation`.** `report.heartbeat` carries the state
   tuple (`version`, `generation_live`, `isolate_after`, `terminate_after`,
   `mismatch_count`, `agent`, `delivery`, `resource`, `recovery`), not
@@ -423,8 +432,8 @@ path the client's daemon bound, read when the environment carried none, §8).
 | the supervisor board lists no tabs | no live session reported a pane: the adapter predates the report, or this pi is not inside an Orca pane | `onlyne --server-root … sessions --json` for `projection.observed.host.orca.pane_key`; `env \| grep ORCA_` inside the pane |
 
 `/onlyne status` prints the live state (`connected`, `socket`, `role`, `sessionId`,
-`generation`, `agentState`, `tasks`, `pendingCompletion`, `lastError`, counters), and
-`/onlyne connect` / `/onlyne disconnect` open and close the socket by hand.
+`generation`, `agentState`, `seq`, `taskSeqs`, `tasks`, `pendingCompletions`, `lastError`,
+counters), and `/onlyne connect` / `/onlyne disconnect` open and close the socket by hand.
 
 ## 9. Development
 
@@ -655,7 +664,7 @@ relay_required = ["writer"]        # these roles must have received a handoff
 
 下面每项都是对 `PROTOCOL.md` 的有意解读，或是在已发布客户端上测得的行为。
 
-- **报告序列基线。** 插件自身的 `report` 序列从 1000 开始，而非 1。客户端将自己的调度事件（`created`、资源附加、`ready`）记入同一个 `(generation, seq)` 水位，归约器会静默丢弃任何小于或等于该水位的报告（`crates/onlyne-session/src/reconcile/`）。从 1 开始的插件序列会丢失最初几条观测。版本控制的其他部分均遵循规范。
+- **报告序列基线。** 插件自身的 `report` 序列从 1000 开始，而非 1。客户端将自己的调度事件（`created`、资源附加、`ready`）记入同一个 `(generation, seq)` 水位，归约器会静默丢弃任何小于或等于该水位的报告（`crates/onlyne-session/src/reconcile/`）。从 1 开始的插件序列会丢失最初几条观测。**一个插件只有一个计数器：** 会话持有的每个任务都沿用同一条序列发送心跳，因为客户端会在该任务两次心跳之间，为它自己写入该行的事件取 `row.seq + 1`；若每个任务每轮只推进一次，心跳恰好会撞在那个数上。但闸门是按任务行判断的，所以每条任务记录也会记下自己最后一次上报的 `seq`（`task.lastSeq`，在 `/onlyne status` 中以 `taskSeqs` 呈现），新的分配会被抬到它之上：`A@1001、B@1002、A@1003` 才是可用的形状，任何任务都不会被交回自己该行已经接受过的 seq。心跳轮次也不会重叠：一轮正在写时到来的心跳请求会并入这一轮，换来多做一遍，而不是同一刻的第二次快照。版本控制的其他部分均遵循规范。
 - **`observed` 是一个完整的 `Observation`。** `report.heartbeat` 携带状态元组（`version`、`generation_live`、`isolate_after`、`terminate_after`、`mismatch_count`、`agent`、`delivery`、`resource`、`recovery`），而不是 `{"state": "running"}` 简写：主机对其进行反序列化，覆盖客户端拥有的六个键，并仅应用 `is_legal` 接受的元组。此插件拥有 `agent` 维度（轮次钩子）、`resource` 声明——其进程在记录了挂载操作的窗格中处于活动状态——以及 `host` 绑定。它没有 `delivery`、`recovery`、`generation_live`、`isolate_after`、`terminate_after` 或 `mismatch_count` 的观测依据：在应用元组之前，客户端会依据自己的意图队列、归约器历史和角色配置重写全部六项，因此此插件在这些位置发送的内容不会被读取。任务结果和公开视图均不通过元组传输。
 - **`ready` 每次连接报告一次。** 主机自身的交接路径（`crates/onlyne-client/src/session/dispatch/delivery.rs::hand_session`）已会在客户端为挂载插件暂存会话时报告 `ready`，因此主机会将插件的第二次报告视为空操作。插件仍会发送：在任何工作存在之前完成挂载的插件正是就绪屏障所涵盖的情况，而且该报告只占用一个帧。
 - **从不发送 `cluster_ref`。** 此插件代表本地角色，不代表聚合角色；出于相同原因，Rust 一侧会将该字段设为 `skip_serializing_if`，使其缺省。
@@ -703,7 +712,7 @@ relay_required = ["writer"]        # these roles must have received a handoff
 | 后台任务仍在运行时，会话显示 `idle` | 未安装后台任务扩展，或其 EventBus 服务未在时限内回应状态查询，插件看不到自己留下的运行中工作 | `[pi-onlyne]` 日志中关于后台探针的行；同一 pi 会话中的 `bg_status` 会列出存活任务 |
 | 监管器面板未列出任何标签页 | 没有活动会话报告窗格：适配器早于该报告功能，或此 pi 不在 Orca 窗格内 | `onlyne --server-root … sessions --json` 中的 `projection.observed.host.orca.pane_key`；在窗格内执行 `env \| grep ORCA_` |
 
-`/onlyne status` 会打印实时状态（`connected`、`socket`、`role`、`sessionId`、`generation`、`agentState`、`tasks`、`pendingCompletion`、`lastError`、计数器），`/onlyne connect` / `/onlyne disconnect` 可手动打开和关闭套接字。
+`/onlyne status` 会打印实时状态（`connected`、`socket`、`role`、`sessionId`、`generation`、`agentState`、`seq`、`taskSeqs`、`tasks`、`pendingCompletions`、`lastError`、计数器），`/onlyne connect` / `/onlyne disconnect` 可手动打开和关闭套接字。
 
 ## 9. 开发
 

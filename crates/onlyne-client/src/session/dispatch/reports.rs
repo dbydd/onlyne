@@ -4,7 +4,7 @@ use super::projection::{note_verdict, sync_session};
 use super::retire::on_recycled;
 use super::settle::{SettleAuthority, on_out};
 use super::state::{ControlWord, note_beat};
-use super::transport::serves_session;
+use super::transport::{serves_ending, serves_task};
 
 /// Act on one control command that arrived as a delivery.
 ///
@@ -20,9 +20,26 @@ use super::transport::serves_session;
 /// the honest answer for a task this role does not own, and the caller still
 /// settles the row: re-offering a command no client can act on spends the
 /// delivery forever.
+///
+/// The same question decides whether anything is *applied*. A command naming a
+/// task this role has never held acts on nothing and writes no note: `recycle`
+/// and `cancel` put a word in `control_settles` that the settle door and the
+/// watchdog both read as this client's own order, and an order accepted for a
+/// session the role does not serve is a write to a task somebody else owns. The
+/// answer is `Ok(false)` rather than an error because the row still has to
+/// settle: a command refused here is refused for good, and acking it as
+/// undelivered would have the server offer a command no client can ever act on.
 pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
     let task_id = op.task_id();
     let held = state.holds_task(task_id);
+    if !held {
+        tracing::warn!(
+            op = op.name(),
+            task = %task_id,
+            "a control command naming no session this role holds was refused; nothing was applied"
+        );
+        return Ok(false);
+    }
     match op {
         ControlOp::Recycle { reason, .. } => {
             // The command asks this session's plugin for its own ending, so the
@@ -100,7 +117,7 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
             }
         }
     }
-    Ok(held)
+    Ok(true)
 }
 
 /// `from` is the connection the frame arrived on, which is what decides whether
@@ -114,6 +131,13 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
 /// died and sends the same thing again. What a refused state frame does instead
 /// of being applied is leave the tuple where the serving connection left it and
 /// say so here, in the log the operator reads.
+///
+/// The door is the same question in all three state-carrying arms — heartbeat,
+/// completion, fault — because all three move the session they name: the first
+/// its observed dimensions, the other two its verdict and the close of its
+/// resource. Only the completion and the fault answer for an extra case, where
+/// the client has already retired the session on its own command; see
+/// `ending_is_authorised`.
 pub async fn on_plugin_report(
     state: &DispatchState,
     from: Option<&AdapterIo>,
@@ -142,7 +166,7 @@ pub async fn on_plugin_report(
             // The beat itself is the liveness fact. The server times
             // heartbeats. A quiet, alive session keeps landing fresh rows.
             let mut inner = state.inner.lock();
-            if from.is_some_and(|io| !serves_session(&inner, &task_id, io)) {
+            if from.is_some_and(|io| !serves_task(&inner, &task_id, io)) {
                 // A connection the client holds read-only is not this session's
                 // transport, so its observation is not this session's state: the
                 // whole point of the demotion is that the task answers through
@@ -164,7 +188,7 @@ pub async fn on_plugin_report(
                 note_beat(&mut inner, &task_id, Instant::now());
                 tracing::warn!(
                     task = %task_id,
-                    "a beat from a connection held read-only refreshes the liveness stamp and applies no state"
+                    "a beat from a connection serving no such session refreshes the liveness stamp and applies no state"
                 );
                 false
             } else {
@@ -250,6 +274,13 @@ pub async fn on_plugin_report(
             // that leaves this arm is the plugin's own claim about work it did, and
             // `on_out` reads the session's row for that claim, refused whole when
             // the row says no turn ran.
+            if !ending_is_authorised(state, from, &task_id) {
+                tracing::warn!(
+                    task = %task_id,
+                    "a completion from a connection serving no such session was refused"
+                );
+                return Ok(());
+            }
             let asked = if state.take_controlled_settle(&task_id) {
                 SettleAuthority::ControlDriven
             } else {
@@ -264,6 +295,18 @@ pub async fn on_plugin_report(
             reason,
             ..
         } => {
+            // A recorded fault is a verdict too: it feeds the mismatch counter and
+            // the isolate/terminate ladder of the session it names, so the
+            // connection that files one is held to the same door as the connection
+            // that ends one.
+            if !ending_is_authorised(state, from, &task_id) {
+                tracing::warn!(
+                    task = %task_id,
+                    kind = %kind,
+                    "a fault from a connection serving no such session was refused"
+                );
+                return Ok(());
+            }
             let inner = state.inner.lock();
             onlyne_session::record_fault(&inner.store, &task_id, &kind, "plugin", &reason)?;
             false
@@ -274,6 +317,24 @@ pub async fn on_plugin_report(
         sync_session(state, &subject).await?;
     }
     Ok(())
+}
+
+/// Whether the sender of a report that ends or faults a session may do it.
+///
+/// The strict half is the heartbeat's rule unchanged: only the connection
+/// serving a session speaks for it, and `None` is the client's own door — the
+/// local CLI's `report`, and the fault a refused `focus` files — which is the
+/// session's own authority. `serves_ending` carries the two windows where an
+/// ending is legitimate and the strict rule cannot see its sender: the connection
+/// held read-only for this task, and the completion that answers this client's
+/// own `control` command, which reaches this door after the command has already
+/// retired the slot it would have been checked against.
+fn ending_is_authorised(state: &DispatchState, from: Option<&AdapterIo>, task_id: &str) -> bool {
+    let Some(io) = from else {
+        return true;
+    };
+    let inner = state.inner.lock();
+    serves_ending(&inner, task_id, io)
 }
 
 /// Compose one plugin heartbeat into the tuple the reducer is allowed to read.

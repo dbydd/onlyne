@@ -687,6 +687,109 @@ mod ledger_gates {
         );
     }
 
+    /// The pass reads what is due, deadline first, one batch at a time.
+    ///
+    /// Two bounds the flush queue depended on and did not carry: a retry the
+    /// machine parked in the future came back as sendable on the very next pass,
+    /// so the backoff asked for nothing; and an unbounded read handed the pass a
+    /// queue an offline client had filled — tens of thousands of rows held on the
+    /// store's one connection, with the rows behind the cap never reached.
+    #[test]
+    fn flush_order_parks_a_retry_and_caps_one_pass_at_the_batch() {
+        let (_dir, path) = temp_db("client.db");
+        let store = ClientStore::open(&path).unwrap();
+        let now = Utc::now();
+        let parked = envelope(
+            MsgKind::Task,
+            "parked",
+            Some("o-00000000-0000-4000-8000-0000000000a1"),
+        );
+        store
+            .enqueue_intent(
+                parked.op_id.as_deref().unwrap(),
+                &serde_json::to_value(&parked).unwrap(),
+            )
+            .unwrap();
+        store
+            .bump_intent(
+                parked.op_id.as_deref().unwrap(),
+                now + Duration::seconds(20),
+                "backoff",
+            )
+            .unwrap();
+        assert!(
+            store.flush_order().unwrap().is_empty(),
+            "a row inside its backoff is not the pass's to send"
+        );
+        assert_eq!(
+            store
+                .due_intents(now + Duration::seconds(21), 10)
+                .unwrap()
+                .len(),
+            1,
+            "the same row is there once the deadline has arrived"
+        );
+
+        let width = i64::from(crate::INTENT_FLUSH_BATCH_SIZE) + 25;
+        for slot in 0..width {
+            let op_id = format!("o-{slot:08}-0000-4000-8000-000000000000");
+            let env = envelope(MsgKind::Task, "queued", Some(&op_id));
+            store
+                .enqueue_intent(&op_id, &serde_json::to_value(&env).unwrap())
+                .unwrap();
+            // The first row created is the shortest-overdue one, so a batch that
+            // came back in creation order would lead with the wrong row.
+            store
+                .bump_intent(&op_id, now - Duration::seconds(slot), "queued")
+                .unwrap();
+        }
+        let batch = store.flush_order().unwrap();
+        assert_eq!(
+            i64::try_from(batch.len()).expect("the batch fits an i64"),
+            i64::from(crate::INTENT_FLUSH_BATCH_SIZE),
+            "one pass reads one batch, not the queue"
+        );
+        assert_eq!(
+            batch[0].op_id,
+            format!("o-{:08}-0000-4000-8000-000000000000", width - 1),
+            "the row that has waited longest leads the batch"
+        );
+        assert_eq!(
+            batch[1].op_id,
+            format!("o-{:08}-0000-4000-8000-000000000000", width - 2),
+            "and the deadline, not the rowid, orders it"
+        );
+        assert_eq!(
+            store.pending_intent_count().unwrap(),
+            width + 1,
+            "the cap bounds the read, never the queue"
+        );
+    }
+
+    /// The delete a permanent refusal earns runs on the store's own connection.
+    ///
+    /// The row's ending is the contract: one call removes it, and a caller that
+    /// retries after losing the answer reads `false` — the row is gone either
+    /// way, so the queue cannot hand the same refused frame to the server again.
+    #[test]
+    fn delete_intent_removes_the_row_and_answers_whether_one_went() {
+        let (_dir, path) = temp_db("client.db");
+        let store = ClientStore::open(&path).unwrap();
+        let env = envelope(
+            MsgKind::Task,
+            "refused",
+            Some("o-00000000-0000-4000-8000-0000000000b2"),
+        );
+        let op_id = env.op_id.clone().unwrap();
+        store
+            .enqueue_intent(&op_id, &serde_json::to_value(&env).unwrap())
+            .unwrap();
+        assert!(store.delete_intent(&op_id).unwrap());
+        assert!(!store.delete_intent(&op_id).unwrap());
+        assert_eq!(store.pending_intent_count().unwrap(), 0);
+        assert!(store.flush_order().unwrap().is_empty());
+    }
+
     #[test]
     fn events_since_and_head_survive_restart() {
         let (_dir, path) = temp_db("server.db");

@@ -59,14 +59,14 @@ fn from_slots_sorts_and_dedups() {
 }
 
 #[test]
-fn hello_live_tasks_empty_when_store_has_rows_but_no_slots() {
+fn hello_live_tasks_merges_store_rows_with_slots() {
     let dir = tempdir().unwrap();
     let store = ClientStore::open(dir.path().join("client.db")).unwrap();
     store
-        .upsert_session("t-work", &stored("running", "attached"))
+        .upsert_session("t-work", &stored("ready", "attached"))
         .unwrap();
     store
-        .upsert_session("t-idle", &stored("idle", "attached"))
+        .upsert_session("t-booting", &stored("booting", "attached"))
         .unwrap();
     let dispatch = DispatchState::new(
         "planner",
@@ -76,11 +76,18 @@ fn hello_live_tasks_empty_when_store_has_rows_but_no_slots() {
         Arc::new(FakeBackend::new()),
         store,
     );
-    let tasks = dispatch.hello_live_tasks();
-    assert!(tasks.is_empty(), "a fresh process has no slots: {tasks:?}");
+    let tasks = dispatch.hello_live_tasks().expect("store answers");
+    assert_eq!(
+        tasks.len(),
+        2,
+        "DB rows are merged even when slots are empty: {tasks:?}"
+    );
+    assert!(tasks.contains(&"t-work".to_string()));
+    assert!(tasks.contains(&"t-booting".to_string()));
     let hello = hello_with_live_tasks(&hello_args(Vec::new()), tasks);
     let value = serde_json::to_value(&hello).unwrap();
-    assert!(value.get("live_tasks").is_none());
+    let claimed = value["live_tasks"].as_array().expect("live_tasks present");
+    assert_eq!(claimed.len(), 2);
 }
 
 #[test]
@@ -88,7 +95,7 @@ fn hello_live_tasks_only_slot_tasks() {
     let dir = tempdir().unwrap();
     let store = ClientStore::open(dir.path().join("client.db")).unwrap();
     store
-        .upsert_session("t-orphan", &stored("running", "attached"))
+        .upsert_session("t-orphan", &stored("ready", "attached"))
         .unwrap();
     let state = DispatchState::new(
         "planner",
@@ -105,11 +112,14 @@ fn hello_live_tasks_only_slot_tasks() {
     let second_id = second.task_id().unwrap().to_string();
     dispatch(&state, &second).unwrap();
 
-    let tasks = state.hello_live_tasks();
-    let mut expected = vec![first_id.clone(), second_id.clone()];
+    let tasks = state.hello_live_tasks().expect("store answers");
+    let mut expected = vec![first_id.clone(), second_id.clone(), "t-orphan".to_string()];
     expected.sort();
     assert_eq!(tasks, expected);
-    assert!(!tasks.contains(&"t-orphan".to_string()));
+    assert!(
+        tasks.contains(&"t-orphan".to_string()),
+        "DB row is merged with slots"
+    );
 
     let hello = hello_with_live_tasks(&hello_args(Vec::new()), tasks);
     let frame = serde_json::to_value(ClientOp::Hello(hello)).unwrap();
@@ -121,5 +131,49 @@ fn hello_live_tasks_only_slot_tasks() {
         names,
         expected.iter().map(String::as_str).collect::<Vec<_>>()
     );
-    assert!(!names.contains(&"t-orphan"));
+}
+
+/// The durable half of the claim failing is an answer, not an empty claim.
+///
+/// A sqlite error used to be swallowed into an empty `live_tasks`, which told
+/// the server this client holds nothing and had every in_flight row requeued.
+/// The call must surface the error, and the degraded claim the runloop falls
+/// back to must still name the tasks held in memory slots.
+#[test]
+fn hello_live_tasks_surfaces_store_failure_and_slots_fallback_remembers() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    store
+        .upsert_session("t-durable", &stored("ready", "attached"))
+        .unwrap();
+    let state = DispatchState::new(
+        "planner",
+        dir.path(),
+        vec!["echo".into()],
+        2,
+        Arc::new(FakeBackend::new()),
+        store,
+    );
+    let task = task_envelope();
+    let task_id = task.task_id().unwrap().to_string();
+    dispatch(&state, &task).unwrap();
+
+    // Break the durable half the way an io error or a bad migration would:
+    // the query's table is gone, so `active_session_tasks` errors.
+    let wreck = rusqlite::Connection::open(dir.path().join("client.db")).unwrap();
+    wreck.execute_batch("DROP TABLE sessions").unwrap();
+    drop(wreck);
+
+    let error = state
+        .hello_live_tasks()
+        .expect_err("a broken store must answer with its error, not an empty claim");
+    assert!(
+        matches!(error, onlyne_store::StoreError::Sqlite(_)),
+        "the sqlite failure reaches the caller: {error:?}"
+    );
+    assert_eq!(
+        state.live_claim_from_slots(),
+        vec![task_id.clone()],
+        "the degraded fallback still claims what the memory slots serve"
+    );
 }

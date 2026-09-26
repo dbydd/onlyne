@@ -1,5 +1,5 @@
 use super::socket::AdapterSocket;
-use crate::session::dispatch::{ReadyNotice, on_plugin_report, on_ready, sync_session};
+use crate::session::dispatch::{ReadyNotice, on_plugin_report, on_ready, sync_frame, sync_session};
 use anyhow::{Context, Result};
 use onlyne_adapter::{AdapterIo, AdapterServer, ServerConnection};
 use onlyne_layout::LocalStream;
@@ -133,6 +133,17 @@ impl AdapterSocket {
                     ));
                 }
                 let prose = dispatch.role_prose();
+                // The same claim the runloop makes to the server at `hello`: the
+                // tasks this client already holds a session for, read from its
+                // durable store. A plugin that says hello after a restart seeds
+                // its own injections from this list instead of racing a second
+                // copy of work the host already dispatched.
+                // A store failure is logged by `hello_live_tasks` itself; the
+                // seed list then carries the memory half, which is all this
+                // process can still prove it serves.
+                let delivered_tasks = dispatch
+                    .hello_live_tasks()
+                    .unwrap_or_else(|_| dispatch.live_claim_from_slots());
                 Ok(HelloAck {
                     protocol: hello.protocol,
                     role,
@@ -148,6 +159,7 @@ impl AdapterSocket {
                         name: server,
                     },
                     host_capabilities: vec![Capability::Probe, Capability::Recycle],
+                    delivered_tasks,
                 })
             }
         })
@@ -318,10 +330,37 @@ impl AdapterSocket {
             for session in retired {
                 if let Err(error) = sync_session(&self.dispatch, &session).await {
                     tracing::warn!(
-                        session = %session,
                         error = %error,
+                        session = %session,
                         "a retired session's exit was not published"
                     );
+                    // A lost exit leaves the server's mirror row open forever,
+                    // so the failure is not the end of the publish. The same
+                    // heartbeat frame `send_frame` would have queued for a down
+                    // link goes into the durable intent table here, and the next
+                    // link flush carries the exit. `sync_session` reaching this
+                    // arm means its own queueing failed too — usually a store
+                    // that refused one write, not one that refuses every write —
+                    // and a second failed attempt is logged, never swallowed.
+                    match sync_frame(&self.dispatch, &session) {
+                        Ok(Some(op)) => {
+                            if let Err(error) = self.dispatch.enqueue_op(&op) {
+                                tracing::warn!(
+                                    error = %error,
+                                    session = %session,
+                                    "a retired session's sync intent was not queued"
+                                );
+                            }
+                        }
+                        // No row, nothing to publish: the exit this loop owes was
+                        // never a stored session.
+                        Ok(None) => {}
+                        Err(error) => tracing::warn!(
+                            error = %error,
+                            session = %session,
+                            "a retired session's sync frame could not be rebuilt"
+                        ),
+                    }
                 }
             }
         }

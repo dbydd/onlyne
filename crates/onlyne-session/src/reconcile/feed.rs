@@ -1,10 +1,9 @@
 use crate::lifecycle::{
-    DeliveryState, IgnoredReason, LifecycleEvent, Observation, RecoveryState, Verdict, Version,
+    DeliveryState, IgnoredReason, LifecycleEvent, Observation, RecoveryState, Verdict,
 };
 
-use super::bridge::{Bridge, apply_at_next, apply_persist};
+use super::bridge::{Bridge, apply_at_next, apply_from_stored};
 use super::ledger::SessionLedger;
-use super::record::stored_observation;
 
 /// Seed the session row for a task just given a resource. Idempotent: a row
 /// that already exists keeps its own history.
@@ -183,24 +182,23 @@ pub fn feed_delivered(
 /// the only event that carries an observation, and legality stays the
 /// reducer's decision: a session that never passed Ready has no turn to have
 /// delivered, and the reducer refuses that tuple.
+///
+/// The tuple and the version it is written at come from one read inside the
+/// bridge's apply transaction. Reading the row here first was the race: a beat
+/// landing between that read and the write left the settlement carrying a
+/// tuple the watermark had already passed, and the reducer answered on a
+/// sequence its own reader never saw.
 pub fn settle(
     bridge: &Bridge,
     ledger: &dyn SessionLedger,
     task_id: &str,
 ) -> anyhow::Result<Verdict> {
-    let row = ledger.get_session(task_id)?;
-    let current = stored_observation(ledger, row.as_ref());
-    let version = Version::new(
-        current.version.generation,
-        current.version.seq.saturating_add(1),
-    );
-    let body = settle_body(&current);
-    apply_persist(
-        bridge,
-        ledger,
-        task_id,
-        &LifecycleEvent::Heartbeat { v: version, body },
-    )
+    apply_from_stored(bridge, ledger, task_id, |current, version| {
+        LifecycleEvent::Heartbeat {
+            v: version,
+            body: settle_body(current),
+        }
+    })
 }
 
 /// The tuple a settlement leaves behind: the same session with its intent

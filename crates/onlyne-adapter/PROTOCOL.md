@@ -9,7 +9,7 @@ A request carries `id`; its response carries `reply_to`. Operation payloads read
 | Direction | Frame | JSON example |
 | --- | --- | --- |
 | plugin → host | `hello` | `{"id":1,"op":"hello","args":{"protocol":1,"plugin":"onlyne-agent-pi","version":"1.0.0","kind":"agent","capabilities":["register","report","inject","recycle"],"mount":{"role":"planner","session":"8b1c..."}}}` |
-| host → plugin | `welcome` | `{"reply_to":1,"op":"welcome","args":{"protocol":1,"role":"planner","session_id":"s1","generation":1,"prose":"Read the incoming task","server":{"connected":true,"cluster":"local","name":"server"},"host_capabilities":["inject"]}}` |
+| host → plugin | `welcome` | `{"reply_to":1,"op":"welcome","args":{"protocol":1,"role":"planner","session_id":"s1","generation":1,"prose":"Read the incoming task","server":{"connected":true,"cluster":"local","name":"server"},"host_capabilities":["inject"],"delivered_tasks":["task-0"]}}` |
 | plugin → host | `report.ready` | `{"id":2,"op":"report","args":{"kind":"ready","data":{"task_id":"task-1","session_id":"s1","generation":1,"seq":1}}}` |
 | plugin → host | `report.heartbeat` | `{"id":3,"op":"report","args":{"kind":"heartbeat","data":{"task_id":"task-1","generation":1,"seq":1002,"observed":{"version":{"generation":1,"seq":1002},"generation_live":true,"isolate_after":1,"terminate_after":3,"mismatch_count":0,"agent":"running","delivery":"none","resource":"attached","recovery":"none","host":{"orca":{"pane_key":"45e603f7-0772-48aa-bcf6-832272747713:b6d067b6-9255-4f5c-a13f-24f194ea0560"}}}}}}` |
 | plugin → host | `report.complete` | `{"id":4,"op":"report","args":{"kind":"complete","data":{"task_id":"task-1","outcome":"done","head":"finished"}}}` |
@@ -56,6 +56,10 @@ On this socket that delivery is a `config_get` frame whose only key is `stdin:{t
 
 The first frame must be `hello`, and the server waits exactly five seconds for it. Any other first frame gets `invalid` with the exact message `hello required first` and field `op`; then the connection closes. A `hello` that arrives after the window closes the connection silently and logs a `tracing::warn!`. The log carries the local peer pid when one is available.
 
+`hello` also declares the revision it speaks, and the host refuses one it does not speak — the check runs before the host's own welcome callback, so no host has to remember it. A plugin on another revision gets `protocol_version` with field `protocol` as the answer to its own frame, then a `bye` whose `reason` repeats the same sentence, then the connection closes. It is never welcomed, and it never sits holding a half-open socket waiting for a `welcome` that is not coming.
+
+`welcome` carries `delivered_tasks`: the task ids the host has already dispatched to a session of this role, taken from the host's own durable record. It is always an array and empty when the host holds nothing. A plugin that restarts and says `hello` again seeds its delivery bookkeeping from this list, so a task the host already handed out is never injected twice.
+
 Platform-owned data stays on the gateway side. A gateway plugin that receives `RenderSendArgs` gets the envelope plus rendered text and image, nothing more. An agent that receives `AssignArgs` gets the envelope, the prose, and the intent, nothing more. Neither serialized payload carries `platform_metadata`, `raw`, or `channel_id`. The SDK states this rule, and the conformance suite inspects the delivered bytes. The wire types carry no raw metadata field at all, so a plugin cannot smuggle platform data into an agent payload through these frames.
 
 ## Report sequencing and the ready barrier
@@ -91,6 +95,8 @@ The optional external coding-agent face has these members. Each one returns `Res
 
 A gateway binary implements `GatewayPlugin` from `onlyne-adapter`. The trait keeps platform SDK dependencies at the plugin boundary. The plugin receives finished text plus optional PNG bytes through `Outbound`; rendering stays in the gateway binary. A plugin never links `resvg`, `pulldown-cmark`, or the test kit.
 The internal host-side multiplexer buffers frames through `QueuedFrame`. The plugin-side send payload carries `Outbound`.
+
+Both buffers are bounded at 256 frames per connection (`INBOUND_CAPACITY`), because a buffered frame can carry an inline image and a host that stopped consuming should not bill its stall to this process's memory. A full inbound queue is waited on for about 200 ms first, so a host that merely paused loses nothing. Past that window the frame is shed, and that is the pressure signal: a shed request gets `internal` with field `queue` — retryable, because a host that drains again takes it next time — while a notification or an already-late reply has no reader to signal, so it is logged and dropped.
 The gateway binary converts an inbound or outbound task into an `Outbound` envelope before it hands the task to a plugin.
 
 The fixed signatures are:

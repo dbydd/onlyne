@@ -201,6 +201,13 @@ pub struct HelloAck {
     pub server: ServerInfo,
     /// Capabilities the host itself will exercise against this plugin.
     pub host_capabilities: Vec<Capability>,
+    /// Tasks the host has already dispatched to a session of this role.
+    ///
+    /// A plugin that says `hello` after a restart seeds its own delivery
+    /// bookkeeping from this list, so a task the host already handed out is
+    /// never injected twice. The list names task ids; it is always an array
+    /// and empty when the host holds nothing to report.
+    pub delivered_tasks: Vec<String>,
 }
 
 /// Cluster identity handed out at handshake.

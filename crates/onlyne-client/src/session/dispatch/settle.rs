@@ -1,8 +1,8 @@
 use super::*;
 
 use super::outbound::{store_ack, transport_envelope};
-use super::projection::{note_verdict, sync_session};
-use super::retire::{release_locked, retire_idle_locked};
+use super::projection::{note_verdict, phase, sync_session};
+use super::retire::{PendingClose, close_retired, release_locked, retire_idle_locked};
 use super::state::{
     DispatchInner, DispatchState, slot_key_named, slot_key_serving_task, slot_task,
 };
@@ -51,11 +51,19 @@ pub enum SettleAuthority {
 /// `ResourceClosed` from any live phase, which leaves the death of an agent that
 /// never started reading exactly like the death of one that worked. A task this
 /// client holds no row for answers the same way, with its own word in the reason.
+///
+/// One read answers both halves, and both come off the row's own column: the
+/// word the operator is handed is the word `projection_of` publishes, so the
+/// refusal cannot name a phase other than the reading that caused it. The tuple
+/// inside `observed_json` is a second source for the same dimension, and a row
+/// whose bytes are unparsable rebuilds to `Booting` beside a column still
+/// reading `running` — a guard that decided on one and reported the other, and
+/// a read-only door that wrote an alert and a ledger event while answering.
 fn turn_recorded(inner: &DispatchInner, task_id: &str) -> (bool, String) {
     let Ok(Some(row)) = inner.store.get_session(task_id) else {
         return (false, "no session row".to_string());
     };
-    let agent = stored_observation(&inner.store, Some(&row)).agent;
+    let agent = phase(&row.agent_state, AgentState::Booting);
     (
         matches!(agent, AgentState::Running | AgentState::Idle),
         row.agent_state,
@@ -117,26 +125,7 @@ pub async fn on_out(
     }
     let settled = {
         let mut inner = state.inner.lock();
-        let verdict = settle(&inner.bridge, &inner.store, task_id)?;
-        // The verdict lands in the task's own record, after the delivery drain
-        // that makes it `accepted`. `settle` invents no receipt, so a session
-        // whose task is settled and whose delivery drained is the pair `project`
-        // reads as `exited`; writing the task record first would leave a verdict
-        // beside a delivery that never drained if the drain failed, and the
-        // report that would fix it has already been answered.
-        if !inner.store.settle_task(task_id, task_state_of(outcome))? {
-            tracing::warn!(
-                task = %task_id,
-                ?outcome,
-                "a second verdict arrived for a settled task; the first one stands"
-            );
-            note_verdict(&verdict, task_id);
-            // The replayed session still owns the task binding until this
-            // release, so the standing verdict travels with the client's own
-            // post-release tuple and capacity returns to the role.
-            release_locked(&mut inner, task_id, None)?;
-            None
-        } else {
+        if take_verdict(&inner, task_id, outcome)? {
             inner
                 .store
                 .put_out_head(task_id, head.as_deref().unwrap_or(""))?;
@@ -166,7 +155,6 @@ pub async fn on_out(
             let held = inner.held_handoffs.remove(task_id);
 
             Some((
-                verdict,
                 completion_envelope(
                     &inner.role,
                     origin,
@@ -178,15 +166,25 @@ pub async fn on_out(
                 causality,
                 held,
             ))
+        } else {
+            tracing::warn!(
+                task = %task_id,
+                ?outcome,
+                "a second verdict arrived for a settled task; the first one stands"
+            );
+            // The replayed session still owns the task binding until this
+            // release, so the standing verdict travels with the client's own
+            // post-release tuple and capacity returns to the role.
+            release_locked(&mut inner, task_id, None)?;
+            None
         }
     };
     // The refused branch carries the release result out of the lock. The task
     // account remains the first verdict. The client row is published after the
     // replay session has returned its binding and completed its retirement.
-    let Some((verdict, receipt, role, causality, held)) = settled else {
+    let Some((receipt, role, causality, held)) = settled else {
         return sync_session(state, task_id).await;
     };
-    note_verdict(&verdict, task_id);
     // Every relay is answered before the verdict travels, and none of them
     // moves it: a refused handoff is a record on the settled task, not a
     // different outcome for it. The merge happens on the way in, so a downstream
@@ -223,6 +221,41 @@ pub async fn on_out(
         transport_envelope(state, &envelope).await?;
     }
     sync_session(state, task_id).await
+}
+
+/// Drain one session's completion and file its task's verdict, answered with
+/// whether this report is the first verdict the task took.
+///
+/// The drain runs first and the verdict lands behind it, because the order is the
+/// row's own need: `settle` closes the completion intent, and a settled task beside
+/// a delivery that never drained is the pair `project` cannot read as `exited`. A
+/// report arriving behind a standing verdict therefore still drains the session
+/// that sent it — the retried row whose task the grace sweep had already answered,
+/// and the replayed session the caller's release retires — and only its own verdict
+/// is refused. Which verdict the task keeps is `settle_task`'s answer either way:
+/// it writes where `settled_at IS NULL` and refuses to move one that is stamped.
+///
+/// A drain with no subject is the one thing this order cannot carry. A task this
+/// client holds no row for has no intent to close, and `settle` answers the attempt
+/// with `unknown session`, which used to fail the whole report ahead of the verdict
+/// its record is still entitled to take — the shape a `client.db` replaced under a
+/// live role, or a foreign task reported into one, arrives in. The row is read for
+/// that alone, and the verdict is filed whatever the reading says.
+fn take_verdict(
+    inner: &DispatchInner,
+    task_id: &str,
+    outcome: Outcome,
+) -> Result<bool> {
+    let drain = inner
+        .store
+        .get_session(task_id)?
+        .map(|_| settle(&inner.bridge, &inner.store, task_id))
+        .transpose()?;
+    let first = inner.store.settle_task(task_id, task_state_of(outcome))?;
+    if let Some(verdict) = drain {
+        note_verdict(&verdict, task_id);
+    }
+    Ok(first)
 }
 
 /// One relay per downstream role, carrying this completion's own lines and the
@@ -291,11 +324,26 @@ fn merged_handoffs<'a>(
 /// entry stays in `revived`: the connection's `detach` frame or its socket end
 /// retires it through `release_connection`, and the plugin that just completed
 /// ends its own session either way.
+///
+/// The name a connection mounted with is how this sweep judges which task that
+/// connection came back for, and the connection is what it removes. Two held
+/// connections can carry one name — `record_revived_connection` dedups per
+/// connection, and an agent that redials twice while another serves its session
+/// is held twice — and the one inside its own frame is left in the buffer by the
+/// rule above. Dropping held entries by name would then take that connection's
+/// entry with it: no bye reached it, nothing promoted it, and `release_connection`
+/// could no longer find the socket it still holds, which is a held connection
+/// neither silenced nor served.
+///
+/// A name that resolves to no slot is the other half of the judgement, and the
+/// answer there is the name itself: `dispatch` mints a session id from the task,
+/// so a held connection whose slot has already retired is one that came back for
+/// this task and for no other.
 async fn retire_revived(state: &DispatchState, task_id: &str) {
-    let leaving = {
+    let (leaving, pending) = {
         let mut inner = state.inner.lock();
         let mut leaving: Vec<AdapterIo> = Vec::new();
-        let mut silent: Vec<String> = Vec::new();
+        let mut pending: Vec<PendingClose> = Vec::new();
         for (session_id, io, _) in inner.revived.iter() {
             if inner.in_frame.iter().any(|busy| busy.same_connection(io)) {
                 continue;
@@ -310,12 +358,11 @@ async fn retire_revived(state: &DispatchState, task_id: &str) {
                 .unwrap_or_else(|| session_id == task_id);
             if reaches {
                 leaving.push(io.clone());
-                silent.push(session_id.clone());
             }
         }
         inner
             .revived
-            .retain(|(session_id, _, _)| !silent.contains(session_id));
+            .retain(|(_, revived, _)| !leaving.iter().any(|io| io.same_connection(revived)));
         let silenced: Vec<String> = inner
             .sessions
             .iter()
@@ -348,10 +395,20 @@ async fn retire_revived(state: &DispatchState, task_id: &str) {
                 current.read_only = false;
                 current.dropped_at = None;
             }
-            retire_idle_locked(&mut inner, &key, onlyne_session::CloseReason::Replaced);
+            retire_idle_locked(
+                &mut inner,
+                &key,
+                onlyne_session::CloseReason::Replaced,
+                &mut pending,
+            );
         }
-        leaving
+        (leaving, pending)
     };
+    // The replaced sessions' resources are this client's to give back, and the
+    // hosts take their time about it: the sweep already wrote every row and took
+    // every slot, so the close runs off the lock, ahead of the byes below that
+    // await the network on each held connection.
+    close_retired(pending);
     for io in leaving {
         let notice = AdapterMsg::Host(HostOp::Bye(onlyne_proto::ByeNotice {
             reason: "the session that took this task answered for yours".into(),

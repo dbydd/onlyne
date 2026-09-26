@@ -118,6 +118,62 @@ fn one_agent_process_serves_every_session_of_its_command() {
 }
 
 #[test]
+fn a_replacement_process_keeps_the_sessions_and_reservations_of_its_own_command() {
+    let fake = Fake::new();
+    let backend = AcpBackend::new(AcpOptions::default());
+    let dead = backend.spawn(fake.spec("t-dead")).unwrap();
+    let (outcome, _lines, _log) = run_turn(&backend, &dead, "t-dead", "MARK:die go");
+    assert_eq!(outcome.outcome, TaskState::Failed, "{outcome:?}");
+    // The responder notices the corpse and takes it off the table on its own
+    // clock; the session that served it stays named here until it is closed.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && !backend.state.agents.lock().is_empty() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        backend.state.agents.lock().is_empty(),
+        "the dead agent stayed"
+    );
+
+    // The same command is a runtime worth starting again, and a fresh agent
+    // numbers its sessions from the top: this id is one the dead process
+    // answered to, on a different process.
+    let live = backend.spawn(fake.spec("t-live")).unwrap();
+    assert_eq!(
+        dead.backend_ref["id"], live.backend_ref["id"],
+        "the replacement reused the session id, which is the case this guards"
+    );
+    assert_ne!(dead.backend_ref["pid"], live.backend_ref["pid"]);
+
+    // Releasing the session of the process that already left must not release a
+    // reservation of the process that did not: it never took one there, and a
+    // release there would tear the replacement down under its own session.
+    backend
+        .close(&dead, CloseReason::Fault, false)
+        .expect("closing a session of a dead process is allowed");
+    let until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < until {
+        assert_eq!(
+            backend.state.agents.lock().len(),
+            1,
+            "closing a dead session released the process that replaced it"
+        );
+        assert!(
+            backend.state.sessions.lock().len() <= 1,
+            "the dead session outlived its own close, or took the live one with it"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        backend.probe(&live).unwrap().alive,
+        "the live agent is gone"
+    );
+    let (outcome, _lines, _log) = run_turn(&backend, &live, "t-live", "carry on");
+    assert_eq!(outcome.outcome, TaskState::Done, "{outcome:?}");
+    finish(&backend, &fake, &[&live]);
+}
+
+#[test]
 fn an_agent_that_dies_mid_turn_fails_its_task_with_the_detail() {
     let fake = Fake::new();
     let backend = AcpBackend::new(AcpOptions::default());

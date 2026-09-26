@@ -233,6 +233,26 @@ fn every_combination_times_every_event_yields_a_verdict_without_panic() {
         checked >= observations.len() * 20,
         "matrix too small: {checked}"
     );
+    assert_eq!(
+        AGENTS.len(),
+        AgentState::VARIANT_COUNT,
+        "update AGENTS when AgentState gains a variant"
+    );
+    assert_eq!(
+        DELIVERIES.len(),
+        DeliveryState::VARIANT_COUNT,
+        "update DELIVERIES when DeliveryState gains a variant"
+    );
+    assert_eq!(
+        RESOURCES.len(),
+        ResourceState::VARIANT_COUNT,
+        "update RESOURCES when ResourceState gains a variant"
+    );
+    assert_eq!(
+        RECOVERIES.len(),
+        RecoveryState::VARIANT_COUNT,
+        "update RECOVERIES when RecoveryState gains a variant"
+    );
 }
 
 #[test]
@@ -260,10 +280,11 @@ fn illegal_heartbeats_are_rejected_by_legality() {
 }
 
 #[test]
-fn the_surviving_legality_rules_are_pinned() {
-    // One row per rule `is_legal` kept, plus the tuples that only became legal
-    // once the task's result left the tuple. The rules are the session's own;
-    // nothing here can be satisfied by moving a task field.
+fn legality_rules_match_spec_section_2_2() {
+    // One row per cross-constraint §2.2 of the design freezes and `is_legal`
+    // keeps, plus the tuples that only became legal once the task's result left
+    // the tuple. The rules are the session's own; nothing here can be satisfied
+    // by moving a task field.
     let tuple =
         |live: bool, agent: AgentState, delivery: DeliveryState, recovery: RecoveryState| {
             Observation::build(
@@ -287,7 +308,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::None,
             ),
             true,
-            "plain idle",
+            "§2.2 rule: a plain idle tuple — no intent, no recovery substate — binds no cross-constraint",
         ),
         (
             tuple(
@@ -297,7 +318,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::None,
             ),
             true,
-            "an accepted receipt needs no task result beside it",
+            "§2.2 rule: an accepted receipt needs no task result beside it — accepted with an idle agent is legal",
         ),
         (
             tuple(
@@ -307,7 +328,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::Draining,
             ),
             true,
-            "a drain with its intent still open",
+            "§2.2 rule: draining belongs to an idle agent — a drain with its intent still open",
         ),
         (
             tuple(
@@ -317,7 +338,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::IdleWaiting,
             ),
             true,
-            "a re-prompt waiting on a retried intent",
+            "§2.2 rule: idle_waiting belongs to an idle agent — a re-prompt waiting on a retried intent",
         ),
         (
             tuple(
@@ -327,7 +348,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::None,
             ),
             true,
-            "retries burned against a live turn",
+            "§2.2 rule: exhausted needs an open turn exit — retries burned against a live running turn",
         ),
         (
             tuple(
@@ -337,7 +358,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::None,
             ),
             true,
-            "a settled post-mortem row",
+            "§2.2 rule: post-mortem row: gone agent, accepted delivery",
         ),
         (
             tuple(
@@ -347,7 +368,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::IdleFault,
             ),
             true,
-            "an exhausted intent parked on a fault line",
+            "§2.2 rule: idle_fault belongs to an idle agent — an exhausted intent parked on a fault line",
         ),
         (
             Observation {
@@ -360,7 +381,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 )
             },
             false,
-            "zero isolate_after",
+            "§2.2 rule: reconcile policy counters are nonzero — zero isolate_after",
         ),
         (
             Observation {
@@ -373,7 +394,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 )
             },
             false,
-            "zero terminate_after",
+            "§2.2 rule: reconcile policy counters are nonzero — zero terminate_after",
         ),
         (
             tuple(
@@ -383,7 +404,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::IdleFault,
             ),
             false,
-            "a recovery substate on a dead generation",
+            "§2.2 rule: recovery substates belong to live generations only",
         ),
         (
             tuple(
@@ -393,7 +414,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::Draining,
             ),
             false,
-            "a gone agent cannot still be draining",
+            "§2.2 rule: a gone agent keeps no recovery substate — a gone agent cannot still be draining",
         ),
         (
             tuple(
@@ -403,7 +424,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::IdleWaiting,
             ),
             false,
-            "idle_waiting belongs to an idle agent",
+            "§2.2 rule: idle_waiting belongs to an idle agent",
         ),
         (
             tuple(
@@ -413,7 +434,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::IdleFault,
             ),
             false,
-            "idle_fault belongs to an idle agent",
+            "§2.2 rule: idle_fault belongs to an idle agent",
         ),
         (
             tuple(
@@ -423,7 +444,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::Draining,
             ),
             false,
-            "draining belongs to an idle or running agent",
+            "§2.2 rule: draining belongs to an idle or running agent",
         ),
         (
             tuple(
@@ -433,7 +454,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::None,
             ),
             false,
-            "a booting process delivered nothing",
+            "§2.2 rule: accepted is a post-turn fact — a booting process delivered nothing",
         ),
         (
             tuple(
@@ -443,7 +464,7 @@ fn the_surviving_legality_rules_are_pinned() {
                 RecoveryState::None,
             ),
             false,
-            "exhausted needs an open turn exit",
+            "§2.2 rule: exhausted needs an open turn exit — never a ready agent",
         ),
     ];
     for (obs, want, why) in rows {

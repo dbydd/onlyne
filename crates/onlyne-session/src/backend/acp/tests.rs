@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-use super::turn::{payload_dir, payload_path};
+use super::turn::{evidence_path, payload_dir, payload_path};
 use super::{AcpBackend, AcpOptions};
 
 mod payload;

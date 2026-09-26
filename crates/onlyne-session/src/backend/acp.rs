@@ -10,7 +10,11 @@
 //! ([`SessionBackend::deliver`]) and it reports the ending itself
 //! ([`SessionBackend::outcomes`]). The agent's half is one file: every prompt
 //! names an absolute report path under the workspace, and the turn's end reads
-//! it once, consumes it, and lets it stand in for the agent's closing words.
+//! it once and clears that path — spending an accepted report, moving a refused
+//! one aside as evidence — so a report stands in for the closing words of exactly
+//! the turn that was asked for it. The agent is a self-driving role with no
+//! plugin of ours inside it, so a file left behind is the whole of what it can
+//! say about how it ended.
 //!
 //! Process discipline, which is what makes it different from a loop that just
 //! calls [`onlyne_acp::Agent::prompt`]:
@@ -37,7 +41,7 @@
 //! * **the conversation is written down.** An ACP session owns no terminal, so
 //!   `<workspace>/.onlyne/logs/session-<task>.log` (rendered, for `tail -f`) and
 //!   `session-<task>.events.jsonl` (raw updates, plus this client's own
-//!   `dispatch`, `payload`, `handoff` and `turn` records) are the whole
+//!   `dispatch`, `payload`, `evidence`, `handoff` and `turn` records) are the whole
 //!   human-visible surface. Both are best effort: a write that fails is a
 //!   warning, never a
 //!   failed turn.

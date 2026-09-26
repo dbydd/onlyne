@@ -17,7 +17,7 @@ set -euo pipefail
 # after it. The valid report routes two child tasks to the worker, so the
 # worker's client stages two sessions and needs one agent process for each — the
 # second mounts once the first child has settled and the agent that served it has
-# taken its session off the client's one parked slot.
+# taken its session off the client's park.
 # The planner runs one ACP slot. Before the refused-verdict path in
 # `crates/onlyne-client/src/session/dispatch/settle.rs` returned a replay's task
 # binding, a blocked replay retained that slot. The live planner then pulled
@@ -140,8 +140,10 @@ env ONLYNE_BACKEND=acp "$CLIENT" run --workspace "$planner_ws" >"$tmp/planner-cl
 planner_client_pid=$!
 track "$planner_client_pid"
 # `mount_worker` starts one agent process for one of the worker's sessions. A
-# second unnamed mount replaces the one parked slot a client holds, so a later
-# call may run only after the agent before it has taken the session it came for.
+# second unnamed mount waits in the client's park behind the agent already there,
+# and the oldest waiting agent is the one that takes the session staged next — so
+# a later call may run only after the agent before it has taken the session it
+# came for.
 mount_worker() {
   "$FAKE" --workspace "$worker_ws" --script "$SCRIPT" >>"$tmp/worker-fake.log" 2>&1 &
   worker_fake_pid=$!
@@ -473,7 +475,7 @@ PY
 # `wait_first_child_acked <parent>` waits for one child of the report to reach
 # `acked`. Both children are delivered together, so the first one to settle is
 # the proof that the worker's first agent took the session it mounted for and the
-# client's parked slot is free for the second agent.
+# client's park is free for the second agent.
 wait_first_child_acked() {
   local parent=$1 attempt
   for attempt in $(seq 1 240); do
@@ -558,9 +560,8 @@ grep -Fq 'payload skipped: caller owns the report file' "$trace" \
 wait_session_outcome "$TASK" done
 
 # The second child's session is the worker's second one, and it needs an agent
-# process of its own: the one parked slot a client holds is the first agent's
-# until that agent has taken its session, which is what the first child settling
-# shows.
+# process of its own: the client's park is the first agent's until that agent has
+# taken its session, which is what the first child settling shows.
 wait_first_child_acked "$TASK"
 mount_worker
 
@@ -630,7 +631,7 @@ validate_no_children "$tmp/blocked-ledger.json" "$TASK" \
 # ACP process's handoff visible before the next task claims the other slot.
 wait_for_replay_or_release "$TASK"
 
-# --- an invalid report stays fixable and cancels its turn -------------------
+# --- an invalid report cancels its turn and stays readable as evidence ------
 INVALID_PROSE="payload-v2 author rejected the grammar $CALLER_MARKER"
 send_and_gate "$INVALID_PROSE"
 mkdir -p "$(dirname "$REPORT_PATH")"
@@ -643,7 +644,17 @@ grep -Fq 'line 1: report line carries no prefix' "$tmp/check-invalid.txt" \
   || fail "report check must name the invalid first line" "$check_out"
 touch "$gate"
 wait_session_outcome "$TASK" cancelled
-[ -e "$REPORT_PATH" ] || fail "an invalid report must remain on disk for its author" "$REPORT_PATH"
+# The refused bytes survive the read that turned them away, and they do not
+# survive it at the report path: a report left there would be the ending the
+# next turn of this task id reads, refusing a verdict its agent never wrote. So
+# the client moves the file aside under `.invalid`, where its author can still
+# read what the parser made of it.
+[ ! -e "$REPORT_PATH" ] || fail "a refused report must clear the path the next turn reads" "$REPORT_PATH"
+[ -e "$REPORT_PATH.invalid" ] || fail "a refused report must stay on disk as evidence" "$REPORT_PATH.invalid"
+[ "$(cat "$REPORT_PATH.invalid")" = "$INVALID_BODY" ] \
+  || fail "the evidence must be the bytes the agent wrote" \
+     "actual=$(cat "$REPORT_PATH.invalid") expected=$INVALID_BODY"
+# The cleared path takes a corrected report as readily as it took this one.
 "$ONLYNE" --workspace "$planner_ws" report write --path "$REPORT_PATH" \
   --verdict done --head "$INVALID_BODY" >/dev/null \
   || fail "the retained report path must accept a corrected report"

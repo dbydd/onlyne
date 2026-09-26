@@ -1227,3 +1227,236 @@ async fn a_death_with_no_report_owed_is_no_turn_behind_a_settle() {
         refused[0].1
     );
 }
+
+/// Bind a fresh connection as the transport of one task's session, the way
+/// `hand_over` binds a plugin that mounted naming the session it was spawned for.
+fn bind_serving(state: &DispatchState, task: &str) -> AdapterIo {
+    let (stream, _peer) = tokio::io::duplex(1024);
+    let io = AdapterIo::new(stream, Duration::from_secs(5), Duration::from_secs(5));
+    state
+        .inner
+        .lock()
+        .transports
+        .insert(task.to_string(), (io.clone(), Vec::new()));
+    io
+}
+
+/// One dispatch state holding two sessions, each served by its own connection.
+/// The frames below name the first and travel on the second.
+fn two_served_sessions() -> (TempDir, DispatchState, String, AdapterIo, AdapterIo) {
+    let dir = tempdir().expect("temp dir");
+    let owed = new_task_id();
+    let foreign_task = new_task_id();
+    let state = staged_state(&dir, &owed);
+    seeded_ready(&state, &owed);
+    opened_task(&state, &owed);
+    serving_slot(&state, &owed, "msg-owed");
+    serving_slot(&state, &foreign_task, "msg-foreign");
+    let serving = bind_serving(&state, &owed);
+    let foreign = bind_serving(&state, &foreign_task);
+    (dir, state, owed, serving, foreign)
+}
+
+/// A completion ends a session, publishes its verdict, and spends its delivery,
+/// and a plugin sends one for the session its own process is live in. A connection
+/// bound to somebody else's session knows nothing of that, and used to have the
+/// door anyway: any plugin mounted on this role's socket could settle any task the
+/// role held, with a head line it invented. The victim's own agent runs a turn
+/// first, so its row is one a settle would accept — which leaves the sender as
+/// the only thing deciding the frame.
+#[tokio::test]
+async fn a_completion_from_a_connection_serving_another_session_settles_nothing() {
+    let (_dir, state, owed, serving, foreign) = two_served_sessions();
+    beat(&state, &owed, "running", 1005).await;
+
+    on_plugin_report(
+        &state,
+        Some(&foreign),
+        Report::Complete {
+            task_id: owed.clone(),
+            outcome: Outcome::Done,
+            head: Some("a verdict for a session I do not serve".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .expect("a refused completion is answered the way an applied one is");
+
+    let (task_state, head) = verdict(&state, &owed);
+    assert_eq!(
+        task_state,
+        TaskState::Pending,
+        "the foreign frame settles no verdict"
+    );
+    assert_eq!(head, None, "and writes no head line");
+    assert!(
+        faults(&state, &owed).is_empty(),
+        "a refused frame files no fault either"
+    );
+    let queued = queued_ops(&state);
+    assert!(
+        !queued
+            .iter()
+            .any(|op| matches!(op, ClientOp::Ack(ack) if ack.msg_id == "msg-owed")),
+        "the refused settle leaves the delivery the session still owes unspent: {queued:?}"
+    );
+
+    on_plugin_report(
+        &state,
+        Some(&serving),
+        Report::Complete {
+            task_id: owed.clone(),
+            outcome: Outcome::Done,
+            head: Some("the serving connection's own account".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .expect("the serving connection's completion is applied");
+    let (task_state, head) = verdict(&state, &owed);
+    assert_eq!(
+        task_state,
+        TaskState::Done,
+        "the connection that serves the session still settles it"
+    );
+    assert_eq!(
+        head.as_deref(),
+        Some("the serving connection's own account"),
+        "and its head line is the one that lands"
+    );
+}
+
+/// A recorded fault is no note in the margin: it feeds the mismatch counter and
+/// the isolate/terminate ladder of the session it names, so the connection filing
+/// one stands at the same door as the one ending it.
+#[tokio::test]
+async fn a_fault_from_a_connection_serving_another_session_records_nothing() {
+    let (_dir, state, owed, serving, foreign) = two_served_sessions();
+    let fault = |task: &str| Report::Fault {
+        task_id: Some(task.to_string()),
+        session_id: None,
+        generation: None,
+        seq: None,
+        kind: "overload".into(),
+        reason: "a queue the sender never watched".into(),
+        desired: None,
+        observed: None,
+    };
+
+    on_plugin_report(&state, Some(&foreign), fault(&owed))
+        .await
+        .expect("a refused fault is answered the way an applied one is");
+    assert!(
+        faults(&state, &owed).is_empty(),
+        "a foreign connection records no fault against this session"
+    );
+
+    on_plugin_report(&state, Some(&serving), fault(&owed))
+        .await
+        .expect("the serving connection's fault is applied");
+    let recorded = faults(&state, &owed);
+    assert_eq!(
+        recorded.len(),
+        1,
+        "the session's own transport still files its faults: {recorded:?}"
+    );
+    assert_eq!(recorded[0].0, "overload");
+}
+
+/// The note a `recycle` or `cancel` leaves behind is this client's own word: the
+/// settle door reads it as the authority for a verdict with no turn behind it, and
+/// the watchdog settles by it when no report ever comes. An order for a task this
+/// role never held has no session to end and no answer coming, so the row still
+/// settles as delivered (see the scenarios' `a_cancel_for_an_unknown_task_...`) and
+/// nothing is written for the two readers above.
+#[tokio::test]
+async fn a_control_command_for_an_unheld_task_writes_no_note() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+
+    for op in [
+        ControlOp::Cancel {
+            task_id: task.clone(),
+            reason: "an order for a session nobody here holds".into(),
+        },
+        ControlOp::Recycle {
+            task_id: task.clone(),
+            reason: "the same order, another word".into(),
+        },
+    ] {
+        let held = on_control(&state, &op)
+            .await
+            .expect("a command with no subject is applied, not refused");
+        assert!(!held, "this role holds no such task");
+    }
+
+    let later = Instant::now() + Duration::from_secs(3600);
+    let notes = state.control_settles_due(later);
+    assert!(
+        notes.is_empty(),
+        "a command this role cannot serve notes no word: {notes:?}"
+    );
+    assert_eq!(state.session_count(), 0, "and it creates no session");
+}
+
+/// The window the ending door exists for, travelled by a real connection. An
+/// operator's `recycle` notes the word, asks the plugin for its ending, and
+/// retires the slot in the same breath — so the completion that answers the
+/// command commonly arrives with no binding left for the strict rule to resolve,
+/// on a socket the client still holds. The note and the binding together are what
+/// let it through, and a rule that checked only the strict door would leave the
+/// task to the watchdog's fallback word instead of the agent's own account.
+#[tokio::test]
+async fn a_completion_answering_the_clients_own_recycle_arrives_on_a_retired_binding() {
+    let dir = tempdir().expect("temp dir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    opened_task(&state, &task);
+    serving_slot(&state, &task, "msg-recycled");
+    let serving = bind_serving(&state, &task);
+
+    let held = on_control(
+        &state,
+        &ControlOp::Recycle {
+            task_id: task.clone(),
+            reason: "workspace moved".into(),
+        },
+    )
+    .await
+    .expect("the command is applied");
+    assert!(held, "the command named a task this client holds");
+    assert!(
+        state.inner.lock().sessions.is_empty(),
+        "the command retired the slot the strict door reads"
+    );
+
+    on_plugin_report(
+        &state,
+        Some(&serving),
+        Report::Complete {
+            task_id: task.clone(),
+            outcome: Outcome::Done,
+            head: Some("recycled".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .expect("the answer to the client's own command is applied");
+
+    let (task_state, head) = verdict(&state, &task);
+    assert_eq!(
+        task_state,
+        TaskState::Done,
+        "the commanded ending settles from the plugin's own frame"
+    );
+    assert_eq!(
+        head.as_deref(),
+        Some("recycled"),
+        "and the agent's line is the one that stands"
+    );
+}

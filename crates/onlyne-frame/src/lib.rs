@@ -12,6 +12,14 @@
 //! - undecodable JSON ([`io::ErrorKind::InvalidData`]) -> `bad_frame`
 //! - [`UnexpectedEof`] -> the peer dropped the connection mid-frame
 //! - a clean end of stream at a frame boundary -> [`read_frame`] yields `Ok(None)`
+//!
+//! The decoder never buffers more than one frame body at a time, and the ceiling
+//! is applied before any body byte is read: the announced length is checked
+//! against [`MAX_FRAME_BYTES`], and [`fill`] refuses a destination larger than
+//! [`MAX_PARTIAL_FRAME_BYTES`]. A sender that dribbles bytes therefore holds the
+//! reader's memory to the announced length it was allowed to announce, so
+//! `MAX_FRAME_BYTES` is the binding limit and `MAX_PARTIAL_FRAME_BYTES` is the
+//! outer wall behind it.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -23,12 +31,31 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// reaches the stream, which keeps the connection framing consistent.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
-/// A frame body crossed [`MAX_FRAME_BYTES`].
+/// Outer ceiling for the bytes one decode holds: the body buffer, on top of the
+/// four header bytes that name it.
+///
+/// [`MAX_FRAME_BYTES`] is the limit a peer actually meets: an announced length
+/// over it fails before the body is read. This ceiling sits behind that check and
+/// is enforced in [`fill`], the one place stream bytes land in memory, so the
+/// accumulation bound stays true even if the per-frame ceiling is ever raised or a
+/// new caller hands `fill` a buffer sized from untrusted input. Reading a frame
+/// cannot buffer past this many bytes, however slowly the sender dribbles them.
+pub const MAX_PARTIAL_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+// The per-frame gate must stay inside the accumulation wall, or the tighter check
+// stops being the one a peer meets.
+const _: () = assert!(MAX_FRAME_BYTES + 4 <= MAX_PARTIAL_FRAME_BYTES);
+
+/// A frame ran past a ceiling: [`MAX_FRAME_BYTES`] for one body, announced or
+/// serialised, or [`MAX_PARTIAL_FRAME_BYTES`] when the decoder's own accumulation
+/// bound is what a read ran into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TooLarge {
     /// Length the peer announced, or the length the local side serialised to.
     pub len: u64,
-    /// The ceiling that was crossed.
+    /// The ceiling that was crossed: [`MAX_FRAME_BYTES`] for a frame body, or
+    /// [`MAX_PARTIAL_FRAME_BYTES`] when the decoder's own accumulation bound is
+    /// what a read ran into.
     pub max: usize,
 }
 
@@ -67,14 +94,8 @@ impl fmt::Display for UnexpectedEof {
 
 impl std::error::Error for UnexpectedEof {}
 
-fn too_large(len: u64) -> Error {
-    Error::new(
-        ErrorKind::InvalidInput,
-        TooLarge {
-            len,
-            max: MAX_FRAME_BYTES,
-        },
-    )
+fn too_large(len: u64, max: usize) -> Error {
+    Error::new(ErrorKind::InvalidInput, TooLarge { len, max })
 }
 
 /// Serialise `value`, prepend its length, then flush the pair as one frame.
@@ -89,9 +110,9 @@ where
     let body = serde_json::to_vec(value).map_err(Error::other)?;
     let len = body.len();
     if len > MAX_FRAME_BYTES {
-        return Err(too_large(len as u64));
+        return Err(too_large(len as u64, MAX_FRAME_BYTES));
     }
-    let prefix = u32::try_from(len).map_err(|_| too_large(len as u64))?;
+    let prefix = u32::try_from(len).map_err(|_| too_large(len as u64, MAX_FRAME_BYTES))?;
     let mut buf = Vec::with_capacity(4 + len);
     buf.extend_from_slice(&prefix.to_be_bytes());
     buf.extend_from_slice(&body);
@@ -114,7 +135,7 @@ where
     }
     let len = u32::from_be_bytes(header) as u64;
     if len > MAX_FRAME_BYTES as u64 {
-        return Err(too_large(len));
+        return Err(too_large(len, MAX_FRAME_BYTES));
     }
     let mut body = vec![0u8; len as usize];
     if !body.is_empty() && !fill(r, &mut body, len).await? {
@@ -137,10 +158,18 @@ where
 /// nothing read at all, which is a clean close at a frame boundary. Ending
 /// partway through yields [`UnexpectedEof`] against `announced`, the total byte
 /// count the caller promised for this read.
+///
+/// `dst` must fit the accumulation ceiling: a destination larger than
+/// [`MAX_PARTIAL_FRAME_BYTES`] is refused with [`TooLarge`] before a byte is read,
+/// which is what caps the memory one decode holds, whatever the peer announces and
+/// however slowly it sends them.
 async fn fill<R>(r: &mut R, dst: &mut [u8], announced: u64) -> Result<bool>
 where
     R: AsyncRead + Unpin,
 {
+    if dst.len() > MAX_PARTIAL_FRAME_BYTES {
+        return Err(too_large(dst.len() as u64, MAX_PARTIAL_FRAME_BYTES));
+    }
     let mut got = 0usize;
     while got < dst.len() {
         match r.read(&mut dst[got..]).await {
@@ -244,6 +273,64 @@ mod tests {
             .expect("header");
         let err = read_frame::<_, Value>(&mut b).await.expect_err("must fail");
         assert!(is_too_large(&err), "err = {err}");
+        let too_large = err
+            .get_ref()
+            .and_then(|r| r.downcast_ref::<TooLarge>())
+            .expect("TooLarge payload");
+        assert_eq!(
+            too_large.max, MAX_FRAME_BYTES,
+            "the gate a peer meets is the per-frame ceiling, not the accumulation wall"
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_the_shortfall_of_a_stalling_sender_at_the_frame_ceiling() {
+        // The worst case for one decode: a peer announces the largest length the
+        // protocol accepts and then stops. The announced size is still legal, so the
+        // read waits for the body, consumes exactly the bytes that arrived, and reports
+        // the gap — the ceiling is what bounds the buffer, and a stalled sender gets no
+        // frame and no extra byte.
+        let (mut a, mut b) = duplex(64);
+        a.write_all(&(MAX_FRAME_BYTES as u32).to_be_bytes())
+            .await
+            .expect("header");
+        // 12 bytes total, inside the duplex capacity: both writes land before the
+        // reader is polled, so the stalled sender cannot deadlock the test itself.
+        a.write_all(b"{\"f\":\"pi").await.expect("eight body bytes");
+        drop(a);
+        let err = read_frame::<_, Value>(&mut b).await.expect_err("must fail");
+        assert_eq!(
+            *err.get_ref()
+                .and_then(|r| r.downcast_ref::<UnexpectedEof>())
+                .expect("UnexpectedEof payload"),
+            UnexpectedEof {
+                expected: MAX_FRAME_BYTES as u64,
+                got: 8,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn fill_refuses_a_destination_past_the_accumulation_ceiling() {
+        // The wall behind the per-frame gate, driven straight: a destination larger
+        // than MAX_PARTIAL_FRAME_BYTES is refused before a byte is read, so one decode
+        // can never buffer past the ceiling whatever the caller sized its buffer to.
+        let (mut a, mut b) = duplex(64);
+        a.write_all(&[1, 2, 3, 4]).await.expect("four bytes");
+        let mut dst = vec![0u8; MAX_PARTIAL_FRAME_BYTES + 1];
+        let err = fill(&mut b, &mut dst, MAX_PARTIAL_FRAME_BYTES as u64 + 1)
+            .await
+            .expect_err("over-ceiling destination must be refused");
+        let too_large = err
+            .get_ref()
+            .and_then(|r| r.downcast_ref::<TooLarge>())
+            .expect("TooLarge payload");
+        assert_eq!(too_large.max, MAX_PARTIAL_FRAME_BYTES);
+        assert_eq!(too_large.len, (MAX_PARTIAL_FRAME_BYTES + 1) as u64);
+        drop(a);
+        let mut sink = Vec::new();
+        b.read_to_end(&mut sink).await.expect("read side");
+        assert_eq!(sink, vec![1, 2, 3, 4], "a refused read consumes nothing");
     }
 
     #[tokio::test]

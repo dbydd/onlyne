@@ -102,6 +102,11 @@ export function welcomeFrom(data) {
     prose: typeof args.prose === "string" ? args.prose : "",
     server: args.server ?? null,
     hostCapabilities: Array.isArray(args.host_capabilities) ? args.host_capabilities : [],
+    // The tasks whose delivery the host already handed this session: a plugin
+    // that restarts under a live client seeds its injection guard from it, so
+    // the work its predecessor read is not injected a second time. Null when the
+    // host says nothing.
+    deliveredTasks: Array.isArray(args.delivered_tasks) ? args.delivered_tasks : null,
   };
 }
 

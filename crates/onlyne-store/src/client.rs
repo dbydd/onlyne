@@ -21,6 +21,14 @@ const CLIENT_MARKER: &str = "onlyne-client";
 /// `public_lifecycle` column, and the task moved into a table of its own.
 const CLIENT_SCHEMA_VERSION: i64 = 2;
 const DEFAULT_LIMIT: i64 = 100;
+/// Rows one flush pass takes from the intent queue.
+///
+/// The queue is durable, so a client that stayed offline through a long outage
+/// can hold tens of thousands of pending rows. A pass that read them all held
+/// the store's single connection for the length of the queue and starved every
+/// other caller of the same database, so one pass takes this many due rows and
+/// the next pass takes the rest.
+pub const INTENT_FLUSH_BATCH_SIZE: u32 = 100;
 
 pub const CLIENT_DDL: &str = r#"CREATE TABLE IF NOT EXISTS sessions(
   task_id TEXT PRIMARY KEY,
@@ -178,6 +186,11 @@ impl ClientStore {
         Ok(changed == 1)
     }
 
+    /// The rows due by `now`, oldest deadline first, at most `limit` of them.
+    ///
+    /// This is [`ClientStore::flush_order`] with the clock supplied by the
+    /// caller, which is how a test reads a retry the machine has parked in the
+    /// future without waiting on it.
     pub fn due_intents(&self, now: DateTime<Utc>, limit: u32) -> StoreResult<Vec<IntentRow>> {
         let conn = self.conn()?;
         let rows = conn
@@ -252,15 +265,35 @@ impl ClientStore {
         )?)
     }
 
-    pub fn flush_order(&self) -> StoreResult<Vec<IntentRow>> {
+    /// Remove a row the server refused for good.
+    ///
+    /// The row is gone rather than parked in a terminal state because a
+    /// permanent refusal will never turn into an acceptance, and the queue must
+    /// not carry it forward on every pass. Like every write here it runs on the
+    /// store's one connection, under the store's lock and its busy timeout: a
+    /// caller that opened a second handle to the file to drop this row wrote
+    /// around that serialization, and whether the row went depended on how that
+    /// handle happened to treat a busy database.
+    pub fn delete_intent(&self, op_id: &str) -> StoreResult<bool> {
         let conn = self.conn()?;
-        let rows = conn
-            .prepare(
-                "SELECT op_id,env_json,attempt,state,next_attempt_at,receipt_json,last_error,created_at,updated_at FROM intents WHERE state IN ('pending','retrying') ORDER BY created_at,rowid",
-            )?
-            .query_map([], intent_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        Ok(conn.execute("DELETE FROM intents WHERE op_id=?", params![op_id])? == 1)
+    }
+
+    /// The rows one flush pass should send, in the order it should send them.
+    ///
+    /// Three bounds, each of which the last pass lacked. Only a row whose
+    /// `next_attempt_at` has arrived is returned, so a retry the machine pushed
+    /// into the future stays put until it is due instead of being sent again on
+    /// the strength of being queued; the deadline orders the batch, so the row
+    /// that has waited longest is first and cannot be starved by later arrivals;
+    /// and the batch is capped at [`INTENT_FLUSH_BATCH_SIZE`] rows, so reading a
+    /// queue an offline client filled costs one bounded read.
+    ///
+    /// A caller that means to look past the current deadline — a test asking what
+    /// a run left in the queue — reads [`ClientStore::due_intents`] with its own
+    /// horizon instead, which is the same query with the clock it supplies.
+    pub fn flush_order(&self) -> StoreResult<Vec<IntentRow>> {
+        self.due_intents(Utc::now(), INTENT_FLUSH_BATCH_SIZE)
     }
 
     pub fn append_event(&self, kind: &str, data: &Value) -> StoreResult<i64> {
@@ -436,6 +469,24 @@ impl ClientStore {
                 "SELECT task_id,kind,parent_task,hop,attempt,task_state,opened_at,settled_at FROM task WHERE settled_at IS NULL ORDER BY opened_at,rowid LIMIT ?",
             )?
             .query_map(params![sql_limit(limit)], task_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Task ids of sessions that are not yet exited, for hello live_tasks claim.
+    /// A fresh process after crash must declare these to prevent duplicate dispatch.
+    ///
+    /// Only claims sessions that can be recovered: those where the plugin has not
+    /// yet mounted or has not started running. Sessions that were running when the
+    /// process died cannot be recovered (the plugin process is gone), so they are
+    /// not claimed and will be requeued by the server.
+    pub fn active_session_tasks(&self) -> StoreResult<Vec<String>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT task_id FROM sessions WHERE agent_state IN ('booting', 'ready') AND resource_state != 'closed' ORDER BY task_id"
+        )?;
+        let rows = stmt
+            .query_map(params![], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }

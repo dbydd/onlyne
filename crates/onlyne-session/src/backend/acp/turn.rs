@@ -11,13 +11,19 @@ use crate::content::ContentWriter;
 use onlyne_acp::{ContentBlock, PromptOutcome};
 use onlyne_layout::RoleWorkspace;
 use onlyne_proto::payload::{Handoff, PayloadV2};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::journal::{Journal, append, completion_head, drain};
 use super::state::SessionEntry;
 
 /// Refusals named in one fault record; the rest are counted, not listed.
 const REFUSAL_LIST_LIMIT: usize = 3;
+
+/// How many refused reports of one task are kept side by side before the newest
+/// refusal replaces the oldest. Every one of them is in the journal regardless;
+/// this bound only limits how many raw files a workspace accumulates under a
+/// task id an agent keeps failing to report against.
+const REFUSED_REPORTS_KEPT: u64 = 8;
 
 /// Map a stop reason onto what the ledger records: the outcome, the fault note
 /// when there is one, and the reason word the turn record carries.
@@ -146,16 +152,27 @@ impl Payload {
     }
 }
 
-/// Read this turn's report, write down what it asks to hand on, and take the
-/// file away. Deleting after reading is the isolation a requeued task id needs:
-/// the next turn starts with no report until an agent living through it writes
-/// one. A file that is not a report is kept — it is the evidence for the
-/// refusal this client recorded, and its author can still fix it in place.
-fn read_payload(workdir: &Path, task_id: &str, journal: &Journal) -> (Payload, Vec<Handoff>) {
+/// Read this turn's report, write down what it asks to hand on, and clear the
+/// path it was read from.
+///
+/// Clearing is the isolation a requeued task id needs: the next turn starts with
+/// no report until an agent living through it writes one. What happens to the
+/// bytes depends on whether this client could read them. An accepted report is
+/// spent — its verdict and handoff lines are in the journal — so the file goes.
+/// A refused one is the evidence for the refusal about to be recorded, so it is
+/// moved aside under `.invalid` rather than deleted: its author can still read
+/// what the parser made of it. It does not stay at the report path, because the
+/// next turn of the same task id would read those stale bytes as its own ending
+/// and settle on a refusal this agent never wrote.
+fn read_payload(
+    workdir: &Path,
+    task_id: &str,
+    journal: &Journal,
+) -> (Payload, Vec<Handoff>, Option<PathBuf>) {
     let path = payload_path(workdir, task_id);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(_) => return (Payload::Absent, Vec::new()),
+        Err(_) => return (Payload::Absent, Vec::new(), None),
     };
     let payload = match String::from_utf8(bytes) {
         Err(_) => Payload::Parsed(PayloadV2::Invalid {
@@ -164,13 +181,67 @@ fn read_payload(workdir: &Path, task_id: &str, journal: &Journal) -> (Payload, V
         Ok(text) => Payload::Parsed(onlyne_proto::payload::parse(&text)),
     };
     let handoffs = emit_handoffs(journal, task_id, &payload);
-    if payload.error().is_some() {
-        return (payload, Vec::new());
+    if let Some(error) = payload.error() {
+        let evidence = keep_as_evidence(&path, error, journal, task_id);
+        return (payload, Vec::new(), evidence);
     }
     if let Err(error) = std::fs::remove_file(&path) {
         tracing::warn!(error = %error, path = %path.display(), "acp: report file stayed behind");
     }
-    (payload, handoffs)
+    (payload, handoffs, None)
+}
+
+/// Where a refused report is kept: the report path with `.invalid` appended, and
+/// with a count after that when an older refusal of the same task already
+/// occupies the plain name.
+pub(super) fn evidence_path(path: &Path, kept: u64) -> PathBuf {
+    let mut text = path.as_os_str().to_os_string();
+    text.push(".invalid");
+    if kept > 0 {
+        text.push(format!(".{kept}"));
+    }
+    PathBuf::from(text)
+}
+
+/// Move a refused report off the path the next turn reads, keeping its bytes, and
+/// answer with where it landed. The journal gets an `evidence` record naming the
+/// file the refusal turned away; a report that could not be moved is logged and
+/// left where it is, because destroying it to clear the path would be the loss
+/// this exists to prevent.
+fn keep_as_evidence(path: &Path, error: &str, journal: &Journal, task_id: &str) -> Option<PathBuf> {
+    let mut kept = 0;
+    let mut target = evidence_path(path, kept);
+    while kept < REFUSED_REPORTS_KEPT && target.exists() {
+        kept += 1;
+        target = evidence_path(path, kept);
+    }
+    match std::fs::rename(path, &target) {
+        Ok(()) => {
+            tracing::warn!(
+                error,
+                path = %path.display(),
+                evidence = %target.display(),
+                "acp: refused report moved aside as evidence"
+            );
+            journal.record(
+                "evidence",
+                vec![
+                    ("task_id", Value::from(task_id)),
+                    ("path", Value::from(target.display().to_string())),
+                    ("error", Value::from(error)),
+                ],
+            );
+            Some(target)
+        }
+        Err(rename) => {
+            tracing::warn!(
+                error = %rename,
+                path = %path.display(),
+                "acp: refused report could not be moved aside; it stays where it was read"
+            );
+            None
+        }
+    }
 }
 
 /// Record this turn's handoff lines, and answer the ones worth routing.
@@ -211,11 +282,15 @@ pub(super) fn run_turn(
     entry: Arc<SessionEntry>,
     sink: OutcomeSink,
     content: ContentWriter,
-    task_id: String,
     prompt: String,
     warning: Option<String>,
     policy: &'static str,
 ) {
+    // The task this turn serves is the one the session was opened for, read from
+    // the binding rather than handed in: `deliver` refuses any other id before it
+    // claims the turn, so the journal, the report path the prompt handed the
+    // agent, and the outcome that leaves here cannot be two different tasks.
+    let task_id = entry.current_task();
     let journal = Journal::new(&entry.workdir, &task_id, &entry.id, content);
     journal.record(
         "dispatch",
@@ -254,7 +329,7 @@ pub(super) fn run_turn(
     // replaces the head while the stop reason still decides the outcome, so a
     // report can never promote a turn the agent was cut short on. The handoff
     // lines are written into the journal here, before the file goes.
-    let (payload, handoffs) = read_payload(&entry.workdir, &task_id, &journal);
+    let (payload, handoffs, evidence) = read_payload(&entry.workdir, &task_id, &journal);
     let payload_kind = payload.payload_kind();
     let payload_error = payload.error().map(str::to_string);
     let head_kind = match &payload {
@@ -320,10 +395,14 @@ pub(super) fn run_turn(
         ("head", head.clone().map(Value::from).unwrap_or(Value::Null)),
         ("handoffs", Value::from(handoffs.len())),
     ];
-    // A refused report stays on disk, so the record that says so names the line
-    // it could not read; an accepted one needs no such field.
+    // A refused report stays on disk as evidence, so the record that says so
+    // names both the line it could not read and the file its bytes are in; an
+    // accepted one needs no such field.
     if let Some(refused) = &payload_error {
         payload_fields.push(("error", Value::from(refused.as_str())));
+        if let Some(kept) = &evidence {
+            payload_fields.push(("evidence", Value::from(kept.display().to_string())));
+        }
     }
     journal.record("payload", payload_fields);
     journal.record(

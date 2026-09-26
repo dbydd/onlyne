@@ -89,6 +89,7 @@ test("welcome parses the host's response body and rejects junk", () => {
     prose: "Read the incoming task",
     server: { connected: true, cluster: "local", name: "server" },
     hostCapabilities: ["probe", "recycle"],
+    deliveredTasks: null,
   });
   assert.deepEqual(welcomeFrom(args)?.role, "planner");
   assert.equal(welcomeFrom(null), null);
@@ -101,7 +102,14 @@ test("welcome parses the host's response body and rejects junk", () => {
     prose: "",
     server: null,
     hostCapabilities: [],
+    deliveredTasks: null,
   });
+  // The host's restart-recovery list travels under its own wire name.
+  assert.deepEqual(
+    welcomeFrom({ op: "welcome", args: { ...args, delivered_tasks: ["task-1"] } }).deliveredTasks,
+    ["task-1"],
+  );
+  assert.equal(welcomeFrom({ op: "welcome", args: { ...args, delivered_tasks: "task-1" } }).deliveredTasks, null);
 });
 
 test("ready matches the host's ready vector, which relays a cluster this plugin never speaks for", { skip: !hasVectors }, () => {

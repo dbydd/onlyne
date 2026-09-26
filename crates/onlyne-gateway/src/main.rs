@@ -1331,6 +1331,7 @@ mod tests {
                         name: "server".to_string(),
                     },
                     host_capabilities: vec![],
+                    delivered_tasks: Vec::new(),
                 })
             }
 
@@ -1414,6 +1415,7 @@ mod tests {
                         name: "server".to_string(),
                     },
                     host_capabilities: vec![],
+                    delivered_tasks: Vec::new(),
                 })
             })
             .await

@@ -43,8 +43,16 @@ pub(super) struct DispatchInner {
     /// never rides the connection of an earlier one.
     pub(super) transports: HashMap<String, (AdapterIo, Vec<Capability>)>,
     /// A plugin that mounted naming no session: an always-running agent
-    /// waiting for this role's next assignment (plan §6 line 285).
-    pub(super) parked: Option<(AdapterIo, Vec<Capability>)>,
+    /// waiting for this role's next assignment (plan §6 line 285), oldest mount
+    /// first.
+    ///
+    /// A queue and not a single slot, because a role can hold more than one
+    /// always-running agent and the second mount that arrived naming no session
+    /// has an open socket either way. Overwriting the first dropped its
+    /// `AdapterIo` with no accounting of any kind: no release, no log, and no
+    /// bye, so the role silently lost a worker that was waiting to be told.
+    /// `revived` has held several connections the same way from the start.
+    pub(super) parked: Vec<(AdapterIo, Vec<Capability>)>,
     /// Zero-activity clock for running tasks. Applied persists refresh it.
     pub(super) stall: crate::session::stall::StallWatch,
     /// A plugin connection that mounted a session a live connection already

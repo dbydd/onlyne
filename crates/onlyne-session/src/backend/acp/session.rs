@@ -60,22 +60,24 @@ impl AcpBackend {
                 })?;
         }
         let entry = Arc::new(SessionEntry {
-            task_id: Mutex::new(spec.task_id.clone()),
+            task_id: spec.task_id.clone(),
             id: start.session_id,
             agent_key: key.to_string(),
+            process: slot.process,
             workdir: spec.cwd.clone(),
             agent: Arc::clone(&slot.agent),
             turn: Turn::new(),
             refusals: Mutex::new(Vec::new()),
         });
-        self.state.sessions.lock().insert(
-            (entry.agent_key.clone(), entry.id.clone()),
-            Arc::clone(&entry),
-        );
+        self.state
+            .sessions
+            .lock()
+            .insert(entry.key(), Arc::clone(&entry));
         tracing::info!(
             task = %spec.task_id,
             acp_session = %entry.id,
             pid = entry.agent.pid(),
+            process = entry.process,
             agent = %key,
             "acp session opened"
         );
@@ -83,11 +85,12 @@ impl AcpBackend {
     }
 
     /// The live session a stored reference names: by the id the agent chose for it
-    /// under its own command first, by task id for a reference that carries
-    /// neither. ACP session ids are only unique within one agent process, so two
-    /// processes may hand out the same `sess-1`, and the key carries the agent
-    /// command for exactly that reason. A reference from a client run that no
-    /// longer holds the process names nothing here.
+    /// under its own command and process first, by task id for a reference that
+    /// carries neither. ACP session ids are only unique within one agent process,
+    /// so two processes may hand out the same `sess-1` — a replacement of a
+    /// crashed agent included — and the key carries the command and this client's
+    /// name for the process for exactly that reason. A reference from a client run
+    /// that no longer holds the process names nothing here.
     fn entry_of(&self, session: &SessionRef) -> Option<Arc<SessionEntry>> {
         let sessions = self.state.sessions.lock();
         let agent = session
@@ -95,8 +98,11 @@ impl AcpBackend {
             .get("agent")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if let Some(id) = session.backend_ref.get("id").and_then(Value::as_str)
-            && let Some(found) = sessions.get(&(agent.to_string(), id.to_string()))
+        let process = session.backend_ref.get("process").and_then(Value::as_u64);
+        if let (Some(id), Some(process)) = (
+            session.backend_ref.get("id").and_then(Value::as_str),
+            process,
+        ) && let Some(found) = sessions.get(&(agent.to_string(), process, id.to_string()))
         {
             return Some(Arc::clone(found));
         }
@@ -108,7 +114,7 @@ impl AcpBackend {
 
     fn take_entry(&self, session: &SessionRef) -> Option<Arc<SessionEntry>> {
         let found = self.entry_of(session)?;
-        let key = (found.agent_key.clone(), found.id.clone());
+        let key = found.key();
         self.state.sessions.lock().remove(&key)
     }
 }
@@ -157,7 +163,10 @@ impl SessionBackend for AcpBackend {
         let entry = match self.open_session(&slot, &spec, &key) {
             Ok(entry) => entry,
             Err(error) => {
-                self.state.retire(&key);
+                // The reservation this spawn took on the chosen process goes back
+                // before the error does, so an agent that refuses its config is
+                // not left running for a session that never existed.
+                self.state.retire(&key, slot.process);
                 return Err(error);
             }
         };
@@ -173,6 +182,7 @@ impl SessionBackend for AcpBackend {
             backend_ref: json!({
                 "id": entry.id,
                 "pid": entry.agent.pid(),
+                "process": entry.process,
                 "agent": key,
                 "log": journal.log.to_string_lossy(),
                 "events": journal.events.to_string_lossy(),
@@ -225,6 +235,18 @@ impl SessionBackend for AcpBackend {
                 "acp: no live session for task {task_id}; its agent is not running here"
             )
         })?;
+        // One session serves one task, and the id it serves was bound when it
+        // opened. A payload naming another task would have this turn write its
+        // journal and read its report under a task the agent was never assigned,
+        // so the two ids can never be reconciled afterwards; refuse it here where
+        // the caller can still hear about it.
+        if entry.current_task() != task_id {
+            return Err(anyhow::anyhow!(
+                "acp: session {} serves task {}; task {task_id} needs a session of its own",
+                entry.id,
+                entry.current_task(),
+            ));
+        }
         if entry.agent.is_gone() {
             return Err(anyhow::anyhow!(
                 "acp: agent {} exited before task {task_id} was delivered",
@@ -241,11 +263,10 @@ impl SessionBackend for AcpBackend {
                 entry.current_task()
             ));
         }
-        *entry.task_id.lock() = task_id.to_string();
         let thread_entry = Arc::clone(&entry);
         let sink = self.state.sink.clone();
         let content = self.state.content.clone();
-        let task_id = task_id.to_string();
+        let task_id = entry.current_task();
         // The prompt tells the agent where to leave its result before the turn
         // starts, so how a task ends never depends on the agent knowing that
         // onlyne exists. The whole text lands in the journal's dispatch
@@ -269,20 +290,9 @@ impl SessionBackend for AcpBackend {
         let policy = self.options.policy();
         if let Err(error) = thread::Builder::new()
             .name(format!("acp-turn {}", short(&task_id)))
-            .spawn(move || {
-                run_turn(
-                    thread_entry,
-                    sink,
-                    content,
-                    task_id,
-                    prompt,
-                    warning,
-                    policy,
-                )
-            })
+            .spawn(move || run_turn(thread_entry, sink, content, prompt, warning, policy))
         {
             entry.turn.finish();
-            *entry.task_id.lock() = session.task_id.clone();
             return Err(anyhow::anyhow!(
                 "acp: task could not start its turn thread: {error}"
             ));
@@ -298,6 +308,7 @@ impl SessionBackend for AcpBackend {
             return Ok(());
         };
         let key = entry.agent_key.clone();
+        let process = entry.process;
         let id = entry.id.clone();
         let generation = entry.turn.generation();
         if entry.turn.phase.lock().live {
@@ -326,7 +337,7 @@ impl SessionBackend for AcpBackend {
                     );
                 }
                 end_session(&entry);
-                state.retire(&reap_key);
+                state.retire(&reap_key, process);
             })
         {
             tracing::warn!(
@@ -334,7 +345,7 @@ impl SessionBackend for AcpBackend {
                 acp_session = %id,
                 "acp: no closer thread; the agent decides its own session's end"
             );
-            self.state.retire(&key);
+            self.state.retire(&key, process);
         }
         tracing::info!(
             task = %session.task_id,

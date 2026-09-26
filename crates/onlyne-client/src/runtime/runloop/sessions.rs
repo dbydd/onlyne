@@ -76,6 +76,12 @@ pub(super) async fn settle_session_outcome(
 /// session staged here hands straight over to it. That is the order an
 /// always-running agent takes: it attaches first and receives its assignment
 /// when a task arrives (plan §6 line 285).
+///
+/// Only a `Task` costs a session slot, so only a `Task` waits at the capacity
+/// gate. A `Completion` is a terminal receipt and a `Note` wakes a session that
+/// already exists; neither opens a slot, and refusing one because the role is
+/// full would hold back work that is already done (the verdict of a task) or
+/// traffic that has no session to create.
 pub(super) async fn accept_delivery(state: &RunState, delivery: &Delivery) {
     // A control command acts on the work the role already holds, so it answers
     // before the capacity gate and before the `accept_new` gate: a role at
@@ -108,12 +114,6 @@ pub(super) async fn accept_delivery(state: &RunState, delivery: &Delivery) {
         });
         return;
     }
-    if !state.dispatch.has_capacity() {
-        // The row stays in flight on the server, which offers it again when a
-        // session frees (plan §5 `max_sessions`).
-        tracing::debug!(msg_id = %delivery.msg_id, "delivery waits for a free session");
-        return;
-    }
     // A `Completion` is a terminal receipt, so it settles the row it names and
     // starts no session (plan §3 line 152's `Completion`).
     if delivery.envelope.kind == onlyne_proto::MsgKind::Completion {
@@ -137,6 +137,13 @@ pub(super) async fn accept_delivery(state: &RunState, delivery: &Delivery) {
             accepted: injected,
             reason: (!injected).then(|| "note has no live session to wake".to_string()),
         });
+        return;
+    }
+    // What is left creates a session, so this is where `max_sessions` bites.
+    if !state.dispatch.has_capacity() {
+        // The row stays in flight on the server, which offers it again when a
+        // session frees (plan §5 `max_sessions`).
+        tracing::debug!(msg_id = %delivery.msg_id, "delivery waits for a free session");
         return;
     }
     let accept_new = state.accept_new.load(Ordering::SeqCst);

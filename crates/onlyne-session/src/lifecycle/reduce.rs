@@ -247,9 +247,15 @@ pub fn apply(obs: &Observation, event: &LifecycleEvent) -> Verdict {
             if obs.recovery == RecoveryState::IdleFault {
                 next.recovery = RecoveryState::None;
             }
-            if next.tuple() == obs.tuple() {
-                return Verdict::Ignored(IgnoredReason::NoOp);
-            }
+            // No early no-op here: the comparison tuple carries the four
+            // dimensions, not the counter, and resetting the counter is often
+            // this event's whole job. A mismatch counted while the agent was
+            // running opens no fault line (`isolate` only marks an idle one), so
+            // a later confirming probe moves nothing but the counter — which the
+            // tuple test read as a replay and dropped. The ladder then only ever
+            // climbed: a session could reach `terminate_after` on stale evidence
+            // long after its last real disagreement. `finish` is the no-op gate
+            // that sees the counter.
             finish(obs, next)
         }
         LifecycleEvent::AdoptNewGeneration { .. } => {

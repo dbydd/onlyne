@@ -45,10 +45,10 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use onlyne_frame::{read_frame, write_frame};
 use onlyne_proto::{
-    AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, ConfigGetArgs, Delivery, DetachArgs,
-    Envelope, ErrorCode, GatewayHealth, GatewayMount, HELLO_REQUIRED_MESSAGE, HealthArgs, HostOp,
-    ImagePart, Outcome, PluginOp, Principal, Receipt, RegisterChannelArgs, RenderSendArgs, Report,
-    ResBody, SessionRegisterArgs, TypingArgs,
+    AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, ByeNotice, ConfigGetArgs, Delivery,
+    DetachArgs, Envelope, ErrorCode, GatewayHealth, GatewayMount, HELLO_REQUIRED_MESSAGE,
+    HealthArgs, HostOp, ImagePart, Outcome, PluginOp, Principal, Receipt, RegisterChannelArgs,
+    RenderSendArgs, Report, ResBody, SessionRegisterArgs, TypingArgs,
 };
 // The crate root names `PluginOp` and its siblings; `HandoffArgs` is reached by
 // its module because the root list does not carry it.
@@ -57,7 +57,7 @@ pub use onlyne_proto::{Capability, HelloAck, HelloArgs, Mount, MountKind, PROTOC
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf, split};
 use tokio::sync::{Mutex, mpsc, oneshot};
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tracing::warn;
 
 pub mod prelude {
@@ -80,6 +80,25 @@ pub mod prelude {
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Frames one connection buffers for its host before the reader sheds.
+///
+/// The ceiling is what keeps a host that stopped consuming — a `Host` future hung
+/// on a model call, a dispatcher awaiting a lock — from turning the socket into an
+/// unbounded queue: every buffered frame can carry an inline image, so an
+/// unbuffered read path costs memory the plugin's stall should not bill here. A
+/// host that drains at the rate the wire delivers never sees the number.
+pub const INBOUND_CAPACITY: usize = 256;
+
+/// How long the reader waits between two tries against a full inbound queue.
+pub const INBOUND_PRESSURE_PAUSE: Duration = Duration::from_millis(20);
+
+/// Tries the reader spends on a full queue before it sheds the frame.
+///
+/// Paired with [`INBOUND_PRESSURE_PAUSE`] this is the backpressure window: a
+/// consumer that finds room within ~200 ms loses nothing, and one that does not
+/// answers its plugin instead of stalling the reader forever.
+pub const INBOUND_PRESSURE_RETRIES: u32 = 10;
 
 #[derive(Debug)]
 pub enum AdapterError {
@@ -233,8 +252,8 @@ impl AdapterIo {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (reader, writer) = split(stream);
-        let (tx, rx) = mpsc::channel(128);
-        let (incoming_tx, incoming_rx) = mpsc::channel(128);
+        let (tx, rx) = mpsc::channel(INBOUND_CAPACITY);
+        let (incoming_tx, incoming_rx) = mpsc::channel(INBOUND_CAPACITY);
         let pending = Arc::new(Mutex::new(HashMap::new()));
         tokio::spawn(writer_loop(writer, rx, write_timeout));
         tokio::spawn(reader_loop(
@@ -242,6 +261,7 @@ impl AdapterIo {
             read_timeout,
             pending.clone(),
             incoming_tx,
+            tx.clone(),
         ));
         (
             AdapterIo {
@@ -365,6 +385,7 @@ async fn reader_loop<R>(
     read_timeout: Duration,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ResBody>>>>,
     incoming: mpsc::Sender<IncomingFrame>,
+    outbound: mpsc::Sender<QueuedFrame>,
 ) where
     R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -376,7 +397,7 @@ async fn reader_loop<R>(
         };
         let id = wire.id;
         let reply_to = wire.reply_to;
-        match wire.msg {
+        let frame = match wire.msg {
             AdapterMsg::Res(body) => {
                 if let Some(reply_id) = reply_to {
                     if let Some(waiter) = pending.lock().await.remove(&reply_id) {
@@ -384,28 +405,81 @@ async fn reader_loop<R>(
                         continue;
                     }
                 }
-                if incoming
-                    .send(IncomingFrame {
-                        id,
-                        reply_to,
-                        msg: AdapterMsg::Res(body),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
+                IncomingFrame {
+                    id,
+                    reply_to,
+                    msg: AdapterMsg::Res(body),
                 }
             }
-            msg => {
-                if incoming
-                    .send(IncomingFrame { id, reply_to, msg })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
+            msg => IncomingFrame { id, reply_to, msg },
+        };
+        if !forward_incoming(&incoming, &outbound, frame).await {
+            break;
         }
+    }
+}
+
+/// Hand one decoded frame to the host's consumer without growing the buffer.
+///
+/// The answer is `false` only when the consumer is gone and the reader must
+/// stop. A full queue is waited on, not widened: the window is what lets a host
+/// that merely paused keep every frame, and [`shed`] is what stops a host that
+/// never returns from stopping the reader with it.
+async fn forward_incoming(
+    incoming: &mpsc::Sender<IncomingFrame>,
+    outbound: &mpsc::Sender<QueuedFrame>,
+    frame: IncomingFrame,
+) -> bool {
+    let mut waiting = frame;
+    for _ in 0..INBOUND_PRESSURE_RETRIES {
+        match incoming.try_send(waiting) {
+            Ok(()) => return true,
+            Err(mpsc::error::TrySendError::Full(rejected)) => {
+                waiting = rejected;
+                sleep(INBOUND_PRESSURE_PAUSE).await;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+        }
+    }
+    shed(outbound, waiting);
+    true
+}
+
+/// Drop one frame the host is not reading, and signal the pressure back.
+///
+/// Only an unanswered request has someone to signal: the error rides its own id,
+/// which is the one reply its plugin can act on, and says `internal` — the
+/// retryable code — because a host that drains again takes the frame next time.
+/// A frame that already answers something else has no such reader waiting, so it
+/// is logged and dropped, and a notification carries no id at all.
+fn shed(outbound: &mpsc::Sender<QueuedFrame>, frame: IncomingFrame) {
+    let IncomingFrame { id, reply_to, msg } = frame;
+    warn!(
+        op = msg.op_name().unwrap_or("res"),
+        reply_to = ?reply_to,
+        capacity = INBOUND_CAPACITY,
+        "adapter inbound queue is full; shedding the frame",
+    );
+    let (Some(id), None) = (id, reply_to) else {
+        return;
+    };
+    let body = ResBody::err(
+        ErrorCode::Internal,
+        format!("host inbound queue is full at {INBOUND_CAPACITY} frames; retry"),
+        Some("queue".to_string()),
+    );
+    if outbound
+        .try_send(QueuedFrame {
+            id: None,
+            reply_to: Some(id),
+            msg: AdapterMsg::Res(body),
+        })
+        .is_err()
+    {
+        warn!(
+            id,
+            "adapter write queue is full too; the shed request goes unanswered"
+        );
     }
 }
 
@@ -516,6 +590,17 @@ impl AdapterServer {
                 ));
             }
         };
+        if hello.protocol != PROTOCOL_VERSION {
+            let reply_to = first.id.unwrap_or_default();
+            return Err(Self::refuse_revision(
+                &mut stream,
+                write_timeout,
+                &hello,
+                reply_to,
+                peer_pid,
+            )
+            .await);
+        }
         let ack = match welcome(&hello) {
             Ok(ack) => ack,
             Err((code, message)) => {
@@ -572,6 +657,7 @@ impl AdapterServer {
         F: FnOnce(HelloArgs) -> Fut + Send,
         Fut: Future<Output = std::result::Result<HelloAck, (ErrorCode, String)>> + Send,
     {
+        let reply_to = first.id.unwrap_or_default();
         let hello = match first.msg {
             AdapterMsg::Plugin(PluginOp::Hello(args)) => args,
             _ => {
@@ -580,7 +666,7 @@ impl AdapterServer {
                     HELLO_REQUIRED_MESSAGE,
                     Some("op".to_string()),
                 );
-                let wire = WireMessage::response(first.id.unwrap_or_default(), body);
+                let wire = WireMessage::response(reply_to, body);
                 let _ = timeout(DEFAULT_WRITE_TIMEOUT, write_frame(&mut stream, &wire)).await;
                 return Err(AdapterError::wire(
                     ErrorCode::Invalid,
@@ -589,6 +675,16 @@ impl AdapterServer {
                 ));
             }
         };
+        if hello.protocol != PROTOCOL_VERSION {
+            return Err(Self::refuse_revision(
+                &mut stream,
+                DEFAULT_WRITE_TIMEOUT,
+                &hello,
+                reply_to,
+                None,
+            )
+            .await);
+        }
         let ack = match welcome(hello.clone()).await {
             Ok(ack) => ack,
             Err((code, message)) => {
@@ -611,6 +707,50 @@ impl AdapterServer {
             io,
             inbound,
         })
+    }
+
+    /// Refuse a `hello` whose revision this SDK does not speak.
+    ///
+    /// A plugin on another revision has to be told twice, in the two ways it can
+    /// hear: the error answers its own frame — that is the reply its request is
+    /// already waiting on — and the `bye` says the connection is over, so it does
+    /// not sit holding a half-open socket for a `welcome` that never comes. The
+    /// word goes to the log as well, since a revision mismatch is a deployment
+    /// fault the host operator, not the plugin, reads.
+    async fn refuse_revision<S>(
+        stream: &mut S,
+        write_timeout: Duration,
+        hello: &HelloArgs,
+        reply_to: u64,
+        peer_pid: Option<u32>,
+    ) -> AdapterError
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let message = format!(
+            "protocol {} unsupported, expected {PROTOCOL_VERSION}",
+            hello.protocol
+        );
+        warn!(
+            plugin = %hello.plugin,
+            protocol = hello.protocol,
+            expected = PROTOCOL_VERSION,
+            peer_pid = ?peer_pid,
+            "adapter hello refused: unsupported protocol revision",
+        );
+        let body = ResBody::err(
+            ErrorCode::ProtocolVersion,
+            message.clone(),
+            Some("protocol".to_string()),
+        );
+        let answer = WireMessage::response(reply_to, body.clone());
+        let _ = timeout(write_timeout, write_frame(stream, &answer)).await;
+        let bye = WireMessage::request(
+            None,
+            AdapterMsg::Host(HostOp::Bye(ByeNotice { reason: message })),
+        );
+        let _ = timeout(write_timeout, write_frame(stream, &bye)).await;
+        AdapterError::Protocol(body)
     }
 }
 
@@ -1514,6 +1654,7 @@ mod tests {
                 name: "srv".to_string(),
             },
             host_capabilities: vec![Capability::Inject],
+            delivered_tasks: Vec::new(),
         }
     }
 
@@ -1592,6 +1733,104 @@ mod tests {
     }
 
     struct SendHost;
+
+    fn hello_on(protocol: u16) -> HelloArgs {
+        HelloArgs {
+            protocol,
+            plugin: "onlyne-agent-test".to_string(),
+            version: "1.0.0".to_string(),
+            kind: MountKind::Agent,
+            capabilities: vec![],
+            mount: None,
+        }
+    }
+
+    /// A plugin speaking another revision is answered on its own frame and then
+    /// bid goodbye: no `welcome`, no half-open connection waiting for one.
+    #[tokio::test]
+    async fn hello_on_an_unsupported_revision_is_answered_then_bidden_bye() {
+        let (client, server) = tokio::io::duplex(4096);
+        let server_task =
+            tokio::spawn(async move { AdapterServer::accept(server, |_| Ok(ack())).await });
+        let (io, mut inbound) =
+            AdapterIo::new_with_inbound(client, Duration::from_secs(2), Duration::from_secs(2));
+        let body = io
+            .request(AdapterMsg::Plugin(PluginOp::Hello(hello_on(
+                PROTOCOL_VERSION + 1,
+            ))))
+            .await
+            .expect("revision answer");
+        assert!(!body.ok);
+        let error = body.error.expect("revision error");
+        assert_eq!(error.code, ErrorCode::ProtocolVersion);
+        assert_eq!(error.field.as_deref(), Some("protocol"));
+        assert!(error.message.contains("unsupported"));
+        let frame = inbound.recv().await.expect("the bye follows");
+        assert!(matches!(
+            frame.msg,
+            AdapterMsg::Host(HostOp::Bye(ByeNotice { .. }))
+        ));
+        let server_err = match server_task.await.expect("server task") {
+            Ok(_) => panic!("server welcomed an unsupported revision"),
+            Err(err) => err,
+        };
+        assert_eq!(server_err.code(), Some(ErrorCode::ProtocolVersion));
+    }
+
+    /// A host that stopped reading its queue does not turn the socket into a
+    /// buffer that grows with whatever the plugin keeps sending: the frames past
+    /// the ceiling are shed, and each request among them gets the retryable
+    /// answer that says so.
+    #[tokio::test]
+    async fn a_stalled_consumer_sheds_past_the_ceiling() {
+        let (host_side, mut plugin_side) = tokio::io::duplex(1 << 20);
+        let (_io, inbound) =
+            AdapterIo::new_with_inbound(host_side, Duration::from_secs(5), Duration::from_secs(5));
+        // Held and never read: this is the hung host.
+        let _stalled = inbound;
+
+        let shed_count = 4;
+        for id in 1..=(INBOUND_CAPACITY as u64 + shed_count) {
+            let wire = WireMessage::request(
+                Some(id),
+                AdapterMsg::Plugin(PluginOp::Detach(DetachArgs {
+                    reason: "pressure".to_string(),
+                })),
+            );
+            write_frame(&mut plugin_side, &wire)
+                .await
+                .expect("write the request");
+        }
+
+        for id in (INBOUND_CAPACITY as u64 + 1)..=(INBOUND_CAPACITY as u64 + shed_count) {
+            let reply = timeout(
+                Duration::from_secs(5),
+                read_frame::<_, WireMessage>(&mut plugin_side),
+            )
+            .await
+            .expect("the shed answer arrives")
+            .expect("a frame decodes")
+            .expect("the stream is open");
+            assert_eq!(reply.reply_to, Some(id));
+            let AdapterMsg::Res(body) = reply.msg else {
+                panic!("a shed answer is the only reply: {reply:?}");
+            };
+            assert!(!body.ok, "the shed answer is an error: {body:?}");
+            let error = body.error.expect("shed error");
+            assert_eq!(error.code, ErrorCode::Internal, "and retryable");
+            assert_eq!(error.field.as_deref(), Some("queue"));
+        }
+        // Nothing inside the ceiling was answered, because nothing was shed.
+        assert!(
+            timeout(
+                Duration::from_millis(200),
+                read_frame::<_, WireMessage>(&mut plugin_side)
+            )
+            .await
+            .is_err(),
+            "only the frames past the ceiling get a reply"
+        );
+    }
 
     #[async_trait]
     impl Host for SendHost {

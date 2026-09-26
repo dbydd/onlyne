@@ -52,6 +52,23 @@ function heartbeats(host) {
 }
 
 /**
+ * Every heartbeat the fake host received, in arrival order, with the two numbers
+ * the host's watermark gate reads — the seq on the frame and the seq inside the
+ * tuple it hands the reducer — beside the facts a test asserts on.
+ */
+function beatFrames(host) {
+  return host
+    .of("report")
+    .filter((args) => args.kind === "heartbeat")
+    .map((args) => ({
+      taskId: args.data.task_id,
+      seq: args.data.seq,
+      versionSeq: args.data.observed.version.seq,
+      agent: args.data.observed.agent,
+    }));
+}
+
+/**
  * The exact keys of a plugin observation outside a pane. `agent`, `resource` and
  * the reconcile defaults are what the plugin states; `delivery` and `recovery`
  * ride as placeholders the client overwrites with its own records, and no
@@ -306,6 +323,21 @@ const assignArgs = () => (ASSIGN_FRAME ? ASSIGN_FRAME.args : {
   task_id: TASK_ID,
   generation: 1,
 });
+
+/**
+ * The same host delivery under its own task id and envelope: what a relay session
+ * holds when the work it is running and the next one handed over are both open.
+ * The envelope id has to move with the task id, or the delivery guard rightly
+ * reads the second assign as the first one re-offered.
+ */
+const secondTaskArgs = () => {
+  const args = structuredClone(assignArgs());
+  args.task_id = ASSIGNED_TASK_ID;
+  args.envelope.id = "6c5d4e3f-8a9b-4c10-9d2e-4f5061728394";
+  args.envelope.causality.task = ASSIGNED_TASK_ID;
+  args.envelope.body.text = "take it from here";
+  return args;
+};
 
 /**
  * Run `body` with exactly the ORCA_* environment an Orca pane exports, so the
@@ -975,6 +1007,111 @@ test("a probe is answered with a heartbeat for the live task", async () => {
   );
   assert.equal(heartbeat.data.observed.agent, "idle", "the probe re-derives a waiting session");
   assert.ok(heartbeat.data.seq > SEQ_BASE, "each heartbeat advances the plugin's own sequence");
+});
+
+// One plugin, one counter, and the counter serves every task the session holds —
+// while the watermark the host gates a report against belongs to one task's row
+// (`onlyne-session`'s reducer: same generation, `seq <= row.seq` is dropped as a
+// stale duplicate). So A@1001, B@1002, A@1003 is the shape that works, and what
+// must never happen is a task's own seq going level or backwards: the dropped
+// beat leaves the liveness stamp where it was, and the sweep retires a session as
+// `heartbeat_stale` under an agent that is alive and working.
+test("two open tasks beat off one counter, each ahead of its own last beat", async () => {
+  const { agent, host } = await mountedAgent();
+  host.notify("assign", assignArgs());
+  host.notify("assign", secondTaskArgs());
+  await waitFor(() => (host.of("assign_ack").length === 2 ? true : null));
+  assert.deepEqual(agent.status().tasks, [TASK_ID, ASSIGNED_TASK_ID]);
+
+  await agent.heartbeat();
+  await agent.heartbeat();
+  await agent.heartbeat();
+
+  const last = new Map();
+  for (const beat of beatFrames(host)) {
+    const prior = last.get(beat.taskId);
+    assert.ok(
+      prior === undefined || beat.seq > prior,
+      `task ${beat.taskId.slice(0, 8)} beat at seq ${beat.seq} is not ahead of its own last beat (${prior})`,
+    );
+    assert.equal(beat.versionSeq, beat.seq, "the tuple the reducer gates carries the frame's seq");
+    last.set(beat.taskId, beat.seq);
+  }
+  const beats = beatFrames(host);
+  for (const taskId of [TASK_ID, ASSIGNED_TASK_ID]) {
+    assert.equal(
+      beats.filter((beat) => beat.taskId === taskId).length,
+      3,
+      `every round beats every open task, not just the head of the list (task ${taskId.slice(0, 8)})`,
+    );
+  }
+  const seqs = beats.map((beat) => beat.seq);
+  assert.equal(new Set(seqs).size, seqs.length, "one writer issues one seq once");
+  // The floor the plugin keeps is the one the wire shows: `/onlyne status` can be
+  // read against a row's watermark without anyone reconstructing it from the log.
+  assert.deepEqual(
+    agent.status().taskSeqs,
+    Object.fromEntries([...last].map(([taskId, seq]) => [taskId, seq])),
+  );
+});
+
+// The timer, a turn hook and a `probe` can each ask for a beat in the same
+// instant. Stacking those asks behind a round still writing splits one tick's
+// facts over two snapshots and doubles the frames every row has to clear, so a
+// request landing mid-round is folded into the round in flight: one more pass,
+// answering with the newest phase anyone asked for. And the fold must not cost
+// the next tick its round — the lock has to be released.
+test("a beat asked for mid-round folds into the running round instead of stacking", async () => {
+  const waiting = true;
+  const surface = fakeSurface({ waiting: () => waiting });
+  const { agent, host } = await startAgent({ surface });
+  agent.start();
+  await waitFor(() => (host.of("report").length >= 1 ? true : null));
+  host.notify("assign", assignArgs());
+  host.notify("assign", secondTaskArgs());
+  await waitFor(() => (host.of("assign_ack").length === 2 ? true : null));
+
+  const inFlight = agent.heartbeat();
+  // Same tick, before the first round has written anything: this is the ask a
+  // turn-start hook makes while the timer's round is still deriving its phase.
+  const folded = agent.heartbeat("running");
+  await Promise.all([inFlight, folded]);
+
+  let beats = beatFrames(host);
+  // The order the frames arrive in is the property: a round beats every open task
+  // before the next round writes anything. Two rounds interleaving instead —
+  // `A idle, A running, B idle, B running` — is what let one task's older beat
+  // trail its own newer one into the host, where the row's watermark gate reads it
+  // stale and the liveness stamp never moves.
+  assert.deepEqual(
+    beats
+      .slice(0, 4)
+      .map((beat) => [beat.taskId === TASK_ID ? "head" : "relay", beat.agent]),
+    [
+      ["head", "idle"],
+      ["relay", "idle"],
+      ["head", "running"],
+      ["relay", "running"],
+    ],
+    "one round beats both tasks before the folded round starts writing",
+  );
+  for (const taskId of [TASK_ID, ASSIGNED_TASK_ID]) {
+    const own = beats.filter((beat) => beat.taskId === taskId);
+    assert.equal(own.length, 2, "two passes, not three: the fold joined a round instead of queuing one");
+    assert.equal(own[0].agent, "idle", "the pass already writing states the phase it derived");
+    assert.equal(own[1].agent, "running", "the pass the fold bought answers the newest ask");
+    assert.ok(own[1].seq > own[0].seq, "and it is still ahead of that task's own last beat");
+  }
+
+  await agent.heartbeat();
+  beats = beatFrames(host);
+  for (const taskId of [TASK_ID, ASSIGNED_TASK_ID]) {
+    assert.equal(
+      beats.filter((beat) => beat.taskId === taskId).length,
+      3,
+      "the finished round released the lock, so the next tick still beats",
+    );
+  }
 });
 
 test("a task body handed over as config_get still reaches pi", async () => {

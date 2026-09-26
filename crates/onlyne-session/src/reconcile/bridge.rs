@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+
+use parking_lot::{Mutex, MutexGuard};
 
 use serde_json::json;
 
@@ -8,13 +9,23 @@ use crate::lifecycle::{self, LifecycleEvent, Observation, Verdict, Version};
 
 use super::fault::{DEFAULT_ISOLATE_AFTER, DEFAULT_TERMINATE_AFTER};
 use super::ledger::SessionLedger;
-use super::record::{SessionRecord, backend_ref_json, stored_observation, to_versioned};
+use super::record::{SessionRecord, backend_ref_json, short, stored_observation, to_versioned};
 
 /// A bridge instance: the reducer facts plus the ledger and the live session
 /// map it resolves probe targets from.
 #[derive(Debug, Default)]
 pub struct Bridge {
     pub(super) live: Mutex<HashMap<String, SessionRef>>,
+    /// One session transaction at a time: the stored watermark is read, reduced
+    /// and written back while this is held, so the writers that share a bridge —
+    /// the plugin's beat, the stall clock, the settle, the sweep — cannot be
+    /// overtaken inside one another's window. The section spans two ledger
+    /// round-trips, which the store serializes anyway. A lock taken before any
+    /// other bridge lock and never taken from inside a ledger call, so the
+    /// ordering `applying` → `live` is the only one that can form. Unpoisoned by
+    /// construction: a panic inside a ledger call leaves the gate behind rather
+    /// than turning the next apply into a second panic.
+    applying: Mutex<()>,
 }
 
 impl Bridge {
@@ -22,18 +33,24 @@ impl Bridge {
         Self::default()
     }
 
+    /// Enter a reduce-and-persist transaction. Every public entry point in this
+    /// module takes the gate exactly once, at its own boundary, and the inner
+    /// rounds never re-enter it.
+    fn applying(&self) -> MutexGuard<'_, ()> {
+        self.applying.lock()
+    }
+
     /// Remember a live session ref. The bridge prefers it over the stored
     /// reference when it names the backend resource.
     pub fn track_live(&self, session: SessionRef) {
         self.live
             .lock()
-            .unwrap()
             .insert(session.task_id.clone(), session);
     }
 
     /// Forget a live session ref.
     pub fn untrack_live(&self, task_id: &str) {
-        self.live.lock().unwrap().remove(task_id);
+        self.live.lock().remove(task_id);
     }
 }
 
@@ -94,8 +111,15 @@ fn event_name(event: &LifecycleEvent) -> &'static str {
 
 /// Reduce `event` against the stored tuple for `task_id` and persist the result.
 ///
-/// `Applied` writes the row (unless a concurrent writer already carries a newer
-/// watermark) and emits one `lifecycle` event describing the transition.
+/// The read, the reduce and the write are one transaction on the bridge's apply
+/// gate, so a writer that shares this bridge cannot take the watermark between
+/// them. A loss to a writer this bridge cannot see — a second client on the same
+/// store — is not swallowed: the caller handed over its own version, so there is
+/// no newer one to allocate on its behalf, and the loss is escalated instead
+/// (see [`report_lost_write`]).
+///
+/// `Applied` writes the row (unless a newer watermark already carries it) and emits one
+/// `lifecycle` event describing the transition.
 /// `Ignored` and `Rejected` leave the ledger untouched and are logged with the
 /// reducer's reason.
 ///
@@ -109,27 +133,43 @@ pub fn apply_persist(
     task_id: &str,
     event: &LifecycleEvent,
 ) -> anyhow::Result<Verdict> {
-    Ok(apply_persist_reported(bridge, ledger, task_id, event)?.0)
+    let (verdict, landed) = apply_persist_reported(bridge, ledger, task_id, event)?;
+    if !landed {
+        report_lost_write(ledger, task_id, event, &verdict, 1);
+    }
+    Ok(verdict)
 }
 
 /// Reduce and persist, reporting alongside the verdict whether the write landed.
 ///
-/// One implementation of the write, shared by every path: a caller that
-/// allocated the version itself (`apply_at_next`) retries on a lost write, and a
-/// caller handing the version over (`apply_persist`) reads the same answer and
-/// does nothing more with it. `false` means a transition the reducer accepted
-/// whose write lost the watermark; a verdict of `Ignored` or `Rejected` has
-/// nothing to write and reports `true`.
+/// One implementation of the write, shared by every path. `false` means a
+/// transition the reducer accepted whose write lost the watermark; a verdict of
+/// `Ignored` or `Rejected` has nothing to write and reports `true`.
 fn apply_persist_reported(
     bridge: &Bridge,
     ledger: &dyn SessionLedger,
     task_id: &str,
     event: &LifecycleEvent,
 ) -> anyhow::Result<(Verdict, bool)> {
+    let _gate = bridge.applying();
     let row = ledger.get_session(task_id)?;
+    apply_round(bridge, ledger, task_id, row.as_ref(), event)
+}
+
+/// One reduce-and-persist round against `row`, the watermark the caller read
+/// inside the same transaction. The gate is held by the caller, so this is the
+/// only place the write's answer is produced.
+fn apply_round(
+    bridge: &Bridge,
+    ledger: &dyn SessionLedger,
+    task_id: &str,
+    row: Option<&SessionRecord>,
+    event: &LifecycleEvent,
+) -> anyhow::Result<(Verdict, bool)> {
     if row.is_none() {
         let known =
-            ledger.task_is_known(task_id)? || bridge.live.lock().unwrap().contains_key(task_id);
+            ledger.task_is_known(task_id)?
+                || bridge.live.lock().contains_key(task_id);
         if !known {
             tracing::warn!(
                 task = %task_id,
@@ -139,22 +179,116 @@ fn apply_persist_reported(
             anyhow::bail!("unknown session {task_id}");
         }
     }
-    let current = stored_observation(ledger, row.as_ref());
+    let current = stored_observation(ledger, row);
     if row.is_none() && matches!(event, LifecycleEvent::Created { .. }) {
         let (seeded, landed) = seed_created(bridge, ledger, task_id, version_of(event))?;
         return Ok((Verdict::Applied(seeded), landed));
     }
+    // An adoption is the one event the reducer exempts from the sequence gate,
+    // and the exemption does not reach the ledger: `upsert_session` refuses
+    // anything not strictly newer. Restamping is what makes the two gates agree.
+    let stamped = if row.is_some() {
+        stamp_adoption(event, &current)
+    } else {
+        None
+    };
+    if let Some(adopting) = stamped.as_ref() {
+        tracing::warn!(
+            task = %task_id,
+            event = event_name(event),
+            from = version_of(event).seq,
+            to = version_of(adopting).seq,
+            watermark = current.version.seq,
+            "adoption carried a sequence the stored watermark had passed; advanced it past the gate"
+        );
+    }
+    let event = stamped.as_ref().unwrap_or(event);
     let verdict = lifecycle::apply(&current, event);
     let landed = record_verdict(
         bridge,
         ledger,
         task_id,
-        row.as_ref(),
+        row,
         event,
         &current,
         &verdict,
     )?;
     Ok((verdict, landed))
+}
+
+/// Re-version an adoption that the write gate would refuse.
+///
+/// `AdoptNewGeneration` and `Supersede` claim a generation, not a point in its
+/// sequence: the reducer says so by letting them through the same-generation
+/// sequence gate. A generation that is already the stored one is the case where
+/// that leaves the version at or behind the watermark the ledger compares, so
+/// the reducer answers `Applied` and `upsert_session` refuses the row — the
+/// adoption lands nowhere and the caller is told it did. Moving it one sequence
+/// past the stored watermark keeps the claim (same generation, newer sequence)
+/// and gives the gate an answer it can take. A generation strictly behind the
+/// stored one is not restamped: the reducer's own staleness gate is the right
+/// answer there.
+fn stamp_adoption(event: &LifecycleEvent, current: &Observation) -> Option<LifecycleEvent> {
+    let v = version_of(event);
+    let adoption = matches!(
+        event,
+        LifecycleEvent::AdoptNewGeneration { .. } | LifecycleEvent::Supersede { .. }
+    );
+    if !adoption || v.generation != current.version.generation || v.seq > current.version.seq {
+        return None;
+    }
+    let newer = Version::new(v.generation, current.version.seq.saturating_add(1));
+    Some(match event {
+        LifecycleEvent::Supersede {
+            old_generation_dead,
+            body,
+            ..
+        } => LifecycleEvent::Supersede {
+            v: newer,
+            old_generation_dead: *old_generation_dead,
+            body: body.clone(),
+        },
+        _ => LifecycleEvent::AdoptNewGeneration { v: newer },
+    })
+}
+
+/// Escalate an accepted transition whose write the ledger refused, once retries
+/// cannot save it. The warn naming the loss is `record_verdict`'s; this is the
+/// part that reaches outside the process: an operator line on the client's alert
+/// surface and one event on the bus, so the server projecting this row learns
+/// the tuple it is showing is not the tuple the reducer settled on.
+fn report_lost_write(
+    ledger: &dyn SessionLedger,
+    task_id: &str,
+    event: &LifecycleEvent,
+    verdict: &Verdict,
+    attempts: usize,
+) {
+    let v = version_of(event);
+    tracing::warn!(
+        task = %task_id,
+        event = event_name(event),
+        generation = v.generation,
+        seq = v.seq,
+        attempts,
+        applied = matches!(verdict, Verdict::Applied(_)),
+        "session transition did not land; the row keeps the older tuple"
+    );
+    ledger.note_alert(format!(
+        "session {} lost its {} write to a newer watermark",
+        short(task_id),
+        event_name(event)
+    ));
+    ledger.emit(
+        "lifecycle_write_lost",
+        json!({
+            "task_id": task_id,
+            "event": event_name(event),
+            "generation": v.generation,
+            "seq": v.seq,
+            "attempts": attempts,
+        }),
+    );
 }
 
 /// Write the `Created` seed row. The reducer defines no transition into
@@ -218,6 +352,7 @@ fn record_verdict(
             if !ledger.upsert_session(task_id, &stored)? {
                 tracing::warn!(
                     task = %task_id,
+                    event = event_name(event),
                     generation = next.version.generation,
                     seq = next.version.seq,
                     "session write lost to a newer watermark; left the row alone"
@@ -267,26 +402,27 @@ fn record_verdict(
 
 /// The next version for a session observed locally: same generation, one
 /// sequence past the stored watermark.
+///
+/// A standalone read, and the caller's write is its own transaction: a writer
+/// can take the watermark between the two. The bridge's local writers allocate
+/// inside their transaction instead of going through here.
 pub fn next_version(ledger: &dyn SessionLedger, task_id: &str) -> anyhow::Result<Version> {
     let row = ledger.get_session(task_id)?;
     let current = stored_observation(ledger, row.as_ref());
-    Ok(Version::new(
-        current.version.generation,
-        current.version.seq.saturating_add(1),
-    ))
+    Ok(next_after(&current))
 }
 
-/// Reduce an event whose version the caller allocates itself. Every feed helper
-/// below goes through here, so an event that arrives twice is dropped by the
-/// reducer's watermark.
-///
-/// The version is read and then written, and a competing writer can land
-/// between the two: a plugin beat arriving inside that window moves the stored
-/// watermark past the version this call allocated, and the write is refused.
-/// A local observation the reducer accepted is a fact, so the window closes by
-/// re-reading the row and writing again, bounded by [`APPLY_ATTEMPTS`]. The
-/// reducer's own gate is unchanged: a duplicate or an older event is still
-/// dropped, and a verdict of `Ignored` or `Rejected` never reaches the retry.
+/// One sequence past a watermark, in the watermark's own generation.
+fn next_after(current: &Observation) -> Version {
+    Version::new(
+        current.version.generation,
+        current.version.seq.saturating_add(1),
+    )
+}
+
+/// Reduce an event whose version is the stored watermark plus one. Every feed
+/// helper below goes through here, so an event that arrives twice is dropped by
+/// the reducer's watermark.
 pub fn apply_at_next(
     bridge: &Bridge,
     ledger: &dyn SessionLedger,
@@ -294,21 +430,69 @@ pub fn apply_at_next(
     make: impl FnMut(Version) -> LifecycleEvent,
 ) -> anyhow::Result<Verdict> {
     let mut make = make;
+    apply_locally(bridge, ledger, task_id, |_, v| make(v))
+}
+
+/// Reduce an event the caller composes from the stored tuple.
+///
+/// For a caller whose body is derived from the row — a settlement replays the
+/// tuple it read with one dimension closed — reading outside the transaction is
+/// the race: the tuple it composed against can be the one the watermark has
+/// already left, and the reducer then answers a version its own reader never
+/// saw. Here the tuple and the version come from the same read that holds the
+/// apply gate, which is the only read that can promise either.
+pub fn apply_from_stored(
+    bridge: &Bridge,
+    ledger: &dyn SessionLedger,
+    task_id: &str,
+    make: impl FnMut(&Observation, Version) -> LifecycleEvent,
+) -> anyhow::Result<Verdict> {
+    apply_locally(bridge, ledger, task_id, make)
+}
+
+/// The local transaction: read the row, let the caller compose its event from
+/// what that read shows, reduce, and write — all of it inside the apply gate, so
+/// the writers sharing this bridge cannot overtake each other between the read
+/// and the write. A write that still loses was taken by a writer this bridge
+/// cannot see (a second client on the same store); the round is replayed on the
+/// fresher row, bounded by [`APPLY_ATTEMPTS`], and the loss is escalated when the
+/// budget is spent. The reducer's own gate is untouched: a duplicate or an older
+/// event is still dropped, and a verdict of `Ignored` or `Rejected` has nothing
+/// to replay.
+fn apply_locally(
+    bridge: &Bridge,
+    ledger: &dyn SessionLedger,
+    task_id: &str,
+    mut make: impl FnMut(&Observation, Version) -> LifecycleEvent,
+) -> anyhow::Result<Verdict> {
+    let _gate = bridge.applying();
     let mut attempt = 1;
     loop {
-        let version = next_version(ledger, task_id)?;
-        let (verdict, landed) = apply_persist_reported(bridge, ledger, task_id, &make(version))?;
-        if landed || attempt == APPLY_ATTEMPTS {
+        let row = ledger.get_session(task_id)?;
+        let current = stored_observation(ledger, row.as_ref());
+        let event = make(&current, next_after(&current));
+        let (verdict, landed) = apply_round(bridge, ledger, task_id, row.as_ref(), &event)?;
+        if landed {
             return Ok(verdict);
         }
+        if attempt == APPLY_ATTEMPTS {
+            report_lost_write(ledger, task_id, &event, &verdict, attempt);
+            return Ok(verdict);
+        }
+        tracing::debug!(
+            task = %task_id,
+            event = event_name(&event),
+            attempt,
+            "write lost to a competing watermark; replaying the round on the fresher row"
+        );
         attempt += 1;
     }
 }
 
 /// Attempts one local event gets to land its write. Four is the number that
-/// covers the writers this client can run against one session — the plugin's
-/// beat, the stall clock, the settle, and the sweep — one retry each, after
-/// which the loss is logged rather than looped over.
+/// covers the writers that can share one store — the plugin's beat, the stall
+/// clock, the settle, and the sweep — one retry each, after which the loss is
+/// escalated rather than looped over.
 const APPLY_ATTEMPTS: usize = 4;
 
 /// Best-effort feed for local observation points.

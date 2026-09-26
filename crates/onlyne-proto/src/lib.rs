@@ -3,7 +3,9 @@
 //! Pure data: every type here is serde-only, so the protocol travels into the
 //! server, the client, the gateway plugins, and the machine-readable schema
 //! export from one definition. This crate holds tokio, a database, and a
-//! transport in none of its code paths.
+//! transport in none of its code paths. The one behaviour beside data is
+//! [`ops`]' phase `FromStr`: an unknown stored word is logged before the `Err`
+//! returns, so a column no reader can decode still leaves a trace.
 //!
 //! Layers, bottom up:
 //! - [`envelope`]: the unified message (§3). Text plus at most one inline image.
@@ -44,8 +46,8 @@ pub use adapter::{
 pub use envelope::{
     BODY_TEXT_MAX_BYTES, Body, CAUSALITY_LABEL_KEY_MAX_BYTES, CAUSALITY_LABEL_MAX_ENTRIES,
     CAUSALITY_LABEL_VALUE_MAX_BYTES, Causality, ControlOp, Envelope, Error, IMAGE_DATA_MAX_BYTES,
-    IMAGE_MIMES, ImagePart, MsgKind, Outcome, Principal, Result, new_envelope, new_id, new_op_id,
-    new_task_id, sha256_hex,
+    IMAGE_DATA_MAX_ENCODED_BYTES, IMAGE_MIMES, ImagePart, MsgKind, Outcome, Principal, Result,
+    new_envelope, new_id, new_op_id, new_task_id, sha256_hex,
 };
 pub use event::{
     Event, EventRow, EventTier, FaultEvent, GatewayHealth, LedgerState, LedgerStateEvent,

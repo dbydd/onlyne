@@ -24,7 +24,7 @@ pub(super) async fn link_loop(init: &ClientInit, state: &RunState) -> Result<()>
     let mut backoff = reconnect_backoff();
     let accept_new = state.dispatch.accept_new();
     loop {
-        match ClientLink::connect(init, state.dispatch.hello_live_tasks()).await {
+        match ClientLink::connect(init, hello_claim(state)).await {
             Ok(link) => {
                 backoff.reset();
                 state.dispatch.attach_outbox(Arc::new(link.clone()));
@@ -106,7 +106,7 @@ pub(super) async fn watch_readiness(link: ClientLink, state: RunState) -> Result
                     ready = true;
                     // The link redials on its own, so its fresh connection needs
                     // the routed `hello` before any queued frame reaches it.
-                    link.authenticate(state.dispatch.hello_live_tasks()).await?;
+                    link.authenticate(hello_claim(&state)).await?;
                     state.accept_new.store(true, Ordering::SeqCst);
                     state.dispatch.set_link_up(true);
                     flush_intents(&link, &state).await;
@@ -125,6 +125,19 @@ pub(super) async fn watch_readiness(link: ClientLink, state: RunState) -> Result
             ConnReadiness::Closed => return Ok(()),
         }
     }
+}
+
+/// The hello claim for one dial: memory slots merged with the durable session
+/// rows, degraded to the slots alone when the store cannot answer. A failed
+/// query must never send an empty claim — the server would requeue every
+/// in_flight row this client still serves — so the memory half is always said,
+/// and the loss of the durable half is logged by `hello_live_tasks` itself.
+fn hello_claim(state: &RunState) -> Vec<String> {
+    state.dispatch.hello_live_tasks().unwrap_or_else(|error| {
+        let claim = state.dispatch.live_claim_from_slots();
+        tracing::warn!(error = %error, "hello claim degraded to the memory slots");
+        claim
+    })
 }
 
 /// Whether the transport answered from a fresh link or a live one.
@@ -150,7 +163,13 @@ pub(super) async fn flush_loop(link: ClientLink, state: RunState) -> Result<()> 
     }
 }
 
-/// Send each pending intent once and record the answer.
+/// Send each due intent once and record the answer.
+///
+/// One row's failure is that row's own, and the pass says so by going on to the
+/// next row. The queue is one priority order behind a batch cap, so a pass that
+/// stopped at a row that could not be sent left every row behind it waiting for a
+/// pass that begins with the same failure — which is how one bad payload stalled
+/// a client's whole outbound queue (round-2 audit C1).
 pub(super) async fn flush_intents(link: &ClientLink, state: &RunState) {
     let rows = match state.intents.lock().pending() {
         Ok(rows) => rows,
@@ -163,7 +182,16 @@ pub(super) async fn flush_intents(link: &ClientLink, state: &RunState) {
         let op = match op_for_intent(&row) {
             Ok(op) => op,
             Err(error) => {
+                // No later pass decodes this row either, so a pass that only
+                // logged it kept the row first in the batch for the life of the
+                // queue. Charging it moves the deadline out of the due window now
+                // and retires the row with a fault at the local ceiling.
                 tracing::warn!(error = %error, op_id = %row.op_id, "intent payload unreadable");
+                let machine = state.intents.lock();
+                let reason = format!("intent payload unreadable: {error}");
+                if let Err(record) = machine.fail_local(&row, &reason) {
+                    tracing::warn!(error = %record, op_id = %row.op_id, "intent failure not recorded");
+                }
                 continue;
             }
         };
@@ -206,8 +234,16 @@ pub(super) async fn flush_intents(link: &ClientLink, state: &RunState) {
                 if let Err(record) = machine.defer(&row, "connection unavailable") {
                     tracing::warn!(error = %record, op_id = %row.op_id, "intent deferral not recorded");
                 }
+                drop(machine);
                 tracing::warn!(error = %error, op_id = %row.op_id, "intent send failed");
-                return;
+                // Stopping here is the one case that is not this row's failure.
+                // With the link gone every row left in the batch answers the same
+                // way, and each costs a doomed round trip; the rows untouched keep
+                // their deadline, so the reconnect's pass starts where this one
+                // stopped. While the link still answers, the batch goes on.
+                if link.readiness() != ConnReadiness::Ready {
+                    return;
+                }
             }
         }
     }

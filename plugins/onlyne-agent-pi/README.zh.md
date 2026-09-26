@@ -277,7 +277,13 @@ stderr 告警并忽略，把机会让回文件。
 - **report 序号基址。** 插件自己的 `report` 序号从 1000 起，不是 1。client 把自身的派发事件
   （`created`、资源 attach、`ready`）写进同一个 `(generation, seq)` 水位，reducer 会静默丢弃
   水位及以下的报告（`crates/onlyne-session/src/reconcile/`），所以从 1 起会丢掉最初的观测。
-  其余版本语义与规范一致。
+  **一个插件一个计数器：** 会话持有的每个任务都共用同一条 `report` 序号发心跳 —— 因为 client
+  会在同一个任务的两次心跳之间，为该行自己的事件取 `row.seq + 1`；若每个任务每轮只推进一格，
+  心跳正好撞在那个数上被当作 stale 丢掉。闸门是按任务行判的，所以每条任务记录还带着自己上一次
+  上报的 `seq`（`task.lastSeq`，`/onlyne status` 里以 `taskSeqs` 呈现），新分配的序号会被抬到它
+  之上：`A@1001、B@1002、A@1003` 才是正确的形状，任何任务都不会拿到它的行已经接受过的 seq。
+  心跳轮次也绝不重叠：一轮还在写时收到的心跳请求会并进这一轮，只多做一遍，而不是对同一刻再快照
+  一次。其余版本语义与规范一致。
 - **`observed` 是完整的 `Observation`。** `report.heartbeat` 携带整个合法状态元组
   （`version`、`generation_live`、`isolate_after`、`terminate_after`、`mismatch_count`、
   `agent`、`delivery`、`resource`、`recovery`），不是
@@ -358,8 +364,8 @@ stderr 告警并忽略，把机会让回文件。
 | supervisor 看板一个 tab 都不列 | 没有 live session 上报过 pane：适配器版本早于这条上报，或这个 pi 不在 Orca pane 里 | `onlyne --server-root … sessions --json` 看 `projection.observed.host.orca.pane_key`；在 pane 里跑 `env \| grep ORCA_` |
 
 `/onlyne status` 打印实时状态（`connected`、`socket`、`role`、`sessionId`、`generation`、
-`agentState`、`tasks`、`pendingCompletion`、`lastError` 与计数器）；`/onlyne connect` /
-`/onlyne disconnect` 手工开合连接。
+`agentState`、`seq`、`taskSeqs`、`tasks`、`pendingCompletions`、`lastError` 与计数器）；
+`/onlyne connect` / `/onlyne disconnect` 手工开合连接。
 
 ## 9. 开发与验证
 

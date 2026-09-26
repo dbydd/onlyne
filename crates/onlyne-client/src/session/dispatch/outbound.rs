@@ -64,6 +64,10 @@ pub(super) async fn transport_envelope(state: &DispatchState, envelope: &Envelop
 pub struct ClientLink {
     handle: ClientConn,
     welcome: Arc<Welcome>,
+    /// Skeleton of the routed `hello`. Its `live_tasks` is deliberately never
+    /// filled in: every send — `connect` and `authenticate` both — stamps a
+    /// freshly-read claim through [`hello_with_live_tasks`], so no caller reads
+    /// the stored list and a write-back here would only go stale.
     hello: HandshakeArgs,
 }
 

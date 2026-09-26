@@ -40,6 +40,7 @@ fn ack(hello: &HelloArgs) -> Result<HelloAck, (ErrorCode, String)> {
             name: "test".to_string(),
         },
         host_capabilities: vec![Capability::Probe, Capability::Recycle],
+        delivered_tasks: Vec::new(),
     })
 }
 

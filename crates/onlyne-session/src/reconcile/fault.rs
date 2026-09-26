@@ -158,7 +158,7 @@ pub fn reconcile_mismatch(
 /// session first, then the row's own `backend_ref` when it parses as a whole
 /// `SessionRef` for this task. Anything else is inconclusive and yields `None`.
 pub fn probe_target(bridge: &Bridge, task_id: &str, row: &SessionRecord) -> Option<SessionRef> {
-    if let Some(session) = bridge.live.lock().unwrap().get(task_id) {
+    if let Some(session) = bridge.live.lock().get(task_id) {
         return Some(session.clone());
     }
     if let Ok(session) = serde_json::from_str::<SessionRef>(&row.backend_ref) {

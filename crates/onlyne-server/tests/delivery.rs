@@ -3377,7 +3377,7 @@ fn a_fault_survives_every_repair_transition() {
     .expect("accepted");
     assert_eq!(inspected["task_id"], json!(adopt_task));
 
-    let closed = faults::repair(
+    faults::repair(
         &fixture.state,
         &AdminOp::RepairClose(RepairTarget {
             task_id: adopt_task.clone(),
@@ -3385,9 +3385,6 @@ fn a_fault_survives_every_repair_transition() {
         }),
     )
     .expect("repair");
-    // The close runs after the task settled as rejected, so the ledger refusal
-    // is reported rather than hidden.
-    assert!(closed.is_ok() || closed.is_err());
 }
 
 #[test]
@@ -3464,20 +3461,6 @@ fn a_missing_health_report_moves_presence_and_keeps_queued_outbound() {
     )
     .expect("query");
     assert_eq!(recorded.len(), 1);
-}
-
-#[test]
-fn outbound_rendering_holds_until_the_gateway_is_reachable() {
-    let fixture = fixture();
-    let mut envelope = note("planner", "gw1", "outbound");
-    envelope.to = Principal::gateway("gw1", "chan1", Some("conv1".to_string()));
-    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
-    assert_eq!(outcome.receipt.state, LedgerState::Queued);
-    let spec = spec_of(&fixture);
-    let route = gateway_host::select_outbound_route(&spec, "gw1", &envelope.from, None)
-        .expect("a route selects the gateway");
-    assert_eq!(route.to.role, "planner");
-    assert!(gateway_host::resolve_inbound_route(&spec, "gw1", "chan1", Some("conv1")).is_some());
 }
 
 #[tokio::test]

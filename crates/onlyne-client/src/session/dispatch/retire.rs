@@ -145,17 +145,63 @@ fn unbind_transports(inner: &mut DispatchInner, key: &str, slot: &SessionSlot) {
         .retain(|served, _| !names_session(key, slot, served));
 }
 
+/// One backend close a retirement owed, carried off the dispatch lock.
+///
+/// A close is a host round trip — a pane kill, a terminal close, an agent reap —
+/// and it can take seconds. The dispatch lock is the one lock every adapter frame,
+/// every report, and every slot of this role queues behind, so a sweep that
+/// retires more than one session at a time must not spend that lock on the hosts
+/// it is calling. A retirement therefore records what it took down here and runs
+/// the closes once it is off the lock.
+pub(super) struct PendingClose {
+    backend: Arc<dyn SessionBackend>,
+    session: SessionRef,
+    reason: onlyne_session::CloseReason,
+}
+
+/// Run the closes a retirement collected.
+///
+/// Four of the five callers hold the dispatch lock and can put it down first — the
+/// two sweeps, the goodbye path, and the merged-handoff retire — and each does,
+/// because a close that blocks must not hold every adapter frame of this role
+/// behind it. The fifth is `release_locked`, which runs inside a caller that
+/// already holds the lock for the store work above it and cannot leave; it takes
+/// the close where it stands, which is the behavior that path has always had.
+///
+/// A failed close is reported and not propagated. The slot is gone from this
+/// client's books either way and its row already reads closed, so the caller has
+/// nothing left to undo; an error that travelled back would replace the answer
+/// the caller is waiting for — which sessions left, and therefore must be
+/// published — with a failure to say so.
+pub(super) fn close_retired(pending: Vec<PendingClose>) {
+    for close in pending {
+        if let Err(error) = close.backend.close(&close.session, close.reason, false) {
+            tracing::warn!(
+                task = %close.session.task_id,
+                backend = %close.session.backend,
+                resource = %close.session.backend_ref,
+                error = %error,
+                "session resource retirement failed"
+            );
+        }
+    }
+}
+
 /// Retire one task-free session after its transport set becomes empty.
 ///
 /// The idle slot releases its backend resource because the agent able to run
 /// another task in it has left. An attached transport keeps the resource because
-/// that agent remains reachable. The dispatch lock serializes the final transport check, reference
-/// refresh, lifecycle projection, backend close, and slot removal with adapter
-/// binding.
+/// that agent remains reachable. The dispatch lock serializes the final transport
+/// check, reference refresh, lifecycle projection, and slot removal with adapter
+/// binding. The backend close is deliberately NOT one of them: it is recorded in
+/// `pending` for the caller to run once it is off the lock, so a sweep of sessions
+/// cannot hold every frame of this role behind a host round trip. See
+/// [`close_retired`] for the one path that cannot put the lock down.
 pub(super) fn retire_idle_locked(
     inner: &mut DispatchInner,
     key: &str,
     reason: onlyne_session::CloseReason,
+    pending: &mut Vec<PendingClose>,
 ) -> bool {
     let Some(slot) = inner.sessions.get(key) else {
         return false;
@@ -202,15 +248,11 @@ pub(super) fn retire_idle_locked(
                 "session resource close projection failed"
             );
         }
-        if let Err(error) = inner.backend.close(&session, reason, false) {
-            tracing::warn!(
-                task = %task_id,
-                backend = %session.backend,
-                resource = %session.backend_ref,
-                error = %error,
-                "session resource retirement failed"
-            );
-        }
+        pending.push(PendingClose {
+            backend: Arc::clone(&inner.backend),
+            session,
+            reason,
+        });
     }
     if reason == onlyne_session::CloseReason::Completed {
         if let Err(error) = feed_agent_gone(&inner.bridge, &inner.store, &task_id) {
@@ -296,7 +338,20 @@ pub(super) fn release_locked(
                 session.task_id = None;
                 session.ready = false;
             }
-            retire_idle_locked(inner, &key, onlyne_session::CloseReason::Completed);
+            let mut pending = Vec::new();
+            retire_idle_locked(
+                inner,
+                &key,
+                onlyne_session::CloseReason::Completed,
+                &mut pending,
+            );
+            // This function answers to its caller's lock, which is already held
+            // across the store work above, so the close it owes cannot wait for a
+            // unlock this scope cannot perform. Running it here is the same
+            // under-lock call the path has always made; the sweeps that CAN leave
+            // the lock — `retire_dropped_ghosts`, `reclaim_exited_resources`,
+            // `close_all` — are the ones that now defer it.
+            close_retired(pending);
         }
     }
     inner.stall.forget(task_id);
@@ -341,29 +396,48 @@ fn close_refusal(reason: onlyne_session::CloseReason) -> &'static str {
 /// sweep, because an operator's SIGTERM must not turn into a hang while a slow
 /// backend CLI exits; whatever the budget cuts off is reported and dropped
 /// anyway.
+///
+/// The order is deliberate: every slot is taken off this client's books under the
+/// dispatch lock — untracked and removed, so nothing still reads a live session —
+/// and the closes it collected run once the lock is let go. A shutdown that
+/// closed each pane while holding that lock spent the whole budget on the host,
+/// with the lock no adapter frame could reach.
 pub fn close_all(state: &DispatchState, reason: onlyne_session::CloseReason, budget: Duration) {
     let started = Instant::now();
-    let mut inner = state.inner.lock();
-    let sessions: Vec<(String, SessionRef)> = inner
-        .sessions
-        .iter()
-        .map(|(key, slot)| (key.clone(), slot.session.clone()))
-        .collect();
-    for (key, session) in sessions {
+    let pending: Vec<PendingClose> = {
+        let mut inner = state.inner.lock();
+        let sessions: Vec<(String, SessionRef)> = inner
+            .sessions
+            .iter()
+            .map(|(key, slot)| (key.clone(), slot.session.clone()))
+            .collect();
+        let mut pending = Vec::with_capacity(sessions.len());
+        for (key, session) in sessions {
+            inner.bridge.untrack_live(&session.task_id);
+            inner.sessions.remove(&key);
+            pending.push(PendingClose {
+                backend: Arc::clone(&inner.backend),
+                session,
+                reason,
+            });
+        }
+        pending
+    };
+    for close in pending {
         if started.elapsed() > budget {
             tracing::warn!(
-                task = %session.task_id,
+                task = %close.session.task_id,
                 "shutdown close budget reached; the resource is left behind"
             );
-        } else if let Err(error) = inner.backend.close(&session, reason, false) {
+            continue;
+        }
+        if let Err(error) = close.backend.close(&close.session, close.reason, false) {
             tracing::warn!(
-                task = %session.task_id,
+                task = %close.session.task_id,
                 error = %error,
                 "session close failed during shutdown"
             );
         }
-        inner.bridge.untrack_live(&session.task_id);
-        inner.sessions.remove(&key);
     }
 }
 
@@ -444,6 +518,7 @@ impl DispatchState {
             })
             .collect();
         let mut retired: Vec<String> = Vec::new();
+        let mut pending: Vec<PendingClose> = Vec::new();
         for (key, reason) in candidates {
             // The id that travels is the session's own, the one whose row the
             // retirement below is about to write.
@@ -454,10 +529,15 @@ impl DispatchState {
             else {
                 continue;
             };
-            if retire_idle_locked(&mut inner, &key, reason) {
+            if retire_idle_locked(&mut inner, &key, reason, &mut pending) {
                 retired.push(task_id);
             }
         }
+        // The tick that found a batch of finished sessions owes a host close for
+        // each, and this sweep runs every 250 ms: on the lock, one slow backend
+        // would spend the whole window and every adapter frame queued behind it.
+        drop(inner);
+        close_retired(pending);
         retired
     }
 
@@ -515,9 +595,10 @@ impl DispatchState {
         }
         let window = Duration::from_secs(grace_secs);
         let mut inner = self.inner.lock();
-        // The arm is decided from the pair of readings here, while both still describe the
-        // slot: which fact closed the window is what the operator has to be able to tell
-        // apart once the retirement itself is a line in the log.
+        // The arm is decided from the pair of readings here, while both still
+        // describe the slot: which fact closed the window is what the operator
+        // has to be able to tell apart once the retirement itself is a line in
+        // the log.
         let due: Vec<(String, RetirementArm)> = inner
             .sessions
             .iter()
@@ -533,6 +614,7 @@ impl DispatchState {
             })
             .collect();
         let mut retired: Vec<Retired> = Vec::new();
+        let mut pending: Vec<PendingClose> = Vec::new();
         for (key, arm) in due {
             let Some(slot) = inner.sessions.get(&key).cloned() else {
                 continue;
@@ -627,7 +709,7 @@ impl DispatchState {
             if let Some(slot) = inner.sessions.get_mut(&key) {
                 slot.task_id = None;
             }
-            if retire_idle_locked(&mut inner, &key, reason) {
+            if retire_idle_locked(&mut inner, &key, reason, &mut pending) {
                 // The id that travels is the session's own, the one whose row was
                 // just fed agent-gone and resource-closed: that row is what the
                 // server mirrors, and its ending is what the caller publishes. The
@@ -640,6 +722,11 @@ impl DispatchState {
                 });
             }
         }
+        // Every session this sweep took is off the slot map and fully written down
+        // by now; what remains is the host's own work, and the lock that answers an
+        // agent's next frame is not to be held through it.
+        drop(inner);
+        close_retired(pending);
         retired
     }
 }

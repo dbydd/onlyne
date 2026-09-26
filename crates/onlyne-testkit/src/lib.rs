@@ -300,6 +300,7 @@ impl HostSim {
                 name: "host-sim".to_string(),
             },
             host_capabilities: self.spec.expected_capabilities.clone(),
+            delivered_tasks: Vec::new(),
         }
     }
 

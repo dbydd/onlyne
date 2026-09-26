@@ -6,9 +6,10 @@ use super::*;
 /// (nothing for the absent rows, which must behave exactly as a turn
 /// without the contract), the prose marker that chooses the agent's stop
 /// reason, and everything the ending has to leave behind. The note
-/// expectations match as substrings; the head is compared exactly. A row
-/// whose `payload_kind` is `invalid` keeps its file; every other row has it
-/// consumed.
+/// expectations match as substrings; the head is compared exactly. No row
+/// leaves its file at the report path — an accepted report is consumed and a
+/// refused one is moved aside as evidence — but only a refused one is still
+/// readable, under `.invalid`.
 struct Cell {
     name: &'static str,
     payload: Option<&'static [u8]>,
@@ -130,15 +131,33 @@ fn a_payload_report_replaces_the_head_and_can_only_lower_the_ending() {
                 outcome.note
             ),
         }
-        // An accepted report is consumed on the read: a requeued task id
-        // starts from nothing rather than from the last turn's words. A
-        // refused one stays on disk as the evidence for the record below.
+        // The report path is clear either way, so a requeued task id starts
+        // from nothing rather than from the last turn's words. What differs is
+        // whether the bytes survived: an accepted report is spent, and a
+        // refused one is kept under `.invalid` as the evidence for the record
+        // below.
+        let evidence = evidence_path(&path, 0);
+        assert!(
+            !path.exists(),
+            "{}: the report path survived its read",
+            cell.name
+        );
         assert_eq!(
-            path.exists(),
+            evidence.exists(),
             cell.payload_kind == "invalid",
             "{}: the report file took the wrong side of its read",
             cell.name
         );
+        if cell.payload_kind == "invalid" {
+            // The refused bytes are the author's to read, so they are kept
+            // whole rather than paraphrased into the journal.
+            assert_eq!(
+                fs::read(&evidence).expect("the evidence is readable"),
+                cell.payload.expect("a refused row pre-placed its bytes"),
+                "{}: the evidence is not what was written",
+                cell.name
+            );
+        }
         let records = onlyne_records(&lines, "payload");
         assert_eq!(records.len(), 1, "{}: {lines:?}", cell.name);
         assert_eq!(records[0]["task_id"], task, "{}", cell.name);
@@ -173,6 +192,42 @@ fn a_payload_report_replaces_the_head_and_can_only_lower_the_ending() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(backend.state.agents.lock().is_empty());
+}
+
+#[test]
+fn a_refused_report_keeps_its_bytes_and_clears_the_path_its_requeue_reads() {
+    let fake = Fake::new();
+    let backend = AcpBackend::new(AcpOptions::default());
+    let task = "t-refused";
+    let path = payload_path(fake.root.path(), task);
+    let bytes = b"the grammar wants a prefix\n";
+    fs::create_dir_all(path.parent().expect("the report path names a file"))
+        .expect("create the report directory");
+    fs::write(&path, bytes).expect("pre-place the refused report");
+    let session = backend.spawn(fake.spec(task)).unwrap();
+    let (outcome, lines, _log) = run_turn(&backend, &session, task, "carry on");
+    assert_eq!(outcome.outcome, TaskState::Cancelled, "{outcome:?}");
+    // The refusal keeps the bytes whole — the journal only carries the parser's
+    // complaint — and it keeps them under a name the ending never opens.
+    let evidence = evidence_path(&path, 0);
+    assert_eq!(
+        fs::read(&evidence).expect("the evidence is readable"),
+        bytes,
+        "the evidence is not what was written"
+    );
+    assert!(!path.exists(), "a refused report stayed on its own path");
+    let record = &onlyne_records(&lines, "payload")[0];
+    assert_eq!(
+        record["evidence"],
+        Value::from(evidence.display().to_string()),
+        "{record:?}"
+    );
+    // The turn the same task id gets next starts from nothing. Had the refused
+    // file stayed where it was read, this is the turn it would have cancelled.
+    let (second, _lines, _log) = run_turn(&backend, &session, task, "carry on");
+    assert_eq!(second.outcome, TaskState::Done, "{second:?}");
+    assert!(second.note.is_none(), "{:?}", second.note);
+    finish(&backend, &fake, &[&session]);
 }
 
 #[test]

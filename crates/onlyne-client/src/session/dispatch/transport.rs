@@ -2,7 +2,7 @@ use super::*;
 
 use super::env::missing_capability;
 use super::outbound::queue_outbound_locked;
-use super::retire::{retire_idle_locked, stored_close_reason};
+use super::retire::{PendingClose, close_retired, retire_idle_locked, stored_close_reason};
 use super::state::{
     DispatchInner, DispatchState, FrameGuard, SessionSlot, has_attached_transport,
     rebase_generation, slot_key_named, slot_key_serving_task, slot_task,
@@ -56,9 +56,54 @@ pub(super) fn serves_session(inner: &DispatchInner, session_id: &str, io: &Adapt
     let Some(slot) = inner.sessions.get(&key) else {
         return false;
     };
+    slot_is_served_by(inner, &key, slot, io)
+}
+
+/// Whether one slot's session is served by `io`.
+///
+/// The body of [`serves_session`] and [`serves_task`]: the question is never
+/// which name the frame carried, but whether this connection is the transport of
+/// the slot that name resolves to.
+fn slot_is_served_by(inner: &DispatchInner, key: &str, slot: &SessionSlot, io: &AdapterIo) -> bool {
     inner.transports.iter().any(|(served, (transport, _))| {
-        transport.same_connection(io) && names_session(&key, slot, served)
+        transport.same_connection(io) && names_session(key, slot, served)
     })
+}
+
+/// Whether `io` is the connection serving the session that answers for one task.
+///
+/// The task-spelling companion of [`serves_session`], and the authority every
+/// state frame a plugin sends is measured against: a report names a task, and the
+/// frame carries its sender, so a connection serving one session cannot end,
+/// fault, or move another session by naming its task.
+///
+/// Unlike [`serves_session`] this walks every slot the task names rather than the
+/// first one a map reach finds. Two slots answer to one task exactly when a
+/// session came back for a task a newer session already took, and there the
+/// first match is whichever one `HashMap` order happens to yield — an authority
+/// check that reads that way refuses the same frame twice and applies it a third
+/// time. The extra walk costs nothing on the ordinary path, where one slot
+/// answers to the task, and the demoted half can never pass anyway: a read-only
+/// slot is served by no transport at all.
+pub(super) fn serves_task(inner: &DispatchInner, task_id: &str, io: &AdapterIo) -> bool {
+    inner.sessions.iter().any(|(key, slot)| {
+        names_session(key, slot, task_id) && slot_is_served_by(inner, key, slot, io)
+    })
+}
+
+/// Whether `io` is any session's transport right now.
+///
+/// Weaker than [`serves_task`] — it says the connection serves *a* session of
+/// this role, not the one a frame names — and it exists for the one window where
+/// the stronger question cannot be asked: an operator's `recycle` or `cancel`
+/// retires the slot before the completion it ordered arrives, and a retired slot
+/// is out of `sessions` for `serves_task` to resolve. See
+/// `ending_is_authorised` in `reports.rs`.
+pub(super) fn is_bound_transport(inner: &DispatchInner, io: &AdapterIo) -> bool {
+    inner
+        .transports
+        .values()
+        .any(|(transport, _)| transport.same_connection(io))
 }
 
 /// Whether one connection is held read-only: it mounted a session this client
@@ -68,6 +113,50 @@ pub(super) fn is_revived_connection(inner: &DispatchInner, io: &AdapterIo) -> bo
         .revived
         .iter()
         .any(|(_, revived, _)| revived.same_connection(io))
+}
+
+/// Whether the connection this client holds read-only answers for one task.
+///
+/// The held half of the pair [`serves_task`] reads live. A demoted connection is
+/// no session's transport, so the strict rule refuses its observation — and the
+/// design still lets it answer for the task its own agent finished: `plugin_send`
+/// holds what it sends so it leaves inside the completion that merges the two
+/// accounts, and `retire_revived` retires the demoted slot with that completion.
+/// A held connection whose `send` is held for one task is therefore the same
+/// connection that may report that task ended, and no other: the name it mounted
+/// with resolves to the slot the task answers to, exactly as the hold path
+/// resolves it.
+fn held_for_task(inner: &DispatchInner, task_id: &str, io: &AdapterIo) -> bool {
+    inner.revived.iter().any(|(name, revived, _)| {
+        revived.same_connection(io)
+            && slot_key_named(inner, name)
+                .and_then(|key| inner.sessions.get(&key))
+                .is_some_and(|slot| slot_task(slot) == task_id)
+    })
+}
+
+/// Whether `io` may end or fault the session that answers for one task.
+///
+/// [`serves_task`] is the whole rule for a frame that moves state: a beat is an
+/// observation of a session, and only its transport has one. An ending is a
+/// different fact — the agent behind either connection ran the work, and the
+/// client may have moved the binding while it was running — so the two windows
+/// where the strict rule cannot see the sender are read here instead:
+///
+/// * the connection is held read-only for this very task ([`held_for_task`]), and
+/// * this client ordered the task to its ending with `control`, which retired the
+///   slot before the answer it asked for arrived. The note names the task, and a
+///   transport still bound somewhere in this role names the sender; a forged
+///   ending has neither, and a foreign connection answering for a task someone
+///   else's command opened has the note without the binding.
+pub(super) fn serves_ending(inner: &DispatchInner, task_id: &str, io: &AdapterIo) -> bool {
+    serves_task(inner, task_id, io)
+        || held_for_task(inner, task_id, io)
+        || (inner
+            .control_settles
+            .iter()
+            .any(|note| note.task_id == task_id)
+            && is_bound_transport(inner, io))
 }
 
 /// Whether one slot is held by a connection this client keeps read-only.
@@ -178,6 +267,19 @@ pub(super) fn note_binding_locked(
                 && attached_to_other(inner, other, other_slot, io)
         });
     let revived = taken || moved_on;
+    // Whether this very connection already stands as the transport of the slot the
+    // name resolves to. The answer decides what this judgement is allowed to
+    // renew: a connection that already serves the session takes nothing new from
+    // the mount, and the mount proves nothing the transport record did not
+    // already prove. Without the distinction the stamp is a clock any caller can
+    // wind, because `hand_staged` runs this judgement through `on_ready` for the
+    // connection already serving a session — so every re-delivery of a task, and
+    // every zombie mount that pushes one through, bought a dead agent a fresh
+    // heartbeat window without one frame from the agent whose silence is what the
+    // sweep reads. The stamp a returning agent does earn is written by the frames
+    // it sends: the ready report of §6 stamps it when the reducer takes the row
+    // (`note_beat`), and so does every accepted beat afterwards.
+    let already_serving = slot_is_served_by(inner, &key, slot, io);
     // A mount that takes a session whose death clock was running is the agent
     // coming back inside the reconnect grace: the barrier had already passed, so
     // `ready` says the plugin spoke once, and the clock says the connection it
@@ -199,7 +301,9 @@ pub(super) fn note_binding_locked(
             // would still read the moment before the drop, and the sweep's
             // silence arm would judge a returning agent that has not beaten yet
             // on the age of a frame from the process before it.
-            slot.last_beat = Some(Instant::now());
+            if !already_serving {
+                slot.last_beat = Some(Instant::now());
+            }
         }
     }
     if revived {
@@ -290,10 +394,13 @@ fn rebase_returned_reporter(inner: &mut DispatchInner, key: &str) {
 
 /// Attach one plugin connection to the session it names, or hold it read-only.
 ///
-/// This is the only place a mount becomes a transport, so the read-only
-/// connection of §1 (b) never lands in `transports` and never steals the
-/// assignment, delivery, or note addressed to the connection that serves the
-/// session now. Answers whether the connection took the session.
+/// This is where a mount that named a session becomes a transport, so the
+/// read-only connection of §1 (b) never lands in `transports` and never steals
+/// the assignment, delivery, or note addressed to the connection that serves the
+/// session now. The one other writer of that map is the parked claim, which runs
+/// the same judgement and keeps a refused agent in the park instead of recording
+/// it read-only for a session it never named. Answers whether the connection took
+/// the session.
 fn attach_transport_locked(
     inner: &mut DispatchInner,
     session_id: &str,
@@ -360,6 +467,12 @@ impl DispatchState {
             .find(|(_, revived, _)| revived.same_connection(io))
             .map(|(session_id, _, _)| session_id.clone())
         else {
+            // The queue branch leaves on this client's authenticated link, so the
+            // server reads what it carries as this role's own message. The held
+            // branch needs no such question answered: a read-only connection's
+            // envelope never reaches the wire, and it leaves later as a `handoff`
+            // line inside the completion the *serving* session routes.
+            send_is_authorised(&inner, envelope)?;
             let op_id = queue_outbound_locked(&mut inner, envelope)?;
             return Ok(serde_json::json!({"queued": true, "op_id": op_id}));
         };
@@ -384,30 +497,69 @@ impl DispatchState {
     ///
     /// Only a mount that names no session parks: it is a plugin that attached
     /// before any work existed, so it takes the next session this role stages
-    /// (plan §6 line 285).
+    /// (plan §6 line 285). A role can host more than one such agent, and each
+    /// that arrives joins the back of the queue: the record is a queue and not
+    /// one slot, because overwriting it dropped the connection that was already
+    /// waiting with no accounting of any kind — no release, no log, and no word
+    /// to the plugin, which is how a quiet role lost a worker.
+    ///
+    /// A connection already in the queue is refreshed where it stands rather
+    /// than sent to the back: a mount that names nothing twice over is the same
+    /// agent re-helloing, and its place in line is that agent's due.
     pub fn park_transport(&self, io: AdapterIo, capabilities: Vec<Capability>) {
-        self.inner.lock().parked = Some((io, capabilities));
+        let mut inner = self.inner.lock();
+        let waiting = inner
+            .parked
+            .iter()
+            .position(|(parked, _)| parked.same_connection(&io));
+        match waiting {
+            Some(index) => inner.parked[index].1 = capabilities,
+            None => inner.parked.push((io, capabilities)),
+        }
     }
 
-    /// Claim this role's waiting agent for one staged session.
+    /// Claim the longest-waiting agent of this role for one staged session.
     ///
     /// An always-running plugin mounts naming no session, so the park holds the
-    /// only connection that can serve the session staged next (plan §6 line 285).
-    /// The claim binds that connection to the session it takes. A claim left
-    /// unbound strands the staged work: the session has a payload and this
-    /// client holds no record of the socket that serves it.
+    /// connection that can serve the session staged next (plan §6 line 285). The
+    /// queue answers in the order it filled, so the agent that has waited longest
+    /// is the one that takes the work. A claim left unbound strands the staged
+    /// work: the session has a payload and this client holds no record of the
+    /// socket that serves it, so a claim the binding judgement refuses returns the
+    /// connection to the back of the park instead of spending it.
+    ///
+    /// A refused parked connection is not a mount that named a session and found
+    /// it served, and the difference is what it is kept for: recording it
+    /// read-only under a session it never mounted would hold it answerable to
+    /// that session's task, and a role with more work to stage would lose the one
+    /// waiting agent it has. It waits, and the socket's own end takes it out of
+    /// the queue through `release_connection`.
     pub(super) fn claim_parked_transport(
         &self,
         session_id: &str,
     ) -> Option<(AdapterIo, Vec<Capability>)> {
         let mut inner = self.inner.lock();
-        let (io, capabilities) = inner.parked.take()?;
-        if !attach_transport_locked(&mut inner, session_id, io.clone(), capabilities.clone()) {
-            // The waiting agent is an older connection returning for a session
-            // the role already serves: it holds the socket and takes nothing.
+        if inner.parked.is_empty() {
             return None;
         }
-        Some((io, capabilities))
+        // The queue is served oldest first.
+        let (io, capabilities) = inner.parked.remove(0);
+        // The judgement of §1 (b) runs first, and the transport is written only
+        // once it answers that this connection takes the session: a refusal here
+        // must leave no read-only record behind, which is why this path does not
+        // run `attach_transport_locked`.
+        if note_binding_locked(&mut inner, session_id, &io) {
+            inner
+                .transports
+                .insert(session_id.to_string(), (io.clone(), capabilities.clone()));
+            return Some((io, capabilities));
+        }
+        tracing::warn!(
+            session = %session_id,
+            "the longest-waiting agent took nothing from this session; it waits for the next"
+        );
+        inner.parked.push((io, capabilities));
+        None
     }
 
     /// The connection that serves one session, when its plugin is attached.
@@ -508,13 +660,11 @@ impl DispatchState {
                 .retain(|(_, revived, _)| !revived.same_connection(io));
             before != inner.revived.len()
         };
-        if inner
+        // A waiting agent whose socket ended leaves the queue and nothing else:
+        // the agents behind it are other connections, still waiting for work.
+        inner
             .parked
-            .as_ref()
-            .is_some_and(|(parked, _)| parked.same_connection(io))
-        {
-            inner.parked = None;
-        }
+            .retain(|(parked, _)| !parked.same_connection(io));
         let released: Vec<String> = inner
             .transports
             .iter()
@@ -575,6 +725,7 @@ impl DispatchState {
             }
         }
         let mut retired: Vec<String> = Vec::new();
+        let mut pending: Vec<PendingClose> = Vec::new();
         if graceful_detach {
             let idle: Vec<String> = released
                 .iter()
@@ -603,13 +754,63 @@ impl DispatchState {
                     .get(&key)
                     .and_then(|slot| stored_close_reason(&inner, &slot.session.task_id))
                     .unwrap_or(onlyne_session::CloseReason::Completed);
-                if retire_idle_locked(&mut inner, &key, reason) {
+                if retire_idle_locked(&mut inner, &key, reason, &mut pending) {
                     retired.push(task_id);
                 }
             }
         }
+        // The goodbye above took the idle slots; the host work their sessions owe
+        // runs with the dispatch lock off it, so a plugin leaving does not make
+        // every other session of this role wait out a pane close.
+        drop(inner);
+        close_retired(pending);
         retired
     }
+}
+
+/// Whether this client may carry one plugin `send` to the server as its own.
+///
+/// Both rules are the client's to enforce because both are about what this
+/// process is willing to sign for: the server's acl answers for the wire, and it
+/// answers for a link this client fills with whichever `from` a plugin thought to
+/// write.
+///
+/// * A role principal besides this role is another session's voice. Every
+///   legitimate sender stamps its own name: the plugin's `send` carries the role
+///   its `hello` answer gave it, which is this client's role, and
+///   [`DispatchState::plugin_handoff`] builds its envelope from the stored role.
+///   A principal naming no role at all — a gateway or cluster sender — is left
+///   alone: no agent plugin mounts with one, and the host paths that build such
+///   envelopes never come through this door.
+/// * `control` is the operator's plane. The server mints every command and admits
+///   one from an admin link alone; a plugin that could queue one here would be
+///   handing its own orders to `on_control` through the back of a message send.
+///
+/// A refusal is an error the sender reads, and reads correctly: unlike a state
+/// report, a `send` the client will not carry has to be answered as a failure, or
+/// the plugin records a handoff that never left.
+///
+/// [`DispatchState::plugin_handoff`]: DispatchState::plugin_handoff
+fn send_is_authorised(inner: &DispatchInner, envelope: &Envelope) -> Result<()> {
+    if envelope.kind == MsgKind::Control {
+        tracing::warn!(
+            role = %inner.role,
+            to = %envelope.to,
+            "a plugin send naming a control command was refused"
+        );
+        return Err(anyhow!("this connection may not queue a control command"));
+    }
+    if let Some(from) = envelope.from.role_name()
+        && from != inner.role
+    {
+        tracing::warn!(
+            role = %inner.role,
+            from,
+            "a plugin send written as another role was refused"
+        );
+        return Err(anyhow!("this role may not send as {from}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

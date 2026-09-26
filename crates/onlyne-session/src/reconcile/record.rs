@@ -131,7 +131,7 @@ pub(super) fn backend_ref_json(
     task_id: &str,
     row: Option<&SessionRecord>,
 ) -> String {
-    if let Some(session) = bridge.live.lock().unwrap().get(task_id) {
+    if let Some(session) = bridge.live.lock().get(task_id) {
         if let Ok(json) = serde_json::to_string(session) {
             return json;
         }

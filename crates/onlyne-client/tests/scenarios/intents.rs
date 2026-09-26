@@ -4,14 +4,31 @@
 use crate::common::sample_envelope;
 use onlyne_client::{
     ops::local_cli::LocalCli,
-    runtime::intent::{IntentMachine, IntentResult, op_for_intent, permanent_error},
+    runtime::intent::{
+        IntentMachine, IntentResult, MAX_LOCAL_FAILURES, op_for_intent, permanent_error,
+    },
     session::dispatch::DispatchState,
 };
 use onlyne_proto::{ClientOp, Envelope, ErrorCode, MsgKind, Receipt, ResBody, new_envelope};
 use onlyne_session::backend::fake::FakeBackend;
-use onlyne_store::ClientStore;
+use onlyne_store::{ClientStore, INTENT_FLUSH_BATCH_SIZE, IntentRow};
 use std::sync::Arc;
 use tempfile::tempdir;
+
+/// What the machine has parked for a retry, read past its deadline.
+///
+/// `flush_order` is the batch one pass may send, so a row still inside its
+/// backoff is deliberately not in it. A case asking what a row holds after a
+/// retry was scheduled reads it through a clock an hour out, which is the same
+/// query with the horizon the case means, rather than sleeping on the ladder.
+fn parked(store: &ClientStore) -> Vec<IntentRow> {
+    store
+        .due_intents(
+            chrono::Utc::now() + chrono::Duration::hours(1),
+            INTENT_FLUSH_BATCH_SIZE,
+        )
+        .unwrap()
+}
 
 #[test]
 fn intent_acl_denial_drops_row_without_retry() {
@@ -95,8 +112,8 @@ fn intent_exhaustion_drives_fault_after_ceiling() {
         IntentResult::Retryable(ErrorCode::Internal, _)
     ));
 
-    // Update row attempt to 2
-    let rows = store.flush_order().unwrap();
+    // The charge parked the row; read it past its deadline to answer again.
+    let rows = parked(&store);
     let res2 = machine
         .attempt(
             &rows[0],
@@ -109,7 +126,7 @@ fn intent_exhaustion_drives_fault_after_ceiling() {
     ));
 
     // Attempt 3 reaches attempts ceiling (3) -> Exhausted
-    let rows = store.flush_order().unwrap();
+    let rows = parked(&store);
     let res3 = machine
         .attempt(
             &rows[0],
@@ -313,6 +330,84 @@ fn intent_survives_a_frame_refused_before_the_routed_hello() {
         IntentResult::Retryable(ErrorCode::Internal, _)
     ));
     assert_eq!(store.pending_intent_count().unwrap(), 1);
-    let kept = store.flush_order().unwrap();
+    assert!(
+        store.flush_order().unwrap().is_empty(),
+        "a deferred row is not sendable before its deadline"
+    );
+    let kept = parked(&store);
     assert_eq!(kept[0].attempt, rows[0].attempt);
+}
+
+/// A row this process cannot turn into a frame retires; it does not hold the
+/// head of the queue for the life of the client.
+///
+/// The payload here is valid JSON that decodes as neither an op nor an envelope
+/// — what a row written by an older build looks like to the flusher. No answer
+/// the server could give will change that, so the role's `attempts` ceiling,
+/// which counts the server's answers, cannot bound it either. A pass that only
+/// logged the failure left the row at its deadline and first in every batch,
+/// taking a slot of the bounded read forever (round-2 audit C1). Charging each
+/// such pass retires the row at [`MAX_LOCAL_FAILURES`] as an observable fault.
+#[test]
+fn an_undecodable_row_is_charged_and_then_retires() {
+    let dir = tempdir().unwrap();
+    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
+    let machine = IntentMachine::new(store.clone(), 3, vec![1_000, 2_000]);
+    let task = "00000000-0000-4000-8000-00000000000d";
+    let op_id = "o-00000000-0000-4000-8000-00000000000c";
+    machine
+        .enqueue_value(op_id, &serde_json::json!({"causality": {"task": task}}))
+        .unwrap();
+
+    // A pass meets the poison: the row is due, and it holds nothing sendable.
+    let due = store.flush_order().unwrap();
+    assert_eq!(due.len(), 1, "the row is due, so a pass has to meet it");
+    assert!(
+        op_for_intent(&due[0]).is_err(),
+        "the row carries no frame to send"
+    );
+    drop(due);
+
+    // Each pass that cannot act on it is charged, so the row leaves the batch a
+    // pass may send while the case reads it past its deadline.
+    for failure in 1..MAX_LOCAL_FAILURES {
+        let rows = parked(&store);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the row stays queued until the local ceiling"
+        );
+        assert!(matches!(
+            machine
+                .fail_local(&rows[0], "intent payload unreadable")
+                .unwrap(),
+            IntentResult::Retryable(ErrorCode::Internal, _)
+        ));
+        assert!(
+            store.flush_order().unwrap().is_empty(),
+            "the charge moves the deadline, so the batch head moves on"
+        );
+        assert_eq!(
+            parked(&store)[0].attempt,
+            i64::from(failure),
+            "the pass was counted against the row"
+        );
+        assert_eq!(store.pending_intent_count().unwrap(), 1);
+    }
+
+    let parked = parked(&store);
+    assert!(matches!(
+        machine
+            .fail_local(&parked[0], "intent payload unreadable")
+            .unwrap(),
+        IntentResult::Exhausted
+    ));
+    assert_eq!(
+        store.pending_intent_count().unwrap(),
+        0,
+        "the ceiling retires the row rather than parking it in the queue"
+    );
+    let faults = onlyne_session::SessionLedger::list_faults(&store, task).unwrap();
+    assert_eq!(faults.len(), 1, "a retired row stays visible");
+    assert_eq!(faults[0].kind, "intent_exhausted");
 }

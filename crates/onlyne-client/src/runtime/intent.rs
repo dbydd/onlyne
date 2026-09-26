@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use onlyne_proto::{ClientOp, Envelope, ErrorCode, MsgKind, Receipt, Report, ResBody, new_op_id};
 use onlyne_store::{ClientStore, IntentRow};
-use rusqlite::Connection;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -21,6 +20,15 @@ pub const PERMANENT_ERRORS: &[ErrorCode] = &[
     ErrorCode::FrameTooLarge,
     ErrorCode::ProtocolVersion,
 ];
+
+/// Passes a row this process cannot act on may be skipped before it retires.
+///
+/// The role's own ceiling (`attempts`) cannot bound this: it counts the answers
+/// the server gave, and a row whose stored payload no longer decodes never
+/// reaches the server to be answered. Without a bound of its own such a row sits
+/// at its deadline, first in the flush batch, taking a slot on every pass for
+/// the life of the queue (round-2 audit C1).
+pub const MAX_LOCAL_FAILURES: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntentState {
@@ -99,6 +107,11 @@ impl IntentMachine {
         Ok(self.store.enqueue_intent(op_id, envelope)?)
     }
 
+    /// The rows this pass may send: due, oldest deadline first, one batch.
+    ///
+    /// Not the whole queue — [`ClientStore::flush_order`] bounds what is due and
+    /// how many rows one pass takes, and a row still inside its backoff is asked
+    /// for again on the pass its deadline arrives.
     pub fn pending(&self) -> Result<Vec<IntentRow>> {
         Ok(self.store.flush_order()?)
     }
@@ -112,6 +125,35 @@ impl IntentMachine {
                 .or_else(|| self.backoff_ms.last().copied())
                 .unwrap_or(1_000),
         )
+    }
+
+    /// Count one pass in which this process could not act on a row at all.
+    ///
+    /// A payload that no longer decodes will not decode on a later pass, and a
+    /// row left at its old deadline holds the head of the flush batch forever:
+    /// every pass spends a slot on a frame that can never be built, and behind a
+    /// batch cap that slot is one the queue's oldest sendable row did not get.
+    /// Charging the pass retires the row at [`MAX_LOCAL_FAILURES`] the way a
+    /// refused row retires at `attempts` — `exhausted`, with the fault that names
+    /// the reason — and the backoff meanwhile takes it out of the due window, so
+    /// the head moves on the same pass.
+    ///
+    /// A transport failure is not this path: the link being down says nothing
+    /// about the row, so [`IntentMachine::defer`] keeps its budget intact and the
+    /// reconnect flushes it (plan §6 line 289).
+    pub fn fail_local(&self, row: &IntentRow, reason: &str) -> Result<IntentResult> {
+        let failures = row.attempt.max(0) as u32 + 1;
+        if failures >= MAX_LOCAL_FAILURES {
+            self.store.exhaust_intent(&row.op_id, reason)?;
+            self.record_exhausted(&row.env_json, row.attempt, reason)?;
+            return Ok(IntentResult::Exhausted);
+        }
+        let due = Utc::now() + self.next_delay(failures);
+        self.store.bump_intent(&row.op_id, due, reason)?;
+        Ok(IntentResult::Retryable(
+            ErrorCode::Internal,
+            reason.to_string(),
+        ))
     }
 
     pub fn attempt(&self, row: &IntentRow, response: Option<&ResBody>) -> Result<IntentResult> {
@@ -198,8 +240,7 @@ impl IntentMachine {
     }
 
     fn delete_intent(&self, op_id: &str) -> Result<()> {
-        let conn = Connection::open(self.store.path())?;
-        conn.execute("DELETE FROM intents WHERE op_id = ?", [op_id])?;
+        self.store.delete_intent(op_id)?;
         Ok(())
     }
 

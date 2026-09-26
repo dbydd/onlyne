@@ -10,12 +10,29 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::warn;
 
 /// Whether a count is zero, so its key stays off the wire. A count that says
 /// nothing — no queued work, no hops owed — costs a client a key it has to
 /// ignore, and an old client never learns the field exists.
 fn is_zero(count: &u32) -> bool {
     *count == 0
+}
+
+/// The error arm the four phase [`std::str::FromStr`] impls share.
+///
+/// Every reader of a stored word has nowhere better to go than its own default,
+/// and each takes it with `unwrap_or`, so a column this vocabulary cannot read
+/// would settle into a plausible-looking row and leave no trace. The word is
+/// logged here before the `Err` returns: the fallback stays the caller's choice,
+/// the record is this crate's.
+fn unknown_phase(kind: &str, word: &str) -> String {
+    warn!(
+        phase = kind,
+        input = word,
+        "phase word is unknown to the protocol; the caller answers with its fallback"
+    );
+    format!("unknown {kind} phase {word:?}")
 }
 
 /// Server's durable answer to an accepted send (§8 `send`, §10 `ledger`).
@@ -44,6 +61,39 @@ pub enum AgentPhase {
     Gone,
 }
 
+/// The name↔variant table for one agent phase. `Display` is the only place a
+/// variant is named: it matches exhaustively, so a new variant fails to compile
+/// here rather than silently losing its word in one direction of the ledger
+/// column that stores it. `FromStr` is the reading side and answers `Err` for
+/// any word it does not know, leaving the caller's fallback to decide; the word
+/// it could not read is logged first, by the shared `unknown_phase` arm below.
+impl std::fmt::Display for AgentPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AgentPhase::Booting => "booting",
+            AgentPhase::Ready => "ready",
+            AgentPhase::Running => "running",
+            AgentPhase::Idle => "idle",
+            AgentPhase::Gone => "gone",
+        })
+    }
+}
+
+impl std::str::FromStr for AgentPhase {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Ok(match name {
+            "booting" => AgentPhase::Booting,
+            "ready" => AgentPhase::Ready,
+            "running" => AgentPhase::Running,
+            "idle" => AgentPhase::Idle,
+            "gone" => AgentPhase::Gone,
+            other => return Err(unknown_phase("agent", other)),
+        })
+    }
+}
+
 /// Intent delivery fact for the current turn exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +107,35 @@ pub enum DeliveryPhase {
     Exhausted,
 }
 
+/// [`AgentPhase`]'s table for the delivery dimension. `none` is the word for
+/// `NoIntent`, which is also its serde word.
+impl std::fmt::Display for DeliveryPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            DeliveryPhase::NoIntent => "none",
+            DeliveryPhase::Pending => "pending",
+            DeliveryPhase::Retrying => "retrying",
+            DeliveryPhase::Accepted => "accepted",
+            DeliveryPhase::Exhausted => "exhausted",
+        })
+    }
+}
+
+impl std::str::FromStr for DeliveryPhase {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Ok(match name {
+            "none" => DeliveryPhase::NoIntent,
+            "pending" => DeliveryPhase::Pending,
+            "retrying" => DeliveryPhase::Retrying,
+            "accepted" => DeliveryPhase::Accepted,
+            "exhausted" => DeliveryPhase::Exhausted,
+            other => return Err(unknown_phase("delivery", other)),
+        })
+    }
+}
+
 /// Backend resource fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +145,32 @@ pub enum ResourcePhase {
     Attached,
     Closing,
     Closed,
+}
+
+/// [`AgentPhase`]'s table for the resource dimension.
+impl std::fmt::Display for ResourcePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ResourcePhase::Detached => "detached",
+            ResourcePhase::Attached => "attached",
+            ResourcePhase::Closing => "closing",
+            ResourcePhase::Closed => "closed",
+        })
+    }
+}
+
+impl std::str::FromStr for ResourcePhase {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Ok(match name {
+            "detached" => ResourcePhase::Detached,
+            "attached" => ResourcePhase::Attached,
+            "closing" => ResourcePhase::Closing,
+            "closed" => ResourcePhase::Closed,
+            other => return Err(unknown_phase("resource", other)),
+        })
+    }
 }
 
 /// Recovery substate of an idle or draining session.
@@ -78,6 +183,33 @@ pub enum RecoveryPhase {
     IdleWaiting,
     IdleFault,
     Draining,
+}
+
+/// [`AgentPhase`]'s table for the recovery dimension. `none` is the word for
+/// `NoRecovery`, which is also its serde word.
+impl std::fmt::Display for RecoveryPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RecoveryPhase::NoRecovery => "none",
+            RecoveryPhase::IdleWaiting => "idle_waiting",
+            RecoveryPhase::IdleFault => "idle_fault",
+            RecoveryPhase::Draining => "draining",
+        })
+    }
+}
+
+impl std::str::FromStr for RecoveryPhase {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Ok(match name {
+            "none" => RecoveryPhase::NoRecovery,
+            "idle_waiting" => RecoveryPhase::IdleWaiting,
+            "idle_fault" => RecoveryPhase::IdleFault,
+            "draining" => RecoveryPhase::Draining,
+            other => return Err(unknown_phase("recovery", other)),
+        })
+    }
 }
 
 /// The full projection the client publishes for one session (§10 `sessions`).
@@ -526,6 +658,16 @@ pub struct QueryFaultsArgs {
 }
 
 /// `control` request: a control op aimed at a role.
+///
+/// The task is named inside [`crate::envelope::ControlOp`], and every variant
+/// names it the same way: one required `task_id: String` holding a task-family
+/// uuid. There is no absent-task control op — the field is never an empty
+/// string, and a caller holding no task id has nothing to aim at. An empty
+/// `task_id` is a defect, not a wildcard. `Option<String>` task fields beside
+/// this one in this module ([`LedgerQuery`], [`HistoryArgs`],
+/// [`QueryFaultsArgs`]) are query filters, where absent means "do not filter",
+/// and [`Report::Fault`] keeps its `Option` because a fault can genuinely name
+/// no task (an exhausted intent never reached a session to be carried by).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ControlArgs {

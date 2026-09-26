@@ -108,7 +108,7 @@ fn closing_a_session_this_client_does_not_hold_is_not_an_error() {
 }
 
 #[test]
-fn a_session_with_no_command_and_a_busy_session_are_refused() {
+fn an_empty_command_a_foreign_task_and_a_busy_session_are_refused() {
     let fake = Fake::new();
     let backend = AcpBackend::new(AcpOptions::default());
     let mut none = fake.spec("t-empty");
@@ -126,11 +126,23 @@ fn a_session_with_no_command_and_a_busy_session_are_refused() {
     backend
         .deliver(&session, "t-busy", "MARK:ask slow turn")
         .expect("the first delivery");
-    // The agent parks its turn on the ask and this client refuses it, so the
-    // turn is long enough to observe: a second payload for the same session is
-    // refused, not queued behind a turn it was never meant to join.
-    let busy = backend
+    // One session serves the task it was opened for. A payload naming another
+    // task is refused before this client claims the turn or writes anything
+    // beside it: the second task needs a session of its own, and a turn that
+    // journalled itself under a task the agent was never assigned could never
+    // be reconciled afterwards.
+    let foreign = backend
         .deliver(&session, "t-other", "second")
+        .expect_err("a session takes one task");
+    assert!(
+        foreign.to_string().contains("needs a session of its own"),
+        "{foreign}"
+    );
+    // The agent parks its turn on the ask and this client refuses it, so the
+    // turn is long enough to observe: a second payload for its own task is
+    // refused too, not queued behind a turn it was never meant to join.
+    let busy = backend
+        .deliver(&session, "t-busy", "second")
         .expect_err("one turn at a time");
     assert!(busy.to_string().contains("still running a turn"), "{busy}");
     let outcome = await_outcome(&feed, "t-busy");

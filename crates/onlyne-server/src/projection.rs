@@ -323,10 +323,10 @@ pub fn write(
         session_id,
         generation: generation as i64,
         seq: seq as i64,
-        agent_state: agent_name(projection.agent).to_string(),
-        delivery_state: delivery_name(projection.delivery).to_string(),
-        resource_state: resource_name(projection.resource).to_string(),
-        recovery_substate: recovery_name(projection.recovery).to_string(),
+        agent_state: agent_name(projection.agent),
+        delivery_state: delivery_name(projection.delivery),
+        resource_state: resource_name(projection.resource),
+        recovery_substate: recovery_name(projection.recovery),
         desired_json: serde_json::to_string(&desired.unwrap_or(Value::Null))?,
         observed_json: serde_json::to_string(&projection)?,
         mismatch_count: 0,
@@ -601,42 +601,27 @@ pub fn session_row(state: &State, task_id: &str) -> anyhow::Result<Option<Sessio
         .map(|row| answer_row(state, row)))
 }
 
+/// One stored agent word, read as the phase it names. A word the vocabulary does
+/// not know is a row written before this one existed, and reads as the freshly
+/// created phase — the same answer [`projection_from_write`] gives for a row with
+/// no projection at all.
 fn parse_agent(name: &str) -> AgentPhase {
-    match name {
-        "ready" => AgentPhase::Ready,
-        "running" => AgentPhase::Running,
-        "idle" => AgentPhase::Idle,
-        "gone" => AgentPhase::Gone,
-        _ => AgentPhase::Booting,
-    }
+    name.parse().unwrap_or(AgentPhase::Booting)
 }
 
+/// [`parse_agent`] for the delivery dimension.
 fn parse_delivery(name: &str) -> DeliveryPhase {
-    match name {
-        "pending" => DeliveryPhase::Pending,
-        "retrying" => DeliveryPhase::Retrying,
-        "accepted" => DeliveryPhase::Accepted,
-        "exhausted" => DeliveryPhase::Exhausted,
-        _ => DeliveryPhase::NoIntent,
-    }
+    name.parse().unwrap_or(DeliveryPhase::NoIntent)
 }
 
+/// [`parse_agent`] for the resource dimension.
 fn parse_resource(name: &str) -> ResourcePhase {
-    match name {
-        "attached" => ResourcePhase::Attached,
-        "closing" => ResourcePhase::Closing,
-        "closed" => ResourcePhase::Closed,
-        _ => ResourcePhase::Detached,
-    }
+    name.parse().unwrap_or(ResourcePhase::Detached)
 }
 
+/// [`parse_agent`] for the recovery dimension.
 fn parse_recovery(name: &str) -> RecoveryPhase {
-    match name {
-        "idle_waiting" => RecoveryPhase::IdleWaiting,
-        "idle_fault" => RecoveryPhase::IdleFault,
-        "draining" => RecoveryPhase::Draining,
-        _ => RecoveryPhase::NoRecovery,
-    }
+    name.parse().unwrap_or(RecoveryPhase::NoRecovery)
 }
 
 /// Wire name of one lifecycle value.
@@ -649,42 +634,26 @@ pub fn lifecycle_name(lifecycle: Lifecycle) -> &'static str {
     }
 }
 
-fn agent_name(phase: AgentPhase) -> &'static str {
-    match phase {
-        AgentPhase::Booting => "booting",
-        AgentPhase::Ready => "ready",
-        AgentPhase::Running => "running",
-        AgentPhase::Idle => "idle",
-        AgentPhase::Gone => "gone",
-    }
+/// The stored word for one agent phase. Every one of these four writers is the
+/// phase's own `Display`, so [`parse_agent`] and its siblings read exactly what
+/// they wrote: a variant added to the vocabulary names itself in one place.
+fn agent_name(phase: AgentPhase) -> String {
+    phase.to_string()
 }
 
-fn delivery_name(phase: DeliveryPhase) -> &'static str {
-    match phase {
-        DeliveryPhase::NoIntent => "none",
-        DeliveryPhase::Pending => "pending",
-        DeliveryPhase::Retrying => "retrying",
-        DeliveryPhase::Accepted => "accepted",
-        DeliveryPhase::Exhausted => "exhausted",
-    }
+/// [`agent_name`] for the delivery dimension.
+fn delivery_name(phase: DeliveryPhase) -> String {
+    phase.to_string()
 }
 
-fn resource_name(phase: ResourcePhase) -> &'static str {
-    match phase {
-        ResourcePhase::Detached => "detached",
-        ResourcePhase::Attached => "attached",
-        ResourcePhase::Closing => "closing",
-        ResourcePhase::Closed => "closed",
-    }
+/// [`agent_name`] for the resource dimension.
+fn resource_name(phase: ResourcePhase) -> String {
+    phase.to_string()
 }
 
-fn recovery_name(phase: RecoveryPhase) -> &'static str {
-    match phase {
-        RecoveryPhase::NoRecovery => "none",
-        RecoveryPhase::IdleWaiting => "idle_waiting",
-        RecoveryPhase::IdleFault => "idle_fault",
-        RecoveryPhase::Draining => "draining",
-    }
+/// [`agent_name`] for the recovery dimension.
+fn recovery_name(phase: RecoveryPhase) -> String {
+    phase.to_string()
 }
 
 /// Record a probe gap as a fault through the projection surface.

@@ -16,7 +16,7 @@ use onlyne_acp::{
 use parking_lot::Mutex;
 use std::path::Path;
 use std::sync::Weak;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 
 use super::journal::or_dash;
@@ -33,6 +33,7 @@ impl AcpBackend {
             state: Arc::new(State {
                 agents: Mutex::new(BTreeMap::new()),
                 sessions: Mutex::new(BTreeMap::new()),
+                process: AtomicU64::new(0),
                 sink,
                 feed,
                 content: ContentWriter::default(),
@@ -95,6 +96,7 @@ impl AcpBackend {
         }
         let slot = Arc::new(AgentSlot {
             live: AtomicUsize::new(1),
+            process: self.state.process.fetch_add(1, Ordering::Relaxed) + 1,
             agent: Arc::clone(&agent),
         });
         spawn_responder(&slot, Arc::clone(&self.state), self.options.clone(), key);
@@ -104,21 +106,30 @@ impl AcpBackend {
 }
 
 impl State {
-    /// One session of this process went away. Past the last one the process goes
-    /// with it, on a thread that can afford to wait for it: see [`State::reap`].
-    pub(super) fn retire(&self, key: &str) {
+    /// One session of the process named by `process` went away, so one
+    /// reservation of that process is released. Past the last one the process
+    /// goes with it, on a thread that can afford to wait for it: see
+    /// [`State::reap`].
+    ///
+    /// The name is what makes the pairing exact. A session of a process that left
+    /// on its own arrives here after [`State::note_gone`] dropped that process, and
+    /// the key may already serve a replacement whose sessions never reserved it:
+    /// releasing one of those would tear down a live agent under its own sessions.
+    pub(super) fn retire(&self, key: &str, process: u64) {
         let slot = {
             let mut agents = self.agents.lock();
             match agents.get(key) {
-                Some(slot) => {
+                Some(slot) if slot.process == process => {
                     if slot.live.fetch_sub(1, Ordering::SeqCst) > 1 {
                         return;
                     }
                     agents.remove(key)
                 }
-                // The process left on its own, and its bookkeeping went with the
-                // notice. There is nothing here to release.
-                None => return,
+                // Either no process answers to this command, or the one that
+                // reserved this session's slot left and a replacement took the
+                // key. The reservation went with the process it was made on; the
+                // one here is not this session's to release.
+                _ => return,
             }
         };
         if let Some(slot) = slot {
@@ -160,6 +171,7 @@ impl State {
             tracing::warn!(
                 agent = %key,
                 pid = slot.agent.pid(),
+                process = slot.process,
                 sessions = slot.live.load(Ordering::SeqCst),
                 "acp: agent process exited"
             );
@@ -195,10 +207,10 @@ fn reap_slot(key: String, slot: Arc<AgentSlot>) {
 /// reaped, because the responder outlives the events it waits for.
 fn spawn_responder(slot: &AgentSlot, state: Arc<State>, options: AcpOptions, key: &str) {
     let agent = Arc::downgrade(&slot.agent);
-    let key = key.to_string();
+    let (key, process) = (key.to_string(), slot.process);
     if let Err(error) = thread::Builder::new()
         .name(format!("acp-permissions {key}"))
-        .spawn(move || answer_permissions(agent, state, options, key))
+        .spawn(move || answer_permissions(agent, state, options, key, process))
     {
         tracing::warn!(
             error = %error,
@@ -208,7 +220,13 @@ fn spawn_responder(slot: &AgentSlot, state: Arc<State>, options: AcpOptions, key
     }
 }
 
-fn answer_permissions(agent: Weak<Agent>, state: Arc<State>, options: AcpOptions, key: String) {
+fn answer_permissions(
+    agent: Weak<Agent>,
+    state: Arc<State>,
+    options: AcpOptions,
+    key: String,
+    process: u64,
+) {
     let Some(handle) = agent.upgrade() else {
         return;
     };
@@ -230,7 +248,7 @@ fn answer_permissions(agent: Weak<Agent>, state: Arc<State>, options: AcpOptions
                 }
                 drop(handle);
                 if let Some(line) = refusal {
-                    record_refusal(&state, &key, &request.session_id, &options, line);
+                    record_refusal(&state, &key, process, &request.session_id, &options, line);
                 }
             }
             Event::Exited { detail } => {
@@ -306,10 +324,12 @@ fn refusal_line(
 }
 
 /// File one permission refusal under the session that was asked. The agent command
-/// scopes the id, because two processes can choose the same one.
+/// and the process it started scope the id, because the same command can be served
+/// by more than one process in turn and each of those is free to choose `sess-1`.
 fn record_refusal(
     state: &State,
     agent_key: &str,
+    process: u64,
     session_id: &str,
     options: &AcpOptions,
     line: String,
@@ -317,7 +337,7 @@ fn record_refusal(
     let entry = state
         .sessions
         .lock()
-        .get(&(agent_key.to_string(), session_id.to_string()))
+        .get(&(agent_key.to_string(), process, session_id.to_string()))
         .cloned();
     match entry {
         Some(entry) => entry.refusals.lock().push(line),

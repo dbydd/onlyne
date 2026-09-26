@@ -52,7 +52,7 @@
       "$ref": "#/definitions/MsgKind"
     },
     "op_id": {
-      "description": "Idempotency key: mandatory for Task, Completion, Control.",
+      "description": "Idempotency key: mandatory for Task, Completion, Control.\n\n`None` is legal only for [`MsgKind::Note`], and [`Envelope::validate`] enforces that: a Task, Completion, or Control without a key is refused on the field `op_id`, so the retry the sender eventually makes dedups on one id.\n\nA note that needs a durable row — the client queues every outbound envelope keyed by its `op_id` — is stamped once by the code that writes the row, and the stamped envelope is what gets stored and replayed (see `stamp_op_id` in `onlyne-client`). So the absent key here never means \"mint one per attempt\": a caller that generated a fresh id on every read would key each retry as a new send, and idempotence would silently stop existing. Keep `op_id` as received, and stamp before the first write.",
       "type": [
         "string",
         "null"
@@ -114,12 +114,53 @@
           "format": "uint32",
           "minimum": 0.0
         },
+        "deadline": {
+          "description": "Wall-clock bound for the whole family.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "family": {
+          "description": "The family's root task id. Every task handed on from one root carries the same family, which is what lets a supervisor read a whole run as one arc instead of walking `parent_task` links, and what `onlyne ledger` prints beside the hop. A root minted before this field existed names none, and the first child mints the family from its own parent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "hop": {
           "description": "Hop count from the root task.",
           "default": 0,
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
+        },
+        "hop_budget": {
+          "description": "The hops this family may spend, set by whoever started it. A role reads it to learn whether it is the hop that keeps the task, which keeps that budget out of the task text.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "labels": {
+          "description": "Free-form metadata the core carries and never interprets. Bounded by [`CAUSALITY_LABEL_MAX_ENTRIES`], [`CAUSALITY_LABEL_KEY_MAX_BYTES`], and [`CAUSALITY_LABEL_VALUE_MAX_BYTES`] at [`Envelope::validate`].",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "origin": {
+          "description": "The role this family reports home to, when the sender is not that role.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "parent_task": {
           "description": "The task that caused this one, when downstream.",

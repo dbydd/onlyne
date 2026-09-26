@@ -355,6 +355,7 @@ pub fn register_link(
             name: crate::version().to_string(),
         },
         host_capabilities: vec![Capability::Report, Capability::Typing],
+        delivered_tasks: Vec::new(),
     }
 }
 

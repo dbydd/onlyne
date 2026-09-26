@@ -36,7 +36,7 @@ impl DispatchState {
                 cluster_ref: String::new(),
                 topology: String::new(),
                 transports: HashMap::new(),
-                parked: None,
+                parked: Vec::new(),
                 stall: crate::session::stall::StallWatch::new(),
                 revived: Vec::new(),
                 held_handoffs: HashMap::new(),
@@ -269,8 +269,41 @@ impl DispatchState {
             .collect()
     }
 
-    /// Sorted live-slot task ids for a hello claim.
-    pub fn hello_live_tasks(&self) -> Vec<String> {
+    /// Sorted live-slot task ids for a hello claim: union of memory slots and
+    /// DB-persisted active sessions, so a process crash does not lose the claim.
+    ///
+    /// A store failure is not swallowed: it is logged with the memory claim
+    /// still derivable from the slots, and returned so the caller can degrade
+    /// to [`live_claim_from_slots`] deliberately instead of answering as if the
+    /// durable half were simply empty. Silently dropping that half lets the
+    /// server requeue every in_flight row a crash left behind, which is the
+    /// duplicate delivery this claim exists to prevent.
+    pub fn hello_live_tasks(&self) -> onlyne_store::StoreResult<Vec<String>> {
+        let mut tasks = self.live_task_ids();
+        // Merge DB-persisted sessions that are not yet exited. A fresh process
+        // after crash has empty slots but the DB still holds the sessions it was
+        // serving, so the hello must claim them to prevent the server from
+        // requeuing work this process is still running.
+        match self.inner.lock().store.active_session_tasks() {
+            Ok(persisted) => {
+                tasks.extend(persisted);
+                Ok(crate::session::claim::from_slots(tasks))
+            }
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    memory_claim = ?crate::session::claim::from_slots(tasks.clone()),
+                    "hello claim lost its durable half: active_session_tasks failed; the DB-persisted sessions are missing and the server may requeue them"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    /// The memory half of [`hello_live_tasks`]: the claim to dial with when the
+    /// durable store cannot answer. The slots are what this process is serving
+    /// right now, so even a degraded hello keeps those rows in_flight.
+    pub fn live_claim_from_slots(&self) -> Vec<String> {
         crate::session::claim::from_slots(self.live_task_ids())
     }
 
@@ -329,7 +362,7 @@ impl DispatchState {
     /// Whether any adapter is currently mounted (named or parked).
     pub fn has_mounted_adapter(&self) -> bool {
         let inner = self.inner.lock();
-        !inner.transports.is_empty() || inner.parked.is_some()
+        !inner.transports.is_empty() || !inner.parked.is_empty()
     }
 
     /// Adopt a role slice: the one `welcome` carried, or the one a reload's

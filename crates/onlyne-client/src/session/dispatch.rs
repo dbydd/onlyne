@@ -55,8 +55,8 @@ pub use env::{
 pub(crate) use outbound::hello_with_live_tasks;
 pub use outbound::{ClientLink, Outbox, send_frame};
 pub use projection::{
-    note_intent_receipt, note_verdict, projection_of, sync_session, task_outcome_of, task_state_of,
-    with_cluster,
+    note_intent_receipt, note_verdict, projection_of, sync_frame, sync_session, task_outcome_of,
+    task_state_of, with_cluster,
 };
 pub use reports::{on_control, on_plugin_report};
 pub use retire::{SESSION_DEAD, close_all, on_recycled};

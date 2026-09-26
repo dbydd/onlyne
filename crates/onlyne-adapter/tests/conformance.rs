@@ -24,6 +24,7 @@ fn ack(host_capabilities: Vec<Capability>) -> HelloAck {
             name: "server".to_string(),
         },
         host_capabilities,
+        delivered_tasks: Vec::new(),
     }
 }
 

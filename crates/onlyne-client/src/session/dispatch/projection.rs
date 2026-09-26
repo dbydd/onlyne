@@ -162,6 +162,20 @@ pub(super) fn phase<T: serde::de::DeserializeOwned>(word: &str, fallback: T) -> 
 /// on the wire. `session_id` is the row the server keys the mirror by, which for
 /// a client-held session is its task id.
 pub async fn sync_session(state: &DispatchState, task_id: &str) -> Result<()> {
+    let Some(op) = sync_frame(state, task_id)? else {
+        return Ok(());
+    };
+    send_frame(state, op).await
+}
+
+/// The durable frame one session's current projection publishes, or `None`
+/// when the store holds no row for it.
+///
+/// `sync_session` sends this through `send_frame`, which already queues it when
+/// the link is down; the frame is exposed separately for the caller whose send
+/// failed for some other reason and owes the exit a second attempt through
+/// [`DispatchState::enqueue_op`].
+pub fn sync_frame(state: &DispatchState, task_id: &str) -> Result<Option<ClientOp>> {
     // One section for both reads: a publish that took the session tuple before a
     // settle and its verdict after would derive a lifecycle the pair never agreed
     // to, and the store's lock is what keeps the two rows in step.
@@ -172,24 +186,20 @@ pub async fn sync_session(state: &DispatchState, task_id: &str) -> Result<()> {
             stored_task_state(&inner, task_id),
         )
     };
-    let Some(row) = row else { return Ok(()) };
+    let Some(row) = row else { return Ok(None) };
     let projection = projection_of(&row, task_state);
-    send_frame(
-        state,
-        ClientOp::Report(Report::Heartbeat {
-            task_id: row.task_id.clone(),
-            session_id: row.task_id.clone(),
-            generation: row.generation.max(0) as u64,
-            seq: row.seq.max(0) as u64,
-            observed: projection
-                .observed
-                .clone()
-                .unwrap_or(serde_json::Value::Null),
-            cluster_ref: None,
-            projection: Some(projection),
-        }),
-    )
-    .await
+    Ok(Some(ClientOp::Report(Report::Heartbeat {
+        task_id: row.task_id.clone(),
+        session_id: row.task_id.clone(),
+        generation: row.generation.max(0) as u64,
+        seq: row.seq.max(0) as u64,
+        observed: projection
+            .observed
+            .clone()
+            .unwrap_or(serde_json::Value::Null),
+        cluster_ref: None,
+        projection: Some(projection),
+    })))
 }
 
 /// Log a reducer verdict and answer the version it advanced to.

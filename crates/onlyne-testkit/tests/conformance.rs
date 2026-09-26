@@ -23,6 +23,7 @@ fn ack() -> HelloAck {
             name: "sim".to_string(),
         },
         host_capabilities: vec![],
+        delivered_tasks: Vec::new(),
     }
 }
 

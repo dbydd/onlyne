@@ -396,7 +396,11 @@ async fn a_redelivered_finished_task_is_acked_and_runs_nowhere() {
 
     accept_delivery(&state, &delivery("msg-first")).await;
     assert!(
-        state.dispatch.hello_live_tasks().contains(&task_id),
+        state
+            .dispatch
+            .hello_live_tasks()
+            .expect("store answers")
+            .contains(&task_id),
         "the first delivery takes a session for the task"
     );
 
@@ -425,7 +429,11 @@ async fn a_redelivered_finished_task_is_acked_and_runs_nowhere() {
     accept_delivery(&state, &delivery("msg-again")).await;
 
     assert!(
-        !state.dispatch.hello_live_tasks().contains(&task_id),
+        !state
+            .dispatch
+            .hello_live_tasks()
+            .expect("store answers")
+            .contains(&task_id),
         "the redelivery stages no session on the role's idle slot"
     );
     let acked = pending_intent_ops(&state)
@@ -507,8 +515,99 @@ async fn a_task_ended_without_a_completion_stays_eligible_for_its_retry() {
     .await;
 
     assert!(
-        state.dispatch.hello_live_tasks().contains(&task_id),
+        state
+            .dispatch
+            .hello_live_tasks()
+            .expect("store answers")
+            .contains(&task_id),
         "the retried task takes a session again"
+    );
+}
+
+/// `max_sessions` counts the sessions a role runs, and a `Task` is the only
+/// delivery that opens one. The gate stood ahead of every kind, so a role at its
+/// cap answered nothing at all — including the receipt of a task it had already
+/// settled and the wake-up aimed at a session already running. Those rows are the
+/// ones no freed session is coming to release: the receipt waits on a slot, the
+/// slot waits on a verdict, and the verdict is the row that is waiting.
+#[tokio::test]
+async fn a_full_role_still_answers_the_deliveries_that_cost_no_slot() {
+    let (state, _store) = test_state(1, vec!["echo".into()]);
+    let running = new_task_id();
+    let task = |msg_id: &str, task_id: &str| Delivery {
+        msg_id: msg_id.into(),
+        envelope: Box::new(
+            new_envelope(
+                MsgKind::Task,
+                Principal::role("sender"),
+                Principal::role("planner"),
+                Body::text("work"),
+                Some(Causality::root(task_id.to_string())),
+            )
+            .expect("task envelope"),
+        ),
+    };
+    accept_delivery(&state, &task("msg-running", &running)).await;
+    assert!(
+        !state.dispatch.has_capacity(),
+        "the role's one slot is taken by the task above"
+    );
+
+    let receipt = new_task_id();
+    accept_delivery(
+        &state,
+        &Delivery {
+            msg_id: "msg-receipt".into(),
+            envelope: Box::new(
+                new_envelope(
+                    MsgKind::Completion,
+                    Principal::role("sender"),
+                    Principal::role("planner"),
+                    Body::text("done"),
+                    Some(Causality::root(receipt)),
+                )
+                .expect("completion envelope"),
+            ),
+        },
+    )
+    .await;
+    accept_delivery(
+        &state,
+        &Delivery {
+            msg_id: "msg-note".into(),
+            envelope: Box::new(
+                new_envelope(
+                    MsgKind::Note,
+                    Principal::role("sender"),
+                    Principal::role("planner"),
+                    Body::text("wake"),
+                    None,
+                )
+                .expect("note envelope"),
+            ),
+        },
+    )
+    .await;
+
+    // The row that does need a session is the one still left waiting for one.
+    accept_delivery(&state, &task("msg-waiting", &new_task_id())).await;
+
+    let ops = pending_intent_ops(&state).expect("pending intents");
+    let acked = |msg_id: &str| {
+        ops.iter()
+            .any(|op| matches!(op, ClientOp::Ack(args) if args.msg_id == msg_id))
+    };
+    assert!(
+        ops.iter().any(|op| matches!(
+            op,
+            ClientOp::Ack(args) if args.msg_id == "msg-receipt" && args.accepted
+        )),
+        "a terminal receipt is settled by a role at its cap: {ops:?}"
+    );
+    assert!(acked("msg-note"), "a note is answered by a role at its cap");
+    assert!(
+        !acked("msg-waiting"),
+        "the task that costs a session is the row that waits for a free one: {ops:?}"
     );
 }
 
@@ -550,7 +649,11 @@ async fn a_gated_delivery_owes_no_answer_and_an_unservable_one_is_refused() {
     accept_delivery(&state, &delivery("msg-gated")).await;
 
     assert!(
-        !state.dispatch.hello_live_tasks().contains(&gated),
+        !state
+            .dispatch
+            .hello_live_tasks()
+            .expect("store answers")
+            .contains(&gated),
         "a client that is not taking work stages no session for it"
     );
     let owed = pending_intent_ops(&state).expect("pending intents");
@@ -566,7 +669,11 @@ async fn a_gated_delivery_owes_no_answer_and_an_unservable_one_is_refused() {
     state.accept_new.store(true, Ordering::SeqCst);
     accept_delivery(&state, &delivery("msg-gated")).await;
     assert!(
-        state.dispatch.hello_live_tasks().contains(&gated),
+        state
+            .dispatch
+            .hello_live_tasks()
+            .expect("store answers")
+            .contains(&gated),
         "the requeued row runs once the link is back"
     );
 

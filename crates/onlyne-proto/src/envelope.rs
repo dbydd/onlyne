@@ -20,6 +20,19 @@ pub const BODY_TEXT_MAX_BYTES: usize = 1024 * 1024;
 /// Decoded ceiling for [`ImagePart::data_base64`].
 pub const IMAGE_DATA_MAX_BYTES: usize = 2 * 1024 * 1024;
 
+/// Base64 ceiling for [`ImagePart::data_base64`]: the longest encoded text that can
+/// still decode inside [`IMAGE_DATA_MAX_BYTES`].
+///
+/// Standard base64 expands each run of three bytes into four, so a text longer than
+/// the exact expansion of the budget cannot describe an in-budget image at all. The
+/// expansion rounds up (`ceil(2 MiB / 3) * 4 = 2796204` for the budget itself) and the
+/// padding characters sit on top of it, so the ceiling carries slack above the exact
+/// expansion. [`ImagePart::decode`] refuses an overlong text before decoding it, which
+/// is what keeps a rejected attachment from allocating a decoded buffer the size of
+/// the sender's text; the verdict it reports is the same one the decoded-size check
+/// would reach, so the wire sees the spec's wording either way.
+pub const IMAGE_DATA_MAX_ENCODED_BYTES: usize = IMAGE_DATA_MAX_BYTES * 4 / 3 + 1024;
+
 /// The image types the core accepts, in stable order.
 pub const IMAGE_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
@@ -232,12 +245,33 @@ pub struct ImagePart {
 
 impl ImagePart {
     /// Decode without re-encoding, used by validators and renderers.
+    ///
+    /// The encoded text is measured first: past [`IMAGE_DATA_MAX_ENCODED_BYTES`] it
+    /// cannot decode to an in-budget image, so the call fails with
+    /// the same error the decoded-size check reports, instead of materialising a decoded
+    /// buffer the size of the sender's text. A text inside that bound decodes in full,
+    /// and the exact decoded ceiling stays [`Body::validate`]'s verdict, so an image one
+    /// byte over the budget reads exactly as it did before the gate existed.
     pub fn decode(&self) -> Result<Vec<u8>> {
+        if self.data_base64.len() > IMAGE_DATA_MAX_ENCODED_BYTES {
+            return Err(image_over_budget());
+        }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.data_base64)
             .map_err(|e| Error::invalid("body.image.data_base64", format!("bad base64: {e}")))?;
         Ok(bytes)
     }
+}
+
+/// The plan's §3 wording for an image over [`IMAGE_DATA_MAX_BYTES`], reported on the
+/// field `body.image.data_base64`. Both the pre-decode length gate in
+/// [`ImagePart::decode`] and the decoded-size check in [`Body::validate`] answer with
+/// it, so the message a client matches on cannot drift between the two.
+fn image_over_budget() -> Error {
+    Error::invalid(
+        "body.image.data_base64",
+        format!("image exceeds {IMAGE_DATA_MAX_BYTES} bytes"),
+    )
 }
 
 /// Envelope payload: text plus at most one inline image.
@@ -298,10 +332,7 @@ impl Body {
             }
             let decoded = image.decode()?;
             if decoded.len() > IMAGE_DATA_MAX_BYTES {
-                return Err(Error::invalid(
-                    "body.image.data_base64",
-                    format!("image exceeds {} bytes", IMAGE_DATA_MAX_BYTES),
-                ));
+                return Err(image_over_budget());
             }
         }
         Ok(())
@@ -372,12 +403,21 @@ impl Causality {
     /// budget, the origin, the deadline, and the labels, so every hop of one run reads
     /// the same figures. A parent that names no family — a root minted before the field
     /// existed — hands its own task id down as the family its children carry.
+    ///
+    /// The hop adds saturating: it counts up to `u32::MAX` and never wraps. Depth is
+    /// how a role learns whether it is the hop that keeps the work, so a child that
+    /// came back around to `hop = 0` would read as the root of a fresh family — under
+    /// its parent's budget, with nothing spent — and a ring of that shape never stops.
+    /// Sitting past the deepest hop any budget names is the reading that ends the
+    /// chain, which is why the saturated counter stays an ordinary `Causality` rather
+    /// than becoming an error this infallible constructor could only report by taking
+    /// every caller's signature with it.
     pub fn child_of(&self) -> Causality {
         Causality {
             task: new_task_id(),
             parent_task: Some(self.task.clone()),
             reply_to: None,
-            hop: self.hop + 1,
+            hop: self.hop.saturating_add(1),
             attempt: 0,
             family: Some(self.family.clone().unwrap_or_else(|| self.task.clone())),
             hop_budget: self.hop_budget,
@@ -430,6 +470,18 @@ pub struct Envelope {
     /// Sender-minted uuid v4.
     pub id: String,
     /// Idempotency key: mandatory for Task, Completion, Control.
+    ///
+    /// `None` is legal only for [`MsgKind::Note`], and [`Envelope::validate`] enforces
+    /// that: a Task, Completion, or Control without a key is refused on the field
+    /// `op_id`, so the retry the sender eventually makes dedups on one id.
+    ///
+    /// A note that needs a durable row — the client queues every outbound envelope
+    /// keyed by its `op_id` — is stamped once by the code that writes the row, and the
+    /// stamped envelope is what gets stored and replayed (see `stamp_op_id` in
+    /// `onlyne-client`). So the absent key here never means "mint one per attempt": a
+    /// caller that generated a fresh id on every read would key each retry as a new
+    /// send, and idempotence would silently stop existing. Keep `op_id` as received,
+    /// and stamp before the first write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op_id: Option<String>,
     pub kind: MsgKind,
@@ -482,11 +534,13 @@ pub fn new_envelope(
 
 impl Envelope {
     /// Copy with an incremented `causality.attempt`, keeping `op_id` intact so a
-    /// retry stays idempotent.
+    /// retry stays idempotent. The counter adds saturating, so a redelivery count read
+    /// off a long-lived row keeps meaning "delivered at least this many times" instead
+    /// of wrapping back to "never delivered".
     pub fn redelivered(&self) -> Envelope {
         let mut next = self.clone();
         if let Some(causality) = &mut next.causality {
-            causality.attempt += 1;
+            causality.attempt = causality.attempt.saturating_add(1);
         }
         next
     }
@@ -789,6 +843,64 @@ mod tests {
         assert_eq!(err.message(), "image exceeds 2097152 bytes");
     }
 
+    /// The budget's own base64 expansion is the largest text the gate must let
+    /// through, so the ceiling has to sit above it: an image exactly at
+    /// [`IMAGE_DATA_MAX_BYTES`] still decodes and still validates.
+    #[test]
+    fn an_image_at_the_decoded_ceiling_still_decodes() {
+        let part = ImagePart {
+            data_base64: STANDARD.encode(vec![0u8; IMAGE_DATA_MAX_BYTES]),
+            mime: "image/png".to_string(),
+            name: None,
+        };
+        // base64 rounds every run of three bytes up to four, so the exact expansion of
+        // the budget is above the budget * 4 / 3 floor the ceiling is built from.
+        let expansion = IMAGE_DATA_MAX_BYTES.div_ceil(3) * 4;
+        assert_eq!(part.data_base64.len(), expansion);
+        assert!(
+            expansion <= IMAGE_DATA_MAX_ENCODED_BYTES,
+            "the ceiling must clear the exact expansion, with room left for padding: \
+             {expansion} vs {IMAGE_DATA_MAX_ENCODED_BYTES}"
+        );
+        assert_eq!(part.decode().expect("decodes").len(), IMAGE_DATA_MAX_BYTES);
+        let mut env = note("x");
+        env.body.image = Some(part);
+        env.validate()
+            .expect("an image at the ceiling is in budget");
+    }
+
+    /// A text too long to decode inside the budget is refused on its length, so no
+    /// decoded buffer is ever allocated for it. The wording proves which gate answered:
+    /// this text is not valid padded base64, so without the length check `decode` would
+    /// have reported `bad base64` instead of the plan's image-ceiling sentence, and
+    /// `validate` would never have reached its own size comparison.
+    #[test]
+    fn an_overlong_base64_text_is_refused_before_it_decodes() {
+        let text = "A".repeat(IMAGE_DATA_MAX_ENCODED_BYTES + 1);
+        assert_ne!(
+            text.len() % 4,
+            0,
+            "the text cannot decode, so only length answers"
+        );
+        let part = ImagePart {
+            data_base64: text,
+            mime: "image/png".to_string(),
+            name: None,
+        };
+        let err = part.decode().expect_err("overlong text is refused");
+        assert_eq!(err.field(), "body.image.data_base64");
+        assert_eq!(err.message(), "image exceeds 2097152 bytes");
+        let mut env = note("x");
+        env.body.image = Some(part);
+        let err = env.validate().unwrap_err();
+        assert_eq!(err.field(), "body.image.data_base64");
+        assert_eq!(
+            err.message(),
+            "image exceeds 2097152 bytes",
+            "a rejection that never decoded the text still answers with the spec sentence"
+        );
+    }
+
     #[test]
     fn unsupported_mime_is_refused() {
         let mut env = note("x");
@@ -845,6 +957,24 @@ mod tests {
     }
 
     #[test]
+    fn redelivery_saturates_the_attempt_instead_of_wrapping_it() {
+        let mut env = task("x");
+        env.causality.as_mut().expect("caus").attempt = u32::MAX;
+        let next = env.redelivered();
+        assert_eq!(
+            next.causality.as_ref().expect("caus").attempt,
+            u32::MAX,
+            "a redelivery count that wrapped to zero would read as never delivered"
+        );
+        assert_eq!(next.op_id, env.op_id, "the retry stays idempotent");
+        assert_eq!(
+            env.fingerprint(),
+            next.fingerprint(),
+            "the folded attempt keeps hashing the same at the ceiling"
+        );
+    }
+
+    #[test]
     fn child_causality_links_to_its_parent() {
         let env = task("x");
         let parent = env.causality.clone().expect("caus");
@@ -852,6 +982,34 @@ mod tests {
         assert_eq!(child.parent_task.as_deref(), Some(parent.task.as_str()));
         assert_eq!(child.hop, 1);
         assert_ne!(child.task, parent.task);
+    }
+
+    #[test]
+    fn a_child_of_the_deepest_hop_stays_there_instead_of_returning_to_zero() {
+        let mut deepest = Causality::root(new_task_id());
+        deepest.hop = u32::MAX - 1;
+        assert_eq!(
+            deepest.child_of().hop,
+            u32::MAX,
+            "one more hop still counts"
+        );
+
+        let mut parent = Causality::root(new_task_id());
+        parent.hop = u32::MAX;
+        parent.hop_budget = Some(4);
+        let child = parent.child_of();
+        assert_eq!(
+            child.hop,
+            u32::MAX,
+            "a hop past the ceiling saturates; wrapping to 0 would hand the child the \
+             reading of a fresh root that has spent nothing against its budget"
+        );
+        assert!(
+            Some(child.hop) > parent.hop_budget,
+            "the saturated child still sits over the family's budget, so the chain stops"
+        );
+        assert_eq!(child.parent_task.as_deref(), Some(parent.task.as_str()));
+        assert_eq!(child.hop_budget, parent.hop_budget);
     }
 
     #[test]

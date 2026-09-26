@@ -220,6 +220,171 @@ async fn a_refused_replay_does_not_relay_its_handoff_again() {
     );
 }
 
+/// The never-ran guard reads the one word the row itself publishes.
+///
+/// A session row whose stored tuple bytes cannot be parsed rebuilds to `Booting`
+/// while its `agent_state` column still carries the phase the last accepted write
+/// left, and the two halves of the old reading disagreed at this door: the guard
+/// refused the completion on the rebuild while the fault it wrote and the
+/// projection it published both named the column — a session that demonstrably ran
+/// a turn denied its own ending, and the refusal left the task open for a requeue
+/// the answer had already come from.
+#[tokio::test]
+async fn a_guard_refuses_on_no_word_but_the_one_it_reports() {
+    let dir = tempdir().expect("tempdir");
+    let task = new_task_id();
+    let (state, store, _backend) = staged_state(&dir, &task);
+    store
+        .upsert_session(
+            &task,
+            &onlyne_session::VersionedSession {
+                agent_state: "running".into(),
+                delivery_state: "pending".into(),
+                resource_state: "attached".into(),
+                recovery_substate: "none".into(),
+                desired_json: "{}".into(),
+                observed_json: "{ not an observation".into(),
+                generation: 9,
+                seq: 9,
+                backend_ref: "{}".into(),
+                mismatch_count: 0,
+                updated_at: 0,
+            },
+        )
+        .expect("the damaged row lands");
+
+    on_out(
+        &state,
+        &task,
+        Outcome::Done,
+        Some("head".into()),
+        None,
+        &[],
+        SettleAuthority::PluginReport,
+    )
+    .await
+    .expect("the report is handled");
+
+    assert_eq!(
+        store
+            .task(&task)
+            .expect("task record")
+            .expect("opened task")
+            .task_state,
+        TaskState::Done,
+        "a row whose own column reads `running` has the turn the guard asks for"
+    );
+    assert!(
+        store
+            .list_faults(&task)
+            .expect("the faults answer")
+            .iter()
+            .all(|fault| fault.kind != SETTLE_WITHOUT_TURN),
+        "the door that reads the row it publishes files no refusal: {:?}",
+        store.list_faults(&task).expect("the faults answer")
+    );
+}
+
+/// A completion for a task this client holds no session row for is still a verdict.
+///
+/// `settle_task` writes the record of a task this process never dispatched for
+/// exactly this reason, and the drain it used to run ahead of that write answers a
+/// missing row with `unknown session` — so the report failed whole, the verdict
+/// stayed unwritten, and the task was left open for a requeue that could never be
+/// answered. The live case is a `client.db` replaced under a running role, or a
+/// foreign task reported into one.
+#[tokio::test]
+async fn a_completion_with_no_session_row_still_files_its_verdict() {
+    let dir = tempdir().expect("tempdir");
+    let task = new_task_id();
+    let (state, store, _backend) = staged_state(&dir, &task);
+    let foreign = new_task_id();
+
+    on_out(
+        &state,
+        &foreign,
+        Outcome::Done,
+        Some("a line".into()),
+        None,
+        &[],
+        SettleAuthority::ClientOwned,
+    )
+    .await
+    .expect("a report with nothing to drain is still settled");
+
+    let record = store
+        .task(&foreign)
+        .expect("the store answers")
+        .expect("the verdict wrote its own record");
+    assert_eq!(record.task_state, TaskState::Done);
+    assert!(record.settled_at.is_some(), "the task closed");
+    assert_eq!(
+        store.get_session(&foreign).expect("store answers"),
+        None,
+        "and no session row was invented to drain"
+    );
+}
+
+/// Two held connections can mount under one session name, and the sweep that
+/// answers them removes the connections it actually told to leave. A bye may not
+/// overtake the response to a frame the plugin is still inside, and the entry of
+/// the connection that keeps it is the one that stays in the buffer — dropping it
+/// by name would leave a live socket that `release_connection` can no longer see,
+/// held by neither the session nor the sweep.
+#[tokio::test]
+async fn a_held_connection_answering_its_own_frame_keeps_its_buffer_entry() {
+    let dir = tempdir().expect("tempdir");
+    let task = new_task_id();
+    let (state, _store, _backend) = staged_state(&dir, &task);
+    let (inside_stream, _inside_peer) = tokio::io::duplex(1024);
+    let inside = AdapterIo::new(
+        inside_stream,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    let (outside_stream, _outside_peer) = tokio::io::duplex(1024);
+    let outside = AdapterIo::new(
+        outside_stream,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    {
+        let mut inner = state.inner.lock();
+        inner.in_frame.push(inside.clone());
+        for io in [&inside, &outside] {
+            inner.revived.push((task.clone(), io.clone(), Vec::new()));
+        }
+    }
+
+    on_out(
+        &state,
+        &task,
+        Outcome::Done,
+        Some("head".into()),
+        None,
+        &[],
+        SettleAuthority::ClientOwned,
+    )
+    .await
+    .expect("the completion answers both accounts");
+
+    let inner = state.inner.lock();
+    assert!(
+        inner
+            .revived
+            .iter()
+            .any(|(_, held, _)| held.same_connection(&inside)),
+        "the connection still inside its own frame keeps its entry"
+    );
+    assert!(
+        !inner
+            .revived
+            .iter()
+            .any(|(_, held, _)| held.same_connection(&outside)),
+        "the connection the sweep reached is the one it left the buffer for"
+    );
+}
+
 #[tokio::test]
 async fn the_first_verdict_keeps_its_receipt_and_handoff_relay() {
     let dir = tempdir().expect("tempdir");

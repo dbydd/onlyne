@@ -60,49 +60,106 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
         placement: None,
         rename: None,
     })?;
-    inner.bridge.track_live(session.clone());
-    // The task's own record opens with the session that serves it, out of the
-    // causality that named the task. A redelivery that found a slot already
-    // serving above never reaches this line, so the chain columns are the chain
-    // the session opened on; a re-dispatch after retirement refreshes them.
-    inner.store.open_task(causality, task_cause(causality))?;
-    // A row this task already carries is the record of the session that served it
-    // before, and the session staged here is born onto it: `rebase_born_session`
-    // moves that row to a generation of its own, and a task with no row keeps the
-    // plain seed below. Either way the row the feeds land on starts at
-    // `Booting`/`Detached`, under a watermark this session's own count can clear.
-    rebase_born_session(&inner, &task_id);
-    feed_created(&inner.bridge, &inner.store, &task_id)?;
-    feed_dispatched(&inner.bridge, &inner.store, &task_id);
-    // A plugin-mode session's liveness is the heartbeat its connection sends and
-    // nothing else, and that connection has not spoken yet: the window of
-    // `[client] reconnect_grace_secs` starts at birth, so a spawn whose plugin
-    // never dials is a ghost the sweep can see rather than a slot that holds its
-    // resource forever. The mount that attaches clears the stamp. A self-driven
-    // backend owns its agent and answers no adapter socket, so it never has a
-    // heartbeat to read and its lifecycle, not this clock, is what ends it.
-    let dropped_at = (!inner.backend.self_driven()).then(Instant::now);
-    // The liveness stamp starts with the slot, so a session whose plugin mounts
-    // and then never sends a frame is readable as silent rather than as a
-    // session nobody can judge.
-    let last_beat = Some(Instant::now());
-    inner.sessions.insert(
-        session_id,
-        SessionSlot {
-            session: session.clone(),
-            task_id: Some(task_id.clone()),
-            ready: false,
-            payload: Some(envelope.clone()),
-            msg_id: None,
-            origin: Some(envelope.from.clone()),
-            causality: causality.clone(),
-            dropped_at,
-            last_beat,
-            read_only: false,
-        },
-    );
-    inner.stall.note_assigned(&task_id, Instant::now());
+    // Everything that can still refuse this delivery runs inside `stage_slot`,
+    // and a refusal past this line leaves a live pane, tab, or child process
+    // behind. Nothing in `sessions` names it, so `close_all`, both reconnect
+    // sweeps, and `live_sessions` never see it again: the resource and the
+    // bridge's record of it leak for the life of the client, which is the shape
+    // a SQLite error in `open_task` or `feed_created` used to leave. The slot is
+    // given back here, and the close runs after the lock is off it.
+    if let Err(error) = stage_slot(&mut inner, &session, &task_id, causality, envelope) {
+        let backend = Arc::clone(&inner.backend);
+        drop(inner);
+        if let Err(close_error) = backend.close(&session, onlyne_session::CloseReason::Fault, false)
+        {
+            tracing::warn!(
+                task = %task_id,
+                backend = %session.backend,
+                resource = %session.backend_ref,
+                error = %close_error,
+                "the resource of a dispatch that did not land was not given back"
+            );
+        }
+        return Err(error);
+    }
     Ok(session)
+}
+
+/// Land one spawned session in this role's bookkeeping: the task's own record,
+/// the session row it is born onto, the slot that holds its payload, and the
+/// stall clock that answers for its work.
+///
+/// The slot is keyed by the session id, which `dispatch` mints from the task, so
+/// one argument carries both spellings.
+///
+/// Split from `dispatch` so a failure names itself as one: every fallible step
+/// lives here, and the caller owns the single undo that matters — a resource the
+/// backend has already opened. The steps run in the order that keeps the ledger
+/// causal: the task record opens before the session row it hosts, and the row
+/// before the slot that can report against it.
+///
+/// This function owns the in-memory half of its own undo. The bridge is tracked
+/// first because `feed_created` reads it for the session's generation, and a step
+/// that refuses would otherwise leave that track behind: the reconciler answers
+/// for sessions this client holds, and a live entry no slot addresses has nothing
+/// left to report about it. The resource is the caller's to hand back, because
+/// only the caller can give it up off the dispatch lock.
+fn stage_slot(
+    inner: &mut DispatchInner,
+    session: &SessionRef,
+    task_id: &str,
+    causality: &Causality,
+    envelope: &Envelope,
+) -> Result<()> {
+    inner.bridge.track_live(session.clone());
+    let landed = (|| -> Result<()> {
+        // The task's own record opens with the session that serves it, out of the
+        // causality that named the task. A redelivery that found a slot already
+        // serving above never reaches this line, so the chain columns are the chain
+        // the session opened on; a re-dispatch after retirement refreshes them.
+        inner.store.open_task(causality, task_cause(causality))?;
+        // A row this task already carries is the record of the session that served it
+        // before, and the session staged here is born onto it: `rebase_born_session`
+        // moves that row to a generation of its own, and a task with no row keeps the
+        // plain seed below. Either way the row the feeds land on starts at
+        // `Booting`/`Detached`, under a watermark this session's own count can clear.
+        rebase_born_session(inner, task_id);
+        feed_created(&inner.bridge, &inner.store, task_id)?;
+        feed_dispatched(&inner.bridge, &inner.store, task_id);
+        // A plugin-mode session's liveness is the heartbeat its connection sends and
+        // nothing else, and that connection has not spoken yet: the window of
+        // `[client] reconnect_grace_secs` starts at birth, so a spawn whose plugin
+        // never dials is a ghost the sweep can see rather than a slot that holds its
+        // resource forever. The mount that attaches clears the stamp. A self-driven
+        // backend owns its agent and answers no adapter socket, so it never has a
+        // heartbeat to read and its lifecycle, not this clock, is what ends it.
+        let dropped_at = (!inner.backend.self_driven()).then(Instant::now);
+        // The liveness stamp starts with the slot, so a session whose plugin mounts
+        // and then never sends a frame is readable as silent rather than as a
+        // session nobody can judge.
+        let last_beat = Some(Instant::now());
+        inner.sessions.insert(
+            task_id.to_string(),
+            SessionSlot {
+                session: session.clone(),
+                task_id: Some(task_id.to_string()),
+                ready: false,
+                payload: Some(envelope.clone()),
+                msg_id: None,
+                origin: Some(envelope.from.clone()),
+                causality: causality.clone(),
+                dropped_at,
+                last_beat,
+                read_only: false,
+            },
+        );
+        inner.stall.note_assigned(task_id, Instant::now());
+        Ok(())
+    })();
+    if landed.is_err() {
+        inner.bridge.untrack_live(task_id);
+    }
+    landed
 }
 
 /// How a delivery reached this role, which is what the task record's `kind`
@@ -403,3 +460,6 @@ impl DispatchState {
             })
     }
 }
+
+#[cfg(test)]
+mod tests;

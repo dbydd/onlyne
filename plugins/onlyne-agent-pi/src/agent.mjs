@@ -139,6 +139,12 @@ export class OnlyneAgent {
     this.connected = false;
     this.socket = null;
     this.welcome = null;
+    /**
+     * The generation for a beat whose task carries no record of its own (the
+     * session's spawn task, before any assign wrote one). The generation the host
+     * names in an `assign` lives on that task's record instead, where a second
+     * concurrent assign cannot rewrite the first one's.
+     */
     this.generation = 1;
     this.seq = SEQ_BASE;
     this.nextId = 1;
@@ -148,8 +154,27 @@ export class OnlyneAgent {
     this.reconnectHandle = null;
     this.heartbeatHandle = null;
     this.settleHandle = null;
+    /**
+     * The heartbeat round in flight, and what the next pass of it should say.
+     * `heartbeat` never lets two rounds overlap, so `beatRound` doubles as the
+     * lock; `beatAgain` records that a beat was asked for while the round was
+     * writing, and `beatPhase` what the newest of those asks wanted said — an
+     * explicit phase, or null for "ask pi again". See `heartbeat`.
+     */
+    this.beatRound = null;
+    this.beatAgain = false;
+    this.beatPhase = null;
     /** @type {Map<string, any>} */
     this.tasks = new Map();
+    /**
+     * Completions the socket could not carry: one entry per `complete` call
+     * taken while the connection was down, kept in the order they were called
+     * and flushed on the next hello. A single slot would let a second
+     * completion overwrite the first, so an outcome nobody had received would
+     * vanish while a reconnect was already in flight.
+     * @type {{ taskId: string, report: any, outcome: string, exitProcess: boolean }[]}
+     */
+    this.pendingCompletions = [];
     /**
      * Every role this session handed something to through a `send` the client
      * accepted: the relay guard's only evidence (`relay.mjs`).
@@ -218,8 +243,15 @@ export class OnlyneAgent {
       sessionId: this.sessionId,
       generation: this.generation,
       agentState: this.agentState,
+      // The plugin's own report counter, and the seq each open task last
+      // carried. A supervisor chasing a beat the host dropped as stale reads
+      // these against the row's watermark instead of guessing from the log.
+      seq: this.seq,
+      taskSeqs: Object.fromEntries(
+        [...this.tasks.values()].map((task) => [task.taskId, task.lastSeq ?? null]),
+      ),
       tasks: this.activeTasks().map((task) => task.taskId),
-      pendingCompletion: this.pendingCompletion?.taskId ?? null,
+      pendingCompletions: this.pendingCompletions.map((pending) => pending.taskId),
       lastError: this.lastError ? String(this.lastError.message ?? this.lastError) : null,
       activity: this.activity.events.slice(0, 5),
       stats: { ...this.stats },
@@ -323,6 +355,18 @@ export class OnlyneAgent {
     }
     this.welcome = welcome;
     this.connected = true;
+    // The client names every delivery it already handed to this session, so a
+    // process that restarts under a live client does not re-inject work its
+    // predecessor read: the delivery guard is process memory, and this is how it
+    // survives one. Seeded before any push drains, so the first `assign` the new
+    // connection sees is already deduped against it. Both spellings go in,
+    // because the guard reads `envelope.id ?? task:<task_id>` (`onAssign`) and a
+    // host may name either the delivery's own id or the task it belongs to here.
+    const alreadyDelivered = Array.isArray(welcome.deliveredTasks) ? welcome.deliveredTasks : [];
+    for (const taskId of alreadyDelivered) {
+      this.injectedDeliveries.add(taskId);
+      this.injectedDeliveries.add(`task:${taskId}`);
+    }
     // A fresh connection has reported nothing, so the phase is a question, not
     // an answer: the first beat below re-derives it from pi. A taskless session
     // is the ready pool, and ready is its own state.
@@ -353,7 +397,7 @@ export class OnlyneAgent {
       })).catch((error) => this.log(`session_register refused: ${error.message}`));
     }
     await this.reportReady();
-    if (this.pendingCompletion) await this.flushPendingCompletion();
+    await this.flushPendingCompletions();
     // The frames that waited for the handshake: the welcome is adopted by now,
     // so the role prose is context before any assignment opens a turn.
     this.handshaking = false;
@@ -483,13 +527,17 @@ export class OnlyneAgent {
   async reportReady() {
     const taskId = this.envTaskId;
     if (!taskId || !this.connected) return;
-    this.seq += 1;
+    // The ready travels the one counter and moves the same row's watermark a
+    // beat reads, so the task's record takes the clamp where one exists: a
+    // ready landing between two of that task's beats cannot hand the row a seq
+    // it has already seen.
+    const seq = this.nextSeq(this.tasks.get(taskId) ?? null);
     try {
       await this.request("report", readyReport({
         taskId,
         sessionId: this.sessionId,
         generation: this.generation,
-        seq: this.seq,
+        seq,
       }));
       this.stats.reports += 1;
       this.notice("state", `ready ${taskId.slice(0, 8)}`);
@@ -499,10 +547,113 @@ export class OnlyneAgent {
   }
 
   /**
-   * One heartbeat for the task this connection serves. The phase is the one the
-   * rule names: `idle` only while the session waits for user input, `running`
-   * for everything else, re-derived from pi on every beat so a phase that went
-   * stale when a run started again cannot survive a tick.
+   * Allocate the next report sequence, for one task when the report names one.
+   *
+   * One writer gets one counter: the protocol asks for a sequence strictly
+   * increasing for the life of a generation (`crates/onlyne-adapter/PROTOCOL.md`,
+   * "Report sequencing and the ready barrier"), and the host's own events for a
+   * row take `row.seq + 1` beside it (`onlyne-session`'s `reconcile/feed.rs`,
+   * `reconcile/bridge.rs`). A per-task counter was the other option, and it is
+   * the worse one: a task's row would then move exactly one per round, tying
+   * with the host's interleaved writes to that row, and the reducer reads a tie
+   * as `StaleOrDuplicateSeq` and throws the liveness fact away. Beating every
+   * task off the one counter is what keeps each row ahead of the host.
+   *
+   * The gate itself is per task row, so the invariant a *task* owes is "my next
+   * beat carries a higher seq than my last one". `task.lastSeq` makes that a
+   * checked property rather than a side effect of write order: an allocation for
+   * a task that has reported before is clamped above its own last report, so no
+   * path — a ready between two beats, a second round folded into the first, a
+   * follow-up envelope arriving mid-round — can hand a task back a seq its row
+   * has already accepted.
+   *
+   * @param {any} [task] the task record the report speaks for. A report naming
+   * no record (the task this process was spawned with, before any `assign` wrote
+   * one) takes the bare counter, which is above everything it has ever sent.
+   */
+  nextSeq(task = null) {
+    this.seq += 1;
+    if (!task) return this.seq;
+    if (typeof task.lastSeq === "number" && task.lastSeq >= this.seq) {
+      this.seq = task.lastSeq + 1;
+    }
+    task.lastSeq = this.seq;
+    return this.seq;
+  }
+
+  /**
+   * One heartbeat round, or the round already running if one is in flight.
+   *
+   * Rounds never overlap. A beat is a snapshot of the session, so a second round
+   * begun while the first is still writing holds no newer evidence than the one
+   * in flight — it only splits one tick's facts across two sequences and doubles
+   * the frames every task's row has to clear. The timer, a turn hook and a
+   * `probe` can each ask for a beat in the same instant: the first starts the
+   * round, the rest fold into it, and the round takes one more pass so the
+   * newest ask is answered. A folded caller shares the running round's outcome,
+   * rejection included, because a plugin reads a failed report as a link that
+   * died, and the reconnect ladder — not a queue of beats behind a socket that
+   * cannot carry them — is the answer to that.
+   *
+   * The phase is the one the rule names: `idle` only while the session waits for
+   * user input, `running` for everything else, re-derived from pi once per round
+   * so a phase that went stale when a run started again cannot survive a tick —
+   * the answer is about the session, so a task does not get its own view of it.
+   *
+   * @param {"idle" | "running" | null} [agent] the phase to state; absent means
+   * ask pi.
+   */
+  heartbeat(agent = null) {
+    if (this.beatRound) {
+      // The newest ask wins the next pass, whatever it is. A bare `heartbeat()`
+      // means "ask pi again" and so clears an earlier explicit phase: a
+      // turn-start beat that says `running` must not pin the turn-end beat that
+      // folded into it, or the idle a waiting session reached never gets
+      // reported and the settle ladder reads a working agent forever.
+      this.beatAgain = true;
+      this.beatPhase = agent;
+      return this.beatRound;
+    }
+    this.beatPhase = agent ?? null;
+    this.beatAgain = false;
+    this.beatRound = this.runBeatRound();
+    return this.beatRound;
+  }
+
+  /** The serialized driver behind `heartbeat`; see there for the why. */
+  async runBeatRound() {
+    let failure = null;
+    try {
+      for (;;) {
+        this.beatAgain = false;
+        try {
+          await this.beatOnce(this.beatPhase);
+        } catch (error) {
+          // The link stopped answering mid-round. Later beats would only pile
+          // behind frames this socket cannot carry; `dropSocket` rejects them
+          // all and the reconnect path re-derives the phase anyway.
+          failure = error;
+          break;
+        }
+        if (!this.beatAgain) break;
+      }
+    } finally {
+      this.beatRound = null;
+      this.beatAgain = false;
+    }
+    if (failure) throw failure;
+  }
+
+  /**
+   * One pass of the round: one beat for every task this session still holds.
+   *
+   * A relay session can hold two open tasks at once (the one it is working and
+   * the next one already handed over), and a beat is the only liveness evidence
+   * either row has: beating the head of the list alone let a second task sit
+   * until the client's heartbeat timeout took it. Each beat carries its own
+   * task's generation and a sequence strictly above the last one that task
+   * sent, so an alternating pair of tasks can never be told stale by its own
+   * earlier frame.
    *
    * A task this plugin already completed gets none: the beat is a full
    * snapshot of what the plugin can see, and after the completion the agent's
@@ -514,22 +665,31 @@ export class OnlyneAgent {
    * heartbeat left over from the finishing turn landed three milliseconds
    * behind the completion.
    */
-  async heartbeat(agent = null) {
+  async beatOnce(agent) {
     if (!this.connected) return;
-    const taskId = this.activeTaskId();
-    if (!taskId) return;
-    if (this.tasks.get(taskId)?.completed) return;
+    let tasks = this.activeTasks();
+    if (tasks.length === 0) {
+      // Nothing is open: the beat still belongs to the task this process was
+      // spawned with, unless that task is one this plugin already completed.
+      const taskId = this.envTaskId;
+      if (!taskId || this.tasks.get(taskId)?.completed) return;
+      tasks = [{ taskId }];
+    }
     const phase = agent ?? (await this.derivedPhase());
     this.agentState = phase;
-    this.seq += 1;
-    await this.request("report", heartbeatReport({
-      taskId,
-      generation: this.generation,
-      seq: this.seq,
-      agent: phase,
-      host: this.host,
-    }));
-    this.stats.reports += 1;
+    for (const task of tasks) {
+      // The clamp is stamped on the record, where the next round can read it;
+      // the synthetic entry above has none, and the bare counter covers it.
+      const seq = this.nextSeq(this.tasks.get(task.taskId) ?? null);
+      await this.request("report", heartbeatReport({
+        taskId: task.taskId,
+        generation: task.generation ?? this.generation,
+        seq,
+        agent: phase,
+        host: this.host,
+      }));
+      this.stats.reports += 1;
+    }
   }
 
   /**
@@ -610,7 +770,6 @@ export class OnlyneAgent {
     }
     this.injectedDeliveries.add(deliveryId);
     this.stats.assigns += 1;
-    if (typeof args.generation === "number") this.generation = args.generation;
 
     const attachments = this.writeAttachments(taskId, envelope);
     const attachmentPaths = attachments.map((item) => item.path);
@@ -644,10 +803,27 @@ export class OnlyneAgent {
       held.envelopeId = envelope.id ?? held.envelopeId;
       held.assignment = assignment;
       held.attachmentPaths = attachmentPaths;
+      // `lastSeq` deliberately does not reset here. It is the floor the next
+      // allocation for this task must clear, and the host's row for the task
+      // still holds the seq of the last beat it accepted; a follow-up envelope
+      // opens no new row, so forgetting the floor would let a later round
+      // re-issue a seq the reducer has already seen.
+      // The host's newest word on this task's generation, which its next beat
+      // must carry; a follow-up can move it.
+      if (typeof args.generation === "number") held.generation = args.generation;
     } else {
       this.tasks.set(taskId, {
         taskId,
         envelopeId: envelope.id ?? null,
+        /** The generation the host names for this task; the beat reports it. */
+        generation: typeof args.generation === "number" ? args.generation : 1,
+        /**
+         * The seq of the last report this plugin sent for this task, stamped by
+         * `nextSeq`. The host gates one task's row on its own watermark, so this
+         * is what keeps a beat ahead of the frame before it however many tasks
+         * share the plugin's counter. Null until the first report.
+         */
+        lastSeq: null,
         // Who handed this task over: the relay guard's count mode does not count
         // a send straight back to it (`relay.mjs`).
         upstream: envelope.from?.role?.role ?? null,
@@ -973,7 +1149,7 @@ export class OnlyneAgent {
     if (task) task.completed = true;
     const report = completeReport({ taskId, outcome: normalized, head: summary });
     if (!this.connected) {
-      this.pendingCompletion = { taskId, report, outcome: normalized, exitProcess };
+      this.pendingCompletions.push({ taskId, report, outcome: normalized, exitProcess });
       this.activity.set({ taskId, phase: `${normalized} queued` });
       this.notice("warn", `complete ${taskId.slice(0, 8)} ${normalized} queued: socket down`);
       return { taskId, outcome: normalized, head: summary, queued: true };
@@ -1005,21 +1181,29 @@ export class OnlyneAgent {
     this.surface.exit?.(reason);
   }
 
-  async flushPendingCompletion() {
-    const pending = this.pendingCompletion;
-    if (!pending || !this.connected) return;
-    this.pendingCompletion = null;
-    try {
-      await this.request("report", pending.report);
-      this.stats.completions += 1;
-      this.activity.set({ taskId: this.activeTaskId() ?? null, phase: pending.outcome });
-      this.notice("out", `complete ${pending.taskId.slice(0, 8)} ${pending.outcome} flushed after reconnect`);
-      if (pending.exitProcess && this.activeTasks().length === 0) {
-        this.exitSession(pending.outcome);
+  /**
+   * Hand over every completion the dead socket could not carry, in the order the
+   * calls came. The drain stops at the first report the new connection refuses:
+   * that one goes back on the head of the queue, and the rest wait for the next
+   * hello with it, so a client that dies mid-flush loses nothing.
+   */
+  async flushPendingCompletions() {
+    while (this.pendingCompletions.length > 0) {
+      if (!this.connected) return;
+      const pending = this.pendingCompletions.shift();
+      try {
+        await this.request("report", pending.report);
+        this.stats.completions += 1;
+        this.activity.set({ taskId: this.activeTaskId() ?? null, phase: pending.outcome });
+        this.notice("out", `complete ${pending.taskId.slice(0, 8)} ${pending.outcome} flushed after reconnect`);
+        if (pending.exitProcess && this.activeTasks().length === 0) {
+          this.exitSession(pending.outcome);
+        }
+      } catch (error) {
+        this.pendingCompletions.unshift(pending);
+        this.log(`queued completion still refused: ${error.message}`);
+        break;
       }
-    } catch (error) {
-      this.pendingCompletion = pending;
-      this.log(`queued completion still refused: ${error.message}`);
     }
   }
 

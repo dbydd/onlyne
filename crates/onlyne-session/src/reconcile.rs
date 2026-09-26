@@ -12,7 +12,7 @@ mod feed;
 mod ledger;
 mod record;
 
-pub use bridge::{Bridge, apply_at_next, apply_persist, next_version, try_feed};
+pub use bridge::{Bridge, apply_at_next, apply_from_stored, apply_persist, next_version, try_feed};
 pub use fault::{
     DEFAULT_ISOLATE_AFTER, DEFAULT_TERMINATE_AFTER, ProbeVerdict, probe_target, reconcile_dead,
     reconcile_mismatch, reconcile_probe, record_fault,

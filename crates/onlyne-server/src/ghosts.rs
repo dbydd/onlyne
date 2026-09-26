@@ -100,6 +100,11 @@ pub fn sweep_once(state: &Arc<State>) -> anyhow::Result<Vec<GhostSweepRow>> {
 /// `session_state`. The audit row names the write the pass made, so a row that
 /// moved between this pass's read and its write records nothing here.
 ///
+/// The settlement is a sequence of statements, not one transaction, so the
+/// ledger evidence is re-read immediately before it: a task whose row moved on
+/// to another state — back to open, or to a different verdict — is left for the
+/// next pass rather than settled on evidence the ledger no longer holds.
+///
 /// The client owns the task's verdict and the mirror carries it: a client
 /// publishes that verdict with the lifecycle its own tuple reads, and a settled
 /// task beside a live agent projects `working`. A mirror row that already
@@ -116,6 +121,14 @@ fn sweep_row(state: &Arc<State>, row: &ServerSessionRow) -> anyhow::Result<Optio
     let outcome = crate::projection::projection_from_write(row)
         .outcome
         .unwrap_or(ledger_outcome);
+    if task_ledger_state(state, &row.task_id)? != Some(ledger_state) {
+        tracing::debug!(
+            task = %row.task_id,
+            ledger_state = %ledger_state,
+            "the task's ledger row moved between the sweep's read and its write, so nothing is settled on stale evidence"
+        );
+        return Ok(None);
+    }
     let settled = faults::settle_task(state, &row.task_id, outcome, &sweep_reason(ledger_state))?;
     let Some(settlement) = settled else {
         return Ok(None);
