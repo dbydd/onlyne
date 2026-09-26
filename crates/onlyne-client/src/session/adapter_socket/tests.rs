@@ -439,6 +439,48 @@ async fn a_handoff_frame_queues_a_child_of_the_task_its_session_serves() {
     assert_eq!(child.labels, staged.causality.labels);
 }
 
+/// A plugin that leaves through the SDK's `exit` hears its `detach` answered:
+/// the call returns `Ok` as soon as the host has taken the frame, well inside
+/// the request timeout it would otherwise sit out.
+#[cfg(unix)]
+#[tokio::test]
+async fn exit_is_answered_before_the_host_lets_the_connection_go() {
+    let dir = tempdir().unwrap();
+    let staged = staged(dir.path()).await;
+    let stream = onlyne_layout::connect_local(&staged.socket)
+        .await
+        .expect("the role socket accepts a plugin");
+    let handle = onlyne_adapter::AdapterClient::connect_with_timeouts(
+        stream,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    handle
+        .hello(HelloArgs {
+            protocol: PROTOCOL_VERSION,
+            plugin: "onlyne-agent-test".into(),
+            version: "1.0.0".into(),
+            kind: MountKind::Agent,
+            capabilities: vec![Capability::Report],
+            mount: Some(Mount::Agent(AgentMount {
+                role: "planner".into(),
+                session: Some(staged.task.clone()),
+                task_id: Some(staged.task.clone()),
+                pid: None,
+            })),
+        })
+        .await
+        .expect("the mount answers");
+
+    let started = std::time::Instant::now();
+    handle.exit("done").await.expect("the detach is answered");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "exit returned after {:?}, not at the host's answer",
+        started.elapsed(),
+    );
+}
+
 /// A `handoff` frame that names no task this client serves is refused with an
 /// error body, and the connection stays live.
 ///

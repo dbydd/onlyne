@@ -18,7 +18,7 @@
 //! - [`NetError::NotReady`] means the handle sits between connections.
 //! - [`NetError::RequestTimeout`] means the caller's own deadline elapsed.
 
-use onlyne_frame::{is_bad_frame, is_too_large, read_frame, write_frame};
+use onlyne_frame::{FrameReader, is_bad_frame, is_too_large, read_frame, write_frame};
 use onlyne_proto::{
     ClientOp, ErrorCode, Event, FaultEvent, Frame, GatewayOp, PROTOCOL_VERSION, ResBody, new_id,
 };
@@ -102,6 +102,15 @@ impl TlsConn {
             Self::Server(stream) => read_frame(stream).await,
         }
         .map_err(map_frame_error)
+    }
+
+    /// Read one frame through `reader`, which keeps a partial frame across a
+    /// dropped call; a `select!` loop reads through this.
+    pub async fn recv_frame_with<T: DeserializeOwned>(
+        &mut self,
+        reader: &mut FrameReader,
+    ) -> Result<Option<T>, NetError> {
+        reader.next(self).await.map_err(map_frame_error)
     }
 }
 
@@ -436,13 +445,25 @@ impl<Op: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> ConnHandl
         self.write(assign_id(frame)?).await
     }
 
-    /// Write a `bye` frame and complete every in-flight waiter as a failure.
+    /// Stop the handle for good, complete every in-flight waiter as a failure,
+    /// and say `bye` on the live connection.
+    ///
+    /// `Ok` means the `bye` was queued on a connection that was live when the
+    /// handle closed. A handle that was reconnecting or already closed has no
+    /// such connection, so the handle still closes but the call answers
+    /// `Disconnected`.
     pub async fn close(&self) -> Result<(), NetError> {
-        self.inner
+        let was = self
+            .inner
             .stop(Some(NetError::Disconnected(
                 "the handle closed the connection".to_string(),
             )))
             .await;
+        if was != STATE_READY {
+            return Err(NetError::Disconnected(
+                "no live connection carried the bye".to_string(),
+            ));
+        }
         let bye = Frame::Bye {
             reason: CLOSE_REASON.to_string(),
         };
@@ -511,20 +532,26 @@ impl<Op> ConnInner<Op> {
         }
     }
 
-    fn set_state(&self, state: u8) {
-        self.state.store(state, Ordering::SeqCst);
+    /// Move from one live state to another. Refused once the handle is closed,
+    /// so nothing can bring a closed handle back.
+    fn advance(&self, from: u8, to: u8) -> bool {
+        self.state
+            .compare_exchange(from, to, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 
     fn is_stopped(&self) -> bool {
         self.state.load(Ordering::SeqCst) == STATE_CLOSED
     }
 
-    /// Stop for good, recording the reason callers read from `failure`.
-    async fn stop(&self, error: Option<NetError>) {
+    /// Stop for good, recording the reason callers read from `failure`, and
+    /// answer the state the handle left.
+    async fn stop(&self, error: Option<NetError>) -> u8 {
         let error = error.unwrap_or(NetError::Disconnected("the connection closed".to_string()));
         *self.failure.lock().await = Some(error.clone());
-        self.set_state(STATE_CLOSED);
+        let was = self.state.swap(STATE_CLOSED, Ordering::SeqCst);
         fail_pending(self, error).await;
+        was
     }
 }
 
@@ -742,6 +769,9 @@ where
     );
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut ping_sent: Option<tokio::time::Instant> = None;
+    // The read branch is dropped whenever another branch wins; the reader keeps
+    // the bytes it had already pulled, so frame boundaries survive that.
+    let mut reader = FrameReader::new();
     loop {
         tokio::select! {
             outgoing = outbound.recv() => {
@@ -756,7 +786,7 @@ where
                     return SessionEnd::Closed("the handle closed the connection".to_string());
                 }
             }
-            incoming = read_frame::<_, Frame<Op>>(stream) => {
+            incoming = reader.next::<_, Frame<Op>>(stream) => {
                 let frame = match incoming {
                     Ok(Some(frame)) => frame,
                     Ok(None) => {
@@ -837,7 +867,10 @@ async fn run_supervisor<S, P, Op>(
                 return;
             }
             SessionEnd::Dead(error) => {
-                inner.set_state(STATE_RECONNECTING);
+                // A `close` that raced the death already failed every waiter.
+                if !inner.advance(STATE_READY, STATE_RECONNECTING) {
+                    return;
+                }
                 fail_pending(&inner, error.clone()).await;
                 drain(&mut outbound);
                 if !plan.can_redial() {
@@ -857,10 +890,20 @@ async fn run_supervisor<S, P, Op>(
                         return;
                     }
                     match plan.reopen().await {
-                        Ok(fresh) => {
+                        Ok(mut fresh) => {
+                            // A `close` can land while `reopen` runs; the fresh
+                            // connection then only carries the `bye`. Its write
+                            // error has no caller left to reach, since `close`
+                            // already recorded the handle's failure.
+                            if !inner.advance(STATE_RECONNECTING, STATE_READY) {
+                                let bye: Frame<Op> = Frame::Bye {
+                                    reason: CLOSE_REASON.to_string(),
+                                };
+                                let _ = write_frame(&mut fresh, &bye).await;
+                                return;
+                            }
                             backoff.reset();
                             stream = fresh;
-                            inner.set_state(STATE_READY);
                             break;
                         }
                         Err(error) => {
@@ -1417,6 +1460,82 @@ mod tests {
             "expected a disconnect, got {failure:?}"
         );
         assert_eq!(handle.readiness(), ConnReadiness::Closed);
+    }
+
+    /// A redial plan that holds `reopen` open until the test releases it.
+    struct GatedPlan {
+        entered: Option<oneshot::Sender<()>>,
+        release: Option<oneshot::Receiver<tokio::io::DuplexStream>>,
+    }
+
+    impl Reopen for GatedPlan {
+        type Stream = tokio::io::DuplexStream;
+
+        fn can_redial(&self) -> bool {
+            true
+        }
+
+        async fn reopen(&mut self) -> Result<tokio::io::DuplexStream, NetError> {
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+            }
+            let release = self.release.take().expect("one reopen per test");
+            release
+                .await
+                .map_err(|_| NetError::Disconnected("the test dropped the gate".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn close_during_reopen_keeps_the_handle_closed() {
+        let (client, first_peer) = tokio::io::duplex(4096);
+        let (entered, reopening) = oneshot::channel();
+        let (gate, release) = oneshot::channel();
+        let handle: ClientConn = spawn_handle(
+            client,
+            ROLE,
+            &settings(),
+            GatedPlan {
+                entered: Some(entered),
+                release: Some(release),
+            },
+        );
+        drop(first_peer);
+        reopening.await.unwrap();
+        assert_eq!(handle.readiness(), ConnReadiness::Reconnecting);
+
+        let closed = handle.close().await;
+        assert!(
+            matches!(closed, Err(NetError::Disconnected(_))),
+            "no live connection carried the bye, got {closed:?}"
+        );
+        assert_eq!(handle.readiness(), ConnReadiness::Closed);
+
+        let (fresh, mut peer) = tokio::io::duplex(4096);
+        gate.send(fresh).unwrap();
+        let bye: Frame<ClientOp> =
+            tokio::time::timeout(Duration::from_secs(3), read_frame(&mut peer))
+                .await
+                .expect("the fresh connection hears the bye")
+                .unwrap()
+                .unwrap();
+        assert!(
+            matches!(bye, Frame::Bye { .. }),
+            "expected a bye, got {bye:?}"
+        );
+        let after: Option<Frame<ClientOp>> =
+            tokio::time::timeout(Duration::from_secs(3), read_frame(&mut peer))
+                .await
+                .expect("the supervisor drops the fresh connection")
+                .unwrap();
+        assert!(after.is_none(), "nothing follows the bye, got {after:?}");
+
+        assert_eq!(handle.readiness(), ConnReadiness::Closed);
+        let refused = handle.send(request()).await;
+        assert!(
+            matches!(refused, Err(NetError::Disconnected(_))),
+            "a closed handle refuses writes, got {refused:?}"
+        );
     }
 
     #[tokio::test]

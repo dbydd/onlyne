@@ -43,7 +43,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::Stream;
-use onlyne_frame::{read_frame, write_frame};
+use onlyne_frame::{FrameReader, read_frame, write_frame};
 use onlyne_proto::{
     AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, ByeNotice, ConfigGetArgs, Delivery,
     DetachArgs, Envelope, ErrorCode, GatewayHealth, GatewayMount, HELLO_REQUIRED_MESSAGE,
@@ -55,7 +55,7 @@ use onlyne_proto::{
 use onlyne_proto::adapter::HandoffArgs;
 pub use onlyne_proto::{Capability, HelloAck, HelloArgs, Mount, MountKind, PROTOCOL_VERSION};
 use serde_json::{Value, json};
-use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf, split};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf, split};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{sleep, timeout};
 use tracing::warn;
@@ -109,7 +109,6 @@ pub enum AdapterError {
     Protocol(ResBody),
     Code { code: ErrorCode, message: String },
     Unexpected(String),
-    RecvDropped,
     SendDropped,
 }
 
@@ -161,7 +160,6 @@ impl fmt::Display for AdapterError {
             },
             AdapterError::Code { code, message } => write!(f, "adapter error {code}: {message}"),
             AdapterError::Unexpected(msg) => write!(f, "adapter unexpected message: {msg}"),
-            AdapterError::RecvDropped => f.write_str("adapter reader task dropped"),
             AdapterError::SendDropped => f.write_str("adapter writer task dropped"),
         }
     }
@@ -225,10 +223,21 @@ struct QueuedFrame {
     msg: AdapterMsg,
 }
 
+/// The requests of one connection that still wait for their answer.
+///
+/// `closed` is set once, when the reader ends: no answer can arrive after that,
+/// so every waiter is dropped at that moment and a later request is refused
+/// before it registers, rather than sitting out its timeout.
+#[derive(Default)]
+struct Pending {
+    closed: bool,
+    waiters: HashMap<u64, oneshot::Sender<ResBody>>,
+}
+
 #[derive(Clone)]
 pub struct AdapterIo {
     tx: mpsc::Sender<QueuedFrame>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ResBody>>>>,
+    pending: Arc<Mutex<Pending>>,
     id: Arc<AtomicU64>,
     read_timeout: Duration,
     write_timeout: Duration,
@@ -243,6 +252,12 @@ impl AdapterIo {
         io
     }
 
+    /// Drive one connection.
+    ///
+    /// `read_timeout` bounds how long one request waits for its answer. It is
+    /// not an idle deadline: the protocol has no keepalive frame, so a quiet
+    /// connection is a healthy one. The connection ends when the peer closes,
+    /// when a write fails, or once every handle is dropped.
     pub fn new_with_inbound<S>(
         stream: S,
         read_timeout: Duration,
@@ -254,14 +269,15 @@ impl AdapterIo {
         let (reader, writer) = split(stream);
         let (tx, rx) = mpsc::channel(INBOUND_CAPACITY);
         let (incoming_tx, incoming_rx) = mpsc::channel(INBOUND_CAPACITY);
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        tokio::spawn(writer_loop(writer, rx, write_timeout));
+        let (writer_done_tx, writer_done_rx) = oneshot::channel();
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        tokio::spawn(writer_loop(writer, rx, write_timeout, writer_done_tx));
         tokio::spawn(reader_loop(
             reader,
-            read_timeout,
             pending.clone(),
             incoming_tx,
-            tx.clone(),
+            tx.downgrade(),
+            writer_done_rx,
         ));
         (
             AdapterIo {
@@ -315,10 +331,20 @@ impl AdapterIo {
             .map_err(|_| AdapterError::SendDropped)
     }
 
+    /// Send one request and wait up to `read_timeout` for its answer.
+    ///
+    /// A connection whose reader has ended answers [`AdapterError::Closed`] at
+    /// once, and so does a request in flight when it ends.
     pub async fn request(&self, msg: AdapterMsg) -> Result<ResBody> {
         let id = self.id.fetch_add(1, Ordering::SeqCst);
         let (response_tx, response_rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, response_tx);
+        {
+            let mut pending = self.pending.lock().await;
+            if pending.closed {
+                return Err(AdapterError::Closed);
+            }
+            pending.waiters.insert(id, response_tx);
+        }
         if self
             .tx
             .send(QueuedFrame {
@@ -329,14 +355,15 @@ impl AdapterIo {
             .await
             .is_err()
         {
-            self.pending.lock().await.remove(&id);
+            self.pending.lock().await.waiters.remove(&id);
             return Err(AdapterError::SendDropped);
         }
         match timeout(self.read_timeout, response_rx).await {
             Ok(Ok(body)) => Ok(body),
-            Ok(Err(_)) => Err(AdapterError::RecvDropped),
+            // The reader dropped the waiter: the connection ended unanswered.
+            Ok(Err(_)) => Err(AdapterError::Closed),
             Err(_) => {
-                self.pending.lock().await.remove(&id);
+                self.pending.lock().await.waiters.remove(&id);
                 Err(AdapterError::Timeout("response"))
             }
         }
@@ -352,10 +379,16 @@ impl AdapterIo {
     }
 }
 
+/// Write queued frames until every handle is gone or the socket refuses one.
+///
+/// The write half is shut down on the way out for streams that carry a half
+/// close. `done` is dropped last and tells the reader to stop: a local socket
+/// closes only when both halves are gone, so the reader must let go of its own.
 async fn writer_loop<W>(
     mut writer: WriteHalf<W>,
     mut rx: mpsc::Receiver<QueuedFrame>,
     write_timeout: Duration,
+    done: oneshot::Sender<()>,
 ) where
     W: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -371,36 +404,53 @@ async fn writer_loop<W>(
             },
             None => WireMessage::request(outbound.id, outbound.msg),
         };
-        if timeout(write_timeout, write_frame(&mut writer, &message))
-            .await
-            .is_err()
-        {
-            break;
+        match timeout(write_timeout, write_frame(&mut writer, &message)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(error = %error, "adapter write failed; closing the connection");
+                break;
+            }
+            Err(_) => {
+                warn!("adapter write timed out; closing the connection");
+                break;
+            }
         }
     }
+    let _ = timeout(write_timeout, writer.shutdown()).await;
+    drop(done);
 }
 
+/// Read frames until the peer closes, the stream fails, or the writer ends.
+///
+/// Waiting for the next frame has no deadline: an idle connection is healthy.
+/// Once the writer has ended — every handle is gone, or the socket refused a
+/// write — nothing on this side can answer the peer again, so the reader stops
+/// too even if the peer never closes, and the socket is released. On every exit
+/// the pending requests are failed at once.
 async fn reader_loop<R>(
     mut reader: ReadHalf<R>,
-    read_timeout: Duration,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ResBody>>>>,
+    pending: Arc<Mutex<Pending>>,
     incoming: mpsc::Sender<IncomingFrame>,
-    outbound: mpsc::Sender<QueuedFrame>,
+    outbound: mpsc::WeakSender<QueuedFrame>,
+    mut writer_done: oneshot::Receiver<()>,
 ) where
     R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let mut frames = FrameReader::new();
     loop {
-        let read = timeout(read_timeout, read_frame::<_, WireMessage>(&mut reader)).await;
-        let wire = match read {
-            Ok(Ok(Some(wire))) => wire,
-            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
+        let wire = tokio::select! {
+            read = frames.next::<_, WireMessage>(&mut reader) => match read {
+                Ok(Some(wire)) => wire,
+                Ok(None) | Err(_) => break,
+            },
+            _ = &mut writer_done => break,
         };
         let id = wire.id;
         let reply_to = wire.reply_to;
         let frame = match wire.msg {
             AdapterMsg::Res(body) => {
                 if let Some(reply_id) = reply_to {
-                    if let Some(waiter) = pending.lock().await.remove(&reply_id) {
+                    if let Some(waiter) = pending.lock().await.waiters.remove(&reply_id) {
                         let _ = waiter.send(body);
                         continue;
                     }
@@ -417,6 +467,9 @@ async fn reader_loop<R>(
             break;
         }
     }
+    let mut pending = pending.lock().await;
+    pending.closed = true;
+    pending.waiters.clear();
 }
 
 /// Hand one decoded frame to the host's consumer without growing the buffer.
@@ -427,7 +480,7 @@ async fn reader_loop<R>(
 /// never returns from stopping the reader with it.
 async fn forward_incoming(
     incoming: &mpsc::Sender<IncomingFrame>,
-    outbound: &mpsc::Sender<QueuedFrame>,
+    outbound: &mpsc::WeakSender<QueuedFrame>,
     frame: IncomingFrame,
 ) -> bool {
     let mut waiting = frame;
@@ -451,8 +504,10 @@ async fn forward_incoming(
 /// which is the one reply its plugin can act on, and says `internal` — the
 /// retryable code — because a host that drains again takes the frame next time.
 /// A frame that already answers something else has no such reader waiting, so it
-/// is logged and dropped, and a notification carries no id at all.
-fn shed(outbound: &mpsc::Sender<QueuedFrame>, frame: IncomingFrame) {
+/// is logged and dropped, and a notification carries no id at all. The reader
+/// holds the write queue weakly, so that it never keeps a connection alive on
+/// its own; once every handle is gone, the shed request has nobody to answer it.
+fn shed(outbound: &mpsc::WeakSender<QueuedFrame>, frame: IncomingFrame) {
     let IncomingFrame { id, reply_to, msg } = frame;
     warn!(
         op = msg.op_name().unwrap_or("res"),
@@ -461,6 +516,13 @@ fn shed(outbound: &mpsc::Sender<QueuedFrame>, frame: IncomingFrame) {
         "adapter inbound queue is full; shedding the frame",
     );
     let (Some(id), None) = (id, reply_to) else {
+        return;
+    };
+    let Some(outbound) = outbound.upgrade() else {
+        warn!(
+            id,
+            "adapter writer is gone; the shed request goes unanswered"
+        );
         return;
     };
     let body = ResBody::err(
@@ -1886,5 +1948,102 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Forbidden);
         assert_eq!(error.field.as_deref(), Some("op"));
         assert!(error.message.contains("handoff"));
+    }
+
+    fn detach(reason: &str) -> AdapterMsg {
+        AdapterMsg::Plugin(PluginOp::Detach(DetachArgs {
+            reason: reason.to_string(),
+        }))
+    }
+
+    /// A connection that says nothing for longer than the request timeout is
+    /// still up: the timeout bounds one answer, not the wait for the next frame.
+    #[tokio::test]
+    async fn a_quiet_connection_outlives_the_request_timeout() {
+        let (plugin_side, mut host_side) = tokio::io::duplex(4096);
+        let read_timeout = Duration::from_millis(200);
+        let (io, _inbound) =
+            AdapterIo::new_with_inbound(plugin_side, read_timeout, Duration::from_secs(1));
+
+        sleep(read_timeout * 4).await;
+
+        let answered = tokio::spawn({
+            let io = io.clone();
+            async move { io.request(detach("after the quiet")).await }
+        });
+        let wire = read_frame::<_, WireMessage>(&mut host_side)
+            .await
+            .expect("a frame decodes")
+            .expect("the connection is still open");
+        let id = wire.id.expect("a request carries its id");
+        write_frame(
+            &mut host_side,
+            &WireMessage::response(id, ResBody::ok(Value::Null)),
+        )
+        .await
+        .expect("answer the request");
+        let body = answered
+            .await
+            .expect("request task")
+            .expect("the quiet connection still reads its answer");
+        assert!(body.ok);
+    }
+
+    /// A peer that goes away fails the request waiting on it at once, and a
+    /// request made afterwards is refused before it waits at all.
+    #[tokio::test]
+    async fn a_closed_peer_fails_the_request_in_flight_at_once() {
+        let (plugin_side, mut host_side) = tokio::io::duplex(4096);
+        let read_timeout = Duration::from_secs(30);
+        let (io, _inbound) =
+            AdapterIo::new_with_inbound(plugin_side, read_timeout, Duration::from_secs(1));
+
+        let in_flight = tokio::spawn({
+            let io = io.clone();
+            async move { io.request(detach("never answered")).await }
+        });
+        read_frame::<_, WireMessage>(&mut host_side)
+            .await
+            .expect("a frame decodes")
+            .expect("the request arrives");
+        drop(host_side);
+
+        let outcome = timeout(Duration::from_secs(1), in_flight)
+            .await
+            .expect("the waiter wakes long before its timeout")
+            .expect("request task");
+        assert!(
+            matches!(outcome, Err(AdapterError::Closed)),
+            "the request in flight reads the close: {outcome:?}"
+        );
+        let later = timeout(Duration::from_secs(1), io.request(detach("too late")))
+            .await
+            .expect("a request on a closed connection does not wait");
+        assert!(
+            matches!(later, Err(AdapterError::Closed)),
+            "a later request is refused: {later:?}"
+        );
+    }
+
+    /// Dropping every handle and the inbound receiver ends the connection even
+    /// though no idle deadline exists: the peer reads end of stream.
+    #[tokio::test]
+    async fn dropping_every_handle_closes_the_connection() {
+        let (plugin_side, mut host_side) = tokio::io::duplex(4096);
+        let (io, inbound) = AdapterIo::new_with_inbound(
+            plugin_side,
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+        );
+        drop(io);
+        drop(inbound);
+        let end = timeout(
+            Duration::from_secs(1),
+            read_frame::<_, WireMessage>(&mut host_side),
+        )
+        .await
+        .expect("the peer hears the close promptly")
+        .expect("a clean end of stream");
+        assert!(end.is_none(), "no frame, only the end: {end:?}");
     }
 }

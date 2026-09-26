@@ -90,6 +90,7 @@ fn main() {
             ("Reload(Value)", size_of::<serde_json::Value>()),
             ("Send(AdminSend)", size_of::<AdminSend>()),
             ("Control(AdminControl)", size_of::<AdminControl>()),
+            ("Report(AdminReport)", size_of::<AdminReport>()),
             ("RepairInspect(RepairTarget)", size_of::<RepairTarget>()),
             ("RepairAdopt(RepairAdopt)", size_of::<RepairAdopt>()),
             ("RepairRebind(RepairRebind)", size_of::<RepairRebind>()),

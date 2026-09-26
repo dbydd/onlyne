@@ -241,11 +241,7 @@ pub async fn on_out(
 /// its record is still entitled to take — the shape a `client.db` replaced under a
 /// live role, or a foreign task reported into one, arrives in. The row is read for
 /// that alone, and the verdict is filed whatever the reading says.
-fn take_verdict(
-    inner: &DispatchInner,
-    task_id: &str,
-    outcome: Outcome,
-) -> Result<bool> {
+fn take_verdict(inner: &DispatchInner, task_id: &str, outcome: Outcome) -> Result<bool> {
     let drain = inner
         .store
         .get_session(task_id)?

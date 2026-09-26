@@ -58,12 +58,12 @@ pub use frame::{
     OP_ID_CONFLICT_MESSAGE, ResBody,
 };
 pub use ops::{
-    AckArgs, AdminControl, AdminOp, AdminSend, AgentPhase, ByeArgs, ClientOp, ControlArgs,
-    ConversationInfo, Delivery, DeliveryPhase, FreshRead, GatewayOp, GhostSweep, HandshakeArgs,
-    HealthArgs, HistoryArgs, LedgerEntry, LedgerQuery, PullArgs, PullReply, QueryFaultsArgs,
-    QueryRolesArgs, QuerySessionsArgs, Receipt, RecoveryPhase, RegisterChannelArgs, RepairAck,
-    RepairAdopt, RepairFail, RepairRebind, RepairTarget, Report, ResourcePhase, RoleInfo,
-    SessionProjection, SessionRow, ShutdownArgs, Subscribe, Welcome,
+    AckArgs, AdminControl, AdminOp, AdminReport, AdminSend, AgentPhase, ByeArgs, ClientOp,
+    ControlArgs, ConversationInfo, Delivery, DeliveryPhase, FreshRead, GatewayOp, GhostSweep,
+    HandshakeArgs, HealthArgs, HistoryArgs, LedgerEntry, LedgerQuery, PullArgs, PullReply,
+    QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, Receipt, RecoveryPhase,
+    RegisterChannelArgs, RepairAck, RepairAdopt, RepairFail, RepairRebind, RepairTarget, Report,
+    ResourcePhase, RoleInfo, SessionProjection, SessionRow, ShutdownArgs, Subscribe, Welcome,
 };
 
 pub use payload::{GRAMMAR_V2, Handoff, MAX_REPORT_HANDOFFS, MAX_REPORT_LINES, PayloadV2};

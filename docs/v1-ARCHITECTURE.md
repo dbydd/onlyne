@@ -127,7 +127,7 @@ CLI socket discovery is fixed. `--socket <path>` wins first, then `ONLYNE_SOCKET
 | Surface | Closed op set | Source |
 |---|---|---|
 | Client to server | `hello`, `send`, `pull`, `ack`, `report`, `subscribe`, `query_ledger`, `query_sessions`, `query_roles`, `query_faults`, `control`, `bye` | Plan §8 line 318 |
-| Admin | `status`, `roles`, `sessions`, `ledger`, `faults`, `query_ghost_sweeps`, `watch`, `history`, `spec_diff`, `reload`, `send`, `control`, `repair_inspect`, `repair_adopt`, `repair_rebind`, `repair_retry`, `repair_fail`, `repair_close`, `repair_ack`, `shutdown` | Plan §8 line 320; `AdminOp` in `crates/onlyne-proto/src/ops.rs` |
+| Admin | `status`, `roles`, `sessions`, `ledger`, `faults`, `query_ghost_sweeps`, `watch`, `history`, `spec_diff`, `reload`, `send`, `control`, `report`, `repair_inspect`, `repair_adopt`, `repair_rebind`, `repair_retry`, `repair_fail`, `repair_close`, `repair_ack`, `shutdown` | Plan §8 line 320; `AdminOp` in `crates/onlyne-proto/src/ops.rs` |
 | Gateway to server | `hello`, `register_channel`, `deliver`, `health`, `bye` (`render_send` travels host to gateway; `typing` is an optional gateway capability) | Plan §8 line 322; `GatewayOp` in `crates/onlyne-proto/src/ops.rs`; `HostOp::RenderSend` and `PluginOp::Typing` in `crates/onlyne-proto/src/adapter.rs` |
 | Adapter plugin to host | `hello`, `report`, `session_register`, `assign_ack`, `send`, `handoff`, `deliver`, `register_channel`, `health`, `typing`, `detach` | `PluginOp` in `crates/onlyne-proto/src/adapter.rs`; frame names in `crates/onlyne-adapter/PROTOCOL.md` |
 | Host to plugin | `welcome`, `assign`, `render_send`, `probe`, `recycle`, `config_get`, `bye` | Plan §7 line 308 |
@@ -391,7 +391,7 @@ CLI socket 发现顺序固定：先是 `--socket <path>`，然后是 `ONLYNE_SOC
 | 表面 | 封闭 op 集合 | 来源 |
 |---|---|---|
 | Client 到 server | `hello`、`send`、`pull`、`ack`、`report`、`subscribe`、`query_ledger`、`query_sessions`、`query_roles`、`query_faults`、`control`、`bye` | Plan §8 行 318 |
-| Admin | `status`、`roles`、`sessions`、`ledger`、`faults`、`query_ghost_sweeps`、`watch`、`history`、`spec_diff`、`reload`、`send`、`control`、`repair_inspect`、`repair_adopt`、`repair_rebind`、`repair_retry`、`repair_fail`、`repair_close`、`repair_ack`、`shutdown` | Plan §8 行 320；`crates/onlyne-proto/src/ops.rs` 中的 `AdminOp` |
+| Admin | `status`、`roles`、`sessions`、`ledger`、`faults`、`query_ghost_sweeps`、`watch`、`history`、`spec_diff`、`reload`、`send`、`control`、`report`、`repair_inspect`、`repair_adopt`、`repair_rebind`、`repair_retry`、`repair_fail`、`repair_close`、`repair_ack`、`shutdown` | Plan §8 行 320；`crates/onlyne-proto/src/ops.rs` 中的 `AdminOp` |
 | Gateway 到 server | `hello`、`register_channel`、`deliver`、`health`、`bye`（`render_send` 从 host 到 gateway；`typing` 是可选 gateway 能力） | Plan §8 行 322；`crates/onlyne-proto/src/ops.rs` 中的 `GatewayOp`；`crates/onlyne-proto/src/adapter.rs` 中的 `HostOp::RenderSend` 和 `PluginOp::Typing` |
 | Adapter plugin 到 host | `hello`、`report`、`session_register`、`assign_ack`、`send`、`handoff`、`deliver`、`register_channel`、`health`、`typing`、`detach` | `crates/onlyne-proto/src/adapter.rs` 中的 `PluginOp`；`crates/onlyne-adapter/PROTOCOL.md` 中的 frame 名称 |
 | Host 到 plugin | `welcome`、`assign`、`render_send`、`probe`、`recycle`、`config_get`、`bye` | Plan §7 行 308 |

@@ -3,9 +3,9 @@
 use chrono::{DateTime, Utc};
 use onlyne_proto::envelope::CAUSALITY_LABEL_MAX_ENTRIES;
 use onlyne_proto::{
-    AckArgs as ProtoAckArgs, AdminControl, AdminOp, AdminSend, Body, Causality, ClientOp,
-    ControlArgs, ControlOp, Envelope, ErrorCode, Frame, ImagePart, LedgerQuery, MsgKind, Outcome,
-    Principal, QueryRolesArgs, QuerySessionsArgs, Report, ResBody, new_envelope, new_id,
+    AckArgs as ProtoAckArgs, AdminControl, AdminOp, AdminReport, AdminSend, Body, Causality,
+    ClientOp, ControlArgs, ControlOp, Envelope, ErrorCode, Frame, ImagePart, LedgerQuery, MsgKind,
+    Outcome, Principal, QueryRolesArgs, QuerySessionsArgs, Report, ResBody, new_envelope, new_id,
     new_task_id,
 };
 use std::collections::BTreeMap;
@@ -741,9 +741,12 @@ async fn complete_inner(
         Ok(payload) => payload,
         Err(message) => return runtime::usage_error(message),
     };
-    let reply_to = match &payload {
-        SendPayload::Client(envelope) => envelope.id.clone(),
-        SendPayload::Admin(admin_send) => admin_send.envelope.id.clone(),
+    let (reply_to, admin_from) = match &payload {
+        SendPayload::Client(envelope) => (envelope.id.clone(), None),
+        SendPayload::Admin(admin_send) => (
+            admin_send.envelope.id.clone(),
+            Some(admin_send.from.clone()),
+        ),
     };
     let request = match request_of(flags, payload) {
         Ok(request) => request,
@@ -754,18 +757,28 @@ async fn complete_inner(
         Ok(_) => {}
         Err(error) => return runtime::exchange_error(&error, flags.timeout_ms),
     }
-    let report = Outbound::client(
-        new_id(),
-        ClientOp::Report(Report::Complete {
-            task_id: args.task,
-            outcome: args.outcome,
-            head: Some(head),
-            reply_to: Some(reply_to),
-            // The command line speaks as a role, whose cluster identity comes
-            // from the server's spec, so a CLI-authored report never names one.
-            cluster_ref: None,
-        }),
-    );
+    let report = Report::Complete {
+        task_id: args.task,
+        outcome: args.outcome,
+        head: Some(head),
+        reply_to: Some(reply_to),
+        // The command line speaks as a role, whose cluster identity comes
+        // from the server's spec, so a CLI-authored report never names one.
+        cluster_ref: None,
+    };
+    // The completion goes out on the surface the envelope went out on: the
+    // admin surface has no client `report`, so an operator files it as the
+    // `--from` role through the admin one.
+    let report = match admin_from {
+        Some(from) => Outbound::admin(
+            new_id(),
+            AdminOp::Report(AdminReport {
+                from,
+                report: Box::new(report),
+            }),
+        ),
+        None => Outbound::client(new_id(), ClientOp::Report(report)),
+    };
     match wire::request_res(&mut stream, &report, flags.timeout_ms).await {
         Ok(body) => runtime::finish(&body, flags),
         Err(error) => runtime::exchange_error(&error, flags.timeout_ms),

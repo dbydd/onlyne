@@ -284,6 +284,7 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
                     generation: generation.max(0) as u64,
                     seq: 0,
                     projection: crate::projection::projection_from_write(&next),
+                    admin: None,
                 });
                 state.emit(event)?;
             }
@@ -476,6 +477,7 @@ pub(crate) fn settle_task(
                 generation: next.generation.max(0) as u64,
                 seq: next.seq.max(0) as u64,
                 projection,
+                admin: None,
             });
             state.emit(event)?;
             settlement = Some(Settlement {

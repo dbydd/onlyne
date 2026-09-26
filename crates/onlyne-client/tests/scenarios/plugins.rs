@@ -212,10 +212,13 @@ async fn a_parked_agent_serves_the_session_it_claimed() {
         "the next task spawns a resource of its own"
     );
     assert!(backend.sessions().contains_key(&second_task));
+    // The detached connection closes, so the channel either ends or stays quiet;
+    // what it never carries is another assignment.
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), assigns.recv())
-            .await
-            .is_err(),
+        !matches!(
+            tokio::time::timeout(Duration::from_millis(200), assigns.recv()).await,
+            Ok(Some(_))
+        ),
         "the finished session's connection is handed nothing more"
     );
     let _second_io = mount_plugin(&socket, Some(&second_task)).await;

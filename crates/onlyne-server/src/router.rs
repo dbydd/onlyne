@@ -121,14 +121,7 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
                 Ok(role) => role.to_string(),
                 Err(body) => return body,
             };
-            match projection::report(state, &role, &report) {
-                Ok(outcome) => ResBody::ok(json!({
-                    "applied": outcome.applied,
-                    "kind": report.kind_name(),
-                    "task_id": report.task_id(),
-                })),
-                Err(error) => internal(error),
-            }
+            report_body(projection::report(state, &role, &report), &report)
         }
         ClientOp::Subscribe(subscribe) => match events::page_for(state, &subscribe) {
             Ok(page) => {
@@ -254,6 +247,10 @@ pub async fn dispatch_admin(state: &Arc<State>, session: &mut Session, op: Admin
             let owner = relay::task_owner(state, admin_control.op.task_id());
             reply_body(state, relay::send(state, &envelope, true, owner.as_deref()))
         }
+        AdminOp::Report(admin_report) => report_body(
+            projection::report_as_admin(state, &admin_report.from, &admin_report.report),
+            &admin_report.report,
+        ),
         AdminOp::RepairInspect(_)
         | AdminOp::RepairAdopt(_)
         | AdminOp::RepairRebind(_)
@@ -269,6 +266,22 @@ pub async fn dispatch_admin(state: &Arc<State>, session: &mut Session, op: Admin
             state.request_shutdown();
             ResBody::ok(json!({ "shutdown": args.reason }))
         }
+    }
+}
+
+/// The answer to one settled report, shared by a session's own report and the
+/// one an operator files for it.
+fn report_body(
+    outcome: anyhow::Result<projection::ProjectionOutcome>,
+    report: &onlyne_proto::Report,
+) -> ResBody {
+    match outcome {
+        Ok(outcome) => ResBody::ok(json!({
+            "applied": outcome.applied,
+            "kind": report.kind_name(),
+            "task_id": report.task_id(),
+        })),
+        Err(error) => internal(error),
     }
 }
 

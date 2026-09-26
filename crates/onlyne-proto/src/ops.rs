@@ -860,6 +860,8 @@ pub enum AdminOp {
     Send(AdminSend),
     /// Issue a control op as `--from <role>`.
     Control(AdminControl),
+    /// File a session's report as `--from <role>`.
+    Report(AdminReport),
     /// Read a session's reducer state without changing it.
     RepairInspect(RepairTarget),
     /// Attach an existing live resource to a session row.
@@ -893,6 +895,7 @@ impl AdminOp {
             AdminOp::Reload(_) => "reload",
             AdminOp::Send(_) => "send",
             AdminOp::Control(_) => "control",
+            AdminOp::Report(_) => "report",
             AdminOp::RepairInspect(_) => "repair_inspect",
             AdminOp::RepairAdopt(_) => "repair_adopt",
             AdminOp::RepairRebind(_) => "repair_rebind",
@@ -950,6 +953,16 @@ pub struct AdminControl {
     pub op: crate::envelope::ControlOp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+}
+
+/// Admin `report`: the operator files a session's report on its behalf. The
+/// server settles it through the path a session's own report takes, and the
+/// `session_state` event it publishes names `from` as the admin principal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct AdminReport {
+    pub from: String,
+    pub report: Box<Report>,
 }
 
 /// Task-addressed repair verb.
@@ -1409,6 +1422,19 @@ mod tests {
                     to: None,
                 }),
                 "control",
+            ),
+            (
+                AdminOp::Report(AdminReport {
+                    from: "planner".into(),
+                    report: Box::new(Report::Complete {
+                        task_id: new_task_id(),
+                        outcome: Outcome::Done,
+                        head: Some("done".into()),
+                        reply_to: None,
+                        cluster_ref: None,
+                    }),
+                }),
+                "report",
             ),
             (
                 AdminOp::RepairInspect(RepairTarget {

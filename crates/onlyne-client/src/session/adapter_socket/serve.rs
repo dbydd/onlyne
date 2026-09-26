@@ -254,6 +254,14 @@ impl AdapterSocket {
                     }
                 }
                 AdapterMsg::Plugin(PluginOp::Detach(_)) => {
+                    // A detach that carries an id is a request like any other
+                    // and is answered before the connection is let go; the
+                    // answer is queued ahead of the writer's end of stream.
+                    if frame.id.is_some() {
+                        io.respond(id, ResBody::ok(serde_json::Value::Null))
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e))?;
+                    }
                     graceful_detach = true;
                     break;
                 }

@@ -12,7 +12,7 @@ use crate::state::State;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use onlyne_proto::{
-    AgentPhase, ControlOp, DeliveryPhase, Event, Frame, FreshRead, Lifecycle, Outcome,
+    AgentPhase, ControlOp, DeliveryPhase, Event, Frame, FreshRead, Lifecycle, Outcome, Principal,
     QuerySessionsArgs, RecoveryPhase, Report, ResourcePhase, SessionProjection, SessionRow,
     SessionStateEvent,
 };
@@ -39,6 +39,33 @@ impl ProjectionOutcome {
 
 /// Apply one client report to the session table.
 pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<ProjectionOutcome> {
+    settle(state, role, None, report)
+}
+
+/// Apply one report an operator filed over the admin surface on a session's
+/// behalf. It takes the path a session's own report takes, so the row keeps
+/// the role that owns the task, and the `session_state` event names the
+/// operator. A task with no row yet is written under the operator's role, as a
+/// self-report from that role would be.
+pub fn report_as_admin(
+    state: &State,
+    from: &str,
+    report: &Report,
+) -> anyhow::Result<ProjectionOutcome> {
+    let owner = report
+        .task_id()
+        .and_then(|task_id| relay::task_owner(state, task_id))
+        .unwrap_or_else(|| from.to_string());
+    let admin = Principal::role(from);
+    settle(state, &owner, Some(&admin), report)
+}
+
+fn settle(
+    state: &State,
+    role: &str,
+    admin: Option<&Principal>,
+    report: &Report,
+) -> anyhow::Result<ProjectionOutcome> {
     match report {
         Report::Ready {
             task_id,
@@ -66,6 +93,7 @@ pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<Proj
                 *seq,
                 projection,
                 None,
+                admin,
             )
         }
         Report::Heartbeat {
@@ -110,6 +138,7 @@ pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<Proj
                 *seq,
                 projection,
                 desired,
+                admin,
             )?;
             // An applied `exited` write is the pane dying while the link is
             // still up. A claimed in-flight row for this session goes back on
@@ -172,6 +201,7 @@ pub fn report(state: &State, role: &str, report: &Report) -> anyhow::Result<Proj
                 seq,
                 projection,
                 None,
+                admin,
             )
         }
         Report::Fault {
@@ -264,6 +294,7 @@ pub fn write(
     seq: u64,
     projection: SessionProjection,
     desired: Option<Value>,
+    admin: Option<&Principal>,
 ) -> anyhow::Result<ProjectionOutcome> {
     let stored = state.ledger.get_session_row(task_id)?;
     if let Some(row) = &stored {
@@ -293,6 +324,7 @@ pub fn write(
                 row.generation.max(0) as u64,
                 row.seq.max(0) as u64,
                 projection,
+                admin,
             )?;
             return Ok(ProjectionOutcome {
                 applied: true,
@@ -359,7 +391,7 @@ pub fn write(
             )?;
         }
     }
-    emit_session_state(state, &write, generation, seq, projection)?;
+    emit_session_state(state, &write, generation, seq, projection, admin)?;
     Ok(ProjectionOutcome {
         applied: true,
         row: Some(row_from_write(&write)),
@@ -372,6 +404,7 @@ fn emit_session_state(
     generation: u64,
     seq: u64,
     projection: SessionProjection,
+    admin: Option<&Principal>,
 ) -> anyhow::Result<()> {
     state.emit(Event::SessionState(SessionStateEvent {
         task_id: write.task_id.clone(),
@@ -380,6 +413,7 @@ fn emit_session_state(
         generation,
         seq,
         projection,
+        admin: admin.cloned(),
     }))?;
     Ok(())
 }

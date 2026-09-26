@@ -10,12 +10,13 @@ use rustls::{
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
-use std::io::BufReader;
+use std::io::{self, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 use x509_parser::prelude::parse_x509_certificate;
 
 use crate::NetError;
+use crate::identity::write_private_atomic;
 
 #[derive(Debug, Clone)]
 pub struct ServerCert {
@@ -75,27 +76,42 @@ pub fn gen_self_signed(common_name: &str, validity_days: i64) -> Result<ServerCe
     })
 }
 
+/// Load the server identity at `path`, generating one only when no file exists.
+///
+/// A file that exists but fails to load is an error, never a cue to regenerate:
+/// a new key changes the pin every client holds, so silent replacement locks the
+/// whole fleet out. An expired or not-yet-valid certificate is refused under the
+/// same rule even though the client pin check ignores dates; the operator rotates
+/// the identity deliberately by deleting the file and redistributing the pin.
 pub fn load_or_create(path: &Path, common_name: &str) -> Result<ServerCert, NetError> {
-    if path.exists() {
-        if let Ok(cert) = load_pair(path) {
-            return Ok(cert);
+    match fs::read(path) {
+        Ok(bytes) => parse_pair(&bytes).map_err(|error| {
+            NetError::Crypto(format!(
+                "server identity {} is unusable ({error}); refusing to replace it, \
+                 since a new identity changes the pin every client holds",
+                path.display()
+            ))
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let cert = gen_self_signed(common_name, 3650)?;
+            let mut data = Vec::with_capacity(cert.key_pem.len() + cert.cert_pem.len() + 1);
+            data.extend_from_slice(&cert.key_pem);
+            if !cert.key_pem.ends_with(b"\n") {
+                data.push(b'\n');
+            }
+            data.extend_from_slice(&cert.cert_pem);
+            write_private_atomic(path, &data)?;
+            Ok(cert)
         }
+        Err(error) => Err(NetError::Io(format!(
+            "server identity {}: {error}",
+            path.display()
+        ))),
     }
-    let cert = gen_self_signed(common_name, 3650)?;
-    let mut data = Vec::with_capacity(cert.key_pem.len() + cert.cert_pem.len() + 1);
-    data.extend_from_slice(&cert.key_pem);
-    if !cert.key_pem.ends_with(b"\n") {
-        data.push(b'\n');
-    }
-    data.extend_from_slice(&cert.cert_pem);
-    fs::write(path, data)?;
-    set_private_mode(path)?;
-    Ok(cert)
 }
 
-fn load_pair(path: &Path) -> Result<ServerCert, NetError> {
-    let bytes = fs::read(path)?;
-    let mut reader = BufReader::new(bytes.as_slice());
+fn parse_pair(bytes: &[u8]) -> Result<ServerCert, NetError> {
+    let mut reader = BufReader::new(bytes);
     let items: Vec<_> = rustls_pemfile::read_all(&mut reader).collect::<Result<Vec<_>, _>>()?;
     let cert = items
         .iter()
@@ -112,8 +128,8 @@ fn load_pair(path: &Path) -> Result<ServerCert, NetError> {
         ));
     }
     Ok(ServerCert {
-        key_pem: extract_first_key_pem(&bytes)?,
-        cert_pem: extract_first_cert_pem(&bytes)?,
+        key_pem: extract_first_key_pem(bytes)?,
+        cert_pem: extract_first_cert_pem(bytes)?,
         spki_pin: spki_pin_of(&cert)?,
     })
 }
@@ -280,28 +296,50 @@ impl ServerCertVerifier for PinnedVerifier {
     }
 }
 
-fn set_private_mode(path: &Path) -> Result<(), NetError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(path)?.permissions();
-        permissions.set_mode(0o600);
-        fs::set_permissions(path, permissions)?;
-    }
-    #[cfg(windows)]
-    {
-        // Same-user processes can already read the key file. TLS private keys
-        // and certs live in the user profile directory and inherit its ACL.
-        let _ = path;
-    }
-    Ok(())
-}
-
 trait Pipe: Sized {
     fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T;
 }
 impl<T> Pipe for T {
     fn pipe<U>(self, f: impl FnOnce(Self) -> U) -> U {
         f(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unusable_identity_is_refused_and_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.pem");
+        let good = load_or_create(&path, "127.0.0.1").unwrap();
+        let full = fs::read(&path).unwrap();
+        let truncated = &full[..full.len() / 2];
+        for corrupt in [truncated, b"not a pem file".as_slice(), b"".as_slice()] {
+            fs::write(&path, corrupt).unwrap();
+            let error = load_or_create(&path, "127.0.0.1").unwrap_err();
+            assert!(
+                error.to_string().contains(&path.display().to_string()),
+                "{error}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), corrupt);
+        }
+        fs::write(&path, &full).unwrap();
+        assert_eq!(
+            load_or_create(&path, "127.0.0.1").unwrap().spki_pin,
+            good.spki_pin
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_identity_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.pem");
+        load_or_create(&path, "127.0.0.1").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

@@ -43,9 +43,7 @@ impl Bridge {
     /// Remember a live session ref. The bridge prefers it over the stored
     /// reference when it names the backend resource.
     pub fn track_live(&self, session: SessionRef) {
-        self.live
-            .lock()
-            .insert(session.task_id.clone(), session);
+        self.live.lock().insert(session.task_id.clone(), session);
     }
 
     /// Forget a live session ref.
@@ -167,9 +165,7 @@ fn apply_round(
     event: &LifecycleEvent,
 ) -> anyhow::Result<(Verdict, bool)> {
     if row.is_none() {
-        let known =
-            ledger.task_is_known(task_id)?
-                || bridge.live.lock().contains_key(task_id);
+        let known = ledger.task_is_known(task_id)? || bridge.live.lock().contains_key(task_id);
         if !known {
             tracing::warn!(
                 task = %task_id,
@@ -204,15 +200,7 @@ fn apply_round(
     }
     let event = stamped.as_ref().unwrap_or(event);
     let verdict = lifecycle::apply(&current, event);
-    let landed = record_verdict(
-        bridge,
-        ledger,
-        task_id,
-        row,
-        event,
-        &current,
-        &verdict,
-    )?;
+    let landed = record_verdict(bridge, ledger, task_id, row, event, &current, &verdict)?;
     Ok((verdict, landed))
 }
 

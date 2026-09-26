@@ -766,6 +766,55 @@ fn complete_local_head_without_text_names_the_flag() {
     );
 }
 
+/// On the admin surface `complete` files its report through the admin
+/// vocabulary, as the `--from` role: the admin socket has no client `report`,
+/// and a client-shaped frame there is answered `unknown_op` and never settles.
+#[test]
+fn complete_on_the_admin_surface_files_an_admin_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("srv");
+    let listener = admin_listener(&root);
+    let ok = || serde_json::json!({"f": "res", "id": "r1", "ok": true, "data": {}});
+    let server = serve_sequence(listener, vec![ok(), ok()]);
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--server-root",
+            root.to_str().unwrap(),
+            "complete",
+            "--force",
+            SUPERVISOR_FLAG,
+            "--from",
+            "ops",
+            "--task",
+            TEST_TASK,
+            "--text",
+            "settled by the operator",
+            "--outcome",
+            "done",
+        ])
+        .output()
+        .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_OK),
+        "the admin completion settles: {}",
+        stderr_of(&output)
+    );
+    assert_eq!(requests.len(), 2, "the completion send and its report");
+    assert_eq!(requests[0]["op"], "send");
+    assert_eq!(requests[0]["args"]["from"], "ops");
+    let report = &requests[1];
+    assert_eq!(report["op"], "report");
+    assert_eq!(report["args"]["from"], "ops");
+    assert_eq!(report["args"]["report"]["kind"], "complete");
+    assert_eq!(report["args"]["report"]["data"]["task_id"], TEST_TASK);
+    assert_eq!(report["args"]["report"]["data"]["outcome"], "done");
+}
+
 /// The long half of the supervisor gate, spelled as the operator types it.
 const SUPERVISOR_FLAG: &str = "--yes-i-am-supervisor-not-other-role";
 

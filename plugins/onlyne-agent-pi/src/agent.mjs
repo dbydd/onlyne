@@ -1154,7 +1154,16 @@ export class OnlyneAgent {
       this.notice("warn", `complete ${taskId.slice(0, 8)} ${normalized} queued: socket down`);
       return { taskId, outcome: normalized, head: summary, queued: true };
     }
-    await this.request("report", report);
+    // The claim above only fences a second call while this report is in
+    // flight. A refused or broken request handed nothing over, so the task
+    // goes back to open and the caller sees why: a retry reports again, and
+    // `completeFromTool` still finds the task.
+    try {
+      await this.request("report", report);
+    } catch (error) {
+      if (task) task.completed = false;
+      throw error;
+    }
     this.stats.completions += 1;
     this.surface.customEntry?.("onlyne-complete", { taskId, outcome: normalized, head: summary });
     this.activity.set({ taskId: this.activeTaskId() ?? null, phase: normalized });

@@ -416,6 +416,7 @@ mod tests {
             generation: 1,
             seq: 14,
             projection: SessionProjection::default_working(),
+            admin: None,
         });
         let value = serde_json::to_value(Frame::event(41, event.clone())).expect("encode");
         assert_eq!(value["f"], "ev");

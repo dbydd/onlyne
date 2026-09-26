@@ -193,6 +193,82 @@ where
     Ok(true)
 }
 
+/// Bytes one [`FrameReader::next`] asks the stream for before it knows a length.
+const READ_CHUNK: usize = 64 * 1024;
+
+/// A frame decoder whose partial progress outlives the future that reads it.
+///
+/// [`read_frame`] keeps the bytes it has read inside its own future, so a
+/// caller that drops the future mid-frame — `tokio::select!` choosing another
+/// branch — loses them and every later frame boundary with them. This reader
+/// keeps them in `buf` instead: [`FrameReader::next`] awaits only
+/// [`AsyncReadExt::read_buf`], which is cancel-safe, so dropping a `next`
+/// future discards nothing, and the next call resumes where the stream is.
+#[derive(Debug, Default)]
+pub struct FrameReader {
+    buf: Vec<u8>,
+}
+
+impl FrameReader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Read one frame. Cancel-safe: see the type's documentation.
+    ///
+    /// `Ok(None)` means the peer closed the stream at a frame boundary.
+    pub async fn next<R, T>(&mut self, r: &mut R) -> Result<Option<T>>
+    where
+        R: AsyncRead + Unpin,
+        T: DeserializeOwned,
+    {
+        loop {
+            if let Some(end) = self.frame_end()? {
+                let decoded = serde_json::from_slice::<T>(&self.buf[4..end]);
+                self.buf.drain(..end);
+                return decoded.map(Some).map_err(|e| {
+                    Error::new(ErrorKind::InvalidData, format!("bad frame json: {e}"))
+                });
+            }
+            self.buf.reserve(READ_CHUNK);
+            if r.read_buf(&mut self.buf).await? == 0 {
+                if self.buf.is_empty() {
+                    return Ok(None);
+                }
+                // Same accounting as `read_frame`: a short header counts against
+                // its 4 bytes, a short body against the announced length.
+                let got = self.buf.len() as u64;
+                let eof = match self.announced() {
+                    Some(len) => UnexpectedEof {
+                        expected: len,
+                        got: got - 4,
+                    },
+                    None => UnexpectedEof { expected: 4, got },
+                };
+                return Err(Error::new(ErrorKind::UnexpectedEof, eof));
+            }
+        }
+    }
+
+    fn announced(&self) -> Option<u64> {
+        let header: [u8; 4] = self.buf.get(..4)?.try_into().ok()?;
+        Some(u32::from_be_bytes(header) as u64)
+    }
+
+    /// The end offset of a complete frame at the front of the buffer, refusing
+    /// an oversize length before any of its body is read.
+    fn frame_end(&self) -> Result<Option<usize>> {
+        let Some(len) = self.announced() else {
+            return Ok(None);
+        };
+        if len > MAX_FRAME_BYTES as u64 {
+            return Err(too_large(len, MAX_FRAME_BYTES));
+        }
+        let end = 4 + len as usize;
+        Ok((self.buf.len() >= end).then_some(end))
+    }
+}
+
 /// `true` when `err` reports a frame over [`MAX_FRAME_BYTES`].
 pub fn is_too_large(err: &Error) -> bool {
     err.get_ref()
@@ -386,6 +462,81 @@ mod tests {
         a.write_all(&9u32.to_be_bytes()).await.expect("header");
         a.write_all(b"{not json").await.expect("body");
         let err = read_frame::<_, Value>(&mut b).await.expect_err("must fail");
+        assert!(is_bad_frame(&err), "err = {err}");
+    }
+
+    #[tokio::test]
+    async fn frame_reader_keeps_partial_bytes_when_a_next_future_is_dropped() {
+        // The bug FrameReader fixes: a `select!` that drops a read future
+        // mid-frame must not lose the bytes that future already consumed.
+        let (mut a, mut b) = duplex(4096);
+        let one = json!({"f": "req", "id": "r1", "op": "pull", "args": {"k": "v"}});
+        let two = json!({"f": "ack", "seq": 41});
+        let one_bytes = frame_bytes(&one);
+        let split = 4 + 6;
+        a.write_all(&one_bytes[..split])
+            .await
+            .expect("header and part of body");
+
+        let mut reader = FrameReader::new();
+        // `biased` polls `next` first: it drains every available byte from the
+        // duplex, finds the frame incomplete and returns Pending; the ready
+        // branch then wins and the `next` future is dropped mid-frame.
+        tokio::select! {
+            biased;
+            got = reader.next::<_, Value>(&mut b) => panic!("frame cannot be complete yet: {got:?}"),
+            _ = std::future::ready(()) => {}
+        }
+        assert_eq!(
+            reader.buf.len(),
+            split,
+            "the dropped future consumed the partial frame from the stream"
+        );
+
+        a.write_all(&one_bytes[split..]).await.expect("rest of one");
+        a.write_all(&frame_bytes(&two)).await.expect("two");
+        drop(a);
+        let g1: Value = reader.next(&mut b).await.expect("r1").expect("f1");
+        let g2: Value = reader.next(&mut b).await.expect("r2").expect("f2");
+        let g3: Option<Value> = reader.next(&mut b).await.expect("r3");
+        assert_eq!((g1, g2, g3), (one, two, None));
+    }
+
+    #[tokio::test]
+    async fn frame_reader_rejects_an_oversize_announced_length() {
+        let (mut a, mut b) = duplex(64);
+        a.write_all(&(MAX_FRAME_BYTES as u32 + 1).to_be_bytes())
+            .await
+            .expect("header");
+        let err = FrameReader::new()
+            .next::<_, Value>(&mut b)
+            .await
+            .expect_err("must fail");
+        assert!(is_too_large(&err), "err = {err}");
+    }
+
+    #[tokio::test]
+    async fn frame_reader_reports_a_truncated_body_as_unexpected_eof() {
+        let (mut a, mut b) = duplex(64);
+        a.write_all(&20u32.to_be_bytes()).await.expect("header");
+        a.write_all(b"short").await.expect("partial body");
+        drop(a);
+        let err = FrameReader::new()
+            .next::<_, Value>(&mut b)
+            .await
+            .expect_err("must fail");
+        assert_eq!(err.kind(), ErrorKind::UnexpectedEof, "err = {err}");
+    }
+
+    #[tokio::test]
+    async fn frame_reader_reports_undecodable_json_as_bad_frame() {
+        let (mut a, mut b) = duplex(64);
+        a.write_all(&9u32.to_be_bytes()).await.expect("header");
+        a.write_all(b"{not json").await.expect("body");
+        let err = FrameReader::new()
+            .next::<_, Value>(&mut b)
+            .await
+            .expect_err("must fail");
         assert!(is_bad_frame(&err), "err = {err}");
     }
 }

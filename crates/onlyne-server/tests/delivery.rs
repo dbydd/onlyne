@@ -4,12 +4,12 @@
 use chrono::Utc;
 use onlyne_config::Spec;
 use onlyne_proto::{
-    AckArgs, AdminControl, AdminOp, AdminSend, Body, Causality, ClientOp, ControlArgs, ControlOp,
-    Delivery, Envelope, ErrorCode, Event, Frame, GatewayOp, HandshakeArgs, HealthArgs, HistoryArgs,
-    LedgerQuery, LedgerState, Lifecycle, MsgKind, OP_ID_CONFLICT_MESSAGE, Outcome, Principal,
-    PullArgs, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, RepairAck, RepairAdopt,
-    RepairFail, RepairRebind, RepairTarget, Report, ResBody, SessionProjection, ShutdownArgs,
-    Subscribe,
+    AckArgs, AdminControl, AdminOp, AdminReport, AdminSend, Body, Causality, ClientOp, ControlArgs,
+    ControlOp, Delivery, Envelope, ErrorCode, Event, Frame, GatewayOp, HandshakeArgs, HealthArgs,
+    HistoryArgs, LedgerQuery, LedgerState, Lifecycle, MsgKind, OP_ID_CONFLICT_MESSAGE, Outcome,
+    Principal, PullArgs, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, RepairAck,
+    RepairAdopt, RepairFail, RepairRebind, RepairTarget, Report, ResBody, SessionProjection,
+    ShutdownArgs, Subscribe,
 };
 use onlyne_server::state::{ChannelBinding, RoleConnection, Server, ServerInit};
 use onlyne_server::{events, faults, gateway_host, projection, relay, router, stale};
@@ -2551,6 +2551,80 @@ fn a_same_version_publish_applies_only_the_outcome_and_emits_the_stored_version(
     assert_eq!(event.projection, verdict);
 }
 
+/// An operator settling a session's task over the admin surface takes the path
+/// the session's own completion takes: the working row exits with the verdict
+/// and stays under the owning role, and the event names the operator.
+#[tokio::test]
+async fn an_admin_report_settles_a_working_task_and_names_the_operator() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    ready(&fixture.state, "builder", &task_id, 1);
+    let event_head = fixture.state.event_head();
+
+    let body = router::dispatch_admin(
+        &fixture.state,
+        &mut router::Session::default(),
+        AdminOp::Report(AdminReport {
+            from: "planner".into(),
+            report: Box::new(Report::Complete {
+                task_id: task_id.clone(),
+                outcome: Outcome::Done,
+                head: Some("settled by the operator".into()),
+                reply_to: None,
+                cluster_ref: None,
+            }),
+        }),
+    )
+    .await;
+    assert!(body.ok, "the admin report is answered ok: {body:?}");
+    assert_eq!(body.data.expect("data")["applied"], true);
+
+    let row = projection::session_row(&fixture.state, &task_id)
+        .expect("row")
+        .expect("present");
+    assert_eq!(row.public_lifecycle, Lifecycle::Exited);
+    assert_eq!(row.projection.outcome, Some(Outcome::Done));
+    assert_eq!(row.role.as_deref(), Some("builder"));
+
+    let page = events::replay(
+        &fixture.state,
+        event_head.max(0) as u64,
+        &events::EventFilter::default(),
+        10,
+    )
+    .expect("event replay");
+    let settled = page
+        .rows
+        .iter()
+        .find_map(|row| match &row.event {
+            Event::SessionState(event) if event.task_id == task_id => Some(event),
+            _ => None,
+        })
+        .expect("a session_state event for the settled task");
+    assert_eq!(settled.role, "builder");
+    assert_eq!(settled.admin, Some(Principal::role("planner")));
+}
+
+/// A session reporting on itself leaves the admin principal off its event.
+#[test]
+fn a_self_report_names_no_admin_principal() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    let event_head = fixture.state.event_head();
+    ready(&fixture.state, "builder", &task_id, 1);
+    let page = events::replay(
+        &fixture.state,
+        event_head.max(0) as u64,
+        &events::EventFilter::default(),
+        10,
+    )
+    .expect("event replay");
+    let Event::SessionState(event) = &page.rows[0].event else {
+        panic!("expected one session_state event");
+    };
+    assert_eq!(event.admin, None);
+}
+
 #[test]
 fn a_same_version_publish_skips_once_the_stored_row_carries_an_outcome() {
     let fixture = fixture();
@@ -3809,6 +3883,16 @@ async fn every_admin_arm_answers_without_internal_failure() {
         AdminOp::RepairAck(RepairAck {
             fault_id: 4242,
             reason: "test".to_string(),
+        }),
+        AdminOp::Report(AdminReport {
+            from: "planner".to_string(),
+            report: Box::new(Report::Complete {
+                task_id: task_id.clone(),
+                outcome: Outcome::Done,
+                head: None,
+                reply_to: None,
+                cluster_ref: None,
+            }),
         }),
         AdminOp::Shutdown(ShutdownArgs {
             reason: "test".to_string(),

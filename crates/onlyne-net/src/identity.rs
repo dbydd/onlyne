@@ -1,7 +1,9 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
-use std::fs;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::Path;
 
 use crate::NetError;
@@ -35,8 +37,7 @@ impl KeyPair {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), NetError> {
-        fs::write(path, self.0.to_bytes())?;
-        set_private_mode(path)
+        write_private_atomic(path, &self.0.to_bytes())
     }
 
     pub fn public_str(&self) -> String {
@@ -83,22 +84,66 @@ pub fn challenge_message(challenge: &[u8; 32], role: &str, protocol: u16) -> Vec
     message
 }
 
-fn set_private_mode(path: &Path) -> Result<(), NetError> {
+/// Replace `path` with `data` so that no reader ever sees a torn file or a
+/// window at umask permissions.
+///
+/// The temp file lives in the target directory so the rename stays on one
+/// filesystem, and is created with mode 0600 rather than chmodded afterward.
+/// The directory fsync makes the rename itself survive a crash.
+pub(crate) fn write_private_atomic(path: &Path, data: &[u8]) -> Result<(), NetError> {
+    let io_error = |error: io::Error| NetError::Io(format!("{}: {error}", path.display()));
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| NetError::Io(format!("{}: not a file path", path.display())))?;
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let mut temp_name = OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(format!(".tmp.{}", std::process::id()));
+    let temp_path = dir.join(temp_name);
+    // A crash of an earlier process with the same pid can leave this name behind.
+    match fs::remove_file(&temp_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(error)),
+    }
+    let written = write_new_private(&temp_path, data).and_then(|()| fs::rename(&temp_path, path));
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temp_path);
+        return Err(io_error(error));
+    }
+    sync_dir(dir).map_err(io_error)
+}
+
+fn write_new_private(path: &Path, data: &[u8]) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(path)?.permissions();
-        permissions.set_mode(0o600);
-        fs::set_permissions(path, permissions)?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    #[cfg(windows)]
+    // Windows: key files live in the user profile directory and inherit its
+    // ACL; there is no mode to set at creation.
+    let mut file = options.open(path)?;
+    file.write_all(data)?;
+    file.sync_all()
+}
+
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
     {
-        // Same-user processes can already read the key file. The identity key
-        // lives in the user profile directory and inherits its ACL; a chmod
-        // analogue would not tighten that.
-        let _ = path;
+        fs::File::open(dir)?.sync_all()
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        // Directory handles cannot be fsynced through std on Windows; NTFS
+        // journals the rename metadata.
+        let _ = dir;
+        Ok(())
+    }
 }
 
 pub(crate) fn decode_signature(text: &str) -> Result<Signature, NetError> {
@@ -109,4 +154,29 @@ pub(crate) fn decode_signature(text: &str) -> Result<Signature, NetError> {
         .try_into()
         .map_err(|_| NetError::Unauthorized("invalid signature length".to_string()))?;
     Ok(Signature::from_bytes(&bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn save_creates_owner_only_file_and_replaces_existing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.key");
+        fs::write(&path, b"stale world-readable bytes").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let key = KeyPair::from_seed([9; 32]);
+        key.save(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(fs::read(&path).unwrap(), [9; 32]);
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [OsString::from("identity.key")]);
+    }
 }

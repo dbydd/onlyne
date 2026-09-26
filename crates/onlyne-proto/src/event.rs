@@ -120,6 +120,10 @@ pub struct SessionStateEvent {
     pub generation: u64,
     pub seq: u64,
     pub projection: SessionProjection,
+    /// The operator who filed this write on the session's behalf over the
+    /// admin surface. Absent when the session reported on itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin: Option<Principal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -291,6 +295,7 @@ mod tests {
             generation: 1,
             seq: 2,
             projection: SessionProjection::default_working(),
+            admin: None,
         });
         assert_eq!(session.tier(), EventTier::Durable);
         let fault = Event::Fault(FaultEvent {

@@ -282,13 +282,20 @@ pub trait RoleIo {
     async fn recv_frame(&mut self) -> Result<Option<Frame<ClientOp>>, onlyne_net::NetError>;
 }
 
-impl RoleIo for TlsConn {
+/// A TLS role link plus the reader that keeps a partial frame alive while the
+/// serve loop's `select!` drops its read branch for an outbound frame.
+struct TlsRole {
+    conn: TlsConn,
+    reader: onlyne_frame::FrameReader,
+}
+
+impl RoleIo for TlsRole {
     async fn send_frame(&mut self, frame: &Frame) -> Result<(), onlyne_net::NetError> {
-        TlsConn::send_frame(self, frame).await
+        self.conn.send_frame(frame).await
     }
 
     async fn recv_frame(&mut self) -> Result<Option<Frame<ClientOp>>, onlyne_net::NetError> {
-        TlsConn::recv_frame(self).await
+        self.conn.recv_frame_with(&mut self.reader).await
     }
 }
 
@@ -298,7 +305,11 @@ pub async fn role_connection(
     connection: TlsConn,
     role: &str,
 ) -> anyhow::Result<()> {
-    role_connection_with_io(state, connection, role).await
+    let io = TlsRole {
+        conn: connection,
+        reader: onlyne_frame::FrameReader::new(),
+    };
+    role_connection_with_io(state, io, role).await
 }
 
 /// Serve one authenticated role connection over any [`RoleIo`].

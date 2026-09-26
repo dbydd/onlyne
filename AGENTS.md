@@ -215,7 +215,7 @@ in memory. Adoption requeue leaves those rows `in_flight` with their tickets reh
 link, which is how a link flap stops handing a running task to a second session. An absent or empty
 list requeues every unacknowledged row, so a client from an earlier build behaves as before.
 
-Admin op vocabulary has twenty closed verbs: nine reads plus `reload`, `send`, `control`, seven `repair_*` verbs with suffixes `inspect`, `adopt`, `rebind`, `retry`, `fail`, `close`, `ack`, plus `shutdown`:
+Admin op vocabulary has twenty-one closed verbs: nine reads plus `reload`, `send`, `control`, `report`, seven `repair_*` verbs with suffixes `inspect`, `adopt`, `rebind`, `retry`, `fail`, `close`, `ack`, plus `shutdown`:
 - `status`
 - `roles`
 - `sessions`
@@ -228,6 +228,7 @@ Admin op vocabulary has twenty closed verbs: nine reads plus `reload`, `send`, `
 - `reload`
 - `send`
 - `control`
+- `report`
 - `repair_inspect`
 - `repair_adopt`
 - `repair_rebind`
@@ -236,6 +237,8 @@ Admin op vocabulary has twenty closed verbs: nine reads plus `reload`, `send`, `
 - `repair_close`
 - `repair_ack`
 - `shutdown`
+
+Admin `report` files one session report as the `--from` role. The server settles it on the path a session's own `report` takes, so the row stays under the role that owns the task, and the `session_state` event it publishes carries that role as its `admin` principal. `onlyne complete` on the admin surface sends it.
 
 Gateway to server op vocabulary has five closed verbs:
 - `hello`

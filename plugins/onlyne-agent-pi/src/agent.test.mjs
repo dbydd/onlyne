@@ -119,10 +119,17 @@ async function waitFor(predicate, { timeoutMs = 2_000, stepMs = 5 } = {}) {
  * reports are never held: the handshake waits on them.
  * `handoffError` refuses every `handoff` with that error body, the way a client
  * that cannot find the task the session names would; with none, the fake answers
- * the child the proto documents.
+ * the child the proto documents. `failCompletions` refuses that many `complete`
+ * reports before answering the rest, the way a client whose settle failed would.
  */
 class FakeHost {
-  constructor({ coalesceAssign = null, holdCompletion = false, failSend = false, handoffError = null } = {}) {
+  constructor({
+    coalesceAssign = null,
+    holdCompletion = false,
+    failSend = false,
+    handoffError = null,
+    failCompletions = 0,
+  } = {}) {
     this.server = createServer((socket) => this.onConnection(socket));
     this.frames = [];
     this.sockets = new Set();
@@ -131,6 +138,7 @@ class FakeHost {
     this.holdCompletion = holdCompletion;
     this.failSend = failSend;
     this.handoffError = handoffError;
+    this.failCompletions = failCompletions;
     this.held = [];
   }
 
@@ -174,6 +182,15 @@ class FakeHost {
     }
     if (this.holdCompletion && frame.op === "report" && frame.args?.kind === "complete") {
       this.held.push({ socket, id: frame.id });
+      return;
+    }
+    if (this.failCompletions > 0 && frame.op === "report" && frame.args?.kind === "complete") {
+      this.failCompletions -= 1;
+      socket.write(encodeFrame({
+        reply_to: frame.id,
+        ok: false,
+        error: { code: "invalid", message: "settle refused" },
+      }));
       return;
     }
     if (this.failSend && frame.op === "send") {
@@ -270,11 +287,12 @@ async function startAgent({
   holdCompletion = false,
   failSend = false,
   handoffError = null,
+  failCompletions = 0,
   relay = null,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "pi-onlyne-agent-"));
   const socketPath = join(dir, "s");
-  const host = new FakeHost({ coalesceAssign, holdCompletion, failSend, handoffError });
+  const host = new FakeHost({ coalesceAssign, holdCompletion, failSend, handoffError, failCompletions });
   await host.listen(socketPath);
   const logs = [];
   const agent = new OnlyneAgent({
@@ -862,6 +880,31 @@ test("an explicit tool outcome wins and a second completion is refused", async (
   assert.equal(completes[0].data.outcome, "failed");
   // One session asks for one exit, even when a second completion is refused.
   assert.deepEqual(surface.calls.exits, ["failed"]);
+});
+
+// A refused report handed nothing over: the task stays open, the tool caller
+// sees the refusal, and the retry reports again and settles the task.
+test("a refused completion report leaves the task open for the retry", async () => {
+  const { agent, host, surface } = await startAgent({ failCompletions: 1 });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+  agent.onTurnStart();
+  agent.onTurnEnd();
+
+  await assert.rejects(() => agent.completeFromTool({ outcome: "done", text: "built it" }), /settle refused/);
+  assert.deepEqual(agent.status().tasks, [TASK_ID], "the refused task is still open");
+  assert.equal(agent.status().stats.completions, 0);
+  assert.deepEqual(surface.calls.exits, []);
+
+  const result = await agent.completeFromTool({ outcome: "done", text: "built it" });
+  assert.deepEqual(result, { taskId: TASK_ID, outcome: "done", head: "built it" });
+  const completes = host.of("report").filter((report) => report.kind === "complete");
+  assert.equal(completes.length, 2, "the retry reported again");
+  assert.deepEqual(agent.status().tasks, []);
+  assert.equal(agent.status().stats.completions, 1);
+  assert.deepEqual(surface.calls.exits, ["done"]);
 });
 
 // The completion body is what the tool call handed over. The sentence a turn
