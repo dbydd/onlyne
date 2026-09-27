@@ -16,9 +16,9 @@ use onlyne_net::conn::{ClientConn, ConnReadiness, dial};
 use onlyne_net::{ConnSettings, KeyPair, NetError};
 use onlyne_proto::{
     AckArgs, AdapterMsg, AgentPhase, AssignArgs, Body, Capability, Causality, ClientOp, ControlOp,
-    DeliveryPhase, Envelope, Frame, Handoff, HandshakeArgs, HostOp, Lifecycle, MsgKind, Outcome,
-    PROTOCOL_VERSION, Principal, RecoveryPhase, RecycleArgs, Report, ResBody, ResourcePhase,
-    SessionProjection, Welcome, new_envelope,
+    DeliveryPhase, Envelope, Frame, Handoff, HandshakeArgs, HostOp, Lifecycle, LiveSession,
+    MsgKind, Outcome, PROTOCOL_VERSION, Principal, RecoveryPhase, RecycleArgs, Report, ResBody,
+    ResourcePhase, SessionProjection, Welcome, new_envelope,
 };
 use onlyne_proto::{
     IgnoredReason, LifecycleEvent, Observation, TaskState, Verdict, Version, project,
@@ -54,7 +54,7 @@ pub use env::{
 // through this path, so the re-export exists for that module alone: ungated, it
 // is an unused import in every non-test build of the crate.
 #[cfg(test)]
-pub(crate) use outbound::hello_with_live_tasks;
+pub(crate) use outbound::hello_with_live_sessions;
 pub use outbound::{ClientLink, Outbox, send_frame};
 pub use projection::{
     note_intent_receipt, note_verdict, projection_of, sync_frame, sync_session, task_outcome_of,

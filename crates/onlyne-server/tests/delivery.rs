@@ -180,7 +180,16 @@ fn hello_args(role: &str) -> HandshakeArgs {
         agent: "test".to_string(),
         version: "1.0.0".to_string(),
         aggregate: false,
-        live_tasks: Vec::new(),
+        live_sessions: Vec::new(),
+    }
+}
+
+/// One session a client claims at `hello`, on the delivery it serves.
+fn live_session(task_id: &str) -> onlyne_proto::LiveSession {
+    onlyne_proto::LiveSession {
+        session_id: task_id.to_string(),
+        task_id: Some(task_id.to_string()),
+        suspended: false,
     }
 }
 
@@ -933,7 +942,7 @@ fn a_claimed_live_task_stays_in_flight_and_teardown_requeues_it() {
     let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
     let mut session = router::Session::with_sender(sender, "builder");
     let mut args = hello_args("builder");
-    args.live_tasks = vec![task_id];
+    args.live_sessions = vec![live_session(&task_id)];
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let reply = runtime.block_on(router::dispatch_client(
         &fixture.state,
@@ -993,7 +1002,7 @@ fn an_exited_publish_requeues_the_claimed_in_flight_row() {
     let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
     let mut session = router::Session::with_sender(sender, "builder");
     let mut args = hello_args("builder");
-    args.live_tasks = vec![task_id.clone()];
+    args.live_sessions = vec![live_session(&task_id)];
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let reply = runtime.block_on(router::dispatch_client(
         &fixture.state,
@@ -1337,7 +1346,7 @@ fn an_exited_publish_requeues_a_held_row_of_a_task_that_is_still_open() {
 }
 
 #[test]
-fn an_old_hello_json_without_live_tasks_requeues_like_today() {
+fn an_old_hello_json_without_live_sessions_requeues_like_today() {
     let raw = json!({
         "protocol": onlyne_proto::PROTOCOL_VERSION,
         "role": "builder",
@@ -1348,7 +1357,7 @@ fn an_old_hello_json_without_live_tasks_requeues_like_today() {
         "aggregate": false,
     });
     let args: HandshakeArgs = serde_json::from_value(raw).expect("old hello json");
-    assert!(args.live_tasks.is_empty());
+    assert!(args.live_sessions.is_empty());
 
     let fixture = fixture();
     let envelope = task("planner", "builder", "work");
@@ -2024,7 +2033,7 @@ fn stale_working_observer_records_fault_without_mutating_session() {
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let conn = rusqlite::Connection::open(fixture.state.ledger.path()).expect("open ledger");
     conn.execute(
-        "UPDATE sessions SET updated_at=?1 WHERE task_id=?2",
+        "UPDATE sessions SET updated_at=?1 WHERE session_id=(SELECT session_id FROM session_tasks WHERE task_id=?2)",
         rusqlite::params![old, task_id],
     )
     .expect("age session");
@@ -2039,7 +2048,7 @@ fn stale_working_observer_records_fault_without_mutating_session() {
         fixture
             .state
             .ledger
-            .get_session_row(&task_id)
+            .session_row_for_task(&task_id)
             .expect("session row")
             .is_some_and(|row| {
                 projection::row_from_write(&row).public_lifecycle == Lifecycle::Working
@@ -2059,7 +2068,7 @@ fn age_session(state: &onlyne_server::State, task_id: &str, age_secs: i64) {
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let conn = rusqlite::Connection::open(state.ledger.path()).expect("open ledger");
     conn.execute(
-        "UPDATE sessions SET updated_at=?1 WHERE task_id=?2",
+        "UPDATE sessions SET updated_at=?1 WHERE session_id=(SELECT session_id FROM session_tasks WHERE task_id=?2)",
         rusqlite::params![old, task_id],
     )
     .expect("age session");
@@ -2149,7 +2158,7 @@ fn observe_once_records_heartbeat_missing_for_an_online_role() {
     let row = fixture
         .state
         .ledger
-        .get_session_row(&task_id)
+        .session_row_for_task(&task_id)
         .expect("row")
         .expect("present");
     assert_eq!(
@@ -2526,7 +2535,7 @@ fn a_same_version_publish_applies_only_the_outcome_and_emits_the_stored_version(
     let row = fixture
         .state
         .ledger
-        .get_session_row(&task_id)
+        .session_row_for_task(&task_id)
         .expect("mirror read")
         .expect("mirror row");
     assert_eq!((row.generation, row.seq), (1, 7));
@@ -2597,7 +2606,9 @@ async fn an_admin_report_settles_a_working_task_and_names_the_operator() {
         .rows
         .iter()
         .find_map(|row| match &row.event {
-            Event::SessionState(event) if event.task_id == task_id => Some(event),
+            Event::SessionState(event) if event.task_id.as_deref() == Some(task_id.as_str()) => {
+                Some(event)
+            }
             _ => None,
         })
         .expect("a session_state event for the settled task");
@@ -2667,7 +2678,7 @@ fn a_same_version_publish_skips_once_the_stored_row_carries_an_outcome() {
     let row = fixture
         .state
         .ledger
-        .get_session_row(&task_id)
+        .session_row_for_task(&task_id)
         .expect("mirror read")
         .expect("mirror row");
     assert_eq!(
@@ -2686,7 +2697,7 @@ fn a_same_version_publish_refuses_a_dimension_change_with_an_outcome() {
     let before = fixture
         .state
         .ledger
-        .get_session_row(&task_id)
+        .session_row_for_task(&task_id)
         .expect("mirror read")
         .expect("mirror row");
     let event_head = fixture.state.event_head();
@@ -2707,7 +2718,7 @@ fn a_same_version_publish_refuses_a_dimension_change_with_an_outcome() {
     let after = fixture
         .state
         .ledger
-        .get_session_row(&task_id)
+        .session_row_for_task(&task_id)
         .expect("mirror read")
         .expect("mirror row");
     assert_eq!(after, before);
@@ -2830,8 +2841,21 @@ async fn a_fresh_read_answers_the_probed_value_and_a_plain_read_the_mirror() {
 
     // A probe that does not land answers the stored row inside the read's own
     // bound. It is never given a longer one: the bound is the operator's.
+    // A session of its own: one session serves one delivery, and the fixture's
+    // first task already holds the session this helper would name.
     let quiet = onlyne_proto::new_task_id();
-    ready(&fixture.state, "planner", &quiet, 1);
+    projection::report(
+        &fixture.state,
+        "planner",
+        &projection_publish(
+            quiet.clone(),
+            &format!("sess-{quiet}"),
+            1,
+            1,
+            ready_projection(),
+        ),
+    )
+    .expect("a mirror for a task whose probe never lands");
     let started = std::time::Instant::now();
     let silent = read(&fixture.state, &quiet, Some(300)).await;
     assert!(silent.ok, "{silent:?}");
@@ -2848,7 +2872,18 @@ async fn a_fresh_read_answers_the_probed_value_and_a_plain_read_the_mirror() {
     // A task no connected client owns has nobody to ask, so nothing is waited
     // on: the stored row comes back with the marker that says so.
     let unowned = onlyne_proto::new_task_id();
-    ready(&fixture.state, "builder", &unowned, 1);
+    projection::report(
+        &fixture.state,
+        "builder",
+        &projection_publish(
+            unowned.clone(),
+            &format!("sess-{unowned}"),
+            1,
+            1,
+            ready_projection(),
+        ),
+    )
+    .expect("a mirror for a task no connected client owns");
     let started = std::time::Instant::now();
     let offline = read(&fixture.state, &unowned, Some(10_000)).await;
     assert!(offline.ok, "{offline:?}");
@@ -3015,7 +3050,7 @@ fn a_heartbeat_report_publishes_the_sessions_row_through_the_router() {
     let row = fixture
         .state
         .ledger
-        .get_session_row(&task_id)
+        .session_row_for_task(&task_id)
         .expect("session read")
         .expect("the heartbeat published the session");
     assert_eq!((row.generation, row.seq), (1, 7));
@@ -3807,7 +3842,7 @@ async fn every_client_and_gateway_arm_answers_without_internal_failure() {
             agent: "onlyne-gateway-telegram".to_string(),
             version: "1.0.0".to_string(),
             aggregate: false,
-            live_tasks: Vec::new(),
+            live_sessions: Vec::new(),
         }),
         GatewayOp::RegisterChannel(onlyne_proto::RegisterChannelArgs {
             platform: "telegram".to_string(),

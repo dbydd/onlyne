@@ -112,7 +112,12 @@ pub fn sweep_once(state: &Arc<State>) -> anyhow::Result<Vec<GhostSweepRow>> {
 /// and the ledger's reading is what the row takes where the mirror carries none.
 /// The audit row's `outcome` names what the mirror finally reads.
 fn sweep_row(state: &Arc<State>, row: &ServerSessionRow) -> anyhow::Result<Option<GhostSweepRow>> {
-    let Some(ledger_state) = task_ledger_state(state, &row.task_id)? else {
+    // A row with no delivery on it has nothing to be settled against: the
+    // sweep's evidence is the ledger row of the task the session served.
+    let Some(task_id) = row.task_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(ledger_state) = task_ledger_state(state, task_id)? else {
         return Ok(None);
     };
     let Some(ledger_outcome) = settled_outcome(ledger_state) else {
@@ -121,21 +126,21 @@ fn sweep_row(state: &Arc<State>, row: &ServerSessionRow) -> anyhow::Result<Optio
     let outcome = crate::projection::projection_from_write(row)
         .outcome
         .unwrap_or(ledger_outcome);
-    if task_ledger_state(state, &row.task_id)? != Some(ledger_state) {
+    if task_ledger_state(state, task_id)? != Some(ledger_state) {
         tracing::debug!(
-            task = %row.task_id,
+            task = %task_id,
             ledger_state = %ledger_state,
             "the task's ledger row moved between the sweep's read and its write, so nothing is settled on stale evidence"
         );
         return Ok(None);
     }
-    let settled = faults::settle_task(state, &row.task_id, outcome, &sweep_reason(ledger_state))?;
+    let settled = faults::settle_task(state, task_id, outcome, &sweep_reason(ledger_state))?;
     let Some(settlement) = settled else {
         return Ok(None);
     };
     if settlement.generation != row.generation || settlement.seq_before != row.seq {
         tracing::debug!(
-            task = %row.task_id,
+            task = %task_id,
             generation = settlement.generation,
             seq_before = settlement.seq_before,
             "a write landed between the sweep's read and its write, so the pass records no audit row"
@@ -144,7 +149,7 @@ fn sweep_row(state: &Arc<State>, row: &ServerSessionRow) -> anyhow::Result<Optio
     }
     let audit = GhostSweepRow {
         id: 0,
-        task_id: row.task_id.clone(),
+        task_id: task_id.to_string(),
         role: row.role.clone(),
         session_id: row.session_id.clone(),
         generation: settlement.generation,

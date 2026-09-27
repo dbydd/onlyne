@@ -200,7 +200,7 @@ pub fn history(state: &State, args: &HistoryArgs) -> anyhow::Result<ReplayPage> 
 /// The task an event names, when it names one.
 pub fn event_task(event: &Event) -> Option<String> {
     match event {
-        Event::SessionState(session) => Some(session.task_id.clone()),
+        Event::SessionState(session) => session.task_id.clone(),
         Event::LedgerState(ledger) => ledger.task.clone(),
         Event::Fault(fault) => fault.task_id.clone(),
         Event::RolePresence(_) | Event::GatewayPresence { .. } | Event::SpecReloaded(_) => None,

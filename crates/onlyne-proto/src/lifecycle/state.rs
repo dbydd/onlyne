@@ -290,6 +290,12 @@ pub enum TaskState {
     Failed,
     /// Work cancelled by operator or supervisor.
     Cancelled,
+    /// Work waiting on something outside the delivery.
+    ///
+    /// The delivery's own verdict, never a synonym for `Failed`: a session that
+    /// ended a turn without completing leaves the work waiting, and a board
+    /// reads it as waiting rather than as failed.
+    Blocked,
 }
 
 /// Event/observation version. Ordering is lexicographic: generation first,

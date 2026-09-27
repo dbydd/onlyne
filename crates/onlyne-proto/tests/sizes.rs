@@ -33,7 +33,7 @@ fn hot_enums_stay_under_their_size_ceilings() {
 fn session_row_size_is_pinned() {
     assert_eq!(
         size_of::<SessionRow>(),
-        160,
+        184,
         "SessionRow layout changed; update the pin with the measured size"
     );
 }

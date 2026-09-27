@@ -343,10 +343,10 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
             generation: 0,
         });
         // The registry holds one link per role, so this hello says the link that
-        // carried any in-flight row of this role is gone. `live_tasks` is the
-        // live pane's declaration: those in-flight rows stay in_flight and their
-        // tickets are rebound to this link's generation. A re-delivery of a live
-        // task would open a second session. Every other in-flight row is requeued
+        // carried any in-flight row of this role is gone. `live_sessions` is
+        // the live pane's declaration: the row of every delivery those sessions
+        // are bound to stays in_flight and its ticket is rebound to this link's
+        // generation. A re-delivery of a live task would open a second session. Every other in-flight row is requeued
         // and its ticket dropped. A push marks its row `in_flight` before the
         // frame reaches a socket, and a push issued while the role's death is
         // still unprocessed leaves a row whose ticket names a connection that no
@@ -354,9 +354,14 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
         // registry generation has moved on, and `pull` passes by a row whose
         // ticket is still armed. This is the row half of what a clean `bye`
         // does; the link that is registering now keeps its registry entry and
-        // its `Online` presence below. An omitted `live_tasks` field is an empty
-        // list, which requeues every unacknowledged row the way 1.0.8 did.
-        let claimed: HashSet<String> = args.live_tasks.iter().cloned().collect();
+        // its `Online` presence below. An omitted `live_sessions` field is an
+        // empty list, which requeues every unacknowledged row: a session bound
+        // to no delivery has no row to keep in flight.
+        let claimed: HashSet<String> = args
+            .live_sessions
+            .iter()
+            .filter_map(|session| session.task_id.clone())
+            .collect();
         match relay::requeue_role_rows(state, &entry.role, &claimed) {
             Ok(requeued) if requeued > 0 => {
                 tracing::info!(

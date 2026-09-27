@@ -5,6 +5,12 @@
 //! [`SessionLedger`] is the seam the session reducer's persistence bridge writes
 //! them through. This crate implements the port; the client's reconcile module
 //! drives it.
+//!
+//! A stored session row answers for a session, which is the table's key in both
+//! databases; the delivery a session serves is a binding of its own. The port
+//! stays delivery-addressed because that is how the reducer holds a session —
+//! one tuple per delivery it opened — and the implementation resolves the
+//! delivery to its session through the binding.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,9 +18,10 @@ use serde::{Deserialize, Serialize};
 /// monotonic: `upsert_session` applies a row only when its `(generation, seq)` is
 /// strictly newer than the stored watermark, and reports whether the row changed.
 pub trait SessionLedger: Send + Sync {
-    /// Load one session row.
+    /// Load the session row serving one delivery.
     fn get_session(&self, task_id: &str) -> anyhow::Result<Option<SessionRecord>>;
-    /// Monotonic session upsert. Returns true when the row changed.
+    /// Monotonic session upsert, which also opens the delivery's binding.
+    /// Returns true when the row changed.
     fn upsert_session(&self, task_id: &str, version: &VersionedSession) -> anyhow::Result<bool>;
     /// Whether the task itself is tracked, so a stray report cannot conjure a row.
     fn task_is_known(&self, task_id: &str) -> anyhow::Result<bool>;
@@ -35,6 +42,8 @@ pub trait SessionLedger: Send + Sync {
 /// plus the task state that caller owns.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRecord {
+    /// The delivery this session serves, as the caller named it. Not the row's
+    /// key: the session id is.
     pub task_id: String,
     pub agent_state: String,
     pub delivery_state: String,

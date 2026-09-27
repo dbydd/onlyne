@@ -114,7 +114,12 @@ pub struct RolePresence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case", default)]
 pub struct SessionStateEvent {
-    pub task_id: String,
+    /// The delivery this session was serving when the write landed, read off
+    /// the row's binding. Absent for a session no delivery is bound to, and the
+    /// field keeps its place so a write that names a delivery still encodes to
+    /// the same bytes it always did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     pub role: String,
     pub session_id: String,
     pub generation: u64,
@@ -289,7 +294,7 @@ mod tests {
     #[test]
     fn durable_tiers_cover_ledger_and_session_only() {
         let session = Event::SessionState(SessionStateEvent {
-            task_id: new_task_id(),
+            task_id: Some(new_task_id()),
             role: "builder".into(),
             session_id: "s".into(),
             generation: 1,

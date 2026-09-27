@@ -138,12 +138,16 @@ impl AdapterSocket {
                 // durable store. A plugin that says hello after a restart seeds
                 // its own injections from this list instead of racing a second
                 // copy of work the host already dispatched.
-                // A store failure is logged by `hello_live_tasks` itself; the
+                // A store failure is logged by `hello_live_sessions` itself; the
                 // seed list then carries the memory half, which is all this
-                // process can still prove it serves.
-                let delivered_tasks = dispatch
-                    .hello_live_tasks()
-                    .unwrap_or_else(|_| dispatch.live_claim_from_slots());
+                // process can still prove it serves. A session bound to no
+                // delivery seeds nothing: there is no task to name.
+                let delivered_tasks: Vec<String> = dispatch
+                    .hello_live_sessions()
+                    .unwrap_or_else(|_| dispatch.live_claim_from_slots())
+                    .into_iter()
+                    .filter_map(|session| session.task_id)
+                    .collect();
                 Ok(HelloAck {
                     protocol: hello.protocol,
                     role,

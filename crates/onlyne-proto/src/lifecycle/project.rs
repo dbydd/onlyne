@@ -15,7 +15,8 @@ use crate::event::Lifecycle;
 /// Rules, evaluated in order:
 /// - Gone exits. A done task with an accepted delivery exits (receipt closed
 ///   the drain).
-/// - A begun task (Done/Failed/Cancelled), an in-flight intent
+/// - A task with an ending the session still carries (Done/Failed/Cancelled, or
+///   a blocked delivery whose work waits on something outside it), an in-flight intent
 ///   (Pending/Retrying/Exhausted), draining, running, and both recovery
 ///   substates all project `working`: the session still has open work or an
 ///   open fault line. A `Done` task whose receipt has not landed is open work —
@@ -35,7 +36,7 @@ pub fn project(
         return Lifecycle::Exited;
     }
     match task_state {
-        TaskState::Done | TaskState::Failed | TaskState::Cancelled => {
+        TaskState::Done | TaskState::Failed | TaskState::Cancelled | TaskState::Blocked => {
             return Lifecycle::Working;
         }
         TaskState::Pending => {}

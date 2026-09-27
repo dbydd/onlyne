@@ -108,6 +108,9 @@ pub fn task_state_of(outcome: Outcome) -> TaskState {
         Outcome::Done => TaskState::Done,
         Outcome::Failed => TaskState::Failed,
         Outcome::Cancelled => TaskState::Cancelled,
+        // A blocked delivery is a settled delivery whose work waits on
+        // something outside it, which is the task record's own blocked state.
+        Outcome::Blocked => TaskState::Blocked,
     }
 }
 
@@ -119,6 +122,7 @@ pub fn task_outcome_of(task_state: TaskState) -> Option<Outcome> {
         TaskState::Done => Some(Outcome::Done),
         TaskState::Failed => Some(Outcome::Failed),
         TaskState::Cancelled => Some(Outcome::Cancelled),
+        TaskState::Blocked => Some(Outcome::Blocked),
     }
 }
 

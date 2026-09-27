@@ -141,11 +141,11 @@ fn every_client_statement_runs_against_the_client_schema() {
     assert!(
         store
             .upsert_session(task_id, &version)
-            .describe("INSERT INTO sessions(...) ... ON CONFLICT(task_id)")
+            .describe("INSERT INTO sessions(...) ... ON CONFLICT(session_id)")
     );
     store
         .get_session(task_id)
-        .describe("SELECT ... FROM sessions WHERE task_id=?");
+        .describe("SELECT ... FROM sessions WHERE session_id=(SELECT ... FROM session_tasks)");
     store
         .open_task(&Causality::root(task_id.to_string()), "root")
         .describe("INSERT INTO task(...) ... ON CONFLICT(task_id) DO UPDATE");
@@ -176,7 +176,7 @@ fn every_client_statement_runs_against_the_client_schema() {
     );
     store
         .task_is_known(task_id)
-        .describe("SELECT COUNT(*) FROM sessions WHERE task_id=?");
+        .describe("SELECT COUNT(*) FROM session_tasks WHERE task_id=?");
     store
         .task_attempt(task_id)
         .describe("SELECT env_json,attempt FROM intents");
@@ -236,9 +236,9 @@ fn every_server_statement_runs_against_the_server_schema() {
         .describe("DELETE FROM roles WHERE name NOT IN (...)");
     store
         .project_session(&SessionWrite {
-            task_id: task_id.to_string(),
-            role: "worker".to_string(),
             session_id: session_id.to_string(),
+            task_id: Some(task_id.to_string()),
+            role: "worker".to_string(),
             generation: 1,
             seq: 1,
             agent_state: "booting".to_string(),
@@ -248,12 +248,19 @@ fn every_server_statement_runs_against_the_server_schema() {
             desired_json: "{}".to_string(),
             observed_json: "{}".to_string(),
             mismatch_count: 0,
+            last_seen: 1_789_000_000,
             updated_at: 1_789_000_000,
         })
-        .describe("INSERT INTO sessions(...) ON CONFLICT(task_id)");
+        .describe("INSERT INTO sessions(...) ON CONFLICT(session_id)");
     store
-        .get_session_row(task_id)
-        .describe("SELECT ... FROM sessions WHERE task_id=?");
+        .get_session_row(session_id)
+        .describe("SELECT ... FROM sessions WHERE session_id=?");
+    store.session_row_for_task(task_id).describe(
+        "SELECT ... FROM sessions WHERE session_id=(SELECT ... FROM session_tasks WHERE task_id=?)",
+    );
+    store
+        .open_binding_of(session_id)
+        .describe("SELECT ... FROM session_tasks WHERE session_id=? AND released_at IS NULL");
     store
         .list_sessions(Default::default())
         .describe("SELECT ... FROM sessions ORDER BY updated_at");
@@ -270,7 +277,7 @@ fn every_server_statement_runs_against_the_server_schema() {
             })
             .describe("SELECT ... FROM sessions WHERE lifecycle-from-observed_json=?")
             .iter()
-            .any(|row| row.task_id == task_id),
+            .any(|row| row.task_id.as_deref() == Some(task_id)),
         "a projection that cannot say its lifecycle reads back as created"
     );
     assert!(
@@ -281,8 +288,44 @@ fn every_server_statement_runs_against_the_server_schema() {
             })
             .describe("SELECT ... FROM sessions WHERE lifecycle-from-observed_json=?")
             .iter()
-            .all(|row| row.task_id != task_id),
+            .all(|row| row.task_id.as_deref() != Some(task_id)),
         "the same row is not working"
+    );
+    // One delivery at a time: taking the binding it already holds changes
+    // nothing, and releasing it leaves the row readable by the delivery that
+    // carried it — the reader of a settled delivery still asks for it.
+    assert!(
+        !store
+            .open_binding(session_id, task_id, 1_789_000_000)
+            .describe("INSERT INTO session_tasks(...) ... ON CONFLICT(session_id,task_id)")
+    );
+    assert!(
+        store
+            .release_binding(session_id, task_id, 1_789_000_100)
+            .describe("UPDATE session_tasks SET released_at=? WHERE session_id=? AND task_id=?")
+    );
+    assert!(
+        store
+            .session_row_for_task(task_id)
+            .describe("SELECT ... FROM sessions WHERE session_id=(SELECT ... FROM session_tasks WHERE task_id=?)")
+            .is_some_and(|row| row.session_id == session_id),
+        "a released binding still names the session that carried the delivery"
+    );
+    assert!(
+        store
+            .open_binding_of(session_id)
+            .describe("SELECT ... FROM session_tasks WHERE session_id=? AND released_at IS NULL")
+            .is_none(),
+        "a released session is on no delivery"
+    );
+    assert!(
+        store
+            .session_row_for_task(task_id)
+            .expect("the row reads")
+            .expect("the row is present")
+            .task_id
+            .is_none(),
+        "and its mirror row names no delivery either"
     );
 
     let mut env = envelope(

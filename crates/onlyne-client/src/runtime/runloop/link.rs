@@ -9,7 +9,7 @@ use crate::session::dispatch::{self, ClientLink};
 use anyhow::{Result, anyhow};
 use onlyne_net::conn::ConnReadiness;
 use onlyne_net::is_permanent;
-use onlyne_proto::{ClientOp, EventTier, Frame, Subscribe};
+use onlyne_proto::{ClientOp, EventTier, Frame, LiveSession, Subscribe};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -131,13 +131,16 @@ pub(super) async fn watch_readiness(link: ClientLink, state: RunState) -> Result
 /// rows, degraded to the slots alone when the store cannot answer. A failed
 /// query must never send an empty claim — the server would requeue every
 /// in_flight row this client still serves — so the memory half is always said,
-/// and the loss of the durable half is logged by `hello_live_tasks` itself.
-fn hello_claim(state: &RunState) -> Vec<String> {
-    state.dispatch.hello_live_tasks().unwrap_or_else(|error| {
-        let claim = state.dispatch.live_claim_from_slots();
-        tracing::warn!(error = %error, "hello claim degraded to the memory slots");
-        claim
-    })
+/// and the loss of the durable half is logged by `hello_live_sessions` itself.
+fn hello_claim(state: &RunState) -> Vec<LiveSession> {
+    state
+        .dispatch
+        .hello_live_sessions()
+        .unwrap_or_else(|error| {
+            let claim = state.dispatch.live_claim_from_slots();
+            tracing::warn!(error = %error, "hello claim degraded to the memory slots");
+            claim
+        })
 }
 
 /// Whether the transport answered from a fresh link or a live one.

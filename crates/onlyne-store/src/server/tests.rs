@@ -21,8 +21,11 @@ fn seeded() -> (tempfile::TempDir, ServerLedger) {
         let conn = ledger.conn().expect("connection");
         conn.execute_batch(&format!(
             "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{SEED})
-             INSERT INTO sessions(task_id,role,session_id,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,updated_at)
-             SELECT 't'||i,'planner','s'||i,1,i,'idle','none','attached','none','null','{{\"lifecycle\":\"working\"}}',0,printf('2026-09-22T%02d:00:00Z',i%24) FROM n;
+             INSERT INTO sessions(session_id,role,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,last_seen,updated_at)
+             SELECT 's'||i,'planner',1,i,'idle','none','attached','none','null','{{\"lifecycle\":\"working\"}}',0,printf('2026-09-22T%02d:00:00Z',i%24),printf('2026-09-22T%02d:00:00Z',i%24) FROM n;
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{SEED})
+             INSERT INTO session_tasks(session_id,task_id,bound_at,released_at)
+             SELECT 's'||i,'t'||i,printf('2026-09-22T%02d:00:00Z',i%24),NULL FROM n;
              WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{SEED})
              INSERT INTO ledger(msg_id,op_id,kind,from_json,to_json,attempt,state,enqueued_at)
              SELECT 'm'||i,'op'||i,'note','{{}}','{{}}',0,'queued',printf('2026-09-22T%02d:00:00Z',i%24) FROM n;

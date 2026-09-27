@@ -117,7 +117,7 @@ fn the_sweep_settles_a_working_row_whose_task_already_acked() {
 
     let row = state
         .ledger
-        .get_session_row(&task_id)
+        .session_row_for_task(&task_id)
         .expect("the row reads")
         .expect("the row is present");
     let projected = projection::row_from_write(&row);
@@ -250,7 +250,7 @@ fn the_sweep_keeps_the_verdict_the_client_published() {
 
     let row = state
         .ledger
-        .get_session_row(&task_id)
+        .session_row_for_task(&task_id)
         .expect("the row reads")
         .expect("the row is present");
     let projected = projection::row_from_write(&row);
@@ -296,7 +296,7 @@ fn the_sweep_leaves_a_working_row_whose_task_is_still_open() {
 
     let row = state
         .ledger
-        .get_session_row(&task_id)
+        .session_row_for_task(&task_id)
         .expect("the row reads")
         .expect("the row is present");
     assert_eq!(

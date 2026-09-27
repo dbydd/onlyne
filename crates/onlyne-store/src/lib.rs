@@ -17,7 +17,7 @@ pub use client::{CLIENT_DDL, ClientStore, INTENT_FLUSH_BATCH_SIZE, IntentRow, Ta
 pub use error::{StoreError, StoreResult, UNSUPPORTED_SCHEMA};
 pub use server::{
     Append, CursorRow, EventRecord, FaultQuery, GhostSweepRow, LedgerRow, RoleRow, SERVER_DDL,
-    ServerFaultRow, ServerLedger, ServerSessionRow, SessionWrite, rfc3339,
+    ServerFaultRow, ServerLedger, ServerSessionRow, SessionBindingRow, SessionWrite, rfc3339,
 };
 pub use session::{FaultRecord, SessionLedger, SessionRecord, VersionedSession};
 

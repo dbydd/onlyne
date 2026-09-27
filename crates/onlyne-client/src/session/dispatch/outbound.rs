@@ -64,17 +64,20 @@ pub(super) async fn transport_envelope(state: &DispatchState, envelope: &Envelop
 pub struct ClientLink {
     handle: ClientConn,
     welcome: Arc<Welcome>,
-    /// Skeleton of the routed `hello`. Its `live_tasks` is deliberately never
-    /// filled in: every send — `connect` and `authenticate` both — stamps a
-    /// freshly-read claim through [`hello_with_live_tasks`], so no caller reads
-    /// the stored list and a write-back here would only go stale.
+    /// Skeleton of the routed `hello`. Its `live_sessions` is deliberately
+    /// never filled in: every send — `connect` and `authenticate` both — stamps
+    /// a freshly-read claim through [`hello_with_live_sessions`], so no caller
+    /// reads the stored list and a write-back here would only go stale.
     hello: HandshakeArgs,
 }
 
 impl ClientLink {
     /// Dial, verify the certificate pin, sign the server challenge, then read
     /// the role slice with `hello`.
-    pub async fn connect(init: &ClientInit, live_tasks: Vec<String>) -> Result<Self, NetError> {
+    pub async fn connect(
+        init: &ClientInit,
+        live_sessions: Vec<LiveSession>,
+    ) -> Result<Self, NetError> {
         let keypair = KeyPair::load(&init.key_path)?;
         let settings = ConnSettings {
             agent: AGENT.to_string(),
@@ -91,13 +94,13 @@ impl ClientLink {
             agent: AGENT.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             aggregate: false,
-            live_tasks: Vec::new(),
+            live_sessions: Vec::new(),
         };
         let body = handle
             .request(
                 Frame::req(
                     String::new(),
-                    ClientOp::Hello(hello_with_live_tasks(&hello, live_tasks)),
+                    ClientOp::Hello(hello_with_live_sessions(&hello, live_sessions)),
                 ),
                 REQUEST_TIMEOUT,
             )
@@ -127,13 +130,13 @@ impl ClientLink {
     /// The net layer redials on its own, and a fresh connection carries no role
     /// binding until this frame lands, so a caller replays it whenever readiness
     /// returns (plan §7 line 310).
-    pub async fn authenticate(&self, live_tasks: Vec<String>) -> Result<(), NetError> {
+    pub async fn authenticate(&self, live_sessions: Vec<LiveSession>) -> Result<(), NetError> {
         let body = self
             .handle
             .request(
                 Frame::req(
                     String::new(),
-                    ClientOp::Hello(hello_with_live_tasks(&self.hello, live_tasks)),
+                    ClientOp::Hello(hello_with_live_sessions(&self.hello, live_sessions)),
                 ),
                 REQUEST_TIMEOUT,
             )
@@ -186,17 +189,18 @@ impl ClientLink {
     }
 }
 
-/// Stamp dispatch live-slot task ids onto a hello skeleton.
+/// Stamp the live sessions this client holds onto a hello skeleton.
 ///
-/// Slots exist from assign until release. A fresh process has none, so hello
-/// sends an empty list and the server requeues. A live client whose link
-/// flaps still holds its slots, so those rows stay in_flight.
-pub(crate) fn hello_with_live_tasks(
+/// Slots exist from assign until release. A fresh process holds none, so hello
+/// sends an empty list and the server requeues. A live client whose link flaps
+/// still holds its slots, so the deliveries those sessions are bound to stay
+/// in_flight.
+pub(crate) fn hello_with_live_sessions(
     hello: &HandshakeArgs,
-    live_tasks: Vec<String>,
+    live_sessions: Vec<LiveSession>,
 ) -> HandshakeArgs {
     let mut hello = hello.clone();
-    hello.live_tasks = live_tasks;
+    hello.live_sessions = live_sessions;
     hello
 }
 

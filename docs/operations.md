@@ -151,7 +151,7 @@ This layout keeps SQLite files and file locks on a local filesystem. It also kee
 
 When a role link dies, the server requeues that role's `in_flight` delivery rows to `queued`, where they wait for the next pull before delivery.
 
-Takeover requeueing when a new link lands follows the same path. The `live_tasks` field of `hello` declares the session tasks still alive in that client's memory; declared rows remain `in_flight`, and their delivery tickets are reattached to the new link's generation, so they are requeued normally if that link later terminates.
+Takeover requeueing when a new link lands follows the same path. The `live_sessions` field of `hello` declares the sessions still alive in that client's memory and the deliveries they are bound to; declared rows remain `in_flight`, and their delivery tickets are reattached to the new link's generation, so they are requeued normally if that link later terminates.
 
 If a declared session dies before completion, the client publishes an `exited` projection. When the server sees an `in_flight` row with the same `session_id` as that session ticket, it requeues the row, again through the gates below.
 
@@ -402,7 +402,7 @@ Inheritance occurs in exactly one place, `Causality::child_of`: both the CLI's `
 
 `labels` is the only core field the system does not interpret: at most 8 entries, keys no longer than 32 bytes, and values no longer than 256 bytes. `Envelope::validate` rejects an out-of-bounds value and names the field.
 
-New ledger-table columns are added in place, like `expires_at` and `requeued`, so the server's schema marker remains 4 and an existing state.db need not be rebuilt.
+New ledger-table columns are added in place, like `expires_at` and `requeued`, so a ledger change alone does not move the schema marker; the marker moves only when a table's own layout changes, and the server's is 5.
 
 ## Host resource reclamation
 
@@ -683,7 +683,7 @@ Onlyne 的 SQLite 数据库要放在本地文件系统。不要把 server root �
 
 role link 死亡时，服务端把该 role 的 `in_flight` 投递行重投回 `queued`，等待下一次 pull 再交付。
 
-新 link 落地时的接管重投走同一条路。`hello` 的 `live_tasks` 字段申报该 client 内存里仍活着的会话任务；被申报的行保持 `in_flight`，其 delivery ticket 改挂新 link 的 generation，此后该 link 终止时照常被重投。
+新 link 落地时的接管重投走同一条路。`hello` 的 `live_sessions` 字段申报该 client 内存里仍活着的会话，以及它们绑定的投递；被申报的行保持 `in_flight`，其 delivery ticket 改挂新 link 的 generation，此后该 link 终止时照常被重投。
 
 被申报的会话若在结清之前死亡，client 发布 `exited` 投影，服务端见到与该会话 ticket 同 `session_id` 的 `in_flight` 行时把该行重投回队列，同样经过下面的闸。
 
@@ -939,7 +939,7 @@ onlyne send --hop-budget <n> --label <k=v> --deadline <rfc3339> \
 
 `labels` 是核心唯一不解释的字段：上限 8 条，键不超过 32 字节，值不超过 256 字节，越界由 `Envelope::validate` 拒收并点名字段。
 
-ledger 表新增的列走 in-place 加列，与 `expires_at`、`requeued` 同样处理，因此 server 的 schema marker 仍是 4，已有的 state.db 不必重建。
+ledger 表新增的列走 in-place 加列，与 `expires_at`、`requeued` 同样处理，因此只加 ledger 列不会推动 schema marker；marker 只在表本身布局变化时前进，server 当前是 5。
 
 ## 宿主资源回收
 

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::session::{FaultRecord, SessionLedger, SessionRecord, VersionedSession};
 use chrono::{DateTime, Utc};
 use onlyne_proto::Causality;
+use onlyne_proto::LiveSession;
 use onlyne_proto::TaskState;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -12,15 +13,21 @@ use serde_json::Value;
 
 use crate::error::{StoreError, StoreResult};
 use crate::server::{
-    EventRecord, append_event_conn, event_head_conn, events_since_conn, open_connection, rfc3339,
-    string_tag,
+    EventRecord, OPEN_BINDING_TASK, SESSION_ID_FOR_TASK, append_event_conn, event_head_conn,
+    events_since_conn, open_connection, rfc3339, string_tag,
 };
 
 const CLIENT_MARKER: &str = "onlyne-client";
 /// The client DDL's own revision; the server store carries a separate one.
 /// Version 2 is the tuple rebuild: the `sessions` row lost its
 /// `public_lifecycle` column, and the task moved into a table of its own.
-const CLIENT_SCHEMA_VERSION: i64 = 2;
+/// Version 3 rekeys the client's mirror the way the server's is keyed: the
+/// `sessions` row is addressed by `session_id`, carries `last_seen`, and the
+/// deliveries the client's sessions serve live in `session_tasks`. A marker-2
+/// file holds rows under the old key and no bindings table, which cannot be
+/// read back as this layout, so it stops at the door on the same string every
+/// other mismatch prints.
+const CLIENT_SCHEMA_VERSION: i64 = 3;
 const DEFAULT_LIMIT: i64 = 100;
 /// Rows one flush pass takes from the intent queue.
 ///
@@ -31,10 +38,16 @@ const DEFAULT_LIMIT: i64 = 100;
 /// the next pass takes the rest.
 pub const INTENT_FLUSH_BATCH_SIZE: u32 = 100;
 
-pub const CLIENT_DDL: &str = r#"CREATE TABLE IF NOT EXISTS sessions(
-  task_id TEXT PRIMARY KEY,
-  role TEXT,
-  session_id TEXT NOT NULL,
+pub const CLIENT_DDL: &str = r#"-- The client's own mirror of the sessions it holds, keyed the way the server's
+-- mirror is: a session row answers for a session, and which delivery that
+-- session serves lives in `session_tasks` below.
+--
+-- Two columns are the client's alone, because only the process that holds a
+-- session can answer them: `backend` names the runtime's placement and
+-- `backend_ref` is the reference that runtime answers to. There is no `role`
+-- column: one client serves one role, and the workspace config owns that fact.
+CREATE TABLE IF NOT EXISTS sessions(
+  session_id TEXT PRIMARY KEY,
   generation INTEGER NOT NULL,
   seq INTEGER NOT NULL,
   agent_state TEXT NOT NULL,
@@ -44,14 +57,29 @@ pub const CLIENT_DDL: &str = r#"CREATE TABLE IF NOT EXISTS sessions(
   observed_json TEXT NOT NULL,
   backend TEXT,
   backend_ref TEXT,
-  -- docs/v1-PLAN.md:356 requires the (generation, seq) gate and the kernel's isolate-after-N and terminate-after-N policy needs a persisted counter, so this pair carries DEFAULT_ISOLATE_AFTER and DEFAULT_TERMINATE_AFTER from crates/onlyne-session/src/reconcile.rs; the fence at line 368 lists neither column.
+  -- The (generation, seq) gate. The reducer's isolate-after-N and
+  -- terminate-after-N policy needs a persisted counter, so this pair carries
+  -- DEFAULT_ISOLATE_AFTER and DEFAULT_TERMINATE_AFTER.
   desired_json TEXT NOT NULL,
   mismatch_count INTEGER NOT NULL DEFAULT 0,
-  -- docs/v1-PLAN.md:368 defers the session fields to the lifecycle store, whose SessionRecord.updated_at in crates/onlyne-session/src/reconcile.rs is i64 unix seconds, and the store encodes those seconds through its own helper on every write.
+  -- When this client last wrote about the session. A reader judges a row's
+  -- freshness by it, and the tuple's own version lives in the pair above.
+  last_seen TEXT NOT NULL,
+  -- When the tuple last moved. Both clocks are the kernel's unix seconds,
+  -- encoded through this crate's own helper on every write.
   updated_at TEXT NOT NULL
 );
--- Secondary index for the kernel's session-addressed delete and close paths; task_id stays the primary key so a task holds one session tuple.
-CREATE INDEX IF NOT EXISTS sessions_session_id_idx ON sessions(session_id);
+-- Which delivery a session serves: the same table, columns and keys as the
+-- server's, and the only place a binding lives on this side too.
+CREATE TABLE IF NOT EXISTS session_tasks(
+  session_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  bound_at TEXT NOT NULL,
+  released_at TEXT,
+  PRIMARY KEY (session_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS session_tasks_task_idx ON session_tasks(task_id);
+CREATE INDEX IF NOT EXISTS session_tasks_open_idx ON session_tasks(session_id, released_at);
 -- The task's own record. How its work ended is not a session dimension: the
 -- session tuple says what this session can prove about its agent, intent,
 -- resource, and recovery line, and `project` needs the task's verdict handed
@@ -67,7 +95,10 @@ CREATE TABLE IF NOT EXISTS task(
   parent_task TEXT,
   hop INTEGER NOT NULL DEFAULT 0,
   attempt INTEGER NOT NULL DEFAULT 0,
-  -- TaskState's own snake_case tag from crates/onlyne-session/src/lifecycle/state.rs. `pending` is the open state, and the settle write is the only thing that leaves it, so `settled_at IS NULL` and `task_state = 'pending'` answer the same question.
+  -- TaskState's own snake_case tag from onlyne-proto's lifecycle vocabulary.
+  -- `pending` is the open state, and the settle write is the only thing that
+  -- leaves it, so `settled_at IS NULL` and `task_state = 'pending'` answer the
+  -- same question.
   task_state TEXT NOT NULL,
   opened_at TEXT NOT NULL,
   settled_at TEXT
@@ -98,7 +129,8 @@ CREATE TABLE IF NOT EXISTS config_cache(
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
--- docs/v1-PLAN.md:368 lists no client faults table; the bridge records faults locally so a restart still shows them.
+-- The client keeps its own fault rows: the bridge records them locally, so a
+-- restart still shows what the process found wrong.
 CREATE TABLE IF NOT EXISTS faults(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id TEXT,
@@ -109,13 +141,15 @@ CREATE TABLE IF NOT EXISTS faults(
   desired_json TEXT,
   observed_json TEXT,
   intent TEXT,
-  -- docs/v1-PLAN.md:287 makes an exhausted intent observable through the local fault and the fault report; the attempt count is what an operator reads before intervening.
+  -- An exhausted intent is observable through the local fault and the fault
+  -- report; the attempt count is what an operator reads before intervening.
   attempt INTEGER,
   backend_ref TEXT,
   kind TEXT NOT NULL,
   reason TEXT NOT NULL,
   state TEXT NOT NULL,
-  -- docs/v1-PLAN.md:364 types the server's faults.created_at TEXT while FaultRecord.created_at in crates/onlyne-session/src/reconcile.rs is i64 unix seconds, and the store encodes those seconds through its own helper on every write.
+  -- Encoded from the kernel's unix seconds through this crate's own helper on
+  -- every write.
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS faults_task_kind_generation_idx ON faults(task_id,kind,generation);
@@ -382,7 +416,9 @@ impl ClientStore {
         let generation = generation as i64;
         let seq = seq as i64;
         let changed = conn.execute(
-            "UPDATE sessions SET generation=?,seq=?,updated_at=? WHERE task_id=? AND (? > generation OR (? = generation AND ? > seq))",
+            &format!(
+                "UPDATE sessions SET generation=?,seq=?,updated_at=? WHERE session_id={SESSION_ID_FOR_TASK} AND (? > generation OR (? = generation AND ? > seq))"
+            ),
             params![
                 generation,
                 seq,
@@ -474,20 +510,34 @@ impl ClientStore {
         Ok(rows)
     }
 
-    /// Task ids of sessions that are not yet exited, for hello live_tasks claim.
-    /// A fresh process after crash must declare these to prevent duplicate dispatch.
+    /// The sessions this client holds and can recover, for the `hello` claim:
+    /// each one's id, the delivery it is on now, and whether its process has
+    /// been released.
+    ///
+    /// A fresh process after a crash has empty slots and this table is the only
+    /// witness left that the sessions exist, so it must declare them to prevent
+    /// duplicate dispatch.
     ///
     /// Only claims sessions that can be recovered: those where the plugin has not
     /// yet mounted or has not started running. Sessions that were running when the
     /// process died cannot be recovered (the plugin process is gone), so they are
-    /// not claimed and will be requeued by the server.
-    pub fn active_session_tasks(&self) -> StoreResult<Vec<String>> {
+    /// not claimed and the server requeues their deliveries.
+    ///
+    /// Nothing suspends a session yet: a row here is a session this process
+    /// still has a runtime for, so every claim is unsuspended.
+    pub fn active_sessions(&self) -> StoreResult<Vec<LiveSession>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT task_id FROM sessions WHERE agent_state IN ('booting', 'ready') AND resource_state != 'closed' ORDER BY task_id"
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT session_id,{OPEN_BINDING_TASK} FROM sessions WHERE agent_state IN ('booting', 'ready') AND resource_state != 'closed' ORDER BY session_id"
+        ))?;
         let rows = stmt
-            .query_map(params![], |row| row.get::<_, String>(0))?
+            .query_map(params![], |row| {
+                Ok(LiveSession {
+                    session_id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    suspended: false,
+                })
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -500,28 +550,41 @@ impl ClientStore {
 }
 
 impl SessionLedger for ClientStore {
+    /// The session serving one delivery, read through its binding.
+    ///
+    /// The record answers for the delivery the caller named: a session that
+    /// served one delivery and then another still answers for the first, which
+    /// is what a caller holding that delivery's tuple asks for.
     fn get_session(&self, task_id: &str) -> anyhow::Result<Option<SessionRecord>> {
         let conn = self.conn()?;
         let row = conn
             .query_row(
-                "SELECT task_id,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,generation,seq,backend_ref,mismatch_count,updated_at FROM sessions WHERE task_id=?",
+                &format!(
+                    "SELECT {} FROM sessions WHERE session_id={SESSION_ID_FOR_TASK}",
+                    CLIENT_SESSION_COLUMNS
+                ),
                 params![task_id],
-                session_record_row,
+                |row| session_record_row(row, task_id),
             )
             .optional()?;
         Ok(row)
     }
 
+    /// Write one session tuple, and bind the delivery it is about.
+    ///
+    /// The row is addressed by the session's own id, which the backend
+    /// reference names; the delivery the tuple serves is the binding this write
+    /// opens, and a session serves one delivery at a time.
     fn upsert_session(&self, task_id: &str, version: &VersionedSession) -> anyhow::Result<bool> {
         let conn = self.conn()?;
         let (backend, session_id) = backend_parts(task_id, &version.backend_ref);
-        let changed = conn.execute(
-            "INSERT INTO sessions(task_id,role,session_id,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,observed_json,backend,backend_ref,desired_json,mismatch_count,updated_at) VALUES(?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?)
-             ON CONFLICT(task_id) DO UPDATE SET session_id=excluded.session_id,generation=excluded.generation,seq=excluded.seq,agent_state=excluded.agent_state,delivery_state=excluded.delivery_state,resource_state=excluded.resource_state,recovery_substate=excluded.recovery_substate,observed_json=excluded.observed_json,backend=COALESCE(excluded.backend,sessions.backend),backend_ref=excluded.backend_ref,desired_json=excluded.desired_json,mismatch_count=excluded.mismatch_count,updated_at=excluded.updated_at
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "INSERT INTO sessions(session_id,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,observed_json,backend,backend_ref,desired_json,mismatch_count,last_seen,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(session_id) DO UPDATE SET generation=excluded.generation,seq=excluded.seq,agent_state=excluded.agent_state,delivery_state=excluded.delivery_state,resource_state=excluded.resource_state,recovery_substate=excluded.recovery_substate,observed_json=excluded.observed_json,backend=COALESCE(excluded.backend,sessions.backend),backend_ref=excluded.backend_ref,desired_json=excluded.desired_json,mismatch_count=excluded.mismatch_count,last_seen=excluded.last_seen,updated_at=excluded.updated_at
              WHERE excluded.generation > sessions.generation OR (excluded.generation = sessions.generation AND excluded.seq > sessions.seq)",
             params![
-                task_id,
-                session_id,
+                &session_id,
                 version.generation,
                 version.seq,
                 version.agent_state,
@@ -533,16 +596,23 @@ impl SessionLedger for ClientStore {
                 version.backend_ref,
                 version.desired_json,
                 version.mismatch_count,
+                crate::server::unix_to_rfc3339(version.updated_at),
                 crate::server::unix_to_rfc3339(version.updated_at)
             ],
         )?;
+        if changed == 1 {
+            crate::server::open_binding_conn(&tx, &session_id, task_id, version.updated_at)?;
+        }
+        tx.commit()?;
         Ok(changed == 1)
     }
 
     fn task_is_known(&self, task_id: &str) -> anyhow::Result<bool> {
         let conn = self.conn()?;
+        // The binding is the record of a delivery having become a session here,
+        // which is exactly what this asks.
         let session_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE task_id=?",
+            "SELECT COUNT(*) FROM session_tasks WHERE task_id=?",
             params![task_id],
             |r| r.get(0),
         )?;
@@ -626,6 +696,16 @@ fn intent_task_matches(env_json: &str, task_id: &str) -> bool {
         == Some(task_id)
 }
 
+/// What the stored backend reference says about the session itself: the
+/// runtime's name for its placement, and the id this client files the session
+/// under.
+///
+/// `backend_ref` is the whole `SessionRef` a backend handed back, serialized,
+/// so its `task_id` is the session's own key on this side — a client-held
+/// session shares it with the delivery that opened it, which is also the id
+/// that delivery is reported under. A reference carrying neither leaves the
+/// session under the delivery it opened, which is the spelling this store has
+/// always used.
 fn backend_parts(task_id: &str, backend_ref: &str) -> (Option<String>, String) {
     let parsed = serde_json::from_str::<Value>(backend_ref).ok();
     let backend = parsed
@@ -642,20 +722,27 @@ fn backend_parts(task_id: &str, backend_ref: &str) -> (Option<String>, String) {
     (backend, session_id)
 }
 
-fn session_record_row(r: &Row<'_>) -> rusqlite::Result<SessionRecord> {
+/// One stored session tuple's columns, in the order [`session_record_row`]
+/// reads them.
+const CLIENT_SESSION_COLUMNS: &str = "agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,generation,seq,backend_ref,mismatch_count,updated_at";
+
+/// One stored tuple, stamped with the delivery the caller asked about: the row
+/// answers for a session, and the delivery it serves is the binding, which the
+/// caller holds.
+fn session_record_row(r: &Row<'_>, task_id: &str) -> rusqlite::Result<SessionRecord> {
     Ok(SessionRecord {
-        task_id: r.get(0)?,
-        agent_state: r.get(1)?,
-        delivery_state: r.get(2)?,
-        resource_state: r.get(3)?,
-        recovery_substate: r.get(4)?,
-        desired_json: r.get(5)?,
-        observed_json: r.get(6)?,
-        generation: r.get(7)?,
-        seq: r.get(8)?,
-        backend_ref: r.get(9)?,
-        mismatch_count: r.get(10)?,
-        updated_at: crate::server::rfc3339_to_unix(&r.get::<_, String>(11)?),
+        task_id: task_id.to_string(),
+        agent_state: r.get(0)?,
+        delivery_state: r.get(1)?,
+        resource_state: r.get(2)?,
+        recovery_substate: r.get(3)?,
+        desired_json: r.get(4)?,
+        observed_json: r.get(5)?,
+        generation: r.get(6)?,
+        seq: r.get(7)?,
+        backend_ref: r.get(8)?,
+        mismatch_count: r.get(9)?,
+        updated_at: crate::server::rfc3339_to_unix(&r.get::<_, String>(10)?),
     })
 }
 

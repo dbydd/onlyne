@@ -553,7 +553,7 @@ pub fn pull(
     let session_row = row
         .task
         .as_deref()
-        .map(|task| state.ledger.get_session_row(task))
+        .map(|task| state.ledger.session_row_for_task(task))
         .transpose()?
         .flatten();
     let ticket = DeliveryTicket {
@@ -1089,7 +1089,7 @@ fn row_labels(row: &LedgerRow) -> Option<BTreeMap<String, String>> {
 pub fn task_owner(state: &State, task_id: &str) -> Option<String> {
     state
         .ledger
-        .get_session_row(task_id)
+        .session_row_for_task(task_id)
         .ok()
         .flatten()
         .map(|row| row.role)

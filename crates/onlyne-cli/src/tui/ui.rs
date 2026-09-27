@@ -354,10 +354,13 @@ fn render_swarm_graph(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state:
         rows.push(
             Row::new(vec![
                 Cell::from(role_of(session)),
-                Cell::from(short(&session.task_id)),
+                Cell::from(short(session.task_id.as_deref().unwrap_or(""))),
                 Cell::from(state_label(session)),
                 Cell::from(agent_label(session)),
-                Cell::from(inflight_route(snapshot, &session.task_id)),
+                Cell::from(inflight_route(
+                    snapshot,
+                    session.task_id.as_deref().unwrap_or(""),
+                )),
             ])
             .style(style),
         );
@@ -1159,7 +1162,7 @@ mod tests {
 
     fn session(task: &str, lifecycle: Lifecycle, agent: AgentPhase) -> SessionRow {
         SessionRow {
-            task_id: task.into(),
+            task_id: Some(task.into()),
             role: Some("planner".into()),
             session_id: "s1".into(),
             generation: 1,
@@ -1168,6 +1171,7 @@ mod tests {
             projection: projection(lifecycle, agent),
             outcome: None,
             updated_at: Some(Utc::now().timestamp().to_string()),
+            last_seen: Some(Utc::now().timestamp().to_string()),
             heartbeat_stale: false,
             fresh: None,
         }

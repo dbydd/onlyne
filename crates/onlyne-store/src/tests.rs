@@ -81,7 +81,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-server".to_string(), 4, 1));
+        assert_eq!(marker, ("onlyne-server".to_string(), 5, 1));
 
         let (_dir, client_path) = temp_db("client.db");
         ClientStore::open(&client_path).unwrap();
@@ -94,7 +94,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-client".to_string(), 2, 1));
+        assert_eq!(marker, ("onlyne-client".to_string(), 3, 1));
     }
 
     #[test]
@@ -110,7 +110,7 @@ mod ledger_gates {
         let conn = Connection::open(&marker_path).unwrap();
         conn.execute("CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL)", []).unwrap();
         conn.execute(
-            "INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',2,1)",
+            "INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',4,1)",
             [],
         )
         .unwrap();
@@ -131,7 +131,7 @@ mod ledger_gates {
         let conn = Connection::open(&marker_path).unwrap();
         conn.execute("CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL)", []).unwrap();
         conn.execute(
-            "INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-client',1,1)",
+            "INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-client',2,1)",
             [],
         )
         .unwrap();
@@ -202,15 +202,15 @@ mod ledger_gates {
         let fresh = ServerLedger::open(&fresh_path, 14).unwrap();
         round_trip_family_metadata(&fresh, 30);
 
-        // The same five columns on a marker-4 ledger built without them, which
-        // is the ALTER branch a live server takes on open. The ordinary insert
+        // The same five columns on a current-marker ledger built without them,
+        // which is the ALTER branch a live server takes on open. The ordinary insert
         // names all five, so it lands only when the ALTER matches the
         // declaration name for name.
         let (_dir, path) = temp_db("server-family-migrated.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL);
-             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',4,1);
+             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',5,1);
              CREATE TABLE ledger(
                msg_id TEXT PRIMARY KEY,
                op_id TEXT UNIQUE,
@@ -275,7 +275,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-server".to_string(), 4, 1));
+        assert_eq!(marker, ("onlyne-server".to_string(), 5, 1));
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(ledger)")
             .unwrap()
@@ -813,9 +813,9 @@ mod ledger_gates {
         assert!(
             ledger
                 .project_session(&SessionWrite {
-                    task_id: task_id.clone(),
-                    role: "builder".to_string(),
                     session_id: "sess-1".to_string(),
+                    task_id: Some(task_id.clone()),
+                    role: "builder".to_string(),
                     generation: 3,
                     seq: 9,
                     agent_state: "gone".to_string(),
@@ -825,6 +825,7 @@ mod ledger_gates {
                     desired_json: "null".to_string(),
                     observed_json: stored_projection.to_string(),
                     mismatch_count: 0,
+                    last_seen: 1_789_000_000,
                     updated_at: 1_789_000_000,
                 })
                 .unwrap()
@@ -833,7 +834,7 @@ mod ledger_gates {
         assert!(
             ledger
                 .publish_mirror_outcome(
-                    &task_id,
+                    "sess-1",
                     verdict_projection,
                     stored_projection,
                     1_789_000_100,
@@ -843,7 +844,7 @@ mod ledger_gates {
         assert!(
             !ledger
                 .publish_mirror_outcome(
-                    &task_id,
+                    "sess-1",
                     r#"{"lifecycle":"exited","agent":"gone","outcome":"done"}"#,
                     stored_projection,
                     1_789_000_200,
@@ -852,11 +853,25 @@ mod ledger_gates {
         );
 
         let row = ledger
-            .get_session_row(&task_id)
+            .get_session_row("sess-1")
             .unwrap()
             .expect("the mirror row");
         assert_eq!(row.observed_json, verdict_projection);
         assert_eq!((row.generation, row.seq), (3, 9));
+        assert_eq!(
+            row.task_id.as_deref(),
+            Some(task_id.as_str()),
+            "the row answers for a session and names the delivery it is bound to"
+        );
+        assert_eq!(
+            ledger
+                .open_binding_of("sess-1")
+                .unwrap()
+                .expect("the open binding")
+                .task_id,
+            task_id,
+            "the delivery a session serves is the binding, not a column"
+        );
     }
 
     #[test]
@@ -865,9 +880,9 @@ mod ledger_gates {
         let ledger = ServerLedger::open(&path, 14).unwrap();
         let task_id = new_uuid(30);
         let write = SessionWrite {
-            task_id: task_id.clone(),
-            role: "builder".to_string(),
             session_id: "8b1c".to_string(),
+            task_id: Some(task_id.clone()),
+            role: "builder".to_string(),
             generation: 1,
             seq: 4,
             agent_state: "running".to_string(),
@@ -881,6 +896,7 @@ mod ledger_gates {
             })
             .unwrap(),
             mismatch_count: 0,
+            last_seen: 1_789_000_000,
             updated_at: 1_789_000_000,
         };
         assert!(ledger.project_session(&write).unwrap());
@@ -893,7 +909,7 @@ mod ledger_gates {
                 })
                 .unwrap()
                 .iter()
-                .any(|row| row.task_id == task_id)
+                .any(|row| row.task_id.as_deref() == Some(task_id.as_str()))
         };
         let created = || {
             ledger
@@ -904,7 +920,7 @@ mod ledger_gates {
                 })
                 .unwrap()
                 .iter()
-                .any(|row| row.task_id == task_id)
+                .any(|row| row.task_id.as_deref() == Some(task_id.as_str()))
         };
         assert!(working() && !created(), "the key inside the mirror decides");
 
@@ -917,8 +933,8 @@ mod ledger_gates {
         // out of a `working` one.
         let conn = Connection::open(&path).unwrap();
         conn.execute(
-            "UPDATE sessions SET observed_json='not json' WHERE task_id=?",
-            params![task_id],
+            "UPDATE sessions SET observed_json='not json' WHERE session_id=?",
+            params![write.session_id],
         )
         .unwrap();
         drop(conn);
@@ -1497,12 +1513,12 @@ mod ledger_gates {
     }
 
     #[test]
-    fn ensure_schema_adds_expires_at_in_place_on_a_version_4_file() {
+    fn ensure_schema_adds_expires_at_in_place_on_a_current_marker_file() {
         let (_dir, path) = temp_db("server.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL);
-             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',4,1);
+             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',5,1);
              CREATE TABLE ledger(
                msg_id TEXT PRIMARY KEY,
                op_id TEXT UNIQUE,
@@ -1536,7 +1552,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-server".to_string(), 4, 1));
+        assert_eq!(marker, ("onlyne-server".to_string(), 5, 1));
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(ledger)")
             .unwrap()
@@ -1568,12 +1584,12 @@ mod ledger_gates {
     }
 
     #[test]
-    fn ensure_schema_adds_requeued_in_place_on_a_version_4_file() {
+    fn ensure_schema_adds_requeued_in_place_on_a_current_marker_file() {
         let (_dir, path) = temp_db("server.db");
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "CREATE TABLE schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL);
-             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',4,1);
+             INSERT INTO schema_marker(name,version,protocol_version) VALUES('onlyne-server',5,1);
              CREATE TABLE ledger(
                msg_id TEXT PRIMARY KEY,
                op_id TEXT UNIQUE,
@@ -1608,7 +1624,7 @@ mod ledger_gates {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(marker, ("onlyne-server".to_string(), 4, 1));
+        assert_eq!(marker, ("onlyne-server".to_string(), 5, 1));
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(ledger)")
             .unwrap()

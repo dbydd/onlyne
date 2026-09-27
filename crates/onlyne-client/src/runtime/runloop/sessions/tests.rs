@@ -58,6 +58,17 @@ async fn ran_a_turn(state: &RunState, task_id: &str) {
     .expect("the beat is handled");
 }
 
+/// Whether the hello claim this client would send names a session serving this
+/// delivery.
+fn claimed(state: &RunState, task_id: &str) -> bool {
+    state
+        .dispatch
+        .hello_live_sessions()
+        .expect("store answers")
+        .iter()
+        .any(|session| session.task_id.as_deref() == Some(task_id))
+}
+
 /// Real ACP v1 peer used by the client-level delivery test below. The ready
 /// marker is written by the test outbox when the Ready report leaves; the
 /// child checks it at the instant it receives the prompt, making the causal
@@ -397,11 +408,7 @@ async fn a_redelivered_finished_task_is_acked_and_runs_nowhere() {
 
     accept_delivery(&state, &delivery("msg-first")).await;
     assert!(
-        state
-            .dispatch
-            .hello_live_tasks()
-            .expect("store answers")
-            .contains(&task_id),
+        claimed(&state, &task_id),
         "the first delivery takes a session for the task"
     );
 
@@ -430,11 +437,7 @@ async fn a_redelivered_finished_task_is_acked_and_runs_nowhere() {
     accept_delivery(&state, &delivery("msg-again")).await;
 
     assert!(
-        !state
-            .dispatch
-            .hello_live_tasks()
-            .expect("store answers")
-            .contains(&task_id),
+        !claimed(&state, &task_id),
         "the redelivery stages no session on the role's idle slot"
     );
     let acked = pending_intent_ops(&state)
@@ -516,11 +519,7 @@ async fn a_task_ended_without_a_completion_stays_eligible_for_its_retry() {
     .await;
 
     assert!(
-        state
-            .dispatch
-            .hello_live_tasks()
-            .expect("store answers")
-            .contains(&task_id),
+        claimed(&state, &task_id),
         "the retried task takes a session again"
     );
 }
@@ -650,11 +649,7 @@ async fn a_gated_delivery_owes_no_answer_and_an_unservable_one_is_refused() {
     accept_delivery(&state, &delivery("msg-gated")).await;
 
     assert!(
-        !state
-            .dispatch
-            .hello_live_tasks()
-            .expect("store answers")
-            .contains(&gated),
+        !claimed(&state, &gated),
         "a client that is not taking work stages no session for it"
     );
     let owed = pending_intent_ops(&state).expect("pending intents");
@@ -670,11 +665,7 @@ async fn a_gated_delivery_owes_no_answer_and_an_unservable_one_is_refused() {
     state.accept_new.store(true, Ordering::SeqCst);
     accept_delivery(&state, &delivery("msg-gated")).await;
     assert!(
-        state
-            .dispatch
-            .hello_live_tasks()
-            .expect("store answers")
-            .contains(&gated),
+        claimed(&state, &gated),
         "the requeued row runs once the link is back"
     );
 

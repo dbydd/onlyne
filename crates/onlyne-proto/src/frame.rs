@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn event_frame_keeps_seq_beside_the_typed_event() {
         let event = Event::SessionState(SessionStateEvent {
-            task_id: new_task_id(),
+            task_id: Some(new_task_id()),
             role: "builder".into(),
             session_id: "s1".into(),
             generation: 1,

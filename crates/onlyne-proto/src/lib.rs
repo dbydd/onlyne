@@ -66,10 +66,10 @@ pub use lifecycle::{
 pub use ops::{
     AckArgs, AdminControl, AdminOp, AdminReport, AdminSend, ByeArgs, ClientOp, ControlArgs,
     ConversationInfo, Delivery, FreshRead, GatewayOp, GhostSweep, HandshakeArgs, HealthArgs,
-    HistoryArgs, LedgerEntry, LedgerQuery, PullArgs, PullReply, QueryFaultsArgs, QueryRolesArgs,
-    QuerySessionsArgs, Receipt, RegisterChannelArgs, RepairAck, RepairAdopt, RepairFail,
-    RepairRebind, RepairTarget, Report, RoleInfo, SessionProjection, SessionRow, ShutdownArgs,
-    Subscribe, Welcome,
+    HistoryArgs, LedgerEntry, LedgerQuery, LiveSession, PullArgs, PullReply, QueryFaultsArgs,
+    QueryRolesArgs, QuerySessionsArgs, Receipt, RegisterChannelArgs, RepairAck, RepairAdopt,
+    RepairFail, RepairRebind, RepairTarget, Report, RoleInfo, SessionProjection, SessionRow,
+    ShutdownArgs, Subscribe, Welcome,
 };
 
 pub use payload::{GRAMMAR_V2, Handoff, MAX_REPORT_HANDOFFS, MAX_REPORT_LINES, PayloadV2};

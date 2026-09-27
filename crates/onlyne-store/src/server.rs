@@ -28,10 +28,15 @@ use crate::transition_allowed;
 /// stops at the door on the same string every other mismatch prints.
 /// The ledger's five family-metadata columns — `family`, `hop_budget`,
 /// `origin`, `deadline`, `labels_json` — were applied in place beside
-/// `expires_at` and `requeued`, so a file at the current marker keeps opening
-/// and the marker stays 4.
+/// `expires_at` and `requeued`, so they never moved the marker.
+/// Version 5 rekeys the mirror: a session row is addressed by `session_id`
+/// rather than by the delivery it happens to serve, carries `last_seen` beside
+/// `updated_at`, and the deliveries it serves are recorded in `session_tasks`.
+/// A marker-4 file holds rows under the old key and no bindings table, which
+/// cannot be read back as this layout, so it stops at the door on the same
+/// string every other mismatch prints.
 /// The client store keeps its own revision.
-const SERVER_SCHEMA_VERSION: i64 = 4;
+const SERVER_SCHEMA_VERSION: i64 = 5;
 const PROTOCOL_VERSION: i64 = 1;
 const SERVER_MARKER: &str = "onlyne-server";
 const DEFAULT_LIMIT: i64 = 100;
@@ -45,31 +50,55 @@ pub const SERVER_DDL: &str = r#"CREATE TABLE IF NOT EXISTS roles(
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions(
-  task_id TEXT PRIMARY KEY,
+  session_id TEXT PRIMARY KEY,
   role TEXT NOT NULL,
-  session_id TEXT NOT NULL,
   generation INTEGER NOT NULL,
   seq INTEGER NOT NULL,
   agent_state TEXT NOT NULL,
   delivery_state TEXT NOT NULL,
   resource_state TEXT NOT NULL,
   recovery_substate TEXT NOT NULL,
-  -- docs/v1-PLAN.md:356 requires the (generation, seq) gate and the kernel's isolate-after-N and terminate-after-N policy needs a persisted counter, so this pair carries DEFAULT_ISOLATE_AFTER and DEFAULT_TERMINATE_AFTER from crates/onlyne-session/src/reconcile.rs; the fence at line 354 omits both columns.
+  -- The (generation, seq) gate. The session reducer's isolate-after-N and
+  -- terminate-after-N policy needs a persisted counter, so this pair carries
+  -- DEFAULT_ISOLATE_AFTER and DEFAULT_TERMINATE_AFTER.
   desired_json TEXT NOT NULL,
-  -- docs/v1-PLAN.md:354 lists `public_lifecycle TEXT` among the session columns, and this row carried one beside the four dimensions it came from. The tuple rebuild took the duplicate back: this column holds the client's published projection whole, lifecycle included, and every reader of the mirror parses its lifecycle out of here.
+  -- The client's published projection whole, lifecycle included: there is no
+  -- column beside it to fall back to, and every reader of the mirror parses the
+  -- lifecycle out of these bytes.
   observed_json TEXT NOT NULL,
   mismatch_count INTEGER NOT NULL,
-  -- docs/v1-PLAN.md:354 types this column TEXT while SessionRecord.updated_at in crates/onlyne-session/src/reconcile.rs is i64 unix seconds, and the store encodes those seconds through its own helper on every write.
+  -- The mirror's own freshness: what a reader judges a stale row by. v1's
+  -- mirror could be hours old and read as current.
+  last_seen TEXT NOT NULL,
+  -- When the projection content last moved. A beat that only refreshes
+  -- `last_seen` leaves it alone.
   updated_at TEXT NOT NULL
 );
--- Secondary index for session-addressed reads; task_id is the primary key per docs/v1-PLAN.md:354, and a re-keyed session can appear on two task rows.
-CREATE INDEX IF NOT EXISTS sessions_session_id_idx ON sessions(session_id);
+-- The role-addressed reads: one role's sessions, which the note rule and the
+-- stale scan ask for.
+CREATE INDEX IF NOT EXISTS sessions_role_idx ON sessions(role);
 -- The order `list_sessions` reads in, ascending so the read walks it backwards:
 -- a descending index does not satisfy `updated_at DESC, rowid DESC` — SQLite
 -- leaves a `TEMP B-TREE FOR LAST TERM` and spills it to a temporary file on
 -- every read, and a reader that polls once a second turns that into megabytes
 -- per second of writes nothing asked for.
 CREATE INDEX IF NOT EXISTS sessions_updated_idx ON sessions(updated_at);
+-- Which delivery a session serves, and which sessions have served a delivery.
+-- The mirror row answers for a session; this table is the only place a
+-- delivery binding lives, so a session that served one delivery and then
+-- another is one row here twice rather than two mirror rows.
+CREATE TABLE IF NOT EXISTS session_tasks(
+  session_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  bound_at TEXT NOT NULL,
+  released_at TEXT,
+  PRIMARY KEY (session_id, task_id)
+);
+-- The reverse read: the session serving a task.
+CREATE INDEX IF NOT EXISTS session_tasks_task_idx ON session_tasks(task_id);
+-- The open binding of one session: at most one row per session is unreleased,
+-- because a session serves one delivery at a time.
+CREATE INDEX IF NOT EXISTS session_tasks_open_idx ON session_tasks(session_id, released_at);
 CREATE TABLE IF NOT EXISTS ledger(
   msg_id TEXT PRIMARY KEY,
   op_id TEXT UNIQUE,
@@ -85,7 +114,8 @@ CREATE TABLE IF NOT EXISTS ledger(
   reason TEXT,
   enqueued_at TEXT NOT NULL,
   acked_at TEXT,
-  -- docs/v1-PLAN.md:358 declares body_json TEXT NOT NULL while line 360 retains the body until acked plus retention_days and then sets NULL, so the document argues with itself and the code keeps the retention rule.
+  -- Nullable because retention pruning clears an acknowledged body after the
+  -- cutoff.
   body_json TEXT,
   -- Causality's hop count from the root task. `parent_task` alone gives the
   -- chain's shape, not its depth; `onlyne handoff` reads both back to extend
@@ -94,8 +124,7 @@ CREATE TABLE IF NOT EXISTS ledger(
   -- Persisted expiry deadline of a ttl note, so a restarted server can re-arm
   -- its sweep.
   expires_at TEXT,
-  -- Times this row has moved from in_flight back to queued. Applied in place
-  -- so the marker stays 2.
+  -- Times this row has moved from in_flight back to queued.
   requeued INTEGER NOT NULL DEFAULT 0,
   -- The family's root task id, read off the envelope's causality. `parent_task`
   -- gives the chain's shape, and this names the arc every hop of one run
@@ -140,7 +169,8 @@ CREATE TABLE IF NOT EXISTS faults(
   kind TEXT NOT NULL,
   reason TEXT NOT NULL,
   state TEXT NOT NULL,
-  -- docs/v1-PLAN.md:364 types this column TEXT while FaultRecord.created_at in crates/onlyne-session/src/reconcile.rs is i64 unix seconds, and the store encodes those seconds through its own helper on every write.
+  -- Encoded from the kernel's unix seconds through this crate's own helper on
+  -- every write.
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS faults_task_kind_generation_idx ON faults(task_id,kind,generation);
@@ -183,11 +213,19 @@ pub struct RoleRow {
     pub updated_at: String,
 }
 
+/// One mirror row as a writer hands it over, and as a reader gets it back.
+///
+/// The address is `session_id`, which is the table's key: a session serves one
+/// delivery at a time, and the deliveries it serves live in `session_tasks`
+/// rather than in this row. `task_id` is the delivery the write is about — the
+/// binding a writer opens — and on a read it is the delivery the session is
+/// serving now, derived from its open `session_tasks` row and absent when the
+/// session is on no delivery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionWrite {
-    pub task_id: String,
-    pub role: String,
     pub session_id: String,
+    pub task_id: Option<String>,
+    pub role: String,
     pub generation: i64,
     pub seq: i64,
     pub agent_state: String,
@@ -197,10 +235,27 @@ pub struct SessionWrite {
     pub desired_json: String,
     pub observed_json: String,
     pub mismatch_count: i64,
+    /// When the mirror last saw this session, in unix seconds. Stored as the
+    /// RFC 3339 text the crate's helpers produce.
+    pub last_seen: i64,
+    /// When the projection content last moved, in unix seconds.
     pub updated_at: i64,
 }
 
 pub type ServerSessionRow = SessionWrite;
+
+/// One `session_tasks` row: which delivery a session serves, and whether it
+/// still serves it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionBindingRow {
+    pub session_id: String,
+    pub task_id: String,
+    /// When this session took the delivery, in unix seconds.
+    pub bound_at: i64,
+    /// When it stopped serving it, in unix seconds. `None` while the delivery
+    /// is the one the session is on.
+    pub released_at: Option<i64>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerRow {
@@ -463,29 +518,96 @@ impl ServerLedger {
         Ok(conn.execute(&sql, params_from_iter(args))?)
     }
 
+    /// Write one mirror row, and bind the delivery the write carries.
+    ///
+    /// The row is addressed by session id and the `(generation, seq)` gate is
+    /// the row's own, as it was when the row answered for a task. A write that
+    /// lands binds its delivery in the same transaction: a session serves one
+    /// delivery at a time, so taking this one releases whatever the session was
+    /// on before. A write the gate refuses changes nothing, the binding
+    /// included — the row it was refused by is the newer word.
     pub fn project_session(&self, write: &SessionWrite) -> StoreResult<bool> {
         let conn = self.conn()?;
-        let changed = conn.execute(
-            "INSERT INTO sessions(task_id,role,session_id,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-             ON CONFLICT(task_id) DO UPDATE SET role=excluded.role,session_id=excluded.session_id,generation=excluded.generation,seq=excluded.seq,agent_state=excluded.agent_state,delivery_state=excluded.delivery_state,resource_state=excluded.resource_state,recovery_substate=excluded.recovery_substate,desired_json=excluded.desired_json,observed_json=excluded.observed_json,mismatch_count=excluded.mismatch_count,updated_at=excluded.updated_at
-             WHERE excluded.generation > sessions.generation OR (excluded.generation = sessions.generation AND excluded.seq > sessions.seq)",
-            params![
-                write.task_id,
-                write.role,
-                write.session_id,
-                write.generation,
-                write.seq,
-                write.agent_state,
-                write.delivery_state,
-                write.resource_state,
-                write.recovery_substate,
-                write.desired_json,
-                write.observed_json,
-                write.mismatch_count,
-                unix_to_rfc3339(write.updated_at)
-            ],
-        )?;
-        Ok(changed == 1)
+        let tx = conn.unchecked_transaction()?;
+        let changed = project_session_conn(&tx, write)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Move one mirror row to the session the write names, and write it there.
+    ///
+    /// This is what `repair rebind` means once a row is addressed by its
+    /// session: the operator says the delivery is now carried by another
+    /// session, so the row moves to that address instead of a second row
+    /// appearing beside it. The bindings move with it, since they name the same
+    /// session. A row already sitting at the new address is the one being
+    /// replaced, so it goes first: the operator's word is the newer fact.
+    pub fn rebind_session(&self, from_session_id: &str, write: &SessionWrite) -> StoreResult<bool> {
+        let conn = self.conn()?;
+        let tx = conn.unchecked_transaction()?;
+        if from_session_id != write.session_id {
+            tx.execute(
+                "DELETE FROM session_tasks WHERE session_id=?",
+                params![write.session_id],
+            )?;
+            tx.execute(
+                "DELETE FROM sessions WHERE session_id=?",
+                params![write.session_id],
+            )?;
+            tx.execute(
+                "UPDATE session_tasks SET session_id=? WHERE session_id=?",
+                params![write.session_id, from_session_id],
+            )?;
+            tx.execute(
+                "UPDATE sessions SET session_id=? WHERE session_id=?",
+                params![write.session_id, from_session_id],
+            )?;
+        }
+        let changed = project_session_conn(&tx, write)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Take one delivery for a session: a `session_tasks` row with `bound_at`.
+    ///
+    /// Answers whether the binding moved, which a pair already open does not.
+    pub fn open_binding(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        bound_at: i64,
+    ) -> StoreResult<bool> {
+        let conn = self.conn()?;
+        Ok(open_binding_conn(&conn, session_id, task_id, bound_at)? > 0)
+    }
+
+    /// Stop serving one delivery: its `session_tasks` row gets `released_at`.
+    ///
+    /// Only an open binding is released, so the first release is the one the
+    /// row keeps and a second call changes nothing.
+    pub fn release_binding(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        released_at: i64,
+    ) -> StoreResult<bool> {
+        let conn = self.conn()?;
+        Ok(release_binding_conn(&conn, session_id, task_id, released_at)? == 1)
+    }
+
+    /// The delivery a session is on now, when it is on one.
+    ///
+    /// At most one binding of a session is open, so the order here only decides
+    /// which row a hand-written pair of open bindings answers with.
+    pub fn open_binding_of(&self, session_id: &str) -> StoreResult<Option<SessionBindingRow>> {
+        let conn = self.conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT session_id,task_id,bound_at,released_at FROM session_tasks WHERE session_id=? AND released_at IS NULL ORDER BY bound_at DESC,task_id DESC LIMIT 1",
+                params![session_id],
+                session_binding_row,
+            )
+            .optional()?)
     }
 
     /// Publish a late mirror verdict when the stored projection bytes still
@@ -493,29 +615,52 @@ impl ServerLedger {
     /// session version while `observed_json` carries the task verdict.
     pub fn publish_mirror_outcome(
         &self,
-        task_id: &str,
+        session_id: &str,
         observed_json: &str,
         expected_observed_json: &str,
         updated_at: i64,
     ) -> StoreResult<bool> {
         let conn = self.conn()?;
         let changed = conn.execute(
-            "UPDATE sessions SET observed_json=?,updated_at=? WHERE task_id=? AND observed_json=?",
+            "UPDATE sessions SET observed_json=?,updated_at=? WHERE session_id=? AND observed_json=?",
             params![
                 observed_json,
                 unix_to_rfc3339(updated_at),
-                task_id,
+                session_id,
                 expected_observed_json
             ],
         )?;
         Ok(changed == 1)
     }
 
-    pub fn get_session_row(&self, task_id: &str) -> StoreResult<Option<ServerSessionRow>> {
+    /// One mirror row, addressed by its session id.
+    pub fn get_session_row(&self, session_id: &str) -> StoreResult<Option<ServerSessionRow>> {
         let conn = self.conn()?;
         let row = conn
             .query_row(
-                "SELECT task_id,role,session_id,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,updated_at FROM sessions WHERE task_id=?",
+                &format!(
+                    "SELECT {} FROM sessions WHERE session_id=?",
+                    session_columns()
+                ),
+                params![session_id],
+                session_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// The mirror row serving one delivery, read through its binding.
+    ///
+    /// A reader asks "the session serving this task"; the binding is where that
+    /// fact lives, and the row's own `task_id` is derived from it either way.
+    pub fn session_row_for_task(&self, task_id: &str) -> StoreResult<Option<ServerSessionRow>> {
+        let conn = self.conn()?;
+        let row = conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM sessions WHERE session_id={SESSION_ID_FOR_TASK}",
+                    session_columns()
+                ),
                 params![task_id],
                 session_row,
             )
@@ -528,7 +673,13 @@ impl ServerLedger {
         let mut clauses = Vec::new();
         let mut args = Vec::new();
         if let Some(task_id) = filter.task_id {
-            clauses.push("task_id=?".to_string());
+            // The delivery filter asks which session served the task, which is
+            // the bindings table's answer. Both spellings of a binding count: a
+            // delivery that ended still names the session that carried it, and
+            // a reader of a settled delivery still asks for it.
+            clauses.push(
+                "session_id IN (SELECT session_id FROM session_tasks WHERE task_id=?)".to_string(),
+            );
             args.push(SqlValue::Text(task_id));
         }
         if let Some(role) = filter.role {
@@ -1261,13 +1412,119 @@ const FAULT_COLUMNS: &str = "id,task_id,role,session_id,generation,seq,desired_j
 const GHOST_SWEEP_COLUMNS: &str =
     "id,task_id,role,session_id,generation,seq_before,seq_after,outcome,evidence,swept_at";
 
+/// The delivery one session is serving right now, as a subquery over its
+/// bindings: an unbound session answers with nothing, which is the state a
+/// claim reports as a session with no delivery.
+///
+/// No ordering: at most one binding of a session is open, which is what
+/// `open_binding_conn` maintains, and an ordered subquery would have SQLite
+/// spill a sorter into a temporary file on every listing read.
+pub(crate) const OPEN_BINDING_TASK: &str =
+    "(SELECT st.task_id FROM session_tasks st WHERE st.session_id=sessions.session_id
+   AND st.released_at IS NULL LIMIT 1)";
+
+/// One mirror row's columns, as every read of the table selects them.
+///
+/// `task_id` is not a column of `sessions`: it is the delivery the row is
+/// labelled with — the one its session is on now, selected in the second
+/// position `session_row` reads.
+pub(crate) fn session_columns() -> String {
+    format!(
+        "session_id,{OPEN_BINDING_TASK},\
+         role,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,\
+         desired_json,observed_json,mismatch_count,last_seen,updated_at"
+    )
+}
+
+/// The session serving one task, as a subquery over the bindings.
+///
+/// The open binding is the session on that delivery now; the fallback to the
+/// last binding taken keeps a settled delivery readable, exactly as the row it
+/// used to be keyed by stayed readable.
+pub(crate) const SESSION_ID_FOR_TASK: &str = "(SELECT session_id FROM session_tasks WHERE task_id=?
+   ORDER BY (released_at IS NULL) DESC, bound_at DESC, session_id DESC LIMIT 1)";
+
+/// Apply one mirror write, and bind its delivery when the write lands.
+///
+/// Shared by the plain write and the operator's rebind, which differ only in
+/// where the row is addressed before the write.
+fn project_session_conn(conn: &Connection, write: &SessionWrite) -> StoreResult<bool> {
+    let changed = conn.execute(
+        "INSERT INTO sessions(session_id,role,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,last_seen,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(session_id) DO UPDATE SET role=excluded.role,generation=excluded.generation,seq=excluded.seq,agent_state=excluded.agent_state,delivery_state=excluded.delivery_state,resource_state=excluded.resource_state,recovery_substate=excluded.recovery_substate,desired_json=excluded.desired_json,observed_json=excluded.observed_json,mismatch_count=excluded.mismatch_count,last_seen=excluded.last_seen,updated_at=excluded.updated_at
+         WHERE excluded.generation > sessions.generation OR (excluded.generation = sessions.generation AND excluded.seq > sessions.seq)",
+        params![
+            write.session_id,
+            write.role,
+            write.generation,
+            write.seq,
+            write.agent_state,
+            write.delivery_state,
+            write.resource_state,
+            write.recovery_substate,
+            write.desired_json,
+            write.observed_json,
+            write.mismatch_count,
+            unix_to_rfc3339(write.last_seen),
+            unix_to_rfc3339(write.updated_at)
+        ],
+    )?;
+    if changed == 1 {
+        if let Some(task_id) = write.task_id.as_deref() {
+            open_binding_conn(conn, &write.session_id, task_id, write.last_seen)?;
+        }
+    }
+    Ok(changed == 1)
+}
+
+/// Take one delivery for a session, releasing whatever it was on before.
+///
+/// A session serves one delivery at a time, so this is the one place that rule
+/// is enforced: the session's other open binding is released at the clock this
+/// take carries. A pair already open stays as it stands — its `bound_at` is
+/// when this session took that delivery, not when it was last written about —
+/// and a pair whose binding was released is taken again under this clock.
+pub(crate) fn open_binding_conn(
+    conn: &Connection,
+    session_id: &str,
+    task_id: &str,
+    bound_at: i64,
+) -> StoreResult<usize> {
+    let at = unix_to_rfc3339(bound_at);
+    conn.execute(
+        "UPDATE session_tasks SET released_at=? WHERE session_id=? AND released_at IS NULL AND task_id<>?",
+        params![at, session_id, task_id],
+    )?;
+    Ok(conn.execute(
+        "INSERT INTO session_tasks(session_id,task_id,bound_at,released_at) VALUES(?,?,?,NULL)
+         ON CONFLICT(session_id,task_id) DO UPDATE SET bound_at=excluded.bound_at,released_at=NULL
+         WHERE session_tasks.released_at IS NOT NULL",
+        params![session_id, task_id, at],
+    )?)
+}
+
+/// Stop serving one delivery. Only an open binding is released, so the first
+/// release is the one the row keeps.
+pub(crate) fn release_binding_conn(
+    conn: &Connection,
+    session_id: &str,
+    task_id: &str,
+    released_at: i64,
+) -> StoreResult<usize> {
+    Ok(conn.execute(
+        "UPDATE session_tasks SET released_at=? WHERE session_id=? AND task_id=? AND released_at IS NULL",
+        params![unix_to_rfc3339(released_at), session_id, task_id],
+    )?)
+}
+
 /// The sessions listing read, as SQL. Named so the caller and the plan test run
 /// one text: the order's tie key is the primary key because an explicit `rowid`
 /// cannot be an index column, and an order SQLite cannot satisfy from an index
 /// makes it spill a sorter to a temporary file on every read.
 fn sessions_list_sql(where_sql: &str) -> String {
     format!(
-        "SELECT task_id,role,session_id,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,updated_at FROM sessions{where_sql} ORDER BY updated_at DESC,rowid DESC LIMIT ?"
+        "SELECT {} FROM sessions{where_sql} ORDER BY updated_at DESC,rowid DESC LIMIT ?",
+        session_columns()
     )
 }
 
@@ -1333,11 +1590,13 @@ fn role_row(r: &Row<'_>) -> rusqlite::Result<RoleRow> {
     })
 }
 
+/// One [`session_columns`] row. `task_id` is the derived binding, so it is the
+/// second column rather than one of the table's own.
 fn session_row(r: &Row<'_>) -> rusqlite::Result<ServerSessionRow> {
     Ok(ServerSessionRow {
-        task_id: r.get(0)?,
-        role: r.get(1)?,
-        session_id: r.get(2)?,
+        session_id: r.get(0)?,
+        task_id: r.get(1)?,
+        role: r.get(2)?,
         generation: r.get(3)?,
         seq: r.get(4)?,
         agent_state: r.get(5)?,
@@ -1347,7 +1606,19 @@ fn session_row(r: &Row<'_>) -> rusqlite::Result<ServerSessionRow> {
         desired_json: r.get(9)?,
         observed_json: r.get(10)?,
         mismatch_count: r.get(11)?,
-        updated_at: rfc3339_to_unix(&r.get::<_, String>(12)?),
+        last_seen: rfc3339_to_unix(&r.get::<_, String>(12)?),
+        updated_at: rfc3339_to_unix(&r.get::<_, String>(13)?),
+    })
+}
+
+fn session_binding_row(r: &Row<'_>) -> rusqlite::Result<SessionBindingRow> {
+    Ok(SessionBindingRow {
+        session_id: r.get(0)?,
+        task_id: r.get(1)?,
+        bound_at: rfc3339_to_unix(&r.get::<_, String>(2)?),
+        released_at: r
+            .get::<_, Option<String>>(3)?
+            .map(|text| rfc3339_to_unix(&text)),
     })
 }
 
@@ -1544,6 +1815,7 @@ fn parse_outcome(value: &str) -> Option<Outcome> {
         "done" => Some(Outcome::Done),
         "failed" => Some(Outcome::Failed),
         "cancelled" => Some(Outcome::Cancelled),
+        "blocked" => Some(Outcome::Blocked),
         _ => None,
     }
 }

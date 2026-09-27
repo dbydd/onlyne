@@ -40,7 +40,9 @@ pub(super) fn stored_close_reason(
     match stored_task_state(inner, task_id) {
         TaskState::Pending => None,
         TaskState::Done => Some(crate::backend::CloseReason::Completed),
-        TaskState::Failed => Some(crate::backend::CloseReason::Fault),
+        // A blocked delivery leaves the work owed, which is what a fault reason
+        // names here, exactly as it does for a failed one.
+        TaskState::Failed | TaskState::Blocked => Some(crate::backend::CloseReason::Fault),
         TaskState::Cancelled => Some(crate::backend::CloseReason::Cancelled),
     }
 }
@@ -59,7 +61,9 @@ pub(super) fn stored_close_reason(
 fn grace_close_reason(inner: &DispatchInner, task_id: &str) -> crate::backend::CloseReason {
     match stored_task_state(inner, task_id) {
         TaskState::Done => crate::backend::CloseReason::Completed,
-        TaskState::Pending | TaskState::Failed => crate::backend::CloseReason::Fault,
+        TaskState::Pending | TaskState::Failed | TaskState::Blocked => {
+            crate::backend::CloseReason::Fault
+        }
         TaskState::Cancelled => crate::backend::CloseReason::Cancelled,
     }
 }

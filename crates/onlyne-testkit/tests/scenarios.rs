@@ -729,7 +729,9 @@ allowed_targets = ["planner"]"#,
         .expect("query sessions before the client returns");
     for task in &queued {
         assert!(
-            !before_return.iter().any(|row| &row.task_id == task),
+            !before_return
+                .iter()
+                .any(|row| row.task_id.as_deref() == Some(task)),
             "task {task} has no session before its client returns: {before_return:?}"
         );
     }
@@ -800,7 +802,10 @@ allowed_targets = ["planner"]"#,
         .await
         .expect("query sessions after the queue drained");
     for task in &queued {
-        let count = served.iter().filter(|row| &row.task_id == task).count();
+        let count = served
+            .iter()
+            .filter(|row| row.task_id.as_deref() == Some(task))
+            .count();
         assert_eq!(
             count, 1,
             "task {task} ran in exactly one session, not {count}: {served:?}"

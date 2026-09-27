@@ -139,3 +139,140 @@ externally visible contract:
 
 A v1 database (marker 4 server / 2 client) is refused with the byte-exact
 `onlyne: unsupported schema; v1.0.0 does not migrate`.
+
+---
+
+## Slice 2: `drive` and `placement` replace `backend`
+
+The plan's §"驱动与放置" lines 253-289.
+
+v1's `backend` enum presses two questions into one value: *how the client talks to the
+runtime* (`acp` is a way of talking) and *where the runtime process is displayed*
+(`herdr`, `orca`, `zellij` are places). `headless` is `exec` under another name. A role
+therefore cannot say "an ACP agent, started by the client, with no pane", which is the
+ordinary ACP shape.
+
+### Interface
+
+**Drive is a property of the runtime and lives in the spec** (`crates/onlyne-config`,
+`spec.toml`). `[[client]].session_command` and `[[client]].timeout`'s command half are
+replaced by one table per role:
+
+```toml
+[[client]]
+role = "builder"
+
+[client.runtime]
+drive = "plugin"          # plugin | acp | exec
+command = ["pi", "--mode", "rpc", …]   # placeholders {session} and {task} keep working
+```
+
+**Placement is a property of the machine and lives in the workspace config**
+(`<workspace>/.onlyne/config.toml`):
+
+```toml
+placement = "herdr"       # herdr | orca | zellij | headless | external
+```
+
+An absent `placement` probes `herdr`, `orca`, `zellij` in that order and falls back to
+`headless`. An absent `drive` is `plugin`, which is what every role in the tree is today.
+
+The `backend` key is **deleted** from both files. A configuration that still carries it is
+refused with the file and line and a message naming the replacement — not silently
+ignored, because a cluster that keeps running under a policy nobody set is the failure
+mode this slice exists to prevent.
+
+`acp` pairs only with `headless`, and the configuration validator refuses every other
+combination by name. The reason is physical: stdio carries the ACP channel and cannot also
+be a pane's terminal.
+
+`ONLYNE_BACKEND` keeps working for tests and for a host that has no terminal host to
+probe; it now selects **placement**, not a fused backend.
+
+### Acceptance
+
+- Every combination in the plan's `drive × placement` table is either accepted or refused
+  with the validator's own message; a table-driven test walks the matrix.
+- `acp × headless` runs a session to `acked` through the exec-driven ACP path.
+- A workspace with `placement = "external"` starts no process of its own and accepts a
+  plugin that dials in.
+- A config carrying `backend` is refused, with the line number, in both files.
+
+---
+
+## Slice 3: what reaches the model, and how a turn ends
+
+The plan's §"投递格式与角色能力" lines 291-334 and §"事件钩子" lines 336-351. This is the
+slice that removes the reason a model reads itself as a relay node, so its contracts are
+textual and must be asserted byte for byte.
+
+Three parts, landable in this order.
+
+### 3a. One delivery template
+
+The client renders delivery text from **one** template; v1 rendered it once per plugin
+(JavaScript in the pi plugin, Rust in the ACP backend). Task id, hop, budget, and
+generation leave the body — a tool call carries them — and upstream content is always
+quoted and labelled as material. The exact shape is the plan's block at line 314.
+
+Model-visible template text is English, matching the runtime's system prompt. The template
+is the one place in this system where wording is a contract: a **golden-text test** pins
+the rendered bytes for a delivery with a body, one reference block, and one attachment.
+
+A delivery with no upstream reference material must not render an empty labelled block.
+
+### 3b. Obligations as tools
+
+- **pi** keeps three tools (`onlyne_send`, `onlyne_handoff`, `onlyne_complete`). Their
+  descriptions state effect and precondition only — no identity language, no protocol
+  vocabulary, no urging.
+- **ACP** sessions mount `onlyne mcp` through `session/new`'s `mcpServers`, which every ACP
+  agent must support. The client issues the token and passes it in the child's
+  environment; the `tools` mount kind carries it (`AGENTS.md` §8).
+- **Role prose is injected at the runtime's instruction layer**, not as one conversation
+  message: for pi, through the runtime's system-prompt extension point; for ACP, written
+  into the workspace instruction file before the session opens.
+- **payload-v2 is deleted**: `out/<task-id>.md`, the grammar block, `onlyne report
+  check|write|path`, and the `onlyne-role-payload-v2` skill all go. Its invariants (one
+  verdict per turn, handoff lines naming their recipient) move into the client-side check
+  the `complete` tool performs, so a malformed completion is refused by the client rather
+  than discovered by a file read.
+
+### 3c. One turn-end rule
+
+`complete(outcome, summary, details?, files?)`:
+
+- `summary` is one display line; `details` is the full result (≤ 64 KiB) delivered
+  verbatim to the next hop and the originator; `files` is absolute paths.
+- The ledger's 200-character head is a display field and appears in **no** model-visible
+  text.
+
+- An explicit `complete` is the main path.
+- A turn that ends without one gets **one** neutral nudge:
+  `If this task is finished, report it with onlyne_complete; if something is missing, say what.`
+- A second turn ending without one settles the delivery: `oneshot` becomes `blocked`
+  (`Outcome::Blocked`, added in slice 1), while `task` and `role` sessions go idle and the
+  board shows "waiting".
+- A turn that ends in a `handoff` without a `complete` travels the same path — the nudge,
+  then the same settlement.
+
+Each step publishes an event: `turn_end_without_complete`, `delivery_blocked`, `handoff`.
+What to *do* about a blocked delivery is operator policy and belongs to hooks, never to
+the delivery path.
+
+Constraints the client enforces while handling a tool call (hop budget, relay
+requirement) refuse with a message naming what is missing. The plan moves these checks
+here from the pi plugin, where they were the plugin's private guard.
+
+### Acceptance
+
+- The golden-text test pins the rendered delivery, including the no-reference-material
+  case.
+- A scripted session that never calls `complete` receives exactly one nudge and then
+  settles `blocked`; its events are asserted in order.
+- A session that hands off and never completes follows the same two steps.
+- An ACP session reaches `onlyne mcp`'s tools through `mcpServers` and completes through
+  them.
+- No file under `.onlyne/out/` is written by any path, and grep finds no reader of it.
+- A `complete` carrying a `details` body over the cap is refused with the cap named, and
+  one at the cap passes.

@@ -117,7 +117,7 @@ impl Row {
 #[derive(Default)]
 struct Cluster {
     rows: Vec<Row>,
-    claims: Vec<Vec<String>>,
+    claims: Vec<Vec<onlyne_proto::LiveSession>>,
     reports: Vec<Report>,
     /// The envelopes the client sent, which is where a task's completion travels:
     /// the terminal receipt is a `Completion` addressed to the task's origin, not a
@@ -161,8 +161,12 @@ impl Cluster {
     /// queue and their tickets are dropped (`relay::requeue_role_rows` plus the
     /// `keep_deliveries` that makes a requeued row claimable again).
     fn hello(&mut self, args: &HandshakeArgs) -> Welcome {
-        self.claims.push(args.live_tasks.clone());
-        let claimed: HashSet<String> = args.live_tasks.iter().cloned().collect();
+        self.claims.push(args.live_sessions.clone());
+        let claimed: HashSet<String> = args
+            .live_sessions
+            .iter()
+            .filter_map(|session| session.task_id.clone())
+            .collect();
         for row in self.rows.iter_mut() {
             if row.state == LedgerState::InFlight && !claimed.contains(&row.task_id) {
                 row.state = LedgerState::Queued;
@@ -584,7 +588,7 @@ async fn eventually(mut predicate: impl FnMut() -> bool, what: &str) {
 ///
 /// The row is the shape a killed process leaves behind: delivered once, never
 /// acknowledged, its ticket armed on a link that no longer exists. The restart
-/// claims nothing — `live_tasks` is the live pane's own declaration and a fresh
+/// claims nothing — `live_sessions` is the live pane's own declaration and a fresh
 /// process holds no slots — so the server requeues the row, and the client's pull
 /// is the only thing that can bring it back. What proves it ran is the agent's
 /// half: the mounted plugin is handed the assignment, its completion reaches the
@@ -620,7 +624,7 @@ async fn a_restart_drains_the_work_left_in_flight() {
     let cluster = fixture.cluster.lock();
     assert_eq!(
         cluster.claims,
-        vec![Vec::<String>::new()],
+        vec![Vec::<onlyne_proto::LiveSession>::new()],
         "a restarted process declares no live task at hello"
     );
     assert_eq!(

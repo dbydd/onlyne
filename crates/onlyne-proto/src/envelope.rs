@@ -215,6 +215,12 @@ pub enum Outcome {
     Done,
     Failed,
     Cancelled,
+    /// The delivery ended waiting on something outside it.
+    ///
+    /// A first-class result rather than a synonym for `Failed`: the ending rule
+    /// settles a delivery whose session ended without a completion as blocked,
+    /// and a board reads it as waiting rather than as failed.
+    Blocked,
 }
 
 impl Outcome {
@@ -223,6 +229,7 @@ impl Outcome {
             Outcome::Done => "done",
             Outcome::Failed => "failed",
             Outcome::Cancelled => "cancelled",
+            Outcome::Blocked => "blocked",
         }
     }
 }

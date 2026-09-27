@@ -28,7 +28,10 @@ use tokio::time::{Duration, timeout};
 /// role. The task id is the sessions table's primary key, so the order is total
 /// and a pure function of the session set: permuting the slice cannot change it.
 fn session_order_key(session: &SessionRow) -> (&str, &str) {
-    (session.role.as_deref().unwrap_or(""), &session.task_id)
+    (
+        session.role.as_deref().unwrap_or(""),
+        session.task_id.as_deref().unwrap_or(""),
+    )
 }
 
 #[derive(Clone, Debug, Default)]
@@ -883,7 +886,7 @@ pub fn layout_nodes(snapshot: &Snapshot, active_only: bool) -> Vec<LayoutNode> {
             sessions: sessions
                 .into_iter()
                 .map(|session| SessionLine {
-                    task: session.task_id.clone(),
+                    task: session.task_id.clone().unwrap_or_default(),
                     state: match session.public_lifecycle {
                         Lifecycle::Created => SessionState::Created,
                         Lifecycle::Working => SessionState::Working,
@@ -1178,7 +1181,7 @@ pub fn page_history(delta: isize, filter: &mut HistoryFilter, total: usize, page
 pub fn selected_graph_task(snapshot: &Snapshot, index: usize, active_only: bool) -> Option<String> {
     visible_sessions(snapshot, active_only)
         .get(index)
-        .map(|session| session.task_id.clone())
+        .and_then(|session| session.task_id.clone())
 }
 
 pub fn selected_history_task(snapshot: &Snapshot, index: usize) -> Option<String> {
@@ -1187,7 +1190,7 @@ pub fn selected_history_task(snapshot: &Snapshot, index: usize) -> Option<String
 
 pub fn event_task(row: &EventRow) -> Option<String> {
     match &row.event {
-        onlyne_proto::Event::SessionState(event) => Some(event.task_id.clone()),
+        onlyne_proto::Event::SessionState(event) => event.task_id.clone(),
         onlyne_proto::Event::LedgerState(event) => event.task.clone(),
         onlyne_proto::Event::Fault(event) => event.task_id.clone(),
         onlyne_proto::Event::RolePresence(_)
@@ -1423,7 +1426,7 @@ pub fn focus_from(snapshot: &Snapshot, task_id: &str) -> Option<String> {
             snapshot
                 .sessions
                 .iter()
-                .find(|session| session.task_id == task_id)
+                .find(|session| session.task_id.as_deref() == Some(task_id))
                 .and_then(|session| session.role.clone())
         })
 }
@@ -1517,7 +1520,7 @@ mod tests {
 
     fn state_session(lifecycle: Lifecycle, agent: AgentPhase) -> SessionRow {
         SessionRow {
-            task_id: "t1".into(),
+            task_id: Some("t1".into()),
             role: Some("builder".into()),
             session_id: "s1".into(),
             generation: 1,
@@ -1530,6 +1533,7 @@ mod tests {
             },
             outcome: None,
             updated_at: None,
+            last_seen: None,
             heartbeat_stale: false,
             fresh: None,
         }

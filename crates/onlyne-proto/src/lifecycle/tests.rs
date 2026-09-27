@@ -40,12 +40,13 @@ const RECOVERIES: [RecoveryPhase; 4] = [
     RecoveryPhase::Draining,
 ];
 /// The projection's input. Not enumerated into the tuple — it is not a session
-/// dimension — but every projection is computed over all four.
-const TASK_STATES: [TaskState; 4] = [
+/// dimension — but every projection is computed over all five.
+const TASK_STATES: [TaskState; 5] = [
     TaskState::Pending,
     TaskState::Done,
     TaskState::Failed,
     TaskState::Cancelled,
+    TaskState::Blocked,
 ];
 const LIVE: [bool; 2] = [true, false];
 

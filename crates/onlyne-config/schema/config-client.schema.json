@@ -33,6 +33,20 @@
       "description": "Server certificate SPKI fingerprint.",
       "type": "string"
     },
+    "client": {
+      "description": "`[client]` — the workspace-local client policy.",
+      "default": {
+        "session": {
+          "idle_close": null,
+          "scope": "oneshot"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ClientSection"
+        }
+      ]
+    },
     "key_path": {
       "description": "Path to this role's private key file.",
       "type": "string"
@@ -110,6 +124,24 @@
         }
       }
     },
+    "ClientSection": {
+      "description": "`[client]` — the workspace-local client policy, beside `plugins` and `[server]`.",
+      "type": "object",
+      "properties": {
+        "session": {
+          "description": "`[client.session]` — what a session serves and when it closes.",
+          "default": {
+            "idle_close": null,
+            "scope": "oneshot"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/SessionPolicy"
+            }
+          ]
+        }
+      }
+    },
     "OrcaSection": {
       "description": "`[orca]` — settings for the Orca session backend.",
       "type": "object",
@@ -122,7 +154,7 @@
       }
     },
     "ServerEndpoint": {
-      "description": "Server host and port pair used by the client.",
+      "description": "Server host and port used by the client.",
       "type": "object",
       "required": [
         "host",
@@ -140,6 +172,55 @@
           "minimum": 0.0
         }
       }
+    },
+    "SessionPolicy": {
+      "description": "`[client.session]` — the per-role session policy. `scope` decides which deliveries one session serves; `idle_close` decides when an idle session ends. An absent key keeps the scope's own default, so a workspace written before v2 stays valid and lands on `oneshot`.",
+      "type": "object",
+      "properties": {
+        "idle_close": {
+          "description": "How long a session may sit idle before this client closes it. `None` means the scope's own default. `Some(ZERO)` means no idle close at all, the same \"0 disables\" reading `stall_report_secs` and `reconnect_grace_secs` take. Spelled as a duration (`30s`, `5m`, `2h`, `1d`) or a bare integer of seconds.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "description": "Which deliveries a session serves. The default, `oneshot`, is v1's behavior: one delivery per session, closed when that delivery settles.",
+          "default": "oneshot",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SessionScope"
+            }
+          ]
+        }
+      }
+    },
+    "SessionScope": {
+      "description": "The `scope` of a `[client.session]` table: which deliveries one session serves.",
+      "oneOf": [
+        {
+          "description": "One delivery, closed when that delivery settles.",
+          "type": "string",
+          "enum": [
+            "oneshot"
+          ]
+        },
+        {
+          "description": "Every delivery one task family sends this role, closed on the idle timeout or an operator close.",
+          "type": "string",
+          "enum": [
+            "task"
+          ]
+        },
+        {
+          "description": "A standing session pool for the role, at most the role's `max_sessions` active, closed on an operator close or a recycle.",
+          "type": "string",
+          "enum": [
+            "role"
+          ]
+        }
+      ]
     }
   }
 }

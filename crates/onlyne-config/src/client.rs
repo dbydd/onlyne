@@ -4,8 +4,9 @@ use crate::{
     locate::{find_key_line_in_table, line_from_span},
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use std::path::Path;
+use std::time::Duration;
 
 /// Client-side `<workspace>/.onlyne/config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -47,6 +48,151 @@ pub struct ClientConfig {
     /// nonempty.
     #[serde(default)]
     pub backend: String,
+    /// `[client]` — the workspace-local client policy.
+    #[serde(default)]
+    pub client: ClientSection,
+}
+
+/// `[client]` — the workspace-local client policy, beside `plugins` and
+/// `[server]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ClientSection {
+    /// `[client.session]` — what a session serves and when it closes.
+    #[serde(default)]
+    pub session: SessionPolicy,
+}
+
+/// `[client.session]` — the per-role session policy. `scope` decides which
+/// deliveries one session serves; `idle_close` decides when an idle session
+/// ends. An absent key keeps the scope's own default, so a workspace written
+/// before v2 stays valid and lands on `oneshot`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionPolicy {
+    /// Which deliveries a session serves. The default, `oneshot`, is v1's
+    /// behavior: one delivery per session, closed when that delivery settles.
+    #[serde(default)]
+    pub scope: SessionScope,
+    /// How long a session may sit idle before this client closes it. `None`
+    /// means the scope's own default. `Some(ZERO)` means no idle close at all,
+    /// the same "0 disables" reading `stall_report_secs` and
+    /// `reconnect_grace_secs` take. Spelled as a duration (`30s`, `5m`, `2h`,
+    /// `1d`) or a bare integer of seconds.
+    #[serde(default, deserialize_with = "de_idle_close")]
+    // The published schema answers what a `config.toml` may write, and a
+    // `Duration`'s own shape is a `{ secs, nanos }` struct TOML never sees.
+    #[schemars(with = "Option<String>")]
+    pub idle_close: Option<Duration>,
+}
+
+/// The `scope` of a `[client.session]` table: which deliveries one session
+/// serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(rename_all = "lowercase")]
+pub enum SessionScope {
+    /// One delivery, closed when that delivery settles.
+    #[default]
+    Oneshot,
+    /// Every delivery one task family sends this role, closed on the idle
+    /// timeout or an operator close.
+    Task,
+    /// A standing session pool for the role, at most the role's
+    /// `max_sessions` active, closed on an operator close or a recycle.
+    Role,
+}
+
+impl SessionScope {
+    /// The one spelling of each scope, as `config.toml` writes it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Oneshot => "oneshot",
+            Self::Task => "task",
+            Self::Role => "role",
+        }
+    }
+
+    /// Parse a written scope, `None` for anything else.
+    ///
+    /// An unknown scope is a refusal and never a fall back to `oneshot`: a
+    /// typo read as the default would silently change which conversation a
+    /// delivery lands in.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "oneshot" => Some(Self::Oneshot),
+            "task" => Some(Self::Task),
+            "role" => Some(Self::Role),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionScope {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw)
+            .ok_or_else(|| de::Error::custom(format!("unknown client.session scope `{raw}`")))
+    }
+}
+
+impl std::fmt::Display for SessionScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// `idle_close` written as a duration string or a bare integer of seconds.
+fn de_idle_close<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Duration>, D::Error> {
+    let raw = toml::Value::deserialize(deserializer)?;
+    idle_close_value(&raw).ok_or_else(|| {
+        de::Error::custom(format!(
+            "client.session.idle_close must be a duration (`30s`, `5m`, `2h`, `1d`, or \
+             bare seconds), got {}",
+            toml_literal(&raw)
+        ))
+    })
+}
+
+/// The duration one written `idle_close` carries, `None` when the value is not
+/// one.
+fn idle_close_value(raw: &toml::Value) -> Option<Option<Duration>> {
+    match raw {
+        toml::Value::String(text) => parse_idle_close(text).map(Some),
+        toml::Value::Integer(secs) => u64::try_from(*secs).ok().map(Duration::from_secs).map(Some),
+        _ => None,
+    }
+}
+
+/// A written `idle_close`: `30s`, `5m`, `2h`, `1d`, or a bare integer of
+/// seconds. `0` is a real value, not an absent one, and means no idle close.
+fn parse_idle_close(raw: &str) -> Option<Duration> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let (digits, scale) = match text.as_bytes().last() {
+        Some(b's') => (&text[..text.len() - 1], 1),
+        Some(b'm') => (&text[..text.len() - 1], 60),
+        Some(b'h') => (&text[..text.len() - 1], 3_600),
+        Some(b'd') => (&text[..text.len() - 1], 86_400),
+        _ => (text, 1),
+    };
+    let digits = digits.trim();
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(scale)
+        .map(Duration::from_secs)
+}
+
+/// A rejected value as the refusal names it.
+fn toml_literal(raw: &toml::Value) -> String {
+    match raw {
+        toml::Value::String(text) => format!("`{text}`"),
+        other => other.to_string(),
+    }
 }
 
 /// `[orca]` — settings for the Orca session backend.
@@ -148,6 +294,7 @@ impl ClientConfig {
                 err.message().to_string(),
             )
         })?;
+        validate_session(&parsed, text, file)?;
         let config: Self = parsed.clone().try_into().map_err(|err: toml::de::Error| {
             SpecError::parse(
                 file,
@@ -254,7 +401,63 @@ fn acp_permission_line(text: &str, permission: &str) -> usize {
         .unwrap_or(1)
 }
 
-/// Server host and port pair used by the client.
+/// `[client.session] scope` is `oneshot` | `task` | `role`, and `idle_close` is
+/// a duration. Both refusals point at the line that carries the rejected value.
+///
+/// The check runs on the parsed document, before the struct conversion, so an
+/// unknown scope is refused with its own line rather than a serde message that
+/// points somewhere else — and so a typo in `scope` never becomes `oneshot`.
+fn validate_session(parsed: &toml::Value, text: &str, file: &str) -> Result<(), SpecError> {
+    let Some(session) = parsed
+        .get("client")
+        .and_then(|client| client.get("session"))
+    else {
+        return Ok(());
+    };
+    if let Some(scope) = session.get("scope") {
+        let written = scope.as_str().unwrap_or_default();
+        if SessionScope::parse(written).is_none() {
+            return Err(SpecError::parse(
+                file,
+                session_key_line(text, "scope", scope),
+                format!(
+                    "client.session.scope must be `oneshot`, `task` or `role`, got {}",
+                    toml_literal(scope)
+                ),
+            ));
+        }
+    }
+    if let Some(idle_close) = session.get("idle_close") {
+        if idle_close_value(idle_close).is_none() {
+            return Err(SpecError::parse(
+                file,
+                session_key_line(text, "idle_close", idle_close),
+                format!(
+                    "client.session.idle_close must be a duration (`30s`, `5m`, `2h`, `1d`, or \
+                     bare seconds), got {}",
+                    toml_literal(idle_close)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Line of a `[client.session]` key: the key inside the table when it is
+/// written there, otherwise the line that carries the rejected value (dotted
+/// or inline table forms).
+fn session_key_line(text: &str, key: &str, value: &toml::Value) -> usize {
+    find_key_line_in_table(text, "client.session", key)
+        .or_else(|| {
+            let literal = value.to_string();
+            text.lines()
+                .position(|line| line.contains(key) && line.contains(&literal))
+                .map(|idx| idx + 1)
+        })
+        .unwrap_or(1)
+}
+
+/// Server host and port used by the client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ServerEndpoint {
     /// Hostname or address, possibly a `$NAME` env reference.

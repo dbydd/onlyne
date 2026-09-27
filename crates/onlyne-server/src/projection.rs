@@ -158,7 +158,7 @@ fn settle(
             cluster_ref,
         } => {
             let origin = cluster_ref.clone();
-            let stored = state.ledger.get_session_row(task_id)?;
+            let stored = state.ledger.session_row_for_task(task_id)?;
             let mut observation = serde_json::json!({
                 "head": head,
                 "reply_to": reply_to,
@@ -296,7 +296,7 @@ pub fn write(
     desired: Option<Value>,
     admin: Option<&Principal>,
 ) -> anyhow::Result<ProjectionOutcome> {
-    let stored = state.ledger.get_session_row(task_id)?;
+    let stored = state.ledger.session_row_for_task(task_id)?;
     if let Some(row) = &stored {
         let watermark = (row.generation.max(0) as u64, row.seq.max(0) as u64);
         if (generation, seq) <= watermark {
@@ -310,7 +310,7 @@ pub fn write(
             write.observed_json = serde_json::to_string(&projection)?;
             write.updated_at = Utc::now().timestamp();
             if !state.ledger.publish_mirror_outcome(
-                &write.task_id,
+                &write.session_id,
                 &write.observed_json,
                 &row.observed_json,
                 write.updated_at,
@@ -350,9 +350,9 @@ pub fn write(
         session_id.to_string()
     };
     let write = SessionWrite {
-        task_id: task_id.to_string(),
-        role: role.to_string(),
         session_id,
+        task_id: Some(task_id.to_string()),
+        role: role.to_string(),
         generation: generation as i64,
         seq: seq as i64,
         agent_state: agent_name(projection.agent),
@@ -362,6 +362,7 @@ pub fn write(
         desired_json: serde_json::to_string(&desired.unwrap_or(Value::Null))?,
         observed_json: serde_json::to_string(&projection)?,
         mismatch_count: 0,
+        last_seen: Utc::now().timestamp(),
         updated_at: Utc::now().timestamp(),
     };
     let applied = state.ledger.project_session(&write)?;
@@ -481,7 +482,7 @@ pub async fn sessions_read(
 /// watches the durable `session_state` event the projection write publishes, so
 /// what it returns on is the write that landed rather than a promise of one.
 async fn probe_task(state: &State, task_id: &str, wait_ms: u64, admin: bool) -> FreshRead {
-    let Some(row) = state.ledger.get_session_row(task_id).ok().flatten() else {
+    let Some(row) = state.ledger.session_row_for_task(task_id).ok().flatten() else {
         return FreshRead::Offline;
     };
     let watermark = (row.generation.max(0) as u64, row.seq.max(0) as u64);
@@ -549,14 +550,14 @@ fn advances(frame: &Frame, task_id: &str, watermark: (u64, u64)) -> bool {
     let Event::SessionState(moved) = &**event else {
         return false;
     };
-    moved.task_id == task_id && (moved.generation, moved.seq) > watermark
+    moved.task_id.as_deref() == Some(task_id) && (moved.generation, moved.seq) > watermark
 }
 
 /// The `(generation, seq)` the stored row of one task carries, when it exists.
 fn row_version(state: &State, task_id: &str) -> Option<(u64, u64)> {
     state
         .ledger
-        .get_session_row(task_id)
+        .session_row_for_task(task_id)
         .ok()
         .flatten()
         .map(|row| (row.generation.max(0) as u64, row.seq.max(0) as u64))
@@ -575,6 +576,7 @@ pub fn row_from_write(row: &ServerSessionRow) -> SessionRow {
         outcome: projection.outcome,
         projection,
         updated_at: Some(row.updated_at.to_string()),
+        last_seen: Some(row.last_seen.to_string()),
         heartbeat_stale: false,
         // A fresh read stamps this per answer; the stored row knows nothing of
         // one, and a plain read claims nothing about its freshness.
@@ -591,7 +593,9 @@ fn answer_row(state: &State, row: &ServerSessionRow) -> SessionRow {
         updated_at,
         now,
         heartbeat_grace_secs(state),
-        state.has_seen_session(&row.task_id),
+        row.task_id
+            .as_deref()
+            .is_some_and(|task| state.has_seen_session(task)),
     );
     out
 }
@@ -630,7 +634,7 @@ pub fn projection_with_outcome(row: &ServerSessionRow, outcome: Outcome) -> Sess
 pub fn session_row(state: &State, task_id: &str) -> anyhow::Result<Option<SessionRow>> {
     Ok(state
         .ledger
-        .get_session_row(task_id)?
+        .session_row_for_task(task_id)?
         .as_ref()
         .map(|row| answer_row(state, row)))
 }

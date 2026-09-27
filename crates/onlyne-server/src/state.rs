@@ -269,7 +269,9 @@ impl Server {
                 ..onlyne_proto::QuerySessionsArgs::default()
             })?;
         for row in &inherited {
-            server.note_session_write(&row.task_id);
+            if let Some(task_id) = row.task_id.as_deref() {
+                server.note_session_write(task_id);
+            }
         }
         if !inherited.is_empty() {
             tracing::info!(

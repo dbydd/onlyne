@@ -96,8 +96,8 @@ to you and the spec file.
 4. Append the fragments to `spec.toml`, then run `onlyne reload`. `onlyne spec-diff` shows
    the pending delta first. The spec file is the only truth; there is no runtime config API.
 
-An existing tree carries a store marker: the server's `state.db` names revision 4 and a
-client's `client.db` names revision 2. A marker answering another revision stops that daemon
+An existing tree carries a store marker: the server's `state.db` names revision 5 and a
+client's `client.db` names revision 3. A marker answering another revision stops that daemon
 with `onlyne: unsupported schema; v1.0.0 does not migrate`, and a pre-v1 layout stops
 `onlyne client init` with exit 2 and `onlyne: legacy workspace layout; v1.0.0 does not
 migrate` before it writes anything.

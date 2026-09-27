@@ -43,7 +43,8 @@ impl WorkingSession {
             return None;
         }
         Some(Self {
-            task_id: row.task_id.clone(),
+            // A row with no delivery on it has no task to file a fault against.
+            task_id: row.task_id.clone()?,
             role: row.role.clone(),
             updated_at: DateTime::from_timestamp(row.updated_at, 0).unwrap_or(Utc::now()),
         })

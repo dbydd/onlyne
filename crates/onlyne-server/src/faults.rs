@@ -230,7 +230,7 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
         AdminOp::RepairInspect(target) => {
             let session = state
                 .ledger
-                .get_session_row(&target.task_id)?
+                .session_row_for_task(&target.task_id)?
                 .map(|row| crate::projection::row_from_write(&row));
             let faults = query(
                 state,
@@ -246,7 +246,7 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
             ))
         }
         AdminOp::RepairAdopt(adopt) => {
-            let Some(row) = state.ledger.get_session_row(&adopt.task_id)? else {
+            let Some(row) = state.ledger.session_row_for_task(&adopt.task_id)? else {
                 return Ok(Err(unknown_task(&adopt.task_id)));
             };
             let mut next = row.clone();
@@ -262,7 +262,7 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
             Ok(Ok(json!({ "task_id": adopt.task_id, "faults": moved })))
         }
         AdminOp::RepairRebind(rebind) => {
-            let Some(row) = state.ledger.get_session_row(&rebind.task_id)? else {
+            let Some(row) = state.ledger.session_row_for_task(&rebind.task_id)? else {
                 return Ok(Err(unknown_task(&rebind.task_id)));
             };
             let mut next = row.clone();
@@ -276,7 +276,10 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
                 "reason": rebind.reason,
             }))?;
             next.updated_at = Utc::now().timestamp();
-            if state.ledger.project_session(&next)? {
+            // The row moves to the session the operator named: a session row is
+            // addressed by its session id, so this is a move rather than a
+            // column update.
+            if state.ledger.rebind_session(&row.session_id, &next)? {
                 let event = Event::SessionState(onlyne_proto::SessionStateEvent {
                     task_id: next.task_id.clone(),
                     role: next.role.clone(),
@@ -462,7 +465,7 @@ pub(crate) fn settle_task(
     reason: &str,
 ) -> anyhow::Result<Option<Settlement>> {
     let mut settlement = None;
-    if let Some(row) = state.ledger.get_session_row(task_id)? {
+    if let Some(row) = state.ledger.session_row_for_task(task_id)? {
         let seq_before = row.seq;
         let mut next = row.clone();
         let projection = crate::projection::projection_with_outcome(&next, outcome);

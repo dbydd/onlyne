@@ -313,18 +313,31 @@ pub enum FreshRead {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionRow {
-    pub task_id: String,
+    /// The session this row answers for, which is the mirror table's key.
+    pub session_id: String,
+    /// The delivery this session is currently serving, read off its open
+    /// `session_tasks` binding. A session a client holds but has not bound to a
+    /// delivery has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    pub session_id: String,
     pub generation: u64,
     pub seq: u64,
     pub public_lifecycle: Lifecycle,
     pub projection: SessionProjection,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<Outcome>,
+    /// When the projection content last moved. A heartbeat that only refreshes
+    /// `last_seen` leaves this alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+    /// When this session was last seen at all, which is what a reader judges
+    /// the row's freshness by: the mirror of a pane that died hours ago reads
+    /// exactly like a live one, and this is the field that separates them. The
+    /// server never decides staleness from it; the caller prints it and judges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
     /// True when a working row the server has seen is silent past heartbeat grace.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub heartbeat_stale: bool,
@@ -524,14 +537,27 @@ pub struct HandshakeArgs {
     pub version: String,
     /// True when the connection serves an aggregate role for a sub-cluster.
     pub aggregate: bool,
-    /// Task ids the client still runs on this role. A reconnecting client sends
-    /// this list at `hello`, and the adoption requeue leaves those rows
-    /// `in_flight` with their tickets rebound to the new link: the work is
-    /// alive in a pane the successor connection inherits, so a re-delivery
-    /// would hand the same task to a second session. An empty or absent list
-    /// keeps the pre-1.0.9 behavior of requeueing every unacknowledged row.
+    /// The sessions the client still holds on this role. A reconnecting client
+    /// sends this list at `hello`, and the adoption requeue leaves the
+    /// deliveries those sessions are bound to `in_flight` with their tickets
+    /// rebound to the new link: the work is alive in a pane the successor
+    /// connection inherits, so a re-delivery would hand the same task to a
+    /// second session. An empty or absent list requeues every unacknowledged
+    /// row, which is what a client from an earlier build sends.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub live_tasks: Vec<String>,
+    pub live_sessions: Vec<LiveSession>,
+}
+
+/// One session a client claims it still holds, as `hello` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct LiveSession {
+    pub session_id: String,
+    /// The delivery this session is bound to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// A session the client holds but has released its process for.
+    pub suspended: bool,
 }
 
 /// Client-to-server vocabulary (§8). One `match` in the server router.
@@ -939,7 +965,7 @@ mod tests {
                     agent: "onlyne-client".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
                     aggregate: false,
-                    live_tasks: Vec::new(),
+                    live_sessions: Vec::new(),
                 }),
                 "hello",
             ),
