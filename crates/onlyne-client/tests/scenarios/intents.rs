@@ -2,6 +2,7 @@
 //! a row against the server's answer.
 
 use crate::common::sample_envelope;
+use onlyne_client::backend::fake::FakeBackend;
 use onlyne_client::{
     ops::local_cli::LocalCli,
     runtime::intent::{
@@ -10,7 +11,6 @@ use onlyne_client::{
     session::dispatch::DispatchState,
 };
 use onlyne_proto::{ClientOp, Envelope, ErrorCode, MsgKind, Receipt, ResBody, new_envelope};
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::{ClientStore, INTENT_FLUSH_BATCH_SIZE, IntentRow};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -137,7 +137,7 @@ fn intent_exhaustion_drives_fault_after_ceiling() {
     assert_eq!(store.pending_intent_count().unwrap(), 0);
 
     let task_id = envelope.task_id().unwrap();
-    let faults = onlyne_session::SessionLedger::list_faults(&store, task_id).unwrap();
+    let faults = onlyne_store::session::SessionLedger::list_faults(&store, task_id).unwrap();
     assert_eq!(faults.len(), 1);
     assert_eq!(faults[0].kind, "intent_exhausted");
 }
@@ -407,7 +407,7 @@ fn an_undecodable_row_is_charged_and_then_retires() {
         0,
         "the ceiling retires the row rather than parking it in the queue"
     );
-    let faults = onlyne_session::SessionLedger::list_faults(&store, task).unwrap();
+    let faults = onlyne_store::session::SessionLedger::list_faults(&store, task).unwrap();
     assert_eq!(faults.len(), 1, "a retired row stays visible");
     assert_eq!(faults[0].kind, "intent_exhausted");
 }

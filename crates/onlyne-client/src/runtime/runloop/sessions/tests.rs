@@ -1,17 +1,18 @@
 use super::{accept_delivery, outcome_loop};
+use crate::backend::{AcpBackend, AcpOptions};
 use crate::runtime::intent::IntentMachine;
 use crate::runtime::runloop::config::{DEFAULT_INTENT_ATTEMPTS, RunState, default_intent_backoff};
 use crate::runtime::runloop::test_support::{pending_intent_ops, test_state};
 use crate::session::dispatch::{DispatchState, SettleAuthority, on_plugin_report};
 use anyhow::Result;
-use onlyne_layout::RoleWorkspace;
+use onlyne_config::layout::RoleWorkspace;
 use onlyne_net::NetError;
 use onlyne_proto::{
     Body, Causality, ClientOp, Delivery, MsgKind, Outcome, Principal, Report, ResBody,
     new_envelope, new_task_id,
 };
-use onlyne_session::{AcpBackend, AcpOptions, SessionLedger};
 use onlyne_store::ClientStore;
+use onlyne_store::session::SessionLedger;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -258,7 +259,7 @@ async fn an_acp_delivery_reaches_the_agent_and_settles_through_the_client() {
             // The task's own record is the account of the verdict; the session
             // row beside it says what the session proved about its agent.
             if let Some(record) = store.task(&task_id).expect("read task record")
-                && record.task_state == onlyne_session::TaskState::Failed
+                && record.task_state == onlyne_proto::TaskState::Failed
             {
                 break store.get_session(&task_id).expect("read session").unwrap();
             }
@@ -271,7 +272,7 @@ async fn an_acp_delivery_reaches_the_agent_and_settles_through_the_client() {
         Err(error) => {
             crate::session::dispatch::close_all(
                 &state.dispatch,
-                onlyne_session::CloseReason::Shutdown,
+                crate::backend::CloseReason::Shutdown,
                 Duration::from_secs(1),
             );
             pump.abort();
@@ -315,7 +316,7 @@ async fn an_acp_delivery_reaches_the_agent_and_settles_through_the_client() {
     let record = store.task(&task_id).expect("read task record");
     assert_eq!(
         record.map(|record| record.task_state),
-        Some(onlyne_session::TaskState::Failed),
+        Some(onlyne_proto::TaskState::Failed),
         "the ACP refusal settled the task failed, in the task's own record"
     );
     let observed: serde_json::Value =

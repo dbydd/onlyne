@@ -1,4 +1,4 @@
-//! Resolution and execution of the three sibling daemon binaries.
+//! Resolution and execution of the sibling daemon binaries.
 
 use crate::runtime::EXIT_NO_SIBLING;
 use std::path::{Path, PathBuf};

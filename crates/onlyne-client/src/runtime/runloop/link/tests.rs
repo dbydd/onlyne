@@ -1,11 +1,11 @@
 use super::*;
+use crate::reconcile::{Bridge, apply_persist, next_version};
 use crate::runtime::runloop::test_support::test_state;
 use onlyne_proto::{
     Body, Causality, Lifecycle, MsgKind, Principal, Report, new_envelope, new_task_id,
 };
-use onlyne_session::{
-    Bridge, LifecycleEvent, SessionLedger, TaskState, apply_persist, next_version,
-};
+use onlyne_proto::{LifecycleEvent, TaskState};
+use onlyne_store::session::SessionLedger;
 
 /// The plugin beat shape: the three dimensions a plugin can witness, with the
 /// client's own dimensions as placeholders.
@@ -30,7 +30,7 @@ fn plugin_beat(agent: &str, delivery: &str, resource: &str) -> serde_json::Value
 /// completion envelope may be on the wire, still queued, or already taken, and
 /// only the server's answer says which. The flusher is the only place that
 /// answer is seen, so routing it into the reducer is what turns
-/// `DeliveryState::Accepted` from a claim the client made when it settled the
+/// `DeliveryPhase::Accepted` from a claim the client made when it settled the
 /// task into a fact it witnessed. With the verdict already `done`, the projection
 /// reads `exited` through the done-and-accepted arm — no resource has to close
 /// for it, and the agent is still sitting in the pane it was given.

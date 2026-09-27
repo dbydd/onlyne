@@ -7,9 +7,11 @@ use super::sessions::{accept_delivery, outcome_loop};
 use crate::session::adapter_socket::AdapterSocket;
 use crate::session::dispatch::{self, ClientLink, DispatchState};
 use anyhow::{Result, anyhow};
-use onlyne_layout::RoleWorkspace;
+use onlyne_config::layout::RoleWorkspace;
 use onlyne_proto::{AckArgs, ClientOp, ControlOp, Delivery, PullArgs, PullReply};
 use onlyne_store::ClientStore;
+use onlyne_wire::socket::{registration_path, remove_registration};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -27,7 +29,10 @@ pub async fn run(init: ClientInit) -> Result<()> {
     let store = ClientStore::open(workspace.client_db_path())?;
     let state = RunState::new(&init, store)?;
     let mut acceptor = tokio::spawn(acceptor(init.clone(), state.clone()));
-    let closing = tokio::spawn(close_on_signal(state.dispatch.clone()));
+    let closing = tokio::spawn(close_on_signal(
+        state.dispatch.clone(),
+        workspace.root().to_path_buf(),
+    ));
     let mut outcomes = tokio::spawn(outcome_loop(state.clone()));
     let outcome = tokio::select! {
         link = link_loop(&init, &state) => link,
@@ -45,7 +50,26 @@ pub async fn run(init: ClientInit) -> Result<()> {
     acceptor.abort();
     closing.abort();
     outcomes.abort();
+    // The registration names this process as the client for this workspace, so
+    // the run's end takes it with it on the path that returns. The signal path
+    // leaves through `process::exit` and takes its own copy.
+    deregister_client(workspace.root());
     outcome
+}
+
+/// Remove the registration the client published for `root`.
+///
+/// A file left naming a dead pid is what an external runtime's plugin reads as
+/// a live client, and this is the one place every non-signal exit passes
+/// through, so the removal is not optional on the way out.
+fn deregister_client(root: &Path) {
+    if let Err(error) = remove_registration(root) {
+        tracing::warn!(
+            error = %error,
+            registration = %registration_path(root).display(),
+            "could not remove the client registration"
+        );
+    }
 }
 
 /// Close live sessions when the operator stops the client.
@@ -53,10 +77,10 @@ pub async fn run(init: ClientInit) -> Result<()> {
 /// `SIGTERM` ends the foreground client, and the default disposition would
 /// kill the process with every tab it opened still running: the resources
 /// would outlive the only thing that can address them. Each session closes with
-/// [`onlyne_session::CloseReason::Shutdown`] first, so the backend record and
+/// [`crate::backend::CloseReason::Shutdown`] first, so the backend record and
 /// the plugin-facing tab map end truthfully.
 #[cfg(unix)]
-pub(super) async fn close_on_signal(dispatch: DispatchState) {
+pub(super) async fn close_on_signal(dispatch: DispatchState, root: PathBuf) {
     use tokio::signal::unix::{SignalKind, signal};
     let mut terminate = match signal(SignalKind::terminate()) {
         Ok(stream) => stream,
@@ -78,9 +102,10 @@ pub(super) async fn close_on_signal(dispatch: DispatchState) {
     }
     dispatch::close_all(
         &dispatch,
-        onlyne_session::CloseReason::Shutdown,
+        crate::backend::CloseReason::Shutdown,
         SHUTDOWN_CLOSE_BUDGET,
     );
+    deregister_client(&root);
     std::process::exit(0);
 }
 
@@ -90,7 +115,7 @@ pub(super) async fn close_on_signal(dispatch: DispatchState) {
 /// daemon stop. Ctrl-C is the console interrupt, and it runs the same
 /// close_all budget the unix SIGINT path uses.
 #[cfg(windows)]
-pub(super) async fn close_on_signal(dispatch: DispatchState) {
+pub(super) async fn close_on_signal(dispatch: DispatchState, root: PathBuf) {
     // `ctrl_c()` installs synchronously and hands back the watch stream; the
     // await belongs on `recv`, which yields once per console interrupt.
     let mut interrupt = match tokio::signal::windows::ctrl_c() {
@@ -104,9 +129,10 @@ pub(super) async fn close_on_signal(dispatch: DispatchState) {
     tracing::info!("Ctrl-C: closing live sessions");
     dispatch::close_all(
         &dispatch,
-        onlyne_session::CloseReason::Shutdown,
+        crate::backend::CloseReason::Shutdown,
         SHUTDOWN_CLOSE_BUDGET,
     );
+    deregister_client(&root);
     std::process::exit(0);
 }
 

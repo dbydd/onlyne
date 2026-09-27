@@ -43,13 +43,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::Stream;
-use onlyne_frame::{FrameReader, read_frame, write_frame};
 use onlyne_proto::{
     AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, ByeNotice, ConfigGetArgs, Delivery,
     DetachArgs, Envelope, ErrorCode, GatewayHealth, GatewayMount, HELLO_REQUIRED_MESSAGE,
     HealthArgs, HostOp, ImagePart, Outcome, PluginOp, Principal, Receipt, RegisterChannelArgs,
     RenderSendArgs, Report, ResBody, SessionRegisterArgs, TypingArgs,
 };
+use onlyne_wire::{FrameReader, read_frame, write_frame};
 // The crate root names `PluginOp` and its siblings; `HandoffArgs` is reached by
 // its module because the root list does not carry it.
 use onlyne_proto::adapter::HandoffArgs;
@@ -549,7 +549,7 @@ pub struct AdapterClient;
 
 impl AdapterClient {
     pub async fn connect_local(path: impl AsRef<Path>) -> Result<AgentHandle> {
-        let stream = onlyne_layout::connect_local(path.as_ref()).await?;
+        let stream = onlyne_wire::socket::connect_local(path.as_ref()).await?;
         Ok(Self::connect(stream))
     }
 
@@ -892,7 +892,7 @@ impl CapabilitySet {
 
 impl AdapterClient {
     pub async fn connect_gateway_local(path: impl AsRef<Path>) -> Result<GatewayHandle> {
-        let stream = onlyne_layout::connect_local(path.as_ref()).await?;
+        let stream = onlyne_wire::socket::connect_local(path.as_ref()).await?;
         Ok(Self::gateway(stream))
     }
 }

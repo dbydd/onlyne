@@ -16,7 +16,7 @@ One workspace, one role, one daemon. The role runs many sessions at once.
 | `history --workspace <dir>` | Reserved for the live role runtime. |
 
 `run` is the only launch verb, and it stays in the foreground. `--workspace` takes a relative path and resolves it to an absolute path before use, so the daemon, its generated sessions, and herdr's `--cwd` all read one location. A supervisor that wants the client in the background owns that decision — a visible terminal tab, `launchd`, `nohup` — so the client never detaches, writes no pid file, and nothing signals it by number. A `run` whose adapter socket cannot be bound ends there with exit 1 and names the failure on stderr; an `accept` error after a successful bind logs at `error` level (`adapter socket accept failed; retrying`) and retries every 100 ms with the listener held.
-`status` prints `onlyne: client running uptime <n>s socket <path> faults <n>`. The `<path>` is the served socket path read through the owner tree — the canonical `run/s`, or the short derived path a deep workspace serves from, the answer `<workspace>/.onlyne/run/socket` also carries. The uptime is the age of the socket file, and a client counts as running only when that socket answers an `admin` `hello`, so a socket file an unclean exit left behind reads as not running. When the answering client holds no server link it adds `onlyne: client not connected` on stderr.
+`status` prints `onlyne: client running uptime <n>s socket <path> faults <n>`. The `<path>` is the served socket in the machine-level runtime directory, `/tmp/onlyne-<uid>/<digest>.sock` (`$ONLYNE_RUNTIME_DIR` overriding the directory), where `<digest>` is the first 16 hex characters of `sha256` over the workspace's canonical root. The uptime is the age of the `<digest>.json` registration that client published, and a client counts as running only when that socket answers an `admin` `hello`, so a socket an unclean exit left behind reads as not running. When the answering client holds no server link it adds `onlyne: client not connected` on stderr.
 
 The printed `[[client]]` fragment is a complete role entry: it carries `role`, `key`, `admin`, `max_sessions`, the ACL lists, `prose`, and `session_command`. Paste it into `spec.toml` and reload; the client can then spawn sessions for that role.
 
@@ -30,11 +30,23 @@ Both `init` and `run` create these paths under `--workspace`:
 | `.onlyne/client.db` | | SQLite: `intents`, `sessions`, `faults`, `prose_cache`, `config_cache`, `events` |
 | `.onlyne/keys/role.key` | `0600` | 32 raw ed25519 bytes, generated once |
 | `.onlyne/run/` | `0700` | runtime directory |
-| `.onlyne/run/s` | `0600` | adapter socket, the canonical spelling; `run` binds it while the path fits 103 bytes |
-| `.onlyne/run/socket` | `0600` | one line naming the path actually served — the canonical `run/s`, or, for a tree deeper than the bound, a short derived path under the system temporary directory |
 | `.onlyne/logs/client.log` | | stdout and stderr, when the operator starts `run` under a shell that redirects them |
 | `.onlyne/agent/<id>/` | | installed plugin package with `plugin.toml` |
 | `.onlyne/cache/orca-tabs.jsonl` | | append-only Orca tab to session map: a supervisor/display side-channel, not the identity (the adapter protocol owns that) |
+
+The adapter socket and its registration live outside the workspace, in the
+machine-level runtime directory — `/tmp/onlyne-<uid>/`, `$ONLYNE_RUNTIME_DIR`
+overriding it, `0700`. `<workspace>/.onlyne/run/s` stays the canonical spelling
+operators read; nothing binds there.
+
+| path | mode | content |
+| --- | --- | --- |
+| `<runtime>/<digest>.sock` | `0600` | the adapter socket, bound for the life of the run |
+| `<runtime>/<digest>.json` | `0600` | the registration: `kind` (`client`), `role`, `root`, `pid`, `version`, and the `runtime` hosting the role's sessions |
+
+`run` binds the socket, then publishes the registration, and the run's end
+removes it: a registration outliving its surface is what an external runtime's
+plugin reads as a live client.
 
 `init` never writes `spec.toml`. A workspace holding the pre-v1 layout is refused before any write: exit 2 and the byte-exact line `onlyne: legacy workspace layout; v1.0.0 does not migrate`.
 

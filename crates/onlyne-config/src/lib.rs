@@ -14,8 +14,12 @@
 //! * [`keys`] — the keys a document carried beyond the schema
 //! * [`redact`] — debug strings with secret material masked
 //! * [`hash`] — [`spec_hash`] and [`canonical_bytes`] for cache keys
+//! * [`layout`] — the server root and role workspace trees, their bootstrap, and
+//!   the pre-v1 refusal
 //!
-//! The crate depends on nothing else in this workspace. The server maps
+//! [`layout`] is the one module that reaches past this workspace's own crates: it
+//! names [`onlyne_wire::socket::SocketEndpoint`] for the socket a tree serves and
+//! the mode helpers that keep `run/` and `keys/` owner-only. The server maps
 //! [`RouteTarget`] into protocol principals.
 
 mod client;
@@ -24,6 +28,7 @@ mod env;
 mod error;
 mod hash;
 pub mod keys;
+pub mod layout;
 mod locate;
 #[path = "redact.rs"]
 mod redact_impl;

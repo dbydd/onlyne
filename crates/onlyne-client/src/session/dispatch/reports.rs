@@ -51,7 +51,7 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
             // session that died holding a task leaves: `failed`.
             state.owe_controlled_settle(task_id, ControlWord::Recycle, Instant::now());
             state.recycle_plugin(task_id, reason, None).await;
-            on_recycled(state, task_id, onlyne_session::CloseReason::Operator)?;
+            on_recycled(state, task_id, crate::backend::CloseReason::Operator)?;
         }
         ControlOp::Cancel { reason, .. } => {
             // The same note for the same reason: a cancel ends the task on the
@@ -60,7 +60,7 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
             state
                 .recycle_plugin(task_id, reason, Some(Outcome::Cancelled))
                 .await;
-            on_recycled(state, task_id, onlyne_session::CloseReason::Cancelled)?;
+            on_recycled(state, task_id, crate::backend::CloseReason::Cancelled)?;
         }
         ControlOp::Probe { .. } => {
             // A probe that found no transport asked nothing, so there is no fresh
@@ -308,7 +308,7 @@ pub async fn on_plugin_report(
                 return Ok(());
             }
             let inner = state.inner.lock();
-            onlyne_session::record_fault(&inner.store, &task_id, &kind, "plugin", &reason)?;
+            crate::reconcile::record_fault(&inner.store, &task_id, &kind, "plugin", &reason)?;
             false
         }
         Report::Fault { task_id: None, .. } => false,
@@ -401,16 +401,16 @@ fn compose_observation(
     // intent back to `ready` has begun a new assignment: the old drain was
     // consumed by whatever settled it, or by the fault path that took the work,
     // and only the exit it hung on is gone.
-    if body.agent == AgentState::Ready && body.delivery == DeliveryState::Exhausted {
-        body.delivery = DeliveryState::None;
+    if body.agent == AgentPhase::Ready && body.delivery == DeliveryPhase::Exhausted {
+        body.delivery = DeliveryPhase::NoIntent;
     }
     // `Accepted` is a post-turn fact and `Booting` is the word a plugin uses for
     // a process that is not there any more (see `observationFor`'s `gone`
     // mapping). The receipt the client wrote cannot belong to a turn that
     // stopped existing, so the drain stays where the plugin left it: open,
     // unacknowledged.
-    if body.agent == AgentState::Booting && body.delivery == DeliveryState::Accepted {
-        body.delivery = DeliveryState::Pending;
+    if body.agent == AgentPhase::Booting && body.delivery == DeliveryPhase::Accepted {
+        body.delivery = DeliveryPhase::Pending;
     }
     // A recovery substate rides only the agents `is_legal` allows it on, which is
     // the reducer's own coupling for those transitions (`reduce.rs::transition`),
@@ -423,12 +423,12 @@ fn compose_observation(
     // dropping the label is what keeps the reducer from refusing the beat whole —
     // the frame that says the session went back to work would be the one lost.
     let held = match body.recovery {
-        RecoveryState::IdleWaiting | RecoveryState::IdleFault => body.agent == AgentState::Idle,
-        RecoveryState::Draining => matches!(body.agent, AgentState::Idle | AgentState::Running),
-        RecoveryState::None => true,
+        RecoveryPhase::IdleWaiting | RecoveryPhase::IdleFault => body.agent == AgentPhase::Idle,
+        RecoveryPhase::Draining => matches!(body.agent, AgentPhase::Idle | AgentPhase::Running),
+        RecoveryPhase::NoRecovery => true,
     };
     if !held {
-        body.recovery = RecoveryState::None;
+        body.recovery = RecoveryPhase::NoRecovery;
     }
     // An idle agent whose task is still open and whose exit has no receipt is
     // the design's `idle_waiting` (§2.2, §4.2): the turn ended without a
@@ -441,12 +441,12 @@ fn compose_observation(
     // appears at all. A stronger label the client already holds is left alone:
     // `draining` says the exit is in asynchronous send and `idle_fault` says a
     // fact disagreed, while `idle_waiting` means there is no exit yet.
-    if body.agent == AgentState::Idle
+    if body.agent == AgentPhase::Idle
         && task_state == Some(TaskState::Pending)
-        && body.delivery != DeliveryState::Accepted
-        && body.recovery == RecoveryState::None
+        && body.delivery != DeliveryPhase::Accepted
+        && body.recovery == RecoveryPhase::NoRecovery
     {
-        body.recovery = RecoveryState::IdleWaiting;
+        body.recovery = RecoveryPhase::IdleWaiting;
     }
     body
 }

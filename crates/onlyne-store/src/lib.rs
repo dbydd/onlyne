@@ -10,6 +10,7 @@
 mod client;
 mod error;
 mod server;
+pub mod session;
 #[cfg(test)]
 mod tests;
 pub use client::{CLIENT_DDL, ClientStore, INTENT_FLUSH_BATCH_SIZE, IntentRow, TaskRow};
@@ -18,6 +19,7 @@ pub use server::{
     Append, CursorRow, EventRecord, FaultQuery, GhostSweepRow, LedgerRow, RoleRow, SERVER_DDL,
     ServerFaultRow, ServerLedger, ServerSessionRow, SessionWrite, rfc3339,
 };
+pub use session::{FaultRecord, SessionLedger, SessionRecord, VersionedSession};
 
 pub use onlyne_proto::LedgerState;
 

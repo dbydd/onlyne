@@ -1,7 +1,7 @@
+use crate::backend::{SessionBackend, SessionRef};
 use crate::session::dispatch::{DispatchState, dispatch};
 use anyhow::{Context, Result, anyhow};
 use onlyne_proto::{Delivery, Envelope, Report};
-use onlyne_session::{SessionBackend, SessionRef};
 use onlyne_store::ClientStore;
 use std::sync::Arc;
 

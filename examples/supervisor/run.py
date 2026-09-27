@@ -127,7 +127,7 @@ def client_env() -> dict[str, str]:
 
 
 def need_binaries() -> None:
-    for binary in (ONLYNE, SERVER, BIN / "onlyne-client", BIN / "onlyne-tui"):
+    for binary in (ONLYNE, SERVER, BIN / "onlyne-client"):
         if not binary.exists():
             die(f"missing binary {binary}; run cargo build --workspace first")
     if not shutil.which("pi"):
@@ -563,7 +563,7 @@ def up(text: str) -> None:
     say(f"  {ONLYNE} --server-root {CLUSTER} watch --follow")
     say(f"  {ONLYNE} --server-root {CLUSTER} sessions   # ring rows carry the pane binding")
     say(f"  wc -l {LIGHTS}   # one line per hop; {TOTAL} lines is the finished round")
-    say(f"  {BIN / 'onlyne-tui'} --server-root {CLUSTER}   # page 1 role network, page 2 swarm rows")
+    say(f"  {ONLYNE} tui --server-root {CLUSTER}   # page 1 role network, page 2 swarm rows")
     say("keep talking to the supervisor tab; `run.py lights` replays the round "
         "with the script in the dispatch seat")
 

@@ -1,6 +1,6 @@
 use super::*;
+use crate::backend::fake::FakeBackend;
 use onlyne_proto::new_task_id;
-use onlyne_session::backend::fake::FakeBackend;
 use tempfile::tempdir;
 
 /// The resource one client-held session names on this role's backend.
@@ -354,7 +354,7 @@ async fn a_control_close_ends_the_sessions_own_row() {
         );
     }
 
-    on_recycled(&state, &task, onlyne_session::CloseReason::Cancelled).expect("the close runs");
+    on_recycled(&state, &task, crate::backend::CloseReason::Cancelled).expect("the close runs");
 
     let row = store.get_session(&task).unwrap().expect("the session row");
     assert_eq!(
@@ -390,12 +390,12 @@ async fn a_control_close_refuses_the_held_delivery_with_the_operators_word() {
     for (key, reason, word) in [
         (
             "cancelled",
-            onlyne_session::CloseReason::Cancelled,
+            crate::backend::CloseReason::Cancelled,
             "operator cancel",
         ),
         (
             "recycled",
-            onlyne_session::CloseReason::Operator,
+            crate::backend::CloseReason::Operator,
             "operator recycle",
         ),
     ] {
@@ -453,7 +453,7 @@ impl SessionBackend for LockProbe {
     fn name(&self) -> &'static str {
         "fake"
     }
-    fn capabilities(&self) -> onlyne_session::Capabilities {
+    fn capabilities(&self) -> crate::backend::Capabilities {
         self.host.capabilities()
     }
     fn available(&self) -> Result<bool> {
@@ -465,13 +465,13 @@ impl SessionBackend for LockProbe {
     fn attach(&self, session: &SessionRef) -> Result<SessionRef> {
         self.host.attach(session)
     }
-    fn probe(&self, session: &SessionRef) -> Result<onlyne_session::ResourceProbe> {
+    fn probe(&self, session: &SessionRef) -> Result<crate::backend::ResourceProbe> {
         self.host.probe(session)
     }
     fn close(
         &self,
         session: &SessionRef,
-        reason: onlyne_session::CloseReason,
+        reason: crate::backend::CloseReason,
         force: bool,
     ) -> Result<()> {
         let held = self
@@ -518,7 +518,7 @@ fn a_retirement_closes_the_host_off_the_dispatch_lock() {
     dispatched_ghost(&state, &shutdown, Instant::now());
     close_all(
         &state,
-        onlyne_session::CloseReason::Shutdown,
+        crate::backend::CloseReason::Shutdown,
         Duration::from_secs(5),
     );
 

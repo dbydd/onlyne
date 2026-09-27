@@ -5,7 +5,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use clap::{CommandFactory, Parser, Subcommand};
 use onlyne_config::Spec;
-use onlyne_layout::{ServerRoot, apply_private_mode};
+use onlyne_config::layout::ServerRoot;
+use onlyne_wire::socket::{
+    RegistrationFile, SOCKET_SUFFIX, read_registration, registration_path, remove_registration,
+    runtime_dir_path, socket_path, workspace_digest,
+};
 
 use crate::generate::{GenerateArgs, GenerateError, generate};
 use crate::{Server, ServerInit};
@@ -336,43 +340,92 @@ async fn run_command(root: &Path, output: Output) -> i32 {
     }
 }
 
-/// Remove a run socket left behind by a server that is no longer running.
+/// The registration `root`'s daemon published, when one is readable.
+fn published(root: &Path) -> Option<RegistrationFile> {
+    read_registration(root).ok().flatten()
+}
+
+/// The pid the registration for `root` names, when that process is alive.
 ///
-/// A `SIGKILL`ed server leaves its bound path on disk. The readiness poll below
-/// watches that path, so the start path removes it first; the recorded pid
-/// decides, and a live pid keeps the path for the already-running answer above.
-pub fn clear_stale_socket(layout: &ServerRoot) -> bool {
-    let socket = layout.socket_path();
-    if !socket.exists() {
-        return false;
-    }
-    if read_pid(&layout.pid_path())
+/// v2 dropped `run/server.pid`: the registration is the file that names the
+/// process serving a tree, and it is written by that process at bind time, so
+/// start, stop, and status read the same fact the CLI client resolves.
+fn live_pid(root: &Path) -> Option<u32> {
+    published(root)
+        .map(|registration| registration.pid)
         .filter(|pid| process_alive(*pid))
-        .is_some()
-    {
-        return false;
+}
+
+/// The socket a reader resolves for `root`, without creating anything.
+///
+/// `status` reports on a machine that may never have run a daemon, so it names
+/// the path without asking the runtime directory to appear.
+fn socket_path_of(root: &Path) -> PathBuf {
+    runtime_dir_path().join(format!("{}{SOCKET_SUFFIX}", workspace_digest(root)))
+}
+
+/// Drop the endpoint files a just-exited `pid` published.
+///
+/// Only while the registration still names that pid: a daemon that has since
+/// restarted owns these files, and clearing them would unlink the socket out
+/// from under it.
+fn clear_dead_endpoint(root: &Path, pid: u32) {
+    if published(root).map(|registration| registration.pid) != Some(pid) {
+        return;
     }
-    match fs::remove_file(&socket) {
-        Ok(()) => true,
-        Err(error) => {
-            eprintln!(
-                "onlyne-server: remove the stale socket {}: {error}",
-                socket.display()
-            );
-            false
-        }
+    let _ = remove_registration(root);
+    if let Ok(socket) = socket_path(root) {
+        let _ = fs::remove_file(socket);
     }
 }
 
-/// Spawn `run` detached, record its pid, and wait for the admin socket.
+/// Remove a run socket and registration left behind by a server that is no
+/// longer running.
+///
+/// A `SIGKILL`ed server leaves both files in the runtime directory. The
+/// readiness poll below watches the registration, so the start path clears the
+/// pair first; the published pid decides, and a live pid keeps both for the
+/// already-running answer above.
+pub fn clear_stale_socket(root: &Path) -> bool {
+    if live_pid(root).is_some() {
+        return false;
+    }
+    let socket = match socket_path(root) {
+        Ok(socket) => socket,
+        Err(error) => {
+            eprintln!("onlyne-server: resolve the runtime directory: {error}");
+            return false;
+        }
+    };
+    let mut removed = false;
+    if socket.exists() {
+        match fs::remove_file(&socket) {
+            Ok(()) => removed = true,
+            Err(error) => {
+                eprintln!(
+                    "onlyne-server: remove the stale socket {}: {error}",
+                    socket.display()
+                );
+            }
+        }
+    }
+    if let Err(error) = remove_registration(root) {
+        eprintln!(
+            "onlyne-server: remove the stale registration {}: {error}",
+            registration_path(root).display()
+        );
+    }
+    removed
+}
+
+/// Spawn `run` detached and wait for the registration that says it is serving.
 async fn start_command(root: &Path, output: Output) -> i32 {
-    let layout = ServerRoot::resolve(root);
-    let pid_path = layout.pid_path();
-    if let Some(pid) = read_pid(&pid_path).filter(|pid| process_alive(*pid)) {
+    if let Some(pid) = live_pid(root) {
         eprintln!("onlyne: server already running at pid {pid}");
         return 2;
     }
-    clear_stale_socket(&layout);
+    clear_stale_socket(root);
+    let layout = ServerRoot::resolve(root);
     if let Err(error) = layout.bootstrap() {
         eprintln!("onlyne-server: {error}");
         return 1;
@@ -429,22 +482,15 @@ async fn start_command(root: &Path, output: Output) -> i32 {
         }
     };
     let pid = child.id();
-    if let Err(error) = fs::write(&pid_path, format!("{pid}\n")) {
-        eprintln!("onlyne-server: {}: {error}", pid_path.display());
-        return 1;
-    }
-    if let Err(error) = apply_private_mode(&pid_path) {
-        eprintln!("onlyne-server: {}: {error}", pid_path.display());
-        return 1;
-    }
+    let socket = socket_path_of(root);
     let deadline = Instant::now() + Duration::from_millis(START_READY_MS);
     while Instant::now() < deadline {
-        if layout.socket_path().exists() {
+        if published(root).is_some() {
             if output.json {
                 output.emit(serde_json::json!({
                     "event": "started",
                     "pid": pid,
-                    "socket": layout.socket_path().display().to_string(),
+                    "socket": socket.display().to_string(),
                 }));
             } else {
                 output.status(&format!("onlyne-server: started pid {pid}"));
@@ -454,8 +500,8 @@ async fn start_command(root: &Path, output: Output) -> i32 {
         tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
     }
     eprintln!(
-        "onlyne: server did not open {} within {START_READY_MS}ms",
-        layout.socket_path().display()
+        "onlyne: server did not publish {} within {START_READY_MS}ms",
+        registration_path(root).display()
     );
     #[cfg(unix)]
     {
@@ -468,23 +514,17 @@ async fn start_command(root: &Path, output: Output) -> i32 {
     {
         terminate_pid(pid);
     }
-    let _ = fs::remove_file(&pid_path);
+    clear_dead_endpoint(root, pid);
     1
 }
 
-/// Signal the recorded process and wait a bounded time for it to exit.
+/// Signal the published process and wait a bounded time for it to exit.
 async fn stop_command(root: &Path, output: Output) -> i32 {
-    let layout = ServerRoot::resolve(root);
-    let pid_path = layout.pid_path();
-    let Some(pid) = read_pid(&pid_path) else {
+    let Some(pid) = live_pid(root) else {
+        clear_stale_socket(root);
         eprintln!("onlyne: server not running");
         return 2;
     };
-    if !process_alive(pid) {
-        let _ = fs::remove_file(&pid_path);
-        eprintln!("onlyne: server not running");
-        return 2;
-    }
     #[cfg(unix)]
     {
         let _ = ProcessCommand::new("kill")
@@ -499,7 +539,7 @@ async fn stop_command(root: &Path, output: Output) -> i32 {
     let deadline = Instant::now() + Duration::from_millis(STOP_WAIT_MS);
     while Instant::now() < deadline {
         if !process_alive(pid) {
-            let _ = fs::remove_file(&pid_path);
+            clear_dead_endpoint(root, pid);
             if output.json {
                 output.emit(serde_json::json!({"event": "stopped", "pid": pid}));
             } else {
@@ -516,9 +556,9 @@ async fn stop_command(root: &Path, output: Output) -> i32 {
 /// Process-level answer read from this root, distinct from the admin `status` op.
 fn status_command(root: &Path, output: Output) -> i32 {
     let layout = ServerRoot::resolve(root);
-    let pid = read_pid(&layout.pid_path()).filter(|pid| process_alive(*pid));
-    let uptime_s = pid.and_then(|_| pid_file_age_seconds(&layout.pid_path()));
-    let socket = layout.socket_path();
+    let pid = live_pid(root);
+    let uptime_s = pid.and_then(|_| file_age_seconds(&registration_path(root)));
+    let socket = socket_path_of(root);
     let spec_path = layout.spec_path();
     let spec_hash = match Spec::load(&spec_path) {
         Ok(spec) => Some(spec.semantic_hash()),
@@ -568,11 +608,6 @@ fn status_command(root: &Path, output: Output) -> i32 {
     if spec_readable { 0 } else { 1 }
 }
 
-fn read_pid(path: &Path) -> Option<u32> {
-    let text = fs::read_to_string(path).ok()?;
-    text.trim().parse().ok()
-}
-
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
     ProcessCommand::new("kill")
@@ -616,7 +651,7 @@ fn terminate_pid(pid: u32) {
     }
 }
 
-fn pid_file_age_seconds(path: &Path) -> Option<u64> {
+fn file_age_seconds(path: &Path) -> Option<u64> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
     Some(SystemTime::now().duration_since(modified).ok()?.as_secs())
 }

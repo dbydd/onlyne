@@ -569,7 +569,7 @@ fn cert_pin_from_server_cert_reaches_every_config() {
     let spec = spec_with_roles(&["planner", "builder"]);
     generate(&args(&root, &out), &spec).unwrap();
     let cert = onlyne_net::load_or_create(
-        &onlyne_layout::ServerRoot::resolve(&root).key_path(),
+        &onlyne_config::layout::ServerRoot::resolve(&root).key_path(),
         "test-cluster",
     )
     .unwrap();
@@ -581,7 +581,7 @@ fn cert_pin_from_server_cert_reaches_every_config() {
     }
     #[cfg(unix)]
     assert_eq!(
-        fs::metadata(onlyne_layout::ServerRoot::resolve(&root).key_path())
+        fs::metadata(onlyne_config::layout::ServerRoot::resolve(&root).key_path())
             .unwrap()
             .permissions()
             .mode()
@@ -873,13 +873,33 @@ fn init_root(root: &Path) {
     assert_eq!(output.status.code(), Some(0));
 }
 
+/// Publish the registration a server root's daemon would publish, naming
+/// `pid`. The process verbs read the pid from here, not from a pid file.
+fn publish(root: &Path, pid: u32) {
+    onlyne_wire::socket::write_registration(
+        root,
+        &onlyne_wire::socket::RegistrationFile {
+            pid,
+            ..onlyne_wire::socket::RegistrationFile::server(root)
+        },
+    )
+    .expect("write a registration");
+}
+
+/// The pid the registration for `root` names, when one is published.
+fn read_published(root: &Path) -> Option<u32> {
+    onlyne_wire::socket::read_registration(root)
+        .expect("read the registration")
+        .map(|registration| registration.pid)
+}
+
 #[test]
-fn start_refuses_when_a_live_pid_is_recorded() {
+fn start_refuses_when_a_live_registration_names_this_process() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("server");
     init_root(&root);
     let pid = std::process::id();
-    fs::write(root.join(".onlyne/run/server.pid"), format!("{pid}\n")).unwrap();
+    publish(&root, pid);
     let output = run_cli(&["start", "--root", root.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(
@@ -887,13 +907,13 @@ fn start_refuses_when_a_live_pid_is_recorded() {
         format!("onlyne: server already running at pid {pid}")
     );
     assert_eq!(
-        fs::read_to_string(root.join(".onlyne/run/server.pid")).unwrap(),
-        format!("{pid}\n")
+        read_published(&root).expect("the registration survives a refused start"),
+        pid
     );
 }
 
 #[test]
-fn stop_without_a_pid_file_says_not_running() {
+fn stop_without_a_registration_says_not_running() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("server");
     init_root(&root);
@@ -903,23 +923,25 @@ fn stop_without_a_pid_file_says_not_running() {
         String::from_utf8(output.stderr).unwrap().trim_end(),
         "onlyne: server not running"
     );
-    assert!(!root.join(".onlyne/run/server.pid").exists());
+    assert!(read_published(&root).is_none());
 }
 
 #[test]
-fn stop_clears_a_stale_pid_file() {
+fn stop_clears_a_registration_naming_a_dead_process() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("server");
     init_root(&root);
-    let pid_path = root.join(".onlyne/run/server.pid");
-    fs::write(&pid_path, format!("{}\n", dead_pid())).unwrap();
+    publish(&root, dead_pid());
     let output = run_cli(&["stop", "--root", root.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap().trim_end(),
         "onlyne: server not running"
     );
-    assert!(!pid_path.exists(), "a stale pid file is removed");
+    assert!(
+        read_published(&root).is_none(),
+        "a registration naming a dead process is removed"
+    );
 }
 
 #[test]
@@ -927,11 +949,7 @@ fn status_reports_a_stopped_server_as_json() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("server");
     init_root(&root);
-    fs::write(
-        root.join(".onlyne/run/server.pid"),
-        format!("{}\n", dead_pid()),
-    )
-    .unwrap();
+    publish(&root, dead_pid());
     let output = run_cli(&["status", "--root", root.to_str().unwrap(), "--json"]);
     assert_eq!(output.status.code(), Some(0));
     let report: serde_json::Value =
@@ -947,7 +965,7 @@ fn status_reports_a_stopped_server_as_json() {
             .as_str()
             .unwrap()
             .replace('\\', "/")
-            .ends_with(".onlyne/run/s")
+            .ends_with(&format!("{}.sock", onlyne_wire::socket::workspace_digest(&root)))
     );
 }
 

@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::session::{FaultRecord, SessionLedger, SessionRecord, VersionedSession};
 use chrono::{DateTime, Utc};
 use onlyne_proto::Causality;
-use onlyne_session::{FaultRecord, SessionLedger, SessionRecord, TaskState, VersionedSession};
+use onlyne_proto::TaskState;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};

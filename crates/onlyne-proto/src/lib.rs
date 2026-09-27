@@ -32,6 +32,7 @@ pub mod adapter;
 pub mod envelope;
 pub mod event;
 pub mod frame;
+pub mod lifecycle;
 pub mod ops;
 pub mod payload;
 pub mod text;
@@ -57,13 +58,18 @@ pub use frame::{
     AdminFrame, ErrorCode, ErrorPayload, Frame, GatewayFrame, MAX_ERROR_MESSAGE_BYTES,
     OP_ID_CONFLICT_MESSAGE, ResBody,
 };
+pub use lifecycle::{
+    AgentPhase, DeliveryPhase, HostRef, IgnoredReason, LifecycleEvent, Observation, OrcaPane,
+    RecoveryPhase, RejectReason, ResourcePhase, TaskState, Verdict, Version, apply, event_version,
+    is_legal, project,
+};
 pub use ops::{
-    AckArgs, AdminControl, AdminOp, AdminReport, AdminSend, AgentPhase, ByeArgs, ClientOp,
-    ControlArgs, ConversationInfo, Delivery, DeliveryPhase, FreshRead, GatewayOp, GhostSweep,
-    HandshakeArgs, HealthArgs, HistoryArgs, LedgerEntry, LedgerQuery, PullArgs, PullReply,
-    QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, Receipt, RecoveryPhase,
-    RegisterChannelArgs, RepairAck, RepairAdopt, RepairFail, RepairRebind, RepairTarget, Report,
-    ResourcePhase, RoleInfo, SessionProjection, SessionRow, ShutdownArgs, Subscribe, Welcome,
+    AckArgs, AdminControl, AdminOp, AdminReport, AdminSend, ByeArgs, ClientOp, ControlArgs,
+    ConversationInfo, Delivery, FreshRead, GatewayOp, GhostSweep, HandshakeArgs, HealthArgs,
+    HistoryArgs, LedgerEntry, LedgerQuery, PullArgs, PullReply, QueryFaultsArgs, QueryRolesArgs,
+    QuerySessionsArgs, Receipt, RegisterChannelArgs, RepairAck, RepairAdopt, RepairFail,
+    RepairRebind, RepairTarget, Report, RoleInfo, SessionProjection, SessionRow, ShutdownArgs,
+    Subscribe, Welcome,
 };
 
 pub use payload::{GRAMMAR_V2, Handoff, MAX_REPORT_HANDOFFS, MAX_REPORT_LINES, PayloadV2};

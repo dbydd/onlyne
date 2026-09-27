@@ -58,10 +58,10 @@ async fn fake_agent_mounts_the_role_named_in_the_workspace_config() {
     .unwrap();
 
     let socket = workspace.join(".onlyne/run/s");
-    let listener = onlyne_layout::bind_tokio(&socket).unwrap();
+    let listener = onlyne_wire::socket::bind_tokio(&socket).unwrap();
     let (hello_tx, hello_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        use onlyne_layout::local_socket::prelude::TokioListener;
+        use onlyne_wire::socket::prelude::TokioListener;
         let stream = listener.accept().await.unwrap();
         AdapterServer::accept(stream, move |hello| {
             let _ = hello_tx.send(hello.mount.clone());

@@ -17,23 +17,25 @@
 use crate::common::{assert_settled, complete_plugin, plugin_beat, ran_a_turn};
 use onlyne_adapter::AdapterIo;
 use onlyne_client::ClientInit;
+use onlyne_client::backend::fake::FakeBackend;
 use onlyne_client::session::dispatch::{DispatchState, Outbox, SETTLE_WITHOUT_TURN, send_frame};
-use onlyne_frame::{read_frame, write_frame};
-use onlyne_layout::{RoleWorkspace, connect_local};
+use onlyne_config::layout::RoleWorkspace;
 use onlyne_net::NetError;
 use onlyne_net::{
     KeyPair, TcpListen, TlsConn, accept as accept_handshake, gen_self_signed, server_config,
     table_from,
 };
+use onlyne_proto::TaskState;
 use onlyne_proto::{
     AckArgs, AdapterMsg, AgentMount, Body, Capability, Causality, ClientOp, Delivery, Envelope,
     Frame, HandshakeArgs, HelloArgs, HostOp, LedgerEntry, LedgerQuery, LedgerState, Lifecycle,
     Mount, MountKind, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp, Presence, Principal, PullReply,
     Report, ResBody, RoleInfo, SessionProjection, Welcome, new_envelope,
 };
-use onlyne_session::backend::fake::FakeBackend;
-use onlyne_session::{SessionLedger, TaskState};
 use onlyne_store::ClientStore;
+use onlyne_store::session::SessionLedger;
+use onlyne_wire::socket::connect_local;
+use onlyne_wire::{read_frame, write_frame};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -1096,16 +1098,16 @@ async fn a_retired_session_publishes_its_exit_to_the_mirror() {
     // projection the way it does for every beat it takes: the mirror now reads the
     // session `working`, the one reading the server's own observer can fault about.
     let beat_seq = 10;
-    let witnessed = onlyne_session::Observation::build(
-        onlyne_session::Version::new(1, beat_seq),
+    let witnessed = onlyne_proto::Observation::build(
+        onlyne_proto::Version::new(1, beat_seq),
         true,
-        onlyne_session::DEFAULT_ISOLATE_AFTER,
-        onlyne_session::DEFAULT_TERMINATE_AFTER,
+        onlyne_client::reconcile::DEFAULT_ISOLATE_AFTER,
+        onlyne_client::reconcile::DEFAULT_TERMINATE_AFTER,
         0,
-        onlyne_session::AgentState::Running,
-        onlyne_session::DeliveryState::None,
-        onlyne_session::ResourceState::Attached,
-        onlyne_session::RecoveryState::None,
+        onlyne_proto::AgentPhase::Running,
+        onlyne_proto::DeliveryPhase::NoIntent,
+        onlyne_proto::ResourcePhase::Attached,
+        onlyne_proto::RecoveryPhase::NoRecovery,
     );
     let beat = io
         .request(AdapterMsg::Plugin(PluginOp::Report(plugin_beat(

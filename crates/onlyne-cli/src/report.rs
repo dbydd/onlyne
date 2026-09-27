@@ -9,7 +9,7 @@
 //! refusal so the author sees the rule the file broke.
 
 use clap::{Args, Subcommand, ValueEnum};
-use onlyne_layout::RoleWorkspace;
+use onlyne_config::layout::RoleWorkspace;
 use onlyne_proto::payload::{GRAMMAR_V2, Handoff, PayloadV2, parse};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -347,7 +347,7 @@ fn target_file(
     path: Option<&Path>,
 ) -> Result<PathBuf, String> {
     match (path, task) {
-        (Some(file), _) => Ok(onlyne_layout::absolute_path(file)),
+        (Some(file), _) => Ok(onlyne_wire::socket::absolute_path(file)),
         (None, Some(task)) => Ok(task_path(flags, task)?.0),
         (None, None) => Err("onlyne: report needs --task <id> or --path <file>".to_string()),
     }
@@ -385,8 +385,8 @@ fn workspace_dir(flags: &GlobalFlags) -> PathBuf {
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     match RoleWorkspace::discover(&start) {
-        Ok(workspace) => onlyne_layout::absolute_path(workspace.root()),
-        Err(_) => onlyne_layout::absolute_path(&start),
+        Ok(workspace) => onlyne_wire::socket::absolute_path(workspace.root()),
+        Err(_) => onlyne_wire::socket::absolute_path(&start),
     }
 }
 

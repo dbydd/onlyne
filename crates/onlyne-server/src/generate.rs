@@ -1,11 +1,12 @@
 use chrono::Utc;
+use onlyne_config::layout::ServerRoot;
 use onlyne_config::template::{
     Placeholders, Template, TemplateError, available_roles, discover, load_tree, local_override,
     merge_fragment, scan_for_prefixes, substitute_at,
 };
 use onlyne_config::{ClientEntry, Spec};
-use onlyne_layout::{ServerRoot, apply_private_mode};
 use onlyne_net::KeyPair;
+use onlyne_wire::socket::apply_private_mode;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;

@@ -1,7 +1,8 @@
 use super::*;
+use crate::reconcile::{feed_resource_attached, feed_turn_ended, feed_turn_started};
 use crate::session::dispatch::SETTLE_WITHOUT_TURN;
+use onlyne_proto::is_legal;
 use onlyne_proto::new_task_id;
-use onlyne_session::{feed_resource_attached, feed_turn_ended, feed_turn_started, is_legal};
 use serde_json::Value;
 use tempfile::{TempDir, tempdir};
 
@@ -30,7 +31,7 @@ fn staged_state(dir: &TempDir, task: &str) -> DispatchState {
         dir.path(),
         Vec::new(),
         8,
-        Arc::new(onlyne_session::backend::fake::FakeBackend::new()),
+        Arc::new(crate::backend::fake::FakeBackend::new()),
         store,
     );
     state.inner.lock().bridge.track_live(SessionRef {
@@ -76,9 +77,9 @@ fn draining_row(state: &DispatchState, task: &str) {
     .expect("open the completion drain");
     drop(inner);
     let row = client_tuple(state, task);
-    assert_eq!(row.agent, AgentState::Ready);
-    assert_eq!(row.delivery, DeliveryState::Pending);
-    assert_eq!(row.recovery, RecoveryState::None);
+    assert_eq!(row.agent, AgentPhase::Ready);
+    assert_eq!(row.delivery, DeliveryPhase::Pending);
+    assert_eq!(row.recovery, RecoveryPhase::NoRecovery);
 }
 
 /// The client's records one turn after the drain opened: the agent ended its
@@ -102,9 +103,9 @@ fn waiting_row(state: &DispatchState, task: &str) {
     .expect("open the completion drain");
     drop(inner);
     let row = client_tuple(state, task);
-    assert_eq!(row.agent, AgentState::Idle);
-    assert_eq!(row.delivery, DeliveryState::Pending);
-    assert_eq!(row.recovery, RecoveryState::Draining);
+    assert_eq!(row.agent, AgentPhase::Idle);
+    assert_eq!(row.delivery, DeliveryPhase::Pending);
+    assert_eq!(row.recovery, RecoveryPhase::Draining);
 }
 
 /// The client's records once the completion's receipt has landed: the settlement
@@ -115,8 +116,8 @@ fn settled_row(state: &DispatchState, task: &str) {
     settle(&inner.bridge, &inner.store, task).expect("the receipt landed");
     drop(inner);
     let row = client_tuple(state, task);
-    assert_eq!(row.delivery, DeliveryState::Accepted);
-    assert_eq!(row.recovery, RecoveryState::None);
+    assert_eq!(row.delivery, DeliveryPhase::Accepted);
+    assert_eq!(row.recovery, RecoveryPhase::NoRecovery);
 }
 
 /// The row's recovery line moved to a fault, the way the reconcile loop moves it
@@ -140,8 +141,8 @@ fn faulted_row(state: &DispatchState, task: &str) {
     .expect("a reconcile fact disagreed");
     drop(inner);
     let row = client_tuple(state, task);
-    assert_eq!(row.agent, AgentState::Idle);
-    assert_eq!(row.recovery, RecoveryState::IdleFault);
+    assert_eq!(row.agent, AgentPhase::Idle);
+    assert_eq!(row.recovery, RecoveryPhase::IdleFault);
 }
 
 /// Burn the open drain's retries beside an already-open fault line, the way the
@@ -178,8 +179,8 @@ fn exhausted_row(state: &DispatchState, task: &str) {
     .expect("the retries are spent");
     drop(inner);
     let row = client_tuple(state, task);
-    assert_eq!(row.delivery, DeliveryState::Exhausted);
-    assert_eq!(row.recovery, RecoveryState::IdleFault);
+    assert_eq!(row.delivery, DeliveryPhase::Exhausted);
+    assert_eq!(row.recovery, RecoveryPhase::IdleFault);
 }
 
 /// The task state the composition's caller hands it: the task record's own
@@ -345,7 +346,7 @@ fn closed_row(state: &DispatchState, task: &str) {
     drop(inner);
     assert_eq!(
         client_tuple(state, task).agent,
-        AgentState::Gone,
+        AgentPhase::Gone,
         "a closed resource kills the agent fact it hosted"
     );
 }
@@ -385,13 +386,17 @@ async fn an_idle_beat_over_an_open_task_is_composed_idle_waiting() {
     let client = client_tuple(&state, &task);
     assert_eq!(
         client.agent,
-        AgentState::Idle,
+        AgentPhase::Idle,
         "the turn that ran has ended"
     );
-    assert_eq!(client.delivery, DeliveryState::None, "no exit was reported");
+    assert_eq!(
+        client.delivery,
+        DeliveryPhase::NoIntent,
+        "no exit was reported"
+    );
     assert_eq!(
         client.recovery,
-        RecoveryState::None,
+        RecoveryPhase::NoRecovery,
         "and no label is stored"
     );
 
@@ -399,12 +404,12 @@ async fn an_idle_beat_over_an_open_task_is_composed_idle_waiting() {
     assert!(is_legal(&idle), "{idle:?}");
     assert_eq!(
         idle.recovery,
-        RecoveryState::IdleWaiting,
+        RecoveryPhase::IdleWaiting,
         "an idle agent over an open task with no receipt is waiting for its exit"
     );
     assert_eq!(
         idle.delivery,
-        DeliveryState::None,
+        DeliveryPhase::NoIntent,
         "the label invents no intent: the plugin reported no completion"
     );
 
@@ -439,7 +444,7 @@ async fn an_idle_beat_over_an_open_task_is_composed_idle_waiting() {
     assert!(is_legal(&idle), "{idle:?}");
     assert_eq!(
         idle.recovery,
-        RecoveryState::None,
+        RecoveryPhase::NoRecovery,
         "no task record means no open work to wait for: {idle:?}"
     );
 }
@@ -515,11 +520,11 @@ fn a_beat_onto_an_open_drain_keeps_the_client_dimension_and_stays_legal() {
     draining_row(&state, &task);
 
     let cases = [
-        ("booting", AgentState::Booting),
-        ("ready", AgentState::Ready),
-        ("running", AgentState::Running),
-        ("idle", AgentState::Idle),
-        ("gone", AgentState::Gone),
+        ("booting", AgentPhase::Booting),
+        ("ready", AgentPhase::Ready),
+        ("running", AgentPhase::Running),
+        ("idle", AgentPhase::Idle),
+        ("gone", AgentPhase::Gone),
     ];
     for (spelling, agent) in cases {
         let tuple = compose(&state, &task, spelling);
@@ -527,18 +532,18 @@ fn a_beat_onto_an_open_drain_keeps_the_client_dimension_and_stays_legal() {
         assert_eq!(tuple.agent, agent, "{spelling}: the agent is the plugin's");
         assert_eq!(
             tuple.resource,
-            ResourceState::Attached,
+            ResourcePhase::Attached,
             "{spelling}: the resource is the plugin's"
         );
         assert_eq!(
             tuple.delivery,
-            DeliveryState::Pending,
+            DeliveryPhase::Pending,
             "{spelling}: an unacknowledged intent stays in flight whatever the \
              plugin says about the agent"
         );
         assert_eq!(
             tuple.recovery,
-            RecoveryState::None,
+            RecoveryPhase::NoRecovery,
             "{spelling}: the substate is the client's, and it had none to give"
         );
     }
@@ -557,14 +562,14 @@ fn a_draining_label_follows_the_agent_that_can_hold_it() {
     assert!(is_legal(&idle), "{idle:?}");
     assert_eq!(
         idle.recovery,
-        RecoveryState::Draining,
+        RecoveryPhase::Draining,
         "an idle agent keeps the label its drain carries"
     );
     let running = compose(&state, &task, "running");
     assert!(is_legal(&running), "{running:?}");
     assert_eq!(
         running.recovery,
-        RecoveryState::Draining,
+        RecoveryPhase::Draining,
         "so does a running one: the completion is still in asynchronous send"
     );
     for spelling in ["ready", "booting", "gone"] {
@@ -572,12 +577,12 @@ fn a_draining_label_follows_the_agent_that_can_hold_it() {
         assert!(is_legal(&tuple), "{spelling}: {tuple:?}");
         assert_eq!(
             tuple.recovery,
-            RecoveryState::None,
+            RecoveryPhase::NoRecovery,
             "{spelling}: no agent of that shape carries a recovery substate"
         );
         assert_eq!(
             tuple.delivery,
-            DeliveryState::Pending,
+            DeliveryPhase::Pending,
             "{spelling}: dropping the label does not close the intent"
         );
     }
@@ -597,14 +602,14 @@ fn a_fault_line_and_an_exhausted_intent_are_repaired_to_what_the_agent_can_hold(
     assert!(is_legal(&idle), "{idle:?}");
     assert_eq!(
         idle.recovery,
-        RecoveryState::IdleFault,
+        RecoveryPhase::IdleFault,
         "the fault line belongs to an idle agent, which is what the client holds"
     );
     let ready = compose(&state, &task, "ready");
     assert!(is_legal(&ready), "{ready:?}");
     assert_eq!(
         ready.recovery,
-        RecoveryState::None,
+        RecoveryPhase::NoRecovery,
         "a ready agent is not an idle one, so the reducer could not take the pair"
     );
 
@@ -615,14 +620,14 @@ fn a_fault_line_and_an_exhausted_intent_are_repaired_to_what_the_agent_can_hold(
     assert!(is_legal(&idle), "{idle:?}");
     assert_eq!(
         idle.delivery,
-        DeliveryState::Exhausted,
+        DeliveryPhase::Exhausted,
         "an exhausted intent beside an idle agent is the fault path the client is on"
     );
     let ready = compose(&state, &task, "ready");
     assert!(is_legal(&ready), "{ready:?}");
     assert_eq!(
         ready.delivery,
-        DeliveryState::None,
+        DeliveryPhase::NoIntent,
         "a ready agent has no turn exit for those retries to have burned against"
     );
 }
@@ -638,11 +643,11 @@ fn a_beat_onto_a_settled_drain_repairs_only_the_pairing_the_reducer_forbids() {
     settled_row(&state, &task);
 
     let cases = [
-        ("booting", AgentState::Booting, DeliveryState::Pending),
-        ("ready", AgentState::Ready, DeliveryState::Accepted),
-        ("running", AgentState::Running, DeliveryState::Accepted),
-        ("idle", AgentState::Idle, DeliveryState::Accepted),
-        ("gone", AgentState::Gone, DeliveryState::Accepted),
+        ("booting", AgentPhase::Booting, DeliveryPhase::Pending),
+        ("ready", AgentPhase::Ready, DeliveryPhase::Accepted),
+        ("running", AgentPhase::Running, DeliveryPhase::Accepted),
+        ("idle", AgentPhase::Idle, DeliveryPhase::Accepted),
+        ("gone", AgentPhase::Gone, DeliveryPhase::Accepted),
     ];
     for (spelling, agent, delivery) in cases {
         let tuple = compose(&state, &task, spelling);
@@ -654,7 +659,7 @@ fn a_beat_onto_a_settled_drain_repairs_only_the_pairing_the_reducer_forbids() {
         );
         assert_eq!(
             tuple.recovery,
-            RecoveryState::None,
+            RecoveryPhase::NoRecovery,
             "{spelling}: the settlement closed the substate"
         );
     }
@@ -778,7 +783,7 @@ async fn a_beat_from_a_held_connection_refreshes_liveness_and_applies_no_state()
     let tuple = client_tuple(&state, &task);
     assert_eq!(
         tuple.agent,
-        AgentState::Ready,
+        AgentPhase::Ready,
         "the held connection's observation is not this session's state"
     );
 }
@@ -871,7 +876,7 @@ async fn a_no_op_beat_still_stamps_the_liveness_clock() {
     drop(inner);
     assert_eq!(
         client_tuple(&state, &task).agent,
-        AgentState::Running,
+        AgentPhase::Running,
         "the first beat's dimension is the one that stands"
     );
 }
@@ -922,12 +927,12 @@ async fn a_completion_with_no_turn_behind_it_leaves_the_task_open() {
     let tuple = client_tuple(&state, &task);
     assert_eq!(
         tuple.agent,
-        AgentState::Ready,
+        AgentPhase::Ready,
         "the tuple stays where the barrier left it"
     );
     assert_eq!(
         tuple.delivery,
-        DeliveryState::None,
+        DeliveryPhase::NoIntent,
         "a completion for work that never ran opens no drain"
     );
 }
@@ -979,7 +984,7 @@ async fn a_completion_after_a_running_beat_settles_with_an_empty_head() {
     serving_slot(&state, &task, "msg-worked");
     assert_eq!(
         client_tuple(&state, &task).agent,
-        AgentState::Ready,
+        AgentPhase::Ready,
         "the barrier alone is the shape the refusal turns away"
     );
 

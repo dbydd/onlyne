@@ -21,7 +21,7 @@ pub const SESSION_DEAD: &str = "session_dead";
 pub fn on_recycled(
     state: &DispatchState,
     task_id: &str,
-    reason: onlyne_session::CloseReason,
+    reason: crate::backend::CloseReason,
 ) -> Result<()> {
     let mut inner = state.inner.lock();
     release_locked(&mut inner, task_id, Some(reason))
@@ -36,12 +36,12 @@ pub fn on_recycled(
 pub(super) fn stored_close_reason(
     inner: &DispatchInner,
     task_id: &str,
-) -> Option<onlyne_session::CloseReason> {
+) -> Option<crate::backend::CloseReason> {
     match stored_task_state(inner, task_id) {
         TaskState::Pending => None,
-        TaskState::Done => Some(onlyne_session::CloseReason::Completed),
-        TaskState::Failed => Some(onlyne_session::CloseReason::Fault),
-        TaskState::Cancelled => Some(onlyne_session::CloseReason::Cancelled),
+        TaskState::Done => Some(crate::backend::CloseReason::Completed),
+        TaskState::Failed => Some(crate::backend::CloseReason::Fault),
+        TaskState::Cancelled => Some(crate::backend::CloseReason::Cancelled),
     }
 }
 
@@ -56,11 +56,11 @@ pub(super) fn stored_close_reason(
 /// `cancelled` one is a `Cancelled`, and a `failed` task — like one that never
 /// settled at all — is a `Fault`, because the work was still owed when the agent
 /// left.
-fn grace_close_reason(inner: &DispatchInner, task_id: &str) -> onlyne_session::CloseReason {
+fn grace_close_reason(inner: &DispatchInner, task_id: &str) -> crate::backend::CloseReason {
     match stored_task_state(inner, task_id) {
-        TaskState::Done => onlyne_session::CloseReason::Completed,
-        TaskState::Pending | TaskState::Failed => onlyne_session::CloseReason::Fault,
-        TaskState::Cancelled => onlyne_session::CloseReason::Cancelled,
+        TaskState::Done => crate::backend::CloseReason::Completed,
+        TaskState::Pending | TaskState::Failed => crate::backend::CloseReason::Fault,
+        TaskState::Cancelled => crate::backend::CloseReason::Cancelled,
     }
 }
 
@@ -156,7 +156,7 @@ fn unbind_transports(inner: &mut DispatchInner, key: &str, slot: &SessionSlot) {
 pub(super) struct PendingClose {
     backend: Arc<dyn SessionBackend>,
     session: SessionRef,
-    reason: onlyne_session::CloseReason,
+    reason: crate::backend::CloseReason,
 }
 
 /// Run the closes a retirement collected.
@@ -200,7 +200,7 @@ pub(super) fn close_retired(pending: Vec<PendingClose>) {
 pub(super) fn retire_idle_locked(
     inner: &mut DispatchInner,
     key: &str,
-    reason: onlyne_session::CloseReason,
+    reason: crate::backend::CloseReason,
     pending: &mut Vec<PendingClose>,
 ) -> bool {
     let Some(slot) = inner.sessions.get(key) else {
@@ -254,7 +254,7 @@ pub(super) fn retire_idle_locked(
             reason,
         });
     }
-    if reason == onlyne_session::CloseReason::Completed {
+    if reason == crate::backend::CloseReason::Completed {
         if let Err(error) = feed_agent_gone(&inner.bridge, &inner.store, &task_id) {
             tracing::warn!(
                 task = %task_id,
@@ -273,7 +273,7 @@ pub(super) fn retire_idle_locked(
 pub(super) fn release_locked(
     inner: &mut DispatchInner,
     task_id: &str,
-    reason: Option<onlyne_session::CloseReason>,
+    reason: Option<crate::backend::CloseReason>,
 ) -> Result<()> {
     let resource = inner
         .store
@@ -342,7 +342,7 @@ pub(super) fn release_locked(
             retire_idle_locked(
                 inner,
                 &key,
-                onlyne_session::CloseReason::Completed,
+                crate::backend::CloseReason::Completed,
                 &mut pending,
             );
             // This function answers to its caller's lock, which is already held
@@ -370,15 +370,15 @@ pub(super) fn release_locked(
 /// commands ([`ControlWord::refusal`]), so a row reads the same thing whichever
 /// door refused it, and each names the command that was given rather than the
 /// verdict that command left behind.
-fn close_refusal(reason: onlyne_session::CloseReason) -> &'static str {
+fn close_refusal(reason: crate::backend::CloseReason) -> &'static str {
     match reason {
         // The close an operator's `cancel` runs: the `ControlOp::Cancel` arm of
         // `on_control`, which is also how the server asks for `repair close` and
         // `repair fail` to reach this client.
-        onlyne_session::CloseReason::Cancelled => ControlWord::Cancel.refusal(),
+        crate::backend::CloseReason::Cancelled => ControlWord::Cancel.refusal(),
         // The close an operator's `recycle` runs: the `ControlOp::Recycle` arm
         // of `on_control`.
-        onlyne_session::CloseReason::Operator => ControlWord::Recycle.refusal(),
+        crate::backend::CloseReason::Operator => ControlWord::Recycle.refusal(),
         // No control command reaches this branch with another reason: a
         // `completed`, `fault` or `replaced` close retires an idle slot, and a
         // `shutdown` close runs `close_all`, neither of which comes through
@@ -402,7 +402,7 @@ fn close_refusal(reason: onlyne_session::CloseReason) -> &'static str {
 /// and the closes it collected run once the lock is let go. A shutdown that
 /// closed each pane while holding that lock spent the whole budget on the host,
 /// with the lock no adapter frame could reach.
-pub fn close_all(state: &DispatchState, reason: onlyne_session::CloseReason, budget: Duration) {
+pub fn close_all(state: &DispatchState, reason: crate::backend::CloseReason, budget: Duration) {
     let started = Instant::now();
     let pending: Vec<PendingClose> = {
         let mut inner = state.inner.lock();
@@ -504,7 +504,7 @@ impl DispatchState {
     /// gives the sweep above.
     pub fn reclaim_exited_resources(&self) -> Vec<String> {
         let mut inner = self.inner.lock();
-        let candidates: Vec<(String, onlyne_session::CloseReason)> = inner
+        let candidates: Vec<(String, crate::backend::CloseReason)> = inner
             .sessions
             .iter()
             .filter(|(key, slot)| {
@@ -554,7 +554,7 @@ impl DispatchState {
     /// bound to a task goes with it: the plugin connection that would have
     /// reported the ending is the one that dropped. The agent-gone feed is what
     /// says the process left — the session's own tuple reaches `Exited` through
-    /// `AgentState::Gone` rather than through a task result — and the reason the
+    /// `AgentPhase::Gone` rather than through a task result — and the reason the
     /// backend is handed is the one `grace_close_reason` reads off what the slot
     /// still owes.
     ///

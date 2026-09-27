@@ -118,7 +118,7 @@ opens no pane: the client drives the agent with `session/prompt` and reads the s
 exits 5 with a three-line refusal whose first line is
 `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`.
 `onlyne-client doctor` prints host-detection JSON and exits 0.
-The adapter socket binds `.onlyne/run/s` for a path of 103 bytes or less, and a deeper tree binds the short derived path that `run/socket` records; `run` exits 1 with `onlyne-client: bind the workspace socket <canonical path>: <detail>` when the bind fails — the detail names the served path, both lengths, and the OS reason — and a later `accept` error logs at `error` level and retries every 100 ms.
+The adapter socket lives in the machine-level runtime directory — `/tmp/onlyne-<uid>/<digest>.sock`, with `$ONLYNE_RUNTIME_DIR` overriding the directory and `<digest>` the first 16 hex characters of `sha256` over the workspace's canonical root — so no path length rule applies; `run` exits 1 with `onlyne-client: bind the workspace socket <canonical path>: <detail>` when the bind fails — the detail names the bound path, its length, the runtime directory, and the OS reason — and a later `accept` error logs at `error` level and retries every 100 ms.
 herdr is kept by operator decision, and its standing lives in
 `crates/onlyne-session/src/backend/herdr/NOTE.md`: a workspace that wants another backend names
 it in `config.toml`, and a herdr failure carries no product signal.
@@ -191,10 +191,12 @@ red before the fix, green after. The live ring demo
 tabs, and outside one `ONLYNE_BACKEND=exec` runs them headless. Treat it as manual smoke.
 
 Socket invariant: the path a daemon binds is the path `socket_path()` returns, and every
-finder — CLI, TUI, fake agent, plugin — resolves through `onlyne-layout`
-(`SocketEndpoint`/`socket_path()`/`bind_socket`). An edit that joins `.onlyne/run/s` by hand
-splits a deep workspace in two: the canonical spelling stays bare, the daemon serves a
-short derived path, and `run/socket` names the served one.
+finder — CLI, TUI, fake agent, plugin — resolves through `onlyne-wire`'s socket module
+(`socket_path()`/`SocketEndpoint`/`bind_socket`). A socket lives in one machine-level runtime
+directory (`/tmp/onlyne-<uid>/`, `$ONLYNE_RUNTIME_DIR` overriding it) as `<digest>.sock`,
+beside the `<digest>.json` registration naming the surface that serves it, and nothing binds
+inside the tree any more. An edit that joins `.onlyne/run/s` by hand, or digests a spelling
+other than the canonical root, dials a path no daemon holds.
 
 ## Formal invariants
 

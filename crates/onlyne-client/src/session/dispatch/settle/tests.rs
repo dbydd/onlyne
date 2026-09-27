@@ -1,8 +1,8 @@
 use super::*;
+use crate::backend::fake::FakeBackend;
 use onlyne_proto::{
     Body, Causality, Envelope, Handoff, MsgKind, Outcome, Principal, new_envelope, new_task_id,
 };
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
 use std::sync::Arc;
 use tempfile::{TempDir, tempdir};
@@ -237,7 +237,7 @@ async fn a_guard_refuses_on_no_word_but_the_one_it_reports() {
     store
         .upsert_session(
             &task,
-            &onlyne_session::VersionedSession {
+            &onlyne_store::session::VersionedSession {
                 agent_state: "running".into(),
                 delivery_state: "pending".into(),
                 resource_state: "attached".into(),

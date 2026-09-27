@@ -38,7 +38,7 @@ async fn a_delivered_cancel_stops_the_session_process() {
         dir.path(),
         vec!["sleep".into(), "120".into()],
         1,
-        Arc::new(onlyne_session::backend::exec::ExecBackend::new()),
+        Arc::new(onlyne_client::backend::exec::ExecBackend::new()),
         store,
     );
 
@@ -81,7 +81,7 @@ async fn a_cancel_for_an_unknown_task_creates_no_session() {
         dir.path(),
         vec!["sleep".into(), "120".into()],
         1,
-        Arc::new(onlyne_session::backend::exec::ExecBackend::new()),
+        Arc::new(onlyne_client::backend::exec::ExecBackend::new()),
         store,
     );
 
@@ -109,7 +109,7 @@ async fn a_focus_for_an_unknown_task_still_settles() {
         dir.path(),
         vec!["sleep".into(), "120".into()],
         1,
-        Arc::new(onlyne_session::backend::exec::ExecBackend::new()),
+        Arc::new(onlyne_client::backend::exec::ExecBackend::new()),
         store,
     );
 

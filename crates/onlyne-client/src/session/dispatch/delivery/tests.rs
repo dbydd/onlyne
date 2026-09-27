@@ -1,6 +1,6 @@
 use super::*;
+use crate::backend::fake::FakeBackend;
 use onlyne_proto::new_task_id;
-use onlyne_session::backend::fake::FakeBackend;
 use tempfile::tempdir;
 
 /// One task-shaped delivery, the only envelope kind `dispatch` accepts.

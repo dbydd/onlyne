@@ -15,8 +15,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 onlyne-adapter = { path = "../onlyne-adapter", version = "1.4.1" }
 onlyne-config = { path = "../onlyne-config", version = "1.4.1" }
-onlyne-frame = { path = "../onlyne-frame", version = "1.4.1" }
-onlyne-layout = { path = "../onlyne-layout", version = "1.4.1" }
+onlyne-wire = { path = "../onlyne-wire", version = "1.4.1" }
 interprocess = { workspace = true }
 onlyne-net = { path = "../onlyne-net", version = "1.4.1" }
 onlyne-proto = { path = "../onlyne-proto", version = "1.4.1" }
@@ -40,7 +39,7 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 base64 = "0.22"
 onlyne-client = { path = "../onlyne-client", version = "1.4.1" }
-onlyne-frame = { path = "../onlyne-frame", version = "1.4.1" }
+onlyne-wire = { path = "../onlyne-wire", version = "1.4.1" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 onlyne-net = { path = "../onlyne-net", version = "1.4.1" }
 tempfile = "3"

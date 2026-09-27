@@ -6,12 +6,12 @@ use crate::common::{
     serve_role_socket, task_delivery,
 };
 use onlyne_adapter::AdapterIo;
+use onlyne_client::backend::fake::FakeBackend;
 use onlyne_client::session::dispatch::{DispatchState, on_plugin_report};
 use onlyne_proto::{
     AdapterMsg, DetachArgs, HelloArgs, Mount, MountKind, Outcome, PROTOCOL_VERSION, PluginOp,
     Report,
 };
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,7 +119,7 @@ async fn the_second_task_gets_its_own_session_and_connection() {
         capabilities: Vec::new(),
         mount: Some(Mount::Admin),
     };
-    let stream = onlyne_layout::connect_local(&socket).await.unwrap();
+    let stream = onlyne_wire::socket::connect_local(&socket).await.unwrap();
     let io = AdapterIo::new(stream, Duration::from_secs(2), Duration::from_secs(2));
     let body = io
         .request(AdapterMsg::Plugin(PluginOp::Hello(admin)))

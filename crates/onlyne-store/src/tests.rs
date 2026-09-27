@@ -1,13 +1,11 @@
 #[cfg(test)]
 mod ledger_gates {
+    use crate::session::{SessionLedger, VersionedSession};
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use onlyne_proto::{
         Body, Causality, Envelope, LedgerQuery, LedgerState, MsgKind, Principal, QuerySessionsArgs,
         new_envelope,
     };
-    use onlyne_session::lifecycle::Version;
-    use onlyne_session::reconcile::{Bridge, feed_ready};
-    use onlyne_session::{SessionLedger, VersionedSession, apply_persist};
     use rusqlite::{Connection, params};
     use serde_json::json;
     use tempfile::TempDir;
@@ -929,69 +927,6 @@ mod ledger_gates {
     }
 
     #[test]
-    fn client_store_drives_apply_persist_created_and_ready() {
-        let (_dir, path) = temp_db("client.db");
-        let store = ClientStore::open(&path).unwrap();
-        let bridge = Bridge::new();
-        let task_id = new_uuid(10);
-        let env = envelope(
-            MsgKind::Task,
-            "tracked",
-            Some("o-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
-        );
-        store
-            .enqueue_intent(
-                env.op_id.as_deref().unwrap(),
-                &serde_json::to_value(&env).unwrap(),
-            )
-            .unwrap();
-        apply_persist(
-            &bridge,
-            &store,
-            &task_id,
-            &onlyne_session::lifecycle::LifecycleEvent::Created {
-                v: Version::new(1, 1),
-            },
-        )
-        .unwrap();
-        let created = store.get_session(&task_id).unwrap().unwrap();
-        // The row answers with its tuple, and the public view comes out of
-        // `project` beside the task state the caller owns. Nothing here holds a
-        // lifecycle to read.
-        let created_tuple = onlyne_session::project(
-            observation(&created).agent,
-            observation(&created).delivery,
-            observation(&created).resource,
-            observation(&created).recovery,
-            onlyne_session::TaskState::Pending,
-        );
-        assert_eq!(created_tuple, onlyne_session::PublicLifecycle::Created);
-        assert_eq!((created.generation, created.seq), (1, 1));
-        feed_ready(&bridge, &store, &task_id).unwrap();
-        let ready = store.get_session(&task_id).unwrap().unwrap();
-        let ready_tuple = observation(&ready);
-        assert_eq!(ready_tuple.agent, onlyne_session::AgentState::Ready);
-        assert_eq!(
-            onlyne_session::project(
-                ready_tuple.agent,
-                ready_tuple.delivery,
-                ready_tuple.resource,
-                ready_tuple.recovery,
-                onlyne_session::TaskState::Pending,
-            ),
-            onlyne_session::PublicLifecycle::Idle
-        );
-        assert_eq!((ready.generation, ready.seq), (1, 2));
-        assert!(store.list_faults(&task_id).unwrap().is_empty());
-        assert!(store.event_head().unwrap() >= 2);
-    }
-
-    /// Decode the tuple one stored row carries.
-    fn observation(row: &onlyne_session::SessionRecord) -> onlyne_session::Observation {
-        serde_json::from_str(&row.observed_json).expect("the stored tuple is readable")
-    }
-
-    #[test]
     fn a_settled_task_is_readable_only_from_the_task_table() {
         let (_dir, path) = temp_db("client-task.db");
         let store = ClientStore::open(&path).unwrap();
@@ -999,7 +934,7 @@ mod ledger_gates {
         let causality = Causality::root(task_id.clone());
         assert!(store.open_task(&causality, "task").unwrap());
         let opened = store.task(&task_id).unwrap().expect("the open record");
-        assert_eq!(opened.task_state, onlyne_session::TaskState::Pending);
+        assert_eq!(opened.task_state, onlyne_proto::TaskState::Pending);
         assert_eq!(opened.kind.as_deref(), Some("task"));
         assert_eq!((opened.hop, opened.attempt), (0, 0));
         assert!(opened.settled_at.is_none());
@@ -1007,18 +942,18 @@ mod ledger_gates {
 
         assert!(
             store
-                .settle_task(&task_id, onlyne_session::TaskState::Done)
+                .settle_task(&task_id, onlyne_proto::TaskState::Done)
                 .unwrap()
         );
         let settled = store.task(&task_id).unwrap().expect("the settled record");
-        assert_eq!(settled.task_state, onlyne_session::TaskState::Done);
+        assert_eq!(settled.task_state, onlyne_proto::TaskState::Done);
         assert!(settled.settled_at.is_some(), "the settle stamps its clock");
         assert!(store.open_tasks(10).unwrap().is_empty());
         // The first terminal verdict is the record: a later report for the same
         // task cannot rewrite it.
         assert!(
             !store
-                .settle_task(&task_id, onlyne_session::TaskState::Failed)
+                .settle_task(&task_id, onlyne_proto::TaskState::Failed)
                 .unwrap(),
             "a settled task keeps the verdict that settled it"
         );
@@ -1028,7 +963,7 @@ mod ledger_gates {
                 .unwrap()
                 .expect("the record")
                 .task_state,
-            onlyne_session::TaskState::Done
+            onlyne_proto::TaskState::Done
         );
         // Re-dispatching the task refreshes its chain and keeps its verdict.
         let deeper = Causality {
@@ -1047,19 +982,19 @@ mod ledger_gates {
         let again = store.task(&task_id).unwrap().expect("the record");
         assert_eq!((again.hop, again.attempt), (3, 2));
         assert_eq!(again.parent_task.as_deref(), Some(new_uuid(21).as_str()));
-        assert_eq!(again.task_state, onlyne_session::TaskState::Done);
+        assert_eq!(again.task_state, onlyne_proto::TaskState::Done);
         assert_eq!(again.opened_at, settled.opened_at);
         // A verdict for a task this store never opened writes its own record
         // rather than being dropped.
         let unopened = new_uuid(22);
         assert!(
             store
-                .settle_task(&unopened, onlyne_session::TaskState::Cancelled)
+                .settle_task(&unopened, onlyne_proto::TaskState::Cancelled)
                 .unwrap(),
             "a settle with no open record still lands"
         );
         let arrived = store.task(&unopened).unwrap().expect("the verdict's row");
-        assert_eq!(arrived.task_state, onlyne_session::TaskState::Cancelled);
+        assert_eq!(arrived.task_state, onlyne_proto::TaskState::Cancelled);
         assert!(arrived.kind.is_none(), "nobody claimed a delivery cause");
         assert_eq!(
             arrived.opened_at,
@@ -1072,7 +1007,7 @@ mod ledger_gates {
     fn insert_fault_round_trips_task_columns() {
         let (_dir, path) = temp_db("client-fault.db");
         let store = ClientStore::open(&path).unwrap();
-        let fault = onlyne_session::FaultRecord {
+        let fault = crate::session::FaultRecord {
             id: 999,
             task_id: "task-fault-1".to_string(),
             session_id: "task-fault-1".to_string(),
@@ -1354,7 +1289,7 @@ mod ledger_gates {
         assert_eq!(head.graphemes(true).count(), OUT_HEAD_CLUSTERS);
         assert_eq!(head, "é".repeat(OUT_HEAD_CLUSTERS));
         assert!(head.is_char_boundary(head.len()));
-        assert!(head.len() < onlyne_frame::MAX_FRAME_BYTES);
+        assert!(head.len() < onlyne_wire::MAX_FRAME_BYTES);
     }
 
     #[test]
@@ -1377,7 +1312,7 @@ mod ledger_gates {
         assert_eq!(head.graphemes(true).count(), OUT_HEAD_CLUSTERS);
         assert!(head.ends_with(family), "a ZWJ sequence was cut mid-cluster");
         assert_eq!(head.matches('\u{200D}').count(), OUT_HEAD_CLUSTERS * 3);
-        assert!(head.len() < onlyne_frame::MAX_FRAME_BYTES);
+        assert!(head.len() < onlyne_wire::MAX_FRAME_BYTES);
 
         let flag = "\u{1F1EF}\u{1F1F5}".repeat(OUT_HEAD_CLUSTERS + 3);
         let head = head_preview(&flag);

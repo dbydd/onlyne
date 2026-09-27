@@ -1,17 +1,17 @@
-//! `onlyne` — one socket, one protocol, three sibling binaries.
+//! `onlyne` — one socket, one protocol, two sibling binaries.
 //!
 //! `onlyne server <verb>` execs the server binary for the process verbs
 //! (`init`, `run`, `start`, `stop`, `generate`), and `onlyne status`,
 //! `onlyne reload`, `onlyne server status`, and `onlyne server reload` are
 //! in-process admin-socket queries with no exec, because keeping `status`
 //! working while the daemon runs
-//! and its binary is absent is worth the rule; `onlyne client <verb>` and
-//! `onlyne gateway run|list|auth` exec their sibling, `onlyne gateway status`
-//! queries here, and the admin nouns (`roles`, `sessions`, `ledger`, `faults`,
-//! `watch`, `history`, `spec_diff`, `wait-ready`, `repair`) plus the message
-//! verbs (`send`, `reply`, `complete`, `handoff`, `ack`, `reject`, `control`,
-//! `who`, `ping`) share one path in this process: resolve a socket, write one
-//! frame, print one JSON line, return one exit code.
+//! and its binary is absent is worth the rule; `onlyne client <verb>` execs its
+//! sibling, `onlyne gateway status` reads the registered gateway mounts from
+//! the admin socket here, and the admin nouns (`roles`, `sessions`, `ledger`,
+//! `faults`, `watch`, `history`, `spec_diff`, `wait-ready`, `repair`) plus the
+//! message verbs (`send`, `reply`, `complete`, `handoff`, `ack`, `reject`,
+//! `control`, `who`, `ping`) share one path in this process: resolve a socket,
+//! write one frame, print one JSON line, return one exit code.
 
 mod admin;
 mod flags;
@@ -23,6 +23,7 @@ mod report;
 mod runtime;
 mod skill;
 mod socket;
+pub mod tui;
 mod verbs;
 mod wire;
 
@@ -49,7 +50,7 @@ its protocol on its own stdio. A session the reconnect sweep retires refuses \
 the delivery it still held with this client's own word `session_dead`. The \
 server's own budgets settle a row as `requeue_exhausted`, `requeue_ttl`, or \
 `expired`. A row that settled with nothing to say carries no `reason` key. \
-`onlyne-tui` page 2 appends \
+The board's page 2 appends \
 `reason=<text>` to a row's tail only where that key is present, so an `acked` \
 row prints what it printed before the column reached the board.";
 
@@ -80,7 +81,7 @@ ONLYNE_BACKEND takes precedence over the configured value when it is nonempty.";
     name = "onlyne",
     bin_name = "onlyne",
     version,
-    about = "One socket, one protocol, three sibling binaries.",
+    about = "One socket, one protocol, two sibling binaries.",
     after_help = CLI_AFTER_HELP,
     subcommand_negates_reqs = true
 )]
@@ -98,7 +99,7 @@ enum Verb {
     Server(ServerCmd),
     /// Run the onlyne client, forwarding every remaining argument.
     Client(RestArgs),
-    /// Run the onlyne gateway; platform verbs exec, `status` queries here.
+    /// Report the gateway mounts the server knows.
     Gateway(GatewayCmd),
     /// Deliver a message to a role.
     Send(SendCmd),
@@ -151,7 +152,7 @@ enum Verb {
     Repair(RepairCmd),
     /// Cluster-level verbs.
     Cluster(ClusterCmd),
-    /// Observe the admin socket in a terminal, forwarding to onlyne-tui.
+    /// Observe the admin socket in a terminal.
     Tui(RestArgs),
     /// Write the shipped skill documents into a directory tree.
     #[command(long_about = skill::FAMILY_INTRO)]
@@ -166,7 +167,8 @@ enum Verb {
 
 #[derive(clap::Args, Debug, Clone)]
 struct RestArgs {
-    /// Arguments forwarded to the sibling, verbatim, flags included.
+    /// Arguments forwarded verbatim, flags included: to the sibling binary for
+    /// the exec verbs, to the in-process board for `tui`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -217,22 +219,18 @@ enum ServerVerb {
     Unknown(Vec<String>),
 }
 
-/// The `gateway` group: the platform verbs exec `onlyne-gateway`, and `status`
-/// reads the registered gateways from the admin socket here.
+/// The `gateway` group: a read-only view of the gateway mounts the server
+/// registered. The platform verbs that used to exec `onlyne-gateway` went with
+/// the frozen gateway crate; the mount vocabulary itself stays in
+/// `onlyne-proto` and `onlyne-adapter`.
 #[derive(clap::Args, Debug, Clone)]
 struct GatewayCmd {
     #[command(subcommand)]
-    verb: Option<GatewayVerb>,
+    verb: GatewayVerb,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 enum GatewayVerb {
-    /// Serve one platform: `run <telegram|feishu|qqbot|weixin>`.
-    Run(RestArgs),
-    /// List the gateways declared under the server root.
-    List(RestArgs),
-    /// Platform onboarding, the former `auth` verb.
-    Auth(RestArgs),
     /// Report the registered gateways and their capabilities.
     Status,
 }
@@ -568,8 +566,9 @@ fn generate(flags: &GlobalFlags, cmd: GenerateCmd) -> i32 {
 
     forward::exec("onlyne-server", &args)
 }
-/// `tui` execs `onlyne-tui`, carrying the server selector through so
-/// `onlyne --server-root <dir> tui` reaches the same socket the CLI would.
+/// `tui` runs the observation board in this process, carrying the server
+/// selector through so `onlyne --server-root <dir> tui` reaches the same socket
+/// the CLI would.
 fn tui(flags: &GlobalFlags, rest: &RestArgs) -> i32 {
     let mut args = rest.args.clone();
     if let Some(socket) = &flags.socket {
@@ -584,7 +583,7 @@ fn tui(flags: &GlobalFlags, rest: &RestArgs) -> i32 {
         args.push("--workspace".to_string());
         args.push(workspace.to_string_lossy().to_string());
     }
-    forward::exec("onlyne-tui", &args)
+    tui::run(&args)
 }
 
 /// The `server` group. The lifecycle verbs exec `onlyne-server`; the admin
@@ -637,16 +636,10 @@ fn unknown_server_verb(args: &[String]) -> i32 {
     runtime::usage_error(format!("onlyne: unknown server verb {name}"))
 }
 
-/// The `gateway` group. The platform verbs exec `onlyne-gateway`; `status`
-/// reports the connected gateways from `AdminOp::Status::connected_gateways`.
+/// The `gateway` group. `status` reports the connected gateways from
+/// `AdminOp::Status::connected_gateways`.
 fn gateway(flags: &GlobalFlags, cmd: GatewayCmd) -> i32 {
-    let Some(verb) = cmd.verb else {
-        return forward::exec("onlyne-gateway", &[]);
-    };
-    match verb {
-        GatewayVerb::Run(rest) => sibling_exec("onlyne-gateway", "run", &rest),
-        GatewayVerb::List(rest) => sibling_exec("onlyne-gateway", "list", &rest),
-        GatewayVerb::Auth(rest) => sibling_exec("onlyne-gateway", "auth", &rest),
+    match cmd.verb {
         GatewayVerb::Status => admin::status(flags),
     }
 }

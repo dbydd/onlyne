@@ -6,9 +6,9 @@ use super::config::{
 };
 use anyhow::{Context, Result, anyhow};
 use onlyne_adapter::AdapterIo;
-use onlyne_layout::RoleWorkspace;
-use onlyne_layout::connect_local;
+use onlyne_config::layout::RoleWorkspace;
 use onlyne_proto::{AdapterMsg, HelloArgs, MountKind, PROTOCOL_VERSION, PluginOp};
+use onlyne_wire::socket::connect_local;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

@@ -18,10 +18,10 @@
 //! - [`NetError::NotReady`] means the handle sits between connections.
 //! - [`NetError::RequestTimeout`] means the caller's own deadline elapsed.
 
-use onlyne_frame::{FrameReader, is_bad_frame, is_too_large, read_frame, write_frame};
 use onlyne_proto::{
     ClientOp, ErrorCode, Event, FaultEvent, Frame, GatewayOp, PROTOCOL_VERSION, ResBody, new_id,
 };
+use onlyne_wire::{FrameReader, is_bad_frame, is_too_large, read_frame, write_frame};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, Error as TlsError, ServerConfig};
 use serde::Serialize;

@@ -1,28 +1,20 @@
 [workspace]
 resolver = "2"
-# `plugins/*` is a glob for the Rust gateway crates only; `onlyne-agent-pi` is a
-# pure-Node package with no Cargo.toml, so the pattern must not reach it.
-members = ["crates/*", "plugins/onlyne-gateway-*"]
+# `plugins/` holds only `onlyne-agent-pi`, a pure-Node package with no
+# Cargo.toml, so the member glob stays inside `crates/`.
+members = ["crates/*"]
 default-members = [
-  "crates/onlyne-frame",
+  "crates/onlyne-wire",
   "crates/onlyne-proto",
   "crates/onlyne-config",
-  "crates/onlyne-layout",
   "crates/onlyne-store",
   "crates/onlyne-acp",
-  "crates/onlyne-session",
   "crates/onlyne-net",
   "crates/onlyne-adapter",
   "crates/onlyne-server",
   "crates/onlyne-client",
-  "crates/onlyne-gateway",
   "crates/onlyne-cli",
-  "crates/onlyne-tui",
   "crates/onlyne-testkit",
-  "plugins/onlyne-gateway-telegram",
-  "plugins/onlyne-gateway-feishu",
-  "plugins/onlyne-gateway-qqbot",
-  "plugins/onlyne-gateway-weixin",
 ]
 
 [workspace.package]
@@ -37,12 +29,10 @@ homepage = "https://github.com/dbydd/onlyne"
 
 [workspace.dependencies]
 # internal
-onlyne-frame = { path = "crates/onlyne-frame", version = "1.4.1" }
+onlyne-wire = { path = "crates/onlyne-wire", version = "1.4.1" }
 onlyne-proto = { path = "crates/onlyne-proto", version = "1.4.1" }
 onlyne-config = { path = "crates/onlyne-config", version = "1.4.1" }
-onlyne-layout = { path = "crates/onlyne-layout", version = "1.4.1" }
 onlyne-store = { path = "crates/onlyne-store", version = "1.4.1" }
-onlyne-session = { path = "crates/onlyne-session", version = "1.4.1" }
 onlyne-net = { path = "crates/onlyne-net", version = "1.4.1" }
 onlyne-adapter = { path = "crates/onlyne-adapter", version = "1.4.1" }
 onlyne-server = { path = "crates/onlyne-server", version = "1.4.1" }
@@ -60,10 +50,6 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "r
 futures-util = "0.3"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = [
-  "json",
-  "rustls-tls-webpki-roots",
-] }
 rusqlite = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-pemfile = "2"
@@ -92,23 +78,6 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v4", "serde"] }
-
-# platform SDKs: gateway side only
-openlark = { version = "0.17.0", default-features = false, features = ["websocket"] }
-teloxide = { version = "0.17.0", default-features = false, features = ["rustls"] }
-wechat-ilink = "0.5.0"
-tokio-tungstenite = { version = "0.29", default-features = false, features = [
-  "connect",
-  "rustls-tls-webpki-roots",
-] }
-
-# rendering / media: gateway side only
-pulldown-cmark = "0.12"
-resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts"] }
-unicode-display-width = "0.2"
-aes-gcm = "0.10"
-qrcode = { version = "0.14", default-features = false }
-url = "2"
 
 [profile.release]
 opt-level = "z"

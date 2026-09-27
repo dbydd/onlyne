@@ -1,11 +1,12 @@
 use super::*;
+use crate::backend::fake::FakeBackend;
 use crate::session::dispatch::{DispatchState, dispatch, hello_with_live_tasks};
 use onlyne_proto::{
     Body, Causality, ClientOp, Envelope, HandshakeArgs, MsgKind, PROTOCOL_VERSION, Principal,
     new_envelope, new_task_id,
 };
-use onlyne_session::{SessionLedger, VersionedSession, backend::fake::FakeBackend};
 use onlyne_store::ClientStore;
+use onlyne_store::session::{SessionLedger, VersionedSession};
 use std::sync::Arc;
 use tempfile::tempdir;
 

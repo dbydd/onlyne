@@ -1,11 +1,11 @@
 //! Workspace init: the legacy-config refusal, the on-disk modes of the role key and
 //! socket, and the role fragment `onlyne init` prints.
 
+use onlyne_client::backend::fake::FakeBackend;
 use onlyne_client::{
     ops::init::{InitArgs, init, legacy_error_code},
     session::{adapter_socket::AdapterSocket, dispatch::DispatchState},
 };
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -141,19 +141,28 @@ fn permissions_mode_600_for_role_key_and_socket() {
     );
     #[cfg(unix)]
     {
+        // The serving side writes the kind, role, and runtime it knows, and a
+        // role workspace's client writes them itself.
+        let registration = onlyne_wire::socket::read_registration(ws_dir.path())
+            .unwrap()
+            .expect("the bind published the client registration");
+        assert_eq!(
+            registration.kind,
+            onlyne_wire::socket::RegistrationKind::Client
+        );
+        assert_eq!(registration.role.as_deref(), Some("planner"));
         assert!(
-            endpoint.marker().exists(),
-            "the bind publishes the served path in {}",
-            endpoint.marker().display(),
+            !endpoint.natural().exists(),
+            "nothing binds inside the tree any more: {}",
+            endpoint.natural().display(),
         );
     }
-    // Windows cannot bind a unix UDS: the file at `run/s` is a marker naming the
-    // NPFS pipe the listener holds, so there is no separate `run/socket` to
-    // publish and the served path is the canonical spelling.
+    // Windows cannot bind a unix UDS: the served `<digest>.sock` is a marker
+    // file naming the NPFS pipe the listener holds.
     #[cfg(not(unix))]
     {
-        assert_eq!(endpoint.actual(), endpoint.natural());
-        let served = std::fs::read_to_string(endpoint.actual()).expect("read the served run/s");
+        assert_ne!(endpoint.actual(), endpoint.natural());
+        let served = std::fs::read_to_string(endpoint.actual()).expect("read the served marker");
         assert!(
             served.starts_with("v1:"),
             "the served file names the pipe, got {served:?}"
@@ -169,8 +178,18 @@ fn permissions_mode_600_for_role_key_and_socket() {
             .mode()
             & 0o777;
         assert_eq!(sock_mode, 0o600);
+        // The registration names the surface beside the socket, and it is the
+        // file a listing reader parses, so it carries the same owner-only mode.
+        let reg_mode = std::fs::metadata(endpoint.registration())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(reg_mode, 0o600);
     }
     drop(listener);
+    let _ = std::fs::remove_file(endpoint.actual());
+    let _ = std::fs::remove_file(endpoint.registration());
 }
 
 /// The printed fragment is a complete role entry: pasting it into `spec.toml`

@@ -1,6 +1,6 @@
 use super::*;
+use crate::backend::fake::FakeBackend;
 use onlyne_proto::new_task_id;
-use onlyne_session::backend::fake::FakeBackend;
 use tempfile::tempdir;
 
 /// One dispatch lock and its role's state, empty but for the wiring a binding

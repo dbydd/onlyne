@@ -4,12 +4,15 @@
 //! backgrounding is the operator's job — a visible terminal tab, `launchd`, or
 //! `nohup`. So no pid file is written and nothing signals a process by number.
 //! `status` asks the workspace socket instead: a client is running when its
-//! adapter socket answers the admin `hello` probe, and the socket file's mtime
-//! dates that client. On Windows the path is a marker file, which still carries
-//! an mtime, so uptime stays the age of the bound name.
+//! adapter socket answers the admin `hello` probe, and the registration's mtime
+//! dates that client. The socket lives in the machine-level runtime directory
+//! (`<runtime>/<digest>.sock`) beside the `<digest>.json` that names the surface
+//! serving it, so the path is short enough to probe on every platform and the
+//! `run/s` spelling is only what operators read.
 
 use anyhow::Result;
-use onlyne_layout::RoleWorkspace;
+use onlyne_config::layout::RoleWorkspace;
+use onlyne_wire::socket::registration_path;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -51,17 +54,22 @@ impl StatusReport {
 /// Report the client serving `workspace`, and `None` when none is running.
 ///
 /// A client is running when its adapter socket answers an `admin` `hello`: a
-/// socket file no process answers is what an unclean exit leaves behind, and
+/// registration no process answers is what an unclean exit leaves behind, and
 /// this verb refuses it exactly as it refuses a missing socket. The link state
 /// is the fact the answering client holds, and the uptime is the age of the
-/// socket file that client bound.
+/// registration that client published.
 pub async fn status(workspace: &Path) -> Result<Option<StatusReport>> {
     let layout = RoleWorkspace::resolve(workspace);
     let socket = layout.socket_path();
     let Some(connected) = crate::session::adapter_socket::server_link_state(&socket).await else {
         return Ok(None);
     };
-    let uptime = std::fs::metadata(&socket)
+    // The registration is what a bind publishes and a run's end removes, so its
+    // mtime dates this client and not some earlier bind. A client that served
+    // a long time and republished late reads as young, which is the answer: the
+    // registration names the process, and a republished one is a restarted one.
+    let stamp = registration_path(layout.root());
+    let uptime = std::fs::metadata(&stamp)
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())

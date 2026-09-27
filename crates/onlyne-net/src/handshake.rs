@@ -17,7 +17,7 @@
 //!
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::Verifier;
-use onlyne_frame::{is_bad_frame, is_too_large, read_frame, write_frame};
+use onlyne_wire::{is_bad_frame, is_too_large, read_frame, write_frame};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

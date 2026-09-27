@@ -1,14 +1,15 @@
 use super::{run, settle_control};
+use crate::backend::{
+    Capabilities, CloseReason, ResourceProbe, SessionBackend, SessionRef, SpawnSpec,
+};
 use crate::runtime::runloop::config::{ClientInit, RunState};
 use crate::runtime::runloop::test_support::test_state;
 use crate::session::dispatch::{self, ReadyNotice};
-use onlyne_layout::RoleWorkspace;
+use onlyne_config::layout::RoleWorkspace;
+use onlyne_proto::TaskState;
 use onlyne_proto::{
     Body, Capability, ClientOp, ControlOp, Delivery, Lifecycle, MsgKind, Outcome, Principal,
     Report, SessionProjection, new_envelope, new_task_id,
-};
-use onlyne_session::{
-    Capabilities, CloseReason, ResourceProbe, SessionBackend, SessionRef, SpawnSpec, TaskState,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +17,7 @@ use tempfile::tempdir;
 
 #[derive(Clone, Default)]
 struct CloseFailingBackend {
-    inner: onlyne_session::backend::fake::FakeBackend,
+    inner: crate::backend::fake::FakeBackend,
 }
 
 impl SessionBackend for CloseFailingBackend {
@@ -159,18 +160,13 @@ async fn an_unbindable_socket_ends_the_run_with_an_error() {
     let dir = tempdir().unwrap();
     let workspace = RoleWorkspace::resolve(dir.path());
     workspace.bootstrap().unwrap();
-    #[cfg(unix)]
-    std::fs::write(
-        workspace.run_dir().join("socket"),
-        "/nonexistent-dir-onlyne-for-this-test/sock\n",
-    )
-    .unwrap();
-    // Windows resolves the natural path regardless of the Unix endpoint
-    // marker. Hold the production NPFS listener instead: a second bind to
-    // that live name is the platform's EADDRINUSE equivalent.
-    #[cfg(windows)]
-    let (_held_listener, _endpoint) =
-        onlyne_layout::bind_socket(workspace.root(), &workspace.run_dir()).unwrap();
+    // A bind drops a stale socket file and then binds, so a name another run
+    // still holds is not what stops it. A directory squatting the socket name
+    // is: the unlink cannot remove a directory, and the bind that follows finds
+    // the name in use. The path is this workspace's own digest, so the
+    // sabotage touches no other tree's socket.
+    let socket = onlyne_wire::socket::socket_path(workspace.root()).unwrap();
+    std::fs::create_dir(&socket).unwrap();
     let init = ClientInit::new(
         dir.path(),
         "planner",
@@ -183,6 +179,7 @@ async fn an_unbindable_socket_ends_the_run_with_an_error() {
         .await
         .expect("the bind failure ends the run well inside the timeout");
     let error = outcome.expect_err("an unbindable socket is an error");
+    let _ = std::fs::remove_dir(&socket);
     assert!(
         error.to_string().contains("bind the workspace socket"),
         "{error}"

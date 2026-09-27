@@ -2,21 +2,21 @@
 //! report queued while the link is down.
 
 use crate::common::spawn_ready;
+use onlyne_client::backend::fake::FakeBackend;
 use onlyne_client::{
     ClientInit,
     ops::local_cli::LocalCli,
     runtime::intent::{IntentMachine, op_for_intent},
     session::dispatch::{ClientLink, DispatchState},
 };
-use onlyne_frame::{read_frame, write_frame};
 use onlyne_net::{
     KeyPair, TcpListen, TlsConn, accept as accept_handshake, gen_self_signed, server_config,
     table_from,
 };
 use onlyne_proto::{ClientOp, Frame, PROTOCOL_VERSION, QueryRolesArgs, Report, Welcome};
-use onlyne_session::SessionLedger;
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
+use onlyne_store::session::SessionLedger;
+use onlyne_wire::{read_frame, write_frame};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;

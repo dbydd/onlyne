@@ -3451,14 +3451,16 @@ fn a_fault_survives_every_repair_transition() {
     .expect("accepted");
     assert_eq!(inspected["task_id"], json!(adopt_task));
 
-    faults::repair(
+    let closed = faults::repair(
         &fixture.state,
         &AdminOp::RepairClose(RepairTarget {
             task_id: adopt_task.clone(),
             reason: Some("operator close".to_string()),
         }),
     )
-    .expect("repair");
+    .expect("repair")
+    .expect("accepted");
+    assert_eq!(closed["task_id"], json!(adopt_task));
 }
 
 #[test]
@@ -4068,12 +4070,12 @@ async fn an_admin_send_records_the_admin_marker_and_still_passes_the_acl() {
 
 #[tokio::test]
 async fn the_run_socket_answers_a_status_frame_and_is_private() {
-    use onlyne_frame::{read_frame, write_frame};
-    use onlyne_layout::connect_local;
+    use onlyne_wire::socket::connect_local;
+    use onlyne_wire::{read_frame, write_frame};
 
     let fixture = fixture();
     let listener = onlyne_server::admin::bind(&fixture.state).expect("bind");
-    let path = onlyne_layout::ServerRoot::resolve(&fixture.root).socket_path();
+    let path = onlyne_wire::socket::socket_path(&fixture.state.root).expect("the socket path");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -4108,12 +4110,12 @@ async fn the_run_socket_answers_a_status_frame_and_is_private() {
 
 #[tokio::test]
 async fn a_pre_hello_gateway_frame_is_refused_with_the_invalid_code() {
-    use onlyne_frame::{read_frame, write_frame};
-    use onlyne_layout::connect_local;
+    use onlyne_wire::socket::connect_local;
+    use onlyne_wire::{read_frame, write_frame};
 
     let fixture = fixture();
     let listener = onlyne_server::admin::bind(&fixture.state).expect("bind");
-    let path = onlyne_layout::ServerRoot::resolve(&fixture.root).socket_path();
+    let path = onlyne_config::layout::ServerRoot::resolve(&fixture.root).socket_path();
     let state = fixture.state.clone();
     let task = tokio::spawn(async move {
         let _ = onlyne_server::admin::serve_socket(state, listener).await;
@@ -4314,17 +4316,29 @@ async fn the_relay_policy_travels_from_the_entry_to_the_row_and_the_welcome() {
 #[tokio::test]
 async fn shutdown_unlinks_the_admin_socket() {
     let fixture = fixture();
-    let layout = onlyne_layout::ServerRoot::resolve(&fixture.root);
     let listener = onlyne_server::admin::bind(&fixture.state).expect("bind");
-    let path = layout.socket_path();
+    let root = fixture.state.root.as_path();
+    let path = onlyne_wire::socket::socket_path(root).expect("the socket path");
     assert!(
         path.exists(),
         "the run socket is bound at {}",
         path.display()
     );
+    assert!(
+        onlyne_wire::socket::read_registration(root)
+            .expect("read the registration")
+            .is_some(),
+        "the registration is published beside the socket"
+    );
     drop(listener);
     onlyne_server::admin::unlink(&fixture.state).expect("unlink");
     assert!(!path.exists(), "the run socket is gone after shutdown");
+    assert!(
+        onlyne_wire::socket::read_registration(root)
+            .expect("read the registration")
+            .is_none(),
+        "the registration is gone after shutdown"
+    );
     onlyne_server::admin::unlink(&fixture.state).expect("a second unlink is a no-op");
 }
 
@@ -4332,9 +4346,7 @@ async fn shutdown_unlinks_the_admin_socket() {
 fn start_clears_a_stale_socket_from_a_dead_pid() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("server");
-    std::fs::create_dir_all(root.join(".onlyne/run")).expect("create the run dir");
-    let layout = onlyne_layout::ServerRoot::resolve(&root);
-    std::fs::write(layout.socket_path(), b"").expect("write a stale socket file");
+    std::fs::create_dir_all(root.join(".onlyne")).expect("create the root");
     #[cfg(unix)]
     let mut child = std::process::Command::new("true")
         .spawn()
@@ -4346,9 +4358,24 @@ fn start_clears_a_stale_socket_from_a_dead_pid() {
         .expect("spawn cmd");
     let pid = child.id();
     child.wait().expect("reap the child");
-    std::fs::write(layout.pid_path(), format!("{pid}\n")).expect("write the pid file");
-    assert!(onlyne_server::cli::clear_stale_socket(&layout));
-    assert!(!layout.socket_path().exists());
+    let socket = onlyne_wire::socket::socket_path(&root).expect("the socket path");
+    std::fs::write(&socket, b"").expect("write a stale socket file");
+    onlyne_wire::socket::write_registration(
+        &root,
+        &onlyne_wire::socket::RegistrationFile {
+            pid,
+            ..onlyne_wire::socket::RegistrationFile::server(&root)
+        },
+    )
+    .expect("write a stale registration");
+    assert!(onlyne_server::cli::clear_stale_socket(&root));
+    assert!(!socket.exists(), "the stale socket is gone");
+    assert!(
+        onlyne_wire::socket::read_registration(&root)
+            .expect("read the registration")
+            .is_none(),
+        "the stale registration is gone"
+    );
 }
 
 #[tokio::test]

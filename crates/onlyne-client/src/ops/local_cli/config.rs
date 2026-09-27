@@ -3,7 +3,7 @@
 //! 1.2.1 installer appended.
 
 use anyhow::{Context, Result, anyhow};
-use onlyne_layout::RoleWorkspace;
+use onlyne_config::layout::RoleWorkspace;
 use std::path::Path;
 
 /// The top-level `plugins` array line, its parsed ids, and the text the file

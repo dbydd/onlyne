@@ -89,7 +89,7 @@ pub fn timeout_json(timeout_ms: u64) -> String {
     )
 }
 
-/// The `onlyne version` report, probing each sibling for a path.
+/// The `onlyne version` report, probing each sibling binary for a path.
 pub fn version_json() -> String {
     encode(
         false,
@@ -99,7 +99,6 @@ pub fn version_json() -> String {
             binaries: Siblings {
                 onlyne_server: sibling("onlyne-server"),
                 onlyne_client: sibling("onlyne-client"),
-                onlyne_gateway: sibling("onlyne-gateway"),
             },
         },
     )
@@ -124,6 +123,4 @@ struct Siblings {
     onlyne_server: Option<PathBuf>,
     #[serde(rename = "onlyne-client")]
     onlyne_client: Option<PathBuf>,
-    #[serde(rename = "onlyne-gateway")]
-    onlyne_gateway: Option<PathBuf>,
 }

@@ -1,0 +1,501 @@
+use super::model::{
+    Detail, Focus, FocusOutcome, KeyCmd, MAX_SPACING, MIN_SPACING, Page, Snapshot, StateView,
+    UiState, cycle_edge, cycle_role, cycle_state, detail, focus_from, focus_message, interpret_key,
+    location, nav_after, nav_step, pull, role_detail, role_edges, select_state_view, selected_role,
+    send_focus, toggle_state_view,
+};
+use super::socket::{NO_SOCKET_MESSAGE, SocketArgs, resolve_socket};
+use super::ui::{
+    apply_page_history, clamp_cursor, detail_pane_size, drag_role_view, follow_role_edge,
+    graph_len, history_len, history_page_size, jump_detail, map_view_size, move_cursor,
+    move_role_edge, pan_role_view, render, render_once_text, role_back, scroll_detail,
+    selected_task, sync_map, zoom_role_view,
+};
+use clap::Parser;
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
+use std::io::stdout;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "onlyne-tui",
+    version,
+    about = "Observe an Onlyne v1 admin socket"
+)]
+struct Cli {
+    /// Unix socket path, used verbatim.
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    /// Server root; the admin socket is `<dir>/.onlyne/run/s`, or the short path
+    /// `<dir>/.onlyne/run/socket` names when the canonical spelling is too long.
+    #[arg(long)]
+    server_root: Option<PathBuf>,
+    /// Workspace used only for upward `.onlyne/run/s` discovery, which also
+    /// accepts a tree whose only socket record is `.onlyne/run/socket`.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+    /// Render one frame as plain text to stdout and exit.
+    #[arg(long)]
+    once: bool,
+    /// Page `--once` renders: 1 is the role network, 2 is the swarm view.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=2), default_value_t = 1)]
+    page: u8,
+    /// Rows the first pull keeps: `active` is the view `a` opens on, `all` the
+    /// view it toggles to.
+    #[arg(
+        long,
+        value_parser = clap::builder::PossibleValuesParser::new(StateView::WORDS),
+        default_value = StateView::Active.word(),
+    )]
+    state: String,
+    /// Role-map spacing/repulsion: 1 is compact, 4 is widest.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=4), default_value_t = 2)]
+    spacing: u8,
+}
+
+/// The `tui` verb: the observation board, parsed from the arguments the operator
+/// forwarded to `onlyne tui` and driven in this process.
+///
+/// The board keeps its own parser, so `onlyne tui --help`, the `--state` refusal,
+/// and every exit code read exactly as they did when this verb exec'd the
+/// `onlyne-tui` binary.
+pub fn run(args: &[String]) -> i32 {
+    let argv = std::iter::once("onlyne-tui").chain(args.iter().map(String::as_str));
+    match board(Cli::parse_from(argv)) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("onlyne-tui: {error:#}");
+            1
+        }
+    }
+}
+
+fn board(cli: Cli) -> anyhow::Result<i32> {
+    let socket = match resolve_socket(&SocketArgs {
+        socket: cli.socket,
+        server_root: cli.server_root,
+        workspace: cli.workspace,
+    }) {
+        Ok(path) => path,
+        Err(_) => {
+            eprintln!("{NO_SOCKET_MESSAGE}");
+            return Ok(3);
+        }
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()?;
+    let mut state = UiState::default();
+    if cli.page == 2 {
+        state.page = Page::Swarm;
+    }
+    state.spacing = cli.spacing as usize;
+    // Read back the word clap already checked.
+    let view = StateView::from_word(&cli.state).expect("clap accepted the word");
+    select_state_view(&mut state, view);
+    let mut snapshot = runtime.block_on(pull(&socket, &state.filter, 30));
+    if cli.once {
+        sync_selection_and_detail(&runtime, &socket, &snapshot, &mut state);
+        sync_map(&mut state, &snapshot);
+        println!("{}", render_once_text(&snapshot, &state, 120, 36));
+        return Ok(0);
+    }
+    run_interactive(&runtime, &socket, &mut snapshot, &mut state)
+}
+
+fn run_interactive(
+    runtime: &tokio::runtime::Runtime,
+    socket: &std::path::Path,
+    snapshot: &mut Snapshot,
+    state: &mut UiState,
+) -> anyhow::Result<i32> {
+    crossterm::terminal::enable_raw_mode()?;
+    let mut out = stdout();
+    crossterm::execute!(
+        out,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
+    let backend = CrosstermBackend::new(out);
+    let mut terminal = Terminal::new(backend)?;
+    let result = run_loop(runtime, socket, &mut terminal, snapshot, state);
+    crossterm::terminal::disable_raw_mode()?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::event::DisableMouseCapture,
+        crossterm::terminal::LeaveAlternateScreen
+    )?;
+    result
+}
+
+fn run_loop(
+    runtime: &tokio::runtime::Runtime,
+    socket: &std::path::Path,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    snapshot: &mut Snapshot,
+    state: &mut UiState,
+) -> anyhow::Result<i32> {
+    sync_selection_and_detail(runtime, socket, snapshot, state);
+    sync_map(state, snapshot);
+    let mut refreshed = Instant::now();
+    loop {
+        terminal.draw(|frame| render(frame, snapshot, state))?;
+        if refreshed.elapsed() >= Duration::from_secs(1) && state.search.is_none() {
+            refresh_now(runtime, socket, terminal, snapshot, state, &mut refreshed);
+        }
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if handle_search_key(
+                    key.code,
+                    runtime,
+                    socket,
+                    terminal,
+                    snapshot,
+                    state,
+                    &mut refreshed,
+                ) {
+                    continue;
+                }
+                if handle_key(
+                    key.code,
+                    key.modifiers,
+                    runtime,
+                    socket,
+                    terminal,
+                    snapshot,
+                    state,
+                    &mut refreshed,
+                )? {
+                    return Ok(0);
+                }
+            }
+            Event::Mouse(mouse) => handle_mouse(mouse, terminal, snapshot, state),
+            _ => {}
+        }
+    }
+}
+
+/// One key press. Returns whether the operator asked to leave.
+#[allow(clippy::too_many_arguments)]
+fn handle_key(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    runtime: &tokio::runtime::Runtime,
+    socket: &std::path::Path,
+    terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
+    snapshot: &mut Snapshot,
+    state: &mut UiState,
+    refreshed: &mut Instant,
+) -> anyhow::Result<bool> {
+    let cmd = interpret_key(code, modifiers, state.page, state.focus);
+    let view = map_view(terminal);
+    let panel = detail_view(terminal);
+    let was_swarm = state.page == Page::Swarm;
+    let before = location(state);
+    match cmd {
+        KeyCmd::Quit => return Ok(true),
+        KeyCmd::SetPage(page) => {
+            state.page = page;
+            state.detail_scroll = 0;
+            sync_selection_and_detail(runtime, socket, snapshot, state);
+        }
+        KeyCmd::TogglePage => {
+            state.page = state.page.toggle();
+            state.detail_scroll = 0;
+            sync_selection_and_detail(runtime, socket, snapshot, state);
+        }
+        KeyCmd::Enter => sync_selection_and_detail(runtime, socket, snapshot, state),
+        KeyCmd::DetailScroll(delta) => scroll_detail(state, delta, panel),
+        KeyCmd::DetailJump(jump) => jump_detail(state, jump, panel),
+        KeyCmd::Refresh => refresh_now(runtime, socket, terminal, snapshot, state, refreshed),
+        KeyCmd::Spacing(delta) => {
+            if delta >= 0 {
+                state.spacing = (state.spacing + delta as usize).min(MAX_SPACING);
+            } else {
+                state.spacing = state.spacing.saturating_sub(1).max(MIN_SPACING);
+            }
+            reflow_map(snapshot, state, view);
+        }
+        KeyCmd::Recentre => state.role_cam.reset(),
+        KeyCmd::RoleEdge(delta) => move_role_edge(delta, snapshot, state),
+        KeyCmd::FollowEdge => {
+            if follow_role_edge(snapshot, state) {
+                sync_selection_and_detail(runtime, socket, snapshot, state);
+            }
+        }
+        KeyCmd::RoleBack => {
+            if role_back(state) {
+                sync_selection_and_detail(runtime, socket, snapshot, state);
+            }
+        }
+        KeyCmd::Pan { dx, dy } => pan_role_view((dx, dy), snapshot, state, view),
+        KeyCmd::HistoryWalk(delta) => walk_history(delta, runtime, socket, snapshot, state),
+        KeyCmd::SetListFocus(focus) => state.focus = focus,
+        KeyCmd::MoveCursor(delta) => {
+            let len = focus_len(snapshot, state);
+            match state.focus {
+                Focus::Graph => move_cursor(&mut state.graph_cursor, len, delta),
+                Focus::History => move_cursor(&mut state.history_cursor, len, delta),
+            }
+            sync_selection_and_detail(runtime, socket, snapshot, state);
+        }
+        KeyCmd::StartSearch => state.search = Some(state.filter.text.clone()),
+        KeyCmd::CycleState => {
+            cycle_state(&mut state.filter);
+            refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
+        }
+        KeyCmd::CycleWindow => {
+            state.filter.window = state.filter.window.next();
+            state.filter.reset_page();
+            refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
+        }
+        KeyCmd::CycleRole => {
+            cycle_role(snapshot, &mut state.filter);
+            refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
+        }
+        KeyCmd::CycleEdge => {
+            cycle_edge(snapshot, &mut state.filter);
+            refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
+        }
+        KeyCmd::HistoryPage(delta) => {
+            let page_size = history_page_size(terminal_size(terminal).1);
+            apply_page_history(delta, snapshot, state, page_size);
+            refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
+        }
+        KeyCmd::ToggleActive => {
+            toggle_state_view(state);
+            clamp_cursor(
+                &mut state.graph_cursor,
+                graph_len(snapshot, state.active_only),
+            );
+            sync_selection_and_detail(runtime, socket, snapshot, state);
+        }
+        KeyCmd::SessionFocus => apply_session_focus(runtime, socket, snapshot, state),
+        KeyCmd::Ignore => {}
+    }
+    if was_swarm && state.page == Page::Swarm && !matches!(cmd, KeyCmd::HistoryWalk(_)) {
+        nav_after(state, before);
+    }
+    Ok(false)
+}
+
+/// `F`: send a focus control op for the selected session on the admin socket.
+fn apply_session_focus(
+    runtime: &tokio::runtime::Runtime,
+    socket: &std::path::Path,
+    snapshot: &Snapshot,
+    state: &mut UiState,
+) {
+    let Some(task_id) = selected_task(snapshot, state) else {
+        state.message = focus_message(&FocusOutcome::NoSession);
+        return;
+    };
+    let Some(from) = focus_from(snapshot, &task_id) else {
+        state.message = focus_message(&FocusOutcome::Denied {
+            code: "unknown_role".into(),
+            message: "no role to send as".into(),
+        });
+        return;
+    };
+    let outcome = runtime.block_on(send_focus(socket, &from, &task_id));
+    state.message = focus_message(&outcome);
+}
+
+/// `^p`/`^n`: walk the page-2 history and reload the detail pane for wherever
+/// the cursor lands.
+fn walk_history(
+    delta: isize,
+    runtime: &tokio::runtime::Runtime,
+    socket: &std::path::Path,
+    snapshot: &Snapshot,
+    state: &mut UiState,
+) {
+    if !nav_step(state, delta) {
+        return;
+    }
+    clamp_cursor(
+        &mut state.graph_cursor,
+        graph_len(snapshot, state.active_only),
+    );
+    clamp_cursor(&mut state.history_cursor, history_len(snapshot));
+    sync_selection_and_detail(runtime, socket, snapshot, state);
+}
+
+/// Re-settle the page-1 map after the repulsion knob moved, then bring the
+/// camera back inside the new extent.
+fn reflow_map(snapshot: &Snapshot, state: &mut UiState, view: (usize, usize)) {
+    sync_map(state, snapshot);
+    pan_role_view((0, 0), snapshot, state, view);
+}
+
+/// The page-1 mouse: the wheel zooms, a left drag pans the map.
+fn handle_mouse(
+    mouse: crossterm::event::MouseEvent,
+    terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
+    snapshot: &Snapshot,
+    state: &mut UiState,
+) {
+    if state.page != Page::RoleMap {
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+            state.drag = None;
+        }
+        return;
+    }
+    let view = map_view(terminal);
+    match mouse.kind {
+        MouseEventKind::ScrollUp => zoom_role_view(-1, snapshot, state, view),
+        MouseEventKind::ScrollDown => zoom_role_view(1, snapshot, state, view),
+        MouseEventKind::Down(MouseButton::Left) => state.drag = Some((mouse.column, mouse.row)),
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(from) = state.drag {
+                drag_role_view(from, (mouse.column, mouse.row), snapshot, state, view);
+                state.drag = Some((mouse.column, mouse.row));
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => state.drag = None,
+        _ => {}
+    }
+}
+
+fn handle_search_key(
+    key: KeyCode,
+    runtime: &tokio::runtime::Runtime,
+    socket: &std::path::Path,
+    terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
+    snapshot: &mut Snapshot,
+    state: &mut UiState,
+    refreshed: &mut Instant,
+) -> bool {
+    let Some(input) = state.search.as_mut() else {
+        return false;
+    };
+    match key {
+        KeyCode::Esc => state.search = None,
+        KeyCode::Enter => {
+            state.filter.text = input.clone();
+            state.filter.reset_page();
+            state.search = None;
+            refresh_now(runtime, socket, terminal, snapshot, state, refreshed);
+        }
+        KeyCode::Backspace => {
+            input.pop();
+        }
+        KeyCode::Char(ch) => input.push(ch),
+        _ => {}
+    }
+    true
+}
+
+fn refresh_now(
+    runtime: &tokio::runtime::Runtime,
+    socket: &std::path::Path,
+    terminal: &Terminal<CrosstermBackend<std::io::Stdout>>,
+    snapshot: &mut Snapshot,
+    state: &mut UiState,
+    refreshed: &mut Instant,
+) {
+    let previous = snapshot.clone();
+    let page_size = history_page_size(terminal.size().map(|size| size.height).unwrap_or(36));
+    let next = runtime.block_on(pull(socket, &state.filter, page_size));
+    *snapshot = if next.server_online {
+        next
+    } else {
+        Snapshot {
+            server_online: false,
+            last_error: next.last_error,
+            refreshed_at: next.refreshed_at,
+            ..previous
+        }
+    };
+    clamp_cursor(
+        &mut state.graph_cursor,
+        graph_len(snapshot, state.active_only),
+    );
+    clamp_cursor(&mut state.history_cursor, history_len(snapshot));
+    sync_map(state, snapshot);
+    sync_selection_and_detail(runtime, socket, snapshot, state);
+    *refreshed = Instant::now();
+}
+
+fn sync_selection_and_detail(
+    runtime: &tokio::runtime::Runtime,
+    socket: &std::path::Path,
+    snapshot: &Snapshot,
+    state: &mut UiState,
+) {
+    let key = match state.page {
+        Page::RoleMap => {
+            let role = selected_role(snapshot, state);
+            let len = role
+                .as_deref()
+                .map(|role| role_edges(snapshot, role).len())
+                .unwrap_or(0);
+            state.role_edge = state.role_edge.filter(|index| *index < len);
+            role
+        }
+        Page::Swarm => selected_task(snapshot, state),
+    };
+    // The subject is tagged with its page, so switching pages always reloads
+    // even when a role name and a task id happen to read the same.
+    let tagged = key
+        .as_ref()
+        .map(|key| format!("{}:{key}", state.page.number()));
+    if tagged == state.detail_key {
+        return;
+    }
+    state.detail_key = tagged;
+    state.detail_scroll = 0;
+    let Some(key) = key else {
+        state.detail = None;
+        return;
+    };
+    let loaded = match state.page {
+        Page::RoleMap => runtime
+            .block_on(role_detail(socket, &key))
+            .map(Detail::Role),
+        Page::Swarm => runtime.block_on(detail(socket, &key)).map(Detail::Task),
+    };
+    match loaded {
+        Ok(detail) => state.detail = Some(detail),
+        Err(error) => state.message = format!("detail failed: {error}"),
+    }
+}
+
+fn focus_len(snapshot: &Snapshot, state: &UiState) -> usize {
+    match state.focus {
+        Focus::Graph => graph_len(snapshot, state.active_only),
+        Focus::History => history_len(snapshot),
+    }
+}
+
+/// The terminal's size, or the size the maps are laid out for when the
+/// terminal will not say.
+fn terminal_size(terminal: &Terminal<CrosstermBackend<std::io::Stdout>>) -> (u16, u16) {
+    let size = terminal.size().unwrap_or(ratatui::layout::Size {
+        width: 120,
+        height: 36,
+    });
+    (size.width, size.height)
+}
+
+/// The cells the role map pane draws in, so the camera clamps to the room the
+/// pane really has.
+fn map_view(terminal: &Terminal<CrosstermBackend<std::io::Stdout>>) -> (usize, usize) {
+    let (width, height) = terminal_size(terminal);
+    map_view_size(Rect::new(0, 0, width, height))
+}
+
+/// The page-2 detail panel, so `J`/`K` stop scrolling where the text does.
+fn detail_view(terminal: &Terminal<CrosstermBackend<std::io::Stdout>>) -> Rect {
+    detail_pane_size(terminal_size(terminal))
+}

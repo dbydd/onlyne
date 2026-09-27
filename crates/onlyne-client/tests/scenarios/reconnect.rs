@@ -9,13 +9,13 @@ use crate::common::{
 };
 use onlyne_adapter::{AdapterIo, WireMessage};
 use onlyne_client::session::dispatch::{DispatchState, SettleAuthority, on_out};
-use onlyne_frame::{read_frame, write_frame};
 use onlyne_proto::{
     AdapterMsg, AgentMount, Capability, ClientOp, Handoff, HelloArgs, HostOp, Lifecycle, Mount,
     MountKind, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp, Report,
 };
-use onlyne_session::SessionLedger;
 use onlyne_store::ClientStore;
+use onlyne_store::session::SessionLedger;
+use onlyne_wire::{read_frame, write_frame};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,7 +30,7 @@ async fn witnessed_plugin(
     socket: &Path,
     session: &str,
 ) -> (AdapterIo, tokio::sync::mpsc::UnboundedReceiver<String>) {
-    let stream = onlyne_layout::connect_local(socket)
+    let stream = onlyne_wire::socket::connect_local(socket)
         .await
         .expect("the role socket accepts a plugin");
     let (io, mut inbound) =
@@ -131,7 +131,7 @@ async fn the_reconnect_grace_retires_a_ghost_whose_agent_never_returns() {
     assert_eq!(backend.closed_sessions.lock()[0].task_id, task_id);
     assert_eq!(
         backend.reasons.lock().as_slice(),
-        [onlyne_session::CloseReason::Completed],
+        [onlyne_client::backend::CloseReason::Completed],
         "the close carries the reason the settled task earned"
     );
     assert_eq!(
@@ -157,7 +157,7 @@ async fn the_reconnect_grace_retires_a_ghost_whose_agent_never_returns() {
 /// A plugin that dies mid-task leaves work owed, and the retry that would have
 /// answered it never arrives, so this window is the only thing left to notice.
 /// The sweep feeds the agent-gone event: the session reaches `Exited` through
-/// `AgentState::Gone`, not through a task result, and the resource closes with
+/// `AgentPhase::Gone`, not through a task result, and the resource closes with
 /// the reason the open task earns — a `Fault`, because the work was owed when its
 /// agent went. What the work ended as is this sweep's to write: the agent that
 /// would have reported the ending is the one that left, so the task settles
@@ -211,10 +211,10 @@ async fn the_reconnect_grace_takes_a_ghost_whose_task_is_still_open() {
         .get_session(&task_id)
         .unwrap()
         .expect("the retired ghost keeps its row");
-    let observed = onlyne_session::stored_observation(&store, Some(&row));
+    let observed = onlyne_client::reconcile::stored_observation(&store, Some(&row));
     assert_eq!(
         observed.agent,
-        onlyne_session::AgentState::Gone,
+        onlyne_proto::AgentPhase::Gone,
         "the tuple's agent dimension is gone: {row:?}"
     );
     assert_eq!(
@@ -244,7 +244,7 @@ async fn the_reconnect_grace_takes_a_ghost_whose_task_is_still_open() {
         .expect("the task keeps its own record");
     assert_eq!(
         record.task_state,
-        onlyne_session::TaskState::Failed,
+        onlyne_proto::TaskState::Failed,
         "the sweep settles the work its agent left owed: {record:?}"
     );
     assert!(
@@ -265,7 +265,7 @@ async fn the_reconnect_grace_takes_a_ghost_whose_task_is_still_open() {
     );
     assert_eq!(
         backend.reasons.lock().as_slice(),
-        [onlyne_session::CloseReason::Fault],
+        [onlyne_client::backend::CloseReason::Fault],
         "the close carries the fault the owed work earns"
     );
     assert_eq!(
@@ -703,7 +703,7 @@ async fn a_session_whose_plugin_never_mounts_retires_past_the_grace() {
     );
     assert_eq!(
         backend.reasons.lock().as_slice(),
-        [onlyne_session::CloseReason::Fault],
+        [onlyne_client::backend::CloseReason::Fault],
         "the close carries the fault the task no agent ever answered earns"
     );
     assert_eq!(
@@ -740,8 +740,8 @@ fn beat_body(seq: u64, agent: &str) -> serde_json::Value {
 /// `mount_raw_plugin` waits for an assignment, and a connection that is held
 /// read-only — or one that returns to a session whose payload has already been
 /// handed over — is handed none, so a test that waited here would wait forever.
-async fn raw_mount(socket: &Path, session: &str) -> onlyne_layout::LocalStream {
-    let mut stream = onlyne_layout::connect_local(socket)
+async fn raw_mount(socket: &Path, session: &str) -> onlyne_wire::socket::LocalStream {
+    let mut stream = onlyne_wire::socket::connect_local(socket)
         .await
         .expect("the role socket accepts a raw plugin");
     let hello = HelloArgs {
@@ -781,7 +781,7 @@ async fn raw_mount(socket: &Path, session: &str) -> onlyne_layout::LocalStream {
 
 /// One beat on a raw plugin stream, and the answer the role socket gave it.
 async fn raw_beat(
-    stream: &mut onlyne_layout::LocalStream,
+    stream: &mut onlyne_wire::socket::LocalStream,
     task_id: &str,
     seq: u64,
     agent: &str,
@@ -979,7 +979,7 @@ async fn a_session_whose_plugin_stops_beating_dies_when_the_window_expires() {
     );
 
     // Past it the silence is the agent's death, and the same window answers for
-    // it: the tuple reaches `Exited` through `AgentState::Gone`, and the work the
+    // it: the tuple reaches `Exited` through `AgentPhase::Gone`, and the work the
     // agent left owed ends `failed`.
     assert_eq!(
         state
@@ -990,8 +990,8 @@ async fn a_session_whose_plugin_stops_beating_dies_when_the_window_expires() {
     );
     let row = store.get_session(&task_id).unwrap().expect("row");
     assert_eq!(
-        onlyne_session::stored_observation(&store, Some(&row)).agent,
-        onlyne_session::AgentState::Gone,
+        onlyne_client::reconcile::stored_observation(&store, Some(&row)).agent,
+        onlyne_proto::AgentPhase::Gone,
         "the tuple's agent dimension is gone: {row:?}"
     );
     assert_eq!(
@@ -1005,12 +1005,12 @@ async fn a_session_whose_plugin_stops_beating_dies_when_the_window_expires() {
         .expect("the task keeps its record");
     assert_eq!(
         record.task_state,
-        onlyne_session::TaskState::Failed,
+        onlyne_proto::TaskState::Failed,
         "the work the silent agent left owed ends failed: {record:?}"
     );
     assert_eq!(
         backend.reasons.lock().as_slice(),
-        [onlyne_session::CloseReason::Fault],
+        [onlyne_client::backend::CloseReason::Fault],
         "the close carries the fault the owed work earns"
     );
 

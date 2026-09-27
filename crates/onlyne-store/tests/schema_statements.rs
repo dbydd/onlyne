@@ -7,10 +7,11 @@
 //! statement in the panic message.
 
 use chrono::{TimeZone, Utc};
+use onlyne_proto::TaskState;
 use onlyne_proto::{
     Body, Causality, LedgerQuery, Lifecycle, MsgKind, Principal, QuerySessionsArgs, new_envelope,
 };
-use onlyne_session::{FaultRecord, SessionLedger, TaskState, VersionedSession};
+use onlyne_store::session::{FaultRecord, SessionLedger, VersionedSession};
 use onlyne_store::{
     Append, ClientStore, FaultQuery, LedgerRow, ServerFaultRow, ServerLedger, SessionWrite,
 };

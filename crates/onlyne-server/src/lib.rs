@@ -19,7 +19,7 @@ pub mod state;
 
 use anyhow::Context;
 pub use generate::{GenerateArgs, GenerateError, GenerateReport, GeneratedRole, generate};
-use onlyne_layout::ServerRoot;
+use onlyne_config::layout::ServerRoot;
 use onlyne_net::{TcpListen, TlsConn, handshake, tls};
 use onlyne_proto::{ClientOp, Frame, PROTOCOL_VERSION};
 pub use state::{
@@ -286,7 +286,7 @@ pub trait RoleIo {
 /// serve loop's `select!` drops its read branch for an outbound frame.
 struct TlsRole {
     conn: TlsConn,
-    reader: onlyne_frame::FrameReader,
+    reader: onlyne_wire::FrameReader,
 }
 
 impl RoleIo for TlsRole {
@@ -307,7 +307,7 @@ pub async fn role_connection(
 ) -> anyhow::Result<()> {
     let io = TlsRole {
         conn: connection,
-        reader: onlyne_frame::FrameReader::new(),
+        reader: onlyne_wire::FrameReader::new(),
     };
     role_connection_with_io(state, io, role).await
 }

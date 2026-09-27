@@ -250,8 +250,13 @@ impl IntentMachine {
             .and_then(|v| v.get("task"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        let _ =
-            onlyne_session::record_fault(&self.store, task, "intent_exhausted", "intent", reason)?;
+        let _ = crate::reconcile::record_fault(
+            &self.store,
+            task,
+            "intent_exhausted",
+            "intent",
+            reason,
+        )?;
         let _ = attempt;
         let report = Report::Fault {
             task_id: Some(task.to_string()),

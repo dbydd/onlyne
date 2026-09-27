@@ -3,14 +3,14 @@
 //! names.
 
 use crate::common::{ReasonBackend, sample_envelope};
+use onlyne_client::backend::fake::FakeBackend;
 use onlyne_client::{
     runtime::intent::op_for_intent,
     session::dispatch::{DispatchState, dispatch, on_recycled},
 };
 use onlyne_proto::{AssignAckArgs, ClientOp};
-use onlyne_session::SessionLedger;
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
+use onlyne_store::session::SessionLedger;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -75,11 +75,16 @@ fn cancelled_settle_closes_with_the_real_reason() {
     let env = sample_envelope("planner", "task 1");
     let task_id = env.task_id().unwrap().to_string();
     dispatch(&state, &env).unwrap();
-    on_recycled(&state, &task_id, onlyne_session::CloseReason::Cancelled).unwrap();
+    on_recycled(
+        &state,
+        &task_id,
+        onlyne_client::backend::CloseReason::Cancelled,
+    )
+    .unwrap();
 
     assert_eq!(
         backend.reasons.lock().as_slice(),
-        [onlyne_session::CloseReason::Cancelled]
+        [onlyne_client::backend::CloseReason::Cancelled]
     );
     assert_eq!(state.session_count(), 0);
 }
@@ -108,7 +113,7 @@ fn detached_tuple_sees_no_close_call() {
     store
         .upsert_session(
             &task_id,
-            &onlyne_session::VersionedSession {
+            &onlyne_store::session::VersionedSession {
                 agent_state: row.agent_state.clone(),
                 delivery_state: row.delivery_state.clone(),
                 resource_state: "detached".to_string(),
@@ -124,7 +129,12 @@ fn detached_tuple_sees_no_close_call() {
         )
         .unwrap();
 
-    on_recycled(&state, &task_id, onlyne_session::CloseReason::Completed).unwrap();
+    on_recycled(
+        &state,
+        &task_id,
+        onlyne_client::backend::CloseReason::Completed,
+    )
+    .unwrap();
 
     assert!(
         backend.reasons.lock().is_empty(),

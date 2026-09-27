@@ -12,10 +12,11 @@ to you and the spec file.
 
 ## Mount points
 
-- Admin surface: `onlyne --server-root <root> <verb>` reaches `<root>/.onlyne/run/s`, the
-  local trust root (0600); a root whose canonical spelling passes the unix path bound serves
-  its socket elsewhere and records the bound path in `<root>/.onlyne/run/socket`. Your admin
-  sends carry a required `--from _supervisor`, and the admin surface stamps `admin = true`
+- Admin surface: `onlyne --server-root <root> <verb>` reaches the socket that root's daemon
+  publishes in the machine-level runtime directory
+  (`/tmp/onlyne-<uid>/<digest>.sock`, `$ONLYNE_RUNTIME_DIR` overriding it), the local trust
+  root (0600); `<root>/.onlyne/run/s` is only the canonical spelling operators print. Your
+  admin sends carry a required `--from _supervisor`, and the admin surface stamps `admin = true`
   on every envelope it relays. Put `admin = true` on your own `[[client]]` entry too: that
   is the standing a client-held supervisor session sends with, and the flag the Control-class
   ACL bypass reads.

@@ -13,8 +13,8 @@ use crate::projection;
 use crate::relay::{self, RelayReply};
 use crate::state::{self as server_state, State};
 use chrono::Utc;
+use onlyne_config::layout::ServerRoot;
 use onlyne_config::{Spec, SpecDiff};
-use onlyne_layout::ServerRoot;
 use onlyne_proto::{
     AdminOp, Body, Causality, ClientOp, ControlOp, ErrorCode, Event, Frame, GatewayOp,
     HELLO_REQUIRED_MESSAGE, LedgerEntry, MsgKind, Presence, Principal, QueryRolesArgs, ResBody,

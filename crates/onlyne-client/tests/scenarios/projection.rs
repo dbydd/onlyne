@@ -4,11 +4,11 @@
 use crate::common::{
     RecordingOutbox, plugin_beat, projection_publishes_of, published_projection, spawn_ready,
 };
+use onlyne_client::backend::fake::FakeBackend;
 use onlyne_client::session::dispatch::{DispatchState, on_plugin_report};
 use onlyne_proto::ClientOp;
-use onlyne_session::SessionLedger;
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
+use onlyne_store::session::SessionLedger;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -81,9 +81,9 @@ async fn lifecycle_write_publishes_its_projection_in_a_heartbeat() {
     // A heartbeat whose version is the stored watermark plus one, and whose
     // body is the stored observation with the agent idle: a legal transition.
     let row = store.get_session(&task_id).unwrap().unwrap();
-    let mut body: onlyne_session::Observation = serde_json::from_str(&row.observed_json).unwrap();
-    body.agent = onlyne_session::AgentState::Idle;
-    body.version = onlyne_session::Version::new(row.generation as u64, row.seq as u64 + 1);
+    let mut body: onlyne_proto::Observation = serde_json::from_str(&row.observed_json).unwrap();
+    body.agent = onlyne_proto::AgentPhase::Idle;
+    body.version = onlyne_proto::Version::new(row.generation as u64, row.seq as u64 + 1);
     on_plugin_report(
         &state,
         None,
@@ -135,21 +135,21 @@ async fn the_publish_is_a_heartbeat_carrying_the_stored_projection() {
     state.set_cluster_ref("cluster-b");
 
     let task_id = "11111111-1111-4111-8111-111111111111".to_string();
-    let observation = onlyne_session::Observation::build(
-        onlyne_session::Version::new(1, 7),
+    let observation = onlyne_proto::Observation::build(
+        onlyne_proto::Version::new(1, 7),
         true,
-        onlyne_session::DEFAULT_ISOLATE_AFTER,
-        onlyne_session::DEFAULT_TERMINATE_AFTER,
+        onlyne_client::reconcile::DEFAULT_ISOLATE_AFTER,
+        onlyne_client::reconcile::DEFAULT_TERMINATE_AFTER,
         0,
-        onlyne_session::AgentState::Running,
-        onlyne_session::DeliveryState::Pending,
-        onlyne_session::ResourceState::Attached,
-        onlyne_session::RecoveryState::None,
+        onlyne_proto::AgentPhase::Running,
+        onlyne_proto::DeliveryPhase::Pending,
+        onlyne_proto::ResourcePhase::Attached,
+        onlyne_proto::RecoveryPhase::NoRecovery,
     );
     store
         .upsert_session(
             &task_id,
-            &onlyne_session::to_versioned(&observation, "pane-1", "null").unwrap(),
+            &onlyne_client::reconcile::to_versioned(&observation, "pane-1", "null").unwrap(),
         )
         .unwrap();
 
@@ -225,11 +225,11 @@ async fn noop_heartbeats_republish_the_projection() {
     outbox.clear().await;
 
     let row = store.get_session(&task_id).unwrap().unwrap();
-    let mut body: onlyne_session::Observation = serde_json::from_str(&row.observed_json).unwrap();
+    let mut body: onlyne_proto::Observation = serde_json::from_str(&row.observed_json).unwrap();
     let generation = row.generation as u64;
     let seq_one = row.seq as u64 + 1;
     let seq_two = row.seq as u64 + 2;
-    body.version = onlyne_session::Version::new(generation, seq_one);
+    body.version = onlyne_proto::Version::new(generation, seq_one);
     on_plugin_report(
         &state,
         None,
@@ -242,7 +242,7 @@ async fn noop_heartbeats_republish_the_projection() {
     )
     .await
     .unwrap();
-    body.version = onlyne_session::Version::new(generation, seq_two);
+    body.version = onlyne_proto::Version::new(generation, seq_two);
     on_plugin_report(
         &state,
         None,
@@ -302,10 +302,10 @@ async fn stale_heartbeat_does_not_republish() {
     outbox.clear().await;
 
     let row = store.get_session(&task_id).unwrap().unwrap();
-    let mut body: onlyne_session::Observation = serde_json::from_str(&row.observed_json).unwrap();
+    let mut body: onlyne_proto::Observation = serde_json::from_str(&row.observed_json).unwrap();
     let generation = row.generation as u64;
     let seq = row.seq as u64 + 1;
-    body.version = onlyne_session::Version::new(generation, seq);
+    body.version = onlyne_proto::Version::new(generation, seq);
     on_plugin_report(
         &state,
         None,
@@ -320,7 +320,7 @@ async fn stale_heartbeat_does_not_republish() {
     .unwrap();
     assert_eq!(outbox.projection_publishes().await.len(), 1);
 
-    body.version = onlyne_session::Version::new(generation, seq);
+    body.version = onlyne_proto::Version::new(generation, seq);
     on_plugin_report(
         &state,
         None,
@@ -333,7 +333,7 @@ async fn stale_heartbeat_does_not_republish() {
     )
     .await
     .unwrap();
-    body.version = onlyne_session::Version::new(generation, seq.saturating_sub(1));
+    body.version = onlyne_proto::Version::new(generation, seq.saturating_sub(1));
     on_plugin_report(
         &state,
         None,
@@ -372,7 +372,7 @@ async fn heartbeat_junk_in_the_client_dimensions_writes_none_of_it() {
     outbox.clear().await;
 
     let row = store.get_session(&task_id).unwrap().unwrap();
-    let mut junk: onlyne_session::Observation = serde_json::from_str(&row.observed_json).unwrap();
+    let mut junk: onlyne_proto::Observation = serde_json::from_str(&row.observed_json).unwrap();
     let tuning = (
         junk.isolate_after,
         junk.terminate_after,
@@ -381,7 +381,7 @@ async fn heartbeat_junk_in_the_client_dimensions_writes_none_of_it() {
     junk.isolate_after = 0;
     junk.terminate_after = 0;
     junk.mismatch_count = 7;
-    junk.version = onlyne_session::Version::new(row.generation as u64, row.seq as u64 + 1);
+    junk.version = onlyne_proto::Version::new(row.generation as u64, row.seq as u64 + 1);
     on_plugin_report(
         &state,
         None,
@@ -409,7 +409,7 @@ async fn heartbeat_junk_in_the_client_dimensions_writes_none_of_it() {
         1,
         "the discarded beat still republished: {syncs:?}"
     );
-    let published: onlyne_session::Observation =
+    let published: onlyne_proto::Observation =
         serde_json::from_value(syncs[0].observed.clone()).unwrap();
     assert_eq!(
         (
@@ -421,15 +421,15 @@ async fn heartbeat_junk_in_the_client_dimensions_writes_none_of_it() {
         "the wire carries the client's tuning, not the body's"
     );
     assert!(
-        onlyne_session::is_legal(&published),
+        onlyne_proto::is_legal(&published),
         "an illegal tuple must not reach the publish: {published:?}"
     );
-    let mut legal: onlyne_session::Observation =
+    let mut legal: onlyne_proto::Observation =
         serde_json::from_str(&after_junk.observed_json).unwrap();
     let generation = after_junk.generation as u64;
     let seq = after_junk.seq as u64 + 1;
-    legal.agent = onlyne_session::AgentState::Idle;
-    legal.version = onlyne_session::Version::new(generation, seq);
+    legal.agent = onlyne_proto::AgentPhase::Idle;
+    legal.version = onlyne_proto::Version::new(generation, seq);
     on_plugin_report(
         &state,
         None,
@@ -449,11 +449,11 @@ async fn heartbeat_junk_in_the_client_dimensions_writes_none_of_it() {
         "the next legal beat still publishes: {syncs:?}"
     );
     assert_eq!((syncs[1].generation, syncs[1].seq), (generation, seq));
-    let published: onlyne_session::Observation =
+    let published: onlyne_proto::Observation =
         serde_json::from_value(syncs[1].observed.clone()).unwrap();
     assert_eq!(
         published.agent,
-        onlyne_session::AgentState::Idle,
+        onlyne_proto::AgentPhase::Idle,
         "the agent the plugin witnessed is still taken as sent"
     );
     assert_eq!(

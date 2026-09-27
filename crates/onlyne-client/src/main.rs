@@ -145,8 +145,8 @@ async fn main() {
             // session backends as `SpawnSpec.cwd` is one absolute answer. A
             // relative cwd would be read against whatever directory a host
             // surface happens to start its pane in.
-            let workspace = onlyne_layout::absolute_path(&workspace);
-            let path = onlyne_layout::RoleWorkspace::resolve(&workspace);
+            let workspace = onlyne_wire::socket::absolute_path(&workspace);
+            let path = onlyne_config::layout::RoleWorkspace::resolve(&workspace);
             local_cli::heal_workspace_config(&workspace);
             match load_workspace_config(&path.config_path()) {
                 Ok(config) => match onlyne_client::run(
@@ -172,7 +172,7 @@ async fn main() {
                     Ok(()) => 0,
                     Err(error)
                         if error
-                            .downcast_ref::<onlyne_session::NoSupportedHost>()
+                            .downcast_ref::<onlyne_client::backend::NoSupportedHost>()
                             .is_some() =>
                     {
                         eprintln!("{error}");
@@ -231,7 +231,7 @@ async fn main() {
             }
         },
         Command::Doctor => {
-            let report = onlyne_client::host::doctor_report(&onlyne_session::process_env());
+            let report = onlyne_client::host::doctor_report(&onlyne_client::backend::process_env());
             println!("{report}");
             0
         }
@@ -286,7 +286,7 @@ fn plugin_verb(result: anyhow::Result<local_cli::PluginAction>) -> i32 {
 
 /// Answer the role query from the prose cache in `client.db`.
 fn local_roles(workspace: &Path) -> i32 {
-    let layout = onlyne_layout::RoleWorkspace::resolve(workspace);
+    let layout = onlyne_config::layout::RoleWorkspace::resolve(workspace);
     if !layout.client_db_path().exists() {
         println!("{}", serde_json::json!({"ok": true, "data": {"roles": []}}));
         return 0;

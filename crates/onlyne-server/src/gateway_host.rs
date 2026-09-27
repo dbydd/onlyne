@@ -625,7 +625,7 @@ impl Host for GatewayHostImpl {
 /// adapter host loop.
 pub async fn serve_adapter(
     state: Arc<State>,
-    stream: onlyne_layout::LocalStream,
+    stream: onlyne_wire::socket::LocalStream,
     first: onlyne_adapter::WireMessage,
 ) -> anyhow::Result<()> {
     let hello = match first.msg {
@@ -638,7 +638,7 @@ pub async fn serve_adapter(
                 reply_to: Some(first.id.unwrap_or_default()),
                 msg: AdapterMsg::Res(body),
             };
-            onlyne_frame::write_frame(&mut stream, &reply).await?;
+            onlyne_wire::write_frame(&mut stream, &reply).await?;
             return Ok(());
         }
     };
@@ -652,7 +652,7 @@ pub async fn serve_adapter(
                 reply_to: Some(first.id.unwrap_or_default()),
                 msg: AdapterMsg::Res(ResBody::err(code, message, None)),
             };
-            onlyne_frame::write_frame(&mut stream, &reply).await?;
+            onlyne_wire::write_frame(&mut stream, &reply).await?;
             return Ok(());
         }
     };
@@ -672,7 +672,7 @@ pub async fn serve_adapter(
             serde_json::to_value(HostOp::Welcome(ack.clone())).unwrap_or_default(),
         )),
     };
-    onlyne_frame::write_frame(&mut stream, &welcome_frame).await?;
+    onlyne_wire::write_frame(&mut stream, &welcome_frame).await?;
     let (io, inbound) = onlyne_adapter::AdapterIo::new_with_inbound(
         stream,
         onlyne_adapter::DEFAULT_READ_TIMEOUT,

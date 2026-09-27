@@ -30,7 +30,7 @@ class Onlyne < Formula
   end
 
   def install
-    bin.install "onlyne", "onlyne-server", "onlyne-client", "onlyne-gateway", "onlyne-tui"
+    bin.install "onlyne", "onlyne-server", "onlyne-client"
   end
 
   test do

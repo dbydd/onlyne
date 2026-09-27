@@ -63,9 +63,9 @@ fn turn_recorded(inner: &DispatchInner, task_id: &str) -> (bool, String) {
     let Ok(Some(row)) = inner.store.get_session(task_id) else {
         return (false, "no session row".to_string());
     };
-    let agent = phase(&row.agent_state, AgentState::Booting);
+    let agent = phase(&row.agent_state, AgentPhase::Booting);
     (
-        matches!(agent, AgentState::Running | AgentState::Idle),
+        matches!(agent, AgentPhase::Running | AgentPhase::Idle),
         row.agent_state,
     )
 }
@@ -107,7 +107,7 @@ pub async fn on_out(
             let reason = format!(
                 "no turn ran: the agent phase this client holds for the session reads {phase}"
             );
-            onlyne_session::record_fault(
+            crate::reconcile::record_fault(
                 &inner.store,
                 task_id,
                 SETTLE_WITHOUT_TURN,
@@ -394,7 +394,7 @@ async fn retire_revived(state: &DispatchState, task_id: &str) {
             retire_idle_locked(
                 &mut inner,
                 &key,
-                onlyne_session::CloseReason::Replaced,
+                crate::backend::CloseReason::Replaced,
                 &mut pending,
             );
         }
@@ -442,7 +442,7 @@ fn record_denials(state: &DispatchState, task_id: &str, denied: &[Denial]) -> Re
                 "error": refusal.reason,
             }),
         )?;
-        onlyne_session::record_fault(
+        crate::reconcile::record_fault(
             &inner.store,
             task_id,
             "handoff_denied",

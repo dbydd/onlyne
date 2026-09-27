@@ -1,10 +1,10 @@
 use super::config::{OUTCOME_POLL_MS, RunState};
 use super::run::settle_control;
+use crate::backend::SessionOutcome;
 use crate::session::accept::AcceptPath;
 use crate::session::dispatch::{self, ClientLink};
 use anyhow::{Result, anyhow};
 use onlyne_proto::{AckArgs, ClientOp, Delivery, QueryRolesArgs, RoleInfo};
-use onlyne_session::SessionOutcome;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -48,12 +48,12 @@ pub(super) async fn settle_session_outcome(
         anyhow!("self-driven backend reported a non-terminal outcome for task {task_id}")
     })?;
     if let Some(reason) = refusals.as_deref() {
-        onlyne_session::record_fault(&state.store, &task_id, "permission", "acp", reason)?;
+        crate::reconcile::record_fault(&state.store, &task_id, "permission", "acp", reason)?;
     }
-    if outcome == onlyne_session::TaskState::Failed
+    if outcome == onlyne_proto::TaskState::Failed
         && let Some(reason) = note.as_deref()
     {
-        onlyne_session::record_fault(&state.store, &task_id, "acp", "acp", reason)?;
+        crate::reconcile::record_fault(&state.store, &task_id, "acp", "acp", reason)?;
     }
     dispatch::on_out(
         &state.dispatch,

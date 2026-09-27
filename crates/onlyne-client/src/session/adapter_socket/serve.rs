@@ -2,11 +2,11 @@ use super::socket::AdapterSocket;
 use crate::session::dispatch::{ReadyNotice, on_plugin_report, on_ready, sync_frame, sync_session};
 use anyhow::{Context, Result};
 use onlyne_adapter::{AdapterIo, AdapterServer, ServerConnection};
-use onlyne_layout::LocalStream;
 use onlyne_proto::{
     AdapterMsg, Capability, ErrorCode, HelloAck, HostOp, Mount, MountKind, PluginOp, Report,
     ResBody, ServerInfo,
 };
+use onlyne_wire::socket::LocalStream;
 
 impl AdapterSocket {
     /// Serve one accepted connection on whichever surface it opened.
@@ -15,7 +15,7 @@ impl AdapterSocket {
     /// plugin opens with an adapter `hello`, and the local CLI opens with a
     /// request frame. The first frame decides, so one path serves both.
     pub(super) async fn connection(&self, mut stream: LocalStream) -> Result<()> {
-        let first = onlyne_frame::read_frame::<_, serde_json::Value>(&mut stream)
+        let first = onlyne_wire::read_frame::<_, serde_json::Value>(&mut stream)
             .await
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let Some(first) = first else {
@@ -40,7 +40,7 @@ impl AdapterSocket {
         loop {
             let value = match pending.take() {
                 Some(value) => value,
-                None => match onlyne_frame::read_frame::<_, serde_json::Value>(&mut stream).await {
+                None => match onlyne_wire::read_frame::<_, serde_json::Value>(&mut stream).await {
                     Ok(Some(value)) => value,
                     Ok(None) => return Ok(()),
                     Err(error) => return Err(anyhow::anyhow!(error.to_string())),
@@ -50,7 +50,7 @@ impl AdapterSocket {
                 serde_json::from_value(value).context("decode a client frame")?;
             if let onlyne_proto::Frame::Ping { t } = frame {
                 let pong = onlyne_proto::Frame::<onlyne_proto::ClientOp>::Pong { t, server_seq: 0 };
-                onlyne_frame::write_frame(&mut stream, &pong)
+                onlyne_wire::write_frame(&mut stream, &pong)
                     .await
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
                 continue;
@@ -60,7 +60,7 @@ impl AdapterSocket {
             };
             let body = self.local_op(op).await;
             let reply = onlyne_proto::Frame::<onlyne_proto::ClientOp>::res(id, body);
-            onlyne_frame::write_frame(&mut stream, &reply)
+            onlyne_wire::write_frame(&mut stream, &reply)
                 .await
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         }

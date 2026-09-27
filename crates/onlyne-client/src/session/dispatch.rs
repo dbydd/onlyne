@@ -1,12 +1,17 @@
 // The parts below open with `use super::*`, so this module keeps the imports the
 // single-file version shared with them, and re-exports exactly the names it
 // exported publicly before the split. No logic lives here.
+use crate::backend::{SessionBackend, SessionRef, SpawnSpec};
+use crate::reconcile::{
+    Bridge, apply_persist, feed_agent_gone, feed_created, feed_dispatched, feed_intent_receipt,
+    feed_ready, feed_resource_closed, settle, stored_observation,
+};
 use crate::runtime::intent::stamp_op_id;
 use crate::runtime::runloop::ClientInit;
 use crate::session::handoff::{self, Denial};
 use anyhow::{Context, Result, anyhow};
 use onlyne_adapter::AdapterIo;
-use onlyne_layout::RoleWorkspace;
+use onlyne_config::layout::RoleWorkspace;
 use onlyne_net::conn::{ClientConn, ConnReadiness, dial};
 use onlyne_net::{ConnSettings, KeyPair, NetError};
 use onlyne_proto::{
@@ -15,14 +20,11 @@ use onlyne_proto::{
     PROTOCOL_VERSION, Principal, RecoveryPhase, RecycleArgs, Report, ResBody, ResourcePhase,
     SessionProjection, Welcome, new_envelope,
 };
-use onlyne_session::{
-    AgentState, Bridge, DeliveryState, IgnoredReason, LifecycleEvent, Observation, PublicLifecycle,
-    RecoveryState, ResourceState, SessionBackend, SessionLedger, SessionRecord, SessionRef,
-    SpawnSpec, TaskState, Verdict, Version, apply_persist, feed_agent_gone, feed_created,
-    feed_dispatched, feed_intent_receipt, feed_ready, feed_resource_closed, project, settle,
-    stored_observation,
+use onlyne_proto::{
+    IgnoredReason, LifecycleEvent, Observation, TaskState, Verdict, Version, project,
 };
 use onlyne_store::ClientStore;
+use onlyne_store::session::{SessionLedger, SessionRecord};
 use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};

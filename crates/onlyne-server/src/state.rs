@@ -175,7 +175,7 @@ impl GatewayRegistry {
 #[derive(Debug, Default)]
 pub struct ListenerHandles {
     pub tcp: Option<tokio::net::TcpListener>,
-    pub admin: Option<onlyne_layout::LocalListener>,
+    pub admin: Option<onlyne_wire::socket::LocalListener>,
 }
 
 #[derive(Debug)]
@@ -208,7 +208,7 @@ pub struct ServerInit {
 
 impl Server {
     pub fn open(init: &ServerInit) -> anyhow::Result<Arc<Self>> {
-        let layout = onlyne_layout::ServerRoot::resolve(&init.root);
+        let layout = onlyne_config::layout::ServerRoot::resolve(&init.root);
         layout.bootstrap()?;
         let spec = Spec::load(layout.spec_path())?;
         let ledger = ServerLedger::open(layout.state_db_path(), spec.server.fault_history_days)?;

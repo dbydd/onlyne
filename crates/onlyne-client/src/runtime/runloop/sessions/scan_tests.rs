@@ -7,11 +7,12 @@ use crate::session::dispatch::{
 };
 use anyhow::Result;
 use onlyne_adapter::AdapterIo;
+use onlyne_proto::TaskState;
 use onlyne_proto::{
     AgentPhase, Body, Capability, Causality, ClientOp, Lifecycle, MsgKind, Outcome, Principal,
     Report, ResourcePhase, SessionProjection, new_envelope, new_task_id,
 };
-use onlyne_session::{SessionLedger, TaskState, VersionedSession};
+use onlyne_store::session::{SessionLedger, VersionedSession};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -669,7 +670,7 @@ async fn a_cancel_whose_close_refused_the_delivery_settles_and_publishes_alone()
     on_recycled(
         &state.dispatch,
         &task,
-        onlyne_session::CloseReason::Cancelled,
+        crate::backend::CloseReason::Cancelled,
     )
     .expect("the close runs");
     assert_eq!(state.dispatch.session_count(), 0, "the slot is gone");

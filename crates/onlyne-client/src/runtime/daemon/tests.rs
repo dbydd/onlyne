@@ -1,7 +1,7 @@
 use super::*;
+use crate::backend::fake::FakeBackend;
 use crate::session::adapter_socket::AdapterSocket;
 use crate::session::dispatch::DispatchState;
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
 use std::sync::Arc;
 use tempfile::tempdir;

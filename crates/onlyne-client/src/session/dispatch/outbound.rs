@@ -291,6 +291,16 @@ impl DispatchState {
         self.inner.lock().link_up.load(Ordering::SeqCst)
     }
 
+    /// The name of the session runtime hosting this role's sessions.
+    ///
+    /// The registration beside the client socket carries it, and an external
+    /// runtime's plugin matches on it to find the client its own session
+    /// belongs to, so the answer is the backend's own name rather than a
+    /// spelling invented here.
+    pub fn runtime_name(&self) -> String {
+        self.inner.lock().backend.name().to_string()
+    }
+
     /// Record that the server link came up or went down.
     pub fn set_link_up(&self, up: bool) {
         self.inner.lock().link_up.store(up, Ordering::SeqCst);

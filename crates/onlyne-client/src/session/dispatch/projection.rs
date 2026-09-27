@@ -82,13 +82,13 @@ pub fn projection_of(row: &SessionRecord, task_state: TaskState) -> SessionProje
     // observation as `observed_json`, so the derivation reads them rather than
     // the JSON bytes. A word that does not decode falls back to the freshly
     // created dimension, which is the reading the wire columns below give too.
-    let lifecycle = wire_lifecycle(project(
-        phase(&row.agent_state, AgentState::Booting),
-        phase(&row.delivery_state, DeliveryState::None),
-        phase(&row.resource_state, ResourceState::Detached),
-        phase(&row.recovery_substate, RecoveryState::None),
+    let lifecycle = project(
+        phase(&row.agent_state, AgentPhase::Booting),
+        phase(&row.delivery_state, DeliveryPhase::NoIntent),
+        phase(&row.resource_state, ResourcePhase::Detached),
+        phase(&row.recovery_substate, RecoveryPhase::NoRecovery),
         task_state,
-    ));
+    );
     SessionProjection {
         lifecycle,
         agent: phase(&row.agent_state, AgentPhase::Booting),
@@ -97,18 +97,6 @@ pub fn projection_of(row: &SessionRecord, task_state: TaskState) -> SessionProje
         recovery: phase(&row.recovery_substate, RecoveryPhase::NoRecovery),
         outcome: task_outcome_of(task_state),
         observed,
-    }
-}
-
-/// The wire word for a derived lifecycle. `PublicLifecycle` and `Lifecycle` are
-/// the same view named in two crates, and a match is what notices if one of them
-/// grows an arm the other does not have.
-fn wire_lifecycle(lifecycle: PublicLifecycle) -> Lifecycle {
-    match lifecycle {
-        PublicLifecycle::Created => Lifecycle::Created,
-        PublicLifecycle::Working => Lifecycle::Working,
-        PublicLifecycle::Idle => Lifecycle::Idle,
-        PublicLifecycle::Exited => Lifecycle::Exited,
     }
 }
 

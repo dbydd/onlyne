@@ -64,7 +64,7 @@ impl DispatchState {
             .map(|slot| slot.session.backend.clone())
     }
     /// The terminal-fact stream of a backend that drives its own agent.
-    pub fn outcome_feed(&self) -> Option<onlyne_session::OutcomeFeed> {
+    pub fn outcome_feed(&self) -> Option<crate::backend::OutcomeFeed> {
         self.inner.lock().backend.outcomes()
     }
 
@@ -437,7 +437,7 @@ impl DispatchState {
         let inner = self.inner.lock();
         matches!(
             stored_close_reason(&inner, task_id),
-            Some(onlyne_session::CloseReason::Completed)
+            Some(crate::backend::CloseReason::Completed)
         )
     }
 

@@ -1,5 +1,5 @@
 use super::*;
-use onlyne_layout::UNIX_SOCKET_PATH_MAX;
+use onlyne_wire::socket::UNIX_SOCKET_PATH_MAX;
 use tempfile::tempdir;
 
 /// The guard reads its policy from the environment before its own

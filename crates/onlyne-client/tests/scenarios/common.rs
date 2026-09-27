@@ -2,20 +2,20 @@
 //! builders, the plugin-mount helpers, and the recording backends.
 
 use onlyne_adapter::{AdapterIo, WireMessage};
+use onlyne_client::backend::fake::FakeBackend;
 use onlyne_client::session::{
     accept::AcceptPath,
     adapter_socket::AdapterSocket,
     dispatch::{DispatchState, ReadyNotice, dispatch, on_plugin_report, on_ready, projection_of},
 };
-use onlyne_frame::{read_frame, write_frame};
 use onlyne_proto::{
     AdapterMsg, AgentMount, Capability, ClientOp, Delivery, Envelope, HelloArgs, HostOp, Lifecycle,
     Mount, MountKind, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp, Report, new_envelope,
     new_task_id,
 };
-use onlyne_session::SessionLedger;
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
+use onlyne_store::session::SessionLedger;
+use onlyne_wire::{read_frame, write_frame};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -163,7 +163,7 @@ pub(super) async fn ran_a_turn(io: &AdapterIo, task_id: &str) {
 }
 
 /// The same turn on a raw plugin stream, where the fixture writes frames itself.
-pub(super) async fn ran_a_turn_raw(stream: &mut onlyne_layout::LocalStream, task_id: &str) {
+pub(super) async fn ran_a_turn_raw(stream: &mut onlyne_wire::socket::LocalStream, task_id: &str) {
     write_frame(
         stream,
         &WireMessage {
@@ -267,42 +267,45 @@ pub(super) async fn spawn_ready(
 #[derive(Clone, Default)]
 pub(super) struct ReasonBackend {
     pub(super) inner: FakeBackend,
-    pub(super) reasons: Arc<parking_lot::Mutex<Vec<onlyne_session::CloseReason>>>,
-    pub(super) closed_sessions: Arc<parking_lot::Mutex<Vec<onlyne_session::SessionRef>>>,
+    pub(super) reasons: Arc<parking_lot::Mutex<Vec<onlyne_client::backend::CloseReason>>>,
+    pub(super) closed_sessions: Arc<parking_lot::Mutex<Vec<onlyne_client::backend::SessionRef>>>,
     pub(super) fail_close: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl onlyne_session::SessionBackend for ReasonBackend {
+impl onlyne_client::backend::SessionBackend for ReasonBackend {
     fn name(&self) -> &'static str {
         self.inner.name()
     }
-    fn capabilities(&self) -> onlyne_session::Capabilities {
+    fn capabilities(&self) -> onlyne_client::backend::Capabilities {
         self.inner.capabilities()
     }
     fn available(&self) -> anyhow::Result<bool> {
         self.inner.available()
     }
-    fn spawn(&self, spec: onlyne_session::SpawnSpec) -> anyhow::Result<onlyne_session::SessionRef> {
+    fn spawn(
+        &self,
+        spec: onlyne_client::backend::SpawnSpec,
+    ) -> anyhow::Result<onlyne_client::backend::SessionRef> {
         self.inner.spawn(spec)
     }
     fn attach(
         &self,
-        session: &onlyne_session::SessionRef,
-    ) -> anyhow::Result<onlyne_session::SessionRef> {
+        session: &onlyne_client::backend::SessionRef,
+    ) -> anyhow::Result<onlyne_client::backend::SessionRef> {
         let mut refreshed = self.inner.attach(session)?;
         refreshed.backend_ref["refreshed"] = serde_json::Value::Bool(true);
         Ok(refreshed)
     }
     fn probe(
         &self,
-        session: &onlyne_session::SessionRef,
-    ) -> anyhow::Result<onlyne_session::ResourceProbe> {
+        session: &onlyne_client::backend::SessionRef,
+    ) -> anyhow::Result<onlyne_client::backend::ResourceProbe> {
         self.inner.probe(session)
     }
     fn close(
         &self,
-        session: &onlyne_session::SessionRef,
-        reason: onlyne_session::CloseReason,
+        session: &onlyne_client::backend::SessionRef,
+        reason: onlyne_client::backend::CloseReason,
         force: bool,
     ) -> anyhow::Result<()> {
         self.reasons.lock().push(reason);
@@ -346,7 +349,7 @@ pub(super) async fn mount_plugin(
     socket: &Path,
     session: Option<&str>,
 ) -> (AdapterIo, tokio::sync::mpsc::UnboundedReceiver<String>) {
-    let stream = onlyne_layout::connect_local(socket)
+    let stream = onlyne_wire::socket::connect_local(socket)
         .await
         .expect("the role socket accepts a plugin");
     let (io, mut inbound) =
@@ -397,8 +400,11 @@ pub(super) async fn complete_plugin(io: &AdapterIo, task_id: &str, outcome: Outc
     assert!(body.ok, "the completion report is accepted: {body:?}");
 }
 
-pub(super) async fn mount_raw_plugin(socket: &Path, session: &str) -> onlyne_layout::LocalStream {
-    let mut stream = onlyne_layout::connect_local(socket)
+pub(super) async fn mount_raw_plugin(
+    socket: &Path,
+    session: &str,
+) -> onlyne_wire::socket::LocalStream {
+    let mut stream = onlyne_wire::socket::connect_local(socket)
         .await
         .expect("the role socket accepts a raw plugin");
     let hello = HelloArgs {
@@ -446,7 +452,7 @@ pub(super) async fn mount_raw_plugin(socket: &Path, session: &str) -> onlyne_lay
 }
 
 pub(super) async fn complete_raw_plugin(
-    stream: &mut onlyne_layout::LocalStream,
+    stream: &mut onlyne_wire::socket::LocalStream,
     task_id: &str,
     outcome: Outcome,
 ) {
@@ -534,7 +540,7 @@ pub(super) fn published_projection(
         .task(task_id)
         .unwrap()
         .map(|record| record.task_state)
-        .unwrap_or(onlyne_session::TaskState::Pending);
+        .unwrap_or(onlyne_proto::TaskState::Pending);
     projection_of(&row, task_state)
 }
 
@@ -554,7 +560,7 @@ pub(super) fn assert_settled(store: &ClientStore, task_id: &str) {
         .expect("the settled task keeps its own record");
     assert_eq!(
         record.task_state,
-        onlyne_session::TaskState::Done,
+        onlyne_proto::TaskState::Done,
         "the verdict lives in the task table"
     );
     assert!(

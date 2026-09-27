@@ -1,9 +1,9 @@
 //! End-to-end contracts of the `onlyne` binary, exercised through real sockets
 //! and a real `exec`, so the messages, exit codes and stream split stay pinned.
 
-use onlyne_layout::local_socket::prelude::SyncListener;
-use onlyne_layout::{LocalListenerSync, LocalStreamSync, bind_local_sync_poll};
 use onlyne_proto::{NO_SOCKET_MESSAGE, binary_not_found};
+use onlyne_wire::socket::prelude::SyncListener;
+use onlyne_wire::socket::{LocalListenerSync, LocalStreamSync, bind_local_sync_poll};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
@@ -2565,46 +2565,6 @@ fn gateway_status_queries_the_admin_socket() {
         gateway["capabilities"],
         serde_json::json!(["register", "deliver"]),
         "the capabilities must reach stdout"
-    );
-}
-
-/// `gateway run` execs `onlyne-gateway`, and the platform plus its flags reach
-/// the sibling verbatim.
-#[test]
-fn gateway_run_forwards_to_onlyne_gateway() {
-    let dir = tempfile::tempdir().unwrap();
-    let bin_dir = dir.path().join("bin");
-    let argv_out = dir.path().join("argv.txt");
-    stub_binary(
-        &bin_dir,
-        "onlyne-gateway",
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ONLYNE_ARGV\"\n",
-    );
-    let cli = onlyne_in(&bin_dir);
-    let root = dir.path().join("srv");
-
-    let output = spawn_output(
-        Command::new(&cli)
-            .current_dir(dir.path())
-            .env("ONLYNE_ARGV", &argv_out)
-            .env("PATH", path_with(&bin_dir))
-            .args([
-                "gateway",
-                "run",
-                "telegram",
-                "--server-root",
-                root.to_str().unwrap(),
-                "--token",
-                "t0ken",
-            ]),
-    );
-    assert_eq!(output.status.code(), Some(EXIT_OK));
-    assert_eq!(
-        read_stub_argv(&argv_out),
-        format!(
-            "run\ntelegram\n--server-root\n{}\n--token\nt0ken\n",
-            root.display()
-        )
     );
 }
 

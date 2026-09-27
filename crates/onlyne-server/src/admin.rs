@@ -1,9 +1,11 @@
 //! Admin and gateway socket for a server root (plan §7 line 293).
 //!
-//! [`bind_socket`] picks the path: the canonical `<server-root>/.onlyne/run/s`
-//! while it fits the unix socket-name bound, and a short derived path past that
-//! bound. The path actually served is named in `<run>/socket`, so every reader
-//! reaches one socket through one file.
+//! v2 moves the endpoint out of the tree: [`bind_socket_v2`] binds
+//! `<runtime_dir>/<digest>.sock`, where the digest covers the canonical server
+//! root, so there is no `run/s` spelling and no `sun_path` length rule. The
+//! registration published beside it, `<runtime_dir>/<digest>.json`, is what
+//! every reader resolves, and it is written by the serving side because only
+//! the serving side knows the surface is an admin one.
 //!
 //! One listener serves both surfaces: a connection that opens with an adapter
 //! `hello` is a gateway process, and a connection that opens with a request
@@ -16,10 +18,13 @@ use crate::ServerInit;
 use crate::router::{self, Session};
 use crate::state::State;
 use anyhow::Context;
-use onlyne_frame::{read_frame, write_frame};
-use onlyne_layout::local_socket::prelude::TokioListener;
-use onlyne_layout::{LocalListener, LocalStream, ServerRoot, bind_socket};
 use onlyne_proto::{AdminOp, ClientOp, ErrorCode, Frame, GatewayOp, ResBody};
+use onlyne_wire::socket::prelude::TokioListener;
+use onlyne_wire::socket::{
+    LocalListener, LocalStream, RegistrationFile, bind_socket_v2, registration_path,
+    remove_registration, socket_path, write_registration,
+};
+use onlyne_wire::{read_frame, write_frame};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -29,44 +34,48 @@ pub async fn run(init: ServerInit) -> anyhow::Result<()> {
     crate::serve(state).await
 }
 
-/// Bind the run socket and publish the served path.
+/// Bind the run socket and publish the registration that names it.
 ///
-/// [`bind_socket`] resolves the endpoint, creates `run/` with mode `0700`, drops
-/// a stale file at the served path, binds, and writes the served path into
-/// `<run>/socket`. Privacy is applied inside the bind: unix `mode(0o600)` on the
-/// bind options (fchmod before bind, no umask TOCTOU) and windows owner-only
-/// SDDL. A short endpoint logs both spellings with the canonical length, so the
-/// operator sees the tree the socket stands for.
+/// [`bind_socket_v2`] creates the runtime directory `0700`, drops a stale name
+/// at `<runtime_dir>/<digest>.sock`, and binds it; privacy is applied inside the
+/// bind: unix `mode(0o600)` on the bind options (fchmod before bind, no umask
+/// TOCTOU) and windows owner-only SDDL. The registration is written after the
+/// bind, so a reader never sees an endpoint that is not yet served, and it
+/// carries this process's pid, which is what `onlyne-server start` and `stop`
+/// read in place of the old `run/server.pid`.
+///
+/// A refused registration fails the whole bind: a socket no reader can find is
+/// not the outcome the serving side asked for.
 pub fn bind(state: &State) -> anyhow::Result<LocalListener> {
-    let layout = ServerRoot::resolve(&state.root);
-    let (listener, endpoint) =
-        bind_socket(layout.root(), &layout.run_dir()).with_context(|| {
-            format!(
-                "bind the admin socket {}",
-                layout.socket_path_natural().display()
-            )
-        })?;
-    if endpoint.short() {
-        tracing::warn!(
-            served = %endpoint.actual().display(),
-            canonical = %endpoint.natural().display(),
-            canonical_bytes = endpoint.natural().as_os_str().len(),
-            "the run socket is served from a short path; the marker names it"
-        );
-    } else {
-        tracing::info!(socket = %endpoint.actual().display(), "the run socket is open");
-    }
+    let root = state.root.as_path();
+    let socket = socket_path(root).context("resolve the admin socket path")?;
+    let listener = bind_socket_v2(root)
+        .with_context(|| format!("bind the admin socket {}", socket.display()))?;
+    let registration = registration_path(root);
+    write_registration(root, &RegistrationFile::server(root)).with_context(|| {
+        format!(
+            "publish the admin registration {}",
+            registration.display()
+        )
+    })?;
+    tracing::info!(
+        socket = %socket.display(),
+        registration = %registration.display(),
+        "the run socket is open"
+    );
     Ok(listener)
 }
 
-/// Remove the run socket this server bound.
+/// Remove the run socket and registration this server published.
 ///
 /// Every exit route calls this before the process leaves, so a client that
 /// retries the path after a shutdown finds it absent and reports the plan's
-/// absent-path answer rather than a connection refusal (plan line 344).
+/// absent-path answer rather than a connection refusal (plan line 344). The
+/// registration goes with the socket: a file naming a process that is exiting
+/// is the one fact `onlyne-server start` uses to refuse a second daemon.
 pub fn unlink(state: &State) -> anyhow::Result<()> {
-    let layout = ServerRoot::resolve(&state.root);
-    let path = layout.socket_path();
+    let root = state.root.as_path();
+    let path = socket_path(root).context("resolve the admin socket path")?;
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -74,7 +83,9 @@ pub fn unlink(state: &State) -> anyhow::Result<()> {
             Err(anyhow::Error::new(error)
                 .context(format!("remove the run socket {}", path.display())))
         }
-    }
+    }?;
+    remove_registration(root)
+        .with_context(|| format!("remove the admin registration for {}", root.display()))
 }
 
 /// Accept connections on the run socket until it fails.
@@ -259,13 +270,15 @@ allowed_targets = ["planner"]
         assert!(head > 0, "an emitted event moves the cursor");
 
         let listener = bind(&state).expect("bind the run socket");
-        let path = ServerRoot::resolve(&state.root).socket_path();
+        let path = onlyne_wire::socket::socket_path(&state.root).expect("the socket path");
         let serving = state.clone();
         let socket_task = tokio::spawn(async move {
             let _ = serve_socket(serving, listener).await;
         });
 
-        let mut stream = onlyne_layout::connect_local(&path).await.expect("connect");
+        let mut stream = onlyne_wire::socket::connect_local(&path)
+            .await
+            .expect("connect");
         let probe: Frame<ClientOp> = Frame::Ping { t: 1_699_600_000 };
         write_frame(&mut stream, &probe)
             .await
@@ -291,14 +304,45 @@ allowed_targets = ["planner"]
         socket_task.abort();
     }
 
-    /// The field shape that moves the socket: a server root whose canonical
-    /// spelling passes the unix bound, so the daemon serves a short derived path
-    /// and every reader reaches it through the published marker.
+    /// What v2 publishes at bind: the socket under the runtime directory, named
+    /// by a registration that states the surface, the tree, and this process.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_root_past_the_path_bound_serves_the_published_short_path() {
-        use onlyne_layout::UNIX_SOCKET_PATH_MAX;
-        use std::path::Path;
+    async fn binding_publishes_a_server_registration_in_the_runtime_directory() {
+        use onlyne_wire::socket::{RegistrationKind, read_registration, registration_path, runtime_dir, workspace_digest};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("server");
+        std::fs::create_dir_all(root.join(".onlyne")).expect("create the root");
+        std::fs::write(root.join(".onlyne/spec.toml"), spec_text()).expect("write the spec");
+        let state = Server::open(&ServerInit { root, listen: None }).expect("open the server");
+
+        let _listener = bind(&state).expect("bind the run socket");
+        let runtime = runtime_dir().expect("the runtime directory");
+        let digest = workspace_digest(&state.root);
+        assert_eq!(registration_path(&state.root), runtime.join(format!("{digest}.json")));
+        assert!(runtime.join(format!("{digest}.sock")).exists(), "the socket is under the runtime directory");
+
+        let registration = read_registration(&state.root)
+            .expect("read the registration")
+            .expect("a bound socket publishes one");
+        assert_eq!(registration.kind, RegistrationKind::Server);
+        assert_eq!(registration.role, None, "a server root serves no role");
+        assert_eq!(registration.root, onlyne_wire::socket::absolute_path(&state.root));
+        assert_eq!(registration.pid, std::process::id());
+        assert!(!registration.version.is_empty());
+
+        // The tree keeps no socket: nothing is bound under `.onlyne/run`.
+        assert!(!state.root.join(".onlyne/run/s").exists());
+    }
+
+    /// A deep root binds the same short runtime path as a shallow one, because
+    /// the digest covers the canonical root and the length of the tree is not
+    /// part of the name. v1 needed a second derived path here.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_root_past_the_path_bound_serves_the_same_runtime_path() {
+        use onlyne_wire::socket::{UNIX_SOCKET_PATH_MAX, socket_path};
 
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("server-root".repeat(8)).join("deep");
@@ -306,8 +350,7 @@ allowed_targets = ["planner"]
         std::fs::write(root.join(".onlyne/spec.toml"), spec_text()).expect("write the spec");
         let state = Server::open(&ServerInit { root, listen: None }).expect("open the server");
 
-        let layout = ServerRoot::resolve(&state.root);
-        let natural = layout.socket_path_natural();
+        let natural = state.root.join(".onlyne/run/s");
         assert!(
             natural.as_os_str().len() > UNIX_SOCKET_PATH_MAX,
             "{} is {} bytes",
@@ -316,23 +359,19 @@ allowed_targets = ["planner"]
         );
 
         let listener = bind(&state).expect("bind on a root past the bound");
-        let endpoint = layout.socket_endpoint();
-        assert!(endpoint.short(), "a deep root serves a short path");
+        let served = socket_path(&state.root).expect("the served path");
         assert!(
-            endpoint.actual().as_os_str().len() <= UNIX_SOCKET_PATH_MAX,
+            served.as_os_str().len() <= UNIX_SOCKET_PATH_MAX,
             "{} is {} bytes",
-            endpoint.actual().display(),
-            endpoint.actual().as_os_str().len()
+            served.display(),
+            served.as_os_str().len()
         );
-        let published = std::fs::read_to_string(endpoint.marker()).expect("read the marker");
-        assert_eq!(Path::new(published.trim()), endpoint.actual());
-        assert_eq!(layout.socket_path(), endpoint.actual());
 
         let serving = state.clone();
         let socket_task = tokio::spawn(async move {
             let _ = serve_socket(serving, listener).await;
         });
-        let mut stream = onlyne_layout::connect_local(endpoint.actual())
+        let mut stream = onlyne_wire::socket::connect_local(&served)
             .await
             .expect("connect the served path");
         let probe: Frame<ClientOp> = Frame::Ping { t: 1_700_000_000 };
@@ -357,26 +396,24 @@ allowed_targets = ["planner"]
         socket_task.abort();
 
         unlink(&state).expect("unlink the served path");
+        assert!(!served.exists(), "the served path survived unlink");
         assert!(
-            !endpoint.actual().exists(),
-            "the served path survived unlink"
-        );
-        let _ = std::fs::remove_dir(
-            endpoint
-                .actual()
-                .parent()
-                .expect("the served path sits in its own directory"),
+            onlyne_wire::socket::read_registration(&state.root)
+                .expect("read the registration")
+                .is_none(),
+            "the registration survived unlink"
         );
     }
 
-    /// Windows binds no `sun_path`: `<root>/.onlyne/run/s` is a regular marker
-    /// file naming the NPFS pipe the daemon holds, so the canonical spelling needs
-    /// no length rule and `run/socket` is never written. A root past the unix
+    /// Windows binds no `sun_path`: the runtime path is a regular marker file
+    /// naming the NPFS pipe the daemon holds, so the same
+    /// `<runtime_dir>/<digest>.sock` every reader resolves carries the pipe name
+    /// and the registration beside it names the surface. A root past the unix
     /// bound still serves that one path end to end.
     #[cfg(not(unix))]
     #[tokio::test]
-    async fn a_root_past_the_path_bound_keeps_the_canonical_path() {
-        use onlyne_layout::UNIX_SOCKET_PATH_MAX;
+    async fn a_root_past_the_path_bound_serves_the_runtime_marker() {
+        use onlyne_wire::socket::{UNIX_SOCKET_PATH_MAX, socket_path};
 
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("server-root".repeat(8)).join("deep");
@@ -384,8 +421,7 @@ allowed_targets = ["planner"]
         std::fs::write(root.join(".onlyne/spec.toml"), spec_text()).expect("write the spec");
         let state = Server::open(&ServerInit { root, listen: None }).expect("open the server");
 
-        let layout = ServerRoot::resolve(&state.root);
-        let natural = layout.socket_path_natural();
+        let natural = state.root.join(".onlyne/run/s");
         assert!(
             natural.as_os_str().len() > UNIX_SOCKET_PATH_MAX,
             "{} is {} bytes",
@@ -394,21 +430,24 @@ allowed_targets = ["planner"]
         );
 
         let listener = bind(&state).expect("bind on a root past the bound");
-        let endpoint = layout.socket_endpoint();
-        assert_eq!(endpoint.actual(), endpoint.natural());
-        assert!(!endpoint.short(), "the canonical path needs no stand-in");
-        let served = std::fs::read_to_string(endpoint.actual()).expect("read the served path");
+        let served = socket_path(&state.root).expect("the served path");
+        let marker = std::fs::read_to_string(&served).expect("read the served path");
         assert!(
-            served.starts_with("v1:"),
-            "the served path names the pipe, got {served:?}"
+            marker.starts_with("v1:"),
+            "the served path names the pipe, got {marker:?}"
         );
-        assert_eq!(layout.socket_path(), endpoint.actual());
+        assert!(
+            onlyne_wire::socket::read_registration(&state.root)
+                .expect("read the registration")
+                .is_some(),
+            "a bound socket publishes a registration"
+        );
 
         let serving = state.clone();
         let socket_task = tokio::spawn(async move {
             let _ = serve_socket(serving, listener).await;
         });
-        let mut stream = onlyne_layout::connect_local(endpoint.actual())
+        let mut stream = onlyne_wire::socket::connect_local(&served)
             .await
             .expect("connect the served path");
         let probe: Frame<ClientOp> = Frame::Ping { t: 1_700_000_000 };
@@ -433,9 +472,6 @@ allowed_targets = ["planner"]
         socket_task.abort();
 
         unlink(&state).expect("unlink the served path");
-        assert!(
-            !endpoint.actual().exists(),
-            "the served path survived unlink"
-        );
+        assert!(!served.exists(), "the served path survived unlink");
     }
 }

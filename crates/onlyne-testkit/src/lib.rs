@@ -1,5 +1,6 @@
 //! Onlyne adapter conformance fixtures.
 
+pub mod harness;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -543,7 +544,7 @@ impl FakeAgent {
             .hello_role(self.role.clone(), "onlyne-agent-fake", capabilities)
             .await
             .context("fake agent hello")?;
-        let mut state = FakeAgentState {
+        let mut state = FakeAgentPhase {
             welcome,
             last_assign: None,
             beats: 0,
@@ -562,7 +563,7 @@ impl FakeAgent {
     async fn run_step(
         &self,
         handle: &AgentHandle,
-        state: &mut FakeAgentState,
+        state: &mut FakeAgentPhase,
         step: &Value,
     ) -> Result<()> {
         let object = step
@@ -788,7 +789,7 @@ impl FakeAgent {
         Ok(())
     }
 
-    fn state_value(&self, state: &FakeAgentState) -> Result<Value> {
+    fn state_value(&self, state: &FakeAgentPhase) -> Result<Value> {
         Ok(json!({
             "welcome": state.welcome,
             "assign": state.last_assign,
@@ -822,7 +823,7 @@ impl FakeAgent {
 /// nothing about the accepted path.
 const SEQ_BASE: u64 = 1000;
 
-struct FakeAgentState {
+struct FakeAgentPhase {
     welcome: HelloAck,
     last_assign: Option<AssignArgs>,
     /// Beats this agent has reported, counting from one. The sequence it puts on
@@ -1168,7 +1169,7 @@ pub fn image_limit_message() -> String {
 /// before any bind. An adapter fixture that joined `run/s` itself would dial a
 /// file nothing listens on.
 pub fn socket_from_workspace(workspace: &Path) -> PathBuf {
-    onlyne_layout::RoleWorkspace::resolve(workspace).socket_path()
+    onlyne_config::layout::RoleWorkspace::resolve(workspace).socket_path()
 }
 
 /// Role one workspace serves, read from its `.onlyne/config.toml`.

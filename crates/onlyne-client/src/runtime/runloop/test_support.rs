@@ -1,8 +1,8 @@
 use super::config::{DEFAULT_INTENT_ATTEMPTS, RunState, default_intent_backoff};
+use crate::backend::fake::FakeBackend;
 use crate::runtime::intent::{IntentMachine, op_for_intent};
 use crate::session::dispatch::DispatchState;
 use onlyne_proto::{ClientOp, Presence, RoleInfo};
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
 use std::sync::Arc;
 use tempfile::tempdir;

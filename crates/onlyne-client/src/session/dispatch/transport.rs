@@ -362,10 +362,10 @@ fn rebase_returned_reporter(inner: &mut DispatchInner, key: &str) {
     let task_id = slot.session.task_id.clone();
     let verdict = rebase_generation(inner, &task_id, |stored| {
         let mut body = stored.clone();
-        body.agent = AgentState::Booting;
-        body.recovery = RecoveryState::None;
-        if body.delivery == DeliveryState::Accepted {
-            body.delivery = DeliveryState::Pending;
+        body.agent = AgentPhase::Booting;
+        body.recovery = RecoveryPhase::NoRecovery;
+        if body.delivery == DeliveryPhase::Accepted {
+            body.delivery = DeliveryPhase::Pending;
         }
         body
     });
@@ -753,7 +753,7 @@ impl DispatchState {
                     .sessions
                     .get(&key)
                     .and_then(|slot| stored_close_reason(&inner, &slot.session.task_id))
-                    .unwrap_or(onlyne_session::CloseReason::Completed);
+                    .unwrap_or(crate::backend::CloseReason::Completed);
                 if retire_idle_locked(&mut inner, &key, reason, &mut pending) {
                     retired.push(task_id);
                 }

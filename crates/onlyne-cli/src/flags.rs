@@ -15,8 +15,7 @@ pub const ROLE_ENV: &str = "ONLYNE_ROLE";
 
 /// Environment variable naming the socket to speak to. The client injects it
 /// into every session it starts, so a verb run from inside a session reaches
-/// the socket its daemon actually binds, which for a deep workspace sits in a
-/// short derived directory. `--socket` outranks it.
+/// the socket its daemon actually binds. `--socket` outranks it.
 pub const SOCKET_ENV: &str = "ONLYNE_SOCKET";
 
 /// `--as <surface>` selection, applied to a `--socket` path that carries no other hint.
@@ -37,16 +36,18 @@ pub enum AsArg {
 /// reaches the args body of the four verbs named below.
 #[derive(Debug, Clone, Args)]
 pub struct GlobalFlags {
-    /// Unix socket path, used verbatim.
+    /// Unix socket path. An absolute value is used verbatim; a relative one
+    /// resolves against the current directory.
     #[arg(long, global = true)]
     pub socket: Option<PathBuf>,
-    /// Server root; its admin socket is resolved from `<dir>/.onlyne/run`.
+    /// Server root; its admin socket is resolved from the runtime directory,
+    /// searching upward from `<dir>` for the owner tree.
     /// `--server-root` selects the server, and a second cluster is addressed by
     /// giving it its own root directory.
     #[arg(long, global = true)]
     pub server_root: Option<PathBuf>,
-    /// Role workspace; its client socket is resolved from
-    /// `<dir>/.onlyne/run`, searched upward.
+    /// Role workspace; its client socket is resolved from the runtime
+    /// directory, searching upward from `<dir>` for the owner tree.
     #[arg(long, global = true)]
     pub workspace: Option<PathBuf>,
     /// Surface hint for a `--socket` path with no other hint.
@@ -75,6 +76,24 @@ pub struct GlobalFlags {
 }
 
 impl GlobalFlags {
+    /// Flags that only name a socket, for a caller that resolves one and needs
+    /// none of the verb machinery. The TUI board is that caller: it watches a
+    /// socket and sends no op, so it must not restate the whole flag set to
+    /// reach the shared resolver.
+    pub fn addressing(socket: Option<PathBuf>, server_root: Option<PathBuf>, workspace: Option<PathBuf>) -> Self {
+        Self {
+            socket,
+            server_root,
+            workspace,
+            surface_hint: AsArg::Auto,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            pretty: false,
+            quiet: false,
+            json: false,
+            request: None,
+        }
+    }
+
     /// The local sender role, read from `ONLYNE_ROLE`, defaulting to `cli`.
     pub fn local_role(&self) -> String {
         std::env::var(ROLE_ENV).unwrap_or_else(|_| DEFAULT_ROLE.to_string())

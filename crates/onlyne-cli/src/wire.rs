@@ -1,7 +1,7 @@
 //! One request frame out, one answer frame in, each bounded by `--timeout`.
 
-use onlyne_layout::{LocalStream, connect_local};
 use onlyne_proto::{AdminOp, ClientOp, ErrorCode, Frame, ResBody};
+use onlyne_wire::socket::{LocalStream, connect_local};
 use serde::{Deserialize, Serialize};
 use std::io::{ErrorKind, Result as IoResult};
 use std::path::Path;
@@ -105,7 +105,7 @@ pub async fn send_frame<T: Serialize + ?Sized>(
 ) -> Result<(), ExchangeError> {
     match timeout(
         Duration::from_millis(timeout_ms),
-        onlyne_frame::write_frame(stream, frame),
+        onlyne_wire::write_frame(stream, frame),
     )
     .await
     {
@@ -119,7 +119,7 @@ pub async fn send_frame<T: Serialize + ?Sized>(
 pub async fn recv_frame(stream: &mut LocalStream, timeout_ms: u64) -> Result<Frame, ExchangeError> {
     match timeout(
         Duration::from_millis(timeout_ms),
-        onlyne_frame::read_frame::<_, Frame>(stream),
+        onlyne_wire::read_frame::<_, Frame>(stream),
     )
     .await
     {

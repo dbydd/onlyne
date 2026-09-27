@@ -2,10 +2,10 @@
 //! environment a spawn carries.
 
 use crate::common::sample_envelope;
+use onlyne_client::backend::fake::FakeBackend;
 use onlyne_client::session::dispatch::{DispatchState, dispatch};
-use onlyne_session::SessionLedger;
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
+use onlyne_store::session::SessionLedger;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -13,39 +13,42 @@ use tempfile::tempdir;
 #[derive(Clone, Default)]
 struct RecordingSpawnBackend {
     inner: FakeBackend,
-    specs: Arc<parking_lot::Mutex<Vec<onlyne_session::SpawnSpec>>>,
+    specs: Arc<parking_lot::Mutex<Vec<onlyne_client::backend::SpawnSpec>>>,
 }
 
-impl onlyne_session::SessionBackend for RecordingSpawnBackend {
+impl onlyne_client::backend::SessionBackend for RecordingSpawnBackend {
     fn name(&self) -> &'static str {
         self.inner.name()
     }
-    fn capabilities(&self) -> onlyne_session::Capabilities {
+    fn capabilities(&self) -> onlyne_client::backend::Capabilities {
         self.inner.capabilities()
     }
     fn available(&self) -> anyhow::Result<bool> {
         self.inner.available()
     }
-    fn spawn(&self, spec: onlyne_session::SpawnSpec) -> anyhow::Result<onlyne_session::SessionRef> {
+    fn spawn(
+        &self,
+        spec: onlyne_client::backend::SpawnSpec,
+    ) -> anyhow::Result<onlyne_client::backend::SessionRef> {
         self.specs.lock().push(spec.clone());
         self.inner.spawn(spec)
     }
     fn attach(
         &self,
-        session: &onlyne_session::SessionRef,
-    ) -> anyhow::Result<onlyne_session::SessionRef> {
+        session: &onlyne_client::backend::SessionRef,
+    ) -> anyhow::Result<onlyne_client::backend::SessionRef> {
         self.inner.attach(session)
     }
     fn probe(
         &self,
-        session: &onlyne_session::SessionRef,
-    ) -> anyhow::Result<onlyne_session::ResourceProbe> {
+        session: &onlyne_client::backend::SessionRef,
+    ) -> anyhow::Result<onlyne_client::backend::ResourceProbe> {
         self.inner.probe(session)
     }
     fn close(
         &self,
-        session: &onlyne_session::SessionRef,
-        reason: onlyne_session::CloseReason,
+        session: &onlyne_client::backend::SessionRef,
+        reason: onlyne_client::backend::CloseReason,
         force: bool,
     ) -> anyhow::Result<()> {
         self.inner.close(session, reason, force)
@@ -60,35 +63,38 @@ struct NamedBackend {
     name: &'static str,
 }
 
-impl onlyne_session::SessionBackend for NamedBackend {
+impl onlyne_client::backend::SessionBackend for NamedBackend {
     fn name(&self) -> &'static str {
         self.name
     }
-    fn capabilities(&self) -> onlyne_session::Capabilities {
+    fn capabilities(&self) -> onlyne_client::backend::Capabilities {
         self.inner.capabilities()
     }
     fn available(&self) -> anyhow::Result<bool> {
         self.inner.available()
     }
-    fn spawn(&self, spec: onlyne_session::SpawnSpec) -> anyhow::Result<onlyne_session::SessionRef> {
+    fn spawn(
+        &self,
+        spec: onlyne_client::backend::SpawnSpec,
+    ) -> anyhow::Result<onlyne_client::backend::SessionRef> {
         self.inner.spawn(spec)
     }
     fn attach(
         &self,
-        session: &onlyne_session::SessionRef,
-    ) -> anyhow::Result<onlyne_session::SessionRef> {
+        session: &onlyne_client::backend::SessionRef,
+    ) -> anyhow::Result<onlyne_client::backend::SessionRef> {
         self.inner.attach(session)
     }
     fn probe(
         &self,
-        session: &onlyne_session::SessionRef,
-    ) -> anyhow::Result<onlyne_session::ResourceProbe> {
+        session: &onlyne_client::backend::SessionRef,
+    ) -> anyhow::Result<onlyne_client::backend::ResourceProbe> {
         self.inner.probe(session)
     }
     fn close(
         &self,
-        session: &onlyne_session::SessionRef,
-        reason: onlyne_session::CloseReason,
+        session: &onlyne_client::backend::SessionRef,
+        reason: onlyne_client::backend::CloseReason,
         force: bool,
     ) -> anyhow::Result<()> {
         self.inner.close(session, reason, force)
@@ -240,7 +246,7 @@ fn the_live_dispatch_leaves_pane_placement_to_the_backend() {
     assert_eq!(
         specs[0].env.get("ONLYNE_SOCKET").map(String::as_str),
         Some(
-            onlyne_layout::RoleWorkspace::resolve(dir.path())
+            onlyne_config::layout::RoleWorkspace::resolve(dir.path())
                 .socket_path()
                 .to_string_lossy()
                 .as_ref()

@@ -9,8 +9,8 @@
 //! writes, so a child continues whatever its parent row holds.
 
 use chrono::{DateTime, Utc};
-use onlyne_layout::LocalStream;
 use onlyne_proto::{AdminOp, ClientOp, ErrorCode, LedgerQuery};
+use onlyne_wire::socket::LocalStream;
 use serde_json::Value;
 use std::collections::BTreeMap;
 

@@ -2,13 +2,17 @@ use super::*;
 use onlyne_proto::MountKind;
 
 #[cfg(unix)]
+use crate::backend::fake::FakeBackend;
+#[cfg(unix)]
 use crate::session::dispatch::{DispatchState, Outbox, dispatch};
 #[cfg(unix)]
 use onlyne_adapter::{AdapterIo, IncomingFrame};
 #[cfg(unix)]
-use onlyne_layout::RoleWorkspace;
+use onlyne_config::layout::RoleWorkspace;
 #[cfg(unix)]
 use onlyne_net::NetError;
+#[cfg(unix)]
+use onlyne_proto::TaskState;
 #[cfg(unix)]
 use onlyne_proto::adapter::HandoffArgs;
 #[cfg(unix)]
@@ -17,10 +21,6 @@ use onlyne_proto::{
     HelloArgs, Mount, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp, Principal, Report, ResBody,
     new_envelope, new_task_id,
 };
-#[cfg(unix)]
-use onlyne_session::TaskState;
-#[cfg(unix)]
-use onlyne_session::backend::fake::FakeBackend;
 #[cfg(unix)]
 use onlyne_store::ClientStore;
 #[cfg(unix)]
@@ -53,9 +53,9 @@ fn dispatch_state(workspace: &Path) -> DispatchState {
     )
 }
 
-/// A workspace whose canonical socket spelling is over the unix bound binds
-/// the short path, names it in the marker, and answers for it through the one
-/// accessor the clients use.
+/// A workspace whose canonical socket spelling is over the unix bound serves
+/// the runtime path, publishes the client registration that names the surface,
+/// and answers for it through the one accessor the clients use.
 ///
 /// The hand-joined canonical leaf is the shape this case replaces: past the
 /// bound it fails to bind, and the client keeps a server link while its local
@@ -64,7 +64,7 @@ fn dispatch_state(workspace: &Path) -> DispatchState {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_deep_workspace_serves_the_short_endpoint() {
-    use onlyne_layout::UNIX_SOCKET_PATH_MAX;
+    use onlyne_wire::socket::UNIX_SOCKET_PATH_MAX;
     let segment = "deep-workspace-segment-aaaaaaaaaaaaaaaaaaaaaa";
     let dir = tempdir().unwrap();
     let workspace = dir.path().join(segment).join(segment).join("leaf");
@@ -101,23 +101,33 @@ async fn a_deep_workspace_serves_the_short_endpoint() {
         endpoint.actual().to_path_buf(),
         "the accessor answers the path that was bound",
     );
+    // The serving side owns the registration's facts, and a role workspace's
+    // client writes them itself: kind, the role this process serves, and the
+    // runtime hosting its sessions.
+    let registration = onlyne_wire::socket::read_registration(&workspace)
+        .unwrap()
+        .expect("the bind published the client registration");
     assert_eq!(
-        std::fs::read_to_string(endpoint.marker()).unwrap().trim(),
-        endpoint.actual().to_string_lossy().as_ref(),
-        "the marker names the served path",
+        registration.kind,
+        onlyne_wire::socket::RegistrationKind::Client,
     );
+    assert_eq!(registration.role.as_deref(), Some("planner"));
+    assert_eq!(registration.runtime.as_deref(), Some("fake"));
+    assert_eq!(registration.pid, std::process::id());
     assert!(
         !endpoint.natural().exists(),
         "the canonical leaf stays empty: {}",
         endpoint.natural().display(),
     );
     drop(listener);
+    // The file is this test's to remove; the directory is the machine-level
+    // runtime directory every other live workspace also uses.
     let _ = std::fs::remove_file(endpoint.actual());
-    let _ = std::fs::remove_dir(endpoint.actual().parent().unwrap());
+    let _ = std::fs::remove_file(endpoint.registration());
 }
 
 #[test]
-fn admin_probe_mounts_without_a_marker() {
+fn admin_probe_mounts_without_a_mount_kind() {
     let agent = onlyne_proto::Mount::Agent(onlyne_proto::AgentMount {
         role: "planner".to_string(),
         ..Default::default()
@@ -126,6 +136,58 @@ fn admin_probe_mounts_without_a_marker() {
     assert!(!mount_allowed(Some(&agent), MountKind::Agent, "reviewer"));
     assert!(mount_allowed(None, MountKind::Admin, "planner"));
     assert!(!mount_allowed(None, MountKind::Agent, "planner"));
+}
+
+/// A surface that stops serving takes the registration it published with it.
+///
+/// The file names this process as the client for the workspace, and an external
+/// runtime's plugin reads it as a live client: a registration outliving its
+/// surface answers that question with a pid that is gone.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stopped_surface_leaves_no_registration_behind() {
+    let dir = tempdir().unwrap();
+    let workspace = dir.path().to_path_buf();
+    let adapter = AdapterSocket {
+        workspace: workspace.clone(),
+        role: "planner".into(),
+        cluster: "c".into(),
+        server: "s".into(),
+        dispatch: dispatch_state(&workspace),
+    };
+    let socket = adapter.path();
+    let host = tokio::spawn(adapter.serve());
+    for _ in 0..100 {
+        if onlyne_wire::socket::read_registration(&workspace)
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        onlyne_wire::socket::read_registration(&workspace)
+            .unwrap()
+            .is_some(),
+        "the serving surface published the client registration"
+    );
+    host.abort();
+    let _ = host.await;
+    // The abort drops the serving future, which is where the registration is
+    // owned; a poll boundary is all it waits for.
+    for _ in 0..100 {
+        if onlyne_wire::socket::read_registration(&workspace).unwrap().is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        onlyne_wire::socket::read_registration(&workspace).unwrap(),
+        None,
+        "the surface took its registration down when it stopped serving"
+    );
+    let _ = std::fs::remove_file(socket);
 }
 
 /// A served socket, the store the client queues its intents into, and one
@@ -268,7 +330,7 @@ async fn a_local_completion_settles_the_task_and_publishes_only_its_projection()
     assert!(beat.ok, "the turn heartbeat is accepted: {beat:?}");
     frames.lock().clear();
 
-    let mut stream = onlyne_layout::connect_local(&staged.socket)
+    let mut stream = onlyne_wire::socket::connect_local(&staged.socket)
         .await
         .expect("the local surface accepts the completion");
     let request = Frame::<ClientOp>::req(
@@ -281,10 +343,10 @@ async fn a_local_completion_settles_the_task_and_publishes_only_its_projection()
             cluster_ref: Some("origin-cluster".into()),
         }),
     );
-    onlyne_frame::write_frame(&mut stream, &request)
+    onlyne_wire::write_frame(&mut stream, &request)
         .await
         .expect("write the local completion");
-    let response: Frame<ClientOp> = onlyne_frame::read_frame(&mut stream)
+    let response: Frame<ClientOp> = onlyne_wire::read_frame(&mut stream)
         .await
         .expect("read the local completion answer")
         .expect("the local surface answers");
@@ -341,7 +403,7 @@ async fn mounted(
     socket: &Path,
     session: &str,
 ) -> (AdapterIo, tokio::sync::mpsc::Receiver<IncomingFrame>) {
-    let stream = onlyne_layout::connect_local(socket)
+    let stream = onlyne_wire::socket::connect_local(socket)
         .await
         .expect("the role socket accepts a plugin");
     let (io, inbound) =
@@ -447,7 +509,7 @@ async fn a_handoff_frame_queues_a_child_of_the_task_its_session_serves() {
 async fn exit_is_answered_before_the_host_lets_the_connection_go() {
     let dir = tempdir().unwrap();
     let staged = staged(dir.path()).await;
-    let stream = onlyne_layout::connect_local(&staged.socket)
+    let stream = onlyne_wire::socket::connect_local(&staged.socket)
         .await
         .expect("the role socket accepts a plugin");
     let handle = onlyne_adapter::AdapterClient::connect_with_timeouts(

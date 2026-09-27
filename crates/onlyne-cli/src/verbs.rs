@@ -389,7 +389,7 @@ async fn run_one(flags: &GlobalFlags, target: &SocketTarget, request: &Outbound)
 
 /// Send one request on an open stream, print the answer, and return its exit code.
 async fn run_on(
-    stream: &mut onlyne_layout::LocalStream,
+    stream: &mut onlyne_wire::socket::LocalStream,
     flags: &GlobalFlags,
     request: &Outbound,
 ) -> i32 {
@@ -411,7 +411,7 @@ fn missing_row(flags: &GlobalFlags, kind: &str, id: &str) -> i32 {
 
 /// Read the first ledger row back through `query_ledger`.
 async fn lookup_row(
-    stream: &mut onlyne_layout::LocalStream,
+    stream: &mut onlyne_wire::socket::LocalStream,
     flags: &GlobalFlags,
     target: &SocketTarget,
     args: LedgerQuery,
@@ -951,7 +951,7 @@ async fn admin_control(
 /// no role. `Err` carries the exit code of an exchange that has already reported
 /// itself.
 async fn owning_role(
-    stream: &mut onlyne_layout::LocalStream,
+    stream: &mut onlyne_wire::socket::LocalStream,
     flags: &GlobalFlags,
     task: &str,
 ) -> Result<Option<String>, i32> {

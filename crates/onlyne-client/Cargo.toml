@@ -8,13 +8,12 @@ repository.workspace = true
 description = "Onlyne v1 client: role runtime, dispatch, intent, adapter socket"
 
 [dependencies]
-onlyne-frame = { path = "../onlyne-frame", version = "1.4.1" }
+onlyne-wire = { path = "../onlyne-wire", version = "1.4.1" }
 onlyne-proto = { path = "../onlyne-proto", version = "1.4.1" }
-onlyne-session = { path = "../onlyne-session", version = "1.4.1" }
 onlyne-store = { path = "../onlyne-store", version = "1.4.1" }
 onlyne-config = { path = "../onlyne-config", version = "1.4.1" }
-onlyne-layout = { path = "../onlyne-layout", version = "1.4.1" }
 interprocess = { workspace = true }
+onlyne-acp = { path = "../onlyne-acp", version = "1.4.1" }
 onlyne-adapter = { path = "../onlyne-adapter", version = "1.4.1" }
 onlyne-net = { path = "../onlyne-net", version = "1.4.1" }
 anyhow = "1.0"
@@ -34,6 +33,17 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 parking_lot = "0.12"
 tar = "0.4"
 flate2 = "1.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 onlyne-testkit = { path = "../onlyne-testkit", version = "1.4.1" }

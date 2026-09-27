@@ -151,7 +151,7 @@ mod tests {
         let server_error = server.await.unwrap().unwrap_err();
         assert!(matches!(server_error, NetError::Unauthorized(_)));
         let closed: Result<Option<serde_json::Value>, _> =
-            onlyne_frame::read_frame(&mut right).await;
+            onlyne_wire::read_frame(&mut right).await;
         assert!(closed.map(|item| item.is_none()).unwrap_or(false));
     }
 
@@ -194,7 +194,7 @@ mod tests {
 
     #[tokio::test]
     async fn handshake_rejects_tampered_challenge() {
-        use onlyne_frame::{read_frame, write_frame};
+        use onlyne_wire::{read_frame, write_frame};
         let registered = KeyPair::from_seed([21; 32]);
         let table = AclTable::new(
             [("worker".to_string(), registered.public_str(), false)],

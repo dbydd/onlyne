@@ -4,9 +4,9 @@ use crate::common::{
     ReasonBackend, RecordingOutbox, complete_plugin, deliver, mount_plugin, plugin_beat,
     published_projection, run_a_turn, sample_envelope, serve_role_socket, task_delivery,
 };
+use onlyne_client::backend::fake::FakeBackend;
 use onlyne_client::session::dispatch::{DispatchState, dispatch, on_plugin_report};
 use onlyne_proto::{Lifecycle, Outcome, Report, new_task_id};
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
 use std::sync::Arc;
 use std::time::Duration;
@@ -155,16 +155,16 @@ async fn exited_sessions_do_not_hold_the_capacity_cap() {
     // from being read as one.
     for text in ["task 2", "task 3"] {
         let task_id = deliver(&state, &task_delivery(text)).await;
-        let settled = onlyne_session::Observation::build(
-            onlyne_session::Version::new(1, 3),
+        let settled = onlyne_proto::Observation::build(
+            onlyne_proto::Version::new(1, 3),
             true,
-            onlyne_session::DEFAULT_ISOLATE_AFTER,
-            onlyne_session::DEFAULT_TERMINATE_AFTER,
+            onlyne_client::reconcile::DEFAULT_ISOLATE_AFTER,
+            onlyne_client::reconcile::DEFAULT_TERMINATE_AFTER,
             0,
-            onlyne_session::AgentState::Gone,
-            onlyne_session::DeliveryState::Accepted,
-            onlyne_session::ResourceState::Attached,
-            onlyne_session::RecoveryState::None,
+            onlyne_proto::AgentPhase::Gone,
+            onlyne_proto::DeliveryPhase::Accepted,
+            onlyne_proto::ResourcePhase::Attached,
+            onlyne_proto::RecoveryPhase::NoRecovery,
         );
         on_plugin_report(
             &state,
@@ -182,7 +182,7 @@ async fn exited_sessions_do_not_hold_the_capacity_cap() {
             store
                 .task(&task_id)
                 .unwrap()
-                .is_some_and(|record| record.task_state == onlyne_session::TaskState::Pending),
+                .is_some_and(|record| record.task_state == onlyne_proto::TaskState::Pending),
             "{text} opened its task but settled nothing: the beat proves the agent gone, not the work done"
         );
     }

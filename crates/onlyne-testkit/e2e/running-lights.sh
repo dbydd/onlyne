@@ -38,7 +38,7 @@ trap cleanup EXIT
 
 LIGHTS_PROSE='running lights'
 SCRIPT="$SRC/crates/onlyne-testkit/scripts/running-light.json"
-TUI=$(bin onlyne-tui)
+TUI=$(bin onlyne)
 # The chain's length is the script's own hop budget: the agent that meets a task
 # at hop `max_hop` keeps it instead of passing it on, so a budget of `max_hop`
 # leaves `max_hop + 1` tasks behind. Reading it here keeps one number, in the
@@ -242,7 +242,7 @@ capture_any_light() {
   local exclude=$1 frame=$2 ledger=$3 attempt seen edge role roles_seen= caught=none
   for attempt in $(seq 1 300); do
     "$ONLYNE" --server-root "$tmp/server" ledger --state in_flight > "$ledger.cand" 2>/dev/null || true
-    "$TUI" --server-root "$tmp/server" --page 2 --once > "$frame.cand" 2>/dev/null || true
+    "$TUI" tui --server-root "$tmp/server" --page 2 --once > "$frame.cand" 2>/dev/null || true
     while read -r role; do
       [ -n "$role" ] || continue
       [ "$role" != "$exclude" ] || continue

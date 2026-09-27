@@ -3,14 +3,14 @@
 
 use crate::common::serve_role_socket;
 use onlyne_adapter::AdapterIo;
+use onlyne_client::backend::fake::FakeBackend;
 use onlyne_client::session::{adapter_socket::AdapterSocket, dispatch::DispatchState};
-use onlyne_frame::{read_frame, write_frame};
 use onlyne_proto::{
     AdapterMsg, ClientOp, ErrorCode, Frame, HelloArgs, HostOp, Mount, MountKind, PROTOCOL_VERSION,
     PluginOp, QueryRolesArgs,
 };
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
+use onlyne_wire::{read_frame, write_frame};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -68,7 +68,7 @@ async fn an_admin_hello_survives_the_wire_and_is_admitted() {
     assert!(decoded.mount.is_none(), "null decodes as an absent mount");
     assert_eq!(decoded.kind, MountKind::Admin);
 
-    let stream = onlyne_layout::connect_local(&socket).await.unwrap();
+    let stream = onlyne_wire::socket::connect_local(&socket).await.unwrap();
     let io = AdapterIo::new(stream, Duration::from_secs(2), Duration::from_secs(2));
     let body = io
         .request(AdapterMsg::Plugin(PluginOp::Hello(admin)))
@@ -91,7 +91,7 @@ async fn an_admin_hello_survives_the_wire_and_is_admitted() {
         mount: None,
         ..decoded
     };
-    let stream = onlyne_layout::connect_local(&socket).await.unwrap();
+    let stream = onlyne_wire::socket::connect_local(&socket).await.unwrap();
     let io = AdapterIo::new(stream, Duration::from_secs(2), Duration::from_secs(2));
     let refused = io
         .request(AdapterMsg::Plugin(PluginOp::Hello(anonymous)))
@@ -123,7 +123,7 @@ async fn a_local_ping_is_answered_and_keeps_the_socket_open() {
         store,
     );
     let (socket, host) = serve_role_socket(&state, dir.path()).await;
-    let mut stream = onlyne_layout::connect_local(&socket).await.unwrap();
+    let mut stream = onlyne_wire::socket::connect_local(&socket).await.unwrap();
 
     write_frame(&mut stream, &Frame::<ClientOp>::Ping { t: 4_242 })
         .await

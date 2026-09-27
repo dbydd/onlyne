@@ -70,7 +70,7 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<SessionRef
     if let Err(error) = stage_slot(&mut inner, &session, &task_id, causality, envelope) {
         let backend = Arc::clone(&inner.backend);
         drop(inner);
-        if let Err(close_error) = backend.close(&session, onlyne_session::CloseReason::Fault, false)
+        if let Err(close_error) = backend.close(&session, crate::backend::CloseReason::Fault, false)
         {
             tracing::warn!(
                 task = %task_id,

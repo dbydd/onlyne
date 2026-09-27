@@ -1,7 +1,7 @@
 //! Exit-code table, the socket-resolution entry point, and socket error mapping.
 
-use onlyne_layout::LocalStream;
 use onlyne_proto::{ErrorCode, ResBody};
+use onlyne_wire::socket::LocalStream;
 use std::future::Future;
 use std::io::ErrorKind;
 

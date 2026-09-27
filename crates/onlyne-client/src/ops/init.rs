@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use onlyne_config::Spec;
-use onlyne_layout::{LEGACY_WORKSPACE_MESSAGE, RoleWorkspace, ServerRoot, detect_legacy};
+use onlyne_config::layout::{LEGACY_WORKSPACE_MESSAGE, RoleWorkspace, ServerRoot, detect_legacy};
 use onlyne_net::KeyPair;
 use std::path::{Path, PathBuf};
 

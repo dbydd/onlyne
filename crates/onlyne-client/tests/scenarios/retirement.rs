@@ -6,13 +6,13 @@ use crate::common::{
     eventually, mount_plugin, published_projection, run_a_turn, sample_envelope, serve_role_socket,
     task_delivery,
 };
+use onlyne_client::backend::fake::FakeBackend;
 use onlyne_client::session::dispatch::{DispatchState, dispatch, on_plugin_report};
 use onlyne_proto::{
     AdapterMsg, AgentPhase, DetachArgs, Lifecycle, Outcome, PluginOp, Report, ResourcePhase,
 };
-use onlyne_session::SessionLedger;
-use onlyne_session::backend::fake::FakeBackend;
 use onlyne_store::ClientStore;
+use onlyne_store::session::SessionLedger;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
@@ -229,12 +229,12 @@ async fn a_replayed_settled_task_returns_the_one_slot_it_took() {
     assert_eq!(
         backend.reasons.lock().as_slice(),
         [
-            onlyne_session::CloseReason::Completed,
-            onlyne_session::CloseReason::Completed,
+            onlyne_client::backend::CloseReason::Completed,
+            onlyne_client::backend::CloseReason::Completed,
         ]
     );
     let record = store.task(&task).unwrap().unwrap();
-    assert_eq!(record.task_state, onlyne_session::TaskState::Done);
+    assert_eq!(record.task_state, onlyne_proto::TaskState::Done);
     assert_eq!(record.settled_at, first_settled_at);
     assert_eq!(
         store.out_head(&task).unwrap().as_deref(),
@@ -441,7 +441,7 @@ async fn graceful_detach_retires_the_completed_session_resource() {
     assert_eq!(closed[0].backend_ref["refreshed"], true);
     assert_eq!(
         backend.reasons.lock().as_slice(),
-        [onlyne_session::CloseReason::Completed]
+        [onlyne_client::backend::CloseReason::Completed]
     );
     assert_eq!(state.session_count(), 0);
     host.abort();
@@ -546,7 +546,7 @@ async fn periodic_reclaim_closes_an_exited_session_after_connection_loss() {
     assert_eq!(backend.closed_sessions.lock()[0].task_id, task_id);
     assert_eq!(
         backend.reasons.lock().as_slice(),
-        [onlyne_session::CloseReason::Completed]
+        [onlyne_client::backend::CloseReason::Completed]
     );
     let row = store
         .get_session(&task_id)
