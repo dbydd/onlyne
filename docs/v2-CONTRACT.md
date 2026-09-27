@@ -107,11 +107,36 @@ idle_close = "2h"   # absent means the scope's own default
 
 Semantics are the plan's table (lines 222-228) and are enforced entirely on the client:
 the server delivers by role and knows nothing about scope. `task` keys on the task family
-(`causality.family_root`), so a second delivery to one role in a family lands in the
+(`causality.family`), so a second delivery to one role in a family lands in the
 session that served the first.
 
 Whatever an unsupported `scope` value does, it MUST NOT silently become `oneshot`: it is a
 configuration refusal with the line number, like every other spec error.
+
+### What the implementation settled, and one gap it left
+
+Three things were not fixed above and are recorded here so nobody invents a second
+spelling of them:
+
+- **A publish that names no delivery.** The mirror side expresses this as
+  `SessionRow.task_id: Option<String>`, but `Report::Heartbeat.task_id` is a plain
+  `String`, so the empty string is the only spelling a report has for "this session is
+  between deliveries". The server reads `""` and an absent field alike. A future change
+  that gives the report path an `Option` should delete the empty-string reading in the
+  same change rather than keeping both.
+- **A no-op heartbeat must not advance the projection tuple.** The acceptance bullet below
+  states the observable; the client-side rule is that a beat whose verdict is "nothing
+  changed" refreshes the in-memory liveness stamp and reaches the mirror so `last_seen`
+  moves, while `generation`, `seq`, and `updated_at` stay where they were. A beat does
+  advance the tuple when it reports a change — that gate is what orders every projection
+  write, so it is not decoration.
+- **The family-to-session map is in memory only.** `task` scope's key (a family) lives in
+  the client's slot table, and no table persists it, so "the next delivery of the family
+  resumes the same conversation" holds while the client process lives and does not survive
+  its restart. This is a known gap, not an oversight: crossing a client restart needs a
+  durable family key that no table carries yet. The plan's `task`-scope row says
+  "resumes the same conversation where the runtime supports it", and that promise is
+  currently bounded by the client's lifetime.
 
 ### Acceptance
 

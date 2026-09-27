@@ -22,11 +22,11 @@ Two script preconditions the client enforces, both of which now fail loudly inst
 
 The binary prints one `rendered` line per host `render_send`, and `gateway-mount.sh` asserts on that output. Inbound `deliver` frames travel from the fake gateway to the server. The e2e route sends a `Task` to the conversation and asserts that the rendered reply line appears.
 
-The three-way conformance fixture uses the testkit stub because `onlyne-testkit` does not depend on `onlyne-session`.
+The three-way conformance fixture uses the testkit stub because the session backends live in `onlyne-client` and `onlyne-testkit` does not depend on it.
 
 ## Backend choice
 
-The three-way fixture uses the testkit stub backend because only the local crate may declare the `onlyne-session` dependency.
+The three-way fixture uses the testkit stub backend because only `onlyne-client` may declare a session backend, and a leaf crate does not take a dependency on a sibling daemon.
 
 ## E2E
 
@@ -64,11 +64,11 @@ client 强制两条脚本前提，现在两者都会直接大声失败，而不�
 
 该二进制文件会为每个宿主 `render_send` 打印一行 `rendered`，`gateway-mount.sh` 会对该输出进行断言。传入的 `deliver` 帧从假网关传送到服务器。e2e 路由向该会话发送一个 `Task`，并断言渲染后的回复行会出现。
 
-三方一致性夹具使用测试工具包的桩，因为 `onlyne-testkit` 不依赖 `onlyne-session`。
+三方一致性夹具使用测试工具包的桩，因为 session backend 现在位于 `onlyne-client`，而 `onlyne-testkit` 不依赖它。
 
 ## 后端选择
 
-三方夹具使用测试工具包的桩后端，因为只有本地 crate 可以声明 `onlyne-session` 依赖。
+三方夹具使用测试工具包的桩后端，因为只有 `onlyne-client` 可以声明 session backend，而叶子 crate 不依赖兄弟 daemon。
 
 ## E2E
 

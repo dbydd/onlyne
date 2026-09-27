@@ -1,8 +1,11 @@
 use super::*;
 
 use super::env::missing_capability;
+use super::idle::{resumable, suspend_locked};
 use super::outbound::queue_outbound_locked;
-use super::retire::{PendingClose, close_retired, retire_idle_locked, stored_close_reason};
+use super::retire::{
+    PendingClose, close_retired, keeps_idle, retire_idle_locked, stored_close_reason,
+};
 use super::state::{
     DispatchInner, DispatchState, FrameGuard, SessionSlot, has_attached_transport,
     rebase_generation, slot_key_named, slot_key_serving_task, slot_task,
@@ -749,6 +752,17 @@ impl DispatchState {
                 else {
                     continue;
                 };
+                // A scoped session whose runtime can resume is not this goodbye's
+                // to end: the conversation is in the runtime's own store, and the
+                // delivery that comes next starts the command again. Releasing the
+                // process now is the same act the idle bound performs, and the
+                // session is resumed the same way.
+                if keeps_idle(&inner, &key) && resumable(&inner, &key) {
+                    if suspend_locked(&mut inner, &key, &mut pending) {
+                        retired.push(task_id);
+                    }
+                    continue;
+                }
                 let reason = inner
                     .sessions
                     .get(&key)

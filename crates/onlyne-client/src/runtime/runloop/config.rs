@@ -70,6 +70,10 @@ pub struct ClientInit {
     /// it: the mode, model and reasoning effort handed to the agent when a
     /// session opens, and what to answer when the agent asks for permission.
     pub acp: onlyne_config::AcpSection,
+    /// The workspace config's `[client.session]` table: which deliveries one
+    /// session of this role serves, and how long an idle one may wait before
+    /// this client releases its process (plan §10).
+    pub session: onlyne_config::SessionPolicy,
 }
 
 impl ClientInit {
@@ -91,6 +95,7 @@ impl ClientInit {
             reconnect_grace_secs: onlyne_config::DEFAULT_RECONNECT_GRACE_SECS,
             backend: String::new(),
             acp: onlyne_config::AcpSection::default(),
+            session: onlyne_config::SessionPolicy::default(),
         }
     }
 
@@ -115,6 +120,11 @@ impl ClientInit {
     /// Adopt the `[acp]` table the workspace config carries.
     pub fn with_acp(mut self, acp: onlyne_config::AcpSection) -> Self {
         self.acp = acp;
+        self
+    }
+    /// Adopt the `[client.session]` table the workspace config carries.
+    pub fn with_session(mut self, session: onlyne_config::SessionPolicy) -> Self {
+        self.session = session;
         self
     }
 }
@@ -165,7 +175,8 @@ impl RunState {
             1,
             Arc::from(backend),
             store.clone(),
-        );
+        )
+        .with_session_policy(init.session.clone());
         let intents = IntentMachine::new(
             store.clone(),
             DEFAULT_INTENT_ATTEMPTS,

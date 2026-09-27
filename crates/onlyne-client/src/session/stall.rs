@@ -17,6 +17,10 @@ pub const STALLED_REASON: &str = "no applied progress";
 pub struct StallWatch {
     last_progress: HashMap<String, Instant>,
     reported: HashSet<String>,
+    /// The newest `(generation, seq)` each task's reporter has been seen at.
+    /// A heartbeat's version is a watermark: a beat at or below it is a replay,
+    /// and the row it names does not move for a beat that observed nothing.
+    beats: HashMap<String, (u64, u64)>,
 }
 
 impl StallWatch {
@@ -44,6 +48,28 @@ impl StallWatch {
     pub fn forget(&mut self, task_id: &str) {
         self.last_progress.remove(task_id);
         self.reported.remove(task_id);
+        self.beats.remove(task_id);
+    }
+
+    /// Record one heartbeat's version, answering whether it is the newest one
+    /// this task's reporter has been seen at.
+    ///
+    /// The version orders the reporter's own frames: the same rule the stored
+    /// row's watermark used to apply, kept here because a beat that observed
+    /// nothing no longer moves the row. A reporter that came back with a new
+    /// generation reads as newer, which is what a rebase is for.
+    pub fn note_beat_seq(&mut self, task_id: &str, generation: u64, seq: u64) -> bool {
+        match self.beats.get(task_id) {
+            Some(&(seen_generation, seen_seq))
+                if (generation, seq) <= (seen_generation, seen_seq) =>
+            {
+                false
+            }
+            _ => {
+                self.beats.insert(task_id.to_string(), (generation, seq));
+                true
+            }
+        }
     }
 
     /// Task ids whose freeze exceeds `threshold_secs` and have not been

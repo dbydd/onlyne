@@ -20,7 +20,10 @@ struct PongBody {
     data: PongData,
 }
 
-fn encode<T: Serialize>(pretty: bool, value: &T) -> String {
+/// Encode one value the way every verb prints it: compact by default, indented
+/// under `--pretty`. Public so a verb that builds its own document rather than
+/// forwarding an answer body (`ls`, `version`) prints the same JSON.
+pub fn encode<T: Serialize>(pretty: bool, value: &T) -> String {
     if pretty {
         serde_json::to_string_pretty(value).expect("serialisable value")
     } else {

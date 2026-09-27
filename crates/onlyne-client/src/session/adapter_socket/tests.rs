@@ -389,10 +389,10 @@ async fn a_local_completion_settles_the_task_and_publishes_only_its_projection()
     assert!(sent.iter().any(|op| matches!(
         op,
         ClientOp::Report(Report::Heartbeat {
-            task_id,
+            session_id,
             projection: Some(_),
             ..
-        }) if task_id == &staged.task
+        }) if session_id == &staged.task
     )));
 }
 

@@ -30,31 +30,30 @@ client 可以通过 TLS 在不同机器上运行。生成的工作区可以整�
 ### 前置条件
 
 - **从 crates.io 安装：** Cargo 和 Rust 1.85 或更新版本。
-- **构建默认功能的 gateway：** 安装 `protoc` 并把它放在 `PATH` 中。server、client、CLI 和 TUI 不需要 `protoc`。
+- **平台 SDK：** 不需要。IM gateway crate 已冻结并移出本分支，因此树里不再编译 `teloxide`、`openlark`、`wechat-ilink` 或 `resvg`。
 - **运行时：** 每个 role client 都能访问的地址和端口；本地 admin socket 与 adapter socket 需要一个可写的 owner tree。
 - **agent 宿主：** 一个受支持的 backend 和对应 adapter。真实 pi 路径需要 [pi coding agent](https://github.com/badlogic/pi-mono)。
-- **服务：** 安装不会自动注册服务。可以在前台运行 daemon，或使用 `onlyne server start`。
+- **服务：** 安装不会自动注册服务，也没有 `start`/`stop`。两个 daemon 都在前台运行；要常驻由终端宿主、`launchd` 或 `systemd` 负责。
 
 ### crates.io 安装
 
-从当前发布的软件包安装 CLI、daemon 和 TUI。整套包一起安装，保证兄弟二进制来自同一构建：
+从当前发布的软件包安装 CLI 和两个 daemon。整套包一起安装，保证兄弟二进制来自同一构建：
 
 ```bash
 cargo install \
-  onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui
+  onlyne-cli onlyne-server onlyne-client
 ```
 
-这会安装五个命令：
+这会安装三个命令：
 
 | 命令 | 职责 |
 |---|---|
-| `onlyne` | 薄的操作入口：转发生命周期命令，并直接读写本地 admin/adapter socket。 |
-| `onlyne-server` | 一个集群的路由器、投递队列、持久账本、fault 记录、gateway 宿主和 admin socket。 |
+| `onlyne` | 操作入口。所有 verb 都在这个进程里实现：查询、admin 操作、`init`/`generate`、内置 TUI，以及 MCP 工具桥。两个 daemon 不再向它转发任何东西。 |
+| `onlyne-server` | 一个集群的路由器、投递队列、持久账本、fault 记录和 admin socket。子命令只有 `run`。 |
 | `onlyne-client` | 一个角色工作区的 server 链路、session 生命周期、backend 宿主、adapter socket 和持久出站 intent。 |
-| `onlyne-gateway` | 一个聊天平台进程：`telegram`、`feishu`、`qqbot` 或 `weixin`。 |
-| `onlyne-tui` | 通过 server 本地 admin socket 展示两页观测面板。 |
 
-`onlyne-agent-fake` 是额外的源码/testkit 命令，不包含在这五个从 registry 安装的命令中。下面的 fake 快速路径会构建它。
+观测面板是 `onlyne tui` 这个 verb，不是独立二进制。`onlyne-agent-fake` 是额外的
+源码/testkit 命令，不包含在这三个从 registry 安装的命令中。下面的 fake 快速路径会构建它。
 
 ### 预编译二进制
 
@@ -77,7 +76,7 @@ brew install dbydd/onlyne/onlyne
 clone URL 是 tap 命令的一部分：Homebrew 会把短名 `dbydd/onlyne` 读成一个叫
 `homebrew-onlyne` 的仓库，那不是本仓库。
 
-五个二进制装进 Homebrew 的 prefix，`onlyne-gateway` 也在内，安装机上不需要 Rust toolchain。
+这些二进制装进 Homebrew 的 prefix，安装机上不需要 Rust toolchain。
 
 ### agent handbook
 
@@ -178,7 +177,7 @@ ONLYNE_BACKEND=exec target/debug/onlyne-client run --workspace "$tmp/planner"
 在仓库所在的 Orca 标签页中运行：
 
 ```bash
-cargo build -p onlyne-cli -p onlyne-server -p onlyne-client -p onlyne-tui
+cargo build -p onlyne-cli -p onlyne-server -p onlyne-client
 python3 examples/supervisor/run.py up
 python3 examples/supervisor/run.py status
 python3 examples/supervisor/run.py stop
@@ -200,7 +199,7 @@ ONLYNE_BACKEND=exec python3 examples/supervisor/run.py up
 此时 supervisor 输出写入演示根目录，不打开可见的 supervisor 标签页。可以在另一个终端检查演示：
 
 ```bash
-target/debug/onlyne-tui --server-root /tmp/onlyne-sup
+target/debug/onlyne --server-root /tmp/onlyne-sup tui
 ```
 
 完整步骤见 [`examples/supervisor/README.md`](examples/supervisor/README.md)。[research-flywheel](https://github.com/dbydd/research-flywheel) 是建立在 Onlyne 上的更大 agent 环示例。
@@ -379,17 +378,12 @@ onlyne --server-root <root> repair ack    --fault-id <id> --reason <text>
 
 `onlyne --help` 会列出 socket backend 和退出码。简表：`0` 成功，`1` daemon/运行时失败，`2` 本地校验失败，`3` 找不到 socket，`4` 操作员输入被拒绝，`5` `client run` 找不到支持的 session host，`127` 缺少兄弟二进制。
 
-### Gateway
+### Bridge 挂载
 
-在 `spec.toml` 中声明 `[[gateway]]`，通过 literal token 或环境变量配置提供凭证，然后每个平台运行一个进程：
-
-```bash
-onlyne-gateway --server-root <root> list
-onlyne-gateway --server-root <root> auth telegram
-onlyne-gateway --server-root <root> run telegram --token "$TELEGRAM_TOKEN"
-```
-
-飞书、QQ 和微信使用同样的 `auth` 与 `run` 形状；平台特有的凭证步骤以 gateway 的 onboarding 输出为准。
+IM gateway 宿主与它的四个平台插件已冻结并移出本分支：v2 把 gateway 挂载泛化为 `bridge`
+挂载，协议保留了这个 mount kind，但本分支上已经没有驱动它的宿主。CLI 仍然只回答
+`onlyne gateway status`——一个只读视图，列出 server 已注册的挂载。`spec.toml` 里的
+`[[gateway]]` 条目、`auth` verb 和按平台起的 `run` 进程都是 v1 表面，本分支上已不存在。
 
 ## 架构
 
@@ -400,13 +394,13 @@ graph LR
   P[pi 宿主 + pi-onlyne] -->|adapter 协议| C[onlyne-client · role workspace]
   A[其他 agent adapter] -->|adapter 协议| C
   C -->|TLS frame| SRV[onlyne-server]
-  SRV -->|adapter 协议| G[onlyne-gateway · telegram feishu qqbot weixin]
-  G --> H[人类聊天平台]
+  B[外部 bridge 宿主] -->|adapter 协议| SRV
+  B --> H[人类聊天平台]
   SC[supervisor / aggregate client] -->|aggregate role 链路| PS[父 onlyne-server]
-  SRV --- AD[owner-only admin socket]
+  SRV --- AD[/tmp/onlyne-<uid>/ 里的 admin socket]
 ```
 
-server 在写账本前执行 ACL，并负责跨机器路由。每个 client 负责一个角色的 session 执行，并在发送前把出站消息写入持久 intent 队列。TLS 链路断开时，运行中的 session 保留本地状态；重连后队列按顺序发出。平台 SDK 依赖留在 gateway host，server 与 client daemon 不承载它们。
+server 在写账本前执行 ACL，并负责跨机器路由。每个 client 负责一个角色的 session 执行，并在发送前把出站消息写入持久 intent 队列。TLS 链路断开时，运行中的 session 保留本地状态；重连后队列按顺序发出。admin 与 adapter socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`，旁边是点名其服务面的 `<digest>.json` 注册文件；workspace 树内不再绑定任何东西。
 
 ### Session backend
 

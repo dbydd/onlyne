@@ -4,7 +4,8 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use onlyne_proto::{
-    AdminOp, Frame, LedgerEntry, LedgerQuery, QuerySessionsArgs, ResBody, SessionRow, new_id,
+    AdminOp, EventRow, Frame, HistoryArgs, LedgerEntry, LedgerQuery, QuerySessionsArgs, ResBody,
+    SessionRow, new_id,
 };
 use onlyne_wire::socket::{connect_local, read_registration, registration_path, socket_path};
 use serde::{Deserialize, Serialize};
@@ -608,6 +609,59 @@ impl Cluster {
         }
         body.data
             .ok_or_else(|| anyhow!("send response missing data"))
+    }
+
+    /// Send a task with an explicit family key. The family is the chain key
+    /// `task` scope groups sessions by; no family falls back to its own task id.
+    pub async fn admin_send_with_family(
+        &self,
+        from: &str,
+        to: &str,
+        text: &str,
+        family: &str,
+    ) -> Result<serde_json::Value> {
+        let task = onlyne_proto::new_task_id();
+        let mut causality = onlyne_proto::Causality::root(task);
+        causality.family = Some(family.to_string());
+        let envelope = Box::new(onlyne_proto::new_envelope(
+            onlyne_proto::MsgKind::Task,
+            onlyne_proto::Principal::role(from),
+            onlyne_proto::Principal::role(to),
+            onlyne_proto::Body::text(text.to_string()),
+            Some(causality),
+        )?);
+        let op = AdminOp::Send(onlyne_proto::AdminSend {
+            from: from.to_string(),
+            envelope,
+        });
+        let body = admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64).await?;
+        if !body.ok {
+            bail!("admin send failed: {:?}", body.error);
+        }
+        body.data
+            .ok_or_else(|| anyhow!("send response missing data"))
+    }
+
+    /// Read persisted events after `since_seq`, optionally filtered by task.
+    pub async fn history(&self, since_seq: u64, task_id: Option<&str>) -> Result<Vec<EventRow>> {
+        let body = admin_request(
+            &self.server_root,
+            AdminOp::History(HistoryArgs {
+                since_seq,
+                task_id: task_id.map(str::to_string),
+                ..Default::default()
+            }),
+            ADMIN_TIMEOUT.as_millis() as u64,
+        )
+        .await?;
+        if !body.ok {
+            bail!("history query failed: {:?}", body.error);
+        }
+        let data = body
+            .data
+            .ok_or_else(|| anyhow!("history response missing data"))?;
+        serde_json::from_value(data.get("events").cloned().unwrap_or_default())
+            .context("parse history rows")
     }
 
     /// Query ledger.

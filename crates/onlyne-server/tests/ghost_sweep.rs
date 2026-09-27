@@ -3,7 +3,8 @@
 
 use onlyne_net::KeyPair;
 use onlyne_proto::{
-    AckArgs, Body, Causality, Lifecycle, MsgKind, Outcome, Principal, Report, SessionProjection,
+    AckArgs, Body, Causality, LedgerState, Lifecycle, LiveSession, MsgKind, Outcome, Principal,
+    PullArgs, Report, SessionProjection,
 };
 use onlyne_server::relay::{self, RelayReply};
 use onlyne_server::state::{Server, ServerInit};
@@ -312,6 +313,94 @@ fn the_sweep_leaves_a_working_row_whose_task_is_still_open() {
             .is_empty(),
         "a row the pass did not move records no audit row"
     );
+}
+
+/// A delivery a live session holds is work still owed, and adoption is what
+/// keeps its ledger row open: the pass acts on that row's verdict, so it finds
+/// nothing here and leaves both the mirror row and the ticket alone.
+///
+/// A suspended session names its delivery exactly as a running one does — the
+/// work is still owed, and the client means to resume it — so this is the shape
+/// the sweep must never move.
+#[test]
+fn the_sweep_leaves_the_delivery_a_suspended_session_holds() {
+    let (_dir, state) = open_server(60);
+    let (task_id, msg_id) = working_task(&state);
+
+    // The session was suspended with its delivery unacknowledged, so the row is
+    // back on the queue with no ticket; the hello that names it takes it back.
+    let sessions = [LiveSession {
+        session_id: "sess-ghost".to_string(),
+        task_id: Some(task_id.clone()),
+        suspended: true,
+    }];
+    let claim = relay::Claim::from_sessions(&sessions);
+    relay::requeue_role_rows(&state, "builder", &claim).expect("adoption");
+    let row = adopted_row(&state, &msg_id);
+    assert_eq!(
+        row.state,
+        LedgerState::InFlight,
+        "adoption holds the delivery the suspended session named"
+    );
+    let ticket = state
+        .delivery_ticket(&msg_id)
+        .expect("adoption arms the row's ticket");
+    assert_eq!(ticket.session_id.as_deref(), Some("sess-ghost"));
+    assert!(
+        relay::pull(&state, "builder", Some("sess-ghost"), &PullArgs::default())
+            .expect("pull")
+            .deliveries
+            .is_empty(),
+        "the session that holds the row is not handed it a second time"
+    );
+
+    let swept = ghosts::sweep_once(&state).expect("one pass");
+    assert!(
+        swept.is_empty(),
+        "a held delivery's task has no verdict for the pass to write"
+    );
+    let mirror = state
+        .ledger
+        .session_row_for_task(&task_id)
+        .expect("the row reads")
+        .expect("the row is present");
+    assert_eq!(
+        projection::row_from_write(&mirror).public_lifecycle,
+        Lifecycle::Working,
+        "the mirror row keeps the projection the client published"
+    );
+    assert!(
+        state
+            .ledger
+            .list_ghost_sweeps(10)
+            .expect("the audit reads")
+            .is_empty(),
+        "a row the pass did not move records no audit row"
+    );
+    assert_eq!(
+        state
+            .delivery_ticket(&msg_id)
+            .expect("the held ticket survives the pass")
+            .session_id
+            .as_deref(),
+        Some("sess-ghost"),
+        "the pass leaves the claim's ticket armed"
+    );
+}
+
+/// One ledger row of a task's dispatch, read back after adoption moved it.
+fn adopted_row(state: &Arc<onlyne_server::State>, msg_id: &str) -> onlyne_store::LedgerRow {
+    state
+        .ledger
+        .ledger_query(onlyne_proto::LedgerQuery {
+            msg_id: Some(msg_id.to_string()),
+            limit: 1,
+            ..onlyne_proto::LedgerQuery::default()
+        })
+        .expect("the ledger reads")
+        .into_iter()
+        .next()
+        .expect("the dispatch row is present")
 }
 
 /// `[server].ghost_sweep_secs` decides whether the pass runs at all, and `0`

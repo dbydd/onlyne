@@ -155,7 +155,7 @@ v2 全文和代码统一用下表的词，一个词一个意思：
 | 放置 | 运行时进程显示在哪里：`herdr`、`orca`、`zellij`、`headless`、`external` |
 | 插件 | 运行时内部、经 adapter 协议与 client 对话的扩展 |
 | 绑定 | 一次投递与一个会话的对应关系 |
-| 任务族 | 以 `causality.family_root` 为键的一串转交 |
+| 任务族 | 以 `causality.family` 为键的一串转交 |
 
 「host」在 v2 里只指 adapter 协议的 host 一侧（client 或 server），终端宿主统一叫放置。
 
@@ -425,7 +425,7 @@ v2 只预留接口，A2A 桥放 v2.1。v1 的 gateway 挂载泛化为 `bridge` �
 
 | A2A | Onlyne |
 |---|---|
-| Task | 桥发起的任务族（family_root） |
+| Task | 桥发起的任务族（family） |
 | Message | Envelope |
 | Artifact | `complete` 的 `details` 与 `files` |
 | TaskState 主要取值：submitted / working / input-required / completed / failed / canceled | 看板列：排队 / 运行 / 等待 / 完成 / 失败 / 取消 |

@@ -1,10 +1,11 @@
-//! Hello claim: the sessions occupying dispatch live slots.
+//! Hello claim: the sessions this client holds, as `hello.live_sessions`.
 //!
-//! Slots exist from assign until `release_locked`. A fresh process has an
-//! empty map, so hello claims no session and the server requeues. A live
-//! client whose link flaps still holds its slots, so the deliveries those
-//! sessions are bound to stay `in_flight`. Heartbeat stale, stall reports, and
-//! operator repair cover a pane that has already died.
+//! A slot exists from the delivery that opened its session until that session
+//! ends. A fresh process has an empty map and empty rows, so its hello claims
+//! nothing and the server requeues every unacknowledged row. A live client whose
+//! link flaps still holds its slots, so the deliveries those sessions are
+//! serving stay `in_flight`. Heartbeat stale, stall reports, and operator repair
+//! cover a pane that has already died.
 
 use std::collections::BTreeMap;
 
@@ -22,19 +23,6 @@ pub fn from_sessions(sessions: impl IntoIterator<Item = LiveSession>) -> Vec<Liv
         by_id.entry(session.session_id.clone()).or_insert(session);
     }
     by_id.into_values().collect()
-}
-
-/// The claim for the sessions held in memory alone: a client-held session shares
-/// its id with the delivery that opened it, and the slot is that delivery.
-pub fn from_slots(ids: impl IntoIterator<Item = impl Into<String>>) -> Vec<LiveSession> {
-    from_sessions(ids.into_iter().map(|id| {
-        let id = id.into();
-        LiveSession {
-            session_id: id.clone(),
-            task_id: Some(id),
-            suspended: false,
-        }
-    }))
 }
 
 #[cfg(test)]

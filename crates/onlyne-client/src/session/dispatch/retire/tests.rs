@@ -17,6 +17,12 @@ fn session_ref(task: &str) -> SessionRef {
 /// stands with the task it answers for.
 fn slot(task: &str, read_only: bool, dropped_at: Option<Instant>) -> SessionSlot {
     SessionSlot {
+        keeps_idle: false,
+        family: None,
+        idle_since: None,
+        suspended: false,
+        opened_at: Instant::now(),
+        command: Vec::new(),
         session: session_ref(task),
         task_id: Some(task.to_string()),
         ready: !read_only,

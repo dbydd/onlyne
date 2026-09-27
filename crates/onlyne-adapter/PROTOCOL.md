@@ -1,6 +1,6 @@
 # Onlyne adapter protocol
 
-This document is the contract for external TypeScript plugins that talk to a host over the socket. The transport is the length-prefixed JSON frame from `onlyne-frame`: a four-byte big-endian `u32` body length, then one UTF-8 JSON object. No other header sits in front of it. Every example below shows the JSON body.
+This document is the contract for external TypeScript plugins that talk to a host over the socket. The transport is the length-prefixed JSON frame from `onlyne-wire` (`crates/onlyne-wire/src/frame.rs`): a four-byte big-endian `u32` body length, then one UTF-8 JSON object. No other header sits in front of it. Every example below shows the JSON body.
 
 A request carries `id`; its response carries `reply_to`. Operation payloads read `{\"op\":...,\"args\":...}`. A host notification drops `id`. A plugin drops `id` too when it wants no answer.
 

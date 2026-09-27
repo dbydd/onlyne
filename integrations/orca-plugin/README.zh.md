@@ -203,7 +203,7 @@ worker 只在看板**结构**或某个会话状态变化时重写文档（见 `p
 上报了该 tab 的 pane，这个 tab 才在轴上。**
 
 session 自己的进程会在每个 heartbeat 上报自己跑在哪——adapter 协议里的
-`observed.host.orca.pane_key`（`crates/onlyne-session/src/host.rs`）。它能报，是因为它就被 spawn 在
+`observed.host.orca.pane_key`（`crates/onlyne-client/src/host.rs`）。它能报，是因为它就被 spawn 在
 那个 pane 里，从那里继承了 `ORCA_PANE_KEY`（以及 `ORCA_TAB_ID`、`ORCA_LEAF_ID`、
 `ORCA_TERMINAL_HANDLE`）（**2026-09-11 实测，Orca 1.4.198**：`orca terminal create --command …` 会把
 这些导出给命令进程）。两边的 key 都是 `<tab_id>:<leaf_id>`，所以裁剪就是「这份上报」与「Orca 自己
@@ -346,7 +346,7 @@ BIN_DIR=target/debug node tools/smoke.mjs
    supervisor 需要的东西必须能通过这两个动词答出来。
 3. **`sessions` 必须继续上报 pane。** 既然不再有 per-role worktree 注册，某个 role 的 tab 在 Orca
   侧与其他 tab 无从区分，所以 tab 轴由每个 session 上报的 pane 决定
-  （`observed.host.orca.pane_key`，`crates/onlyne-session/src/host.rs`），而不是由任何 workspace 路径
+  （`observed.host.orca.pane_key`，`crates/onlyne-client/src/host.rs`），而不是由任何 workspace 路径
   决定。有两条性质对这块看板要紧：绑定必须在 `report.complete` 之后仍然存在（结束了的会话也要说得
   出自己跑在哪），并且它的 `pane_key` 必须与 Orca 自己 `terminal list` 用的 `<tab_id>:<leaf_id>`
   拼法一致。一旦它在 observation 里改名或消失，tab 轴会变空，而不会变错。

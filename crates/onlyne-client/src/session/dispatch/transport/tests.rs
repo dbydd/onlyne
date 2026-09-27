@@ -236,6 +236,12 @@ fn a_read_only_slot_never_holds_the_handle_of_the_task_it_lost() {
     );
     let task = new_task_id();
     let serving = |read_only: bool| SessionSlot {
+        keeps_idle: false,
+        family: None,
+        idle_since: None,
+        suspended: false,
+        opened_at: Instant::now(),
+        command: Vec::new(),
         session: SessionRef {
             task_id: task.clone(),
             backend: "fake".into(),

@@ -44,7 +44,9 @@ async fn a_delivered_cancel_stops_the_session_process() {
 
     let envelope = sample_envelope("planner", "run the batch");
     let task_id = envelope.task_id().unwrap().to_string();
-    let session = dispatch(&state, &envelope).unwrap();
+    let session = dispatch(&state, &envelope)
+        .unwrap()
+        .expect("the role has room for it");
     let pid = session.backend_ref["pid"]
         .as_u64()
         .expect("the exec reference carries its pid") as u32;

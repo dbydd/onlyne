@@ -157,6 +157,34 @@ pub fn apply(obs: &Observation, event: &LifecycleEvent) -> Verdict {
             }
             finish(obs, next)
         }
+        LifecycleEvent::Suspend { .. } => {
+            if obs.resource == ResourcePhase::Detached {
+                return Verdict::Rejected(RejectReason::UndefinedTransition);
+            }
+            if obs.resource == ResourcePhase::Closed {
+                return Verdict::Ignored(IgnoredReason::NoOp);
+            }
+            if matches!(
+                obs.agent,
+                AgentPhase::Booting | AgentPhase::Running | AgentPhase::Gone
+            ) {
+                return Verdict::Rejected(RejectReason::UndefinedTransition);
+            }
+            let mut next = obs.advanced(v);
+            next.resource = ResourcePhase::Closed;
+            finish(obs, next)
+        }
+        LifecycleEvent::Resume { .. } => {
+            let mut next = obs.advanced(v);
+            match obs.resource {
+                ResourcePhase::Attached => return Verdict::Ignored(IgnoredReason::NoOp),
+                ResourcePhase::Closed => next.resource = ResourcePhase::Attached,
+                ResourcePhase::Detached | ResourcePhase::Closing => {
+                    return Verdict::Rejected(RejectReason::UndefinedTransition);
+                }
+            }
+            finish(obs, next)
+        }
         LifecycleEvent::ResourceCloseRequested { .. } | LifecycleEvent::ResourceClosed { .. } => {
             let mut next = obs.advanced(v);
             match (event, obs.resource) {

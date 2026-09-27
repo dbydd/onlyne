@@ -168,9 +168,13 @@ pub(super) async fn accept_delivery(state: &RunState, delivery: &Delivery) {
         // requeue would have brought back is destroyed instead. The row stays in
         // flight — unanswered is not a decision — and the next `hello` that does
         // not claim it is what puts it back on the queue.
+        //
+        // The same answer covers the scope's own wait: a delivery whose family's
+        // session is mid-delivery, or one that arrives with every slot spent,
+        // belongs to a session this role will free. It waits the same way.
         Ok(None) => tracing::debug!(
             msg_id = %delivery.msg_id,
-            "the link is not taking work; the delivery stays in flight"
+            "no session takes the delivery yet; it stays in flight"
         ),
         Err(error) => {
             tracing::warn!(error = %error, msg_id = %delivery.msg_id, "delivery refused");
@@ -332,6 +336,29 @@ pub(super) async fn scan_control_settles(state: &RunState) {
                 task = %note.task_id,
                 error = %error,
                 "a settled task's exit was not published"
+            );
+        }
+    }
+}
+
+/// Release the process of every idle session whose scope bound has expired, and
+/// publish each one's row.
+///
+/// The suspension is [`DispatchState::suspend_idle_sessions`]'s: the session is
+/// marked suspended, its row moves through the `Suspend` event, and one backend
+/// close is collected per session. What this sweep adds is the report — a
+/// released process sends no frame of its own, so the row it just left would sit
+/// on the mirror as the last thing the living session published. A session whose
+/// runtime cannot resume is left exactly where it is, which is the "process
+/// alive, session alive" degradation the scope table names: this client will not
+/// release a process it cannot bring back.
+pub(super) async fn scan_idle_sessions(state: &RunState) {
+    for session_id in state.dispatch.suspend_idle_sessions(Instant::now()) {
+        if let Err(error) = dispatch::sync_session(&state.dispatch, &session_id).await {
+            tracing::warn!(
+                session = %session_id,
+                error = %error,
+                "a suspended session's row was not published"
             );
         }
     }

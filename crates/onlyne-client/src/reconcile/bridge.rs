@@ -73,6 +73,8 @@ fn version_of(event: &LifecycleEvent) -> Version {
         | LifecycleEvent::ResourceAttach { v }
         | LifecycleEvent::ResourceCloseRequested { v }
         | LifecycleEvent::ResourceClosed { v }
+        | LifecycleEvent::Suspend { v }
+        | LifecycleEvent::Resume { v }
         | LifecycleEvent::AgentGone { v }
         | LifecycleEvent::Cancel { v }
         | LifecycleEvent::Fail { v }
@@ -98,6 +100,8 @@ fn event_name(event: &LifecycleEvent) -> &'static str {
         LifecycleEvent::ResourceAttach { .. } => "resource_attach",
         LifecycleEvent::ResourceCloseRequested { .. } => "resource_close_requested",
         LifecycleEvent::ResourceClosed { .. } => "resource_closed",
+        LifecycleEvent::Suspend { .. } => "suspend",
+        LifecycleEvent::Resume { .. } => "resume",
         LifecycleEvent::AgentGone { .. } => "agent_gone",
         LifecycleEvent::Cancel { .. } => "cancel",
         LifecycleEvent::Fail { .. } => "fail",

@@ -36,27 +36,31 @@ that "also reads the old shape" gets rejected.
 ## Crate map and dependency law
 
 ```text
-onlyne-frame     4-byte BE length + JSON; zero business imports
-onlyne-proto     types + validation + error codes; no tokio
-onlyne-config    TOML spec/config parsing, env secrets
-onlyne-layout    workspace/server root discovery, legacy refusal
-onlyne-store     server ledger + client db; (generation,seq) monotonic gates
-onlyne-session   pure lifecycle reducer + SessionBackend (herdr|orca|zellij|exec|acp|fake)
+onlyne-proto     types + validation + error codes + the session reducer; no tokio
+onlyne-wire      4-byte BE length + JSON, the one link implementation, the runtime directory
+                 and the registration files; zero business imports
 onlyne-net       TLS 1.3 + pinning, ed25519 challenge, acl_allows, backoff
-onlyne-adapter   the one adapter protocol SDK (agent side and gateway side)
+onlyne-config    TOML spec/config parsing, env secrets, workspace trees (onlyne-config::layout)
+onlyne-store     server ledger + client db; (generation,seq) monotonic gates
+onlyne-adapter   the one adapter protocol SDK (agent side and bridge side)
 onlyne-acp       ACP v1 client: JSON-RPC over an agent's own stdio
-onlyne-tui       the admin-socket observation board the `tui` verb execs
-onlyne-server/-client/-gateway   three bins; onlyne-cli the thin entry; onlyne-testkit fakes+e2e
-plugins/onlyne-gateway-*         one platform per crate; depend on adapter+proto only
+onlyne-server    the server daemon, `run` only
+onlyne-client    the client daemon, `run` only, owning the session backends
+                 (herdr|orca|zellij|exec|acp|fake) and the reconcile bridge
+onlyne-cli       the `onlyne` binary: every verb, the built-in TUI (crates/onlyne-cli/src/tui/),
+                 `mcp`, and the compiled handbooks
+onlyne-testkit   the scenario harness, the fake runtime, the conformance fixtures
 ```
 
 `onlyne-server` and `onlyne-client` share no production dependency edge:
 `cargo tree -p onlyne-server -e normal` names no `onlyne-client`, and the reverse holds (the name
 appears in `crates/onlyne-server/Cargo.toml` under `[dev-dependencies]`, a line no test uses).
-Platform SDKs (`teloxide`, `openlark`, `wechat-ilink`, `resvg`) must stay out of both binaries.
+Platform SDKs must stay out of both binaries.
 After any dependency edit, prove it with
-`cargo tree -p onlyne-client | grep -E 'teloxide|openlark|wechat-ilink|resvg'`. Gateways compile
-per feature; `--no-default-features --features telegram` must build.
+`cargo tree -p onlyne-client | grep -E 'teloxide|openlark|wechat-ilink|resvg'`.
+
+The IM gateway crates and their four platform plugins are frozen and off this branch. The
+protocol keeps the `bridge` mount kind for them; nothing here builds or tests them.
 
 ## Change procedures
 
@@ -68,7 +72,7 @@ of fourteen (`ErrorCode::ALL`, `crates/onlyne-proto/src/frame.rs`; fourteen `err
 fixtures sit beside the frame vectors). Add one and you owe a fixture, a PROTOCOL.md row, and
 the regenerated schema that `gen-schema` just wrote.
 
-**Lifecycle** (`onlyne-session/src/lifecycle/`): `apply()` and `is_legal()` are a
+**Lifecycle** (`onlyne-proto/src/lifecycle/`): `apply()` and `is_legal()` are a
 table-tested reducer — five axes (`agent`, `delivery`, `resource`, `recovery`, and the
 generation's liveness), 20 `LifecycleEvent` variants, versions `(generation, seq)`. A new
 transition needs its table rows in the same commit. Reviewers
@@ -95,7 +99,7 @@ the admin surface only; every message verb already prints JSON.
 
 The `reason` column on a ledger row reaches both read surfaces. `onlyne ledger` projects every
 field of the durable row, and `ROW_FIELD_KEYS` (`onlyne-cli/src/ledger.rs`) names `reason` among
-the keys a caller reads off it; `task_detail_text` in `onlyne-tui/src/ui.rs` appends
+the keys a caller reads off it; `task_detail_text` in `onlyne-cli/src/tui/ui.rs` appends
 `reason=<text>` to a page-2 row that carries one. `LedgerEntry::reason` (`onlyne-proto/src/ops.rs`)
 and `LedgerStateEvent::reason` (`onlyne-proto/src/event.rs`) both serialize `#[serde(default,
 skip_serializing_if = "Option::is_none")]`, so a row with nothing to say omits the key and its
@@ -103,7 +107,7 @@ bytes match the pre-column shape, and a stored row without the key decodes as no
 with-value shape keeps its fixtures under `crates/onlyne-proto/tests/wire_vectors/`
 (`res_ledger_answer_rejected_with_reason.json`, `ev_ledger_state_rejected_with_reason.json`).
 
-**Backend** (`onlyne-session/src/backend/`): capabilities `{spawn,attach,probe,close,
+**Backend** (`onlyne-client/src/backend/`): capabilities `{spawn,attach,probe,close,
 focus,rename}`. A missing capability degrades through faults, never panics.
 `ONLYNE_BACKEND` names `herdr | orca | zellij | exec | acp | fake | auto`; `headless` parses as
 `exec` and projections keep the name `exec` (`BackendName::parse`/`as_str`). Selection order is a
@@ -120,7 +124,7 @@ exits 5 with a three-line refusal whose first line is
 `onlyne-client doctor` prints host-detection JSON and exits 0.
 The adapter socket lives in the machine-level runtime directory — `/tmp/onlyne-<uid>/<digest>.sock`, with `$ONLYNE_RUNTIME_DIR` overriding the directory and `<digest>` the first 16 hex characters of `sha256` over the workspace's canonical root — so no path length rule applies; `run` exits 1 with `onlyne-client: bind the workspace socket <canonical path>: <detail>` when the bind fails — the detail names the bound path, its length, the runtime directory, and the OS reason — and a later `accept` error logs at `error` level and retries every 100 ms.
 herdr is kept by operator decision, and its standing lives in
-`crates/onlyne-session/src/backend/herdr/NOTE.md`: a workspace that wants another backend names
+`crates/onlyne-client/src/backend/herdr/NOTE.md`: a workspace that wants another backend names
 it in `config.toml`, and a herdr failure carries no product signal.
 herdr maps session (inherited) → workspace `onlyne:<cluster>` → tab = role → pane = one onlyne session.
 `<cluster>` is the server's `[server] name`, read from `welcome.cluster` and injected into every pane as `ONLYNE_CLUSTER`.
@@ -134,7 +138,7 @@ Focus: `workspace focus` → `tab focus` → `agent focus <pane_id>` for a manag
 Control reaches a full role: a client at `max_sessions` pulls with `control_only`, so `focus`/`recycle`/`cancel` land on the session holding the last slot, and task rows stay `queued`.
 Retirement invariant an editor keeps: a session's host resource (pane, tab, zellij session, exec child) is closed when the session holds no task and no plugin transport is attached. The client owns the closes (`retire_idle_locked` in `onlyne-client/src/session/dispatch/retire.rs`), and a backend's `close` must stay safe to call on a resource the host already dropped — herdr reads `pane_not_found` as success, debug line `herdr pane already closed`.
 
-**Client dispatch** (`onlyne-client/src/session/dispatch/`, `onlyne-client/src/session/stall.rs`): the dispatch lock serializes slot, transport, backend, and lifecycle work, and the 250 ms readiness tick (`onlyne-client/src/runtime/runloop/`, `READINESS_POLL_MS` in its `config.rs`) drives `reclaim_exited_resources`. A session serves one task for its whole life: the client mints no id of its own, so `session_id` equals `task_id` (`dispatch` in `onlyne-client/src/session/dispatch/delivery.rs`), and a task this role already finished settles from the durable record with no second run (`task_completed_here` in `onlyne-client/src/runtime/runloop/sessions.rs`). `StallWatch::note_applied` refreshes an assigned clock; `note_assigned` owns clock creation, so a late observation from a plugin that already answered cannot reopen a stall episode on a settled task. A connection release forgets the progress clocks of the sessions it served, and both `stall_due` and `stall_report` check the stored lifecycle before a `stalled` fault reaches the wire.
+**Client dispatch** (`onlyne-client/src/session/dispatch/`, `onlyne-client/src/session/stall.rs`): the dispatch lock serializes slot, transport, backend, and lifecycle work, and the 250 ms readiness tick (`onlyne-client/src/runtime/runloop/`, `READINESS_POLL_MS` in its `config.rs`) drives `reclaim_exited_resources`. A session is addressed by its own `session_id` and may serve several deliveries in turn, so the two ids are not the same value: the bindings live in their own table, `session_tasks(session_id, task_id, bound_at, released_at)`, and `SessionRow.task_id` is the delivery the session is serving right now, `None` while it holds a process but is bound to nothing (`SessionRow` in `onlyne-proto/src/ops.rs`; `dispatch` in `onlyne-client/src/session/dispatch/delivery.rs`). A task this role already finished settles from the durable record with no second run (`task_completed_here` in `onlyne-client/src/runtime/runloop/sessions.rs`). `StallWatch::note_applied` refreshes an assigned clock; `note_assigned` owns clock creation, so a late observation from a plugin that already answered cannot reopen a stall episode on a settled task. A connection release forgets the progress clocks of the sessions it served, and both `stall_due` and `stall_report` check the stored lifecycle before a `stalled` fault reaches the wire.
 
 The accept gate decides what a delivery the pull brought meets. A gate shut because the link left `Ready` leaves that row in flight: the client answers nothing, and the next `hello` that does not claim the row is what puts it back on the server's queue (`accept_delivery` in `onlyne-client/src/runtime/runloop/sessions.rs`). The client's own refusal (`accepted: false`) settles a row `rejected`, and that terminal answer is kept for work this client cannot serve at all, such as a pane backend meeting a protocol-speaking command.
 
@@ -152,24 +156,29 @@ A pane backend refuses a protocol-speaking command before it spawns: `reject_pro
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                 # per-crate -p reruns suffice for isolated edits
+crates/onlyne-testkit/tests/scenarios.rs   # the scenario suite, the primary body
 crates/onlyne-testkit/e2e/<case>.sh    # ONLYNE_BACKEND=fake; ONLYNE_BIN_DIR picks the build dir
 ```
 
-The eighteen case scripts under `crates/onlyne-testkit/e2e/` each encode one verification case,
-and the directory keeps `lib.sh`, the shared harness, beside them plus `acp-agent.py`, the
-scripted ACP peer cases 18 and 19 drive. The named cases cover the single-machine task (1), ACL
-rejects (2), idempotency (3), reconnect requeue (4), two-cluster federation (5), gateway mount
-(6), legacy refusal (7), relocation (9), the running-lights ring (12), the heartbeat watch (14),
-the hello claim across a server restart (15), the headless `exec` face (16), the deep-workspace
-socket `socket-path-length.sh` (17), the ACP backend `acp-session.sh` (18), and the payload-v2
-report `acp-payload-v2.sh` (19); the live-host faces are Orca (10), pi (11), and herdr (13).
-Cases 1-7, 9, 12, and 14-17 run on `ONLYNE_BACKEND=fake`, and cases 18 and 19 name
-`backend = "acp"` with that scripted agent. Case 8 of the plan is the static gate above, which
-is why no script carries its number.
+**The scenario suite is the primary body.** `crates/onlyne-testkit/tests/scenarios.rs` is one
+test binary driven by `Cluster::start`: a real server and real clients in a temporary directory
+with a fake runtime on a real socket. Each scenario names the shell script it supersedes on the
+line above its attribute, so the port's progress reads off the file itself.
+`scenario_11_federation` stays `#[ignore]` with its reason on the attribute — the harness models
+one server, and the two-root case is `e2e/two-cluster.sh`.
 
-The live acceptance record under `docs/` reports 19/19 scripts green.
-The release commit's local workspace gate in `Devlogs.md` reports 1101 passed, 0 failed,
-and 1 ignored across 69 targets.
+**The shell cases are what the suite has not absorbed.** `crates/onlyne-testkit/e2e/` holds
+twenty scripts beside `lib.sh` and the scripted ACP peer `acp-agent.py`. They are the live faces
+(`pi-live.sh`, `orca-live.sh`, `herdr-live.sh`, `handoff-live.sh`), the ACP pair
+(`acp-session.sh`, `acp-payload-v2.sh`), and the real-process or two-root shapes the harness does
+not model (`requeue-claim.sh`, `two-cluster.sh`, `running-lights.sh`, `gateway-mount.sh`,
+`exec-headless.sh`, `socket-path-length.sh`). A live case prints `SKIP` and exits 0 when the host
+lacks the runtime or the model, so a green line means "passed here" and a skip means
+"not exercised here".
+
+The gate reading in the commit receipt for `282c77a` is 1008 passed, 0 failed, 2 ignored, from
+`cargo test --workspace` with fmt and clippy clean. Per-crate counts move with every phase, so
+this file does not carry them; `cargo test -p <crate>` is what produces one.
 
 The earlier 2026-09-23 sweep from the repository root with `ONLYNE_BIN_DIR=target/release`
 (`lib.sh` derives `BIN_DIR` from `ONLYNE_BIN_DIR`, and `target/debug` is its default) was:
@@ -182,8 +191,8 @@ acp-session 0           orca-live 0           pi-live 1           running-lights
 acp-payload-v2 0        herdr-live 0 (SKIP)
 ```
 
-This dated sweep preceded the final release fixes. Its result remains historical evidence; the
-final 19/19 record and the separate 1101/69 release gate above are the current readings.
+This dated sweep is v1 evidence and is kept as such. The current reading is the workspace gate
+quoted above; `docs/live-evidence-1.4.0.md` and `Devlogs.md` hold the v1 records.
 
 A bug fix needs its reproduction as an e2e or a table test:
 red before the fix, green after. The live ring demo

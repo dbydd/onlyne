@@ -1469,7 +1469,7 @@ allowed_targets = ["worker"]"#,
 /// no seam here.
 ///
 /// The behaviour is implemented and covered end to end by
-/// crates/onlyne-testkit/e2e/two-cluster.sh (case 5 of docs/STATUS.md), which
+/// crates/onlyne-testkit/e2e/two-cluster.sh, which
 /// drives both roots and asserts the boundary this scenario names: the parent
 /// ledger settles under the aggregate name and carries no child-layer role name
 /// or prose.
@@ -1678,6 +1678,759 @@ allowed_targets = ["builder"]"#,
         .expect("the moved workspace must still reach its server");
 
     println!("✓ Scenario 12: generate+relocate [rendered role served, moved tree served]");
+}
+
+/// Scenario 13: `oneshot` scope gives every delivery its own session.
+#[tokio::test]
+async fn scenario_13_oneshot_gives_each_delivery_its_own_session() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker"]"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+    cluster
+        .start_fake_agent(&worker_ws, &serve_once(false))
+        .await
+        .expect("start first agent");
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+
+    let first = cluster
+        .admin_send("worker", "worker", "oneshot one")
+        .await
+        .expect("send first");
+    let first_task = task_of(&first);
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(first_task.clone()),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Acked),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("first task acked");
+    let first_row = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(first_task.clone()),
+                ..Default::default()
+            },
+            |rows| !rows.is_empty(),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("first session row");
+    let first_session = first_row[0].session_id.clone();
+
+    cluster
+        .start_fake_agent(&worker_ws, &serve_once(false))
+        .await
+        .expect("start second agent");
+    let second = cluster
+        .admin_send("worker", "worker", "oneshot two")
+        .await
+        .expect("send second");
+    let second_task = task_of(&second);
+    let second_rows = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(second_task.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter()
+                    .any(|row| row.task_id.as_deref() == Some(second_task.as_str()))
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("second session row");
+    assert_ne!(first_task, second_task);
+    assert_ne!(first_session, second_rows[0].session_id);
+    println!("✓ Scenario 13: oneshot scope [two deliveries, two session ids]");
+}
+
+/// Scenario 14: `task` scope keys a session by causality family.
+#[tokio::test]
+async fn scenario_14_task_scope_keeps_a_family_in_one_session() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker"]
+max_sessions = 2"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+    append_client_session_config(&worker_ws, "task", "0s");
+    let family_a = onlyne_proto::new_task_id();
+    let family_b = onlyne_proto::new_task_id();
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+    cluster
+        .start_fake_agent(&worker_ws, &serve_repeated(false, 2))
+        .await
+        .expect("start first agent");
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+
+    let first = cluster
+        .admin_send_with_family("worker", "worker", "family one", &family_a)
+        .await
+        .expect("send first family delivery");
+    let first_task = task_of(&first);
+    let first_row = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(first_task.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter()
+                    .any(|row| row.task_id.as_deref() == Some(first_task.as_str()))
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("first family session");
+    let session_id = first_row[0].session_id.clone();
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(first_task),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Acked),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("first family delivery acked");
+
+    let second = cluster
+        .admin_send_with_family("worker", "worker", "family two", &family_a)
+        .await
+        .expect("send second family delivery");
+    let second_task = task_of(&second);
+    let second_row = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(second_task.clone()),
+                ..Default::default()
+            },
+            |rows| !rows.is_empty(),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("second family session");
+    assert_eq!(second_row[0].session_id, session_id);
+
+    cluster
+        .start_fake_agent(&worker_ws, &serve_repeated(false, 1))
+        .await
+        .expect("start other-family agent");
+    let other = cluster
+        .admin_send_with_family("worker", "worker", "other family", &family_b)
+        .await
+        .expect("send other family delivery");
+    let other_task = task_of(&other);
+    let other_row = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(other_task.clone()),
+                ..Default::default()
+            },
+            |rows| !rows.is_empty(),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("other family session");
+    assert_ne!(other_row[0].session_id, session_id);
+    println!("✓ Scenario 14: task scope [same family reuses, different family separates]");
+}
+
+/// Scenario 15: `role` scope pools sessions up to `max_sessions`.
+#[tokio::test]
+async fn scenario_15_role_scope_pools_up_to_max_sessions() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker"]
+max_sessions = 2"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+    append_client_session_config(&worker_ws, "role", "0s");
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+    let script = serve_repeated_with_delay(true, 2, 5_000);
+    cluster
+        .start_fake_agent(&worker_ws, &script)
+        .await
+        .expect("start first agent");
+    cluster
+        .start_fake_agent(&worker_ws, &script)
+        .await
+        .expect("start second agent");
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+
+    let first = cluster
+        .admin_send("worker", "worker", "role one")
+        .await
+        .expect("send first");
+    let first_task = task_of(&first);
+    cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(first_task.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter()
+                    .any(|row| row.task_id.as_deref() == Some(first_task.as_str()))
+            },
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("first role session");
+    let second = cluster
+        .admin_send("worker", "worker", "role two")
+        .await
+        .expect("send second");
+    let second_task = task_of(&second);
+    let active = cluster
+        .poll_sessions(
+            QuerySessionsArgs::default(),
+            |rows| {
+                rows.iter()
+                    .filter(|row| {
+                        row.task_id.as_deref() == Some(first_task.as_str())
+                            || row.task_id.as_deref() == Some(second_task.as_str())
+                    })
+                    .count()
+                    == 2
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("two role sessions");
+    let first_session = active
+        .iter()
+        .find(|row| row.task_id.as_deref() == Some(first_task.as_str()))
+        .expect("first role session")
+        .session_id
+        .clone();
+    let second_session = active
+        .iter()
+        .find(|row| row.task_id.as_deref() == Some(second_task.as_str()))
+        .expect("second role session")
+        .session_id
+        .clone();
+    assert_ne!(first_session, second_session);
+
+    let third = cluster
+        .admin_send("worker", "worker", "role three")
+        .await
+        .expect("send third");
+    let third_task = task_of(&third);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let waiting = cluster
+        .query_sessions(QuerySessionsArgs {
+            task_id: Some(third_task.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query waiting third task");
+    assert!(
+        waiting.is_empty(),
+        "third task must wait while both slots are busy"
+    );
+
+    let settled = cluster
+        .poll_ledger(
+            LedgerQuery::default(),
+            |rows| {
+                rows.iter().any(|row| {
+                    row.task.as_deref() == Some(first_task.as_str())
+                        && row.state == LedgerState::Acked
+                }) && rows.iter().any(|row| {
+                    row.task.as_deref() == Some(second_task.as_str())
+                        && row.state == LedgerState::Acked
+                })
+            },
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("first two role tasks acked");
+    assert!(
+        settled
+            .iter()
+            .any(|row| row.task.as_deref() == Some(first_task.as_str()))
+    );
+    let third_row = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(third_task.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter()
+                    .any(|row| row.task_id.as_deref() == Some(third_task.as_str()))
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("third role task eventually dispatched");
+    assert!(third_row[0].session_id == first_session || third_row[0].session_id == second_session);
+    println!("✓ Scenario 15: role scope [two active sessions, third waits then reuses]");
+}
+
+/// Scenario 16: suspension frees a slot and the same family resumes its session.
+#[tokio::test]
+async fn scenario_16_suspend_frees_the_slot_and_the_family_resumes_it() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker"]"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+    append_client_session_config(&worker_ws, "task", "1s");
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+    cluster
+        .start_fake_agent(&worker_ws, &serve_repeated(true, 2))
+        .await
+        .expect("start resumable agent");
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+
+    let first = cluster
+        .admin_send_with_family("worker", "worker", "suspend me", "family-suspend")
+        .await
+        .expect("send first");
+    let first_task = task_of(&first);
+    let first_rows = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(first_task.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter()
+                    .any(|row| row.task_id.as_deref() == Some(first_task.as_str()))
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("first session row");
+    let session_id = first_rows[0].session_id.clone();
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(first_task),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Acked),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("first task acked");
+    cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(session_id.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter()
+                    .any(|row| row.projection.resource == onlyne_proto::ResourcePhase::Closed)
+            },
+            Duration::from_secs(15),
+        )
+        .await
+        .expect("session suspended");
+
+    cluster
+        .start_fake_agent(&worker_ws, &serve_repeated(true, 1))
+        .await
+        .expect("start agent for resume");
+
+    let second = cluster
+        .admin_send_with_family("worker", "worker", "resume me", "family-suspend")
+        .await
+        .expect("send family continuation");
+    let second_task = task_of(&second);
+    let resumed = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(second_task.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter()
+                    .any(|row| row.task_id.as_deref() == Some(second_task.as_str()))
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("resumed session row");
+    assert_eq!(resumed[0].session_id, session_id);
+    assert_eq!(
+        resumed[0].projection.resource,
+        onlyne_proto::ResourcePhase::Attached
+    );
+    println!("✓ Scenario 16: suspend/resume [suspended slot is reusable, family keeps session id]");
+}
+
+/// Scenario 17: without `resume`, an idle scoped session keeps its process.
+#[tokio::test]
+async fn scenario_17_no_resume_capability_keeps_the_process_and_the_session() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker"]
+max_sessions = 2"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+    append_client_session_config(&worker_ws, "task", "1s");
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+    cluster
+        .start_fake_agent(&worker_ws, &serve_repeated(false, 2))
+        .await
+        .expect("start non-resumable agent");
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+
+    let first = cluster
+        .admin_send_with_family("worker", "worker", "stay alive", "family-live")
+        .await
+        .expect("send first");
+    let first_task = task_of(&first);
+    let first_rows = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(first_task.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter()
+                    .any(|row| row.task_id.as_deref() == Some(first_task.as_str()))
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("first row");
+    let session_id = first_rows[0].session_id.clone();
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(first_task),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Acked),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("first task acked");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let idle = cluster
+        .query_sessions(QuerySessionsArgs {
+            task_id: Some(session_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query idle session");
+    assert_eq!(idle.len(), 1);
+    assert_eq!(
+        idle[0].projection.resource,
+        onlyne_proto::ResourcePhase::Attached,
+        "without resume the process must stay alive"
+    );
+
+    let second = cluster
+        .admin_send_with_family("worker", "worker", "still here", "family-live")
+        .await
+        .expect("send family continuation");
+    let second_task = task_of(&second);
+    let resumed = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(second_task.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter()
+                    .any(|row| row.task_id.as_deref() == Some(second_task.as_str()))
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("family continuation row");
+    assert_eq!(resumed[0].session_id, session_id);
+    println!("✓ Scenario 17: no resume [idle process stays, family reuses session]");
+}
+
+/// Scenario 18: a heartbeat that only refreshes `last_seen` is not a projection write.
+#[tokio::test]
+async fn scenario_18_a_last_seen_only_heartbeat_writes_no_updated_at_and_no_event() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker"]"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+    cluster
+        .start_fake_agent(
+            &worker_ws,
+            &AgentScript {
+                hello: ScriptHello {
+                    capabilities: vec![
+                        onlyne_proto::Capability::Register,
+                        onlyne_proto::Capability::Report,
+                        onlyne_proto::Capability::Inject,
+                    ],
+                },
+                steps: vec![
+                    json!({"wait_assign": true}),
+                    json!({"report": "ready"}),
+                    json!({"report": "heartbeat"}),
+                    json!({"sleep_ms": 3000}),
+                    json!({"report": "heartbeat"}),
+                    json!({"sleep_ms": 1000}),
+                ],
+                repeat: false,
+            },
+        )
+        .await
+        .expect("start heartbeat agent");
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+    let sent = cluster
+        .admin_send("worker", "worker", "heartbeat freshness")
+        .await
+        .expect("send heartbeat task");
+    let task_id = task_of(&sent);
+    let before = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(task_id.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter().any(|row| {
+                    row.task_id.as_deref() == Some(task_id.as_str())
+                        && row.updated_at.is_some()
+                        && row.last_seen.is_some()
+                })
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("initial projection row");
+    let before = before[0].clone();
+    let before_events = cluster
+        .history(0, Some(&task_id))
+        .await
+        .expect("history before beat");
+    let after = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(task_id.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter()
+                    .any(|row| row.last_seen.is_some() && row.last_seen != before.last_seen)
+            },
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("query after heartbeat");
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].updated_at, before.updated_at);
+    assert_ne!(after[0].last_seen, before.last_seen);
+    let after_events = cluster
+        .history(0, Some(&task_id))
+        .await
+        .expect("history after beat");
+    assert_eq!(after_events.len(), before_events.len());
+    println!("✓ Scenario 18: last-seen heartbeat [updated_at and event stream unchanged]");
+}
+
+fn task_of(receipt: &serde_json::Value) -> String {
+    receipt["task"].as_str().expect("task id").to_string()
+}
+
+fn append_client_session_config(workspace: &std::path::Path, scope: &str, idle_close: &str) {
+    let config = workspace.join(".onlyne/config.toml");
+    let mut text = std::fs::read_to_string(&config).expect("read client config");
+    text.push_str(&format!(
+        "\n[client.session]\nscope = {scope:?}\nidle_close = {idle_close:?}\n"
+    ));
+    std::fs::write(config, text).expect("write client session config");
+}
+
+fn serve_once(resume: bool) -> AgentScript {
+    let mut capabilities = vec![
+        onlyne_proto::Capability::Register,
+        onlyne_proto::Capability::Report,
+        onlyne_proto::Capability::Inject,
+    ];
+    if resume {
+        capabilities.push(onlyne_proto::Capability::Resume);
+    }
+    AgentScript {
+        hello: ScriptHello { capabilities },
+        steps: vec![
+            json!({"wait_assign": true}),
+            json!({"report": "ready"}),
+            json!({"report": "heartbeat"}),
+            json!({"sleep_ms": 3000}),
+            json!({"complete": {"outcome": "done", "head_from": "assign_body"}}),
+        ],
+        repeat: false,
+    }
+}
+
+fn serve_repeated(resume: bool, turns: u64) -> AgentScript {
+    serve_repeated_with_delay(resume, turns, 0)
+}
+
+fn serve_repeated_with_delay(resume: bool, turns: u64, delay_ms: u64) -> AgentScript {
+    let capabilities = serve_once(resume).hello.capabilities;
+    let mut steps = Vec::new();
+    for _ in 0..turns {
+        steps.extend([
+            json!({"wait_assign": true}),
+            json!({"report": "ready"}),
+            json!({"report": "heartbeat"}),
+        ]);
+        if delay_ms > 0 {
+            steps.push(json!({"sleep_ms": delay_ms}));
+        }
+        steps.push(json!({"report": "idle"}));
+        steps.push(json!({
+            "complete": {"outcome": "done", "head_from": "assign_body"}
+        }));
+    }
+    AgentScript {
+        hello: ScriptHello { capabilities },
+        steps,
+        repeat: false,
+    }
 }
 
 /// Every regular file under `root`, in no particular order.

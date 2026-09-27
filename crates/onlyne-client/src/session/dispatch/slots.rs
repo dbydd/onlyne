@@ -24,6 +24,7 @@ impl DispatchState {
                 workspace: workspace.into(),
                 command,
                 max_sessions,
+                session_policy: onlyne_config::SessionPolicy::default(),
                 relay_required: Vec::new(),
                 relay_count: None,
                 backend,
@@ -44,6 +45,17 @@ impl DispatchState {
                 in_frame: Vec::new(),
             })),
         }
+    }
+
+    /// Adopt the role's `[client.session]` policy.
+    pub fn with_session_policy(self, policy: onlyne_config::SessionPolicy) -> Self {
+        self.inner.lock().session_policy = policy;
+        self
+    }
+
+    /// The role's `[client.session]` policy.
+    pub fn session_policy(&self) -> onlyne_config::SessionPolicy {
+        self.inner.lock().session_policy.clone()
     }
 
     pub fn session_count(&self) -> usize {
@@ -308,8 +320,19 @@ impl DispatchState {
     /// The memory half of [`hello_live_sessions`]: the claim to dial with when
     /// the durable store cannot answer. The slots are what this process is
     /// serving right now, so even a degraded hello keeps those rows in_flight.
+    ///
+    /// A slot answers with the session's own id — the one that stays put while a
+    /// scope hands the session delivery after delivery — the delivery it is
+    /// serving now, and whether its process has been released. A session between
+    /// deliveries claims no delivery: the server keeps the rows those sessions
+    /// are still the owners of, and invents none.
     pub fn live_claim_from_slots(&self) -> Vec<LiveSession> {
-        crate::session::claim::from_slots(self.live_task_ids())
+        let inner = self.inner.lock();
+        crate::session::claim::from_sessions(inner.sessions.values().map(|slot| LiveSession {
+            session_id: slot.session.task_id.clone(),
+            task_id: slot.task_id.clone(),
+            suspended: slot.suspended,
+        }))
     }
 
     /// Start the stall clock for a newly assigned task.
@@ -419,8 +442,22 @@ impl DispatchState {
     /// cap waits on the server: the row stays in flight and the next pull
     /// offers it again once a session frees. Each task runs in its own session,
     /// so a slot whose task has finished still spends capacity until it retires.
+    ///
+    /// A scope that hands a delivery on to a session the role already holds
+    /// spends no slot at all, so an `task` or `role` session sitting idle — or
+    /// suspended, its slot already given back — is room even at the cap. The
+    /// placement decides which delivery goes where; this only answers whether
+    /// there is somewhere for one to go. `oneshot` reuses nothing, which is the
+    /// count it has always been.
     pub fn has_capacity(&self) -> bool {
         let inner = self.inner.lock();
+        if !matches!(
+            inner.session_policy.scope,
+            onlyne_config::SessionScope::Oneshot
+        ) && inner.sessions.values().any(super::scope::takes_new_work)
+        {
+            return true;
+        }
         live_sessions(&inner) < inner.max_sessions as usize
     }
 

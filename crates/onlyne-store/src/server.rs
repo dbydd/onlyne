@@ -633,6 +633,23 @@ impl ServerLedger {
         Ok(changed == 1)
     }
 
+    /// Refresh only one mirror row's `last_seen`.
+    ///
+    /// A beat that observed nothing new is not a projection write: it does not
+    /// move `(generation, seq)`, it does not touch `updated_at`, and it
+    /// publishes no event. It still has to reach the row, because `last_seen`
+    /// is what a reader judges freshness by — a mirror whose `last_seen` froze
+    /// at the last content change is the v1 defect that column exists to fix,
+    /// and it is why the row carries it at all.
+    pub fn touch_session_last_seen(&self, session_id: &str, last_seen: i64) -> StoreResult<bool> {
+        let conn = self.conn()?;
+        let changed = conn.execute(
+            "UPDATE sessions SET last_seen=? WHERE session_id=?",
+            params![unix_to_rfc3339(last_seen), session_id],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// One mirror row, addressed by its session id.
     pub fn get_session_row(&self, session_id: &str) -> StoreResult<Option<ServerSessionRow>> {
         let conn = self.conn()?;

@@ -158,9 +158,9 @@ fn unbind_transports(inner: &mut DispatchInner, key: &str, slot: &SessionSlot) {
 /// it is calling. A retirement therefore records what it took down here and runs
 /// the closes once it is off the lock.
 pub(super) struct PendingClose {
-    backend: Arc<dyn SessionBackend>,
-    session: SessionRef,
-    reason: crate::backend::CloseReason,
+    pub(super) backend: Arc<dyn SessionBackend>,
+    pub(super) session: SessionRef,
+    pub(super) reason: crate::backend::CloseReason,
 }
 
 /// Run the closes a retirement collected.
@@ -191,7 +191,29 @@ pub(super) fn close_retired(pending: Vec<PendingClose>) {
     }
 }
 
+/// Whether this role's scope keeps one session alive after its delivery settles.
+///
+/// `oneshot` is the rule the client has always had: the session served its one
+/// delivery and the slot is done with it. A `task` or `role` session outlives
+/// the delivery that opened it, which is the whole point of the scope, so its
+/// slot stays serving nothing until the scope sends it the next delivery or
+/// `idle_close` releases its process.
+///
+/// A read-only slot is never kept: it is a connection that came back for a task
+/// a newer session already took, and it owns no delivery of this role.
+pub(super) fn keeps_idle(inner: &DispatchInner, key: &str) -> bool {
+    inner
+        .sessions
+        .get(key)
+        .is_some_and(|slot| slot.keeps_idle && !slot.read_only)
+}
+
 /// Retire one task-free session after its transport set becomes empty.
+///
+/// This is the `oneshot` ending, and the ending of every session whose scope
+/// does not keep it: its resource closes because the agent able to run another
+/// task in it has left. [`keeps_idle`] answers for the scopes that keep a
+/// session between deliveries, and those never reach here with work behind them.
 ///
 /// The idle slot releases its backend resource because the agent able to run
 /// another task in it has left. An attached transport keeps the resource because
@@ -338,24 +360,56 @@ pub(super) fn release_locked(
             }
             inner.sessions.remove(&key);
         } else {
+            let session_id = inner
+                .sessions
+                .get(&key)
+                .map(|slot| slot.session.task_id.clone())
+                .unwrap_or_else(|| task_id.to_string());
+            let keeps = keeps_idle(inner, &key);
+            let now = Instant::now();
             if let Some(session) = inner.sessions.get_mut(&key) {
                 session.task_id = None;
                 session.ready = false;
+                session.idle_since = Some(now);
             }
-            let mut pending = Vec::new();
-            retire_idle_locked(
-                inner,
-                &key,
-                crate::backend::CloseReason::Completed,
-                &mut pending,
-            );
-            // This function answers to its caller's lock, which is already held
-            // across the store work above, so the close it owes cannot wait for a
-            // unlock this scope cannot perform. Running it here is the same
-            // under-lock call the path has always made; the sweeps that CAN leave
-            // the lock — `retire_dropped_ghosts`, `reclaim_exited_resources`,
-            // `close_all` — are the ones that now defer it.
-            close_retired(pending);
+            // The binding goes with the delivery. A session that serves several
+            // deliveries in turn serves none between them, and both the hello
+            // claim and the mirrored row read the open binding to say which
+            // delivery a session is on.
+            if let Err(error) = inner.store.release_binding(&session_id, task_id) {
+                tracing::warn!(
+                        session = %session_id,
+                        task = %task_id,
+                        error = %error,
+                        "a settled session's binding was not handed back"
+                );
+            }
+            if keeps {
+                // A `task` or `role` session outlives the delivery that opened
+                // it: that is what the scope is for. It stays idle, with its
+                // process and its row, until the scope sends it the next
+                // delivery or `idle_close` releases the process.
+                tracing::info!(
+                        session = %session_id,
+                        task = %task_id,
+                        "delivery settled; the session stays idle for its scope's next one"
+                );
+            } else {
+                let mut pending = Vec::new();
+                retire_idle_locked(
+                    inner,
+                    &key,
+                    crate::backend::CloseReason::Completed,
+                    &mut pending,
+                );
+                // This function answers to its caller's lock, which is already held
+                // across the store work above, so the close it owes cannot wait for an
+                // unlock this scope cannot perform. Running it here is the same
+                // under-lock call the path has always made; the sweeps that CAN leave
+                // the lock — `retire_dropped_ghosts`, `reclaim_exited_resources`,
+                // `close_all` — are the ones that now defer it.
+                close_retired(pending);
+            }
         }
     }
     inner.stall.forget(task_id);

@@ -294,7 +294,9 @@ async fn the_settles_own_publish_already_carries_its_retirement() {
 
     let envelope = sample_envelope("planner", "task A");
     let task_id = envelope.task_id().unwrap().to_string();
-    dispatch(&state, &envelope).unwrap();
+    dispatch(&state, &envelope)
+        .unwrap()
+        .expect("the role has room for it");
     run_a_turn(&state, &task_id).await;
     on_plugin_report(
         &state,
@@ -367,7 +369,9 @@ async fn automatic_retirement_survives_a_backend_close_failure() {
 
     let envelope = sample_envelope("planner", "task A");
     let task_id = envelope.task_id().unwrap().to_string();
-    dispatch(&state, &envelope).unwrap();
+    dispatch(&state, &envelope)
+        .unwrap()
+        .expect("the role has room for it");
     run_a_turn(&state, &task_id).await;
     on_plugin_report(
         &state,

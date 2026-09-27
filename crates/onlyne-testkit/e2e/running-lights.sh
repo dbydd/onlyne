@@ -320,7 +320,7 @@ for hop, row in enumerate(tasks):
     # operator's own send, so it carries the token bare; every later hop is a
     # relayed child, and a task row's `out_head` is the body preview the server
     # keeps for the operator, so the relay builder's own `handoff: ` prefix
-    # (RELAY_BODY_PREFIX) shows on it. docs/STATUS.md case 19 records that
+    # (RELAY_BODY_PREFIX) shows on it. acp-payload-v2.sh records that
     # literal prefix as intended, so the prefix is the contract, not a stray.
     prefix = "" if hop == 0 else "handoff: "
     if row.get("out_head") != prefix + "running-lights token, hop %d" % hop:

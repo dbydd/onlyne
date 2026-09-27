@@ -109,7 +109,7 @@ def client_env() -> dict[str, str]:
     """Environment for `onlyne-client run`, which the client inherits.
 
     `onlyne-client` resolves `ONLYNE_BACKEND` in `backend_for`
-    (`crates/onlyne-session/src/backend/mod.rs`); an empty value falls back to
+    (`crates/onlyne-client/src/backend/mod.rs`); an empty value falls back to
     the zellij backend, and this demo wants the pi sessions as Orca tabs, which
     is the orca backend. An operator's own `ONLYNE_BACKEND` value wins, which is
     how `exec` gives a headless run.

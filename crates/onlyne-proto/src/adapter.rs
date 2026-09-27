@@ -58,6 +58,8 @@ pub enum Capability {
     Typing,
     /// Enumerate real conversations during `register_channel`.
     Conversations,
+    /// Keep session conversation in the runtime store so its process can be released and resumed.
+    Resume,
 }
 
 impl Capability {
@@ -70,10 +72,11 @@ impl Capability {
             Capability::Probe => "probe",
             Capability::Typing => "typing",
             Capability::Conversations => "conversations",
+            Capability::Resume => "resume",
         }
     }
 
-    pub const ALL: [Capability; 7] = [
+    pub const ALL: [Capability; 8] = [
         Capability::Register,
         Capability::Report,
         Capability::Inject,
@@ -81,6 +84,7 @@ impl Capability {
         Capability::Probe,
         Capability::Typing,
         Capability::Conversations,
+        Capability::Resume,
     ];
 }
 

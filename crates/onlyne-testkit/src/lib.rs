@@ -598,13 +598,16 @@ impl FakeAgent {
                             .report_ready(assign.task_id.clone(), "sim-session")
                             .await?;
                     }
-                    "heartbeat" => {
+                    "heartbeat" | "idle" => {
                         state.beats += 1;
-                        // This beat is also the turn: its `agent: running` is
-                        // what moves the session's row past `ready`, and a
-                        // completion reported before any such beat is refused
-                        // whole (`SETTLE_WITHOUT_TURN` in the client).
-                        state.turn_reported = true;
+                        let running = kind == "heartbeat";
+                        // A running beat is also the turn: its `agent: running`
+                        // moves the session past `ready`, and a completion
+                        // before one is refused (`SETTLE_WITHOUT_TURN`). An
+                        // idle beat is the runtime's post-turn at-rest report.
+                        if running {
+                            state.turn_reported = true;
+                        }
                         // The shape a real plugin reports: a whole `Observation`,
                         // whose only optional field is the host binding. A beat that
                         // omits the dimensions cannot deserialize in the client, and
@@ -633,7 +636,7 @@ impl FakeAgent {
                                     "isolate_after": 1,
                                     "terminate_after": 3,
                                     "mismatch_count": 0,
-                                    "agent": "running",
+                                    "agent": if running { "running" } else { "idle" },
                                     "delivery": "none",
                                     "resource": "attached",
                                     "recovery": "none",
@@ -1159,7 +1162,9 @@ pub fn empty_body_envelope() -> Envelope {
 }
 
 pub fn session_backend_choice() -> String {
-    "hostsim-stub:onlyne-session is unavailable without a sibling dependency".to_string()
+    "hostsim-stub: a session backend lives in onlyne-client, and a leaf crate does not take a \
+     dependency on a sibling daemon"
+        .to_string()
 }
 
 pub async fn write_response(io: &AdapterIo, frame: IncomingFrame, body: ResBody) -> Result<()> {

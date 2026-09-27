@@ -99,7 +99,7 @@ The plan does not fix the address form a parent uses for a child cluster, so thi
 
 The landed shape today routes a parent delivery to the aggregate role name. `resolve_target` accepts a role present in `spec.client` and refuses `Principal::Cluster` with `unknown_role` and field `to.cluster`. Source: `crates/onlyne-server/src/relay.rs` lines 90-127. A cluster principal used as a sender requires an admin send. Source: `crates/onlyne-server/src/relay.rs` lines 154-159; `Principal::Cluster` in `crates/onlyne-proto/src/envelope.rs` lines 42-43.
 
-`gateway_ref` is landed as an opaque handle on the host-to-gateway render path, filled from the envelope's `causality.reply_to`, beside `conversation`. Source: `render_outbound` in `crates/onlyne-server/src/gateway_host.rs` lines 119-174; `RenderSendArgs` in `crates/onlyne-proto/src/adapter.rs` lines 316-324. The gateway resolves that handle in its own `gateway_ref(channel, conversation, external_id, scene)` table. Source: `crates/onlyne-gateway/src/refs.rs` lines 63-100; `docs/v1-PLAN.md` S10 line 455.
+`gateway_ref` is landed as an opaque handle on the host-to-gateway render path, filled from the envelope's `causality.reply_to`, beside `conversation`. Source: `render_outbound` in `crates/onlyne-server/src/gateway_host.rs` lines 119-174; `RenderSendArgs` in `crates/onlyne-proto/src/adapter.rs` lines 316-324. The gateway resolves that handle in its own `gateway_ref(channel, conversation, external_id, scene)` table. Source: the gateway's `refs.rs` lines 63-100 in the frozen gateway crate, which is off this branch and no longer builds here, and `docs/v1-PLAN.md` S10 line 455.
 
 ## Prose exposure
 

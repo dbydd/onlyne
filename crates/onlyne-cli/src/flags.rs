@@ -63,7 +63,8 @@ pub struct GlobalFlags {
     #[arg(long, global = true)]
     pub quiet: bool,
     /// Accepted for script legibility. Every verb already prints json; only
-    /// `cluster export-prose` changes behaviour, wrapping the prose in an object.
+    /// `cluster export-prose` and `ls` change behaviour: the first wraps the
+    /// prose in an object, the second swaps the human table for the row list.
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     pub json: bool,
     /// Replace the constructed args body verbatim with this JSON object.

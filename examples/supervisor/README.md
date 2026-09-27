@@ -120,14 +120,14 @@ The appeal of this demo is that it really moves. Run `run.py up` in an Orca tab 
    `onlyne --server-root /tmp/onlyne-sup sessions --json` includes
    `observed.host.orca.pane_key`, the real pane to which that session is bound:
    `pane_key = "<tabId>:<leafId>"`.
-3. **TUI**: open another tab and run `target/debug/onlyne-tui --server-root /tmp/onlyne-sup`.
+3. **TUI**: open another tab and run `target/debug/onlyne --server-root /tmp/onlyne-sup tui`.
    Page 1 is the role network: all five ring members are online. `_supervisor` does not appear—the
    position is the operator's own, and its `[[client]]` entry only registers the operator's identity,
    with no client process and therefore no box on the graph. The work it dispatches and the queued
    receipts are still visible in the ledger and through `ledger` on page 2. Page 2 is the per-task
    swarm view, with ten rows laid out by hop and their status advancing with each ack. For a single-frame
    reading, use
-   `target/debug/onlyne-tui --server-root /tmp/onlyne-sup --once --page 2 --state all`,
+   `target/debug/onlyne --server-root /tmp/onlyne-sup tui --once --page 2 --state all`,
    which reveals the `reason` field on settled rows. See the TUI's own help line for key bindings.
 4. **Teardown**: `run.py stop` closes the supervisor tab it opened (checking again and reporting an
    error if it could not close it), removes leftover session tabs from Orca, and then sends SIGTERM to
@@ -290,12 +290,12 @@ RING=a,b,c,d,e FILE=/tmp/onlyne-sup/lights.txt K=1 TOTAL=10
    `onlyne --server-root /tmp/onlyne-sup sessions --json` 的每一行都带
    `observed.host.orca.pane_key`，也就是这条会话绑定的真实 pane：
    `pane_key = "<tabId>:<leafId>"`。
-3. **TUI**：另开一个标签页，跑 `target/debug/onlyne-tui --server-root /tmp/onlyne-sup`。
+3. **TUI**：另开一个标签页，跑 `target/debug/onlyne --server-root /tmp/onlyne-sup tui`。
    第 1 页是角色网络：五个环成员在线。`_supervisor` 不上图——它是操作者自己的位置，
    `[[client]]` 条目只登记操作者身份，没有客户端进程，图上不给它盒子；它派出去的活和
    排队的回执，在第 2 页的账本和 `ledger` 里照样看得到。第 2 页是逐任务的 swarm
    视图，十行按 hop 排开，状态跟着 ack 往前走。单帧读取用
-   `target/debug/onlyne-tui --server-root /tmp/onlyne-sup --once --page 2 --state all`，
+   `target/debug/onlyne --server-root /tmp/onlyne-sup tui --once --page 2 --state all`，
    这样可以看到已结清行的 `reason` 字段。按键看 TUI 自己的帮助行。
 4. **收摊**：`run.py stop` 关掉它开的 supervisor 标签页（关完会再查一遍，没关掉就
    报错），清掉留在 Orca 里的会话标签页，再 SIGTERM 掉脚本自己拉起的五个 client

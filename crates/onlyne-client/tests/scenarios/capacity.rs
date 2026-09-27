@@ -70,8 +70,16 @@ async fn each_task_gets_its_own_session_and_max_sessions_caps_the_live_ones() {
         deadline: None,
         labels: None,
     });
-    let err = dispatch(&state, &overflow).expect_err("the role is at its cap");
-    assert_eq!(err.to_string(), "max_sessions reached");
+    // It waits for a slot instead of being refused: a refusal settles the row
+    // `rejected`, which is terminal, so the work would come back only through an
+    // operator's `repair retry`. The row stays in flight for the pull that runs
+    // once a session frees (plan §5 `max_sessions`).
+    assert!(
+        dispatch(&state, &overflow)
+            .expect("a full role answers; it does not fail")
+            .is_none(),
+        "a delivery with no free session waits"
+    );
 
     // Task 1 ends on its own connection. Its settled slot keeps the attached
     // resource and spends no capacity, so the next task is accepted.
@@ -221,8 +229,12 @@ fn redelivered_task_keeps_its_one_session() {
     );
 
     let envelope = sample_envelope("planner", "task 1");
-    let first = dispatch(&state, &envelope).unwrap();
-    let again = dispatch(&state, &envelope).unwrap();
+    let first = dispatch(&state, &envelope)
+        .unwrap()
+        .expect("the role has room for it");
+    let again = dispatch(&state, &envelope)
+        .unwrap()
+        .expect("the role has room for it");
 
     assert_eq!(first.task_id, again.task_id);
     assert_eq!(

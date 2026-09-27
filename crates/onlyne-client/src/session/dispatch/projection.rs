@@ -1,7 +1,7 @@
 use super::*;
 
 use super::outbound::send_frame;
-use super::state::{DispatchInner, DispatchState};
+use super::state::{DispatchInner, DispatchState, binding_task_state, slot_key_named};
 
 /// Stamp the origin cluster on the state-carrying report kinds.
 ///
@@ -151,10 +151,12 @@ pub(super) fn phase<T: serde::de::DeserializeOwned>(word: &str, fallback: T) -> 
 ///
 /// The frame is the client's heartbeat report carrying the whole projection:
 /// one frame per session activity, and the only one that puts a session's state
-/// on the wire. `session_id` is the row the server keys the mirror by, which for
-/// a client-held session is its task id.
-pub async fn sync_session(state: &DispatchState, task_id: &str) -> Result<()> {
-    let Some(op) = sync_frame(state, task_id)? else {
+/// on the wire. The argument names the session, or the delivery a caller has in
+/// hand: a client-held session takes its id from the delivery that opened it, so
+/// both spellings reach the same row and the slot the client holds decides which
+/// session that is.
+pub async fn sync_session(state: &DispatchState, session_id: &str) -> Result<()> {
+    let Some(op) = sync_frame(state, session_id)? else {
         return Ok(());
     };
     send_frame(state, op).await
@@ -167,22 +169,45 @@ pub async fn sync_session(state: &DispatchState, task_id: &str) -> Result<()> {
 /// the link is down; the frame is exposed separately for the caller whose send
 /// failed for some other reason and owes the exit a second attempt through
 /// [`DispatchState::enqueue_op`].
-pub fn sync_frame(state: &DispatchState, task_id: &str) -> Result<Option<ClientOp>> {
+///
+/// The session's own id is what the server keys the mirror by, and it stays put
+/// while a scope hands the session delivery after delivery. The delivery travels
+/// beside it as `task_id`: the one the session is bound to now, or the last one
+/// it served once the binding is released. Whether the session is between
+/// deliveries is the projection's own delivery dimension, not the id's — so the
+/// mirror keeps reading the delivery a row belongs to while the pair says the
+/// session is live.
+///
+/// A session whose row was never given a delivery sends an empty `task_id`,
+/// which is the wire's only spelling for "this session is on no delivery"; a
+/// client-held session always has the delivery that opened it.
+pub fn sync_frame(state: &DispatchState, session_id: &str) -> Result<Option<ClientOp>> {
     // One section for both reads: a publish that took the session tuple before a
     // settle and its verdict after would derive a lifecycle the pair never agreed
     // to, and the store's lock is what keeps the two rows in step.
-    let (row, task_state) = {
+    let (key, row, task_state) = {
         let inner = state.inner.lock();
-        (
-            inner.store.get_session(task_id)?,
-            stored_task_state(&inner, task_id),
-        )
+        let key = slot_key_named(&inner, session_id);
+        let task_state = match key.as_deref().and_then(|key| inner.sessions.get(key)) {
+            // A session this client holds answers from its slot: the delivery it
+            // serves now is the binding, and a session serving nothing reads as
+            // `pending`, which is a live session rather than an exit.
+            Some(slot) => binding_task_state(&inner, slot),
+            // A session whose slot is gone is read from the delivery the caller
+            // named, which is how a retired session's row stays publishable.
+            None => match inner.store.get_session(session_id)? {
+                Some(row) => stored_task_state(&inner, &row.task_id),
+                None => TaskState::Pending,
+            },
+        };
+        (key, inner.store.get_session(session_id)?, task_state)
     };
     let Some(row) = row else { return Ok(None) };
+    let session_id = key.unwrap_or_else(|| row.session_id.clone());
     let projection = projection_of(&row, task_state);
     Ok(Some(ClientOp::Report(Report::Heartbeat {
         task_id: row.task_id.clone(),
-        session_id: row.task_id.clone(),
+        session_id,
         generation: row.generation.max(0) as u64,
         seq: row.seq.max(0) as u64,
         observed: projection

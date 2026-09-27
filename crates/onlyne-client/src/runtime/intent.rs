@@ -55,6 +55,17 @@ pub enum IntentResult {
     Retryable(ErrorCode, String),
     Dropped(ErrorCode, String),
     Exhausted,
+    /// The frame reached a connection whose routed `hello` has not landed yet.
+    ///
+    /// The net layer redials behind the runloop's back, so a connection reads
+    /// `Ready` while it still carries no role binding, and the server refuses
+    /// every frame that arrives in that window. The refusal is a fact about the
+    /// connection, not about the row: charging it a backoff rung takes the row
+    /// out of the due window for a whole delay, and the flush the runloop runs
+    /// behind the replayed `hello` then finds nothing to send — which is how a
+    /// reconnecting client's own state stayed off the server's mirror for a
+    /// second (e2e case 15). The row keeps its place in the queue instead.
+    NotAuthenticated,
 }
 
 /// Give one outbound envelope the `op_id` its intent row is keyed by.
@@ -219,9 +230,12 @@ impl IntentMachine {
         }
         // A frame answered before the server session finished its `hello` names a
         // window of the connection, so the row waits for the handshake instead of
-        // leaving the queue (plan §7 line 310's refusal).
+        // leaving the queue (plan §7 line 310's refusal). It waits with its
+        // deadline where it is rather than on a backoff rung: the rows behind it
+        // in the same batch are refused the same way, and the reconnect's own
+        // flush has to be able to send them (plan §7 line 310).
         if error.message == onlyne_proto::HELLO_REQUIRED_MESSAGE {
-            return self.defer(row, "connection not authenticated");
+            return Ok(IntentResult::NotAuthenticated);
         }
         if PERMANENT_ERRORS.contains(&error.code) {
             self.delete_intent(&row.op_id)?;

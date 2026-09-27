@@ -214,6 +214,21 @@ pub async fn on_plugin_report(
                     .ok()
                     .flatten()
                     .map(|record| record.task_state);
+                // A beat at or below the newest version this task's reporter has
+                // been seen at is a replay of a frame already taken. The row no
+                // longer moves for a beat that observed nothing, so its version
+                // cannot answer this on its own: the watermark lives beside the
+                // liveness stamp, and a replay buys only the stamp.
+                if !inner.stall.note_beat_seq(&task_id, generation, seq) {
+                    note_beat(&mut inner, &task_id, Instant::now());
+                    tracing::debug!(
+                        task = %task_id,
+                        generation,
+                        seq,
+                        "a heartbeat at or below the watermark was taken as a replay; it refreshes liveness only"
+                    );
+                    return Ok(());
+                }
                 let verdict = match serde_json::from_value::<Observation>(observed) {
                     Ok(body) => apply_persist(
                         &inner.bridge,
@@ -248,12 +263,19 @@ pub async fn on_plugin_report(
                         // reducer. Leaving the stamp alone for them starves the clock the
                         // silence arm reads, and the sweep then closes the pane under an agent
                         // that is working — the shape a live role died of at thirty seconds
-                        // into a turn. The version still advances through the bump below, and
-                        // the tuple stays exactly as the last accepted write left it.
+                        // into a turn. So the stamp goes on, and the frame travels: it is
+                        // what refreshes the mirror's own `last_seen`.
+                        //
+                        // The row itself does not move. The plan's rule for a heartbeat is
+                        // that it refreshes `last_seen` and that only changed content is
+                        // persisted — and `(generation, seq)` beside `updated_at` is the
+                        // watermark projection writes are ordered by, not a liveness
+                        // counter. Advancing it here made a beat that observed nothing read
+                        // as a fresh write: a reader saw `updated_at` move and could not
+                        // tell a session that had changed from one that had merely said it
+                        // was still there.
                         note_beat(&mut inner, &task_id, Instant::now());
-                        inner
-                            .store
-                            .bump_session_version(&task_id, generation, seq)?
+                        true
                     }
                     Verdict::Ignored(_) | Verdict::Rejected(_) => false,
                 }

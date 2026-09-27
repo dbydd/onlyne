@@ -35,6 +35,7 @@ impl MemoryLedger {
         let mut sessions = self.sessions.lock().unwrap();
         let entry = sessions.entry(session.task_id.clone()).or_insert_with(|| {
             let record = SessionRecord {
+                session_id: session.task_id.clone(),
                 task_id: session.task_id.clone(),
                 agent_state: String::new(),
                 delivery_state: String::new(),
@@ -89,6 +90,7 @@ impl SessionLedger for MemoryLedger {
         let mut sessions = self.sessions.lock().unwrap();
         let entry = sessions.entry(task_id.to_string()).or_insert_with(|| {
             let record = SessionRecord {
+                session_id: task_id.to_string(),
                 task_id: task_id.to_string(),
                 agent_state: String::new(),
                 delivery_state: String::new(),
@@ -127,6 +129,7 @@ impl SessionLedger for MemoryLedger {
             return Ok(false);
         }
         entry.0 = SessionRecord {
+            session_id: task_id.to_string(),
             task_id: task_id.to_string(),
             agent_state: version.agent_state.clone(),
             delivery_state: version.delivery_state.clone(),

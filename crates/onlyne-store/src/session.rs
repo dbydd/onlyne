@@ -42,6 +42,11 @@ pub trait SessionLedger: Send + Sync {
 /// plus the task state that caller owns.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRecord {
+    /// The row's own key. A session serves one delivery at a time and keeps its
+    /// own id while that binding moves, so the two are separate facts: this one
+    /// names the session, and `task_id` names the delivery the caller asked
+    /// about.
+    pub session_id: String,
     /// The delivery this session serves, as the caller named it. Not the row's
     /// key: the session id is.
     pub task_id: String,

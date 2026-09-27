@@ -19,6 +19,9 @@ pub(super) struct DispatchInner {
     pub(super) relay_required: Vec<String>,
     /// The count form of the same policy (`relay_count`).
     pub(super) relay_count: Option<u32>,
+    /// The role's workspace session policy: which deliveries one session serves,
+    /// and how long an idle one may wait before its process is released (§10).
+    pub(super) session_policy: onlyne_config::SessionPolicy,
     pub(super) backend: Arc<dyn SessionBackend>,
     pub(super) store: ClientStore,
     pub(super) bridge: Bridge,
@@ -130,6 +133,36 @@ pub struct SessionSlot {
     /// slot is handed no assignment and no note, and what its agent sends is
     /// held for the completion that merges it.
     pub(super) read_only: bool,
+    /// The task family this session was opened for, under the `task` scope. The
+    /// scope hands that family's later deliveries here instead of opening a
+    /// second conversation for one chain, so this is the key the resolution
+    /// reads and the reason a session outlives the delivery that opened it.
+    pub(super) family: Option<String>,
+    /// When this session stopped serving a delivery, while it is still alive.
+    /// The role's `idle_close` bound runs from here, and a slot serving a
+    /// delivery has none.
+    pub(super) idle_since: Option<Instant>,
+    /// This session's process has been released and the conversation lives in
+    /// the runtime's own store: the next delivery bound to this session resumes
+    /// it. A suspended slot spends no capacity, holds no transport, and answers
+    /// no frame.
+    pub(super) suspended: bool,
+    /// When this session was opened. The order a `role` pool hands its sessions
+    /// out in: the one that has waited longest takes the delivery.
+    pub(super) opened_at: Instant,
+    /// The argv this session's runtime was started with, rendered when the
+    /// session was born. Resuming it starts this command again rather than a
+    /// freshly rendered one, because the command carries the runtime's own key
+    /// for the conversation and may interpolate the delivery into it.
+    pub(super) command: Vec<String>,
+    /// This session's scope keeps it alive after a delivery settles.
+    ///
+    /// `oneshot` does not: that session's own id is the delivery that opened it,
+    /// and when that delivery is answered the session is over. A `task` or
+    /// `role` session serving nothing between deliveries is idle, which is a
+    /// live session rather than an exit, and the verdict of a delivery it has
+    /// already finished says nothing about it.
+    pub(super) keeps_idle: bool,
 }
 
 /// One operator's word this client is still waiting to see answered.
@@ -393,6 +426,41 @@ pub(super) fn session_exited(inner: &DispatchInner, task_id: &str) -> bool {
     projection_of(&row, stored_task_state(inner, task_id)).lifecycle == Lifecycle::Exited
 }
 
+/// How the delivery one slot is serving ended, read from the task's own record.
+///
+/// A slot serving nothing answers `Pending`. That is not a guess about work in
+/// flight: no delivery of this session is open for a verdict right now, and
+/// `project` reads the pair as a live session rather than as an exit — which is
+/// what an idle `task` or `role` session is. The verdict of a delivery it has
+/// already finished belongs to that delivery, and says nothing about a session
+/// the scope kept open for the family's next one.
+pub(super) fn binding_task_state(inner: &DispatchInner, slot: &SessionSlot) -> TaskState {
+    match slot.task_id.as_deref() {
+        Some(task_id) => stored_task_state(inner, task_id),
+        None if slot.keeps_idle => TaskState::Pending,
+        // A session no scope keeps has one delivery behind it and no next one:
+        // its own id is that delivery's record, and its verdict is the answer.
+        None => stored_task_state(inner, &slot.session.task_id),
+    }
+}
+
+/// Whether the session one slot holds is over.
+///
+/// The slot's own id addresses the row: a session that has served several
+/// deliveries has one row and a moving binding, and the row is the session's.
+/// A slot with no row at all has not been written about yet and is live.
+pub(super) fn slot_exited(inner: &DispatchInner, slot: &SessionSlot) -> bool {
+    let Some(row) = inner
+        .store
+        .get_session(&slot.session.task_id)
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    projection_of(&row, binding_task_state(inner, slot)).lifecycle == Lifecycle::Exited
+}
+
 /// Sessions that hold the role's concurrency: the staged slots whose tuple and
 /// task verdict have not projected to `Exited`.
 ///
@@ -402,10 +470,13 @@ pub(super) fn session_exited(inner: &DispatchInner, task_id: &str) -> bool {
 /// table settled or from the observation a plugin sends as its last heartbeat.
 /// The rows stay in `client.db` and stay queryable; a session with no row at all
 /// is live.
+///
+/// A suspended session spends nothing: the scope's rules count active sessions,
+/// and a session whose process has been released is what freeing a slot means.
 pub(super) fn live_sessions(inner: &DispatchInner) -> usize {
     inner
         .sessions
         .values()
-        .filter(|slot| !session_exited(inner, &slot.session.task_id))
+        .filter(|slot| !slot.suspended && !slot_exited(inner, slot))
         .count()
 }

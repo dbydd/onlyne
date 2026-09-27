@@ -14,7 +14,8 @@ use serde_json::Value;
 use crate::error::{StoreError, StoreResult};
 use crate::server::{
     EventRecord, OPEN_BINDING_TASK, SESSION_ID_FOR_TASK, append_event_conn, event_head_conn,
-    events_since_conn, open_connection, rfc3339, string_tag,
+    events_since_conn, open_binding_conn, open_connection, release_binding_conn, rfc3339,
+    string_tag,
 };
 
 const CLIENT_MARKER: &str = "onlyne-client";
@@ -518,28 +519,65 @@ impl ClientStore {
     /// witness left that the sessions exist, so it must declare them to prevent
     /// duplicate dispatch.
     ///
-    /// Only claims sessions that can be recovered: those where the plugin has not
-    /// yet mounted or has not started running. Sessions that were running when the
-    /// process died cannot be recovered (the plugin process is gone), so they are
-    /// not claimed and the server requeues their deliveries.
+    /// Only claims sessions whose runtime may still be there: the ones that have
+    /// not mounted yet or are between turns (`booting`, `ready`, `idle`). A
+    /// session that was mid-turn when this process died is not claimed — the
+    /// plugin that was running it is gone — so the server requeues its
+    /// deliveries instead.
     ///
-    /// Nothing suspends a session yet: a row here is a session this process
-    /// still has a runtime for, so every claim is unsuspended.
+    /// A suspended session — one whose resource is `closed` while its agent has
+    /// not gone — is claimed with `suspended: true`. The work it holds is still
+    /// owed, so the server holds its row rather than requeueing it, and the
+    /// session resumes that delivery instead of opening a second one. An exited
+    /// session (`agent_state` `gone`) is never claimed: it holds nothing.
     pub fn active_sessions(&self) -> StoreResult<Vec<LiveSession>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(&format!(
-            "SELECT session_id,{OPEN_BINDING_TASK} FROM sessions WHERE agent_state IN ('booting', 'ready') AND resource_state != 'closed' ORDER BY session_id"
+            "SELECT session_id,{OPEN_BINDING_TASK},resource_state FROM sessions \
+             WHERE agent_state IN ('booting', 'ready', 'idle') \
+             AND (resource_state != 'closed' OR agent_state IN ('ready', 'idle')) \
+             ORDER BY session_id"
         ))?;
         let rows = stmt
             .query_map(params![], |row| {
+                let resource_state: String = row.get(2)?;
                 Ok(LiveSession {
                     session_id: row.get(0)?,
                     task_id: row.get(1)?,
-                    suspended: false,
+                    suspended: resource_state == "closed",
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Stop serving one delivery: its `session_tasks` row gets `released_at`.
+    ///
+    /// A `task` or `role` scope session outlives the delivery it served, so
+    /// settling that delivery is not the end of the binding. Releasing it here
+    /// is what stops the session from reading as bound to settled work: the next
+    /// delivery's binding would close the other open one anyway
+    /// ([`crate::server::open_binding_conn`]), but a session that goes idle with
+    /// no next delivery keeps answering `OPEN_BINDING_TASK` with a task that is
+    /// over, and `hello` then claims it for work nobody owes. Only an open
+    /// binding is released, so the first call is the one the row keeps and a
+    /// second changes nothing; the count is how many rows moved.
+    pub fn release_binding(&self, session_id: &str, task_id: &str) -> StoreResult<usize> {
+        let conn = self.conn()?;
+        release_binding_conn(&conn, session_id, task_id, Utc::now().timestamp())
+    }
+
+    /// Take one delivery for a session: its `session_tasks` row opens now.
+    ///
+    /// A scoped session serves its next delivery without its tuple moving, and
+    /// the binding has to open first: `SESSION_ID_FOR_TASK` reads it, so a write
+    /// for a delivery whose binding is not open yet lands on no row at all.
+    /// Opening a pair also closes the session's other open binding, so the
+    /// session is on one delivery at a time either way. The count is how many
+    /// rows the insert moved — zero for a pair already open.
+    pub fn bind_task(&self, session_id: &str, task_id: &str) -> StoreResult<usize> {
+        let conn = self.conn()?;
+        open_binding_conn(&conn, session_id, task_id, Utc::now().timestamp())
     }
 
     fn conn(&self) -> StoreResult<MutexGuard<'_, Connection>> {
@@ -724,25 +762,26 @@ fn backend_parts(task_id: &str, backend_ref: &str) -> (Option<String>, String) {
 
 /// One stored session tuple's columns, in the order [`session_record_row`]
 /// reads them.
-const CLIENT_SESSION_COLUMNS: &str = "agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,generation,seq,backend_ref,mismatch_count,updated_at";
+const CLIENT_SESSION_COLUMNS: &str = "session_id,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,generation,seq,backend_ref,mismatch_count,updated_at";
 
-/// One stored tuple, stamped with the delivery the caller asked about: the row
-/// answers for a session, and the delivery it serves is the binding, which the
-/// caller holds.
+/// One stored tuple, carrying its own key beside the delivery the caller asked
+/// about: the row answers for a session, and the delivery it serves is the
+/// binding, which the caller holds.
 fn session_record_row(r: &Row<'_>, task_id: &str) -> rusqlite::Result<SessionRecord> {
     Ok(SessionRecord {
+        session_id: r.get(0)?,
         task_id: task_id.to_string(),
-        agent_state: r.get(0)?,
-        delivery_state: r.get(1)?,
-        resource_state: r.get(2)?,
-        recovery_substate: r.get(3)?,
-        desired_json: r.get(4)?,
-        observed_json: r.get(5)?,
-        generation: r.get(6)?,
-        seq: r.get(7)?,
-        backend_ref: r.get(8)?,
-        mismatch_count: r.get(9)?,
-        updated_at: crate::server::rfc3339_to_unix(&r.get::<_, String>(10)?),
+        agent_state: r.get(1)?,
+        delivery_state: r.get(2)?,
+        resource_state: r.get(3)?,
+        recovery_substate: r.get(4)?,
+        desired_json: r.get(5)?,
+        observed_json: r.get(6)?,
+        generation: r.get(7)?,
+        seq: r.get(8)?,
+        backend_ref: r.get(9)?,
+        mismatch_count: r.get(10)?,
+        updated_at: crate::server::rfc3339_to_unix(&r.get::<_, String>(11)?),
     })
 }
 

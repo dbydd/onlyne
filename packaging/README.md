@@ -50,10 +50,10 @@ dispatch the workflow by hand with a `tag` input. Four jobs run in order:
    names no workspace version fails rather than publishing an unreproducible build.
 2. `build` — five targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`,
    `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`. Each builds
-   the five release binaries (`onlyne`, `onlyne-server`, `onlyne-client`, `onlyne-gateway`,
-   `onlyne-tui`) with `--locked`, packages them beside `LICENSE` and the shell completions the CLI
-   emits itself, and writes a `.sha256` beside each archive. Every job installs `protoc`: the
-   gateway plugins' default features pull `openlark`, whose build runs prost.
+   the three release binaries (`onlyne`, `onlyne-server`, `onlyne-client`) with `--locked`,
+   packages them beside `LICENSE` and the shell completions the CLI emits itself, and writes a
+   `.sha256` beside each archive. No job installs `protoc` any more: the gateway plugins that
+   pulled `openlark` are frozen off this branch, and nothing in the tree compiles a platform SDK.
 3. `release` — publishes every archive, its checksum, and a combined `SHA256SUMS` to the GitHub
    Release, creating it with generated notes when the tag has none, and ends on a published
    release: a tag that was deleted and pushed again leaves its release a draft, and a draft serves
@@ -63,10 +63,10 @@ dispatch the workflow by hand with a `tag` input. Four jobs run in order:
 
 ## Homebrew
 
-The formula installs the prebuilt archives, so a machine needs no Rust toolchain. `onlyne-gateway`
-is one of the five, which is what makes the install complete rather than partial. This repository
-is the tap — `Formula/` is where Homebrew looks — and the clone URL is part of the tap command
-because the repository is not named `homebrew-onlyne`:
+The formula installs the prebuilt archives, so a machine needs no Rust toolchain. All three
+binaries are in them, which is what makes the install complete rather than partial. This
+repository is the tap — `Formula/` is where Homebrew looks — and the clone URL is part of the tap
+command because the repository is not named `homebrew-onlyne`:
 
 ```sh
 brew tap dbydd/onlyne https://github.com/dbydd/onlyne.git

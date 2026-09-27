@@ -155,7 +155,9 @@ fn pane_backend_still_spawns_an_interactive_session_command() {
         store.clone(),
     );
 
-    dispatch(&state, &sample_envelope("planner", "task 1")).unwrap();
+    dispatch(&state, &sample_envelope("planner", "task 1"))
+        .unwrap()
+        .expect("the role has room for it");
     assert_eq!(state.session_count(), 1);
 
     let protocol = DispatchState::new(
@@ -166,7 +168,9 @@ fn pane_backend_still_spawns_an_interactive_session_command() {
         Arc::new(FakeBackend::new()),
         store,
     );
-    dispatch(&protocol, &sample_envelope("planner", "task 2")).unwrap();
+    dispatch(&protocol, &sample_envelope("planner", "task 2"))
+        .unwrap()
+        .expect("the role has room for it");
 }
 
 /// Each protocol spelling earns its own refusal, naming the token the argv
@@ -223,7 +227,9 @@ fn the_live_dispatch_leaves_pane_placement_to_the_backend() {
 
     let envelope = sample_envelope("planner", "task 1");
     let task_id = envelope.task_id().unwrap().to_string();
-    dispatch(&state, &envelope).unwrap();
+    dispatch(&state, &envelope)
+        .unwrap()
+        .expect("the role has room for it");
 
     let specs = backend.specs.lock();
     assert_eq!(specs.len(), 1, "dispatch spawns once for a fresh task");

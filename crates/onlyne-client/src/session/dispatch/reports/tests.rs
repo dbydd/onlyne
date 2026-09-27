@@ -252,6 +252,12 @@ fn serving_slot(state: &DispatchState, task: &str, msg_id: &str) {
     inner.sessions.insert(
         task.to_string(),
         SessionSlot {
+            keeps_idle: false,
+            family: None,
+            idle_since: None,
+            suspended: false,
+            opened_at: Instant::now(),
+            command: Vec::new(),
             session: SessionRef {
                 task_id: task.to_string(),
                 backend: "fake".into(),
@@ -741,6 +747,12 @@ async fn a_beat_from_a_held_connection_refreshes_liveness_and_applies_no_state()
         inner.sessions.insert(
             task.clone(),
             SessionSlot {
+                keeps_idle: false,
+                family: None,
+                idle_since: None,
+                suspended: false,
+                opened_at: Instant::now(),
+                command: Vec::new(),
                 session,
                 task_id: Some(task.clone()),
                 ready: true,
@@ -816,6 +828,12 @@ async fn a_no_op_beat_still_stamps_the_liveness_clock() {
         inner.sessions.insert(
             task.clone(),
             SessionSlot {
+                keeps_idle: false,
+                family: None,
+                idle_since: None,
+                suspended: false,
+                opened_at: Instant::now(),
+                command: Vec::new(),
                 session,
                 task_id: Some(task.clone()),
                 ready: true,

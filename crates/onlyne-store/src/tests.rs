@@ -403,6 +403,82 @@ mod ledger_gates {
         assert_eq!(row.desired_json, "{\"desired\":\"a\"}");
     }
 
+    /// `active_sessions` is the durable half of the `hello` claim, and the two
+    /// rows it has to tell apart are the suspended session — whose work is
+    /// still owed, so its delivery is held rather than requeued — and the
+    /// exited one, which holds nothing.
+    #[test]
+    fn active_sessions_claims_a_suspended_session_and_never_an_exited_one() {
+        let (_dir, path) = temp_db("client.db");
+        let store = ClientStore::open(&path).unwrap();
+        let states = [
+            ("s-live", "ready", "attached"),
+            ("s-suspended", "idle", "closed"),
+            ("s-exited", "gone", "closed"),
+            ("s-running", "running", "attached"),
+            ("s-booting", "booting", "closed"),
+        ];
+        for (index, (session_id, agent, resource)) in states.iter().enumerate() {
+            let mut version = versioned(1, index as i64 + 1, session_id);
+            version.agent_state = (*agent).to_string();
+            version.resource_state = (*resource).to_string();
+            version.backend_ref = format!("{{\"backend\":\"fake\",\"task_id\":\"{session_id}\"}}");
+            assert!(
+                store
+                    .upsert_session(&format!("t-{session_id}"), &version)
+                    .unwrap()
+            );
+        }
+
+        let claimed = store.active_sessions().unwrap();
+        let shape: Vec<(&str, Option<&str>, bool)> = claimed
+            .iter()
+            .map(|session| {
+                (
+                    session.session_id.as_str(),
+                    session.task_id.as_deref(),
+                    session.suspended,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("s-live", Some("t-s-live"), false),
+                ("s-suspended", Some("t-s-suspended"), true),
+            ],
+            "a suspended session is claimed as suspended; an exited one is not claimed"
+        );
+    }
+
+    /// A `task` or `role` scope session outlives the delivery it served, so the
+    /// release is what stops settled work from reading as a delivery this
+    /// session still holds.
+    #[test]
+    fn release_binding_stops_a_settled_delivery_from_reading_as_held() {
+        let (_dir, path) = temp_db("client.db");
+        let store = ClientStore::open(&path).unwrap();
+        let mut version = versioned(1, 5, "a");
+        version.agent_state = "idle".to_string();
+        version.resource_state = "attached".to_string();
+        version.backend_ref = "{\"backend\":\"fake\",\"task_id\":\"s-1\"}".to_string();
+        assert!(store.upsert_session("t-1", &version).unwrap());
+        assert_eq!(
+            store.active_sessions().unwrap()[0].task_id.as_deref(),
+            Some("t-1")
+        );
+
+        assert_eq!(store.release_binding("s-1", "t-1").unwrap(), 1);
+        let claimed = store.active_sessions().unwrap();
+        assert_eq!(claimed.len(), 1, "the session is still held");
+        assert_eq!(claimed[0].task_id, None, "settled work is not a delivery");
+        assert_eq!(
+            store.release_binding("s-1", "t-1").unwrap(),
+            0,
+            "the first release is the one the binding keeps"
+        );
+    }
+
     #[test]
     fn transition_matrix_and_mutation_guard() {
         let states = [

@@ -325,17 +325,19 @@ fn intent_survives_a_frame_refused_before_the_routed_hello() {
             )),
         )
         .unwrap();
-    assert!(matches!(
-        res,
-        IntentResult::Retryable(ErrorCode::Internal, _)
-    ));
+    assert!(matches!(res, IntentResult::NotAuthenticated));
     assert_eq!(store.pending_intent_count().unwrap(), 1);
+    // The refusal is a fact about the connection, so the row keeps its deadline:
+    // the flush the runloop runs behind the replayed hello has to be able to send
+    // it. A backoff rung here parked the row for a second, which is the window a
+    // reconnecting client's own session row stayed missing from the mirror.
     assert!(
-        store.flush_order().unwrap().is_empty(),
-        "a deferred row is not sendable before its deadline"
+        !store.flush_order().unwrap().is_empty(),
+        "a row refused for want of the handshake stays due"
     );
     let kept = parked(&store);
     assert_eq!(kept[0].attempt, rows[0].attempt);
+    assert_eq!(kept[0].state, "pending");
 }
 
 /// A row this process cannot turn into a frame retires; it does not hold the

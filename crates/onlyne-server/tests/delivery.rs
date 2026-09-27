@@ -185,9 +185,13 @@ fn hello_args(role: &str) -> HandshakeArgs {
 }
 
 /// One session a client claims at `hello`, on the delivery it serves.
-fn live_session(task_id: &str) -> onlyne_proto::LiveSession {
+///
+/// The session id is the client's own name for the pane, which is why it is
+/// passed instead of derived from the delivery: a `task` or `role` scope session
+/// serves several deliveries in turn and keeps its id across them.
+fn live_session(session_id: &str, task_id: &str) -> onlyne_proto::LiveSession {
     onlyne_proto::LiveSession {
-        session_id: task_id.to_string(),
+        session_id: session_id.to_string(),
         task_id: Some(task_id.to_string()),
         suspended: false,
     }
@@ -942,7 +946,7 @@ fn a_claimed_live_task_stays_in_flight_and_teardown_requeues_it() {
     let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
     let mut session = router::Session::with_sender(sender, "builder");
     let mut args = hello_args("builder");
-    args.live_sessions = vec![live_session(&task_id)];
+    args.live_sessions = vec![live_session("sess-live", &task_id)];
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let reply = runtime.block_on(router::dispatch_client(
         &fixture.state,
@@ -1002,7 +1006,7 @@ fn an_exited_publish_requeues_the_claimed_in_flight_row() {
     let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
     let mut session = router::Session::with_sender(sender, "builder");
     let mut args = hello_args("builder");
-    args.live_sessions = vec![live_session(&task_id)];
+    args.live_sessions = vec![live_session("sess-live", &task_id)];
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let reply = runtime.block_on(router::dispatch_client(
         &fixture.state,
@@ -1056,6 +1060,357 @@ fn an_exited_publish_requeues_the_claimed_in_flight_row() {
     .expect("redeliver");
     assert_eq!(pulled.deliveries.len(), 1);
     assert_eq!(pulled.deliveries[0].msg_id, msg_id);
+}
+
+/// The same claim for a session whose process is released: the work it holds is
+/// still owed, so the client still names that delivery at `hello`.
+fn suspended_session(session_id: &str, task_id: &str) -> onlyne_proto::LiveSession {
+    onlyne_proto::LiveSession {
+        suspended: true,
+        ..live_session(session_id, task_id)
+    }
+}
+
+/// The hello's claim is read per delivery. The delivery a live session names is
+/// held: it stays `in_flight` and its ticket is rehomed to the link that just
+/// registered and to the session that holds it, so that session's later death
+/// still releases the row. The delivery nobody names goes back on the queue with
+/// its ticket dropped, which is what makes it claimable again. The held delivery
+/// then settles on the row the claim kept.
+#[test]
+fn a_hello_holds_the_delivery_a_live_session_names_and_requeues_the_rest() {
+    let fixture = fixture();
+    let held = accepted(
+        relay::send(
+            &fixture.state,
+            &task("planner", "builder", "held"),
+            false,
+            None,
+        )
+        .expect("relay"),
+    );
+    let dropped = accepted(
+        relay::send(
+            &fixture.state,
+            &task("planner", "builder", "dropped"),
+            false,
+            None,
+        )
+        .expect("relay"),
+    );
+    let held_task = held.receipt.task.clone().expect("task id");
+    let held_msg = held.receipt.msg_id.clone();
+    let dropped_msg = dropped.receipt.msg_id.clone();
+    // The link that is about to die took both rows with a role-level pull, so
+    // neither ticket names a session.
+    for _ in 0..2 {
+        relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+    }
+    assert_eq!(
+        row_of(&fixture.state, &held_msg).state,
+        LedgerState::InFlight
+    );
+    assert_eq!(
+        row_of(&fixture.state, &dropped_msg).state,
+        LedgerState::InFlight
+    );
+    assert!(
+        fixture
+            .state
+            .delivery_ticket(&held_msg)
+            .expect("the old link's ticket")
+            .session_id
+            .is_none(),
+        "a role-level pull arms a ticket that names no session"
+    );
+    let events_before = ledger_state_events(&fixture.state).len();
+
+    let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
+    let mut session = router::Session::with_sender(sender, "builder");
+    let mut args = hello_args("builder");
+    args.live_sessions = vec![live_session("sess-live", &held_task)];
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let reply = runtime.block_on(router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(args),
+    ));
+    assert!(reply.ok, "the hello should be accepted: {reply:?}");
+
+    // Half one: the named delivery is held, and its ticket now names both the
+    // successor link and the session that holds it.
+    let held_row = row_of(&fixture.state, &held_msg);
+    assert_eq!(
+        held_row.state,
+        LedgerState::InFlight,
+        "a delivery a live session names stays in_flight"
+    );
+    assert_eq!(held_row.requeued, 0, "holding a row is not a requeue");
+    let ticket = fixture
+        .state
+        .delivery_ticket(&held_msg)
+        .expect("the held ticket stays armed");
+    assert_eq!(
+        ticket.session_id.as_deref(),
+        Some("sess-live"),
+        "the ticket names the session the claim named"
+    );
+    assert_eq!(
+        ticket.generation, session.generation,
+        "and the link that just registered"
+    );
+
+    // Half two: the delivery nobody named went back on the queue, and its
+    // ticket is gone, which is what makes it claimable by the next pull.
+    let dropped_row = row_of(&fixture.state, &dropped_msg);
+    assert_eq!(
+        dropped_row.state,
+        LedgerState::Queued,
+        "a delivery no live session names is requeued"
+    );
+    assert_eq!(dropped_row.requeued, 1, "through the automatic gate");
+    assert!(
+        fixture.state.delivery_ticket(&dropped_msg).is_none(),
+        "the requeue drops the ticket that held it"
+    );
+    assert_eq!(
+        ledger_state_events(&fixture.state).len(),
+        events_before + 1,
+        "one requeue, one ledger_state event, and the held row publishes none"
+    );
+    // A reader that asks `roles` and reads the role `online` has already missed
+    // the requeue: the presence event is published after adoption ran with this
+    // hello, so the two never disagree about which rows the link holds.
+    let replayed = events::replay(&fixture.state, 0, &events::EventFilter::default(), 500)
+        .expect("replay")
+        .rows;
+    let requeue_seq = replayed
+        .iter()
+        .find(|row| matches!(&row.event, Event::LedgerState(event) if event.msg_id == dropped_msg))
+        .map(|row| row.seq)
+        .expect("the requeue reached the observation plane");
+    let online_seq = replayed
+        .iter()
+        .find(|row| row.event.type_name() == "role_presence")
+        .map(|row| row.seq)
+        .expect("the hello published the role's presence");
+    assert!(
+        requeue_seq < online_seq,
+        "adoption runs before the presence row says online: {requeue_seq} !< {online_seq}"
+    );
+
+    let settled = relay::ack(
+        &fixture.state,
+        &AckArgs {
+            msg_id: held_msg.clone(),
+            op_id: None,
+            accepted: true,
+            reason: None,
+        },
+    )
+    .expect("the ack ran")
+    .expect("the held row settles");
+    assert_eq!(
+        settled.state,
+        LedgerState::Acked,
+        "the session that holds the delivery can still settle it"
+    );
+    assert!(
+        fixture.state.delivery_ticket(&held_msg).is_none(),
+        "the settlement spends the ticket"
+    );
+}
+
+/// A session that names no delivery holds no row. The client spells that by
+/// leaving `task_id` out, and by sending it empty on a wire that has no
+/// `Option`. The delivery such a session says nothing about is requeued like any
+/// other unacknowledged row, so a session between deliveries keeps nothing in
+/// flight just by being listed.
+#[test]
+fn sessions_that_name_no_delivery_hold_nothing() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+    relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+    assert_eq!(row_of(&fixture.state, &msg_id).state, LedgerState::InFlight);
+
+    let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
+    let mut session = router::Session::with_sender(sender, "builder");
+    let mut args = hello_args("builder");
+    args.live_sessions = vec![
+        onlyne_proto::LiveSession {
+            session_id: "sess-idle".to_string(),
+            task_id: None,
+            suspended: false,
+        },
+        onlyne_proto::LiveSession {
+            session_id: "sess-between".to_string(),
+            task_id: Some(String::new()),
+            suspended: false,
+        },
+        onlyne_proto::LiveSession {
+            session_id: "sess-suspended-idle".to_string(),
+            task_id: Some(String::new()),
+            suspended: true,
+        },
+    ];
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let reply = runtime.block_on(router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(args),
+    ));
+    assert!(reply.ok, "the hello should be accepted: {reply:?}");
+
+    assert_eq!(
+        row_of(&fixture.state, &msg_id).state,
+        LedgerState::Queued,
+        "a delivery no live session names goes back on the queue"
+    );
+    assert!(fixture.state.delivery_ticket(&msg_id).is_none());
+}
+
+/// A link that drops requeues the rows it held, and a session that is still
+/// running one of them reconnects claiming it. The row is taken back off the
+/// queue rather than left there for a pull to hand out: the session that holds
+/// a delivery is the one that answers it, and a second delivery of the same task
+/// would run the work twice. The delivery the same hello does not name stays
+/// queued, which is the other half of the rule in the state a drop leaves.
+#[test]
+fn a_claimed_delivery_that_went_back_to_the_queue_is_taken_back() {
+    let fixture = fixture();
+    let held = accepted(
+        relay::send(
+            &fixture.state,
+            &task("planner", "builder", "held"),
+            false,
+            None,
+        )
+        .expect("relay"),
+    );
+    let other = accepted(
+        relay::send(
+            &fixture.state,
+            &task("planner", "builder", "other"),
+            false,
+            None,
+        )
+        .expect("relay"),
+    );
+    let held_task = held.receipt.task.clone().expect("task id");
+    let held_msg = held.receipt.msg_id.clone();
+    let other_msg = other.receipt.msg_id.clone();
+    for _ in 0..2 {
+        relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+    }
+    assert_eq!(
+        relay::disconnect(&fixture.state, "builder").expect("teardown"),
+        2,
+        "the dropped link returns both rows to the queue"
+    );
+    assert_eq!(row_of(&fixture.state, &held_msg).state, LedgerState::Queued);
+    assert_eq!(
+        row_of(&fixture.state, &other_msg).state,
+        LedgerState::Queued
+    );
+    let events_before = ledger_state_events(&fixture.state).len();
+
+    let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
+    let mut session = router::Session::with_sender(sender, "builder");
+    let mut args = hello_args("builder");
+    args.live_sessions = vec![live_session("sess-live", &held_task)];
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let reply = runtime.block_on(router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(args),
+    ));
+    assert!(reply.ok, "the hello should be accepted: {reply:?}");
+
+    let row = row_of(&fixture.state, &held_msg);
+    assert_eq!(
+        row.state,
+        LedgerState::InFlight,
+        "the session that holds the delivery takes its row back off the queue"
+    );
+    assert_eq!(
+        row.requeued, 1,
+        "the take-back is not a requeue of its own: the teardown's move is the one counted"
+    );
+    let ticket = fixture
+        .state
+        .delivery_ticket(&held_msg)
+        .expect("the taken-back row is armed again");
+    assert_eq!(ticket.session_id.as_deref(), Some("sess-live"));
+    assert_eq!(ticket.generation, session.generation);
+
+    let other_row = row_of(&fixture.state, &other_msg);
+    assert_eq!(
+        other_row.state,
+        LedgerState::Queued,
+        "the delivery this hello does not name waits for a pull"
+    );
+    assert!(fixture.state.delivery_ticket(&other_msg).is_none());
+    assert_eq!(
+        ledger_state_events(&fixture.state).len(),
+        events_before + 1,
+        "the take-back publishes its own in_flight transition"
+    );
+    match &ledger_state_events(&fixture.state)
+        .last()
+        .expect("the take-back event")
+        .event
+    {
+        Event::LedgerState(event) => {
+            assert_eq!(event.msg_id, held_msg);
+            assert_eq!(event.state, LedgerState::InFlight);
+        }
+        other => panic!("expected ledger_state, got {other:?}"),
+    }
+}
+
+/// A suspended session is a session whose process was released and whose work is
+/// still owed, so its delivery is held on exactly the same terms as a running
+/// session's: the row stays `in_flight` and the ticket names that session, which
+/// is what a later release of it matches.
+#[test]
+fn a_suspended_session_holds_its_delivery_the_same_way() {
+    let fixture = fixture();
+    let envelope = task("planner", "builder", "work");
+    let outcome = accepted(relay::send(&fixture.state, &envelope, false, None).expect("relay"));
+    let msg_id = outcome.receipt.msg_id.clone();
+    let task_id = outcome.receipt.task.clone().expect("task id");
+    relay::pull(&fixture.state, "builder", None, &PullArgs::default()).expect("pull");
+
+    let (sender, _receiver) = tokio::sync::mpsc::channel::<Frame>(8);
+    let mut session = router::Session::with_sender(sender, "builder");
+    let mut args = hello_args("builder");
+    args.live_sessions = vec![suspended_session("sess-suspended", &task_id)];
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let reply = runtime.block_on(router::dispatch_client(
+        &fixture.state,
+        &mut session,
+        ClientOp::Hello(args),
+    ));
+    assert!(reply.ok, "the hello should be accepted: {reply:?}");
+
+    let row = row_of(&fixture.state, &msg_id);
+    assert_eq!(
+        row.state,
+        LedgerState::InFlight,
+        "a suspended session's delivery is still owed, so its row is not requeued"
+    );
+    let ticket = fixture
+        .state
+        .delivery_ticket(&msg_id)
+        .expect("the suspended session's ticket stays armed");
+    assert_eq!(
+        ticket.session_id.as_deref(),
+        Some("sess-suspended"),
+        "the ticket names the suspended session, which is what its release matches"
+    );
+    assert_eq!(ticket.generation, session.generation);
 }
 
 #[test]
@@ -2936,6 +3291,109 @@ fn reports_produce_session_rows_and_events() {
         page.rows
             .iter()
             .any(|row| row.event.type_name() == "session_state")
+    );
+}
+
+/// A `task` or `role` scope session goes idle between deliveries and publishes
+/// from there, and its report carries an empty `task_id` — the only spelling the
+/// field's `String` has for "no delivery". The row is still the session's own,
+/// so the write lands on it and opens no binding: a binding under the empty task
+/// id would leave the mirror reading as though the session served a task called
+/// `""`. A session on no delivery contradicts no completion either, so the
+/// post-complete revival fault is never asked about it.
+#[test]
+fn a_publish_from_a_session_between_deliveries_binds_no_task() {
+    let fixture = fixture();
+    let task_id = onlyne_proto::new_task_id();
+    ready(&fixture.state, "builder", &task_id, 1);
+    let done = projection::report(
+        &fixture.state,
+        "builder",
+        &Report::Complete {
+            task_id: task_id.clone(),
+            outcome: Outcome::Done,
+            head: Some("finished".into()),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .expect("complete");
+    assert!(done.applied);
+    // The delivery settles and the session lets its binding go: this is where a
+    // scoped session sits between deliveries.
+    let exited = fixture
+        .state
+        .ledger
+        .get_session_row("sess-1")
+        .expect("read")
+        .expect("the session's row");
+    assert!(
+        fixture
+            .state
+            .ledger
+            .release_binding("sess-1", &task_id, exited.updated_at)
+            .expect("release")
+    );
+    let next_seq = exited.seq + 1;
+
+    let idle = projection::report(
+        &fixture.state,
+        "builder",
+        &projection_publish(
+            String::new(),
+            "sess-1",
+            1,
+            next_seq as u64,
+            SessionProjection {
+                agent: onlyne_proto::AgentPhase::Idle,
+                ..heartbeat_projection()
+            },
+        ),
+    )
+    .expect("publish");
+    assert!(
+        idle.applied,
+        "a publish that names no delivery still lands on the session's own row"
+    );
+
+    let row = fixture
+        .state
+        .ledger
+        .get_session_row("sess-1")
+        .expect("read")
+        .expect("the row is present");
+    assert_eq!(row.seq, next_seq, "the write carries the client's version");
+    assert_eq!(row.task_id, None, "the session is on no delivery");
+    assert!(
+        fixture
+            .state
+            .ledger
+            .session_row_for_task("")
+            .expect("read")
+            .is_none(),
+        "the empty task id names no delivery, so it binds no session"
+    );
+    let published = events::replay(&fixture.state, 0, &events::EventFilter::default(), 200)
+        .expect("replay")
+        .rows
+        .into_iter()
+        .rev()
+        .find_map(|record| match record.event {
+            Event::SessionState(event) if event.session_id == "sess-1" => Some(event),
+            _ => None,
+        })
+        .expect("the publish emitted a session_state event");
+    assert_eq!(published.task_id, None, "an idle session reports no task");
+    assert_eq!(published.seq, next_seq as u64);
+    assert!(
+        fixture
+            .state
+            .ledger
+            .open_faults()
+            .expect("faults")
+            .iter()
+            .all(|fault| fault.task_id.as_deref() != Some("")),
+        "a session on no delivery earns no fault against an empty task id"
     );
 }
 

@@ -51,23 +51,40 @@ fn task_envelope() -> Envelope {
 }
 
 #[test]
-fn from_slots_sorts_and_dedups() {
+fn from_sessions_sorts_and_dedups() {
     assert_eq!(
-        from_slots(["t-b", "t-a", "t-b"]),
+        from_sessions([
+            LiveSession {
+                session_id: "t-b".into(),
+                task_id: Some("t-b".into()),
+                suspended: false,
+            },
+            LiveSession {
+                session_id: "t-a".into(),
+                task_id: None,
+                suspended: true,
+            },
+            LiveSession {
+                session_id: "t-b".into(),
+                task_id: None,
+                suspended: true,
+            },
+        ]),
         vec![
             LiveSession {
                 session_id: "t-a".into(),
-                task_id: Some("t-a".into()),
-                suspended: false,
+                task_id: None,
+                suspended: true,
             },
             LiveSession {
                 session_id: "t-b".into(),
                 task_id: Some("t-b".into()),
                 suspended: false,
             },
-        ]
+        ],
+        "one entry per session, the first reading kept, ordered by id"
     );
-    assert!(from_slots(Vec::<String>::new()).is_empty());
+    assert!(from_sessions(Vec::<LiveSession>::new()).is_empty());
 }
 
 #[test]

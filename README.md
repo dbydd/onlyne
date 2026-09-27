@@ -26,31 +26,31 @@ The fake and Orca examples below intentionally use `target/debug/...`; the launc
 ### Prerequisites
 
 - **Registry install:** Cargo and Rust 1.85 or newer.
-- **Default-feature gateway build:** install `protoc` and keep it on `PATH`. The server, client, CLI, and TUI do not require `protoc`.
+- **Platform SDKs:** none. The IM gateway crates are frozen off this branch, so nothing in the tree compiles `teloxide`, `openlark`, `wechat-ilink`, or `resvg`.
 - **Runtime:** an address and port reachable by every role client. The local admin and adapter sockets require a writable owner tree.
 - **Agent host:** a supported backend and an adapter. The real pi path needs the [pi coding agent](https://github.com/badlogic/pi-mono); use pi 0.85.1 for the path documented here.
-- **Services:** installation does not register a service. Run a daemon in the foreground or use `onlyne server start`.
+- **Services:** installation does not register a service, and there is no `start`/`stop`. Both daemons run in the foreground; a terminal host, `launchd`, or `systemd` keeps one resident.
 
 ### Registry packages
 
-Install the CLI, daemons, and TUI from the current published packages. Keep the package set together so the sibling binaries share one build:
+Install the CLI and the two daemons from the current published packages. Keep the package set together so the sibling binaries share one build:
 
 ```bash
 cargo install \
-  onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui
+  onlyne-cli onlyne-server onlyne-client
 ```
 
-That produces five commands:
+That produces three commands:
 
 | Command | Role |
 |---|---|
-| `onlyne` | Thin operator entry point. It forwards lifecycle commands to sibling binaries and reads or writes the local admin/adapter sockets directly. |
-| `onlyne-server` | One cluster's router, delivery queue, durable ledger, fault record, gateway host, and admin socket. |
+| `onlyne` | Operator entry point. Every verb is implemented in this process: the queries, the admin operations, `init`/`generate`, the built-in TUI, and the MCP tool bridge. The two daemons forward nothing back. |
+| `onlyne-server` | One cluster's router, delivery queue, durable ledger, fault record, and admin socket. Subcommand: `run`. |
 | `onlyne-client` | One role workspace's server link, session lifecycle, backend host, adapter socket, and durable outbound intents. |
-| `onlyne-gateway` | One chat-platform process: `telegram`, `feishu`, `qqbot`, or `weixin`. |
-| `onlyne-tui` | Two-page observation board over the server's local admin socket. |
 
-`onlyne-agent-fake` is an additional source/testkit-only command. It is absent from the five registry-installed binaries and is built by the fake quickstart below.
+The observation board is the `onlyne tui` verb, not a separate binary. `onlyne-agent-fake` is an
+additional source/testkit-only command. It is absent from the three registry-installed binaries
+and is built by the fake quickstart below.
 
 ### Prebuilt binaries
 
@@ -75,8 +75,7 @@ brew install dbydd/onlyne/onlyne
 The clone URL belongs in the tap command: Homebrew reads the short name `dbydd/onlyne` as a
 repository called `homebrew-onlyne`, and that is not this one.
 
-The five binaries land in Homebrew's prefix, `onlyne-gateway` included, so no Rust toolchain
-is needed on the installing machine.
+The binaries land in Homebrew's prefix, so no Rust toolchain is needed on the installing machine.
 
 ### Agent handbooks
 
@@ -177,7 +176,7 @@ The repository includes a five-role running-lights demo. It generates a cluster,
 From an Orca tab in the repository:
 
 ```bash
-cargo build -p onlyne-cli -p onlyne-server -p onlyne-client -p onlyne-tui
+cargo build -p onlyne-cli -p onlyne-server -p onlyne-client
 python3 examples/supervisor/run.py up
 python3 examples/supervisor/run.py status
 python3 examples/supervisor/run.py stop
@@ -199,7 +198,7 @@ ONLYNE_BACKEND=exec python3 examples/supervisor/run.py up
 The supervisor output is then written under the demo root instead of opening a visible supervisor tab. In another terminal, inspect the demo with:
 
 ```bash
-target/debug/onlyne-tui --server-root /tmp/onlyne-sup
+target/debug/onlyne --server-root /tmp/onlyne-sup tui
 ```
 
 The full walkthrough is [`examples/supervisor/README.md`](examples/supervisor/README.md). The [research-flywheel](https://github.com/dbydd/research-flywheel) project is a larger agent-ring example built on Onlyne.
@@ -376,17 +375,13 @@ onlyne --server-root <root> repair ack    --fault-id <id> --reason <text>
 
 `onlyne --help` lists the socket backends and exit codes. In short: `0` success, `1` runtime/daemon failure, `2` local validation, `3` no socket, `4` operator-input refusal, `5` no supported session host, and `127` a missing sibling binary.
 
-### Gateways
+### Bridge mounts
 
-Declare a `[[gateway]]` entry in `spec.toml`, provide its credential through a literal token or environment-backed config, then run one platform per process:
-
-```bash
-onlyne-gateway --server-root <root> list
-onlyne-gateway --server-root <root> auth telegram
-onlyne-gateway --server-root <root> run telegram --token "$TELEGRAM_TOKEN"
-```
-
-Feishu, QQ, and WeChat use the same `auth` and `run` shape. See the gateway's onboarding output for its platform-specific credential steps.
+The IM gateway host and its four platform plugins are frozen and live off this branch: v2
+generalized the gateway mount into a `bridge` mount, and the protocol keeps that mount kind
+without a host to drive it. `onlyne gateway status` is what the CLI still answers — a read-only
+view of the mounts the server has registered. A `[[gateway]]` entry in `spec.toml`, an `auth`
+verb, and a per-platform `run` process are v1 surfaces that no longer exist on this branch.
 
 ## Architecture
 
@@ -397,13 +392,13 @@ graph LR
   P[pi host + pi-onlyne] -->|adapter protocol| C[onlyne-client · role workspace]
   A[other agent adapters] -->|adapter protocol| C
   C -->|TLS frame| SRV[onlyne-server]
-  SRV -->|adapter protocol| G[onlyne-gateway · telegram feishu qqbot weixin]
-  G --> H[human chat platform]
+  B[external bridge hosts] -->|adapter protocol| SRV
+  B --> H[human chat platform]
   SC[supervisor / aggregate client] -->|aggregate role link| PS[parent onlyne-server]
-  SRV --- AD[owner-only admin socket]
+  SRV --- AD[admin socket in /tmp/onlyne-<uid>/]
 ```
 
-The server enforces ACL before ledger writes and owns cross-machine routing. Each client owns its role's session execution and writes outbound messages to a durable intent queue before transmission. If the TLS link drops, running sessions keep their local state; queued intents flush in order after reconnection. The gateway host contains platform SDK dependencies; server and client daemons do not.
+The server enforces ACL before ledger writes and owns cross-machine routing. Each client owns its role's session execution and writes outbound messages to a durable intent queue before transmission. If the TLS link drops, running sessions keep their local state; queued intents flush in order after reconnection. The admin and adapter sockets bind in the machine-level runtime directory `/tmp/onlyne-<uid>/`, beside a `<digest>.json` registration that names the surface serving them; nothing binds inside a workspace tree.
 
 ### Session backends
 

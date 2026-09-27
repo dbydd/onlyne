@@ -21,8 +21,10 @@ to you and the spec file.
   is the standing a client-held supervisor session sends with, and the flag the Control-class
   ACL bypass reads.
 - Lifecycle: `onlyne server init|run|status|generate|reload`, the top-level
-  `onlyne wait-ready`, `onlyne client run|init|status`, `onlyne gateway
-  run|list|auth|status`. Nothing detaches and there is no `start`/`stop`: both daemons
+  `onlyne wait-ready`, `onlyne client run|init|status`, and `onlyne gateway status`. The
+  platform verbs that used to sit beside `gateway status` went with the frozen gateway
+  crate; the mount vocabulary itself stays in the protocol. Nothing detaches and there is
+  no `start`/`stop`: both daemons
   run in the foreground, and a supervisor that wants one in the background starts `run`
   itself (a tab, `launchd`, `systemd`).
 - Every request verb prints one JSON line for its answer. `onlyne cluster export-prose`
@@ -38,12 +40,12 @@ to you and the spec file.
 
   ```bash
   cargo install --locked \
-    onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui onlyne-testkit
+    onlyne-cli onlyne-server onlyne-client onlyne-testkit
   ```
 
-- `onlyne version` reports the CLI package, protocol, and sibling binary paths. The gateway
-  and testkit commands do not accept `--version`; read `onlyne version` for the installed
-  package inventory.
+- `onlyne version` reports the CLI package, protocol, and sibling binary paths. The testkit
+  command does not accept `--version`; read `onlyne version` for the installed package
+  inventory. The TUI is a verb of the `onlyne` binary, not a separate one.
 - `onlyne schema spec` and `onlyne schema client` print the compiled JSON Schema of
   `<server-root>/.onlyne/spec.toml` and `<workspace>/.onlyne/config.toml`; `--pretty` indents
   the same document. The keys, their types, and which of them are required come out of the
@@ -96,8 +98,8 @@ to you and the spec file.
 4. Append the fragments to `spec.toml`, then run `onlyne reload`. `onlyne spec-diff` shows
    the pending delta first. The spec file is the only truth; there is no runtime config API.
 
-An existing tree carries a store marker: the server's `state.db` names revision 4 and a
-client's `client.db` names revision 2. A marker answering another revision stops that daemon
+An existing tree carries a store marker: the server's `state.db` names revision 5 and a
+client's `client.db` names revision 3. A marker answering another revision stops that daemon
 with `onlyne: unsupported schema; v1.0.0 does not migrate`, and a pre-v1 layout stops
 `onlyne client init` with exit 2 and `onlyne: legacy workspace layout; v1.0.0 does not
 migrate` before it writes anything.

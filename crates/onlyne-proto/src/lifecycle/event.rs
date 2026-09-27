@@ -36,6 +36,10 @@ pub enum LifecycleEvent {
     ResourceCloseRequested { v: Version },
     /// Backend confirmed the resource closed.
     ResourceClosed { v: Version },
+    /// Client released the session's process while retaining its generation.
+    Suspend { v: Version },
+    /// Client re-took the session's process after it was suspended.
+    Resume { v: Version },
     /// Agent process observed gone.
     AgentGone { v: Version },
     /// Cancel accepted. The result settles in the task ledger; no session
@@ -117,6 +121,8 @@ pub fn event_version(event: &LifecycleEvent) -> Version {
         | LifecycleEvent::ResourceAttach { v }
         | LifecycleEvent::ResourceCloseRequested { v }
         | LifecycleEvent::ResourceClosed { v }
+        | LifecycleEvent::Suspend { v }
+        | LifecycleEvent::Resume { v }
         | LifecycleEvent::AgentGone { v }
         | LifecycleEvent::Cancel { v }
         | LifecycleEvent::Fail { v }

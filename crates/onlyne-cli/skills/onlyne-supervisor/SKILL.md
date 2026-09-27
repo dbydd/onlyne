@@ -21,8 +21,10 @@ to you and the spec file.
   is the standing a client-held supervisor session sends with, and the flag the Control-class
   ACL bypass reads.
 - Lifecycle: `onlyne server init|run|status|generate|reload`, the top-level
-  `onlyne wait-ready`, `onlyne client run|init|status`, `onlyne gateway
-  run|list|auth|status`. Nothing detaches and there is no `start`/`stop`: both daemons
+  `onlyne wait-ready`, `onlyne client run|init|status`, and `onlyne gateway status`. The
+  platform verbs that used to sit beside `gateway status` went with the frozen gateway
+  crate; the mount vocabulary itself stays in the protocol. Nothing detaches and there is
+  no `start`/`stop`: both daemons
   run in the foreground, and a supervisor that wants one in the background starts `run`
   itself (a tab, `launchd`, `systemd`).
 - Every request verb prints one JSON line for its answer. `onlyne cluster export-prose`
@@ -38,12 +40,12 @@ to you and the spec file.
 
   ```bash
   cargo install --locked \
-    onlyne-cli onlyne-server onlyne-client onlyne-gateway onlyne-tui onlyne-testkit
+    onlyne-cli onlyne-server onlyne-client onlyne-testkit
   ```
 
-- `onlyne version` reports the CLI package, protocol, and sibling binary paths. The gateway
-  and testkit commands do not accept `--version`; read `onlyne version` for the installed
-  package inventory.
+- `onlyne version` reports the CLI package, protocol, and sibling binary paths. The testkit
+  command does not accept `--version`; read `onlyne version` for the installed package
+  inventory. The TUI is a verb of the `onlyne` binary, not a separate one.
 - `onlyne schema spec` and `onlyne schema client` print the compiled JSON Schema of
   `<server-root>/.onlyne/spec.toml` and `<workspace>/.onlyne/config.toml`; `--pretty` indents
   the same document. The keys, their types, and which of them are required come out of the

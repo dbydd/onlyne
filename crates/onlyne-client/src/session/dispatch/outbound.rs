@@ -233,7 +233,30 @@ impl Outbox for ClientLink {
         &self,
         op: ClientOp,
     ) -> Pin<Box<dyn Future<Output = Result<(), NetError>> + Send + '_>> {
-        Box::pin(async move { self.request(op).await.map(|_| ()) })
+        Box::pin(async move {
+            // A refusal is not a send. The server answered, which says the frame
+            // arrived, and it took nothing: the callers of this method treat `Ok`
+            // as "the server has it" — `send_frame` skips the durable queue on
+            // `Ok`, and `transport_envelope` skips it for a completion — so a
+            // refusal answered here would drop the frame outright. The two
+            // refusals this path meets while the queue is warming are the
+            // pre-handshake one (a window of the connection) and a transient
+            // internal one, and both are the intent machine's to judge, which is
+            // where the caller hands the frame instead.
+            let body = self.request(op).await?;
+            if !body.ok {
+                let error = body.error.clone().unwrap_or(onlyne_proto::ErrorPayload {
+                    code: onlyne_proto::ErrorCode::Internal,
+                    message: "the server took nothing and named no reason".to_string(),
+                    field: None,
+                });
+                return Err(NetError::Rejected {
+                    code: wire_code(error.code),
+                    message: error.message,
+                });
+            }
+            Ok(())
+        })
     }
 
     fn request(

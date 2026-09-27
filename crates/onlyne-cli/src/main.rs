@@ -10,6 +10,10 @@
 //! `reject`, `control`, `who`, `ping`) share one path here: resolve a socket,
 //! write one frame, print one JSON line, return one exit code.
 //!
+//! `ls` is the one verb that opens no socket: it reads the runtime directory's
+//! registration files and reports every surface on the machine, so the question
+//! it answers can be asked before any tree resolves.
+//!
 //! The two foreground daemons keep their own binaries, so `server run` and
 //! `client run` are the only execs: [`forward`] locates the sibling and hands it
 //! this CLI's selector plus the operator's arguments. Staying resident is not a
@@ -20,6 +24,7 @@ mod admin;
 mod flags;
 mod forward;
 mod ledger;
+mod ls;
 mod media;
 mod render;
 mod report;
@@ -130,6 +135,9 @@ enum Verb {
     Control(ControlCmd),
     /// Query the roles the server knows.
     Who,
+    /// List every Onlyne surface registered on this machine.
+    #[command(after_help = ls::LS_AFTER_HELP)]
+    Ls,
     /// Probe the socket with a ping frame and print the pong.
     Ping,
     /// Report server status.
@@ -524,6 +532,7 @@ fn run() -> i32 {
             )
         }
         Verb::Who => verbs::who(flags),
+        Verb::Ls => ls::run(flags),
         Verb::Ping => verbs::ping(flags),
         Verb::Status => admin::status(flags),
         Verb::Roles(cmd) => admin::roles(flags, cmd.args),

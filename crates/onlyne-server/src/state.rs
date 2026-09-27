@@ -447,12 +447,20 @@ impl Server {
         before - table.len()
     }
 
-    /// Point one delivery ticket at the current link generation so this link's
-    /// teardown can still requeue the row.
-    pub fn rehang_delivery(&self, msg_id: &str, generation: u64) {
+    /// Point one delivery ticket at the current link generation and at the
+    /// session that holds the row.
+    ///
+    /// The generation is what this link's teardown compares before it requeues
+    /// the row (`crates/onlyne-server/src/lib.rs`); the session id is what
+    /// [`crate::relay::release_exited_delivery`] matches when that session dies
+    /// before it completes, and what `pull`'s in-flight guard compares so the
+    /// holder is never handed its own row twice. Adoption is the one caller:
+    /// the hello that lands names the session each held delivery belongs to.
+    pub fn rehang_delivery(&self, msg_id: &str, generation: u64, session_id: &str) {
         if let Ok(mut table) = self.deliveries.write() {
             if let Some(ticket) = table.get_mut(msg_id) {
                 ticket.generation = generation;
+                ticket.session_id = Some(session_id.to_string());
             }
         }
     }

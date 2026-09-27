@@ -115,6 +115,33 @@ pub fn feed_agent_gone(
     apply_at_next(bridge, ledger, task_id, |v| LifecycleEvent::AgentGone { v })
 }
 
+/// This client released the session's process and kept its conversation.
+///
+/// The session's own id addresses the feed, because the event is about the
+/// session rather than about the delivery it happens to be bound to: a session
+/// that has served several deliveries has one row. The resource goes while the
+/// generation stays live, which is the pair `ResourceClosed` cannot express —
+/// that event kills the agent fact with the resource, and `project` then reads
+/// the session as exited rather than as waiting.
+pub fn feed_suspended(
+    bridge: &Bridge,
+    ledger: &dyn SessionLedger,
+    session_id: &str,
+) -> anyhow::Result<Verdict> {
+    apply_at_next(bridge, ledger, session_id, |v| LifecycleEvent::Suspend {
+        v,
+    })
+}
+
+/// This client started the runtime behind a suspended session again.
+pub fn feed_resumed(
+    bridge: &Bridge,
+    ledger: &dyn SessionLedger,
+    session_id: &str,
+) -> anyhow::Result<Verdict> {
+    apply_at_next(bridge, ledger, session_id, |v| LifecycleEvent::Resume { v })
+}
+
 /// Work given up on: while the agent is idle the session opens a fault line,
 /// and the generation stays open so a later resource close still finalizes the
 /// row. How the work ended is written to the task ledger, not here.

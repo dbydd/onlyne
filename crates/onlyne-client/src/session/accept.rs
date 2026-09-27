@@ -32,7 +32,7 @@ impl AcceptPath {
             .task_id()
             .context("delivery missing causality.task")?;
         let _ = task_id;
-        Ok(Some(dispatch(&self.dispatch, &delivery.envelope)?))
+        dispatch(&self.dispatch, &delivery.envelope)
     }
 
     pub fn ready_report(

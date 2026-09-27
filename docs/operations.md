@@ -151,7 +151,7 @@ This layout keeps SQLite files and file locks on a local filesystem. It also kee
 
 When a role link dies, the server requeues that role's `in_flight` delivery rows to `queued`, where they wait for the next pull before delivery.
 
-Takeover requeueing when a new link lands follows the same path. The `live_sessions` field of `hello` declares the sessions still alive in that client's memory and the deliveries they are bound to; declared rows remain `in_flight`, and their delivery tickets are reattached to the new link's generation, so they are requeued normally if that link later terminates.
+Takeover requeueing when a new link lands follows the same path, with a rule read off the claim. The `live_sessions` field of `hello` declares the sessions still alive in that client's memory and the delivery each one is bound to; a delivery any of them names is held, so its row stays `in_flight` — or returns there, when the departed link's teardown already put it back on the queue, because the session that holds it is still running it and a pull would otherwise hand the same task to a second session. Its delivery ticket is reattached to the new link's generation and to the session that holds it, so the row is requeued normally if that link later terminates, and released if that session dies. Every unacknowledged row no live session names is requeued and its ticket dropped, which is what makes it claimable again. A suspended session names no delivery: only a session between deliveries is ever suspended, and the row such a session left is requeued by the rule above. Were one ever suspended with work still owed, it would name that delivery, and the server would hold it exactly as a running session's row is held — the work is still owed either way.
 
 If a declared session dies before completion, the client publishes an `exited` projection. When the server sees an `in_flight` row with the same `session_id` as that session ticket, it requeues the row, again through the gates below.
 
@@ -683,7 +683,7 @@ Onlyne 的 SQLite 数据库要放在本地文件系统。不要把 server root �
 
 role link 死亡时，服务端把该 role 的 `in_flight` 投递行重投回 `queued`，等待下一次 pull 再交付。
 
-新 link 落地时的接管重投走同一条路。`hello` 的 `live_sessions` 字段申报该 client 内存里仍活着的会话，以及它们绑定的投递；被申报的行保持 `in_flight`，其 delivery ticket 改挂新 link 的 generation，此后该 link 终止时照常被重投。
+新 link 落地时的接管重投走同一条路，只是多一条从申报里读出的规则。`hello` 的 `live_sessions` 字段申报该 client 内存里仍活着的会话，以及每个会话绑定的那个投递；被申报的投递由该会话持有：其行保持 `in_flight`，若断掉的 link 在拆除时已经把它退回队列，则在这里被取回 `in_flight` —— 持有它的会话还在跑这件活，否则一次 pull 会把同一个 task 交给第二个会话。它的 delivery ticket 改挂新 link 的 generation，并记下持有它的 session，因此该 link 随后终止时照常重投，而该会话死去时该行被释放。没有被任何活会话申报的未确认行照常重投并丢弃 ticket，这才让它重新可领。`suspended` 的会话不申报任何投递：只有两次投递之间的会话才会被挂起，它留下的那一行按上一条规则重投。若真有会话在还欠着活的时候被挂起，它会申报那个投递，server 便与运行中的会话一样持有它 —— 活无论如何都还欠着。
 
 被申报的会话若在结清之前死亡，client 发布 `exited` 投影，服务端见到与该会话 ticket 同 `session_id` 的 `in_flight` 行时把该行重投回队列，同样经过下面的闸。
 

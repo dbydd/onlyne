@@ -229,6 +229,7 @@ async fn noop_heartbeats_republish_the_projection() {
     let generation = row.generation as u64;
     let seq_one = row.seq as u64 + 1;
     let seq_two = row.seq as u64 + 2;
+    let row_seq = row.seq as u64;
     body.version = onlyne_proto::Version::new(generation, seq_one);
     on_plugin_report(
         &state,
@@ -272,14 +273,18 @@ async fn noop_heartbeats_republish_the_projection() {
         2,
         "each accepted no-op heartbeat publishes one projection: {syncs:?}"
     );
-    assert_eq!((syncs[0].generation, syncs[0].seq), (generation, seq_one));
-    assert_eq!((syncs[1].generation, syncs[1].seq), (generation, seq_two));
+    // The plan's heartbeat rule: a beat that observed nothing refreshes liveness
+    // and persists nothing, so both frames carry the row's own tuple — which has
+    // not moved — and a reader of `updated_at` cannot take a no-op for a write.
+    assert_eq!((syncs[0].generation, syncs[0].seq), (generation, row_seq));
+    assert_eq!((syncs[1].generation, syncs[1].seq), (generation, row_seq));
     assert_eq!(syncs[0].projection, syncs[1].projection);
     let stored = store.get_session(&task_id).unwrap().unwrap();
     assert_eq!(syncs[0].projection, published_projection(&store, &task_id));
     assert_eq!(
         (stored.generation as u64, stored.seq as u64),
-        (generation, seq_two)
+        (generation, row_seq),
+        "a no-op beat moves no version and writes no new updated_at"
     );
 }
 
@@ -400,8 +405,8 @@ async fn heartbeat_junk_in_the_client_dimensions_writes_none_of_it() {
     let after_junk = store.get_session(&task_id).unwrap().unwrap();
     assert_eq!(
         (after_junk.generation, after_junk.seq),
-        (row.generation, row.seq + 1),
-        "a discarded claim is still a heartbeat the server times"
+        (row.generation, row.seq),
+        "a discarded claim writes nothing; the beat refreshes liveness and no version"
     );
     let syncs = outbox.projection_publishes().await;
     assert_eq!(
@@ -427,7 +432,9 @@ async fn heartbeat_junk_in_the_client_dimensions_writes_none_of_it() {
     let mut legal: onlyne_proto::Observation =
         serde_json::from_str(&after_junk.observed_json).unwrap();
     let generation = after_junk.generation as u64;
-    let seq = after_junk.seq as u64 + 1;
+    // The discarded beat took the next version as a replay watermark without
+    // moving the row, so the next frame the client will take is the one after it.
+    let seq = after_junk.seq as u64 + 2;
     legal.agent = onlyne_proto::AgentPhase::Idle;
     legal.version = onlyne_proto::Version::new(generation, seq);
     on_plugin_report(

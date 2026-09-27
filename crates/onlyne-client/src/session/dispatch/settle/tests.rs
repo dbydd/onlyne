@@ -30,7 +30,9 @@ fn staged_state(dir: &TempDir, task: &str) -> (DispatchState, ClientStore, Arc<F
         store.clone(),
     );
     let envelope = task_envelope(task);
-    let session = dispatch(&state, &envelope).expect("stage the task");
+    let session = dispatch(&state, &envelope)
+        .expect("stage the task")
+        .expect("the role has room for it");
     assert_eq!(session.task_id, task);
     {
         let inner = state.inner.lock();

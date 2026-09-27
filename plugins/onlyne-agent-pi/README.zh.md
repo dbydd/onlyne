@@ -277,7 +277,7 @@ stderr 告警并忽略，把机会让回文件。
 
 - **report 序号基址。** 插件自己的 `report` 序号从 1000 起，不是 1。client 把自身的派发事件
   （`created`、资源 attach、`ready`）写进同一个 `(generation, seq)` 水位，reducer 会静默丢弃
-  水位及以下的报告（`crates/onlyne-session/src/reconcile/`），所以从 1 起会丢掉最初的观测。
+  水位及以下的报告（`crates/onlyne-client/src/reconcile/`），所以从 1 起会丢掉最初的观测。
   **一个插件一个计数器：** 会话持有的每个任务都共用同一条 `report` 序号发心跳 —— 因为 client
   会在同一个任务的两次心跳之间，为该行自己的事件取 `row.seq + 1`；若每个任务每轮只推进一格，
   心跳正好撞在那个数上被当作 stale 丢掉。闸门是按任务行判的，所以每条任务记录还带着自己上一次
@@ -305,14 +305,14 @@ stderr 告警并忽略，把机会让回文件。
 - **`config_get` 只有当键以 `stdin:` 开头时按任务正文处理**，这正是 `PROTOCOL.md` 为无
   `inject` 插件记录的重载。其他键记日志后忽略，绝不误读。
 - **`frame_too_large` / `bad_frame`**：超限正文在写出任何字节之前就被拒；帧错误关闭连接并重
-  连。帧一旦损坏无法重新同步，这与 `crates/onlyne-frame/src/lib.rs` 的结论一致。
+  连。帧一旦损坏无法重新同步，这与 `crates/onlyne-wire/src/frame.rs` 的结论一致。
 - **投递按 envelope id 幂等，任务不按 id 一次性使用**：去重键是 envelope id。同一条投递重复
   到达只注入一次，ack 带 `reason: "duplicate"`；正在运行的任务收到新 envelope，会作为新消息
   注入同一个会话，工作记录保留自己的计数与转发账本，只把"自这条指令以来的轮数"看门狗归零。
   client 每条 envelope 都发新 uuid，所以 `duplicate` 只在真正的重投上生效。
 
 - **pane 绑定（Orca tab）。** 在 Orca pane 里，插件在每个 heartbeat 上报自己跑在哪：报告
-  `Observation` 里的 `observed.host.orca.pane_key`（`crates/onlyne-session/src/host.rs`），环境
+  `Observation` 里的 `observed.host.orca.pane_key`（`crates/onlyne-client/src/host.rs`），环境
   报得出时还带上 `tab_id` / `leaf_id` 和终端的 `handle`。这个绑定是**继承**来的，不是猜的：Orca
   pane 会把自己那四个 `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_LEAF_ID` / `ORCA_TERMINAL_HANDLE`
   导出给它启动的命令（2026-09-11 实测，Orca 1.4.198），而 client 会把自己的环境继续传给

@@ -246,13 +246,18 @@ fn verdict(state: &RunState, task: &str) -> (TaskState, Option<String>) {
 }
 
 /// The state this client last reported for one session, when the queue holds it.
-fn published_projection(state: &RunState, task: &str) -> Option<SessionProjection> {
+///
+/// The publish names the session and the delivery it is serving right now. A
+/// settled session serves none, so the frame reads `session_id`, which is the
+/// spelling that stays put: for the sessions these cases stage, the session id
+/// is the task id that opened it.
+fn published_projection(state: &RunState, session_id: &str) -> Option<SessionProjection> {
     queued_ops(state).into_iter().find_map(|op| match op {
         ClientOp::Report(Report::Heartbeat {
-            task_id,
+            session_id: published,
             projection,
             ..
-        }) if task_id == task => projection,
+        }) if published == session_id => projection,
         _ => None,
     })
 }
@@ -269,10 +274,10 @@ fn last_published(state: &RunState, task: &str) -> SessionProjection {
         .rev()
         .find_map(|op| match op {
             ClientOp::Report(Report::Heartbeat {
-                task_id,
+                session_id,
                 projection: Some(projection),
                 ..
-            }) if task_id == task => Some(projection),
+            }) if session_id == task => Some(projection),
             _ => None,
         })
         .unwrap_or_else(|| panic!("the session's own last publish"))
@@ -285,11 +290,11 @@ fn last_published_seq(state: &RunState, task: &str) -> u64 {
         .rev()
         .find_map(|op| match op {
             ClientOp::Report(Report::Heartbeat {
-                task_id,
+                session_id,
                 seq,
                 projection: Some(_),
                 ..
-            }) if task_id == task => Some(seq),
+            }) if session_id == task => Some(seq),
             _ => None,
         })
         .unwrap_or_else(|| panic!("the session's own last publish"))

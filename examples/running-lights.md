@@ -106,7 +106,7 @@ relay builder's own `handoff: ` prefix shows on it. The prefix is the contract, 
 
 ## Two frames of the moving light
 
-`onlyne-tui --once` renders one frame as plain text. The light is the `◐` glyph, a session in the
+`onlyne --server-root <root> tui --once` renders one frame as plain text. The light is the `◐` glyph, a session in the
 working state, inside a role's box. These are two real frames from one run, three seconds apart:
 
 ```text
@@ -136,7 +136,7 @@ The `*` beside a name is not the light. A settled session keeps its star for the
 | the script DSL (`handoff`, `repeat`, `echo_field_to`) | `crates/onlyne-testkit/src/lib.rs` |
 | `handoff` and the hop it writes | `crates/onlyne-cli/src/verbs.rs` (`handoff_causality`) |
 | hop persisted and read back | `crates/onlyne-store/src/server.rs`, `crates/onlyne-server/src/relay.rs` |
-| the graph | `crates/onlyne-tui/src/layout.rs` |
+| the graph | `crates/onlyne-cli/src/tui/layout.rs` |
 
 # 中文
 
@@ -248,7 +248,7 @@ builder 自己的 `handoff: ` 前缀会显现在上面。这个前缀是约定�
 
 ## 移动流水灯的两个画面
 
-`onlyne-tui --once` 会将一个画面渲染为纯文本。流水灯是 `◐` 字形，代表角色
+`onlyne --server-root <root> tui --once` 会将一个画面渲染为纯文本。流水灯是 `◐` 字形，代表角色
 框内处于 working 状态的 session。下面是同一次运行中相隔三秒的两个真实画面：
 
 ```text
@@ -280,4 +280,4 @@ ledger、从不信任星号的原因，也是它捕获的两个画面始终显�
 | 脚本 DSL（`handoff`、`repeat`、`echo_field_to`） | `crates/onlyne-testkit/src/lib.rs` |
 | `handoff` 及其写入的 hop | `crates/onlyne-cli/src/verbs.rs`（`handoff_causality`） |
 | hop 的持久化与回读 | `crates/onlyne-store/src/server.rs`、`crates/onlyne-server/src/relay.rs` |
-| 图 | `crates/onlyne-tui/src/layout.rs` |
+| 图 | `crates/onlyne-cli/src/tui/layout.rs` |

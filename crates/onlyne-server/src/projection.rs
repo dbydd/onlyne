@@ -296,7 +296,16 @@ pub fn write(
     desired: Option<Value>,
     admin: Option<&Principal>,
 ) -> anyhow::Result<ProjectionOutcome> {
-    let stored = state.ledger.session_row_for_task(task_id)?;
+    // A publish from a session between deliveries names no delivery at all:
+    // `task_id` is a `String` on the wire, so the empty string is the only
+    // spelling it has for "none". Such a row is still the session's own, so it
+    // is read by its session id, and the write binds the session to no task.
+    let names_delivery = !task_id.is_empty();
+    let stored = if names_delivery {
+        state.ledger.session_row_for_task(task_id)?
+    } else {
+        state.ledger.get_session_row(session_id)?
+    };
     if let Some(row) = &stored {
         let watermark = (row.generation.max(0) as u64, row.seq.max(0) as u64);
         if (generation, seq) <= watermark {
@@ -304,6 +313,14 @@ pub fn write(
                 return Ok(ProjectionOutcome::skipped());
             };
             if !adds_only_outcome(&stored_projection, &projection) {
+                // A beat that observed nothing new still moves `last_seen`: the
+                // column is what a reader judges this row's freshness by, and a
+                // beat is evidence the session is there even when its projection
+                // did not change. The tuple, `updated_at`, and the event stream
+                // are all left exactly as they were.
+                state
+                    .ledger
+                    .touch_session_last_seen(&row.session_id, Utc::now().timestamp())?;
                 return Ok(ProjectionOutcome::skipped());
             }
             let mut write = row.clone();
@@ -317,7 +334,9 @@ pub fn write(
             )? {
                 return Ok(ProjectionOutcome::skipped());
             }
-            state.note_session_write(task_id);
+            if names_delivery {
+                state.note_session_write(task_id);
+            }
             emit_session_state(
                 state,
                 &write,
@@ -332,14 +351,18 @@ pub fn write(
             });
         }
     }
-    let revival = stored.as_ref().is_some_and(|row| {
-        projection_from_write(row).lifecycle == Lifecycle::Exited
-            && row.generation.max(0) as u64 == generation
-            && matches!(
-                projection.lifecycle,
-                Lifecycle::Working | Lifecycle::Created
-            )
-    });
+    // The fault below is about a delivery's task: a client reporting a heartbeat
+    // for a task whose completion already landed. A session between deliveries
+    // has no task to contradict, so it is never asked.
+    let revival = names_delivery
+        && stored.as_ref().is_some_and(|row| {
+            projection_from_write(row).lifecycle == Lifecycle::Exited
+                && row.generation.max(0) as u64 == generation
+                && matches!(
+                    projection.lifecycle,
+                    Lifecycle::Working | Lifecycle::Created
+                )
+        });
     let landing = lifecycle_name(projection.lifecycle);
     let session_id = if session_id.is_empty() {
         stored
@@ -351,7 +374,7 @@ pub fn write(
     };
     let write = SessionWrite {
         session_id,
-        task_id: Some(task_id.to_string()),
+        task_id: names_delivery.then(|| task_id.to_string()),
         role: role.to_string(),
         generation: generation as i64,
         seq: seq as i64,
@@ -369,7 +392,9 @@ pub fn write(
     if !applied {
         return Ok(ProjectionOutcome::skipped());
     }
-    state.note_session_write(task_id);
+    if names_delivery {
+        state.note_session_write(task_id);
+    }
     if revival {
         let open = state.ledger.faults_query(FaultQuery {
             task_id: Some(task_id.to_string()),

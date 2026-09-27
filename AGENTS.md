@@ -14,12 +14,19 @@ claim that the code does it today.
 |---|---|---|
 | zero | v1 defect fixes on paths v2 keeps | done |
 | one | structure, no behavior change: `onlyne-wire`, runtime-directory sockets and registration files, crate merges and splits, forwarding-layer removal, this file | in progress |
-| two | behavior: session table rekey and scopes, drive/placement split, delivery rendering, settlement rules, declarative routes, spec edit ops, event hooks | not started |
+| two | behavior: session table rekey and scopes, drive/placement split, delivery rendering, settlement rules, declarative routes, spec edit ops, event hooks | in progress |
 | three | interfaces: `view` reducer, TUI, `onlyne-web` | not started |
 
 Landed in phase one so far: the `onlyne-wire` crate (frame codec plus the runtime
 directory and registration files), sockets moved out of the workspace tree, the crate
 consolidation in §3, and a scenario suite under `crates/onlyne-testkit/tests/`.
+
+Landed in phase two so far: slice one's session rekey — both session tables are keyed by
+`session_id` with bindings in `session_tasks`, `HandshakeArgs.live_sessions` replaced
+`live_tasks`, `Outcome::Blocked` exists — and the client half of it: `[client.session]`
+scope and `idle_close`, session scopes (`oneshot`/`task`/`role`) enforced on the client,
+suspend and resume behind the runtime's `resume` capability, and a held session surviving a
+server-link loss by re-reporting itself at the next hello.
 
 When you finish a phase-one or phase-two item, update this table and the section it
 touches in the same change.
@@ -66,7 +73,7 @@ One word, one meaning, in prose and in code:
 | placement | where the runtime process is displayed: `herdr`, `orca`, `zellij`, `headless`, `external` |
 | plugin | an extension inside a runtime that speaks the adapter protocol to the client |
 | binding | the correspondence between one delivery and one session |
-| task family | a chain of handoffs keyed by `causality.family_root` |
+| task family | a chain of handoffs keyed by `causality.family` |
 
 `host` means only the adapter protocol's host side (client or server). The terminal host
 is called placement, never host.

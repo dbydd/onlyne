@@ -87,7 +87,9 @@ async fn staged_control(state: &RunState, task_id: &str, control: ControlOp) -> 
         Some(onlyne_proto::Causality::root(task_id.to_string())),
     )
     .expect("task envelope");
-    let session = dispatch::dispatch(&state.dispatch, &task).expect("dispatch task");
+    let session = dispatch::dispatch(&state.dispatch, &task)
+        .expect("dispatch task")
+        .expect("the role has room for it");
     state.dispatch.attach_msg_id(task_id, "msg-task");
     let _ = dispatch::on_ready(
         &state.dispatch,

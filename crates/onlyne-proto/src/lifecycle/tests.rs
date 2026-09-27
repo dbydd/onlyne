@@ -162,6 +162,8 @@ fn events_at(v: Version) -> Vec<LifecycleEvent> {
         LifecycleEvent::ResourceAttach { v },
         LifecycleEvent::ResourceCloseRequested { v },
         LifecycleEvent::ResourceClosed { v },
+        LifecycleEvent::Suspend { v },
+        LifecycleEvent::Resume { v },
         LifecycleEvent::AgentGone { v },
         LifecycleEvent::Cancel { v },
         LifecycleEvent::Fail { v },
@@ -814,6 +816,176 @@ fn duplicate_event_id_is_idempotent_noop() {
     );
     assert_eq!(again, Verdict::Ignored(IgnoredReason::NoOp));
     assert_eq!(obs.agent, AgentPhase::Running);
+}
+
+#[test]
+fn suspend_idle_attached_closes_resource_and_keeps_generation_live() {
+    let obs = Observation::build(
+        Version::new(1, 3),
+        true,
+        1,
+        3,
+        0,
+        AgentPhase::Idle,
+        DeliveryPhase::NoIntent,
+        ResourcePhase::Attached,
+        RecoveryPhase::NoRecovery,
+    );
+    let suspended = apply(
+        &obs,
+        &LifecycleEvent::Suspend {
+            v: Version::new(1, 4),
+        },
+    )
+    .expect_applied("suspend idle attached");
+    assert_eq!(suspended.resource, ResourcePhase::Closed);
+    assert!(suspended.generation_live);
+    assert_eq!(suspended.agent, AgentPhase::Idle);
+    assert_eq!(public_of(&suspended, TaskState::Pending), Lifecycle::Idle);
+    assert!(is_legal(&suspended), "{suspended:?}");
+}
+
+#[test]
+fn suspend_rejects_detached_and_running_and_is_noop_when_closed() {
+    let detached = Observation::build(
+        Version::new(1, 3),
+        true,
+        1,
+        3,
+        0,
+        AgentPhase::Idle,
+        DeliveryPhase::NoIntent,
+        ResourcePhase::Detached,
+        RecoveryPhase::NoRecovery,
+    );
+    assert_eq!(
+        apply(
+            &detached,
+            &LifecycleEvent::Suspend {
+                v: Version::new(1, 4),
+            },
+        ),
+        Verdict::Rejected(RejectReason::UndefinedTransition)
+    );
+    let running = live_working();
+    assert_eq!(
+        apply(
+            &running,
+            &LifecycleEvent::Suspend {
+                v: Version::new(1, 4),
+            },
+        ),
+        Verdict::Rejected(RejectReason::UndefinedTransition)
+    );
+    let closed = Observation::build(
+        Version::new(1, 3),
+        true,
+        1,
+        3,
+        0,
+        AgentPhase::Idle,
+        DeliveryPhase::NoIntent,
+        ResourcePhase::Closed,
+        RecoveryPhase::NoRecovery,
+    );
+    assert_eq!(
+        apply(
+            &closed,
+            &LifecycleEvent::Suspend {
+                v: Version::new(1, 4),
+            },
+        ),
+        Verdict::Ignored(IgnoredReason::NoOp)
+    );
+}
+
+#[test]
+fn resume_attaches_closed_resource_and_preserves_idle_projection() {
+    let closed = Observation::build(
+        Version::new(1, 3),
+        true,
+        1,
+        3,
+        0,
+        AgentPhase::Idle,
+        DeliveryPhase::NoIntent,
+        ResourcePhase::Closed,
+        RecoveryPhase::NoRecovery,
+    );
+    let resumed = apply(
+        &closed,
+        &LifecycleEvent::Resume {
+            v: Version::new(1, 4),
+        },
+    )
+    .expect_applied("resume closed");
+    assert_eq!(resumed.resource, ResourcePhase::Attached);
+    assert_eq!(resumed.agent, AgentPhase::Idle);
+    assert!(resumed.generation_live);
+    assert_eq!(public_of(&resumed, TaskState::Pending), Lifecycle::Idle);
+    assert!(is_legal(&resumed), "{resumed:?}");
+}
+
+#[test]
+fn resume_attached_is_noop_and_detached_or_closing_is_rejected() {
+    let attached = Observation::build(
+        Version::new(1, 3),
+        true,
+        1,
+        3,
+        0,
+        AgentPhase::Idle,
+        DeliveryPhase::NoIntent,
+        ResourcePhase::Attached,
+        RecoveryPhase::NoRecovery,
+    );
+    assert_eq!(
+        apply(
+            &attached,
+            &LifecycleEvent::Resume {
+                v: Version::new(1, 4),
+            },
+        ),
+        Verdict::Ignored(IgnoredReason::NoOp)
+    );
+    for resource in [ResourcePhase::Detached, ResourcePhase::Closing] {
+        let obs = Observation::build(
+            Version::new(1, 3),
+            true,
+            1,
+            3,
+            0,
+            AgentPhase::Idle,
+            DeliveryPhase::NoIntent,
+            resource,
+            RecoveryPhase::NoRecovery,
+        );
+        assert_eq!(
+            apply(
+                &obs,
+                &LifecycleEvent::Resume {
+                    v: Version::new(1, 4),
+                },
+            ),
+            Verdict::Rejected(RejectReason::UndefinedTransition)
+        );
+    }
+}
+
+#[test]
+fn closed_resource_with_live_generation_is_legal() {
+    let obs = Observation::build(
+        Version::new(1, 3),
+        true,
+        1,
+        3,
+        0,
+        AgentPhase::Idle,
+        DeliveryPhase::NoIntent,
+        ResourcePhase::Closed,
+        RecoveryPhase::NoRecovery,
+    );
+    assert!(is_legal(&obs), "{obs:?}");
 }
 
 #[test]

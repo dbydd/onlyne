@@ -28,7 +28,9 @@ fn assign_ack_rejection_queues_a_rejected_delivery_ack() {
     );
     let env = sample_envelope("planner", "reject me");
     let task_id = env.task_id().unwrap().to_string();
-    dispatch(&state, &env).unwrap();
+    dispatch(&state, &env)
+        .unwrap()
+        .expect("the role has room for it");
     state.attach_msg_id(&task_id, "msg-reject");
 
     assert!(state.push_assign_ack(AssignAckArgs {
@@ -74,7 +76,9 @@ fn cancelled_settle_closes_with_the_real_reason() {
 
     let env = sample_envelope("planner", "task 1");
     let task_id = env.task_id().unwrap().to_string();
-    dispatch(&state, &env).unwrap();
+    dispatch(&state, &env)
+        .unwrap()
+        .expect("the role has room for it");
     on_recycled(
         &state,
         &task_id,
@@ -105,7 +109,9 @@ fn detached_tuple_sees_no_close_call() {
 
     let env = sample_envelope("planner", "task 1");
     let task_id = env.task_id().unwrap().to_string();
-    dispatch(&state, &env).unwrap();
+    dispatch(&state, &env)
+        .unwrap()
+        .expect("the role has room for it");
 
     // Rewind the stored tuple to Detached at a higher watermark, which is the
     // state a probe-confirmed loss leaves behind.

@@ -329,7 +329,7 @@ the shipped client.
 - **Report sequence base.** The plugin's own `report` sequence starts at 1000, not 1. The
   client stamps its own dispatch events (`created`, resource attach, `ready`) into the
   same `(generation, seq)` watermark, and the reducer silently drops any report at or
-  below it (`crates/onlyne-session/src/reconcile/`). A plugin sequence starting at 1
+  below it (`crates/onlyne-client/src/reconcile/`). A plugin sequence starting at 1
   would lose its first observations. **One plugin, one counter:** every task the session
   holds beats off the same sequence, because the client takes `row.seq + 1` for its own
   event on a row between two of that task's beats, and a counter that advanced one per
@@ -368,7 +368,7 @@ the shipped client.
 - **`frame_too_large` / `bad_frame`**: an oversize body is refused before any byte is
   written, and a framing fault closes the connection and reconnects. Framing cannot
   resynchronise after a corrupt body, which is the same conclusion
-  `crates/onlyne-frame/src/lib.rs` reaches.
+  `crates/onlyne-wire/src/frame.rs` reaches.
 - **Deliveries are idempotent; tasks are not.** The dedup key is the envelope id. The
   same delivery twice gets one injection and an ack with `reason: "duplicate"`, and a
   new envelope for a task that is already running reaches that session as another
@@ -378,7 +378,7 @@ the shipped client.
 
 - **Pane binding (Orca tabs).** Inside an Orca pane the plugin reports the pane it runs in on every
   heartbeat, as `observed.host.orca.pane_key` in the report's `Observation`
-  (`crates/onlyne-session/src/host.rs`), beside `tab_id` / `leaf_id` and the terminal `handle` when
+  (`crates/onlyne-client/src/host.rs`), beside `tab_id` / `leaf_id` and the terminal `handle` when
   the environment names them. The binding is *inherited*, never guessed: an Orca pane exports
   `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_LEAF_ID` / `ORCA_TERMINAL_HANDLE` into the command it
   starts (measured 2026-09-11, Orca 1.4.198), and the client passes its own environment on to the
@@ -668,16 +668,16 @@ relay_required = ["writer"]        # these roles must have received a handoff
 
 下面每项都是对 `PROTOCOL.md` 的有意解读，或是在已发布客户端上测得的行为。
 
-- **报告序列基线。** 插件自身的 `report` 序列从 1000 开始，而非 1。客户端将自己的调度事件（`created`、资源附加、`ready`）记入同一个 `(generation, seq)` 水位，归约器会静默丢弃任何小于或等于该水位的报告（`crates/onlyne-session/src/reconcile/`）。从 1 开始的插件序列会丢失最初几条观测。**一个插件只有一个计数器：** 会话持有的每个任务都沿用同一条序列发送心跳，因为客户端会在该任务两次心跳之间，为它自己写入该行的事件取 `row.seq + 1`；若每个任务每轮只推进一次，心跳恰好会撞在那个数上。但闸门是按任务行判断的，所以每条任务记录也会记下自己最后一次上报的 `seq`（`task.lastSeq`，在 `/onlyne status` 中以 `taskSeqs` 呈现），新的分配会被抬到它之上：`A@1001、B@1002、A@1003` 才是可用的形状，任何任务都不会被交回自己该行已经接受过的 seq。心跳轮次也不会重叠：一轮正在写时到来的心跳请求会并入这一轮，换来多做一遍，而不是同一刻的第二次快照。版本控制的其他部分均遵循规范。
+- **报告序列基线。** 插件自身的 `report` 序列从 1000 开始，而非 1。客户端将自己的调度事件（`created`、资源附加、`ready`）记入同一个 `(generation, seq)` 水位，归约器会静默丢弃任何小于或等于该水位的报告（`crates/onlyne-client/src/reconcile/`）。从 1 开始的插件序列会丢失最初几条观测。**一个插件只有一个计数器：** 会话持有的每个任务都沿用同一条序列发送心跳，因为客户端会在该任务两次心跳之间，为它自己写入该行的事件取 `row.seq + 1`；若每个任务每轮只推进一次，心跳恰好会撞在那个数上。但闸门是按任务行判断的，所以每条任务记录也会记下自己最后一次上报的 `seq`（`task.lastSeq`，在 `/onlyne status` 中以 `taskSeqs` 呈现），新的分配会被抬到它之上：`A@1001、B@1002、A@1003` 才是可用的形状，任何任务都不会被交回自己该行已经接受过的 seq。心跳轮次也不会重叠：一轮正在写时到来的心跳请求会并入这一轮，换来多做一遍，而不是同一刻的第二次快照。版本控制的其他部分均遵循规范。
 - **`observed` 是一个完整的 `Observation`。** `report.heartbeat` 携带状态元组（`version`、`generation_live`、`isolate_after`、`terminate_after`、`mismatch_count`、`agent`、`delivery`、`resource`、`recovery`），而不是 `{"state": "running"}` 简写：主机对其进行反序列化，覆盖客户端拥有的六个键，并仅应用 `is_legal` 接受的元组。此插件拥有 `agent` 维度（轮次钩子）、`resource` 声明——其进程在记录了挂载操作的窗格中处于活动状态——以及 `host` 绑定。它没有 `delivery`、`recovery`、`generation_live`、`isolate_after`、`terminate_after` 或 `mismatch_count` 的观测依据：在应用元组之前，客户端会依据自己的意图队列、归约器历史和角色配置重写全部六项，因此此插件在这些位置发送的内容不会被读取。任务结果和公开视图均不通过元组传输。
 - **`ready` 每次连接报告一次。** 主机自身的交接路径（`crates/onlyne-client/src/session/dispatch/delivery.rs::hand_session`）已会在客户端为挂载插件暂存会话时报告 `ready`，因此主机会将插件的第二次报告视为空操作。插件仍会发送：在任何工作存在之前完成挂载的插件正是就绪屏障所涵盖的情况，而且该报告只占用一个帧。
 - **从不发送 `cluster_ref`。** 此插件代表本地角色，不代表聚合角色；出于相同原因，Rust 一侧会将该字段设为 `skip_serializing_if`，使其缺省。
 - **使用心跳响应 `probe`**，遵循 `PROTOCOL.md` 中“`probe` 声明新的资源观测”的说明。
 - **仅当 `config_get` 以 `stdin:` 开头时，才将其读取为任务正文**，这是 `PROTOCOL.md` 为缺少 `inject` 的插件记录的重载。任何其他键都会记录到日志并被忽略，不会被误读。
-- **`frame_too_large` / `bad_frame`**：正文过大时，会在写入任何字节之前拒绝；分帧错误会关闭连接并重新连接。正文损坏后，分帧无法重新同步，这也与 `crates/onlyne-frame/src/lib.rs` 得出的结论相同。
+- **`frame_too_large` / `bad_frame`**：正文过大时，会在写入任何字节之前拒绝；分帧错误会关闭连接并重新连接。正文损坏后，分帧无法重新同步，这也与 `crates/onlyne-wire/src/frame.rs` 得出的结论相同。
 - **投递具备幂等性；任务不具备。** 去重键是信封 id。同一投递出现两次只会产生一次注入，以及带有 `reason: "duplicate"` 的确认；为已在运行的任务创建的新信封，会作为另一条消息到达该会话——工作记录保留其计数器和其中继账本，仅其“自该指令以来的轮次”看门狗重新启动。客户端为每个信封生成新的 uuid，因此 `duplicate` 仅会在真正重新提供任务时触发。
 
-- **窗格绑定（Orca 标签页）。** 在 Orca 窗格内，插件会在每次心跳中通过报告 `Observation` 里的 `observed.host.orca.pane_key` 报告其运行所在的窗格（`crates/onlyne-session/src/host.rs`），并在环境变量指明时一并报告 `tab_id` / `leaf_id` 和终端 `handle`。绑定是从*内部*继承的，从不猜测：Orca 窗格会将其 `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_LEAF_ID` / `ORCA_TERMINAL_HANDLE` 导出到所启动的命令中（测于 2026-09-11，Orca 1.4.198），客户端会将自己的环境传递给会话命令。因此，窗格内的进程是唯一能够从内部说明 onlyne 会话位于哪个窗格的组件；pi 下游的任何内容都无法恢复此信息。在窗格之外，`host` 键会完全缺失：普通终端中的 pi 会报告不含 host 字段的观测，不会生成空窗格字段。
+- **窗格绑定（Orca 标签页）。** 在 Orca 窗格内，插件会在每次心跳中通过报告 `Observation` 里的 `observed.host.orca.pane_key` 报告其运行所在的窗格（`crates/onlyne-client/src/host.rs`），并在环境变量指明时一并报告 `tab_id` / `leaf_id` 和终端 `handle`。绑定是从*内部*继承的，从不猜测：Orca 窗格会将其 `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_LEAF_ID` / `ORCA_TERMINAL_HANDLE` 导出到所启动的命令中（测于 2026-09-11，Orca 1.4.198），客户端会将自己的环境传递给会话命令。因此，窗格内的进程是唯一能够从内部说明 onlyne 会话位于哪个窗格的组件；pi 下游的任何内容都无法恢复此信息。在窗格之外，`host` 键会完全缺失：普通终端中的 pi 会报告不含 host 字段的观测，不会生成空窗格字段。
 - **不会为此向工作区写入任何内容。** 已不再有绑定声明文件：绑定信息随客户端已经镜像的观测一同传递。不存在声明文件，因为没有组件创建它，工作区的缓存目录也不会被触及。这使 `integrations/orca-plugin` 无需读取任何路径即可将标签页轴限定为真实会话，也让监管器仍能说明一个*已结束*会话的运行位置：`report.complete` 会继续携带 `host`。
 
 ## 7. 配置参考

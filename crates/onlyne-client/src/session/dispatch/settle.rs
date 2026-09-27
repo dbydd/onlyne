@@ -123,7 +123,7 @@ pub async fn on_out(
             return Ok(());
         }
     }
-    let settled = {
+    let (settled, session_id) = {
         let mut inner = state.inner.lock();
         if take_verdict(&inner, task_id, outcome)? {
             inner
@@ -131,11 +131,15 @@ pub async fn on_out(
                 .put_out_head(task_id, head.as_deref().unwrap_or(""))?;
             // The handle and the chain this answer travels on belong to the session
             // serving the task, not to a read-only one that came back for it.
-            let slot =
-                slot_key_serving_task(&inner, task_id).and_then(|key| inner.sessions.get_mut(&key));
+            let key = slot_key_serving_task(&inner, task_id);
+            let slot = key.as_deref().and_then(|key| inner.sessions.get_mut(key));
             let origin = slot.as_ref().and_then(|slot| slot.origin.clone());
             let causality = slot.as_ref().map(|slot| slot.causality.clone());
             let msg_id = slot.and_then(|slot| slot.msg_id.take());
+            // The publish that follows names the session, not the delivery: a
+            // scoped session outlives this delivery and its row has to read as a
+            // live session serving nothing rather than as a session that exited.
+            let session_id = key.unwrap_or_else(|| task_id.to_string());
             if let Some(msg_id) = msg_id {
                 store_ack(
                     &inner,
@@ -154,18 +158,21 @@ pub async fn on_out(
             // completion, so it leaves the buffer here and travels beside the report.
             let held = inner.held_handoffs.remove(task_id);
 
-            Some((
-                completion_envelope(
-                    &inner.role,
-                    origin,
-                    task_id,
-                    head.as_deref(),
-                    causality.as_ref(),
-                ),
-                inner.role.clone(),
-                causality,
-                held,
-            ))
+            (
+                Some((
+                    completion_envelope(
+                        &inner.role,
+                        origin,
+                        task_id,
+                        head.as_deref(),
+                        causality.as_ref(),
+                    ),
+                    inner.role.clone(),
+                    causality,
+                    held,
+                )),
+                session_id,
+            )
         } else {
             tracing::warn!(
                 task = %task_id,
@@ -175,15 +182,17 @@ pub async fn on_out(
             // The replayed session still owns the task binding until this
             // release, so the standing verdict travels with the client's own
             // post-release tuple and capacity returns to the role.
+            let session_id =
+                slot_key_serving_task(&inner, task_id).unwrap_or_else(|| task_id.to_string());
             release_locked(&mut inner, task_id, None)?;
-            None
+            (None, session_id)
         }
     };
-    // The refused branch carries the release result out of the lock. The task
-    // account remains the first verdict. The client row is published after the
-    // replay session has returned its binding and completed its retirement.
+    // The refused branch carries no receipt: the task account remains the first
+    // verdict, and the client's own row is published now that the replay session
+    // has returned its binding and completed its retirement.
     let Some((receipt, role, causality, held)) = settled else {
-        return sync_session(state, task_id).await;
+        return sync_session(state, &session_id).await;
     };
     // Every relay is answered before the verdict travels, and none of them
     // moves it: a refused handoff is a record on the settled task, not a
@@ -220,7 +229,7 @@ pub async fn on_out(
     if let Some(envelope) = receipt {
         transport_envelope(state, &envelope).await?;
     }
-    sync_session(state, task_id).await
+    sync_session(state, &session_id).await
 }
 
 /// Drain one session's completion and file its task's verdict, answered with

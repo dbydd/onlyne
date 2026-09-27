@@ -15,12 +15,12 @@ use onlyne_config::Spec;
 use onlyne_net::{MsgClass, acl_allows};
 use onlyne_proto::{
     AckArgs, Body, Causality, ControlOp, Delivery, Envelope, ErrorCode, Event, LedgerQuery,
-    LedgerState, LedgerStateEvent, MsgKind, OP_ID_CONFLICT_MESSAGE, Outcome, PROTOCOL_VERSION,
-    Presence, Principal, PullArgs, PullReply, Receipt, ResBody, RolePresence,
+    LedgerState, LedgerStateEvent, LiveSession, MsgKind, OP_ID_CONFLICT_MESSAGE, Outcome,
+    PROTOCOL_VERSION, Presence, Principal, PullArgs, PullReply, Receipt, ResBody, RolePresence,
 };
 use onlyne_store::{Append, LedgerRow};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// How often [`spawn_expiry_sweep`] settles queued rows past their time budget.
 ///
@@ -34,6 +34,15 @@ pub const SWEEP_INTERVAL_MS: u64 = 1000;
 /// A note is absent because `pull` never returns one and the sender's
 /// `ttl_ms` deadline owns its lifetime.
 const PULLABLE_KINDS: [MsgKind; 3] = [MsgKind::Task, MsgKind::Completion, MsgKind::Control];
+
+/// How many of a role's queued rows one `hello` reads for the deliveries it
+/// declares live.
+///
+/// Adoption scans the queue rather than asking per claimed delivery because one
+/// statement answers the whole claim, and the bound matches the one
+/// `ServerLedger::in_flight_for` puts on the other half. A role whose queue is
+/// deeper than this keeps the rest for its next pull, exactly as it does today.
+const CLAIM_SCAN_LIMIT: u32 = 500;
 
 /// the `[[route]]` key set, appended to every route miss so the answer states
 /// the row shape the matcher wanted beside the row it could not find.
@@ -726,23 +735,78 @@ pub const REQUEUE_TTL_REASON: &str = "requeue_ttl";
 /// Reason stored when a released row belongs to a task that already settled.
 pub const RELEASE_SETTLED_REASON: &str = "task_settled";
 
-/// Re-queue a role's in-flight rows and drop the tickets that hold them.
+/// The sessions one `hello` declares live, keyed by the delivery each holds.
 ///
-/// `claimed` is the set of task ids a successor hello declared as live panes.
-/// An in-flight row whose task is in that set stays `in_flight`, and its
-/// delivery ticket is rebound to the current link generation: a re-delivery
-/// would open a second session for the same task. Every other in-flight row
-/// is checked against the spec TTL and requeue budget, then moved by
-/// `ServerLedger::requeue_one`, which publishes its `ledger_state` event in
-/// the same transaction. A row that settled between the read and the move is
-/// left alone. The ticket drop is what makes a requeued row claimable: `pull`
-/// passes by a row whose ticket is still armed, so a row left holding a dead
-/// link's ticket is unreachable even though its state says it is in flight.
-pub fn requeue_role_rows(
-    state: &State,
-    role: &str,
-    claimed: &HashSet<String>,
-) -> anyhow::Result<usize> {
+/// `live_sessions` is the client's own statement about its memory: a session id
+/// beside the delivery that session is bound to. The server reads a named
+/// delivery as work that is still owed and still running, which is why adoption
+/// holds its row instead of requeueing it.
+///
+/// One entry claims nothing: a session on no delivery — `task_id` absent, or
+/// empty on the wire that spells it that way — has no unacknowledged row to
+/// hold, and it pulls its next delivery normally.
+/// `suspended` is not part of the index — a suspended session still names the
+/// delivery it holds, and the work it owes is still owed, so its row is held
+/// exactly as a running session's row is. The session id that goes with the
+/// delivery is what the held row's ticket carries, and that is what the
+/// session's later release matches.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Claim {
+    /// Delivery (task id) → the session that holds it, first claim winning.
+    held: HashMap<String, String>,
+}
+
+impl Claim {
+    /// Index one `hello`'s live sessions by the delivery each names.
+    pub fn from_sessions<'a>(sessions: impl IntoIterator<Item = &'a LiveSession>) -> Self {
+        let mut held = HashMap::new();
+        for session in sessions {
+            // An empty id is how a client that has no `Option` spells "no
+            // delivery" (the same spelling `Report::Heartbeat` uses), so it
+            // names nothing here either.
+            let delivery = session
+                .task_id
+                .as_deref()
+                .filter(|task_id| !task_id.is_empty());
+            if let Some(task_id) = delivery {
+                held.entry(task_id.to_string())
+                    .or_insert_with(|| session.session_id.clone());
+            }
+        }
+        Self { held }
+    }
+
+    /// The session holding one delivery, when this claim names it.
+    pub fn holder(&self, task_id: &str) -> Option<&str> {
+        self.held.get(task_id).map(String::as_str)
+    }
+
+    /// The session holding the delivery one row is about, when this claim
+    /// names it.
+    fn holder_of(&self, row: &LedgerRow) -> Option<&str> {
+        row.task.as_deref().and_then(|task| self.holder(task))
+    }
+}
+
+/// Hold a role's claimed deliveries and requeue the rest of its unacknowledged
+/// rows, dropping the tickets that named no live session.
+///
+/// `claim` is what a successor `hello` declared live. A row whose delivery is
+/// in that claim is held: it stays `in_flight`, and one the departed link's
+/// teardown already put back on the queue returns there, because the session
+/// that holds it is still running it and a pull would otherwise hand the same
+/// task to a second session. Its delivery ticket is armed against the current
+/// link generation and the claiming session, so this link's teardown still
+/// requeues the row and that session's later death still releases it.
+///
+/// Every other unacknowledged row is checked against the spec TTL and requeue
+/// budget, then moved by `ServerLedger::requeue_one`, which publishes its
+/// `ledger_state` event in the same transaction. A row that settled between the
+/// read and the move is left alone. The ticket drop is what makes a requeued
+/// row claimable: `pull` passes by a row whose ticket is still armed, so a row
+/// left holding a dead link's ticket is unreachable even though its state says
+/// it is in flight.
+pub fn requeue_role_rows(state: &State, role: &str, claim: &Claim) -> anyhow::Result<usize> {
     let link_generation = state
         .roles
         .read()
@@ -752,18 +816,47 @@ pub fn requeue_role_rows(
     let mut requeued = 0usize;
     let mut keep = HashSet::new();
     for row in state.ledger.in_flight_for(role)? {
-        if row
-            .task
-            .as_deref()
-            .is_some_and(|task| claimed.contains(task))
-        {
-            state.rehang_delivery(&row.msg_id, link_generation);
+        if let Some(holder) = claim.holder_of(&row) {
+            state.rehang_delivery(&row.msg_id, link_generation, holder);
             keep.insert(row.msg_id.clone());
             continue;
         }
         if apply_automatic_requeue(state, &row)? {
             requeued += 1;
         }
+    }
+    for row in state.ledger.queued_for(role, CLAIM_SCAN_LIMIT)? {
+        let Some(holder) = claim.holder_of(&row) else {
+            continue;
+        };
+        // A note carries no session and is never pulled, so nothing can hold it.
+        if !PULLABLE_KINDS.contains(&row.kind) {
+            continue;
+        }
+        let moved = match state.ledger.mark_in_flight(&row.msg_id) {
+            Ok(moved) => moved,
+            // The row moved between this read and this write — an ack that
+            // landed first, most often — so it is no longer unacknowledged and
+            // this claim has nothing left to hold.
+            Err(onlyne_store::StoreError::InvalidState { .. }) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if !moved {
+            continue;
+        }
+        events::publish(
+            state,
+            Event::LedgerState(ledger_event(&row, LedgerState::InFlight, None, None)),
+        )?;
+        state.record_delivery(DeliveryTicket {
+            msg_id: row.msg_id.clone(),
+            role: role.to_string(),
+            session_id: Some(holder.to_string()),
+            generation: link_generation,
+            seq: state.event_head().max(0) as u64,
+            delivered_at: Utc::now(),
+        });
+        keep.insert(row.msg_id.clone());
     }
     state.keep_deliveries(role, &keep);
     Ok(requeued)
@@ -899,7 +992,7 @@ fn row_age_secs(enqueued_at: &str, now: DateTime<Utc>) -> Option<u64> {
 /// alone. The link half then unregisters the role and emits
 /// `Event::RolePresence { state: Presence::Offline }`.
 pub fn disconnect(state: &State, role: &str) -> anyhow::Result<usize> {
-    let requeued = requeue_role_rows(state, role, &HashSet::new())?;
+    let requeued = requeue_role_rows(state, role, &Claim::default())?;
     state.unregister_role(role);
     state.emit(Event::RolePresence(RolePresence {
         role: role.to_string(),

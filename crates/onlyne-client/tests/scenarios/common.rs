@@ -232,7 +232,9 @@ pub(super) async fn spawn_ready(
 ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
     let env = sample_envelope("planner", text);
     let task_id = env.task_id().unwrap().to_string();
-    let session = dispatch(state, &env).unwrap();
+    let session = dispatch(state, &env)
+        .unwrap()
+        .expect("the role has room for it");
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (io_client, mut client_inbound) =
         AdapterIo::new_with_inbound(client_io, Duration::from_secs(2), Duration::from_secs(2));

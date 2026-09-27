@@ -1,8 +1,8 @@
 use super::config::{ClientInit, FLUSH_PAUSE_MS, READINESS_POLL_MS, RunState, reconnect_backoff};
 use super::run::pull_ack_loop;
 use super::sessions::{
-    refresh_role_slice, scan_control_settles, scan_reclaimed_resources, scan_reconnect_grace,
-    scan_stalls,
+    refresh_role_slice, scan_control_settles, scan_idle_sessions, scan_reclaimed_resources,
+    scan_reconnect_grace, scan_stalls,
 };
 use crate::runtime::intent::op_for_intent;
 use crate::session::dispatch::{self, ClientLink};
@@ -100,6 +100,9 @@ pub(super) async fn watch_readiness(link: ClientLink, state: RunState) -> Result
         // step is the word of a command whose session is gone while its task is
         // still open, and no report is coming to answer it.
         scan_control_settles(&state).await;
+        // Last, behind every sweep that ends a session: a slot is this sweep's
+        // to release only while the scopes that keep it still hold it.
+        scan_idle_sessions(&state).await;
         match link.readiness() {
             ConnReadiness::Ready => {
                 if !ready {
@@ -119,7 +122,11 @@ pub(super) async fn watch_readiness(link: ClientLink, state: RunState) -> Result
                     ready = false;
                     state.accept_new.store(false, Ordering::SeqCst);
                     state.dispatch.set_link_up(false);
-                    tracing::warn!("server link lost; sessions settle and intents keep queuing");
+                    // Nothing about the agents changed: the sessions this client
+                    // holds keep running, and what waits is the outbound queue and
+                    // the intake gate. Only the plugin connection's own loss
+                    // settles work (`scan_reconnect_grace`).
+                    tracing::warn!("server link lost; sessions keep their work and intents queue");
                 }
             }
             ConnReadiness::Closed => return Ok(()),
@@ -156,10 +163,14 @@ pub(super) fn transient(error: &onlyne_net::NetError) -> bool {
 /// The flusher task: push the durable intent queue at the server.
 pub(super) async fn flush_loop(link: ClientLink, state: RunState) -> Result<()> {
     loop {
-        // The link redials behind the runtime's back, and a frame sent into that
-        // fresh connection is refused until its `hello` lands, so the queue waits
-        // for a ready link rather than spending a round trip on the refusal.
-        if link.readiness() == ConnReadiness::Ready {
+        // The net layer redials behind the runloop's back, and a fresh connection
+        // reads `Ready` before `authenticate` has replayed the routed `hello` on
+        // it, so readiness alone would spend a round trip on a refusal that says
+        // nothing about the rows. `link_up` is the runloop's own record that the
+        // current connection carries this role's hello — `link_loop` and the
+        // readiness watcher below are its two authors — and the queue waits for
+        // that rather than for the socket.
+        if state.dispatch.link_up() {
             flush_intents(&link, &state).await;
         }
         sleep(Duration::from_millis(FLUSH_PAUSE_MS)).await;
@@ -223,6 +234,17 @@ pub(super) async fn flush_intents(link: &ClientLink, state: &RunState) {
                     }
                     Ok(crate::runtime::intent::IntentResult::Accepted(_)) => {
                         note_intent_receipt(state, &row);
+                    }
+                    Ok(crate::runtime::intent::IntentResult::NotAuthenticated) => {
+                        // The connection has not read this role's `hello` yet, so
+                        // every row left in the batch answers the same way. The row
+                        // keeps its deadline, and the flush the readiness watcher
+                        // runs behind the replayed hello sends the batch.
+                        tracing::debug!(
+                            op_id = %row.op_id,
+                            "the link carries no routed hello yet; the queue waits for it"
+                        );
+                        return;
                     }
                     Ok(_) => {}
                     Err(error) => {

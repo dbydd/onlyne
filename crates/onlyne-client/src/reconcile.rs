@@ -20,7 +20,7 @@ pub use fault::{
 pub use feed::{
     feed_agent_gone, feed_cancel, feed_created, feed_delivered, feed_dispatched, feed_fail,
     feed_intent_receipt, feed_mismatch, feed_ready, feed_reconcile_ok, feed_resource_attached,
-    feed_resource_closed, feed_turn_ended, feed_turn_started, settle,
+    feed_resource_closed, feed_resumed, feed_suspended, feed_turn_ended, feed_turn_started, settle,
 };
 pub use ledger::MemoryLedger;
 pub use record::{FaultOutcome, stored_observation, to_versioned};

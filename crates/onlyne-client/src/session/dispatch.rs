@@ -4,7 +4,7 @@
 use crate::backend::{SessionBackend, SessionRef, SpawnSpec};
 use crate::reconcile::{
     Bridge, apply_persist, feed_agent_gone, feed_created, feed_dispatched, feed_intent_receipt,
-    feed_ready, feed_resource_closed, settle, stored_observation,
+    feed_ready, feed_resource_closed, feed_resumed, feed_suspended, settle, stored_observation,
 };
 use crate::runtime::intent::stamp_op_id;
 use crate::runtime::runloop::ClientInit;
@@ -37,10 +37,12 @@ use tokio::sync::broadcast;
 
 mod delivery;
 mod env;
+mod idle;
 mod outbound;
 mod projection;
 mod reports;
 mod retire;
+mod scope;
 mod settle;
 mod slots;
 mod state;

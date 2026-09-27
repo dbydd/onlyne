@@ -238,7 +238,7 @@ An Orca worktree can hold tabs that are not onlyne sessions, so exactly one rule
 axis: **a tab is on the axis iff a live session reports that tab's pane.**
 
 A session's own process states where it runs, on every heartbeat, as `observed.host.orca.pane_key`
-in the adapter protocol (`crates/onlyne-session/src/host.rs`). It can: it was spawned inside the
+in the adapter protocol (`crates/onlyne-client/src/host.rs`). It can: it was spawned inside the
 pane and inherits `ORCA_PANE_KEY` (beside `ORCA_TAB_ID`, `ORCA_LEAF_ID` and
 `ORCA_TERMINAL_HANDLE`) from it (**measured 2026-09-11, Orca 1.4.198**: `orca terminal create
 --command …` exports them into the command's process). The key is `<tab_id>:<leaf_id>` on both
@@ -409,7 +409,7 @@ Implemented against the surfaces as measured; these are the points the implement
    nothing else. Anything a supervisor needs must be answerable through those two verbs.
 3. **`sessions` must keep reporting the pane.** With no per-role worktree registration, a role's tab
    is indistinguishable from any other tab on the Orca side, so the pane each session reports scopes
-   the tab axis (`observed.host.orca.pane_key`, `crates/onlyne-session/src/host.rs`), not any
+   the tab axis (`observed.host.orca.pane_key`, `crates/onlyne-client/src/host.rs`), not any
    workspace path. Two properties matter to this board. The binding must survive
    `report.complete` (so a finished session still says where it ran), and its `pane_key` must be the
    same `<tab_id>:<leaf_id>` spelling Orca's own `terminal list` uses. If it is ever renamed or

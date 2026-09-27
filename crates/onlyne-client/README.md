@@ -136,6 +136,55 @@ Tab ownership and working directory are independent. The selector decides which 
 
 The host resource retires with the session: a pane, tab, zellij session, or exec child closes once that session holds no task and no plugin transport is attached. Three paths do the closing — a graceful plugin `detach` closes each idle session that connection served, a settle with no attached agent closes at settle time, and the 250 ms readiness tick closes any tracked session whose stored lifecycle projects `exited` with a stored outcome while its agent is gone, taking the reason from that outcome (`Completed`, `Fault`, or `Cancelled`). One case keeps the resource: a connection that dropped without a `detach`, where that agent may reconnect. Past `[client] reconnect_grace_secs` that agent is gone, and the sweep settles the task the session still owed `failed` and refuses that task's delivery with reason `session_dead`: the row leaves `in_flight`, so the ledger carries the ending an operator reads and `repair retry` is what brings the work back. The same pass publishes the session's own projection — the heartbeat report every ordinary ending travels — so the server's mirrored row for it reads `exited` at once, instead of reading `working` until the server's stale observer records a `stale_working` or `heartbeat_missing` fault. A retirement with the stored resource still open refreshes a stale `backend_ref` through `attach`, projects `resource_closed`, logs `retiring idle session resource` with task, backend, resource, and reason, then closes the resource and drops the slot; a close that fails is a warning.
 
+### Session scopes
+
+`[client.session] scope` decides how long a session lives and what it serves. The scope is
+the client's own rule: the server delivers by role and knows nothing about it.
+
+- `oneshot` (the default) — one delivery per session. The delivery settles, the session
+  ends, and a delivery that was in flight when the client or the runtime restarted is
+  requeued.
+- `task` — one session per task family, keyed on the delivery's causality family
+  (`causality.family`, falling back to the delivery's own task id). In
+  planner → builder → reviewer → builder the second delivery to the builder enters the
+  session the builder used the first time, which is the point of the scope: the
+  conversation keeps its context, and no summary is assembled from the journal to fake it.
+- `role` — a standing pool for the role: deliveries reuse the sessions the role already
+  holds, and one past `max_sessions` waits for a session instead of opening another one
+  (it is not refused; it is dispatched when a session frees up).
+
+A scoped session that has finished a delivery goes idle rather than retiring: its binding
+is released, its host resource stays, and the next delivery of its scope enters it again.
+
+`idle_close` bounds how long an idle `task` or `role` session waits — `"2h"` by default,
+`0` (or `Duration::ZERO`) meaning it is never closed for idleness.
+
+### Suspension
+
+An idle `task` or `role` session may suspend: the runtime saves the conversation, and the
+client releases the process and the slot, so a suspended session spends none of
+`max_sessions`. The next delivery bound to that session resumes it instead of opening a new
+one.
+
+Suspend depends on the runtime's own capability, declared as `resume` in its spec entry's
+capabilities. A runtime without it degrades to "process alive, session alive": the session
+is never suspended, its process and slot stay, and the family's next delivery still enters
+it. The client never writes a history summary of the journal to stand in for a resumed
+conversation; a runtime that cannot restore one keeps its process.
+
+### The server link
+
+A session the client holds survives a lost **server** link: the link drops, intents queue,
+and every session and the delivery it is serving stay exactly as they were. Only the loss
+of the **plugin** connection — the agent gone, past `[client] reconnect_grace_secs` — settles
+work.
+
+Every hello, first and after each redial, carries `live_sessions`: each session the client
+holds, the delivery that session is bound to (none when it is between deliveries), and
+whether it is suspended. That is what keeps the server from requeuing work a live session
+is still serving.
+
+
 ## Server link
 
 The client reconnects on a ladder of 1, 2, 4, 8, 16, 32, 60 seconds; 60 seconds repeats for every later attempt. After a reconnect the order is handshake, welcome, intent flush, pull resume.
@@ -304,6 +353,31 @@ herdr 会话从客户端进程环境继承；在窗格中运行的 pi 子进程�
 角色 spec 条目中的 `max_sessions` 限制该角色同时运行的会话数量。存储的 lifecycle 状态为 `exited` 的会话不占该配额：角色已结束会话对应的行作为历史保留在 `client.db` 中，仍可查询。只要尚未退出的会话少于 `max_sessions`，客户端就会继续拉取。每个任务都有自己的会话和自己的生成过程。完成一个任务的会话不再接收任务；其槽位释放，主机资源关闭，并且不再计入 `max_sessions`。
 
 主机资源随会话退役：当会话不再持有任务且没有插件传输连接时，窗格、标签页、zellij 会话或 exec 子进程就会关闭。共有三条关闭路径——插件正常 `detach` 会关闭该连接服务过的每个空闲会话；结算时没有已连接代理，则在结算时关闭；250 ms 就绪检查则在代理消失且存储的 lifecycle 投影为 `exited`、并带有存储 outcome 时，关闭任何被跟踪的会话，原因取自该 outcome（`Completed`、`Fault` 或 `Cancelled`）。有一种情况会保留资源：连接在未执行 `detach` 的情况下中断，因为该代理可能重连。超过 `[client] reconnect_grace_secs` 后，即认为该代理已经消失；清理流程会将会话仍欠下的任务结算为 `failed`，并以 `session_dead` 为原因拒绝对应任务交付：该行会离开 `in_flight`，因此账本保留了操作者可见的结束结果，而工作只能由 `repair retry` 重新带回。同一次处理还会发布会话自身的投影——每次正常结束都会发送的心跳报告——因此服务器上镜像的行会立即读取为 `exited`，无需在服务器的过期观察器记录 `stale_working` 或 `heartbeat_missing` 故障之前一直读取为 `working`。如果退役时存储的资源仍处于打开状态，会通过 `attach` 刷新过期的 `backend_ref`，投影 `resource_closed`，以任务、后端、资源和原因为由记录 `retiring idle session resource`，然后关闭资源并释放槽位；关闭失败只产生警告。
+
+### 会话作用域
+
+`[client.session] scope` 决定一个会话活多久、为谁服务。作用域完全是客户端自己的规则：服务器只按角色投递，对此一无所知。
+
+- `oneshot`（默认）——一个会话只服务一次投递。投递结算后会话结束；客户端或运行时重启时仍在途的投递会被重新排队。
+- `task`——每个任务家族一个会话，家族取自投递的因果关系家族（`causality.family`，缺失时回退到投递自身的任务 id）。在 planner → builder → reviewer → builder 中，第二次投递给 builder 的投递会进入 builder 第一次使用的会话，这正是该作用域的意义：对话保留自己的上下文，绝不从日志里拼出一份摘要来顶替它。
+- `role`——角色级的常驻会话池：投递优先复用角色已持有的会话，超出 `max_sessions` 的那一个会等待（不是被拒绝），等到有会话空出来再派发。
+
+已完成一次投递的带作用域会话进入空闲而不是退役：绑定释放，宿主资源保留，下一个属于同一作用域的投递会再次进入它。
+
+`idle_close` 限定空闲的 `task` 或 `role` 会话等待多久——默认 `"2h"`，`0`（即 `Duration::ZERO`）表示永不因空闲而关闭。
+
+### 挂起
+
+空闲的 `task` 或 `role` 会话可以挂起：运行时保存对话，客户端释放进程与槽位，因此挂起的会话不占用 `max_sessions`。下一个绑定到该会话的投递会恢复它，而不是新开一个。
+
+挂起取决于运行时自己的能力，即 spec 条目能力列表中的 `resume`。没有该能力的运行时退化为“进程在，会话就在”：会话永不挂起，进程与槽位保留，该家族的后续投递仍然进入它。客户端绝不写一份日志摘要来顶替被恢复的对话；无法恢复对话的运行时只能继续持有进程。
+
+### 服务器链接
+
+客户端持有的会话能挺过**服务器**链路断开：链路断了，intent 排队，每个会话以及它正在服务的投递都原样保留。只有**插件**连接断开——代理消失且超过 `[client] reconnect_grace_secs`——才会结算工作。
+
+每一次 hello（首次以及每次重连后）都携带 `live_sessions`：客户端持有的每个会话、该会话绑定的投递（处于两次投递之间时为空），以及它是否处于挂起。服务器正是靠它避免把仍在被服务的投递重新排队。
+
 
 ## 服务器链接
 
