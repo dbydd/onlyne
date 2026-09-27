@@ -57,6 +57,61 @@ free_port() {
   python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'
 }
 
+# v2 binds every local socket in the machine-level runtime directory, so no case
+# spells `.onlyne/run/s` or reads a `run/socket` marker any more: neither is
+# created. `runtime_dir` prints that directory, `runtime_socket <root>` the
+# socket one owner root is bound to, and `runtime_registration <root>` the
+# `<digest>.json` file naming it. The derivation mirrors
+# `onlyne_wire::socket`: the digest is the first 16 hex characters of `sha256`
+# over the canonical absolute root, so a case and a `onlyne` flag naming the
+# same root agree on one path.
+#
+# The canonical spelling is taken the way `absolute_path` takes it: a root that
+# exists is resolved through its symlinks (macOS reaches one tree through both
+# `/var` and `/private/var`), and a root that does not is normalized lexically.
+runtime_dir() {
+  if [ -n "${ONLYNE_RUNTIME_DIR:-}" ]; then
+    printf '%s\n' "$ONLYNE_RUNTIME_DIR"
+  else
+    printf '/tmp/onlyne-%s\n' "$(id -u)"
+  fi
+}
+
+workspace_digest() {
+  python3 -c '
+import hashlib, os, sys
+
+root = sys.argv[1]
+spelling = os.path.realpath(root) if os.path.exists(root) else os.path.abspath(root)
+print(hashlib.sha256(spelling.replace("\\", "/").lower().encode("utf-8")).hexdigest()[:16])
+' "$1"
+}
+
+runtime_socket() {
+  printf '%s/%s.sock\n' "$(runtime_dir)" "$(workspace_digest "$1")"
+}
+
+runtime_registration() {
+  printf '%s/%s.json\n' "$(runtime_dir)" "$(workspace_digest "$1")"
+}
+
+# `wait_for_socket <root> [tries]` waits for the socket one owner root is bound
+# to and prints it, so a case that needs a live client socket never waits on a
+# path v2 does not create. Returns non-zero when the socket never appears.
+wait_for_socket() {
+  local root=$1 tries=${2:-100} socket n=0
+  socket=$(runtime_socket "$root")
+  while [ "$n" -lt "$tries" ]; do
+    if [ -S "$socket" ]; then
+      printf '%s\n' "$socket"
+      return 0
+    fi
+    n=$((n + 1))
+    sleep 0.1
+  done
+  return 1
+}
+
 json_field() {
   local file=$1 expr_jq=$2 expr_py=$3
   if command -v python3 >/dev/null 2>&1; then

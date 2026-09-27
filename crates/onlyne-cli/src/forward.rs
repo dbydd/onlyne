@@ -1,4 +1,10 @@
 //! Resolution and execution of the sibling daemon binaries.
+//!
+//! The two foreground daemons keep their own binaries, so these are the only
+//! execs left: `onlyne server run` and `onlyne client run`, each handing the
+//! sibling the selector this CLI resolved, plus the client verbs `onlyne
+//! client <verb>` forwards verbatim. Every other verb runs in the `onlyne`
+//! process, which is what keeps a missing binary down to one meaning: 127.
 
 use crate::runtime::EXIT_NO_SIBLING;
 use std::path::{Path, PathBuf};
@@ -65,7 +71,8 @@ pub fn resolve_sibling(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Run the daemon in place of this process, inheriting stdio.
+/// Run the sibling daemon with `args`, inheriting stdio: on unix this process
+/// becomes it, and on windows the child's exit code becomes ours.
 pub fn exec(bin_name: &str, args: &[String]) -> i32 {
     let Some(path) = resolve_sibling(bin_name) else {
         // The canonical line is owned by `onlyne_proto::text`, so the emitter

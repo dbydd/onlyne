@@ -79,7 +79,9 @@ row — says which of those tabs belong to a swarm. So the tab axis has one auth
    ```
 
    - `serverRoots` is the session axis: one entry per onlyne server root, addressed as
-     `onlyne --server-root <S> …` (`<S>/.onlyne/run/s` is that root's admin socket).
+     `onlyne --server-root <S> …` (that root's admin socket is `<digest>.sock` in the
+     machine-level runtime directory — `/tmp/onlyne-<uid>/`, with `ONLYNE_RUNTIME_DIR`
+     overriding it — which `--server-root` derives; nothing binds inside `<S>`).
      **Absent or empty is a valid state.** The board then renders the flat tab list only and
      never calls `onlyne` at all. Entries are trimmed and de-duplicated.
    - **Nothing else scopes the tab axis.** The sessions themselves decide which tabs are listed

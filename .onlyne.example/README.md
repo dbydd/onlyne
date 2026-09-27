@@ -8,8 +8,7 @@ Server root, passed as `onlyne-server run --root <dir>`:
 <root>/.onlyne/
   spec.toml              # single central truth (§5)
   state.db               # ledger, WAL on
-  run/s                  # admin unix socket, 0600, local user only
-  run/server.pid
+  run/                   # v2 creates nothing here; sockets live in the runtime dir
   logs/server.log
   keys/server.key        # ed25519 + TLS private key, PEM 0600
   templates/<topology>/<role>/   # generate content source (§11)
@@ -23,7 +22,7 @@ Role workspace, passed as `onlyne-client run --workspace <dir>`:
 <workspace>/.onlyne/
   config.toml            # role identity, server endpoint, local plugin list
   client.db              # session state, intents, inbox cursor
-  run/s                  # local client socket
+  run/                   # v2 creates nothing here; sockets live in the runtime dir
   logs/client.log
   keys/role.key          # this role private key
   agent/<pkg>/           # vendored coding-agent package copy (§11)

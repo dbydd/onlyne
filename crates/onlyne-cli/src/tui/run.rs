@@ -32,12 +32,12 @@ struct Cli {
     /// Unix socket path, used verbatim.
     #[arg(long)]
     socket: Option<PathBuf>,
-    /// Server root; the admin socket is `<dir>/.onlyne/run/s`, or the short path
-    /// `<dir>/.onlyne/run/socket` names when the canonical spelling is too long.
+    /// Server root; its admin socket is derived from the root and lives in the
+    /// machine-level runtime directory as `<runtime>/<digest>.sock`.
     #[arg(long)]
     server_root: Option<PathBuf>,
-    /// Workspace used only for upward `.onlyne/run/s` discovery, which also
-    /// accepts a tree whose only socket record is `.onlyne/run/socket`.
+    /// Workspace used only for upward discovery of the tree that owns a socket
+    /// in the runtime directory.
     #[arg(long)]
     workspace: Option<PathBuf>,
     /// Render one frame as plain text to stdout and exit.

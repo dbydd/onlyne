@@ -2,8 +2,9 @@
 //
 // Read-only supervisor board for Onlyne, built from two independent axes:
 //   tabs  — the Orca tabs of the panes the connected sessions report running in
-//   roots — each configured onlyne server root's admin surface
-//           (`<root>/.onlyne/run/s`, queried through `sessions` + `roles`)
+//   roots — each configured onlyne server root's admin surface (the runtime
+//           directory's `<digest>.sock`, reached by `--server-root`, queried
+//           through `sessions` + `roles`)
 // joined by the weak `onlyne:<task_id>` title convention, and exposed as a
 // board (notifications + plugin log pane + command results) plus four commands:
 // push the board, rescan, focus a tab, and read the agent context of a tab.

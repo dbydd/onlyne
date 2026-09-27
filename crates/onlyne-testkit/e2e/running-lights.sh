@@ -316,8 +316,14 @@ for hop, row in enumerate(tasks):
     if role(row["from"]) != sender or role(row["to"]) != receiver:
         raise SystemExit("hop %d runs %s->%s, not %s->%s" % (hop, role(row["from"]), role(row["to"]), sender, receiver))
     # The text each hop carries names its own hop, so a mismatch here is a hop
-    # count that disagrees with the payload it was written from.
-    if row.get("out_head") != "running-lights token, hop %d" % hop:
+    # count that disagrees with the payload it was written from. Hop 0 is the
+    # operator's own send, so it carries the token bare; every later hop is a
+    # relayed child, and a task row's `out_head` is the body preview the server
+    # keeps for the operator, so the relay builder's own `handoff: ` prefix
+    # (RELAY_BODY_PREFIX) shows on it. docs/STATUS.md case 19 records that
+    # literal prefix as intended, so the prefix is the contract, not a stray.
+    prefix = "" if hop == 0 else "handoff: "
+    if row.get("out_head") != prefix + "running-lights token, hop %d" % hop:
         raise SystemExit("hop %d carries %r" % (hop, row.get("out_head")))
     parent = None if hop == 0 else tasks[hop - 1]["task"]
     if row.get("parent_task") != parent:

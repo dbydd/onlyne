@@ -69,7 +69,7 @@ gw_key=$(mint_key "$tmp/gw-key" "$tmp/server" "$tmp/gw-key.frag.toml")
 # one line pushes an inbound human message, which the server answers by routing
 # it through `[[route]]` to planner and rendering planner's completion back.
 mkfifo "$tmp/gw-in"
-"$GW_FAKE" --platform fake --gateway-id fg1 --socket "$tmp/server/.onlyne/run/s" <"$tmp/gw-in" >"$tmp/gw-fake.log" 2>&1 &
+"$GW_FAKE" --platform fake --gateway-id fg1 --socket "$(runtime_socket "$tmp/server")" <"$tmp/gw-in" >"$tmp/gw-fake.log" 2>&1 &
 GW_FAKE_PID=$!
 # A read-write open on the FIFO never blocks, so the shell holds a writer
 # before the gateway process starts reading.

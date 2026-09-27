@@ -41,8 +41,8 @@ pub async fn run(init: ServerInit) -> anyhow::Result<()> {
 /// bind: unix `mode(0o600)` on the bind options (fchmod before bind, no umask
 /// TOCTOU) and windows owner-only SDDL. The registration is written after the
 /// bind, so a reader never sees an endpoint that is not yet served, and it
-/// carries this process's pid, which is what `onlyne-server start` and `stop`
-/// read in place of the old `run/server.pid`.
+/// carries this process's pid, which is what `status` reads in place of the old
+/// `run/server.pid`.
 ///
 /// A refused registration fails the whole bind: a socket no reader can find is
 /// not the outcome the serving side asked for.
@@ -52,12 +52,8 @@ pub fn bind(state: &State) -> anyhow::Result<LocalListener> {
     let listener = bind_socket_v2(root)
         .with_context(|| format!("bind the admin socket {}", socket.display()))?;
     let registration = registration_path(root);
-    write_registration(root, &RegistrationFile::server(root)).with_context(|| {
-        format!(
-            "publish the admin registration {}",
-            registration.display()
-        )
-    })?;
+    write_registration(root, &RegistrationFile::server(root))
+        .with_context(|| format!("publish the admin registration {}", registration.display()))?;
     tracing::info!(
         socket = %socket.display(),
         registration = %registration.display(),
@@ -71,8 +67,8 @@ pub fn bind(state: &State) -> anyhow::Result<LocalListener> {
 /// Every exit route calls this before the process leaves, so a client that
 /// retries the path after a shutdown finds it absent and reports the plan's
 /// absent-path answer rather than a connection refusal (plan line 344). The
-/// registration goes with the socket: a file naming a process that is exiting
-/// is the one fact `onlyne-server start` uses to refuse a second daemon.
+/// registration goes with the socket: a file naming a process that has exited
+/// would misreport the tree as served.
 pub fn unlink(state: &State) -> anyhow::Result<()> {
     let root = state.root.as_path();
     let path = socket_path(root).context("resolve the admin socket path")?;
@@ -309,7 +305,9 @@ allowed_targets = ["planner"]
     #[cfg(unix)]
     #[tokio::test]
     async fn binding_publishes_a_server_registration_in_the_runtime_directory() {
-        use onlyne_wire::socket::{RegistrationKind, read_registration, registration_path, runtime_dir, workspace_digest};
+        use onlyne_wire::socket::{
+            RegistrationKind, read_registration, registration_path, runtime_dir, workspace_digest,
+        };
 
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("server");
@@ -320,15 +318,24 @@ allowed_targets = ["planner"]
         let _listener = bind(&state).expect("bind the run socket");
         let runtime = runtime_dir().expect("the runtime directory");
         let digest = workspace_digest(&state.root);
-        assert_eq!(registration_path(&state.root), runtime.join(format!("{digest}.json")));
-        assert!(runtime.join(format!("{digest}.sock")).exists(), "the socket is under the runtime directory");
+        assert_eq!(
+            registration_path(&state.root),
+            runtime.join(format!("{digest}.json"))
+        );
+        assert!(
+            runtime.join(format!("{digest}.sock")).exists(),
+            "the socket is under the runtime directory"
+        );
 
         let registration = read_registration(&state.root)
             .expect("read the registration")
             .expect("a bound socket publishes one");
         assert_eq!(registration.kind, RegistrationKind::Server);
         assert_eq!(registration.role, None, "a server root serves no role");
-        assert_eq!(registration.root, onlyne_wire::socket::absolute_path(&state.root));
+        assert_eq!(
+            registration.root,
+            onlyne_wire::socket::absolute_path(&state.root)
+        );
         assert_eq!(registration.pid, std::process::id());
         assert!(!registration.version.is_empty());
 

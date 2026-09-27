@@ -164,8 +164,8 @@ pub fn spawn_ghost_sweep(state: Arc<crate::state::State>) -> Option<tokio::task:
 
 /// Serve SIGTERM and SIGINT as the graceful stop an operator asks for.
 ///
-/// `onlyne-server stop` sends SIGTERM and waits for the pid, so the handler
-/// requests the same shutdown an admin `shutdown` op does: the listeners stop,
+/// A `run` stays in the foreground, so the stop comes from whoever hosts the
+/// process: the handler requests the same shutdown an admin `shutdown` op does,
 /// and `serve` unlinks the run socket on the way out (plan §8 line 320).
 pub fn spawn_shutdown_signals(
     state: Arc<crate::state::State>,

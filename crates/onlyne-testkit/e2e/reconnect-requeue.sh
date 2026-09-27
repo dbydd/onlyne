@@ -123,12 +123,8 @@ server_pid=$cluster_server_pid
 # flight and no completion races the kill.
 "$CLIENT" run --workspace "$tmp/planner" >"$tmp/client-1.log" 2>&1 &
 client_pid=$!
-socket=""
-for _ in $(seq 1 100); do
-  if [ -S "$tmp/planner/.onlyne/run/s" ]; then socket="$tmp/planner/.onlyne/run/s"; break; fi
-  sleep 0.1
-done
-[ -n "$socket" ] || blocked "planner client socket never appeared" "client=$(cat "$tmp/client-1.log" 2>/dev/null)"
+socket=$(wait_for_socket "$tmp/planner" 100) \
+  || blocked "planner client socket never appeared" "client=$(cat "$tmp/client-1.log" 2>/dev/null)"
 
 task_ids=""
 n=1

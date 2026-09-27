@@ -30,7 +30,6 @@ import {
 import { formatBoard } from "../src/render.mjs";
 
 const MUTATING = /terminal (switch|create|close|rename|send|kill)|worktree (create|rm|remove|delete)/;
-const SOCKET_RELATIVE = join(".onlyne", "run", "s");
 const forbidden = [];
 
 function execFileAsync(binary, args, options) {
@@ -173,17 +172,19 @@ export async function runSmoke({ write = (line) => process.stdout.write(`${line}
     write("no configured server root to probe");
   }
   for (const root of binaries.serverRoots) {
-    const socket = join(root, SOCKET_RELATIVE);
+    // No socket path is probed from here: v2 binds each root's admin socket as
+    // `<digest>.sock` in the machine-level runtime directory, which is what
+    // `onlyne --server-root <root> …` resolves, so the verbs below are the
+    // answer — a root whose socket is missing degrades with its own code.
     const sessions = await onlyne.querySessions(root);
     const roles = await onlyne.queryRoles(root);
     const row = {
       root,
-      socketExists: existsSync(socket),
       sessions: sessions.ok ? { ok: true, rows: sessions.sessions.length } : { ok: false, code: sessions.code, message: sessions.message },
       roles: roles.ok ? { ok: true, rows: roles.roles.length } : { ok: false, code: roles.code, message: roles.message },
     };
     report.steps.roots.push(row);
-    write(`${root}  socket=${row.socketExists}  sessions=${JSON.stringify(row.sessions)}  roles=${JSON.stringify(row.roles)}`);
+    write(`${root}  sessions=${JSON.stringify(row.sessions)}  roles=${JSON.stringify(row.roles)}`);
   }
   const version = await runner.run(binaries.onlyneBin, ["--version"]);
   write(`onlyne --version -> ${version.ok ? version.stdout.trim() : `${version.code}: ${version.message}`}`);

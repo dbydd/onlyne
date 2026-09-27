@@ -1,7 +1,9 @@
 # pi-onlyne — the onlyne agent adapter for pi
 
-This pi extension makes one pi process serve one onlyne role session. It connects to
-`<role workspace>/.onlyne/run/s`, speaks the adapter protocol in
+This pi extension makes one pi process serve one onlyne role session. It connects to the
+socket that workspace's client serves — `<digest>.sock` in the machine-level runtime
+directory (`/tmp/onlyne-<uid>/`, `ONLYNE_RUNTIME_DIR` overriding it), never a path inside
+the tree — speaks the adapter protocol in
 `crates/onlyne-adapter/PROTOCOL.md`, and drives a session through
 `hello → welcome → assign → work → complete → detach`. No Rust code runs here: the
 protocol is reimplemented on Node's `node:net`, with a hand-written four-byte
@@ -398,7 +400,7 @@ the shipped client.
 | `ONLYNE_ROLE` | yes | the mount role |
 | `ONLYNE_SESSION_ID` | yes | mounted session id; `session_id` equals `task_id` in the shipped client |
 | `ONLYNE_TASK_ID` | yes | the task this process serves; drives `session_register` and the initial `ready` |
-| `ONLYNE_SOCKET` | no | the socket the client serves for this workspace, injected into every session process it spawns; with the variable unset the plugin reads the marker `<cwd>/.onlyne/run/socket` for the path the daemon published, and falls back to `<cwd>/.onlyne/run/s` |
+| `ONLYNE_SOCKET` | no | the socket the client serves for this workspace, injected into every session process it spawns; with the variable unset the plugin finds that client itself, by reading the runtime directory's registration files (`<digest>.json`) for the one whose `root` is this workspace |
 | `ONLYNE_RELAY_REQUIRED` | no | the role's spec `relay_required`, comma-joined: the guard's list mode (§5) |
 | `ONLYNE_RELAY_COUNT` | no | the role's spec `relay_count`: the guard's count mode, which decides only when the list is empty (§5) |
 | `ORCA_PANE_KEY` | no | where this process runs (`<tab_id>:<leaf_id>`), reported on every heartbeat as `observed.host.orca.pane_key`; unset outside an Orca pane, which is why the field is then absent |
@@ -408,18 +410,20 @@ the shipped client.
 Constants worth knowing: the plugin heartbeats every 10 s (`heartbeat_timeout_ms` is 30 s),
 allows 5 s for `hello` and 30 s per request, and reconnects on a 1/2/4/8/16/30 s ladder.
 
-The plugin reads three files of its own: `<cwd>/.pi/onlyne.json` (the switch, §1),
+The plugin reads two files of its own: `<cwd>/.pi/onlyne.json` (the switch, §1) and
 `relay.toml` next to its `package.json` (the relay policy's fallback, read only when the
-client injected none, §5), and `<cwd>/.onlyne/run/socket` (the marker naming the socket
-path the client's daemon bound, read when the environment carried none, §8).
+client injected none, §5). A third read belongs to the machine rather than the tree: when
+`ONLYNE_SOCKET` is unset the plugin lists the machine-level runtime directory for the
+client registrations that name this workspace (§8).
 
 ## 8. Troubleshooting
 
 | symptom | cause | check |
 | --- | --- | --- |
 | `[pi-onlyne] session …` never appears | one of the three env vars is missing, or `enabled` is false | `env \| grep ONLYNE_`; `cat .pi/onlyne.json` |
-| `socket error: connect ENOENT …/.onlyne/run/s` | no `onlyne-client run` for this workspace | start the client, or `onlyne-client status` |
-| `socket error: connect EINVAL …/.onlyne/run/s` on a deep workspace | macOS gives `sun_path` 104 bytes, so a socket path past 103 is refused; a generated role workspace nests three levels under its server root and a long root carries the canonical spelling over the bound. The client serves such a workspace from a short path under the temporary directory and publishes it in `<workspace>/.onlyne/run/socket` | `onlyne-client status` for the line `onlyne: client running … socket <path>`, which names the served path, plus the client log line carrying `socket = <path>`; `cat <workspace>/.onlyne/run/socket` holds that same path, and the plugin dials it when the environment injected nothing |
+| `socket unresolved: onlyne: no client is registered for <workspace> …` | no `onlyne-client run` for this workspace, so the runtime directory holds no registration whose `root` is this tree | start the client, or `onlyne-client status`; the message names the runtime directory and every registration it did find |
+| `socket unresolved: … N clients there name runtime pi … ambiguous` | more than one registered client runs pi sessions and none of their roots contains this workspace, so there is no single client to dial | name the socket explicitly with `ONLYNE_SOCKET`, or start the client for this workspace |
+| `socket error: connect ENOENT <path>` | the path in the message is not bound: the client that injected it stopped | `onlyne-client status` for the socket it is serving, and the client log line carrying `socket = <path>` |
 | `reconnecting in 4000ms` in a loop | the client is down or the socket was replaced | `onlyne --server-root … roles` |
 | `ready refused: internal: unknown session for …` | the plugin mounted and reported for a task the client never staged (normal when pi is started by hand outside a task) | start pi under the client, not by hand |
 | `assign` never arrives | the client's `session_command` did not spawn pi, or `inject` was dropped | the client log for the spawn line; `/onlyne status` for the capability set |
@@ -460,7 +464,7 @@ agent's own output lands in `<ws>/.onlyne/logs/session-<task>.log`.
 
 ## pi-onlyne — onlyne 的 pi 代理适配器
 
-此 pi 扩展让一个 pi 进程承载一个 onlyne 角色会话。它连接到 `<role workspace>/.onlyne/run/s`，使用 `crates/onlyne-adapter/PROTOCOL.md` 中的适配器协议，并按照 `hello → welcome → assign → work → complete → detach` 驱动会话。此处不运行 Rust 代码：协议基于 Node 的 `node:net` 重新实现，使用手写的四字节长度前缀 JSON 编解码器，运行时没有 npm 依赖。
+此 pi 扩展让一个 pi 进程承载一个 onlyne 角色会话。它连接到该工作区的 client 所服务的 socket——机器级运行目录里的 `<digest>.sock`（`/tmp/onlyne-<uid>/`，`ONLYNE_RUNTIME_DIR` 可覆盖），而不是树内的任何路径——使用 `crates/onlyne-adapter/PROTOCOL.md` 中的适配器协议，并按照 `hello → welcome → assign → work → complete → detach` 驱动会话。此处不运行 Rust 代码：协议基于 Node 的 `node:net` 重新实现，使用手写的四字节长度前缀 JSON 编解码器，运行时没有 npm 依赖。
 
 在一个 onlyne 会话之外，扩展不会执行任何操作。客户端会向其启动的每个进程注入 `ONLYNE_ROLE`、`ONLYNE_SESSION_ID` 和 `ONLYNE_TASK_ID`（`crates/onlyne-client/src/session/dispatch.rs`）。任一变量缺失时，这就是一个普通的 pi 会话：插件不注册任何内容，也不打开任何内容。
 
@@ -683,7 +687,7 @@ relay_required = ["writer"]        # these roles must have received a handoff
 | `ONLYNE_ROLE` | 是 | 挂载角色 |
 | `ONLYNE_SESSION_ID` | 是 | 挂载的会话 id；已发布客户端中的 `session_id` 等于 `task_id` |
 | `ONLYNE_TASK_ID` | 是 | 此进程承载的任务；驱动 `session_register` 和初始的 `ready` |
-| `ONLYNE_SOCKET` | 否 | 客户端为此工作区提供服务的套接字，会注入所启动的每个会话进程；变量未设置时，插件读取标记 `<cwd>/.onlyne/run/socket` 以获取守护进程公布的路径，并回退到 `<cwd>/.onlyne/run/s` |
+| `ONLYNE_SOCKET` | 否 | 客户端为此工作区提供服务的套接字，会注入所启动的每个会话进程；变量未设置时，插件自己去运行目录读注册文件（`<digest>.json`），挑出 `root` 就是本工作区的那个 client |
 | `ONLYNE_RELAY_REQUIRED` | 否 | 角色规范中的 `relay_required`，以逗号连接：守卫的列表模式（§5） |
 | `ONLYNE_RELAY_COUNT` | 否 | 角色规范中的 `relay_count`：守卫的计数模式，仅在列表为空时决定结果（§5） |
 | `ORCA_PANE_KEY` | 否 | 此进程的运行位置（`<tab_id>:<leaf_id>`），每次心跳通过 `observed.host.orca.pane_key` 上报；在 Orca 窗格之外未设置，因此该字段会缺失 |
@@ -692,15 +696,16 @@ relay_required = ["writer"]        # these roles must have received a handoff
 
 需要知道的常量：插件每 10 s 发送一次心跳（`heartbeat_timeout_ms` 为 30 s），为 `hello` 留出 5 s，每个请求留出 30 s，并按 1/2/4/8/16/30 s 的阶梯重新连接。
 
-插件会读取自己的三个文件：`<cwd>/.pi/onlyne.json`（开关，§1）、`package.json` 旁边的 `relay.toml`（中继策略的回退来源，仅在客户端没有注入策略时读取，§5），以及 `<cwd>/.onlyne/run/socket`（标记客户端守护进程所绑定的套接字路径，当环境变量未携带该路径时读取，§8）。
+插件会读取自己的两个文件：`<cwd>/.pi/onlyne.json`（开关，§1）、`package.json` 旁边的 `relay.toml`（中继策略的回退来源，仅在客户端没有注入策略时读取，§5）。第三处读取属于机器而不是工作区：`ONLYNE_SOCKET` 未设置时，插件遍历机器级运行目录里的 client 注册文件，找出写下本工作区的那个（§8）。
 
 ## 8. 故障排除
 
 | 症状 | 原因 | 检查 |
 | --- | --- | --- |
 | `[pi-onlyne] session …` 始终未出现 | 三个环境变量中缺少一个，或 `enabled` 为 false | `env \| grep ONLYNE_`；`cat .pi/onlyne.json` |
-| `socket error: connect ENOENT …/.onlyne/run/s` | 此工作区没有运行 `onlyne-client run` | 启动客户端，或 `onlyne-client status` |
-| 深层工作区出现 `socket error: connect EINVAL …/.onlyne/run/s` | macOS 为 `sun_path` 提供 104 字节，因此超过 103 的套接字路径会被拒绝；生成的角色工作区嵌套在服务器根目录下三层，过长的根路径会使规范拼写超过此上限。客户端会从临时目录下的短路径为此类工作区提供服务，并将其公布在 `<workspace>/.onlyne/run/socket` | 通过 `onlyne-client status` 查找 `onlyne: client running … socket <path>` 这一行，其中会指明所服务的路径；还需查看带有 `socket = <path>` 的客户端日志行；`cat <workspace>/.onlyne/run/socket` 包含同一路径，环境变量未注入任何值时，插件会连接该路径 |
+| `socket unresolved: onlyne: no client is registered for <workspace> …` | 该工作区没有 `onlyne-client run`，所以运行目录里没有哪个注册文件的 `root` 是这棵树 | 起 client，或 `onlyne-client status`；这条消息会点出运行目录，以及它实际读到的每个注册文件 |
+| `socket unresolved: … N clients there name runtime pi … ambiguous` | 有多个已注册的 client 都在跑 pi 会话，而它们的 root 都不包含本工作区，于是没有唯一可拨的 client | 用 `ONLYNE_SOCKET` 显式指定 socket，或为本工作区起 client |
+| `socket error: connect ENOENT <路径>` | 消息里的路径没人 bind：注入它的那个 client 已经停了 | `onlyne-client status` 看它当前服务的 socket，再看 client 日志里带 `socket = <路径>` 的那行 |
 | `reconnecting in 4000ms` 持续循环 | 客户端已停止，或套接字已被替换 | `onlyne --server-root … roles` |
 | `ready refused: internal: unknown session for …` | 插件完成挂载并为一个客户端从未暂存的任务进行了报告（在任务之外手动启动 pi 时属于正常情况） | 在客户端下启动 pi，不手动启动 |
 | `assign` 始终未到达 | 客户端的 `session_command` 未启动 pi，或 `inject` 已被移除 | 在客户端日志中查看启动行；通过 `/onlyne status` 查看能力集合 |

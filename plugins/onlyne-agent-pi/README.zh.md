@@ -1,7 +1,8 @@
 # pi-onlyne —— pi 的 onlyne agent 适配器
 
-一个 pi 扩展：一个 pi 进程承载一个 onlyne role session。它连接
-`<role workspace>/.onlyne/run/s`，按 `crates/onlyne-adapter/PROTOCOL.md` 通信，带 session 走完
+一个 pi 扩展：一个 pi 进程承载一个 onlyne role session。它连接该工作区的 client 所服务的
+socket——机器级运行目录里的 `<digest>.sock`（`/tmp/onlyne-<uid>/`，`ONLYNE_RUNTIME_DIR` 可覆盖），
+而不是树内的任何路径——按 `crates/onlyne-adapter/PROTOCOL.md` 通信，带 session 走完
 `hello → welcome → assign → 工作 → complete → detach`。全程没有 Rust 代码：协议在 Node 的
 `node:net` 上重写，四字节大端长度前缀加 UTF-8 JSON 的编解码是手写的，运行时零 npm 依赖。
 
@@ -330,7 +331,7 @@ stderr 告警并忽略，把机会让回文件。
 | `ONLYNE_ROLE` | 是 | 挂载的 role |
 | `ONLYNE_SESSION_ID` | 是 | 挂载的 session id；当前 client 中 session_id 等于 task_id |
 | `ONLYNE_TASK_ID` | 是 | 本进程服务的任务；驱动 `session_register` 与首条 `ready` |
-| `ONLYNE_SOCKET` | 否 | client 为该工作区实际服务的 socket 路径；凡 client 拉起的会话进程都会带上。变量未设置时，插件读标记文件 `<cwd>/.onlyne/run/socket`，取守护进程发布的那个路径，随后落到 `<cwd>/.onlyne/run/s` |
+| `ONLYNE_SOCKET` | 否 | client 为该工作区实际服务的 socket 路径；凡 client 拉起的会话进程都会带上。变量未设置时，插件自己去运行目录读注册文件（`<digest>.json`），挑出 `root` 就是本工作区的那个 client |
 | `ONLYNE_RELAY_REQUIRED` | 否 | 该 role 在 spec 里的 `relay_required`，逗号分隔：守卫的名单模式（§5） |
 | `ONLYNE_RELAY_COUNT` | 否 | 该 role 在 spec 里的 `relay_count`：守卫的 count 模式，只在名单为空时起作用（§5） |
 | `ORCA_PANE_KEY` | 否 | 本进程跑在哪（`<tab_id>:<leaf_id>`），每个 heartbeat 以 `observed.host.orca.pane_key` 上报；不在 Orca pane 里时未设置，这也是该字段缺席的原因 |
@@ -340,18 +341,19 @@ stderr 告警并忽略，把机会让回文件。
 值得记住的常量：插件每 10 秒发一次心跳（`heartbeat_timeout_ms` 是 30 秒），`hello` 最多等
 5 秒，单次请求超时 30 秒，重连按 1/2/4/8/16/30 秒阶梯退避。
 
-插件自己读三个文件：`<cwd>/.pi/onlyne.json`（开关，§1）、`package.json` 旁边的
-`relay.toml`（接力策略的兜底，只在 client 没注入策略时才读，§5）、
-`<cwd>/.onlyne/run/socket`（标记文件，写明 client 守护进程绑定的 socket 路径，只在环境里
-没带路径时才读，§8）。
+插件自己读两个文件：`<cwd>/.pi/onlyne.json`（开关，§1）、`package.json` 旁边的
+`relay.toml`（接力策略的兜底，只在 client 没注入策略时才读，§5）。
+第三处读取属于机器而不是工作区：`ONLYNE_SOCKET` 未设置时，插件遍历机器级运行目录里的
+client 注册文件，找出写下本工作区的那个（§8）。
 
 ## 8. 故障排查
 
 | 现象 | 原因 | 检查 |
 | --- | --- | --- |
 | 看不到 `[pi-onlyne] session …` | 三个环境变量缺一，或 `enabled` 为 false | `env \| grep ONLYNE_`；`cat .pi/onlyne.json` |
-| `socket error: connect ENOENT …/.onlyne/run/s` | 该工作区没有 `onlyne-client run` | 起 client，或 `onlyne-client status` |
-| 深层工作区里 `socket error: connect EINVAL …/.onlyne/run/s` | macOS 的 `sun_path` 只有 104 字节，超过 103 的 socket 路径会被内核拒绝；生成的 role 工作区在 server root 下再套三层，root 一长，规范写法就越过这个上界。client 面对这种工作区会把 socket 放到临时目录下的短路径上服务，并把选中的路径发布进 `<workspace>/.onlyne/run/socket` | 看 `onlyne-client status` 打印的 `onlyne: client running … socket <路径>`，那一行点出实际服务的路径，再看 client 日志里带 `socket = <路径>` 的那行；`cat <workspace>/.onlyne/run/socket` 得到同一个路径——环境里没带变量时，插件拨的就是它 |
+| `socket unresolved: onlyne: no client is registered for <workspace> …` | 该工作区没有 `onlyne-client run`，所以运行目录里没有哪个注册文件的 `root` 是这棵树 | 起 client，或 `onlyne-client status`；这条消息会点出运行目录，以及它实际读到的每个注册文件 |
+| `socket unresolved: … N clients there name runtime pi … ambiguous` | 有多个已注册的 client 都在跑 pi 会话，而它们的 root 都不包含本工作区，于是没有唯一可拨的 client | 用 `ONLYNE_SOCKET` 显式指定 socket，或为本工作区起 client |
+| `socket error: connect ENOENT <路径>` | 消息里的路径没人 bind：注入它的那个 client 已经停了 | `onlyne-client status` 看它当前服务的 socket，再看 client 日志里带 `socket = <路径>` 的那行 |
 | 反复 `reconnecting in 4000ms` | client 已停或 socket 被替换 | `onlyne --server-root … roles` |
 | `ready refused: internal: unknown session for …` | 插件为 client 从未暂存的任务报了 ready（手工起 pi 时的正常现象） | 让 client 拉起 pi，而不是手工起 |
 | `assign` 一直不来 | client 的 `session_command` 没能拉起 pi，或 `inject` 被降级 | client 日志里的 spawn 行；`/onlyne status` 看能力集 |

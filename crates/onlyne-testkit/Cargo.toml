@@ -24,3 +24,4 @@ tempfile = "3"
 tokio = { version = "1", features = ["io-util", "io-std", "net", "process", "rt-multi-thread", "macros", "sync", "time", "fs"] }
 tokio-stream = "0.1"
 tracing = "0.1"
+tracing-subscriber = { workspace = true }

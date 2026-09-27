@@ -109,8 +109,8 @@ a row exists. Ring and fan-out shapes live in your prose. The mechanics here nev
   One part rides the bus: `onlyne_send{..., image}` attaches a single image, capped at 2 MiB
   of decoded bytes, in png, jpeg, gif, or webp.
 - Your local socket answers `who` and `ping` in place, and every other verb it carries travels
-  on to the server through your client's link. `onlyne who` and `onlyne ping` resolve the
-  `.onlyne/run/s` above your cwd, and `onlyne watch --follow` resolves that same path and
+  on to the server through your client's link. `onlyne who` and `onlyne ping` resolve the socket
+  of the tree above your cwd, and `onlyne watch --follow` resolves that same path and
   subscribes your client's own link to the event stream.
 - When the server link drops, keep working: your running session still reaches its terminal
   state, and outgoing receipts persist as intents and flush after reconnect. Nothing needs

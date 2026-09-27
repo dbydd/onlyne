@@ -1323,7 +1323,9 @@ mod tests {
         let error = read_registration(&root).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(
-            error.to_string().contains(&files.registration.display().to_string()),
+            error
+                .to_string()
+                .contains(&files.registration.display().to_string()),
             "{error}"
         );
         assert!(

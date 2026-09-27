@@ -21,8 +21,8 @@ pub const SOCKET_ENV: &str = "ONLYNE_SOCKET";
 /// `--as <surface>` selection, applied to a `--socket` path that carries no other hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum AsArg {
-    /// Read the surface from the database beside the path, falling back to the
-    /// `.onlyne/run/s` suffix.
+    /// Read the surface from the tree's `<digest>.json` registration in the
+    /// runtime directory, whose `kind` names the serving side.
     #[default]
     Auto,
     /// Treat the socket as the local admin surface.
@@ -80,7 +80,11 @@ impl GlobalFlags {
     /// none of the verb machinery. The TUI board is that caller: it watches a
     /// socket and sends no op, so it must not restate the whole flag set to
     /// reach the shared resolver.
-    pub fn addressing(socket: Option<PathBuf>, server_root: Option<PathBuf>, workspace: Option<PathBuf>) -> Self {
+    pub fn addressing(
+        socket: Option<PathBuf>,
+        server_root: Option<PathBuf>,
+        workspace: Option<PathBuf>,
+    ) -> Self {
         Self {
             socket,
             server_root,

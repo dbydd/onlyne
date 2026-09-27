@@ -10,6 +10,7 @@ use onlyne_proto::{
 };
 use onlyne_testkit::{
     FakeAgent, HostSim, HostSimSpec, default_agent_capabilities, sample_assign, script_from_path,
+    socket_from_workspace,
 };
 
 /// Workspace config in the shape `onlyne-client init` writes it.
@@ -50,14 +51,16 @@ fn ack(hello: &HelloArgs) -> Result<HelloAck, (ErrorCode, String)> {
 async fn fake_agent_mounts_the_role_named_in_the_workspace_config() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().to_path_buf();
-    std::fs::create_dir_all(workspace.join(".onlyne/run")).unwrap();
+    std::fs::create_dir_all(workspace.join(".onlyne")).unwrap();
     std::fs::write(
         workspace.join(".onlyne/config.toml"),
         config_toml(&workspace, "cluster-b"),
     )
     .unwrap();
 
-    let socket = workspace.join(".onlyne/run/s");
+    // v2 binds in the machine-level runtime directory, and this binary resolves
+    // the same way the e2e scripts do, so the listener sits where the agent dials.
+    let socket = socket_from_workspace(&workspace);
     let listener = onlyne_wire::socket::bind_tokio(&socket).unwrap();
     let (hello_tx, hello_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {

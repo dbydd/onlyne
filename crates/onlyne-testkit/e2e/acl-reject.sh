@@ -35,12 +35,8 @@ client_pid=$!
 fake_pid=$!
 
 # The message verbs connect to the workspace socket, which the client binds.
-socket=""
-for _ in $(seq 1 100); do
-  if [ -S "$tmp/builder/.onlyne/run/s" ]; then socket="$tmp/builder/.onlyne/run/s"; break; fi
-  sleep 0.1
-done
-[ -n "$socket" ] || blocked "builder client socket never appeared" "client=$(cat "$tmp/builder-client.log" 2>/dev/null)"
+socket=$(wait_for_socket "$tmp/builder" 100) \
+  || blocked "builder client socket never appeared" "client=$(cat "$tmp/builder-client.log" 2>/dev/null)"
 [ -n "$(pgrep -f "onlyne-client run --workspace $tmp/builder" || true)" ] || blocked "builder client exited before the send" "client=$(cat "$tmp/builder-client.log" 2>/dev/null)"
 
 # Plan line 500: `onlyne --workspace "$tmp/builder" send --to reviewer --text x`.

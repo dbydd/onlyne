@@ -1,22 +1,18 @@
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use onlyne_config::Spec;
 use onlyne_config::layout::ServerRoot;
 use onlyne_wire::socket::{
-    RegistrationFile, SOCKET_SUFFIX, read_registration, registration_path, remove_registration,
-    runtime_dir_path, socket_path, workspace_digest,
+    RegistrationFile, SOCKET_SUFFIX, read_registration, registration_path, runtime_dir_path,
+    workspace_digest,
 };
 
 use crate::generate::{GenerateArgs, GenerateError, generate};
 use crate::{Server, ServerInit};
-
-const START_READY_MS: u64 = 10_000;
-const STOP_WAIT_MS: u64 = 10_000;
-const POLL_MS: u64 = 50;
 
 #[derive(Debug, Parser)]
 #[command(name = "onlyne-server", version, about = "Onlyne v1 routing daemon")]
@@ -54,18 +50,6 @@ enum Command {
         #[arg(long)]
         root: PathBuf,
     },
-    /// Spawn `run` detached and wait for the admin socket.
-    Start {
-        /// Server root directory.
-        #[arg(long)]
-        root: PathBuf,
-    },
-    /// Signal the recorded server process and wait for it to exit.
-    Stop {
-        /// Server root directory.
-        #[arg(long)]
-        root: PathBuf,
-    },
     /// Report process state read from this server root.
     Status {
         /// Server root directory.
@@ -93,14 +77,26 @@ enum Command {
 }
 
 /// Progress verbosity shared by every subcommand.
+///
+/// `onlyne server init` builds one of these from its own global flags, so the
+/// two entrypoints to [`init_command`] shape their progress alike.
 #[derive(Debug, Clone, Copy)]
-struct Output {
+pub struct Output {
     json: bool,
     quiet: bool,
     verbose: bool,
 }
 
 impl Output {
+    /// The progress surface one entrypoint asked for.
+    pub fn new(json: bool, quiet: bool, verbose: bool) -> Self {
+        Self {
+            json,
+            quiet,
+            verbose,
+        }
+    }
+
     /// One progress line on stderr; silent under `--quiet`.
     fn status(&self, message: &str) {
         if !self.quiet {
@@ -123,8 +119,8 @@ impl Output {
     }
 }
 
-/// Route `tracing` output to stderr, which `start` redirects into
-/// `.onlyne/logs/server.log` (plan §2).
+/// Route `tracing` output to stderr, which a caller that backgrounds `run`
+/// redirects into `.onlyne/logs/server.log` (plan §2).
 ///
 /// A process that already installed a subscriber keeps it, so a test harness
 /// can capture its own spans.
@@ -173,8 +169,6 @@ pub async fn entrypoint_with(args: Vec<String>) -> i32 {
             force,
         }) => init_command(&root, &listen, force, output),
         Some(Command::Run { root }) => run_command(&root, output).await,
-        Some(Command::Start { root }) => start_command(&root, output).await,
-        Some(Command::Stop { root }) => stop_command(&root, output).await,
         Some(Command::Status { root }) => status_command(&root, output),
         Some(Command::Generate {
             root,
@@ -201,7 +195,13 @@ pub async fn entrypoint_with(args: Vec<String>) -> i32 {
     }
 }
 
-fn init_command(root: &Path, listen: &str, force: bool, output: Output) -> i32 {
+/// Write one server root: `<root>/.onlyne/`, its self-signed keypair, and the
+/// `[server]` spec template, then print the certificate pin.
+///
+/// The one implementation of writing a server root: `onlyne-server init` and
+/// `onlyne server init` both land here, so `--server-root` cannot be lost at a
+/// process boundary.
+pub fn init_command(root: &Path, listen: &str, force: bool, output: Output) -> i32 {
     let layout = ServerRoot::resolve(root);
     let spec_path = layout.spec_path();
     if spec_path.exists() && !force {
@@ -349,7 +349,7 @@ fn published(root: &Path) -> Option<RegistrationFile> {
 ///
 /// v2 dropped `run/server.pid`: the registration is the file that names the
 /// process serving a tree, and it is written by that process at bind time, so
-/// start, stop, and status read the same fact the CLI client resolves.
+/// `status` reads the same fact the CLI client resolves.
 fn live_pid(root: &Path) -> Option<u32> {
     published(root)
         .map(|registration| registration.pid)
@@ -362,195 +362,6 @@ fn live_pid(root: &Path) -> Option<u32> {
 /// the path without asking the runtime directory to appear.
 fn socket_path_of(root: &Path) -> PathBuf {
     runtime_dir_path().join(format!("{}{SOCKET_SUFFIX}", workspace_digest(root)))
-}
-
-/// Drop the endpoint files a just-exited `pid` published.
-///
-/// Only while the registration still names that pid: a daemon that has since
-/// restarted owns these files, and clearing them would unlink the socket out
-/// from under it.
-fn clear_dead_endpoint(root: &Path, pid: u32) {
-    if published(root).map(|registration| registration.pid) != Some(pid) {
-        return;
-    }
-    let _ = remove_registration(root);
-    if let Ok(socket) = socket_path(root) {
-        let _ = fs::remove_file(socket);
-    }
-}
-
-/// Remove a run socket and registration left behind by a server that is no
-/// longer running.
-///
-/// A `SIGKILL`ed server leaves both files in the runtime directory. The
-/// readiness poll below watches the registration, so the start path clears the
-/// pair first; the published pid decides, and a live pid keeps both for the
-/// already-running answer above.
-pub fn clear_stale_socket(root: &Path) -> bool {
-    if live_pid(root).is_some() {
-        return false;
-    }
-    let socket = match socket_path(root) {
-        Ok(socket) => socket,
-        Err(error) => {
-            eprintln!("onlyne-server: resolve the runtime directory: {error}");
-            return false;
-        }
-    };
-    let mut removed = false;
-    if socket.exists() {
-        match fs::remove_file(&socket) {
-            Ok(()) => removed = true,
-            Err(error) => {
-                eprintln!(
-                    "onlyne-server: remove the stale socket {}: {error}",
-                    socket.display()
-                );
-            }
-        }
-    }
-    if let Err(error) = remove_registration(root) {
-        eprintln!(
-            "onlyne-server: remove the stale registration {}: {error}",
-            registration_path(root).display()
-        );
-    }
-    removed
-}
-
-/// Spawn `run` detached and wait for the registration that says it is serving.
-async fn start_command(root: &Path, output: Output) -> i32 {
-    if let Some(pid) = live_pid(root) {
-        eprintln!("onlyne: server already running at pid {pid}");
-        return 2;
-    }
-    clear_stale_socket(root);
-    let layout = ServerRoot::resolve(root);
-    if let Err(error) = layout.bootstrap() {
-        eprintln!("onlyne-server: {error}");
-        return 1;
-    }
-    let executable = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("onlyne-server: cannot locate the running binary: {error}");
-            return 1;
-        }
-    };
-    let log = match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(layout.log_path())
-    {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("onlyne-server: {}: {error}", layout.log_path().display());
-            return 1;
-        }
-    };
-    let log_copy = match log.try_clone() {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("onlyne-server: {}: {error}", layout.log_path().display());
-            return 1;
-        }
-    };
-    let mut daemon = ProcessCommand::new(executable);
-    daemon
-        .arg("run")
-        .arg("--root")
-        .arg(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_copy));
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        daemon.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        daemon.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
-    }
-    let child = daemon.spawn();
-    let child = match child {
-        Ok(child) => child,
-        Err(error) => {
-            eprintln!("onlyne-server: cannot spawn the daemon: {error}");
-            return 1;
-        }
-    };
-    let pid = child.id();
-    let socket = socket_path_of(root);
-    let deadline = Instant::now() + Duration::from_millis(START_READY_MS);
-    while Instant::now() < deadline {
-        if published(root).is_some() {
-            if output.json {
-                output.emit(serde_json::json!({
-                    "event": "started",
-                    "pid": pid,
-                    "socket": socket.display().to_string(),
-                }));
-            } else {
-                output.status(&format!("onlyne-server: started pid {pid}"));
-            }
-            return 0;
-        }
-        tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
-    }
-    eprintln!(
-        "onlyne: server did not publish {} within {START_READY_MS}ms",
-        registration_path(root).display()
-    );
-    #[cfg(unix)]
-    {
-        let _ = ProcessCommand::new("kill")
-            .arg("-KILL")
-            .arg(pid.to_string())
-            .status();
-    }
-    #[cfg(windows)]
-    {
-        terminate_pid(pid);
-    }
-    clear_dead_endpoint(root, pid);
-    1
-}
-
-/// Signal the published process and wait a bounded time for it to exit.
-async fn stop_command(root: &Path, output: Output) -> i32 {
-    let Some(pid) = live_pid(root) else {
-        clear_stale_socket(root);
-        eprintln!("onlyne: server not running");
-        return 2;
-    };
-    #[cfg(unix)]
-    {
-        let _ = ProcessCommand::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status();
-    }
-    #[cfg(windows)]
-    {
-        terminate_pid(pid);
-    }
-    let deadline = Instant::now() + Duration::from_millis(STOP_WAIT_MS);
-    while Instant::now() < deadline {
-        if !process_alive(pid) {
-            clear_dead_endpoint(root, pid);
-            if output.json {
-                output.emit(serde_json::json!({"event": "stopped", "pid": pid}));
-            } else {
-                output.status(&format!("onlyne-server: stopped pid {pid}"));
-            }
-            return 0;
-        }
-        tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
-    }
-    eprintln!("onlyne: server {pid} did not stop within {STOP_WAIT_MS}ms");
-    1
 }
 
 /// Process-level answer read from this root, distinct from the admin `status` op.
@@ -635,19 +446,6 @@ fn process_alive(pid: u32) -> bool {
         let ok = GetExitCodeProcess(handle, &mut code);
         CloseHandle(handle);
         ok != 0 && code == STILL_ACTIVE as u32
-    }
-}
-
-#[cfg(windows)]
-fn terminate_pid(pid: u32) {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
-    unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if !handle.is_null() {
-            let _ = TerminateProcess(handle, 1);
-            CloseHandle(handle);
-        }
     }
 }
 

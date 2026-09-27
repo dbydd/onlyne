@@ -26,6 +26,28 @@ const SERVER_INIT_TIMEOUT: Duration = Duration::from_secs(30);
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(5);
 const ROLE_ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Install one subscriber for the process, so the child output this harness
+/// collects is actually readable.
+///
+/// Every spawned process's stdout and stderr is already captured into `debug!`
+/// and `warn!` below, but without a subscriber those lines go nowhere, and a
+/// failing scenario then reports a timeout with no reason beside it. `RUST_LOG`
+/// raises or narrows the level; the default is `warn`, which is where child
+/// stderr lands and where a scenario's own problem shows up unasked.
+fn init_tracing() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .with_target(true)
+            .try_init();
+    });
+}
+
 /// The socket one owner root is bound to, read from its registration file.
 ///
 /// The registration is the answer rather than a guess at `run/s`: a daemon that
@@ -89,6 +111,103 @@ enum AdminFrame {
     },
 }
 
+/// One line per ledger row, carrying the fields a failing poll is asking about.
+fn render_ledger(rows: &[LedgerEntry]) -> String {
+    if rows.is_empty() {
+        return "(no rows)".to_string();
+    }
+    rows.iter()
+        .map(|row| {
+            format!(
+                "msg={} task={} hop={} state={:?} family={} parent={}",
+                row.msg_id,
+                row.task.as_deref().unwrap_or("-"),
+                row.hop,
+                row.state,
+                row.family.as_deref().unwrap_or("-"),
+                row.parent_task.as_deref().unwrap_or("-"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// Spawn one server process for `root`, collecting its output in the background.
+///
+/// The root is the cluster: the spec, the key material, and the stores all live
+/// under it, which is why starting a second process on the same root is the
+/// whole of a restart.
+fn spawn_server(bin: &Path, root: &Path) -> Result<Child> {
+    let mut child = Command::new(bin)
+        .args(["run", "--root", root.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("server spawn")?;
+
+    if let Some(stdout) = child.stdout.take() {
+        let root = root.to_path_buf();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                debug!("server[{}]: {}", root.display(), line);
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let root = root.to_path_buf();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                warn!("server[{}] stderr: {}", root.display(), line);
+            }
+        });
+    }
+    Ok(child)
+}
+
+/// Wait until the server at `root` is serving.
+///
+/// The registration file is the daemon's own "I am serving here" statement, so a
+/// cluster that has not published one has nothing to dial; `run/s` would be a
+/// guess at a path the daemon may never have used.
+async fn wait_server_ready(root: &Path) -> Result<()> {
+    let registration = registration_path(root);
+    let ready_start = Instant::now();
+    let mut last_check = String::new();
+    loop {
+        if ready_start.elapsed() > SERVER_INIT_TIMEOUT {
+            bail!(
+                "server wait-ready timeout after {:?}, last: {}",
+                ready_start.elapsed(),
+                last_check
+            );
+        }
+        if registration.exists() {
+            // Wait a bit for socket to be bound
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            // Try a roles query to confirm it's serving
+            last_check = match admin_request(root, AdminOp::Roles(Default::default()), 2000).await {
+                Ok(body) if body.ok => break,
+                Ok(body) => format!(
+                    "registration published at {}, but roles answered ok=false: {:?}",
+                    registration.display(),
+                    body.error
+                ),
+                Err(e) => format!(
+                    "registration published at {}, but roles failed: {e}",
+                    registration.display()
+                ),
+            };
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        } else {
+            last_check = "no registration file".to_string();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    Ok(())
+}
+
 /// One spawned cluster: server, temp directories, and tracked child processes.
 ///
 /// On drop, kills all tracked children (server, clients, agents) and removes
@@ -98,10 +217,34 @@ pub struct Cluster {
     _temp_dir: TempDir,
     server_child: Mutex<Option<Child>>,
     /// Tracked child processes: clients, agents, any other spawned processes.
-    children: Arc<Mutex<Vec<Child>>>,
+    children: Arc<Mutex<Vec<Tracked>>>,
     /// Role name to workspace root, so a role's own registration file can be
     /// found without the caller threading the workspace through every call.
     role_workspaces: Arc<Mutex<HashMap<String, PathBuf>>>,
+}
+
+/// One tracked child process, under the label a scenario addresses it by.
+///
+/// A scenario that kills a client has to name the one it wants, and the only
+/// thing a caller holds is the workspace the process was started for.
+struct Tracked {
+    label: String,
+    child: Child,
+}
+
+impl Tracked {
+    /// The label one child is tracked under: the process it is, and the
+    /// workspace it serves.
+    fn label(kind: &str, workspace: &Path) -> String {
+        format!("{kind}:{}", workspace.display())
+    }
+
+    fn new(kind: &str, workspace: &Path, child: Child) -> Self {
+        Self {
+            label: Self::label(kind, workspace),
+            child,
+        }
+    }
 }
 
 impl Cluster {
@@ -110,8 +253,8 @@ impl Cluster {
     ///
     /// Returns the cluster handle, which kills all tracked processes and cleans
     /// up temp directories on drop.
-    #[allow(unused_assignments)]
     pub async fn start(spec_toml: &str) -> Result<Self> {
+        init_tracing();
         let temp_dir = tempfile::tempdir().context("create temp dir")?;
         let server_root = temp_dir.path().join("server");
 
@@ -155,20 +298,14 @@ impl Cluster {
         // same spec, so the placeholder makes them dial port 0 and the role
         // never links. The reserved address replaces the line inside `[server]`
         // only, leaving a `listen` key in any other table alone.
-        let server_header = format!(
-            "[server]\n{}\nlisten = \"{}\"",
-            cert_pin_line, listen
-        );
+        let server_header = format!("[server]\n{}\nlisten = \"{}\"", cert_pin_line, listen);
         let merged_spec = if spec_toml.contains("[server]") {
             let (before, after) = spec_toml
                 .split_once("[server]")
                 .ok_or_else(|| anyhow!("[server] header vanished from the test spec"))?;
             // The `[server]` table runs until the next table header; a `listen`
             // past that belongs to someone else's table.
-            let table_end = after
-                .find("\n[")
-                .map(|at| at + 1)
-                .unwrap_or(after.len());
+            let table_end = after.find("\n[").map(|at| at + 1).unwrap_or(after.len());
             let (table, rest) = after.split_at(table_end);
             let stripped: Vec<&str> = table
                 .lines()
@@ -189,71 +326,8 @@ impl Cluster {
             .await
             .context("write merged spec")?;
 
-        // Spawn server
-        let mut server_child = Command::new(&server_bin)
-            .args(["run", "--root", server_root.to_str().unwrap()])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("server spawn")?;
-
-        // Capture logs in background
-        if let Some(stdout) = server_child.stdout.take() {
-            let server_root = server_root.clone();
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    debug!("server[{}]: {}", server_root.display(), line);
-                }
-            });
-        }
-        if let Some(stderr) = server_child.stderr.take() {
-            let server_root = server_root.clone();
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    warn!("server[{}] stderr: {}", server_root.display(), line);
-                }
-            });
-        }
-
-        // Wait for ready. The registration file is the daemon's own "I am
-        // serving here" statement, so a cluster that has not published one has
-        // nothing to dial; `run/s` would be a guess at a path the daemon may
-        // never have used.
-        let registration = registration_path(&server_root);
-        let ready_start = Instant::now();
-        let mut last_check = String::new();
-        loop {
-            if ready_start.elapsed() > SERVER_INIT_TIMEOUT {
-                bail!(
-                    "server wait-ready timeout after {:?}, last: {}",
-                    ready_start.elapsed(),
-                    last_check
-                );
-            }
-            if registration.exists() {
-                last_check = format!("registration exists at {}", registration.display());
-                // Wait a bit for socket to be bound
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                // Try a roles query to confirm it's serving
-                match admin_request(&server_root, AdminOp::Roles(Default::default()), 2000).await {
-                    Ok(body) if body.ok => {
-                        break;
-                    }
-                    Ok(body) => {
-                        last_check = format!("roles ok=false: {:?}", body.error);
-                    }
-                    Err(e) => {
-                        last_check = format!("roles err: {}", e);
-                    }
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            } else {
-                last_check = "no registration file".to_string();
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
+        let server_child = spawn_server(&server_bin, &server_root)?;
+        wait_server_ready(&server_root).await?;
 
         Ok(Cluster {
             server_root,
@@ -262,6 +336,34 @@ impl Cluster {
             children: Arc::new(Mutex::new(Vec::new())),
             role_workspaces: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Stop the server process and start a fresh one on the same root.
+    ///
+    /// Everything durable about a cluster lives under the root — the spec, the
+    /// key material, and the stores — so the second daemon is the same cluster
+    /// in a new process, and a scenario can read exactly what the first one
+    /// left behind.
+    ///
+    /// The registration the old process published is removed first. It names
+    /// the socket a dead process no longer serves, and waiting on it would
+    /// report the predecessor's readiness as the successor's.
+    pub async fn restart_server(&self) -> Result<()> {
+        let server_bin = Self::bin_path("onlyne-server")?;
+        let previous = self.server_child.lock().await.take();
+        if let Some(mut previous) = previous {
+            let _ = previous.start_kill();
+            let _ = previous.wait().await;
+        }
+        std::fs::remove_file(registration_path(&self.server_root))
+            .or_else(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(error),
+            })
+            .context("clear the dead server's registration")?;
+        let server_child = spawn_server(&server_bin, &self.server_root)?;
+        *self.server_child.lock().await = Some(server_child);
+        wait_server_ready(&self.server_root).await
     }
 
     /// Register one role workspace: run onlyne-client init, write the fragment to
@@ -304,7 +406,7 @@ impl Cluster {
         let fragment = String::from_utf8(output.stdout).context("client init stdout utf8")?;
 
         // Append fragment to spec.toml
-        let spec_path = self.server_root.join(".onlyne/spec.toml");
+        let spec_path = self.spec_path();
         let mut spec = tokio::fs::read_to_string(&spec_path)
             .await
             .context("read spec.toml")?;
@@ -359,10 +461,18 @@ impl Cluster {
     /// Spawn onlyne-client run for one workspace, track the process.
     ///
     /// Logs are captured in background.
+    ///
+    /// The scenario suite is a fake-backend suite: `onlyne-client run` needs a
+    /// terminal host for the pane it puts each session in, and `fake` is the
+    /// host that needs no external tool. The variable rides this child's own
+    /// environment rather than the test process's, so the suite stays
+    /// parallel-safe and a caller's own `ONLYNE_BACKEND` cannot change the
+    /// host the suite selects.
     pub async fn start_client(&self, workspace: &Path) -> Result<()> {
         let client_bin = Self::bin_path("onlyne-client")?;
         let mut child = Command::new(&client_bin)
             .args(["run", "--workspace", workspace.to_str().unwrap()])
+            .env("ONLYNE_BACKEND", "fake")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -387,7 +497,47 @@ impl Cluster {
             });
         }
 
-        self.children.lock().await.push(child);
+        self.children
+            .lock()
+            .await
+            .push(Tracked::new("client", workspace, child));
+        Ok(())
+    }
+
+    /// Kill the client this workspace owns and reap it.
+    ///
+    /// The process is the role's whole local half: the server keeps the role's
+    /// queue and this workspace keeps the client's own store, so a scenario can
+    /// take the client away and put it back with `start_client` and read what
+    /// each side remembered. A workspace with no live client is an error rather
+    /// than a no-op — a case that means to drop a client and misses should not
+    /// pass as though it had.
+    pub async fn kill_client(&self, workspace: &Path) -> Result<()> {
+        self.kill_child(&Tracked::label("client", workspace)).await
+    }
+
+    /// Kill the fake agent mounted for this workspace and reap it.
+    ///
+    /// A workspace that is about to move needs both halves gone: the client
+    /// holds the socket it bound for the old path, and the agent holds the path
+    /// it resolved at its own start.
+    pub async fn kill_agent(&self, workspace: &Path) -> Result<()> {
+        self.kill_child(&Tracked::label("agent", workspace)).await
+    }
+
+    /// Kill one tracked child by label and reap it.
+    async fn kill_child(&self, label: &str) -> Result<()> {
+        let tracked = {
+            let mut children = self.children.lock().await;
+            let index = children
+                .iter()
+                .position(|tracked| tracked.label == label)
+                .ok_or_else(|| anyhow!("no tracked child named {label}"))?;
+            children.remove(index)
+        };
+        let mut child = tracked.child;
+        let _ = child.start_kill();
+        let _ = child.wait().await;
         Ok(())
     }
 
@@ -430,7 +580,10 @@ impl Cluster {
             });
         }
 
-        self.children.lock().await.push(child);
+        self.children
+            .lock()
+            .await
+            .push(Tracked::new("agent", workspace, child));
         Ok(())
     }
 
@@ -449,8 +602,7 @@ impl Cluster {
             envelope,
         });
 
-        let body = admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64)
-            .await?;
+        let body = admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64).await?;
         if !body.ok {
             bail!("admin send failed: {:?}", body.error);
         }
@@ -461,8 +613,7 @@ impl Cluster {
     /// Query ledger.
     pub async fn query_ledger(&self, query: LedgerQuery) -> Result<Vec<LedgerEntry>> {
         let op = AdminOp::Ledger(query);
-        let body = admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64)
-            .await?;
+        let body = admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64).await?;
         if !body.ok {
             bail!("ledger query failed: {:?}", body.error);
         }
@@ -478,8 +629,7 @@ impl Cluster {
     /// Query sessions.
     pub async fn query_sessions(&self, query: QuerySessionsArgs) -> Result<Vec<SessionRow>> {
         let op = AdminOp::Sessions(query);
-        let body = admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64)
-            .await?;
+        let body = admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64).await?;
         if !body.ok {
             bail!("sessions query failed: {:?}", body.error);
         }
@@ -498,8 +648,7 @@ impl Cluster {
     /// Reload the server spec.
     pub async fn reload(&self) -> Result<()> {
         let op = AdminOp::Reload(serde_json::json!({}));
-        let body = admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64)
-            .await?;
+        let body = admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64).await?;
         if !body.ok {
             bail!("reload failed: {:?}", body.error);
         }
@@ -509,12 +658,7 @@ impl Cluster {
     /// Poll until a role is online, with timeout.
     pub async fn wait_role_online(&self, role: &str) -> Result<()> {
         let start = Instant::now();
-        let workspace = self
-            .role_workspaces
-            .lock()
-            .await
-            .get(role)
-            .cloned();
+        let workspace = self.role_workspaces.lock().await.get(role).cloned();
         let client_registration = workspace.as_ref().map(|ws| registration_path(ws));
         loop {
             if start.elapsed() > ROLE_ONLINE_TIMEOUT {
@@ -543,8 +687,8 @@ impl Cluster {
             let op = AdminOp::Roles(onlyne_proto::QueryRolesArgs {
                 role: Some(role.to_string()),
             });
-            let body = admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64)
-            .await?;
+            let body =
+                admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64).await?;
             if body.ok {
                 if let Some(data) = body.data {
                     let roles: Vec<serde_json::Value> = serde_json::from_value(
@@ -565,6 +709,10 @@ impl Cluster {
     }
 
     /// Poll until a predicate on ledger rows returns true, with timeout.
+    ///
+    /// A timeout reports the last snapshot it read. A bare "timeout" throws away
+    /// the only evidence the caller has, and the callers that reach this are
+    /// exactly the ones whose rows say what went wrong.
     pub async fn poll_ledger<F>(
         &self,
         query: LedgerQuery,
@@ -575,15 +723,21 @@ impl Cluster {
         F: Fn(&[LedgerEntry]) -> bool,
     {
         let start = Instant::now();
+        let mut last: Vec<LedgerEntry> = Vec::new();
         loop {
             if start.elapsed() > timeout {
-                bail!("poll_ledger timeout");
+                bail!(
+                    "poll_ledger timeout after {timeout:?}; last read {} row(s): {}",
+                    last.len(),
+                    render_ledger(&last)
+                );
             }
 
             let rows = self.query_ledger(query.clone()).await?;
             if predicate(&rows) {
                 return Ok(rows);
             }
+            last = rows;
 
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
@@ -618,34 +772,54 @@ impl Cluster {
         &self.server_root
     }
 
+    /// The cluster's spec file, the one point of truth about its roles.
+    pub fn spec_path(&self) -> PathBuf {
+        self.server_root.join(".onlyne/spec.toml")
+    }
+
+    /// Run one `onlyne` verb against this cluster and answer its stdout.
+    ///
+    /// The harness drives the admin surface directly everywhere else;
+    /// `generate` is the verb with no admin op behind it, so a scenario that
+    /// exercises it runs the CLI an operator runs, against the same root.
+    pub async fn cli(&self, args: &[&str]) -> Result<String> {
+        let bin = Self::bin_path("onlyne")?;
+        let output = Command::new(&bin)
+            .args(["--server-root", self.server_root.to_str().unwrap()])
+            .args(args)
+            .output()
+            .await
+            .with_context(|| format!("run onlyne {}", args.join(" ")))?;
+        if !output.status.success() {
+            bail!(
+                "onlyne {} failed ({}): {}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        String::from_utf8(output.stdout).context("onlyne stdout is not utf8")
+    }
+
     /// The server's admin socket, read from its registration file.
     pub fn admin_socket(&self) -> Result<PathBuf> {
         resolve_socket(&self.server_root)
     }
 
-    fn bin_path(name: &str) -> Result<PathBuf> {
-        // Use CARGO_BIN_EXE_<name> if available, else target/debug/<name>
+    /// Resolve one workspace binary by name.
+    ///
+    /// `CARGO_BIN_EXE_<name>` is only set for binaries of the package under test,
+    /// and this harness is a library, so the lookup below is what normally
+    /// answers: walk to the workspace root and read `target/debug/<name>`. A
+    /// scenario that spawns a binary MUST come through here rather than spelling
+    /// a relative path, which resolves against the test's own working directory.
+    pub fn bin_path(name: &str) -> Result<PathBuf> {
         let env_name = format!("CARGO_BIN_EXE_{}", name.replace('-', "_"));
         if let Ok(path) = std::env::var(&env_name) {
             return Ok(PathBuf::from(path));
         }
 
-        // Find workspace root (where Cargo.toml exists with [workspace])
-        let mut current = std::env::current_dir().context("get current dir")?;
-        loop {
-            let cargo_toml = current.join("Cargo.toml");
-            if cargo_toml.exists() {
-                let content = std::fs::read_to_string(&cargo_toml).context("read Cargo.toml")?;
-                if content.contains("[workspace]") {
-                    break;
-                }
-            }
-            if !current.pop() {
-                bail!("workspace root not found");
-            }
-        }
-
-        let bin = current.join("target/debug").join(name);
+        let bin = Self::repo_root()?.join("target/debug").join(name);
         if !bin.exists() {
             bail!(
                 "binary not found: {}; run cargo build --workspace",
@@ -653,6 +827,27 @@ impl Cluster {
             );
         }
         Ok(bin)
+    }
+
+    /// The repository root: the directory whose `Cargo.toml` carries `[workspace]`.
+    ///
+    /// A scenario that reads a file the repository ships — the example template
+    /// tree `generate` renders from, for one — resolves it from here rather than
+    /// from the test's working directory.
+    pub fn repo_root() -> Result<PathBuf> {
+        let mut current = std::env::current_dir().context("get current dir")?;
+        loop {
+            let cargo_toml = current.join("Cargo.toml");
+            if cargo_toml.exists() {
+                let content = std::fs::read_to_string(&cargo_toml).context("read Cargo.toml")?;
+                if content.contains("[workspace]") {
+                    return Ok(current);
+                }
+            }
+            if !current.pop() {
+                bail!("workspace root not found");
+            }
+        }
     }
 
     async fn free_port() -> Result<u16> {
@@ -678,8 +873,8 @@ impl Drop for Cluster {
 
         // Kill tracked children
         if let Ok(mut children) = self.children.try_lock() {
-            for mut child in children.drain(..) {
-                let _ = child.start_kill();
+            for mut tracked in children.drain(..) {
+                let _ = tracked.child.start_kill();
             }
         }
     }

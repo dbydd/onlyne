@@ -163,21 +163,16 @@ done
 [ "$registered" = "true" ] || fail "planner must register before the send" \
   "roles=$(cat "$tmp/roles.json" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
 
-# The client publishes the path it bound in `<run>/socket`, and the case reads
-# that instead of spelling the canonical path: the socket whose lifecycle this
-# case then follows is the one the client is serving, whatever the path cost.
-marker="$ws/.onlyne/run/socket"
-for _ in $(seq 1 100); do
-  if [ -s "$marker" ]; then
-    break
-  fi
-  sleep 0.1
-done
-[ -s "$marker" ] || fail "the client must publish the bound socket path in $marker" \
+# The socket whose lifecycle this case follows is the one the client is serving,
+# and under v2 that is the runtime path for this workspace root. The client also
+# publishes the `<digest>.json` registration beside it naming the same root.
+socket=$(wait_for_socket "$ws" 100) \
+  || fail "the client must bind the runtime socket for $ws" "$(cat "$tmp/client.log" 2>/dev/null)"
+registration=$(runtime_registration "$ws")
+[ -f "$registration" ] || fail "the client must publish a registration at $registration" \
   "$(cat "$tmp/client.log" 2>/dev/null)"
-socket=$(tr -d '[:space:]' <"$marker")
-[ -n "$socket" ] || fail "the published socket path must be non-empty" "$(cat "$marker" 2>/dev/null)"
-[ -S "$socket" ] || fail "the published path must hold a bound socket" "$socket"
+grep -q -F "$socket" "$tmp/client.log" \
+  || fail "the client log must name the served socket path" "$(cat "$tmp/client.log" 2>/dev/null)"
 
 send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "$TASK_PROSE") \
   || fail "send command failed" "$send_out"

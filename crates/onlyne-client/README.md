@@ -190,7 +190,7 @@ Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind
 | `history --workspace <dir>` | 为实时角色运行时保留。 |
 
 `run` 是唯一的启动动词，并始终留在前台。`--workspace` 接受相对路径，并在使用前将其解析为绝对路径，因此守护进程、它所生成的会话以及 herdr 的 `--cwd` 都会读取同一位置。需要让客户端在后台运行的管理器负责这一决定——可见终端标签页、`launchd`、`nohup`——客户端自身不会分离、不写 pid 文件，也没有东西按编号向其发送信号。无法绑定适配器 socket 的 `run` 会就此结束，退出码为 1，并在 stderr 指明失败原因；成功绑定后出现 `accept` 错误时，会以 `error` 级别记录（`adapter socket accept failed; retrying`），并保持监听器、每 100 ms 重试一次。
-`status` 打印 `onlyne: client running uptime <n>s socket <path> faults <n>`。`<path>` 是通过所有者树读取的已提供服务 socket 路径——可以是规范的 `run/s`，也可以是深层工作区实际服务所用的短派生路径；回答 `<workspace>/.onlyne/run/socket` 也包含该信息。运行时长取自 socket 文件的存续时间；只有该 socket 回应 `admin` `hello` 时，客户端才计为运行中，因此异常退出遗留的 socket 文件会显示为未运行。作出响应的客户端若没有服务器链接，会在 stderr 附加 `onlyne: client not connected`。
+`status` 打印 `onlyne: client running uptime <n>s socket <path> faults <n>`。`<path>` 是机器级运行时目录中的已提供服务 socket，即 `/tmp/onlyne-<uid>/<digest>.sock`（`$ONLYNE_RUNTIME_DIR` 可覆盖该目录），其中 `<digest>` 是工作区规范根路径 `sha256` 的前 16 个十六进制字符。运行时长取自该 client 发布的 `<digest>.json` 注册文件的存续时间；只有该 socket 回应 `admin` `hello` 时，客户端才计为运行中，因此异常退出遗留的 socket 文件会显示为未运行。作出响应的客户端若没有服务器链接，会在 stderr 附加 `onlyne: client not connected`。
 
 打印出的 `[[client]]` 片段是完整的角色条目：其中包含 `role`、`key`、`admin`、`max_sessions`、ACL 列表、`prose` 和 `session_command`。将其粘贴到 `spec.toml` 并重新加载后，客户端便可为该角色生成会话。
 
@@ -204,11 +204,18 @@ Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind
 | `.onlyne/client.db` | | SQLite：`intents`、`sessions`、`faults`、`prose_cache`、`config_cache`、`events` |
 | `.onlyne/keys/role.key` | `0600` | 32 个原始 ed25519 字节，只生成一次 |
 | `.onlyne/run/` | `0700` | 运行时目录 |
-| `.onlyne/run/s` | `0600` | 适配器 socket 的规范拼写；路径不超过 103 字节时，`run` 将其绑定 |
-| `.onlyne/run/socket` | `0600` | 一行内容，指明实际提供服务的路径——规范路径 `run/s`，或者树比绑定路径更深时位于系统临时目录下的短派生路径 |
 | `.onlyne/logs/client.log` | | 操作者通过会重定向输出的 shell 启动 `run` 时的 stdout 和 stderr |
 | `.onlyne/agent/<id>/` | | 包含 `plugin.toml` 的已安装插件包 |
 | `.onlyne/cache/orca-tabs.jsonl` | | 仅追加的 Orca 标签页到会话映射：供管理器/显示使用的旁路信息，不是身份来源（身份由适配器协议管理） |
+
+适配器 socket 及其注册文件位于工作区之外，位于机器级运行时目录——`/tmp/onlyne-<uid>/`，`$ONLYNE_RUNTIME_DIR` 可覆盖它，权限为 `0700`。`<workspace>/.onlyne/run/s` 只作为操作者阅读的规范拼写保留；那里不绑定任何东西，也不存在路径长度规则。
+
+| 路径 | 模式 | 内容 |
+| --- | --- | --- |
+| `<runtime>/<digest>.sock` | `0600` | 适配器 socket，在整个 `run` 期间保持绑定 |
+| `<runtime>/<digest>.json` | `0600` | 注册文件：`kind`（`client`）、`role`、`root`、`pid`、`version`，以及承载该角色会话的 `runtime` |
+
+`run` 先绑定 socket，再发布注册文件，运行结束时将其删除：一份比其服务面活得更久的注册文件，正是外部运行时插件读作"客户端在线"的依据。
 
 `init` 绝不会写入 `spec.toml`。如果工作区采用 v1 之前的布局，程序会在任何写入之前拒绝处理：退出码为 2，并逐字节输出 `onlyne: legacy workspace layout; v1.0.0 does not migrate`。
 

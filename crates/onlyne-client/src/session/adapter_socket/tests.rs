@@ -177,7 +177,10 @@ async fn a_stopped_surface_leaves_no_registration_behind() {
     // The abort drops the serving future, which is where the registration is
     // owned; a poll boundary is all it waits for.
     for _ in 0..100 {
-        if onlyne_wire::socket::read_registration(&workspace).unwrap().is_none() {
+        if onlyne_wire::socket::read_registration(&workspace)
+            .unwrap()
+            .is_none()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

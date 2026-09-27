@@ -51,11 +51,8 @@ mod tests {
         let socket = socket_path(dir).expect("socket path");
         fs::create_dir_all(socket.parent().expect("runtime dir")).expect("runtime dir");
         fs::write(&socket, "").expect("socket file");
-        write_registration(
-            dir,
-            &RegistrationFile::client(dir).with_role("worker"),
-        )
-        .expect("registration");
+        write_registration(dir, &RegistrationFile::client(dir).with_role("worker"))
+            .expect("registration");
         dir.to_path_buf()
     }
 

@@ -93,7 +93,7 @@ gw_key=$(mint_key "$tmp/gw-key" "$tmp/parent" "$tmp/gw-key.frag.toml")
 # A FIFO on stdin holds the gateway open: a pipeline would leave a `tail -f`
 # sibling that no pid list can reach, and the case would hang on its reap.
 mkfifo "$tmp/gw-in"
-"$GW_FAKE" --platform fake --gateway-id fg1 --socket "$tmp/parent/.onlyne/run/s" <"$tmp/gw-in" >"$tmp/gw-fake.log" 2>&1 &
+"$GW_FAKE" --platform fake --gateway-id fg1 --socket "$(runtime_socket "$tmp/parent")" <"$tmp/gw-in" >"$tmp/gw-fake.log" 2>&1 &
 gw_pid=$!
 track "$gw_pid"
 # A read-write open on the FIFO never blocks, so the shell holds a writer before

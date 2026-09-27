@@ -65,7 +65,9 @@ worktree，所以所有会话 tab 都平铺在宿主 worktree 的列表里，而
    ```
 
    - `serverRoots` 就是 session 轴：一项一个 onlyne server root，寻址方式是
-     `onlyne --server-root <S> …`（`<S>/.onlyne/run/s` 是该 root 的 admin socket）。
+     `onlyne --server-root <S> …`（该 root 的 admin socket 是机器级运行目录里的
+     `<digest>.sock`——`/tmp/onlyne-<uid>/`，`ONLYNE_RUNTIME_DIR` 可覆盖该目录——
+     由 `--server-root` 推导；`<S>` 内部不再绑定任何东西）。
      **缺失或空数组都是合法状态**——看板只渲染平铺的 tab 轴，完全不会调用 `onlyne`。
      条目会被 trim 并去重。
    - **tab 轴的范围不由别的东西决定。** 列哪些 tab，由 session 自己决定（见 §4 轴 A），所以没有

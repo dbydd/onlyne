@@ -187,63 +187,94 @@ fn image_over_the_ceiling_is_refused_before_the_socket_is_opened() {
     );
 }
 
-/// `generate` is a forwarder: the spec fragment reaches stdout, the progress
-/// lines reach stderr, and the child's exit code is ours.
-#[test]
-fn generate_forwards_the_argv_to_onlyne_server() {
-    let dir = tempfile::tempdir().unwrap();
-    let bin_dir = dir.path().join("bin");
-    let argv_out = dir.path().join("argv.txt");
-    let script = "#!/bin/sh\n\
-                  printf '%s\n' \"$@\" > \"$ONLYNE_ARGV\"\n\
-                  echo 'rendering spec' >&2\n\
-                  printf '%s\n' '[[client]] roles: worker'\n";
-    stub_binary(&bin_dir, "onlyne-server", script);
-    // The stub shares the directory of the CLI copy, which `resolve_sibling`
-    // probes before `PATH`, so the real daemons the suite just built cannot win.
-    let cli = onlyne_in(&bin_dir);
+/// A `[[client]]` row's key: the shape the spec parser accepts, and all the
+/// generate path reads off the row.
+const GENERATED_ROLE_KEY: &str = "ed25519/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
+/// `generate` renders the role workspaces in this process: the CLI's own
+/// `--server-root` names the tree, the spec fragment is the answer on stdout,
+/// the template lands under `--out`, and no daemon binary is reachable.
+#[test]
+fn generate_renders_the_roles_in_process() {
+    let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("srv");
     let out = dir.path().join("ws");
+    // A `PATH` with no daemon on it: a verb that still exec'd would exit 127.
+    let empty_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&empty_bin).unwrap();
 
-    let output = spawn_output(
-        Command::new(&cli)
-            .current_dir(dir.path())
-            .env("ONLYNE_ARGV", &argv_out)
-            .env("PATH", path_with(&bin_dir))
-            .args([
-                "generate",
-                "--server-root",
-                root.to_str().unwrap(),
-                "--template",
-                "spec/roles.yaml",
-                "--role",
-                "worker",
-                "--out",
-                out.to_str().unwrap(),
-                "--force",
-            ]),
-    );
-
-    assert_eq!(output.status.code(), Some(EXIT_OK));
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[[client]]"),
-        "the spec fragment must reach stdout, not stderr:\n{stdout}"
-    );
-    let stderr = stderr_of(&output);
-    assert!(
-        stderr.contains("rendering spec"),
-        "progress must stay on stderr, not on stdout:\n{stderr}"
-    );
+    let init = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "server",
+            "init",
+            "--root",
+            root.to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:7899",
+        ])
+        .output()
+        .unwrap();
     assert_eq!(
-        read_stub_argv(&argv_out),
-        format!(
-            "generate\n--root\n{}\n--template\nspec/roles.yaml\n--role\nworker\n--out\n{}\n--force\n",
-            root.display(),
-            out.display()
-        )
+        init.status.code(),
+        Some(EXIT_OK),
+        "the fixture root comes from `server init`: {}",
+        stderr_of(&init)
     );
+    let spec = root.join(".onlyne/spec.toml");
+    let mut text = std::fs::read_to_string(&spec).unwrap();
+    text.push_str(&format!(
+        "\n[[client]]\nrole = \"planner\"\nkey = \"{GENERATED_ROLE_KEY}\"\n"
+    ));
+    std::fs::write(&spec, text).unwrap();
+    let template = root.join(".onlyne/templates/dev/planner/AGENTS.md");
+    std::fs::create_dir_all(template.parent().unwrap()).unwrap();
+    std::fs::write(&template, "prose for {{role}}").unwrap();
+
+    let root_arg = root.to_str().unwrap();
+    // Both spellings of the verb, each into its own output tree: the global
+    // selector reaches the verb on either one.
+    for (argv, label) in [
+        (
+            vec!["--server-root", root_arg, "server", "generate"],
+            "server",
+        ),
+        (vec!["generate", "--root", root_arg], "verb"),
+    ] {
+        let out = out.join(label);
+        let mut argv = argv;
+        argv.push("--out");
+        argv.push(out.to_str().unwrap());
+        let output = Command::new(bin())
+            .current_dir(dir.path())
+            .env("PATH", empty_bin.as_os_str())
+            .args(&argv)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(EXIT_OK),
+            "`onlyne {}` needs no sibling: {}",
+            argv.join(" "),
+            stderr_of(&output)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("[[client]]"),
+            "the spec fragment is the answer on stdout:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("role = \"planner\""),
+            "the fragment carries the rendered role:\n{stdout}"
+        );
+        let rendered = out.join("dev/planner/AGENTS.md");
+        assert!(rendered.is_file(), "the template is rendered under --out");
+        assert_eq!(
+            std::fs::read_to_string(&rendered).unwrap(),
+            "prose for planner",
+            "the placeholder is substituted"
+        );
+    }
 }
 
 /// `wait-ready` never spins past its bound: it prints the elapsed bound and
@@ -410,8 +441,7 @@ fn status_without_a_role_names_the_missing_flag() {
     let workspace = dir.path().join("ws");
     // A role workspace with its client socket in place: the path a supervisor
     // agent's shell resolves, where `status` has nothing to answer from.
-    let client_socket = workspace.join(".onlyne").join("run").join("s");
-    std::fs::create_dir_all(client_socket.parent().unwrap()).unwrap();
+    let client_socket = tree_socket(&workspace);
     std::fs::write(&client_socket, "").unwrap();
 
     let output = Command::new(bin())
@@ -496,22 +526,96 @@ fn unknown_server_verb_is_refused_with_exit_two() {
     );
 }
 
-/// `generate` execs the sibling, so the child's exit code becomes the CLI's.
+/// A bare `onlyne server` prints the group's own help on stderr, exits with the
+/// code a bare `onlyne` uses, and asks no daemon binary for it.
 #[test]
-fn generate_propagates_the_child_exit_four() {
+fn server_without_a_verb_prints_the_group_help() {
     let dir = tempfile::tempdir().unwrap();
-    let bin_dir = dir.path().join("bin");
-    stub_binary(&bin_dir, "onlyne-server", "#!/bin/sh\nexit 4\n");
-    let cli = onlyne_in(&bin_dir);
-    let root = dir.path().join("srv");
-
-    let output = spawn_output(
-        Command::new(&cli)
-            .current_dir(dir.path())
-            .env("PATH", path_with(&bin_dir))
-            .args(["generate", "--server-root", root.to_str().unwrap()]),
+    let empty_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&empty_bin).unwrap();
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .env("PATH", empty_bin.as_os_str())
+        .arg("server")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("Usage: onlyne server"),
+        "the group's own usage line is the header:\n{stderr}"
     );
-    assert_eq!(output.status.code(), Some(4));
+    assert!(
+        stderr.contains("init") && stderr.contains("run") && stderr.contains("status"),
+        "the help lists the group's verbs:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "the help goes to stderr, the way a bare `onlyne` writes it"
+    );
+}
+
+/// A root with no `spec.toml` is an operator refusal, decided in this process
+/// on either spelling of the verb: `generate` and `server generate` answer exit
+/// 4 and name the file, with no daemon binary reachable.
+#[test]
+fn generate_refuses_a_root_with_no_spec() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("srv");
+    // A `PATH` with no daemon on it: a verb that still exec'd would exit 127.
+    let empty_bin = dir.path().join("bin");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&empty_bin).unwrap();
+
+    for args in [
+        vec!["generate", "--root", root.to_str().unwrap()],
+        vec![
+            "--server-root",
+            root.to_str().unwrap(),
+            "server",
+            "generate",
+        ],
+    ] {
+        let output = Command::new(bin())
+            .current_dir(dir.path())
+            .env("PATH", empty_bin.as_os_str())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(EXIT_REFUSAL),
+            "`onlyne {}` refuses locally: {}",
+            args.join(" "),
+            stderr_of(&output)
+        );
+        let stderr = stderr_of(&output);
+        assert!(
+            stderr.contains("spec.toml"),
+            "the refusal names the file it wanted: {stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "a refused generate prints no fragment"
+        );
+    }
+}
+
+/// Neither root flag is a usage refusal, decided before any file is read.
+#[test]
+fn generate_without_a_root_names_the_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .arg("generate")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
+    assert_eq!(
+        stderr_of(&output),
+        "onlyne: generate requires --server-root or --root\n"
+    );
+    assert!(output.stdout.is_empty());
 }
 
 /// `--file -` reads the message body from stdin.
@@ -1566,12 +1670,13 @@ fn request_replaces_the_constructed_args_wholesale() {
 
 /// `--request` is validated before the socket opens: a pinned `Task` with no
 /// `op_id` is refused locally, and the protocol error names the field. The
-/// server root below holds no socket, so a remote round trip cannot be what
-/// answers.
+/// server root below holds a socket name no daemon serves, so a remote round
+/// trip cannot be what answers.
 #[test]
 fn request_without_op_id_is_refused_locally() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("srv");
+    std::fs::write(tree_socket(&root), "").unwrap();
     let given = serde_json::to_value(pinned_send(None)).unwrap();
     assert!(!given["envelope"].as_object().unwrap().contains_key("op_id"));
 
@@ -2218,20 +2323,26 @@ fn pinned_send(op_id: Option<&str>) -> onlyne_proto::AdminSend {
     }
 }
 
+/// The socket one owner tree's daemon serves: the runtime directory's
+/// `<digest>.sock`, claimed here so the bind cannot meet a leftover name.
+///
+/// The tree is marked with `.onlyne/`, which is what the CLI's upward walk
+/// looks for before it asks for this path.
+fn tree_socket(root: &Path) -> PathBuf {
+    std::fs::create_dir_all(root.join(".onlyne")).unwrap();
+    let socket = onlyne_wire::socket::socket_path(root).unwrap();
+    let _ = std::fs::remove_file(&socket);
+    socket
+}
+
 /// The admin socket path `--server-root` resolves, bound and ready to answer.
 fn admin_listener(root: &Path) -> LocalListenerSync {
-    let socket = root.join(".onlyne").join("run").join("s");
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    let _ = std::fs::remove_file(&socket);
-    bind_local_sync_poll(&socket).unwrap()
+    bind_local_sync_poll(&tree_socket(root)).unwrap()
 }
 
 /// The role socket path `--workspace` resolves, bound and ready to answer.
 fn role_listener(workspace: &Path) -> LocalListenerSync {
-    let socket = workspace.join(".onlyne").join("run").join("s");
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    let _ = std::fs::remove_file(&socket);
-    bind_local_sync_poll(&socket).unwrap()
+    bind_local_sync_poll(&tree_socket(workspace)).unwrap()
 }
 
 /// Answer one request frame on `listener` and hand back the frame it carried.
@@ -2412,9 +2523,6 @@ fn stub_binary(dir: &Path, name: &str, script: &str) -> PathBuf {
 
 #[cfg(windows)]
 fn unix_script_to_cmd(script: &str) -> String {
-    if script.contains("exit 4") {
-        return "@echo off\r\nexit 4\r\n".into();
-    }
     if let Some(marker) = script.lines().find_map(|line| {
         line.trim()
             .strip_prefix("touch ")
@@ -2434,14 +2542,6 @@ fn unix_script_to_cmd(script: &str) -> String {
              )\r\n\
              :onlyne_after_argv\r\n",
         );
-    }
-    if script.contains("rendering spec") {
-        cmd.push_str("echo rendering spec 1>&2\r\n");
-    }
-    if script.contains("[[client]]") {
-        // `echo(` prints `[` literally; plain `echo [` can be parsed as a
-        // command grouping.
-        cmd.push_str("echo([[client]] roles: worker\r\n");
     }
     cmd.push_str("exit /b 0\r\n");
     cmd
@@ -2487,25 +2587,28 @@ fn path_with(dir: &Path) -> OsString {
     value
 }
 
-/// The lifecycle verbs exec `onlyne-server` with their flags intact, so the
-/// daemon sees the same argv a direct invocation carries.
+/// `server init` writes the root in this process: the spec and its pin land on
+/// disk, the pin is the answer on stdout, and the sibling daemon beside the CLI
+/// never runs.
 #[test]
-fn server_lifecycle_verbs_forward_the_argv_verbatim() {
+fn server_init_writes_the_root_in_process() {
     let dir = tempfile::tempdir().unwrap();
     let bin_dir = dir.path().join("bin");
-    let argv_out = dir.path().join("argv.txt");
+    let marker = dir.path().join("executed");
     stub_binary(
         &bin_dir,
         "onlyne-server",
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ONLYNE_ARGV\"\n",
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
     );
+    // The stub shares the directory of the CLI copy, which `resolve_sibling`
+    // probes before `PATH`, so an exec would run the stub and not the daemon
+    // the suite just built.
     let cli = onlyne_in(&bin_dir);
     let root = dir.path().join("srv");
 
     let output = spawn_output(
         Command::new(&cli)
             .current_dir(dir.path())
-            .env("ONLYNE_ARGV", &argv_out)
             .env("PATH", path_with(&bin_dir))
             .args([
                 "server",
@@ -2516,14 +2619,219 @@ fn server_lifecycle_verbs_forward_the_argv_verbatim() {
                 "127.0.0.1:7899",
             ]),
     );
-    assert_eq!(output.status.code(), Some(EXIT_OK));
+
     assert_eq!(
-        read_stub_argv(&argv_out),
-        format!(
-            "init\n--root\n{}\n--listen\n127.0.0.1:7899\n",
-            root.display()
-        )
+        output.status.code(),
+        Some(EXIT_OK),
+        "{}",
+        stderr_of(&output)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim_start().starts_with("sha256/"),
+        "the certificate pin is the answer:\n{stdout}"
+    );
+    let spec = std::fs::read_to_string(root.join(".onlyne/spec.toml")).unwrap();
+    assert!(spec.contains("[server]"), "the spec template is written");
+    assert!(spec.contains("listen = \"127.0.0.1:7899\""));
+    assert!(
+        spec.contains(&format!("cert_pin = \"{}\"", stdout.trim())),
+        "the pin the spec carries is the one just printed"
+    );
+    assert!(
+        !marker.exists(),
+        "`server init` resolves in process, so onlyne-server must never run"
+    );
+}
+
+/// The v1 bug: `onlyne --server-root <dir> server init` lost the flag at the
+/// exec boundary, and the child failed for want of `--root`. The global
+/// selector is the root now, and `--quiet` is the CLI's own switch for the
+/// progress line.
+#[test]
+fn server_init_honors_the_global_server_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("srv");
+    let second = dir.path().join("quiet-srv");
+
+    let output = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--server-root",
+            root.to_str().unwrap(),
+            "server",
+            "init",
+            "--listen",
+            "127.0.0.1:9999",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_OK),
+        "{}",
+        stderr_of(&output)
+    );
+    let spec = std::fs::read_to_string(root.join(".onlyne/spec.toml")).unwrap();
+    assert!(spec.contains("listen = \"127.0.0.1:9999\""));
+    assert!(
+        spec.contains("name = \"srv\""),
+        "the root names the cluster:\n{spec}"
+    );
+    assert!(
+        stderr_of(&output).contains("wrote"),
+        "the progress line names the file it wrote: {}",
+        stderr_of(&output)
+    );
+
+    let quiet = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--quiet",
+            "--server-root",
+            second.to_str().unwrap(),
+            "server",
+            "init",
+            "--listen",
+            "127.0.0.1:9998",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(quiet.status.code(), Some(EXIT_OK));
+    assert_eq!(
+        stderr_of(&quiet),
+        "",
+        "`--quiet` is the CLI's own switch for the progress line"
+    );
+    assert!(
+        String::from_utf8_lossy(&quiet.stdout)
+            .trim_start()
+            .starts_with("sha256/"),
+        "the answer still reaches stdout under --quiet"
+    );
+
+    let refused = Command::new(bin())
+        .current_dir(dir.path())
+        .args([
+            "--server-root",
+            root.to_str().unwrap(),
+            "server",
+            "init",
+            "--listen",
+            "127.0.0.1:9999",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        refused.status.code(),
+        Some(EXIT_REFUSAL),
+        "a second init refuses to overwrite the spec"
+    );
+    assert!(
+        stderr_of(&refused).contains("refusing to overwrite"),
+        "{}",
+        stderr_of(&refused)
+    );
+
+    let bare = Command::new(bin())
+        .current_dir(dir.path())
+        .args(["server", "init", "--listen", "127.0.0.1:9999"])
+        .output()
+        .unwrap();
+    assert_eq!(bare.status.code(), Some(EXIT_VALIDATION));
+    assert_eq!(
+        stderr_of(&bare),
+        "onlyne: server init requires --root or --server-root\n"
+    );
+}
+
+/// `start` and `stop` left the vocabulary: the operator gets the foreground
+/// answer, exit 2, and nothing on stdout.
+#[test]
+fn server_start_and_stop_are_refused_with_the_foreground_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    for verb in ["start", "stop"] {
+        let output = Command::new(bin())
+            .current_dir(dir.path())
+            .args(["server", verb])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(EXIT_VALIDATION),
+            "`onlyne server {verb}` is refused locally"
+        );
+        assert_eq!(
+            stderr_of(&output),
+            format!(
+                "onlyne: server {verb} is gone; Onlyne runs in the foreground, so staying \
+                 resident belongs to the terminal host or to launchd/systemd\n"
+            ),
+            "the refusal says why there is no {verb}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "a refused verb prints a hint, not an answer"
+        );
+    }
+}
+
+/// The `run` verbs still exec their daemon, so the CLI's own selector rides
+/// across the boundary as the child spells it: `--server-root` becomes the
+/// server's `--root`, `--workspace` becomes the client's own flag, and a flag
+/// the operator typed after the verb stays the only one the child sees.
+#[test]
+fn the_run_verbs_carry_the_cli_selector_across_the_exec() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_dir = dir.path().join("bin");
+    let argv_out = dir.path().join("argv.txt");
+    let script = "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ONLYNE_ARGV\"\n";
+    stub_binary(&bin_dir, "onlyne-server", script);
+    stub_binary(&bin_dir, "onlyne-client", script);
+    let cli = onlyne_in(&bin_dir);
+    let root = dir.path().join("srv");
+    let workspace = dir.path().join("ws");
+
+    let cases = [
+        (
+            vec!["--server-root", root.to_str().unwrap(), "server", "run"],
+            format!("run\n--root\n{}\n", root.display()),
+        ),
+        (
+            vec![
+                "--server-root",
+                root.to_str().unwrap(),
+                "server",
+                "run",
+                "--root",
+                "/tmp/explicit-root",
+            ],
+            "run\n--root\n/tmp/explicit-root\n".to_string(),
+        ),
+        (
+            vec!["--workspace", workspace.to_str().unwrap(), "client", "run"],
+            format!("run\n--workspace\n{}\n", workspace.display()),
+        ),
+        (
+            vec!["client", "run", "--workspace", "/tmp/explicit-ws"],
+            "run\n--workspace\n/tmp/explicit-ws\n".to_string(),
+        ),
+    ];
+    for (args, expected) in cases {
+        let output = spawn_output(
+            Command::new(&cli)
+                .current_dir(dir.path())
+                .env("ONLYNE_ARGV", &argv_out)
+                .env("PATH", path_with(&bin_dir))
+                .args(&args),
+        );
+        assert_eq!(output.status.code(), Some(EXIT_OK), "argv {args:?}");
+        assert_eq!(
+            read_stub_argv(&argv_out),
+            expected,
+            "the child's argv for {args:?}"
+        );
+    }
 }
 
 /// `gateway status` reads the admin status op, so the registered gateway ids

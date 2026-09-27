@@ -213,6 +213,7 @@ async fn fake_agent_over_hostsim_completes_scripted_task() {
         r#"{"hello": {"capabilities": ["register","report","inject","recycle"]},
             "steps": [{"wait_assign": true},
                       {"report": "ready"},
+                      {"report": "heartbeat"},
                       {"complete": {"outcome": "done", "head_from": "assign_body"}},
                       {"echo_prose_to": "prose.log"}]}"#,
     )

@@ -67,14 +67,12 @@ impl AdapterSocket {
                 layout.socket_path().display(),
             )
         })?;
-        endpoint
-            .publish(&self.registration())
-            .with_context(|| {
-                format!(
-                    "publish the client registration {}",
-                    endpoint.registration().display(),
-                )
-            })?;
+        endpoint.publish(&self.registration()).with_context(|| {
+            format!(
+                "publish the client registration {}",
+                endpoint.registration().display(),
+            )
+        })?;
         // Under v2 the socket always lives in the runtime directory, so serving
         // off the `<run>/s` spelling is the normal case and not a move worth a
         // warning. The canonical spelling is logged because it is what an
@@ -102,9 +100,7 @@ impl AdapterSocket {
     /// takes the file with it when the surface stops serving, however it stops.
     pub async fn accept_loop(&self, listener: LocalListener) -> Result<()> {
         let _registration = RegistrationGuard {
-            root: RoleWorkspace::resolve(&self.workspace)
-                .root()
-                .to_path_buf(),
+            root: RoleWorkspace::resolve(&self.workspace).root().to_path_buf(),
         };
         loop {
             match listener.accept().await {

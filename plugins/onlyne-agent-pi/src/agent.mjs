@@ -1,8 +1,9 @@
-// The agent side of the onlyne adapter protocol: one connection to
-// `<role workspace>/.onlyne/run/s`, the hello/welcome handshake, assign
-// delivery, turn-state reports, the completion exit and the idle reminder
-// ladder that leads to it, probe, recycle and detach — plus reconnect when the
-// client restarts under it.
+// The agent side of the onlyne adapter protocol: one connection to the role
+// workspace's client socket — v2 binds it in the machine-level runtime
+// directory as `<digest>.sock`, not inside the tree (`socket.mjs`) — the
+// hello/welcome handshake, assign delivery, turn-state reports, the completion
+// exit and the idle reminder ladder that leads to it, probe, recycle and detach
+// — plus reconnect when the client restarts under it.
 //
 // Everything pi-specific lives behind `surface` (see pi-surface.mjs): this
 // module decides *what* the protocol says and hands the *effects* to the

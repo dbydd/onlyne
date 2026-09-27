@@ -214,8 +214,9 @@ export function normalizePathList(value) {
 }
 
 /** `serverRoots` names the onlyne server roots the board mirrors (one admin
- * socket `<root>/.onlyne/run/s` each). Absent, empty or malformed is a normal
- * state: the board then has no session axis and renders flat Orca tabs only. */
+ * socket each, `<digest>.sock` in the machine-level runtime directory, which
+ * `--server-root` derives). Absent, empty or malformed is a normal state: the
+ * board then has no session axis and renders flat Orca tabs only. */
 export const normalizeServerRoots = normalizePathList;
 
 export function resolveBinaries({

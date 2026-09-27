@@ -1408,6 +1408,18 @@ impl AgentHandle {
         serde_json::from_value(value).map_err(AdapterError::Serde)
     }
 
+    /// Hand this session's task on to another role.
+    ///
+    /// The host mints the child — it knows the parent's causality, the family
+    /// root, and the hop budget — so the answer is the child's own identity:
+    /// `{ "task_id": …, "hop": …, "queued": …, "op_id": … }`. A refused handoff
+    /// arrives as an error carrying the host's own word for the refusal.
+    pub async fn handoff(&self, args: HandoffArgs) -> Result<Value> {
+        self.io
+            .request_ok(AdapterMsg::Plugin(PluginOp::Handoff(args)))
+            .await
+    }
+
     pub fn report_sender(&self) -> ReportSender {
         self.reports.clone()
     }

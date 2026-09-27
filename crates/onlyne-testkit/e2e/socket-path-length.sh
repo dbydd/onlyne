@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Field case (2026-09-17): a generated role workspace three levels under a 55-byte
-# checkout root spells `<ws>/.onlyne/run/s` at 104-109 bytes. macOS `sun_path`
-# holds 104 bytes including its NUL, so those clients could not bind the adapter
-# socket, retried every 0.5s, and reported `connect EINVAL` to the plugin while
-# the server still counted the role connected.
+# Verification case 17, rewritten for the v2 socket move. The rule it used to
+# pin is gone: v1 bound `<workspace>/.onlyne/run/s` while that spelling fit
+# `sun_path` and moved a deeper tree to a short derived path recorded in
+# `run/socket`, and a generated role nests deep enough to pass the bound. v2
+# binds every root at `<runtime_dir>/<digest>.sock` whatever its length, so the
+# length of the workspace is no longer an input to where the socket lives.
 #
-# This case builds a workspace whose canonical socket path is past that bound and
-# proves the served path is short, published, discoverable from the workspace
-# alone, and passes one task end to end.
+# What is left to pin is the invariant that replaced it, and it is a real one:
+# a workspace whose canonical spelling is far past the old bound still serves one
+# short runtime path, its `<digest>.json` registration names that same path and
+# the same root, and nothing at all is created under `<workspace>/.onlyne/run/`.
+# The case keeps the deep workspace and the end-to-end task, because a deep root
+# is exactly the input that used to split one tree across two directories.
+#
+# No real platform credential or window manager is touched: ONLYNE_BACKEND=fake plus the fake gateway only.
 SRC=$(pwd)
 tmp=$(mktemp -d)
 server_pid=""
@@ -22,9 +28,9 @@ cleanup() {
 trap cleanup EXIT
 . "$SRC/crates/onlyne-testkit/e2e/lib.sh"
 
-# The padding is ASCII, so a character count equals the byte count the unix bound
-# is stated in. The loop stops once the workspace path alone is long enough to put
-# its canonical socket path past 103 bytes.
+# The padding is ASCII, so a character count equals the byte count the old unix
+# bound was stated in. The loop stops once the workspace path alone is long
+# enough that its v1 canonical spelling would have been over that bound.
 ws="$tmp/planner"
 n=0
 while [ "${#ws}" -lt 116 ] && [ "$n" -lt 40 ]; do
@@ -32,7 +38,8 @@ while [ "${#ws}" -lt 116 ] && [ "$n" -lt 40 ]; do
   n=$((n + 1))
 done
 natural="$ws/.onlyne/run/s"
-[ "${#natural}" -gt 103 ] || fail "this case needs a canonical socket path past 103 bytes" "$natural (${#natural} bytes)"
+[ "${#natural}" -gt 103 ] \
+  || fail "this case needs a workspace past the old 103-byte bound" "$natural (${#natural} bytes)"
 
 setup_cluster "$tmp/server" "$ws" planner cluster "" "$E2E_PROSE" 'allowed_senders = ["*", "planner"]
 allowed_targets = ["planner"]'
@@ -43,24 +50,43 @@ client_pid=$!
 "$FAKE" --workspace "$ws" --script "$SRC/crates/onlyne-testkit/scripts/echo-complete.json" >"$tmp/fake.log" 2>&1 &
 fake_pid=$!
 
-# The client publishes the path it bound in `<run>/socket`, which is how a caller
-# that spells the long workspace reaches a socket it cannot name directly.
-marker="$ws/.onlyne/run/socket"
-for _ in $(seq 1 100); do
-  if [ -s "$marker" ]; then break; fi
-  sleep 0.1
-done
-[ -s "$marker" ] || fail "the client must publish the bound socket path in $marker" "$(cat "$tmp/client.log" 2>/dev/null)"
-bound=$(tr -d '[:space:]' <"$marker")
-[ -n "$bound" ] || fail "the published path must be non-empty" "$(cat "$marker" 2>/dev/null)"
-[ "${#bound}" -le 103 ] || fail "the served path must fit the unix bound" "$bound (${#bound} bytes)"
-[ "$bound" != "$natural" ] || fail "a canonical path past 103 bytes must bind the short path" "$bound"
-[ -S "$bound" ] || fail "the published path must hold a bound socket" "$bound"
-[ ! -S "$natural" ] || fail "the canonical path must hold no socket" "$natural"
-grep -q -F "$bound" "$tmp/client.log" || fail "the client log must name the served path" "$(cat "$tmp/client.log" 2>/dev/null)"
+# The served path is the one the client bound, derived from this root alone, so
+# the same helper every other case calls answers it without a marker to read.
+bound=$(wait_for_socket "$ws" 100) \
+  || fail "the client must bind a runtime socket for this workspace" "$(cat "$tmp/client.log" 2>/dev/null)"
+[ "${#bound}" -le 103 ] || fail "a runtime path must fit the unix bound" "$bound (${#bound} bytes)"
+case "$bound" in
+  "$(runtime_dir)"/*.sock) ;;
+  *) fail "the served path must sit in the runtime directory" "$bound" ;;
+esac
+grep -q -F "$bound" "$tmp/client.log" \
+  || fail "the client log must name the served path" "$(cat "$tmp/client.log" 2>/dev/null)"
 
-# `who` names the workspace and never the short path, so this answer is the
-# marker doing its job.
+# The registration beside it names the same root and the same socket, so a reader
+# needs no tree walk to learn who serves what.
+registration=$(runtime_registration "$ws")
+[ -f "$registration" ] \
+  || fail "the client must publish a registration at $registration" "$(cat "$tmp/client.log" 2>/dev/null)"
+reg_root=$(json_field "$registration" '.root' 'json.load(sys.stdin).get("root","")')
+reg_runtime=$(json_field "$registration" '.runtime' 'json.load(sys.stdin).get("runtime","")')
+reg_kind=$(json_field "$registration" '.kind' 'json.load(sys.stdin).get("kind","")')
+reg_role=$(json_field "$registration" '.role' 'json.load(sys.stdin).get("role","")')
+[ "$(basename "$registration")" = "$(workspace_digest "$ws").json" ] \
+  || fail "the registration must be named for this root's digest" "$registration"
+[ "$reg_root" = "$(cd "$ws" && pwd -P)" ] \
+  || fail "the registration must name the canonical workspace root" "root=$reg_root expected=$(cd "$ws" && pwd -P)"
+[ "$reg_kind" = "client" ] || fail "a role workspace must register as a client" "kind=$reg_kind"
+[ "$reg_role" = "planner" ] || fail "the registration must name the serving role" "role=$reg_role"
+[ "$reg_runtime" = "fake" ] || fail "the registration must name the session runtime" "runtime=$reg_runtime"
+
+# Nothing binds in the tree any more: the canonical spelling and the v1 marker
+# are both absent, and `run/` holds no socket at all.
+[ ! -e "$natural" ] || fail "nothing may be created at the canonical spelling" "$natural"
+[ ! -e "$ws/.onlyne/run/socket" ] || fail "the v1 marker must not be published" "$ws/.onlyne/run/socket"
+[ ! -S "$ws/.onlyne/run/s" ] || fail "no socket may live under the workspace run directory" "$ws/.onlyne/run/s"
+
+# `who` names the workspace and never the path, so this answer is the resolver
+# doing its job.
 who_out=""
 who_name=""
 for _ in $(seq 1 100); do
@@ -72,7 +98,7 @@ for _ in $(seq 1 100); do
 done
 [ "$who_name" = "planner" ] || fail "who must reach the client through the workspace" "$who_out $(cat "$tmp/client.log" 2>/dev/null)"
 
-# One task end to end over the short socket: the fake agent resolves the same
+# One task end to end over the runtime socket: the fake agent resolves the same
 # path from the workspace, so a task that settles proves every finder agrees.
 registered=false
 for _ in $(seq 1 100); do

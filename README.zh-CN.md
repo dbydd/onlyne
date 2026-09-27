@@ -260,11 +260,9 @@ sequenceDiagram
 
 ```text
 <server-root>/.onlyne/
-  spec.toml                 协议与角色配置
-  state.db                  账本、fault、事件、ghost-sweep 审计
-  run/s                     owner-only admin/gateway socket（规范名）
-  run/socket                需要时记录实际使用的短 socket 路径
-  run/server.pid            detached server 的 pid
+  spec.toml                 协议与角色真相
+  state.db                  ledger、fault、事件、ghost sweep 审计
+  run/                      owner-only 运行时目录；v2 在这里不创建任何东西
   keys/server.key           TLS 与 server 身份密钥
   templates/                generate 使用的角色内容
   ws/                       默认生成的工作区
@@ -280,8 +278,7 @@ sequenceDiagram
 <workspace>/.onlyne/
   config.toml                 角色与 backend 配置
   client.db                   task/session 状态与持久 intent
-  run/s                       owner-only agent adapter socket（规范名）
-  run/socket                  需要时记录实际使用的短 socket 路径
+  run/                        owner-only 运行时目录；其中不绑定任何东西
   keys/role.key               角色身份密钥
   agent/                      工作区范围的 agent 包
   logs/client.log             client 进程日志
@@ -302,7 +299,18 @@ onlyne schema client --pretty
 
 ### Socket discovery
 
-在 macOS 和 Linux 上，规范的本地 endpoint 是 `<owner>/.onlyne/run/s`，权限为 `0600`。完整路径不超过 103 字节时直接绑定；更深的目录树会使用系统临时目录下的短派生路径，并在 `.onlyne/run/socket` 中记录实际服务路径。Windows 使用 named pipe，`.onlyne/run/s` 是 `v1:onlyne-<32hex>` marker。
+所有本地 socket 都位于同一个机器级运行时目录中，绝不落在工作区目录树内。在 macOS 和 Linux 上该目录是 `/tmp/onlyne-<uid>/`，以 `0700` 创建；`$ONLYNE_RUNTIME_DIR` 在设置且非空时替换整个目录。
+
+一个 owner 树在该目录中拥有两个文件，文件名都由 `<digest>` 决定——该树规范绝对根路径的 `sha256` 前 16 个十六进制字符：
+
+```text
+<runtime-dir>/<digest>.sock    已绑定的 socket，权限 0600
+<runtime-dir>/<digest>.json    注册文件：kind、role、root、pid、version、runtime
+```
+
+注册文件让读取方无需遍历目录树就能知道谁在服务哪棵树：`kind` 说明是 server root 还是角色工作区的 client，`role` 给出角色名。调用方可以用 `onlyne_wire::socket::list_registrations` 列出目录中的全部注册，也可以用 `read_registration <root>` 读取单个注册。
+
+路径长度规则已经不存在。深层工作区和浅层工作区解析到同一个短运行时路径，`.onlyne/run/` 下不会创建任何东西——`<owner>/.onlyne/run/s` 只作为操作者打印时的规范拼写保留。在 Windows 上，同样的两个文件保存 marker 和注册，socket 本身是 marker 中命名的 NPFS pipe。
 
 client 会把实际服务路径以 `ONLYNE_SOCKET` 注入每个 session。socket 选择顺序是：
 
@@ -444,7 +452,7 @@ hello → welcome → report.ready → assign → assign_ack
 - 一个 client session 服务一个 task。task 结清后，该 session 不再占用 `max_sessions` 容量；只要 plugin transport 仍挂着，client 会保留这个已结清 slot，transport 结束后才退役 slot 与宿主资源。仍绑定且未结清的 task session 若 transport 断开超过宽限窗口，或 transport 仍在线但连续三个心跳周期没有新帧，也会退役；client 随后把 task 结清为 `failed`，以 `session_dead` 拒收其持有的投递行，并发布 session 的退出投影。
 - aggregate role 把子集群暴露给父 server，不需要把子角色名或联邦操作加入 wire protocol。
 
-更深的 crate 地图、session 生命周期和形式化设计理由见 [`docs/v1-ARCHITECTURE.md`](docs/v1-ARCHITECTURE.md) 与 [`proofs/BRIEF.md`](proofs/BRIEF.md)。
+v2 的 crate 地图、session 生命周期和形式化设计理由见 [`AGENTS.md`](AGENTS.md) 与 [`docs/v2-PLAN.md`](docs/v2-PLAN.md)。[`docs/v1-ARCHITECTURE.md`](docs/v1-ARCHITECTURE.md) 是归档的 v1 地图，保留下来记录 v1 的形态；[`proofs/BRIEF.md`](proofs/BRIEF.md) 承载 v1 的设计理由。
 
 ## 继续阅读
 

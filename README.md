@@ -259,9 +259,7 @@ The automatic requeue age gate is `[server].requeue_ttl_secs`. It defaults to `0
 <server-root>/.onlyne/
   spec.toml                 protocol and role truth
   state.db                  ledger, faults, events, ghost-sweep audit
-  run/s                     owner-only admin/gateway socket (canonical spelling)
-  run/socket                actual short socket path, when needed
-  run/server.pid            detached server pid
+  run/                      owner-only runtime directory; v2 creates nothing here
   keys/server.key           TLS and server identity key
   templates/                role content used by generate
   ws/                       default generated workspaces
@@ -277,8 +275,7 @@ The automatic requeue age gate is `[server].requeue_ttl_secs`. It defaults to `0
 <workspace>/.onlyne/
   config.toml                 role and backend configuration
   client.db                   task/session state and durable intents
-  run/s                       owner-only agent adapter socket (canonical spelling)
-  run/socket                  actual short socket path, when needed
+  run/                        owner-only runtime directory; holds nothing bound
   keys/role.key               role identity key
   agent/                      workspace-scoped agent packages
   logs/client.log             client process log
@@ -299,7 +296,18 @@ onlyne schema client --pretty
 
 ### Socket discovery
 
-On macOS and Linux, the canonical local endpoint is `<owner>/.onlyne/run/s` with mode `0600`. It is bound directly while the complete path fits 103 bytes. Longer trees bind a short derived path under the system temporary directory and record the served path in `.onlyne/run/socket`. Windows uses a named pipe; `.onlyne/run/s` is a `v1:onlyne-<32hex>` marker.
+Every local socket lives in one machine-level runtime directory, never inside a workspace tree. On macOS and Linux that is `/tmp/onlyne-<uid>/`, created `0700`, and `$ONLYNE_RUNTIME_DIR` replaces the whole directory when it is set and non-empty.
+
+One owner tree owns two files there, both named by `<digest>` — the first 16 hex characters of `sha256` over the tree's canonical absolute root:
+
+```text
+<runtime-dir>/<digest>.sock    the bound socket, mode 0600
+<runtime-dir>/<digest>.json    the registration: kind, role, root, pid, version, runtime
+```
+
+The registration is how a reader learns who serves a tree without walking one: `kind` says whether a server root or a role workspace's client serves it, and `role` names the role. A caller can list every registration in the directory with `onlyne_wire::socket::list_registrations`, or read one with `read_registration <root>`.
+
+There is no path length rule any more. A deeply nested workspace and a shallow one resolve to the same short runtime path, and nothing is created under `.onlyne/run/` — `<owner>/.onlyne/run/s` survives only as the spelling operators print. On Windows the same two files hold a marker and a registration; the socket itself is an NPFS pipe named inside the marker.
 
 The client injects the actual served path as `ONLYNE_SOCKET` into every session. Socket selection is:
 
@@ -441,7 +449,7 @@ External adapters implement [`crates/onlyne-adapter/PROTOCOL.md`](crates/onlyne-
 - One client session serves one task. Once the task settles, the session stops consuming `max_sessions` capacity; the client keeps a settled slot only while its plugin transport is attached, then retires the slot and host resource. An unsettled task-bound session is also retired when its transport disconnects past the grace window or remains attached but silent for three heartbeat intervals; the client then settles the task `failed`, refuses its held delivery with `session_dead`, and publishes the exit.
 - Aggregate roles expose a child cluster to a parent without adding child role names or federation operations to the wire protocol.
 
-The deeper crate map, lifecycle model, and formal design rationale live in [`docs/v1-ARCHITECTURE.md`](docs/v1-ARCHITECTURE.md) and [`proofs/BRIEF.md`](proofs/BRIEF.md).
+The v2 crate map, lifecycle model, and formal design rationale live in [`AGENTS.md`](AGENTS.md) and [`docs/v2-PLAN.md`](docs/v2-PLAN.md). [`docs/v1-ARCHITECTURE.md`](docs/v1-ARCHITECTURE.md) is the archived v1 map, kept as a record of how v1 was shaped; [`proofs/BRIEF.md`](proofs/BRIEF.md) carries the v1 design rationale.
 
 ## Further reading
 

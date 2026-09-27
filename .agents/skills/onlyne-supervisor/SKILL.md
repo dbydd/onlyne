@@ -20,11 +20,11 @@ to you and the spec file.
   on every envelope it relays. Put `admin = true` on your own `[[client]]` entry too: that
   is the standing a client-held supervisor session sends with, and the flag the Control-class
   ACL bypass reads.
-- Lifecycle: `onlyne server init|run|start|stop|status|generate|reload`, the top-level
+- Lifecycle: `onlyne server init|run|status|generate|reload`, the top-level
   `onlyne wait-ready`, `onlyne client run|init|status`, `onlyne gateway
-  run|list|auth|status`. The client never detaches, so it carries no `start`/`stop`: a
-  supervisor that wants it in the background starts `run` itself (a tab, `launchd`,
-  `nohup`).
+  run|list|auth|status`. Nothing detaches and there is no `start`/`stop`: both daemons
+  run in the foreground, and a supervisor that wants one in the background starts `run`
+  itself (a tab, `launchd`, `systemd`).
 - Every request verb prints one JSON line for its answer. `onlyne cluster export-prose`
   prints the prose raw unless `--json` wraps it in an object, and the `report` family
   prints labeled lines and opens no socket. Exit codes: 0 ok, 1 failed answer, 2 local

@@ -1,6 +1,14 @@
-//! Black-box scenario test suite: spawn real server/client/agent processes, observe
-//! ledger and sessions through the admin socket. These scenarios exercise v1 behavior
-//! as a safety net before the v2 rewrite.
+//! Black-box scenario test suite: spawn real server/client/agent processes,
+//! drive them through the admin and adapter sockets, and read what they leave in
+//! the ledger and the session table.
+//!
+//! The v2 contract is what these scenarios exercise (`AGENTS.md`, `docs/v2-PLAN.md`).
+//! The suite is a fake-backend one — `ONLYNE_BACKEND=fake` per child — so each case
+//! runs real binaries without a terminal, a pane manager, or a model.
+//!
+//! A fixture's script models a plugin, and a plugin that never reports a turn is a
+//! plugin whose completions the host refuses (`settle_without_turn`), so every script
+//! that completes reports a heartbeat first: see the capability note on scenario 2.
 
 use onlyne_proto::{LedgerQuery, LedgerState, Lifecycle, QuerySessionsArgs};
 use onlyne_testkit::harness::Cluster;
@@ -134,10 +142,23 @@ allowed_targets = ["planner"]"#,
     println!("✓ Scenario 1: delivery loop [send→in_flight→acked, session working→exited done]");
 }
 
-/// Scenario 2: Handoff chain (family fields correct at every hop; hop_budget refused when spent)
+/// Scenario 2: Handoff chain (family fields at every hop, and the child settles)
 ///
-/// v1 DOES NOT enforce hop_budget server-side (confirmed by v2-PLAN.md: "跳数预算 server 从不执行").
-/// This test checks family field propagation and marks the budget-refusal assertion as ignored.
+/// Asserts: alpha's task is handed to beta through the adapter protocol's own
+/// `handoff` op; the child carries the family id, one hop deeper, and names the
+/// root as its parent; beta's completion settles the child.
+///
+/// The hop budget is not asserted here, and no layer refuses a handoff for
+/// spending it: `Causality::child_of` carries `hop_budget` to the child, and
+/// whether a role keeps the task or passes it on is the plugin's own reading of
+/// that number — which is what this fixture's own `max_hop` gate models. The
+/// client-side check the v2 plan puts on the tool surface ("约束在 client 统一执行",
+/// docs/v2-PLAN.md) is not in this tree yet.
+///
+/// A script whose first step is `wait_assign` must declare `inject`: that
+/// capability is what makes a plugin reachable by `assign`, and without it the
+/// host delivers the payload through the plugin's stdin instead
+/// (`crates/onlyne-adapter/PROTOCOL.md`, "Mounts and capabilities").
 ///
 /// Supersedes: Part of docs/v1-PLAN.md §8 handoff acceptance, e2e running-lights.sh
 #[tokio::test]
@@ -146,18 +167,6 @@ async fn scenario_02_handoff_chain() {
 [server]
 name = "test"
 listen = "127.0.0.1:0"
-
-[[client]]
-role = "alpha"
-prose = "alpha prose"
-allowed_senders = ["*", "alpha"]
-allowed_targets = ["*"]
-
-[[client]]
-role = "beta"
-prose = "beta prose"
-allowed_senders = ["*", "beta"]
-allowed_targets = ["*"]
 "#;
 
     let cluster = Cluster::start(spec).await.expect("cluster start");
@@ -196,9 +205,15 @@ allowed_targets = ["*"]"#,
     // Alpha hands off to beta after 1 hop
     let alpha_script = AgentScript {
         hello: ScriptHello {
+            // `inject` is what makes a plugin reachable by `assign`
+            // (PROTOCOL.md, "Mounts and capabilities"); the pi plugin declares
+            // it, and a script whose first step is `wait_assign` has to as
+            // well, or the host takes the stdin route and the assign never
+            // comes.
             capabilities: vec![
                 onlyne_proto::Capability::Register,
                 onlyne_proto::Capability::Report,
+                onlyne_proto::Capability::Inject,
             ],
         },
         steps: vec![
@@ -215,11 +230,13 @@ allowed_targets = ["*"]"#,
             capabilities: vec![
                 onlyne_proto::Capability::Register,
                 onlyne_proto::Capability::Report,
+                onlyne_proto::Capability::Inject,
             ],
         },
         steps: vec![
             json!({"wait_assign": true}),
             json!({"report": "ready"}),
+            json!({"report": "heartbeat"}),
             json!({"complete": {"outcome": "done", "head": "beta done"}}),
         ],
         repeat: false,
@@ -246,18 +263,27 @@ allowed_targets = ["*"]"#,
         .expect("admin send");
     let root_task = send_result["task"].as_str().expect("root task id");
 
-    // Poll until we have at least 2 task rows (root + child)
-    let all_rows = cluster
+    // Poll until the family's root and its child are both visible. The query is
+    // unfiltered on purpose: `LedgerQuery` has no family filter, and filtering by
+    // the root's own task id could only ever return that one task's rows, never
+    // the child's. The family is selected on the rows instead.
+    let family_rows = cluster
         .poll_ledger(
-            LedgerQuery {
-                task: Some(root_task.to_string()),
-                ..Default::default()
+            LedgerQuery::default(),
+            |rows| {
+                rows.iter()
+                    .filter(|row| row.family.as_deref() == Some(root_task))
+                    .count()
+                    >= 2
             },
-            |rows| rows.len() >= 2,
             Duration::from_secs(60),
         )
         .await
         .expect("poll ledger for family");
+    let all_rows: Vec<_> = family_rows
+        .into_iter()
+        .filter(|row| row.family.as_deref() == Some(root_task))
+        .collect();
 
     // Check family fields: every row in the family carries the same family id
     let families: std::collections::HashSet<_> =
@@ -266,23 +292,87 @@ allowed_targets = ["*"]"#,
     let family_id = families.into_iter().next().unwrap();
     assert_eq!(family_id, root_task, "family id must equal root task");
 
-    // Check hop progression: root has hop 0, child has hop 1
+    // Check hop progression: root has hop 0, child has hop 1. A hop owns two
+    // rows once the child settles — the task itself and the completion receipt
+    // its answer travelled on, which sits at the depth of the task it answers
+    // and is no link in the chain — so the chain's own rows are the tasks.
     let hops: Vec<_> = all_rows.iter().map(|r| r.hop).collect();
     assert!(hops.contains(&0), "root task has hop 0");
     assert!(hops.contains(&1), "child task has hop 1");
 
     // Check parent_task linkage
-    let child_row = all_rows.iter().find(|r| r.hop == 1).expect("child row");
+    let child_row = all_rows
+        .iter()
+        .find(|r| r.kind == onlyne_proto::MsgKind::Task && r.hop == 1)
+        .expect("child row");
     assert_eq!(
         child_row.parent_task.as_deref(),
         Some(root_task),
         "child parent_task must link to root"
     );
 
-    println!(
-        "✓ Scenario 2: handoff chain [family fields correct, hop progression 0→1, parent_task link]"
+    // The chain's end: beta's completion settles the child it was handed, and its
+    // answer travels back to alpha on a completion row of the same family, one
+    // hop down. Note which column holds what: a task row's `out_head` is the
+    // preview the server keeps of the *delivered body* (`head_preview` in
+    // `onlyne-store/src/server.rs`), so the child's own row carries the relay's
+    // text, while the head beta reported rides the receipt.
+    let settled = cluster
+        .poll_ledger(
+            LedgerQuery::default(),
+            |rows| {
+                rows.iter().any(|row| {
+                    row.kind == onlyne_proto::MsgKind::Task
+                        && row.hop == 1
+                        && row.state == LedgerState::Acked
+                })
+            },
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("poll ledger for the settled child");
+    let child = settled
+        .iter()
+        .find(|row| row.kind == onlyne_proto::MsgKind::Task && row.hop == 1)
+        .expect("the child row");
+    assert_eq!(child.family.as_deref(), Some(root_task));
+    assert_eq!(
+        child.out_head.as_deref(),
+        Some("handoff: hop 1"),
+        "the ledger keeps the relayed body's preview, prefix and all"
     );
-    println!("  Note: v1 does not enforce hop_budget server-side (v2 will move check to client)");
+
+    let receipts: Vec<&onlyne_proto::LedgerEntry> = settled
+        .iter()
+        .filter(|row| row.kind == onlyne_proto::MsgKind::Completion)
+        .collect();
+    let receipt = receipts
+        .iter()
+        .find(|row| row.task.as_deref() == child.task.as_deref())
+        .unwrap_or_else(|| {
+            panic!("no completion receipt for the child among {receipts:#?}");
+        });
+    assert_eq!(
+        receipt.to.role_name(),
+        Some("alpha"),
+        "the receipt answers the role that handed the child on"
+    );
+    assert_eq!(
+        receipt.out_head.as_deref(),
+        Some("beta done"),
+        "the receipt carries the head beta reported"
+    );
+    assert_eq!(
+        receipt.hop, 1,
+        "a receipt sits at the depth of the task it answers"
+    );
+
+    println!(
+        "✓ Scenario 2: handoff chain [family fields correct, hop progression 0→1, parent_task link, child acked]"
+    );
+    println!(
+        "  Note: the hop budget rides along in causality; whether a role keeps the task is its own reading of it"
+    );
 }
 
 /// Scenario 3: ACL denial (denied send is refused, leaves no ledger row)
@@ -297,18 +387,6 @@ async fn scenario_03_acl_denial() {
 [server]
 name = "test"
 listen = "127.0.0.1:0"
-
-[[client]]
-role = "builder"
-prose = "builder prose"
-allowed_senders = ["*", "builder"]
-allowed_targets = ["builder"]
-
-[[client]]
-role = "reviewer"
-prose = "reviewer prose"
-allowed_senders = ["*"]
-allowed_targets = ["reviewer"]
 "#;
 
     let cluster = Cluster::start(spec).await.expect("cluster start");
@@ -342,13 +420,16 @@ allowed_targets = ["reviewer"]"#,
 
     let script = AgentScript {
         hello: ScriptHello {
+            // `wait_assign` needs `inject`: see scenario 2's note.
             capabilities: vec![
                 onlyne_proto::Capability::Register,
                 onlyne_proto::Capability::Report,
+                onlyne_proto::Capability::Inject,
             ],
         },
         steps: vec![
             json!({"wait_assign": true}),
+            json!({"report": "heartbeat"}),
             json!({"complete": {"outcome": "done", "head": "builder done"}}),
         ],
         repeat: false,
@@ -406,21 +487,13 @@ allowed_targets = ["reviewer"]"#,
 /// Supersedes: crates/onlyne-testkit/e2e/idempotency.sh
 #[tokio::test]
 async fn scenario_04_idempotency() {
-    let spec = format!(
-        r#"
+    let spec = r#"
 [server]
 name = "test"
 listen = "127.0.0.1:0"
+"#;
 
-[[client]]
-role = "planner"
-prose = "{E2E_PROSE}"
-allowed_senders = ["*", "planner"]
-allowed_targets = ["planner"]
-"#
-    );
-
-    let cluster = Cluster::start(&spec).await.expect("start cluster");
+    let cluster = Cluster::start(spec).await.expect("start cluster");
     let _planner_ws = cluster
         .register_role(
             "planner",
@@ -536,40 +609,563 @@ allowed_targets = ["planner"]"#,
     );
 }
 
-/// Scenario 5: Disconnect recovery (client drops mid-delivery, no duplicate delivery, order kept)
+/// Scenario 5: Disconnect recovery (a client that is gone when work arrives
+/// serves it once, in the order it was sent, when it comes back)
 ///
-/// Not implemented: requires killing and restarting client process with preserved state.
-/// Marked as ignored for v1 baseline.
+/// The plan's disconnect rule (docs/v2-PLAN.md §6): a delivery to a role whose
+/// client is not connected is not lost and not refused — the row stays in flight
+/// on the server, and the client's own store carries what it already held. The
+/// client is taken away *between* tasks rather than mid-frame: a kill timed
+/// against a frame in flight is a race this harness cannot make deterministic,
+/// and what the case is for is the queue's fate, not the framing.
+///
+/// Asserts: the three tasks sent while the client is gone wait `queued` and
+/// serve no session; when the client returns each is served exactly once, the
+/// three settle in the order they were sent, and each task owns exactly one
+/// session row.
+///
+/// Supersedes: crates/onlyne-testkit/e2e/reconnect-requeue.sh
 #[tokio::test]
-#[ignore]
 async fn scenario_05_disconnect_recovery() {
-    // Placeholder for disconnect recovery scenario
-    println!("⊗ Scenario 5: disconnect recovery [not implemented in v1 baseline]");
+    let spec = r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#;
+
+    let cluster = Cluster::start(spec).await.expect("start cluster");
+    let planner_ws = cluster
+        .register_role(
+            "planner",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "planner"]
+allowed_targets = ["planner"]"#,
+            ),
+        )
+        .await
+        .expect("register planner");
+
+    // One script per task: `onlyne-client init` writes `max_sessions = 1` into
+    // the role's fragment, so this role runs one session at a time and each
+    // queued row is staged only once the session before it has retired. A
+    // plugin serves the one session it is bound to, which is why the case mounts
+    // one agent per task.
+    let serve_one = || AgentScript {
+        hello: ScriptHello {
+            // `wait_assign` needs `inject`: see scenario 2's note.
+            capabilities: vec![
+                onlyne_proto::Capability::Register,
+                onlyne_proto::Capability::Report,
+                onlyne_proto::Capability::Inject,
+            ],
+        },
+        steps: vec![
+            json!({"wait_assign": true}),
+            json!({"report": "ready"}),
+            json!({"report": "heartbeat"}),
+            json!({"complete": {"outcome": "done", "head_from": "assign_body"}}),
+        ],
+        repeat: false,
+    };
+
+    cluster
+        .start_client(&planner_ws)
+        .await
+        .expect("start client");
+    cluster
+        .start_fake_agent(&planner_ws, &serve_one())
+        .await
+        .expect("start agent");
+    cluster
+        .wait_role_online("planner")
+        .await
+        .expect("planner online");
+
+    // Warm-up: the role is known to serve work before the drop, so a later
+    // failure is the drop's and not a cluster that never worked.
+    let warm_up = cluster
+        .admin_send("planner", "planner", "before the drop")
+        .await
+        .expect("send the warm-up task");
+    let warm_up_task = warm_up["task"].as_str().expect("task id").to_string();
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(warm_up_task),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|r| r.state == LedgerState::Acked),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("the warm-up task must be acked");
+
+    cluster
+        .kill_client(&planner_ws)
+        .await
+        .expect("kill the client");
+
+    let missed = ["first while gone", "second while gone", "third while gone"];
+    let mut queued = Vec::new();
+    for text in missed {
+        let sent = cluster
+            .admin_send("planner", "planner", text)
+            .await
+            .expect("send while the client is down");
+        assert_eq!(
+            sent["state"], "queued",
+            "work for a role whose client is gone waits in the queue, neither refused nor \
+             handed to a session that does not exist: {sent}"
+        );
+        queued.push(sent["task"].as_str().expect("task id").to_string());
+    }
+
+    // Queued means unattempted: nothing has a session while the local half is
+    // gone, because a session is a fact only the client can report.
+    let before_return = cluster
+        .query_sessions(QuerySessionsArgs::default())
+        .await
+        .expect("query sessions before the client returns");
+    for task in &queued {
+        assert!(
+            !before_return.iter().any(|row| &row.task_id == task),
+            "task {task} has no session before its client returns: {before_return:?}"
+        );
+    }
+
+    // The client comes back in the same workspace, so it resumes from the store
+    // it left behind rather than from nothing.
+    cluster
+        .start_client(&planner_ws)
+        .await
+        .expect("restart the client");
+    cluster
+        .wait_role_online("planner")
+        .await
+        .expect("planner online again");
+
+    // All three agents are mounted before the queue drains, so which agent takes
+    // which row is the queue's decision and not the case's: the role stages the
+    // rows in the order the server offers them, and the parks are served oldest
+    // first.
+    for _ in 0..queued.len() {
+        cluster
+            .start_fake_agent(&planner_ws, &serve_one())
+            .await
+            .expect("start an agent for the queue");
+    }
+
+    let drained = cluster
+        .poll_ledger(
+            LedgerQuery::default(),
+            |rows| {
+                queued.iter().all(|task| {
+                    rows.iter().any(|row| {
+                        row.kind == onlyne_proto::MsgKind::Task
+                            && row.task.as_deref() == Some(task.as_str())
+                            && row.state == LedgerState::Acked
+                    })
+                })
+            },
+            Duration::from_secs(120),
+        )
+        .await
+        .expect("every queued task must settle");
+
+    // Order kept: the acks follow the send order. The stamps are read off the
+    // same ledger, so one format compares as one order.
+    let acked_at: Vec<String> = queued
+        .iter()
+        .map(|task| {
+            drained
+                .iter()
+                .find(|row| {
+                    row.kind == onlyne_proto::MsgKind::Task
+                        && row.task.as_deref() == Some(task.as_str())
+                })
+                .and_then(|row| row.acked_at.as_ref())
+                .map(|stamp| stamp.to_rfc3339())
+                .unwrap_or_else(|| panic!("task {task} settled without a stamp: {drained:?}"))
+        })
+        .collect();
+    assert!(
+        acked_at.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the queue drains in the order it was filled: {acked_at:?}"
+    );
+
+    // Served once: one session row per task, and no second row for any of them.
+    let served = cluster
+        .query_sessions(QuerySessionsArgs::default())
+        .await
+        .expect("query sessions after the queue drained");
+    for task in &queued {
+        let count = served.iter().filter(|row| &row.task_id == task).count();
+        assert_eq!(
+            count, 1,
+            "task {task} ran in exactly one session, not {count}: {served:?}"
+        );
+    }
+
+    println!(
+        "✓ Scenario 5: disconnect recovery [{} queued rows served once, in order]",
+        queued.len()
+    );
 }
 
-/// Scenario 6: Server restart (ledger intact, subscriber resumes from cursor with no gap)
+/// Scenario 6: Server restart (the durable half survives the process)
 ///
-/// Not fully implemented: requires restarting server with preserved DB and checking
-/// event stream continuity. Marked as ignored for v1 baseline.
+/// The server's truth is a file: `spec.toml` names the roles, the key material
+/// is on disk, and the ledger and session rows live in the server's store. A
+/// daemon that is killed and started again on the same root must therefore come
+/// back as the same cluster — the settled work still reads settled, the roles
+/// are registered again from the spec, and the client that was connected before
+/// the gap reconnects and serves the next task.
+///
+/// What this scenario does not assert is event-stream continuity: a subscriber
+/// resuming from a cursor with no gap is a property of the run-events feed, and
+/// this harness observes the admin surface (ledger, sessions, roles) only. The
+/// assertions below are the durable half of the case, not a stand-in for the
+/// other.
 #[tokio::test]
-#[ignore]
 async fn scenario_06_server_restart() {
-    // Placeholder for server restart scenario
-    println!("⊗ Scenario 6: server restart [not implemented in v1 baseline]");
+    let spec = r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#;
+
+    let cluster = Cluster::start(spec).await.expect("start cluster");
+    let planner_ws = cluster
+        .register_role(
+            "planner",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "planner"]
+allowed_targets = ["planner"]"#,
+            ),
+        )
+        .await
+        .expect("register planner");
+
+    cluster
+        .start_client(&planner_ws)
+        .await
+        .expect("start client");
+
+    let script = AgentScript {
+        hello: ScriptHello {
+            // `wait_assign` needs `inject`: see scenario 2's note.
+            capabilities: vec![
+                onlyne_proto::Capability::Register,
+                onlyne_proto::Capability::Report,
+                onlyne_proto::Capability::Inject,
+            ],
+        },
+        steps: vec![
+            json!({"wait_assign": true}),
+            json!({"report": "ready"}),
+            json!({"report": "heartbeat"}),
+            json!({"complete": {"outcome": "done", "head_from": "assign_body"}}),
+        ],
+        repeat: false,
+    };
+    cluster
+        .start_fake_agent(&planner_ws, &script)
+        .await
+        .expect("start agent");
+
+    cluster
+        .wait_role_online("planner")
+        .await
+        .expect("planner online");
+
+    let before = cluster
+        .admin_send("planner", "planner", "settled before the restart")
+        .await
+        .expect("send before the restart");
+    let first_task = before["task"].as_str().expect("task id").to_string();
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(first_task.clone()),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|r| r.state == LedgerState::Acked),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("the first task must be acked before the restart");
+
+    cluster.restart_server().await.expect("restart the server");
+
+    // The ledger is the server's durable record, so what the first process
+    // wrote is what the second one reads. A settled task leaves two rows: the
+    // task itself and the completion receipt its answer travelled on.
+    let survived = cluster
+        .query_ledger(LedgerQuery {
+            task: Some(first_task.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query the ledger after the restart");
+    let task_rows: Vec<_> = survived
+        .iter()
+        .filter(|row| row.kind == onlyne_proto::MsgKind::Task)
+        .collect();
+    assert_eq!(
+        task_rows.len(),
+        1,
+        "exactly the one task row the first process wrote: {survived:?}"
+    );
+    let settled = task_rows[0];
+    assert_eq!(
+        settled.state,
+        LedgerState::Acked,
+        "a settled row stays settled across the restart"
+    );
+    assert!(
+        settled
+            .out_head
+            .as_ref()
+            .is_some_and(|head| head.contains("settled before the restart")),
+        "the task row still carries the body preview the first process wrote: {:?}",
+        settled.out_head
+    );
+    let receipt = survived
+        .iter()
+        .find(|row| row.kind == onlyne_proto::MsgKind::Completion)
+        .unwrap_or_else(|| panic!("the completion receipt must survive too: {survived:?}"));
+    assert!(
+        receipt
+            .out_head
+            .as_ref()
+            .is_some_and(|head| head.contains("settled before the restart")),
+        "the receipt still carries the answer the first process settled with: {:?}",
+        receipt.out_head
+    );
+
+    // The client holds the link, so the cluster needs no help coming back; the
+    // role has to read online against the *new* process before its work resumes.
+    cluster
+        .wait_role_online("planner")
+        .await
+        .expect("planner online after the restart");
+
+    // Work that arrives after the restart is dispatched as it was before it. The
+    // agent that served the first task is bound to the session that retired with
+    // it, so the role mounts a plugin for the new one.
+    let after_script = AgentScript {
+        hello: ScriptHello {
+            capabilities: vec![
+                onlyne_proto::Capability::Register,
+                onlyne_proto::Capability::Report,
+                onlyne_proto::Capability::Inject,
+            ],
+        },
+        steps: vec![
+            json!({"wait_assign": true}),
+            json!({"report": "ready"}),
+            json!({"report": "heartbeat"}),
+            json!({"complete": {"outcome": "done", "head_from": "assign_body"}}),
+        ],
+        repeat: false,
+    };
+    cluster
+        .start_fake_agent(&planner_ws, &after_script)
+        .await
+        .expect("start the agent for the task after the restart");
+
+    let after = cluster
+        .admin_send("planner", "planner", "settled after the restart")
+        .await
+        .expect("send after the restart");
+    let second_task = after["task"].as_str().expect("task id").to_string();
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(second_task.clone()),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|r| r.state == LedgerState::Acked),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("the second task must be acked after the restart");
+
+    println!(
+        "✓ Scenario 6: server restart [settled row survived, role re-registered, new work acked]"
+    );
 }
 
-/// Scenario 7: Large frames interleaved (connection stays up under large frame + heartbeat + outbound)
+/// Scenario 7: Large frames interleaved (the link stays up under a large frame,
+/// heartbeats, and outbound frames)
 ///
-/// This guards the cancel-safety fix (v2-PLAN.md group 1 item 1): conn.rs select! drops
-/// read_frame future when outbound or heartbeat branch wins, losing buffered bytes.
+/// This is the plan's acceptance line "大帧交错：大帧、心跳与出站帧交错时连接不断"
+/// (v2-PLAN.md, verification table) and the regression guard for the cancel-safety
+/// defect of group 1 item 1: `run_session`'s `select!` built a fresh `read_frame`
+/// future every round, and a frame large enough to need several reads lost the
+/// bytes it had already buffered when the outbound or heartbeat branch won —
+/// the next read then took a body for a length header, and the connection died
+/// with a decode error. The larger the frame and the busier the link, the likelier
+/// the loss.
 ///
-/// Not fully implemented: requires TLS client directly framing large envelope while heartbeats run.
-/// Marked as ignored for v1 baseline.
+/// The size is what makes it a guard: a body at half of `BODY_TEXT_MAX_BYTES`
+/// cannot be read in one pass, so the delivery crosses the TLS link while the
+/// client is writing the ready and heartbeat frames of the same session. The
+/// assertions are the two facts a desynchronised stream cannot produce — the
+/// plugin reads the body back byte for byte, and a second task sent afterwards
+/// still arrives, in order.
 #[tokio::test]
-#[ignore]
 async fn scenario_07_large_frames_interleaved() {
-    // Placeholder for large frame interleaving scenario
-    println!("⊗ Scenario 7: large frames interleaved [not implemented in v1 baseline]");
+    let spec = r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#;
+
+    let cluster = Cluster::start(spec).await.expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            "large frame prose",
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker"]"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+
+    // Half the text ceiling: several reads per frame on the link, and still a
+    // legal `body.text` the product is expected to carry whole.
+    let big_body: String = (0..onlyne_proto::BODY_TEXT_MAX_BYTES / 2)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
+
+    let big_script = AgentScript {
+        hello: ScriptHello {
+            // `wait_assign` needs `inject`: see scenario 2's note.
+            capabilities: vec![
+                onlyne_proto::Capability::Register,
+                onlyne_proto::Capability::Report,
+                onlyne_proto::Capability::Inject,
+            ],
+        },
+        steps: vec![
+            json!({"wait_assign": true}),
+            json!({"report": "heartbeat"}),
+            json!({"echo_field_to": {"path": "assign.envelope.body.text", "file": "frames.log"}}),
+            json!({"complete": {"outcome": "done", "head": "large frame read back"}}),
+        ],
+        repeat: false,
+    };
+
+    cluster
+        .start_fake_agent(&worker_ws, &big_script)
+        .await
+        .expect("start agent");
+
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+
+    let big_send = cluster
+        .admin_send("worker", "worker", &big_body)
+        .await
+        .expect("send the large task");
+    let big_task = big_send["task"].as_str().expect("task id").to_string();
+
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(big_task.clone()),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|r| r.state == LedgerState::Acked),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("the large task must be acked");
+
+    let frames_log = worker_ws.join("frames.log");
+    let read_back = tokio::fs::read_to_string(&frames_log)
+        .await
+        .expect("the plugin must have written the body it read");
+    assert_eq!(
+        read_back.trim_end_matches('\n'),
+        big_body,
+        "the plugin must read the {} byte body back byte for byte",
+        big_body.len()
+    );
+
+    // The link's next delivery is the other half of the claim: a stream that lost
+    // bytes inside the large frame cannot carry an ordered frame after it. The
+    // first agent's connection stays bound to the session it served, so the
+    // second task is taken by a plugin mounting for it.
+    let follow_script = AgentScript {
+        hello: ScriptHello {
+            capabilities: vec![
+                onlyne_proto::Capability::Register,
+                onlyne_proto::Capability::Report,
+                onlyne_proto::Capability::Inject,
+            ],
+        },
+        steps: vec![
+            json!({"wait_assign": true}),
+            json!({"report": "heartbeat"}),
+            json!({"echo_field_to": {"path": "assign.envelope.body.text", "file": "frames.log"}}),
+            json!({"complete": {"outcome": "done", "head": "follow-up read back"}}),
+        ],
+        repeat: false,
+    };
+    cluster
+        .start_fake_agent(&worker_ws, &follow_script)
+        .await
+        .expect("start the follow-up agent");
+
+    let follow_send = cluster
+        .admin_send("worker", "worker", "after the large frame")
+        .await
+        .expect("send the follow-up task");
+    let follow_task = follow_send["task"].as_str().expect("task id").to_string();
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(follow_task.clone()),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|r| r.state == LedgerState::Acked),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("the follow-up task must be acked");
+
+    let both = tokio::fs::read_to_string(&frames_log)
+        .await
+        .expect("read the frames log");
+    let lines: Vec<&str> = both.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "the log holds the large body and the follow-up, and nothing else"
+    );
+    assert_eq!(lines[0], big_body, "the large body arrives first");
+    assert_eq!(
+        lines[1], "after the large frame",
+        "the frame after it arrives intact and in order"
+    );
+
+    println!(
+        "✓ Scenario 7: large frames interleaved [{} byte body read back whole, next frame ordered]",
+        big_body.len()
+    );
 }
 
 /// Scenario 8: Legacy layout refusal (old workspace layout exits 2 with fixed refusal text)
@@ -586,12 +1182,11 @@ async fn scenario_08_legacy_layout_refusal() {
     tokio::fs::create_dir_all(legacy_ws.join(".onlyne/channels"))
         .await
         .expect("create channels dir");
-    tokio::fs::write(legacy_ws.join(".onlye/state.db"), b"io_cursors")
+    tokio::fs::write(legacy_ws.join(".onlyne/state.db"), b"io_cursors")
         .await
         .expect("write legacy marker");
 
-    let client_bin = std::env::var("CARGO_BIN_EXE_onlyne_client")
-        .unwrap_or_else(|_| "target/debug/onlyne-client".to_string());
+    let client_bin = Cluster::bin_path("onlyne-client").expect("resolve onlyne-client");
 
     let output = tokio::process::Command::new(&client_bin)
         .args([
@@ -637,12 +1232,6 @@ name = "test"
 listen = "127.0.0.1:0"
 stale_watch_secs = 2
 heartbeat_grace_secs = 4
-
-[[client]]
-role = "planner"
-prose = "planner prose"
-allowed_senders = ["*", "planner"]
-allowed_targets = ["planner"]
 "#;
 
     let cluster = Cluster::start(spec).await.expect("start cluster");
@@ -666,9 +1255,11 @@ allowed_targets = ["planner"]"#,
     // Script: report ready, one heartbeat, then sleep (go silent)
     let script = AgentScript {
         hello: ScriptHello {
+            // `wait_assign` needs `inject`: see scenario 2's note.
             capabilities: vec![
                 onlyne_proto::Capability::Register,
                 onlyne_proto::Capability::Report,
+                onlyne_proto::Capability::Inject,
             ],
         },
         steps: vec![
@@ -786,21 +1377,13 @@ allowed_targets = ["planner"]"#,
 /// integration over real processes.
 #[tokio::test]
 async fn scenario_10_plugin_conformance() {
-    let spec = format!(
-        r#"
+    let spec = r#"
 [server]
 name = "test"
 listen = "127.0.0.1:0"
+"#;
 
-[[client]]
-role = "worker"
-prose = "{E2E_PROSE}"
-allowed_senders = ["*", "worker"]
-allowed_targets = ["worker"]
-"#
-    );
-
-    let cluster = Cluster::start(&spec).await.expect("start cluster");
+    let cluster = Cluster::start(spec).await.expect("start cluster");
     let worker_ws = cluster
         .register_role(
             "worker",
@@ -872,22 +1455,257 @@ allowed_targets = ["worker"]"#,
 
 /// Scenario 11: Federation (two clusters, aggregate role, parent ledger isolation)
 ///
-/// Not fully implemented: requires two server processes, child supervisor client joining
-/// parent as aggregate role. Marked as ignored for v1 baseline.
+/// Not ported to this harness. An aggregate role is an ordinary `[[client]]`
+/// entry whose client the *upper* supervisor launches (docs/v2-PLAN.md D14, §5:
+/// the protocol carries zero federation code), so the case needs two server roots
+/// whose specs each name a role the other root's client serves. `Cluster` models
+/// one server: `register_role` appends a fragment to its own root's spec and
+/// `start_client` serves the roles that root names, so a second root's spec has
+/// no seam here.
+///
+/// The behaviour is implemented and covered end to end by
+/// crates/onlyne-testkit/e2e/two-cluster.sh (case 5 of docs/STATUS.md), which
+/// drives both roots and asserts the boundary this scenario names: the parent
+/// ledger settles under the aggregate name and carries no child-layer role name
+/// or prose.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a two-server harness; the case runs in e2e/two-cluster.sh"]
 async fn scenario_11_federation() {
-    // Placeholder for federation scenario
-    println!("⊗ Scenario 11: federation [not implemented in v1 baseline]");
+    println!(
+        "⊗ Scenario 11: federation [ignored: this harness models one server; \
+         the two-root case is e2e/two-cluster.sh]"
+    );
 }
 
-/// Scenario 12: Generate and relocate (workspace survives move to another path)
+/// Scenario 12: Generate and relocate (a rendered workspace survives a move to
+/// another absolute path)
 ///
-/// Not implemented: requires onlyne generate command and filesystem move. Marked as
-/// ignored for v1 baseline.
+/// `onlyne generate` renders the workspace of every role `spec.toml` names from
+/// the template tree under the server root, and prints the `[[client]]` fragment
+/// whose key the rendered workspace owns; the operator puts that fragment into
+/// the spec. The plan's relocation rule (docs/v2-PLAN.md §11, D20): the output
+/// carries no absolute path of the place it was generated, which is what lets the
+/// whole directory be moved elsewhere and still reach its server.
+///
+/// Asserts: the render lands under `<out>/<topology>/<role>` with a config and a
+/// role key and no `run/` state; no file in it names the server root or the
+/// output tree; the role serves a task from where it was generated; and the same
+/// tree, moved to another absolute path and started there, serves the next one.
+///
+/// Supersedes: crates/onlyne-testkit/e2e/generate-relocate.sh
 #[tokio::test]
-#[ignore]
 async fn scenario_12_generate_relocate() {
-    // Placeholder for generate+relocate scenario
-    println!("⊗ Scenario 12: generate+relocate [not implemented in v1 baseline]");
+    let spec = r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#;
+
+    let cluster = Cluster::start(spec).await.expect("start cluster");
+
+    // The template tree the render reads, shipped in the repository: `generate`
+    // looks under `<server-root>/.onlyne/templates`.
+    let templates = Cluster::repo_root()
+        .expect("repo root")
+        .join(".onlyne.example/templates");
+    copy_tree(&templates, &cluster.server_root().join(".onlyne/templates"))
+        .expect("copy the template tree into the server root");
+
+    // `generate` renders the roles the spec names, so the role is seeded through
+    // the ordinary init fragment first. Its seed entry leaves the spec below,
+    // replaced by the fragment the render prints — that fragment carries the key
+    // the rendered workspace just wrote, which is the identity it connects with.
+    let seed_len = std::fs::metadata(cluster.spec_path())
+        .expect("spec metadata")
+        .len();
+    let _seed = cluster
+        .register_role(
+            "builder",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "builder"]
+allowed_targets = ["builder"]"#,
+            ),
+        )
+        .await
+        .expect("seed the builder entry");
+
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let out = scratch.path().join("gen");
+    let fragment = cluster
+        .cli(&[
+            "generate",
+            "--role",
+            "builder",
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .await
+        .expect("generate the builder workspace");
+
+    // `<out>/<topology>/<role>`: the template tree's own shape is what the render
+    // copies, and `dev/builder` is where the repository's templates put it.
+    let rendered = out.join("dev/builder");
+    assert!(
+        rendered.join(".onlyne/config.toml").is_file(),
+        "the render must write the role's config: {}",
+        rendered.display()
+    );
+    assert!(
+        rendered.join(".onlyne/keys/role.key").is_file(),
+        "the render must write the role's key"
+    );
+    assert!(
+        !rendered.join(".onlyne/run").exists(),
+        "a render is not a run: it must leave no run directory"
+    );
+
+    // The relocation rule itself: no file in the output names the server root or
+    // the tree it was generated into.
+    for prefix in [cluster.server_root(), out.as_path()] {
+        let prefix = prefix.display().to_string();
+        let naming: Vec<String> = files_under(&rendered)
+            .into_iter()
+            .filter(|path| {
+                std::fs::read(path)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).contains(&prefix))
+                    .unwrap_or(false)
+            })
+            .map(|path| path.display().to_string())
+            .collect();
+        assert!(
+            naming.is_empty(),
+            "the render must carry no generation-time path ({prefix} appears in {naming:?})"
+        );
+    }
+
+    let mut seeded = std::fs::read(cluster.spec_path()).expect("read the spec");
+    seeded.truncate(seed_len as usize);
+    let mut rebuilt = String::from_utf8(seeded).expect("the spec is utf8");
+    rebuilt.push_str(&fragment);
+    std::fs::write(cluster.spec_path(), rebuilt).expect("write the spec with the rendered entry");
+    cluster.reload().await.expect("reload the spec");
+
+    let serve_one = || AgentScript {
+        hello: ScriptHello {
+            // `wait_assign` needs `inject`: see scenario 2's note.
+            capabilities: vec![
+                onlyne_proto::Capability::Register,
+                onlyne_proto::Capability::Report,
+                onlyne_proto::Capability::Inject,
+            ],
+        },
+        steps: vec![
+            json!({"wait_assign": true}),
+            json!({"report": "ready"}),
+            json!({"report": "heartbeat"}),
+            json!({"complete": {"outcome": "done", "head_from": "assign_body"}}),
+        ],
+        repeat: false,
+    };
+
+    // Where it was rendered: the role serves from the generated tree. Nothing
+    // waits for the role to read `online` first — work for a role whose client is
+    // not up yet waits in the queue (scenario 5), so the ledger poll is the
+    // assertion.
+    cluster
+        .start_client(&rendered)
+        .await
+        .expect("start the rendered client");
+    cluster
+        .start_fake_agent(&rendered, &serve_one())
+        .await
+        .expect("start the rendered agent");
+    let native = cluster
+        .admin_send("builder", "builder", "from where it was rendered")
+        .await
+        .expect("send to the rendered role");
+    let native_task = native["task"].as_str().expect("task id").to_string();
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(native_task),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|r| r.state == LedgerState::Acked),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("the rendered workspace must serve its task");
+
+    // The move: another absolute path, nothing inside the tree edited.
+    cluster
+        .kill_client(&rendered)
+        .await
+        .expect("stop the rendered client");
+    cluster
+        .kill_agent(&rendered)
+        .await
+        .expect("stop the rendered agent");
+    let moved = scratch.path().join("elsewhere/builder");
+    std::fs::create_dir_all(moved.parent().expect("destination parent"))
+        .expect("create the destination");
+    std::fs::rename(&rendered, &moved).expect("move the workspace");
+
+    cluster
+        .start_client(&moved)
+        .await
+        .expect("start the moved client");
+    cluster
+        .start_fake_agent(&moved, &serve_one())
+        .await
+        .expect("start the moved agent");
+    let relocated = cluster
+        .admin_send("builder", "builder", "from where it was moved")
+        .await
+        .expect("send to the moved role");
+    let relocated_task = relocated["task"].as_str().expect("task id").to_string();
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(relocated_task),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|r| r.state == LedgerState::Acked),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("the moved workspace must still reach its server");
+
+    println!("✓ Scenario 12: generate+relocate [rendered role served, moved tree served]");
+}
+
+/// Every regular file under `root`, in no particular order.
+fn files_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Copy one tree of files, directories and all.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }

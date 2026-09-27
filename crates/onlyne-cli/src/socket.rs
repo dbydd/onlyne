@@ -141,7 +141,10 @@ fn surface_for(flags: &GlobalFlags, root: &Path) -> Surface {
 fn owner_root(dir: &Path) -> Option<PathBuf> {
     if dir.join(OWNER_DIR).is_dir() {
         let root = dir.to_path_buf();
-        return socket_path(&root).ok().filter(|path| path.exists()).map(|_| root);
+        return socket_path(&root)
+            .ok()
+            .filter(|path| path.exists())
+            .map(|_| root);
     }
     dir.parent()
         .and_then(|parent| (parent != dir).then(|| owner_root(parent)).flatten())
@@ -329,7 +332,9 @@ mod tests {
         let sibling = root.join("plugins");
         fs::create_dir_all(&sibling).expect("sibling dir");
         assert_eq!(
-            resolve_socket_from(&sibling).expect("a sibling resolves too").path,
+            resolve_socket_from(&sibling)
+                .expect("a sibling resolves too")
+                .path,
             target.path,
             "one owner tree answers every directory inside it with one path"
         );
@@ -356,7 +361,9 @@ mod tests {
 
         let client = started_workspace(&dir.path().join("ws"), RegistrationKind::Client);
         assert_eq!(
-            resolve_socket_from(&client.join(".")).expect("client tree").surface,
+            resolve_socket_from(&client.join("."))
+                .expect("client tree")
+                .surface,
             Surface::Client
         );
     }
@@ -450,9 +457,7 @@ mod tests {
     fn a_relative_socket_flag_resolves_against_the_current_directory() {
         let relative = "relative.sock";
         let target = resolve(&flags_for(&["--socket", relative])).expect("the flag names a socket");
-        let expected = std::env::current_dir()
-            .expect("cwd")
-            .join(relative);
+        let expected = std::env::current_dir().expect("cwd").join(relative);
         assert_eq!(target.path, expected);
         assert!(
             target.path.is_absolute(),

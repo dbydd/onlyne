@@ -13,6 +13,7 @@ use onlyne_adapter::{
     AdapterClient, AdapterIo, AdapterServer, AgentHandle, Host, HostDispatcher, IncomingFrame,
     accept_report_generation, degrade_for,
 };
+use onlyne_proto::adapter::HandoffArgs;
 use onlyne_proto::{
     AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, Capability, Causality, Delivery,
     DetachArgs, Envelope, ErrorCode, HealthArgs, HelloAck, HelloArgs, HostOp, IMAGE_DATA_MAX_BYTES,
@@ -548,6 +549,7 @@ impl FakeAgent {
             welcome,
             last_assign: None,
             beats: 0,
+            turn_reported: false,
         };
         loop {
             for step in &self.script.steps {
@@ -577,7 +579,10 @@ impl FakeAgent {
                 if value.as_bool() != Some(true) {
                     bail!("wait_assign must be true");
                 }
-                state.last_assign = Some(handle.wait_assign().await.context("wait assign")?);
+                state.last_assign = Some(wait_for_assign(handle).await.context("wait assign")?);
+                // Each assignment opens its own turn, and the script's next one
+                // has to report a beat before it may complete: see `complete`.
+                state.turn_reported = false;
             }
             "report" => {
                 let kind = value
@@ -595,6 +600,11 @@ impl FakeAgent {
                     }
                     "heartbeat" => {
                         state.beats += 1;
+                        // This beat is also the turn: its `agent: running` is
+                        // what moves the session's row past `ready`, and a
+                        // completion reported before any such beat is refused
+                        // whole (`SETTLE_WITHOUT_TURN` in the client).
+                        state.turn_reported = true;
                         // The shape a real plugin reports: a whole `Observation`,
                         // whose only optional field is the host binding. A beat that
                         // omits the dimensions cannot deserialize in the client, and
@@ -641,6 +651,15 @@ impl FakeAgent {
                     .last_assign
                     .as_ref()
                     .ok_or_else(|| anyhow!("complete requires assign"))?;
+                if !state.turn_reported {
+                    bail!(
+                        "complete needs a turn this script reported: the client records a turn \
+                         only from a heartbeat whose agent phase reads `running`, and a \
+                         completion for a session that never ran one is refused whole \
+                         (`settle_without_turn`) while the task stays open. Add a \
+                         {{\"report\": \"heartbeat\"}} step before this one."
+                    );
+                }
                 let outcome = value
                     .get("outcome")
                     .and_then(Value::as_str)
@@ -717,32 +736,20 @@ impl FakeAgent {
                 let values = self.template_values(assign);
                 let to = expand_placeholders(&step.to, &values)?;
                 let text = expand_placeholders(&step.text, &values)?;
-                // The two supervisor flags travel with this call because the
-                // fixture drives the shipped CLI the way a supervisor does, from
-                // outside the session. A role inside a session hands work on
-                // with its plugin's own tool.
-                let output = tokio::process::Command::new(cli_binary()?)
-                    .arg("--workspace")
-                    .arg(&self.workspace)
-                    .arg("handoff")
-                    .arg("--force")
-                    .arg("--yes-i-am-supervisor-not-other-role")
-                    .arg("--task")
-                    .arg(&assign.task_id)
-                    .arg("--to")
-                    .arg(&to)
-                    .arg("--text")
-                    .arg(&text)
-                    .env("ONLYNE_ROLE", &self.role)
-                    .output()
+                // A role hands work on through its plugin's own tool, so the
+                // fixture sends the adapter protocol's `handoff` op and the host
+                // mints the child. Driving the `onlyne handoff` CLI here would
+                // exercise a role-side verb v2 deletes, along with the two
+                // supervisor flags it needed to pass itself off as one.
+                handle
+                    .handoff(HandoffArgs {
+                        task_id: assign.task_id.clone(),
+                        to: to.clone(),
+                        text,
+                        image: None,
+                    })
                     .await
-                    .with_context(|| format!("run handoff of {}", assign.task_id))?;
-                if !output.status.success() {
-                    bail!(
-                        "handoff to {to} failed: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    );
-                }
+                    .with_context(|| format!("hand off {} to {to}", assign.task_id))?;
             }
             "echo_field_to" => {
                 let path_field = value
@@ -830,6 +837,10 @@ struct FakeAgentPhase {
     /// a beat rides on top of this, so each beat is newer than the last and the
     /// client reads it as a fresh frame rather than a replay.
     beats: u64,
+    /// Whether the assignment in hand has had the beat that opens its turn.
+    /// `complete` reads it, because the host refuses a completion for a session
+    /// whose agent phase never left `ready`.
+    turn_reported: bool,
 }
 
 fn value_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
@@ -838,6 +849,32 @@ fn value_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
         current = current.get(part)?;
     }
     Some(current)
+}
+
+/// Wait for the host's `assign` frame, and refuse to wait for one that is not
+/// coming.
+///
+/// `inject` is the capability that makes a plugin reachable by `assign`; a
+/// plugin that mounts without it is handed its task through the plugin's own
+/// stdin, which on this socket is a `config_get` frame whose only key is
+/// `stdin:{task text}` (`crates/onlyne-adapter/PROTOCOL.md`, "Mounts and
+/// capabilities"). A step that waits for an `assign` anyway waits out the
+/// scenario's whole timeout and reports nothing about why, which is how three
+/// scripts kept a capability set their own steps could never work under. The
+/// frame is the answer, so the fixture names it here.
+async fn wait_for_assign(handle: &AgentHandle) -> Result<AssignArgs> {
+    loop {
+        match handle.next_host_op().await? {
+            HostOp::Assign(assign) => return Ok(assign),
+            HostOp::ConfigGet(args) if args.key.starts_with("stdin:") => bail!(
+                "the host delivered the task through this plugin's stdin ({}), so no `assign` \
+                 will arrive: the script's hello must declare the `inject` capability",
+                args.key
+            ),
+            HostOp::Bye(bye) => bail!("the host said goodbye before an assign: {}", bye.reason),
+            _ => {}
+        }
+    }
 }
 
 fn path_in_workspace(workspace: &Path, file: &str) -> PathBuf {
@@ -851,16 +888,14 @@ fn path_in_workspace(workspace: &Path, file: &str) -> PathBuf {
 
 /// Environment variable naming the role a `handoff` step passes the task to.
 pub const NEXT_ROLE_ENV: &str = "ONLYNE_NEXT_ROLE";
-/// Environment variable naming the `onlyne` binary a `handoff` step runs.
-pub const CLI_ENV: &str = "ONLYNE_CLI";
-
 /// One `handoff` step: where the incoming task goes next, and how deep the
 /// chain may run before the agent keeps the task instead of passing it on.
 ///
 /// `to` and `text` carry `{name}` placeholders (`role`, `task`, `hop`,
-/// `next_hop`, `next_role`, `workspace`). The step drives the product's own
-/// `onlyne handoff`, which reads the parent row back to link causality, so the
-/// fixture exercises the shipped path rather than a second envelope builder.
+/// `next_hop`, `next_role`, `workspace`). The step sends the adapter protocol's
+/// `handoff` op, so the fixture exercises the path a real plugin takes — the host
+/// reads the parent row, mints the child, and carries the family's figures —
+/// rather than building a second envelope itself.
 #[derive(Debug, Clone)]
 struct HandoffStep {
     to: String,
@@ -938,29 +973,6 @@ fn expand_placeholders(template: &str, values: &BTreeMap<&'static str, String>) 
     }
     out.push_str(rest);
     Ok(out)
-}
-
-/// The `onlyne` binary a `handoff` step drives.
-///
-/// `ONLYNE_CLI` names it outright. Otherwise it is the `onlyne` built beside
-/// the agent, which is the layout every e2e case has: the case starts
-/// `onlyne-agent-fake` and `onlyne` out of one build directory.
-fn cli_binary() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var(CLI_ENV) {
-        return Ok(PathBuf::from(path));
-    }
-    let exe = std::env::current_exe().context("locate the fake agent binary")?;
-    let sibling = exe
-        .parent()
-        .ok_or_else(|| anyhow!("the fake agent binary has no directory"))?
-        .join("onlyne");
-    if !sibling.is_file() {
-        bail!(
-            "handoff needs {CLI_ENV} set: {} is not a file",
-            sibling.display()
-        );
-    }
-    Ok(sibling)
 }
 
 fn parse_outcome(value: &str) -> Result<Outcome> {

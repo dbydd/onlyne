@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { OnlyneAgent } from "./agent.mjs";
+import { resolveSocketPath, socketPath } from "./socket.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const BIN_DIR = join(REPO_ROOT, "target", "debug");
@@ -50,12 +51,16 @@ test("a real onlyne-client answers hello with a welcome", { skip: !hasBinaries }
   execFileSync(CLIENT, ["init", "--workspace", workspace, "--role", "planner", "--server-root", serverRoot], {
     stdio: "pipe",
   });
-  const child = spawn(CLIENT, ["run", "--workspace", workspace], { stdio: ["ignore", "pipe", "pipe"] });
+  // v2 binds the adapter socket in the machine-level runtime directory, so the
+  // case pins one of its own: the client inherits the override and the plugin
+  // derives the same path from the workspace root (`socket.mjs`).
+  const env = { ...process.env, ONLYNE_RUNTIME_DIR: join(tmp, "runtime") };
+  const child = spawn(CLIENT, ["run", "--workspace", workspace], { stdio: ["ignore", "pipe", "pipe"], env });
   let clientLog = "";
   child.stdout.on("data", (chunk) => { clientLog += chunk; });
   child.stderr.on("data", (chunk) => { clientLog += chunk; });
 
-  const socketPath = join(workspace, ".onlyne", "run", "s");
+  const served = socketPath(workspace, env);
   const surface = {
     available: { wakeUser: true },
     calls: [],
@@ -70,7 +75,7 @@ test("a real onlyne-client answers hello with a welcome", { skip: !hasBinaries }
   };
   const logs = [];
   const agent = new OnlyneAgent({
-    socketPath,
+    socketPath: served,
     cwd: workspace,
     role: "planner",
     sessionId: SESSION_ID,
@@ -80,7 +85,12 @@ test("a real onlyne-client answers hello with a welcome", { skip: !hasBinaries }
     heartbeatMs: 60_000,
   });
   try {
-    await waitFor(() => existsSync(socketPath));
+    await waitFor(() => existsSync(served));
+    // The hand-started case: no `ONLYNE_SOCKET`, so the plugin reads the
+    // registration the client published in the runtime directory. One tree,
+    // two derivations — the client's from its own root, the plugin's from the
+    // cwd — and the case fails here if they disagree by a byte.
+    assert.equal(resolveSocketPath({ ONLYNE_RUNTIME_DIR: env.ONLYNE_RUNTIME_DIR }, workspace), served);
     agent.start();
     await waitFor(() => agent.status().connected, { timeoutMs: 15_000 });
 

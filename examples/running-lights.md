@@ -54,6 +54,7 @@ Every light runs the same script, `crates/onlyne-testkit/scripts/running-light.j
            {"assert_prose_equals": "running lights"},
            {"echo_field_to": {"path": "assign.envelope.causality.hop", "file": "hops.log"}},
            {"report": "ready"},
+           {"report": "heartbeat"},
            {"sleep_ms": 900},
            {"handoff": {"to": "{next_role}",
                        "text": "running-lights token, hop {next_hop}",
@@ -61,12 +62,18 @@ Every light runs the same script, `crates/onlyne-testkit/scripts/running-light.j
            {"complete": {"outcome": "done", "head_from": "assign_body"}}]}
 ```
 
-`handoff` runs the product's own `onlyne handoff` against the role's client socket, so the shipped
-path builds the next task. It reads the parent row back, hangs the new task under `parent_task`, and
-sets `hop` to the parent's hop plus one. `max_hop` is the whole stop condition: the agent that meets
-a task at hop 11 keeps it instead of passing it on. That is what turns an eleven-hop budget into a
-twelve-task chain. `{next_role}` is the one value the script cannot name itself, so it arrives in
-the spawn environment (`ONLYNE_NEXT_ROLE`), beside the workspace the agent was started with.
+`handoff` sends the adapter protocol's own `handoff` op over the role's client socket, which is the
+same relay path the product's `onlyne handoff` verb drives, so the shipped code builds the next task.
+It reads the parent row back, hangs the new task under `parent_task`, and sets `hop` to the parent's
+hop plus one. `max_hop` is the whole stop condition: the agent that meets a task at hop 11 keeps it
+instead of passing it on. That is what turns an eleven-hop budget into a twelve-task chain.
+`{next_role}` is the one value the script cannot name itself, so it arrives in the spawn environment
+(`ONLYNE_NEXT_ROLE`), beside the workspace the agent was started with.
+
+The `heartbeat` before the handoff is not decoration. The client records a turn only from a
+heartbeat whose agent phase reads `running`, and it refuses a completion for a session that never ran
+one (`settle_without_turn`) while leaving the task open — so a script that completes without that
+step is now refused outright rather than hanging.
 
 The `sleep_ms` is the light itself. While a role works the token, its session holds the `working`
 state, and that is what the TUI draws.
@@ -78,12 +85,12 @@ and its depth. The case prints exactly this table:
 
 ```text
 hop  from     to       state  task      parent    head
-0    light6   light1   acked  59e27563  -         running-lights token, hop 0
-1    light1   light2   acked  99a92e33  59e27563  running-lights token, hop 1
-2    light2   light3   acked  f6fbf866  99a92e33  running-lights token, hop 2
-3    light3   light4   acked  a43fa53b  f6fbf866  running-lights token, hop 3
+0    light6   light1   acked  bff6e201  -         running-lights token, hop 0
+1    light1   light2   acked  04728e0b  bff6e201  handoff: running-lights token, hop 1
+2    light2   light3   acked  e8da09d2  04728e0b  handoff: running-lights token, hop 2
+3    light3   light4   acked  7ced5699  e8da09d2  handoff: running-lights token, hop 3
 ...
-11   light5   light6   acked  c2418c5a  dfdd83a3  running-lights token, hop 11
+11   light5   light6   acked  3569378c  6790a448  handoff: running-lights token, hop 11
 ```
 
 Each task also gets a `completion` row back to the role that sent it, so the settled ledger holds
@@ -92,6 +99,10 @@ parent row and writes the next one. That is why the column moves `0..11` with no
 `parent_task` walks the chain from `hop 0` to `hop 11`. The two ends are the ring closing on
 itself: `hop 0` starts at `light6`, and that is where the token comes back to at `hop 5` and
 `hop 11`.
+
+Only `hop 0` carries the token bare: it is the operator's own `send`. Every later hop is a relayed
+child, and a task row's `out_head` is the body preview the server keeps for the operator, so the
+relay builder's own `handoff: ` prefix shows on it. The prefix is the contract, not a stray.
 
 ## Two frames of the moving light
 
@@ -186,6 +197,7 @@ ledger 记录。
            {"assert_prose_equals": "running lights"},
            {"echo_field_to": {"path": "assign.envelope.causality.hop", "file": "hops.log"}},
            {"report": "ready"},
+           {"report": "heartbeat"},
            {"sleep_ms": 900},
            {"handoff": {"to": "{next_role}",
                        "text": "running-lights token, hop {next_hop}",
@@ -193,12 +205,18 @@ ledger 记录。
            {"complete": {"outcome": "done", "head_from": "assign_body"}}]}
 ```
 
-`handoff` 使用产品自身的 `onlyne handoff`，并针对角色的 client socket 运行，
-因此发布版本的路径会构建下一个任务。它回读父记录，将新任务挂在
-`parent_task` 下，并将 `hop` 设置为父任务的 hop 加一。`max_hop` 是整个停止
-条件：在 hop 11 遇到任务的代理会保留该任务，而不会继续传递。正是这一点将十一跳
-预算变成包含十二个任务的链。`{next_role}` 是脚本无法自行指定的唯一值，因此它会
-通过 spawn 环境（`ONLYNE_NEXT_ROLE`）传入，与启动代理时使用的工作区相邻。
+`handoff` 通过角色的 client socket 发送 adapter 协议自己的 `handoff` op，
+它与产品 `onlyne handoff` 动词驱动的是同一条 relay 路径，因此发布版本的代码会
+构建下一个任务。它回读父记录，将新任务挂在 `parent_task` 下，并将 `hop` 设置
+为父任务的 hop 加一。`max_hop` 是整个停止条件：在 hop 11 遇到任务的代理会保留
+该任务，而不会继续传递。正是这一点将十一跳预算变成包含十二个任务的链。
+`{next_role}` 是脚本无法自行指定的唯一值，因此它会通过 spawn 环境
+（`ONLYNE_NEXT_ROLE`）传入，与启动代理时使用的工作区相邻。
+
+handoff 之前的那次 heartbeat 不是装饰。client 只从 agent phase 读作 `running`
+的 heartbeat 记录一轮，而对从未跑过一轮的 session，它会整条拒绝 completion
+（`settle_without_turn`）并让任务保持打开——所以缺少这一步的脚本现在会被直接
+拒绝，而不是挂住。
 
 `sleep_ms` 本身就是流水灯。当角色处理令牌时，其 session 会保持 `working`
 状态，TUI 绘制的正是这个状态。
@@ -223,6 +241,10 @@ hop  from     to       state  task      parent    head
 `hop` 并写入下一条记录。因此，这一列会无缺口地经过 `0..11`，而
 `parent_task` 会沿链从 `hop 0` 走到 `hop 11`。两端正是环重新闭合之处：
 `hop 0` 从 `light6` 开始，而令牌也会在 `hop 5` 和 `hop 11` 回到这里。
+
+只有 `hop 0` 裸带令牌：它来自操作员自己的 `send`。其后的每一次跳转都是被转交的
+child，而 task 记录的 `out_head` 是 server 为操作员保留的正文预览，所以 relay
+builder 自己的 `handoff: ` 前缀会显现在上面。这个前缀是约定本身，不是残留。
 
 ## 移动流水灯的两个画面
 

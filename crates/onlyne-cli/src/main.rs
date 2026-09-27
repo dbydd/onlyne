@@ -1,17 +1,20 @@
-//! `onlyne` — one socket, one protocol, two sibling binaries.
+//! `onlyne` — one socket, one protocol, one operator entrypoint.
 //!
-//! `onlyne server <verb>` execs the server binary for the process verbs
-//! (`init`, `run`, `start`, `stop`, `generate`), and `onlyne status`,
+//! Every verb is implemented in this process: `server init` and
+//! `server generate` call the `onlyne-server` library, `onlyne status`,
 //! `onlyne reload`, `onlyne server status`, and `onlyne server reload` are
-//! in-process admin-socket queries with no exec, because keeping `status`
-//! working while the daemon runs
-//! and its binary is absent is worth the rule; `onlyne client <verb>` execs its
-//! sibling, `onlyne gateway status` reads the registered gateway mounts from
-//! the admin socket here, and the admin nouns (`roles`, `sessions`, `ledger`,
-//! `faults`, `watch`, `history`, `spec_diff`, `wait-ready`, `repair`) plus the
-//! message verbs (`send`, `reply`, `complete`, `handoff`, `ack`, `reject`,
-//! `control`, `who`, `ping`) share one path in this process: resolve a socket,
+//! admin-socket queries, `onlyne gateway status` reads the registered gateway
+//! mounts from the admin socket here, and the admin nouns (`roles`, `sessions`,
+//! `ledger`, `faults`, `watch`, `history`, `spec_diff`, `wait-ready`, `repair`)
+//! plus the message verbs (`send`, `reply`, `complete`, `handoff`, `ack`,
+//! `reject`, `control`, `who`, `ping`) share one path here: resolve a socket,
 //! write one frame, print one JSON line, return one exit code.
+//!
+//! The two foreground daemons keep their own binaries, so `server run` and
+//! `client run` are the only execs: [`forward`] locates the sibling and hands it
+//! this CLI's selector plus the operator's arguments. Staying resident is not a
+//! verb — there is no `start` or `stop` — so exit 127 means exactly one thing:
+//! a daemon binary was not found.
 
 mod admin;
 mod flags;
@@ -62,14 +65,21 @@ Exit codes: 0 the verb answered ok. 1 a socket answer failed or a runtime
 error ended the verb. 2 local validation or usage refusal; the code is
 multipurpose: a bad flag, a bad --request, an invalid report file, and a
 report file that is absent or unreadable all share it. 3 nothing resolved as
-a socket. 4 the operator's input was refused: a `generate` refusal propagated
-from onlyne-server, or `skill export` declining to overwrite a file (pass
-`--force`). 5 `client run` found no session host (see backends below). 127 a
-sibling binary was not found.
+a socket. 4 the operator's input was refused: a `generate` refusal, or
+`skill export` declining to overwrite a file (pass `--force`). 5 `client run`
+found no session host (see backends below). 127 a daemon binary was not found,
+which only `server run` and `client run` can meet.
+
+No verb stays resident: `server start` and `server stop` are gone, and both
+`run` verbs work in the foreground, so keeping a cluster or a client up belongs
+to the terminal host or to launchd/systemd.
 
 A socket resolves in this order: `--socket`, then ONLYNE_SOCKET, then
 `--server-root`, then `--workspace` or the current directory walking upward for
-a tree that owns `.onlyne/run/s` or `.onlyne/run/socket`.
+a tree that owns a socket in the machine-level runtime directory
+(`/tmp/onlyne-<uid>/<digest>.sock`, `$ONLYNE_RUNTIME_DIR` overriding the
+directory). Nothing binds inside a workspace tree; `<root>/.onlyne/run/s` is
+the spelling operators read, not a path a daemon serves.
 
 Session backends (the `backend` key of a role workspace's `config.toml`, read
 by `onlyne client run`): herdr | orca | zellij | exec | headless | acp | fake
@@ -95,9 +105,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Verb {
-    /// Run the onlyne server; lifecycle verbs exec, admin nouns query here.
+    /// Create a server root, run the daemon, or query it on the admin socket.
     Server(ServerCmd),
-    /// Run the onlyne client, forwarding every remaining argument.
+    /// Run the onlyne client, forwarding every remaining argument to it.
     Client(RestArgs),
     /// Report the gateway mounts the server knows.
     Gateway(GatewayCmd),
@@ -144,7 +154,7 @@ enum Verb {
     SpecDiff,
     /// Ask the server to re-read its configuration.
     Reload,
-    /// Render a spec fragment into a workspace, forwarding to onlyne-server.
+    /// Render role workspaces from the templates under a server root.
     Generate(GenerateCmd),
     /// Poll status until the server answers ok.
     WaitReady(WaitReadyCmd),
@@ -167,14 +177,15 @@ enum Verb {
 
 #[derive(clap::Args, Debug, Clone)]
 struct RestArgs {
-    /// Arguments forwarded verbatim, flags included: to the sibling binary for
-    /// the exec verbs, to the in-process board for `tui`.
+    /// Arguments forwarded verbatim, flags included: to the sibling daemon for
+    /// `client` and `server run`, to the in-process board for `tui`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
 
-/// The `server` group: the lifecycle verbs exec `onlyne-server`, and the
-/// admin query and repair nouns resolve against the admin socket here.
+/// The `server` group: `init` and `generate` run through the `onlyne-server`
+/// library, `run` execs the foreground daemon, and every other noun resolves
+/// against the admin socket here.
 #[derive(clap::Args, Debug, Clone)]
 struct ServerCmd {
     #[command(subcommand)]
@@ -184,17 +195,13 @@ struct ServerCmd {
 #[derive(Subcommand, Debug, Clone)]
 enum ServerVerb {
     /// Create the server root and its `[server]` spec template.
-    Init(RestArgs),
-    /// Bind the listeners and serve the cluster.
+    Init(ServerInitCmd),
+    /// Bind the listeners and serve the cluster; execs `onlyne-server run`.
     Run(RestArgs),
-    /// Spawn a detached daemon and wait for the admin socket.
-    Start(RestArgs),
-    /// Signal the recorded daemon and wait for it to exit.
-    Stop(RestArgs),
     /// Report server status through the admin socket.
     Status,
     /// Render role workspaces from the templates under the server root.
-    Generate(RestArgs),
+    Generate(GenerateCmd),
     /// Re-read the spec on disk.
     Reload(RestArgs),
     /// List roles, optionally filtered by `--role`.
@@ -217,6 +224,20 @@ enum ServerVerb {
     /// A verb outside the server vocabulary.
     #[command(external_subcommand)]
     Unknown(Vec<String>),
+}
+
+/// The `server init` flags, the same three `onlyne-server init` takes.
+#[derive(clap::Args, Debug, Clone)]
+struct ServerInitCmd {
+    /// Server root; `--server-root` works too.
+    #[arg(long)]
+    root: Option<PathBuf>,
+    /// TCP address the routing daemon binds, as `host:port`.
+    #[arg(long)]
+    listen: String,
+    /// Overwrite an existing `spec.toml`.
+    #[arg(long)]
+    force: bool,
 }
 
 /// The `gateway` group: a read-only view of the gateway mounts the server
@@ -381,19 +402,19 @@ enum ClusterVerb {
 
 #[derive(clap::Args, Debug, Clone)]
 struct GenerateCmd {
-    /// Server root, forwarded as `--root`; `--server-root` works too.
+    /// Server root; `--server-root` works too.
     #[arg(long = "root")]
     root: Option<PathBuf>,
-    /// Template paths, passed through verbatim.
+    /// Template path relative to the template root; repeat for several.
     #[arg(long)]
     template: Vec<String>,
-    /// Role scoping, passed through verbatim.
+    /// Role name from `spec.toml`; repeat for several.
     #[arg(long)]
     role: Vec<String>,
-    /// Output directory; the server defaults to `<server-root>/.onlyne/ws`.
+    /// Output directory; defaults to `<server-root>/.onlyne/ws`.
     #[arg(long)]
     out: Option<PathBuf>,
-    /// Overwrite files that already exist.
+    /// Replace generated files in an existing workspace.
     #[arg(long)]
     force: bool,
 }
@@ -467,7 +488,7 @@ fn run() -> i32 {
     let flags = &cli.flags;
     match verb {
         Verb::Server(cmd) => server(flags, cmd),
-        Verb::Client(rest) => forward::exec("onlyne-client", &rest.args),
+        Verb::Client(rest) => client(flags, &rest),
         Verb::Gateway(cmd) => gateway(flags, cmd),
         Verb::Send(cmd) => verbs::send(flags, &cmd.sender, cmd.args),
         Verb::Reply(cmd) => verbs::reply(flags, &cmd.sender, cmd.args),
@@ -537,35 +558,37 @@ fn run() -> i32 {
     }
 }
 
-/// `generate` execs `onlyne-server generate`, inheriting stdio so the spec
-/// fragment reaches stdout and the progress lines reach stderr.
+/// `generate` renders the role workspaces through the `onlyne-server` library in
+/// this process, so the CLI's own `--server-root` reaches it: the spec fragment
+/// lands on stdout, and a refusal keeps `GenerateError`'s exit code.
 fn generate(flags: &GlobalFlags, cmd: GenerateCmd) -> i32 {
-    let Some(root) = cmd.root.clone().or_else(|| flags.server_root.clone()) else {
+    let Some(root) = cmd.root.or_else(|| flags.server_root.clone()) else {
         return runtime::usage_error("onlyne: generate requires --server-root or --root");
     };
-    let mut args = vec![
-        "generate".to_string(),
-        "--root".to_string(),
-        root.to_string_lossy().to_string(),
-    ];
-    for template in &cmd.template {
-        args.push("--template".to_string());
-        args.push(template.clone());
-    }
-    for role in &cmd.role {
-        args.push("--role".to_string());
-        args.push(role.clone());
-    }
-    if let Some(out) = &cmd.out {
-        args.push("--out".to_string());
-        args.push(out.to_string_lossy().to_string());
-    }
-    if cmd.force {
-        args.push("--force".to_string());
-    }
-
-    forward::exec("onlyne-server", &args)
+    onlyne_server::generate::cli_generate(onlyne_server::generate::GenerateArgs {
+        root,
+        templates: cmd.template,
+        roles: cmd.role,
+        out: cmd.out,
+        force: cmd.force,
+    })
 }
+
+/// `onlyne client <verb>`: `run` is the client daemon's one verb and stays in
+/// its own binary, so it execs with this CLI's workspace selector carried
+/// across; every other client verb forwards verbatim.
+fn client(flags: &GlobalFlags, rest: &RestArgs) -> i32 {
+    match rest.args.split_first() {
+        Some((verb, tail)) if verb == "run" => sibling_exec(
+            "onlyne-client",
+            "run",
+            ("--workspace", flags.workspace.as_ref()),
+            tail,
+        ),
+        _ => forward::exec("onlyne-client", &rest.args),
+    }
+}
+
 /// `tui` runs the observation board in this process, carrying the server
 /// selector through so `onlyne --server-root <dir> tui` reaches the same socket
 /// the CLI would.
@@ -586,19 +609,23 @@ fn tui(flags: &GlobalFlags, rest: &RestArgs) -> i32 {
     tui::run(&args)
 }
 
-/// The `server` group. The lifecycle verbs exec `onlyne-server`; the admin
+/// The `server` group: `init` and `generate` run in this process through the
+/// `onlyne-server` library, `run` execs the foreground daemon, and the admin
 /// query and repair nouns resolve against the admin socket in this process.
 fn server(flags: &GlobalFlags, cmd: ServerCmd) -> i32 {
     let Some(verb) = cmd.verb else {
-        return forward::exec("onlyne-server", &[]);
+        return server_help();
     };
     match verb {
-        ServerVerb::Init(rest) => sibling_exec("onlyne-server", "init", &rest),
-        ServerVerb::Run(rest) => sibling_exec("onlyne-server", "run", &rest),
-        ServerVerb::Start(rest) => sibling_exec("onlyne-server", "start", &rest),
-        ServerVerb::Stop(rest) => sibling_exec("onlyne-server", "stop", &rest),
+        ServerVerb::Init(cmd) => server_init(flags, cmd),
+        ServerVerb::Run(rest) => sibling_exec(
+            "onlyne-server",
+            "run",
+            ("--root", flags.server_root.as_ref()),
+            &rest.args,
+        ),
         ServerVerb::Status => admin::status(flags),
-        ServerVerb::Generate(rest) => sibling_exec("onlyne-server", "generate", &rest),
+        ServerVerb::Generate(cmd) => generate(flags, cmd),
         ServerVerb::Reload(rest) => {
             if rest.args.is_empty() {
                 admin::reload(flags)
@@ -621,18 +648,78 @@ fn server(flags: &GlobalFlags, cmd: ServerCmd) -> i32 {
     }
 }
 
-/// Run a sibling daemon's `<verb>` with the remaining arguments verbatim,
-/// flags included.
-fn sibling_exec(bin: &str, verb: &str, rest: &RestArgs) -> i32 {
-    let mut args = Vec::with_capacity(rest.args.len() + 1);
-    args.push(verb.to_string());
-    args.extend(rest.args.iter().cloned());
-    forward::exec(bin, &args)
+/// `server init` writes the server root through the `onlyne-server` library in
+/// this process, so the CLI's own `--server-root` reaches it: v1 exec'd the
+/// sibling and dropped the flag there, so `onlyne --server-root /srv server
+/// init` failed inside the child.
+fn server_init(flags: &GlobalFlags, cmd: ServerInitCmd) -> i32 {
+    let Some(root) = cmd.root.or_else(|| flags.server_root.clone()) else {
+        return runtime::usage_error("onlyne: server init requires --root or --server-root");
+    };
+    // `--json` stays the CLI's documented no-op, so the answer shape does not
+    // move with it; `--quiet` is the CLI's own switch for the progress line.
+    let output = onlyne_server::cli::Output::new(false, flags.quiet, false);
+    onlyne_server::cli::init_command(&root, &cmd.listen, cmd.force, output)
+}
+
+/// The answer a bare `onlyne server` gets: the group's own help, with the exit
+/// code a bare `onlyne` uses.
+fn server_help() -> i32 {
+    let command = Cli::command();
+    let Some(server) = command.find_subcommand("server") else {
+        return runtime::usage_error("onlyne: this build has no server group");
+    };
+    // The group's own root build, so the usage line reads `onlyne server` and
+    // not the bare `server` clap would print for an unpathed subcommand.
+    let mut server = server.clone().bin_name("onlyne server");
+    let mut stderr = std::io::stderr();
+    let _ = server.write_help(&mut stderr);
+    runtime::EXIT_VALIDATION
+}
+
+/// Run a sibling daemon's `<verb>`: the selector this CLI resolved, spelled as
+/// the child's own flag, then the operator's remaining arguments verbatim.
+///
+/// The selector is added only when the tail does not spell it itself: clap
+/// refuses a repeated flag, and a flag the operator typed after the verb is
+/// their own answer for the tree the daemon serves.
+fn sibling_exec(bin: &str, verb: &str, selector: (&str, Option<&PathBuf>), rest: &[String]) -> i32 {
+    let mut args = Vec::with_capacity(rest.len() + 2);
+    if let Some(value) = selector.1 {
+        if !spells(rest, selector.0) {
+            args.push(selector.0.to_string());
+            args.push(value.to_string_lossy().to_string());
+        }
+    }
+    args.extend(rest.iter().cloned());
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(verb.to_string());
+    argv.extend(args);
+    forward::exec(bin, &argv)
+}
+
+/// Whether the operator's own tail already spells `flag`.
+fn spells(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| {
+        arg == flag
+            || arg
+                .strip_prefix(flag)
+                .is_some_and(|tail| tail.starts_with('='))
+    })
 }
 
 /// The refusal for a verb outside the server vocabulary.
+///
+/// `start` and `stop` were verbs in v1, so an operator who types one gets the
+/// reason the daemon no longer detaches rather than an unknown-verb message.
 fn unknown_server_verb(args: &[String]) -> i32 {
     let name = args.first().map(String::as_str).unwrap_or_default();
+    if name == "start" || name == "stop" {
+        return runtime::usage_error(format!(
+            "onlyne: server {name} is gone; Onlyne runs in the foreground, so staying resident \
+             belongs to the terminal host or to launchd/systemd"
+        ));
+    }
     runtime::usage_error(format!("onlyne: unknown server verb {name}"))
 }
 

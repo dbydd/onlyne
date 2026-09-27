@@ -3,10 +3,14 @@
 //    onlyne --server-root <S> sessions --json -> {ok:true,data:{sessions:[…]}}
 //    onlyne --server-root <S> roles    --json -> {ok:true,data:{roles:[…]}}
 //
-// `<S>/.onlyne/run/s` is that root's local admin socket. The plugin names the
-// root and never a role workspace socket: session identity lives in the
-// adapter/pi plugin protocol, and the backend no longer registers one workspace
-// per role, so there is nothing to probe per workspace.
+// The admin socket of `<S>` lives in the machine-level runtime directory, not
+// inside the tree: v2 binds it as `<digest>.sock` (`/tmp/onlyne-<uid>/`, with
+// `ONLYNE_RUNTIME_DIR` overriding the directory), `<digest>` the first 16 hex
+// characters of `sha256` over the canonical root, and `--server-root` reaches it
+// through that derivation. The plugin names the root and never a role workspace
+// socket: session identity lives in the adapter/pi plugin protocol, and the
+// backend no longer registers one workspace per role, so there is nothing to
+// probe per workspace.
 //
 // Measured on 2026-09-11 against target/debug/onlyne (v1.0.0):
 //   * a root whose socket is absent -> exit 3 with the canonical

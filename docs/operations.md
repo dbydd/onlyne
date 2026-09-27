@@ -2,7 +2,7 @@
 
 **English**
 
-Onlyne operations are bounded by the server ledger, the client workspace, and the admin local socket (canonical name `.onlyne/run/s`; bind to this path when it is no more than 103 bytes, and to a short derived path under the system temporary directory when the limit is exceeded; record the actually served path in the `run/socket` marker in that same directory).
+Onlyne operations are bounded by the server ledger, the client workspace, and the admin local socket. Every local socket lives in one machine-level runtime directory, `/tmp/onlyne-<uid>/` on macOS and Linux, mode `0700`, and `$ONLYNE_RUNTIME_DIR` replaces the whole directory when it is set and non-empty. One owner tree owns two files there, both named by `<digest>` — the first 16 hex characters of `sha256` over the tree's canonical absolute root: `<digest>.sock` is the bound socket (mode `0600`) and `<digest>.json` is the registration recording `kind`, `role`, `root`, `pid`, `version`, and `runtime`. Nothing binds inside a workspace tree, and there is no socket path length rule: `<owner>/.onlyne/run/s` survives only as a spelling operators print.
 
 ## Duty and operations entry points
 
@@ -34,21 +34,21 @@ A read without `--fresh` is byte-for-byte identical to the previous behavior: it
 
 `onlyne tui --server-root <root> --once --page <1|2> --state <active|all>` renders one plain-text frame and exits. `active` is the default filter and keeps only the active view; `all` also includes settled sessions and ledger rows. Page 2 with `--state all` shows the `reason=<text>` of settled rows directly.
 
-## Reading the service path
+## Reading the served socket
 
-When each daemon binds its socket, it publishes the actually served path at `<owner>/.onlyne/run/socket` (mode `0600`, one absolute path followed by a newline). An operator can read this path in three ways:
+A daemon resolves its own tree's `<digest>` from the canonical root, binds `<runtime-dir>/<digest>.sock`, and writes the registration `<runtime-dir>/<digest>.json` beside it at bind time. A refused registration fails the whole bind: a socket no reader can find is not the outcome the serving side asked for. An operator can read the answer in three ways:
 
 `onlyne-client status --workspace <dir>` prints `socket <path>`; the field value is the served path.
 
-The client log names this path at startup: in the short-path case, one line gives the canonical path, its byte length, the served path, and the marker (`adapter socket moved to the short path`); in the canonical-path case, one line gives the socket path (`adapter socket serving`). The server follows the same convention: in the short-path case, one line gives the served and canonical paths and their lengths (`the run socket is served from a short path; the marker names it`), while the normal case logs `the run socket is open`.
+The registration file itself is plain JSON: `cat <runtime-dir>/<digest>.json` names the kind, the role, the root, the process, the wire version, and the runtime. `onlyne ls` lists every registration in the directory, which is how one machine's servers and clients are enumerated without walking trees.
 
-`cat <workspace>/.onlyne/run/socket` reads the marker file directly.
+A session process starts with `ONLYNE_SOCKET` set to this served path; the `onlyne` command in a role pane uses it to reach the socket directly. The CLI resolution order is `--socket` > `ONLYNE_SOCKET` > `--server-root` > upward lookup from `--workspace`/cwd. A root or workspace resolves to its runtime path by digest, never by inspecting the tree for a socket file.
 
-A session process starts with `ONLYNE_SOCKET` set to this served path; the `onlyne` command in a role pane uses it to reach the socket directly. The CLI resolution order is `--socket` > `ONLYNE_SOCKET` > `--server-root` > upward lookup from `--workspace`/cwd. The lookup recognizes the owner directory by `.onlyne/run/s` or `.onlyne/run/socket`, and resolves the path through `socket_path()`.
+A client whose bind fails exits with code 1 and writes one stderr line naming the served path and the OS reason. A client that cannot bind its socket chooses to exit; the loop that kept the TLS link alive for silent retries has been removed. An `accept` error after a successful bind is logged at `error` level (`adapter socket accept failed; retrying`), retried every 100 milliseconds, with the listener retained.
 
-A client whose bind fails exits with code 1 and writes one stderr line, `onlyne-client: bind the workspace socket <规范路径>: <明细>`; the detail gives the served path, the byte length of each path, and the OS reason. A client that cannot bind its socket chooses to exit; the loop that kept the TLS link alive for silent retries has been removed. An `accept` error after a successful bind is logged at `error` level (`adapter socket accept failed; retrying`), retried every 100 milliseconds, with the listener retained.
+The runtime directory is fixed under `/tmp` on purpose: a launchd-started process and an interactive shell can see different `$TMPDIR`, and one fixed directory makes one root resolve to one path in every context. macOS and some Linux distributions sweep long-idle `/tmp` files, so a daemon rechecks its socket and registration on each heartbeat and rebinds if they are gone.
 
-The verification chain is pinned by `crates/onlyne-testkit/e2e/socket-path-length.sh`: a deeply padded workspace, a short served path, marker publication, the canonical path remaining unused, and end-to-end task completion.
+The verification chain is pinned by `crates/onlyne-testkit/e2e/socket-path-length.sh`: a workspace padded past the old 103-byte bound resolving to the same short runtime path a shallow one does, with the canonical spelling left bare and the v1 marker unpublished.
 
 ## Configuration loading
 
@@ -128,7 +128,7 @@ Both verbs follow the same rule for `--backend-ref`: a value that parses entirel
 
 `onlyne repair ack --fault-id <fault-id> --reason <reason>` acknowledges a fault.
 
-The repair family uses the admin plane at `<server-root>/.onlyne/run/s`; when the tree exceeds the 103-byte limit, it uses the short served path recorded in `run/socket`.
+The repair family uses the admin plane, which is the server root's runtime socket at `<runtime-dir>/<digest>.sock`.
 
 The repair family does not pass through the role workspace's adapter socket.
 
@@ -530,11 +530,11 @@ ACP sessions have no terminal: the agent is a child process held by the client, 
 
 Windows has no SIGTERM / SIGHUP. `tokio::signal::windows::ctrl_c` connects to the existing SIGINT shutdown path. The supervisor performs shutdown by running `onlyne server stop` on the host containing the server root; spec hot reload uses `onlyne reload`. See the previous section for the exec-session child-process kill ladder.
 
-On Windows, `.onlyne/run/s` is a marker file (content `v1:onlyne-<32hex>`), and the named-pipe name is derived from the lowercase sha256 of the path's lexical-absolute form. `--socket \\.\pipe\` passes through unchanged. `ERROR_PIPE_BUSY` is retried within the CLI `--timeout`. On Unix, AF_UNIX remains a filesystem UDS.
+On Windows the runtime directory holds a marker and a registration instead of a filesystem socket, and the named-pipe name is derived from the lowercase sha256 of the tree's lexical-absolute form. `--socket \\.\pipe\` passes through unchanged. `ERROR_PIPE_BUSY` is retried within the CLI `--timeout`. On Unix, AF_UNIX remains a filesystem UDS.
 
 **中文**
 
-Onlyne 运维以 server 账本、client 工作区、admin 本地 socket（规范名 `.onlyne/run/s`；路径不超过 103 字节时绑在这一条，超限时绑到系统临时目录下的短派生路径，实际服务的路径记在同目录的 `run/socket` 标记里）为边界。
+Onlyne 运维以 server 账本、client 工作区、admin 本地 socket 为边界。每个本机 socket 都住在同一个机器级运行目录里：macOS 与 Linux 上是 `/tmp/onlyne-<uid>/`，权限 `0700`，`$ONLYNE_RUNTIME_DIR` 非空时整体替换这个目录。一棵属主树在那里占两个文件，名字都由 `<digest>` 决定——规范绝对路径的 `sha256` 前 16 个十六进制字符：`<digest>.sock` 是已绑定的 socket（权限 `0600`），`<digest>.json` 是注册文件，记 `kind`、`role`、`root`、`pid`、`version`、`runtime`。工作区树内不绑定任何东西，也没有 socket 路径长度规则：`<owner>/.onlyne/run/s` 只作为操作者打印时的规范拼写保留。
 
 ## 值守入口
 
@@ -568,19 +568,19 @@ Onlyne 运维以 server 账本、client 工作区、admin 本地 socket（规范
 
 ## 服务路径的读法
 
-每个守护进程绑定 socket 时把实际服务的路径发布在 `<owner>/.onlyne/run/socket`（mode `0600`，一条绝对路径加一个换行）。操作者读这条路径有三个入口：
+守护进程从规范根算出本树的 `<digest>`，绑定 `<runtime-dir>/<digest>.sock`，并在绑定时把注册文件 `<runtime-dir>/<digest>.json` 写在旁边。注册被拒就让整次绑定失败：读者找不到的 socket 不是服务方要的结局。操作者读这条路径有三个入口：
 
 `onlyne-client status --workspace <dir>` 打印 `socket <path>`，字段值就是这条服务路径。
 
-client 日志在启动时点名这条路径：短路径场景一行同时给出规范路径、其字节长度、服务路径与 marker（`adapter socket moved to the short path`）；规范路径场景一行给出 socket 路径（`adapter socket serving`）。server 侧同口径：短路径场景一行给出 served 与 canonical 两条路径及其长度（`the run socket is served from a short path; the marker names it`），常规场景一行 `the run socket is open`。
+注册文件本身就是明文 JSON：`cat <runtime-dir>/<digest>.json` 给出 kind、role、root、进程、线上版本与运行时。`onlyne ls` 列出该目录里的全部注册，一台机器上的 server 与 client 由此枚举，不必遍历目录树。
 
-`cat <workspace>/.onlyne/run/socket` 直接读 marker 文件。
+session 进程带着 `ONLYNE_SOCKET` 启动，值是这条服务路径；role pane 里的 `onlyne` 命令凭它直达 socket。CLI 的解析次序是 `--socket` > `ONLYNE_SOCKET` > `--server-root` > `--workspace`/cwd 上行查找。根目录或工作区按 digest 解析到运行目录下的路径，不再靠在树里找 socket 文件来认定属主。
 
-session 进程带着 `ONLYNE_SOCKET` 启动，值是这条服务路径；role pane 里的 `onlyne` 命令凭它直达 socket。CLI 的解析次序是 `--socket` > `ONLYNE_SOCKET` > `--server-root` > `--workspace`/cwd 上行查找，查找以 `.onlyne/run/s` 或 `.onlyne/run/socket` 认定属主目录，路径经 `socket_path()` 解析。
+bind 失败的 client 以 exit 1 结束，stderr 一行点名服务路径与 OS 原因；一个绑不上 socket 的 client 选择退出，保持 TLS 链路静默重试的循环已移除。绑定成功之后的 `accept` 错误以 `error` 级记日志（`adapter socket accept failed; retrying`），每 100 毫秒重试一次，listener 保持在手。
 
-bind 失败的 client 以 exit 1 结束，stderr 一行 `onlyne-client: bind the workspace socket <规范路径>: <明细>`，明细给出服务路径、两条路径各自的字节长度与 OS 原因；一个绑不上 socket 的 client 选择退出，保持 TLS 链路静默重试的循环已移除。绑定成功之后的 `accept` 错误以 `error` 级记日志（`adapter socket accept failed; retrying`），每 100 毫秒重试一次，listener 保持在手。
+运行目录固定在 `/tmp` 是有意的：launchd 启动的进程与交互 shell 看到的 `$TMPDIR` 可能不同，固定目录保证同一个根在任何上下文都解析到同一条路径。macOS 与部分 Linux 发行版会清理长期未访问的 `/tmp` 文件，守护进程因此在每次心跳时检查自己的 socket 与注册文件，丢失即重新绑定。
 
-验证链路由 `crates/onlyne-testkit/e2e/socket-path-length.sh` 钉住：垫深的工作区、短服务路径、marker 发布、规范路径保持空位、任务端到端结清。
+验证链路由 `crates/onlyne-testkit/e2e/socket-path-length.sh` 钉住：垫过旧 103 字节界限的工作区解析出与浅工作区同一条短运行路径，规范拼写保持空位，v1 的 marker 不发布。
 
 ## 配置加载
 
@@ -660,7 +660,7 @@ fault 通过 advisory `Event::Fault` 推给观察者。
 
 `onlyne repair ack --fault-id <fault-id> --reason <reason>` 确认一条 fault。
 
-repair 族走 `<server-root>/.onlyne/run/s` 的 admin 面；树深过 103 字节界限时走 `run/socket` 记下的那条短服务路径。
+repair 族走 admin 面，也就是 server root 在运行目录里的那条 socket：`<runtime-dir>/<digest>.sock`。
 
 repair 族不经过 role 工作区的 adapter socket。
 
@@ -1067,4 +1067,4 @@ ACP 会话没有终端：agent 是 client 持有的子进程，会话对 client 
 
 Windows 没有 SIGTERM / SIGHUP。`tokio::signal::windows::ctrl_c` 接到现有 SIGINT 收尾路径。关停由 supervisor 在 server root 所在主机执行 `onlyne server stop`；spec 热加载走 `onlyne reload`。exec 会话子进程的杀阶梯见上一节。
 
-`.onlyne/run/s` 在 Windows 是 marker 文件（内容 `v1:onlyne-<32hex>`），named pipe 名由路径的 lexical-absolute 小写 sha256 派生。`--socket \\.\pipe\` 原样透传。`ERROR_PIPE_BUSY` 在 CLI `--timeout` 内重试。Unix 上 AF_UNIX 仍是文件系统 UDS。
+Windows 上运行目录里放的是 marker 与注册，不是文件系统 socket；named pipe 名由该树 lexical-absolute 路径的小写 sha256 派生。`--socket \\.\pipe\` 原样透传。`ERROR_PIPE_BUSY` 在 CLI `--timeout` 内重试。Unix 上 AF_UNIX 仍是文件系统 UDS。

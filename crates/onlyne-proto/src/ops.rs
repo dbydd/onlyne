@@ -654,9 +654,9 @@ pub struct Welcome {
 
 /// Repair verbs on the admin surface (§8). Each one is a transactional ledger
 /// edit; none of them runs automatically.
-/// `Shutdown` goes beyond the §8 line 320 list — the graceful stop that
-/// `onlyne server stop` needs over the admin socket — because that line's
-/// zero-policy rule bars automatic repair, not an operator-requested stop.
+/// `Shutdown` goes beyond the §8 line 320 list — the graceful stop an operator
+/// asks for over the admin socket — because that line's zero-policy rule bars
+/// automatic repair, not an operator-requested stop.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "op", content = "args")]
 pub enum AdminOp {

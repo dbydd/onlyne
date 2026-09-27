@@ -270,9 +270,17 @@ export default function onlyne(pi: ExtensionAPI) {
       log(`disabled by ${config.path}`);
       return;
     }
-    // Environment first (the client injects the path it serves), then the
-    // marker the daemon publishes, then the canonical `run/s` (socket.mjs).
-    const socketPath = resolveSocketPath(env, ctx.cwd);
+    // The path the client injected, or the client the runtime directory's
+    // registration files name for this workspace (socket.mjs). A session with
+    // neither has no socket to dial, and saying so is the whole answer: this
+    // stays a plain pi session instead of retrying a path nothing serves.
+    let socketPath: string | null = null;
+    try {
+      socketPath = resolveSocketPath(env, ctx.cwd);
+    } catch (error) {
+      log(`socket unresolved: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (socketPath === null) return;
     // The guard's policy comes from the spec through the client's environment;
     // a hand-written `relay.toml` beside the package is the fallback a manual
     // installation still has (relay.mjs).

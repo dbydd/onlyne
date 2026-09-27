@@ -842,7 +842,7 @@ fn appended_fragments_parse_for_two_roles() {
 }
 
 // ---------------------------------------------------------------------------
-// Process verbs: start, stop, status. The real daemon is never spawned.
+// Process verb: status. The real daemon is never spawned.
 // ---------------------------------------------------------------------------
 
 fn dead_pid() -> u32 {
@@ -874,7 +874,7 @@ fn init_root(root: &Path) {
 }
 
 /// Publish the registration a server root's daemon would publish, naming
-/// `pid`. The process verbs read the pid from here, not from a pid file.
+/// `pid`. `status` reads the pid from here, not from a pid file.
 fn publish(root: &Path, pid: u32) {
     onlyne_wire::socket::write_registration(
         root,
@@ -886,61 +886,30 @@ fn publish(root: &Path, pid: u32) {
     .expect("write a registration");
 }
 
-/// The pid the registration for `root` names, when one is published.
-fn read_published(root: &Path) -> Option<u32> {
-    onlyne_wire::socket::read_registration(root)
-        .expect("read the registration")
-        .map(|registration| registration.pid)
-}
-
+/// `start` and `stop` left the daemon's vocabulary: a `run` stays in the
+/// foreground, so keeping the process up belongs to whoever hosts it.
 #[test]
-fn start_refuses_when_a_live_registration_names_this_process() {
+fn start_and_stop_are_gone_from_the_daemon_vocabulary() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("server");
-    init_root(&root);
-    let pid = std::process::id();
-    publish(&root, pid);
-    let output = run_cli(&["start", "--root", root.to_str().unwrap()]);
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap().trim_end(),
-        format!("onlyne: server already running at pid {pid}")
-    );
-    assert_eq!(
-        read_published(&root).expect("the registration survives a refused start"),
-        pid
-    );
-}
-
-#[test]
-fn stop_without_a_registration_says_not_running() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("server");
-    init_root(&root);
-    let output = run_cli(&["stop", "--root", root.to_str().unwrap()]);
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap().trim_end(),
-        "onlyne: server not running"
-    );
-    assert!(read_published(&root).is_none());
-}
-
-#[test]
-fn stop_clears_a_registration_naming_a_dead_process() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("server");
-    init_root(&root);
-    publish(&root, dead_pid());
-    let output = run_cli(&["stop", "--root", root.to_str().unwrap()]);
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap().trim_end(),
-        "onlyne: server not running"
-    );
+    let root_arg = root.to_str().unwrap();
+    for verb in ["start", "stop"] {
+        let output = run_cli(&[verb, "--root", root_arg]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "`onlyne-server {verb}` is a usage refusal"
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(verb),
+            "the refusal names the verb that is gone: {stderr}"
+        );
+        assert!(output.stdout.is_empty(), "a refused verb prints no answer");
+    }
     assert!(
-        read_published(&root).is_none(),
-        "a registration naming a dead process is removed"
+        !root.join(".onlyne").exists(),
+        "a refused verb writes nothing at the root"
     );
 }
 
@@ -965,7 +934,10 @@ fn status_reports_a_stopped_server_as_json() {
             .as_str()
             .unwrap()
             .replace('\\', "/")
-            .ends_with(&format!("{}.sock", onlyne_wire::socket::workspace_digest(&root)))
+            .ends_with(&format!(
+                "{}.sock",
+                onlyne_wire::socket::workspace_digest(&root)
+            ))
     );
 }
 

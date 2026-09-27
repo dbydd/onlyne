@@ -195,10 +195,6 @@ impl ServerRoot {
         SocketEndpoint::resolve(&self.root, &self.run_dir())
     }
 
-    pub fn pid_path(&self) -> PathBuf {
-        self.run_dir().join("server.pid")
-    }
-
     pub fn logs_dir(&self) -> PathBuf {
         self.onlyne.join("logs")
     }
@@ -490,7 +486,6 @@ mod tests {
         assert_eq!(layout.state_db_path(), root.join(".onlyne/state.db"));
         assert_eq!(layout.socket_path_natural(), root.join(".onlyne/run/s"));
         assert_eq!(layout.socket_path(), socket_path(&root).unwrap());
-        assert_eq!(layout.pid_path(), root.join(".onlyne/run/server.pid"));
         assert_eq!(layout.log_path(), root.join(".onlyne/logs/server.log"));
         assert_eq!(layout.key_path(), root.join(".onlyne/keys/server.key"));
         assert_eq!(
@@ -725,7 +720,7 @@ mod tests {
         let endpoint = role.socket_endpoint();
         assert!(endpoint.short(), "v2 binds off the canonical spelling");
         assert_eq!(endpoint.natural(), role.socket_path_natural().as_path());
-        assert_eq!(endpoint.actual(), socket_path(&role.root()).unwrap());
+        assert_eq!(endpoint.actual(), socket_path(role.root()).unwrap());
         assert_eq!(role.socket_path(), endpoint.actual().to_path_buf());
         // A bootstrap writes nothing into the tree, and a bind publishes no
         // registration on its own: the serving side owns the surface.

@@ -4342,42 +4342,6 @@ async fn shutdown_unlinks_the_admin_socket() {
     onlyne_server::admin::unlink(&fixture.state).expect("a second unlink is a no-op");
 }
 
-#[test]
-fn start_clears_a_stale_socket_from_a_dead_pid() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().join("server");
-    std::fs::create_dir_all(root.join(".onlyne")).expect("create the root");
-    #[cfg(unix)]
-    let mut child = std::process::Command::new("true")
-        .spawn()
-        .expect("spawn true");
-    #[cfg(windows)]
-    let mut child = std::process::Command::new("cmd")
-        .args(["/C", "exit", "0"])
-        .spawn()
-        .expect("spawn cmd");
-    let pid = child.id();
-    child.wait().expect("reap the child");
-    let socket = onlyne_wire::socket::socket_path(&root).expect("the socket path");
-    std::fs::write(&socket, b"").expect("write a stale socket file");
-    onlyne_wire::socket::write_registration(
-        &root,
-        &onlyne_wire::socket::RegistrationFile {
-            pid,
-            ..onlyne_wire::socket::RegistrationFile::server(&root)
-        },
-    )
-    .expect("write a stale registration");
-    assert!(onlyne_server::cli::clear_stale_socket(&root));
-    assert!(!socket.exists(), "the stale socket is gone");
-    assert!(
-        onlyne_wire::socket::read_registration(&root)
-            .expect("read the registration")
-            .is_none(),
-        "the stale registration is gone"
-    );
-}
-
 #[tokio::test]
 async fn a_wrong_platform_channel_registration_is_refused() {
     let fixture = fixture();
