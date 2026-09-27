@@ -33,6 +33,8 @@ fn slot(task: &str, read_only: bool, dropped_at: Option<Instant>) -> SessionSlot
         dropped_at,
         last_beat: Some(Instant::now()),
         read_only,
+        tools_token: String::new(),
+        delivered_roles: BTreeSet::new(),
     }
 }
 

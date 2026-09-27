@@ -3,6 +3,7 @@ use onlyne_proto::Presence;
 
 fn slice(max: u32) -> RoleSlice {
     RoleSlice {
+        drive: onlyne_config::Drive::Plugin,
         command: vec!["pi".into()],
         max_sessions: max,
         relay_required: Vec::new(),
@@ -15,7 +16,10 @@ fn info(max: u32) -> RoleInfo {
         name: "planner".into(),
         admin: false,
         max_sessions: max,
-        session_command: vec!["pi".into()],
+        runtime: onlyne_proto::RoleRuntime {
+            drive: onlyne_proto::Drive::Plugin,
+            command: vec!["pi".into()],
+        },
         spec_hash: "h".into(),
         prose: None,
         state: Presence::Online,
@@ -49,13 +53,14 @@ fn an_identical_slice_is_a_no_op() {
 fn command_is_compared() {
     let current = slice(1);
     let next = RoleSlice {
+        drive: onlyne_config::Drive::Plugin,
         command: vec!["other".into()],
         max_sessions: 1,
         relay_required: Vec::new(),
         relay_count: None,
     };
     let fields = slice_diff(&current, &next);
-    assert_eq!(fields, ["session_command"]);
+    assert_eq!(fields, ["runtime"]);
 }
 
 #[test]

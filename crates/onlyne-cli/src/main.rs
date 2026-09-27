@@ -25,9 +25,9 @@ mod flags;
 mod forward;
 mod ledger;
 mod ls;
+mod mcp;
 mod media;
 mod render;
-mod report;
 mod runtime;
 mod skill;
 mod socket;
@@ -68,11 +68,11 @@ row prints what it printed before the column reached the board.";
 const CLI_AFTER_HELP: &str = "\
 Exit codes: 0 the verb answered ok. 1 a socket answer failed or a runtime
 error ended the verb. 2 local validation or usage refusal; the code is
-multipurpose: a bad flag, a bad --request, an invalid report file, and a
-report file that is absent or unreadable all share it. 3 nothing resolved as
-a socket. 4 the operator's input was refused: a `generate` refusal, or
-`skill export` declining to overwrite a file (pass `--force`). 5 `client run`
-found no session host (see backends below). 127 a daemon binary was not found,
+multipurpose: a bad flag, a bad --request, and an argument the verb cannot use
+all share it. 3 nothing resolved as a socket. 4 the operator's input was
+refused: a `generate` refusal, or
+5 `client run` received an `ONLYNE_BACKEND` value that is not a placement.
+127 a daemon binary was not found,
 which only `server run` and `client run` can meet.
 
 No verb stays resident: `server start` and `server stop` are gone, and both
@@ -86,10 +86,11 @@ a tree that owns a socket in the machine-level runtime directory
 directory). Nothing binds inside a workspace tree; `<root>/.onlyne/run/s` is
 the spelling operators read, not a path a daemon serves.
 
-Session backends (the `backend` key of a role workspace's `config.toml`, read
-by `onlyne client run`): herdr | orca | zellij | exec | headless | acp | fake
-| auto. An empty or absent value probes the host, and the environment variable
-ONLYNE_BACKEND takes precedence over the configured value when it is nonempty.";
+Session placement and drive (read by `onlyne client run`): `placement` is the
+role workspace's `config.toml` key and accepts `herdr | orca | zellij | headless
+| external`; `ONLYNE_BACKEND` takes precedence over it. `fake` is the in-process
+test runtime. The spec's `[client.runtime] drive` accepts `plugin | acp | exec`,
+and `acp` requires `placement = \"headless\"`.";
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -124,9 +125,9 @@ enum Verb {
     Complete(CompleteCmd),
     /// Hand a task to another role.
     Handoff(HandoffCmd),
-    /// Validate a completion report file locally; opens no socket.
-    #[command(long_about = report::family_long_about())]
-    Report(report::ReportCmd),
+    /// Serve one session's obligations as MCP tools on stdio.
+    #[command(long_about = mcp::LONG_ABOUT)]
+    Mcp,
     /// Accept a delivered envelope by its msg id.
     Ack(verbs::AckArgs),
     /// Reject a delivered envelope by its msg id.
@@ -502,7 +503,7 @@ fn run() -> i32 {
         Verb::Reply(cmd) => verbs::reply(flags, &cmd.sender, cmd.args),
         Verb::Complete(cmd) => verbs::complete(flags, &cmd.sender, cmd.args),
         Verb::Handoff(cmd) => verbs::handoff(flags, &cmd.sender, cmd.args),
-        Verb::Report(cmd) => report::run(flags, cmd.verb),
+        Verb::Mcp => mcp::run(),
         Verb::Ack(args) => verbs::ack(flags, args),
         Verb::Reject(args) => verbs::reject(flags, args),
         Verb::Control(cmd) => {

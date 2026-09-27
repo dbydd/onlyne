@@ -1,9 +1,9 @@
 // The agent side of the onlyne adapter protocol: one connection to the role
 // workspace's client socket — v2 binds it in the machine-level runtime
 // directory as `<digest>.sock`, not inside the tree (`socket.mjs`) — the
-// hello/welcome handshake, assign delivery, turn-state reports, the completion
-// exit and the idle reminder ladder that leads to it, probe, recycle and detach
-// — plus reconnect when the client restarts under it.
+// hello/welcome handshake, assign delivery, turn-state reports, the host's
+// nudge, the completion exit, probe, recycle and detach — plus reconnect when
+// the client restarts under it.
 //
 // Everything pi-specific lives behind `surface` (see pi-surface.mjs): this
 // module decides *what* the protocol says and hands the *effects* to the
@@ -16,12 +16,10 @@
 // refused report, a socket error, a timeout, a framing fault — because those
 // matter to a host with no panel at all.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createConnection } from "node:net";
-import { basename, join } from "node:path";
 import { createFrameDecoder, encodeFrame } from "./frame.mjs";
 import { createActivity } from "./activity.mjs";
-import { DEFAULT_IDLE_REMINDERS } from "./config.mjs";
 import {
   DEFAULT_HEARTBEAT_MS,
   assignAckArgs,
@@ -33,7 +31,6 @@ import {
   headOf,
   hostBinding,
   imagePart,
-  injectionText,
   normalizeOutcome,
   readyReport,
   sendEnvelope,
@@ -42,7 +39,6 @@ import {
   stdinTaskText,
   welcomeFrom,
 } from "./protocol.mjs";
-import { DEFAULT_RELAY, FORCED_PREFIX, relayEnabled, relayRefusal } from "./relay.mjs";
 
 /** Reconnect ladder in milliseconds, capped like the client's own. */
 export const RECONNECT_LADDER_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
@@ -50,32 +46,14 @@ export const RECONNECT_LADDER_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 export const HELLO_TIMEOUT_MS = 5_000;
 /** Default bound on one request round trip. */
 export const REQUEST_TIMEOUT_MS = 30_000;
-/** How long after a turn end the plugin waits for `agent_settled` before it acts. */
+/**
+ * How long after an errored turn the plugin waits for `agent_settled` before it
+ * reports the failure it witnessed itself.
+ */
 export const SETTLE_FALLBACK_MS = 2_000;
 
 /** Capabilities this plugin implements on the wire. */
 export const CAPABILITIES = ["register", "report", "inject", "recycle"];
-
-/** Mime guess for an attachment the host did not name. */
-function extensionForMime(mime) {
-  switch (mime) {
-    case "image/png":
-      return "png";
-    case "image/jpeg":
-      return "jpg";
-    case "image/gif":
-      return "gif";
-    case "image/webp":
-      return "webp";
-    default:
-      return "bin";
-  }
-}
-
-/** Ids the host mints are uuids; anything else is flattened before it names a file. */
-function safeSegment(value) {
-  return String(value ?? "unknown").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80);
-}
 
 export class OnlyneAgent {
   /**
@@ -88,14 +66,12 @@ export class OnlyneAgent {
    *   surface: any,
    *   log?: (line: string, data?: unknown) => void,
    *   activity?: { note: (kind: string, text: string) => any, set: (patch: any) => any, lines: () => string[], events: any[] },
-   *   relay?: { required?: string[], count?: number | null },
    *   capabilities?: string[],
    *   heartbeatMs?: number,
    *   ladder?: number[],
    *   requestTimeoutMs?: number,
    *   helloTimeoutMs?: number,
    *   settleFallbackMs?: number,
-   *   idleReminders?: number,
    *   createConnection?: (path: string) => any,
    *   timer?: { set: (fn: () => void, ms: number) => any, clear: (handle: any) => void },
    * }} options
@@ -111,20 +87,12 @@ export class OnlyneAgent {
     this.activity = options.activity ?? createActivity();
     this.activity.set({ role: options.role });
     this.log = options.log ?? (() => {});
-    /** The relay guard's policy; the default guards nothing (`relay.mjs`). */
-    this.relay = options.relay ?? DEFAULT_RELAY;
     this.capabilities = options.capabilities ?? CAPABILITIES;
     this.heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
     this.ladder = options.ladder ?? RECONNECT_LADDER_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.helloTimeoutMs = options.helloTimeoutMs ?? HELLO_TIMEOUT_MS;
     this.settleFallbackMs = options.settleFallbackMs ?? SETTLE_FALLBACK_MS;
-    /**
-     * How many idle reminders one task may collect: the bound that turns the
-     * third idle without a completion into a failure (`settleNow`). It comes
-     * from the workspace's `.pi/onlyne.json` (`config.mjs`).
-     */
-    this.idleReminders = options.idleReminders ?? DEFAULT_IDLE_REMINDERS;
     this.createConnection = options.createConnection ?? ((path) => createConnection(path));
     // The pane this process was spawned in, reported on every heartbeat so the
     // supervisor board can attribute the tab (protocol.mjs `hostBinding`). Read
@@ -176,16 +144,6 @@ export class OnlyneAgent {
      * @type {{ taskId: string, report: any, outcome: string, exitProcess: boolean }[]}
      */
     this.pendingCompletions = [];
-    /**
-     * Every role this session handed something to through a `send` the client
-     * accepted: the relay guard's only evidence (`relay.mjs`).
-     *
-     * Process memory, scoped to this session because the agent is: a reconnect
-     * keeps it (the same process re-dials the same client), and a session that
-     * starts fresh starts empty rather than guessing at what an earlier process
-     * sent — the guard judges this session's own deliveries, not history.
-     */
-    this.deliveredTo = new Set();
     /**
      * The deliveries this process has already handed to the model, keyed by
      * envelope id (a delivery's own identity). Keying it by task id would swallow
@@ -385,7 +343,7 @@ export class OnlyneAgent {
     const prose = welcome.prose.trim();
     if (prose && !this.deliveredProse.has(prose)) {
       this.deliveredProse.add(prose);
-      this.surface.proseContext?.(prose, welcome);
+      this.surface.roleProse?.(prose);
     }
 
     if (this.envTaskId) {
@@ -400,7 +358,8 @@ export class OnlyneAgent {
     await this.reportReady();
     await this.flushPendingCompletions();
     // The frames that waited for the handshake: the welcome is adopted by now,
-    // so the role prose is context before any assignment opens a turn.
+    // so the role prose is in the instruction layer before any assignment opens
+    // a turn.
     this.handshaking = false;
     this.drainDeferred();
     if (this.tasks.size > 0) await this.heartbeat().catch(() => {});
@@ -482,6 +441,7 @@ export class OnlyneAgent {
     const op = frame.op;
     const args = frame.args ?? {};
     if (op === "assign") void this.onAssign(args);
+    else if (op === "nudge") this.onNudge(frame, args);
     else if (op === "probe") void this.probe();
     else if (op === "recycle") void this.onRecycle(args);
     else if (op === "config_get") void this.onConfigGet(args);
@@ -596,10 +556,11 @@ export class OnlyneAgent {
    * died, and the reconnect ladder — not a queue of beats behind a socket that
    * cannot carry them — is the answer to that.
    *
-   * The phase is the one the rule names: `idle` only while the session waits for
-   * user input, `running` for everything else, re-derived from pi once per round
-   * so a phase that went stale when a run started again cannot survive a tick —
-   * the answer is about the session, so a task does not get its own view of it.
+   * The phase is the one the phase rule names: `idle` only while the session
+   * waits for user input, `running` for everything else, re-derived from pi once
+   * per round so a phase that went stale when a run started again cannot survive
+   * a tick — the answer is about the session, so a task does not get its own
+   * view of it.
    *
    * @param {"idle" | "running" | null} [agent] the phase to state; absent means
    * ask pi.
@@ -610,7 +571,7 @@ export class OnlyneAgent {
       // means "ask pi again" and so clears an earlier explicit phase: a
       // turn-start beat that says `running` must not pin the turn-end beat that
       // folded into it, or the idle a waiting session reached never gets
-      // reported and the settle ladder reads a working agent forever.
+      // reported, and the client's own rule reads a working agent forever.
       this.beatAgain = true;
       this.beatPhase = agent;
       return this.beatRound;
@@ -648,8 +609,8 @@ export class OnlyneAgent {
   /**
    * One pass of the round: one beat for every task this session still holds.
    *
-   * A relay session can hold two open tasks at once (the one it is working and
-   * the next one already handed over), and a beat is the only liveness evidence
+   * A session can hold two open tasks at once (the one it is working and the
+   * next one already handed over), and a beat is the only liveness evidence
    * either row has: beating the head of the list alone let a second task sit
    * until the client's heartbeat timeout took it. Each beat carries its own
    * task's generation and a sequence strictly above the last one that task
@@ -772,38 +733,30 @@ export class OnlyneAgent {
     this.injectedDeliveries.add(deliveryId);
     this.stats.assigns += 1;
 
-    const attachments = this.writeAttachments(taskId, envelope);
-    const attachmentPaths = attachments.map((item) => item.path);
+    // The delivery text arrives already rendered: the client's one template
+    // built it from the sender, the body and the files it wrote itself. This
+    // plugin injects those bytes and nothing else — it composes no wording of
+    // its own around a delivery, and its other addition to what the model reads
+    // is the role prose, which is a system-prompt section rather than a message.
+    const text = typeof args.text === "string" ? args.text : "";
+    const attachmentPaths = Array.isArray(args.attachments) ? args.attachments : [];
     const prose = typeof args.prose === "string" ? args.prose.trim() : "";
     const proseIsNew = prose.length > 0 && !this.deliveredProse.has(prose);
-    if (proseIsNew) this.deliveredProse.add(prose);
-    // The assignment as the injection saw it, retained so the idle ladder can
-    // re-send it (`remind`): the task identity, its source, its kind, the task
-    // text with whatever handoff lines a relay put inside it, and the paths of
-    // the attachments this call already wrote.
-    const assignment = { ...args, task_id: taskId };
-    const text = injectionText({ assign: assignment, proseIsNew, attachmentPaths });
+    if (proseIsNew) {
+      this.deliveredProse.add(prose);
+      this.surface.roleProse?.(prose);
+    }
 
     const held = this.tasks.get(taskId);
     // A completed record is not a live one: a new envelope for a task that
     // already settled is fresh work under an old id, so it gets a fresh record.
     if (held && !held.completed) {
       // A new envelope for a task this session already holds — a follow-up, a
-      // redirect, a bounce back through a relay. The work record stays where it
-      // is: its delivered set keeps the relay guard's count, and its completion
-      // state still settles the task. Only the "since this instruction" counter
-      // moves, so the settled-without-completing watchdog measures the newest one.
-      // The ladder restarts with it: the reminder count, the idle episode it was
-      // charged to (`remindedAt`), and the failure an errored turn proved all
-      // belong to the instruction being replaced.
-      held.turnsSinceAssign = 0;
-      held.reminders = 0;
-      held.remindedAt = 0;
-      held.reminderWokeTurn = false;
+      // redirect, a bounce back through a handoff. The work record stays where
+      // it is, and the failure an errored turn proved belonged to the
+      // instruction being replaced, so it is cleared with that instruction.
       held.errored = false;
       held.envelopeId = envelope.id ?? held.envelopeId;
-      held.assignment = assignment;
-      held.attachmentPaths = attachmentPaths;
       // `lastSeq` deliberately does not reset here. It is the floor the next
       // allocation for this task must clear, and the host's row for the task
       // still holds the seq of the last beat it accepted; a follow-up envelope
@@ -825,32 +778,19 @@ export class OnlyneAgent {
          * share the plugin's counter. Null until the first report.
          */
         lastSeq: null,
-        // Who handed this task over: the relay guard's count mode does not count
-        // a send straight back to it (`relay.mjs`).
-        upstream: envelope.from?.role?.role ?? null,
-        turnsSinceAssign: 0,
-        turns: 0,
         errored: false,
         head: "",
-        assignment,
-        attachmentPaths,
-        /** Idle reminders sent for this task; the bound is `idleReminders`. */
-        reminders: 0,
-        /** The `turnsSinceAssign` the last reminder was charged to. */
-        remindedAt: 0,
-        /** Whether the next turn is the one this plugin's own reminder woke. */
-        reminderWokeTurn: false,
       });
     }
     this.agentState = "running";
-    this.surface.wakeUser?.(text, attachments.map((item) => item.part));
+    this.surface.wakeUser?.(text, this.imageParts(envelope));
     this.surface.customEntry?.("onlyne-assign", {
       taskId,
       envelopeId: envelope.id ?? null,
       kind: envelope.kind ?? "task",
       proseInjected: proseIsNew,
       prose,
-      attachments: attachments.map((item) => item.path),
+      attachments: attachmentPaths,
     });
     this.activity.set({ taskId, phase: "running" });
     this.notice("in", `task ${taskId.slice(0, 8)} from ${describePrincipal(envelope.from)} (${envelope.kind ?? "task"}): ${headOf(envelope.body?.text)}`);
@@ -864,6 +804,41 @@ export class OnlyneAgent {
     } catch (error) {
       this.log(`assign_ack refused: ${error.message}`);
     }
+  }
+
+  /**
+   * The host's turn-end nudge (`HostOp::Nudge`): the client owns the rule
+   * (`docs/v2-CONTRACT.md` §3c) and the sentence it sends is the whole of what
+   * the model gets.
+   *
+   * Handed over exactly as it arrived — no prefix, no count, no task id, no role
+   * — which is what makes this a nudge rather than v1's ladder, whose reminder
+   * re-injected the assignment and counted its rungs. Nothing in the session's
+   * turn state is reset by it, and the plugin keeps no copy of the text.
+   *
+   * The answer claims only that the sentence was handed over, because the client
+   * settles a delivery on it: `ok` when pi took the text, and a refusal when pi
+   * would not. A frame carrying no `id` is a notification and gets no answer.
+   *
+   * @param {{ id?: number | null }} frame
+   * @param {{ task_id?: string, text?: string }} args
+   */
+  onNudge(frame, args) {
+    const text = typeof args.text === "string" ? args.text : "";
+    const taskId = typeof args.task_id === "string" && args.task_id ? args.task_id.slice(0, 8) : "?";
+    const handedOver = text.length > 0 && this.surface.wakeUser?.(text, []) === true;
+    if (handedOver) this.notice("in", `nudge for task ${taskId}`);
+    else this.notice("warn", `nudge for task ${taskId} was not handed to the model`);
+    if (frame?.id === undefined || frame?.id === null) return;
+    if (handedOver) {
+      this.write({ reply_to: frame.id, ok: true });
+      return;
+    }
+    this.write({
+      reply_to: frame.id,
+      ok: false,
+      error: { code: "internal", message: "pi did not take the nudge text" },
+    });
   }
 
   /** The host asked for a fresh observation: one heartbeat is the answer. */
@@ -880,8 +855,10 @@ export class OnlyneAgent {
     const task = stdinTaskText(args);
     if (task) {
       // The no-`inject` route: the host hands the payload over as a config key.
+      // The key carries the same rendered delivery text an `assign` would, so
+      // it is injected as it stands — this route composes no wording either.
       this.notice("in", `stdin task: ${headOf(task.text)}`);
-      this.surface.wakeUser?.(`[onlyne] task body (delivered as stdin):\n\n${task.text}`, []);
+      this.surface.wakeUser?.(task.text, []);
       return;
     }
     this.log(`config_get ${args?.key ?? "?"} is not implemented by this plugin`);
@@ -903,56 +880,45 @@ export class OnlyneAgent {
   // ------------------------------------------------------------ pi → plugin
 
   /**
-   * A turn started: the plugin's own agent fact is `running`, and the idle
-   * ladder starts over. The count belongs to one idle episode, so a session
-   * that ran again owns a fresh bound; the one turn this plugin's own reminder
-   * woke belongs to the episode that reminder belongs to, and keeps it.
+   * A turn started: the plugin's own agent fact is `running`.
+   *
+   * How a turn end settles the work is the client's rule
+   * (`docs/v2-CONTRACT.md` §3c): the plugin counts nothing, bounds nothing, and
+   * reports only the facts it alone can see — its own phase, and an errored
+   * turn.
    */
   onTurnStart() {
-    for (const task of this.tasks.values()) {
-      if (task.completed) continue;
-      task.turns += 1;
-      if (task.reminderWokeTurn) {
-        task.reminderWokeTurn = false;
-        continue;
-      }
-      task.turnsSinceAssign = 0;
-      task.reminders = 0;
-      task.remindedAt = 0;
-    }
     void this.heartbeat("running").catch((error) => this.log(`heartbeat refused: ${error.message}`));
   }
 
   /**
-   * A turn ended: one turn of a run that may still have more, and the settle
-   * window starts. The phase is re-derived, so the beat says `running` while pi
-   * keeps working and says `idle` only once the session waits for input.
+   * A turn ended: one turn of a run that may still have more. The phase is
+   * re-derived, so the beat says `running` while pi keeps working and says
+   * `idle` only once the session waits for input. A clean turn end settles
+   * nothing: the client owns that decision, and it reaches the session as its
+   * own frame.
    */
   onTurnEnd() {
-    for (const task of this.tasks.values()) {
-      if (!task.completed) task.turnsSinceAssign += 1;
-    }
     void this.heartbeat().catch((error) => this.log(`heartbeat refused: ${error.message}`));
-    this.armSettleFallback();
   }
 
   /**
-   * pi has settled: this is the moment the rule names as waiting for input, and
-   * the settle decision belongs to it.
+   * pi has settled: the session is waiting for input, which is the moment an
+   * errored turn is reported from.
    */
   onSettled() {
     this.clearSettleFallback();
     void this.heartbeat().catch((error) => this.log(`heartbeat refused: ${error.message}`));
-    void this.trySettle().catch((error) => this.log(`settle decision failed: ${error.message}`));
+    void this.trySettle().catch((error) => this.log(`failed-turn report refused: ${error.message}`));
   }
 
   /**
-   * The one settle decision. pi keeps `isIdle()` false while it is running,
-   * retrying, compacting, or holding a queued continuation, and a background task
-   * keeps work running after pi itself has settled, so a settle signal that
-   * arrives during any of those waits re-arms instead of deciding on a session
-   * that is still busy. The fallback timer and `agent_settled` both land here,
-   * and `settleNow` makes the decision idempotent for one idle episode.
+   * Report a turn that failed, once pi is quiet. pi keeps `isIdle()` false while
+   * it is running, retrying, compacting, or holding a queued continuation, and
+   * a background task keeps work running after pi itself has settled, so a
+   * signal that arrives during any of those waits re-arms instead of reporting
+   * from a session that is still busy. The fallback timer and `agent_settled`
+   * both land here, and a task is reported once because the report completes it.
    */
   async trySettle() {
     if (this.closed || this.activeTasks().length === 0) return;
@@ -960,7 +926,7 @@ export class OnlyneAgent {
       this.armSettleFallback();
       return;
     }
-    await this.settleNow().catch((error) => this.log(`settle decision failed: ${error.message}`));
+    await this.reportFailedTurns().catch((error) => this.log(`failed-turn report refused: ${error.message}`));
   }
 
   /** A failed turn: the task's outcome is `failed`, with the error as its head. */
@@ -970,19 +936,18 @@ export class OnlyneAgent {
       task.errored = true;
       if (text) task.head = headOf(text);
     }
-    void this.trySettle().catch((error) => this.log(`settle decision failed: ${error.message}`));
+    void this.trySettle().catch((error) => this.log(`failed-turn report refused: ${error.message}`));
   }
 
   /**
-   * The last assistant text seen, kept as the completion summary for a task
-   * whose `onlyne_complete` call hands no argument over.
+   * The last assistant text seen, kept as the ledger head for a task whose
+   * `onlyne_complete` call carries an empty `summary`.
    *
-   * This is the fallback, never the deliverable: `onlyne_complete`'s `text` is
-   * reported byte for byte by `completeFromTool` and is never written back
-   * here, so the sentence a turn happened to end on cannot stand in for a
-   * payload the tool call carried. Nothing else reads it: an idle that runs out
-   * of reminders fails the task and says why, rather than reporting the text of
-   * a turn nobody completed.
+   * This is the fallback, never the deliverable: `onlyne_complete`'s `summary`
+   * is reported byte for byte by `completeFromTool` and is never written back
+   * here, so the sentence a turn happened to end on cannot stand in for the
+   * summary the tool call carried. Nothing else reads it — and the full result
+   * travels in `details`, which this never touches.
    */
   noteAssistantText(text) {
     const flat = headOf(text);
@@ -997,7 +962,7 @@ export class OnlyneAgent {
     if (this.closed || this.activeTasks().length === 0) return;
     this.settleHandle = this.timer.set(() => {
       this.settleHandle = null;
-      void this.trySettle().catch((error) => this.log(`settle decision failed: ${error.message}`));
+      void this.trySettle().catch((error) => this.log(`failed-turn report refused: ${error.message}`));
     }, this.settleFallbackMs);
   }
 
@@ -1008,121 +973,52 @@ export class OnlyneAgent {
   }
 
   /**
-   * The idle ladder's decision, taken for every task this session still holds
-   * when a settle signal finds the agent idle.
+   * Report the failures this session witnessed itself, for every task it still
+   * holds.
    *
    * An errored turn is proof on its own — pi may skip the clean turn end — so
-   * its task is reported `failed` at once, with the error as its head. Every
-   * other open task gets one rung of the ladder: the plugin re-sends the
-   * assignment (`remind`) and counts it, and the idle that finds the bound
-   * already spent reports `failed` and leaves the session.
-   *
-   * `onlyne_complete` is the only path to `done`. A turn that ends without it
-   * leaves the task `idle_waiting` (the design's own word for it), and the
-   * answer is the reinforcing prompt the model gets instead of a completion it
-   * never claimed.
-   *
-   * A task whose injected message has not run a turn is left alone at every
-   * rung: the reminder would re-send an assignment the model may not have read
-   * yet, and failing now would claim work that never happened.
-   *
-   * A rung belongs to an idle episode, not to a settle signal: `remindedAt`
-   * records the `turnsSinceAssign` the last reminder was charged to, so the
-   * fallback timer and an `agent_settled` answering the same turn end spend one
-   * rung between them.
+   * its task is reported `failed` at once, with the error as its head. Nothing
+   * else is decided here: a turn that ends without a completion is the client's
+   * case, and it reaches the session as the host's nudge (`onNudge`), so a
+   * plugin that also decided it would be the second owner of the rule.
    */
-  async settleNow() {
+  async reportFailedTurns() {
     for (const task of [...this.tasks.values()]) {
-      if (task.completed) continue;
-      if (task.errored) {
-        await this.complete(task.taskId, "failed", task.head);
-        continue;
-      }
-      if (task.turnsSinceAssign === 0 || task.remindedAt === task.turnsSinceAssign) continue;
-      task.remindedAt = task.turnsSinceAssign;
-      if (task.reminders < this.idleReminders) {
-        this.remind(task);
-        continue;
-      }
-      const rungs = `${task.reminders} idle reminder${task.reminders === 1 ? "" : "s"}`;
-      await this.complete(task.taskId, "failed", `no completion after ${rungs}`);
+      if (task.completed || !task.errored) continue;
+      await this.complete(task.taskId, "failed", task.head);
     }
-  }
-
-  /**
-   * One rung of the idle ladder: hand the assignment back to the model.
-   *
-   * The reminder is the injection's own text — `injectionText` with the prose
-   * flag off, so the role prose already in the session's context is not
-   * repeated — under one line saying why it is back. The task text is where a
-   * relay carries its handoff lines, so a handoff the model still owes comes
-   * back with it.
-   *
-   * The attachments travel as the paths the injection wrote, never as parts:
-   * the images were handed to pi once, and re-attaching them would put the same
-   * bytes into the context a second time.
-   *
-   * @param {any} task a record with `assignment` and `attachmentPaths` retained
-   * from `onAssign`
-   */
-  remind(task) {
-    task.reminders += 1;
-    // The turn this reminder is about to wake belongs to the same episode, so
-    // `onTurnStart` spends no reset on it and the bound stays reachable.
-    task.reminderWokeTurn = true;
-    const rung = `reminder ${task.reminders} of ${this.idleReminders}`;
-    const text = [
-      `[onlyne] your turn ended without a completion exit; this task is still open (${rung}). Call onlyne_complete when it is finished.`,
-      "",
-      injectionText({ assign: task.assignment, proseIsNew: false, attachmentPaths: task.attachmentPaths }),
-    ].join("\n");
-    this.surface.wakeUser?.(text, []);
-    this.notice("out", `${rung} for task ${task.taskId.slice(0, 8)}`);
   }
 
   /**
    * `onlyne_complete`: the model's explicit outcome, and the only path to
    * `done`.
    *
-   * A non-empty `text` is the completion body: it is what the model handed
-   * over, reported verbatim as the ledger's one-line `head`, so the last
-   * assistant text never stands in for it. An absent or blank `text` carries no
-   * deliverable at all and falls back to that assistant text.
+   * `summary` is the display line the ledger keeps: it is what the model handed
+   * over, flattened to one line and reported as the `head`, so the last
+   * assistant text never stands in for it. An empty `summary` carries no
+   * display line at all and falls back to that assistant text.
    *
-   * The relay guard runs first, for every outcome, when the workspace's
-   * `relay.toml` names a minimum downstream handoff: a session that still owes
-   * one cannot report a terminal fact. A refusal throws before anything is
-   * written, queued or detached — no completion report, no exit, no state on
-   * the task — so the session stays live and the same call lands once the
-   * handoff has gone out. `force: true` with a non-empty `reason` waives the
-   * guard and stamps the head with `relay-guard-forced: <reason>`, which is the
-   * ledger's audit trail for a completion that skipped the guard.
+   * `details` is the full result and `files` the absolute paths it names. Both
+   * travel on unchanged, and both are what the next hop and the originator
+   * receive: the client owns the shape and the ceiling, and refuses an oversize
+   * body with its own sentence (`docs/v2-CONTRACT.md` §3c).
    *
-   * @param {{ outcome?: string, text?: string, force?: boolean, reason?: string }} input
+   * No policy of this plugin's runs before them. The completion's shape, the
+   * details ceiling and the relay requirement are the client's checks, so its
+   * refusal is raised out of here exactly as it arrived.
+   *
+   * @param {{ outcome?: string, summary?: string, details?: string, files?: string[] }} input
    */
   async completeFromTool(input = {}) {
     const task = [...this.tasks.values()].find((item) => !item.completed);
     const taskId = task?.taskId ?? this.envTaskId;
     if (!taskId) throw new Error("onlyne: no task is assigned to this session");
-    const explicit = headOf(input.text);
-    let head = explicit || task?.head || "";
-    if (relayEnabled(this.relay)) {
-      const refusal = relayRefusal(this.relay, this.deliveredTo, {
-        role: this.role,
-        upstream: task?.upstream ?? null,
-      });
-      if (refusal) {
-        const reason = headOf(input.reason);
-        if (input.force !== true || !reason) {
-          this.log(refusal);
-          this.notice("warn", refusal);
-          throw new Error(`onlyne: ${refusal}`);
-        }
-        head = headOf(`${FORCED_PREFIX}${reason}${explicit ? ` | ${explicit}` : ""}`);
-        this.notice("warn", `relay guard waived: ${reason}`);
-      }
-    }
-    return this.complete(taskId, normalizeOutcome(input.outcome), head);
+    const explicit = headOf(input.summary);
+    const head = explicit || task?.head || "";
+    return this.complete(taskId, normalizeOutcome(input.outcome), head, {
+      details: typeof input.details === "string" ? input.details : null,
+      files: Array.isArray(input.files) ? input.files : [],
+    });
   }
 
   /**
@@ -1138,17 +1034,23 @@ export class OnlyneAgent {
    * therefore means this process can leave without losing the outcome, and a
    * rejected or queued report must never exit.
    *
-   * @param {{ exitProcess?: boolean }} [options] `false` for the recycle path,
-   * which ends the process after its own detach frame instead.
+   * `details` and `files` ride on the report itself; `head` stays the display
+   * line the ledger keeps.
+   *
+   * @param {{ exitProcess?: boolean, details?: string | null, files?: string[] }} [options]
+   *   `exitProcess: false` is the recycle path, which ends the process after
+   *   its own detach frame instead.
    */
   async complete(taskId, outcome, head, options = {}) {
     const exitProcess = options.exitProcess ?? true;
+    const details = typeof options.details === "string" && options.details.length > 0 ? options.details : null;
+    const files = Array.isArray(options.files) ? options.files : [];
     const normalized = normalizeOutcome(outcome);
     const summary = headOf(head);
     const task = this.tasks.get(taskId);
     if (task?.completed) return { taskId, outcome: normalized, head: summary, duplicate: true };
     if (task) task.completed = true;
-    const report = completeReport({ taskId, outcome: normalized, head: summary });
+    const report = completeReport({ taskId, outcome: normalized, head: summary, details, files });
     if (!this.connected) {
       this.pendingCompletions.push({ taskId, report, outcome: normalized, exitProcess });
       this.activity.set({ taskId, phase: `${normalized} queued` });
@@ -1242,10 +1144,6 @@ export class OnlyneAgent {
     const image = this.imageFromPath(input.imagePath);
     const envelope = sendEnvelope({ from: this.role, to: input.to, kind, text: input.text ?? "", image });
     const data = await this.request("send", envelope);
-    // Recorded only after the client answered the `send`: a refused envelope was
-    // never a handoff, and the relay guard must not read one as delivered. Any
-    // kind counts — `note` and `task` are both the session reaching that role.
-    this.deliveredTo.add(String(input.to));
     return { queued: true, op_id: envelope.op_id ?? null, kind, to: input.to, data };
   }
 
@@ -1282,26 +1180,17 @@ export class OnlyneAgent {
   // ------------------------------------------------------------ attachments
 
   /**
-   * Write one inbound image to the workspace and return the path plus the pi
-   * image part, so the model both sees the picture and can address the file.
+   * The pi image parts for one delivery, from the envelope's inline image. The
+   * client writes the files itself and names every path in `assign.args
+   * .attachments`, so this plugin only hands pi the bytes it was given; the
+   * model addresses the files through the paths the delivery text names.
    */
-  writeAttachments(taskId, envelope) {
+  imageParts(envelope) {
     const image = envelope?.body?.image;
     if (!image || typeof image.data_base64 !== "string") return [];
     const mime = typeof image.mime === "string" && image.mime ? image.mime : "image/png";
-    const name = safeSegment(image.name ?? `image.${extensionForMime(mime)}`);
-    const dir = join(this.cwd, ".onlyne", "tmp", "attachments");
-    const path = join(dir, `${safeSegment(taskId)}-${safeSegment(envelope.id)}-${name}`);
-    try {
-      const bytes = Buffer.from(image.data_base64, "base64");
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      writeFileSync(path, bytes, { mode: 0o600 });
-      this.notice("state", `attachment ${basename(path)}`);
-      return [{ path, part: { type: "image", mime, data: image.data_base64, name } }];
-    } catch (error) {
-      this.log(`attachment write failed: ${error.message}`);
-      return [];
-    }
+    const name = typeof image.name === "string" ? image.name : null;
+    return [{ type: "image", mime, data: image.data_base64, name }];
   }
 }
 

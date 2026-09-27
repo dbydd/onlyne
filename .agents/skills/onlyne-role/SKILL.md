@@ -58,13 +58,15 @@ onlyne complete --task <task-id> --outcome done --text "<one-line result>" \
   as the head.
 - A plain `exec` session carries no plugin: `onlyne complete` is yours to run before you
   stop, with both supervisor flags above.
-- A `backend = "acp"` session mounts nothing and needs no `onlyne` command. Its prompt
-  ends with an absolute report path your client prepared under the workspace; the last
-  action before you stop is that file: one `hop-done:` / `hop-failed:` / `hop-blocked:`
-  verdict line, optionally followed by `handoff:` lines your client routes for you. The
-  client reads the file, settles the task, files the receipt, and passes the handoffs on.
-  Write and check the file with the `onlyne report` verbs, or read
-  `skills/onlyne-role-payload-v2/SKILL.md` for the whole grammar before you write one.
+- An ACP session mounts the same three tools through `onlyne mcp`, the MCP server its
+  client attaches to the session, so it needs no `onlyne` command of its own. The names
+  and arguments are the ones above, and a refused call comes back as the tool result's
+  error text, in the client's own words. Nothing about the task is yours to name: the
+  client holds the task, and a call names only the recipient, the text, or the outcome.
+- A turn that ends without `onlyne_complete` gets one nudge in your input: `If this task
+  is finished, report it with onlyne_complete; if something is missing, say what.` A
+  second turn that ends without one settles the delivery — a `oneshot` task becomes
+  `blocked`, and a `task` or `role` session goes idle and the board reads "waiting".
 - One completion per task. Inside your session the plugin keeps that record: a second
   `onlyne_complete` for a task it already reported answers `duplicate` and files no report. The
   process leaves once, at the completion the plugin acked. A hand-run `onlyne complete` carries

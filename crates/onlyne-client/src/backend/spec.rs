@@ -17,6 +17,24 @@ pub struct SpawnSpec {
     pub command: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// The tools-mount token this client minted for the session being opened.
+    ///
+    /// A session the client drives itself has no plugin to carry its
+    /// obligations, so this token is what binds the `onlyne mcp` child back to
+    /// this one session (`docs/v2-CONTRACT.md` §3b). It travels here and not
+    /// inside `env`, because `env` is the agent process's own environment: a
+    /// capability the model can print is no capability, and the mount's env
+    /// belongs to the tool child alone.
+    #[serde(default)]
+    pub tools_token: String,
+    /// The role's control-plane prose, as the slice `welcome` brought it.
+    ///
+    /// A runtime with a system-prompt extension point is handed this through
+    /// that point. An ACP session has none, so this is what the client writes
+    /// into the workspace instruction file before the session opens
+    /// (`AGENTS.md` §12).
+    #[serde(default)]
+    pub prose: String,
     #[serde(default)]
     pub focus: Option<bool>,
     #[serde(default)]
@@ -63,78 +81,116 @@ impl PanePlacement {
     }
 }
 
-/// Stderr line and [`NoSupportedHost`] display when no host is selected. The
-/// two hint lines name the config key and its accepted values, because the
-/// failure an operator actually hits is a workspace configured for no host.
-pub const NO_SUPPORTED_HOST: &str = "onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND\n\
-onlyne: or set the backend in the client config: `backend = \"acp\"`, accepted: herdr|orca|zellij|exec|headless|acp|fake|auto (empty probes, ONLYNE_BACKEND wins)\n\
-onlyne: an acp backend reads its agent from the `[acp]` table: mode, model, reasoning_effort, permission";
-
+/// Where a session of this client runs: the placement the machine resolved, or
+/// the in-process `fake` runtime.
+///
+/// Placement is a property of the machine and comes from the workspace
+/// `config.toml` or from `ONLYNE_BACKEND`; a drive is a property of the runtime
+/// and comes from the role's spec. `fake` is the backend that owns no process
+/// and needs no external tool, which is how the scenario suite and every e2e
+/// case run a real client on a machine with no terminal host at all. Only the
+/// environment and an embedding that resolved the placement itself can name it:
+/// a workspace config names a placement, and a runtime that starts nothing is
+/// not one an operator should reach by typo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackendName {
-    Herdr,
-    Orca,
-    Zellij,
-    Exec,
-    Acp,
+pub enum SessionPlacement {
+    Named(onlyne_config::Placement),
     Fake,
 }
 
-/// Every name an operator may put in `backend` or `ONLYNE_BACKEND`, the `auto`
-/// probe and the `headless` alias included. A rejection names this list, because
-/// the miss it answers is a typo the operator cannot otherwise see.
-pub const BACKEND_NAMES: &str = "herdr|orca|zellij|exec|headless|acp|fake|auto";
+impl SessionPlacement {
+    /// Two pre-split spellings are accepted here and nowhere else: `fake`
+    /// selects the in-process test runtime, and `exec` is the name a v1
+    /// `ONLYNE_BACKEND` used for a session the client runs in the background,
+    /// which is the `headless` placement. A workspace config names neither: its
+    /// key is `placement`, and the five names that key accepts are the ones
+    /// `onlyne_config::PLACEMENT_NAMES` lists.
+    pub fn parse(name: &str) -> Option<Self> {
+        let trimmed = name.trim();
+        if trimmed.eq_ignore_ascii_case("fake") {
+            return Some(Self::Fake);
+        }
+        if trimmed.eq_ignore_ascii_case("exec") {
+            return Some(Self::Named(onlyne_config::Placement::Headless));
+        }
+        onlyne_config::Placement::parse(trimmed).map(Self::Named)
+    }
 
-impl BackendName {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Herdr => "herdr",
-            Self::Orca => "orca",
-            Self::Zellij => "zellij",
-            Self::Exec => "exec",
-            Self::Acp => "acp",
+            Self::Named(placement) => placement.as_str(),
             Self::Fake => "fake",
         }
     }
 
-    pub fn parse(name: &str) -> Option<Self> {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "herdr" => Some(Self::Herdr),
-            "orca" => Some(Self::Orca),
-            "zellij" => Some(Self::Zellij),
-            // `headless` is the operator-facing alias; projections keep `exec`.
-            "exec" | "headless" => Some(Self::Exec),
-            "acp" => Some(Self::Acp),
-            "fake" => Some(Self::Fake),
-            _ => None,
+    /// The placement itself, `None` for the in-process runtime, which names no
+    /// place on the machine.
+    pub fn named(self) -> Option<onlyne_config::Placement> {
+        match self {
+            Self::Named(placement) => Some(placement),
+            Self::Fake => None,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelectionSource {
-    Explicit,
-    Env,
-    None,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostDetection {
-    pub backend: Option<BackendName>,
-    pub source: SelectionSource,
-    pub explicit: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoSupportedHost;
-
-impl std::fmt::Display for NoSupportedHost {
+impl std::fmt::Display for SessionPlacement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(NO_SUPPORTED_HOST)
+        f.write_str(self.as_str())
     }
 }
 
-impl std::error::Error for NoSupportedHost {}
+/// The refusal an explicit `placement` name that matches nothing gets. It names
+/// the accepted set and where each source sits in the precedence, because the
+/// miss it answers is a typo the operator cannot otherwise see.
+pub fn unknown_placement(name: &str) -> String {
+    format!(
+        "onlyne: `{name}` is not a placement; accepted: {} \
+         (absent probes {}, then headless; ONLYNE_BACKEND wins over the workspace's `placement` key)",
+        onlyne_config::PLACEMENT_NAMES,
+        onlyne_config::PLACEMENT_PROBE_ORDER
+            .map(|placement| placement.as_str())
+            .join(", ")
+    )
+}
+
+/// An explicit placement name this client does not know. `onlyne-client run`
+/// answers it with exit 5, the code for "no host the client could use".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownPlacement(pub String);
+
+impl std::fmt::Display for UnknownPlacement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&unknown_placement(&self.0))
+    }
+}
+
+impl std::error::Error for UnknownPlacement {}
+
+/// Which of the four sources answered the placement question. `doctor` reports
+/// the word, because "which machine fact chose this" is the question an
+/// operator actually has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionSource {
+    /// A nonempty `ONLYNE_BACKEND` named it.
+    Explicit,
+    /// The run itself declared it: the role workspace's `config.toml`
+    /// `placement` key, or what an embedding passed to `ClientInit`.
+    Declared,
+    /// A pane host answered the probe.
+    Probe,
+    /// No host answered, so the placement is `headless`.
+    Fallback,
+}
+
+/// The placement this client resolved, and where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementDetection {
+    pub placement: SessionPlacement,
+    pub source: SelectionSource,
+    /// The raw `ONLYNE_BACKEND` value when it named the placement, so a reader
+    /// can see the spelling that won.
+    pub explicit: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRef {
@@ -171,17 +227,23 @@ pub enum CloseReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionOutcome {
     pub task_id: String,
-    pub outcome: TaskState,
+    /// How the turn ended, when ending the turn *is* the fact the client
+    /// records.
+    ///
+    /// `None` is the ordinary ending of a session whose obligations travel as
+    /// tool calls: the agent stopped asking for work (`end_turn`) and this
+    /// backend has no way to know whether the model reported the task done,
+    /// because the completion arrives on the session's own tools connection
+    /// rather than through this process's pipe. Ending a turn without a
+    /// completion is the state the client's turn-end rule owns
+    /// (`docs/v2-CONTRACT.md` §3c): it nudges once, and the *second* ending is
+    /// what settles the delivery. `Some` is a standing this backend did observe
+    /// for itself — a cancelled, refused, or dead turn — and it settles the
+    /// delivery where it lands.
+    pub outcome: Option<TaskState>,
     /// The agent's closing text, already stripped of the status markers an agent
     /// stamps into its own stream. Becomes the completion head.
     pub head: Option<String>,
-    /// Which verdict line [`SessionOutcome::head`] came from: `done`, `failed`,
-    /// or `blocked`. `None` when the head is the agent's closing message rather
-    /// than a report line, which is every session that left no report. The
-    /// reader that hands work on needs the word: a blocked task finished
-    /// nothing, so its handoff lines route nowhere.
-    #[serde(default)]
-    pub head_kind: Option<String>,
     /// Fault detail for the ledger on a failure. An agent process that died
     /// mid-turn names its exit status and the tail of its stderr here.
     pub note: Option<String>,
@@ -190,9 +252,4 @@ pub struct SessionOutcome {
     /// the session row as a fault and settles nothing by itself: the turn kept
     /// running without the thing the agent wanted.
     pub refusals: Option<String>,
-    /// The handoff lines this turn's report asked for, with a blocked verdict's
-    /// lines already dropped. Empty is the common case: a report with no
-    /// handoff line, or no report at all.
-    #[serde(default)]
-    pub handoffs: Vec<onlyne_proto::payload::Handoff>,
 }

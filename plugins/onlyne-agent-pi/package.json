@@ -15,8 +15,7 @@
   "homepage": "https://github.com/dbydd/onlyne/tree/main/plugins/onlyne-agent-pi#readme",
   "files": [
     "src",
-    "onlyne.json.example",
-    "relay.toml.example"
+    "onlyne.json.example"
   ],
   "keywords": [
     "pi-package",

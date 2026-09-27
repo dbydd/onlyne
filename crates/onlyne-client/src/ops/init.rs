@@ -4,23 +4,28 @@ use onlyne_config::layout::{LEGACY_WORKSPACE_MESSAGE, RoleWorkspace, ServerRoot,
 use onlyne_net::KeyPair;
 use std::path::{Path, PathBuf};
 
-/// the backend key `init` seeds (as a comment) among the top-level keys of a
+/// the placement key `init` seeds (as a comment) among the top-level keys of a
 /// fresh workspace config: a commented key above `[server]` uncomments into
 /// the table it belongs to, and the parse never sees a value the template
 /// invented. The value range and the precedence are the ones `onlyne-config`'s
-/// `ClientConfig::backend` documents.
-const BACKEND_COMMENTS: &str = "\
-# The session backend `onlyne client run` starts from: herdr | orca | zellij |
-# exec | headless | acp | fake | auto. An empty or absent value probes the
-# host, and a nonempty ONLYNE_BACKEND wins over this key.
-# backend = \"auto\"
+/// `ClientConfig::placement` documents.
+///
+/// Placement is the machine's half of the pair; the drive is the runtime's and
+/// lives in the server's `spec.toml` (`[client.runtime]`), which is why no
+/// drive is seeded here.
+const PLACEMENT_COMMENTS: &str = "\
+# Where this machine displays the role's runtime: herdr | orca | zellij |
+# headless | external. An absent value probes herdr, orca, zellij in that order
+# and falls back to headless; a nonempty ONLYNE_BACKEND wins over this key.
+# placement = \"headless\"
 ";
 
 /// the `[acp]` table `init` seeds (as a comment) at the foot of a fresh
 /// workspace config, where an uncommented table header opens a table of its
 /// own. The four keys are the ones `onlyne-config`'s `AcpSection` reads.
 const ACP_COMMENTS: &str = "\
-# ACP backend options, read only when the backend is `acp`. `mode`, `model`,
+# ACP options, read only when the role's `[client.runtime] drive` is `acp`.
+# `mode`, `model`,
 # and `reasoning_effort` name the agent's own configuration values: the agent
 # validates them, and an empty one keeps the agent's default. `permission` is
 # this machine's answer to a permission request from the agent: `deny` (the
@@ -91,7 +96,7 @@ pub async fn init(args: InitArgs) -> Result<String> {
         .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or(0)))
         .unwrap_or((listen, 0));
     let config = format!(
-        "role = {role:?}\ncert_pin = {pin:?}\nkey_path = {key_path:?}\nplugins = []\n\n{BACKEND_COMMENTS}\n{RECONNECT_COMMENTS}\n[server]\nhost = {host:?}\nport = {port}\n\n{ACP_COMMENTS}",
+        "role = {role:?}\ncert_pin = {pin:?}\nkey_path = {key_path:?}\nplugins = []\n\n{PLACEMENT_COMMENTS}\n{RECONNECT_COMMENTS}\n[server]\nhost = {host:?}\nport = {port}\n\n{ACP_COMMENTS}",
         role = args.role,
         pin = cert_pin,
         key_path = workspace.key_path().display().to_string(),
@@ -102,11 +107,15 @@ pub async fn init(args: InitArgs) -> Result<String> {
     Ok(fragment(&args.role, &key.public_str(), &args.prose))
 }
 
-/// The `session_command` seed the printed fragment ships.
+/// The `[client.runtime]` seed the printed fragment ships.
 ///
 /// The bytes match the seed `examples/supervisor/run.py` writes into its ring
 /// entries, so a pasted fragment spawns the same session the demo cluster runs.
-const SEED_SESSION_COMMAND: &str = "session_command = [\"pi\", \"--session-id\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]";
+/// The table is written last, because a key after it belongs to it.
+const SEED_RUNTIME: &str = "\
+[client.runtime]\n\
+drive = \"plugin\"\n\
+command = [\"pi\", \"--session-id\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]";
 
 /// The `[[client]]` slice `init` prints for `spec.toml`.
 ///
@@ -114,15 +123,16 @@ const SEED_SESSION_COMMAND: &str = "session_command = [\"pi\", \"--session-id\",
 /// end-to-end script exercises with `send --from planner --to planner`.
 /// `public_key` arrives in the `ed25519/<base64>` form `KeyPair::public_str`
 /// produces, which is the same string the handshake verifies against. The
-/// `session_command` line is what the client runs per task (§5, §6): a role
-/// entry without one leaves every delivery staged with no process behind it.
+/// `[client.runtime]` table is the drive and the argv the client runs per
+/// session (§5, §6): a role entry whose table carries no command leaves every
+/// delivery staged with no process behind it.
 pub fn fragment(role: &str, public_key: &str, prose: &str) -> String {
     let role = toml_string(role);
     let key = toml_string(public_key);
     let prose = toml_string(prose);
     format!(
-        "[[client]]\nrole = {role}\nkey = {key}\nadmin = false\nmax_sessions = 1\nallowed_senders = [\"*\", {role}]\nallowed_targets = [{role}]\nprose = {prose}\n{command}\n{KNOB_COMMENTS}",
-        command = SEED_SESSION_COMMAND,
+        "[[client]]\nrole = {role}\nkey = {key}\nadmin = false\nmax_sessions = 1\nallowed_senders = [\"*\", {role}]\nallowed_targets = [{role}]\nprose = {prose}\n{KNOB_COMMENTS}\n{runtime}\n",
+        runtime = SEED_RUNTIME,
     )
 }
 
@@ -147,6 +157,12 @@ const KNOB_COMMENTS: &str = "\
 # relay_count = <n>
 # The count form of relay_required: this many distinct downstream roles. When
 # both keys are present the non-empty list wins.
+# The [client.runtime] table below is the drive and the argv a session runs.
+# `drive` names how the client talks to the runtime: plugin (the default)
+# starts it and lets its plugin dial back, acp runs the agent as a child over
+# stdio (placement headless only), and exec runs the command and reads its exit
+# code. `command` is the argv, with {session} and {task} substituted; any other
+# brace is refused.
 ";
 
 /// One TOML basic string, with the characters a basic string cannot hold escaped.

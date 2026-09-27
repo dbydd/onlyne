@@ -15,10 +15,20 @@ use tokio::time::sleep;
 /// before this task awaits the ordinary settlement path, so neither its queue
 /// lock nor the dispatch lock can survive into session teardown.
 pub(super) async fn outcome_loop(state: RunState) -> Result<()> {
-    let Some(feed) = state.dispatch.outcome_feed() else {
-        return std::future::pending::<Result<()>>().await;
-    };
     loop {
+        // The feed belongs to the backend the role's drive installed, and that
+        // backend moves with the drive: at startup this client holds the
+        // default drive's backend, and the role's own drive arrives later with
+        // `welcome`. So the feed is read every round instead of being latched
+        // once. A backend that reports no endings of its own — a pane host, a
+        // child process, the in-process test runtime — answers `None`, which is
+        // a round with nothing to drain and not the end of this task: waiting
+        // on the first answer forever is how a session whose drive turns out to
+        // be `acp` would run a whole turn with nobody listening for its ending.
+        let Some(feed) = state.dispatch.outcome_feed() else {
+            sleep(Duration::from_millis(OUTCOME_POLL_MS)).await;
+            continue;
+        };
         while let Some(outcome) = feed.try_recv() {
             settle_session_outcome(&state, outcome).await?;
         }
@@ -27,7 +37,13 @@ pub(super) async fn outcome_loop(state: RunState) -> Result<()> {
 }
 
 /// Feed one self-driven ending through the same fault and settlement paths an
-/// adapter report uses, and hand on whatever the ending's report asked for.
+/// adapter report uses.
+///
+/// A backend that owns its agent reports two shapes of ending. A verdict — how
+/// the work ended — settles here, through the same door a plugin's completion
+/// takes. A turn that simply ended settles nothing: an agent that stopped its
+/// turn without calling `onlyne_complete` is the case §3c's client-owned rule
+/// answers, and `None` is exactly that shape.
 pub(super) async fn settle_session_outcome(
     state: &RunState,
     outcome: SessionOutcome,
@@ -36,20 +52,26 @@ pub(super) async fn settle_session_outcome(
         task_id,
         outcome,
         head,
-        head_kind,
         note,
         refusals,
-        handoffs,
     } = outcome;
-    // A self-driven backend reports in the task's own vocabulary, and the
-    // settlement travels in the wire's. `pending` is the absence of a verdict,
-    // which is nothing this loop can settle: the backend owes an ending.
-    let terminal = dispatch::task_outcome_of(outcome).ok_or_else(|| {
-        anyhow!("self-driven backend reported a non-terminal outcome for task {task_id}")
-    })?;
     if let Some(reason) = refusals.as_deref() {
         crate::reconcile::record_fault(&state.store, &task_id, "permission", "acp", reason)?;
     }
+    // The turn ended and its drive asked for nothing: §3c's rule owns the rest
+    // — the one nudge, and the settlement when a second turn ends the same way.
+    // The agent's own closing line rides along, because the settlement this call
+    // may reach writes it into the task's head.
+    let Some(outcome) = outcome else {
+        return dispatch::on_turn_end(&state.dispatch, &task_id, head).await;
+    };
+    // A self-driven backend reports in the task's own vocabulary, and the
+    // settlement travels in the wire's. `pending` is the absence of a verdict,
+    // which is nothing this loop can settle: a terminal outcome is what an
+    // ending reports.
+    let terminal = dispatch::task_outcome_of(outcome).ok_or_else(|| {
+        anyhow!("self-driven backend reported a non-terminal outcome for task {task_id}")
+    })?;
     if outcome == onlyne_proto::TaskState::Failed
         && let Some(reason) = note.as_deref()
     {
@@ -60,8 +82,6 @@ pub(super) async fn settle_session_outcome(
         &task_id,
         terminal,
         head,
-        head_kind.as_deref(),
-        &handoffs,
         // The ending came from this client's own backend, which watched the agent
         // it is reporting: the never-ran guard belongs to the plugin's door, where
         // the claimant and the claim are the same party.
@@ -393,6 +413,10 @@ pub(super) fn apply_role_info(state: &RunState, info: &RoleInfo) -> Vec<&'static
     let Some((applied, fields)) = crate::session::slice::apply_if_changed(&current, next) else {
         return Vec::new();
     };
+    // A drive can move under a live link, and the backend it selects has to move
+    // with it before the new command is handed to the old one. A drive this
+    // machine cannot host is recorded as a refusal rather than silently kept.
+    state.install_runtime(applied.drive);
     state.dispatch.reconfigure(applied);
     fields
 }

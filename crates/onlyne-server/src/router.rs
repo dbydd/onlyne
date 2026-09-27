@@ -401,7 +401,7 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
         spec_hash: spec.semantic_hash(),
         allowed_targets: entry.allowed_targets.clone(),
         allowed_senders: entry.allowed_senders.clone(),
-        session_command: (!entry.session_command.is_empty()).then(|| entry.session_command.clone()),
+        runtime: Some(role_runtime(&entry.runtime)),
         timeout_ready_ms: Some(entry.timeout.ready_ms),
         timeout_idle_ms: Some(entry.timeout.idle_ms),
         intent_attempts: Some(entry.intent.attempts),
@@ -416,6 +416,25 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
         seq: state.event_head().max(0) as u64,
     };
     ResBody::ok(serde_json::to_value(welcome).unwrap_or_default())
+}
+
+/// The spec's `[client.runtime]` table as the wire carries it.
+///
+/// The two vocabularies stay separate on purpose: `onlyne-config` owns the
+/// spelling a file uses and `onlyne-proto` owns the spelling a frame uses, so
+/// neither crate takes a dependency on the other's parsing — the same boundary
+/// `MsgKindClass` keeps. `drive` is the only field of the table that reaches a
+/// client; the placement is the machine's and never travels.
+fn role_runtime(runtime: &onlyne_config::RuntimeSection) -> onlyne_proto::RoleRuntime {
+    use onlyne_proto::Drive as WireDrive;
+    onlyne_proto::RoleRuntime {
+        drive: match runtime.drive {
+            onlyne_config::Drive::Plugin => WireDrive::Plugin,
+            onlyne_config::Drive::Acp => WireDrive::Acp,
+            onlyne_config::Drive::Exec => WireDrive::Exec,
+        },
+        command: runtime.command.clone(),
+    }
 }
 
 /// The cluster summary `wait-ready` polls.
@@ -516,7 +535,7 @@ pub fn roles(state: &Arc<State>, query: &QueryRolesArgs) -> anyhow::Result<Vec<R
             name: entry.role.clone(),
             admin: entry.admin,
             max_sessions: entry.max_sessions,
-            session_command: entry.session_command.clone(),
+            runtime: role_runtime(&entry.runtime),
             spec_hash: stored
                 .iter()
                 .find(|row| row.name == entry.role)

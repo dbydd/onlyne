@@ -1,6 +1,6 @@
 use onlyne_client::backend::{
-    BackendName, CloseReason, CommandOutput, HerdrBackend, PanePlacement, Runner, SelectionSource,
-    SessionBackend, SessionRef, SpawnSpec, SplitDirection, detect_host,
+    CloseReason, CommandOutput, HerdrBackend, PanePlacement, Runner, SessionBackend, SessionRef,
+    SpawnSpec, SplitDirection,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -90,6 +90,8 @@ fn spec_at(command: Vec<&str>, cwd: &str, placement: Option<PanePlacement>) -> S
         task_id: "abcd1234-ffff-4000-8000-000000000001".into(),
         command: command.into_iter().map(str::to_string).collect(),
         env,
+        tools_token: String::new(),
+        prose: String::new(),
         focus: None,
         placement,
         rename: None,
@@ -195,13 +197,6 @@ fn agent_started() -> String {
             "pane_id": "wF:p2"
         }
     }))
-}
-
-fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-    pairs
-        .iter()
-        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
-        .collect()
 }
 
 #[test]
@@ -974,23 +969,4 @@ fn unknown_option_stderr_is_surfaced() {
         error.to_string().contains("unknown option: --bogus"),
         "{error}"
     );
-}
-
-#[test]
-fn detect_host_covers_herdr_orca_zellij_none_and_explicit() {
-    let herdr = detect_host(&env(&[
-        ("HERDR_ENV", "1"),
-        ("HERDR_SOCKET_PATH", "/tmp/herdr.sock"),
-    ]));
-    assert_eq!(herdr.backend, Some(BackendName::Herdr));
-    assert_eq!(herdr.source, SelectionSource::Env);
-
-    let orca = detect_host(&env(&[("ORCA_PANE_KEY", "tab:leaf")]));
-    assert_eq!(orca.backend, Some(BackendName::Orca));
-    assert_eq!(orca.source, SelectionSource::Env);
-
-    let explicit = detect_host(&env(&[("ONLYNE_BACKEND", "fake")]));
-    assert_eq!(explicit.backend, Some(BackendName::Fake));
-    assert_eq!(explicit.source, SelectionSource::Explicit);
-    assert_eq!(explicit.explicit.as_deref(), Some("fake"));
 }

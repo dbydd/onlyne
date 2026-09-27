@@ -156,6 +156,9 @@ fn settle(
             head,
             reply_to,
             cluster_ref,
+            // `details` and `files` are the client's to deliver to the next hop
+            // and the originator; the ledger row keeps the head.
+            ..
         } => {
             let origin = cluster_ref.clone();
             let stored = state.ledger.session_row_for_task(task_id)?;

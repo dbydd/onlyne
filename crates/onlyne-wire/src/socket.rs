@@ -236,6 +236,16 @@ pub struct RegistrationFile {
     /// server root. `null` in JSON.
     #[serde(default)]
     pub runtime: Option<String>,
+    /// Where this machine displays the role's runtime process (`herdr`,
+    /// `orca`, `zellij`, `headless`, `external`); `None` for a server root, and
+    /// for a client that published its registration before it resolved one.
+    ///
+    /// Placement is a property of the machine, which is why it is recorded
+    /// here: an external runtime's plugin reads the registrations in this
+    /// directory and dials the clients whose placement says the runtime is
+    /// already resident (`external`).
+    #[serde(default)]
+    pub placement: Option<String>,
 }
 
 impl RegistrationFile {
@@ -258,6 +268,7 @@ impl RegistrationFile {
             pid: std::process::id(),
             version: WIRE_VERSION.to_string(),
             runtime: None,
+            placement: None,
         }
     }
 
@@ -270,6 +281,12 @@ impl RegistrationFile {
     /// Name the runtime hosting the role's sessions.
     pub fn with_runtime(mut self, runtime: impl Into<String>) -> Self {
         self.runtime = Some(runtime.into());
+        self
+    }
+
+    /// Name the placement this machine displays the role's sessions in.
+    pub fn with_placement(mut self, placement: impl Into<String>) -> Self {
+        self.placement = Some(placement.into());
         self
     }
 }

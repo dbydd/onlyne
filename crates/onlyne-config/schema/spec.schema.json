@@ -113,12 +113,17 @@
         "role": {
           "type": "string"
         },
-        "session_command": {
-          "default": [],
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+        "runtime": {
+          "description": "The drive and the argv a session runs: `[client.runtime]`.",
+          "default": {
+            "command": [],
+            "drive": "plugin"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/RuntimeSection"
+            }
+          ]
         },
         "timeout": {
           "default": {
@@ -132,6 +137,32 @@
           ]
         }
       }
+    },
+    "Drive": {
+      "description": "How a client talks to one role's runtime: `[client.runtime] drive`.\n\nDrive is a property of the runtime and belongs in the spec. Where the runtime process is displayed is the placement, a property of the machine, and belongs in that role workspace's `config.toml` (`docs/v2-PLAN.md` §\"驱动与放置\").",
+      "oneOf": [
+        {
+          "description": "The client starts the runtime and a plugin inside it dials back.",
+          "type": "string",
+          "enum": [
+            "plugin"
+          ]
+        },
+        {
+          "description": "The client runs the agent as its own child and speaks the Agent Client Protocol on that child's stdio.",
+          "type": "string",
+          "enum": [
+            "acp"
+          ]
+        },
+        {
+          "description": "The client runs the command and reads its exit code.",
+          "type": "string",
+          "enum": [
+            "exec"
+          ]
+        }
+      ]
     },
     "GatewayEntry": {
       "description": "`[[gateway]]` entry.",
@@ -224,6 +255,29 @@
           "type": [
             "string",
             "null"
+          ]
+        }
+      }
+    },
+    "RuntimeSection": {
+      "description": "`[client.runtime]` — the drive and the argv one session of this role runs.\n\nAn absent table is `drive = \"plugin\"` with an empty command, which is what every role in the tree is today.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The argv one session runs. `{session}` and `{task}` are substituted by the client, and every other brace is refused. Absent means an empty list, which no drive can start a session with.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "drive": {
+          "description": "`plugin` | `acp` | `exec`. Absent means [`Drive::Plugin`].",
+          "default": "plugin",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Drive"
+            }
           ]
         }
       }

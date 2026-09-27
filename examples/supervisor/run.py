@@ -229,7 +229,9 @@ def seed_entries() -> str:
             "max_sessions = 2\n"
             f"allowed_senders = {json.dumps(senders)}\n"
             f"allowed_targets = {json.dumps(targets)}\n"
-            f"session_command = {command}\n\n"
+            "[client.runtime]\n"
+            "drive = \"plugin\"\n"
+            f"command = {command}\n\n"
         )
 
     rows = [entry(SUPERVISOR, supervisor_prose, admin=True,

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+onlyne-adapter = { workspace = true }
 onlyne-wire = { workspace = true }
 onlyne-proto = { workspace = true }
 onlyne-config = { workspace = true }

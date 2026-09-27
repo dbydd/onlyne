@@ -20,6 +20,7 @@ mod spec;
 
 pub mod acp;
 pub mod exec;
+pub mod external;
 pub mod fake;
 pub mod herdr;
 pub mod orca;
@@ -37,12 +38,9 @@ pub use herdr::HerdrBackend;
 pub use orca::WorktreePolicy;
 pub use outcome::{OutcomeFeed, OutcomeSink};
 pub use port::{CommandOutput, ProcessRunner, Runner, SessionBackend};
-pub use select::{
-    backend_by_name, backend_for, backend_for_env, default_backend, detect_host, doctor_report,
-    process_env, select_backend, select_backend_from_env,
-};
+pub use select::{backend_for, detect_placement, doctor_report, process_env};
 pub use spec::{
-    BACKEND_NAMES, BackendName, Capabilities, CloseReason, HostDetection, NO_SUPPORTED_HOST,
-    NoSupportedHost, PanePlacement, ResourceProbe, SelectionSource, SessionOutcome, SessionRef,
-    SpawnSpec, SplitDirection,
+    Capabilities, CloseReason, PanePlacement, PlacementDetection, ResourceProbe, SelectionSource,
+    SessionOutcome, SessionPlacement, SessionRef, SpawnSpec, SplitDirection, UnknownPlacement,
+    unknown_placement,
 };

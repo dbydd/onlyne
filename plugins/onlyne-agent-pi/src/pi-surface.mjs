@@ -4,7 +4,9 @@
 //
 // Probed members (measured against pi 0.87.1):
 //   wakeUser      pi.sendUserMessage(content, { deliverAs: "followUp" })
-//   proseContext  pi.sendMessage({customType,...}, { deliverAs:"followUp", triggerTurn:false })
+//   roleProse     pi.on("before_agent_start") -> event.systemPromptOptions.sections
+//                 (index.ts owns the subscription; this module holds the prose and
+//                  writes the section it becomes)
 //   customEntry   pi.appendEntry(customType, data)
 //   widget        ctx.ui.setWidget("onlyne", lines) / ctx.ui.setWidget("onlyne", undefined)
 //   status        ctx.ui.setStatus("onlyne", text)
@@ -17,6 +19,14 @@
 
 import { WIDGET_KEY } from "./activity.mjs";
 import { createBackgroundProbe } from "./background-work.mjs";
+
+/**
+ * The system-prompt section the role prose occupies. pi wraps a section in a tag
+ * of the same name and records it under that name in the transcript, which is
+ * also where the live case reads the prose back from
+ * (`crates/onlyne-testkit/e2e/pi-live.sh`), so the name is stable.
+ */
+export const PROSE_SECTION = "onlyne-role-prose";
 
 /**
  * @param {{ pi: any, log: (line: string) => void, context: () => any }} options
@@ -57,7 +67,6 @@ export function createSurface({ pi, log, context }) {
 
   const available = {
     wakeUser: has(pi.sendUserMessage),
-    proseContext: has(pi.sendMessage),
     customEntry: has(pi.appendEntry),
     widget: has(ctx()?.ui?.setWidget),
     status: true,
@@ -91,7 +100,7 @@ export function createSurface({ pi, log, context }) {
    * built, so a part missing either string stops the whole delivery inside pi.
    * pi reports that failure in its own pane and hands nothing back to this
    * plugin, so an unusable part is dropped here and the assignment still
-   * travels: the injection text already names the file that was written.
+   * travels: the delivery text already names the path the client wrote.
    */
   const wakeUser = (text, parts = []) => {
     if (!available.wakeUser) {
@@ -130,26 +139,53 @@ export function createSurface({ pi, log, context }) {
   };
 
   /**
-   * The role prose, once, as a custom message that joins the LLM context
-   * without starting a turn of its own.
+   * The role prose this session was handed, held for the instruction layer.
+   *
+   * The client rendered it and this module adds nothing to it: no prefix, no
+   * label, no formatting. It reaches the model as a system-prompt section and
+   * never as a conversation message: a message would file the spec's prose in
+   * the transcript's message stream beside the delivery the model was asked to
+   * act on, and the model would read both as the same kind of thing.
    */
-  const proseContext = (text, welcome) => {
-    if (!available.proseContext) return false;
-    try {
-      pi.sendMessage(
-        {
-          customType: "onlyne-role-prose",
-          content: `[onlyne] role prose for ${welcome.role} (from the cluster spec, delivered with welcome):\n\n${text}`,
-          display: true,
-        },
-        { deliverAs: "followUp", triggerTurn: false },
-      );
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      log(`role prose injection refused: ${message}`);
+  let roleProseText = "";
+
+  /** One line for a pi without sectioned prompts, not one per run. */
+  let warnedNoSections = false;
+
+  /**
+   * Hand the role prose over once.
+   * @param {string} text
+   * @returns {boolean} whether there is prose to carry
+   */
+  const roleProse = (text) => {
+    roleProseText = typeof text === "string" ? text : "";
+    return roleProseText.length > 0;
+  };
+
+  /**
+   * Put that prose into the run that is starting: one section of pi's system
+   * prompt, whose value is the client's bytes exactly.
+   *
+   * `before_agent_start` is pi's only instruction-layer point, and it hands the
+   * handler the prompt options it is about to render (`prompt-customizer.ts` in
+   * pi's own examples does this). pi rebuilds those options for every run, so the
+   * section is written again rather than once — the write is idempotent, and the
+   * first run records it in the transcript's system message.
+   * @param {{ systemPromptOptions?: { sections?: Record<string, string> } } | null} event
+   * @returns {boolean} whether a section was written
+   */
+  const applyRoleProse = (event) => {
+    if (roleProseText.length === 0) return false;
+    const sections = event?.systemPromptOptions?.sections;
+    if (!sections) {
+      if (!warnedNoSections) {
+        warnedNoSections = true;
+        log("before_agent_start carries no prompt sections; the role prose reached no instruction layer");
+      }
       return false;
     }
+    sections[PROSE_SECTION] = roleProseText;
+    return true;
   };
 
   const customEntry = (customType, data) => {
@@ -167,7 +203,8 @@ export function createSurface({ pi, log, context }) {
   return {
     available,
     wakeUser,
-    proseContext,
+    roleProse,
+    applyRoleProse,
     customEntry,
     widget,
     status,

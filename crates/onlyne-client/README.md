@@ -18,7 +18,7 @@ One workspace, one role, one daemon. The role runs many sessions at once.
 `run` is the only launch verb, and it stays in the foreground. `--workspace` takes a relative path and resolves it to an absolute path before use, so the daemon, its generated sessions, and herdr's `--cwd` all read one location. A supervisor that wants the client in the background owns that decision — a visible terminal tab, `launchd`, `nohup` — so the client never detaches, writes no pid file, and nothing signals it by number. A `run` whose adapter socket cannot be bound ends there with exit 1 and names the failure on stderr; an `accept` error after a successful bind logs at `error` level (`adapter socket accept failed; retrying`) and retries every 100 ms with the listener held.
 `status` prints `onlyne: client running uptime <n>s socket <path> faults <n>`. The `<path>` is the served socket in the machine-level runtime directory, `/tmp/onlyne-<uid>/<digest>.sock` (`$ONLYNE_RUNTIME_DIR` overriding the directory), where `<digest>` is the first 16 hex characters of `sha256` over the workspace's canonical root. The uptime is the age of the `<digest>.json` registration that client published, and a client counts as running only when that socket answers an `admin` `hello`, so a socket an unclean exit left behind reads as not running. When the answering client holds no server link it adds `onlyne: client not connected` on stderr.
 
-The printed `[[client]]` fragment is a complete role entry: it carries `role`, `key`, `admin`, `max_sessions`, the ACL lists, `prose`, and `session_command`. Paste it into `spec.toml` and reload; the client can then spawn sessions for that role.
+The printed `[[client]]` fragment is a complete role entry: it carries `role`, `key`, `admin`, `max_sessions`, the ACL lists, `prose`, and `[client.runtime]` drive and command. Paste it into `spec.toml` and reload; the client can then spawn sessions for that role.
 
 ## Workspace layout
 
@@ -62,27 +62,27 @@ Three config values take a `$NAME` spelling: `cert_pin`, `key_path`, and `[serve
 | 2 | `status` found no client answering its socket, printed as `onlyne: client not running` |
 | 2 | `status` found a client with no server link, printed as `onlyne: client not connected` |
 | 2 | the workspace holds the legacy layout |
-| 5 | `run` selected no host; stderr is `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND` |
+| 5 | `run` received an `ONLYNE_BACKEND` value that is not a placement |
 
 `status` exits 0 only for a client that is up and connected to its server. That is the fact a script reads.
-`doctor` exits 0 for every host-detection result, including `host: null`.
+`doctor` exits 0 for every placement-detection result, including `placement: null`.
 
 ## Backends
 
-Selection is env `ONLYNE_BACKEND` (nonempty) > workspace `config.toml` `backend` > auto.
+Selection is env `ONLYNE_BACKEND` (nonempty) > workspace `config.toml` `placement` > probe > headless fallback.
 
 | name | parse aliases | how it is chosen | notes |
 | --- | --- | --- | --- |
 | `herdr` | | env, config, or auto probe (first) | pane host |
 | `orca` | | env, config, or auto probe | tab host |
 | `zellij` | | env, config, or auto probe | pane host; probe maps EXITED / `exit_status` |
-| `exec` | `headless` | env or config only | projections record the backend as `exec` |
-| `fake` | | env or config only | in-process, for tests |
-| `auto` | empty string | default when env and config are empty | probes herdr, then orca, then zellij |
+| `headless` | | env or config only | machine placement for exec and ACP drives |
+| `external` | | env or config only | externally managed placement |
+| `fake` | | env only | in-process test runtime |
 
-A nonempty value that names `herdr`, `orca`, `zellij`, `exec`/`headless`, or `fake` selects that backend. `exec` and `fake` are never discovered by auto. With no match, `onlyne-client run` exits 5 and writes `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`.
+A nonempty value that names a placement selects it. The spec's `[client.runtime] drive` names `plugin`, `acp`, or `exec`; `acp` requires `headless`. An unknown explicit `ONLYNE_BACKEND` value makes `onlyne-client run` exit 5.
 
-`fake` runs sessions in-process and needs no external tool; the end-to-end scripts set `ONLYNE_BACKEND=fake`. `exec` spawns the role's `session_command` as a child of the client, holds stdin open, and appends the child's output to `.onlyne/logs/session-<task>.log`. On child exit, `probe` may fill `detail.output_tail` (at most 200 lines / 16 KiB). `crates/onlyne-testkit/e2e/pi-live.sh` and `exec-headless.sh` set this path. Windows close uses `CREATE_NEW_PROCESS_GROUP` plus `CTRL_BREAK`, then `kill`; a process with no console terminates the child directly. Operator-facing graceful stop of the daemons is `onlyne shutdown`.
+`fake` runs sessions in-process and needs no external tool; the end-to-end scripts set `ONLYNE_BACKEND=fake`. The `exec` drive spawns the role's `[client.runtime] command` as a child of the client, holds stdin open, and appends the child's output to `.onlyne/logs/session-<task>.log`. On child exit, `probe` may fill `detail.output_tail` (at most 200 lines / 16 KiB). `crates/onlyne-testkit/e2e/pi-live.sh` and `exec-headless.sh` set this path. Windows close uses `CREATE_NEW_PROCESS_GROUP` plus `CTRL_BREAK`, then `kill`; a process with no console terminates the child directly. Operator-facing graceful stop of the daemons is `onlyne shutdown`.
 
 ### herdr
 
@@ -110,17 +110,17 @@ An agent that mounts naming no session — the always-running plugin — parks a
 
 | field | meaning |
 | --- | --- |
-| `host` | selected backend name, or `null` |
-| `backend_selection` | `explicit`, `env`, or `none` |
+| `placement` | selected placement name, or `null` |
+| `placement_selection` | `explicit`, `config`, `probe`, or `fallback` |
 | `explicit` | raw `ONLYNE_BACKEND` when nonempty |
 | `binary` | CLI path or name for herdr/orca/zellij; `null` for exec, fake, and no host |
 | `session` | `HERDR_SESSION` |
 | `workspace_id` | `HERDR_WORKSPACE_ID` |
 | `tab_id` | `HERDR_TAB_ID` |
 | `pane_id` | `HERDR_PANE_ID` |
-| `refusal` | the `NO_SUPPORTED_HOST` line, present when `host` is `null` |
+| `refusal` | present only when an explicit placement name is unknown |
 
-A missing host yields `host: null` plus `refusal` and exit 0. The verb is a pre-deploy check.
+A missing placement yields `placement: null` and exit 0. `refusal` is present only for an unknown explicit name. The verb is a pre-deploy check.
 
 `[orca] worktree` in `config.toml` sets which Orca tab list a session tab joins. Three states:
 
@@ -280,7 +280,7 @@ Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind
 | 2 | `status` 未发现客户端回应其 socket，打印 `onlyne: client not running` |
 | 2 | `status` 发现客户端没有服务器链接，打印 `onlyne: client not connected` |
 | 2 | 工作区采用旧版布局 |
-| 5 | `run` 未选择主机；stderr 为 `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND` |
+| 5 | `run` 收到不是 placement 的 `ONLYNE_BACKEND` 值 |
 
 只有客户端正在运行且已连接到服务器时，`status` 才退出 0。脚本读取的就是这一事实。
 `doctor` 对每一种主机检测结果（包括 `host: null`）都退出 0。

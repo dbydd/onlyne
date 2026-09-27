@@ -246,6 +246,12 @@ async fn an_acp_delivery_reaches_the_agent_and_settles_through_the_client() {
         // The reconnect sweep is not what this pump exercises, and its
         // window would retire sessions this case holds open on purpose.
         reconnect_grace_secs: 0,
+        selector: crate::runtime::runloop::config::BackendSelector {
+            placement: crate::backend::SessionPlacement::Named(onlyne_config::Placement::Headless),
+            runner: Arc::new(crate::backend::ProcessRunner),
+            worktree: crate::backend::WorktreePolicy::Host,
+            acp: crate::backend::AcpOptions::default(),
+        },
     };
     let pump = tokio::spawn(outcome_loop(state.clone()));
 
@@ -312,7 +318,7 @@ async fn an_acp_delivery_reaches_the_agent_and_settles_through_the_client() {
     let _ = pump.await;
 
     assert!(
-        trace.contains("prompt repair the failing widget"),
+        trace.contains("prompt From sender:\n\nrepair the failing widget"),
         "the task payload crossed the real ACP pipe: {trace}"
     );
     assert!(
@@ -418,8 +424,6 @@ async fn a_redelivered_finished_task_is_acked_and_runs_nowhere() {
         &task_id,
         Outcome::Done,
         Some("done".into()),
-        None,
-        &[],
         SettleAuthority::PluginReport,
     )
     .await
@@ -485,8 +489,6 @@ async fn a_task_ended_without_a_completion_stays_eligible_for_its_retry() {
         &task_id,
         Outcome::Failed,
         Some("crashed".into()),
-        None,
-        &[],
         SettleAuthority::PluginReport,
     )
     .await

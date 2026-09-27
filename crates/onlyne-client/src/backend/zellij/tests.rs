@@ -52,6 +52,8 @@ fn spec() -> SpawnSpec {
         task_id: TASK.into(),
         command: vec!["pi".into()],
         env: BTreeMap::new(),
+        tools_token: String::new(),
+        prose: String::new(),
         focus: None,
         placement: None,
         rename: None,

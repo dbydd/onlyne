@@ -466,61 +466,37 @@ The configuration surface is the `[acp]` table in the workspace's `config.toml`:
 
 A rejected permission request records a `permission` fault whose reason lists the rejected tool call and local policy; the same task's terminal state still enters the ledger normally.
 
-### Completion reports (payload-v2)
+### Completion (the tools mount)
 
-The client completes ACP sessions. There is no `onlyne` CLI inside the agent session, and none is needed. `deliver` injects report instructions at the end of the prompt for every delivery. The first line of those instructions gives the absolute path `<workspace>/.onlyne/out/<task-id>.md` and prints the complete grammar verbatim. The instructions require the agent to write its result to that file before stopping: first write to a temporary name in the same directory, then rename it into place. Report body text follows the existing `out_head` rules: one line, collapsed whitespace, and a 200-character truncation.
+An ACP session has no `onlyne` CLI and needs none: the client hands it three tools
+instead. `session/new` opens the session with one stdio MCP server — the `onlyne`
+entrypoint this client resolved for its own daemons, run as `onlyne mcp`, with
+`ONLYNE_SOCKET` and the session's own `ONLYNE_MCP_TOKEN` in the child's environment
+(`docs/v2-CONTRACT.md` §3b). That process speaks MCP over stdio and carries the same
+obligation vocabulary the pi plugin registers, so the two drives differ in how a model
+reaches the tools and not in what a role can do:
 
-Grammar v2 specifies that a report file contains one verdict line plus zero or more handoff lines (a single-line v1 file is also valid):
+| tool | required | optional |
+|---|---|---|
+| `onlyne_send` | `to`, `text` | `kind` (`note` default, or `task`), `image` |
+| `onlyne_handoff` | `to`, `text` | `image` |
+| `onlyne_complete` | `outcome`, `summary` | `details`, `files` |
 
-| Line | Meaning |
-|---|---|
-| `hop-done: <one-line result>` | verdict: the task is complete, and the body is the conclusion |
-| `hop-failed: <one-sentence reason>` | verdict: the task failed, and the body is the reason |
-| `hop-blocked: <one-line blocker>` | verdict: the task is blocked on an external dependency, and the body is what it is waiting for |
-| `handoff: <target role> \| <one sentence for that role>` | One handoff line; zero to eight may appear. The text after `\|` is optional, and when omitted the verdict body is the delivered content |
+`outcome` is one of `done`, `failed`, `cancelled`, `blocked`. The process dials the
+client's adapter socket lazily on the first tool call and keeps that one connection. No
+argument names a task or a role: the token is the binding, and the client stamps the task
+id and the envelope's sender and causality from its own record of the session. A refused
+call travels back as the tool result's error text, verbatim, so the model reads the host's
+own sentence.
 
-A line beginning with `#` is a comment, and blank lines are ignored. Any other line that violates the grammar means the entire file is Invalid (fail closed: zero handoffs, zero routes). A single file may contain at most 16 lines and at most 8 handoffs; exceeding either limit is also Invalid. CRLF and bare CR are first normalized to LF, then lines are classified.
+The client is the checkpoint for every constraint — the hop budget, the relay
+requirement, handoff routing, the completion's shape, and `details` ≤ 64 KiB — because a
+rule enforced in the bridge would refuse differently from the same rule in the pi plugin.
+`docs/v2-CONTRACT.md` §3b and §3c are the specification of those rules.
 
-The client creates the report directory before delivery. If creation fails, that prompt has no instruction block, and the round settles normally as if the file were absent; the journal adds a `warning` record beside the `dispatch` record.
-
-After the turn ends and every `session/update` for that round has been recorded, the client reads the report file once: it parses first, routes handoffs second, and deletes the file last. Completion values are:
-
-| Report case | Result |
-|---|---|
-| File absent or unreadable | Preserve pre-contract behavior: outcome and head are derived from stopReason and the round's final assistant text |
-| `hop-done: <nonempty>` | The report text becomes head; outcome is still determined by stopReason, and a round classified as an abnormal termination by stopReason keeps that classification; handoff lines are routed normally |
-| `hop-failed: <nonempty>` | Outcome is failed; the report text is both head and fault reason; even a normal `end_turn` is downgraded; handoff lines are routed normally |
-| `hop-blocked: <nonempty>` | Outcome and head come from the report's blocked body, but the task is not handed off: the work is unfinished and there is nothing to pass to the next role |
-| Invalid (extra line, unknown prefix, over limit, empty file, bad UTF-8) | Outcome is cancelled; the fault reason begins with `acp payload invalid:` and states the category and line number; head is empty and there are zero handoffs. The file remains in place, so redelivering the same task after rewriting it can consume it |
-
-The three verdicts `done|failed|blocked` reach the payload layer through the `head_kind` field of `Outcome::Finalized`, allowing the client to distinguish blocked from the other two.
-
-The client routes handoffs over that role's existing server connection without impersonating a human request. A single routing failure (ACL rejection or target role absent from the local connection plane) records one `handoff_denied`: the journal records a `handoff_denied` event with `to_role` and the rejection reason, and the faults plane reports a fault with the same name. The verdict is not removed, the Outcome kind is unchanged, and the remaining handoffs continue.
-
-One report can go to at most eight roles at once, and each role receives the body belonging to its own line: when the line contains `| <one line>`, the recipient reads that sentence; otherwise it reads the verdict body (`Handoff::text_or`, `crates/onlyne-proto/src/payload.rs:29`).
-
-A hop records a handoff's depth in the chain. Handoff-chain depth remains open by product intent: neither the protocol nor the server imposes a hop-count limit, and hop travels with the envelope solely as causal history (`crates/onlyne-proto/src/envelope.rs:331-339`, `crates/onlyne-server/src/relay.rs:640`). The `allowed_targets` edges in `spec.toml` determine which roles can receive a handoff, and the server's ACL gate answers every send according to those edges (`crates/onlyne-server/src/relay.rs:379-393`).
-
-There is one way for an operator to bound the chain: remove the corresponding `allowed_targets` edge and run `onlyne reload`.
-
-Every read appends a `payload` record to that task's journal with the fields `task_id`, `path`, `payload_kind` (one of `done`, `failed`, `blocked`, `invalid`, or `absent`), `head`, and `handoffs` (the number of readable handoff lines in this round). A rejected report record also has an `error` field stating the rejection reason and line number. An absent report is recorded too, so the ledger shows whether that round reported anything.
-
-Before the completion file is deleted, every handoff line worth routing gets a separate `handoff` record with the fields `task_id`, `to_role`, and `head`; a rejected handoff line becomes `handoff_denied` on the client side.
-
-Completion facts enter the ledger through the single `dispatch::on_out` path: settle, `out_head`, acknowledgment, and the completion receipt are all emitted there. Every terminal task sends a receipt; when both the report and final text are absent, a `completion` row with empty body text is recorded.
-
-### Local validation command family (`onlyne report`)
-
-The same grammar parser (`onlyne_proto::payload`) is exposed as local CLI verbs that only read and write workspace files and open no socket:
-
-| Verb | Behavior |
-|---|---|
-| `onlyne report path --task <id>` | Print the absolute completion-file path for the task, together with the three on-disk session paths `log:`, `events:`, and `content:` |
-| `onlyne report check --task <id>` (or `--path <file>`) | Valid: print the verdict kind, head/reason, and every handoff line, then exit 0. Invalid: print `onlyne: <精确原因（含行号）>` plus the complete grammar to stderr and exit 2. File absent or unreadable: report `absent` or the read-failure reason to stderr and exit 2 (3 is reserved only for socket resolution) |
-| `onlyne report write --task <id> --verdict <done\|failed\|blocked> --head <text> [--handoff <role\|text>]...` | Construct a valid report from its parts, write it atomically using a temporary name plus rename, and print the final path |
-| `onlyne report validate --text <s>` (or `--from -` to read stdin) | Run the same parser on the string without touching a file |
-
-`--workspace` uses the same location convention as socket resolution: start at the supplied directory and search its ancestors for `.onlyne/config.toml`; if none is found, use the supplied directory itself. The full grammar is embedded in `onlyne report --help` and `onlyne report check --help`, so an installed user can check the format without consulting documentation.
+The payload-v2 file protocol is gone with it: no `<workspace>/.onlyne/out/<task-id>.md`,
+no grammar block injected into the prompt, and no local `onlyne report check|write|path`
+verbs.
 
 ## Session content
 
@@ -1003,61 +979,21 @@ session_command = ["pi", "--mode", "rpc", "--session-id", "{session}"]
 
 被拒的权限请求落一条 `permission` fault，其 reason 列出被拒的工具调用与本机策略；同一任务的终态照常进 ledger。
 
-### 结项报告（payload-v2）
+### 结项（工具挂载）
 
-ACP 会话的结项由 client 完成，agent 会话内没有 `onlyne` CLI，也不需要它。`deliver` 在每次投递的 prompt 尾部注入一段报告指令。这段指令首行给出绝对路径 `<workspace>/.onlyne/out/<task-id>.md`，并原样打印整份文法。指令要求 agent 在停止前把结果写进该文件：先写同目录的临时名，再 rename 进位。报告正文的取值沿用 `out_head` 的既有规则：单行、空白折叠、200 字符截断。
+ACP 会话内没有 `onlyne` CLI，也不需要它：client 改为交给它三个工具。`session/new` 在开会话时挂上一个 stdio MCP server——client 为自己守护进程解析出的那个 `onlyne` 入口，以 `onlyne mcp` 运行，子进程环境里带 `ONLYNE_SOCKET` 与本会话自己的 `ONLYNE_MCP_TOKEN`（`docs/v2-CONTRACT.md` §3b）。该进程用 stdio 讲 MCP，携带与 pi 插件注册的同一套义务词汇，两种驱动因此只差在模型从哪里够到工具，不差在 role 能做什么：
 
-文法 v2 规定：一个报告文件由一行 verdict 加零或多行 handoff 组成（v1 的单行文件同样合法）：
+| 工具 | 必填 | 可选 |
+|---|---|---|
+| `onlyne_send` | `to`、`text` | `kind`（缺省 `note`，或 `task`）、`image` |
+| `onlyne_handoff` | `to`、`text` | `image` |
+| `onlyne_complete` | `outcome`、`summary` | `details`、`files` |
 
-| 行 | 含义 |
-|---|---|
-| `hop-done: <一行结果>` | verdict：任务做完了，正文是结论 |
-| `hop-failed: <一句话原因>` | verdict：任务失败，正文是原因 |
-| `hop-blocked: <一行阻塞>` | verdict：任务停在外部依赖上，正文是所等之物 |
-| `handoff: <目标 role> \| <交给该 role 的一句话>` | 转手一行，可出现零到八条；`\|` 之后可缺省，缺省即把 verdict 正文当交付内容 |
+`outcome` 取 `done`、`failed`、`cancelled`、`blocked` 之一。该进程在第一次工具调用时才懒连接 client 的 adapter socket，并保持这一条连接。没有任何参数点名任务或角色：token 就是绑定，任务 id 与信封的 from、因果字段都由 client 照自己的记录盖章。被拒的调用原样作为工具结果的错误文本返回，模型读到的是宿主自己的那句话。
 
-行首 `#` 是注释行，空行忽略。除此之外任何不合文法的行 ⇒ 整份文件 Invalid（fail closed：零转手、零路由）。单文件上限 16 行、handoff 上限 8 条，超限同样 Invalid。CRLF 与裸 CR 先归一为 LF 再逐行分类。
+每条约束都以 client 为关卡——跳数预算、relay 要求、转手路由、结项的形状、`details` ≤ 64 KiB——因为写在 bridge 里的规则会与 pi 插件里的同一条规则给出不同的拒绝。这些规则的规格是 `docs/v2-CONTRACT.md` §3b 与 §3c。
 
-报告目录由 client 在投递前创建。创建失败的那次 prompt 不带指令块，本轮按缺位情形照常结项，journal 在 `dispatch` 记录旁补一条 `warning` 记录。
-
-turn 结束、该轮全部 `session/update` 落账之后，client 读取报告文件一次：先解析，再路由 handoff，最后删文件。结项取值：
-
-| 报告情形 | 结果 |
-|---|---|
-| 文件缺位或读不到 | 维持契约前的行为：outcome 与 head 由 stopReason 与该轮末条 assistant 文本推出 |
-| `hop-done: <非空>` | 报告文本作为 head；outcome 仍由 stopReason 判定，被 stopReason 判为非正常终止的那一轮保持原判；handoff 行照常路由 |
-| `hop-failed: <非空>` | outcome 为 failed，报告文本同时是 head 与 fault reason，正常的 `end_turn` 也被降级；handoff 行照常路由 |
-| `hop-blocked: <非空>` | outcome 与 head 取报告的阻塞正文，但任务不转手：活没干完，没有可交给下一 role 的东西 |
-| Invalid（多余行、未知前缀、超限、空文件、坏 UTF-8） | outcome 为 cancelled，fault reason 以 `acp payload invalid:` 开头并写明类别与行号，head 为空，零转手；文件保留在原地，重写后同一 task 重投即可消费 |
-
-`done|failed|blocked` 三种 verdict 由 `Outcome::Finalized` 的 `head_kind` 字段带上报文层，client 据此区分 blocked 与另两种。
-
-handoff 的路由由 client 用该 role 已有的 server 连接发出，不冒充人类请求。单条路由失败（ACL 拒、目标 role 不在本机连接面上）只记一条 `handoff_denied`：journal 记 `handoff_denied` 事件（带 `to_role` 与拒绝原因），faults 面报同名的 fault。verdict 不删，Outcome kind 不变，其余 handoff 继续。
-
-一条报告可以同时交给至多八个 role，每个 role 拿到属于自己那一条的正文：行内带 `| <一行>` 时收件人读那一句，缺省时读 verdict 正文（`Handoff::text_or`，`crates/onlyne-proto/src/payload.rs:29`）。
-
-hop 记录一次转手在链条上的步深。转手链条的深度按产品初衷保持开放：协议与 server 都对 hop 计数不做上限判定，hop 只作因果记录随信封走（`crates/onlyne-proto/src/envelope.rs:331-339`、`crates/onlyne-server/src/relay.rs:640`）。一个 role 能交给谁由 `spec.toml` 的 `allowed_targets` 边决定，server 的 ACL 闸门按这些边逐条回答每一次 send（`crates/onlyne-server/src/relay.rs:379-393`）。
-
-操作员要收束链条，改法就一条：剪掉对应的 `allowed_targets` 边再 `onlyne reload`。
-
-每次读取都向该任务的 journal 追加一条 `payload` 记录，字段为 `task_id`、`path`、`payload_kind`（取值 `done`、`failed`、`blocked`、`invalid`、`absent` 之一）、`head`、`handoffs`（本轮可读出的转手线条数）。报告被拒时记录再多带一个 `error` 字段，写明拒绝原因与行号；缺位同样记录，账上因此能看出这一轮有没有上报。
-
-每条值得路由的转手线在删除结项文件之前另记一条 `handoff` 记录，字段为 `task_id`、`to_role`、`head`；被拒的转手线在 client 侧落 `handoff_denied`。
-
-结项事实经 `dispatch::on_out` 这一条通路落账：settle、`out_head`、ack 与 completion receipt 都在那里发出。每个终态任务都发 receipt，报告与末条文本都缺位的那次落一条正文为空文本的 `completion` 行。
-
-### 本地校验动词族（`onlyne report`）
-
-同一份文法解析器（`onlyne_proto::payload`）暴露成本地 CLI 动词，全部只读写工作区文件，不开任何 socket：
-
-| 动词 | 行为 |
-|---|---|
-| `onlyne report path --task <id>` | 打印该任务的结项文件绝对路径，连同 `log:` / `events:` / `content:` 三条会话落盘路径 |
-| `onlyne report check --task <id>`（或 `--path <file>`） | 合法：打印 verdict kind、head/reason 与全部 handoff 行，退出 0；非法：`onlyne: <精确原因（含行号）>` 加整份文法进 stderr，退出 2；文件不存在或读不到：stderr 报 `absent`/读失败原因，退出 2（3 只留给 socket 解析） |
-| `onlyne report write --task <id> --verdict <done\|failed\|blocked> --head <text> [--handoff <role\|text>]...` | 按部件构造合法报告，临时名 + rename 原子写入，打印最终路径 |
-| `onlyne report validate --text <s>`（或 `--from -` 读 stdin） | 对字符串跑同一解析器，不碰文件 |
-
-`--workspace` 的定位与 socket 解析同一惯例：给定目录起、沿祖先目录找 `.onlyne/config.toml`；找不到就用给定目录本身。文法全文内嵌在 `onlyne report --help` 与 `onlyne report check --help` 里，装机用户不查文档也能核格式。
+payload-v2 文件协议随之删除：没有 `<workspace>/.onlyne/out/<task-id>.md`，prompt 不再注入文法块，也不再有本地的 `onlyne report check|write|path` 动词。
 
 ## 会话内容
 

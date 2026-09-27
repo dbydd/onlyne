@@ -676,8 +676,24 @@ impl FakeAgent {
                         .and_then(Value::as_str)
                         .map(str::to_string),
                 };
+                let details = value
+                    .get("details")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let files = match value.get("files") {
+                    Some(Value::Array(files)) => files
+                        .iter()
+                        .map(|file| {
+                            file.as_str()
+                                .map(str::to_string)
+                                .ok_or_else(|| anyhow!("unknown step: complete.files.{file}"))
+                        })
+                        .collect::<anyhow::Result<Vec<String>>>()?,
+                    Some(_) => bail!("unknown step: complete.files"),
+                    None => Vec::new(),
+                };
                 handle
-                    .report_complete(assign.task_id.clone(), outcome, head)
+                    .report_complete(assign.task_id.clone(), outcome, head, details, files)
                     .await?;
             }
             "fail" => {
@@ -1113,6 +1129,11 @@ pub fn sample_assign(text: &str, prose: &str) -> AssignArgs {
         task_id: envelope.task_id().unwrap_or("task").to_string(),
         generation: 1,
         prose: prose.to_string(),
+        // The text a client renders for this delivery. The fixture builds the
+        // template's own shape rather than a client's answer, so a case reading
+        // it sees a delivery text and not an envelope body.
+        text: format!("From planner:\n\n{text}"),
+        attachments: Vec::new(),
         envelope: Box::new(envelope),
         parent: None,
     }

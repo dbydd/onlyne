@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Headless (exec) session backend: one server, one client, fake agent as
-# session_command. Workspace config carries `backend = "headless"` (the parse
-# alias); lib.sh pins ONLYNE_BACKEND=fake, so this case covers that export
-# with `exec` after the source. Projections still name the backend `exec`.
+# Headless (exec) session backend: one server, one client, fake agent as the
+# role's runtime command. The spec drives it — `[client.runtime] drive = "exec"`
+# — and the workspace config carries `placement = "headless"`. The client's own
+# database names the backend it ran, which is what the last assertions read.
+#
+# lib.sh pins ONLYNE_BACKEND=fake, so this case covers that export with `exec`
+# after the source: `exec` is the pre-split spelling of the headless placement,
+# accepted by the environment and by nothing else (the workspace's key is
+# `placement`, and `exec` is not one of the five names it takes).
 SRC=$(pwd)
 tmp=$(mktemp -d)
 server_pid=""
@@ -61,7 +66,9 @@ SESSION_COMMAND='["'"$run_agent"'"]'
 client_init "$ws" planner "$tmp/server" "$tmp/server/.onlyne/spec.toml" \
   "$tmp/spec.frag.toml" "$E2E_PROSE" 'allowed_senders = ["*", "planner"]
 allowed_targets = ["planner"]
-session_command = '"$SESSION_COMMAND"
+[client.runtime]
+drive = "exec"
+command = '"$SESSION_COMMAND"
 "$ONLYNE" --server-root "$tmp/server" reload
 
 # Config field + alias: the workspace document names `headless`; env `exec`
@@ -69,7 +76,7 @@ session_command = '"$SESSION_COMMAND"
 # (a trailing append would land inside that table).
 config="$ws/.onlyne/config.toml"
 {
-  printf 'backend = "headless"\n'
+  printf 'placement = "headless"\n'
   cat "$config"
 } > "$config.new"
 mv "$config.new" "$config"
@@ -127,11 +134,11 @@ grep -q "exec-headless" "$session_log" || fail "session log must contain the chi
   "$(cat "$session_log" 2>/dev/null)"
 
 db="$ws/.onlyne/client.db"
-backend=$(db_count "$db" "SELECT backend FROM sessions WHERE task_id='$task'")
-[ "$backend" = "exec" ] || fail "client.db sessions.backend must be exec (not headless)" \
-  "backend=$backend ref=$(db_count "$db" "SELECT backend_ref FROM sessions WHERE task_id='$task'")"
+stored=$(session_column "$db" backend "$task")
+[ "$stored" = "exec" ] || fail "the stored session backend must be exec" \
+  "column=backend value=$stored"
 
-ref=$(db_count "$db" "SELECT backend_ref FROM sessions WHERE task_id='$task'")
+ref=$(session_column "$db" backend_ref "$task")
 printf '%s\n' "$ref" | python3 -c '
 import json, sys
 raw = sys.stdin.read()

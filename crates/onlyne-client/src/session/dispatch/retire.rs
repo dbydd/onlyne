@@ -3,7 +3,8 @@ use super::*;
 use super::outbound::store_ack;
 use super::projection::stored_task_state;
 use super::state::{
-    DispatchInner, DispatchState, has_attached_transport, session_exited, slot_key_serving_task,
+    DispatchInner, DispatchState, forget_tools_binding, has_attached_transport, session_exited,
+    slot_key_serving_task,
 };
 use super::transport::{held_read_only, names_session};
 
@@ -290,6 +291,7 @@ pub(super) fn retire_idle_locked(
         }
     }
     inner.bridge.untrack_live(&task_id);
+    forget_tools_binding(inner, key);
     inner.sessions.remove(key);
     true
 }
@@ -358,6 +360,7 @@ pub(super) fn release_locked(
                     },
                 );
             }
+            forget_tools_binding(inner, &key);
             inner.sessions.remove(&key);
         } else {
             let session_id = inner
@@ -472,6 +475,7 @@ pub fn close_all(state: &DispatchState, reason: crate::backend::CloseReason, bud
         let mut pending = Vec::with_capacity(sessions.len());
         for (key, session) in sessions {
             inner.bridge.untrack_live(&session.task_id);
+            forget_tools_binding(&mut inner, &key);
             inner.sessions.remove(&key);
             pending.push(PendingClose {
                 backend: Arc::clone(&inner.backend),

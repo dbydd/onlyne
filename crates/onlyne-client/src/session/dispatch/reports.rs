@@ -5,6 +5,7 @@ use super::retire::on_recycled;
 use super::settle::{SettleAuthority, on_out};
 use super::state::{ControlWord, note_beat};
 use super::transport::{serves_ending, serves_task};
+use super::turn_end::on_turn_end;
 
 /// Act on one control command that arrived as a delivery.
 ///
@@ -165,121 +166,150 @@ pub async fn on_plugin_report(
         } => {
             // The beat itself is the liveness fact. The server times
             // heartbeats. A quiet, alive session keeps landing fresh rows.
-            let mut inner = state.inner.lock();
-            if from.is_some_and(|io| !serves_task(&inner, &task_id, io)) {
-                // A connection the client holds read-only is not this session's
-                // transport, so its observation is not this session's state: the
-                // whole point of the demotion is that the task answers through
-                // the connection serving it now. The beat travels no further than
-                // this refusal — a beat has no recipient to hold it for, unlike
-                // the `send` of §1 (c) — and it is logged rather than dropped in
-                // silence, because a supervisor reading the trail of a session
-                // whose tuple stopped moving wants to see who was talking.
-                // Its liveness half does travel, and that half is what the
-                // agent's life depends on: the stamp the silence arm reads is
-                // about the socket behind it, and both copies of a plugin loaded
-                // into one agent process — the shape a workspace that installs
-                // the plugin twice produces — beat on their own connections.
-                // Letting a refused frame leave the stamp alone starves the
-                // session's clock, and the sweep then retires an agent that is
-                // alive and working. The stamp is read only for a session whose
-                // task is still bound and unsettled, so the demotion keeps its
-                // own retirement.
-                note_beat(&mut inner, &task_id, Instant::now());
-                tracing::warn!(
-                    task = %task_id,
-                    "a beat from a connection serving no such session refreshes the liveness stamp and applies no state"
-                );
-                false
-            } else {
-                // The beat's version is the session's own generation beside the
-                // reporter's sequence, never the plugin's generation field. That
-                // field is a constant a plugin never raises, so taking it
-                // verbatim made every frame of a session whose generation had
-                // moved — which is what a returning agent's rebase does — read
-                // as a stale generation and be dropped. The session's tuple is
-                // the authority on which generation is reporting, and the
-                // sequence stays the reporter's own: it is the only part of the
-                // watermark the plugin is the witness of.
-                let row = inner.store.get_session(&task_id).ok().flatten();
-                let stored = stored_observation(&inner.store, row.as_ref());
-                let generation = stored.version.generation;
-                // The task this beat speaks for, as this client holds it. No
-                // record means nothing was ever opened here for that id, which is
-                // not the same fact as an open task: the composition labels open
-                // work, and there is none to label without a record.
-                let task_state = inner
-                    .store
-                    .task(&task_id)
-                    .ok()
-                    .flatten()
-                    .map(|record| record.task_state);
-                // A beat at or below the newest version this task's reporter has
-                // been seen at is a replay of a frame already taken. The row no
-                // longer moves for a beat that observed nothing, so its version
-                // cannot answer this on its own: the watermark lives beside the
-                // liveness stamp, and a replay buys only the stamp.
-                if !inner.stall.note_beat_seq(&task_id, generation, seq) {
+            let (touched, ended) = {
+                let mut inner = state.inner.lock();
+                if from.is_some_and(|io| !serves_task(&inner, &task_id, io)) {
+                    // A connection the client holds read-only is not this session's
+                    // transport, so its observation is not this session's state: the
+                    // whole point of the demotion is that the task answers through
+                    // the connection serving it now. The beat travels no further than
+                    // this refusal — a beat has no recipient to hold it for, unlike
+                    // the `send` of §1 (c) — and it is logged rather than dropped in
+                    // silence, because a supervisor reading the trail of a session
+                    // whose tuple stopped moving wants to see who was talking.
+                    // Its liveness half does travel, and that half is what the
+                    // agent's life depends on: the stamp the silence arm reads is
+                    // about the socket behind it, and both copies of a plugin loaded
+                    // into one agent process — the shape a workspace that installs
+                    // the plugin twice produces — beat on their own connections.
+                    // Letting a refused frame leave the stamp alone starves the
+                    // session's clock, and the sweep then retires an agent that is
+                    // alive and working. The stamp is read only for a session whose
+                    // task is still bound and unsettled, so the demotion keeps its
+                    // own retirement.
                     note_beat(&mut inner, &task_id, Instant::now());
-                    tracing::debug!(
+                    tracing::warn!(
                         task = %task_id,
-                        generation,
-                        seq,
-                        "a heartbeat at or below the watermark was taken as a replay; it refreshes liveness only"
+                        "a beat from a connection serving no such session refreshes the liveness stamp and applies no state"
                     );
-                    return Ok(());
+                    // A beat that speaks for no session of this role witnessed no
+                    // ending this client may act on.
+                    (false, false)
+                } else {
+                    // The beat's version is the session's own generation beside the
+                    // reporter's sequence, never the plugin's generation field. That
+                    // field is a constant a plugin never raises, so taking it
+                    // verbatim made every frame of a session whose generation had
+                    // moved — which is what a returning agent's rebase does — read
+                    // as a stale generation and be dropped. The session's tuple is
+                    // the authority on which generation is reporting, and the
+                    // sequence stays the reporter's own: it is the only part of the
+                    // watermark the plugin is the witness of.
+                    let row = inner.store.get_session(&task_id).ok().flatten();
+                    let stored = stored_observation(&inner.store, row.as_ref());
+                    let generation = stored.version.generation;
+                    // The task this beat speaks for, as this client holds it. No
+                    // record means nothing was ever opened here for that id, which is
+                    // not the same fact as an open task: the composition labels open
+                    // work, and there is none to label without a record.
+                    let task_state = inner
+                        .store
+                        .task(&task_id)
+                        .ok()
+                        .flatten()
+                        .map(|record| record.task_state);
+                    // A beat at or below the newest version this task's reporter has
+                    // been seen at is a replay of a frame already taken. The row no
+                    // longer moves for a beat that observed nothing, so its version
+                    // cannot answer this on its own: the watermark lives beside the
+                    // liveness stamp, and a replay buys only the stamp.
+                    if !inner.stall.note_beat_seq(&task_id, generation, seq) {
+                        note_beat(&mut inner, &task_id, Instant::now());
+                        tracing::debug!(
+                            task = %task_id,
+                            generation,
+                            seq,
+                            "a heartbeat at or below the watermark was taken as a replay; it refreshes liveness only"
+                        );
+                        return Ok(());
+                    }
+                    let (ended, verdict) = match serde_json::from_value::<Observation>(observed) {
+                        Ok(body) => {
+                            let composed = compose_observation(&stored, body, task_state);
+                            // §3c's turn-end witness: this beat moved the agent out
+                            // of a turn and into the wait that follows one, over a
+                            // task this client still holds open, with no completion
+                            // exit standing anywhere. `idle_waiting` is the
+                            // composition's own word for that pair, and the
+                            // transition is what makes this beat an ending rather
+                            // than one more idle report from a session that already
+                            // waits.
+                            let ended = stored.agent == AgentPhase::Running
+                                && composed.agent == AgentPhase::Idle
+                                && task_state == Some(TaskState::Pending)
+                                && composed.recovery == RecoveryPhase::IdleWaiting;
+                            let verdict = apply_persist(
+                                &inner.bridge,
+                                &inner.store,
+                                &task_id,
+                                &LifecycleEvent::Heartbeat {
+                                    v: Version::new(generation, seq),
+                                    body: composed,
+                                },
+                            )?;
+                            (ended, verdict)
+                        }
+                        Err(error) => {
+                            tracing::warn!(task = %task_id, error = %error, "heartbeat carries no readable observation; liveness only");
+                            // The log line's own promise: a frame whose observation no
+                            // client can read still proves the agent is alive, so the
+                            // stamp goes on and the tuple stays where it stood.
+                            note_beat(&mut inner, &task_id, Instant::now());
+                            (false, Verdict::Ignored(IgnoredReason::NoOp))
+                        }
+                    };
+                    note_verdict(&verdict, &task_id);
+                    let touched = match &verdict {
+                        Verdict::Applied(_) => {
+                            note_beat(&mut inner, &task_id, Instant::now());
+                            inner.stall.note_applied(&task_id, Instant::now());
+                            true
+                        }
+                        Verdict::Ignored(IgnoredReason::NoOp) => {
+                            // A beat that moves no dimension is still the agent saying it is
+                            // alive, and this is where the ordinary long turn lands: a model
+                            // streaming for minutes reports `agent: running` over and over, the
+                            // tuple never changes, and every one of those beats is a no-op to the
+                            // reducer. Leaving the stamp alone for them starves the clock the
+                            // silence arm reads, and the sweep then closes the pane under an agent
+                            // that is working — the shape a live role died of at thirty seconds
+                            // into a turn. So the stamp goes on, and the frame travels: it is
+                            // what refreshes the mirror's own `last_seen`.
+                            //
+                            // The row itself does not move. The plan's rule for a heartbeat is
+                            // that it refreshes `last_seen` and that only changed content is
+                            // persisted — and `(generation, seq)` beside `updated_at` is the
+                            // watermark projection writes are ordered by, not a liveness
+                            // counter. Advancing it here made a beat that observed nothing read
+                            // as a fresh write: a reader saw `updated_at` move and could not
+                            // tell a session that had changed from one that had merely said it
+                            // was still there.
+                            note_beat(&mut inner, &task_id, Instant::now());
+                            true
+                        }
+                        Verdict::Ignored(_) | Verdict::Rejected(_) => false,
+                    };
+                    // A beat the reducer refused moved nothing, so it is no ending
+                    // either.
+                    (touched, ended && !matches!(verdict, Verdict::Rejected(_)))
                 }
-                let verdict = match serde_json::from_value::<Observation>(observed) {
-                    Ok(body) => apply_persist(
-                        &inner.bridge,
-                        &inner.store,
-                        &task_id,
-                        &LifecycleEvent::Heartbeat {
-                            v: Version::new(generation, seq),
-                            body: compose_observation(&stored, body, task_state),
-                        },
-                    )?,
-                    Err(error) => {
-                        tracing::warn!(task = %task_id, error = %error, "heartbeat carries no readable observation; liveness only");
-                        // The log line's own promise: a frame whose observation no
-                        // client can read still proves the agent is alive, so the
-                        // stamp goes on and the tuple stays where it stood.
-                        note_beat(&mut inner, &task_id, Instant::now());
-                        Verdict::Ignored(IgnoredReason::NoOp)
-                    }
-                };
-                note_verdict(&verdict, &task_id);
-                match &verdict {
-                    Verdict::Applied(_) => {
-                        note_beat(&mut inner, &task_id, Instant::now());
-                        inner.stall.note_applied(&task_id, Instant::now());
-                        true
-                    }
-                    Verdict::Ignored(IgnoredReason::NoOp) => {
-                        // A beat that moves no dimension is still the agent saying it is
-                        // alive, and this is where the ordinary long turn lands: a model
-                        // streaming for minutes reports `agent: running` over and over, the
-                        // tuple never changes, and every one of those beats is a no-op to the
-                        // reducer. Leaving the stamp alone for them starves the clock the
-                        // silence arm reads, and the sweep then closes the pane under an agent
-                        // that is working — the shape a live role died of at thirty seconds
-                        // into a turn. So the stamp goes on, and the frame travels: it is
-                        // what refreshes the mirror's own `last_seen`.
-                        //
-                        // The row itself does not move. The plan's rule for a heartbeat is
-                        // that it refreshes `last_seen` and that only changed content is
-                        // persisted — and `(generation, seq)` beside `updated_at` is the
-                        // watermark projection writes are ordered by, not a liveness
-                        // counter. Advancing it here made a beat that observed nothing read
-                        // as a fresh write: a reader saw `updated_at` move and could not
-                        // tell a session that had changed from one that had merely said it
-                        // was still there.
-                        note_beat(&mut inner, &task_id, Instant::now());
-                        true
-                    }
-                    Verdict::Ignored(_) | Verdict::Rejected(_) => false,
-                }
+            };
+            // §3c's rule runs off the lock: it either hands the one nudge to the
+            // session's drive, or settles the delivery blocked.
+            if ended {
+                on_turn_end(state, &task_id, None).await?;
             }
+            touched
         }
         Report::Complete {
             task_id,
@@ -287,15 +317,12 @@ pub async fn on_plugin_report(
             head,
             ..
         } => {
-            // A plugin reports its own ending, and it hands nothing on: the
-            // report file is the only place handoff lines are put down, and that
-            // is a route a plugin-backed session does not have.
-            //
-            // The one completion this client has asked for by name arrives on the
-            // same frame, so the note is what tells the two apart. Everything else
-            // that leaves this arm is the plugin's own claim about work it did, and
-            // `on_out` reads the session's row for that claim, refused whole when
-            // the row says no turn ran.
+            // A plugin reports its own ending. The one completion this client has
+            // asked for by name arrives on the same frame, so the note is what
+            // tells the two apart. Everything else that leaves this arm is the
+            // plugin's own claim about work it did, and `on_out` reads the
+            // session's row for that claim, refused whole when the row says no
+            // turn ran.
             if !ending_is_authorised(state, from, &task_id) {
                 tracing::warn!(
                     task = %task_id,
@@ -308,7 +335,7 @@ pub async fn on_plugin_report(
             } else {
                 SettleAuthority::PluginReport
             };
-            on_out(state, &task_id, outcome, head, None, &[], asked).await?;
+            on_out(state, &task_id, outcome, head, asked).await?;
             false
         }
         Report::Fault {

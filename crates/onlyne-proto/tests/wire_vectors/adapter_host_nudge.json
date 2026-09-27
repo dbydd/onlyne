@@ -1,0 +1,5 @@
+{
+  "frame": "{\"op\":\"nudge\",\"args\":{\"task_id\":\"task-1\",\"text\":\"If this task is finished, report it.\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "the client-composed turn-end sentence is handed verbatim to a plugin that declared inject"
+}

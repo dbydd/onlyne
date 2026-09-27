@@ -211,7 +211,9 @@ PY
 export ONLYNE_BACKEND=orca
 setup_cluster "$tmp/server" "$tmp/planner" planner cluster "" "" 'allowed_senders = ["*", "planner"]
 allowed_targets = ["planner"]
-session_command = ["sleep", "600"]'
+[client.runtime]
+drive = "plugin"
+command = ["sleep", "600"]'
 server_pid=$cluster_server_pid
 ws="$tmp/planner"
 canon_ws=$(cd "$ws" && pwd -P)

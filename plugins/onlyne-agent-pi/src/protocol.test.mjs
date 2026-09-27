@@ -18,7 +18,6 @@ import {
   helloArgs,
   hostBinding,
   imagePart,
-  injectionText,
   normalizeOutcome,
   observationFor,
   readPluginVersion,
@@ -31,7 +30,6 @@ import {
 const VECTOR_DIR = fileURLToPath(new URL("../../../crates/onlyne-proto/tests/wire_vectors/", import.meta.url));
 const hasVectors = existsSync(VECTOR_DIR);
 const vectorFrame = (name) => JSON.parse(JSON.parse(readFileSync(`${VECTOR_DIR}${name}`, "utf8")).frame);
-const ASSIGN = () => vectorFrame("adapter_host_assign.json");
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -237,9 +235,24 @@ test("a completion names an outcome and a single-line head", () => {
     kind: "complete",
     data: { task_id: "t1", outcome: "done" },
   });
+  // The full result and the paths it names ride the same report, and only when
+  // there is something to carry: an empty body adds no key at all.
+  assert.deepEqual(
+    completeReport({ taskId: "t1", outcome: "done", head: "done", details: "all of it", files: ["/ws/a.md"] }),
+    {
+      kind: "complete",
+      data: { task_id: "t1", outcome: "done", head: "done", details: "all of it", files: ["/ws/a.md"] },
+    },
+  );
+  assert.deepEqual(completeReport({ taskId: "t1", outcome: "done", details: "", files: [] }), {
+    kind: "complete",
+    data: { task_id: "t1", outcome: "done" },
+  });
   assert.equal(completeReport({ taskId: "t1", outcome: "weird" }).data.outcome, "done");
   assert.equal(normalizeOutcome(undefined), "done");
   assert.equal(normalizeOutcome("cancelled"), "cancelled");
+  // `blocked` is the proto's own outcome (slice 1), so it travels as itself.
+  assert.equal(normalizeOutcome("blocked"), "blocked");
 });
 
 test("the ledger head is capped at the plan's 200 characters", () => {
@@ -247,63 +260,6 @@ test("the ledger head is capped at the plan's 200 characters", () => {
   assert.equal(headOf("x".repeat(500)).length, 200);
   assert.equal(headOf("  spaced   out \n text "), "spaced out text");
   assert.equal(headOf(undefined), "");
-});
-
-test("an assignment becomes one message naming its origin and payload", { skip: !hasVectors }, () => {
-  const assign = ASSIGN().args;
-  const text = injectionText({ assign, proseIsNew: true });
-  // The vector's causality names no hop budget, and the header is byte for byte
-  // the line this plugin has always injected.
-  assert.equal(
-    text.split("\n")[0],
-    "[onlyne] task 11111111-1111-4111-8111-111111111111 from role:planner (kind task)",
-  );
-  assert.match(text, /\[onlyne\] role prose from the spec:\nRead the incoming task/);
-  assert.match(text, /\nbuild it\n?$/);
-
-  const repeat = injectionText({ assign, proseIsNew: false });
-  assert.doesNotMatch(repeat, /role prose from the spec/);
-  assert.match(repeat, /build it/);
-});
-
-test("the header names the hop and the budget once the family names a budget", () => {
-  const header = (causality) =>
-    injectionText({
-      assign: {
-        task_id: "t9",
-        envelope: {
-          id: "e9",
-          kind: "task",
-          from: { role: { role: "planner" } },
-          causality,
-          body: { text: "pass it on" },
-        },
-      },
-      proseIsNew: false,
-    }).split("\n")[0];
-
-  assert.equal(
-    header({ task: "t9", hop: 2, attempt: 0, family: "t1", hop_budget: 5 }),
-    "[onlyne] task t9 from role:planner (kind task, hop 2, hop budget 5)",
-  );
-  // A family may spend no further hop: zero is a figure the header carries.
-  assert.equal(
-    header({ task: "t9", hop: 0, attempt: 0, family: "t1", hop_budget: 0 }),
-    "[onlyne] task t9 from role:planner (kind task, hop 0, hop budget 0)",
-  );
-  // No budget named: the compat rule holds, hop or no hop.
-  assert.equal(header({ task: "t9", hop: 2, attempt: 0 }), "[onlyne] task t9 from role:planner (kind task)");
-});
-
-test("an empty-bodied assignment still produces an instruction", () => {
-  const text = injectionText({
-    assign: { task_id: "t9", envelope: { id: "e9", kind: "note", from: { gateway: { gateway: "fg1", channel: "fake", conversation: "c1" } }, body: {} } },
-    proseIsNew: false,
-    attachmentPaths: ["/ws/.onlyne/tmp/attachments/a.png"],
-  });
-  assert.match(text, /from gateway:fg1:fake:c1/);
-  assert.match(text, /the task carried no text/);
-  assert.match(text, /\/ws\/\.onlyne\/tmp\/attachments\/a\.png/);
 });
 
 test("a note carries no idempotency key and a task carries both", { skip: !hasVectors }, () => {

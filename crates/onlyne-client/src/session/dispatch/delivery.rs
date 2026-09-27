@@ -1,15 +1,16 @@
 use super::*;
 
-use super::env::{missing_capability, reject_protocol_command_in_pane, served_socket, session_env};
+use super::env::{missing_capability, reject_unpaired_runtime, served_socket, session_env};
 use super::outbound::send_frame;
 use super::projection::{note_verdict, sync_session};
 use super::state::{
-    DispatchInner, DispatchState, SessionSlot, live_sessions, note_beat, rebase_generation,
-    render_tokens, slot_key_serving_task,
+    DispatchInner, DispatchState, SessionSlot, live_sessions, mint_tools_token, note_beat,
+    rebase_generation, render_tokens, slot_key_serving_task,
 };
 use super::transport::{
     is_revived_connection, names_session, note_binding_locked, record_revived_connection,
 };
+use crate::delivery::{from_label, render, write_attachment};
 
 /// One delivery becomes the work of one session, or waits for the session its
 /// scope sends it to.
@@ -28,6 +29,12 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<Option<Ses
         .context("task envelope missing causality.task")?;
     let task_id = causality.task.clone();
     let family = scope::family_of(&causality);
+    // The role's prose, read from its one owner before the dispatch lock is
+    // taken. A session this delivery opens needs it at spawn — a runtime with no
+    // instruction channel of its own is handed it in the workspace — and the
+    // assignment frame that follows carries the same value
+    // (`docs/v2-CONTRACT.md` §3b).
+    let prose = state.role_prose();
     let mut inner = state.inner.lock();
     // A task this role already serves rides its own slot, and the slot that
     // still holds delivery rights is the one that serves it: staging the payload
@@ -52,7 +59,8 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<Option<Ses
             return Ok(Some(session));
         }
         scope::Placement::Resume(key) => {
-            let session = resume_delivery(&mut inner, &key, envelope, &causality, &task_id)?;
+            let session =
+                resume_delivery(&mut inner, &key, envelope, &causality, &task_id, &prose)?;
             return Ok(Some(session));
         }
         scope::Placement::Wait => {
@@ -74,7 +82,7 @@ pub fn dispatch(state: &DispatchState, envelope: &Envelope) -> Result<Option<Ses
         );
         return Ok(None);
     }
-    let session = open_session(&mut inner, envelope, &causality, &task_id, &family)?;
+    let session = open_session(&mut inner, envelope, &causality, &task_id, &family, &prose)?;
     Ok(Some(session))
 }
 
@@ -90,10 +98,11 @@ fn open_session(
     causality: &Causality,
     task_id: &str,
     family: &str,
+    prose: &str,
 ) -> Result<SessionRef> {
+    reject_unpaired_runtime(inner)?;
     let session_id = task_id.to_string();
     let command = render_tokens(&inner.command, &session_id, task_id);
-    reject_protocol_command_in_pane(inner.backend.name(), &command)?;
     let env = session_env(
         &inner.role,
         &session_id,
@@ -106,11 +115,18 @@ fn open_session(
         // short endpoint is handed the served path directly.
         &served_socket(&inner.workspace),
     );
+    // The tools token is minted before the spawn, because the child that mounts
+    // `onlyne mcp` is handed it there, and it is recorded on the slot below so
+    // the session's own state is the only other place it lives: a capability
+    // never reaches a log, a fault, or a ledger row (`docs/v2-CONTRACT.md` §3b).
+    let tools_token = mint_tools_token();
     let session = inner.backend.spawn(SpawnSpec {
         cwd: inner.workspace.clone(),
         task_id: session_id.clone(),
         command: command.clone(),
         env,
+        tools_token: tools_token.clone(),
+        prose: prose.to_string(),
         focus: None,
         placement: None,
         rename: None,
@@ -124,7 +140,16 @@ fn open_session(
     // a SQLite error in `open_task` or `feed_created` used to leave. The slot is
     // given back here, and the close runs after the lock is off it.
     if let Err(error) = stage_slot(
-        inner, &session, task_id, family, command, causality, envelope,
+        inner,
+        Spawned {
+            session: session.clone(),
+            command,
+            tools_token,
+        },
+        task_id,
+        family,
+        causality,
+        envelope,
     ) {
         let backend = Arc::clone(&inner.backend);
         if let Err(close_error) = backend.close(&session, crate::backend::CloseReason::Fault, false)
@@ -203,11 +228,19 @@ fn resume_delivery(
     envelope: &Envelope,
     causality: &Causality,
     task_id: &str,
+    prose: &str,
 ) -> Result<SessionRef> {
-    let (session_id, command) = inner
+    reject_unpaired_runtime(inner)?;
+    let (session_id, command, tools_token) = inner
         .sessions
         .get(key)
-        .map(|slot| (slot.session.task_id.clone(), slot.command.clone()))
+        .map(|slot| {
+            (
+                slot.session.task_id.clone(),
+                slot.command.clone(),
+                slot.tools_token.clone(),
+            )
+        })
         .ok_or_else(|| anyhow!("no session answers to {key}"))?;
     let env = session_env(
         &inner.role,
@@ -218,11 +251,17 @@ fn resume_delivery(
         &inner.topology,
         &served_socket(&inner.workspace),
     );
+    // The resumed process runs the same session, so it is handed the same tools
+    // token: the token belongs to the session and lives in its slot, and this
+    // client's binding is what the mount's first call is measured against. A
+    // session that *reopens* — a new slot for the same task — mints a new one.
     let resumed = inner.backend.spawn(SpawnSpec {
         cwd: inner.workspace.clone(),
         task_id: session_id.clone(),
         command,
         env,
+        tools_token,
+        prose: prose.to_string(),
         focus: None,
         placement: None,
         rename: None,
@@ -295,6 +334,16 @@ fn advance_session_row(inner: &mut DispatchInner, session_id: &str) {
         );
     }
 }
+
+/// The resource one delivery was spawned onto, as the slot has to record it:
+/// the reference the backend answers to, the command that opened it, and the
+/// tools token this client minted for the session it will serve.
+struct Spawned {
+    session: SessionRef,
+    command: Vec<String>,
+    tools_token: String,
+}
+
 /// Land one spawned session in this role's bookkeeping: the task's own record,
 /// the session row it is born onto, the slot that holds its payload, and the
 /// stall clock that answers for its work.
@@ -317,14 +366,13 @@ fn advance_session_row(inner: &mut DispatchInner, session_id: &str) {
 /// only the caller can give it up off the dispatch lock.
 fn stage_slot(
     inner: &mut DispatchInner,
-    session: &SessionRef,
+    spawned: Spawned,
     task_id: &str,
     family: Option<String>,
-    command: Vec<String>,
     causality: &Causality,
     envelope: &Envelope,
 ) -> Result<()> {
-    inner.bridge.track_live(session.clone());
+    inner.bridge.track_live(spawned.session.clone());
     let landed = (|| -> Result<()> {
         // The task's own record opens with the session that serves it, out of the
         // causality that named the task. A redelivery that found a slot already
@@ -352,9 +400,9 @@ fn stage_slot(
         // session nobody can judge.
         let last_beat = Some(Instant::now());
         inner.sessions.insert(
-            session.task_id.clone(),
+            spawned.session.task_id.clone(),
             SessionSlot {
-                session: session.clone(),
+                session: spawned.session.clone(),
                 task_id: Some(task_id.to_string()),
                 ready: false,
                 payload: Some(envelope.clone()),
@@ -367,8 +415,10 @@ fn stage_slot(
                 family,
                 idle_since: None,
                 suspended: false,
+                tools_token: spawned.tools_token,
+                delivered_roles: BTreeSet::new(),
                 opened_at: Instant::now(),
-                command,
+                command: spawned.command,
                 keeps_idle: !matches!(
                     inner.session_policy.scope,
                     onlyne_config::SessionScope::Oneshot
@@ -379,7 +429,7 @@ fn stage_slot(
         Ok(())
     })();
     if landed.is_err() {
-        inner.bridge.untrack_live(&session.task_id);
+        inner.bridge.untrack_live(&spawned.session.task_id);
     }
     landed
 }
@@ -461,6 +511,12 @@ pub struct ReadyNotice {
 /// Report the session ready and hand its held payload to its agent. The `ready`
 /// row reaches the ledger before either the backend delivery or adapter frame,
 /// which is the causal order §6 requires.
+///
+/// The text both hand-over paths carry is [`crate::delivery::render`]'s answer,
+/// rendered here and nowhere else: a plugin injects it, a self-driven backend
+/// prompts with it, and neither composes a delivery of its own. The delivery's
+/// image is written into the workspace first, because the line that names it is
+/// the line the model reads.
 pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -> Result<()> {
     let ReadyNotice {
         task_id,
@@ -469,7 +525,7 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
         io,
         capabilities,
     } = notice;
-    let (payload, target, session, backend, version) = {
+    let (payload, target, session, backend, version, workspace) = {
         let mut inner = state.inner.lock();
         let backend = Arc::clone(&inner.backend);
         // A ready report binds its connection to the session as much as a mount
@@ -528,7 +584,14 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
             note_beat(&mut inner, &task_id, Instant::now());
         }
         let version = note_verdict(&verdict, &task_id).unwrap_or(Version::new(generation, 0));
-        (payload, io, session, backend, version)
+        (
+            payload,
+            io,
+            session,
+            backend,
+            version,
+            inner.workspace.clone(),
+        )
     };
     // The ready report reaches the server before the payload reaches the agent.
     send_frame(
@@ -543,7 +606,19 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
     )
     .await?;
     sync_session(state, &task_id).await?;
-    let text = payload.body.text.clone().unwrap_or_default();
+    // The body travels as it was written, the material is quoted, and the
+    // attachments are the paths just written under the workspace. Upstream
+    // material is the one input no delivery carries yet: the field a sender
+    // fills it from is slice 3b's `complete(details)`.
+    let attachments = write_attachment(&workspace, &task_id, &payload)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let text = render(
+        &from_label(&payload.from),
+        payload.body.text.as_deref().unwrap_or_default(),
+        None,
+        &attachments,
+    );
     match (backend.self_driven(), target) {
         (true, None) => backend.deliver(&session, &task_id, &text),
         (true, Some(_)) => Err(anyhow!(
@@ -553,6 +628,8 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
             let assign = AssignArgs {
                 envelope: Box::new(payload),
                 prose: prose.to_string(),
+                text,
+                attachments,
                 task_id,
                 generation,
                 parent: None,
@@ -690,9 +767,23 @@ impl DispatchState {
             return false;
         }
         let generation = self.session_generation(&task_id).unwrap_or(1);
+        // A note reaches a live agent the way a task does, so it travels the same
+        // one template and its image is written under the workspace first.
+        let workspace = self.inner.lock().workspace.clone();
+        let attachments = write_attachment(&workspace, &task_id, envelope)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let text = render(
+            &from_label(&envelope.from),
+            envelope.body.text.as_deref().unwrap_or_default(),
+            None,
+            &attachments,
+        );
         let assign = AssignArgs {
             envelope: Box::new(envelope.clone()),
             prose: self.role_prose(),
+            text,
+            attachments,
             task_id,
             generation,
             parent: None,

@@ -1,6 +1,8 @@
 use super::*;
 use crate::reconcile::{feed_resource_attached, feed_turn_ended, feed_turn_started};
 use crate::session::dispatch::SETTLE_WITHOUT_TURN;
+use crate::session::dispatch::transport::NUDGE_TEXT;
+use crate::session::dispatch::turn_end::{DELIVERY_BLOCKED, TURN_END_WITHOUT_COMPLETE};
 use onlyne_proto::is_legal;
 use onlyne_proto::new_task_id;
 use serde_json::Value;
@@ -273,6 +275,8 @@ fn serving_slot(state: &DispatchState, task: &str, msg_id: &str) {
             dropped_at: None,
             last_beat: None,
             read_only: false,
+            tools_token: String::new(),
+            delivered_roles: BTreeSet::new(),
         },
     );
 }
@@ -333,6 +337,8 @@ async fn complete_report(
             task_id: task.to_string(),
             outcome,
             head,
+            details: None,
+            files: Vec::new(),
             reply_to: None,
             cluster_ref: None,
         },
@@ -452,6 +458,98 @@ async fn an_idle_beat_over_an_open_task_is_composed_idle_waiting() {
         idle.recovery,
         RecoveryPhase::NoRecovery,
         "no task record means no open work to wait for: {idle:?}"
+    );
+}
+
+/// §3c's rule at the client's own door: the beat that ends a turn over an open
+/// task hands the plugin the one sentence — verbatim, naming its task — and the
+/// second turn that ends the same way settles the delivery `blocked`.
+///
+/// The frame is the whole of what an ending sends, so a session that never
+/// completes reads exactly one nudge and then a verdict, and the two steps are
+/// published in that order (`docs/v2-CONTRACT.md` §3c).
+#[tokio::test]
+async fn a_turn_ending_over_an_open_task_nudges_once_and_then_settles() {
+    let dir = tempdir().expect("tempdir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    opened_task(&state, &task);
+    serving_slot(&state, &task, "msg-open");
+    // The session's plugin: a real connection that declared `inject`, which is
+    // what makes the sentence deliverable at all. The test's own handle is kept
+    // for the length of the test, because the reader behind it ends with it.
+    let (client_side, test_side) = tokio::io::duplex(4096);
+    let serving = AdapterIo::new(client_side, Duration::from_secs(5), Duration::from_secs(5));
+    let (_plugin, mut inbound) =
+        AdapterIo::new_with_inbound(test_side, Duration::from_secs(5), Duration::from_secs(5));
+    {
+        let mut inner = state.inner.lock();
+        inner
+            .transports
+            .insert(task.clone(), (serving, vec![Capability::Inject]));
+    }
+
+    // The turn runs, then ends without a completion: the sentence leaves, once.
+    beat(&state, &task, "running", 1005).await;
+    beat(&state, &task, "idle", 1006).await;
+
+    match inbound
+        .recv()
+        .await
+        .expect("the ending hands its plugin the one sentence")
+        .msg
+    {
+        AdapterMsg::Host(HostOp::Nudge {
+            task_id: nudged,
+            text,
+        }) => {
+            assert_eq!(nudged, task, "the sentence names the task it is about");
+            assert_eq!(text, NUDGE_TEXT, "the sentence is 3c's, verbatim");
+        }
+        other => panic!("a nudge is what an ending sends: {other:?}"),
+    }
+    assert_eq!(
+        verdict(&state, &task).0,
+        TaskState::Pending,
+        "a nudge is not a verdict: the delivery stays open"
+    );
+
+    // The agent works again and ends a second turn without a completion. The
+    // nudge is spent, so this ending settles the delivery blocked.
+    beat(&state, &task, "running", 1007).await;
+    beat(&state, &task, "idle", 1008).await;
+    assert_eq!(
+        verdict(&state, &task).0,
+        TaskState::Blocked,
+        "the second turn that ends without a completion settles it blocked"
+    );
+    while let Ok(frame) = inbound.try_recv() {
+        assert!(
+            !matches!(frame.msg, AdapterMsg::Host(HostOp::Nudge { .. })),
+            "one nudge per delivery, and no second try: {:?}",
+            frame.msg
+        );
+    }
+
+    // Each step of the rule is published, in order.
+    let events = {
+        let inner = state.inner.lock();
+        inner.store.events_since(0, 64).expect("read the journal")
+    };
+    let rule: Vec<&str> = events
+        .iter()
+        .map(|event| event.kind.as_str())
+        .filter(|kind| *kind == TURN_END_WITHOUT_COMPLETE || *kind == DELIVERY_BLOCKED)
+        .collect();
+    assert_eq!(
+        rule,
+        vec![
+            TURN_END_WITHOUT_COMPLETE,
+            TURN_END_WITHOUT_COMPLETE,
+            DELIVERY_BLOCKED
+        ],
+        "every step of the rule is published, in order: {events:?}"
     );
 }
 
@@ -763,6 +861,8 @@ async fn a_beat_from_a_held_connection_refreshes_liveness_and_applies_no_state()
                 dropped_at: None,
                 last_beat: None,
                 read_only: false,
+                tools_token: String::new(),
+                delivered_roles: BTreeSet::new(),
             },
         );
         inner.revived.push((task.clone(), held.clone(), Vec::new()));
@@ -844,6 +944,8 @@ async fn a_no_op_beat_still_stamps_the_liveness_clock() {
                 dropped_at: None,
                 last_beat: None,
                 read_only: false,
+                tools_token: String::new(),
+                delivered_roles: BTreeSet::new(),
             },
         );
     }
@@ -1299,6 +1401,8 @@ async fn a_completion_from_a_connection_serving_another_session_settles_nothing(
             task_id: owed.clone(),
             outcome: Outcome::Done,
             head: Some("a verdict for a session I do not serve".into()),
+            details: None,
+            files: Vec::new(),
             reply_to: None,
             cluster_ref: None,
         },
@@ -1332,6 +1436,8 @@ async fn a_completion_from_a_connection_serving_another_session_settles_nothing(
             task_id: owed.clone(),
             outcome: Outcome::Done,
             head: Some("the serving connection's own account".into()),
+            details: None,
+            files: Vec::new(),
             reply_to: None,
             cluster_ref: None,
         },
@@ -1464,6 +1570,8 @@ async fn a_completion_answering_the_clients_own_recycle_arrives_on_a_retired_bin
             task_id: task.clone(),
             outcome: Outcome::Done,
             head: Some("recycled".into()),
+            details: None,
+            files: Vec::new(),
             reply_to: None,
             cluster_ref: None,
         },

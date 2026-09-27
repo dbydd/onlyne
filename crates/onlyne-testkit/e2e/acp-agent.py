@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """A scripted ACP v1 agent for the acp-session end-to-end case (case 18).
 
-The case runs this file as the role's `session_command`:
+The case runs this file as the role's `[client.runtime] command`, with the
+spec's `drive = "acp"` giving the pair its meaning:
 
     python3 -u acp-agent.py --acp --gate <path> --trace <path>
 
@@ -14,14 +15,17 @@ Protocol discipline, which is what makes the case observable:
 * `session/prompt` is where the case's gate lives: the prompt is traced, then
   the agent waits for the `--gate` file to appear before streaming a single
   deterministic turn — one reasoning chunk, one tool call, its completion, one
-  answer chunk — and answering `stopReason: end_turn`. The wait is bounded, so a
-  case that never releases the gate fails its own assertions instead of hanging.
-* the turn's last action is the payload-v1 report: the case sends prompts the
-  client has decorated with its report directive, and this fixture follows that
-  directive literally — parse the absolute report path out of it, write one
-  report line under a temporary name, rename it into place. Prompt prose
-  carrying `HOPFAIL` chooses the `hop-failed:` line, everything else reports
-  `hop-done:`.
+  answer chunk — and answering a stop reason. The wait is bounded, so a case
+  that never releases the gate fails its own assertions instead of hanging.
+* the standing of that turn is the stop reason it answers with, because that is
+  what the client settles a session it drives itself on. Prompt prose carrying
+  `FAILTURN` ends the turn `refusal` instead of `end_turn`, so one process can
+  be made to settle a second task Failed; the closing answer chunk is the head
+  of record either way.
+* a caller-decorated prompt is still served: with `--caller-report-marker` (or
+  prose carrying `HOPFAIL`) the agent's last action is the payload-v1 report
+  line the prompt's report directive names. No client appends that directive
+  any more, so this is the path a case that owns the report file itself uses.
 * end of stdin is the client leaving: the agent exits 0.
 """
 
@@ -54,6 +58,13 @@ PAYLOAD_HEAD_LINE = "hop-done: " + PAYLOAD_HEAD
 PAYLOAD_FAIL_LINE = "hop-failed: " + PAYLOAD_FAIL_NOTE
 # The prose marker the case sends to make this agent report a failure.
 FAIL_MARKER = "HOPFAIL"
+
+# The prose marker that makes this agent end its turn as a failed one, and the
+# ACP stop reason it answers with in its place. `acp-session.sh` carries both
+# literals and checks them against the `start` trace line, so a drift between
+# the two files fails at the gate with both sides in the message.
+FAIL_TURN_MARKER = "FAILTURN"
+FAIL_STOP = "refusal"
 
 GATE_POLL_SECONDS = 0.05
 # Long enough for a slow machine to complete the gated assertions,
@@ -272,7 +283,11 @@ def run_turn(rid, session_id, prompt, gate, trace, caller_report_marker=None):
         },
     )
     write_payload(prompt, trace, caller_report_marker)
-    result(rid, {"stopReason": "end_turn"})
+    # The stop reason is the whole standing of this turn: `end_turn` unless the
+    # case asked for a turn that settles Failed.
+    stop = FAIL_STOP if FAIL_TURN_MARKER in prompt else "end_turn"
+    trace.write("stop reason=%s" % stop)
+    result(rid, {"stopReason": stop})
 
 
 def dispatch(msg, gate, trace, caller_report_marker=None):
@@ -324,8 +339,18 @@ def main(argv):
     args = parse_args(argv)
     trace = Trace(args.trace)
     trace.write(
-        "start pid=%d constants reasoning=%s answer=%s tool=%s call=%s kind=%s"
-        % (os.getpid(), REASONING, ANSWER, TOOL_TITLE, TOOL_CALL_ID, TOOL_KIND)
+        "start pid=%d constants reasoning=%s answer=%s tool=%s call=%s kind=%s "
+        "fail=%s stop=%s"
+        % (
+            os.getpid(),
+            REASONING,
+            ANSWER,
+            TOOL_TITLE,
+            TOOL_CALL_ID,
+            TOOL_KIND,
+            FAIL_TURN_MARKER,
+            FAIL_STOP,
+        )
     )
     while True:
         line = sys.stdin.readline()

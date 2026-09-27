@@ -53,6 +53,6 @@ on connect.
 ## Truth split
 
 `spec.toml` is the protocol truth: role names, public keys, ACL, prose, concurrency, timeouts, and
-`session_command`. The tree under `<server-root>/.onlyne/templates/` is the content truth: every
+the `[client.runtime]` drive and command. The tree under `<server-root>/.onlyne/templates/` is the content truth: every
 role workspace file outside the runtime artifacts. A template may carry one `.onlyne/config.toml` as
 a local override fragment. Generate merges it with derived values, and derived values win.

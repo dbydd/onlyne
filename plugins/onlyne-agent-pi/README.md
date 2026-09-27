@@ -21,17 +21,19 @@ pi session (spawned by onlyne-client)
   ▼
 hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{role,session,task_id,pid}}
   ◀── welcome{role, prose, generation, server, host_capabilities}
-  ├─ prose ──► pi context, once (custom message, no turn)
+  ├─ prose ──► one `onlyne-role-prose` section of the system prompt, once
   ├─ report.ready ──► the barrier the task payload waits behind
-  ◀── assign{envelope, prose, task_id, generation}
-  ├─ task text (+ image path) ──► pi user message (deliverAs:"followUp")
+  ◀── assign{envelope, prose, text, attachments, task_id, generation}
+  ├─ prose, when the welcome did not already deliver it ──► the same section
+  ├─ text ──► pi user message (deliverAs:"followUp"), byte for byte; `body.image`
+  │    rides as a pi image part, and `attachments` names files the client wrote
   ├─ assign_ack{accepted:true}
   ├─ report.heartbeat{agent} — `running` per turn and every 10s while a task is live,
   │    `idle` only while pi waits for input; every beat re-derives it from pi
-  ├─ the session waits for input with the task open and no `onlyne_complete` ──►
-  │    the idle ladder: the same message again (at most `idleReminders` times),
-  │    then `failed` and out
-  ├─ report.complete{outcome, head} — the ledger's terminal fact, and the last report
+  ├─ the client owns the turn-end rule: a turn that ends without a completion
+  │    earns one nudge, and the second such ending settles the delivery
+  ◀── nudge{task_id, text} ──► pi user message, byte for byte (the client's sentence)
+  ├─ report.complete{outcome, head, details, files} — the ledger's terminal fact, and the last report
   │    └─ the client's answer is the handover: pi is asked to shut down, then detaches
   ├─ probe ──► one heartbeat
   ◀── recycle ──► complete (if unsettled) → stop → pi exits
@@ -107,7 +109,6 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | --- | --- | --- |
 | `enabled` | `true` | `false` turns the extension off for this workspace |
 | `watch.autoStart` | `true` | `false` registers the tools but opens no socket until `/onlyne connect` |
-| `idleReminders` | `2` | how many times one idle episode re-sends the assignment before the task fails (§4); 0 means the first idle without a completion fails it |
 
 A missing file means every default. A malformed file prints one warning on stderr and
 keeps the defaults: a typo must not silently disable a role. The client does not read
@@ -127,7 +128,7 @@ The `hello` frame declares what this plugin actually implements:
 | --- | --- | --- |
 | `register` | always | `session_register{session_id, task_id, generation, pid, title}` after `welcome` |
 | `report` | always | `report.ready` / `report.heartbeat` / `report.complete` |
-| `inject` | when `pi.sendUserMessage` exists | the payload arrives as `assign` and is injected as a pi user message |
+| `inject` | when `pi.sendUserMessage` exists | the delivery arrives as `assign{…, text}` and `text` is injected as a pi user message, unchanged |
 | `recycle` | always | `recycle` settles the task if it is unsettled, then stops the plugin and exits pi |
 
 What happens when a pi API is missing, and what the host does then:
@@ -135,8 +136,8 @@ What happens when a pi API is missing, and what the host does then:
 | gap | detection | behaviour |
 | --- | --- | --- |
 | no `registerTool` (older pi) | probed at `session_start` | no tools are registered; the protocol path is unaffected, and `/onlyne status` still works |
-| no `sendUserMessage` | probed at `session_start` | `inject` is dropped from the capability list, so the host delivers the task through `config_get{key:"stdin:<text>"}`, which the plugin injects through whatever channel remains |
-| no `sendMessage` | probed | the role prose from `welcome` is not injected as context; the task itself still arrives |
+| no `sendUserMessage` | probed at `session_start` | `inject` is dropped from the capability list, so the host delivers the task through `config_get{key:"stdin:<delivery text>"}`, which the plugin injects through whatever channel remains |
+| no `sections` on `before_agent_start` | guarded at each run | the role prose reaches no instruction layer — the run was offered no prompt sections to write into; one stderr line says so, and the delivery text still arrives |
 | no `appendEntry` | probed | no `onlyne-assign` / `onlyne-complete` session entries are recorded |
 | no `ui.setStatus` | guarded | the footer status line is skipped |
 | no `ui.setWidget` | guarded | routine notices continue through the footer status line and the `[pi-onlyne]` stderr line |
@@ -148,7 +149,13 @@ When the host reports a UI (`ctx.hasUI`, true in the TUI and RPC modes, false in
 
 ## 3. Tools
 
-Registered only inside an onlyne session.
+Registered only inside an onlyne session, with the schemas the MCP face carries
+(`docs/v2-CONTRACT.md`, "3b's interface: the `tools` mount"): one obligation vocabulary
+that two drives mount.
+
+Each result is one plain sentence — the recipient for a send or a handoff, the outcome
+for a completion. A tool result is model-visible, and nothing about the plugin's own
+bookkeeping belongs in it.
 
 ### `onlyne_send{to, text, kind?, image?}`
 
@@ -156,67 +163,66 @@ Sends one envelope on the `send` frame. `kind: "note"` (the default) is free tex
 carries no `op_id`. `kind: "task"` hands work to a role, so it carries an `o-<uuid>`
 idempotency key and a fresh `causality.task`. `image` is an absolute path to a
 png/jpeg/gif/webp file: the plugin reads it, base64-encodes it and attaches it as
-`body.image`. The core caps that at 2 MiB and accepts four mime types.
+`body.image`. The core caps that at 2 MiB and accepts four mime types. The result is
+`sent to <role>`.
 
-### `onlyne_complete{outcome?, text?, force?, reason?}`
+### `onlyne_complete{outcome, summary, details?, files?}`
 
-Ends the current task with an explicit outcome (`done` by default, or `failed`). It is the
-only path to `done`: a turn that ends without it is reminded and then failed (§4). A
-non-empty `text` becomes the ledger `head` verbatim: whitespace collapses to one line and
-the text stops at 200 characters. An absent or blank `text` carries no summary, so the
-completion falls back to the last assistant text. The call also ends the session's
-process: once the client has acknowledged the completion report (see §4), the plugin asks
-pi to shut down through `ctx.shutdown()`. pi 0.85.1 has no tool-result `terminate`
-handling. When the workspace carries a relay policy (§5), `force: true` with a non-empty
-`reason` is the deliberate way past a handoff the session still owes.
+Ends the current task with an explicit outcome — the proto's `Outcome`, so `done`,
+`failed`, `cancelled` or `blocked`. `summary` is the display line, and it becomes the
+ledger `head` verbatim: whitespace collapses to one line and the text stops at 200
+characters. An empty `summary` carries no display line, so the head falls back to the last
+assistant text. `details` is the full result and `files` the absolute paths it names; both
+ride the `report.complete` frame unchanged and are what the next hop and the originator
+receive, with the client holding the ceiling and refusing an oversize body with its own
+sentence (§3c of the contract). The call also ends the session's process: once the client
+has acknowledged the completion report (§4), the plugin asks pi to shut down through
+`ctx.shutdown()`. pi 0.85.1 has no tool-result `terminate` handling. The result is
+`reported <outcome>`.
 
 ### `onlyne_handoff{to, text, image?}`
 
 Hands this session's task on to the next hop of its family. The plugin sends one `handoff`
 frame naming the task the session currently holds, and the host mints one child task for
 `to` under it: the child names this task as its `parent_task`, sits one hop further along,
-and carries the same family id, hop budget, origin, deadline and labels. The tool's result
-names the child task id and its hop. A client refusal comes back as the tool's error,
-verbatim. `image` is the same absolute png/jpeg/gif/webp path the send tool takes. An
-assignment whose causality names a hop budget states the hop and the budget in its
-injected header line. `onlyne_send{kind: "task"}` is the other way to reach a role: that
-envelope starts a family of its own at hop 0.
+and carries the same family id, hop budget, origin, deadline and labels. A client refusal
+comes back as the tool's error, verbatim. `image` is the same absolute png/jpeg/gif/webp
+path the send tool takes. The child's id and its hop stay protocol data — the result is
+`handed on to <role>`, and the child is proven from the ledger row the host writes, not
+from a sentence this plugin printed. The delivery text is the client's own rendering
+(sender, body, attachment paths) and this plugin injects it as it stands.
+`onlyne_send{kind: "task"}` is the other way to reach a role: that envelope starts a family
+of its own at hop 0.
 
 ## 4. Outcome rules
 
 `onlyne_complete` is the only path to `done`. The plugin sends one completion per task,
 at the first of these events:
 
-1. **`onlyne_complete`** — the model gives an explicit outcome (`done` by default, or
-   `failed` / `cancelled`). A later completion for the same task is refused (not
-   re-reported). Its non-empty `text` is the head.
+1. **`onlyne_complete`** — the model gives an explicit outcome: `done`, `failed`,
+   `cancelled` or `blocked`. A later completion for the same task is refused (not
+   re-reported). Its non-empty `summary` is the head.
 2. **An errored turn** — the turn ended with a provider error (`stopReason: "error"`).
    That is proof on its own, so the plugin reports `failed` at once, with the error as
-   the head.
-3. **The idle ladder** — a turn ended cleanly without a completion, pi is waiting for
-   input, and the task is still open. The plugin re-sends the assignment and counts the
-   rung. The idle that finds the bound `idleReminders` names already spent reports
-   `failed` — head `no completion after <n> idle reminders` — and the session exits the
-   way any completion makes it exit.
-4. **`recycle{outcome}`** — the host is tearing the session down. The plugin settles an
+   the head. The report itself waits until pi is waiting for input, so the beat that
+   carries it states a phase the session really has.
+3. **`recycle{outcome}`** — the host is tearing the session down. The plugin settles an
    unsettled task with the host's outcome first, then stops and exits pi.
 
-Two things settle nothing: a task that was assigned but whose turn has not run yet (the
-injected message has not executed, so completing now would claim work that never
-happened), and an idle the ladder still has a rung for. The ladder re-sends the
-assignment the task arrived with — the same header, task text and attachment paths the
-injection carried, under one line saying the previous turn ended without a completion —
-and never the role prose, which is already in the session's context. Its images are not
-re-attached: the paths travel as text, so the same bytes are not put into the context
-twice. A new envelope for the same task restarts the count, and so does any turn of the
-session's own (see the idle claim below).
+A turn that ends cleanly without a completion settles nothing here. The client owns that
+rule (`docs/v2-CONTRACT.md`, "3c. One turn-end rule"): it counts the endings, sends its
+own sentence as a `nudge`, and decides what a delivery that never reports becomes. The
+plugin hands the sentence to pi and answers only that it did, so the wording, the count
+and the settlement have one owner rather than two. A task whose injected message has not
+run a turn is left alone whatever a settle signal says: reporting now would claim work
+that never happened.
 
 `head` is a single line, capped at 200 characters; it matches what the client puts in
-`out_head` and what the receipt carries. Each task has one source for it: the `text` of
-the explicit `onlyne_complete` call when that call carried one, the error a failed turn
-reported, or the ladder's own line. The last assistant text is the fallback for an
-`onlyne_complete` call that carried no text at all — a sentence spoken after such a call
-cannot replace what the call handed over, and nothing else reads it.
+`out_head` and what the receipt carries. Each task has one source for it: the `summary`
+of the explicit `onlyne_complete` call when that call carried one, or the error a failed
+turn reported. The last assistant text is the fallback for a call whose `summary` is
+empty — a sentence spoken after such a call cannot replace what the call handed over, and
+nothing else reads it.
 
 A reported completion ends the session's process. `report.complete` goes out as a request,
 and the client answers it only after it has settled the session row, acked the delivery
@@ -250,78 +256,11 @@ A background-task extension changes the question. `bg_run` and its siblings retu
 once and the work continues in a child process, so pi waits for input while the session's
 task is still in flight. The plugin recognises the extension by the tools it registered
 and asks its EventBus service for the live task list; a task in `running` status holds
-the session at `running` and holds the ladder off until that task reports a terminal
-state. On a session without the extension there is no tool to recognise, no query, and
-nothing to wait for.
+the session at `running`, and the one report the plugin owes at a turn end — the failure
+it witnessed itself — waits that out. On a session without the extension there is no tool
+to recognise, no query, and nothing to wait for.
 
-The ladder counts one idle episode, not a task's whole life. Any turn of the session's
-own zeroes the count, so work that resumed and ran again starts the bound over; the one
-turn the ladder's own reminder wakes belongs to the episode that reminder belongs to,
-and the bound stays reachable.
-
-## 5. Relay guard
-
-A session can hand no work over and still report `done`. That is the accident the guard
-closes: a bench session narrated its progress, called `onlyne_complete` with its todos
-untouched, and the downstream writer waited for a handoff that was never sent. The guard
-judges delivery facts only — whether a role was reached — and never the shape or quality
-of the text that was sent.
-
-The policy lives next to the plugin's `package.json`, so it travels inside the copy a
-generated workspace loads: `<ws>/.onlyne/agent/onlyne-agent-pi/relay.toml` in a generated
-workspace, `relay.toml` in a manual installation.
-
-```toml
-relay_required = ["writer"]        # these roles must have received a handoff
-relay_required_count = 2           # legacy alias of relay_count: this many distinct downstream roles
-```
-
-`relay_count` is the canonical count key. `relay_required_count` is its legacy alias, the spelling `relay.toml` itself uses. `relay_required` wins when both the list and the count keys are present.
-
-The policy belongs in the spec, not in the vendor directory. `onlyne generate --force`
-rewrites the copy this package is vendored into and takes a hand-written `relay.toml`
-with it, so a `[[client]]` entry states the policy once and the client injects it into
-every session process it spawns:
-
-```toml
-[[client]]
-role = "planner"
-relay_count = 2                    # this many distinct downstream roles
-relay_required = ["writer"]        # these roles must have received a handoff
-```
-
-The sources rank `environment > relay.toml > none`: `ONLYNE_RELAY_REQUIRED` (the list,
-comma-separated) and `ONLYNE_RELAY_COUNT` (the count, decimal) are the variables the
-client fills from the entry above; a `relay.toml` beside `package.json` is read only
-when the environment names no policy at all; and neither one means no guard. Both
-variables are injected when the spec names both, so the list still wins. A hand-written
-`relay.toml` remains the manual installation's escape hatch — for a box whose spec
-never states the policy — and a file shadowed by the environment is ignored outright. A
-variable that is set but unparsable is reported on stderr and ignored, which gives the
-file its turn.
-
-| | |
-| --- | --- |
-| default | neither source names a policy: no guard, and the completion path is the one this plugin shipped before the guard existed |
-| evidence | the roles this session's own successful `onlyne_send` calls reached, `note` and `task` alike; a refused envelope counts for nothing |
-| refusal | `onlyne_complete` throws `onlyne: relay guard: missing handoff to: writer (…)`, naming what is missing and how to clear it |
-| after a refusal | nothing is reported, queued or detached: the session stays mounted, and the same call lands once the handoff has gone out |
-| list mode | every named role must be in the delivered set, literally |
-| count mode | distinct downstream roles; a send to this role itself or back to the role that assigned the task is not one |
-| scope | this session's own sends, in process memory: a reconnect keeps them, a restarted session starts empty rather than guessing at what an earlier process sent |
-| waiver | `force: true` with a non-empty `reason`; it only matters when the guard refuses |
-| audit | a waived completion's ledger head starts with `relay-guard-forced: <reason>`, followed by the model's `text` when the call carried one |
-| not guarded | outcomes the plugin reports without the model: an errored turn, the idle ladder's failure, and `recycle{outcome}` |
-
-`relay.toml` is a closed subset of TOML: flat `key = value` lines, the two keys above,
-one-line arrays of double-quoted strings, `#` comments. Anything outside that warns on
-stderr and is ignored. It is deliberately not `.onlyne/config.toml`: the client parses
-that file with `deny_unknown_fields`, so a plugin key there would stop the client from
-starting at all.
-
-`force` and `reason` are inert when no policy is in force.
-
-## 6. Protocol notes and deviations
+## 5. Protocol notes and deviations
 
 Each item below is either a deliberate reading of `PROTOCOL.md` or a behaviour measured on
 the shipped client.
@@ -362,9 +301,10 @@ the shipped client.
   reason.
 - **`probe` is answered with a heartbeat**, per `PROTOCOL.md`'s "a `probe` declares fresh
   resource observations".
-- **`config_get` is read as a task body only when it starts with `stdin:`**, which is the
-  overload `PROTOCOL.md` documents for plugins without `inject`. Any other key is logged
-  and ignored, never misread.
+- **`config_get` is read as a delivery text only when it starts with `stdin:`**, which is
+  the overload `PROTOCOL.md` documents for plugins without `inject`: the key carries the
+  same rendered bytes an `assign` puts in `text`, and they are injected as they stand.
+  Any other key is logged and ignored, never misread.
 - **`frame_too_large` / `bad_frame`**: an oversize body is refused before any byte is
   written, and a framing fault closes the connection and reconnects. Framing cannot
   resynchronise after a corrupt body, which is the same conclusion
@@ -372,9 +312,8 @@ the shipped client.
 - **Deliveries are idempotent; tasks are not.** The dedup key is the envelope id. The
   same delivery twice gets one injection and an ack with `reason: "duplicate"`, and a
   new envelope for a task that is already running reaches that session as another
-  message — the work record keeps its counters and its relay ledger, and only its
-  "turns since this instruction" watchdog restarts. The client mints a fresh uuid per
-  envelope, so `duplicate` fires on a genuine re-offer and on nothing else.
+  message. The client mints a fresh uuid per envelope, so `duplicate` fires on a genuine
+  re-offer and on nothing else.
 
 - **Pane binding (Orca tabs).** Inside an Orca pane the plugin reports the pane it runs in on every
   heartbeat, as `observed.host.orca.pane_key` in the report's `Observation`
@@ -393,7 +332,7 @@ the shipped client.
   lets a supervisor still say where a *finished* session ran: `report.complete` carries `host`
   forward.
 
-## 7. Configuration reference
+## 6. Configuration reference
 
 | env var | required | effect |
 | --- | --- | --- |
@@ -401,8 +340,6 @@ the shipped client.
 | `ONLYNE_SESSION_ID` | yes | mounted session id; `session_id` equals `task_id` in the shipped client |
 | `ONLYNE_TASK_ID` | yes | the task this process serves; drives `session_register` and the initial `ready` |
 | `ONLYNE_SOCKET` | no | the socket the client serves for this workspace, injected into every session process it spawns; with the variable unset the plugin finds that client itself, by reading the runtime directory's registration files (`<digest>.json`) for the one whose `root` is this workspace |
-| `ONLYNE_RELAY_REQUIRED` | no | the role's spec `relay_required`, comma-joined: the guard's list mode (§5) |
-| `ONLYNE_RELAY_COUNT` | no | the role's spec `relay_count`: the guard's count mode, which decides only when the list is empty (§5) |
 | `ORCA_PANE_KEY` | no | where this process runs (`<tab_id>:<leaf_id>`), reported on every heartbeat as `observed.host.orca.pane_key`; unset outside an Orca pane, which is why the field is then absent |
 | `ORCA_TAB_ID` / `ORCA_LEAF_ID` | no | the pane ids separately; the pane key is parsed when only the key itself is set |
 | `ORCA_TERMINAL_HANDLE` | no | the terminal handle, reported beside the pane key as `host.orca.handle`, and the value `orca terminal switch` takes |
@@ -410,13 +347,12 @@ the shipped client.
 Constants worth knowing: the plugin heartbeats every 10 s (`heartbeat_timeout_ms` is 30 s),
 allows 5 s for `hello` and 30 s per request, and reconnects on a 1/2/4/8/16/30 s ladder.
 
-The plugin reads two files of its own: `<cwd>/.pi/onlyne.json` (the switch, §1) and
-`relay.toml` next to its `package.json` (the relay policy's fallback, read only when the
-client injected none, §5). A third read belongs to the machine rather than the tree: when
-`ONLYNE_SOCKET` is unset the plugin lists the machine-level runtime directory for the
-client registrations that name this workspace (§8).
+The plugin reads one file of its own: `<cwd>/.pi/onlyne.json` (the switch, §1). A second
+read belongs to the machine rather than the tree: when `ONLYNE_SOCKET` is unset the plugin
+lists the machine-level runtime directory for the client registrations that name this
+workspace (§7).
 
-## 8. Troubleshooting
+## 7. Troubleshooting
 
 | symptom | cause | check |
 | --- | --- | --- |
@@ -427,8 +363,7 @@ client registrations that name this workspace (§8).
 | `reconnecting in 4000ms` in a loop | the client is down or the socket was replaced | `onlyne --server-root … roles` |
 | `ready refused: internal: unknown session for …` | the plugin mounted and reported for a task the client never staged (normal when pi is started by hand outside a task) | start pi under the client, not by hand |
 | `assign` never arrives | the client's `session_command` did not spawn pi, or `inject` was dropped | the client log for the spawn line; `/onlyne status` for the capability set |
-| ledger stays `in_flight` | no completion yet: no turn has run (the injected message has not executed), or the ladder is still reminding it (`idleReminders`). On pi-onlyne 1.2.1 against pi 0.87 an envelope carrying an image left nothing injected at all: pi read the flat `ImageContent` this plugin now sends, refused the nested part the older plugin built, and took the task text down with it | the pi session file for the `onlyne-assign` entry and the reminders injected after it; the `onlyne` panel for `reminder n of m`; `/onlyne status` for the task and phase; for that refusal, the pane's `Extension "<runtime>" error` line and, on 1.2.2, the plugin's `attachment carried no base64 data or no media type` log |
-| `onlyne_complete` answers `relay guard: missing handoff to: …` | the workspace's spec (or a `relay.toml` standing in for it) names a role this session never sent to | routine notices appear in the `onlyne` panel; stderr keeps refusals such as `relay guard from …`, socket errors, timeouts and framing faults; `required=…` names the policy; `relay guard: missing handoff …` names the delivered set |
+| ledger stays `in_flight` | no completion yet: no turn has run (the injected message has not executed), or the turn ended without one and the client has not settled the delivery. On pi-onlyne 1.2.1 against pi 0.87 an envelope carrying an image left nothing injected at all: pi read the flat `ImageContent` this plugin now sends, refused the nested part the older plugin built, and took the task text down with it | the pi session file for the `onlyne-assign` entry and any `nudge` sentence injected after it; `/onlyne status` for the task and phase; for that refusal, the pane's `Extension "<runtime>" error` line and, on 1.2.2, the plugin's `attachment carried no base64 data or no media type` log |
 | `hello … forbidden` / connection closed right after `hello` | the mount role does not match the client's role | `hello.args.mount.role` vs the workspace's role |
 | `frame_too_large` | a body above 8 MiB | only reachable through an oversize outbound image; the ceiling is the core's |
 | tools missing | `pi.registerTool` is absent in that pi version | `/onlyne status`; the capability table above |
@@ -439,11 +374,11 @@ client registrations that name this workspace (§8).
 `generation`, `agentState`, `seq`, `taskSeqs`, `tasks`, `pendingCompletions`, `lastError`,
 counters), and `/onlyne connect` / `/onlyne disconnect` open and close the socket by hand.
 
-## 9. Development
+## 8. Development
 
 ```bash
 cd plugins/onlyne-agent-pi
-node --test src/*.test.mjs        # framing, protocol, agent state machine, config, relay guard, socket path
+node --test src/*.test.mjs        # framing, protocol, agent state machine, config, socket path
 ```
 
 `src/agent.live.test.mjs` skips itself unless `target/debug/onlyne-client` and
@@ -475,17 +410,19 @@ pi session (spawned by onlyne-client)
   ▼
 hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{role,session,task_id,pid}}
   ◀── welcome{role, prose, generation, server, host_capabilities}
-  ├─ prose ──► pi context, once (custom message, no turn)
+  ├─ prose ──► one `onlyne-role-prose` section of the system prompt, once
   ├─ report.ready ──► the barrier the task payload waits behind
-  ◀── assign{envelope, prose, task_id, generation}
-  ├─ task text (+ image path) ──► pi user message (deliverAs:"followUp")
+  ◀── assign{envelope, prose, text, attachments, task_id, generation}
+  ├─ prose（仅当 welcome 尚未投递过） ──► 同一个系统提示 section
+  ├─ text ──► pi user message（deliverAs:"followUp"），逐字节原样；`body.image`
+  │    作为 pi image part 同行，`attachments` 里的路径是 client 已写好的文件
   ├─ assign_ack{accepted:true}
   ├─ report.heartbeat{agent} — `running` per turn and every 10s while a task is live,
   │    `idle` only while pi waits for input; every beat re-derives it from pi
-  ├─ the session waits for input with the task open and no `onlyne_complete` ──►
-  │    the idle ladder: the same message again (at most `idleReminders` times),
-  │    then `failed` and out
-  ├─ report.complete{outcome, head} — the ledger's terminal fact, and the last report
+  ├─ 回合结束的规则由 client 拥有：没有 completion 的回合结束换一次 nudge，
+  │    第二次这样的结束就结算这次投递
+  ◀── nudge{task_id, text} ──► pi user message，逐字节原样（client 自己的句子）
+  ├─ report.complete{outcome, head, details, files} — ledger 的终态事实，也是最后一份报告
   │    └─ the client's answer is the handover: pi is asked to shut down, then detaches
   ├─ probe ──► one heartbeat
   ◀── recycle ──► complete (if unsettled) → stop → pi exits
@@ -547,7 +484,6 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | --- | --- | --- |
 | `enabled` | `true` | `false` 会为此工作区关闭扩展 |
 | `watch.autoStart` | `true` | `false` 会注册工具，但在 `/onlyne connect` 前不打开套接字 |
-| `idleReminders` | `2` | 一次空闲期内重新发送任务分配信息的次数，随后任务失败（§4）；`0` 表示第一次没有完成的空闲就会使任务失败 |
 
 文件缺失时，所有项均使用默认值。文件格式错误时，会在 stderr 打印一条警告并保留默认值：拼写错误不能使角色在无提示的情况下停用。客户端不读取此文件（计划 §11 已将旧的就绪门控降级为生成时模板建议），因此只有此扩展会读取它；键结构仍采用模板所带的结构。
 
@@ -561,7 +497,7 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | --- | --- | --- |
 | `register` | 始终 | 在 `welcome` 之后发送 `session_register{session_id, task_id, generation, pid, title}` |
 | `report` | 始终 | `report.ready` / `report.heartbeat` / `report.complete` |
-| `inject` | 当 `pi.sendUserMessage` 存在时 | 任务正文通过 `assign` 到达，并作为 pi 用户消息注入 |
+| `inject` | 当 `pi.sendUserMessage` 存在时 | 投递以 `assign{…, text}` 到达，`text` 原样注入为 pi 用户消息 |
 | `recycle` | 始终 | `recycle` 会在任务尚未确定最终状态时将其确定，然后停止插件并退出 pi |
 
 pi API 缺失时会发生什么，以及主机随后如何处理：
@@ -569,8 +505,8 @@ pi API 缺失时会发生什么，以及主机随后如何处理：
 | 缺口 | 检测方式 | 行为 |
 | --- | --- | --- |
 | 没有 `registerTool`（较旧的 pi） | 在 `session_start` 时探测 | 不注册任何工具；协议路径不受影响，`/onlyne status` 仍可使用 |
-| 没有 `sendUserMessage` | 在 `session_start` 时探测 | 从能力列表中移除 `inject`，主机通过 `config_get{key:"stdin:<text>"}` 传递任务，插件通过仍然可用的通道注入该内容 |
-| 没有 `sendMessage` | 探测 | 来自 `welcome` 的角色说明不会作为上下文注入；任务本身仍会送达 |
+| 没有 `sendUserMessage` | 在 `session_start` 时探测 | 从能力列表中移除 `inject`，主机通过 `config_get{key:"stdin:<投递文本>"}` 传递任务，插件通过仍然可用的通道注入该内容 |
+| 没有可写 section 的提示选项 | 每次 run 保护性检测 | 角色说明进不了指令层——`before_agent_start` 没有可供写 section 的对象；stderr 打一行说明，投递文本照常送达 |
 | 没有 `appendEntry` | 探测 | 不记录 `onlyne-assign` / `onlyne-complete` 会话条目 |
 | 没有 `ui.setStatus` | 保护性检测 | 跳过页脚状态行 |
 | 没有 `ui.setWidget` | 保护性检测 | 常规通知继续通过页脚状态行和 stderr 上的 `[pi-onlyne]` 行传递 |
@@ -582,32 +518,35 @@ pi API 缺失时会发生什么，以及主机随后如何处理：
 
 ## 3. 工具
 
-仅在 onlyne 会话内注册。
+仅在 onlyne 会话内注册，采用 MCP 面所携带的同一套 schema（`docs/v2-CONTRACT.md`“3b's interface: the `tools` mount”）：一份义务词汇，两个驱动共用。
+
+每个结果只有一句平实的话——send 与 handoff 给出发往的角色，complete 给出结果。工具结果是模型可见的，插件自己的簿记没有理由出现在里面。
 
 ### `onlyne_send{to, text, kind?, image?}`
 
 通过 `send` 帧发送一个信封。`kind: "note"`（默认值）是自由文本，不携带 `op_id`。`kind: "task"` 将工作移交给一个角色，因此携带 `o-<uuid>` 幂等键和新的 `causality.task`。`image` 是 `png/jpeg/gif/webp` 文件的绝对路径：插件读取该文件，进行 base64 编码，并将其作为 `body.image` 附加。核心将该文件限制为 2 MiB，并接受四种 mime 类型。
 
-### `onlyne_complete{outcome?, text?, force?, reason?}`
+结果为 `sent to <role>`。
 
-以明确结果结束当前任务（默认为 `done`，或为 `failed`）。这是通向 `done` 的唯一路径：没有调用它的轮次会先收到提醒，随后失败（§4）。非空 `text` 会原样成为账本的 `head`：空白折叠为一行，文本在 200 个字符处截断。缺失或为空的 `text` 不携带摘要，因此完成时回退到最后一条助手文本。该调用也会结束会话进程：客户端确认完成报告后（见 §4），插件会通过 `ctx.shutdown()` 请求 pi 关闭。pi 0.85.1 没有工具结果的 `terminate` 处理。工作区带有中继策略时（§5），`force: true` 搭配非空 `reason`，可明确绕过会话仍需完成的交接。
+### `onlyne_complete{outcome, summary, details?, files?}`
+
+以明确结果结束当前任务——即 proto 的 `Outcome`：`done`、`failed`、`cancelled` 或 `blocked`。`summary` 是展示用的一行，原样成为账本的 `head`：空白折叠为一行，文本在 200 个字符处截断；`summary` 为空时不携带展示行，head 回退到最后一条助手文本。`details` 是完整结果，`files` 是它所点名的绝对路径：两者原样搭在 `report.complete` 帧上，也正是下游与发起方收到的东西，上限由客户端把守，超限正文由客户端用自己的句子拒绝（契约 §3c）。该调用也会结束会话进程：客户端确认完成报告后（见 §4），插件会通过 `ctx.shutdown()` 请求 pi 关闭。pi 0.85.1 没有工具结果的 `terminate` 处理。结果为 `reported <outcome>`。
 
 ### `onlyne_handoff{to, text, image?}`
 
-将此会话的任务交予其族的下一个节点。插件发送一个 `handoff` 帧，指明会话当前持有的任务，主机随后在 `to` 之下创建一个子任务：子任务将本任务命名为其 `parent_task`，位置向后一跳，并携带相同的族 id、跳数预算、origin、deadline 和 labels。工具结果会给出子任务 id 及其跳数。客户端拒绝会作为工具错误原样返回。`image` 是发送工具所接受的同类绝对 `png/jpeg/gif/webp` 路径。causality 指明跳数预算的任务分配信息，会在其注入的页眉行中写明当前跳数与预算。`onlyne_send{kind: "task"}` 是到达角色的另一种方式：该信封在第 0 跳启动一个新族。
+将此会话的任务交予其族的下一个节点。插件发送一个 `handoff` 帧，指明会话当前持有的任务，主机随后在 `to` 之下创建一个子任务：子任务将本任务命名为其 `parent_task`，位置向后一跳，并携带相同的族 id、跳数预算、origin、deadline 和 labels。结果是 `handed on to <role>`：子任务 id 与跳数是 ledger 的行，不是模型需要读回的东西。客户端拒绝会作为工具错误原样返回。`image` 是发送工具所接受的同类绝对 `png/jpeg/gif/webp` 路径。跳数与跳数预算留在信封的 `causality` 里，属于协议数据：投递文本由 client 自己渲染（发送方、正文、附件路径），本插件原样注入。`onlyne_send{kind: "task"}` 是到达角色的另一种方式：该信封在第 0 跳启动一个新族。
 
 ## 4. 结果规则
 
 `onlyne_complete` 是通向 `done` 的唯一路径。插件为每个任务发送一次完成报告，在以下事件中第一个发生时发送：
 
-1. **`onlyne_complete`**——模型给出明确结果（默认为 `done`，或为 `failed` / `cancelled`）。同一任务后续的完成调用会被拒绝，不会再次报告。其非空 `text` 就是 head。
-2. **出错的轮次**——该轮次以模型提供方错误结束（`stopReason: "error"`）。这本身即可证明出错，因此插件立即报告 `failed`，并将错误作为 head。
-3. **空闲阶梯**——某轮次正常结束但未完成，pi 正在等待输入，且任务仍处于打开状态。插件重新发送任务分配信息，并计入当前级数。当某次空闲发现 `idleReminders` 指定的上限已经用尽时，会报告 `failed`——head 为 `no completion after <n> idle reminders`——并以完成时相同的方式退出会话。
-4. **`recycle{outcome}`**——主机正在拆除会话。插件先使用主机给出的结果确定尚未确定状态的任务，然后停止并退出 pi。
+1. **`onlyne_complete`**——模型给出明确结果：`done`、`failed`、`cancelled` 或 `blocked`。同一任务后续的完成调用会被拒绝，不会再次报告。其非空 `summary` 就是 head。
+2. **出错的轮次**——该轮次以模型提供方错误结束（`stopReason: "error"`）。这本身即可证明出错，因此插件立即报告 `failed`，并将错误作为 head。报告本身要等到 pi 正在等待输入时才发出，因此承载它的那次心跳陈述的是会话真实的阶段。
+3. **`recycle{outcome}`**——主机正在拆除会话。插件先使用主机给出的结果确定尚未确定状态的任务，然后停止并退出 pi。
 
-有两种情况不会确定最终状态：任务已经分配，但其轮次尚未运行，此时注入消息尚未执行，立即完成会声称完成了从未发生的工作；以及阶梯仍有下一级可走的空闲。阶梯重新发送任务最初到达时的分配信息，使用与注入时相同的页眉、任务文本和附件路径，并附上一行说明上一轮次结束时没有完成。阶梯不会重新发送角色说明，因为角色说明已存在于会话上下文中。其图像不会再次附加：路径以文本形式传递，因此相同的字节不会两次进入上下文。同任务的新信封会重新开始计数。
+正常结束、但没有完成的轮次在这里不结算任何东西。那条规则由 client 拥有（`docs/v2-CONTRACT.md` 的「3c. One turn-end rule」）：它统计这类结束、把自己的一句话作为 `nudge` 发来，并决定一次始终不上报的投递会变成什么。插件把那句话交给 pi，并且只回答自己交出去了，于是措辞、计数与结算都只有一个拥有者，而不是两个。注入消息尚未跑过任何轮次的任务，无论结算信号说什么都不动：现在就上报等于宣称从未发生的工作已经完成。
 
-`head` 是单行文本，上限为 200 个字符；它与客户端写入 `out_head` 的内容以及回执携带的内容一致。每个任务的 `head` 只有一个来源：显式 `onlyne_complete` 调用携带的 `text`、失败轮次所报告的错误，或者阶梯自身的文本行。对于完全没有携带文本的 `onlyne_complete` 调用，最后一条助手文本作为回退；此类调用之后说出的句子不能替代调用已经交付的内容，也不会被其他任何内容读取。
+`head` 是单行文本，上限为 200 个字符；它与客户端写入 `out_head` 的内容以及回执携带的内容一致。每个任务的 `head` 只有一个来源：显式 `onlyne_complete` 调用携带 `summary` 时就是它，否则是失败轮次报告的错误。完全没有携带 `summary` 的调用，回退到最后一条助手文本；此类调用之后说出的句子不能替代调用已经交付的内容，也不会被其他任何内容读取。
 
 已报告的完成会结束会话进程。`report.complete` 以请求形式发出；客户端仅在完成会话记录的处理、确认投递并写入 `Completion` 信封后才回复。插件在该回复到达时请求 pi 关闭。套接字无法传输的结果会进入队列，并在下一次 `hello` 之后刷新；该次刷新收到的回复即为结束进程的交接。主机拒绝的完成会让进程继续运行，因此进程退出不会导致任务丢失。
 
@@ -619,52 +558,9 @@ pi API 缺失时会发生什么，以及主机随后如何处理：
 
 插件向 pi 查询，而不是自行假设。`ctx.isIdle()` 回答是否还有运行、压缩或排队中的续跑，`ctx.hasPendingMessages()` 回答输入是否已经在路上；缺失或抛错的探针一律读作 `running`。`agent_settled` 通常是空闲声明落地的时刻，因为 pi 只在一次运行彻底结算之后才触发该事件；单个轮次的结束是另一个时刻。每 10 秒的心跳会在每次触发时重新向 pi 推导阶段，因此重新开始的运行不会留下过期的空闲读数。
 
-后台任务扩展改变了这个问题。`bg_run` 及其同类工具立即返回，工作继续在子进程中运行，于是 pi 在会话任务仍在进行时等待输入。插件通过该扩展注册的工具识别它，并向它的 EventBus 服务查询存活任务列表；处于 `running` 状态的任务会让会话保持 `running`，并让阶梯退后，直到该任务报告终态。没有安装该扩展的会话没有可识别的工具、没有查询，也就没有可等待的东西。
+后台任务扩展改变了这个问题。`bg_run` 及其同类工具立即返回，工作继续在子进程中运行，于是 pi 在会话任务仍在进行时等待输入。插件通过该扩展注册的工具识别它，并向它的 EventBus 服务查询存活任务列表；处于 `running` 状态的任务会让会话保持 `running`，插件在轮次结束时欠下的那份报告——它自己目睹的失败——也要等它结束。没有安装该扩展的会话没有可识别的工具、没有查询，也就没有可等待的东西。
 
-阶梯统计的是一次空闲期，而不是任务的整个生命。会话自己启动的任何一轮次都会把计数清零，因此恢复运行并继续工作之后，上限重新开始；阶梯自己的提醒唤醒的那一轮次属于该提醒所属的空闲期，上限依然可以达到。
-
-## 5. 中继守卫
-
-会话即使没有交接任何工作，也可能报告 `done`。中继守卫用于防止此类意外：一个 bench 会话叙述了自身的进度，在待办事项尚未处理时调用了 `onlyne_complete`，下游的 `writer` 一直等待一个从未发送的交接。中继守卫仅判定投递事实——某个角色是否收到消息——不会判断已发送文本的形式或质量。
-
-策略位于插件的 `package.json` 旁边，因此会随生成工作区所加载的副本一同分发：生成工作区中为 `<ws>/.onlyne/agent/onlyne-agent-pi/relay.toml`，手动安装中为 `relay.toml`。
-
-```toml
-relay_required = ["writer"]        # these roles must have received a handoff
-relay_required_count = 2           # legacy alias of relay_count: this many distinct downstream roles
-```
-
-`relay_count` 是规范计数键。`relay_required_count` 是其旧版别名，也是 `relay.toml` 自身采用的拼写。列表键和计数键同时存在时，`relay_required` 优先。
-
-策略应放在规范中，而不是供应商目录中。`onlyne generate --force` 会重写此包被供应到的副本，并连同其中的手写 `relay.toml` 一同处理，因此一个 `[[client]]` 条目只需声明一次策略，客户端就会将其注入所启动的每个会话进程：
-
-```toml
-[[client]]
-role = "planner"
-relay_count = 2                    # this many distinct downstream roles
-relay_required = ["writer"]        # these roles must have received a handoff
-```
-
-来源的优先级为 `environment > relay.toml > none`：`ONLYNE_RELAY_REQUIRED`（列表，逗号分隔）和 `ONLYNE_RELAY_COUNT`（计数，十进制）是客户端根据上述条目填充的变量；只有环境变量完全未指明策略时，才读取 `package.json` 旁边的 `relay.toml`；两个来源均未指定策略时，不启用守卫。规范同时命名两个变量时，两者都会注入，因此列表仍然优先。手写 `relay.toml` 仍是手动安装的应急入口，适用于规范始终未声明策略的机器；被环境变量遮蔽的文件会被直接忽略。变量已设置但无法解析时，会在 stderr 上报告并忽略，此时由文件决定策略。
-
-|  |  |
-| --- | --- |
-| 默认 | 两个来源均未指明策略：不启用守卫，完成路径沿用守卫加入前此插件随包提供的路径 |
-| 证据 | 此会话自身成功执行的 `onlyne_send` 调用所触达的角色，包括 `note` 和 `task`；被拒绝的信封不计入任何角色 |
-| 拒绝 | `onlyne_complete` 抛出 `onlyne: relay guard: missing handoff to: writer (…)`，并指出缺少的内容及解除方法 |
-| 拒绝之后 | 不会报告任何内容，不会将结果排队，也不会分离：会话保持挂载状态；交接发出后，同一调用即可通过 |
-| 列表模式 | 每个列出的角色都必须按字面出现在已送达集合中 |
-| 计数模式 | 不同的下游角色；发送到当前角色自身或发回分配任务的角色不计入 |
-| 范围 | 此会话自身在进程内存中的发送记录：重新连接会保留记录，重启后的会话从空状态开始，不推测早先进程发送过什么 |
-| 豁免 | `force: true` 搭配非空 `reason`；仅在守卫拒绝时发挥作用 |
-| 审计 | 获豁免的完成报告，其账本 head 以 `relay-guard-forced: <reason>` 开头；若调用携带了模型的 `text`，则将其附加在后面 |
-| 不受守卫保护 | 插件在没有模型参与时报告的结果：出错的轮次、阶梯导致的失败，以及 `recycle{outcome}` |
-
-`relay.toml` 是 TOML 的封闭子集：扁平的 `key = value` 行、上述两个键、由双引号字符串构成的单行数组，以及 `#` 注释。超出此范围的内容会在 stderr 上警告并被忽略。它不采用 `.onlyne/config.toml`：客户端使用 `deny_unknown_fields` 解析该文件，因此在其中加入插件键会阻止客户端启动。
-
-没有生效策略时，`force` 和 `reason` 不起作用。
-
-## 6. 协议说明与差异
+## 5. 协议说明与差异
 
 下面每项都是对 `PROTOCOL.md` 的有意解读，或是在已发布客户端上测得的行为。
 
@@ -673,14 +569,14 @@ relay_required = ["writer"]        # these roles must have received a handoff
 - **`ready` 每次连接报告一次。** 主机自身的交接路径（`crates/onlyne-client/src/session/dispatch/delivery.rs::hand_session`）已会在客户端为挂载插件暂存会话时报告 `ready`，因此主机会将插件的第二次报告视为空操作。插件仍会发送：在任何工作存在之前完成挂载的插件正是就绪屏障所涵盖的情况，而且该报告只占用一个帧。
 - **从不发送 `cluster_ref`。** 此插件代表本地角色，不代表聚合角色；出于相同原因，Rust 一侧会将该字段设为 `skip_serializing_if`，使其缺省。
 - **使用心跳响应 `probe`**，遵循 `PROTOCOL.md` 中“`probe` 声明新的资源观测”的说明。
-- **仅当 `config_get` 以 `stdin:` 开头时，才将其读取为任务正文**，这是 `PROTOCOL.md` 为缺少 `inject` 的插件记录的重载。任何其他键都会记录到日志并被忽略，不会被误读。
+- **仅当 `config_get` 以 `stdin:` 开头时，才将其读取为投递文本**，这是 `PROTOCOL.md` 为缺少 `inject` 的插件记录的重载：该键携带的是与 `assign` 的 `text` 相同的已渲染字节，原样注入。任何其他键都会记录到日志并被忽略，不会被误读。
 - **`frame_too_large` / `bad_frame`**：正文过大时，会在写入任何字节之前拒绝；分帧错误会关闭连接并重新连接。正文损坏后，分帧无法重新同步，这也与 `crates/onlyne-wire/src/frame.rs` 得出的结论相同。
-- **投递具备幂等性；任务不具备。** 去重键是信封 id。同一投递出现两次只会产生一次注入，以及带有 `reason: "duplicate"` 的确认；为已在运行的任务创建的新信封，会作为另一条消息到达该会话——工作记录保留其计数器和其中继账本，仅其“自该指令以来的轮次”看门狗重新启动。客户端为每个信封生成新的 uuid，因此 `duplicate` 仅会在真正重新提供任务时触发。
+- **投递具备幂等性；任务不具备。** 去重键是信封 id。同一投递出现两次只会产生一次注入，以及带有 `reason: "duplicate"` 的确认；为已在运行的任务创建的新信封，会作为另一条消息到达该会话。客户端为每个信封生成新的 uuid，因此 `duplicate` 仅会在真正重新提供任务时触发。
 
 - **窗格绑定（Orca 标签页）。** 在 Orca 窗格内，插件会在每次心跳中通过报告 `Observation` 里的 `observed.host.orca.pane_key` 报告其运行所在的窗格（`crates/onlyne-client/src/host.rs`），并在环境变量指明时一并报告 `tab_id` / `leaf_id` 和终端 `handle`。绑定是从*内部*继承的，从不猜测：Orca 窗格会将其 `ORCA_PANE_KEY` / `ORCA_TAB_ID` / `ORCA_LEAF_ID` / `ORCA_TERMINAL_HANDLE` 导出到所启动的命令中（测于 2026-09-11，Orca 1.4.198），客户端会将自己的环境传递给会话命令。因此，窗格内的进程是唯一能够从内部说明 onlyne 会话位于哪个窗格的组件；pi 下游的任何内容都无法恢复此信息。在窗格之外，`host` 键会完全缺失：普通终端中的 pi 会报告不含 host 字段的观测，不会生成空窗格字段。
 - **不会为此向工作区写入任何内容。** 已不再有绑定声明文件：绑定信息随客户端已经镜像的观测一同传递。不存在声明文件，因为没有组件创建它，工作区的缓存目录也不会被触及。这使 `integrations/orca-plugin` 无需读取任何路径即可将标签页轴限定为真实会话，也让监管器仍能说明一个*已结束*会话的运行位置：`report.complete` 会继续携带 `host`。
 
-## 7. 配置参考
+## 6. 配置参考
 
 | 环境变量 | 是否必需 | 效果 |
 | --- | --- | --- |
@@ -688,17 +584,15 @@ relay_required = ["writer"]        # these roles must have received a handoff
 | `ONLYNE_SESSION_ID` | 是 | 挂载的会话 id；已发布客户端中的 `session_id` 等于 `task_id` |
 | `ONLYNE_TASK_ID` | 是 | 此进程承载的任务；驱动 `session_register` 和初始的 `ready` |
 | `ONLYNE_SOCKET` | 否 | 客户端为此工作区提供服务的套接字，会注入所启动的每个会话进程；变量未设置时，插件自己去运行目录读注册文件（`<digest>.json`），挑出 `root` 就是本工作区的那个 client |
-| `ONLYNE_RELAY_REQUIRED` | 否 | 角色规范中的 `relay_required`，以逗号连接：守卫的列表模式（§5） |
-| `ONLYNE_RELAY_COUNT` | 否 | 角色规范中的 `relay_count`：守卫的计数模式，仅在列表为空时决定结果（§5） |
 | `ORCA_PANE_KEY` | 否 | 此进程的运行位置（`<tab_id>:<leaf_id>`），每次心跳通过 `observed.host.orca.pane_key` 上报；在 Orca 窗格之外未设置，因此该字段会缺失 |
 | `ORCA_TAB_ID` / `ORCA_LEAF_ID` | 否 | 单独的窗格 id；仅设置窗格键本身时，会对该键进行解析 |
 | `ORCA_TERMINAL_HANDLE` | 否 | 终端句柄，在窗格键旁以 `host.orca.handle` 上报，其值即 `orca terminal switch` 所使用的值 |
 
 需要知道的常量：插件每 10 s 发送一次心跳（`heartbeat_timeout_ms` 为 30 s），为 `hello` 留出 5 s，每个请求留出 30 s，并按 1/2/4/8/16/30 s 的阶梯重新连接。
 
-插件会读取自己的两个文件：`<cwd>/.pi/onlyne.json`（开关，§1）、`package.json` 旁边的 `relay.toml`（中继策略的回退来源，仅在客户端没有注入策略时读取，§5）。第三处读取属于机器而不是工作区：`ONLYNE_SOCKET` 未设置时，插件遍历机器级运行目录里的 client 注册文件，找出写下本工作区的那个（§8）。
+插件会读取自己的一个文件：`<cwd>/.pi/onlyne.json`（开关，§1）。另一处读取属于机器而不是工作区：`ONLYNE_SOCKET` 未设置时，插件遍历机器级运行目录里的 client 注册文件，找出写下本工作区的那个（§7）。
 
-## 8. 故障排除
+## 7. 故障排除
 
 | 症状 | 原因 | 检查 |
 | --- | --- | --- |
@@ -709,8 +603,7 @@ relay_required = ["writer"]        # these roles must have received a handoff
 | `reconnecting in 4000ms` 持续循环 | 客户端已停止，或套接字已被替换 | `onlyne --server-root … roles` |
 | `ready refused: internal: unknown session for …` | 插件完成挂载并为一个客户端从未暂存的任务进行了报告（在任务之外手动启动 pi 时属于正常情况） | 在客户端下启动 pi，不手动启动 |
 | `assign` 始终未到达 | 客户端的 `session_command` 未启动 pi，或 `inject` 已被移除 | 在客户端日志中查看启动行；通过 `/onlyne status` 查看能力集合 |
-| 账本保持 `in_flight` | 尚未完成：还没有轮次运行（注入消息尚未执行），或者阶梯仍在提醒（`idleReminders`）。在 pi-onlyne 1.2.1 对上 pi 0.87 时，带图片附件的信封会什么都没注入：pi 读取本插件现在送出的扁平 `ImageContent`，拒掉旧插件构造的嵌套 part，任务正文随之一起丢失 | 在 pi 会话文件中查看 `onlyne-assign` 条目及其后注入的提醒；通过 `onlyne` 面板查看 `reminder n of m`；通过 `/onlyne status` 查看任务和阶段；要找那次拒绝，看窗格里的 `Extension "<runtime>" error` 行，以及 1.2.2 上插件的 `attachment carried no base64 data or no media type` 日志 |
-| `onlyne_complete` 回复 `relay guard: missing handoff to: …` | 工作区的规范（或替代该规范的 `relay.toml`）指定了一个此会话从未向其发送的角色 | 常规通知会出现在 `onlyne` 面板中；stderr 会保留拒绝消息，例如 `relay guard from …`、套接字错误、超时和分帧错误；`required=…` 指明策略；`relay guard: missing handoff …` 指明已送达的集合 |
+| 账本保持 `in_flight` | 尚未完成：还没有轮次运行（注入消息尚未执行），或者该轮次结束时没有完成，而客户端尚未结算这次投递。在 pi-onlyne 1.2.1 对上 pi 0.87 时，带图片附件的信封会什么都没注入：pi 读取本插件现在送出的扁平 `ImageContent`，拒掉旧插件构造的嵌套 part，任务正文随之一起丢失 | 在 pi 会话文件中查看 `onlyne-assign` 条目及其后注入的 `nudge` 句子；通过 `/onlyne status` 查看任务和阶段；要找那次拒绝，看窗格里的 `Extension "<runtime>" error` 行，以及 1.2.2 上插件的 `attachment carried no base64 data or no media type` 日志 |
 | `hello … forbidden`／在 `hello` 后立即关闭连接 | 挂载角色与客户端角色不匹配 | `hello.args.mount.role` 与工作区角色 |
 | `frame_too_large` | 正文超过 8 MiB | 仅可通过超大的出站图像达到；此上限来自核心 |
 | 工具缺失 | 该 pi 版本中不存在 `pi.registerTool` | `/onlyne status`；上方的能力表 |
@@ -719,11 +612,11 @@ relay_required = ["writer"]        # these roles must have received a handoff
 
 `/onlyne status` 会打印实时状态（`connected`、`socket`、`role`、`sessionId`、`generation`、`agentState`、`seq`、`taskSeqs`、`tasks`、`pendingCompletions`、`lastError`、计数器），`/onlyne connect` / `/onlyne disconnect` 可手动打开和关闭套接字。
 
-## 9. 开发
+## 8. 开发
 
 ```bash
 cd plugins/onlyne-agent-pi
-node --test src/*.test.mjs        # framing, protocol, agent state machine, config, relay guard, socket path
+node --test src/*.test.mjs        # framing, protocol, agent state machine, config, socket path
 ```
 
 除非 `target/debug/onlyne-client` 和 `onlyne-server` 存在，否则 `src/agent.live.test.mjs` 会自行跳过。`crates/onlyne-testkit/e2e/pi-live.sh` 是端到端用例：pi 缺失或没有可用的模型凭据时，它会跳过（退出码 0）；否则，它会通过真实客户端运行一个真实任务，直到 `acked`。

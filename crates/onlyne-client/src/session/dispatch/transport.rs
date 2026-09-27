@@ -11,18 +11,13 @@ use super::state::{
     rebase_generation, slot_key_named, slot_key_serving_task, slot_task,
 };
 
-/// The name one held frame is addressed to.
+/// The one sentence a session that ended a turn without a completion reads.
 ///
-/// A role recipient keeps its own name, which is the role the merged relay is
-/// addressed to. Any other recipient keeps the spelling the operator reads in a
-/// session listing, and the merged relay addressed to it is refused and recorded
-/// rather than quietly dropped: a read-only session cannot answer a conversation
-/// it no longer serves.
-fn held_recipient(to: &Principal) -> String {
-    to.role_name()
-        .map(str::to_string)
-        .unwrap_or_else(|| to.to_string())
-}
+/// The wording is a contract (`docs/v2-CONTRACT.md` §3c): the plugin composes
+/// none of it and keeps no copy, so this client owns the bytes and hands them
+/// over verbatim through [`DispatchState::nudge_plugin`].
+pub const NUDGE_TEXT: &str =
+    "If this task is finished, report it with onlyne_complete; if something is missing, say what.";
 
 /// Whether one session slot is the session an adapter mount named.
 ///
@@ -70,7 +65,21 @@ pub(super) fn serves_session(inner: &DispatchInner, session_id: &str, io: &Adapt
 fn slot_is_served_by(inner: &DispatchInner, key: &str, slot: &SessionSlot, io: &AdapterIo) -> bool {
     inner.transports.iter().any(|(served, (transport, _))| {
         transport.same_connection(io) && names_session(key, slot, served)
-    })
+    }) || tools_bound_to(inner, key, io)
+}
+
+/// Whether `io` is the tools mount bound to one session.
+///
+/// A tools mount holds no process and is no transport, so the map the binding
+/// rules fill says nothing about it: the handshake's own record is the whole
+/// answer, and it is what lets a tools connection's `handoff` and `report`
+/// frames travel the same authority door an agent's frames do
+/// (`docs/v2-CONTRACT.md` §3b).
+fn tools_bound_to(inner: &DispatchInner, key: &str, io: &AdapterIo) -> bool {
+    inner
+        .tools_mounts
+        .iter()
+        .any(|(held, bound)| held == key && bound.same_connection(io))
 }
 
 /// Whether `io` is the connection serving the session that answers for one task.
@@ -123,12 +132,11 @@ pub(super) fn is_revived_connection(inner: &DispatchInner, io: &AdapterIo) -> bo
 /// The held half of the pair [`serves_task`] reads live. A demoted connection is
 /// no session's transport, so the strict rule refuses its observation — and the
 /// design still lets it answer for the task its own agent finished: `plugin_send`
-/// holds what it sends so it leaves inside the completion that merges the two
-/// accounts, and `retire_revived` retires the demoted slot with that completion.
-/// A held connection whose `send` is held for one task is therefore the same
-/// connection that may report that task ended, and no other: the name it mounted
-/// with resolves to the slot the task answers to, exactly as the hold path
-/// resolves it.
+/// routes what it sends onto the wire like any other session's, and
+/// `retire_revived` retires the demoted slot with the completion that answers it.
+/// A held connection is therefore the connection that may report one task ended,
+/// and no other: the name it mounted with resolves to the slot the task answers
+/// to.
 fn held_for_task(inner: &DispatchInner, task_id: &str, io: &AdapterIo) -> bool {
     inner.revived.iter().any(|(name, revived, _)| {
         revived.same_connection(io)
@@ -456,44 +464,28 @@ impl DispatchState {
 
     /// Take one plugin `send` frame and answer what the plugin is told.
     ///
-    /// A live connection's envelope goes to the durable outbound queue exactly as
-    /// it always has, and the answer keeps the shape the plugin reads. A frame
-    /// from a connection this client holds read-only is held instead (§1 (c)): it
-    /// leaves as part of the merged handoff its task's completion routes, so the
-    /// recipient sees one message per downstream role and can tell which session
-    /// wrote which half of it.
+    /// One path, whichever connection sent the frame. A handoff is a real
+    /// delivery to the role it names, and this client is the only process
+    /// holding a link that could carry it, so a connection that came back for a
+    /// task another session now serves routes here exactly like the serving one.
+    /// Nothing is held for a later merge (§3c): a session's handoffs travel as
+    /// its own frames, answered where it sends them, so a settlement is only
+    /// the completion's half of the account.
     pub fn plugin_send(&self, io: &AdapterIo, envelope: &Envelope) -> Result<serde_json::Value> {
         let mut inner = self.inner.lock();
-        let Some(session_id) = inner
-            .revived
-            .iter()
-            .find(|(_, revived, _)| revived.same_connection(io))
-            .map(|(session_id, _, _)| session_id.clone())
-        else {
-            // The queue branch leaves on this client's authenticated link, so the
-            // server reads what it carries as this role's own message. The held
-            // branch needs no such question answered: a read-only connection's
-            // envelope never reaches the wire, and it leaves later as a `handoff`
-            // line inside the completion the *serving* session routes.
-            send_is_authorised(&inner, envelope)?;
-            let op_id = queue_outbound_locked(&mut inner, envelope)?;
-            return Ok(serde_json::json!({"queued": true, "op_id": op_id}));
-        };
-        let task = slot_key_named(&inner, &session_id)
-            .and_then(|key| inner.sessions.get(&key))
-            .map(slot_task)
-            .unwrap_or(session_id);
-        let held = Handoff {
-            to_role: held_recipient(&envelope.to),
-            text: Some(envelope.body.text.clone().unwrap_or_default()),
-        };
-        tracing::warn!(
-            task = %task,
-            to = %held.to_role,
-            "a read-only session's send is held for that task's completion"
-        );
-        inner.held_handoffs.entry(task).or_default().push(held);
-        Ok(serde_json::json!({"queued": true, "held": true}))
+        // The envelope leaves on this client's authenticated link, so the server
+        // reads what it carries as this role's own message.
+        send_is_authorised(&inner, envelope)?;
+        let op_id = queue_outbound_locked(&mut inner, envelope)?;
+        // A send the client carried is a delivery to the role it names, and it is
+        // the evidence the relay guard reads at this session's next completion
+        // (`guards.rs`). Only a connection that serves a session records: a
+        // connection that came back for a task another session holds speaks for
+        // no session of this client's.
+        if let Some(key) = super::guards::session_key_of_connection(&inner, io) {
+            super::guards::record_delivery(&mut inner, &key, &envelope.to);
+        }
+        Ok(serde_json::json!({"queued": true, "op_id": op_id}))
     }
 
     /// Park one plugin connection as this role's waiting agent.
@@ -624,6 +616,46 @@ impl DispatchState {
         let request = serde_json::json!({"task_id": task_id});
         if let Err(error) = io.notify(AdapterMsg::Host(HostOp::Probe(request))).await {
             tracing::warn!(error = %error, task = %task_id, "probe frame did not reach the plugin");
+            return false;
+        }
+        true
+    }
+
+    /// Hand one session's own sentence to its agent through the plugin's input.
+    ///
+    /// The turn-end rule has one owner, this client, so the client is what tells
+    /// a plugin-driven session that its turn ended without a completion
+    /// (`docs/v2-CONTRACT.md` §3c). The plugin injects [`NUDGE_TEXT`] through the
+    /// same channel an assignment's text takes and keeps no copy of it; the
+    /// frame carries no envelope, no prose, and no attachments, and it is not a
+    /// delivery: the task stays open and nothing in the plugin's turn
+    /// bookkeeping is reset by it.
+    ///
+    /// Answers whether the frame went out. `false` is the honest answer for a
+    /// session with no plugin to ask and for a plugin that declared no `inject`:
+    /// a drive that cannot be nudged must not be told it was, and the caller
+    /// settles the delivery at that turn end instead.
+    pub async fn nudge_plugin(&self, task_id: &str) -> bool {
+        let Some((io, capabilities)) = self.session_transport(task_id) else {
+            tracing::debug!(
+                task = %task_id,
+                "nudge found no plugin connection to hand the sentence to"
+            );
+            return false;
+        };
+        if missing_capability(&capabilities, Capability::Inject) {
+            tracing::debug!(
+                task = %task_id,
+                "plugin does not implement inject; the turn end settles the delivery"
+            );
+            return false;
+        }
+        let frame = AdapterMsg::Host(HostOp::Nudge {
+            task_id: task_id.to_string(),
+            text: NUDGE_TEXT.to_string(),
+        });
+        if let Err(error) = io.notify(frame).await {
+            tracing::warn!(error = %error, task = %task_id, "nudge frame did not reach the plugin");
             return false;
         }
         true

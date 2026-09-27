@@ -361,6 +361,8 @@ fn spawn_spec(cwd: &Path, task_id: &str, command: &[&str], cluster: &str, role: 
         task_id: task_id.to_string(),
         command: command.iter().map(|part| (*part).to_string()).collect(),
         env,
+        tools_token: String::new(),
+        prose: String::new(),
         focus: None,
         placement: None,
         rename: None,

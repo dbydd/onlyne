@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 fn spec_reloaded_role_slice_change_updates_dispatch_gate() {
     let (state, _store) = test_state(1, vec!["old".into()]);
     let changed = apply_role_info(&state, &role_info(2, vec!["new".into()]));
-    assert_eq!(changed, vec!["session_command", "max_sessions"]);
+    assert_eq!(changed, vec!["runtime", "max_sessions"]);
     let applied = state.dispatch.role_slice();
     assert_eq!(applied.max_sessions, 2);
     assert_eq!(applied.command, vec!["new"]);
@@ -353,6 +353,8 @@ async fn lingering_completed_session(state: &RunState, task: &str) {
             task_id: task.to_string(),
             outcome: Outcome::Done,
             head: Some("done".into()),
+            details: None,
+            files: Vec::new(),
             reply_to: None,
             cluster_ref: None,
         },
@@ -569,6 +571,8 @@ async fn a_cancel_answered_by_the_plugin_settles_through_the_report_alone() {
             task_id: task.clone(),
             outcome: Outcome::Cancelled,
             head: Some("the operator's word".into()),
+            details: None,
+            files: Vec::new(),
             reply_to: None,
             cluster_ref: None,
         },

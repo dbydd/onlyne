@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod content;
+pub mod delivery;
 pub mod host;
 pub mod ops;
 pub mod reconcile;

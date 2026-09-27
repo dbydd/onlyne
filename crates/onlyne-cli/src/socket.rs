@@ -307,6 +307,7 @@ mod tests {
                 pid: std::process::id(),
                 version: "test".to_string(),
                 runtime: None,
+                placement: None,
             },
         )
         .expect("registration");

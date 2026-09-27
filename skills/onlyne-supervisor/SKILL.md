@@ -78,9 +78,9 @@ to you and the spec file.
    directory gets a workspace carrying no package at all, and its sessions start with no
    plugin tools registered.
    The skill a workspace carries comes out of the binary:
-   `onlyne skill export --dest <workspace>/.agents/skills --set role` writes `onlyne-role`
-   and `onlyne-role-payload-v2`, `--set supervisor` writes `onlyne-supervisor` for your own
-   seat, and `--set dev` writes `onlyne`, each as `<dest>/<name>/SKILL.md`. The default
+   `onlyne skill export --dest <workspace>/.agents/skills --set role` writes `onlyne-role`,
+   `--set supervisor` writes `onlyne-supervisor` for your own seat, and `--set dev` writes
+   `onlyne`, each as `<dest>/<name>/SKILL.md`. The default
    `<dest>` is `.agents/skills` under the working directory. A file whose bytes already
    match is left alone, and a differing file stops the export with exit 4 and `onlyne:
    refusing to overwrite <path>; pass --force` before anything is written.

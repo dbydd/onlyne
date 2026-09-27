@@ -224,8 +224,8 @@ fn changed_client_fields(before: &ClientEntry, after: &ClientEntry) -> Vec<Strin
     if before.allowed_targets != after.allowed_targets {
         fields.push("allowed_targets".to_string());
     }
-    if before.session_command != after.session_command {
-        fields.push("session_command".to_string());
+    if before.runtime != after.runtime {
+        fields.push("runtime".to_string());
     }
     if before.timeout != after.timeout {
         fields.push("timeout".to_string());

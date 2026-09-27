@@ -1,0 +1,5 @@
+{
+  "frame": "{\"op\":\"hello\",\"args\":{\"protocol\":1,\"plugin\":\"onlyne-mcp\",\"version\":\"1.4.1\",\"kind\":\"tools\",\"capabilities\":[],\"mount\":{\"token\":\"token-1\"}}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "the MCP bridge binds one session with the client-issued tools token; the mount carries the token and nothing else, since a payload naming a role would let a caller speak for a session it never held"
+}

@@ -4,8 +4,9 @@ use super::outbound::store_ack;
 use super::projection::{stored_task_state, task_state_of};
 use super::retire::stored_close_reason;
 use super::state::{
-    ControlNote, ControlWord, DispatchInner, DispatchState, due_control_settles, live_sessions,
-    session_exited, slot_key_serving_task,
+    ControlNote, ControlWord, DispatchInner, DispatchState, ToolsScope, ToolsSession,
+    due_control_settles, live_sessions, session_exited, slot_key_for_token, slot_key_named,
+    slot_key_serving_task, token_names_session, tools_session_of,
 };
 use super::transport::names_session;
 
@@ -23,6 +24,9 @@ impl DispatchState {
                 role: role.into(),
                 workspace: workspace.into(),
                 command,
+                drive: None,
+                placement: None,
+                runtime_refusal: None,
                 max_sessions,
                 session_policy: onlyne_config::SessionPolicy::default(),
                 relay_required: Vec::new(),
@@ -40,9 +44,10 @@ impl DispatchState {
                 parked: Vec::new(),
                 stall: crate::session::stall::StallWatch::new(),
                 revived: Vec::new(),
-                held_handoffs: HashMap::new(),
                 control_settles: Vec::new(),
+                tools_mounts: Vec::new(),
                 in_frame: Vec::new(),
+                turn_end: super::turn_end::TurnEndWatch::default(),
             })),
         }
     }
@@ -51,6 +56,72 @@ impl DispatchState {
     pub fn with_session_policy(self, policy: onlyne_config::SessionPolicy) -> Self {
         self.inner.lock().session_policy = policy;
         self
+    }
+
+    /// Install the placement this machine resolved. It is the other half of the
+    /// drive rule, so it is recorded even when the pair it makes is refused.
+    pub fn with_placement(self, placement: crate::backend::SessionPlacement) -> Self {
+        self.inner.lock().placement = Some(placement);
+        self
+    }
+
+    /// The drive the role's spec declares, `None` before the first `welcome`.
+    pub fn drive(&self) -> Option<onlyne_config::Drive> {
+        self.inner.lock().drive
+    }
+
+    /// The placement this machine resolved, as the registration spells it.
+    pub fn placement_name(&self) -> Option<&'static str> {
+        self.inner
+            .lock()
+            .placement
+            .map(crate::backend::SessionPlacement::as_str)
+    }
+
+    /// The name of the session backend currently installed.
+    pub fn session_backend(&self) -> &'static str {
+        self.inner.lock().backend.name()
+    }
+
+    /// The role workspace this client serves.
+    pub fn workspace(&self) -> PathBuf {
+        self.inner.lock().workspace.clone()
+    }
+
+    /// Record the drive the role's spec declares, and the sentence a delivery
+    /// meets when that drive cannot run under this machine's placement.
+    ///
+    /// The drive lands whether or not a backend could be installed for it: a
+    /// pair this machine cannot host still has to be *known*, or the next
+    /// delivery would run under the backend the previous drive left behind.
+    pub fn set_drive(&self, drive: onlyne_config::Drive, refusal: Option<String>) {
+        let mut inner = self.inner.lock();
+        inner.drive = Some(drive);
+        inner.runtime_refusal = refusal;
+    }
+
+    /// Install the backend a role's drive selects on this machine.
+    ///
+    /// Answers whether it landed. A drive cannot move while this role holds live
+    /// sessions: their panes, tabs, and children are the installed backend's to
+    /// close and to probe, and a backend that never opened a resource cannot
+    /// answer for it. So the move waits — the caller keeps the old drive
+    /// recorded, and the next `welcome` or spec reload tries again once the
+    /// sessions are gone.
+    pub fn set_backend(&self, backend: Arc<dyn SessionBackend>) -> bool {
+        let mut inner = self.inner.lock();
+        if inner.backend.name() != backend.name() && !inner.sessions.is_empty() {
+            return false;
+        }
+        if inner.backend.name() != backend.name() {
+            tracing::info!(
+                previous = inner.backend.name(),
+                selected = backend.name(),
+                "the session backend moved with the role's drive"
+            );
+        }
+        inner.backend = backend;
+        true
     }
 
     /// The role's `[client.session]` policy.
@@ -264,6 +335,7 @@ impl DispatchState {
     pub fn role_slice(&self) -> crate::session::slice::RoleSlice {
         let inner = self.inner.lock();
         crate::session::slice::RoleSlice {
+            drive: inner.drive.unwrap_or_default(),
             command: inner.command.clone(),
             max_sessions: inner.max_sessions,
             relay_required: inner.relay_required.clone(),
@@ -501,5 +573,90 @@ impl DispatchState {
                     .any(|session| names_session(key, slot, session))
             })
             .and_then(|(_, slot)| slot.task_id.clone())
+    }
+
+    /// The tools token of one live session, when this client holds it.
+    ///
+    /// The one door the token leaves this process through: the session's own
+    /// drive reads it while building the child that mounts `onlyne mcp`
+    /// (`SpawnSpec.tools_token`), and nothing else may hand it out
+    /// (`docs/v2-CONTRACT.md` §3b).
+    pub fn tools_token(&self, session_id: &str) -> Option<String> {
+        let inner = self.inner.lock();
+        let key = slot_key_named(&inner, session_id)?;
+        inner
+            .sessions
+            .get(&key)
+            .filter(|slot| !session_exited(&inner, &slot.session.task_id))
+            .map(|slot| slot.tools_token.clone())
+    }
+
+    /// The session a `tools` mount token speaks for, when it names a live one.
+    pub fn tools_mount_for(&self, token: &str) -> Option<ToolsSession> {
+        let inner = self.inner.lock();
+        let key = slot_key_for_token(&inner, token)?;
+        tools_session_of(&inner, &key)
+    }
+
+    /// Bind one `tools` connection to the session its token names.
+    ///
+    /// The hello validated the token; this writes the binding the session's
+    /// later frames are measured against, and answers the session the
+    /// connection now speaks for. A second connection presenting the same token
+    /// takes the binding over, and the earlier one then fails the per-frame
+    /// liveness check — a token belongs to one session, and the newest
+    /// connection is the one that speaks for it. `None` is a token whose
+    /// session retired between the handshake and this line.
+    pub fn bind_tools_mount(&self, token: &str, io: AdapterIo) -> Option<ToolsSession> {
+        let mut inner = self.inner.lock();
+        let key = slot_key_for_token(&inner, token)?;
+        let session = tools_session_of(&inner, &key)?;
+        inner.tools_mounts.retain(|(held, _)| held != &key);
+        inner.tools_mounts.push((key, io));
+        Some(session)
+    }
+
+    /// Whether one live tools connection still speaks for a session this client
+    /// holds.
+    ///
+    /// A token dies with its session, and a mount whose session has ended is
+    /// refused from then on: this is the per-frame half of that rule, so a
+    /// connection left open past its session's retirement answers `unauthorized`
+    /// and closes rather than speaking for work nobody holds.
+    pub fn tools_connection_live(&self, io: &AdapterIo) -> bool {
+        self.tools_scope(io).is_some()
+    }
+
+    /// What one live tools connection speaks for, read under the lock that owns
+    /// it; `None` when the connection is unbound or its session has stopped
+    /// serving.
+    ///
+    /// The token is the binding (`docs/v2-CONTRACT.md` §3b), so everything a
+    /// tools frame is stamped with comes from the session's own slot: the open
+    /// delivery its `report` and `handoff` frames name, and the session a `send`
+    /// leaves from. Reading it in one locked pass is what keeps a frame from
+    /// being stamped from a state that moved between the lookup and the stamp.
+    pub fn tools_scope(&self, io: &AdapterIo) -> Option<ToolsScope> {
+        let inner = self.inner.lock();
+        let (key, _) = inner
+            .tools_mounts
+            .iter()
+            .find(|(_, bound)| bound.same_connection(io))?;
+        inner
+            .sessions
+            .get(key)
+            .filter(|slot| token_names_session(&inner, slot))
+            .map(|slot| ToolsScope {
+                session_id: slot.session.task_id.clone(),
+                task_id: slot.task_id.clone(),
+            })
+    }
+
+    /// Drop the binding one tools connection held, whichever session it named.
+    pub fn release_tools_connection(&self, io: &AdapterIo) {
+        self.inner
+            .lock()
+            .tools_mounts
+            .retain(|(_, bound)| !bound.same_connection(io));
     }
 }

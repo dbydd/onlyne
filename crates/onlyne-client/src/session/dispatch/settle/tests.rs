@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::fake::FakeBackend;
 use onlyne_proto::{
-    Body, Causality, Envelope, Handoff, MsgKind, Outcome, Principal, new_envelope, new_task_id,
+    Body, Causality, Envelope, MsgKind, Outcome, Principal, new_envelope, new_task_id,
 };
 use onlyne_store::ClientStore;
 use std::sync::Arc;
@@ -50,19 +50,6 @@ fn queued_ops(store: &ClientStore) -> Vec<ClientOp> {
         .collect()
 }
 
-fn relays(ops: &[ClientOp]) -> Vec<Envelope> {
-    ops.iter()
-        .filter_map(|op| match op {
-            ClientOp::Send(envelope)
-                if envelope.kind == MsgKind::Task && envelope.to == Principal::role("reviewer") =>
-            {
-                Some((**envelope).clone())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 fn projection_reports(ops: &[ClientOp]) -> Vec<onlyne_proto::SessionProjection> {
     ops.iter()
         .filter_map(|op| match op {
@@ -86,8 +73,6 @@ async fn a_refused_replay_releases_the_session_and_keeps_the_first_verdict() {
         &task,
         Outcome::Done,
         Some("first head".into()),
-        None,
-        &[],
         SettleAuthority::ClientOwned,
     )
     .await
@@ -115,8 +100,6 @@ async fn a_refused_replay_releases_the_session_and_keeps_the_first_verdict() {
         &task,
         Outcome::Failed,
         Some("replayed head".into()),
-        None,
-        &[],
         SettleAuthority::ClientOwned,
     )
     .await
@@ -179,49 +162,6 @@ async fn a_refused_replay_releases_the_session_and_keeps_the_first_verdict() {
     assert_eq!(publish.outcome, Some(Outcome::Done));
 }
 
-#[tokio::test]
-async fn a_refused_replay_does_not_relay_its_handoff_again() {
-    let dir = tempdir().expect("tempdir");
-    let task = new_task_id();
-    let (state, store, _backend) = staged_state(&dir, &task);
-    let handoff = [Handoff {
-        to_role: "reviewer".into(),
-        text: Some("one handoff".into()),
-    }];
-    on_out(
-        &state,
-        &task,
-        Outcome::Done,
-        Some("first head".into()),
-        None,
-        &handoff,
-        SettleAuthority::ClientOwned,
-    )
-    .await
-    .expect("first verdict");
-    assert_eq!(relays(&queued_ops(&store)).len(), 1);
-
-    let envelope = task_envelope(&task);
-    dispatch(&state, &envelope).expect("stage the replay");
-    on_out(
-        &state,
-        &task,
-        Outcome::Failed,
-        Some("replayed head".into()),
-        None,
-        &handoff,
-        SettleAuthority::ClientOwned,
-    )
-    .await
-    .expect("refused verdict");
-
-    assert_eq!(
-        relays(&queued_ops(&store)).len(),
-        1,
-        "the first settlement owns the handoff relay"
-    );
-}
-
 /// The never-ran guard reads the one word the row itself publishes.
 ///
 /// A session row whose stored tuple bytes cannot be parsed rebuilds to `Booting`
@@ -260,8 +200,6 @@ async fn a_guard_refuses_on_no_word_but_the_one_it_reports() {
         &task,
         Outcome::Done,
         Some("head".into()),
-        None,
-        &[],
         SettleAuthority::PluginReport,
     )
     .await
@@ -307,8 +245,6 @@ async fn a_completion_with_no_session_row_still_files_its_verdict() {
         &foreign,
         Outcome::Done,
         Some("a line".into()),
-        None,
-        &[],
         SettleAuthority::ClientOwned,
     )
     .await
@@ -363,8 +299,6 @@ async fn a_held_connection_answering_its_own_frame_keeps_its_buffer_entry() {
         &task,
         Outcome::Done,
         Some("head".into()),
-        None,
-        &[],
         SettleAuthority::ClientOwned,
     )
     .await
@@ -388,22 +322,16 @@ async fn a_held_connection_answering_its_own_frame_keeps_its_buffer_entry() {
 }
 
 #[tokio::test]
-async fn the_first_verdict_keeps_its_receipt_and_handoff_relay() {
+async fn the_first_verdict_keeps_its_receipt() {
     let dir = tempdir().expect("tempdir");
     let task = new_task_id();
     let (state, store, _backend) = staged_state(&dir, &task);
     state.attach_msg_id(&task, "msg-first");
-    let handoff = [Handoff {
-        to_role: "reviewer".into(),
-        text: Some("first handoff".into()),
-    }];
     on_out(
         &state,
         &task,
         Outcome::Done,
         Some("first head".into()),
-        None,
-        &handoff,
         SettleAuthority::ClientOwned,
     )
     .await
@@ -420,12 +348,6 @@ async fn the_first_verdict_keeps_its_receipt_and_handoff_relay() {
             if envelope.kind == MsgKind::Completion
                 && envelope.causality.as_ref().is_some_and(|causality| causality.task == task)
     )));
-    let relayed = relays(&ops);
-    assert_eq!(relayed.len(), 1);
-    assert_eq!(
-        relayed[0].body.text.as_deref(),
-        Some("handoff: first handoff")
-    );
     assert_eq!(
         store.out_head(&task).expect("out head"),
         Some("first head".into())

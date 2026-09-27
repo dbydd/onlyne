@@ -33,6 +33,8 @@ pub enum MountKind {
     Agent,
     /// Platform gateway on the server socket.
     Gateway,
+    /// ACP tool bridge on a role client socket.
+    Tools,
     /// Local operator tooling on the server socket.
     Admin,
 }
@@ -125,6 +127,18 @@ pub struct ClusterMount {
     pub role: String,
 }
 
+/// ACP tool bridge mount data carried in the same `hello` frame.
+///
+/// The token is the binding: the client mints it for one `(role, session,
+/// generation)` and records that association, so the bridge never supplies a
+/// role of its own. A caller that could name a role here could speak for a
+/// session it never held.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ToolsMount {
+    pub token: String,
+}
+
 /// Plugin and gateway mount data, discriminated by [`MountKind`].
 ///
 /// The mount names the configured instance the connection serves, and that is the
@@ -143,7 +157,8 @@ pub struct ClusterMount {
 /// beside it in the same args object rather than nested under a tag.
 ///
 /// Untagged matching is first-match-wins, so the variant order below is the
-/// disambiguation rule: `Agent`, then `Gateway`, then `Cluster`, then `Admin`.
+/// disambiguation rule: `Agent`, then `Gateway`, then `Cluster`, then `Tools`,
+/// then `Admin`.
 /// Each payload denies unknown fields, and that guard is what makes the order
 /// safe to read rather than a silent mis-decode: `AgentMount` and `ClusterMount`
 /// both carry `role`, so without it a cluster mount would decode as an agent
@@ -159,6 +174,7 @@ pub enum Mount {
     Agent(AgentMount),
     Gateway(GatewayMount),
     Cluster(ClusterMount),
+    Tools(ToolsMount),
     /// Admin tooling needs no mount data.
     Admin,
 }
@@ -302,6 +318,13 @@ pub enum HostOp {
     Recycle(RecycleArgs),
     /// Read one host config key.
     ConfigGet(ConfigGetArgs),
+    /// Ask the plugin to hand one client-composed sentence to its agent input.
+    ///
+    /// This is sent only to a plugin that declared `inject`; the client decides
+    /// whether a drive can be nudged. The text is verbatim, and the plugin keeps
+    /// no copy, composes none, and does not reset its turn bookkeeping. Its
+    /// response claims only that the sentence was handed over.
+    Nudge { task_id: String, text: String },
     /// The host is going away.
     Bye(ByeNotice),
 }
@@ -315,6 +338,7 @@ impl HostOp {
             HostOp::Probe(_) => "probe",
             HostOp::Recycle(_) => "recycle",
             HostOp::ConfigGet(_) => "config_get",
+            HostOp::Nudge { .. } => "nudge",
             HostOp::Bye(_) => "bye",
         }
     }
@@ -349,6 +373,20 @@ pub struct HandoffArgs {
 pub struct AssignArgs {
     pub envelope: Box<Envelope>,
     pub prose: String,
+    /// The delivery text, rendered by the client's one template
+    /// (`onlyne-client`'s `delivery` module).
+    ///
+    /// A plugin injects these bytes and renders nothing of its own: the wording
+    /// of a delivery is a contract (`AGENTS.md` §12), and v1 built it once per
+    /// plugin — JavaScript here, Rust in the ACP backend — so the text a model
+    /// read depended on which drive delivered it. The envelope still travels
+    /// beside it, for the fields a plugin reports on rather than injects.
+    pub text: String,
+    /// Absolute paths of the files this delivery carries, in the order `text`
+    /// names them. The client writes them before the assignment leaves, so
+    /// every path here names a file that exists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
     pub task_id: String,
     pub generation: u64,
     /// Envelope of the task that caused this one, when downstream.
@@ -573,6 +611,18 @@ mod tests {
             serde_json::to_value(Mount::Admin).expect("encode admin mount"),
             serde_json::Value::Null
         );
+
+        let tools = Mount::Tools(ToolsMount {
+            token: "token-1".into(),
+        });
+        let value = serde_json::to_value(&tools).expect("encode tools mount");
+        assert_eq!(value, serde_json::json!({"token": "token-1"}));
+        assert_eq!(
+            serde_json::from_value::<Mount>(value).expect("decode tools mount"),
+            tools
+        );
+        serde_json::from_value::<Mount>(serde_json::json!({"token": "token-1", "role": "planner"}))
+            .expect_err("tools mounts deny fields owned by another mount");
 
         serde_json::from_value::<Mount>(serde_json::json!({"cluster": "b"}))
             .expect_err("a mount missing its identifying fields matches no variant");

@@ -1,5 +1,5 @@
 //! The `SessionBackend` surface: bring a session up on a shared agent process,
-//! report what it is, hand it a payload, and let it go without parking the
+//! report what it is, hand it one delivery, and let it go without parking the
 //! caller.
 //!
 //! Every method here answers its caller and nothing else; the facts a session
@@ -8,16 +8,37 @@
 use crate::backend::*;
 use parking_lot::Mutex;
 use serde_json::json;
+use std::fs;
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
 use super::journal::Journal;
+use super::mcp;
 use super::state::{AcpBackend, AgentSlot, SessionEntry, Turn};
-use super::turn::{completion_directive, payload_dir, run_turn};
+use super::turn::run_turn;
 
 /// How long the detached closer waits for a running turn before it lets the agent
 /// decide the turn's end on its own.
 const TURN_CLOSE_BUDGET: Duration = Duration::from_secs(60);
+
+/// The instruction file a role's prose is written into.
+///
+/// The `agents.md` convention's own name, and the file this repository's own
+/// world uses. It is a choice rather than a certainty: `onlyne-acp` carries no
+/// instruction field, so a file is the only vehicle, and an agent that reads
+/// another name — claude-code reads `CLAUDE.md` — will not see the prose until
+/// the filename is wired to the spec's agent package, which is its own slice
+/// (`docs/v2-CONTRACT.md` §3b, the known gap). Whoever wires it meets the
+/// choice here, at the line that makes it.
+const PROSE_FILE: &str = "AGENTS.md";
+
+/// The marker pair one client-owned prose block sits between.
+///
+/// The block is this client's: the file belongs to the operator, and the two
+/// markers are the only bytes of it this code may find and replace.
+const PROSE_BEGIN: &str = "<!-- onlyne:role-prose:begin -->";
+const PROSE_END: &str = "<!-- onlyne:role-prose:end -->";
 
 impl AcpBackend {
     /// Open the ACP session and apply the configured mode and model, so a session
@@ -30,7 +51,11 @@ impl AcpBackend {
         spec: &SpawnSpec,
         key: &str,
     ) -> Result<Arc<SessionEntry>> {
-        let start = slot.agent.new_session(&spec.cwd, Vec::new())?;
+        // The role's prose goes into the workspace before the session opens: an
+        // agent that starts working the moment `session/new` returns still reads
+        // the instructions this client put there for it.
+        write_role_prose(&spec.cwd, &spec.prose)?;
+        let start = slot.agent.new_session(&spec.cwd, vec![mcp::mount(spec)?])?;
         if !self.options.mode.is_empty() {
             slot.agent
                 .set_mode(&start.session_id, &self.options.mode)
@@ -116,6 +141,72 @@ impl AcpBackend {
         let found = self.entry_of(session)?;
         let key = found.key();
         self.state.sessions.lock().remove(&key)
+    }
+
+    /// The live session one delivery or nudge is addressed to.
+    ///
+    /// One session serves one task, and the id it serves was bound when it
+    /// opened. A turn naming another task would journal itself under a task the
+    /// agent was never assigned, so the two ids can never be reconciled
+    /// afterwards; refuse it here, where the caller can still hear about it.
+    fn live_entry(&self, session: &SessionRef, task_id: &str) -> Result<Arc<SessionEntry>> {
+        let entry = self.entry_of(session).ok_or_else(|| {
+            anyhow::anyhow!(
+                "acp: no live session for task {task_id}; its agent is not running here"
+            )
+        })?;
+        if entry.current_task() != task_id {
+            return Err(anyhow::anyhow!(
+                "acp: session {} serves task {}; task {task_id} needs a session of its own",
+                entry.id,
+                entry.current_task(),
+            ));
+        }
+        if entry.agent.is_gone() {
+            return Err(anyhow::anyhow!(
+                "acp: agent {} exited before task {task_id} was delivered",
+                entry.agent_key
+            ));
+        }
+        Ok(entry)
+    }
+
+    /// Start one turn on its own thread, with `prompt` verbatim as the text the
+    /// agent reads.
+    ///
+    /// The turn is claimed before the thread starts, so a second turn offered to
+    /// a session whose agent is still thinking is refused rather than queued
+    /// behind a turn it was never meant to join. `record` is the journal record
+    /// this turn leaves — `dispatch` for a delivery, `nudge` for the sentence
+    /// §3c sends — so an operator reading the file can tell which one it was.
+    fn start_turn(
+        &self,
+        entry: &Arc<SessionEntry>,
+        task_id: &str,
+        prompt: String,
+        record: &'static str,
+    ) -> Result<()> {
+        if entry.turn.begin().is_none() {
+            return Err(anyhow::anyhow!(
+                "acp: session {} is still running a turn for task {}",
+                entry.id,
+                entry.current_task()
+            ));
+        }
+        let thread_entry = Arc::clone(entry);
+        let sink = self.state.sink.clone();
+        let content = self.state.content.clone();
+        let policy = self.options.policy();
+        if let Err(error) = thread::Builder::new()
+            .name(format!("acp-turn {}", short(task_id)))
+            .spawn(move || run_turn(thread_entry, sink, content, prompt, record, policy))
+        {
+            entry.turn.finish();
+            return Err(anyhow::anyhow!(
+                "acp: task could not start its turn thread: {error}"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -229,75 +320,30 @@ impl SessionBackend for AcpBackend {
         })
     }
 
-    fn deliver(&self, session: &SessionRef, task_id: &str, prose: &str) -> Result<()> {
-        let entry = self.entry_of(session).ok_or_else(|| {
-            anyhow::anyhow!(
-                "acp: no live session for task {task_id}; its agent is not running here"
-            )
-        })?;
-        // One session serves one task, and the id it serves was bound when it
-        // opened. A payload naming another task would have this turn write its
-        // journal and read its report under a task the agent was never assigned,
-        // so the two ids can never be reconciled afterwards; refuse it here where
-        // the caller can still hear about it.
-        if entry.current_task() != task_id {
-            return Err(anyhow::anyhow!(
-                "acp: session {} serves task {}; task {task_id} needs a session of its own",
-                entry.id,
-                entry.current_task(),
-            ));
-        }
-        if entry.agent.is_gone() {
-            return Err(anyhow::anyhow!(
-                "acp: agent {} exited before task {task_id} was delivered",
-                entry.agent_key
-            ));
-        }
-        // The claim happens before the thread starts, so a second delivery to a
-        // session whose agent is still thinking is refused rather than queued
-        // behind a turn it was never meant to join.
-        if entry.turn.begin().is_none() {
-            return Err(anyhow::anyhow!(
-                "acp: session {} is still running a turn for task {}",
-                entry.id,
-                entry.current_task()
-            ));
-        }
-        let thread_entry = Arc::clone(&entry);
-        let sink = self.state.sink.clone();
-        let content = self.state.content.clone();
+    /// Hand one delivery to its session as a turn.
+    ///
+    /// The prompt is the rendered delivery text and nothing else: this client
+    /// appends no directive of its own, and the agent's own tools mount carries
+    /// whatever it owes back. The whole text lands in the journal's `dispatch`
+    /// record, which is the operator's proof of what was asked.
+    fn deliver(&self, session: &SessionRef, task_id: &str, prompt: &str) -> Result<()> {
+        let entry = self.live_entry(session, task_id)?;
         let task_id = entry.current_task();
-        // The prompt tells the agent where to leave its result before the turn
-        // starts, so how a task ends never depends on the agent knowing that
-        // onlyne exists. The whole text lands in the journal's dispatch
-        // record, which is the operator's proof of what was asked. The agent
-        // can only write where the directory already is, so the client makes
-        // it first; a failure costs only the directive — the turn runs on the
-        // task's prose, settles as a turn whose agent left no report, and
-        // leaves a warning beside the dispatch record saying why.
-        let warning = match std::fs::create_dir_all(payload_dir(&entry.workdir)) {
-            Ok(()) => None,
-            Err(error) => Some(format!("report directory not created: {error}")),
-        };
-        let prompt = match &warning {
-            None => format!(
-                "{}{}",
-                prose,
-                completion_directive(&entry.workdir, &task_id)
-            ),
-            Some(_) => prose.to_string(),
-        };
-        let policy = self.options.policy();
-        if let Err(error) = thread::Builder::new()
-            .name(format!("acp-turn {}", short(&task_id)))
-            .spawn(move || run_turn(thread_entry, sink, content, prompt, warning, policy))
-        {
-            entry.turn.finish();
-            return Err(anyhow::anyhow!(
-                "acp: task could not start its turn thread: {error}"
-            ));
-        }
-        Ok(())
+        self.start_turn(&entry, &task_id, prompt.to_string(), "dispatch")
+    }
+
+    /// Tell a session whose turn ended without a completion, in the one words
+    /// this client owns (`docs/v2-CONTRACT.md` §3c).
+    ///
+    /// An ACP agent has no injection channel besides `session/prompt`, so the
+    /// sentence arrives as the next prompt, verbatim. It is not a delivery: no
+    /// payload, prose, or attachment is re-sent, nothing of the session's turn
+    /// bookkeeping is reset, and the journal names the record `nudge` so the two
+    /// are told apart in the operator's file.
+    fn nudge(&self, session: &SessionRef, task_id: &str, text: &str) -> Result<()> {
+        let entry = self.live_entry(session, task_id)?;
+        let task_id = entry.current_task();
+        self.start_turn(&entry, &task_id, text.to_string(), "nudge")
     }
 
     fn close(&self, session: &SessionRef, reason: CloseReason, _force: bool) -> Result<()> {
@@ -405,4 +451,85 @@ fn tolerated(error: &anyhow::Error) -> bool {
 fn short(id: &str) -> &str {
     let from = id.len().saturating_sub(8);
     id.get(from..).unwrap_or(id)
+}
+
+/// Write the role's prose into the workspace's instruction file.
+///
+/// The block between the markers is this client's and the rest of the file is
+/// the operator's: a block that is there is replaced where it stands, a file
+/// without one gets it appended as its own paragraph, and not a byte outside
+/// the markers is touched either way. Prose the role no longer has takes its
+/// block out, because a block that stays is prose this client would be standing
+/// behind after it stopped.
+///
+/// A read that fails for any reason but absence is an error: this runs while a
+/// session opens, and a spawn that cannot write the instructions it was asked
+/// to write must not report a session that will never read them.
+fn write_role_prose(workdir: &Path, prose: &str) -> Result<()> {
+    let path = workdir.join(PROSE_FILE);
+    let existing = match fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "acp: {} could not be read: {error}",
+                path.display()
+            ));
+        }
+    };
+    let block = (!prose.trim().is_empty()).then(|| format!("{PROSE_BEGIN}\n{prose}\n{PROSE_END}"));
+    let next = match existing {
+        None => match block {
+            Some(block) => format!("{block}\n"),
+            None => return Ok(()),
+        },
+        Some(text) => match block_span(&text) {
+            Some((start, stop)) => match block {
+                Some(block) => format!("{}{block}{}", &text[..start], &text[stop..]),
+                None => format!("{}{}", &text[..start], &text[stop..]),
+            },
+            None => match block {
+                Some(block) => append_block(&text, &block),
+                None => return Ok(()),
+            },
+        },
+    };
+    fs::write(&path, next)
+        .map_err(|error| anyhow::anyhow!("acp: {} could not be written: {error}", path.display()))
+}
+
+/// The byte span one client-owned block occupies, its markers and their own
+/// line endings included.
+///
+/// The span starts at the beginning of the line the begin marker sits on, so a
+/// replacement cannot leave the marker's own indentation behind. A begin marker
+/// with no end marker after it owns the rest of the file: everything from this
+/// client's own marker on is text this code wrote, and a half-written block is
+/// replaced rather than doubled.
+fn block_span(text: &str) -> Option<(usize, usize)> {
+    let begin = text.find(PROSE_BEGIN)?;
+    let start = text[..begin].rfind('\n').map(|at| at + 1).unwrap_or(0);
+    let stop = match text[begin..].find(PROSE_END) {
+        Some(at) => {
+            let end = begin + at + PROSE_END.len();
+            text[end..]
+                .find('\n')
+                .map(|at| end + at + 1)
+                .unwrap_or(text.len())
+        }
+        None => text.len(),
+    };
+    Some((start, stop))
+}
+
+/// The file with the block added as its own paragraph.
+fn append_block(text: &str, block: &str) -> String {
+    let gap = if text.is_empty() || text.ends_with("\n\n") {
+        ""
+    } else if text.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    format!("{text}{gap}{block}\n")
 }

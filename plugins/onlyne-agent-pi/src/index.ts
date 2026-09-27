@@ -7,21 +7,26 @@
 // `crates/onlyne-client/src/dispatch.rs`); with any of the three missing this is
 // a plain pi session and the extension stays silent rather than failing.
 //
-//   session_start    -> read env + .pi/onlyne.json, connect, register tools
-//   turn_start       -> heartbeat{running}
-//   turn_end         -> one turn of a run ended; the phase is re-derived from pi
-//                       and the settle window opens
-//   message_end      -> keep the last assistant text; a failed turn is `failed`
-//   agent_settled    -> heartbeat{idle} when the session waits for input, then
-//                       the settle decision: the idle ladder, or `failed` at once
-//   session_shutdown -> detach{reason}
+//   session_start      -> read env + .pi/onlyne.json, connect, register tools
+//   before_agent_start -> the role prose becomes one section of the system
+//                         prompt the run is about to send (the instruction layer)
+//   turn_start         -> heartbeat{running}
+//   turn_end           -> one turn of a run ended; the phase is re-derived from pi
+//                         and the fallback window for a witnessed failure opens
+//   message_end        -> keep the last assistant text; a failed turn is `failed`
+//   agent_settled      -> heartbeat{idle} when the session waits for input, and the
+//                         report a failed turn owes is sent from here
+//   session_shutdown   -> detach{reason}
+//
+// Host frames are dispatched in `agent.mjs`, not here: `assign` and `nudge` are
+// injected as user messages, `probe` is answered with a heartbeat, and `recycle`
+// settles the task and stops the plugin.
 
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import { OnlyneAgent } from "./agent.mjs";
 import { loadConfig, sessionIdentity } from "./config.mjs";
-import { loadRelay, relayEnabled } from "./relay.mjs";
 import { resolveSocketPath } from "./socket.mjs";
 import { createSurface } from "./pi-surface.mjs";
 
@@ -54,7 +59,6 @@ interface WelcomeLike {
 interface PiSurface {
   available: {
     wakeUser: boolean;
-    proseContext: boolean;
     customEntry: boolean;
     widget: boolean;
     status: boolean;
@@ -64,7 +68,8 @@ interface PiSurface {
     registerCommand: boolean;
   };
   wakeUser(text: string, parts?: ImagePartInput[]): boolean;
-  proseContext(text: string, welcome: WelcomeLike): boolean;
+  roleProse(text: string): boolean;
+  applyRoleProse(event: { systemPromptOptions?: { sections?: Record<string, string> } }): boolean;
   customEntry(customType: string, data: unknown): boolean;
   widget(lines: string[] | undefined): void;
   status(text: string): void;
@@ -141,10 +146,10 @@ export default function onlyne(pi: ExtensionAPI) {
         name: "onlyne_send",
         label: "Onlyne send",
         description:
-          "Send one message to another role in this onlyne cluster. kind=note (default) is free text; kind=task hands work to the role and creates a session for it.",
-        promptSnippet: "Send a note or a task to another onlyne role",
+          "Send one message to another role. kind=note (default) is free text; kind=task hands work to that role and opens a task for it.",
+        promptSnippet: "Send a note or a task to another role",
         promptGuidelines: [
-          "Use onlyne_send when a task needs another onlyne role's work; it submits the envelope to the cluster and returns once the router has queued it.",
+          "Use onlyne_send when something has to reach another role; the call returns once the message is queued.",
         ],
         parameters: Type.Object({
           to: Type.String({ description: "target role name, e.g. builder" }),
@@ -160,7 +165,9 @@ export default function onlyne(pi: ExtensionAPI) {
             kind: params.kind,
             imagePath: params.image ?? null,
           });
-          return textResult(`queued ${result.kind} to ${result.to}`, result);
+          // The recipient and nothing else: a tool result is model-visible, and
+          // there is no fact about this send the model needs beyond where it went.
+          return textResult(`sent to ${result.to}`, { to: result.to });
         },
       }));
     } catch (error) {
@@ -171,33 +178,34 @@ export default function onlyne(pi: ExtensionAPI) {
         name: "onlyne_complete",
         label: "Onlyne complete",
         description:
-          "End this onlyne task with an explicit outcome. Call it once, when the assigned work is finished (outcome=done), provably impossible (outcome=failed), or withdrawn (outcome=cancelled). This call is the only way the task reaches done: a turn that ends without it leaves the task open, the session re-sends you the assignment up to the workspace's idle-reminder bound, and the idle that finds the bound spent fails the task and ends the session. In a workspace whose relay policy (relay.toml) names the handoffs this session owes, the call is refused until each one has gone out.",
-        promptSnippet: "Finish the current onlyne task with an outcome and a one-line summary",
+          "End the current task with an explicit outcome: done (the work is finished), failed (it is provably impossible), cancelled (it was withdrawn), or blocked (something outside this session stops it). summary is the one-line result and details is the full one; files names the paths the result rests on. If the workspace requires a handoff before the task may end, the call is refused until that handoff has gone out.",
+        promptSnippet: "Finish the current task with an outcome and a one-line summary",
         promptGuidelines: [
-          "Use onlyne_complete at the end of an onlyne task, naming the outcome and the result in one line; the summary becomes the ledger head.",
-          "If the assignment is sent to you again while it is still open, the previous turn ended without a completion: finish the work and call onlyne_complete.",
-          "If onlyne_complete answers 'relay guard', the session still owes a downstream handoff: make it with onlyne_send and call onlyne_complete again. Close the session anyway only when the handoff is genuinely impossible, with force: true and a reason.",
+          "Use onlyne_complete at the end of the current task, naming the outcome and the result in one line.",
         ],
         parameters: Type.Object({
-          outcome: Type.Optional(Type.String({ description: '"done" (default), "failed", or "cancelled"' })),
-          text: Type.Optional(Type.String({ description: "one-line result summary" })),
-          force: Type.Optional(Type.Boolean({ description: "waive the relay guard; requires a non-empty reason" })),
-          reason: Type.Optional(Type.String({ description: "why the relay guard is waived; stamped into the ledger head after `relay-guard-forced: `" })),
+          outcome: Type.String({ description: '"done", "failed", "cancelled", or "blocked"' }),
+          summary: Type.String({ description: "one-line result summary" }),
+          details: Type.Optional(Type.String({ description: "the full result, delivered as it stands" })),
+          files: Type.Optional(Type.Array(Type.String(), { description: "absolute paths of the files the result names" })),
         }),
         async execute(_toolCallId, params) {
           if (!agent) throw new Error("onlyne: session is not connected");
           // The exit is not a tool-result flag: pi 0.85.1 has no tool-result
           // `terminate` handling. `agent.complete` asks the surface to shut the
-          // process down once the client has acknowledged the report. A relay
-          // refusal throws out of here as a tool error, which leaves the session
-          // mounted for the handoff that clears it.
+          // process down once the client has acknowledged the report. A refusal
+          // from the client throws out of here as a tool error, so the model
+          // reads the host's own sentence.
           const result = await agent.completeFromTool({
             outcome: params.outcome,
-            text: params.text,
-            force: params.force,
-            reason: params.reason,
+            summary: params.summary,
+            details: params.details,
+            files: params.files,
           });
-          return textResult(`onlyne task ${result.taskId} -> ${result.outcome}`, result);
+          // The outcome and nothing else: the ledger's head stays a display
+          // field (docs/v2-CONTRACT.md §3c), and the task's identity is not a
+          // fact the model is meant to hold.
+          return textResult(`reported ${result.outcome}`, { outcome: result.outcome });
         },
       }));
     } catch (error) {
@@ -208,16 +216,14 @@ export default function onlyne(pi: ExtensionAPI) {
         name: "onlyne_handoff",
         label: "Onlyne handoff",
         description:
-          "Hand this session's task on to the next hop of its family. The host mints one child task for the named role, names this task as the child's parent_task, raises the hop by one, and lets the family's budget, labels, origin and deadline ride along, so the child continues the run this session serves. Use it for the next slot of a ring or a chain; onlyne_send{kind:\"task\"} starts a new family at hop 0, and onlyne_send{kind:\"note\"} is free text.",
-        promptSnippet: "Hand this task on to the next role of its family",
+          "Hand the current task on to another role, which continues it. Call it when this task's work goes on to another role.",
+        promptSnippet: "Hand the current task on to another role",
         promptGuidelines: [
-          "Use onlyne_handoff when the work goes on to the next role of the run this session serves: the child the host mints carries the same family id, hop budget, labels, origin and deadline, and this task becomes its parent_task.",
-          "Use onlyne_send with kind=\"task\" when a role should get work of its own: that child is hop 0 of a family this session starts.",
-          "Use onlyne_send with kind=\"note\" for free text to a role, which carries no task and no hop.",
+          "Use onlyne_handoff when this task's work goes on to another role; the receiving role continues it.",
         ],
         parameters: Type.Object({
           to: Type.String({ description: "target role name, e.g. builder" }),
-          text: Type.String({ description: "handoff text for the next role of the run" }),
+          text: Type.String({ description: "handoff text for the receiving role" }),
           image: Type.Optional(Type.String({ description: "absolute path to a png/jpeg/gif/webp image to attach" })),
         }),
         async execute(_toolCallId, params) {
@@ -227,7 +233,10 @@ export default function onlyne(pi: ExtensionAPI) {
             text: params.text,
             imagePath: params.image ?? null,
           });
-          return textResult(`handed on to ${result.to} as ${result.taskId} at hop ${result.hop}`, result);
+          // The recipient and nothing else: the child's id and the hop are the
+          // host's bookkeeping, and a result naming them would teach the model
+          // to read itself as one node of a numbered chain.
+          return textResult(`handed on to ${result.to}`, { to: result.to });
         },
       }));
     } catch (error) {
@@ -281,17 +290,6 @@ export default function onlyne(pi: ExtensionAPI) {
       log(`socket unresolved: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (socketPath === null) return;
-    // The guard's policy comes from the spec through the client's environment;
-    // a hand-written `relay.toml` beside the package is the fallback a manual
-    // installation still has (relay.mjs).
-    const relay = loadRelay();
-    if (relay.warning) log(relay.warning);
-    if (relayEnabled(relay)) {
-      const origin = relay.source === "env" ? "the client's environment" : relay.path;
-      log(
-        `relay guard from ${origin}: required=${JSON.stringify(relay.required)} count=${relay.count ?? "-"}`,
-      );
-    }
     surface = createSurface({ pi, log, context: () => context });
     agent = new OnlyneAgent({
       socketPath,
@@ -300,8 +298,6 @@ export default function onlyne(pi: ExtensionAPI) {
       sessionId: identity.sessionId,
       taskId: identity.taskId,
       surface,
-      relay,
-      idleReminders: config.idleReminders,
       log,
     });
     log(`session ${identity.sessionId} role=${identity.role} socket=${socketPath}`);
@@ -313,6 +309,15 @@ export default function onlyne(pi: ExtensionAPI) {
       agent.capabilities = agent.capabilities.filter((name) => name !== "inject");
     }
     if (config.autoStart) agent.start();
+  });
+
+  // The role prose is instruction-layer text: `before_agent_start` hands the
+  // handler the prompt options the run is about to render, and a section written
+  // there is part of the system prompt rather than one more message the model has
+  // to read as an utterance. Outside an onlyne session there is no surface and
+  // nothing to add.
+  pi.on("before_agent_start", async (event) => {
+    surface?.applyRoleProse(event);
   });
 
   pi.on("turn_start", async () => {

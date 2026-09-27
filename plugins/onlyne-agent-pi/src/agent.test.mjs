@@ -11,7 +11,6 @@ import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 
 import { OnlyneAgent } from "./agent.mjs";
-import { DEFAULT_IDLE_REMINDERS } from "./config.mjs";
 import { createFrameDecoder, encodeFrame } from "./frame.mjs";
 import { SEQ_BASE, readyReport } from "./protocol.mjs";
 
@@ -51,6 +50,11 @@ function heartbeats(host) {
     .map((args) => args.data.observed);
 }
 
+/** Every `report.complete` the fake host received, in arrival order. */
+function completions(host) {
+  return host.of("report").filter((report) => report.kind === "complete");
+}
+
 /**
  * Every heartbeat the fake host received, in arrival order, with the two numbers
  * the host's watermark gate reads — the seq on the frame and the seq inside the
@@ -86,16 +90,6 @@ const OBSERVED_KEYS = [
   "recovery",
 ];
 
-/**
- * The observation's keys with the pane binding discounted: `host` rides along
- * when the process was spawned in an Orca pane, and the test host's own
- * environment decides whether it does.
- */
-function dimensionKeys(observed) {
-  const { host, ...rest } = observed;
-  return Object.keys(rest);
-}
-
 /** Poll until `predicate` holds, so a test never races the event loop. */
 async function waitFor(predicate, { timeoutMs = 2_000, stepMs = 5 } = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -121,6 +115,8 @@ async function waitFor(predicate, { timeoutMs = 2_000, stepMs = 5 } = {}) {
  * that cannot find the task the session names would; with none, the fake answers
  * the child the proto documents. `failCompletions` refuses that many `complete`
  * reports before answering the rest, the way a client whose settle failed would.
+ * `request` sends a host frame carrying an id, which is how the plugin is asked
+ * for an answer (`nudge`); `answers` reads what came back.
  */
 class FakeHost {
   constructor({
@@ -226,6 +222,16 @@ class FakeHost {
     for (const socket of this.sockets) socket.write(encodeFrame({ op, args }));
   }
 
+  /** One host request, with the id the plugin's answer is keyed by. */
+  request(op, args, id) {
+    for (const socket of this.sockets) socket.write(encodeFrame({ id, op, args }));
+  }
+
+  /** Every answer the plugin sent for one host request id. */
+  answers(id) {
+    return this.frames.filter((entry) => entry.frame.reply_to === id).map((entry) => entry.frame);
+  }
+
   of(op) {
     return this.frames.filter((entry) => entry.frame.op === op).map((entry) => entry.frame.args);
   }
@@ -244,7 +250,6 @@ function fakeSurface(options = {}) {
     calls,
     available: {
       wakeUser: true,
-      proseContext: true,
       customEntry: true,
       // Off by default: tests that do not opt into a panel keep the footer and log path.
       widget: options.widget === true,
@@ -258,7 +263,7 @@ function fakeSurface(options = {}) {
       calls.wakeUser.push({ text, parts });
       return true;
     },
-    proseContext: (text) => {
+    roleProse: (text) => {
       calls.prose.push(text);
       return true;
     },
@@ -288,7 +293,6 @@ async function startAgent({
   failSend = false,
   handoffError = null,
   failCompletions = 0,
-  relay = null,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "pi-onlyne-agent-"));
   const socketPath = join(dir, "s");
@@ -309,7 +313,6 @@ async function startAgent({
     settleFallbackMs: options.settleFallbackMs ?? 30_000,
     heartbeatMs: options.heartbeatMs ?? 60_000,
     ...(capabilities ? { capabilities } : {}),
-    ...(relay ? { relay } : {}),
     ...(options.host !== undefined ? { host: options.host } : {}),
   });
   cleanups.push(async () => {
@@ -338,12 +341,16 @@ const assignArgs = () => (ASSIGN_FRAME ? ASSIGN_FRAME.args : {
     admin: false,
   },
   prose: "Read the incoming task",
+  // The delivery text the client's template renders for that envelope and body:
+  // `From <sender role>:` / blank / the body verbatim. The plugin injects these
+  // bytes and composes nothing of its own around a delivery.
+  text: "From planner:\n\nbuild it",
   task_id: TASK_ID,
   generation: 1,
 });
 
 /**
- * The same host delivery under its own task id and envelope: what a relay session
+ * The same host delivery under its own task id and envelope: what a session
  * holds when the work it is running and the next one handed over are both open.
  * The envelope id has to move with the task id, or the delivery guard rightly
  * reads the second assign as the first one re-offered.
@@ -354,6 +361,7 @@ const secondTaskArgs = () => {
   args.envelope.id = "6c5d4e3f-8a9b-4c10-9d2e-4f5061728394";
   args.envelope.causality.task = ASSIGNED_TASK_ID;
   args.envelope.body.text = "take it from here";
+  args.text = "From planner:\n\ntake it from here";
   return args;
 };
 
@@ -493,7 +501,7 @@ test("a fresh agent opens with hello, registers and reports ready", async () => 
   // The report stream starts above the host's own dispatch sequence, or the
   // reducer would drop it as stale (onlyne-session's watermark gate).
   assert.ok(ready.data.seq > SEQ_BASE - 1, `seq ${ready.data.seq} must clear the host watermark`);
-  // The role prose arrived once, as context rather than as a turn.
+  // The role prose was handed to the instruction layer once, not as a message.
   assert.deepEqual(surface.calls.prose, ["Read the incoming task"]);
   assert.equal(agent.status().connected, true);
 });
@@ -503,15 +511,15 @@ test("an assign is injected once, acked, and a redelivery changes nothing", asyn
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
 
-  host.notify("assign", assignArgs());
+  const args = assignArgs();
+  host.notify("assign", args);
   await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
   const injected = surface.calls.wakeUser[0];
-  assert.match(injected.text, /\[onlyne\] task 11111111-1111-4111-8111-111111111111 from role:planner \(kind task\)/);
-  assert.match(injected.text, /build it/);
+  // What the client rendered, byte for byte: no header, no prose, no wrapper.
+  assert.equal(injected.text, args.text, "the frame's text is injected unchanged");
   assert.deepEqual(injected.parts, []);
   // The prose came with welcome and is not repeated on every payload.
   assert.deepEqual(surface.calls.prose, ["Read the incoming task"]);
-  assert.doesNotMatch(injected.text, /Read the incoming task/);
   assert.deepEqual(surface.calls.entries[0].type, "onlyne-assign");
   assert.equal(surface.calls.entries[0].data.proseInjected, false);
 
@@ -538,10 +546,6 @@ test("a new envelope for a running task reaches the model and keeps its record",
   host.notify("assign", assignArgs());
   await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
   const record = agent.tasks.get(TASK_ID);
-  // Turns already run under this task, without driving the turn hooks: a real
-  // turn end also arms the settle fallback, which would complete the task.
-  record.turns = 3;
-  record.turnsSinceAssign = 2;
 
   const base = assignArgs();
   const follow = {
@@ -551,16 +555,15 @@ test("a new envelope for a running task reaches the model and keeps its record",
       id: "4a3b2c1d-6e7f-4a90-8b1c-2d3e4f506172",
       body: { text: "actually, use the q8 variant" },
     },
+    text: "From planner:\n\nactually, use the q8 variant",
   };
   host.notify("assign", follow);
   await waitFor(() => (surface.calls.wakeUser.length === 2 ? true : null));
-  assert.match(surface.calls.wakeUser[1].text, /q8 variant/);
+  assert.equal(surface.calls.wakeUser[1].text, follow.text, "the follow-up's own text is injected unchanged");
   const acks = await waitFor(() => (host.of("assign_ack").length === 2 ? host.of("assign_ack") : null));
   assert.deepEqual(acks[1], { task_id: TASK_ID, accepted: true });
 
   assert.equal(agent.tasks.get(TASK_ID), record, "the running work record survives");
-  assert.equal(record.turns, 3, "what the session already did under this task is not erased");
-  assert.equal(record.turnsSinceAssign, 0, "the watchdog counts from the newest instruction");
   assert.equal(record.envelopeId, "4a3b2c1d-6e7f-4a90-8b1c-2d3e4f506172");
 
   // The same envelope again is the true duplicate, and it changes nothing.
@@ -573,16 +576,16 @@ test("a new envelope for a running task reaches the model and keeps its record",
 // The live case in crates/onlyne-testkit/e2e/pi-live.sh found this: the client
 // hands over a staged session by writing the hello reply and the first assign
 // together, so both frames arrive in one read. The assignment must not be
-// injected from inside the handshake, or the role prose loses its welcome-time
-// delivery and gets folded into the task turn instead.
+// injected from inside the handshake, or the role prose is still unwritten when
+// the delivery text opens the turn that should carry it.
 test("an assign sharing the hello reply's chunk waits for the welcome", async () => {
   const events = [];
   const surface = fakeSurface();
-  const proseContext = surface.proseContext;
+  const roleProse = surface.roleProse;
   const wakeUser = surface.wakeUser;
-  surface.proseContext = (text, welcome) => {
+  surface.roleProse = (text) => {
     events.push("prose");
-    return proseContext(text, welcome);
+    return roleProse(text);
   };
   surface.wakeUser = (text, parts) => {
     events.push("assign");
@@ -597,45 +600,49 @@ test("an assign sharing the hello reply's chunk waits for the welcome", async ()
   }
   assert.deepEqual(events, ["prose", "assign"]);
   assert.deepEqual(surface.calls.prose, ["Read the incoming task"]);
-  assert.doesNotMatch(surface.calls.wakeUser[0].text, /Read the incoming task/);
+  assert.equal(surface.calls.wakeUser[0].text, assignArgs().text, "the frame's text, byte for byte");
   assert.equal(surface.calls.entries[0].data.proseInjected, false);
   const acks = await waitFor(() => (host.of("assign_ack").length >= 1 ? host.of("assign_ack") : null));
   assert.deepEqual(acks[0], { task_id: TASK_ID, accepted: true });
 });
 
-test("a waiting turn end reports idle, and the settle after it re-sends the assignment", async () => {
-  const { agent, host, surface } = await startAgent();
+// The role prose reaches the instruction layer, never the delivery text. An
+// assign that carries prose the welcome did not (a spec edited between the two
+// frames) hands it over the same way, before the task message: the injected text
+// stays exactly the bytes the client rendered.
+test("prose the welcome did not deliver reaches the instruction layer before the task message", async () => {
+  const events = [];
+  const surface = fakeSurface();
+  const roleProse = surface.roleProse;
+  const wakeUser = surface.wakeUser;
+  surface.roleProse = (text) => {
+    events.push(`prose:${text}`);
+    return roleProse(text);
+  };
+  surface.wakeUser = (text, parts) => {
+    events.push(`assign:${text}`);
+    return wakeUser(text, parts);
+  };
+  const { agent, host } = await startAgent({ surface });
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
-  host.notify("assign", assignArgs());
+
+  const args = assignArgs();
+  args.prose = "Write the changelog in the house style";
+  host.notify("assign", args);
   await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
 
-  agent.onTurnStart();
-  const running = await waitFor(() => host.of("report").find((report) => report.data?.observed?.agent === "running"));
-  assert.equal(running.kind, "heartbeat");
-  assert.equal(running.data.observed.resource, "attached");
-  assert.deepEqual(dimensionKeys(running.data.observed), OBSERVED_KEYS, "a running beat carries exactly the dimensions the plugin can see");
-  assert.equal(running.data.observed.version.generation, 1);
-
-  agent.onTurnEnd();
-  const idle = await waitFor(() => host.of("report").find((report) => report.data?.observed?.agent === "idle"));
-  assert.equal(idle.kind, "heartbeat");
-  assert.deepEqual(dimensionKeys(idle.data.observed), OBSERVED_KEYS, "an idle beat claims no dimension the plugin does not own");
-
-  agent.noteAssistantText("OK");
-  agent.onSettled();
-  // A turn that ends without a completion leaves the task open: the settle sends
-  // the assignment again rather than reporting an outcome the model never
-  // claimed. `onlyne_complete` is the only path to `done`.
-  const reminded = await waitFor(() =>
-    surface.calls.wakeUser.length === 2 ? surface.calls.wakeUser : null,
-  );
-  assert.match(reminded[1].text, /build it/, "the reminder carries the task text");
-  assert.deepEqual(host.of("report").filter((report) => report.kind === "complete"), []);
-  assert.deepEqual(surface.calls.exits, [], "a task with a rung left is not failed");
+  assert.deepEqual(events, [
+    "prose:Read the incoming task",
+    "prose:Write the changelog in the house style",
+    `assign:${args.text}`,
+  ]);
+  assert.deepEqual(surface.calls.prose, ["Read the incoming task", "Write the changelog in the house style"]);
+  assert.equal(surface.calls.wakeUser[0].text, args.text, "the prose is not folded into the delivery");
+  assert.equal(surface.calls.entries[0].data.proseInjected, true);
 });
 
-test("a busy turn end reports no idle beat and does not settle the ladder", async () => {
+test("a busy turn end reports no idle beat", async () => {
   const surface = fakeSurface({ waiting: false });
   const { agent, host } = await startAgent({ surface });
   agent.start();
@@ -654,7 +661,6 @@ test("a busy turn end reports no idle beat and does not settle the ladder", asyn
     false,
     "the turn-end beat follows the busy surface rather than assuming the hook means idle",
   );
-  assert.equal(surface.calls.wakeUser.length, 1, "the ladder waits while the turn is still running");
   assert.deepEqual(surface.calls.exits, []);
 });
 
@@ -682,7 +688,10 @@ test("a turn-end heartbeat after the completion never leaves the plugin", async 
   assert.deepEqual(host.of("report").slice(reports), [], "the completion is the last report");
 });
 
-test("a busy pi holds the settle decision until it is waiting for input", async () => {
+// The plugin still owes one report at a turn end: the failure it witnessed
+// itself. That report waits for the idle it is about, exactly as the phase-based
+// signal always did.
+test("a busy pi holds the failed-turn report until it is waiting for input", async () => {
   let waiting = false;
   const surface = fakeSurface({ waiting: () => waiting });
   const { agent, host } = await startAgent({ surface, options: { settleFallbackMs: 40 } });
@@ -690,19 +699,16 @@ test("a busy pi holds the settle decision until it is waiting for input", async 
   await waitFor(() => host.of("report").length >= 1);
   host.notify("assign", assignArgs());
   await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
-  agent.onTurnEnd();
-  agent.onSettled();
+  agent.onTurnError("provider exploded");
   await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.equal(surface.calls.wakeUser.length, 1, "a busy pi is not reminded");
+  assert.deepEqual(completions(host), [], "a busy pi is not reported on yet");
 
   waiting = true;
-  const reminded = await waitFor(() =>
-    surface.calls.wakeUser.length === 2 ? surface.calls.wakeUser : null,
-  );
-  assert.match(reminded[1].text, /build it/, "the decision waits for the idle it is about");
+  const complete = await waitFor(() => completions(host)[0] ?? null);
+  assert.deepEqual(complete.data, { task_id: TASK_ID, outcome: "failed", head: "provider exploded" });
 });
 
-test("a live background task holds the ladder off until its task is terminal", async () => {
+test("a live background task holds the failed-turn report until its task is terminal", async () => {
   let backgroundWork = true;
   const surface = fakeSurface({ backgroundWork: () => backgroundWork });
   const { agent, host } = await startAgent({ surface, options: { settleFallbackMs: 40 } });
@@ -712,122 +718,45 @@ test("a live background task holds the ladder off until its task is terminal", a
   await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
 
   agent.onTurnStart();
-  agent.onTurnEnd();
-  agent.onSettled();
+  agent.onTurnError("provider exploded");
   await waitFor(() => heartbeats(host).at(-1)?.agent === "running");
   await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.equal(surface.calls.wakeUser.length, 1, "work off the agent loop keeps the ladder off");
+  assert.deepEqual(completions(host), [], "work off the agent loop keeps the report off");
 
   backgroundWork = false;
   agent.onSettled();
-  const reminded = await waitFor(() =>
-    surface.calls.wakeUser.length === 2 ? surface.calls.wakeUser : null,
-  );
-  assert.match(reminded[1].text, /build it/, "the terminal task releases the idle ladder");
+  const complete = await waitFor(() => completions(host)[0] ?? null);
+  assert.deepEqual(complete.data, { task_id: TASK_ID, outcome: "failed", head: "provider exploded" });
 });
 
-// The idle ladder (`docs/SWARM-REFACTOR-GRILLME.md` §4.2): a turn that ends
-// without a completion exit re-sends the assignment, and the idle that finds the
-// bound spent fails the task instead of settling it `done`. The bound is the
-// workspace's (`config.mjs`, two by default) and the count lives on the record
-// `onAssign` wrote for the task, which is why a task can be reminded twice and
-// failed on the third idle without the tool ever being called.
-test("only settled idles spend ladder rungs, ordinary turns reset them, and the bound fails the task", async () => {
-  const { agent, host, surface } = await startAgent();
-  assert.equal(agent.idleReminders, DEFAULT_IDLE_REMINDERS, "the bound is the workspace's, two by default");
+// The turn-end rule has one owner, the client (`docs/v2-CONTRACT.md` §3c): a
+// turn that ends without a completion leaves the task open, and the client
+// decides what that means and tells the session with its own sentence. The
+// plugin's answer to a clean turn end is its beat and nothing else — no
+// injection, no count, and no outcome nobody claimed.
+test("a turn that ends without a completion settles nothing and says nothing", async () => {
+  const { agent, host, surface } = await startAgent({ options: { settleFallbackMs: 40 } });
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
-  // The assignment carries an image, so the reminder has an attachment path to
-  // name and a part it must not hand over twice.
-  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  const assignment = structuredClone(assignArgs());
-  assignment.envelope.body = {
-    text: "build it",
-    image: { data_base64: bytes.toString("base64"), mime: "image/png", name: "shot.png" },
-  };
-  host.notify("assign", assignment);
+  host.notify("assign", assignArgs());
   await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
-  assert.equal(surface.calls.wakeUser[0].parts.length, 1, "the injection carries the image");
+  agent.noteAssistantText("OK");
 
-  // The first turn belongs to the session itself. Its settled idle spends rung
-  // one. The turn that reminder wakes does not reset the episode, so its own
-  // settled idle spends rung two rather than starting over.
+  // Two clean turns and a settle after each: the fallback window and the
+  // settled signal both land, and neither has anything to decide.
   agent.onTurnStart();
   agent.onTurnEnd();
   agent.onSettled();
-  const first = await waitFor(() =>
-    surface.calls.wakeUser.length === 2 ? surface.calls.wakeUser : null,
-  );
-  const firstReminder = first.at(-1);
-  assert.match(firstReminder.text, /reminder 1 of 2/);
-  assert.match(firstReminder.text, /build it/, "the reminder carries the task text");
-  assert.match(
-    firstReminder.text,
-    /\[onlyne\] task 11111111-1111-4111-8111-111111111111 from role:planner \(kind task\)/,
-    "and the identity and source the injection named",
-  );
-  assert.match(firstReminder.text, /\[onlyne\] attachment saved to: .*shot\.png/, "the path travels as text");
-  assert.deepEqual(firstReminder.parts, [], "and the image itself is not handed over twice");
-  assert.doesNotMatch(firstReminder.text, /Read the incoming task/, "the role prose is already in the context");
-
+  await new Promise((resolve) => setTimeout(resolve, 100));
   agent.onTurnStart();
   agent.onTurnEnd();
   agent.onSettled();
-  const secondRung = await waitFor(() =>
-    surface.calls.wakeUser.length === 3 ? surface.calls.wakeUser : null,
-  );
-  assert.match(secondRung.at(-1).text, /reminder 2 of 2/, "the reminder-woken turn keeps the episode's count");
-  assert.deepEqual(host.of("report").filter((report) => report.kind === "complete"), []);
+  await new Promise((resolve) => setTimeout(resolve, 100));
 
-  // The next turn is the one the second reminder wakes, so it does not reset
-  // the episode. Let that turn end without a settle, then start a turn of the
-  // session's own: that ordinary turn begins a fresh episode.
-  agent.onTurnStart();
-  agent.onTurnEnd();
-  agent.onTurnStart();
-  agent.onTurnEnd();
-  agent.onSettled();
-  const reset = await waitFor(() =>
-    surface.calls.wakeUser.length === 4 ? surface.calls.wakeUser : null,
-  );
-  assert.match(reset.at(-1).text, /reminder 1 of 2/, "an ordinary turn clears the episode's rung count");
-
-  agent.onTurnStart();
-  agent.onTurnEnd();
-  agent.onSettled();
-  const secondFresh = await waitFor(() =>
-    surface.calls.wakeUser.length === 5 ? surface.calls.wakeUser : null,
-  );
-  assert.match(secondFresh.at(-1).text, /reminder 2 of 2/);
-
-  // The third idle in the fresh episode spends the bound, so the open task
-  // fails and the session leaves — the tool was never called.
-  agent.onTurnStart();
-  agent.onTurnEnd();
-  agent.onSettled();
-  const complete = await waitFor(() => host.of("report").find((report) => report.kind === "complete"));
-  assert.deepEqual(complete.data, {
-    task_id: TASK_ID,
-    outcome: "failed",
-    head: "no completion after 2 idle reminders",
-  });
-  assert.deepEqual(surface.calls.exits, ["failed"], "the ladder's failure leaves the session");
-  assert.equal(surface.calls.wakeUser.length, 5, "the bound is spent: no third reminder");
-
-  // A turn that hands the outcome over is never reminded: the tool call is the
-  // exit the ladder exists to get.
-  const completed = await startAgent();
-  completed.agent.start();
-  await waitFor(() => completed.host.of("report").length >= 1);
-  completed.host.notify("assign", assignArgs());
-  await waitFor(() => (completed.surface.calls.wakeUser.length === 1 ? true : null));
-  completed.agent.onTurnStart();
-  completed.agent.onTurnEnd();
-  await completed.agent.completeFromTool({ outcome: "done", text: "built it" });
-  completed.agent.onSettled();
-  await new Promise((resolve) => setTimeout(resolve, 60));
-  assert.equal(completed.surface.calls.wakeUser.length, 1, "the completion is the exit: no reminder follows it");
-  assert.deepEqual(completed.surface.calls.exits, ["done"]);
+  assert.equal(surface.calls.wakeUser.length, 1, "no turn end injects anything");
+  assert.deepEqual(completions(host), [], "and no turn end reports an outcome nobody claimed");
+  assert.deepEqual(surface.calls.exits, [], "the session stays mounted");
+  assert.deepEqual(agent.status().tasks, [TASK_ID], "the task is still open");
 });
 
 test("an assigned task that never ran is not completed", async () => {
@@ -865,7 +794,7 @@ test("an explicit tool outcome wins and a second completion is refused", async (
   agent.onTurnEnd();
   agent.noteAssistantText("looks fine");
 
-  const result = await agent.completeFromTool({ outcome: "failed", text: "changed my mind" });
+  const result = await agent.completeFromTool({ outcome: "failed", summary: "changed my mind" });
   assert.deepEqual(result, { taskId: TASK_ID, outcome: "failed", head: "changed my mind" });
   assert.deepEqual(await agent.completeFromTool({ outcome: "done" }), {
     taskId: TASK_ID,
@@ -893,12 +822,12 @@ test("a refused completion report leaves the task open for the retry", async () 
   agent.onTurnStart();
   agent.onTurnEnd();
 
-  await assert.rejects(() => agent.completeFromTool({ outcome: "done", text: "built it" }), /settle refused/);
+  await assert.rejects(() => agent.completeFromTool({ outcome: "done", summary: "built it" }), /settle refused/);
   assert.deepEqual(agent.status().tasks, [TASK_ID], "the refused task is still open");
   assert.equal(agent.status().stats.completions, 0);
   assert.deepEqual(surface.calls.exits, []);
 
-  const result = await agent.completeFromTool({ outcome: "done", text: "built it" });
+  const result = await agent.completeFromTool({ outcome: "done", summary: "built it" });
   assert.deepEqual(result, { taskId: TASK_ID, outcome: "done", head: "built it" });
   const completes = host.of("report").filter((report) => report.kind === "complete");
   assert.equal(completes.length, 2, "the retry reported again");
@@ -922,7 +851,7 @@ test("an explicit tool argument is the head over the last assistant text", async
   agent.noteAssistantText("Handed off to `a` with K=6.");
 
   const payload = "K=10: 1:a 2:b 3:c 4:d 5:e 6:a 7:b 8:c 9:d 10:e";
-  const result = await agent.completeFromTool({ outcome: "done", text: payload });
+  const result = await agent.completeFromTool({ outcome: "done", summary: payload });
   assert.equal(result.head, payload, "the argument is the head, byte for byte");
   const completes = host.of("report").filter((report) => report.kind === "complete");
   assert.deepEqual(completes[0].data, { task_id: TASK_ID, outcome: "done", head: payload });
@@ -936,11 +865,11 @@ test("an explicit tool argument is the head over the last assistant text", async
   assert.equal(host.of("report").filter((report) => report.kind === "complete").length, 1);
 });
 
-// An argument that carries nothing is no argument: the completion summary is
-// the last assistant text instead of an empty head. (An argument absent
-// altogether is the queued-completion case above.)
+// A summary that carries nothing is no summary: the head is the last assistant
+// text instead of an empty display line. (A summary absent altogether is the
+// queued-completion case above.)
 test("an empty tool argument falls back to the last assistant text", async () => {
-  for (const text of ["", "   "]) {
+  for (const summary of ["", "   "]) {
     const { agent, host, surface } = await startAgent();
     agent.start();
     await waitFor(() => host.of("report").length >= 1);
@@ -950,8 +879,8 @@ test("an empty tool argument falls back to the last assistant text", async () =>
     agent.onTurnEnd();
     agent.noteAssistantText("appended 10:e and handed the token back");
 
-    const result = await agent.completeFromTool({ outcome: "done", text });
-    assert.equal(result.head, "appended 10:e and handed the token back", `text=${JSON.stringify(text)}`);
+    const result = await agent.completeFromTool({ outcome: "done", summary });
+    assert.equal(result.head, "appended 10:e and handed the token back", `summary=${JSON.stringify(summary)}`);
     const complete = host.of("report").find((report) => report.kind === "complete");
     assert.equal(complete.data.head, "appended 10:e and handed the token back");
   }
@@ -1016,25 +945,32 @@ test("a reconnect beat re-derives the phase from the surface", async () => {
   );
 });
 
-test("an inbound image is written under the workspace and handed to pi", async () => {
+// The client writes every file a delivery carries and names the absolute paths
+// in the frame. The plugin's whole job on an inbound image is to turn the bytes
+// beside it into a pi content part: it writes nothing, and the paths it records
+// are the ones it was handed.
+test("an inbound image reaches pi as a part while the client's own paths are recorded", async () => {
   const { agent, host, surface, dir } = await startAgent();
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
   const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const shot = "/ws/.onlyne/tmp/attachments/11111111-1111-4111-8111-111111111111-shot.png";
   const args = assignArgs();
   args.envelope.body = { text: "what is this?", image: { data_base64: bytes.toString("base64"), mime: "image/png", name: "shot.png" } };
+  args.text = `From planner:\n\nwhat is this?\n\nAttachments: ${shot}`;
+  args.attachments = [shot];
   host.notify("assign", args);
   await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
 
   const injected = surface.calls.wakeUser[0];
+  assert.equal(injected.text, args.text, "the frame's text, byte for byte");
   assert.equal(injected.parts.length, 1);
   assert.equal(injected.parts[0].mime, "image/png");
   assert.equal(injected.parts[0].data, bytes.toString("base64"));
-  const path = join(dir, ".onlyne", "tmp", "attachments", `${TASK_ID}-3f2a1c4e-5b6d-4e7f-8a90-1b2c3d4e5f60-shot.png`);
-  assert.ok(existsSync(path), `expected ${path}`);
-  assert.deepEqual([...readFileSync(path)], [...bytes]);
-  assert.ok(injected.text.includes(path), "the injected message names the file it wrote");
-  assert.deepEqual(surface.calls.entries[0].data.attachments, [path]);
+  assert.equal(injected.parts[0].name, "shot.png");
+  // The client writes the files: the workspace stays untouched.
+  assert.equal(existsSync(join(dir, ".onlyne")), false, "the plugin writes no attachment file");
+  assert.deepEqual(surface.calls.entries[0].data.attachments, [shot]);
 });
 
 test("a probe is answered with a heartbeat for the live task", async () => {
@@ -1157,13 +1093,14 @@ test("a beat asked for mid-round folds into the running round instead of stackin
   }
 });
 
-test("a task body handed over as config_get still reaches pi", async () => {
+test("the delivery text handed over as config_get reaches pi unchanged", async () => {
   const { agent, host, surface } = await startAgent();
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
-  host.notify("config_get", { key: "stdin:do the thing" });
+  const text = "From planner:\n\ndo the thing";
+  host.notify("config_get", { key: `stdin:${text}` });
   await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
-  assert.match(surface.calls.wakeUser[0].text, /do the thing/);
+  assert.equal(surface.calls.wakeUser[0].text, text, "the stdin route composes no wording of its own");
 });
 
 test("recycle settles the task, detaches and asks pi to exit", async () => {
@@ -1273,156 +1210,121 @@ test("a host that never answers the hello is dropped and retried", async () => {
   assert.match(agent.status().lastError, /hello timed out/);
 });
 
-// ---------------------------------------------------------------- relay guard
+// ---------------------------------------------------- the completion's shape
 
-// The relay guard is what stops a session from reporting a terminal outcome
-// while it still owes a downstream handoff. Its evidence is delivery only:
-// the roles this session's own successful `onlyne_send` calls reached.
+// What the model hands over is the whole of the completion: `summary` becomes
+// the ledger's display head, and `details` and `files` ride the same report
+// unchanged. The shape and the details ceiling are the client's checks
+// (`docs/v2-CONTRACT.md` §3c), so the plugin keeps none of them of its own.
 
-/** The exact `report.complete` args this plugin sent before the guard existed. */
+/** The exact `report.complete` args a completion that carries no body sends. */
 const COMPLETE_VECTOR =
   '{"kind":"complete","data":{"task_id":"11111111-1111-4111-8111-111111111111","outcome":"done","head":"handed the token over"}}';
 
-/** Every `report.complete` the fake host received, in arrival order. */
-function completions(host) {
-  return host.of("report").filter((report) => report.kind === "complete");
-}
+test("a completion sends the summary as the head and adds nothing else", async () => {
+  const { agent, host } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
 
-/** The host's own assign frame, handed over by a role that is not this one. */
-function assignmentFrom(role) {
-  const args = assignArgs();
-  return { ...args, envelope: { ...args.envelope, from: { role: { role } } } };
-}
+  await agent.completeFromTool({ outcome: "done", summary: "handed the token over" });
 
-test("with no relay policy the completion frame is unchanged, force and reason included", async () => {
-  const inputs = [
-    { outcome: "done", text: "handed the token over" },
-    { outcome: "done", text: "handed the token over", force: true, reason: "no policy is in force" },
-  ];
-  for (const input of inputs) {
+  assert.equal(JSON.stringify(completions(host)[0]), COMPLETE_VECTOR);
+});
+
+test("details and files ride the completion unchanged", async () => {
+  const { agent, host } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  const details = "the whole result\nsecond line\n";
+  const files = ["/ws/out/token.txt", "/ws/out/report.md"];
+
+  await agent.completeFromTool({ outcome: "done", summary: "appended 10:e", details, files });
+
+  const [complete] = completions(host);
+  assert.equal(complete.data.details, details, "byte for byte, newlines and all");
+  assert.deepEqual(complete.data.files, files);
+});
+
+test("the outcome travels as the model's own word, the proto's four all through", async () => {
+  for (const outcome of ["done", "failed", "cancelled", "blocked"]) {
     const { agent, host } = await startAgent();
     agent.start();
     await waitFor(() => host.of("report").length >= 1);
-    await agent.completeFromTool(input);
-    assert.equal(JSON.stringify(completions(host)[0]), COMPLETE_VECTOR, JSON.stringify(input));
+
+    await agent.completeFromTool({ outcome, summary: "the word is the outcome" });
+
+    assert.equal(completions(host)[0].data.outcome, outcome, `${outcome} must not be rewritten`);
   }
 });
 
-test("a relay list refuses a completion until every named role has a handoff", async () => {
-  const { agent, host, surface } = await startAgent({ relay: { required: ["writer"] } });
+// ---------------------------------------------------------- the host's nudge
+
+// The turn-end rule has one owner, the client (`docs/v2-CONTRACT.md` §3c), so
+// the sentence a session reads when its turn ended without a completion is the
+// client's own: `nudge { task_id, text }`, handed over exactly as it arrived and
+// answered with the one claim the plugin can make — that the text was handed
+// over.
+
+/** 3c's nudge sentence, verbatim. */
+const NUDGE_TEXT =
+  "If this task is finished, report it with onlyne_complete; if something is missing, say what.";
+
+test("a nudge hands the client's sentence over as it stands and answers ok", async () => {
+  const { agent, host, surface } = await startAgent();
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
-
-  await assert.rejects(
-    () => agent.completeFromTool({ outcome: "done", text: "wrote the notes" }),
-    (error) => {
-      assert.match(
-        error.message,
-        /^onlyne: relay guard: missing handoff to: writer \(this session delivered to: none\)/,
-      );
-      assert.match(error.message, /force:true and a non-empty reason/);
-      return true;
-    },
-  );
-  assert.deepEqual(completions(host), []);
-  assert.deepEqual(surface.calls.exits, []);
-
-  await agent.sendFromTool({ to: "writer", text: "here is the outline" });
-  const result = await agent.completeFromTool({ outcome: "done", text: "wrote the notes" });
-  assert.deepEqual(result, { taskId: TASK_ID, outcome: "done", head: "wrote the notes" });
-  assert.equal(completions(host).length, 1);
-  assert.deepEqual(surface.calls.exits, ["done"]);
-});
-
-test("a relay count wants distinct downstream roles and ignores echoes", async () => {
-  const { agent, host } = await startAgent({ relay: { required: [], count: 2 } });
-  agent.start();
-  await waitFor(() => host.of("report").length >= 1);
-  host.notify("assign", assignmentFrom("supervisor"));
-  await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
-
-  await agent.sendFromTool({ to: "supervisor", text: "status" }); // back upstream
-  await agent.sendFromTool({ to: "planner", text: "note to self" }); // this role
-  await agent.sendFromTool({ to: "builder", text: "build it" });
-  await assert.rejects(
-    () => agent.completeFromTool({ outcome: "done" }),
-    /missing handoff: 1 of 2 required distinct downstream roles/,
-  );
-
-  await agent.sendFromTool({ to: "writer", text: "document it" });
-  const result = await agent.completeFromTool({ outcome: "done" });
-  assert.equal(result.outcome, "done");
-  assert.equal(completions(host).length, 1);
-});
-
-test("force needs a reason, and the reason it takes is stamped into the head", async () => {
-  const { agent, host } = await startAgent({ relay: { required: ["writer"] } });
-  agent.start();
-  await waitFor(() => host.of("report").length >= 1);
-
-  await assert.rejects(
-    () =>
-      agent.completeFromTool({
-        outcome: "done",
-        text: "outline is done",
-        force: true,
-        reason: "   ",
-      }),
-    /missing handoff to: writer/,
-  );
-  assert.deepEqual(completions(host), []);
-
-  const result = await agent.completeFromTool({
-    outcome: "done",
-    text: "outline is done",
-    force: true,
-    reason: "writer is offline for the day",
-  });
-  assert.equal(result.head, "relay-guard-forced: writer is offline for the day | outline is done");
-  assert.equal(completions(host)[0].data.head, result.head);
-});
-
-test("a refusal detaches nothing, and the same call lands once the handoff is out", async () => {
-  const { agent, host, surface } = await startAgent({ relay: { required: ["writer"] } });
-  agent.start();
-  await waitFor(() => host.of("report").length >= 1);
-
-  await assert.rejects(() => agent.completeFromTool({ outcome: "done", text: "half done" }), /relay guard/);
-  assert.equal(agent.status().connected, true);
-  assert.equal(agent.status().stats.completions, 0);
-  assert.deepEqual(surface.calls.exits, []);
-  assert.deepEqual(host.of("detach"), []);
-  assert.deepEqual(completions(host), []);
-
-  await agent.sendFromTool({ to: "writer", text: "the outline so far" });
-  await agent.completeFromTool({ outcome: "done", text: "half done" });
-  assert.equal(agent.status().stats.completions, 1);
-  assert.deepEqual(surface.calls.exits, ["done"]);
-});
-
-test("a send the client refused is not a handoff", async () => {
-  const { agent, host } = await startAgent({ relay: { required: ["writer"] }, failSend: true });
-  agent.start();
-  await waitFor(() => host.of("report").length >= 1);
-
-  await assert.rejects(() => agent.sendFromTool({ to: "writer", text: "outline" }), /no_route/);
-  await assert.rejects(() => agent.completeFromTool({ outcome: "done" }), /missing handoff to: writer/);
-});
-
-test("the handoff ledger belongs to the session, not to one task", async () => {
-  const { agent, host } = await startAgent({ relay: { required: ["writer"] } });
-  agent.start();
-  await waitFor(() => host.of("report").length >= 1);
-
-  // A note sent before the assignment arrived is still this session reaching
-  // the role the policy names.
-  await agent.sendFromTool({ to: "writer", text: "preamble" });
   host.notify("assign", assignArgs());
-  await waitFor(() => (host.of("assign_ack").length === 1 ? true : null));
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+  const record = agent.tasks.get(TASK_ID);
+  const reportsBefore = host.of("report").length;
 
-  const result = await agent.completeFromTool({ outcome: "done", text: "wrote the notes" });
-  assert.equal(result.outcome, "done");
-  assert.equal(completions(host).length, 1);
+  host.request("nudge", { task_id: TASK_ID, text: NUDGE_TEXT }, 900);
+  await waitFor(() => (host.answers(900).length > 0 ? true : null));
+
+  assert.equal(surface.calls.wakeUser.length, 2);
+  const handed = surface.calls.wakeUser[1];
+  // No prefix, no count, no task id, no role, and nothing of the delivery text
+  // repeated: the client's sentence is the whole of it.
+  assert.equal(handed.text, NUDGE_TEXT, "the client's bytes, with nothing around them");
+  assert.deepEqual(handed.parts, []);
+  assert.deepEqual(host.answers(900), [{ reply_to: 900, ok: true }]);
+  // A nudge is not a delivery and not a report: the task stays open, its record
+  // is untouched, and no frame of the plugin's own follows.
+  assert.equal(agent.tasks.get(TASK_ID), record);
+  assert.equal(record.errored, false);
+  assert.deepEqual(host.of("report").slice(reportsBefore), []);
+});
+
+test("a nudge carrying no text is refused rather than answered ok", async () => {
+  const { agent, host, surface } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  host.request("nudge", { task_id: TASK_ID, text: "" }, 901);
+  await waitFor(() => (host.answers(901).length > 0 ? true : null));
+
+  assert.equal(surface.calls.wakeUser.length, 0, "there is nothing to hand over");
+  const [answer] = host.answers(901);
+  // The client settles a delivery on this answer, so it must not read as handed
+  // over when pi took nothing.
+  assert.equal(answer.ok, false);
+  assert.equal(answer.error.code, "internal");
+});
+
+test("a nudge that carries no id is a notification and gets no answer", async () => {
+  const { agent, host, surface } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  host.notify("nudge", { task_id: TASK_ID, text: NUDGE_TEXT });
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+
+  assert.equal(surface.calls.wakeUser[0].text, NUDGE_TEXT);
+  assert.equal(
+    host.frames.some((entry) => entry.frame.reply_to !== undefined),
+    false,
+    "a notification owes no answer",
+  );
 });
 
 // ------------------------------------------------------------ the handoff tool

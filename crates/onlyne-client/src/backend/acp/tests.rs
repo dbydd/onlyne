@@ -8,6 +8,7 @@
 use crate::backend::{
     CloseReason, OutcomeFeed, SessionBackend, SessionOutcome, SessionRef, SpawnSpec,
 };
+use onlyne_config::layout::RoleWorkspace;
 use onlyne_proto::lifecycle::TaskState;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -16,10 +17,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-use super::turn::{evidence_path, payload_dir, payload_path};
 use super::{AcpBackend, AcpOptions};
 
-mod payload;
 mod process;
 mod session;
 mod turn;
@@ -34,6 +33,12 @@ mod turn;
 /// every ending the backend has to map, and the agent's chosen answer is echoed
 /// back as its closing message — which is how a test reads what this client
 /// decided without a second channel.
+///
+/// It also traces the two halves of §3b a test has to see from the agent's own
+/// side: the `mcpServers` the client handed `session/new`, and the `ONLYNE_*`
+/// variables this process was really started with. The second one is the claim
+/// that the mount's token is not the agent's: a token in this line would be a
+/// capability the model can read.
 const FAKE_AGENT: &str = r##"#!/usr/bin/env python3
 """A scripted ACP v1 agent for the onlyne-session acp backend tests."""
 import json, os, sys
@@ -47,6 +52,10 @@ def trace(line):
         with open(TRACE, "a") as fh:
             fh.write(line + "\n")
             fh.flush()
+
+
+def mounted(params):
+    return json.dumps(params.get("mcpServers") or [], sort_keys=True)
 
 
 def send(msg):
@@ -159,6 +168,7 @@ def dispatch(msg):
         SESSIONS[0] += 1
         sid = "sess-%d" % SESSIONS[0]
         trace("new %s" % sid)
+        trace("mount %s" % mounted(params))
         result(rid, {"sessionId": sid, "modes": {"currentModeId": "default"},
                      "models": {"currentModelId": "fast"}, "configOptions": []})
     elif method == "session/set_mode":
@@ -188,6 +198,8 @@ def dispatch(msg):
 
 def main():
     trace("start pid %d" % os.getpid())
+    trace("env %s" % json.dumps({name: value for name, value in os.environ.items()
+                                 if name.startswith("ONLYNE_")}, sort_keys=True))
     while True:
         msg = read_line()
         if msg is None:
@@ -200,12 +212,28 @@ def main():
 main()
 "##;
 
+/// A turn that ended without a completion, as [`SessionOutcome`] reports it: the
+/// agent stopped asking for work and stated no verdict about the task. This
+/// backend witnessed no standing, so it hands the ending on and §3c's rule reads
+/// it — a clean `end_turn` is not this drive's verdict.
+const NO_VERDICT: Option<TaskState> = None;
+
+/// The token a session of this rig is opened with, standing in for the mint the
+/// client makes per session. A test needs a value it can find in the agent's own
+/// trace, and it is at the same time the string §3b forbids the agent's
+/// environment to carry.
+const TOOLS_TOKEN: &str = "tok-rig-3b";
+
 /// One tempdir per fake agent: the script, the trace, and the workspace whose
 /// `.onlyne/logs` the backend journals into.
 struct Fake {
     root: TempDir,
     script: PathBuf,
     trace: PathBuf,
+    /// The directory holding the rig's stand-in for the `onlyne` CLI. It goes
+    /// first on the child's `PATH`, so the mount's entrypoint probe finds this
+    /// rig's file rather than whatever the machine has installed.
+    bin: PathBuf,
 }
 
 impl Fake {
@@ -213,10 +241,20 @@ impl Fake {
         let root = TempDir::new().expect("a temp workspace for the fake agent");
         let script = root.path().join("fake_agent.py");
         fs::write(&script, FAKE_AGENT).expect("write the fake agent script");
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).expect("a directory for the onlyne stand-in");
+        fs::write(bin.join("onlyne"), "#!/bin/sh\nexit 0\n").expect("write the stand-in");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(bin.join("onlyne"), fs::Permissions::from_mode(0o755))
+                .expect("make the stand-in executable");
+        }
         Fake {
             trace: root.path().join("agent.trace"),
             root,
             script,
+            bin,
         }
     }
 
@@ -235,11 +273,35 @@ impl Fake {
             cwd: self.root.path().to_path_buf(),
             task_id: task.to_string(),
             command: self.command(),
-            env: BTreeMap::from([("ACP_TRACE".to_string(), self.trace_display())]),
+            env: self.env(),
+            tools_token: TOOLS_TOKEN.to_string(),
+            prose: String::new(),
             focus: None,
             placement: None,
             rename: None,
         }
+    }
+
+    /// The environment every session of this rig runs with: where the agent
+    /// writes its trace, and a `PATH` whose first entry is this rig's own bin
+    /// directory. The mount's command is resolved on that `PATH`, so a test can
+    /// name the CLI's path as a fact rather than reading whatever build the
+    /// machine happens to have.
+    fn env(&self) -> BTreeMap<String, String> {
+        let mut dirs = vec![self.bin.clone()];
+        if let Some(inherited) = std::env::var_os("PATH") {
+            dirs.extend(std::env::split_paths(&inherited));
+        }
+        let path = std::env::join_paths(dirs).expect("a usable PATH");
+        BTreeMap::from([
+            ("ACP_TRACE".to_string(), self.trace_display()),
+            ("PATH".to_string(), path.to_string_lossy().into_owned()),
+        ])
+    }
+
+    /// The `onlyne` the mount under test is supposed to resolve to.
+    fn stub(&self) -> PathBuf {
+        self.bin.join("onlyne")
     }
 
     fn trace_display(&self) -> String {
@@ -291,6 +353,44 @@ fn onlyne_records(lines: &[Value], kind: &str) -> Vec<Value> {
         .collect()
 }
 
+/// The `mcpServers` this client handed `session/new`, one entry per session in
+/// the order the agent opened them.
+fn traced_mounts(fake: &Fake) -> Vec<Value> {
+    traced_json(fake, "mount ")
+        .into_iter()
+        .flat_map(|value| value.as_array().cloned().unwrap_or_default())
+        .collect()
+}
+
+/// The `ONLYNE_*` variables this rig's agent process was really started with,
+/// as it saw them itself.
+fn traced_env(fake: &Fake) -> Value {
+    traced_json(fake, "env ")
+        .pop()
+        .expect("the agent traced its own environment")
+}
+
+/// One class of the agent's own trace lines, each carrying a JSON document.
+fn traced_json(fake: &Fake, prefix: &str) -> Vec<Value> {
+    fake.traced()
+        .lines()
+        .filter_map(|line| line.strip_prefix(prefix))
+        .map(|body| {
+            serde_json::from_str(body).unwrap_or_else(|error| panic!("{prefix}{body}: {error}"))
+        })
+        .collect()
+}
+
+/// One variable of a mount's own environment, as the agent received it.
+fn mount_env(mount: &Value, name: &str) -> Option<String> {
+    mount["env"]
+        .as_array()?
+        .iter()
+        .find(|pair| pair["name"] == name)
+        .and_then(|pair| pair["value"].as_str())
+        .map(str::to_string)
+}
+
 fn await_outcome(feed: &OutcomeFeed, task: &str) -> SessionOutcome {
     // One turn is a spawned agent and its round trips. The suite runs every crate's
     // tests over the runner's few cores at once, so this bound belongs to the
@@ -325,7 +425,7 @@ fn run_turn(
     let outcome = await_outcome(&feed, task);
     // The journal is written before the fact is handed over, so a complete
     // file is observable in the same moment the outcome is. `run_turn` ends
-    // there, so the whole file is settled by the time the report is read.
+    // there, so the whole file is settled by the time the outcome is read.
     (outcome, jsonl(&events), read_or_empty(&log))
 }
 

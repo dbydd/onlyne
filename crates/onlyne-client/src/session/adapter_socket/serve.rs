@@ -1,5 +1,7 @@
 use super::socket::AdapterSocket;
-use crate::session::dispatch::{ReadyNotice, on_plugin_report, on_ready, sync_frame, sync_session};
+use crate::session::dispatch::{
+    DispatchState, ReadyNotice, on_plugin_report, on_ready, sync_frame, sync_session,
+};
 use anyhow::{Context, Result};
 use onlyne_adapter::{AdapterIo, AdapterServer, ServerConnection};
 use onlyne_proto::{
@@ -78,11 +80,22 @@ impl AdapterSocket {
                     "roles": [{"name": role, "role": role, "prose": prose}]
                 }))
             }
-            ClientOp::Report(report @ Report::Complete { .. }) => result_to_body(
-                on_plugin_report(&self.dispatch, None, report)
-                    .await
-                    .map(|()| serde_json::Value::Null),
-            ),
+            ClientOp::Report(report @ Report::Complete { .. }) => {
+                // The operator's door answers a completion that breaks the
+                // client's own shape rule the way every other door does
+                // (`docs/v2-CONTRACT.md` §3b). No connection arrived with the
+                // frame, so only the rule over the report itself is read here:
+                // the relay guard measures a session's delivery record, and this
+                // door has no sender whose record it could read.
+                match self.dispatch.completion_refusal(None, &report) {
+                    Some(refusal) => refusal,
+                    None => result_to_body(
+                        on_plugin_report(&self.dispatch, None, report)
+                            .await
+                            .map(|()| serde_json::Value::Null),
+                    ),
+                }
+            }
             other => match self.dispatch.request(other).await {
                 Ok(body) => body,
                 Err(error) => ResBody::err(ErrorCode::Internal, error.to_string(), None),
@@ -132,6 +145,27 @@ impl AdapterSocket {
                         "adapter mount does not match role".to_string(),
                     ));
                 }
+                // A tools mount names no session of its own: the token is the
+                // binding, so the session it speaks for, that session's
+                // generation, and the role it speaks as all come from this
+                // client's record rather than from a field the caller supplies
+                // (`docs/v2-CONTRACT.md` §3b). A token that names no live
+                // session is refused here, before any welcome, and the sentence
+                // carries the field the adapter's welcome refusal has no slot
+                // for.
+                let (session_id, generation) = match hello.mount.as_ref() {
+                    Some(Mount::Tools(mount)) => {
+                        let Some(session) = dispatch.tools_mount_for(&mount.token) else {
+                            return Err((
+                                ErrorCode::Unauthorized,
+                                DispatchState::TOOLS_GONE_MESSAGE.to_string(),
+                            ));
+                        };
+                        (Some(session.session_id), session.generation)
+                    }
+                    Some(Mount::Agent(mount)) => (mount.session.clone(), 1),
+                    _ => (None, 1),
+                };
                 let prose = dispatch.role_prose();
                 // The same claim the runloop makes to the server at `hello`: the
                 // tasks this client already holds a session for, read from its
@@ -151,11 +185,8 @@ impl AdapterSocket {
                 Ok(HelloAck {
                     protocol: hello.protocol,
                     role,
-                    session_id: hello.mount.as_ref().and_then(|m| match m {
-                        Mount::Agent(a) => a.session.clone(),
-                        _ => None,
-                    }),
-                    generation: 1,
+                    session_id,
+                    generation,
                     prose,
                     server: ServerInfo {
                         connected: dispatch.link_up(),
@@ -169,6 +200,19 @@ impl AdapterSocket {
         })
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
+        // The token's session can retire between the handshake and this line. The
+        // binding written here is what every later frame is measured against, so
+        // a connection that cannot take it is closed without serving anything
+        // (`docs/v2-CONTRACT.md` §3b).
+        if let Some(Mount::Tools(mount)) = connection.hello.mount.as_ref() {
+            if self
+                .dispatch
+                .bind_tools_mount(&mount.token, connection.io.clone())
+                .is_none()
+            {
+                return Ok(());
+            }
+        }
         self.serve_connection(connection).await
     }
 
@@ -183,6 +227,15 @@ impl AdapterSocket {
             Some(onlyne_proto::Mount::Agent(mount)) => mount.session.clone(),
             _ => None,
         };
+        // A tools mount holds no process: it carries one session's obligations
+        // and nothing about its lifecycle, so it is neither a transport nor a
+        // parked agent and the agent paths below are not its own
+        // (`docs/v2-CONTRACT.md` §3b). Its binding was written by `serve_plugin`
+        // before this connection was served.
+        let tools = matches!(
+            connection.hello.mount.as_ref(),
+            Some(onlyne_proto::Mount::Tools(_)),
+        );
         if agent {
             // The ready barrier of §6 runs now: the local `ready` row and its
             // report reach the server before the `assign` frame leaves.
@@ -192,43 +245,90 @@ impl AdapterSocket {
         let mut graceful_detach = false;
         while let Some(frame) = connection.inbound.recv().await {
             let id = frame.id.unwrap_or_default();
+            // A tools mount speaks for a session while that session lives, and
+            // the token dies with it: the check runs before every frame, and a
+            // frame that finds no session is answered `unauthorized` and takes
+            // the connection with it. A frame carrying no id can be told
+            // nothing, and the connection closes just the same.
+            if tools && !self.dispatch.tools_connection_live(&io) {
+                if frame.id.is_some() {
+                    io.respond(id, DispatchState::tools_gone())
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                }
+                break;
+            }
             // Nothing in this handler may tell this connection to leave ahead of
             // the answer it is about to receive.
             let _held = self.dispatch.hold_frame(&io);
+            // A tools mount serves the agent mount's op set minus everything
+            // about process lifecycle: it holds no process, so it registers no
+            // session and acks no assignment (`docs/v2-CONTRACT.md` §3b). Every
+            // other op is refused by name, like every other mount's, and the
+            // duplicate `hello` keeps the answer the arm below already gives.
+            if tools
+                && let AdapterMsg::Plugin(op) = &frame.msg
+                && !matches!(
+                    op,
+                    PluginOp::Send(_)
+                        | PluginOp::Handoff(_)
+                        | PluginOp::Report(_)
+                        | PluginOp::Detach(_)
+                        | PluginOp::Hello(_)
+                )
+            {
+                if frame.id.is_some() {
+                    io.respond(
+                        id,
+                        ResBody::err(
+                            ErrorCode::Forbidden,
+                            format!("{} is not allowed on a tools mount", op.name()),
+                            Some("op".into()),
+                        ),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                }
+                continue;
+            }
             match frame.msg {
                 AdapterMsg::Plugin(PluginOp::Report(report)) => {
-                    let result = match report {
-                        Report::Ready {
-                            task_id,
-                            session_id,
-                            generation,
-                            ..
-                        } => {
-                            let prose = self.dispatch.role_prose();
-                            on_ready(
-                                &self.dispatch,
-                                ReadyNotice {
-                                    task_id,
-                                    session_id,
-                                    generation,
-                                    io: Some(io.clone()),
-                                    capabilities: capabilities.clone(),
-                                },
-                                &prose,
-                            )
-                            .await
-                            .map(|()| serde_json::Value::Null)
-                        }
-                        // The frame carries its sender: a report only moves the
-                        // state of a session this very connection serves.
-                        other => on_plugin_report(&self.dispatch, Some(&io), other)
-                            .await
-                            .map(|()| serde_json::Value::Null),
+                    let body = if tools {
+                        self.tools_report(&io, report).await
+                    } else {
+                        let result = match report {
+                            Report::Ready {
+                                task_id,
+                                session_id,
+                                generation,
+                                ..
+                            } => {
+                                let prose = self.dispatch.role_prose();
+                                on_ready(
+                                    &self.dispatch,
+                                    ReadyNotice {
+                                        task_id,
+                                        session_id,
+                                        generation,
+                                        io: Some(io.clone()),
+                                        capabilities: capabilities.clone(),
+                                    },
+                                    &prose,
+                                )
+                                .await
+                                .map(|()| serde_json::Value::Null)
+                            }
+                            // The frame carries its sender: a report only moves
+                            // the state of a session this very connection
+                            // serves.
+                            other => on_plugin_report(&self.dispatch, Some(&io), other)
+                                .await
+                                .map(|()| serde_json::Value::Null),
+                        };
+                        result_to_body(result)
                     };
                     if frame.id.is_some() {
-                        io.respond(id, result_to_body(result))
-                            .await
-                            .map_err(|e| anyhow::anyhow!(e))?;
+                        io.respond(id, body).await.map_err(|e| anyhow::anyhow!(e))?;
                     }
                 }
                 AdapterMsg::Plugin(PluginOp::SessionRegister(args)) => {
@@ -283,25 +383,54 @@ impl AdapterSocket {
                         .map_err(|e| anyhow::anyhow!(e))?;
                     }
                 }
-                AdapterMsg::Plugin(PluginOp::Send(envelope)) => {
+                AdapterMsg::Plugin(PluginOp::Send(mut envelope)) => {
                     // A live connection's frame lands in the durable outbound
                     // queue. A frame from a connection held read-only because its
                     // session was taken by a newer one is held for that task's
                     // completion, which is what routes it beside the newer
                     // session's own handoff.
-                    let result = self.dispatch.plugin_send(&io, &envelope);
+                    //
+                    // A tools mount's frame is measured against the family's
+                    // ceiling and stamped before it is queued: the sender and
+                    // the whole causality chain come from this client's own
+                    // record of the delivery the session serves, never from the
+                    // bridge (`docs/v2-CONTRACT.md` §3b).
+                    let prepared = if tools {
+                        self.dispatch.stamp_tools_send(&io, &mut envelope)
+                    } else {
+                        Ok(())
+                    };
+                    let body = match prepared {
+                        Ok(()) => result_to_body(self.dispatch.plugin_send(&io, &envelope)),
+                        Err(refusal) => refusal,
+                    };
                     if frame.id.is_some() {
-                        io.respond(id, result_to_body(result))
-                            .await
-                            .map_err(|e| anyhow::anyhow!(e))?;
+                        io.respond(id, body).await.map_err(|e| anyhow::anyhow!(e))?;
                     }
                 }
-                AdapterMsg::Plugin(PluginOp::Handoff(args)) => {
+                AdapterMsg::Plugin(PluginOp::Handoff(mut args)) => {
                     // The frame names the task the session hands on, and the
                     // answer names the child the host minted for the recipient.
                     // A refused frame answers the same error shape every other
-                    // plugin frame answers with.
-                    let body = self.dispatch.plugin_handoff(&io, args);
+                    // plugin frame answers with. A tools mount names no task at
+                    // all, so its frame is stamped from the client's own record
+                    // first (`docs/v2-CONTRACT.md` §3b).
+                    let stamped = if tools {
+                        self.dispatch.stamp_tools_task(&io, &mut args.task_id)
+                    } else {
+                        Ok(())
+                    };
+                    let body = match stamped {
+                        Err(refusal) => refusal,
+                        // The child this frame mints sits one hop below the task the
+                        // session serves, and the family's ceiling is measured where
+                        // the frame is handled (`docs/v2-CONTRACT.md` §3b).
+                        Ok(()) if tools => match self.dispatch.handoff_refusal(&io, &args) {
+                            Some(refusal) => refusal,
+                            None => self.dispatch.plugin_handoff(&io, args),
+                        },
+                        Ok(()) => self.dispatch.plugin_handoff(&io, args),
+                    };
                     if frame.id.is_some() {
                         io.respond(id, body).await.map_err(|e| anyhow::anyhow!(e))?;
                     }
@@ -321,6 +450,14 @@ impl AdapterSocket {
                     }
                 }
             }
+        }
+        if tools {
+            // A tools mount holds no slot and no resource: its binding goes with
+            // the connection, and nothing else does. No retirement runs, no exit
+            // is published, and no bye is owed — this connection carried one
+            // session's obligations, not its process
+            // (`docs/v2-CONTRACT.md` §3b).
+            self.dispatch.release_tools_connection(&io);
         }
         if agent {
             // The ended connection releases its bindings. A detach frame also
@@ -379,6 +516,41 @@ impl AdapterSocket {
         Ok(())
     }
 
+    /// Answer one `report` frame from a `tools` mount.
+    ///
+    /// A tools mount holds no process, so the ready barrier and the liveness beat
+    /// describe nothing it has: a completion is the one report this path serves,
+    /// and every other kind is refused by name
+    /// (`docs/v2-CONTRACT.md` §3b). The task that completion settles is stamped
+    /// from the client's own record of the delivery the session serves, because
+    /// the mount names none — the refusal a stamp can bring answers here, before
+    /// `on_plugin_report` is reached, so that door only ever sees the stamped
+    /// value.
+    async fn tools_report(&self, io: &AdapterIo, mut report: Report) -> ResBody {
+        let kind = report.kind_name();
+        let Report::Complete { task_id, .. } = &mut report else {
+            return ResBody::err(
+                ErrorCode::Forbidden,
+                format!("report {kind} is not served on a tools mount"),
+                None,
+            );
+        };
+        if let Err(refusal) = self.dispatch.stamp_tools_task(io, task_id) {
+            return refusal;
+        }
+        // The client's own constraints answer before the frame is applied: a
+        // completion that breaks one is refused as the failed tool call it is,
+        // which is the answer the pi plugin's own tools give on the other drive
+        // (`docs/v2-CONTRACT.md` §3b).
+        if let Some(refusal) = self.dispatch.completion_refusal(Some(io), &report) {
+            return refusal;
+        }
+        match on_plugin_report(&self.dispatch, Some(io), report).await {
+            Ok(()) => ResBody::ok(serde_json::Value::Null),
+            Err(error) => ResBody::err(ErrorCode::Internal, error.to_string(), None),
+        }
+    }
+
     /// Bind a freshly mounted plugin to the session it names, or park it.
     ///
     /// A mount that names its session is that session's transport: the
@@ -387,6 +559,10 @@ impl AdapterSocket {
     /// that names nothing is a plugin that arrived before any work existed: it
     /// waits as this role's parked agent and takes the next staged session
     /// (plan §6 line 285).
+    ///
+    /// A `tools` mount reaches neither branch: it holds no process and serves no
+    /// payload, so its binding was written by `serve_plugin` and this door is
+    /// never its own (`docs/v2-CONTRACT.md` §3b).
     async fn hand_over(
         &self,
         session_id: Option<&str>,
@@ -421,13 +597,18 @@ fn result_to_body(result: Result<serde_json::Value>) -> ResBody {
     }
 }
 
-/// An `agent` mount must name this role; the `admin` probe carries no mount
-/// marker at all, because `Mount` is untagged and its unit variant serializes
-/// as `null`, which reads back as `None`, so the `kind` field is what
-/// identifies the probe.
+/// An `agent` mount must name this role, and a `tools` mount must carry the
+/// mount its kind claims; the `admin` probe carries no mount marker at all,
+/// because `Mount` is untagged and its unit variant serializes as `null`, which
+/// reads back as `None`, so the `kind` field is what identifies the probe.
+///
+/// A `tools` mount names no role of its own: the token *is* the binding
+/// (`docs/v2-CONTRACT.md` §3b), and the session it speaks for is resolved at the
+/// handshake, against this client's own record.
 pub fn mount_allowed(mount: Option<&Mount>, kind: MountKind, role: &str) -> bool {
     match mount {
         Some(Mount::Agent(agent)) => agent.role == role,
+        Some(Mount::Tools(_)) => kind == MountKind::Tools,
         _ => kind == MountKind::Admin,
     }
 }

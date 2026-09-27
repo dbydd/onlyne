@@ -1,4 +1,4 @@
-use onlyne_config::{ClientEntry, IntentPolicy, ServerSection, Spec, Timeouts};
+use onlyne_config::{ClientEntry, IntentPolicy, RuntimeSection, ServerSection, Spec, Timeouts};
 use onlyne_server::generate::{GenerateArgs, generate};
 use std::fs;
 #[cfg(unix)]
@@ -17,7 +17,7 @@ fn client_entry(role: &str) -> ClientEntry {
         max_sessions: 1,
         allowed_senders: vec![],
         allowed_targets: vec![],
-        session_command: vec![],
+        runtime: RuntimeSection::default(),
         timeout: Timeouts {
             ready_ms: 30_000,
             idle_ms: 60_000,

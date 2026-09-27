@@ -1,4 +1,7 @@
-use crate::backend::{AcpOptions, ProcessRunner, WorktreePolicy, backend_for_env, process_env};
+use crate::backend::{
+    AcpOptions, ProcessRunner, Runner, SessionBackend, SessionPlacement, WorktreePolicy,
+    backend_for, detect_placement, process_env,
+};
 use crate::runtime::intent::IntentMachine;
 use crate::session::dispatch::DispatchState;
 use anyhow::Result;
@@ -63,9 +66,13 @@ pub struct ClientInit {
     /// Seconds a dropped plugin connection may stay away before this client
     /// retires the task-free session it left behind. Zero disables the sweep.
     pub reconnect_grace_secs: u64,
-    /// Workspace `config.toml` `backend`. Empty means auto. `ONLYNE_BACKEND`
-    /// in the process environment takes precedence when it is nonempty.
-    pub backend: String,
+    /// The placement this run was told to use: `onlyne-client run` passes the
+    /// workspace `config.toml`'s `placement` key, and an embedding passes
+    /// whatever it resolved — the scenario suite passes the in-process
+    /// `fake` runtime. `None` probes herdr, orca, zellij in that order and
+    /// falls back to `headless`. `ONLYNE_BACKEND` in the process environment
+    /// takes precedence when it names a placement.
+    pub placement: Option<SessionPlacement>,
     /// The workspace config's `[acp]` table. Only the ACP session backend reads
     /// it: the mode, model and reasoning effort handed to the agent when a
     /// session opens, and what to answer when the agent asks for permission.
@@ -93,7 +100,7 @@ impl ClientInit {
             orca_worktree: "host".to_string(),
             stall_report_secs: onlyne_config::DEFAULT_STALL_REPORT_SECS,
             reconnect_grace_secs: onlyne_config::DEFAULT_RECONNECT_GRACE_SECS,
-            backend: String::new(),
+            placement: None,
             acp: onlyne_config::AcpSection::default(),
             session: onlyne_config::SessionPolicy::default(),
         }
@@ -113,8 +120,9 @@ impl ClientInit {
         self.reconnect_grace_secs = secs;
         self
     }
-    pub fn with_backend(mut self, backend: impl Into<String>) -> Self {
-        self.backend = backend.into();
+    /// Adopt the `placement` this run was told to use, if it was told one.
+    pub fn with_placement(mut self, placement: Option<SessionPlacement>) -> Self {
+        self.placement = placement;
         self
     }
     /// Adopt the `[acp]` table the workspace config carries.
@@ -142,6 +150,38 @@ pub fn acp_options(acp: &onlyne_config::AcpSection) -> AcpOptions {
     }
 }
 
+/// What picking a session backend needs from this machine.
+///
+/// The placement is the machine's half of the pair and is known at startup; the
+/// drive is the runtime's half and arrives later, with `welcome`. Keeping the
+/// two apart here is the point of the slice: the backend is chosen when both
+/// halves are known, instead of by one fused value read out of one file.
+#[derive(Clone)]
+pub struct BackendSelector {
+    pub placement: SessionPlacement,
+    pub runner: Arc<dyn Runner>,
+    pub worktree: WorktreePolicy,
+    pub acp: AcpOptions,
+}
+
+impl BackendSelector {
+    /// The backend this role's drive and this machine's placement select.
+    ///
+    /// Refuses a pair the rule does not allow — `acp` anywhere but `headless` —
+    /// so a caller never gets a backend that would run the agent where its
+    /// channel cannot follow it.
+    pub fn build(&self, drive: onlyne_config::Drive) -> Result<Arc<dyn SessionBackend>> {
+        backend_for(
+            drive,
+            self.placement,
+            Arc::clone(&self.runner),
+            self.worktree.clone(),
+            &self.acp,
+        )
+        .map(Arc::from)
+    }
+}
+
 #[derive(Clone)]
 pub struct RunState {
     pub accept_new: Arc<AtomicBool>,
@@ -153,30 +193,42 @@ pub struct RunState {
     /// Seconds a dropped plugin connection may stay away before this client
     /// retires the task-free session it left behind. Zero disables the sweep.
     pub reconnect_grace_secs: u64,
+    /// The machine's half of the runtime pair: the placement a role's drive is
+    /// resolved against, and the settings only a backend reads.
+    pub selector: BackendSelector,
 }
 
 impl RunState {
     pub fn new(init: &ClientInit, store: ClientStore) -> Result<Self> {
-        let requested = std::env::var("ONLYNE_BACKEND")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| init.backend.clone());
-        let backend = backend_for_env(
-            &requested,
-            &process_env(),
-            Arc::new(ProcessRunner),
-            WorktreePolicy::from_config(&init.orca_worktree),
-            &acp_options(&init.acp),
-        )?;
+        let detected = detect_placement(&process_env(), init.placement)?;
+        let selector = BackendSelector {
+            placement: detected.placement,
+            runner: Arc::new(ProcessRunner),
+            worktree: WorktreePolicy::from_config(&init.orca_worktree),
+            acp: acp_options(&init.acp),
+        };
+        tracing::info!(
+            placement = %selector.placement,
+            source = ?detected.source,
+            explicit = ?detected.explicit,
+            "placement resolved"
+        );
+        // The backend a role's drive selects is installed when the drive
+        // arrives with `welcome`. Until then the default drive's backend is in
+        // place, because a dispatcher always holds one and no session can open
+        // before the first `hello`.
+        let backend = selector.build(onlyne_config::Drive::Plugin)?;
         let dispatch = DispatchState::new(
             init.role.clone(),
             init.workspace.clone(),
             Vec::new(),
             1,
-            Arc::from(backend),
+            Arc::clone(&backend),
             store.clone(),
         )
-        .with_session_policy(init.session.clone());
+        .with_session_policy(init.session.clone())
+        .with_placement(selector.placement);
+        dispatch.set_drive(onlyne_config::Drive::Plugin, None);
         let intents = IntentMachine::new(
             store.clone(),
             DEFAULT_INTENT_ATTEMPTS,
@@ -191,13 +243,18 @@ impl RunState {
             welcome: Arc::new(Mutex::new(None)),
             stall_report_secs: init.stall_report_secs,
             reconnect_grace_secs: init.reconnect_grace_secs,
+            selector,
         })
     }
 
     /// Adopt the role slice the server sent with `welcome`.
     pub(super) async fn adopt(&self, welcome: &Welcome) {
-        self.dispatch
-            .reconfigure(crate::session::slice::RoleSlice::from_welcome(welcome));
+        let slice = crate::session::slice::RoleSlice::from_welcome(welcome);
+        // The backend a drive selects is installed before the slice lands, so
+        // the command that arrives with the slice is never handed to the
+        // backend the previous drive left behind.
+        self.install_runtime(slice.drive);
+        self.dispatch.reconfigure(slice);
         // The topology name is the address the host backends group sessions
         // under, so it is recorded with the rest of what the server says about
         // this role. `welcome.cluster` is the server's own `[server] name`.
@@ -216,6 +273,76 @@ impl RunState {
             }
         }
         *self.welcome.lock().await = Some(welcome.clone());
+    }
+
+    /// Install the backend this role's drive selects on this machine.
+    ///
+    /// Runs on every `welcome` and on every spec reload, and does nothing when
+    /// the drive has not moved. Three answers:
+    ///
+    /// * the backend is installed, and the registration is republished with the
+    ///   name it reports;
+    /// * the drive moved while this role holds live sessions, so nothing moves:
+    ///   their panes, tabs, and children are the installed backend's to close
+    ///   and to probe, and the next attempt lands once the role is quiet;
+    /// * the drive and this machine's placement cannot be paired at all, which
+    ///   is recorded so every delivery meets the sentence instead of a backend
+    ///   the previous drive left behind.
+    pub(super) fn install_runtime(&self, drive: onlyne_config::Drive) {
+        if self.dispatch.drive() == Some(drive) {
+            return;
+        }
+        match self.selector.build(drive) {
+            Ok(backend) => {
+                if self.dispatch.set_backend(backend) {
+                    self.dispatch.set_drive(drive, None);
+                    tracing::info!(
+                        drive = %drive,
+                        placement = %self.selector.placement,
+                        backend = %self.dispatch.session_backend(),
+                        "session backend selected"
+                    );
+                    self.republish_registration();
+                } else {
+                    tracing::warn!(
+                        drive = %drive,
+                        placement = %self.selector.placement,
+                        live = self.dispatch.session_count(),
+                        held = %self.dispatch.session_backend(),
+                        "the role's drive changed while it holds live sessions: they keep the \
+                         backend they were opened under, and the new drive lands once the role \
+                         is quiet"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    drive = %drive,
+                    placement = %self.selector.placement,
+                    error = %error,
+                    "the drive this role's spec declares cannot run under this machine's \
+                     placement; every delivery for this role will be refused with that sentence"
+                );
+                self.dispatch.set_drive(drive, Some(error.to_string()));
+            }
+        }
+    }
+
+    /// Republish this client's registration.
+    ///
+    /// The bind wrote one before the role's drive was known, so the `runtime`
+    /// field it carries is the default drive's backend. An external runtime's
+    /// plugin reads that file to find the clients it serves, and a stale name
+    /// there is the same class of fact this slice exists to stop trusting.
+    fn republish_registration(&self) {
+        if let Err(error) = crate::session::adapter_socket::republish_registration(
+            &self.dispatch.workspace(),
+            &self.dispatch.role(),
+            self.dispatch.session_backend(),
+            self.dispatch.placement_name(),
+        ) {
+            tracing::warn!(error = %error, "the client registration was not republished");
+        }
     }
 
     /// Durable event cursor for the next `subscribe`. Zero asks the server for

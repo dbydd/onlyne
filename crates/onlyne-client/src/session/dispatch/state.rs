@@ -3,6 +3,7 @@ use super::*;
 use super::outbound::Outbox;
 use super::projection::{projection_of, stored_task_state};
 use super::transport::names_session;
+use super::turn_end::TurnEndWatch;
 
 #[derive(Clone)]
 pub struct DispatchState {
@@ -12,6 +13,18 @@ pub(super) struct DispatchInner {
     pub(super) role: String,
     pub(super) workspace: PathBuf,
     pub(super) command: Vec<String>,
+    /// The drive the role's spec declares (`[client.runtime] drive`). `None`
+    /// until the first `welcome` names it.
+    pub(super) drive: Option<onlyne_config::Drive>,
+    /// The placement this machine resolved, the other half of the drive rule.
+    /// `None` until the run resolves one; a pair the rule refuses is what
+    /// [`super::env::reject_unpaired_runtime`] refuses a session over.
+    pub(super) placement: Option<crate::backend::SessionPlacement>,
+    /// Why a session may not open under this role's drive on this machine, when
+    /// the pair is one the rule refuses. Every delivery the role is offered is
+    /// refused with it: a backend the previous drive left behind must not serve
+    /// work under a policy nobody set.
+    pub(super) runtime_refusal: Option<String>,
     pub(super) max_sessions: u32,
     /// Downstream roles a session of this role owes a handoff to, from the
     /// server's spec slice (`relay_required`). Empty is the default and means
@@ -60,15 +73,12 @@ pub(super) struct DispatchInner {
     pub(super) stall: crate::session::stall::StallWatch,
     /// A plugin connection that mounted a session a live connection already
     /// serves: the agent that dropped came back after a newer session took the
-    /// task. It is served nothing, and what it sends is held rather than sent,
-    /// keyed by the name it mounted with. The capabilities that mount came with
-    /// are kept beside it, because a session whose live connection goes away
-    /// hands itself to the first connection that was holding for it.
+    /// task. It is served no state, and the ending it reports is answered like
+    /// any other connection's; the name it mounted with is what that judgement
+    /// reads. The capabilities that mount came with are kept beside it, because
+    /// a session whose live connection goes away hands itself to the first
+    /// connection that was holding for it.
     pub(super) revived: Vec<(String, AdapterIo, Vec<Capability>)>,
-    /// What those held connections sent, keyed by the task whose completion
-    /// carries it. `on_out` drains the key before it routes, so the recipient
-    /// reads one relay per downstream role.
-    pub(super) held_handoffs: HashMap<String, Vec<Handoff>>,
     /// Tasks whose ending this client asked for with a `control` command.
     ///
     /// `recycle` and `cancel` reach the agent as a `notify`, so the completion
@@ -84,6 +94,22 @@ pub(super) struct DispatchInner {
     /// record of the word, held to [`CONTROL_SETTLE_BOUND`] and settled by the
     /// tick's own sweep when no report has come to settle it instead.
     pub(super) control_settles: Vec<ControlNote>,
+    /// 3c's turn-end bookkeeping, keyed by the task whose delivery it belongs to.
+    ///
+    /// Which delivery already spent its one nudge, and which settled at that
+    /// door. It stays here: no column holds it, no frame carries it, and no log
+    /// line reads it, because the ending it remembers is one this client
+    /// witnessed for itself (`docs/v2-CONTRACT.md` §3c).
+    pub(super) turn_end: TurnEndWatch,
+    /// Live `tools` mounts, one binding per session they speak for.
+    ///
+    /// A tools mount holds no process, so it is no transport and no parked
+    /// agent: it lands in neither of those tables. This one exists to answer
+    /// which session a connection speaks for, and nothing else consults it. The
+    /// token itself stays in the session's own slot; an entry here carries the
+    /// slot's key and the connection, never the token
+    /// (`docs/v2-CONTRACT.md` §3b).
+    pub(super) tools_mounts: Vec<(String, AdapterIo)>,
     /// Connections inside one of their own inbound frames right now.
     ///
     /// A frame handler runs to completion before `adapter_socket` answers the
@@ -130,8 +156,8 @@ pub struct SessionSlot {
     pub(super) last_beat: Option<Instant>,
     /// Whether this session's task has been taken by a newer session, leaving
     /// this slot served only by a connection that came back for it. A read-only
-    /// slot is handed no assignment and no note, and what its agent sends is
-    /// held for the completion that merges it.
+    /// slot is handed no assignment and no note: the work belongs to the session
+    /// that took the task, and this one answers only for how its own turn ended.
     pub(super) read_only: bool,
     /// The task family this session was opened for, under the `task` scope. The
     /// scope hands that family's later deliveries here instead of opening a
@@ -142,11 +168,28 @@ pub struct SessionSlot {
     /// The role's `idle_close` bound runs from here, and a slot serving a
     /// delivery has none.
     pub(super) idle_since: Option<Instant>,
-    /// This session's process has been released and the conversation lives in
+    /// A session whose process has been released and the conversation lives in
     /// the runtime's own store: the next delivery bound to this session resumes
     /// it. A suspended slot spends no capacity, holds no transport, and answers
     /// no frame.
     pub(super) suspended: bool,
+    /// The capability token a `tools` mount presents to speak for this session.
+    ///
+    /// Minted when the session opens and handed to the session's own drive
+    /// through its spawn spec; it lives here, in the session's own state, so
+    /// nothing outside the session may hand it out, it dies with the slot, and
+    /// a session that reopens gets a new one. It is a capability, so it never
+    /// reaches a log line, a fault, or a ledger row
+    /// (`docs/v2-CONTRACT.md` §3b, `AGENTS.md` §8).
+    pub(super) tools_token: String,
+    /// The roles this session delivered to since it opened.
+    ///
+    /// A send the client carried is a handoff, whatever envelope kind it was,
+    /// and this set is the evidence the relay guard reads at the session's next
+    /// completion. It belongs to the session rather than to one delivery: the
+    /// family's obligation outlives the task that opened it
+    /// (`plugins/onlyne-agent-pi`, `guards.rs`).
+    pub(super) delivered_roles: BTreeSet<String>,
     /// When this session was opened. The order a `role` pool hands its sessions
     /// out in: the one that has waited longest takes the delivery.
     pub(super) opened_at: Instant,
@@ -408,6 +451,96 @@ pub(super) fn render_tokens(tokens: &[String], session: &str, task: &str) -> Vec
         .iter()
         .map(|token| token.replace("{session}", session).replace("{task}", task))
         .collect()
+}
+
+/// The session a `tools` mount token spoke for, as the mount needs it.
+///
+/// The token *is* the binding (`docs/v2-CONTRACT.md` §3b): the role this mount
+/// speaks for is the client's own, and the session and its generation come from
+/// the client's record rather than from a field the caller supplies. A caller
+/// that could name its own session could speak for one it never held.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolsSession {
+    /// The session's own id, the spelling the mount answers for.
+    pub session_id: String,
+    /// The generation the session was opened under, the third half of the
+    /// `(role, session_id, generation)` record.
+    pub generation: u64,
+    /// The delivery the session serves right now, when one is open.
+    pub task_id: Option<String>,
+}
+
+/// Mint the capability token one session's `tools` mount presents.
+///
+/// The value is random and per-session: it is a capability, so it is handed to
+/// the session's own drive alone and never logged, faulted, or written down.
+pub(super) fn mint_tools_token() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// The slot one live session's tools token names.
+///
+/// A token names a session while that session lives and serves: the slot
+/// carries both, so a token whose slot has retired — or whose tuple and verdict
+/// project `Exited` — names nothing, and neither does one whose session is
+/// suspended (no process to mount from) or read-only (a newer session took the
+/// task, and a read-only slot serves no state). The mount that presents such a
+/// token is refused. The scan is small (one role's slots) and the token never
+/// leaves this process.
+pub(super) fn slot_key_for_token(inner: &DispatchInner, token: &str) -> Option<String> {
+    if token.is_empty() {
+        return None;
+    }
+    inner
+        .sessions
+        .iter()
+        .find(|(_, slot)| slot.tools_token == token && token_names_session(inner, slot))
+        .map(|(key, _)| key.clone())
+}
+
+/// Whether one slot is a session a tools token may still name.
+///
+/// A token names a session while that session lives and serves: an `Exited`
+/// projection is the session over, a suspended session has no process to mount
+/// from, and a read-only slot is a session a newer one took the task from, which
+/// serves no state. The three refusals are one predicate so the handshake, the
+/// per-frame gate, and the stamped scope cannot disagree about which tokens
+/// still name anything.
+pub(super) fn token_names_session(inner: &DispatchInner, slot: &SessionSlot) -> bool {
+    !slot.suspended && !slot.read_only && !slot_exited(inner, slot)
+}
+
+/// What one live tools connection speaks for.
+///
+/// Everything a tools frame is stamped with comes from here, so the fields are
+/// the session's own record rather than anything the mount supplied: the
+/// delivery its `report` and `handoff` frames name, and the session a `send`
+/// frame leaves from (`docs/v2-CONTRACT.md` §3b). A `send` starts a family of
+/// its own, so no chain of this session's rides out with it.
+#[derive(Clone, Debug)]
+pub struct ToolsScope {
+    /// The session's own id, the key its slot and row are held under.
+    pub session_id: String,
+    /// The delivery the session serves right now, when one is open.
+    pub task_id: Option<String>,
+}
+
+/// The mount-side facts of one session slot.
+pub(super) fn tools_session_of(inner: &DispatchInner, key: &str) -> Option<ToolsSession> {
+    inner.sessions.get(key).map(|slot| ToolsSession {
+        session_id: slot.session.task_id.clone(),
+        generation: slot.session.generation,
+        task_id: slot.task_id.clone(),
+    })
+}
+
+/// Drop the tools binding one session held, when the session goes away.
+///
+/// A binding holds a live connection handle, and a slot that leaves this
+/// client's books leaves nothing for the mount to speak for: the entry goes
+/// with it so a retired session's socket is not kept open by this table.
+pub(super) fn forget_tools_binding(inner: &mut DispatchInner, key: &str) {
+    inner.tools_mounts.retain(|(held, _)| held != key);
 }
 
 /// Whether the session of one task is over.

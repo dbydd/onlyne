@@ -49,7 +49,7 @@
       "additionalProperties": false
     },
     "AgentPhase": {
-      "description": "Agent-side lifecycle fact, as reported by the plugin and stored verbatim.",
+      "description": "Agent-side lifecycle fact: the agent dimension of a session, the word the ledger column stores, and the word the wire projection carries. One definition serves both sides — the reducer's twin `AgentPhase` is gone.",
       "type": "string",
       "enum": [
         "booting",
@@ -85,9 +85,17 @@
         "envelope",
         "generation",
         "prose",
-        "task_id"
+        "task_id",
+        "text"
       ],
       "properties": {
+        "attachments": {
+          "description": "Absolute paths of the files this delivery carries, in the order `text` names them. The client writes them before the assignment leaves, so every path here names a file that exists.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "envelope": {
           "$ref": "#/definitions/Envelope"
         },
@@ -111,6 +119,10 @@
           "type": "string"
         },
         "task_id": {
+          "type": "string"
+        },
+        "text": {
+          "description": "The delivery text, rendered by the client's one template (`onlyne-client`'s `delivery` module).\n\nA plugin injects these bytes and renders nothing of its own: the wording of a delivery is a contract (`AGENTS.md` §12), and v1 built it once per plugin — JavaScript here, Rust in the ACP backend — so the text a model read depended on which drive delivered it. The envelope still travels beside it, for the fields a plugin reports on rather than injects.",
           "type": "string"
         }
       }
@@ -197,6 +209,13 @@
           "type": "string",
           "enum": [
             "conversations"
+          ]
+        },
+        {
+          "description": "Keep session conversation in the runtime store so its process can be released and resumed.",
+          "type": "string",
+          "enum": [
+            "resume"
           ]
         }
       ]
@@ -450,7 +469,7 @@
       }
     },
     "DeliveryPhase": {
-      "description": "Intent delivery fact for the current turn exit.",
+      "description": "Intent delivery fact for the current turn exit: the delivery dimension of a session. `none` is the word for `NoIntent`, which is also its serde word.",
       "type": "string",
       "enum": [
         "none",
@@ -970,6 +989,37 @@
           }
         },
         {
+          "description": "Ask the plugin to hand one client-composed sentence to its agent input.\n\nThis is sent only to a plugin that declared `inject`; the client decides whether a drive can be nudged. The text is verbatim, and the plugin keeps no copy, composes none, and does not reset its turn bookkeeping. Its response claims only that the sentence was handed over.",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "type": "object",
+              "required": [
+                "task_id",
+                "text"
+              ],
+              "properties": {
+                "task_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              }
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "nudge"
+              ]
+            }
+          }
+        },
+        {
           "description": "The host is going away.",
           "type": "object",
           "required": [
@@ -1021,7 +1071,7 @@
       ]
     },
     "Mount": {
-      "description": "Plugin and gateway mount data, discriminated by [`MountKind`].\n\nThe mount names the configured instance the connection serves, and that is the identity the ACL and the routing use: `gateway` holds a `[[gateway]]` id and `role` holds a spec role name, both taken from the server's spec, because one plugin crate can back several configured instances with their own credentials, channels, and `[[route]]` bindings.\n\nThe program name travels in its own field. `HelloArgs::plugin` on this surface and `HandshakeArgs::agent` on a role connection name the crate that connected, which is the thing a protocol or version mismatch is about. Deriving the instance from the program would collapse the several-instances case.\n\nThe enum is untagged, so the wire form is the plan's own `hello` example at §7 line 298 — `\"mount\":{\"role\":\"planner\",\"session\":\"8b1c...\"}` — with `kind` beside it in the same args object rather than nested under a tag.\n\nUntagged matching is first-match-wins, so the variant order below is the disambiguation rule: `Agent`, then `Gateway`, then `Cluster`, then `Admin`. Each payload denies unknown fields, and that guard is what makes the order safe to read rather than a silent mis-decode: `AgentMount` and `ClusterMount` both carry `role`, so without it a cluster mount would decode as an agent mount. A new field belongs to the earliest variant that owns it, and making one collide with an earlier variant's set is a wire change this list must be updated for.\n\nA bare `Admin` mount serializes as JSON `null`; the sibling `kind` field is what identifies it.",
+      "description": "Plugin and gateway mount data, discriminated by [`MountKind`].\n\nThe mount names the configured instance the connection serves, and that is the identity the ACL and the routing use: `gateway` holds a `[[gateway]]` id and `role` holds a spec role name, both taken from the server's spec, because one plugin crate can back several configured instances with their own credentials, channels, and `[[route]]` bindings.\n\nThe program name travels in its own field. `HelloArgs::plugin` on this surface and `HandshakeArgs::agent` on a role connection name the crate that connected, which is the thing a protocol or version mismatch is about. Deriving the instance from the program would collapse the several-instances case.\n\nThe enum is untagged, so the wire form is the plan's own `hello` example at §7 line 298 — `\"mount\":{\"role\":\"planner\",\"session\":\"8b1c...\"}` — with `kind` beside it in the same args object rather than nested under a tag.\n\nUntagged matching is first-match-wins, so the variant order below is the disambiguation rule: `Agent`, then `Gateway`, then `Cluster`, then `Tools`, then `Admin`. Each payload denies unknown fields, and that guard is what makes the order safe to read rather than a silent mis-decode: `AgentMount` and `ClusterMount` both carry `role`, so without it a cluster mount would decode as an agent mount. A new field belongs to the earliest variant that owns it, and making one collide with an earlier variant's set is a wire change this list must be updated for.\n\nA bare `Admin` mount serializes as JSON `null`; the sibling `kind` field is what identifies it.",
       "anyOf": [
         {
           "$ref": "#/definitions/AgentMount"
@@ -1031,6 +1081,9 @@
         },
         {
           "$ref": "#/definitions/ClusterMount"
+        },
+        {
+          "$ref": "#/definitions/ToolsMount"
         },
         {
           "description": "Admin tooling needs no mount data.",
@@ -1053,6 +1106,13 @@
           "type": "string",
           "enum": [
             "gateway"
+          ]
+        },
+        {
+          "description": "ACP tool bridge on a role client socket.",
+          "type": "string",
+          "enum": [
+            "tools"
           ]
         },
         {
@@ -1099,11 +1159,22 @@
     },
     "Outcome": {
       "description": "Task result dimension.",
-      "type": "string",
-      "enum": [
-        "done",
-        "failed",
-        "cancelled"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "done",
+            "failed",
+            "cancelled"
+          ]
+        },
+        {
+          "description": "The delivery ended waiting on something outside it.\n\nA first-class result rather than a synonym for `Failed`: the ending rule settles a delivery whose session ended without a completion as blocked, and a board reads it as waiting rather than as failed.",
+          "type": "string",
+          "enum": [
+            "blocked"
+          ]
+        }
       ]
     },
     "PluginOp": {
@@ -1405,7 +1476,7 @@
       ]
     },
     "RecoveryPhase": {
-      "description": "Recovery substate of an idle or draining session.",
+      "description": "Recovery substate carried alongside an idle or draining session. `none` is the word for `NoRecovery`, which is also its serde word.",
       "type": "string",
       "enum": [
         "none",
@@ -1629,6 +1700,20 @@
                     "null"
                   ]
                 },
+                "details": {
+                  "description": "The full result, delivered verbatim to the next hop and the originator.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "files": {
+                  "description": "Absolute paths of the files the result names.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "head": {
                   "type": [
                     "string",
@@ -1744,7 +1829,7 @@
       }
     },
     "ResourcePhase": {
-      "description": "Backend resource fact.",
+      "description": "Backend resource fact (pane / tab / terminal handle): the resource dimension of a session.",
       "type": "string",
       "enum": [
         "detached",
@@ -1865,6 +1950,19 @@
           ]
         }
       }
+    },
+    "ToolsMount": {
+      "description": "ACP tool bridge mount data carried in the same `hello` frame.\n\nThe token is the binding: the client mints it for one `(role, session, generation)` and records that association, so the bridge never supplies a role of its own. A caller that could name a role here could speak for a session it never held.",
+      "type": "object",
+      "required": [
+        "token"
+      ],
+      "properties": {
+        "token": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     },
     "TypingArgs": {
       "description": "`typing`: platform typing indicator for one conversation. `on` starts the indicator and `false` stops it, which is the pair a platform API exposes.",

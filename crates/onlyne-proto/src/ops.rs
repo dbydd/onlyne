@@ -120,6 +120,12 @@ pub enum Report {
         outcome: Outcome,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         head: Option<String>,
+        /// The full result, delivered verbatim to the next hop and the originator.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
+        /// Absolute paths of the files the result names.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -426,6 +432,51 @@ pub struct GhostSweep {
     /// Unix seconds.
     pub swept_at: i64,
 }
+/// How a role's client talks to the role's runtime: the spec's
+/// `[client.runtime]` table as the wire carries it (`docs/v2-PLAN.md`
+/// §"驱动与放置").
+///
+/// The drive and the argv are properties of the runtime, so they belong to the
+/// role and travel with it. Where the runtime process is displayed is the
+/// placement, a property of the machine that runs the client, and never
+/// travels on this wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct RoleRuntime {
+    /// `plugin` | `acp` | `exec`. An absent key reads as [`Drive::Plugin`],
+    /// which is what every role in the tree is today.
+    #[serde(default)]
+    pub drive: Drive,
+    /// The argv one session runs, with `{session}` and `{task}` substituted by
+    /// the client. An absent key reads as an empty list, which no drive can
+    /// start a session with.
+    #[serde(default)]
+    pub command: Vec<String>,
+}
+
+impl Default for RoleRuntime {
+    fn default() -> Self {
+        Self {
+            drive: Drive::Plugin,
+            command: Vec::new(),
+        }
+    }
+}
+
+/// The way a client talks to a role's runtime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Drive {
+    /// The client starts the runtime and a plugin inside it dials back.
+    #[default]
+    Plugin,
+    /// The client runs the agent as its own child and speaks the Agent Client
+    /// Protocol on that child's stdio.
+    Acp,
+    /// The client runs the command and reads its exit code.
+    Exec,
+}
+
 /// One `roles` answer row: the registry record plus live presence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -433,9 +484,9 @@ pub struct RoleInfo {
     pub name: String,
     pub admin: bool,
     pub max_sessions: u32,
-    /// Command tokens used to spawn one role session.
+    /// The drive and the argv one role session runs (`[client.runtime]`).
     #[serde(default)]
-    pub session_command: Vec<String>,
+    pub runtime: RoleRuntime,
     pub spec_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prose: Option<String>,
@@ -650,8 +701,12 @@ pub struct Welcome {
     pub aggregate: Option<String>,
     pub allowed_targets: Vec<String>,
     pub allowed_senders: Vec<String>,
+    /// The drive and the argv one session of this role runs, as the spec's
+    /// `[client.runtime]` table wrote them. An absent key is a server that
+    /// predates the split, and a client reads it as the default runtime: a
+    /// plugin drive with no command.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_command: Option<Vec<String>>,
+    pub runtime: Option<RoleRuntime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ready_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1173,6 +1228,26 @@ mod tests {
         assert_eq!(projection.outcome, Some(Outcome::Done));
     }
 
+    /// The `[client.runtime]` table travels with the role and reads back as
+    /// written. A frame that omits the key lands on the default runtime: a
+    /// plugin drive with no command, which is what a server predating the split
+    /// sends and what every role in the tree was.
+    #[test]
+    fn a_role_runtime_decodes_and_an_absent_one_is_a_plugin_drive() {
+        let written: RoleRuntime = serde_json::from_value(
+            serde_json::json!({"drive": "acp", "command": ["python3", "agent.py"]}),
+        )
+        .expect("the runtime table decodes");
+        assert_eq!(written.drive, Drive::Acp);
+        assert_eq!(written.command, ["python3", "agent.py"]);
+
+        let absent: RoleRuntime = serde_json::from_value(serde_json::json!({}))
+            .expect("an empty table is the default runtime");
+        assert_eq!(absent, RoleRuntime::default());
+        assert_eq!(absent.drive, Drive::Plugin);
+        assert!(absent.command.is_empty());
+    }
+
     /// The relay slice is additive, so a welcome a server wrote before the keys
     /// existed still lands, with both keys absent — which is what "no guard"
     /// means — and a welcome that carries them decodes as written.
@@ -1189,7 +1264,7 @@ mod tests {
             "aggregate": null,
             "allowed_targets": ["builder"],
             "allowed_senders": ["*"],
-            "session_command": ["pi", "--session-id", "{session}"],
+            "runtime": {"drive": "plugin", "command": ["pi", "--session-id", "{session}"]},
             "timeout_ready_ms": 30_000,
             "timeout_idle_ms": 60_000,
             "intent_attempts": 3,
@@ -1277,6 +1352,8 @@ mod tests {
                         task_id: new_task_id(),
                         outcome: Outcome::Done,
                         head: Some("done".into()),
+                        details: None,
+                        files: Vec::new(),
                         reply_to: None,
                         cluster_ref: None,
                     }),

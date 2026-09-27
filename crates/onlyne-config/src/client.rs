@@ -1,7 +1,8 @@
 use crate::{
     SpecError,
     env::Env,
-    locate::{find_key_line_in_table, line_from_span},
+    locate::{find_key_line_in_table, line_from_span, root_key_line},
+    spec::{BACKEND_IS_GONE, Drive},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -42,15 +43,98 @@ pub struct ClientConfig {
     /// disables the sweep.
     #[serde(default = "default_reconnect_grace_secs")]
     pub reconnect_grace_secs: u64,
-    /// Requested session backend (`herdr` | `orca` | `zellij` | `exec` /
-    /// `headless` | `acp` | `fake` | `auto`). Empty means auto-detect. The
-    /// process environment `ONLYNE_BACKEND` takes precedence when it is
-    /// nonempty.
+    /// Where this machine displays the role's runtime process (`herdr` |
+    /// `orca` | `zellij` | `headless` | `external`). Absent probes herdr, orca,
+    /// zellij in that order and falls back to `headless`. The process
+    /// environment `ONLYNE_BACKEND` takes precedence when it is nonempty.
+    ///
+    /// Placement is a property of the machine and lives here; the drive is a
+    /// property of the runtime and lives in the spec's `[client.runtime]`
+    /// (`docs/v2-PLAN.md` §"驱动与放置").
     #[serde(default)]
-    pub backend: String,
+    pub placement: Option<Placement>,
     /// `[client]` — the workspace-local client policy.
     #[serde(default)]
     pub client: ClientSection,
+}
+
+/// Where the role's runtime process is displayed on this machine.
+///
+/// Placement depends on which terminal host the machine has and lives in that
+/// machine's workspace config. An absent `placement` probes the three pane
+/// hosts in [`PLACEMENT_PROBE_ORDER`] and falls back to [`Placement::Headless`]
+/// (`docs/v2-PLAN.md` §"驱动与放置").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(rename_all = "lowercase")]
+pub enum Placement {
+    /// A herdr pane.
+    Herdr,
+    /// An Orca tab.
+    Orca,
+    /// A zellij pane.
+    Zellij,
+    /// No pane: the client starts the runtime in the background.
+    Headless,
+    /// No process of the client's own: a runtime that is already resident dials
+    /// the client's socket.
+    External,
+}
+
+/// Every value a workspace `placement` accepts, in the order a refusal names
+/// them.
+pub const PLACEMENT_NAMES: &str = "herdr|orca|zellij|headless|external";
+
+/// What an absent `placement` probes, in order, before it falls back to
+/// [`Placement::Headless`].
+pub const PLACEMENT_PROBE_ORDER: [Placement; 3] =
+    [Placement::Herdr, Placement::Orca, Placement::Zellij];
+
+impl Placement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Herdr => "herdr",
+            Self::Orca => "orca",
+            Self::Zellij => "zellij",
+            Self::Headless => "headless",
+            Self::External => "external",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "herdr" => Some(Self::Herdr),
+            "orca" => Some(Self::Orca),
+            "zellij" => Some(Self::Zellij),
+            "headless" => Some(Self::Headless),
+            "external" => Some(Self::External),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Placement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The one rule that binds the two halves of what `backend` used to be:
+/// `acp` pairs only with `headless`.
+///
+/// The reason is physical. The ACP drive carries its channel on the child's
+/// stdio, and a pane's stdio is the pane's terminal: one file descriptor cannot
+/// be both. So the pairing is refused here, by name, rather than discovered at
+/// spawn time as a pane that prints protocol frames.
+pub fn validate_drive_placement(drive: Drive, placement: Placement) -> Result<(), String> {
+    if drive == Drive::Acp && placement != Placement::Headless {
+        return Err(format!(
+            "drive = \"acp\" pairs only with placement = \"headless\", not placement = \"{}\": \
+             stdio carries the ACP channel and cannot also be a pane's terminal",
+            placement.as_str()
+        ));
+    }
+    Ok(())
 }
 
 /// `[client]` — the workspace-local client policy, beside `plugins` and
@@ -294,6 +378,10 @@ impl ClientConfig {
                 err.message().to_string(),
             )
         })?;
+        // The fused key first: a file that still carries it is refused by the
+        // move, not by whatever serde says about the keys that replaced it.
+        validate_backend_key(&parsed, text, file)?;
+        validate_placement(&parsed, text, file)?;
         validate_session(&parsed, text, file)?;
         let config: Self = parsed.clone().try_into().map_err(|err: toml::de::Error| {
             SpecError::parse(
@@ -457,6 +545,74 @@ fn session_key_line(text: &str, key: &str, value: &toml::Value) -> usize {
         .unwrap_or(1)
 }
 
+/// Refuse the fused `backend` key.
+///
+/// The key cannot be read past: `acp` names a drive, `herdr` a placement, and
+/// `headless` was either. A client that keeps running against a value nobody
+/// split is the failure this refusal removes, so the line and both
+/// replacements are named instead (`docs/v2-CONTRACT.md` §"Slice 2").
+fn validate_backend_key(parsed: &toml::Value, text: &str, file: &str) -> Result<(), SpecError> {
+    if parsed
+        .as_table()
+        .is_some_and(|root| root.contains_key("backend"))
+    {
+        return Err(SpecError::parse(
+            file,
+            root_key_line(text, "backend"),
+            BACKEND_IS_GONE,
+        ));
+    }
+    if carries_backend(parsed) {
+        return Err(SpecError::parse(file, 1, BACKEND_IS_GONE));
+    }
+    Ok(())
+}
+
+/// Whether a parsed document carries a `backend` key below its root. The client
+/// config has no table the key belonged to, so any depth is a leftover.
+fn carries_backend(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Table(table) => {
+            table.contains_key("backend") || table.values().any(carries_backend)
+        }
+        toml::Value::Array(items) => items.iter().any(carries_backend),
+        _ => false,
+    }
+}
+
+/// `placement` is `herdr` | `orca` | `zellij` | `headless` | `external`. The
+/// refusal points at the line that carries the rejected value.
+///
+/// The check runs on the parsed document, before the struct conversion, so a
+/// typo is refused by name and its own line rather than by a serde message.
+fn validate_placement(parsed: &toml::Value, text: &str, file: &str) -> Result<(), SpecError> {
+    let Some(placement) = parsed.get("placement") else {
+        return Ok(());
+    };
+    let written = placement.as_str().unwrap_or_default();
+    if Placement::parse(written).is_none() {
+        return Err(SpecError::parse(
+            file,
+            placement_line(text, placement),
+            format!(
+                "placement must be one of `herdr`, `orca`, `zellij`, `headless`, `external`, got {}",
+                toml_literal(placement)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Line of `placement`: the field line when it is written there, otherwise the
+/// line that carries the rejected value.
+fn placement_line(text: &str, value: &toml::Value) -> usize {
+    let literal = value.to_string();
+    text.lines()
+        .position(|line| line.contains("placement") && line.contains(&literal))
+        .map(|idx| idx + 1)
+        .unwrap_or_else(|| root_key_line(text, "placement"))
+}
+
 /// Server host and port used by the client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ServerEndpoint {
@@ -478,4 +634,105 @@ fn display_name(path: &Path) -> &str {
     path.file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::{DRIVE_NAMES, Drive};
+
+    /// The plan's `drive × placement` table, one row per combination: the four
+    /// rows it fixes are accepted, every other cell is refused by name.
+    ///
+    /// ```text
+    /// drive  x placement                                verdict
+    /// plugin x herdr | orca | zellij | headless         accepted
+    /// plugin x external                                 accepted
+    /// acp    x headless                                 accepted
+    /// acp    x herdr | orca | zellij | external         refused  (stdio is the ACP channel)
+    /// exec   x any placement                            accepted
+    /// ```
+    #[test]
+    fn the_drive_placement_matrix_accepts_the_plans_four_rows_and_refuses_the_rest() {
+        use Drive::{Acp, Exec, Plugin};
+        use Placement::{External, Headless, Herdr, Orca, Zellij};
+        let matrix: [(Drive, Placement, bool); 15] = [
+            (Plugin, Herdr, true),
+            (Plugin, Orca, true),
+            (Plugin, Zellij, true),
+            (Plugin, Headless, true),
+            (Plugin, External, true),
+            (Acp, Headless, true),
+            (Acp, Herdr, false),
+            (Acp, Orca, false),
+            (Acp, Zellij, false),
+            (Acp, External, false),
+            (Exec, Herdr, true),
+            (Exec, Orca, true),
+            (Exec, Zellij, true),
+            (Exec, Headless, true),
+            (Exec, External, true),
+        ];
+        for (drive, placement, accepted) in matrix {
+            let verdict = validate_drive_placement(drive, placement);
+            assert_eq!(verdict.is_ok(), accepted, "{drive} x {placement}");
+            if accepted {
+                continue;
+            }
+            assert_eq!(
+                verdict.expect_err("a refused cell carries its message"),
+                format!(
+                    "drive = \"acp\" pairs only with placement = \"headless\", not placement = \
+                     \"{placement}\": stdio carries the ACP channel and cannot also be a pane's \
+                     terminal"
+                ),
+                "{drive} x {placement}"
+            );
+        }
+    }
+
+    /// Every name a refusal prints is a name the parser accepts, and the
+    /// spelling round-trips, for both vocabularies.
+    #[test]
+    fn every_named_value_parses_and_prints_back() {
+        for name in PLACEMENT_NAMES.split('|') {
+            let placement = Placement::parse(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(placement.as_str(), name);
+            assert_eq!(placement.to_string(), name);
+        }
+        for name in DRIVE_NAMES.split('|') {
+            let drive = Drive::parse(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(drive.as_str(), name);
+        }
+        for absent in ["", "  ", "auto", "hdr", "headless pane", "hdr pane"] {
+            assert_eq!(Placement::parse(absent), None, "{absent:?}");
+        }
+        // Surrounding space is trimmed, so a pasted value with a stray newline
+        // still names its placement rather than refusing the whole run.
+        assert_eq!(
+            Placement::parse(" herdr\n"),
+            Some(Placement::Herdr),
+            "the value is trimmed before it is read"
+        );
+        // `fake` is not a placement a workspace may name: the test-only runtime
+        // is selected by `ONLYNE_BACKEND` and by nothing else.
+        assert_eq!(Placement::parse("fake"), None);
+    }
+
+    /// The default `[client.runtime]` table is what every role in the tree is
+    /// today: a plugin drive with no command.
+    #[test]
+    fn a_role_without_a_runtime_table_reads_as_a_plugin_drive() {
+        let text = "[server]\n\
+                    name = \"cluster-a\"\n\
+                    listen = \"0.0.0.0:7811\"\n\
+                    cert_pin = \"sha256/0000000000000000000000000000000000000000000000000000000000000000\"\n\
+                    \n\
+                    [[client]]\n\
+                    role = \"planner\"\n\
+                    key = \"ed25519/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n";
+        let spec = crate::Spec::parse_str(text).expect("an entry without a runtime table parses");
+        assert_eq!(spec.client[0].runtime.drive, Drive::Plugin);
+        assert!(spec.client[0].runtime.command.is_empty());
+    }
 }

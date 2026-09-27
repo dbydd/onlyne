@@ -246,6 +246,45 @@ the rendered bytes for a delivery with a body, one reference block, and one atta
 
 A delivery with no upstream reference material must not render an empty labelled block.
 
+### What the implementation settled, and one gap it left
+
+This above did not fix these, and they are recorded here so nobody invents a
+second spelling of them:
+
+- **The renderer is `onlyne-client`'s `delivery` module**, one pure function over
+  the source, the body, the upstream material, and the attachment paths. Its
+  golden test is a table at the bottom of the same file, so the bytes are pinned
+  without a server, a client, or a runtime.
+- **The rendered text travels in `AssignArgs`**, as `text`, with the absolute
+  paths it names in `attachments`. That one field is what every drive injects:
+  the plugin injects it, a self-driven backend is prompted with it, and the
+  `config_get{key:"stdin:<text>"}` route carries it for a plugin without
+  `inject`. `prose` stays beside it, because role prose is delivered through the
+  runtime's instruction layer (3b) and the plugin's own marker decides when.
+- **The client writes a delivery's attachment**, under
+  `<workspace>/.onlyne/tmp/attachments/`, before the text that names it is
+  rendered. The path in the text has to name a file that exists, and a plugin
+  that both wrote the file and injected the path could name one that does not.
+  A failed write drops the line and leaves the rest of the delivery standing.
+- **Upstream reference material has no producer yet.** The template renders the
+  block, `render` takes it as an optional input, and no path in the tree fills
+  it: `complete(details)` delivering to the next hop is 3b/3c, and the envelope
+  or frame field it rides is that slice's to settle. Until then every delivery
+  renders the no-reference shape.
+
+  **3b/3c settled this by deferring it, and the reason is a real choice rather
+  than an omission.** Two answers are defensible — the reference is the sending
+  session's own `details`, or it is the body of the envelope that session is
+  serving, which is what the golden text above shows (`Reference material from
+  reviewer` under a task sent by *planner*). They differ in whose words travel
+  and in where the attribution goes, since the reference's `from` is not the
+  envelope's sender in the second reading; and a handoff can be minted before
+  the session completes, so the value has to be answerable at envelope-build
+  time. `details` therefore goes upward only for now — the completion envelope's
+  body, read by the originator — and the reference's own slice carries the
+  two-client chain as its proof (A→B task, B completes with `details`, A reads
+  the body; B→C handoff shows the reference).
+
 ### 3b. Obligations as tools
 
 - **pi** keeps three tools (`onlyne_send`, `onlyne_handoff`, `onlyne_complete`). Their
@@ -257,11 +296,132 @@ A delivery with no upstream reference material must not render an empty labelled
 - **Role prose is injected at the runtime's instruction layer**, not as one conversation
   message: for pi, through the runtime's system-prompt extension point; for ACP, written
   into the workspace instruction file before the session opens.
+
+  For ACP that file is **`<workspace>/AGENTS.md`**, in a delimited client-owned
+  block: replaced when present, appended when absent, and no operator byte
+  outside the block is ever touched. `onlyne-acp` carries no instruction field,
+  so a file is the only vehicle, and the agents.md convention is the one this
+  repository's own world uses. **Known gap:** agents differ in which filename
+  they read — claude-code reads `CLAUDE.md` — so an agent that reads another name
+  will not see the prose until the filename is wired to the spec's agent package,
+  which is its own slice rather than a table of guesses written now.
 - **payload-v2 is deleted**: `out/<task-id>.md`, the grammar block, `onlyne report
   check|write|path`, and the `onlyne-role-payload-v2` skill all go. Its invariants (one
   verdict per turn, handoff lines naming their recipient) move into the client-side check
   the `complete` tool performs, so a malformed completion is refused by the client rather
   than discovered by a file read.
+
+#### 3b's interface: the `tools` mount
+
+An ACP session has no plugin connection — the client spawned the agent itself, so there is
+nothing on the adapter socket to carry the session's obligations. `onlyne mcp` is that
+connection, and these are the pieces both halves build against.
+
+**The mount.** `MountKind` gains `tools`, and `Mount` gains `Tools(ToolsMount)` placed after
+`Cluster` and before `Admin`. Untagged matching is first-match-wins, and `ToolsMount` carries
+a field no earlier variant owns, so a payload that reaches it has already failed agent,
+gateway, and cluster; `Admin` stays the `null` arm.
+
+```json
+{"op":"hello","args":{"protocol":1,"plugin":"onlyne-mcp","version":"<crate version>",
+  "kind":"tools","capabilities":[],"mount":{"token":"<uuid>"}}}
+```
+
+`ToolsMount { token: String }` and nothing else. The token *is* the binding: the client mints
+one when it opens a session and records it against `(role, session_id, generation)`, so the
+connection's role and session come from the client's own record rather than from a field the
+caller supplies. A mount that names its own role would let a caller speak for a session it
+never held.
+
+**The ops.** A tools mount may send `send`, `handoff`, `report`, and `detach`: the agent
+mount's set minus everything about process lifecycle (`session_register`, `assign_ack`,
+`hello`'s task bookkeeping), because this connection holds no process. Anything else answers
+`forbidden` naming the op and the kind, like every other mount. `hello` is answered with the
+same `HelloAck`, so a tools mount learns the host's protocol and the role it speaks for. An
+unknown, expired, or retired token answers `unauthorized` with field `token` and the
+connection closes without a welcome.
+
+**The client is the checkpoint.** The tools mount carries no policy of its own: the hop
+budget, the relay requirement, the family rules of `handoff`, the completion's shape, and
+3c's ≤ 64 KiB `details` cap are enforced where they already live — in the client's handling
+of the op. A constraint added to the pi plugin's tools must therefore be added to the
+client's op handling, not to `onlyne mcp`, or the two drives would refuse differently.
+
+**The MCP face.** `onlyne mcp` speaks MCP over stdio (`initialize`,
+`notifications/initialized`, `tools/list`, `tools/call`) and carries three tools — the same
+three names pi's plugin registers, so a role's obligation vocabulary is one vocabulary:
+
+| tool | required | optional |
+|---|---|---|
+| `onlyne_send` | `to`, `text` | `kind` (`note` default, or `task`), `image` |
+| `onlyne_handoff` | `to`, `text` | `image` |
+| `onlyne_complete` | `outcome`, `summary` | `details`, `files` |
+
+`outcome` is one of `done`, `failed`, `cancelled`, `blocked` — the proto's `Outcome`, not a
+second list. The process dials the client's adapter socket lazily on the first tool call and
+keeps that one connection; the socket comes from `ONLYNE_SOCKET` and the token from
+`ONLYNE_MCP_TOKEN`, both placed in the agent child's environment by the client. A refused
+call travels back as the tool result's error text verbatim, so the model reads the host's own
+sentence rather than a paraphrase.
+
+**The three tools and pi's three tools are one vocabulary**, which is why `onlyne_send`
+carries `kind`: without it an ACP role could note and hand on, but never assign work, and the
+drives would differ in what a role can *do* rather than only in how the model reaches the
+tools. Same names, same argument names, same meanings — one obligation vocabulary that two
+drives mount. `kind`'s default is `note`, because a model that means to hand work on says so.
+
+**The client's half.** `crates/onlyne-acp` already models the mount point —
+`McpServer::Stdio { name, command, args, env }` and `new_session(cwd, mcp_servers)` — and
+`crates/onlyne-client/src/backend/acp/session.rs` passes an empty list today. The client fills
+it with one entry:
+
+```json
+{"type":"stdio","name":"onlyne","command":"<the onlyne entrypoint>","args":["mcp"],
+ "env":[{"name":"ONLYNE_SOCKET","value":"<the client's adapter socket>"},
+        {"name":"ONLYNE_MCP_TOKEN","value":"<the session's token>"}]}
+```
+
+`command` is the `onlyne` entrypoint the client resolves for its own daemons — the same
+resolution that produces `onlyne: missing binary <path>`, not a fresh PATH lookup, because the
+two answers must not disagree on a machine where several builds are installed. The token is
+minted when the session opens and lives in the session's own state, not in a table: nothing
+outside the session may hand it out, it dies with the session, and a session that reopens gets
+a new one. The env is the only place it is written — it is a capability, so it never reaches
+a log line, a fault, or a ledger row.
+
+**The tools mount is not a plugin.** The client accepts it on the same adapter socket, but
+nothing about it registers a task, holds a process, or reports lifecycle: a tools call is an
+obligation performed for the session its token names, and the client refuses one whose token
+belongs to a session that has ended.
+
+**A tools mount names nothing session-scoped; the token does.** On this path the client
+*stamps* `task_id` on `report` and `handoff` from the session's open binding, and stamps
+`envelope.from` on `send` as the token's role — the bridge supplies the recipient, the text,
+the kind, and the image, and nothing else. That is why no tool argument names a task id, and
+why `HelloAck.delivered_tasks` is not consulted by this path: a caller that had to be told its
+own task id could be lied to about it, and one that could claim another role's name would turn
+the ACL into a check of a claim rather than of a fact.
+
+**`send` is not a continuation of the session's task; `handoff` is.** So the two drives must
+agree with the shape a plugin already builds (`sendEnvelope`, `plugins/onlyne-agent-pi/src/protocol.mjs`),
+which means `send` carries none of the session's family:
+
+- `kind: "task"` is a **root**: a fresh task id, `hop: 0`, `attempt: 0`, a fresh `op_id`, and
+  no family, budget, origin, or deadline taken from the session being served. It is never
+  `Causality::child_of` — that is `handoff`'s, and it is what makes asking another role for
+  work a different act from handing them yours.
+- `kind: "note"` carries no causality and no `op_id` at all, which is also that function's
+  shape.
+
+The **hop budget is therefore checked on `handoff`**, where a family is being continued; a
+`send` whose root starts a budget of its own is never refused for budget, so a spent budget
+stops a forward and never new work.
+
+An empty `task_id` on a tools-mount frame means "the session's own open task". A non-empty one
+that disagrees with it is refused `forbidden` on field `task_id` rather than silently
+overwritten — a caller wrong about the session it speaks for is a bug in the caller, and a
+silent correction hides it. A session with no open task answers `invalid` on field `task_id`
+and names that, because a completion for a task nobody holds cannot be recorded.
 
 ### 3c. One turn-end rule
 
@@ -284,6 +444,31 @@ A delivery with no upstream reference material must not render an empty labelled
 Each step publishes an event: `turn_end_without_complete`, `delivery_blocked`, `handoff`.
 What to *do* about a blocked delivery is operator policy and belongs to hooks, never to
 the delivery path.
+
+#### 3c's interface: how a nudge travels
+
+The turn-end rule has one owner, the client, so the client is what tells a session that its
+turn ended without a completion. A session the client drives itself (`acp`) takes the text as
+its next prompt. A plugin-driven session is the plugin's own process, so the text needs a
+frame: **`nudge { task_id, text }`**, added to the host-to-plugin set beside `assign` and
+`probe`.
+
+- It carries no envelope, no prose, no attachments, and it is not a delivery: the task stays
+  open, the delivery's own rendered text is not sent again, and nothing in the plugin's turn
+  bookkeeping is reset by it. v1's ladder re-injected the whole assignment and counted the
+  rungs; this frame exists so that it cannot.
+- The plugin injects `text` through the same channel an assign's text takes, and answers `ok`
+  once it has handed the text over — handing over is what the answer claims, not that the
+  model read it.
+- **A plugin that declared no `inject` is never sent one.** The client settles the delivery at
+  that turn end instead: a drive that cannot be nudged must not be told it was. That is also
+  the rule for a one-shot drive whose process has already exited — the turn that ended is the
+  last one there will be, so the first ending settles.
+- The text is 3c's sentence verbatim. The plugin composes none of it, and keeps no copy of it.
+
+With this frame in place, the plugin's own idle ladder, its `idleReminders` knob, and its
+reminder wording have no remaining caller: the client owns the count, the wording, and the
+settlement, and a second copy of them in a plugin is the bug this slice removes.
 
 Constraints the client enforces while handling a tool call (hop budget, relay
 requirement) refuse with a message naming what is missing. The plan moves these checks

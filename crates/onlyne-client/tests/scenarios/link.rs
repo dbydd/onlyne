@@ -58,7 +58,10 @@ async fn pinned_tls_link_fetches_welcome_and_caches_prose() {
         aggregate: Some("cluster-b".into()),
         allowed_targets: vec![],
         allowed_senders: vec![],
-        session_command: None,
+        runtime: Some(onlyne_proto::RoleRuntime {
+            drive: onlyne_proto::Drive::Plugin,
+            command: Vec::new(),
+        }),
         timeout_ready_ms: None,
         timeout_idle_ms: None,
         intent_attempts: Some(4),
@@ -155,10 +158,11 @@ async fn pinned_tls_link_fetches_welcome_and_caches_prose() {
         key_path.clone(),
         certificate.spki_pin.clone(),
     )
-    // CI (and `env -u` local runs) have no herdr/orca/zellij; `fake` is
-    // opt-in and is the session backend this test needs. Product exit 5
-    // when auto-detect finds nothing stays intact.
-    .with_backend("fake");
+    // A CI machine and an `env -u` local run have no herdr/orca/zellij to probe,
+    // and this test needs no runtime of its own: the in-process `fake` runtime
+    // is what the pre-split `backend = "fake"` named, and it is reachable here
+    // by declaration, because no workspace config may name it.
+    .with_placement(Some(onlyne_client::backend::SessionPlacement::Fake));
     let client = tokio::spawn(onlyne_client::run(init));
 
     let mut cached = None;

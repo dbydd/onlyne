@@ -1,0 +1,5 @@
+{
+  "frame": "{\"op\":\"report\",\"args\":{\"kind\":\"complete\",\"data\":{\"task_id\":\"11111111-1111-4111-8111-111111111111\",\"outcome\":\"done\",\"head\":\"finished\",\"details\":\"the full result\",\"files\":[\"/workspace/result.txt\"]}}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "a completion carries its ledger head beside the full result and the absolute paths of the files that result names"
+}

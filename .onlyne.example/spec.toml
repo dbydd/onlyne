@@ -64,8 +64,6 @@ max_sessions = 3
 allowed_senders = ["*"]
 # allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role. On the entry of a role named `_supervisor` this list is the only gate: an empty one reaches every registered role, and a non-empty one names the reachable roles exactly.
 allowed_targets = ["builder", "reviewer", "_supervisor"]
-# session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list. Headless/exec runs this argv as a child of the client (`backend = "headless"` in workspace config.toml, or ONLYNE_BACKEND=exec).
-session_command = ["pi", "--session-id", "{session}"]
 # aggregate marks this role as the representative of an external cluster. Read by the server and the generate driver as an annotation. Default: empty string, which marks a local role.
 aggregate = ""
 # reconnect_grace_secs is not a key of this file. The window a dropped plugin connection may stay away before its role client retires the task-free session it left behind is read from that role's own workspace `.onlyne/config.toml` (Default: 60 seconds; 0 disables the sweep), and this file parses with deny_unknown_fields, so a line here refuses the start.
@@ -84,6 +82,12 @@ attempts = 3
 # backoff_ms sets retry delays in order. Read by the client intent runner. Default: [1000, 2000, 4000].
 backoff_ms = [1000, 2000, 4000]
 
+# [client.runtime] is the drive and the argv one session runs: drive = "plugin" (the default),
+# "acp" (placement = "headless" only), or "exec"; {session} and {task} are substituted.
+[client.runtime]
+drive = "plugin"
+command = ["pi", "--session-id", "{session}"]
+
 # docs/v1-PLAN.md §5 line 232
 [[client]]
 # role names this role, the unit of addressing and ACL keying. Read by the server router, the ACL decision, and the generate driver. Default: empty string, refused per entry.
@@ -100,8 +104,6 @@ max_sessions = 2
 allowed_senders = ["planner", "_supervisor"]
 # allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role. On the entry of a role named `_supervisor` this list is the only gate: an empty one reaches every registered role, and a non-empty one names the reachable roles exactly.
 allowed_targets = ["planner", "reviewer"]
-# session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list.
-session_command = ["pi", "--session-id", "{session}"]
 # aggregate marks this role as the representative of an external cluster. Read by the server and the generate driver as an annotation. Default: empty string, which marks a local role.
 aggregate = ""
 
@@ -118,6 +120,12 @@ idle_ms = 60000
 attempts = 3
 # backoff_ms sets retry delays in order. Read by the client intent runner. Default: [1000, 2000, 4000].
 backoff_ms = [1000, 2000, 4000]
+
+# [client.runtime] is the drive and the argv one session runs: drive = "plugin" (the default),
+# "acp" (placement = "headless" only), or "exec"; {session} and {task} are substituted.
+[client.runtime]
+drive = "plugin"
+command = ["pi", "--session-id", "{session}"]
 
 # docs/v1-PLAN.md §5 line 232
 [[client]]
@@ -135,8 +143,6 @@ max_sessions = 1
 allowed_senders = ["planner", "builder"]
 # allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role. On the entry of a role named `_supervisor` this list is the only gate: an empty one reaches every registered role, and a non-empty one names the reachable roles exactly.
 allowed_targets = ["planner"]
-# session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list.
-session_command = ["pi", "--session-id", "{session}"]
 # aggregate marks this role as the representative of an external cluster. Read by the server and the generate driver as an annotation. Default: empty string, which marks a local role.
 aggregate = ""
 
@@ -154,6 +160,12 @@ attempts = 3
 # backoff_ms sets retry delays in order. Read by the client intent runner. Default: [1000, 2000, 4000].
 backoff_ms = [1000, 2000, 4000]
 
+# [client.runtime] is the drive and the argv one session runs: drive = "plugin" (the default),
+# "acp" (placement = "headless" only), or "exec"; {session} and {task} are substituted.
+[client.runtime]
+drive = "plugin"
+command = ["pi", "--session-id", "{session}"]
+
 # docs/v1-PLAN.md §5 line 245
 [[client]]
 # role names this role, the unit of addressing and ACL keying. Read by the server router, the ACL decision, and the generate driver. Default: empty string, refused per entry.
@@ -170,8 +182,6 @@ max_sessions = 1
 allowed_senders = ["*"]
 # allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role. On the entry of a role named `_supervisor` this list is the only gate: an empty one reaches every registered role, and a non-empty one names the reachable roles exactly.
 allowed_targets = ["_supervisor", "builder"]
-# session_command spawns the coding agent for one session. Read by the client session backend, with {session} and {task} substituted. Default: empty list.
-session_command = ["pi", "--session-id", "{session}"]
 # aggregate marks this role as the representative of an external cluster. Read by the server and the generate driver as an annotation. Default: empty string, which marks a local role. docs/v1-PLAN.md §5 line 248.
 aggregate = "cluster-b"
 
@@ -188,6 +198,12 @@ idle_ms = 60000
 attempts = 3
 # backoff_ms sets retry delays in order. Read by the client intent runner. Default: [1000, 2000, 4000].
 backoff_ms = [1000, 2000, 4000]
+
+# [client.runtime] is the drive and the argv one session runs: drive = "plugin" (the default),
+# "acp" (placement = "headless" only), or "exec"; {session} and {task} are substituted.
+[client.runtime]
+drive = "plugin"
+command = ["pi", "--session-id", "{session}"]
 
 # docs/v1-PLAN.md §5 line 252
 [[gateway]]

@@ -457,7 +457,7 @@ v2 的 crate 地图、session 生命周期和形式化设计理由见 [`AGENTS.m
 - [`crates/onlyne-adapter/PROTOCOL.md`](crates/onlyne-adapter/PROTOCOL.md) — 外部 agent/gateway wire contract。
 - [`examples/supervisor/README.md`](examples/supervisor/README.md) — 真实 pi/Orca running-lights 演示。
 - [`skills/onlyne-supervisor/SKILL.md`](skills/onlyne-supervisor/SKILL.md) — supervisor agent 的操作 handbook。
-- [`skills/onlyne-role/SKILL.md`](skills/onlyne-role/SKILL.md) 与 [`skills/onlyne-role-payload-v2/SKILL.md`](skills/onlyne-role-payload-v2/SKILL.md) — 角色侧任务与结项 handbook。
+- [`skills/onlyne-role/SKILL.md`](skills/onlyne-role/SKILL.md) — 角色侧任务与结项 handbook。
 - [`.agents/skills/onlyne/SKILL.md`](.agents/skills/onlyne/SKILL.md) — 本仓库的开发指导。
 
 ### 项目记录

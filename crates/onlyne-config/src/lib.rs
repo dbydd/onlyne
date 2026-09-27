@@ -37,7 +37,8 @@ pub mod template;
 
 pub use client::{
     AcpSection, ClientConfig, ClientSection, DEFAULT_RECONNECT_GRACE_SECS,
-    DEFAULT_STALL_REPORT_SECS, OrcaSection, ServerEndpoint, SessionPolicy, SessionScope,
+    DEFAULT_STALL_REPORT_SECS, OrcaSection, PLACEMENT_NAMES, PLACEMENT_PROBE_ORDER, Placement,
+    ServerEndpoint, SessionPolicy, SessionScope, validate_drive_placement,
 };
 pub use diff::{RoleChange, SpecDiff};
 pub use env::Env;
@@ -45,13 +46,14 @@ pub use error::SpecError;
 pub use hash::{canonical_bytes, spec_hash};
 pub use redact_impl::SECRET_KEYS;
 pub use spec::{
-    ACL_EDGE_KINDS, ALLOWED_PLACEHOLDERS, AclEdge, ClientEntry, DEFAULT_AGENT_PACKAGE,
-    DEFAULT_BACKOFF_MS, DEFAULT_CERT_PIN_PREFIX, DEFAULT_FAULT_HISTORY_DAYS,
+    ACL_EDGE_KINDS, ALLOWED_PLACEHOLDERS, AclEdge, BACKEND_IS_GONE, ClientEntry,
+    DEFAULT_AGENT_PACKAGE, DEFAULT_BACKOFF_MS, DEFAULT_CERT_PIN_PREFIX, DEFAULT_FAULT_HISTORY_DAYS,
     DEFAULT_GHOST_SWEEP_SECS, DEFAULT_HEARTBEAT_GRACE_SECS, DEFAULT_HEARTBEAT_TIMEOUT_MS,
     DEFAULT_INTENT_ATTEMPTS, DEFAULT_KEY_PREFIX, DEFAULT_MAX_SESSIONS, DEFAULT_NOTE_QUEUE,
     DEFAULT_REQUEUE_MAX_ATTEMPTS, DEFAULT_REQUEUE_TTL_SECS, DEFAULT_RESYNC_LAG,
-    DEFAULT_STALE_WATCH_SECS, DEFAULT_TEMPLATE_ROOT, GatewayEntry, IntentPolicy, KEY_BYTE_LEN,
-    MsgKindClass, RouteEntry, RouteTarget, SUPERVISOR_ROLE, ServerSection, Spec, Timeouts,
+    DEFAULT_STALE_WATCH_SECS, DEFAULT_TEMPLATE_ROOT, DRIVE_NAMES, Drive, GatewayEntry,
+    IntentPolicy, KEY_BYTE_LEN, MsgKindClass, RouteEntry, RouteTarget, RuntimeSection,
+    SUPERVISOR_ROLE, ServerSection, Spec, Timeouts,
 };
 pub use template::{
     Placeholders, Template, TemplateError, discover, load_tree, local_override, merge_fragment,

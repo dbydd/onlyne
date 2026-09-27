@@ -58,13 +58,15 @@ fn permissions_mode_600_for_role_key_and_socket() {
         .unwrap();
     assert!(fragment.starts_with("[[client]]\n"));
     // The knob comments ride the fragment as TOML comments; the effective
-    // entry is the ten live lines in their fixed shape, and the comments are
-    // the documented vocabulary behind them.
+    // entry includes the runtime table in its fixed shape, and the comments are
+    // the documented vocabulary behind them. TOML reads a blank line as
+    // nothing, so the one that separates the comments from the runtime table is
+    // not an entry key either.
     let lines: Vec<&str> = fragment
         .lines()
-        .filter(|line| !line.starts_with('#'))
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
         .collect();
-    assert_eq!(lines.len(), 9, "fragment shape is fixed: {fragment:?}");
+    assert_eq!(lines.len(), 11, "fragment shape is fixed: {fragment:?}");
     assert_eq!(lines[0], "[[client]]");
     assert_eq!(lines[1], "role = \"planner\"");
     assert!(
@@ -80,11 +82,13 @@ fn permissions_mode_600_for_role_key_and_socket() {
             "allowed_senders = [\"*\", \"planner\"]",
             "allowed_targets = [\"planner\"]",
             "prose = \"v1 smoke prose\"",
-            "session_command = [\"pi\", \"--session-id\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]",
+            "[client.runtime]",
+            "drive = \"plugin\"",
+            "command = [\"pi\", \"--session-id\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]",
         ]
     );
     assert!(
-        lines[8].starts_with("session_command = "),
+        lines[10].starts_with("command = "),
         "the live entry closes with the command line: {fragment:?}"
     );
     assert!(fragment.contains("key = \"ed25519/"));
@@ -227,7 +231,7 @@ fn init_fragment_is_a_pasteable_spawnable_role() {
         .find(|entry| entry.role == "planner")
         .expect("the fragment registers the role");
     assert_eq!(
-        planner.session_command,
+        planner.runtime.command,
         vec![
             "pi",
             "--session-id",

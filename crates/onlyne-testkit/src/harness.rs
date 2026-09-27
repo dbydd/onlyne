@@ -412,8 +412,15 @@ impl Cluster {
             .await
             .context("read spec.toml")?;
 
-        // If ACL override is given, filter out the default ACL lines from fragment
+        // If ACL override is given, filter out the default ACL lines from
+        // fragment. The entry's `[client.runtime]` table is held back and
+        // re-emitted last: a key written after a table header belongs to that
+        // table, so the ACL lines appended before it would land inside the
+        // runtime table and the entry would silently keep the fragment's
+        // defaults — an ACL's `max_sessions` dropping back to 1 is how this was
+        // found.
         let filtered_fragment = if let Some(acl_lines) = acl {
+            let (body, runtime) = split_runtime_block(&fragment);
             let acl_keys: Vec<&str> = acl_lines
                 .lines()
                 .filter_map(|line| {
@@ -423,7 +430,7 @@ impl Cluster {
                 .collect();
 
             let mut result = String::new();
-            for line in fragment.lines() {
+            for line in body.lines() {
                 let trimmed = line.trim();
                 let keep = if let Some(eq_pos) = trimmed.find('=') {
                     let key = trimmed[..eq_pos].trim();
@@ -438,6 +445,7 @@ impl Cluster {
             }
             result.push_str(acl_lines);
             result.push('\n');
+            result.push_str(&runtime);
             result
         } else {
             fragment
@@ -932,4 +940,26 @@ impl Drop for Cluster {
             }
         }
     }
+}
+
+/// Split one `onlyne-client init` fragment into its entry body and the trailing
+/// `[client.runtime]` table.
+///
+/// A key written after a table header belongs to that table, so a caller that
+/// appends keys of its own — the ACL override — must write them after the body
+/// and leave this block last. The header is matched as a line rather than as a
+/// substring: the fragment's comment block names the table in prose.
+fn split_runtime_block(fragment: &str) -> (String, String) {
+    let mut body = String::new();
+    let mut runtime = String::new();
+    let mut in_runtime = false;
+    for line in fragment.lines() {
+        if line.trim_start().starts_with("[client.runtime]") {
+            in_runtime = true;
+        }
+        let target = if in_runtime { &mut runtime } else { &mut body };
+        target.push_str(line);
+        target.push('\n');
+    }
+    (body, runtime)
 }

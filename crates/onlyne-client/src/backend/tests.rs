@@ -3,7 +3,7 @@ use super::*;
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,10 +19,6 @@ impl ProbeRunner {
     fn reply(self, status: i32, body: &str) -> Self {
         self.script.lock().push_back((status, body.to_string()));
         self
-    }
-
-    fn calls(&self) -> Vec<(String, Vec<String>)> {
-        self.calls.lock().clone()
     }
 }
 
@@ -56,216 +52,177 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 }
 
 #[test]
-fn detect_host_table_covers_explicit_env_and_none() {
+fn placement_detection_uses_explicit_declared_probe_then_fallback() {
     let cases = [
         (
             env(&[("ONLYNE_BACKEND", "herdr")]),
-            Some(BackendName::Herdr),
+            None,
+            SessionPlacement::Named(onlyne_config::Placement::Herdr),
+            SelectionSource::Explicit,
+        ),
+        (
+            env(&[("ONLYNE_BACKEND", "exec")]),
+            None,
+            SessionPlacement::Named(onlyne_config::Placement::Headless),
             SelectionSource::Explicit,
         ),
         (
             env(&[("ONLYNE_BACKEND", "fake")]),
-            Some(BackendName::Fake),
+            None,
+            SessionPlacement::Fake,
             SelectionSource::Explicit,
         ),
         (
-            env(&[("ONLYNE_BACKEND", "ACP")]),
-            Some(BackendName::Acp),
+            env(&[]),
+            Some(SessionPlacement::Named(onlyne_config::Placement::Orca)),
+            SessionPlacement::Named(onlyne_config::Placement::Orca),
+            SelectionSource::Declared,
+        ),
+        // The declaration is the run's own answer, so it outranks the probe:
+        // a machine that could host a pane still runs whatever this run was
+        // told to use. The scenario suite relies on it to name the in-process
+        // runtime on a host that has a terminal host of its own.
+        (
+            env(&[("HERDR_ENV", "1"), ("HERDR_SESSION", "s")]),
+            Some(SessionPlacement::Fake),
+            SessionPlacement::Fake,
+            SelectionSource::Declared,
+        ),
+        // And an explicit `ONLYNE_BACKEND` outranks both.
+        (
+            env(&[("ONLYNE_BACKEND", "orca")]),
+            Some(SessionPlacement::Fake),
+            SessionPlacement::Named(onlyne_config::Placement::Orca),
             SelectionSource::Explicit,
         ),
         (
-            env(&[
-                ("HERDR_ENV", "1"),
-                ("HERDR_SESSION", "onlyne-test"),
-                ("ORCA_PANE_KEY", "tab:leaf"),
-            ]),
-            Some(BackendName::Herdr),
-            SelectionSource::Env,
+            env(&[("HERDR_ENV", "1"), ("HERDR_SESSION", "s")]),
+            None,
+            SessionPlacement::Named(onlyne_config::Placement::Herdr),
+            SelectionSource::Probe,
         ),
         (
-            env(&[("ORCA_WORKTREE_ID", "wt-1")]),
-            Some(BackendName::Orca),
-            SelectionSource::Env,
+            env(&[("ORCA_PANE_KEY", "tab:leaf")]),
+            None,
+            SessionPlacement::Named(onlyne_config::Placement::Orca),
+            SelectionSource::Probe,
         ),
         (
-            env(&[("ZELLIJ", "0")]),
-            Some(BackendName::Zellij),
-            SelectionSource::Env,
+            env(&[("ZELLIJ", "1")]),
+            None,
+            SessionPlacement::Named(onlyne_config::Placement::Zellij),
+            SelectionSource::Probe,
         ),
-        (env(&[]), None, SelectionSource::None),
-        (env(&[("HERDR_ENV", "1")]), None, SelectionSource::None),
         (
-            env(&[("ONLYNE_BACKEND", "auto"), ("ZELLIJ", "1")]),
-            Some(BackendName::Zellij),
-            SelectionSource::Env,
+            env(&[]),
+            None,
+            SessionPlacement::Named(onlyne_config::Placement::Headless),
+            SelectionSource::Fallback,
         ),
     ];
-    for (input, backend, source) in cases {
-        let detected = detect_host(&input);
-        assert_eq!(detected.backend, backend, "{input:?}");
+    for (input, declared, placement, source) in cases {
+        let detected = detect_placement(&input, declared).unwrap();
+        assert_eq!(detected.placement, placement, "{input:?}");
         assert_eq!(detected.source, source, "{input:?}");
     }
 }
 
 #[test]
-fn empty_env_refuses_with_no_supported_host() {
+fn placement_parse_and_unknown_explicit_name_are_precise() {
+    for name in [
+        "herdr", "orca", "zellij", "headless", "external", "exec", "fake",
+    ] {
+        assert!(SessionPlacement::parse(name).is_some(), "{name}");
+    }
+    for name in ["acp", "auto", "garbage"] {
+        assert!(SessionPlacement::parse(name).is_none(), "{name}");
+    }
+    let error = detect_placement(&env(&[("ONLYNE_BACKEND", "garbage")]), None).unwrap_err();
+    assert!(error.downcast_ref::<UnknownPlacement>().is_some());
+    assert!(error.to_string().contains(onlyne_config::PLACEMENT_NAMES));
+}
+
+#[test]
+fn backend_matrix_validates_drive_and_placement_pairs() {
+    use onlyne_config::{Drive, Placement};
     let runner = Arc::new(ProbeRunner::default());
-    let error = select_backend_from_env(
-        &BTreeMap::new(),
+    let acp = AcpOptions::default();
+    let cells = [
+        (Drive::Plugin, Placement::Herdr, "herdr"),
+        (Drive::Plugin, Placement::Orca, "orca"),
+        (Drive::Plugin, Placement::Zellij, "zellij"),
+        (Drive::Plugin, Placement::Headless, "exec"),
+        (Drive::Plugin, Placement::External, "external"),
+        (Drive::Exec, Placement::Herdr, "herdr"),
+        (Drive::Exec, Placement::Orca, "orca"),
+        (Drive::Exec, Placement::Zellij, "zellij"),
+        (Drive::Exec, Placement::Headless, "exec"),
+        (Drive::Exec, Placement::External, "exec"),
+        (Drive::Acp, Placement::Headless, "acp"),
+    ];
+    for (drive, placement, name) in cells {
+        let backend = backend_for(
+            drive,
+            SessionPlacement::Named(placement),
+            runner.clone(),
+            WorktreePolicy::Host,
+            &acp,
+        )
+        .unwrap();
+        assert_eq!(backend.name(), name, "{drive:?} x {placement:?}");
+    }
+    let error = backend_for(
+        Drive::Acp,
+        SessionPlacement::Named(Placement::Orca),
         runner,
         WorktreePolicy::Host,
-        &AcpOptions::default(),
+        &acp,
     )
     .err()
-    .expect("empty env must refuse");
-    assert!(error.downcast_ref::<NoSupportedHost>().is_some());
-    assert_eq!(error.to_string(), NO_SUPPORTED_HOST);
-}
-
-#[test]
-fn named_backends_stay_exact_and_unknown_names_error() {
-    let runner = Arc::new(ProbeRunner::default());
-    assert_eq!(
-        backend_by_name(
-            "herdr",
-            runner.clone(),
-            WorktreePolicy::Host,
-            &AcpOptions::default()
-        )
-        .unwrap()
-        .name(),
-        "herdr"
-    );
-    assert_eq!(
-        backend_for_env(
-            "zellij",
-            &BTreeMap::new(),
-            runner.clone(),
-            WorktreePolicy::Host,
-            &AcpOptions::default()
-        )
-        .unwrap()
-        .name(),
-        "zellij"
-    );
-    assert_eq!(
-        backend_for_env(
-            "fake",
-            &BTreeMap::new(),
-            runner.clone(),
-            WorktreePolicy::Host,
-            &AcpOptions::default()
-        )
-        .unwrap()
-        .name(),
-        "fake"
-    );
-    assert_eq!(
-        backend_for_env(
-            "exec",
-            &BTreeMap::new(),
-            runner.clone(),
-            WorktreePolicy::Host,
-            &AcpOptions::default()
-        )
-        .unwrap()
-        .name(),
-        "exec"
-    );
-    assert_eq!(runner.calls().len(), 0);
-    let error = backend_for_env(
-        "nope",
-        &BTreeMap::new(),
-        runner,
-        WorktreePolicy::Host,
-        &AcpOptions::default(),
-    )
-    .err()
-    .expect("unknown name must error");
-    assert_eq!(
-        error.to_string(),
-        format!("unknown session backend: nope; accepted: {BACKEND_NAMES}")
+    .expect("ACP pane pairing must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("drive = \"acp\" pairs only with placement = \"headless\"")
     );
 }
 
+/// The external placement is the row where the operator starts the runtime, so
+/// this backend answers with a session name and runs nothing: the argv belongs
+/// to the resident runtime, and a spawn that ran it would fail here on a binary
+/// that does not exist. The reference it hands back names the placement the
+/// runtime's plugin matches on when it dials the client (`docs/v2-PLAN.md`
+/// line 289).
 #[test]
-fn headless_is_the_exec_alias() {
-    assert_eq!(BackendName::parse("headless"), Some(BackendName::Exec));
-    assert_eq!(BackendName::parse("HEADLESS"), Some(BackendName::Exec));
-    assert_eq!(BackendName::parse("exec"), Some(BackendName::Exec));
-    assert_eq!(BackendName::Exec.as_str(), "exec");
-    assert_eq!(BackendName::parse("nope"), None);
-
-    let detected = detect_host(&env(&[("ONLYNE_BACKEND", "headless")]));
-    assert_eq!(detected.backend, Some(BackendName::Exec));
-    assert_eq!(detected.source, SelectionSource::Explicit);
-    assert_eq!(detected.backend.unwrap().as_str(), "exec");
-
-    let runner = Arc::new(ProbeRunner::default());
-    assert_eq!(
-        backend_by_name(
-            "headless",
-            runner.clone(),
-            WorktreePolicy::Host,
-            &AcpOptions::default()
-        )
-        .unwrap()
-        .name(),
-        "exec"
+fn external_placement_names_a_session_and_starts_no_process() {
+    let backend = external::ExternalBackend::new();
+    let spec = SpawnSpec {
+        cwd: PathBuf::from("/nonexistent/workspace"),
+        task_id: "T-external".to_string(),
+        command: vec!["/nonexistent/onlyne-no-such-binary".to_string()],
+        env: BTreeMap::new(),
+        tools_token: String::new(),
+        prose: String::new(),
+        focus: None,
+        placement: None,
+        rename: None,
+    };
+    let session = backend
+        .spawn(spec)
+        .expect("a resident runtime's session opens with no process of this client's");
+    assert_eq!(session.backend, "external");
+    assert_eq!(session.backend_ref["id"], "T-external");
+    assert_eq!(session.backend_ref["placement"], "external");
+    assert!(
+        backend.probe(&session).expect("probe").alive,
+        "the connection the runtime opened is the resource, and this client holds it"
     );
-}
-
-#[test]
-fn env_probe_picks_herdr_before_orca() {
-    let runner = Arc::new(ProbeRunner::default());
-    let backend = select_backend_from_env(
-        &env(&[
-            ("HERDR_ENV", "1"),
-            ("HERDR_SOCKET_PATH", "/tmp/herdr.sock"),
-            ("ORCA_PANE_KEY", "tab:leaf"),
-            ("ZELLIJ", "0"),
-        ]),
-        runner,
-        WorktreePolicy::Host,
-        &AcpOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(backend.name(), "herdr");
-}
-
-/// `acp` is a name like any other: selectable by name and by
-/// `ONLYNE_BACKEND`, and never a host that auto-discovery can stumble into.
-#[test]
-fn acp_is_named_but_never_discovered() {
-    let runner = Arc::new(ProbeRunner::default());
-    assert_eq!(
-        backend_by_name(
-            "acp",
-            runner.clone(),
-            WorktreePolicy::Host,
-            &AcpOptions::default()
-        )
-        .unwrap()
-        .name(),
-        "acp"
+    assert!(
+        backend
+            .close(&session, CloseReason::Completed, false)
+            .is_ok(),
+        "closing stops a process this client never had"
     );
-    let explicit = select_backend_from_env(
-        &env(&[("ONLYNE_BACKEND", "acp"), ("ZELLIJ", "1")]),
-        runner.clone(),
-        WorktreePolicy::Host,
-        &AcpOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(explicit.name(), "acp");
-    // An auto probe in a zellij terminal must still pick zellij, not acp.
-    let auto = select_backend_from_env(
-        &env(&[("ONLYNE_BACKEND", "auto"), ("ZELLIJ", "1")]),
-        runner,
-        WorktreePolicy::Host,
-        &AcpOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(auto.name(), "zellij");
 }
 
 /// A backend outlives its first drain, and any number of views may pull from
@@ -277,21 +234,17 @@ fn an_outcome_stream_hands_each_fact_to_one_consumer() {
     assert!(feed.try_recv().is_none());
     sink.push(SessionOutcome {
         task_id: "t1".into(),
-        outcome: onlyne_proto::lifecycle::TaskState::Done,
+        outcome: Some(onlyne_proto::lifecycle::TaskState::Done),
         head: Some("done".into()),
-        head_kind: Some("done".into()),
         note: None,
         refusals: None,
-        handoffs: Vec::new(),
     });
     sink.push(SessionOutcome {
         task_id: "t2".into(),
-        outcome: onlyne_proto::lifecycle::TaskState::Failed,
+        outcome: Some(onlyne_proto::lifecycle::TaskState::Failed),
         head: None,
-        head_kind: None,
         note: Some("agent exited".into()),
         refusals: Some("2 refused".into()),
-        handoffs: Vec::new(),
     });
     assert_eq!(
         feed.recv_timeout(Duration::from_millis(10))

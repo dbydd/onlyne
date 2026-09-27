@@ -9,7 +9,7 @@ fn a_permission_ask_is_refused_and_the_turn_still_reports_its_answer() {
     let session = backend.spawn(fake.spec("t-deny")).unwrap();
     let (outcome, _lines, log) = run_turn(&backend, &session, "t-deny", "MARK:ask go");
 
-    assert_eq!(outcome.outcome, TaskState::Done, "{outcome:?}");
+    assert_eq!(outcome.outcome, NO_VERDICT, "{outcome:?}");
     // The agent's own account of the answer is the closing line.
     assert_eq!(outcome.head.as_deref(), Some("answer=no"));
     assert!(log.contains("answer=no"), "{log}");
@@ -73,7 +73,7 @@ fn refusals_belong_to_the_turn_that_asked() {
     // The refusal accumulator belongs to the turn that asked, so a later
     // turn on the same conversation reports none of it.
     let (second, _lines, _log) = run_turn(&backend, &session, "t-two", "second");
-    assert_eq!(second.outcome, TaskState::Done);
+    assert_eq!(second.outcome, NO_VERDICT);
     assert!(second.refusals.is_none(), "{:?}", second.refusals);
     finish(&backend, &fake, &[&session]);
 }
@@ -112,7 +112,7 @@ fn one_agent_process_serves_every_session_of_its_command() {
     assert!(fake.traced().contains("close sess-1"), "{}", fake.traced());
     assert!(backend.probe(&second).unwrap().alive);
     let (outcome, _lines, _log) = run_turn(&backend, &second, "t-b", "still here");
-    assert_eq!(outcome.outcome, TaskState::Done);
+    assert_eq!(outcome.outcome, NO_VERDICT);
     assert_eq!(outcome.head.as_deref(), Some("I edited hello.py."));
     finish(&backend, &fake, &[&second, &third]);
 }
@@ -123,7 +123,7 @@ fn a_replacement_process_keeps_the_sessions_and_reservations_of_its_own_command(
     let backend = AcpBackend::new(AcpOptions::default());
     let dead = backend.spawn(fake.spec("t-dead")).unwrap();
     let (outcome, _lines, _log) = run_turn(&backend, &dead, "t-dead", "MARK:die go");
-    assert_eq!(outcome.outcome, TaskState::Failed, "{outcome:?}");
+    assert_eq!(outcome.outcome, Some(TaskState::Failed), "{outcome:?}");
     // The responder notices the corpse and takes it off the table on its own
     // clock; the session that served it stays named here until it is closed.
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -169,7 +169,7 @@ fn a_replacement_process_keeps_the_sessions_and_reservations_of_its_own_command(
         "the live agent is gone"
     );
     let (outcome, _lines, _log) = run_turn(&backend, &live, "t-live", "carry on");
-    assert_eq!(outcome.outcome, TaskState::Done, "{outcome:?}");
+    assert_eq!(outcome.outcome, NO_VERDICT, "{outcome:?}");
     finish(&backend, &fake, &[&live]);
 }
 
@@ -180,7 +180,7 @@ fn an_agent_that_dies_mid_turn_fails_its_task_with_the_detail() {
     let session = backend.spawn(fake.spec("t-die")).unwrap();
     let (outcome, lines, log) = run_turn(&backend, &session, "t-die", "MARK:die go");
 
-    assert_eq!(outcome.outcome, TaskState::Failed);
+    assert_eq!(outcome.outcome, Some(TaskState::Failed));
     assert_eq!(outcome.head, None);
     let note = outcome.note.expect("the death is explained");
     assert!(note.contains("7"), "{note}");

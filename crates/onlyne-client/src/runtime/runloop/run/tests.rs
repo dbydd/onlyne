@@ -1,7 +1,9 @@
 use super::{run, settle_control};
+use crate::backend::{AcpOptions, ProcessRunner, SessionPlacement, WorktreePolicy};
 use crate::backend::{
     Capabilities, CloseReason, ResourceProbe, SessionBackend, SessionRef, SpawnSpec,
 };
+use crate::runtime::runloop::config::BackendSelector;
 use crate::runtime::runloop::config::{ClientInit, RunState};
 use crate::runtime::runloop::test_support::test_state;
 use crate::session::dispatch::{self, ReadyNotice};
@@ -74,6 +76,12 @@ fn state_with_backend(backend: Arc<dyn SessionBackend>) -> (RunState, tempfile::
         welcome: Arc::new(tokio::sync::Mutex::new(None)),
         stall_report_secs: 0,
         reconnect_grace_secs: 0,
+        selector: BackendSelector {
+            placement: SessionPlacement::Fake,
+            runner: Arc::new(ProcessRunner),
+            worktree: WorktreePolicy::Host,
+            acp: AcpOptions::default(),
+        },
     };
     (state, dir)
 }
@@ -176,7 +184,9 @@ async fn an_unbindable_socket_ends_the_run_with_an_error() {
         workspace.key_path(),
         "sha256/0000000000000000000000000000000000000000000000000000000000000000",
     )
-    .with_backend("fake");
+    .with_placement(Some(SessionPlacement::Named(
+        onlyne_config::Placement::Headless,
+    )));
     let outcome = tokio::time::timeout(Duration::from_secs(10), run(init))
         .await
         .expect("the bind failure ends the run well inside the timeout");

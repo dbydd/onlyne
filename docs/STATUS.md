@@ -88,8 +88,8 @@ inside a workspace tree.
 Eleven crates are active, and `onlyne-web` is the twelfth entry in `AGENTS.md` §6 with nothing
 built behind it yet.
 
-- [x] `onlyne-proto` — protocol vocabulary, ops, errors, events, the session reducer, and the
-  payload-v2 report grammar. No tokio.
+- [x] `onlyne-proto` — protocol vocabulary, ops, errors, events, and the session reducer. No
+  tokio.
 - [x] `onlyne-wire` — the frame codec, the one link implementation the server, client, adapter
   SDK, CLI, TUI and web all share, the runtime directory, and the registration files.
 - [x] `onlyne-net` — TLS, admission, redial.
@@ -138,15 +138,14 @@ Each scenario names the script it supersedes on the line above its attribute, so
 progress is readable from the file itself.
 
 **The shell cases are what the suite has not absorbed yet.** `crates/onlyne-testkit/e2e/`
-holds twenty scripts beside `lib.sh` and the scripted ACP peer `acp-agent.py`, run with
+holds the shell cases beside `lib.sh` and the scripted ACP peer `acp-agent.py`, run with
 `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root. They fall into three
 groups:
 
 - *live* — `pi-live.sh`, `orca-live.sh`, `herdr-live.sh`, and `handoff-live.sh`. Each needs a
   real runtime or a model on the host and prints `SKIP` with exit 0 when it is not there, so a
   green line means "passed here" and a skip means "not exercised here".
-- *ACP* — `acp-session.sh` and `acp-payload-v2.sh`, the scripted ACP v1 agent and the
-  closing-report path.
+- *ACP* — `acp-session.sh`, the scripted ACP v1 agent.
 - *real-process or two-root shapes the harness does not model* — `requeue-claim.sh` (a server
   taken down with `kill -9` under a live client), `two-cluster.sh` (the two-root federation
   case the ignored scenario points at), `running-lights.sh` (the long one), `gateway-mount.sh`
@@ -224,8 +223,7 @@ socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`（可由 `ONLYNE_RUNT
 
 十一个 crate 在用；`onlyne-web` 是 `AGENTS.md` §6 的第十二个条目，背后还没有实现。
 
-- `onlyne-proto` —— 协议词汇、ops、errors、events、session reducer 与 payload-v2 报告文法。
-  不依赖 tokio。
+- `onlyne-proto` —— 协议词汇、ops、errors、events 与 session reducer。不依赖 tokio。
 - `onlyne-wire` —— 帧编解码、server/client/adapter SDK/CLI/TUI/web 共用的那一套连接实现、
   运行目录与注册文件。
 - `onlyne-net` —— TLS、准入、重连退避。
@@ -269,14 +267,14 @@ generate/relocate。`scenario_11_federation` 保持 `#[ignore]`，理由写在�
 一个 server，双根那一例是下面的 shell 脚本。每个场景都在自己属性上方一行写明它取代哪个脚本，
 所以迁移进度可以直接从文件本身读出。
 
-**shell 用例是这套 suite 尚未吸收的部分。** `crates/onlyne-testkit/e2e/` 下有二十个脚本，
-另有 `lib.sh` 与脚本化 ACP 对端 `acp-agent.py`，从仓库根目录以
+**shell 用例是这套 suite 尚未吸收的部分。** `crates/onlyne-testkit/e2e/` 下的 shell 用例
+连同 `lib.sh` 与脚本化 ACP 对端 `acp-agent.py`，从仓库根目录以
 `ONLYNE_BACKEND=fake BIN_DIR=target/debug` 运行。分三类：
 
 - *live* —— `pi-live.sh`、`orca-live.sh`、`herdr-live.sh`、`handoff-live.sh`。每个都需要真实
   runtime 或主机上的模型，条件不满足时打印 `SKIP` 并以 0 退出，因此绿色行表示“在这里过了”，
   skip 表示“这里没跑到”。
-- *ACP* —— `acp-session.sh` 与 `acp-payload-v2.sh`，即脚本化的 ACP v1 agent 与收尾报告路径。
+- *ACP* —— `acp-session.sh`，即脚本化的 ACP v1 agent。
 - *harness 建模不了的真实进程或双根形态* —— `requeue-claim.sh`（活 client 下面
   `kill -9` 掉 server）、`two-cluster.sh`（被 ignore 的场景所指向的双根 federation 形态）、
   `running-lights.sh`（长的那个）、`gateway-mount.sh`（短的那个）、`exec-headless.sh`，以及

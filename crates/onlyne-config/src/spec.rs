@@ -88,6 +88,88 @@ pub struct ServerSection {
     pub requeue_ttl_secs: u64,
 }
 
+/// Why a document may not carry the fused `backend` key any more, and what an
+/// editor moves it to. The two halves it pressed into one value now live in two
+/// files (`docs/v2-PLAN.md` §"驱动与放置", `docs/v2-CONTRACT.md` §"Slice 2"), so the
+/// refusal names both, in both files that can carry the key.
+pub const BACKEND_IS_GONE: &str = "\
+`backend` is gone: a drive belongs in the spec's `[client.runtime]` (`drive = \"plugin\"`,
+`\"acp\"`, or `\"exec\"`, with the argv in `command`) and a placement belongs in the role
+workspace's `config.toml` (`placement = \"herdr\"`, `\"orca\"`, `\"zellij\"`, `\"headless\"`, or
+`\"external\"`)";
+
+/// How a client talks to one role's runtime: `[client.runtime] drive`.
+///
+/// Drive is a property of the runtime and belongs in the spec. Where the
+/// runtime process is displayed is the placement, a property of the machine,
+/// and belongs in that role workspace's `config.toml` (`docs/v2-PLAN.md` §"驱动与放置").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(rename_all = "lowercase")]
+pub enum Drive {
+    /// The client starts the runtime and a plugin inside it dials back.
+    #[default]
+    Plugin,
+    /// The client runs the agent as its own child and speaks the Agent Client
+    /// Protocol on that child's stdio.
+    Acp,
+    /// The client runs the command and reads its exit code.
+    Exec,
+}
+
+/// Every value `drive` accepts, in the order a refusal names them.
+pub const DRIVE_NAMES: &str = "plugin|acp|exec";
+
+impl Drive {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plugin => "plugin",
+            Self::Acp => "acp",
+            Self::Exec => "exec",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "plugin" => Some(Self::Plugin),
+            "acp" => Some(Self::Acp),
+            "exec" => Some(Self::Exec),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Drive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// `[client.runtime]` — the drive and the argv one session of this role runs.
+///
+/// An absent table is `drive = "plugin"` with an empty command, which is what
+/// every role in the tree is today.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeSection {
+    /// `plugin` | `acp` | `exec`. Absent means [`Drive::Plugin`].
+    #[serde(default)]
+    pub drive: Drive,
+    /// The argv one session runs. `{session}` and `{task}` are substituted by
+    /// the client, and every other brace is refused. Absent means an empty
+    /// list, which no drive can start a session with.
+    #[serde(default)]
+    pub command: Vec<String>,
+}
+
+impl Default for RuntimeSection {
+    fn default() -> Self {
+        Self {
+            drive: Drive::Plugin,
+            command: Vec::new(),
+        }
+    }
+}
+
 /// `[[client]]` entry. Aggregate roles use the same struct and carry an
 /// annotation in `aggregate`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -104,8 +186,9 @@ pub struct ClientEntry {
     pub allowed_senders: Vec<String>,
     #[serde(default)]
     pub allowed_targets: Vec<String>,
+    /// The drive and the argv a session runs: `[client.runtime]`.
     #[serde(default)]
-    pub session_command: Vec<String>,
+    pub runtime: RuntimeSection,
     #[serde(default)]
     pub timeout: Timeouts,
     #[serde(default)]
@@ -298,6 +381,10 @@ impl Spec {
             )
         })?;
         rewrite_client_relay_count_alias(&mut parsed);
+        // Ahead of the struct conversion, so a file that still carries the fused
+        // key is refused by the move rather than by whatever serde says about a
+        // field nothing declares.
+        validate_backend_key(&parsed, text, file)?;
         let spec: Spec = parsed.clone().try_into().map_err(|err: toml::de::Error| {
             SpecError::parse(
                 file,
@@ -498,7 +585,7 @@ fn validate(spec: &Spec, value: &toml::Value, text: &str, file: &str) -> Result<
                 format!("role {} has invalid key: {message}", client.role),
             )
         })?;
-        validate_session_command(&client.role, &client.session_command, text, file, idx)?;
+        validate_runtime_command(&client.role, &client.runtime.command, text, file, idx)?;
     }
 
     for (idx, gateway) in spec.gateway.iter().enumerate() {
@@ -687,7 +774,55 @@ fn validate_duplicate_gateways(spec: &Spec, text: &str, file: &str) -> Result<()
     Ok(())
 }
 
-fn validate_session_command(
+/// Refuse the fused key wherever it sits: at the document root, or in any
+/// `[[client]]` entry (its own level or below it).
+///
+/// A file that still carries `backend` is refused rather than read past,
+/// because the value it holds cannot be split by a reader: `acp` names a drive,
+/// `herdr` a placement, and `headless` was either. A cluster that keeps
+/// running under a policy nobody set is exactly the failure this refusal
+/// removes (`docs/v2-CONTRACT.md` §"Slice 2").
+fn validate_backend_key(value: &toml::Value, text: &str, file: &str) -> Result<(), SpecError> {
+    if value
+        .as_table()
+        .is_some_and(|root| root.contains_key("backend"))
+    {
+        return Err(SpecError::validate(
+            file,
+            crate::locate::root_key_line(text, "backend"),
+            BACKEND_IS_GONE,
+        ));
+    }
+    for (idx, entry) in value
+        .get("client")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if carries_backend(entry) {
+            return Err(SpecError::validate(
+                file,
+                key_line_in_array_entry(text, "client", idx, "backend"),
+                BACKEND_IS_GONE,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a parsed table carries a `backend` key at its own level or below it.
+fn carries_backend(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Table(table) => {
+            table.contains_key("backend") || table.values().any(carries_backend)
+        }
+        toml::Value::Array(items) => items.iter().any(carries_backend),
+        _ => false,
+    }
+}
+
+fn validate_runtime_command(
     role: &str,
     tokens: &[String],
     text: &str,
@@ -699,15 +834,28 @@ fn validate_session_command(
             if !ALLOWED_PLACEHOLDERS.contains(&placeholder.as_str()) {
                 return Err(SpecError::validate(
                     file,
-                    key_line_in_array_entry(text, "client", entry_index, "session_command"),
+                    runtime_command_line(text, entry_index),
                     format!(
-                        "role {role} has unknown session_command placeholder {{{placeholder}}}"
+                        "role {role} has unknown runtime command placeholder {{{placeholder}}}"
                     ),
                 ));
             }
         }
     }
     Ok(())
+}
+
+/// The line a runtime-command placeholder refusal points at: the `command`
+/// line of that entry when it is written as one, then the table header, then
+/// the entry itself. Every spelling the file accepts lands on the entry, and
+/// the ones a line scan can name land on the offending key.
+fn runtime_command_line(text: &str, entry_index: usize) -> usize {
+    ["command", "runtime", "drive"]
+        .into_iter()
+        .find_map(|key| {
+            crate::locate::find_key_line_in_array_entry(text, "client", entry_index, key)
+        })
+        .unwrap_or_else(|| key_line_in_array_entry(text, "client", entry_index, "runtime"))
 }
 
 fn placeholders(token: &str) -> Vec<String> {

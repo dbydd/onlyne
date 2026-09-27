@@ -36,8 +36,12 @@ export const SEQ_BASE = 1000;
 /** Heartbeat cadence while a task is active (`heartbeat_timeout_ms` is 30s). */
 export const DEFAULT_HEARTBEAT_MS = 10_000;
 
-/** Outcomes the wire accepts for one completion. */
-export const OUTCOMES = ["done", "failed", "cancelled"];
+/**
+ * Outcomes the wire accepts for one completion. The proto's own `Outcome`
+ * (`crates/onlyne-proto/src/envelope.rs`), so the two drives that mount these
+ * tools refuse the same spellings rather than each keeping a list.
+ */
+export const OUTCOMES = ["done", "failed", "cancelled", "blocked"];
 
 /** Mime types `ImagePart` accepts, in the core's stable order. */
 export const IMAGE_MIMES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -136,11 +140,21 @@ export function heartbeatReport({ taskId, generation, seq, agent, host = null })
   };
 }
 
-/** `report.complete` — the terminal fact the ledger keeps. */
-export function completeReport({ taskId, outcome, head }) {
+/**
+ * `report.complete` — the terminal fact the ledger keeps.
+ *
+ * `head` is the display line the ledger holds; `details` is the full result,
+ * carried verbatim for the next hop and the originator, and `files` are the
+ * absolute paths that result names. The client owns the `details` ceiling and
+ * refuses an oversize body, so this builds the frame and adds no rule of its
+ * own (`docs/v2-CONTRACT.md` §3c).
+ */
+export function completeReport({ taskId, outcome, head, details = null, files = [] }) {
   const report = { kind: "complete", data: { task_id: taskId, outcome: normalizeOutcome(outcome) } };
   const text = headOf(head);
   if (text) report.data.head = text;
+  if (typeof details === "string" && details.length > 0) report.data.details = details;
+  if (Array.isArray(files) && files.length > 0) report.data.files = files;
   return report;
 }
 
@@ -282,7 +296,7 @@ export function sendEnvelope({ from, to, kind = "note", text = "", image = null,
   return envelope;
 }
 
-/** A human-readable principal, for injection headers. */
+/** A human-readable principal, for the plugin's own operator log line. */
 export function describePrincipal(principal) {
   if (!principal || typeof principal !== "object") return "unknown";
   if (principal.role) {
@@ -310,48 +324,10 @@ export function normalizeOutcome(value) {
 }
 
 /**
- * The user message one `assign` becomes.
- *
- * The task text is quoted verbatim under a header naming its origin, so a
- * session transcript shows where the instruction came from; the role prose
- * (identical in `welcome` and `assign`) is folded in only when it has not
- * already been delivered.
- *
- * The header also carries the family's own figures — the hop this assignment
- * sits at and the hops the family may spend — so a role reads its position off
- * the instruction. Both appear only when the causality names a hop budget: the
- * budget is what marks a payload as a member of a bounded family, and a payload
- * that names none injects exactly the bytes it produced before this header
- * carried them.
- * @param {{ assign: any, proseIsNew: boolean, attachmentPaths?: string[] }} options
- */
-export function injectionText({ assign, proseIsNew, attachmentPaths = [] }) {
-  const envelope = assign.envelope ?? {};
-  const causality = envelope.causality ?? {};
-  const taskId = assign.task_id ?? envelope.causality?.task ?? "unknown";
-  const position =
-    typeof causality.hop_budget === "number"
-      ? `, hop ${causality.hop ?? 0}, hop budget ${causality.hop_budget}`
-      : "";
-  const lines = [
-    `[onlyne] task ${taskId} from ${describePrincipal(envelope.from)} (kind ${envelope.kind ?? "task"}${position})`,
-  ];
-  const prose = typeof assign.prose === "string" ? assign.prose.trim() : "";
-  if (prose && proseIsNew) {
-    lines.push("", "[onlyne] role prose from the spec:", prose);
-  }
-  const text = typeof envelope.body?.text === "string" ? envelope.body.text.trim() : "";
-  lines.push("", text || "(the task carried no text; the image attachment is the payload)");
-  if (attachmentPaths.length > 0) {
-    lines.push("", `[onlyne] attachment saved to: ${attachmentPaths.join(", ")}`);
-  }
-  return lines.join("\n");
-}
-
-/**
- * Task body for the `config_get` route: when a plugin does not declare `inject`
- * the host hands the payload over as `config_get{key:"stdin:<task text>"}`
- * (PROTOCOL.md, "Mounts and capabilities").
+ * Delivery text for the `config_get` route: when a plugin does not declare
+ * `inject` the host hands the payload over as
+ * `config_get{key:"stdin:<delivery text>"}`, the same bytes an `assign` carries
+ * in its `text` (PROTOCOL.md, "Mounts and capabilities").
  * @returns {{ text: string } | null}
  */
 export function stdinTaskText(args) {

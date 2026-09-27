@@ -9,7 +9,7 @@
 
 use onlyne_client::ops::init::toml_string;
 use onlyne_config::{
-    AcpSection, ClientEntry, DEFAULT_RECONNECT_GRACE_SECS, IntentPolicy, Spec, Timeouts,
+    AcpSection, ClientEntry, DEFAULT_RECONNECT_GRACE_SECS, IntentPolicy, Placement, Spec, Timeouts,
 };
 use std::path::Path;
 use std::path::PathBuf;
@@ -110,7 +110,7 @@ fn sorted_keys(table: &toml::Table) -> Vec<String> {
     keys
 }
 
-/// The template documents `backend` above the live `[server]` header and the
+/// The template documents `placement` above the live `[server]` header and the
 /// `[acp]` table below it, and that placement is load-bearing in TOML: a key
 /// belongs to whichever table was last opened. Uncomment the block in place and
 /// the config must load with each key in its own table. A family moved to the
@@ -132,12 +132,12 @@ fn uncommenting_the_template_lands_each_key_in_its_own_table() {
     let config = config_text(workspace.path());
 
     // Relative order, recorded as three index comparisons.
-    let backend_key = line_index(&config, "# backend = \"auto\"");
+    let placement_key = line_index(&config, "# placement = \"headless\"");
     let server_header = line_index(&config, "[server]");
     let acp_header = line_index(&config, "# [acp]");
     assert!(
-        backend_key < server_header && server_header < acp_header,
-        "the backend vocabulary sits above [server] and the [acp] block below it:\n{config}"
+        placement_key < server_header && server_header < acp_header,
+        "the placement vocabulary sits above [server] and the [acp] block below it:\n{config}"
     );
 
     let range = config
@@ -146,12 +146,10 @@ fn uncommenting_the_template_lands_each_key_in_its_own_table() {
         .filter(|line| line.starts_with('#'))
         .collect::<Vec<_>>()
         .join("\n");
-    for name in [
-        "herdr", "orca", "zellij", "exec", "headless", "acp", "fake", "auto",
-    ] {
+    for name in ["herdr", "orca", "zellij", "headless", "external"] {
         assert!(
             range.contains(name),
-            "the backend comment names {name}, a value an operator may write: {range}"
+            "the placement comment names {name}, a value an operator may write: {range}"
         );
     }
     assert!(
@@ -176,9 +174,9 @@ fn uncommenting_the_template_lands_each_key_in_its_own_table() {
         sorted_keys(&uncommented),
         [
             "acp",
-            "backend",
             "cert_pin",
             "key_path",
+            "placement",
             "plugins",
             "reconnect_grace_secs",
             "role",
@@ -207,8 +205,10 @@ fn uncommenting_the_template_lands_each_key_in_its_own_table() {
     let loaded = onlyne_config::ClientConfig::parse_str(&uncomment(&config))
         .expect("the uncommented template loads as a config");
     assert_eq!(
-        loaded.backend, "auto",
-        "backend belongs to the top level of the config"
+        loaded.placement,
+        Some(Placement::Headless),
+        "uncommenting the documented placement lands the value it quotes, and \
+         leaving it commented is what probes the pane hosts"
     );
     assert_eq!(
         loaded.acp,
@@ -216,23 +216,29 @@ fn uncommenting_the_template_lands_each_key_in_its_own_table() {
         "uncommenting the [acp] block applies the parser's own defaults"
     );
 
-    // The knob vocabulary closes the printed fragment, after every live line, so
-    // a paste keeps one entry per `[[]]` header.
+    // The knob vocabulary is one comment block inside the entry, and the
+    // `[client.runtime]` table closes the fragment: a key written after a table
+    // header belongs to that table, so the drive and its argv come last, and a
+    // case that restates the table (the e2e helper does) can drop the whole
+    // block and append its own.
     let first_comment = fragment
         .lines()
         .position(|line| line.starts_with('#'))
         .expect("the fragment carries its optional keys as comments");
-    assert_eq!(
-        first_comment,
-        live_lines(&fragment).len(),
-        "the comments form one block at the foot of the fragment:\n{fragment}"
-    );
+    let tail: Vec<&str> = fragment
+        .lines()
+        .skip(first_comment)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let comments = tail.iter().take_while(|line| line.starts_with('#')).count();
     assert!(
-        fragment
-            .lines()
-            .skip(first_comment)
-            .all(|line| line.starts_with('#')),
-        "the comment block runs to the foot of the fragment:\n{fragment}"
+        comments > 0,
+        "the optional keys are one contiguous comment run:\n{fragment}"
+    );
+    assert_eq!(
+        tail.get(comments).copied(),
+        Some("[client.runtime]"),
+        "the runtime table is the only block after the comment run:\n{fragment}"
     );
     for knob in [
         "# timeout = {",
@@ -281,11 +287,7 @@ fn stripping_the_comments_leaves_exactly_the_live_keys() {
     // each documented surface reads as the parser's own default.
     let loaded: onlyne_config::ClientConfig =
         toml::from_str(&config).expect("init wrote a config the client can load");
-    assert_eq!(
-        loaded.backend,
-        String::new(),
-        "backend stays unset: {config}"
-    );
+    assert_eq!(loaded.placement, None, "placement stays unset: {config}");
     assert_eq!(loaded.acp, AcpSection::default(), "[acp] stays absent");
 
     let stripped_fragment = live_lines(&fragment).join("\n") + "\n";
@@ -303,7 +305,7 @@ fn stripping_the_comments_leaves_exactly_the_live_keys() {
             "max_sessions",
             "prose",
             "role",
-            "session_command",
+            "runtime",
         ],
         "the live entry carries exactly the eight keys the fragment writes"
     );

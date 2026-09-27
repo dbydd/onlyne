@@ -73,11 +73,12 @@ if [ "$probe_ok" != true ]; then
   exit 0
 fi
 
-# One role's `session_command`. Two details are load-bearing and both are case
-# 11's: RPC mode treats stdin EOF as "the operator left", which is exactly the
-# pipe the `exec` backend holds open, and `--session-dir` keeps a session file
-# the case can read back as proof the assignment reached pi's context.
-session_command() {
+# One role's runtime argv, the `command` half of its `[[client]].runtime` table.
+# Two details are load-bearing and both are case 11's: RPC mode treats stdin EOF
+# as "the operator left", which is exactly the pipe the `exec` backend holds
+# open, and `--session-dir` keeps a session file the case can read back as proof
+# the assignment reached pi's context.
+runtime_command() {
   local ws=$1
   printf '["pi", "--mode", "rpc", "--model", "%s", "--session-id", "{session}", "--session-dir", "%s/.pi/sessions", "-e", "%s", "-ns", "-nc"]' \
     "$MODEL" "$ws" "$PLUGIN_DIR"
@@ -89,14 +90,18 @@ BETA_PROSE='You are beta. When a task reaches you, end it with onlyne_complete a
 setup_cluster "$tmp/server" "$tmp/alpha" alpha alpha "" "$ALPHA_PROSE" \
   'allowed_senders = ["*", "alpha"]
 allowed_targets = ["beta"]
-session_command = '"$(session_command "$tmp/alpha")"
+[client.runtime]
+drive = "plugin"
+command = '"$(runtime_command "$tmp/alpha")"
 server_pid=$cluster_server_pid
 SERVER_ROOT="$tmp/server"
 
 client_init "$tmp/beta" beta "$SERVER_ROOT" "$SERVER_ROOT/.onlyne/spec.toml" "$tmp/beta-spec.frag.toml" "$BETA_PROSE" \
   'allowed_senders = ["*", "beta"]
 allowed_targets = ["alpha"]
-session_command = '"$(session_command "$tmp/beta")"
+[client.runtime]
+drive = "plugin"
+command = '"$(runtime_command "$tmp/beta")"
 "$ONLYNE" --server-root "$SERVER_ROOT" reload
 
 # The plugin's own switch file. The generated templates carry it; these
@@ -238,10 +243,24 @@ done
   "$(find "$tmp/beta" -name '*.jsonl' 2>/dev/null | head -n 5)"
 # The list is expanded unquoted on purpose: `find` names one file per line and
 # each is an argument. No workspace path here holds a space.
-grep -l -F -- "[onlyne] task $child" $beta_sessions > "$tmp/beta-assign.txt" 2>/dev/null || true
-[ -s "$tmp/beta-assign.txt" ] || fail "the child assign must reach beta's pi context" \
+#
+# The delivery text is the client's, so the file is read for the template's own
+# source line: v2 keeps the task id out of the body, and the child id reaches
+# this file through the plugin's `onlyne-assign` entry beside the text it
+# injected. All three are one claim — this context was handed this child — so
+# one file has to carry all three.
+beta_file=""
+for file in $beta_sessions; do
+  if grep -q -F -- "onlyne-assign" "$file" 2>/dev/null \
+    && grep -q -F -- "From alpha:" "$file" 2>/dev/null \
+    && grep -q -F -- "$child" "$file" 2>/dev/null; then
+    beta_file=$file
+    break
+  fi
+done
+[ -n "$beta_file" ] || fail "the child assign must reach beta's pi context" \
   "child=$child sessions=$beta_sessions"
-printf 'PASS handoff-live delivery: %s carries the child assign\n' "$(sed -n '1p' "$tmp/beta-assign.txt")"
+printf 'PASS handoff-live delivery: %s carries the child assign\n' "$beta_file"
 
 # 5. alpha's own session records the handoff tool call, which is the evidence
 #    that the model used its tool rather than the case driving the admin verb.
@@ -251,14 +270,20 @@ printf 'PASS handoff-live delivery: %s carries the child assign\n' "$(sed -n '1p
 #    tool") and the plugin records that prose in the file as `onlyne-role-prose`.
 #    So the transcript must carry an assistant `toolCall` whose name is
 #    `onlyne_handoff` and whose `to` argument is beta, and the host's answer to
-#    that call must name the child the ledger already shows — the child id is
-#    minted by the client and reaches this session only through the tool's own
-#    result.
+#    that call is the plugin's own sentence, `handed on to beta`.
+#    The child itself is proven from the ledger row it minted, not from that
+#    answer: the minted id is host bookkeeping and stays out of the model's
+#    context, which is what the plugin's tool result deliberately does not
+#    carry. So the two halves are the same act read where each owner writes it —
+#    the session records the call and its acceptance, the ledger records the row
+#    the host minted (exactly one child of the root, hop 1, addressed to beta,
+#    read off the same answer step 2 used).
 #    The call and its answer are read the way pi writes them: an assistant
 #    message content block of type `toolCall` carries the name and arguments,
 #    and a `toolResult` message carrying the same `toolCallId` holds what the
 #    host answered. A call that reached the host and a `done` ledger row are the
-#    same act only when the answer names the child, which is why both halves are
+#    same act only when the row's own columns name the child the case is holding
+#    and the answer says the handoff landed, which is why both halves are
 #    asserted here rather than the presence of the tool's name.
 alpha_sessions=""
 for _ in $(seq 1 100); do
@@ -269,13 +294,48 @@ done
 [ -n "$alpha_sessions" ] || fail "alpha's pi session file must exist" \
   "$(find "$tmp/alpha" -name '*.jsonl' 2>/dev/null | head -n 5)"
 # One file per line again, and the checker reads all of them: the call the case
-# wants may be in any transcript this workspace wrote.
-python3 -c '
+# wants may be in any transcript this workspace wrote. The ledger rows arrive on
+# stdin, so this one script reads the session's side and the host's side of the
+# same handoff and refuses to accept a call the ledger does not back.
+data_rows "$tmp/ledger.json" | python3 -c '
 import json,sys
-child=sys.argv[1]
-paths=sys.argv[2:]
+root,child=sys.argv[1],sys.argv[2]
+paths=sys.argv[3:]
+
+def answer_text(message):
+    content=message.get("content")
+    if isinstance(content,str):
+        return content
+    parts=[]
+    for block in content or []:
+        if isinstance(block,str):
+            parts.append(block)
+        elif isinstance(block,dict) and isinstance(block.get("text"),str):
+            parts.append(block["text"])
+    return "\n".join(parts)
+
+def role_of(row):
+    """The role the row is addressed to, from the decoded `to` principal."""
+    to=row.get("to")
+    if isinstance(to,str):
+        try:
+            to=json.loads(to)
+        except ValueError:
+            return None
+    while isinstance(to,dict):
+        to=to.get("role")
+    return to if isinstance(to,str) else None
+
+rows=[json.loads(line) for line in sys.stdin if line.strip()]
+children=[row for row in rows if row.get("parent_task")==root]
+assert len(children)==1, "the root must have exactly one child row: %s" % children
+row=children[0]
+assert row.get("task")==child, "the child row must be the one the case holds: %s" % row
+assert row.get("hop")==1, "the child row must sit at hop 1: %s" % row
+assert role_of(row)=="beta", "the child row must be addressed to beta: %s" % row
+
 calls=[]
-answers=[]
+answers={}
 for path in paths:
     for line in open(path):
         line=line.strip()
@@ -292,25 +352,29 @@ for path in paths:
                 if isinstance(block,dict) and block.get("type")=="toolCall" and block.get("name")=="onlyne_handoff":
                     calls.append(block)
         elif role=="toolResult" and message.get("toolName")=="onlyne_handoff":
-            answers.append(message)
+            answers[message.get("toolCallId")]=message
 if not calls:
     raise SystemExit("no assistant toolCall named onlyne_handoff in " + " ".join(paths))
+paired=[]
 for call in calls:
-    arguments=call.get("arguments") or {}
-    if arguments.get("to")!="beta":
+    if (call.get("arguments") or {}).get("to")!="beta":
         continue
-    for answer in answers:
-        if call.get("id") is not None and answer.get("toolCallId")!=call.get("id"):
-            continue
-        if answer.get("isError"):
-            continue
-        if child in json.dumps(answer):
-            print("PASS handoff-live tool: onlyne_handoff to=beta answered with child %s" % child)
-            sys.exit(0)
-raise SystemExit("no onlyne_handoff call to beta came back with child %s: arguments=%s answers=%s" % (
-    child, [call.get("arguments") for call in calls],
-    [json.dumps(answer.get("content"))[:200] for answer in answers]))
-' "$child" $alpha_sessions || fail "alpha must have called the handoff tool" \
-  "sessions=$alpha_sessions child=$child"
+    answer=answers.get(call.get("id"))
+    if answer is None:
+        continue
+    paired.append((call,answer))
+assert paired, ("no onlyne_handoff call to beta has an answer: arguments=%s answers=%s" % (
+    [call.get("arguments") for call in calls],
+    [json.dumps(answer.get("content"))[:200] for answer in answers.values()]))
+accepted=[answer for _,answer in paired if not answer.get("isError")]
+assert accepted, "every onlyne_handoff call to beta was answered with an error: %s" % (
+    [answer_text(answer)[:200] for _,answer in paired])
+for answer in accepted:
+    text=answer_text(answer).strip()
+    assert text=="handed on to beta", "the tool result must be the plain sentence: %r" % text
+print("PASS handoff-live tool: onlyne_handoff to=beta answered `handed on to beta`, "
+      "and the ledger row it minted is child %s (parent=%s hop=1 to=beta)" % (child,root))
+' "$root_task" "$child" $alpha_sessions || fail "alpha must have called the handoff tool" \
+  "sessions=$alpha_sessions child=$child ledger=$ledger_out"
 
 echo "PASS handoff-live"

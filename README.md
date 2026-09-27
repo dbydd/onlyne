@@ -454,7 +454,7 @@ The v2 crate map, lifecycle model, and formal design rationale live in [`AGENTS.
 - [`crates/onlyne-adapter/PROTOCOL.md`](crates/onlyne-adapter/PROTOCOL.md) — the external agent/gateway wire contract.
 - [`examples/supervisor/README.md`](examples/supervisor/README.md) — the real pi/Orca running-lights demo.
 - [`skills/onlyne-supervisor/SKILL.md`](skills/onlyne-supervisor/SKILL.md) — the operating handbook for a cluster supervisor agent.
-- [`skills/onlyne-role/SKILL.md`](skills/onlyne-role/SKILL.md) and [`skills/onlyne-role-payload-v2/SKILL.md`](skills/onlyne-role-payload-v2/SKILL.md) — role-side task and completion handbooks.
+- [`skills/onlyne-role/SKILL.md`](skills/onlyne-role/SKILL.md) — the role-side task and completion handbook.
 - [`.agents/skills/onlyne/SKILL.md`](.agents/skills/onlyne/SKILL.md) — development guidance for this repository.
 
 ### Project records

@@ -2,11 +2,13 @@
 set -euo pipefail
 # Case 18: the ACP session backend, end to end.
 #
-# The role runs `python3 -u acp-agent.py ... --acp` as its `session_command`: a
-# real ACP v1 peer on stdio, not a fake backend. The workspace config names a
-# top-level `backend = "acp"` plus an `[acp]` table, so the client opens the
-# session with the mode, model and reasoning effort this case chose, and the
-# agent's trace is the proof it received them.
+# The role's spec entry drives it with `[client.runtime] drive = "acp"` and runs
+# `python3 -u acp-agent.py ... --acp` as that drive's `command`: a real ACP v1
+# peer on stdio, not a fake backend. The workspace config places the client in
+# `headless` — the only placement `acp` pairs with, because stdio carries the
+# channel — and carries the `[acp]` table, so the client opens the session with
+# the mode, model and reasoning effort this case chose, and the agent's trace is
+# the proof it received them.
 #
 # The agent holds its one turn at a gate. That is the whole trick: while the
 # gate is held, the journal provably carries the client's dispatch record
@@ -14,11 +16,13 @@ set -euo pipefail
 # the content index, and the rendered log — one conversation read three ways,
 # all of them durable files under the role workspace.
 #
-# Every prompt travels with the backend's payload-v1 report directive, and the
-# fixture obeys it: the first task leaves a `hop-done:` line that becomes the
-# ledger head in place of the streamed answer; a second task whose prose
-# carries `HOPFAIL` reports `hop-failed:` and must settle Failed with the
-# reason as its head and one acp fault on the record.
+# Every prompt is the client's rendered delivery text and nothing else: v2
+# appends no directive of its own, and there is no report file left to read.
+# The agent's own ending is the whole settlement input — the turn record's `head`
+# is its closing line and the stop reason it answered with is the standing — so
+# the first task, which ends `end_turn`, becomes a Done task whose ledger head
+# is that line, while a second task whose prose carries `FAILTURN` ends
+# `refusal` and must settle Failed with that reason on the fault record.
 #
 # No product id is assumed. The task comes from `send`, the socket from the
 # client's own marker, and the ACP session id, agent pid, journal and log paths
@@ -69,10 +73,11 @@ cleanup() {
 trap cleanup EXIT
 . "$SRC/crates/onlyne-testkit/e2e/lib.sh"
 
-# lib.sh pins ONLYNE_BACKEND=fake. This case talks to the ACP backend, so it
-# covers that export after the source; the workspace config names the same
-# backend, which is what an operator would ship.
-export ONLYNE_BACKEND=acp
+# lib.sh pins ONLYNE_BACKEND=fake. This case talks to a real child of the
+# client, so it covers that export after the source: `headless` is the placement
+# the workspace config names too, which is what an operator would ship. The
+# drive is the spec's, and the spec below sets it to `acp`.
+export ONLYNE_BACKEND=headless
 
 SERVER=$(bin onlyne-server)
 CLIENT=$(bin onlyne-client)
@@ -93,35 +98,39 @@ TOOL_KIND='edit'
 ACCEPT_MODE='acceptEdits'
 FIXTURE_MODEL='fixture-model'
 FIXTURE_EFFORT='high'
-# The payload-v1 report literals: the fixture writes these lines to the report
-# path its prompt names, and the ledger rows below must carry the text after
-# the prefix — not the streamed answer.
-PAYLOAD_HEAD='The fixture reported through the payload file.'
-PAYLOAD_FAIL_NOTE='The fixture failed on purpose for the payload case.'
+# The prose marker the fixture reads to end a turn as a failed one, and the ACP
+# stop reason it answers with instead of `end_turn`. `acp-agent.py` carries the
+# same literals and traces them in its `start` line, which the trace assertions
+# below check against these values, so a drift between the two files fails at
+# the gate with both sides in the message.
+FAIL_TURN_MARKER='FAILTURN'
+FAIL_STOP='refusal'
 
 ws="$tmp/planner"
 gate="$tmp/gate"
 trace="$tmp/agent.trace"
 
 # One `[[client]]` row — ACL self-send included, so the role can be sent to —
-# whose `session_command` is the absolute fixture path. The JSON is generated
-# rather than quoted by hand so a path a shell would have to escape still
-# reaches the spec as one argv element.
-session_command=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' \
+# whose drive is `acp` and whose command is the absolute fixture path. The JSON
+# is generated rather than quoted by hand so a path a shell would have to escape
+# still reaches the spec as one argv element. The `[client.runtime]` table is
+# stated last: a key written after a table header belongs to that table, not to
+# the entry.
+runtime_command=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' \
   python3 -u "$AGENT" --acp --gate "$gate" --trace "$trace")
-acl=$(printf 'allowed_senders = ["*", "planner"]\nallowed_targets = ["planner"]\nsession_command = %s\n' \
-  "$session_command")
+acl=$(printf 'allowed_senders = ["*", "planner"]\nallowed_targets = ["planner"]\n[client.runtime]\ndrive = "acp"\ncommand = %s\n' \
+  "$runtime_command")
 setup_cluster "$tmp/server" "$ws" planner cluster "" "$E2E_PROSE" "$acl"
 server_pid=$cluster_server_pid
 
-# `backend` is a top-level config key and `[acp]` a table of its own. The key is
-# prepended above `[server]` because a trailing append would land inside that
+# `placement` is a top-level config key and `[acp]` a table of its own. The key
+# is prepended above `[server]` because a trailing append would land inside that
 # table, and the table is appended after the document it belongs to. The client
 # would refuse both mistakes — the "must register" poll below is their real
 # proof — but the parse here names the mistake instead of leaving it inferred.
 config="$ws/.onlyne/config.toml"
 {
-  printf 'backend = "acp"\n'
+  printf 'placement = "headless"\n'
   cat "$config"
   printf '\n[acp]\nmode = "%s"\nmodel = "%s"\nreasoning_effort = "%s"\npermission = "deny"\n' \
     "$ACCEPT_MODE" "$FIXTURE_MODEL" "$FIXTURE_EFFORT"
@@ -134,9 +143,9 @@ import tomllib
 with open(sys.argv[1], "rb") as handle:
     doc = tomllib.load(handle)
 mode, model, effort = sys.argv[2:5]
-# The key has to be read off the document root: a `backend` inside `[server]`
+# The key has to be read off the document root: a `placement` inside `[server]`
 # would leave this None, which is the mistake this assertion exists for.
-assert doc.get("backend") == "acp", doc
+assert doc.get("placement") == "headless", doc
 acp = doc["acp"]
 assert acp.get("mode") == mode, acp
 assert acp.get("model") == model, acp
@@ -144,7 +153,7 @@ assert acp.get("reasoning_effort") == effort, acp
 assert acp.get("permission") == "deny", acp
 PY
 then
-  fail "the workspace must carry a top-level backend plus the [acp] table" "$(cat "$config")"
+  fail "the workspace must carry a top-level placement plus the [acp] table" "$(cat "$config")"
 fi
 
 "$CLIENT" run --workspace "$ws" >"$tmp/client.log" 2>&1 &
@@ -191,7 +200,7 @@ db="$ws/.onlyne/client.db"
 ref=""
 gated="false"
 for _ in $(seq 1 300); do
-  ref=$(db_count "$db" "SELECT backend_ref FROM sessions WHERE task_id='$task'" 2>/dev/null) || true
+  ref=$(session_column "$db" backend_ref "$task" 2>/dev/null) || true
   if [ -n "$ref" ] && grep -q -F "session/prompt id=" "$trace" 2>/dev/null; then
     gated="true"
     break
@@ -223,10 +232,6 @@ acp_session=$(sed -n '1p' "$tmp/acp-ref.txt")
 acp_pid=$(sed -n '2p' "$tmp/acp-ref.txt")
 events=$(sed -n '3p' "$tmp/acp-ref.txt")
 log=$(sed -n '4p' "$tmp/acp-ref.txt")
-# The backend derives both journal paths and the report path from the same
-# workspace, so the two `dirname`s off the stored journal spelling reach
-# `<workdir>/.onlyne/out` whatever way the path was written to disk.
-report_path="$(dirname "$(dirname "$events")")/out/$task.md"
 case "$acp_pid" in
   ''|*[!0-9]*) fail "the ACP session reference must carry a numeric pid" "pid=$acp_pid ref=$ref" ;;
 esac
@@ -240,20 +245,21 @@ fi
 [ -s "$events" ] || fail "the ACP backend must journal the dispatch record before the prompt" \
   "logs=$(ls -1 "$ws/.onlyne/logs" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
 journal_report=$(cat "$events" 2>/dev/null || true)
-if ! python3 - "$events" "$task" "$TASK_PROSE" "$report_path" <<'PY'
+if ! python3 - "$events" "$task" "$TASK_PROSE" <<'PY'
 import json
 import sys
 
-path, task, prose, report_path = sys.argv[1:5]
+path, task, prose = sys.argv[1:4]
 lines = [line for line in open(path, encoding="utf-8").read().splitlines() if line.strip()]
 assert len(lines) == 1, lines
 record = json.loads(lines[0])["onlyne"]
 assert record["kind"] == "dispatch", record
 assert record["task_id"] == task, record
-# The dispatch record is the whole prompt: the task's prose with the report
-# directive appended, naming the very path the fixture's agent will write.
-assert record["prose"].startswith(prose), record
-assert f"Result report (write before you stop): {report_path}" in record["prose"], record
+# The dispatch record is the whole prompt: the client's rendered delivery text
+# (`From <role>:` and the body verbatim) and nothing else. v2 appends no
+# directive of its own — the agent's own tools carry what it owes back — so the
+# record ends with the prose, byte for byte.
+assert record["prompt"] == f"From planner:\n\n{prose}", record
 PY
 then
   fail "a gated turn must leave exactly the one dispatch record in the journal" "$journal_report"
@@ -275,15 +281,14 @@ done
 rows_any "$tmp/ledger.json" state acked || fail "ledger state must become acked" \
   "ledger=$ledger_out trace=$(cat "$trace" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
 # Every settled task files its completion receipt, and this one's head is the
-# payload report the fixture wrote — the streamed answer no longer settles.
+# agent's own closing line: no file stands in for it any more, so the last line
+# of the closing message is what the ledger records and what the receiving role
+# reads.
 rows_any "$tmp/ledger.json" kind completion || fail "the settled task must file a completion row" \
   "ledger=$ledger_out trace=$(cat "$trace" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
 out_head=$(row_value "$tmp/ledger.json" out_head state acked)
-[ "$out_head" = "$PAYLOAD_HEAD" ] \
-  || fail "the acked row must carry the payload report in out_head" "out_head=$out_head ledger=$ledger_out"
-case "$out_head" in
-  *"$ANSWER"*) fail "out_head must not fall back to the streamed answer" "out_head=$out_head" ;;
-esac
+[ "$out_head" = "$ANSWER" ] \
+  || fail "the acked row must carry the agent's closing line in out_head" "out_head=$out_head ledger=$ledger_out"
 
 sessions_out=""
 for _ in $(seq 1 120); do
@@ -299,35 +304,31 @@ rows_any "$tmp/sessions.json" public_lifecycle exited || fail "sessions public_l
 [ "$(row_value "$tmp/sessions.json" outcome)" = "done" ] || fail "sessions outcome must be done" "$sessions_out"
 
 # The journal's two halves, semantically: the client's dispatch first, the
-# agent's four updates in the order it sent them, then the client's own read of
-# the payload report and the turn record closing the file.
+# agent's four updates in the order it sent them, then the turn record the
+# client writes when it reads the ending.
 journal_report=$(cat "$events" 2>/dev/null || true)
 if ! python3 - "$events" "$task" "$acp_session" "$TASK_PROSE" "$REASONING" "$ANSWER" "$TOOL_TITLE" \
-  "$report_path" "$PAYLOAD_HEAD" <<'PY'
+  <<'PY'
 import json
 import sys
 
-path, task, session, prose, reasoning, answer, tool_title, report_path, payload_head = sys.argv[1:10]
+path, task, session, prose, reasoning, answer, tool_title = sys.argv[1:8]
 lines = [line for line in open(path, encoding="utf-8").read().splitlines() if line.strip()]
 records = [json.loads(line) for line in lines]
 
 ours = [record for record in records if "onlyne" in record]
-assert len(ours) == 3, ours
+assert len(ours) == 2, ours
 assert records[0] is ours[0], "the dispatch record opens the journal"
-assert records[-1] is ours[2], "the turn record closes the journal"
-dispatch, payload, turn = (record["onlyne"] for record in ours)
+assert records[-1] is ours[1], "the turn record closes the journal"
+dispatch, turn = (record["onlyne"] for record in ours)
 assert dispatch["kind"] == "dispatch" and dispatch["task_id"] == task, dispatch
-assert dispatch["prose"].startswith(prose), dispatch
-assert f"Result report (write before you stop): {report_path}" in dispatch["prose"], dispatch
-assert payload["kind"] == "payload" and payload["task_id"] == task, payload
-assert payload["path"] == report_path, payload
-assert payload["payload_kind"] == "done", payload
-assert payload["head"] == payload_head, payload
+assert dispatch["prompt"] == f"From planner:\n\n{prose}", dispatch
 assert turn["kind"] == "turn" and turn["task_id"] == task, turn
 assert turn["stop_reason"] == "end_turn", turn
-# The report stands in for the closing message: the head of record is the
-# payload line, and the streamed answer survives only in the agent's update.
-assert turn["head"] == payload_head, turn
+# The closing message is the head of record: no file stands in for it any more,
+# so the agent's own last line is what the receiving role reads as this turn's
+# answer.
+assert turn["head"] == answer, turn
 
 updates = [record for record in records if "onlyne" not in record]
 assert [update.get("sessionUpdate") for update in updates] == [
@@ -346,7 +347,7 @@ assert call["kind"] == "edit" and call["status"] == "pending", call
 assert done["status"] == "completed", done
 PY
 then
-  fail "the journal must hold dispatch, updates, payload and turn in order" "$journal_report"
+  fail "the journal must hold the dispatch record, the updates and the turn record in order" "$journal_report"
 fi
 
 # The index is the role-wide cursor over those same records, so it has one entry
@@ -391,29 +392,36 @@ for want in "> $REASONING" "tool $TOOL_CALL_ID $TOOL_TITLE kind=$TOOL_KIND" \
 done
 
 # The fixture's own record: the pid the reference names, the constants both
-# files share, and the settings the client applied on this session.
+# files share, the settings the client applied on this session, and the stop
+# reason this turn answered with.
 trace_report=$(cat "$trace" 2>/dev/null || true)
 for want in \
-  "start pid=$acp_pid constants reasoning=$REASONING answer=$ANSWER tool=$TOOL_TITLE call=$TOOL_CALL_ID kind=$TOOL_KIND" \
+  "start pid=$acp_pid constants reasoning=$REASONING answer=$ANSWER tool=$TOOL_TITLE call=$TOOL_CALL_ID kind=$TOOL_KIND fail=$FAIL_TURN_MARKER stop=$FAIL_STOP" \
   "initialize protocolVersion=1 client=onlyne-client" \
   "session/new id=$acp_session" \
   "session/set_mode id=$acp_session modeId=$ACCEPT_MODE" \
   "session/set_config_option id=$acp_session configId=model value=$FIXTURE_MODEL" \
   "session/set_config_option id=$acp_session configId=reasoning_effort value=$FIXTURE_EFFORT" \
-  "session/prompt id=$acp_session text=$TASK_PROSE" \
-  "Result report (write before you stop): $report_path" \
   "gate open" \
-  "payload line=hop-done: $PAYLOAD_HEAD"; do
+  "stop reason=end_turn"; do
   if ! grep -q -F -- "$want" "$trace"; then
     fail "the fixture trace must carry: $want" "$trace_report"
   fi
 done
+# The prompt the agent received is the delivery text and nothing else: the
+# directive that used to carry the report path is gone, so the line ends where
+# the prose does.
+grep -q -x -F -- "session/prompt id=$acp_session text=From planner: /  / $TASK_PROSE" "$trace" \
+  || fail "the agent must receive the delivery text alone" "$trace_report"
 
-# The contract's downgrading half: a fresh task whose prose carries `HOPFAIL`
-# makes the fixture report `hop-failed:`, and that one line must settle the
-# task Failed — reason as head and fault note, receipt still filed, report
-# consumed. The second turn runs on the same client path as the first.
-fail_prose='acp session task: HOPFAIL settle this one from the report'
+# The failing half, on the same client path as the first: a fresh task whose
+# prose carries `FAILTURN` makes the fixture answer its turn with a `refusal`
+# stop reason instead of `end_turn`. Nothing else about the turn changes — the
+# same reasoning, tool call and closing line are streamed — so this proves the
+# standing is read off the stop reason and not off the words, while the closing
+# line stays the head the ledger records and the completion receipt is still
+# filed. One acp fault names the reason.
+fail_prose='acp session task: FAILTURN end this turn without finishing'
 send2_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "$fail_prose") \
   || fail "second send command failed" "$send2_out"
 printf '%s\n' "$send2_out" > "$tmp/send2.json"
@@ -421,19 +429,20 @@ printf '%s\n' "$send2_out" > "$tmp/send2.json"
   || fail "second send ok must be true" "$send2_out"
 task2=$(json_field "$tmp/send2.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
 ledger2_out=""
-out_head2=""
 for _ in $(seq 1 120); do
   ledger2_out=$("$ONLYNE" --server-root "$tmp/server" ledger --task "$task2" 2>/dev/null) || true
   printf '%s\n' "$ledger2_out" > "$tmp/ledger2.json"
-  out_head2=$(row_value "$tmp/ledger2.json" out_head state acked)
-  if [ "$out_head2" = "$PAYLOAD_FAIL_NOTE" ]; then
+  if rows_any "$tmp/ledger2.json" state acked 2>/dev/null; then
     break
   fi
   sleep 0.5
 done
-[ "$out_head2" = "$PAYLOAD_FAIL_NOTE" ] \
-  || fail "the failed task must carry the report's reason in out_head" \
-     "out_head=$out_head2 ledger=$ledger2_out trace=$(cat "$trace" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
+rows_any "$tmp/ledger2.json" state acked || fail "the failed task must still reach acked" \
+  "ledger=$ledger2_out trace=$(cat "$trace" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
+out_head2=$(row_value "$tmp/ledger2.json" out_head state acked)
+[ "$out_head2" = "$ANSWER" ] \
+  || fail "the failed turn's head must still be the agent's closing line" \
+     "out_head=$out_head2 ledger=$ledger2_out"
 rows_any "$tmp/ledger2.json" kind completion || fail "a failed ACP task must still file its completion" \
   "ledger=$ledger2_out client=$(cat "$tmp/client.log" 2>/dev/null)"
 sessions2_out=""
@@ -448,14 +457,18 @@ done
 rows_any "$tmp/sessions2.json" public_lifecycle exited || fail "the failed session must reach exited" \
   "sessions=$sessions2_out client=$(cat "$tmp/client.log" 2>/dev/null)"
 [ "$(row_value "$tmp/sessions2.json" outcome)" = "failed" ] \
-  || fail "the failed report must settle the session as failed" "$sessions2_out"
-if ! grep -q -F -- "payload line=hop-failed: $PAYLOAD_FAIL_NOTE" "$trace"; then
-  fail "the fixture trace must carry the failed report line" "$(cat "$trace" 2>/dev/null)"
+  || fail "the refusal stop reason must settle the session as failed" "$sessions2_out"
+if ! grep -q -F -- "session/prompt id=$acp_session text=From planner: /  / $fail_prose" "$trace"; then
+  fail "the second turn must carry the delivery text that asks for it" "$(cat "$trace" 2>/dev/null)"
 fi
-[ ! -e "$ws/.onlyne/out/$task2.md" ] || fail "the client must consume the report file" \
-  "reports=$(ls -1 "$ws/.onlyne/out" 2>/dev/null)"
-faults=$(db_count "$db" "SELECT COUNT(*) FROM faults WHERE task_id='$task2' AND kind='acp'") || faults=0
-[ "${faults:-0}" -ge 1 ] || fail "a failed ACP turn must record one acp fault" \
+if ! grep -q -F -- "stop reason=$FAIL_STOP" "$trace"; then
+  fail "the fixture must answer the second turn with the refusal stop reason" \
+    "$(cat "$trace" 2>/dev/null)"
+fi
+# The fault names the reason the turn ended with: the reason used to be the
+# report's, and it is now the client's own reading of the stop reason.
+faults=$(db_count "$db" "SELECT COUNT(*) FROM faults WHERE task_id='$task2' AND kind='acp' AND reason LIKE '%$FAIL_STOP%'") || faults=0
+[ "${faults:-0}" -ge 1 ] || fail "a failed ACP turn must record one acp fault naming its stop reason" \
   "faults=$faults ledger=$ledger2_out client=$(cat "$tmp/client.log" 2>/dev/null)"
 
 # The turns are over and every assertion has passed, so the client is drained

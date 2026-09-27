@@ -1,5 +1,5 @@
-//! Headless session backend: run the role's `session_command` as a child of the
-//! client.
+//! Headless session backend: run the role's `[client.runtime] command` as a
+//! child of the client.
 //!
 //! The other two backends own a *terminal* — zellij a pane, Orca a tab — and the
 //! fake backend owns nothing at all, so none of them can serve a coding agent
@@ -288,7 +288,8 @@ impl SessionBackend for ExecBackend {
     fn spawn(&self, spec: SpawnSpec) -> Result<SessionRef> {
         let Some(program) = spec.command.first() else {
             return Err(anyhow::anyhow!(
-                "exec: role has no session_command; there is nothing to run for task {}",
+                "exec: the role's `[client.runtime] command` is empty; there is nothing to run \
+                 for task {}",
                 spec.task_id
             ));
         };

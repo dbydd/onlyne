@@ -14,8 +14,6 @@
 //! - [`event`]: the observation plane (§9), at-most-once with cursor resync.
 //! - [`ops`]: the client-to-server and admin vocabularies (§6, §8).
 //! - [`adapter`]: the one adapter protocol mounted on both sides (§7).
-//! - [`payload`]: the closing-report grammar a session writes on disk, off the
-//!   wire but shared by the binaries that read and check it.
 //!
 //! Compatibility posture: [`PROTOCOL_VERSION`] is checked at handshake and a
 //! mismatch answers [`frame::ErrorCode::ProtocolVersion`]. Legacy layouts and
@@ -34,14 +32,13 @@ pub mod event;
 pub mod frame;
 pub mod lifecycle;
 pub mod ops;
-pub mod payload;
 pub mod text;
 
 pub use adapter::{
     AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, ByeNotice, Capability, ClusterMount,
     ConfigGetArgs, DetachArgs, GatewayBinding, GatewayMount, HELLO_REQUIRED_MESSAGE,
     HELLO_TIMEOUT_MS, HandoffArgs, HelloAck, HelloArgs, HostOp, Mount, MountKind, MsgDirection,
-    PluginOp, RecycleArgs, RenderSendArgs, ServerInfo, SessionRegisterArgs, TypingArgs,
+    PluginOp, RecycleArgs, RenderSendArgs, ServerInfo, SessionRegisterArgs, ToolsMount, TypingArgs,
     WelcomeSlice,
 };
 pub use envelope::{
@@ -65,14 +62,12 @@ pub use lifecycle::{
 };
 pub use ops::{
     AckArgs, AdminControl, AdminOp, AdminReport, AdminSend, ByeArgs, ClientOp, ControlArgs,
-    ConversationInfo, Delivery, FreshRead, GatewayOp, GhostSweep, HandshakeArgs, HealthArgs,
+    ConversationInfo, Delivery, Drive, FreshRead, GatewayOp, GhostSweep, HandshakeArgs, HealthArgs,
     HistoryArgs, LedgerEntry, LedgerQuery, LiveSession, PullArgs, PullReply, QueryFaultsArgs,
     QueryRolesArgs, QuerySessionsArgs, Receipt, RegisterChannelArgs, RepairAck, RepairAdopt,
-    RepairFail, RepairRebind, RepairTarget, Report, RoleInfo, SessionProjection, SessionRow,
-    ShutdownArgs, Subscribe, Welcome,
+    RepairFail, RepairRebind, RepairTarget, Report, RoleInfo, RoleRuntime, SessionProjection,
+    SessionRow, ShutdownArgs, Subscribe, Welcome,
 };
-
-pub use payload::{GRAMMAR_V2, Handoff, MAX_REPORT_HANDOFFS, MAX_REPORT_LINES, PayloadV2};
 
 pub use text::{
     BINARY_NOT_FOUND_PREFIX, LEGACY_WORKSPACE_MESSAGE, NO_SOCKET_MESSAGE,

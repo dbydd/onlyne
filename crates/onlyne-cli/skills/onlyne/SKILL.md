@@ -9,11 +9,11 @@ Guidance for agents changing this codebase. Runtime operation lives in
 `skills/onlyne-supervisor/SKILL.md` and `skills/onlyne-role/SKILL.md`; this file covers
 working on the repo.
 
-`onlyne skill export [--set role|supervisor|dev]... [--dest DIR] [--force]` writes the four
+`onlyne skill export [--set role|supervisor|dev]... [--dest DIR] [--force]` writes the three
 shipped documents to `<dest>/<name>/SKILL.md`, and `<dest>` defaults to `.agents/skills` under
-the working directory: `onlyne-supervisor`, `onlyne-role`, `onlyne-role-payload-v2`, and
-`onlyne`, this file, which `--set dev` selects. The bytes are compiled into `onlyne-cli`
-(`include_str!` in `crates/onlyne-cli/src/skill.rs`, over the four regular files under
+the working directory: `onlyne-supervisor`, `onlyne-role`, and `onlyne`, this file, which
+`--set dev` selects. The bytes are compiled into `onlyne-cli`
+(`include_str!` in `crates/onlyne-cli/src/skill.rs`, over the three regular files under
 `crates/onlyne-cli/skills/`), so an installed binary answers with the skills of its own version,
 over no network and with no checkout. Regular files keep the packaged manuals intact across
 checkout and archive tools, and `the_crate_copies_are_the_repository_copies` asserts that every
@@ -109,19 +109,18 @@ with-value shape keeps its fixtures under `crates/onlyne-proto/tests/wire_vector
 
 **Backend** (`onlyne-client/src/backend/`): capabilities `{spawn,attach,probe,close,
 focus,rename}`. A missing capability degrades through faults, never panics.
-`ONLYNE_BACKEND` names `herdr | orca | zellij | exec | acp | fake | auto`; `headless` parses as
-`exec` and projections keep the name `exec` (`BackendName::parse`/`as_str`). Selection order is a
-nonempty process `ONLYNE_BACKEND`, then the workspace `config.toml` `backend`, then auto. An empty
-value or `auto` probes herdr, then orca, then zellij. `exec`, `acp` and `fake` enable only when one
-of those two names them, so auto discovery never picks one. The workspace `[acp]` table
+`placement` names `herdr | orca | zellij | headless | external`; `ONLYNE_BACKEND` takes precedence
+over the workspace placement. `fake` is the in-process test runtime. The spec's
+`[client.runtime] drive` names `plugin | acp | exec`; `acp` requires `headless`. Selection order is
+a nonempty process `ONLYNE_BACKEND`, then workspace placement, then probe herdr, orca, zellij, and
+fallback to headless. The workspace `[acp]` table
 (`AcpSection` in `onlyne-config/src/client.rs`) carries `mode`, `model`, `reasoning_effort` and
 `permission` (`deny` default, `allow`), and the ACP backend is its only reader. An ACP session
 opens no pane: the client drives the agent with `session/prompt` and reads the streamed
 `session/update` notifications, and the conversation lands in
-`<workspace>/.onlyne/logs/session-<task>.log` plus `session-<task>.events.jsonl`. No match is `NoSupportedHost`; `onlyne-client run`
-exits 5 with a three-line refusal whose first line is
-`onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`.
-`onlyne-client doctor` prints host-detection JSON and exits 0.
+`<workspace>/.onlyne/logs/session-<task>.log` plus `session-<task>.events.jsonl`. An unknown explicit
+`ONLYNE_BACKEND` value makes `onlyne-client run` exit 5. `onlyne-client doctor` prints placement
+selection JSON and exits 0.
 The adapter socket lives in the machine-level runtime directory — `/tmp/onlyne-<uid>/<digest>.sock`, with `$ONLYNE_RUNTIME_DIR` overriding the directory and `<digest>` the first 16 hex characters of `sha256` over the workspace's canonical root — so no path length rule applies; `run` exits 1 with `onlyne-client: bind the workspace socket <canonical path>: <detail>` when the bind fails — the detail names the bound path, its length, the runtime directory, and the OS reason — and a later `accept` error logs at `error` level and retries every 100 ms.
 herdr is kept by operator decision, and its standing lives in
 `crates/onlyne-client/src/backend/herdr/NOTE.md`: a workspace that wants another backend names
@@ -168,9 +167,9 @@ line above its attribute, so the port's progress reads off the file itself.
 one server, and the two-root case is `e2e/two-cluster.sh`.
 
 **The shell cases are what the suite has not absorbed.** `crates/onlyne-testkit/e2e/` holds
-twenty scripts beside `lib.sh` and the scripted ACP peer `acp-agent.py`. They are the live faces
-(`pi-live.sh`, `orca-live.sh`, `herdr-live.sh`, `handoff-live.sh`), the ACP pair
-(`acp-session.sh`, `acp-payload-v2.sh`), and the real-process or two-root shapes the harness does
+eighteen scripts beside `lib.sh` and the scripted ACP peer `acp-agent.py`. They are the live faces
+(`pi-live.sh`, `orca-live.sh`, `herdr-live.sh`, `handoff-live.sh`), the ACP case
+(`acp-session.sh`), and the real-process or two-root shapes the harness does
 not model (`requeue-claim.sh`, `two-cluster.sh`, `running-lights.sh`, `gateway-mount.sh`,
 `exec-headless.sh`, `socket-path-length.sh`). A live case prints `SKIP` and exits 0 when the host
 lacks the runtime or the model, so a green line means "passed here" and a skip means

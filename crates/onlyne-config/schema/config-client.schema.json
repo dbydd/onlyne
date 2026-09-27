@@ -24,11 +24,6 @@
         }
       ]
     },
-    "backend": {
-      "description": "Requested session backend (`herdr` | `orca` | `zellij` | `exec` / `headless` | `acp` | `fake` | `auto`). Empty means auto-detect. The process environment `ONLYNE_BACKEND` takes precedence when it is nonempty.",
-      "default": "",
-      "type": "string"
-    },
     "cert_pin": {
       "description": "Server certificate SPKI fingerprint.",
       "type": "string"
@@ -59,6 +54,18 @@
       "allOf": [
         {
           "$ref": "#/definitions/OrcaSection"
+        }
+      ]
+    },
+    "placement": {
+      "description": "Where this machine displays the role's runtime process (`herdr` | `orca` | `zellij` | `headless` | `external`). Absent probes herdr, orca, zellij in that order and falls back to `headless`. The process environment `ONLYNE_BACKEND` takes precedence when it is nonempty.\n\nPlacement is a property of the machine and lives here; the drive is a property of the runtime and lives in the spec's `[client.runtime]` (`docs/v2-PLAN.md` §\"驱动与放置\").",
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Placement"
+        },
+        {
+          "type": "null"
         }
       ]
     },
@@ -152,6 +159,46 @@
           "type": "string"
         }
       }
+    },
+    "Placement": {
+      "description": "Where the role's runtime process is displayed on this machine.\n\nPlacement depends on which terminal host the machine has and lives in that machine's workspace config. An absent `placement` probes the three pane hosts in [`PLACEMENT_PROBE_ORDER`] and falls back to [`Placement::Headless`] (`docs/v2-PLAN.md` §\"驱动与放置\").",
+      "oneOf": [
+        {
+          "description": "A herdr pane.",
+          "type": "string",
+          "enum": [
+            "herdr"
+          ]
+        },
+        {
+          "description": "An Orca tab.",
+          "type": "string",
+          "enum": [
+            "orca"
+          ]
+        },
+        {
+          "description": "A zellij pane.",
+          "type": "string",
+          "enum": [
+            "zellij"
+          ]
+        },
+        {
+          "description": "No pane: the client starts the runtime in the background.",
+          "type": "string",
+          "enum": [
+            "headless"
+          ]
+        },
+        {
+          "description": "No process of the client's own: a runtime that is already resident dials the client's socket.",
+          "type": "string",
+          "enum": [
+            "external"
+          ]
+        }
+      ]
     },
     "ServerEndpoint": {
       "description": "Server host and port used by the client.",

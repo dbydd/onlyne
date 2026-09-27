@@ -147,7 +147,7 @@ fn the_client_session_table_reads_after_the_other_tables() {
 cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
 key_path = "keys/role.key"
 plugins = ["demo"]
-backend = "acp"
+placement = "headless"
 
 [server]
 host = "127.0.0.1"

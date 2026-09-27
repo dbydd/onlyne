@@ -224,6 +224,20 @@ db_count() {
   fi
 }
 
+# `session_column <db-file> <column> <task-id>` prints one column of the session
+# row that serves `task`.
+#
+# Since the v2 rekey the client's `sessions` table is addressed by
+# `session_id`, and the delivery relation lives in `session_tasks`, so a query
+# that filters `sessions` by `task_id` matches nothing at all — the column no
+# longer exists there. The subquery is the resolver `onlyne-store` itself uses
+# (`SESSION_ID_FOR_TASK`): the open binding first, then the newest, so a task
+# whose session was re-bound reads as the row it is being served by.
+session_column() {
+  local db=$1 column=$2 task=$3
+  db_count "$db" "SELECT $column FROM sessions WHERE session_id=(SELECT session_id FROM session_tasks WHERE task_id='$task' ORDER BY (released_at IS NULL) DESC, bound_at DESC, session_id DESC LIMIT 1)"
+}
+
 # `rows_any <answer-file> <field> <value>` exits 0 when any row of a list answer
 # carries `field` equal to `value`. `data_rows` normalises the shipped
 # `{"ok":true,"data":{"ledger":[...]}}` envelope, so a predicate reads one shape.
@@ -286,14 +300,43 @@ client_init() {
     # lines are dropped first and the spec keeps one key each. The key names come
     # out of the caller's own lines, which keeps a newly defaulted init line from
     # breaking every case that overrides it.
-    local keys
+    local keys drop_runtime keys_file runtime_file
     keys=$(printf '%s\n' "$acl" | sed -n 's/^\([a-z_]\{1,\}\) *=.*/\1/p' | sort -u | paste -sd'|' -)
-    if [ -n "$keys" ]; then
-      grep -v -E "^($keys) = " "$fragment" >> "$spec"
-    else
-      cat "$fragment" >> "$spec"
+    # Both halves sit beside the fragment the caller handed in, so this helper
+    # needs no scratch directory of its own.
+    keys_file="$fragment.keys.toml"
+    runtime_file="$fragment.runtime.toml"
+    # The fragment is split at its trailing `[client.runtime]` table, because
+    # the caller's acl lines are entry-level keys: appended straight after the
+    # fragment they would land *inside* that table and be lost. Split, they land
+    # before it, and the table stays the last thing in the entry — a key written
+    # after a table header belongs to that table.
+    awk -v head="$keys_file" -v tail="$runtime_file" '
+      BEGIN { part = 0 }
+      /^\[client\.runtime\]$/ { part = 1 }
+      { print > (part == 0 ? head : tail) }
+    ' "$fragment"
+    # A caller that restates the runtime table names `[client.runtime]`, and the
+    # fragment's table goes with it: a second header of one name is a TOML
+    # error, and the caller's table is appended after its own keys, so it is the
+    # one that stands.
+    drop_runtime=false
+    if printf '%s\n' "$acl" | grep -q '^\[client\.runtime\]$'; then
+      drop_runtime=true
     fi
+    awk -v keys="$keys" '
+      BEGIN { names = split(keys, name, "|") }
+      {
+        for (i = 1; i <= names; i++) {
+          if (name[i] != "" && $0 ~ ("^" name[i] " = ")) next
+        }
+        print
+      }
+    ' "$keys_file" >> "$spec"
     printf '%s\n' "$acl" >> "$spec"
+    if [ "$drop_runtime" = "false" ]; then
+      cat "$runtime_file" >> "$spec"
+    fi
   else
     cat "$fragment" >> "$spec"
   fi

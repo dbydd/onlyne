@@ -1,10 +1,10 @@
 use onlyne_config::{
-    AcpSection, ClientConfig, DEFAULT_BACKOFF_MS, DEFAULT_FAULT_HISTORY_DAYS,
+    AcpSection, BACKEND_IS_GONE, ClientConfig, DEFAULT_BACKOFF_MS, DEFAULT_FAULT_HISTORY_DAYS,
     DEFAULT_HEARTBEAT_GRACE_SECS, DEFAULT_HEARTBEAT_TIMEOUT_MS, DEFAULT_MAX_SESSIONS,
     DEFAULT_NOTE_QUEUE, DEFAULT_RECONNECT_GRACE_SECS, DEFAULT_REQUEUE_MAX_ATTEMPTS,
     DEFAULT_REQUEUE_TTL_SECS, DEFAULT_RESYNC_LAG, DEFAULT_STALE_WATCH_SECS,
-    DEFAULT_STALL_REPORT_SECS, DEFAULT_TEMPLATE_ROOT, Env, IntentPolicy, Spec, SpecDiff, Timeouts,
-    canonical_bytes, config_client_schema, redact,
+    DEFAULT_STALL_REPORT_SECS, DEFAULT_TEMPLATE_ROOT, Drive, Env, IntentPolicy, Placement,
+    RuntimeSection, Spec, SpecDiff, Timeouts, canonical_bytes, config_client_schema, redact,
 };
 use std::fs;
 
@@ -34,9 +34,12 @@ admin = false
 max_sessions = 3
 allowed_senders = ["*"]
 allowed_targets = ["builder", "reviewer"]
-session_command = ["pi", "--session-id", "{session}"]
 timeout = { ready_ms = 30000, idle_ms = 60000 }
 intent = { attempts = 3, backoff_ms = [1000, 2000, 4000] }
+
+[client.runtime]
+drive = "plugin"
+command = ["pi", "--session-id", "{session}"]
 
 [[client]]
 role = "_supervisor"
@@ -97,8 +100,9 @@ fn sample_spec_parses_and_defaults_are_asserted() {
     assert_eq!(planner.max_sessions, 3);
     assert_eq!(planner.allowed_senders, vec!["*"]);
     assert_eq!(planner.allowed_targets, vec!["builder", "reviewer"]);
+    assert_eq!(planner.runtime.drive, Drive::Plugin);
     assert_eq!(
-        planner.session_command,
+        planner.runtime.command,
         vec!["pi", "--session-id", "{session}"]
     );
     assert_eq!(planner.timeout.ready_ms, 30_000);
@@ -196,7 +200,7 @@ port = 7811
 }
 
 #[test]
-fn client_backend_defaults_empty_and_reads_override() {
+fn client_placement_defaults_absent_and_reads_override() {
     let config = ClientConfig::parse_str(
         r#"role = "planner"
 cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
@@ -208,13 +212,16 @@ port = 7811
 "#,
     )
     .unwrap();
-    assert_eq!(config.backend, "");
+    // Absent means "probe the pane hosts and fall back to headless", which is
+    // the placement `None` stands for: an empty string would be a value, and a
+    // value nobody wrote must not read as one.
+    assert_eq!(config.placement, None);
 
     let configured = ClientConfig::parse_str(
         r#"role = "planner"
 cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
 key_path = "keys/role.key"
-backend = "headless"
+placement = "headless"
 
 [server]
 host = "127.0.0.1"
@@ -222,7 +229,76 @@ port = 7811
 "#,
     )
     .unwrap();
-    assert_eq!(configured.backend, "headless");
+    assert_eq!(configured.placement, Some(Placement::Headless));
+}
+
+/// The fused key is refused in both files, with its own line and both
+/// replacements named: a cluster that keeps running under a policy nobody set
+/// is the failure this refusal exists to remove (`docs/v2-CONTRACT.md`
+/// §"Slice 2").
+#[test]
+fn a_backend_key_is_refused_by_both_loaders_with_its_line() {
+    let client = ClientConfig::parse_str(
+        r#"role = "planner"
+cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
+key_path = "keys/role.key"
+backend = "acp"
+
+[server]
+host = "127.0.0.1"
+port = 7811
+"#,
+    )
+    .unwrap_err();
+    assert_eq!(
+        client.to_string(),
+        format!("config.toml:4: {BACKEND_IS_GONE}")
+    );
+
+    let spec = Spec::parse_str(&format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[client]]
+role = "planner"
+key = "{KEY_A}"
+backend = "herdr"
+"#
+    ))
+    .unwrap_err();
+    assert_eq!(spec.to_string(), format!("spec.toml:9: {BACKEND_IS_GONE}"));
+}
+
+/// `[client.runtime]` is a table, so its keys land on the entry they were
+/// written under rather than on the next one.
+#[test]
+fn a_runtime_table_lands_on_its_own_entry() {
+    let text = format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[client]]
+role = "planner"
+key = "{KEY_A}"
+
+[client.runtime]
+drive = "acp"
+command = ["python3", "agent.py"]
+
+[[client]]
+role = "builder"
+key = "{KEY_A}"
+"#
+    );
+    let spec = Spec::parse_str(&text).expect("both entries parse");
+    assert_eq!(spec.client[0].runtime.drive, Drive::Acp);
+    assert_eq!(spec.client[0].runtime.command, ["python3", "agent.py"]);
+    // The second entry carries no table, so it keeps the default drive.
+    assert_eq!(spec.client[1].runtime, RuntimeSection::default());
 }
 
 #[test]
@@ -415,7 +491,7 @@ key = "ed25519/AAA="
 }
 
 #[test]
-fn session_command_placeholder_validation_names_unknown_placeholder() {
+fn a_runtime_command_placeholder_is_refused_by_name_and_line() {
     let text = format!(
         r#"[server]
 name = "cluster-a"
@@ -425,13 +501,16 @@ cert_pin = "{CERT_HEX}"
 [[client]]
 role = "planner"
 key = "{KEY_A}"
-session_command = ["pi", "{{unknown}}"]
+
+[client.runtime]
+drive = "plugin"
+command = ["pi", "{{unknown}}"]
 "#
     );
     let err = Spec::parse_str(&text).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "spec.toml:9: role planner has unknown session_command placeholder {unknown}"
+        "spec.toml:12: role planner has unknown runtime command placeholder {unknown}"
     );
 }
 
@@ -819,10 +898,30 @@ fn the_published_client_schema_carries_reconnect_grace_secs() {
 }
 
 #[test]
-fn the_published_client_schema_carries_backend() {
+fn the_published_client_schema_carries_placement_and_drops_backend() {
     let schema: serde_json::Value = serde_json::from_str(config_client_schema()).unwrap();
-    assert_eq!(schema["properties"]["backend"]["default"], "");
-    assert_eq!(schema["properties"]["backend"]["type"], "string");
+    assert!(
+        schema["properties"].get("backend").is_none(),
+        "the fused key must not be documented anywhere: the loader refuses it by name"
+    );
+    assert_eq!(
+        schema["properties"]["placement"]["default"],
+        serde_json::Value::Null
+    );
+    let names: Vec<&str> = schema["definitions"]["Placement"]["oneOf"]
+        .as_array()
+        .expect("the placement enum renders one arm per value")
+        .iter()
+        .filter_map(|arm| arm["enum"][0].as_str())
+        .collect();
+    assert_eq!(names, ["herdr", "orca", "zellij", "headless", "external"]);
+    // The ignored-key report reads these names, so a key the schema does not
+    // name is one the loader calls unknown.
+    assert_eq!(
+        onlyne_config::keys::unknown_client_keys("placement = \"headless\"\n"),
+        Ok(vec![]),
+        "the key the loader accepts is named by the published schema"
+    );
 }
 
 #[test]

@@ -126,6 +126,8 @@ fn spawn_spec(cwd: &Path) -> SpawnSpec {
         task_id: "task-1".into(),
         command: vec!["pi".into()],
         env,
+        tools_token: String::new(),
+        prose: String::new(),
         focus: None,
         placement: None,
         rename: None,

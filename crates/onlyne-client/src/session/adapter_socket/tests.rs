@@ -6,6 +6,8 @@ use crate::backend::fake::FakeBackend;
 #[cfg(unix)]
 use crate::session::dispatch::{DispatchState, Outbox, dispatch};
 #[cfg(unix)]
+use chrono::Utc;
+#[cfg(unix)]
 use onlyne_adapter::{AdapterIo, IncomingFrame};
 #[cfg(unix)]
 use onlyne_config::layout::RoleWorkspace;
@@ -18,8 +20,8 @@ use onlyne_proto::adapter::HandoffArgs;
 #[cfg(unix)]
 use onlyne_proto::{
     AdapterMsg, AgentMount, Body, Capability, Causality, ClientOp, Envelope, ErrorCode, Frame,
-    HelloArgs, Mount, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp, Principal, Report, ResBody,
-    new_envelope, new_task_id,
+    HelloArgs, HostOp, Mount, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp, Principal, Report,
+    ResBody, SessionRegisterArgs, ToolsMount, new_envelope, new_id, new_op_id, new_task_id,
 };
 #[cfg(unix)]
 use onlyne_store::ClientStore;
@@ -342,6 +344,8 @@ async fn a_local_completion_settles_the_task_and_publishes_only_its_projection()
             task_id: staged.task.clone(),
             outcome: Outcome::Done,
             head: Some("done".into()),
+            details: None,
+            files: Vec::new(),
             reply_to: Some("completion-message".into()),
             cluster_ref: Some("origin-cluster".into()),
         }),
@@ -591,5 +595,351 @@ async fn a_handoff_naming_no_served_task_is_refused_with_an_error() {
     assert!(
         body.ok,
         "the session's own task is still handed on: {body:?}",
+    );
+}
+
+/// Connect to the role socket without saying hello yet, the way a tools mount
+/// that has not made its first call would.
+#[cfg(unix)]
+async fn tools_stream(socket: &Path) -> (AdapterIo, tokio::sync::mpsc::Receiver<IncomingFrame>) {
+    let stream = onlyne_wire::socket::connect_local(socket)
+        .await
+        .expect("the role socket accepts a tools mount");
+    AdapterIo::new_with_inbound(stream, Duration::from_secs(5), Duration::from_secs(5))
+}
+
+/// The `hello` one tools mount presents: `tools` kind, no capability of its
+/// own, and the only field it is allowed to supply — the token.
+#[cfg(unix)]
+fn tools_hello(token: &str) -> AdapterMsg {
+    AdapterMsg::Plugin(PluginOp::Hello(HelloArgs {
+        protocol: PROTOCOL_VERSION,
+        plugin: "onlyne-mcp".into(),
+        version: "1.0.0".into(),
+        kind: MountKind::Tools,
+        capabilities: Vec::new(),
+        mount: Some(Mount::Tools(ToolsMount {
+            token: token.to_string(),
+        })),
+    }))
+}
+
+/// Mount one tools connection for the token the staged session was given.
+#[cfg(unix)]
+async fn mounted_tools(
+    socket: &Path,
+    state: &DispatchState,
+    session: &str,
+) -> (AdapterIo, tokio::sync::mpsc::Receiver<IncomingFrame>) {
+    let token = state.tools_token(session).expect("the session's token");
+    let (io, inbound) = tools_stream(socket).await;
+    let body = io
+        .request(tools_hello(&token))
+        .await
+        .expect("the mount is answered");
+    assert!(body.ok, "the role socket admits this tools mount: {body:?}");
+    (io, inbound)
+}
+
+/// A tools hello naming a live token learns the role it speaks as and the
+/// session's own id and generation: the mount names none of them itself, so the
+/// client's record is the only thing that could answer them
+/// (`docs/v2-CONTRACT.md` §3b).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tools_hello_is_answered_with_the_session_its_token_names() {
+    let dir = tempdir().unwrap();
+    let staged = staged(dir.path()).await;
+    let token = staged
+        .state
+        .tools_token(&staged.task)
+        .expect("the session's token");
+    let (io, _inbound) = tools_stream(&staged.socket).await;
+
+    let body = io
+        .request(tools_hello(&token))
+        .await
+        .expect("the mount is answered");
+    assert!(body.ok, "the mount is admitted: {body:?}");
+    let welcome = body.data.expect("the welcome travels in the answer");
+    let HostOp::Welcome(ack) =
+        serde_json::from_value::<HostOp>(welcome).expect("the answer is a host frame")
+    else {
+        panic!("a tools hello is answered with a welcome");
+    };
+    assert_eq!(
+        ack.role, "planner",
+        "the mount speaks as this client's own role",
+    );
+    assert_eq!(
+        ack.session_id.as_deref(),
+        Some(staged.task.as_str()),
+        "the session comes from the token's record, not from the mount",
+    );
+    assert_eq!(
+        ack.generation, 1,
+        "the generation the session was opened under"
+    );
+}
+
+/// A token no session holds is refused `unauthorized` before any welcome, and
+/// the connection closes with the refusal.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unknown_tools_token_is_refused_and_the_socket_closes() {
+    let dir = tempdir().unwrap();
+    let staged = staged(dir.path()).await;
+    let (io, _inbound) = tools_stream(&staged.socket).await;
+    let unknown = new_task_id();
+
+    let answered = io.request(tools_hello(&unknown)).await;
+    let body = match answered {
+        Ok(body) => body,
+        Err(error) => panic!("the refusal is the hello's own answer: {error:?}"),
+    };
+    assert!(!body.ok, "a token no session holds is refused: {body:?}");
+    let error = body.error.expect("the refusal carries an error");
+    assert_eq!(error.code, ErrorCode::Unauthorized);
+    assert!(
+        error.field.is_none(),
+        "the welcome refusal the adapter writes has no field slot: {error:?}",
+    );
+    assert!(
+        error.message.contains("token") && error.message.contains("session"),
+        "so the sentence is where the field and its state are named: {error:?}",
+    );
+
+    // No welcome reached this connection, and no second frame will: the client
+    // let the socket go with the refusal.
+    let after = io.request(tools_hello(&unknown)).await;
+    assert!(
+        after.is_err(),
+        "the refused connection is closed, not served: {after:?}",
+    );
+}
+
+/// A tools mount holds no process, so it may not register or bind a session:
+/// the frame is refused by name, and the connection stays open to carry the
+/// obligations it does serve.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tools_mount_may_not_register_a_session() {
+    let dir = tempdir().unwrap();
+    let staged = staged(dir.path()).await;
+    let (io, _inbound) = mounted_tools(&staged.socket, &staged.state, &staged.task).await;
+
+    let body = io
+        .request(AdapterMsg::Plugin(PluginOp::SessionRegister(
+            SessionRegisterArgs {
+                session_id: staged.task.clone(),
+                pid: None,
+                generation: 1,
+                title: None,
+                task_id: Some(staged.task.clone()),
+            },
+        )))
+        .await
+        .expect("the refusal is answered");
+    assert!(
+        !body.ok,
+        "a tools mount registers nothing it does not hold: {body:?}",
+    );
+    let error = body.error.expect("the refusal carries an error");
+    assert_eq!(error.code, ErrorCode::Forbidden);
+    assert_eq!(error.field.as_deref(), Some("op"));
+    assert!(
+        error.message.contains("session_register") && error.message.contains("tools mount"),
+        "the refusal names the op and the kind it is not allowed on: {error:?}",
+    );
+}
+
+/// A completion from a tools mount with an empty `task_id` settles the task the
+/// session serves: the empty field is this path's spelling of "my own open
+/// task", and the ledger row the settlement writes is what proves which task it
+/// was.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tools_completion_with_an_empty_task_id_settles_the_served_task() {
+    let dir = tempdir().unwrap();
+    let staged = staged(dir.path()).await;
+    staged.state.attach_msg_id(&staged.task, "msg-tools");
+    let frames = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    staged
+        .state
+        .attach_outbox(Arc::new(CaptureOutbox { frames }));
+    // A completion settles work that ran, and the turn behind it is recorded the
+    // way the fixture records one: a beat on the session's own agent mount.
+    let (agent, _agent_inbound) = mounted(&staged.socket, &staged.task).await;
+    let beat = agent
+        .request(AdapterMsg::Plugin(PluginOp::Report(Report::Heartbeat {
+            task_id: staged.task.clone(),
+            session_id: String::new(),
+            generation: 1,
+            seq: 1005,
+            observed: serde_json::json!({
+                "version": {"generation": 1, "seq": 1005},
+                "generation_live": true,
+                "isolate_after": 1,
+                "terminate_after": 3,
+                "mismatch_count": 0,
+                "agent": "running",
+                "delivery": "none",
+                "resource": "attached",
+                "recovery": "none",
+            }),
+            projection: None,
+            cluster_ref: None,
+        })))
+        .await
+        .expect("the turn heartbeat is answered");
+    assert!(beat.ok, "the turn heartbeat is accepted: {beat:?}");
+
+    let (tools, _tools_inbound) = mounted_tools(&staged.socket, &staged.state, &staged.task).await;
+    let body = tools
+        .request(AdapterMsg::Plugin(PluginOp::Report(Report::Complete {
+            task_id: String::new(),
+            outcome: Outcome::Done,
+            head: Some("the session's own task".into()),
+            details: None,
+            files: Vec::new(),
+            reply_to: None,
+            cluster_ref: None,
+        })))
+        .await
+        .expect("the completion is answered");
+    assert!(
+        body.ok,
+        "an empty task id means the session's own open task: {body:?}",
+    );
+
+    let settled = staged
+        .store
+        .task(&staged.task)
+        .expect("read the served task")
+        .expect("the task the session serves was opened");
+    assert_eq!(settled.task_state, TaskState::Done);
+    let untouched = new_task_id();
+    assert!(
+        staged
+            .store
+            .task(&untouched)
+            .expect("read an unrelated task")
+            .is_none(),
+        "no other task was settled",
+    );
+}
+
+/// A completion naming a task the session does not serve is refused rather than
+/// silently rewritten: a caller wrong about the session it speaks for is a bug
+/// in the caller, and the field it was wrong about travels back named.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tools_completion_naming_another_task_is_refused() {
+    let dir = tempdir().unwrap();
+    let staged = staged(dir.path()).await;
+    let (tools, _inbound) = mounted_tools(&staged.socket, &staged.state, &staged.task).await;
+    let other = new_task_id();
+
+    let body = tools
+        .request(AdapterMsg::Plugin(PluginOp::Report(Report::Complete {
+            task_id: other.clone(),
+            outcome: Outcome::Done,
+            head: Some("not this session's".into()),
+            details: None,
+            files: Vec::new(),
+            reply_to: None,
+            cluster_ref: None,
+        })))
+        .await
+        .expect("the refusal is answered");
+    assert!(
+        !body.ok,
+        "a task this session does not serve is refused: {body:?}",
+    );
+    let error = body.error.expect("the refusal carries an error");
+    assert_eq!(error.code, ErrorCode::Forbidden);
+    assert_eq!(error.field.as_deref(), Some("task_id"));
+    assert!(
+        error.message.contains(&other) && error.message.contains(&staged.task),
+        "the refusal names both the task it was given and the one it serves: {error:?}",
+    );
+}
+
+/// A `send` from a tools mount leaves with the sender this client's own record
+/// holds, and with the chain it starts: the bridge writes an empty principal and
+/// no chain at all, and a `task` send becomes a root — the same envelope the pi
+/// plugin's own `sendEnvelope` mints for the same tool (`handoff` is the one that
+/// continues a family, and the hop budget answers there).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tools_send_carries_the_role_and_starts_a_family_of_its_own() {
+    let dir = tempdir().unwrap();
+    let staged = staged(dir.path()).await;
+    let (tools, _inbound) = mounted_tools(&staged.socket, &staged.state, &staged.task).await;
+
+    // The envelope `onlyne mcp` builds for `onlyne_send kind=task`: it names the
+    // recipient, the body, and the kind, and nothing that belongs to the
+    // session.
+    let envelope = Envelope {
+        protocol: PROTOCOL_VERSION,
+        id: new_id(),
+        op_id: Some(new_op_id()),
+        kind: MsgKind::Task,
+        from: Principal::role(""),
+        to: Principal::role("reviewer"),
+        control: None,
+        causality: Some(Causality::default()),
+        body: Body::text("carry the brief"),
+        ts: Utc::now(),
+        ttl_ms: None,
+        admin: false,
+    };
+    let body = tools
+        .request(AdapterMsg::Plugin(PluginOp::Send(Box::new(envelope))))
+        .await
+        .expect("the send is answered");
+    assert!(body.ok, "the send is queued: {body:?}");
+    let op_id = body
+        .data
+        .as_ref()
+        .and_then(|data| data["op_id"].as_str())
+        .expect("the answer names the queued frame")
+        .to_string();
+
+    let queued = staged.store.flush_order().expect("the intent queue");
+    let row = queued
+        .iter()
+        .find(|row| row.op_id == op_id)
+        .expect("the send is queued under the op_id the answer names");
+    let envelope: Envelope =
+        serde_json::from_value(row.env_json.clone()).expect("the queued frame is an envelope");
+    assert_eq!(
+        envelope.from,
+        Principal::role("planner"),
+        "the sender is the client's own role, not the bridge's empty principal",
+    );
+    assert_eq!(
+        envelope.to,
+        Principal::role("reviewer"),
+        "the recipient stays the bridge's",
+    );
+    let root = envelope
+        .causality
+        .expect("a task send opens a task of its own");
+    assert_ne!(root.task, staged.task, "the task it opens is its own");
+    assert_eq!(root.parent_task, None, "a new family has no parent");
+    assert_eq!(root.hop, 0, "a new family starts at hop 0");
+    assert_eq!(root.attempt, 0);
+    assert_eq!(
+        root.hop_budget, None,
+        "not one figure of the served family rides out: {root:?}",
+    );
+    assert!(
+        envelope
+            .op_id
+            .as_deref()
+            .is_some_and(|op_id| op_id.starts_with("o-")),
+        "a task send carries the idempotency key its shape requires: {:?}",
+        envelope.op_id,
     );
 }

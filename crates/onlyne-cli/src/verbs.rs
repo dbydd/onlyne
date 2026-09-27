@@ -58,14 +58,16 @@ const PLUGIN_SEND: &str = "sends with its plugin's own tool, onlyne_send (to, te
 
 /// The plugin tool `handoff` stands in for, which reads the parent row back to
 /// continue the task family the way this verb does.
-const PLUGIN_HANDOFF: &str = "hands work on with its plugin's own tool, onlyne_handoff (task_id, to, text, image), which \
-     names this task as the child's parent_task and carries the family's hop budget, origin, \
-     deadline, and labels";
+///
+/// The tool names no task: the client stamps the task and the whole causality
+/// chain from the session the caller's token binds, so a tool call cannot hand
+/// on work for a session it does not hold.
+const PLUGIN_HANDOFF: &str = "hands work on with its plugin's own tool, onlyne_handoff (to, text, image), which \
+     continues this session's task family, carrying its hop budget, origin, deadline, and labels";
 
 /// The plugin tool `complete` stands in for, which is the only path a session
 /// has to `done`.
-const PLUGIN_COMPLETE: &str =
-    "reports its ending with its plugin's own tool, onlyne_complete (outcome, text, force, reason)";
+const PLUGIN_COMPLETE: &str = "reports its ending with its plugin's own tool, onlyne_complete (outcome, summary, details, files)";
 
 /// What a role inside a session does for `reply`, which has no plugin tool of
 /// its own. The plugin carries the session's own connection, so it is what
@@ -761,6 +763,8 @@ async fn complete_inner(
         task_id: args.task,
         outcome: args.outcome,
         head: Some(head),
+        details: None,
+        files: Vec::new(),
         reply_to: Some(reply_to),
         // The command line speaks as a role, whose cluster identity comes
         // from the server's spec, so a CLI-authored report never names one.

@@ -17,16 +17,19 @@ pi session（由 onlyne-client spawn）
   ▼
 hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{role,session,task_id,pid}}
   ◀── welcome{role, prose, generation, server, host_capabilities}
-  ├─ prose ──► 注入 pi 上下文一次（custom message，不触发 turn）
+  ├─ prose ──► 系统提示里的一个 `onlyne-role-prose` section，只写一次
   ├─ report.ready ──► 载荷等待的那道 barrier
-  ◀── assign{envelope, prose, task_id, generation}
-  ├─ task text (+ image path) ──► pi user message（deliverAs:"followUp"）
+  ◀── assign{envelope, prose, text, attachments, task_id, generation}
+  ├─ prose（仅当 welcome 尚未投递过） ──► 同一个 section
+  ├─ text ──► pi user message（deliverAs:"followUp"），逐字节原样；`body.image`
+  │    作为 pi image part 同行，`attachments` 里的路径是 client 已写好的文件
   ├─ assign_ack{accepted:true}
   ├─ report.heartbeat{agent} —— 每个 turn 以及任务存续期间每 10 秒发 `running`，
   │    只有 pi 等待输入时才发 `idle`；每次心跳都重新向 pi 推导
-  ├─ 任务仍开着、pi 正在等待输入却没有 `onlyne_complete` ──► idle 阶梯：
-  │    同一条消息再注入（最多 `idleReminders` 次），之后 `failed` 并退出
-  ├─ report.complete{outcome, head} —— ledger 的终态事实，也是最后一份报告
+  ├─ 轮次结束的规则归 client：没有 completion 的轮次结束换来一次 nudge，
+  │    第二次这样的结束就结算这次投递
+  ◀── nudge{task_id, text} ──► pi user message，逐字节原样（client 自己的句子）
+  ├─ report.complete{outcome, head, details, files} —— ledger 的终态事实，也是最后一份报告
   │    └─ client 的应答就是交接点：插件据此让 pi 退出，随后 detach
   ├─ probe ──► 一条 heartbeat
   ◀── recycle ──► （未终态则先 complete）→ 停插件 → pi 退出
@@ -99,7 +102,6 @@ pi --session-id <id> -e /abs/path/to/plugins/onlyne-agent-pi -ns -nc
 | --- | --- | --- |
 | `enabled` | `true` | `false` 时该工作区禁用扩展 |
 | `watch.autoStart` | `true` | `false` 时注册工具但不建连接，需 `/onlyne connect` |
-| `idleReminders` | `2` | 一次空闲期内重发任务的次数上限（§4）；`0` 表示第一次空闲就判失败 |
 
 文件缺失即取各自默认值。文件格式错误时打印一行警告，并保留默认值：一个笔误不该静默关掉一个
 role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 generate 期模板提示），所以
@@ -116,7 +118,7 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 | --- | --- | --- |
 | `register` | 始终 | `welcome` 之后发 `session_register{session_id, task_id, generation, pid, title}` |
 | `report` | 始终 | `report.ready` / `report.heartbeat` / `report.complete` |
-| `inject` | `pi.sendUserMessage` 存在 | 载荷以 `assign` 到达，并作为 pi user message 注入 |
+| `inject` | `pi.sendUserMessage` 存在 | 投递以 `assign{…, text}` 到达，`text` 原样注入为 pi user message |
 | `recycle` | 始终 | 收到 `recycle` 先补终态，再停插件并让 pi 退出 |
 
 缺了某个 pi API 时会怎样，宿主怎么应对：
@@ -124,8 +126,8 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 | 缺失项 | 探测时机 | 行为 |
 | --- | --- | --- |
 | `registerTool`（老 pi） | `session_start` | 不注册任何工具；协议通路不受影响，`/onlyne status` 仍可用 |
-| `sendUserMessage` | `session_start` | capability 里去掉 `inject`，宿主改走 `config_get{key:"stdin:<text>"}`，插件用剩余的注入通道投递 |
-| `sendMessage` | `session_start` | `welcome` 的 role prose 不再作为上下文注入；任务本身照常到达 |
+| `sendUserMessage` | `session_start` | capability 里去掉 `inject`，宿主改走 `config_get{key:"stdin:<投递文本>"}`，插件用剩余的注入通道投递 |
+| `before_agent_start` 没有 `sections` | 每次 run 保护性检测 | role prose 进不了指令层——这次 run 没有可供写 section 的对象；stderr 打一行说明，投递文本照常到达 |
 | `appendEntry` | `session_start` | 不再写 `onlyne-assign` / `onlyne-complete` 会话条目 |
 | `ui.setStatus` | 调用点保护 | 跳过 footer 状态行 |
 | `ui.setWidget` | 调用点保护 | 日常通知继续走 footer 状态行与 `[pi-onlyne]` stderr 行 |
@@ -137,58 +139,62 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 
 ## 3. 工具面
 
-仅在 onlyne session 内注册。
+仅在 onlyne session 内注册，用 MCP 面所带的同一套 schema（`docs/v2-CONTRACT.md`
+“3b's interface: the `tools` mount”）：一份义务词汇，两个驱动共用。
+
+每个结果只有一句话——send 与 handoff 说发给谁，complete 说结果。工具结果模型看得见，
+插件自己的账本没有理由出现在里面。
 
 ### `onlyne_send{to, text, kind?, image?}`
 
 经 `send` 帧提交一个 envelope。`kind: "note"`（默认）是自由文本，不带 `op_id`。
 `kind: "task"` 是派人办事，因此带 `o-<uuid>` 幂等键和新生成的 `causality.task`。`image` 是
 png/jpeg/gif/webp 的绝对路径：插件读出内容，base64 编码后挂成 `body.image`。核心限 2 MiB，
-只收四种 mime。
+只收四种 mime。结果是 `sent to <role>`。
 
-### `onlyne_complete{outcome?, text?, force?, reason?}`
+### `onlyne_complete{outcome, summary, details?, files?}`
 
-显式结束当前任务，`outcome` 缺省 `done`，也可 `failed`。它是通向 `done` 的唯一路径：turn 结束时
-没有这次调用，任务会被重发提醒，之后判失败（§4）。`text` 非空时就是 ledger 的 `head`，
-原样写出：空白折叠成单行，截到 200 字符。`text` 缺失或全空白时不带摘要，completion 退回
-最后一段 assistant 文本。这一调用同时结束所在 session 的进程。client 应答完 completion
-报告（见 §4）之后，插件通过 `ctx.shutdown()` 让 pi 退出。pi 0.85.1 没有 tool-result
-`terminate` 处理。工作区带接力策略（§5）时，`force: true` 加非空 `reason` 是绕过一个仍欠着的
-接力的正规通道。
+显式结束当前任务，`outcome` 就是 proto 的 `Outcome`：`done`、`failed`、`cancelled` 或
+`blocked`。`summary` 是展示用的一行，原样成为 ledger 的 `head`：空白折叠成单行，截到
+200 字符；`summary` 为空时不带展示行，head 退回最后一段 assistant 文本。`details` 是完整结果，
+`files` 是它点名的绝对路径：两者原样搭在 `report.complete` 帧上，也正是下游与发起方收到的东西，
+上限由 client 把守，超限正文由 client 用自己的句子拒绝（契约 §3c）。这一调用同时结束所在
+session 的进程。client 应答完 completion 报告（见 §4）之后，插件通过 `ctx.shutdown()` 让 pi
+退出。pi 0.85.1 没有 tool-result `terminate` 处理。结果是 `reported <outcome>`。
 
 ### `onlyne_handoff{to, text, image?}`
 
 把本会话手上的任务交给家族的下一跳。插件发一个 `handoff` 帧，帧里点名本会话当前持有的任务，
 宿主据此为 `to` 铸一个该家族的子任务：子任务把本任务记为 `parent_task`，hop 加一，家族 id、
-hop 预算、origin、deadline 与 labels 一并随行。工具结果给出子任务 id 与它的 hop。client 拒绝时
-以工具错误原样抛出。`image` 与 send 工具同一含义：png/jpeg/gif/webp 图片的绝对路径。家族带
-hop 预算时，注入的标题行写明 hop 与预算。`onlyne_send{kind: "task"}` 是触达 role 的另一条路：
+hop 预算、origin、deadline 与 labels 一并随行。结果是 `handed on to <role>`：子任务 id 与 hop
+是 ledger 里的行，不是模型要读回来的东西。client 拒绝时以工具错误原样抛出。`image` 与 send
+工具同一含义：png/jpeg/gif/webp 图片的绝对路径。hop 与
+hop 预算留在 envelope 的 `causality` 里，属于协议数据：投递文本由 client 自己渲染（发送方、
+正文、附件路径），本插件原样注入。`onlyne_send{kind: "task"}` 是触达 role 的另一条路：
 那条 envelope 开一个新家族，hop 从 0 起。
 
 ## 4. outcome 判定规则
 
-`onlyne_complete` 是通向 `done` 的唯一路径。插件每个任务只发一次 completion，取以下四者的先到者：
+`onlyne_complete` 是通向 `done` 的唯一路径。插件每个任务只发一次 completion，取以下三者的先到者：
 
-1. **`onlyne_complete`** —— 模型给显式 outcome（缺省 `done`，也可 `failed` / `cancelled`）。同一
-   任务的第二次 completion 被拒（不重报）。`text` 非空时即 head，原样写出。
+1. **`onlyne_complete`** —— 模型给显式 outcome：`done`、`failed`、`cancelled` 或 `blocked`。同一
+   任务的第二次 completion 被拒（不重报）。`summary` 非空时即 head，原样写出。
 2. **turn 出错** —— turn 以 provider 错误告终（`stopReason: "error"`）。这本身就是证据，插件立即
-   报 `failed`，错误信息当 head。
-3. **idle 阶梯** —— 某轮干净结束却没有 completion，pi 正在等待输入，任务还开着。插件重发任务并
-   记一次；当空闲发现 `idleReminders` 给的次数已经用完，就报 `failed`（head 为 `no completion
-   after <n> idle reminders`），并像任何一次 completion 一样退出 session。
-4. **`recycle{outcome}`** —— 宿主拆 session。插件先按宿主给的 outcome 结算未终态的任务，再停
+   报 `failed`，错误信息当 head。上报本身要等到 pi 正在等待输入时才发出，所以承载它的那次心跳
+   陈述的是 session 真实的阶段。
+3. **`recycle{outcome}`** —— 宿主拆 session。插件先按宿主给的 outcome 结算未终态的任务，再停
    插件并退出 pi。
 
-两种情况都不结算：任务已投递但还没跑过任何 turn（注入的消息尚未执行，这时报终态就是撒谎），
-以及阶梯还有余额的那次空闲。阶梯重发的是任务到手时的那条消息——同样的头部、任务文本和附件路径，
-外加一行说明上一轮没有 completion——但不重发 role prose，它已经在上下文里；图片也不重挂，
-路径以文本出现，同样的字节不会进上下文两次。同一任务收到新 envelope 时计数重来；session 自己
-跑起来的任何一轮也把计数清零（见下面的空闲判定）。
+干净结束、却没有 completion 的 turn 在这里不结算任何东西。那条规则归 client
+（`docs/v2-CONTRACT.md` 的 “3c. One turn-end rule”）：它数这类结束、把自己的一句话作为 `nudge`
+发来，并决定一次始终不上报的投递会变成什么。插件把那句话交给 pi，并且只回答自己交出去了，
+于是措辞、计数与结算都只有一个主人，而不是两个。注入的消息还没跑过任何 turn 的任务，无论结算
+信号说什么都不动：现在就报终态，等于声称干过一件没发生过的活。
 
 `head` 恒为单行、上限 200 字符，与 client 写入 `out_head` 和回执携带的内容一致。每个任务的 head
-只有一个来源：显式 `onlyne_complete` 带的 `text`（有则原样采用）、出错 turn 报的错误，或阶梯自己
-的那一行。最后一段 assistant 文本只是 `text` 完全缺失的 `onlyne_complete` 的退路——调用之后再说
-的话顶不掉调用交出的内容，此外没有任何东西读它。
+只有一个来源：显式 `onlyne_complete` 带 `summary` 时就是它，否则是出错 turn 报的错误。最后一段
+assistant 文本只是 `summary` 完全缺失的 `onlyne_complete` 的退路——调用之后再说的话顶不掉调用
+交出的内容，此外没有任何东西读它。
 
 报出去的 completion 会结束所在 session 的进程。`report.complete` 以请求形式发出，client 只有
 在结算 session 行、ack 掉投递、并写好 `Completion` envelope 之后才应答，插件就在这个应答处
@@ -212,66 +218,10 @@ steer 或 follow-up 消息、重试、压缩，以及被后台任务扩展移出
 
 后台任务扩展改变了这个问题。`bg_run` 与同类工具立即返回，工作继续在子进程里跑，于是 pi 在任务
 仍在进行时就等待输入。插件通过该扩展注册的工具认出它，再向它的 EventBus 服务查存活任务列表；
-处于 `running` 的任务会把 session 按在 `running` 上，也让阶梯退后，直到该任务报出终态。没有装
-这个扩展的 session 没有工具可认、没有查询，也没有东西要等。
+处于 `running` 的任务会把 session 按在 `running` 上，插件在轮次结束时欠下的那份报告——它自己
+目睹的失败——也要等它结束。没有装这个扩展的 session 没有工具可认、没有查询，也没有东西要等。
 
-阶梯算的是一次空闲期，不是任务的一生。session 自己跑起来的任何一轮都把计数清零，于是恢复运行、
-继续干活之后，上限重新开始；阶梯自己的提醒唤醒的那一轮属于该提醒所属的空闲期，上限依然能达到。
-
-## 5. 接力守卫
-
-会话可以一件活都没交出去，就把 `done` 报掉。守卫堵的就是这个事故：一个 bench 会话边叙述进度边
-调 `onlyne_complete`，四个 todo 一个没动，下游 writer 永远等一条从未发出的接力。判据只是投递
-事实——某个 role 有没有被触达——绝不看发出去的文本长什么样、写得好不好。
-
-策略文件放在插件自己的 `package.json` 旁边，因此随 generate 出的工作区一起被带进去：生成的工作
-区里是 `<ws>/.onlyne/agent/onlyne-agent-pi/relay.toml`，手工安装则是插件目录下的 `relay.toml`。
-
-```toml
-relay_required = ["writer"]        # 这些 role 必须收到过接力
-relay_required_count = 2           # ……或至少这么多个不同的下游 role
-```
-
-两个键同时存在时以 `relay_required` 为准。
-
-策略属于 spec，不属于 vendor 目录。`onlyne generate --force` 会重写本插件被拷进去的那份副本，
-连带抹掉手写的 `relay.toml`；所以在 `[[client]]` 条目里写一次，client 就会把它注入到它拉起的
-每一个 session 进程：
-
-```toml
-[[client]]
-role = "planner"
-relay_required = ["writer"]        # 这些 role 必须收到过接力
-relay_count = 2                    # ……或至少这么多个不同的下游 role
-```
-
-来源优先级是 `环境变量 > relay.toml > 都没有`：`ONLYNE_RELAY_REQUIRED`（名单，逗号分隔）与
-`ONLYNE_RELAY_COUNT`（数量，十进制）就是 client 按上面的条目填进去的两个变量；只有环境变量
-一个都没给出策略时，才去读 `package.json` 旁边的 `relay.toml`；两者都没有 = 无守卫。spec 两个键
-都写时 client 两个变量都注入，仍然以名单为准。手写的 `relay.toml` 仍是手工安装的逃生门——服务
-那些 spec 里根本没写策略的机器——被环境变量盖住的文件则完全不参与。设了但解析不了的变量，会在
-stderr 告警并忽略，把机会让回文件。
-
-| | |
-| --- | --- |
-| 默认 | 两个来源都没给策略 = 无守卫，completion 路径与守卫存在之前逐字节相同 |
-| 判据材料 | 本会话自己成功 `onlyne_send` 触达过的 role，`note` 与 `task` 都算；被 client 拒掉的 envelope 不算 |
-| 拒绝 | `onlyne_complete` 抛 `onlyne: relay guard: missing handoff to: writer (…)`，点名缺哪条边、怎么解除 |
-| 拒绝之后 | 不上报、不排队、不 detach：session 仍然挂着，补上接力后同一次调用即可落地 |
-| 名单模式 | 名单里每个 role 都要字面出现在已投递集合里 |
-| count 模式 | 数不同的下游 role；发给本 role 自己、或回指派活的上游，都不算一个 |
-| 作用域 | 本会话自己的投递，仅进程内存：重连不丢，会话重启从空开始，不去猜上一个进程发过什么 |
-| 豁免 | `force: true` 加非空 `reason`；只在守卫拒绝时才起作用 |
-| 审计 | 被豁免的 completion，ledger head 以 `relay-guard-forced: <reason>` 开头；调用带了 `text` 时紧接其后 |
-| 不管的路 | 插件不经过模型就报出的终态：turn 出错、idle 阶梯用尽，以及 `recycle{outcome}` |
-
-`relay.toml` 是 TOML 的封闭子集：扁平的 `key = value` 行、上面两个键、单行双引号字符串数组、
-`#` 注释。子集之外一律 stderr 告警并忽略。它刻意不放 `.onlyne/config.toml`：client 以
-`deny_unknown_fields` 解析那个文件，插件往里加键会让 client 直接起不来。
-
-没有策略时，`force` 与 `reason` 两个参数是惰性的。
-
-## 6. 协议说明与偏差
+## 5. 协议说明与偏差
 
 下面每条要么是对 `PROTOCOL.md` 的明确解读，要么是在实际 client 上实测到的行为。
 
@@ -302,14 +252,14 @@ stderr 告警并忽略，把机会让回文件。
   原因把该字段写成 `skip_serializing_if` 缺省。
 - **`probe` 用一条 heartbeat 应答**，对应 `PROTOCOL.md` 里 “`probe` declares fresh resource
   observations”。
-- **`config_get` 只有当键以 `stdin:` 开头时按任务正文处理**，这正是 `PROTOCOL.md` 为无
-  `inject` 插件记录的重载。其他键记日志后忽略，绝不误读。
+- **`config_get` 只有当键以 `stdin:` 开头时按投递文本处理**，这正是 `PROTOCOL.md` 为无
+  `inject` 插件记录的重载：该键携带的是与 `assign` 的 `text` 相同的已渲染字节，原样注入。
+  其他键记日志后忽略，绝不误读。
 - **`frame_too_large` / `bad_frame`**：超限正文在写出任何字节之前就被拒；帧错误关闭连接并重
   连。帧一旦损坏无法重新同步，这与 `crates/onlyne-wire/src/frame.rs` 的结论一致。
 - **投递按 envelope id 幂等，任务不按 id 一次性使用**：去重键是 envelope id。同一条投递重复
   到达只注入一次，ack 带 `reason: "duplicate"`；正在运行的任务收到新 envelope，会作为新消息
-  注入同一个会话，工作记录保留自己的计数与转发账本，只把"自这条指令以来的轮数"看门狗归零。
-  client 每条 envelope 都发新 uuid，所以 `duplicate` 只在真正的重投上生效。
+  注入同一个会话。client 每条 envelope 都发新 uuid，所以 `duplicate` 只在真正的重投上生效。
 
 - **pane 绑定（Orca tab）。** 在 Orca pane 里，插件在每个 heartbeat 上报自己跑在哪：报告
   `Observation` 里的 `observed.host.orca.pane_key`（`crates/onlyne-client/src/host.rs`），环境
@@ -324,7 +274,7 @@ stderr 告警并忽略，把机会让回文件。
   被碰。这既让 `integrations/orca-plugin` 能不读任何路径就把 tab 轴收窄到真会话，也让
   supervisor 在会话 *结束之后*仍然说得出它跑在哪：`report.complete` 会把 `host` 带过去。
 
-## 7. 配置项
+## 6. 配置项
 
 | 环境变量 | 必需 | 作用 |
 | --- | --- | --- |
@@ -332,8 +282,6 @@ stderr 告警并忽略，把机会让回文件。
 | `ONLYNE_SESSION_ID` | 是 | 挂载的 session id；当前 client 中 session_id 等于 task_id |
 | `ONLYNE_TASK_ID` | 是 | 本进程服务的任务；驱动 `session_register` 与首条 `ready` |
 | `ONLYNE_SOCKET` | 否 | client 为该工作区实际服务的 socket 路径；凡 client 拉起的会话进程都会带上。变量未设置时，插件自己去运行目录读注册文件（`<digest>.json`），挑出 `root` 就是本工作区的那个 client |
-| `ONLYNE_RELAY_REQUIRED` | 否 | 该 role 在 spec 里的 `relay_required`，逗号分隔：守卫的名单模式（§5） |
-| `ONLYNE_RELAY_COUNT` | 否 | 该 role 在 spec 里的 `relay_count`：守卫的 count 模式，只在名单为空时起作用（§5） |
 | `ORCA_PANE_KEY` | 否 | 本进程跑在哪（`<tab_id>:<leaf_id>`），每个 heartbeat 以 `observed.host.orca.pane_key` 上报；不在 Orca pane 里时未设置，这也是该字段缺席的原因 |
 | `ORCA_TAB_ID` / `ORCA_LEAF_ID` | 否 | pane 的两个 id；只设了 pane key 时插件会自己解析 |
 | `ORCA_TERMINAL_HANDLE` | 否 | 终端 handle，随 pane key 一起上报为 `host.orca.handle`，也是 `orca terminal switch` 要的那个值 |
@@ -341,12 +289,11 @@ stderr 告警并忽略，把机会让回文件。
 值得记住的常量：插件每 10 秒发一次心跳（`heartbeat_timeout_ms` 是 30 秒），`hello` 最多等
 5 秒，单次请求超时 30 秒，重连按 1/2/4/8/16/30 秒阶梯退避。
 
-插件自己读两个文件：`<cwd>/.pi/onlyne.json`（开关，§1）、`package.json` 旁边的
-`relay.toml`（接力策略的兜底，只在 client 没注入策略时才读，§5）。
-第三处读取属于机器而不是工作区：`ONLYNE_SOCKET` 未设置时，插件遍历机器级运行目录里的
-client 注册文件，找出写下本工作区的那个（§8）。
+插件自己读一个文件：`<cwd>/.pi/onlyne.json`（开关，§1）。
+另一处读取属于机器而不是工作区：`ONLYNE_SOCKET` 未设置时，插件遍历机器级运行目录里的
+client 注册文件，找出写下本工作区的那个（§7）。
 
-## 8. 故障排查
+## 7. 故障排查
 
 | 现象 | 原因 | 检查 |
 | --- | --- | --- |
@@ -357,8 +304,7 @@ client 注册文件，找出写下本工作区的那个（§8）。
 | 反复 `reconnecting in 4000ms` | client 已停或 socket 被替换 | `onlyne --server-root … roles` |
 | `ready refused: internal: unknown session for …` | 插件为 client 从未暂存的任务报了 ready（手工起 pi 时的正常现象） | 让 client 拉起 pi，而不是手工起 |
 | `assign` 一直不来 | client 的 `session_command` 没能拉起 pi，或 `inject` 被降级 | client 日志里的 spawn 行；`/onlyne status` 看能力集 |
-| ledger 停在 `in_flight` | 还没有 completion：没跑过 turn（注入的消息尚未执行），或阶梯还在提醒（`idleReminders`） | pi session 文件里的 `onlyne-assign` 条目和其后注入的提醒；`onlyne` 面板里的 `reminder n of m`；`/onlyne status` 看任务与阶段 |
-| `onlyne_complete` 回答 `relay guard: missing handoff to: …` | 工作区的 spec（或顶替它的 `relay.toml`）点名了一个本会话从未触达的 role | 日常通知显示在 `onlyne` 面板；stderr 保留 `relay guard from …` 等拒绝、socket 错误、超时与帧错误；`required=…` 说明策略；`relay guard: missing handoff …` 列出已投递集合 |
+| ledger 停在 `in_flight` | 还没有 completion：没跑过 turn（注入的消息尚未执行），或 turn 结束时没有 completion，而 client 还没结算这次投递 | pi session 文件里的 `onlyne-assign` 条目和其后注入的 `nudge` 句子；`/onlyne status` 看任务与阶段 |
 | `hello` 后立刻 `forbidden` / 断连 | mount role 与 client 的 role 不一致 | `hello.args.mount.role` 对该工作区的 role |
 | `frame_too_large` | 正文超过 8 MiB | 只会由超限的出站图片触发；上限来自核心 |
 | 工具缺失 | 该 pi 版本没有 `pi.registerTool` | `/onlyne status`；对照上面的能力表 |
@@ -369,11 +315,11 @@ client 注册文件，找出写下本工作区的那个（§8）。
 `agentState`、`seq`、`taskSeqs`、`tasks`、`pendingCompletions`、`lastError` 与计数器）；
 `/onlyne connect` / `/onlyne disconnect` 手工开合连接。
 
-## 9. 开发与验证
+## 8. 开发与验证
 
 ```bash
 cd plugins/onlyne-agent-pi
-node --test src/*.test.mjs        # 帧编解码、协议词汇、agent 状态机、配置、接力守卫、socket 路径
+node --test src/*.test.mjs        # 帧编解码、协议词汇、agent 状态机、配置、socket 路径
 ```
 
 `src/agent.live.test.mjs` 只在 `target/debug/onlyne-client` 与 `onlyne-server` 存在时运行。

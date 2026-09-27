@@ -1,6 +1,8 @@
 use super::config::{DEFAULT_INTENT_ATTEMPTS, RunState, default_intent_backoff};
 use crate::backend::fake::FakeBackend;
+use crate::backend::{AcpOptions, SessionPlacement, WorktreePolicy};
 use crate::runtime::intent::{IntentMachine, op_for_intent};
+use crate::runtime::runloop::config::BackendSelector;
 use crate::session::dispatch::DispatchState;
 use onlyne_proto::{ClientOp, Presence, RoleInfo};
 use onlyne_store::ClientStore;
@@ -35,6 +37,12 @@ pub(super) fn test_state(max_sessions: u32, command: Vec<String>) -> (RunState, 
         // This fixture exercises the stall and intent surfaces, not the
         // reconnect sweep, so the window stays closed here.
         reconnect_grace_secs: 0,
+        selector: BackendSelector {
+            placement: SessionPlacement::Fake,
+            runner: Arc::new(crate::backend::ProcessRunner),
+            worktree: WorktreePolicy::Host,
+            acp: AcpOptions::default(),
+        },
     };
     (state, store)
 }
@@ -44,7 +52,10 @@ pub(super) fn role_info(max_sessions: u32, command: Vec<String>) -> RoleInfo {
         name: "planner".into(),
         admin: false,
         max_sessions,
-        session_command: command,
+        runtime: onlyne_proto::RoleRuntime {
+            drive: onlyne_proto::Drive::Plugin,
+            command,
+        },
         spec_hash: "hash".into(),
         prose: None,
         state: Presence::Online,

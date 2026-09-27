@@ -365,8 +365,10 @@ async fn fixture(cluster: Cluster, adjust: impl FnOnce(ClientInit) -> ClientInit
         )
         // CI and `env -u` local runs have no herdr/orca/zellij; `fake` is the
         // backend that needs no host surface, and the session this case stages
-        // answers through the plugin the test mounts.
-        .with_backend("fake"),
+        // answers through the plugin the test mounts. It is also the backend the
+        // pre-split `backend = "fake"` named: no workspace config may name it, so
+        // an embedding is the one that does.
+        .with_placement(Some(onlyne_client::backend::SessionPlacement::Fake)),
     );
     Fixture {
         _dir: dir,
@@ -467,7 +469,10 @@ fn welcome() -> Welcome {
         aggregate: None,
         allowed_targets: vec![],
         allowed_senders: vec![],
-        session_command: None,
+        runtime: Some(onlyne_proto::RoleRuntime {
+            drive: onlyne_proto::Drive::Plugin,
+            command: Vec::new(),
+        }),
         timeout_ready_ms: None,
         timeout_idle_ms: None,
         intent_attempts: Some(3),
@@ -483,7 +488,10 @@ fn role_info() -> RoleInfo {
         name: "planner".into(),
         admin: false,
         max_sessions: 1,
-        session_command: Vec::new(),
+        runtime: onlyne_proto::RoleRuntime {
+            drive: onlyne_proto::Drive::Plugin,
+            command: Vec::new(),
+        },
         spec_hash: "hash".into(),
         prose: Some("planner prose".into()),
         state: Presence::Online,

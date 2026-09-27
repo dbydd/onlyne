@@ -144,6 +144,8 @@ async fn exited_sessions_do_not_hold_the_capacity_cap() {
             task_id: first.clone(),
             outcome: Outcome::Done,
             head: Some("done".into()),
+            details: None,
+            files: Vec::new(),
             reply_to: None,
             cluster_ref: None,
         },

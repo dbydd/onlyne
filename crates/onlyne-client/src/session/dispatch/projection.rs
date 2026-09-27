@@ -55,12 +55,16 @@ pub fn with_cluster(state: &DispatchState, report: Report) -> Report {
             task_id,
             outcome,
             head,
+            details,
+            files,
             reply_to,
-            ..
+            cluster_ref: _,
         } => Report::Complete {
             task_id,
             outcome,
             head,
+            details,
+            files,
             reply_to,
             cluster_ref: Some(cluster),
         },

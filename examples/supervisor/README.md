@@ -74,7 +74,7 @@ Every step performed by `up` is expressed in the product's own terms (idempotent
    create`), and uses the `up` argument as the first message. **The script does not wait for the ring
    to finish**: the supervisor dispatches work itself, so `up` prints its instructions and exits.
 
-Each session tab runs the full interactive pi TUI (there is no `--mode rpc` in `session_command`).
+Each session tab runs the full interactive pi TUI (there is no `--mode rpc` in the runtime command).
 Task bodies do not travel through argv: the client renders `{task}` as the task **id**, and the
 pi-onlyne plugin injects the body when handling `assign`. As a result, you can directly see the model
 read the task, do the work, and report completion in the TUI.
@@ -138,7 +138,7 @@ the TUI: tabs are for people to watch, and the adapter injects the task body int
 For headless use (CI, no Orca), use `export ONLYNE_BACKEND=exec`; sessions become child processes of
 the client, and the supervisor also runs as a child process and writes its output to
 `/tmp/onlyne-sup/logs/supervisor.log`. To use a script-driven stdin pipe on a machine with tabs, switch
-`session_command` back to its rpc form (`pi --mode rpc --session-id {session} --session-dir .pi/sessions -ns`).
+the runtime `command` back to its rpc form (`pi --mode rpc --session-id {session} --session-dir .pi/sessions -ns`).
 The cost is that the tab contains only a JSON stream, but the benefit is that the host can push later
 turns over stdin. Both routes deliver task bodies the same way, and neither uses argv as a body channel.
 
@@ -252,7 +252,7 @@ python3 examples/supervisor/run.py stop            # 收摊
    create`），第一句话就是 `up` 的参数。**脚本不等环跑完**：派活由 supervisor 自己
    发，`up` 打完提示就退出。
 
-每个会话标签页里跑的是完整的交互式 pi TUI（`session_command` 里没有
+每个会话标签页里跑的是完整的交互式 pi TUI（runtime `command` 里没有
 `--mode rpc`）。任务正文不走 argv：`{task}` 在客户端渲染成任务 **id**，正文由
 pi-onlyne 插件在 `assign` 时注入。所以 TUI 里能直接看见模型读任务、干活、交差。
 
@@ -305,7 +305,7 @@ RING=a,b,c,d,e FILE=/tmp/onlyne-sup/lights.txt K=1 TOTAL=10
 初始会话由适配器注入任务正文。无头场合（CI、没有 Orca）用 `export ONLYNE_BACKEND=exec`，
 会话变成客户端自己的子进程，supervisor 也作为子进程把输出写进
 `/tmp/onlyne-sup/logs/supervisor.log`。想在带标签页的机器上走脚本驱动的 stdin 管道，
-把 `session_command` 换回 rpc 形态即可（`pi --mode rpc --session-id {session} --session-dir .pi/sessions -ns`）。
+把 runtime `command` 换回 rpc 形态即可（`pi --mode rpc --session-id {session} --session-dir .pi/sessions -ns`）。
 代价是标签页里只剩 JSON 流，好处是宿主能用 stdin 推后续轮次。两条路的任务正文投递
 一样，argv 都不是正文的通道。
 

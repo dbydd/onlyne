@@ -6,9 +6,9 @@ set -euo pipefail
 # and speaks the adapter protocol from `crates/onlyne-adapter/PROTOCOL.md`. This
 # case is the one end-to-end proof that a real pi process, spawned as a role
 # session by `onlyne-client`, reaches `acked` through its own completion exit:
-# the workspace's `session_command` points pi at the plugin directory, pi runs
-# one turn, and the ledger, the session projection and the injected prose are
-# all asserted from the supervisor side.
+# the role's `[[client]].runtime` command points pi at the plugin directory, pi
+# runs one turn, and the ledger, the session projection and the injected
+# delivery text are all asserted from the supervisor side.
 #
 # Skip discipline (same as orca-live.sh): this case needs a real model call, so
 # it prints SKIP and exits 0 unless pi is on PATH *and* answers a credential
@@ -67,9 +67,10 @@ if [ "$probe_ok" != true ]; then
   exit 0
 fi
 
-# `session_command` lives in the role's `[[client]]` spec entry (the server sends
-# it in `welcome`, and the client spawns it per task with `{session}`/`{task}`
-# substituted), so it travels in the `client_init` fragment the helper appends.
+# The drive and its argv live in the role's `[[client]].runtime` table (the
+# server sends the slice in `welcome`, and the client spawns the command per
+# task with `{session}`/`{task}` substituted), so they travel in the
+# `client_init` fragment the helper appends.
 #
 # Two details are load-bearing:
 #   * RPC mode needs a stdin that never closes: pi reads its next command from
@@ -85,7 +86,9 @@ SESSION_COMMAND='["pi", "--mode", "rpc", "--session-id", "{session}", "--session
 
 setup_cluster "$tmp/server" "$tmp/planner" planner cluster "" "$E2E_PROSE" 'allowed_senders = ["*", "planner"]
 allowed_targets = ["planner"]
-session_command = '"$SESSION_COMMAND"
+[client.runtime]
+drive = "plugin"
+command = '"$SESSION_COMMAND"
 server_pid=$cluster_server_pid
 ws="$tmp/planner"
 
@@ -121,26 +124,48 @@ for _ in $(seq 1 150); do
 done
 [ "$online" = true ] || fail "planner must register on the server" "client=$(cat "$tmp/client.log" 2>/dev/null)"
 
-send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "reply with exactly: OK") \
+# The task text is the operator's own words, and it names the obligation the
+# case asserts. Under v1 the delivery and the plugin's reminder ladder pushed
+# the model toward the completion; v2's delivery is deliberately neutral and
+# the tool descriptions state effect and precondition only (§3a, §3b), so a
+# fixture that left the completion to the model's inclination would assert
+# something it never asked for. Naming a tool is not protocol vocabulary: the
+# body is an operator's sentence, and the case's claim is that the client's
+# rendered delivery reaches the model byte-exact with that sentence inside it.
+TASK_TEXT='reply with exactly: OK, then report this task finished with onlyne_complete and summary OK'
+send_out=$("$ONLYNE" --server-root "$tmp/server" send "${SUPERVISOR_FLAGS[@]}" --from planner --to planner --text "$TASK_TEXT") \
   || fail "send command failed" "$send_out"
 printf '%s\n' "$send_out" > "$tmp/send.json"
 task=$(json_field "$tmp/send.json" '.data.task' 'json.load(sys.stdin)["data"]["task"]')
 [ "$(json_field "$tmp/send.json" '.data.state' 'json.load(sys.stdin)["data"]["state"]')" = "in_flight" ] \
   || fail "send data.state must be in_flight" "$send_out"
 
-# 1. The ledger reaches `acked` and its `out_head` carries the model's answer.
+# 1. The ledger reaches `acked` and its `out_head` carries the model's own
+#    summary, which the task text asked it for beside the completion.
+#
+#    The row read is the completion the plugin's report wrote, selected by its
+#    own `kind` rather than by whichever row happens to be listed first: the
+#    assign row is acked as soon as the session mounts, so a first-acked-row
+#    read would print the operator's body preview back and assert nothing about
+#    the model.
 ledger_out=""
+out_head=""
 for _ in $(seq 1 240); do
   ledger_out=$("$ONLYNE" --server-root "$tmp/server" ledger --task "$task" 2>/dev/null) || true
   printf '%s\n' "$ledger_out" > "$tmp/ledger.json"
-  if rows_any "$tmp/ledger.json" state acked 2>/dev/null; then
+  out_head=$(data_rows "$tmp/ledger.json" 2>/dev/null | python3 -c '
+import json,sys
+rows=[json.loads(line) for line in sys.stdin if line.strip()]
+settled=[row for row in rows if row.get("kind")=="completion" and row.get("state")=="acked"]
+print(settled[0].get("out_head","") if settled else "")
+' 2>/dev/null || true)
+  if [ -n "$out_head" ]; then
     break
   fi
   sleep 0.5
 done
-rows_any "$tmp/ledger.json" state acked || fail "ledger state must become acked" \
+[ -n "$out_head" ] || fail "the ledger must carry the plugin's acked completion row" \
   "ledger=$ledger_out client=$(cat "$tmp/client.log" 2>/dev/null)"
-out_head=$(row_value "$tmp/ledger.json" out_head state acked)
 case "$out_head" in
   *OK*) ;;
   *) fail "ledger out_head must contain the model's OK" "out_head=$out_head ledger=$ledger_out" ;;
@@ -183,9 +208,11 @@ printf 'PASS pi-live host binding: %s\n' "$pane"
 
 # 3. The assign really reached pi's context, and the plugin's own completion
 #    entry was recorded. pi's session file records both, so the two claims are
-#    read back from the file the plugin was told to use: the header carries the
-#    task id, the body carries the task text, and the custom entry names the
-#    outcome the ledger already shows.
+#    read back from the file the plugin was told to use: the injected message is
+#    the delivery text the client rendered — the source line and the task text,
+#    with no task id, hop, or budget in it — the plugin's own entry names the
+#    task it injected, and the completion entry names the outcome the ledger
+#    already shows.
 session_file=""
 for _ in $(seq 1 100); do
   session_file=$(find "$ws/.pi/sessions" -name "*${task}*" -type f 2>/dev/null | head -n 1)
@@ -194,8 +221,10 @@ for _ in $(seq 1 100); do
 done
 [ -n "$session_file" ] || fail "pi must have written a session file for $task" \
   "sessions=$(find "$ws" -name '*.jsonl' 2>/dev/null | head -n 5) client=$(cat "$tmp/client.log" 2>/dev/null)"
-grep -q "\[onlyne\] task $task" "$session_file" || fail "the injected assign header must reach pi's context" "$session_file"
-grep -q "reply with exactly: OK" "$session_file" || fail "the injected task text must reach pi's context" "$session_file"
+grep -q "From planner:" "$session_file" || fail "the rendered delivery text must reach pi's context" "$session_file"
+grep -q -F -- "$TASK_TEXT" "$session_file" || fail "the injected task text must reach pi's context" "$session_file"
+grep -q "onlyne-assign" "$session_file" || fail "the plugin must record the assign it injected" "$session_file"
+grep -q "$task" "$session_file" || fail "the assigned task id must reach pi's session file" "$session_file"
 grep -q "onlyne-complete" "$session_file" || fail "the plugin must record its completion entry" "$session_file"
 # The role prose arrives with `welcome`, as context rather than as a turn, and
 # the plugin records it as its own entry. Both halves are asserted: the entry

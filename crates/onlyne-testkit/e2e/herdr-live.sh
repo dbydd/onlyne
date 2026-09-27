@@ -5,7 +5,7 @@ set -euo pipefail
 # Needs a reachable herdr session. HERDR_SESSION defaults to onlyne-test.
 # The binary defaults to HERDR_BIN_PATH or /opt/homebrew/bin/herdr.
 #
-# session_command is sleep 600 so spawn takes the pane-run track. Starting a
+# The runtime command is sleep 600 so spawn takes the pane-run track. Starting a
 # real agent is covered by pi-live.sh and crates/onlyne-session/tests/herdr_live.rs.
 #
 # Skip discipline: a missing binary or an unreachable HERDR_SESSION prints
@@ -79,7 +79,6 @@ fi
 
 cat >"$tmp/herdr_case.py" <<'PY'
 import json
-import sqlite3
 import sys
 
 
@@ -223,14 +222,14 @@ if cmd == "stray-workspaces":
             print(workspace_id)
     sys.exit(0)
 if cmd == "backend-ref":
-    db, task = sys.argv[2], sys.argv[3]
-    row = sqlite3.connect(db).execute(
-        "SELECT backend_ref FROM sessions WHERE task_id=?", (task,)
-    ).fetchone()
-    if not row or not row[0]:
+    # The stored reference arrives already resolved: the case reads it through
+    # `session_column`, the one derivation of "the session that serves this
+    # task", so this helper only unwraps the JSON it holds.
+    stored = sys.argv[2]
+    if not stored:
         sys.exit(1)
     try:
-        parsed = json.loads(row[0])
+        parsed = json.loads(stored)
     except ValueError:
         sys.exit(1)
     herdr = herdr_object(parsed)
@@ -264,7 +263,9 @@ export HERDR_BIN_PATH="$HERDR_BIN"
 
 setup_cluster "$tmp/server" "$tmp/planner" planner cluster "" "" 'allowed_senders = ["*", "planner"]
 allowed_targets = ["planner"]
-session_command = ["sleep", "600"]'
+[client.runtime]
+drive = "plugin"
+command = ["sleep", "600"]'
 server_pid=$cluster_server_pid
 ws="$tmp/planner"
 
@@ -368,7 +369,9 @@ sessions_out=""
 for _ in $(seq 1 150); do
   sessions_out=$("$ONLYNE" --server-root "$tmp/server" sessions --task "$task" 2>/dev/null) || true
   printf '%s\n' "$sessions_out" >"$tmp/sessions.json"
-  if python3 "$tmp/herdr_case.py" backend-ref "$ws/.onlyne/client.db" "$task" >"$tmp/backend-ref.json" 2>/dev/null; then
+  stored=$(session_column "$ws/.onlyne/client.db" backend_ref "$task" 2>/dev/null) || stored=""
+  if [ -n "$stored" ] \
+    && python3 "$tmp/herdr_case.py" backend-ref "$stored" >"$tmp/backend-ref.json" 2>/dev/null; then
     ref_ok=true
     break
   fi

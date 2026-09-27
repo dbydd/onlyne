@@ -394,6 +394,8 @@ pub(super) async fn complete_plugin(io: &AdapterIo, task_id: &str, outcome: Outc
             task_id: task_id.to_string(),
             outcome,
             head: Some("done".into()),
+            details: None,
+            files: Vec::new(),
             reply_to: None,
             cluster_ref: None,
         })))
@@ -468,6 +470,8 @@ pub(super) async fn complete_raw_plugin(
                 task_id: task_id.to_string(),
                 outcome,
                 head: Some("done".into()),
+                details: None,
+                files: Vec::new(),
                 reply_to: None,
                 cluster_ref: None,
             })),

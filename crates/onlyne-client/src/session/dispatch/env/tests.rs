@@ -103,6 +103,8 @@ fn a_deep_workspace_hands_the_session_the_short_served_socket() {
         task_id: "t-1".into(),
         command: vec!["pi".into()],
         env,
+        tools_token: String::new(),
+        prose: String::new(),
         focus: None,
         placement: None,
         rename: None,

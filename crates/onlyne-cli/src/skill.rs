@@ -41,7 +41,7 @@ struct Skill {
 /// The group an operator selects with `--set`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum SkillSet {
-    /// The handbook for a role working its task, with the payload-v2 grammar.
+    /// The handbook for a role working its task and reporting its result.
     Role,
     /// The operating manual for a cluster supervisor agent.
     Supervisor,
@@ -50,7 +50,7 @@ pub enum SkillSet {
 }
 
 /// The shipped documents, in the order `export` reports them.
-const SHIPPED: [Skill; 4] = [
+const SHIPPED: [Skill; 3] = [
     Skill {
         set: SkillSet::Supervisor,
         name: "onlyne-supervisor",
@@ -60,11 +60,6 @@ const SHIPPED: [Skill; 4] = [
         set: SkillSet::Role,
         name: "onlyne-role",
         body: include_str!("../skills/onlyne-role/SKILL.md"),
-    },
-    Skill {
-        set: SkillSet::Role,
-        name: "onlyne-role-payload-v2",
-        body: include_str!("../skills/onlyne-role-payload-v2/SKILL.md"),
     },
     Skill {
         set: SkillSet::Dev,

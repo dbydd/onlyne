@@ -13,20 +13,39 @@ claim that the code does it today.
 | phase | content | state |
 |---|---|---|
 | zero | v1 defect fixes on paths v2 keeps | done |
-| one | structure, no behavior change: `onlyne-wire`, runtime-directory sockets and registration files, crate merges and splits, forwarding-layer removal, this file | in progress |
+| one | structure, no behavior change: `onlyne-wire`, runtime-directory sockets and registration files, crate merges and splits, forwarding-layer removal, this file | done |
 | two | behavior: session table rekey and scopes, drive/placement split, delivery rendering, settlement rules, declarative routes, spec edit ops, event hooks | in progress |
 | three | interfaces: `view` reducer, TUI, `onlyne-web` | not started |
 
-Landed in phase one so far: the `onlyne-wire` crate (frame codec plus the runtime
+Landed in phase one: the `onlyne-wire` crate (frame codec plus the runtime
 directory and registration files), sockets moved out of the workspace tree, the crate
-consolidation in §3, and a scenario suite under `crates/onlyne-testkit/tests/`.
+consolidation in §3, the forwarding layer's removal, and a scenario suite under
+`crates/onlyne-testkit/tests/`.
 
-Landed in phase two so far: slice one's session rekey — both session tables are keyed by
-`session_id` with bindings in `session_tasks`, `HandshakeArgs.live_sessions` replaced
-`live_tasks`, `Outcome::Blocked` exists — and the client half of it: `[client.session]`
-scope and `idle_close`, session scopes (`oneshot`/`task`/`role`) enforced on the client,
-suspend and resume behind the runtime's `resume` capability, and a held session surviving a
-server-link loss by re-reporting itself at the next hello.
+Landed in phase two, by slice:
+
+- **Sessions.** Both session tables are keyed by `session_id` with bindings in
+  `session_tasks`; `HandshakeArgs.live_sessions` replaced `live_tasks`; `Outcome::Blocked`
+  exists; `[client.session]` carries `scope` and `idle_close`; the scopes
+  (`oneshot`/`task`/`role`) are enforced on the client; suspend and resume ride the runtime's
+  `resume` capability; and a held session survives a server-link loss by re-reporting itself
+  at the next hello.
+- **Drive and placement.** §11's split is in: `[client.runtime]` carries `drive` and
+  `command`, the workspace config carries `placement`, and the validator's matrix is the one
+  checkpoint for which pairs are legal.
+- **What reaches the model.** §12 is in: the client renders the delivery from one template
+  (`onlyne-client`'s `delivery` module) and it travels in `AssignArgs.text` with the attachment
+  paths it names; role prose reaches pi as a system-prompt section and an ACP session as a
+  client-owned block in `<workspace>/AGENTS.md`; pi keeps three tools and an ACP session gets
+  the same three through `onlyne mcp` mounted in `session/new`'s `mcpServers`; and the turn-end
+  rule is the client's — one neutral nudge, then settlement — with the plugin's own idle ladder
+  and relay guard deleted rather than kept beside it.
+- **payload-v2 is deleted.** No report file, no grammar, no `onlyne report check|write|path`,
+  and no `onlyne-role-payload-v2` skill. A completion's `details` rides the completion
+  envelope's body to the originator, and an operator reads a task's ending from the ledger.
+
+Still to land in phase two: declarative route edges, `SpecGet`/`SpecApply` with a streaming
+subscribe, event hooks, and liveness held in memory rather than recomputed.
 
 When you finish a phase-one or phase-two item, update this table and the section it
 touches in the same change.

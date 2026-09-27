@@ -18,10 +18,11 @@ A request carries `id`; its response carries `reply_to`. Operation payloads read
 | plugin → host | `assign_ack` | `{"id":7,"op":"assign_ack","args":{"task_id":"task-1","accepted":true,"reason":null}}` |
 | plugin → host | `send` | `{"id":8,"op":"send","args":{"protocol":1,"id":"3f2504e0-4f89-41d3-9a0c-0305e82c3301","op_id":"o-3f2504e0-4f89-41d3-9a0c-0305e82c3302","kind":"task","from":{"role":{"role":"planner"}},"to":{"role":{"role":"builder"}},"causality":{"task":"3f2504e0-4f89-41d3-9a0c-0305e82c3303","hop":0,"attempt":0},"body":{"text":"build it"},"ts":"2026-01-01T00:00:00Z","admin":false}}` |
 | plugin → host | `handoff` | `{"id":14,"op":"handoff","args":{"task_id":"task-1","to":"builder","text":"carry it on","image":null}}` |
-| host → plugin | `assign` | `{"op":"assign","args":{"envelope":{"protocol":1,"id":"3f2504e0-4f89-41d3-9a0c-0305e82c3301","op_id":"o-3f2504e0-4f89-41d3-9a0c-0305e82c3302","kind":"task","from":{"role":{"role":"planner"}},"to":{"role":{"role":"builder"}},"causality":{"task":"3f2504e0-4f89-41d3-9a0c-0305e82c3303","hop":0,"attempt":0},"body":{"text":"build it"},"ts":"2026-01-01T00:00:00Z","admin":false},"prose":"Read the incoming task","task_id":"task-1","generation":1,"parent":null}}` |
+| host → plugin | `assign` | `{"op":"assign","args":{"envelope":{"protocol":1,"id":"3f2504e0-4f89-41d3-9a0c-0305e82c3301","op_id":"o-3f2504e0-4f89-41d3-9a0c-0305e82c3302","kind":"task","from":{"role":{"role":"planner"}},"to":{"role":{"role":"builder"}},"causality":{"task":"3f2504e0-4f89-41d3-9a0c-0305e82c3303","hop":0,"attempt":0},"body":{"text":"build it"},"ts":"2026-01-01T00:00:00Z","admin":false},"prose":"Read the incoming task","text":"From planner:\n\nbuild it","task_id":"task-1","generation":1,"parent":null}}` |
 | host → plugin | `probe` | `{"op":"probe","args":{"task_id":"task-1"}}` |
 | host → plugin | `recycle` | `{"op":"recycle","args":{"task_id":"task-1","reason":"operator","outcome":"cancelled"}}` |
 | host → plugin | `config_get` | `{"op":"config_get","args":{"key":"model.name"}}` |
+| host → plugin | `nudge` | `{"op":"nudge","args":{"task_id":"task-1","text":"If this task is finished, report it."}}` |
 | plugin → host | `deliver` (gateway) | `{"id":9,"op":"deliver","args":{"msg_id":"m1","envelope":{"protocol":1,"id":"3f2504e0-4f89-41d3-9a0c-0305e82c3304","kind":"note","from":{"gateway":{"gateway":"fg1","channel":"fake","conversation":"c1"}},"to":{"role":{"role":"planner"}},"body":{"text":"hello"},"ts":"2026-01-01T00:00:00Z","admin":false}}}` |
 | plugin → host | `register_channel` (gateway) | `{"id":10,"op":"register_channel","args":{"platform":"fake","channel":"fg1","conversations":null}}` |
 | plugin → host | `health` (gateway) | `{"id":11,"op":"health","args":{"state":"online","detail":null,"uptime_s":3}}` |
@@ -36,13 +37,13 @@ A request carries `id`; its response carries `reply_to`. Operation payloads read
 
 ## Mounts and capabilities
 
-Pick the mount by `kind`. Agent plugins send `kind: agent` with `mount.role` and an optional `mount.session`. Gateways send `kind: gateway` with `mount.gateway` and `mount.platform`. A connection that speaks for a sub-cluster carries `mount.cluster` and `mount.role`. Admin tooling sends `kind: admin` with `mount` null.
+Pick the mount by `kind`. Agent plugins send `kind: agent` with `mount.role` and an optional `mount.session`. Gateways send `kind: gateway` with `mount.gateway` and `mount.platform`. A connection that speaks for a sub-cluster carries `mount.cluster` and `mount.role`. Tools bridges send `kind: tools` with `mount.token`; the client mints that token per session, and it identifies `(role, session, generation)`, so a tools mount never states its own role. The connection holds no process, which is why its operation set excludes the agent mount's lifecycle operations. An unknown, expired, or retired token is answered with `unauthorized` on field `token`, and the connection closes without a welcome. Admin tooling sends `kind: admin` with `mount` null.
 
 `kind` names the connection class. The mount payload is flat and untagged. `kind` sits beside it inside `hello.args`, not inside a wrapper: `{"role":"planner","session":"8b1c..."}` for an agent, `{"gateway":"gw1","platform":"telegram"}` for a gateway, `{"cluster":"cluster-b","role":"cluster-b"}` for a cluster.
 
-The host matches the payload's field set against the variants in declaration order — agent, gateway, cluster, admin. Every payload denies unknown fields. So adding a field to one payload changes which variant answers, and the new field belongs to the earliest variant that owns it.
+The host matches the payload's field set against the variants in declaration order — agent, gateway, cluster, tools, admin. Every payload denies unknown fields. So adding a field to one payload changes which variant answers, and the new field belongs to the earliest variant that owns it.
 
-An agent connection may send `report`, `session_register`, `assign_ack`, `send`, `handoff`, and `detach`. A gateway connection may send `deliver`, `register_channel`, `health`, `typing`, and `detach`. A forbidden operation returns `forbidden` with an `op` field and a message naming the operation and the mount kind.
+An agent connection may send `report`, `session_register`, `assign_ack`, `send`, `handoff`, and `detach`. A gateway connection may send `deliver`, `register_channel`, `health`, `typing`, and `detach`. A tools connection may send `send`, `handoff`, `report`, and `detach`. A forbidden operation returns `forbidden` with an `op` field and a message naming the operation and the mount kind.
 
 `handoff` submits one child of the family the connection's own session serves. The host reads the task named in `task_id`, mints the child through `Causality::child_of`, queues the envelope for `to`, and answers `{"task_id":"<child uuid>","hop":3,"queued":true,"op_id":"<uuid>"}`. The frame needs a live agent connection: a connection this host holds read-only serves no task, and its `handoff` earns `invalid` on the field `task_id`. `task_id`, `to`, and `text` are required fields; `image` is optional and carries the shape a task body carries. A frame that omits a required field fails the decoder and ends the connection, which is how this socket answers a malformed frame for every operation.
 
@@ -52,6 +53,10 @@ With no `recycle`, the host must judge resource loss through `probe`. With no `r
 
 On this socket that delivery is a `config_get` frame whose only key is `stdin:{task text}`. So a plugin without `inject` must read an unrecognised `config_get` key as a task body, not as a configuration read. The plan lists `config_get{key}` host-to-plugin at §7 line 308 and names no frame for the stdin route at line 310. This document writes the overload down for that reason, instead of leaving it as folklore.
 
+`assign` carries the delivery text the client already rendered as `text`, and the absolute paths of the files the delivery carries in `attachments` — absent when the delivery carries none. A plugin injects `text` byte for byte and renders no delivery wording of its own: the template lives in the client, and the text a model reads is the same whichever drive delivered it. `prose` is the role's own spec text, delivered at the runtime's instruction layer rather than folded into the delivery.
+
+`nudge` is sent only to a plugin that declared `inject`; it hands the client's sentence to the agent verbatim through the same input channel, keeps no copy, composes none, and does not reset turn bookkeeping. A drive that cannot be nudged is settled by the client at turn end instead.
+
 ## Handshake and errors
 
 The first frame must be `hello`, and the server waits exactly five seconds for it. Any other first frame gets `invalid` with the exact message `hello required first` and field `op`; then the connection closes. A `hello` that arrives after the window closes the connection silently and logs a `tracing::warn!`. The log carries the local peer pid when one is available.
@@ -60,7 +65,7 @@ The first frame must be `hello`, and the server waits exactly five seconds for i
 
 `welcome` carries `delivered_tasks`: the task ids the host has already dispatched to a session of this role, taken from the host's own durable record. It is always an array and empty when the host holds nothing. A plugin that restarts and says `hello` again seeds its delivery bookkeeping from this list, so a task the host already handed out is never injected twice.
 
-Platform-owned data stays on the gateway side. A gateway plugin that receives `RenderSendArgs` gets the envelope plus rendered text and image, nothing more. An agent that receives `AssignArgs` gets the envelope, the prose, and the intent, nothing more. Neither serialized payload carries `platform_metadata`, `raw`, or `channel_id`. The SDK states this rule, and the conformance suite inspects the delivered bytes. The wire types carry no raw metadata field at all, so a plugin cannot smuggle platform data into an agent payload through these frames.
+Platform-owned data stays on the gateway side. A gateway plugin that receives `RenderSendArgs` gets the envelope plus rendered text and image, nothing more. An agent that receives `AssignArgs` gets the envelope, the delivery text, the role prose, and the intent, nothing more. Neither serialized payload carries `platform_metadata`, `raw`, or `channel_id`. The SDK states this rule, and the conformance suite inspects the delivered bytes. The wire types carry no raw metadata field at all, so a plugin cannot smuggle platform data into an agent payload through these frames.
 
 ## Report sequencing and the ready barrier
 

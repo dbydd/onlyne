@@ -1078,6 +1078,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "interprocess",
+ "onlyne-adapter",
  "onlyne-config",
  "onlyne-net",
  "onlyne-proto",

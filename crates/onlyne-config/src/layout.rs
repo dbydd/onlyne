@@ -348,16 +348,6 @@ impl RoleWorkspace {
         self.logs_dir().join(CONTENT_INDEX_FILE_NAME)
     }
 
-    /// The report file one session closes its task through.
-    pub fn report_path(&self, task_id: &str) -> PathBuf {
-        self.out_dir().join(format!("{task_id}.md"))
-    }
-
-    /// Directory holding the closing reports of this role's sessions.
-    pub fn out_dir(&self) -> PathBuf {
-        self.onlyne.join("out")
-    }
-
     pub fn keys_dir(&self) -> PathBuf {
         self.onlyne.join("keys")
     }

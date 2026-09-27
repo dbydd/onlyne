@@ -1,17 +1,17 @@
 //! A connection that comes back: the reconnect grace retiring a ghost, a returning agent
 //! keeping its session, the spawn whose plugin never dials at all, and the read-only
-//! connection whose sends merge into the completion.
+//! connection whose completion is answered before any bye reaches it.
 
 use crate::common::{
     ReasonBackend, RecordingOutbox, assert_settled, complete_plugin, complete_raw_plugin, deliver,
     eventually, mount_plugin, mount_raw_plugin, plugin_beat, published_projection, ran_a_turn,
-    ran_a_turn_raw, sample_envelope, serve_role_socket, task_delivery,
+    serve_role_socket, task_delivery,
 };
 use onlyne_adapter::{AdapterIo, WireMessage};
-use onlyne_client::session::dispatch::{DispatchState, SettleAuthority, on_out};
+use onlyne_client::session::dispatch::DispatchState;
 use onlyne_proto::{
-    AdapterMsg, AgentMount, Capability, ClientOp, Handoff, HelloArgs, HostOp, Lifecycle, Mount,
-    MountKind, MsgKind, Outcome, PROTOCOL_VERSION, PluginOp, Report,
+    AdapterMsg, AgentMount, Capability, HelloArgs, HostOp, Lifecycle, Mount, MountKind, Outcome,
+    PROTOCOL_VERSION, PluginOp, Report,
 };
 use onlyne_store::ClientStore;
 use onlyne_store::session::SessionLedger;
@@ -25,7 +25,7 @@ use tempfile::tempdir;
 ///
 /// `mount_plugin` keeps the assignments alone. The reconnect cases below also
 /// have to see a `bye`, because which frames a returning agent is handed — and
-/// which end it — is the fact the grace window and the merge are judged on.
+/// which end it — is the fact the read-only hold is judged on.
 async fn witnessed_plugin(
     socket: &Path,
     session: &str,
@@ -355,134 +355,6 @@ async fn an_agent_that_reconnects_inside_the_window_keeps_its_session() {
     host.abort();
 }
 
-/// A connection that returns for a session another connection already serves is
-/// held read-only, and what it sends travels with the completion that answered the
-/// task.
-///
-/// The shape is a plugin that redialed while the client still holds the socket
-/// behind it, or a restarted process that mounts under the id its session was born
-/// with. Handing it the assignment would put two answers on one task, so the
-/// returning connection gets nothing, and its `send` is held rather than put on the
-/// wire. When the task settles, the two accounts leave as one relay per downstream
-/// role, each line marked with the session that wrote it, and the returning
-/// connection is told to leave.
-#[tokio::test]
-async fn a_connection_that_returns_for_a_taken_session_is_held_and_merged() {
-    let dir = tempdir().unwrap();
-    let store = ClientStore::open(dir.path().join("client.db")).unwrap();
-    let backend = Arc::new(ReasonBackend::default());
-    let state = DispatchState::new(
-        "planner",
-        dir.path(),
-        vec!["agent".into()],
-        2,
-        backend.clone(),
-        store.clone(),
-    );
-    let outbox = Arc::new(RecordingOutbox::default());
-    state.attach_outbox(outbox.clone());
-    let (socket, host) = serve_role_socket(&state, dir.path()).await;
-
-    // Task A runs on the connection its own plugin mounted with.
-    let first_task = deliver(&state, &task_delivery("task A")).await;
-    let mut stream = mount_raw_plugin(&socket, &first_task).await;
-
-    // The same session id mounts a second time.
-    let (io_zombie, mut witnessed) = witnessed_plugin(&socket, &first_task).await;
-    assert!(
-        witnessed.try_recv().is_err(),
-        "a returning connection for a served session is handed no assignment"
-    );
-    assert!(
-        state.session_transport(&first_task).is_some(),
-        "the session stays served by the connection that came first"
-    );
-    let queued_before = store.flush_order().unwrap().len();
-    let body = io_zombie
-        .request(AdapterMsg::Plugin(PluginOp::Send(Box::new(
-            sample_envelope("reviewer", "the part I had already written"),
-        ))))
-        .await
-        .expect("the held send is answered");
-    assert!(body.ok, "the held send is not refused: {body:?}");
-    assert_eq!(
-        body.data.as_ref().and_then(|data| data.get("held")),
-        Some(&serde_json::Value::Bool(true)),
-        "the answer says the frame was held, not sent: {body:?}"
-    );
-    assert_eq!(
-        store.flush_order().unwrap().len(),
-        queued_before,
-        "a held send leaves nothing in the outbound queue"
-    );
-    let relays = |frames: Vec<ClientOp>| -> Vec<String> {
-        frames
-            .into_iter()
-            .filter_map(|op| match op {
-                ClientOp::Send(envelope) => Some(envelope),
-                _ => None,
-            })
-            .filter(|envelope| {
-                envelope.kind == MsgKind::Task
-                    && envelope.to == onlyne_proto::Principal::role("reviewer")
-            })
-            .map(|envelope| envelope.body.text.unwrap_or_default())
-            .collect()
-    };
-    assert!(
-        relays(outbox.frames().await).is_empty(),
-        "nothing reaches the downstream role before the task is answered"
-    );
-    assert!(
-        state.session_transport(&first_task).is_some(),
-        "the session the returning connection named is still served"
-    );
-
-    outbox.clear().await;
-    // The connection that owns the task answers it, so the held lines travel
-    // beside the ones the session wrote.
-    ran_a_turn_raw(&mut stream, &first_task).await;
-    let handoffs = [Handoff {
-        to_role: "reviewer".into(),
-        text: Some("the part the task wrote".into()),
-    }];
-    on_out(
-        &state,
-        &first_task,
-        Outcome::Done,
-        Some("the part the task wrote".into()),
-        None,
-        &handoffs,
-        SettleAuthority::PluginReport,
-    )
-    .await
-    .expect("the task settles");
-
-    let relayed = relays(outbox.frames().await);
-    assert_eq!(
-        relayed.as_slice(),
-        ["handoff: [retry] the part the task wrote\n[zombie] the part I had already written"],
-        "the two accounts leave as one relay for the downstream role"
-    );
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), witnessed.recv())
-            .await
-            .expect("the merged handoff retires the returning connection")
-            .as_deref()
-            .map(|line| line.starts_with("bye:")),
-        Some(true),
-        "the read-only connection is told to leave, and was never assigned"
-    );
-    assert!(
-        backend.closed_sessions.lock().is_empty(),
-        "the session that answered the task is left standing"
-    );
-    assert_eq!(state.session_count(), 1, "one session serves the role");
-    assert_settled(&store, &first_task);
-    drop(stream);
-    host.abort();
-}
-
 /// A read-only connection's own completion is answered before any bye reaches it.
 ///
 /// `adapter_socket` runs the report handler to completion and only then answers the
@@ -527,6 +399,8 @@ async fn a_read_only_completion_is_answered_before_any_bye() {
             task_id: task_id.clone(),
             outcome: Outcome::Done,
             head: Some("the returning half".into()),
+            details: None,
+            files: Vec::new(),
             reply_to: None,
             cluster_ref: None,
         })))

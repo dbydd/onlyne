@@ -8,7 +8,7 @@ use crate::reconcile::{
 };
 use crate::runtime::intent::stamp_op_id;
 use crate::runtime::runloop::ClientInit;
-use crate::session::handoff::{self, Denial};
+use crate::session::handoff;
 use anyhow::{Context, Result, anyhow};
 use onlyne_adapter::AdapterIo;
 use onlyne_config::layout::RoleWorkspace;
@@ -16,8 +16,8 @@ use onlyne_net::conn::{ClientConn, ConnReadiness, dial};
 use onlyne_net::{ConnSettings, KeyPair, NetError};
 use onlyne_proto::{
     AckArgs, AdapterMsg, AgentPhase, AssignArgs, Body, Capability, Causality, ClientOp, ControlOp,
-    DeliveryPhase, Envelope, Frame, Handoff, HandshakeArgs, HostOp, Lifecycle, LiveSession,
-    MsgKind, Outcome, PROTOCOL_VERSION, Principal, RecoveryPhase, RecycleArgs, Report, ResBody,
+    DeliveryPhase, Envelope, Frame, HandshakeArgs, HostOp, Lifecycle, LiveSession, MsgKind,
+    Outcome, PROTOCOL_VERSION, Principal, RecoveryPhase, RecycleArgs, Report, ResBody,
     ResourcePhase, SessionProjection, Welcome, new_envelope,
 };
 use onlyne_proto::{
@@ -26,8 +26,7 @@ use onlyne_proto::{
 use onlyne_store::ClientStore;
 use onlyne_store::session::{SessionLedger, SessionRecord};
 use parking_lot::Mutex;
-use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -37,6 +36,7 @@ use tokio::sync::broadcast;
 
 mod delivery;
 mod env;
+mod guards;
 mod idle;
 mod outbound;
 mod projection;
@@ -47,6 +47,7 @@ mod settle;
 mod slots;
 mod state;
 mod transport;
+mod turn_end;
 
 pub use delivery::{ReadyNotice, dispatch, on_ready};
 pub use env::{
@@ -57,6 +58,8 @@ pub use env::{
 // is an unused import in every non-test build of the crate.
 #[cfg(test)]
 pub(crate) use outbound::hello_with_live_sessions;
+// 3c's one sentence lives with the transport that speaks it, and the ACP
+// backend's tests read it here to assert a nudge reaches the agent verbatim.
 pub use outbound::{ClientLink, Outbox, send_frame};
 pub use projection::{
     note_intent_receipt, note_verdict, projection_of, sync_frame, sync_session, task_outcome_of,
@@ -68,3 +71,6 @@ pub use settle::{SETTLE_WITHOUT_TURN, SettleAuthority, on_out};
 pub use state::{
     CONTROL_SETTLE_BOUND, ControlNote, ControlWord, DispatchState, FrameGuard, SessionSlot,
 };
+#[cfg(test)]
+pub(crate) use transport::NUDGE_TEXT;
+pub use turn_end::on_turn_end;

@@ -31,12 +31,32 @@ pub trait SessionBackend: Send + Sync {
         false
     }
 
-    /// Hand one task payload to a session this backend owns.
-    fn deliver(&self, _session: &SessionRef, _task_id: &str, _prose: &str) -> Result<()> {
+    /// Hand one delivery's rendered text to a session this backend owns.
+    ///
+    /// The text is the delivery and nothing else: a backend that needs words of
+    /// its own sends them through [`SessionBackend::nudge`].
+    fn deliver(&self, _session: &SessionRef, _task_id: &str, _prompt: &str) -> Result<()> {
         Err(unsupported(
             self.name(),
             "deliver",
             "backend delivers through an adapter socket",
+        ))
+    }
+
+    /// Tell one session its turn ended without a completion, in this client's
+    /// own words (`docs/v2-CONTRACT.md` §3c).
+    ///
+    /// A backend that can hand the text over answers `Ok`; one that cannot —
+    /// because the drive has no injection channel, or its process is gone —
+    /// answers an error, and the turn-end rule settles the delivery at that
+    /// ending instead: a drive that cannot be nudged must not be told it was.
+    /// The text is this client's, verbatim; a backend composes none of it and
+    /// keeps no copy.
+    fn nudge(&self, _session: &SessionRef, _task_id: &str, _text: &str) -> Result<()> {
+        Err(unsupported(
+            self.name(),
+            "nudge",
+            "backend has no channel to hand the sentence to",
         ))
     }
 

@@ -6,7 +6,7 @@ use onlyne_proto::{AdapterMsg, HelloArgs, HostOp, MountKind, PROTOCOL_VERSION, P
 use onlyne_wire::socket::prelude::TokioListener;
 use onlyne_wire::socket::{
     LocalListener, RegistrationFile, SocketEndpoint, bind_socket_v2, connect_local,
-    registration_path, remove_registration,
+    registration_path, remove_registration, write_registration,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -35,15 +35,17 @@ impl AdapterSocket {
     ///
     /// The kind is the client's own: a role workspace's daemon serves the
     /// client surface, and no reader infers that from what happens to sit
-    /// beside the tree. `role` names the one role this process serves, and
-    /// `runtime` names the session backend that hosts it, which is the field an
-    /// external runtime's plugin matches on to find the client its session
-    /// belongs to.
+    /// beside the tree. `role` names the one role this process serves,
+    /// `runtime` the session backend that hosts it, and `placement` where this
+    /// machine displays that runtime — the machine-owned half of the pair an
+    /// external runtime's plugin matches on to find the clients it serves.
     pub fn registration(&self) -> RegistrationFile {
-        let root = RoleWorkspace::resolve(&self.workspace);
-        RegistrationFile::client(root.root())
-            .with_role(self.role.clone())
-            .with_runtime(self.dispatch.runtime_name())
+        client_registration(
+            &self.workspace,
+            &self.role,
+            &self.dispatch.runtime_name(),
+            self.dispatch.placement_name(),
+        )
     }
 
     /// Bind the workspace socket and report the endpoint that was served.
@@ -129,6 +131,49 @@ impl AdapterSocket {
         let (listener, _) = self.bind().await?;
         self.accept_loop(listener).await
     }
+}
+
+/// The registration a client for `workspace` publishes beside its socket.
+///
+/// One builder answers for the bind and for every republish after it, because
+/// the file is the machine-level record of which surface serves this tree: a
+/// second spelling of that record would drift from the first.
+pub fn client_registration(
+    workspace: &Path,
+    role: &str,
+    runtime: &str,
+    placement: Option<&str>,
+) -> RegistrationFile {
+    let root = RoleWorkspace::resolve(workspace);
+    let registration = RegistrationFile::client(root.root())
+        .with_role(role)
+        .with_runtime(runtime);
+    match placement {
+        Some(name) => registration.with_placement(name),
+        None => registration,
+    }
+}
+
+/// Rewrite the registration for `workspace` with the facts this client has now.
+///
+/// The bind publishes a registration before the role's drive is known, so the
+/// `runtime` field it carries is the default drive's backend. Every `welcome`
+/// names the real drive and the client installs the backend it selects, and
+/// this is what puts that answer on the file an external runtime's plugin reads
+/// to find the clients it serves.
+pub fn republish_registration(
+    workspace: &Path,
+    role: &str,
+    runtime: &str,
+    placement: Option<&str>,
+) -> Result<()> {
+    let root = RoleWorkspace::resolve(workspace);
+    let path = registration_path(root.root());
+    write_registration(
+        root.root(),
+        &client_registration(workspace, role, runtime, placement),
+    )
+    .with_context(|| format!("republish the client registration {}", path.display()))
 }
 
 /// The registration a serving surface owns for as long as it serves.

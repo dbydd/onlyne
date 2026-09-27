@@ -7,14 +7,22 @@
 // Anthropic `source: { type, media_type, data }` this plugin once sent — stops
 // the whole delivery inside pi, and pi reports that in its own pane without
 // handing anything back to the plugin.
+//
+// The role prose is the other half: it becomes one section of pi's system prompt
+// at `before_agent_start` (`event.systemPromptOptions.sections`, the mutable
+// prompt options pi hands the handler) and never a message. The section's value
+// is the client's own text, byte for byte.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createSurface } from "./pi-surface.mjs";
+import { PROSE_SECTION, createSurface } from "./pi-surface.mjs";
 
-/** The injection text `agent.mjs` builds for one assignment. */
-const TASK_TEXT = "[onlyne] task 11111111-1111-4111-8111-111111111111 from role:planner";
+/**
+ * One delivery text in the shape the client renders and `agent.mjs` injects.
+ * The surface carries it verbatim; it composes no part of it.
+ */
+const TASK_TEXT = "From planner:\n\nbuild it";
 
 /** One inline image part in the shape the agent hands the surface. */
 const PNG_PART = { type: "image", mime: "image/png", data: "iVBORw0KGgoAAAANSUhEUg==", name: "shot.png" };
@@ -34,6 +42,7 @@ const PNG_CONTENT = [
  */
 function fakeSurface({ refuse = null } = {}) {
   const calls = [];
+  const messages = [];
   const lines = [];
   const surface = createSurface({
     pi: {
@@ -41,11 +50,16 @@ function fakeSurface({ refuse = null } = {}) {
         calls.push({ content, options });
         if (refuse?.(content, options)) throw new Error("this pi does not take that option");
       },
+      // Recorded, never expected: no part of this plugin is a conversation
+      // message any more, and the prose is the one that could creep back.
+      sendMessage(message, options) {
+        messages.push({ message, options });
+      },
     },
     log: (line) => lines.push(line),
     context: () => null,
   });
-  return { calls, lines, surface };
+  return { calls, messages, lines, surface };
 }
 
 test("an image attachment reaches pi as one flat image content part beside the task text", () => {
@@ -112,6 +126,64 @@ test("delivery asks for followUp and a refusal of that option retries with the s
   assert.equal(refusing.calls[1].options, undefined);
   assert.deepEqual(refusing.calls[1].content, PNG_CONTENT);
   assert.deepEqual(refusing.lines, [], "a delivery that landed on the retry is not a failure");
+});
+
+/** One role prose, in the shape the client renders and `agent.mjs` hands over. */
+const PROSE_TEXT = "Read the incoming task.\n\nAnswer in the house style.\n";
+
+/** The shift `before_agent_start` hands a handler: the prompt options it is about to render. */
+const promptEvent = () => ({ systemPromptOptions: { sections: {} } });
+
+test("the role prose becomes one system-prompt section, byte for byte", () => {
+  const { surface, calls, messages } = fakeSurface();
+  assert.equal(surface.roleProse(PROSE_TEXT), true);
+
+  const event = promptEvent();
+  assert.equal(surface.applyRoleProse(event), true);
+  assert.deepEqual(event.systemPromptOptions.sections, { [PROSE_SECTION]: PROSE_TEXT });
+  // The client's bytes exactly: no prefix naming the role, no label, no newline
+  // of this plugin's own.
+  assert.equal(event.systemPromptOptions.sections[PROSE_SECTION], PROSE_TEXT);
+  // And it travelled as no message at all: the injection that used to put the
+  // prose in the transcript's message stream is gone.
+  assert.deepEqual(messages, [], "the role prose is not a conversation message");
+  assert.deepEqual(calls, [], "and not a user message either");
+});
+
+test("no prose arrived is no section written", () => {
+  const { surface } = fakeSurface();
+  const event = promptEvent();
+
+  assert.equal(surface.applyRoleProse(event), false);
+  assert.deepEqual(event.systemPromptOptions.sections, {});
+});
+
+test("every run writes the section again, because pi rebuilds the prompt options per run", () => {
+  const { surface } = fakeSurface();
+  surface.roleProse(PROSE_TEXT);
+
+  const first = promptEvent();
+  const second = promptEvent();
+  assert.equal(surface.applyRoleProse(first), true);
+  assert.equal(surface.applyRoleProse(second), true);
+  assert.deepEqual(second.systemPromptOptions.sections, first.systemPromptOptions.sections);
+
+  // A later prose — the spec edited between two runs of one session — takes the
+  // section over rather than being masked by the text that was written first.
+  surface.roleProse("Answer in the log style.");
+  const third = promptEvent();
+  surface.applyRoleProse(third);
+  assert.deepEqual(third.systemPromptOptions.sections, { [PROSE_SECTION]: "Answer in the log style." });
+});
+
+test("a pi whose prompt options carry no sections reports it once and carries no prose", () => {
+  const { surface, lines } = fakeSurface();
+  surface.roleProse(PROSE_TEXT);
+
+  assert.equal(surface.applyRoleProse({ systemPromptOptions: {} }), false);
+  assert.equal(surface.applyRoleProse({}), false);
+  assert.equal(lines.length, 1, "one line, not one per run");
+  assert.match(lines[0], /no instruction layer/);
 });
 
 /**

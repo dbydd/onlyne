@@ -53,7 +53,9 @@ use onlyne_wire::{FrameReader, read_frame, write_frame};
 // The crate root names `PluginOp` and its siblings; `HandoffArgs` is reached by
 // its module because the root list does not carry it.
 use onlyne_proto::adapter::HandoffArgs;
-pub use onlyne_proto::{Capability, HelloAck, HelloArgs, Mount, MountKind, PROTOCOL_VERSION};
+pub use onlyne_proto::{
+    Capability, HelloAck, HelloArgs, Mount, MountKind, PROTOCOL_VERSION, ToolsMount,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf, split};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -998,16 +1000,26 @@ impl ReportSender {
         Ok(report)
     }
 
+    /// File this session's verdict for a task.
+    ///
+    /// `head` is the one-line preview the ledger keeps for the operator;
+    /// `details` is the full result, which the client delivers verbatim to the
+    /// next hop and the originator, and `files` names the files it refers to.
+    /// A caller with only a head passes `None` and an empty list.
     pub async fn complete(
         &self,
         task_id: impl Into<String>,
         outcome: Outcome,
         head: Option<String>,
+        details: Option<String>,
+        files: Vec<String>,
     ) -> Result<Report> {
         let report = Report::Complete {
             task_id: task_id.into(),
             outcome,
             head,
+            details,
+            files,
             reply_to: None,
             cluster_ref: None,
         };
@@ -1214,6 +1226,13 @@ where
                     | PluginOp::Typing(_)
                     | PluginOp::Detach(_)
             ),
+            MountKind::Tools => matches!(
+                op,
+                PluginOp::Send(_)
+                    | PluginOp::Handoff(_)
+                    | PluginOp::Report(_)
+                    | PluginOp::Detach(_)
+            ),
             MountKind::Admin => false,
         };
         if allowed {
@@ -1387,8 +1406,12 @@ impl AgentHandle {
         task_id: impl Into<String>,
         outcome: Outcome,
         head: Option<String>,
+        details: Option<String>,
+        files: Vec<String>,
     ) -> Result<Report> {
-        self.reports.complete(task_id, outcome, head).await
+        self.reports
+            .complete(task_id, outcome, head, details, files)
+            .await
     }
 
     pub async fn report_fault(

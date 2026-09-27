@@ -1,4 +1,5 @@
 use super::*;
+use onlyne_config::{Placement, validate_drive_placement};
 
 pub fn process_env() -> BTreeMap<String, String> {
     std::env::vars().collect()
@@ -25,197 +26,168 @@ fn zellij_host_present(env: &BTreeMap<String, String>) -> bool {
     env.contains_key("ZELLIJ")
 }
 
-/// Map process environment to a backend choice.
-pub fn detect_host(env: &BTreeMap<String, String>) -> HostDetection {
-    let explicit = env
-        .get("ONLYNE_BACKEND")
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    if let Some(name) = &explicit {
-        if !name.eq_ignore_ascii_case("auto") {
-            return HostDetection {
-                backend: BackendName::parse(name),
-                source: SelectionSource::Explicit,
-                explicit: Some(name.clone()),
-            };
-        }
-    }
-    let backend = if herdr_host_present(env) {
-        Some(BackendName::Herdr)
+/// The pane this process is already inside, if any: what an absent `placement`
+/// probes, in the plan's order (herdr, orca, zellij).
+fn probed_placement(env: &BTreeMap<String, String>) -> Option<Placement> {
+    if herdr_host_present(env) {
+        Some(Placement::Herdr)
     } else if orca_host_present(env) {
-        Some(BackendName::Orca)
+        Some(Placement::Orca)
     } else if zellij_host_present(env) {
-        Some(BackendName::Zellij)
+        Some(Placement::Zellij)
     } else {
         None
-    };
-    HostDetection {
-        source: if backend.is_some() {
-            SelectionSource::Env
-        } else {
-            SelectionSource::None
-        },
-        backend,
-        explicit,
     }
 }
 
+/// Resolve the placement this client runs under.
+///
+/// Precedence, highest first: a nonempty `ONLYNE_BACKEND` that names a
+/// placement, the placement this run declared — the workspace config's
+/// `placement` key for `onlyne-client run`, an embedding's own answer
+/// otherwise — then the probe over the three pane hosts, and finally `headless`
+/// — the fallback the plan fixes for a machine with no terminal host
+/// (`docs/v2-PLAN.md` §"驱动与放置").
+///
+/// An explicit name that matches nothing is refused by name. It is never
+/// silently replaced by the probe, because a cluster running under a placement
+/// nobody chose is the failure this split exists to remove.
+pub fn detect_placement(
+    env: &BTreeMap<String, String>,
+    declared: Option<SessionPlacement>,
+) -> Result<PlacementDetection> {
+    let explicit = env
+        .get("ONLYNE_BACKEND")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"));
+    if let Some(name) = &explicit {
+        let Some(placement) = SessionPlacement::parse(name) else {
+            return Err(UnknownPlacement(name.clone()).into());
+        };
+        return Ok(PlacementDetection {
+            placement,
+            source: SelectionSource::Explicit,
+            explicit: Some(name.clone()),
+        });
+    }
+    if let Some(placement) = declared {
+        return Ok(PlacementDetection {
+            placement,
+            source: SelectionSource::Declared,
+            explicit: None,
+        });
+    }
+    let probed = probed_placement(env);
+    Ok(PlacementDetection {
+        placement: SessionPlacement::Named(probed.unwrap_or(Placement::Headless)),
+        source: if probed.is_some() {
+            SelectionSource::Probe
+        } else {
+            SelectionSource::Fallback
+        },
+        explicit: None,
+    })
+}
+
+/// `onlyne-client doctor`: the placement this machine resolves, as JSON, with
+/// exit 0 for every answer — a refusal included, which the caller reads as the
+/// `refusal` line rather than as a process failure.
 pub fn doctor_report(env: &BTreeMap<String, String>) -> Value {
-    let detected = detect_host(env);
-    let host = detected.backend.map(|name| name.as_str());
-    let backend_selection = match detected.source {
+    let detected = detect_placement(env, None);
+    let found = detected.as_ref().ok();
+    let placement = found.map(|detected| detected.placement.as_str());
+    let selection = found.map(|detected| match detected.source {
         SelectionSource::Explicit => "explicit",
-        SelectionSource::Env => "env",
-        SelectionSource::None => "none",
-    };
-    let binary = match detected.backend {
-        Some(BackendName::Herdr) => Some(
+        SelectionSource::Declared => "declared",
+        SelectionSource::Probe => "probe",
+        SelectionSource::Fallback => "fallback",
+    });
+    let binary = match placement {
+        Some("herdr") => Some(
             env.get("HERDR_BIN_PATH")
                 .filter(|value| !value.is_empty())
                 .cloned()
                 .unwrap_or_else(|| "herdr".into()),
         ),
-        Some(BackendName::Orca) => Some(
+        Some("orca") => Some(
             env.get("ORCA_CLI_COMMAND")
                 .filter(|value| !value.is_empty())
                 .cloned()
                 .unwrap_or_else(|| "orca".into()),
         ),
-        Some(BackendName::Zellij) => Some(
+        Some("zellij") => Some(
             env.get("ZELLIJ_COMMAND")
                 .filter(|value| !value.is_empty())
                 .cloned()
                 .unwrap_or_else(|| "zellij".into()),
         ),
-        // `exec`, `acp` and `fake` run or drive a command the role config names,
-        // so there is no host binary to report.
-        Some(BackendName::Exec) | Some(BackendName::Acp) | Some(BackendName::Fake) => None,
-        None => None,
+        // `headless`, `external` and `fake` run or drive a command the role
+        // config names, so there is no host binary to report.
+        _ => None,
     };
     let mut report = serde_json::json!({
-        "host": host,
+        "placement": placement,
+        "placement_selection": selection,
         "binary": binary,
         "session": env.get("HERDR_SESSION").filter(|value| !value.is_empty()),
         "workspace_id": env.get("HERDR_WORKSPACE_ID").filter(|value| !value.is_empty()),
         "tab_id": env.get("HERDR_TAB_ID").filter(|value| !value.is_empty()),
         "pane_id": env.get("HERDR_PANE_ID").filter(|value| !value.is_empty()),
-        "backend_selection": backend_selection,
-        "explicit": detected.explicit,
+        "explicit": found.and_then(|detected| detected.explicit.clone()),
     });
-    if detected.backend.is_none() {
-        report["refusal"] = Value::String(NO_SUPPORTED_HOST.into());
+    if let Err(error) = &detected {
+        report["refusal"] = Value::String(error.to_string());
     }
     report
 }
 
-/// Build a backend from an environment map. `ONLYNE_BACKEND` wins when it
-/// names `herdr`, `orca`, `zellij`, `exec` (alias `headless`), `acp`, or
-/// `fake`. An empty or `auto` value probes herdr, then orca, then zellij.
-/// `exec`, `acp` and `fake` are never discovered. No match returns
-/// [`NoSupportedHost`].
-pub fn select_backend_from_env(
-    env: &BTreeMap<String, String>,
-    runner: Arc<dyn Runner>,
-    policy: WorktreePolicy,
-    acp: &AcpOptions,
-) -> Result<Box<dyn SessionBackend>> {
-    let detected = detect_host(env);
-    match detected.backend {
-        Some(name) => backend_by_name(name.as_str(), runner, policy, acp),
-        None if detected
-            .explicit
-            .as_deref()
-            .is_some_and(|name| !name.eq_ignore_ascii_case("auto")) =>
-        {
-            Err(anyhow::anyhow!(
-                "unknown session backend: {}; accepted: {}",
-                detected.explicit.unwrap_or_default(),
-                BACKEND_NAMES
-            ))
-        }
-        None => Err(NoSupportedHost.into()),
-    }
-}
-
-/// Probe the process environment. Live `HERDR_*` / `ORCA_*` / `ZELLIJ` values
-/// on the developer machine affect this path; tests use
-/// [`select_backend_from_env`].
-pub fn select_backend(
-    runner: Arc<dyn Runner>,
-    policy: WorktreePolicy,
-    acp: &AcpOptions,
-) -> Result<Box<dyn SessionBackend>> {
-    let mut env = process_env();
-    env.remove("ONLYNE_BACKEND");
-    select_backend_from_env(&env, runner, policy, acp)
-}
-
-pub fn backend_by_name(
-    name: &str,
-    runner: Arc<dyn Runner>,
-    policy: WorktreePolicy,
-    acp: &AcpOptions,
-) -> Result<Box<dyn SessionBackend>> {
-    match BackendName::parse(name) {
-        Some(BackendName::Herdr) => Ok(Box::new(herdr::HerdrBackend::new(runner))),
-        Some(BackendName::Orca) => Ok(Box::new(orca::OrcaBackend::with_policy(runner, policy))),
-        Some(BackendName::Zellij) => Ok(Box::new(zellij::ZellijBackend::new(runner))),
-        Some(BackendName::Fake) => Ok(Box::new(fake::FakeBackend::new())),
-        Some(BackendName::Exec) => Ok(Box::new(exec::ExecBackend::new())),
-        Some(BackendName::Acp) => Ok(Box::new(acp::AcpBackend::new(acp.clone()))),
-        None => Err(anyhow::anyhow!(
-            "unknown session backend: {name}; accepted: {BACKEND_NAMES}"
-        )),
-    }
-}
-
-/// Resolve a backend name to a concrete backend. `auto` and empty probe the
-/// supplied runner's process environment through [`select_backend`]. Named
-/// values stay exact: an unknown name errors and names the accepted set.
-pub fn backend_for(
-    requested: &str,
-    runner: Arc<dyn Runner>,
-    policy: WorktreePolicy,
-    acp: &AcpOptions,
-) -> Result<Box<dyn SessionBackend>> {
-    backend_for_env(requested, &process_env(), runner, policy, acp)
-}
-
-pub fn backend_for_env(
-    requested: &str,
-    env: &BTreeMap<String, String>,
-    runner: Arc<dyn Runner>,
-    policy: WorktreePolicy,
-    acp: &AcpOptions,
-) -> Result<Box<dyn SessionBackend>> {
-    let name = requested.trim();
-    if name.eq_ignore_ascii_case("auto") || name.is_empty() {
-        let mut probe = env.clone();
-        probe.remove("ONLYNE_BACKEND");
-        return select_backend_from_env(&probe, runner, policy, acp);
-    }
-    backend_by_name(name, runner, policy, acp)
-}
-
-/// Client default backend: driven by `ONLYNE_BACKEND`
-/// (`herdr` | `orca` | `zellij` | `exec`/`headless` | `acp` | `fake` | `auto`).
-/// An empty value probes herdr, then orca, then zellij. `exec`, `acp` and
-/// `fake` stay opt-in. `headless` selects [`BackendName::Exec`];
-/// [`BackendName::as_str`] still answers `exec`.
+/// Build the backend one `drive × placement` pair selects.
 ///
-/// `worktree` is the workspace config's `[orca] worktree` policy; only the
-/// Orca backend reads it. `acp` is the `[acp]` table, read only by the ACP
-/// backend.
-pub fn default_backend(
-    worktree: WorktreePolicy,
+/// The drive is a property of the runtime and arrives from the role's spec with
+/// `welcome`; the placement is a property of this machine. Together they are
+/// the plan's four rows:
+///
+/// | drive | placement | who starts the runtime |
+/// |---|---|---|
+/// | plugin | herdr / orca / zellij | the client, in that pane; the plugin dials back |
+/// | plugin | headless | the client, in the background; the plugin dials back |
+/// | plugin | external | nobody: the resident runtime dials in |
+/// | acp | headless | the client, as a child it speaks ACP to on stdio |
+/// | exec | any placement | the client, which reads the exit code |
+///
+/// The pair is validated first: `acp` pairs only with `headless`, because stdio
+/// carries the ACP channel and cannot also be a pane's terminal.
+///
+/// `fake` is the in-process runtime the test suite selects through
+/// `ONLYNE_BACKEND`; it ignores the drive, because it owns no process at all.
+pub fn backend_for(
+    drive: onlyne_config::Drive,
+    placement: SessionPlacement,
+    runner: Arc<dyn Runner>,
+    policy: WorktreePolicy,
     acp: &AcpOptions,
 ) -> Result<Box<dyn SessionBackend>> {
-    let env = process_env();
-    backend_for_env(
-        env.get("ONLYNE_BACKEND").map(String::as_str).unwrap_or(""),
-        &env,
-        Arc::new(ProcessRunner),
-        worktree,
-        acp,
-    )
+    if let Some(named) = placement.named() {
+        validate_drive_placement(drive, named).map_err(|message| anyhow::anyhow!("{message}"))?;
+    }
+    Ok(match placement {
+        SessionPlacement::Fake => Box::new(fake::FakeBackend::new()),
+        SessionPlacement::Named(Placement::Herdr) => Box::new(herdr::HerdrBackend::new(runner)),
+        SessionPlacement::Named(Placement::Orca) => {
+            Box::new(orca::OrcaBackend::with_policy(runner, policy))
+        }
+        SessionPlacement::Named(Placement::Zellij) => Box::new(zellij::ZellijBackend::new(runner)),
+        SessionPlacement::Named(Placement::Headless) => match drive {
+            onlyne_config::Drive::Acp => Box::new(acp::AcpBackend::new(acp.clone())),
+            onlyne_config::Drive::Plugin | onlyne_config::Drive::Exec => {
+                Box::new(exec::ExecBackend::new())
+            }
+        },
+        SessionPlacement::Named(Placement::External) => match drive {
+            onlyne_config::Drive::Plugin => Box::new(external::ExternalBackend::new()),
+            onlyne_config::Drive::Acp | onlyne_config::Drive::Exec => {
+                Box::new(exec::ExecBackend::new())
+            }
+        },
+    })
 }

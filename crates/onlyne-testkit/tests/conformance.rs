@@ -280,6 +280,8 @@ fn platform_payload_stays_on_gateway_side() {
     let propagated = AssignArgs {
         envelope: inbound.envelope,
         prose: "agent prose".to_string(),
+        text: "From gateway:fg1:fake:conv-1:\n\nhello".to_string(),
+        attachments: Vec::new(),
         task_id: "task-1".to_string(),
         generation: 1,
         parent: None,

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use onlyne_client::{
-    ClientInit, ops::init::InitArgs, ops::local_cli, ops::local_cli::LocalCli, runtime::daemon,
-    runtime::intent::IntentMachine,
+    ClientInit, backend::SessionPlacement, ops::init::InitArgs, ops::local_cli,
+    ops::local_cli::LocalCli, runtime::daemon, runtime::intent::IntentMachine,
 };
 use onlyne_proto::QueryRolesArgs;
 use std::path::{Path, PathBuf};
@@ -17,16 +17,20 @@ struct Cli {
 enum Command {
     /// Run one role client against its workspace config.
     ///
-    /// Each session this client holds needs a terminal host for its pane, so a
-    /// run that detects no host and names no backend in ONLYNE_BACKEND or in
-    /// the workspace config's `backend` key stops at startup with exit 5.
+    /// A session is displayed somewhere, and that placement is this machine's:
+    /// absent from the workspace config, it probes herdr, then orca, then
+    /// zellij, and falls back to running the runtime in the background. A name
+    /// neither the environment nor the config knows stops the run at startup
+    /// with exit 5.
     #[command(
         after_help = "config: --workspace names the role workspace; its `.onlyne/config.toml` \
-                      carries `backend` (herdr|orca|zellij|exec|headless|acp|fake|auto; empty \
-                      probes the host, ONLYNE_BACKEND wins) and, for the acp backend, the \
+                      carries `placement` (herdr|orca|zellij|headless|external; absent probes \
+                      herdr, orca, zellij and falls back to headless, and a nonempty \
+                      ONLYNE_BACKEND wins) and, for a role whose spec drives it with acp, the \
                       `[acp]` table: `mode`, `model`, `reasoning_effort` (each validated by \
                       the agent, empty keeps its default) and `permission` (`deny`, the \
-                      default, or `allow`)."
+                      default, or `allow`). The drive itself is the runtime's property and \
+                      lives in the server's spec.toml: `[client.runtime] drive` and `command`."
     )]
     Run {
         #[arg(long)]
@@ -84,7 +88,7 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
-    /// Print host detection JSON. Needs no socket. Always exits 0.
+    /// Print placement-detection JSON. Needs no socket. Always exits 0.
     Doctor,
 }
 
@@ -164,7 +168,11 @@ async fn main() {
                     .with_orca_worktree(config.orca.worktree)
                     .with_stall_report_secs(config.stall_report_secs)
                     .with_reconnect_grace_secs(config.reconnect_grace_secs)
-                    .with_backend(config.backend)
+                    // The workspace key names one of the five placements; the
+                    // run's own declaration carries the resolved vocabulary,
+                    // which is also what lets an embedding name the in-process
+                    // runtime a config file may not.
+                    .with_placement(config.placement.map(SessionPlacement::Named))
                     .with_acp(config.acp)
                     .with_session(config.client.session),
                 )
@@ -173,7 +181,7 @@ async fn main() {
                     Ok(()) => 0,
                     Err(error)
                         if error
-                            .downcast_ref::<onlyne_client::backend::NoSupportedHost>()
+                            .downcast_ref::<onlyne_client::backend::UnknownPlacement>()
                             .is_some() =>
                     {
                         eprintln!("{error}");

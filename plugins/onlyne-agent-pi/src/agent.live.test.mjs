@@ -65,7 +65,7 @@ test("a real onlyne-client answers hello with a welcome", { skip: !hasBinaries }
     available: { wakeUser: true },
     calls: [],
     wakeUser(text) { this.calls.push(text); return true; },
-    proseContext: () => true,
+    roleProse: () => true,
     customEntry: () => true,
     status: () => {},
     welcome: () => {},

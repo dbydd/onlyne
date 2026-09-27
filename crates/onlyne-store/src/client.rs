@@ -44,9 +44,11 @@ pub const CLIENT_DDL: &str = r#"-- The client's own mirror of the sessions it ho
 -- session serves lives in `session_tasks` below.
 --
 -- Two columns are the client's alone, because only the process that holds a
--- session can answer them: `backend` names the runtime's placement and
--- `backend_ref` is the reference that runtime answers to. There is no `role`
--- column: one client serves one role, and the workspace config owns that fact.
+-- session can answer them: `backend` names the backend that ran it (`acp`,
+-- `exec`, `herdr`, `external`, … — which one comes from the role's drive under
+-- the placement this machine resolved) and `backend_ref` is the reference that
+-- backend answers to. There is no `role` column: one client serves one role,
+-- and the workspace config owns that fact.
 CREATE TABLE IF NOT EXISTS sessions(
   session_id TEXT PRIMARY KEY,
   generation INTEGER NOT NULL,
@@ -734,9 +736,8 @@ fn intent_task_matches(env_json: &str, task_id: &str) -> bool {
         == Some(task_id)
 }
 
-/// What the stored backend reference says about the session itself: the
-/// runtime's name for its placement, and the id this client files the session
-/// under.
+/// What the stored backend reference says about the session itself: the backend
+/// that ran it, and the id this client files the session under.
 ///
 /// `backend_ref` is the whole `SessionRef` a backend handed back, serialized,
 /// so its `task_id` is the session's own key on this side — a client-held

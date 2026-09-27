@@ -6,15 +6,13 @@
 //! log file — and a mounted plugin inside that place reports the session's state
 //! back. An ACP agent has no place and mounts nothing: it is a process that
 //! speaks a turn protocol on a pipe, so this backend owns both halves the plugin
-//! would otherwise supply. It carries the payload itself
+//! would otherwise supply. It carries the delivery itself
 //! ([`SessionBackend::deliver`]) and it reports the ending itself
-//! ([`SessionBackend::outcomes`]). The agent's half is one file: every prompt
-//! names an absolute report path under the workspace, and the turn's end reads
-//! it once and clears that path — spending an accepted report, moving a refused
-//! one aside as evidence — so a report stands in for the closing words of exactly
-//! the turn that was asked for it. The agent is a self-driving role with no
-//! plugin of ours inside it, so a file left behind is the whole of what it can
-//! say about how it ended.
+//! ([`SessionBackend::outcomes`]). The ending is the agent's own: the head is
+//! the closing message it streamed, and its stop reason decides the standing.
+//! The agent is a self-driving role with no plugin of ours inside it, so the
+//! conversation this client journaled is the whole of what it can say about how
+//! it ended.
 //!
 //! Process discipline, which is what makes it different from a loop that just
 //! calls [`onlyne_acp::Agent::prompt`]:
@@ -41,10 +39,8 @@
 //! * **the conversation is written down.** An ACP session owns no terminal, so
 //!   `<workspace>/.onlyne/logs/session-<task>.log` (rendered, for `tail -f`) and
 //!   `session-<task>.events.jsonl` (raw updates, plus this client's own
-//!   `dispatch`, `payload`, `evidence`, `handoff` and `turn` records) are the whole
-//!   human-visible surface. Both are best effort: a write that fails is a
-//!   warning, never a
-//!   failed turn.
+//!   `dispatch` and `turn` records) are the whole human-visible surface. Both
+//!   are best effort: a write that fails is a warning, never a failed turn.
 //! * **closing does not wait on the dispatch lock.** A close asks the agent to
 //!   stop, waits a short bounded moment for the turn, and hands a turn that is
 //!   still running to a detached thread rather than parking its caller.
@@ -55,6 +51,7 @@
 use super::*;
 
 mod journal;
+mod mcp;
 mod process;
 mod session;
 mod state;

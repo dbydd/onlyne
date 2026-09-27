@@ -42,12 +42,13 @@ impl AcpBackend {
     }
 
     /// The argv this session's agent runs as: the role's rendered
-    /// `session_command`, never a string handed to a shell.
+    /// `[client.runtime] command`, never a string handed to a shell.
     pub(super) fn command_of(spec: &SpawnSpec) -> Result<Vec<String>> {
         match spec.command.first() {
             Some(program) if !program.trim().is_empty() => Ok(spec.command.clone()),
             _ => Err(anyhow::anyhow!(
-                "acp: role has no session_command; there is nothing to run for task {}",
+                "acp: the role's `[client.runtime] command` is empty; there is nothing to run \
+                 for task {}",
                 spec.task_id
             )),
         }

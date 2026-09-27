@@ -3,13 +3,57 @@
 use super::*;
 
 #[test]
+fn a_nudge_is_a_turn_of_its_own_and_the_journal_says_which_it_was() {
+    use crate::session::dispatch::NUDGE_TEXT;
+
+    let fake = Fake::new();
+    let backend = AcpBackend::new(AcpOptions::default());
+    let session = backend.spawn(fake.spec("t-nudge")).unwrap();
+    let feed = backend
+        .outcomes()
+        .expect("an acp backend reports its own endings");
+    let events = journal(&session, "events");
+
+    // A turn the agent ends without a completion is the ending §3c's rule reads,
+    // and the rule's own answer to it is one sentence on the same conversation.
+    backend
+        .deliver(&session, "t-nudge", "MARK:noanswer look at the tests")
+        .expect("the first turn");
+    let first = await_outcome(&feed, "t-nudge");
+    assert_eq!(first.outcome, NO_VERDICT);
+
+    backend
+        .nudge(&session, "t-nudge", NUDGE_TEXT)
+        .expect("a nudge is a turn");
+    let second = await_outcome(&feed, "t-nudge");
+    assert_eq!(second.outcome, NO_VERDICT);
+    assert_eq!(
+        fake.traced().matches("prompt ").count(),
+        2,
+        "the nudge reached the agent as a prompt of its own: {}",
+        fake.traced()
+    );
+
+    // The journal separates the assignment from the nudge: a reader of the
+    // session's record has to be able to tell what the client asked for from
+    // what the rule asked again.
+    let lines = jsonl(&events);
+    assert_eq!(onlyne_records(&lines, "dispatch").len(), 1, "{lines:?}");
+    let nudges = onlyne_records(&lines, "nudge");
+    assert_eq!(nudges.len(), 1, "{lines:?}");
+    assert_eq!(nudges[0]["task_id"], "t-nudge");
+    assert_eq!(nudges[0]["prompt"], NUDGE_TEXT);
+    finish(&backend, &fake, &[&session]);
+}
+
+#[test]
 fn a_turn_journals_its_asking_its_answer_and_its_ending() {
     let fake = Fake::new();
     let backend = AcpBackend::new(AcpOptions::default());
     let session = backend.spawn(fake.spec("t-journal")).unwrap();
     let (outcome, lines, log) = run_turn(&backend, &session, "t-journal", "fix the bug");
 
-    assert_eq!(outcome.outcome, TaskState::Done);
+    assert_eq!(outcome.outcome, NO_VERDICT);
     assert_eq!(outcome.head.as_deref(), Some("I edited hello.py."));
     assert!(outcome.note.is_none());
     assert!(outcome.refusals.is_none());
@@ -19,14 +63,10 @@ fn a_turn_journals_its_asking_its_answer_and_its_ending() {
     let dispatch = onlyne_records(&lines, "dispatch");
     assert_eq!(dispatch.len(), 1, "{lines:?}");
     assert_eq!(dispatch[0]["task_id"], "t-journal");
-    // The dispatch record is the whole prompt: the task's prose with this
-    // backend's completion directive appended.
-    let prose = dispatch[0]["prose"].as_str().expect("a prompt is text");
-    assert!(prose.starts_with("fix the bug"), "{prose}");
-    assert!(
-        prose.contains("Result report (write before you stop): "),
-        "{prose}"
-    );
+    // The dispatch record's own field is the prompt, and the prompt is the task's prose
+    // alone: this backend appends no directive of its own.
+    let prompt = dispatch[0]["prompt"].as_str().expect("a prompt is text");
+    assert_eq!(prompt, "fix the bug");
     assert!(dispatch[0]["at"].as_str().unwrap().ends_with('Z'));
     assert!(lines[0].get("onlyne").is_some());
     let turn = onlyne_records(&lines, "turn");
@@ -75,7 +115,7 @@ fn another_sessions_text_stays_out_of_this_turns_journal() {
     let backend = AcpBackend::new(AcpOptions::default());
     let session = backend.spawn(fake.spec("t-noise")).unwrap();
     let (outcome, lines, log) = run_turn(&backend, &session, "t-noise", "MARK:noise go");
-    assert_eq!(outcome.outcome, TaskState::Done);
+    assert_eq!(outcome.outcome, NO_VERDICT);
     assert!(!log.contains("not this turn"), "{log}");
     assert!(
         !lines.iter().any(|line| line["sessionId"] == "sess-other"),
@@ -92,49 +132,49 @@ fn every_stop_reason_that_is_not_an_answer_settles_a_turn() {
     let cases = [
         (
             "MARK:cancel",
-            TaskState::Cancelled,
+            Some(TaskState::Cancelled),
             "cancelled",
             "cancelled",
             Some("cancelled"),
         ),
         (
             "MARK:maxtokens",
-            TaskState::Failed,
+            Some(TaskState::Failed),
             "over-tokens",
             "max_tokens",
             Some("max_tokens"),
         ),
         (
             "MARK:refusal",
-            TaskState::Failed,
+            Some(TaskState::Failed),
             "refused",
             "refusal",
             Some("refusal"),
         ),
         (
             "MARK:weird",
-            TaskState::Failed,
+            Some(TaskState::Failed),
             "unknown-reason",
             "stopped_by_hook",
             Some("stopped_by_hook"),
         ),
         (
             "MARK:nostop",
-            TaskState::Failed,
+            Some(TaskState::Failed),
             "no-stop-reason",
             "(absent)",
             Some("(absent)"),
         ),
         (
             "MARK:noanswer MARK:nostop",
-            TaskState::Failed,
+            Some(TaskState::Failed),
             "silent-and-cut",
             "(absent)",
             Some("no answer"),
         ),
         (
             "MARK:noanswer",
-            TaskState::Done,
+            NO_VERDICT,
             "silent-answer",
             "end_turn",
             None,
@@ -205,7 +245,7 @@ fn a_blocked_journal_never_loses_a_turn() {
     let backend = AcpBackend::new(AcpOptions::default());
     let session = backend.spawn(fake.spec("t-blocked")).unwrap();
     let (outcome, _lines, _log) = run_turn(&backend, &session, "t-blocked", "carry on");
-    assert_eq!(outcome.outcome, TaskState::Done);
+    assert_eq!(outcome.outcome, NO_VERDICT);
     assert_eq!(outcome.head.as_deref(), Some("I edited hello.py."));
     finish(&backend, &fake, &[&session]);
 }

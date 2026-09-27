@@ -937,13 +937,13 @@ fn supervisor_refusal(verb: &str) -> String {
              onlyne_handoff continues the family this session was handed"
         }
         "handoff" => {
-            "hands work on with its plugin's own tool, onlyne_handoff (task_id, to, text, image), \
-             which names this task as the child's parent_task and carries the family's hop \
-             budget, origin, deadline, and labels"
+            "hands work on with its plugin's own tool, onlyne_handoff (to, text, image), which \
+             continues this session's task family, carrying its hop budget, origin, deadline, \
+             and labels"
         }
         "complete" => {
-            "reports its ending with its plugin's own tool, onlyne_complete (outcome, text, \
-             force, reason)"
+            "reports its ending with its plugin's own tool, onlyne_complete (outcome, summary, \
+             details, files)"
         }
         "reply" => {
             "replies through its plugin, which answers for its session and offers no reply tool \
@@ -1527,7 +1527,7 @@ fn schema_prints_the_compiled_document_per_target() {
     let dir = tempfile::tempdir().unwrap();
 
     for (target, title, key) in [
-        ("client", "ClientConfig", "backend"),
+        ("client", "ClientConfig", "placement"),
         ("spec", "Spec", "server"),
     ] {
         let output = Command::new(bin())
@@ -2877,7 +2877,7 @@ fn gateway_status_queries_the_admin_socket() {
 }
 
 /// `skill export` reads the documents out of the binary, so it needs no socket
-/// and no source checkout: the four land under `.agents/skills` in the working
+/// and no source checkout: the three land under `.agents/skills` in the working
 /// directory, and a second run over that tree matches every byte.
 #[test]
 fn skill_export_writes_the_shipped_documents_under_the_working_directory() {
@@ -2899,15 +2899,10 @@ fn skill_export_writes_the_shipped_documents_under_the_working_directory() {
     let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         body["data"]["written"].as_array().unwrap().len(),
-        4,
+        3,
         "{body}"
     );
-    for name in [
-        "onlyne-supervisor",
-        "onlyne-role",
-        "onlyne-role-payload-v2",
-        "onlyne",
-    ] {
+    for name in ["onlyne-supervisor", "onlyne-role", "onlyne"] {
         let file = dir
             .path()
             .join(".agents/skills")
@@ -2931,7 +2926,7 @@ fn skill_export_writes_the_shipped_documents_under_the_working_directory() {
     );
     assert_eq!(
         body["data"]["unchanged"].as_array().unwrap().len(),
-        4,
+        3,
         "{body}"
     );
 }

@@ -32,7 +32,8 @@ currently answering. A registration file that does not parse is skipped by the
 reader rather than aborting the listing, and the count goes to stderr.
 
 `ROOT` is the canonical owner tree: pass it to `--server-root` or `--workspace`
-to address that surface.";
+to address that surface. `RUNTIME` names the client's session backend, and
+`PLACEMENT` names where the machine displays it.";
 
 /// One row of the listing, and the `--json` shape: the registration's own fields
 /// plus the two liveness facts and the socket path they describe.
@@ -44,6 +45,7 @@ struct Row {
     pid: u32,
     version: String,
     runtime: Option<String>,
+    placement: Option<String>,
     socket: PathBuf,
     socket_exists: bool,
     pid_alive: bool,
@@ -106,6 +108,7 @@ fn row(path: &Path, reg: &RegistrationFile) -> Row {
         pid: reg.pid,
         version: reg.version.clone(),
         runtime: reg.runtime.clone(),
+        placement: reg.placement.clone(),
         socket_exists: std::fs::symlink_metadata(&socket).is_ok(),
         pid_alive: pid_alive(reg.pid),
         socket,
@@ -146,12 +149,12 @@ fn print_table(rows: &[Row]) {
         .unwrap_or(0);
 
     println!(
-        "{:<6} {:<8} {:<root_width$}  {:>pid_width$}  {:<7} {:<7} {:<7} VERSION",
-        "KIND", "ROLE", "ROOT", "PID", "SOCKET", "ALIVE", "RUNTIME",
+        "{:<6} {:<8} {:<root_width$}  {:>pid_width$}  {:<7} {:<7} {:<7} {:<9} VERSION",
+        "KIND", "ROLE", "ROOT", "PID", "SOCKET", "ALIVE", "RUNTIME", "PLACEMENT",
     );
     for row in rows {
         println!(
-            "{:<6} {:<8} {:<root_width$}  {:>pid_width$}  {:<7} {:<7} {:<7} {}",
+            "{:<6} {:<8} {:<root_width$}  {:>pid_width$}  {:<7} {:<7} {:<7} {:<9} {}",
             row.kind,
             cell(row.role.as_deref()),
             row.root.display(),
@@ -159,6 +162,7 @@ fn print_table(rows: &[Row]) {
             yes_no(row.socket_exists),
             yes_no(row.pid_alive),
             cell(row.runtime.as_deref()),
+            cell(row.placement.as_deref()),
             row.version,
         );
     }
@@ -238,6 +242,7 @@ mod tests {
             pid,
             version: "1.4.1".to_string(),
             runtime: None,
+            placement: None,
         }
     }
 
@@ -251,6 +256,7 @@ mod tests {
             pid,
             version: "1.4.1".to_string(),
             runtime: Some("pi".to_string()),
+            placement: Some("herdr".to_string()),
         }
     }
 
@@ -313,6 +319,8 @@ mod tests {
         assert_eq!(listed_client.root, client);
         assert_eq!(listed_client.role.as_deref(), Some("planner"));
         assert_eq!(listed_client.runtime.as_deref(), Some("pi"));
+        assert_eq!(listed_server.placement, None);
+        assert_eq!(listed_client.placement.as_deref(), Some("herdr"));
     }
 
     /// `--json` is a list of the same fields the table prints, so a script
@@ -337,6 +345,7 @@ mod tests {
         assert_eq!(first["version"], "1.4.1");
         assert!(first["role"].is_null(), "an absent role reads as null");
         assert!(first["runtime"].is_null());
+        assert!(first["placement"].is_null());
         assert_eq!(first["socket_exists"], false, "no socket was bound");
         assert_eq!(first["pid_alive"], true, "this test process registered it");
     }

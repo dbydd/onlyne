@@ -70,13 +70,13 @@ fn turn_recorded(inner: &DispatchInner, task_id: &str) -> (bool, String) {
     )
 }
 
-/// Settle one finished task: relay what its report asked to hand on, publish the
-/// verdict, and answer the sender.
+/// Settle one finished task: publish the verdict, retire what answered for it,
+/// and let the receipt leave.
 ///
-/// The relay runs first and on purpose. A role that takes the handed-on task
-/// must find the chain already pointing at it when the completion receipt
-/// arrives, and a handoff that outlives this call has no caller left to record
-/// its refusal.
+/// No handoff is routed here. A session's handoffs travel as its own `handoff`
+/// frames (`handoff.rs`), answered where the session sends them, so a
+/// settlement is only the completion's half of the account: the verdict, the
+/// receipt, and the resources this task was holding.
 ///
 /// A replayed delivery for work whose first verdict already settled is ordinary
 /// at-least-once traffic. The first verdict stands. The replay returns the task
@@ -96,8 +96,6 @@ pub async fn on_out(
     task_id: &str,
     outcome: Outcome,
     head: Option<String>,
-    head_kind: Option<&str>,
-    handoffs: &[Handoff],
     asked: SettleAuthority,
 ) -> Result<()> {
     if asked == SettleAuthority::PluginReport {
@@ -154,23 +152,14 @@ pub async fn on_out(
             // A settled session gives its capacity back, so a role at
             // `max_sessions` takes the next row instead of holding finished slots.
             release_locked(&mut inner, task_id, None)?;
-            // Whatever a read-only connection held for this task is answered by this
-            // completion, so it leaves the buffer here and travels beside the report.
-            let held = inner.held_handoffs.remove(task_id);
-
             (
-                Some((
-                    completion_envelope(
-                        &inner.role,
-                        origin,
-                        task_id,
-                        head.as_deref(),
-                        causality.as_ref(),
-                    ),
-                    inner.role.clone(),
-                    causality,
-                    held,
-                )),
+                Some((completion_envelope(
+                    &inner.role,
+                    origin,
+                    task_id,
+                    head.as_deref(),
+                    causality.as_ref(),
+                ),)),
                 session_id,
             )
         } else {
@@ -191,36 +180,12 @@ pub async fn on_out(
     // The refused branch carries no receipt: the task account remains the first
     // verdict, and the client's own row is published now that the replay session
     // has returned its binding and completed its retirement.
-    let Some((receipt, role, causality, held)) = settled else {
+    let Some((receipt,)) = settled else {
         return sync_session(state, &session_id).await;
     };
-    // Every relay is answered before the verdict travels, and none of them
-    // moves it: a refused handoff is a record on the settled task, not a
-    // different outcome for it. The merge happens on the way in, so a downstream
-    // role reads one envelope for this task, not two.
-    let routed = merged_handoffs(
-        handoffs,
-        held.as_deref(),
-        head.as_deref().unwrap_or_default(),
-    );
-    // A settle can race the retirement of the session it serves, and a task no
-    // slot answers for is still a task the relay may name: the fallback is the
-    // task itself as the root of its own family, which is the child link a
-    // missing chain would have produced for it.
-    let parent = causality.unwrap_or_else(|| Causality::root(task_id));
-    let denied = handoff::route(
-        state,
-        &role,
-        &parent,
-        head_kind,
-        head.as_deref().unwrap_or_default(),
-        &routed,
-    )
-    .await;
-    record_denials(state, task_id, &denied)?;
-    // The merged relay has left, so the read-only session that wrote its half of
-    // it is retired. The settled account above is the whole settlement: nothing
-    // here settles or releases this task a second time.
+    // A connection that came back for this task has now had its ending answered,
+    // so it is retired here. The settled account above is the whole settlement:
+    // nothing here settles or releases this task a second time.
     retire_revived(state, task_id).await;
     // The terminal receipt leaves as its own envelope, so the origin — a role
     // or a gateway conversation — learns the outcome (plan §3 `Completion`).
@@ -263,60 +228,13 @@ fn take_verdict(inner: &DispatchInner, task_id: &str, outcome: Outcome) -> Resul
     Ok(first)
 }
 
-/// One relay per downstream role, carrying this completion's own lines and the
-/// ones a read-only connection held for the same task.
-///
-/// Each line keeps the marker of the session that wrote it — `[retry]` for the
-/// session that finished and `[zombie]` for the one that came back for the task
-/// and was held — so the recipient can tell the two accounts apart inside the one
-/// envelope. Line order follows the report's own order, with the held lines of the
-/// same role below them. Nothing held is the ordinary case, and it routes the
-/// report's lines without copying them.
-fn merged_handoffs<'a>(
-    own: &'a [Handoff],
-    held: Option<&'a [Handoff]>,
-    head: &str,
-) -> Cow<'a, [Handoff]> {
-    let held: &[Handoff] = match held {
-        Some(held) if !held.is_empty() => held,
-        _ => return Cow::Borrowed(own),
-    };
-    let mut order: Vec<String> = Vec::new();
-    let mut segments: HashMap<String, Vec<String>> = HashMap::new();
-    for (marker, group) in [("[retry]", own), ("[zombie]", held)] {
-        for handoff in group {
-            let line = format!("{marker} {}", handoff.text_or(head));
-            if !segments.contains_key(handoff.to_role.as_str()) {
-                order.push(handoff.to_role.clone());
-            }
-            segments
-                .entry(handoff.to_role.clone())
-                .or_default()
-                .push(line);
-        }
-    }
-    Cow::Owned(
-        order
-            .into_iter()
-            .map(|to_role| Handoff {
-                text: Some(
-                    segments
-                        .remove(to_role.as_str())
-                        .unwrap_or_default()
-                        .join("\n"),
-                ),
-                to_role,
-            })
-            .collect(),
-    )
-}
-
-/// Retire the read-only connections and slots a merged handoff has just answered.
+/// Retire the read-only connections and slots a settled task has just answered.
 ///
 /// A connection that came back for a session another connection serves is
-/// dropped from that session's record and its agent is told to leave, since what
-/// it had to say travelled with the relay above. A slot that lost its task to a
-/// newer session has the transport naming it dropped, its task binding released,
+/// dropped from that session's record and its agent is told to leave, because
+/// the ending it reported is the whole of what it still had to say. A slot that
+/// lost its task to a newer session has the transport naming it dropped, its
+/// task binding released,
 /// and is retired as `Replaced`: the resource its agent was holding is this
 /// client's to close, and the newer session answers for the task. The account for
 /// the task is the settlement above.
@@ -424,44 +342,6 @@ async fn retire_revived(state: &DispatchState, task_id: &str) {
     }
 }
 
-/// Write down the relays this role could not send.
-///
-/// Each refusal gets an event of its own, because that is the plane a supervisor
-/// reads to see which handoff line died. The fault queue dedups on
-/// `(task, kind, generation)`, so the first refusal of a turn is also the one
-/// the task's fault row names; the rest stay in the events.
-fn record_denials(state: &DispatchState, task_id: &str, denied: &[Denial]) -> Result<()> {
-    if denied.is_empty() {
-        return Ok(());
-    }
-    let inner = state.inner.lock();
-    for refusal in denied {
-        tracing::warn!(
-            task = %task_id,
-            to_role = %refusal.to_role,
-            error = %refusal.reason,
-            "handoff denied"
-        );
-        inner.store.append_event(
-            "handoff_denied",
-            &serde_json::json!({
-                "task_id": task_id,
-                "to_role": refusal.to_role,
-                "text": refusal.text,
-                "error": refusal.reason,
-            }),
-        )?;
-        crate::reconcile::record_fault(
-            &inner.store,
-            task_id,
-            "handoff_denied",
-            "acp",
-            &format!("{}: {}", refusal.to_role, refusal.reason),
-        )?;
-    }
-    Ok(())
-}
-
 /// The receipt for one finished task, or `None` when its sender is unknown.
 ///
 /// Every settled task answers its sender, the role that sent the task included:
@@ -556,9 +436,23 @@ impl DispatchState {
             Ok(queued) => queued,
             Err(error) => return ResBody::err(ErrorCode::Internal, error.to_string(), None),
         };
+        // §4's durable class for this op: which handoff left this client, for
+        // whom, and on which hop of the chain. The enqueue above already
+        // succeeded, so the event cannot describe a handoff that never was; a
+        // failure here is the event table's own, and the relay has left.
+        if let Err(error) =
+            super::turn_end::record_handoff(self, &args.task_id, &args.to, child.hop, &args.text)
+        {
+            tracing::warn!(
+                task = %args.task_id,
+                to = %args.to,
+                error = %error,
+                "the handoff event was not written"
+            );
+        }
         // The queue path answers with the frame's `op_id`: a connection this
-        // client holds read-only serves no session, and the check above refused
-        // that connection before this line.
+        // client holds read-only serves no session, and the capability check
+        // inside `plugin_send` refuses that connection before this line.
         ResBody::ok(serde_json::json!({
             "task_id": child.task,
             "hop": child.hop,

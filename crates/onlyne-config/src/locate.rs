@@ -55,6 +55,48 @@ pub(crate) fn key_line_in_table(source: &str, table_name: &str, key: &str) -> us
     key_line_between(&lines, start + 1, end, key).unwrap_or(start + 1)
 }
 
+/// Find the line of a key written at the document root.
+///
+/// A key under a table header belongs to that table, so the scan stops at the
+/// first header line and reports line 1 when the root carries no such key.
+pub(crate) fn root_key_line(source: &str, key: &str) -> usize {
+    let prefix = format!("{key} =");
+    let dotted = format!("{key}=");
+    for (idx, line) in source.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            break;
+        }
+        if trimmed.starts_with(&prefix) || trimmed.starts_with(&dotted) {
+            return idx + 1;
+        }
+    }
+    1
+}
+
+/// Find the line of a key inside a table-array entry, `None` when the entry is
+/// absent or does not carry the key.
+///
+/// The `Option` is what a caller needs when it has a chain of spellings to try
+/// and a fallback of its own: [`key_line_in_array_entry`] reports the entry
+/// header when the key is written in a form a line scan cannot name.
+pub(crate) fn find_key_line_in_array_entry(
+    source: &str,
+    table_name: &str,
+    entry_index: usize,
+    key: &str,
+) -> Option<usize> {
+    let lines: Vec<&str> = source.lines().collect();
+    let starts = array_entry_lines(source, table_name);
+    let start_line = starts.get(entry_index).copied()?;
+    let start_idx = start_line.saturating_sub(1);
+    let end_idx = starts
+        .get(entry_index + 1)
+        .map(|line| line.saturating_sub(1))
+        .unwrap_or(lines.len());
+    key_line_between(&lines, start_idx, end_idx, key)
+}
+
 /// Find the line of a key inside a top-level table, `None` when the table is
 /// absent or does not carry the key.
 pub(crate) fn find_key_line_in_table(source: &str, table_name: &str, key: &str) -> Option<usize> {

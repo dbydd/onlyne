@@ -8,6 +8,8 @@ fn spec(cwd: &Path, task: &str, command: Vec<&str>) -> SpawnSpec {
         task_id: task.into(),
         command: command.into_iter().map(str::to_string).collect(),
         env: BTreeMap::new(),
+        tools_token: String::new(),
+        prose: String::new(),
         focus: None,
         placement: None,
         rename: None,
@@ -178,7 +180,12 @@ fn a_role_without_a_session_command_is_refused() {
     let error = backend
         .spawn(spec(dir.path(), "empty", vec![]))
         .unwrap_err();
-    assert!(error.to_string().contains("no session_command"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("[client.runtime] command` is empty"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -201,6 +208,8 @@ fn spec_cmd(cwd: &Path, task: &str, command: Vec<String>) -> SpawnSpec {
         task_id: task.into(),
         command,
         env: BTreeMap::new(),
+        tools_token: String::new(),
+        prose: String::new(),
         focus: None,
         placement: None,
         rename: None,

@@ -105,9 +105,9 @@ impl From<RoleInfo> for RoleView {
 }
 
 /// Decode one `roles` row. A row from a server that predates `edges`,
-/// `aggregate`, or `session_command` still lands: `edges` and `aggregate`
-/// default and the page then draws no arrow, and `session_command` defaults to
-/// an empty token list.
+/// `aggregate`, or `runtime` still lands: `edges` and `aggregate` default and
+/// the page then draws no arrow, while a missing runtime defaults to the
+/// plugin drive with an empty command.
 impl TryFrom<Value> for RoleView {
     type Error = serde_json::Error;
 
@@ -1486,6 +1486,21 @@ mod tests {
         let role = RoleView::try_from(value).unwrap();
         assert_eq!(role.edges, vec!["builder", "reviewer"]);
         assert_eq!(role.aggregate.as_deref(), Some("cluster-x"));
+    }
+
+    #[test]
+    fn role_view_accepts_runtime_shape() {
+        let value = json!({
+            "name": "builder",
+            "admin": false,
+            "max_sessions": 1,
+            "spec_hash": "abc",
+            "state": "online",
+            "sessions": 0,
+            "runtime": {"drive": "exec", "command": ["pi", "{task}"]}
+        });
+        let role = RoleView::try_from(value).unwrap();
+        assert_eq!(role.name, "builder");
     }
 
     #[test]
