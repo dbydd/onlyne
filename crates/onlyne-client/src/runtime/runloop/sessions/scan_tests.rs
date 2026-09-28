@@ -33,27 +33,27 @@ fn spec_reloaded_identical_role_slice_is_noop() {
     assert_eq!(state.dispatch.role_slice().max_sessions, 2);
 }
 
-/// A reload that arms or disarms the guard has to reach a live connection,
-/// which never sees a second `welcome`: the role row is the only carrier,
-/// and the next spawn reads the policy off the dispatcher.
+/// A reload that adds or removes an edge has to reach a live connection, which
+/// never sees a second `welcome`: the role row is the only carrier, and the
+/// next completion reads the obligation off the dispatcher.
 #[test]
-fn a_relay_policy_from_the_role_row_is_adopted() {
+fn a_role_rows_edges_are_adopted_as_the_obligation() {
     let (state, _store) = test_state(2, vec!["pi".into()]);
     let mut armed = role_info(2, vec!["pi".into()]);
-    armed.relay_required = Some(vec!["writer".into()]);
-    armed.relay_count = Some(2);
+    armed.edges = vec!["writer".into()];
     let changed = apply_role_info(&state, &armed);
-    assert_eq!(changed, vec!["relay_required", "relay_count"]);
+    assert_eq!(changed, vec!["allowed_targets"]);
     let applied = state.dispatch.role_slice();
-    assert_eq!(applied.relay_required, vec!["writer".to_string()]);
-    assert_eq!(applied.relay_count, Some(2));
+    assert_eq!(applied.required_targets, vec!["writer".to_string()]);
 
     let disarmed = role_info(2, vec!["pi".into()]);
     let changed = apply_role_info(&state, &disarmed);
-    assert_eq!(changed, vec!["relay_required", "relay_count"]);
+    assert_eq!(changed, vec!["allowed_targets"]);
     let applied = state.dispatch.role_slice();
-    assert!(applied.relay_required.is_empty());
-    assert_eq!(applied.relay_count, None);
+    assert!(
+        applied.required_targets.is_empty(),
+        "a role that names no target owes nothing"
+    );
 }
 
 #[tokio::test]

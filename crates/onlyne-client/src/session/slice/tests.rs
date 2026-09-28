@@ -6,8 +6,7 @@ fn slice(max: u32) -> RoleSlice {
         drive: onlyne_config::Drive::Plugin,
         command: vec!["pi".into()],
         max_sessions: max,
-        relay_required: Vec::new(),
-        relay_count: None,
+        required_targets: Vec::new(),
     }
 }
 
@@ -28,8 +27,6 @@ fn info(max: u32) -> RoleInfo {
         detail: None,
         edges: Vec::new(),
         aggregate: None,
-        relay_required: None,
-        relay_count: None,
     }
 }
 
@@ -56,46 +53,36 @@ fn command_is_compared() {
         drive: onlyne_config::Drive::Plugin,
         command: vec!["other".into()],
         max_sessions: 1,
-        relay_required: Vec::new(),
-        relay_count: None,
+        required_targets: Vec::new(),
     };
     let fields = slice_diff(&current, &next);
     assert_eq!(fields, ["runtime"]);
 }
 
+/// A reload that widens or narrows the edges moves the obligation with them:
+/// one list answers both questions, so the diff names the spec key that moved.
 #[test]
-fn a_changed_relay_policy_is_compared() {
+fn a_changed_allowed_targets_is_compared() {
     let current = slice(1);
     let armed = RoleSlice {
-        relay_required: vec!["writer".into()],
-        relay_count: Some(2),
+        required_targets: vec!["writer".into()],
         ..current.clone()
     };
     assert_eq!(
         slice_diff(&current, &armed),
-        ["relay_required", "relay_count"],
-        "a list, a count, and the pair each report the keys they moved"
+        ["allowed_targets"],
+        "the declaration the guard reads is the one the diff reports"
     );
 
-    let counted = RoleSlice {
-        relay_count: Some(2),
-        ..current.clone()
-    };
-    assert_eq!(slice_diff(&current, &counted), ["relay_count"]);
-
-    // The role row the client adopts carries the same policy it would see
-    // in a welcome, so a reload arms a live session's next spawn.
+    // The role row the client adopts carries the same list it would see in a
+    // welcome, so a reload moves the obligation of a live session's next spawn.
     let from_row = RoleSlice::from_role_info(
         &RoleInfo {
-            relay_required: Some(vec!["writer".into()]),
-            relay_count: Some(2),
+            edges: vec!["writer".into()],
             ..info(1)
         },
         &current,
     );
-    assert_eq!(from_row.relay_required, vec!["writer".to_string()]);
-    assert_eq!(
-        slice_diff(&current, &from_row),
-        ["relay_required", "relay_count"]
-    );
+    assert_eq!(from_row.required_targets, vec!["writer".to_string()]);
+    assert_eq!(slice_diff(&current, &from_row), ["allowed_targets"]);
 }

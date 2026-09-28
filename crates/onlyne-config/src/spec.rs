@@ -98,6 +98,17 @@ pub const BACKEND_IS_GONE: &str = "\
 workspace's `config.toml` (`placement = \"herdr\"`, `\"orca\"`, `\"zellij\"`, `\"headless\"`, or
 `\"external\"`)";
 
+/// Why a document may not carry `relay_required`, `relay_required_count`, or
+/// `relay_count` any more, and what one declaration replaces all three. The
+/// edges a role may address are already the edges it owes: `allowed_targets`
+/// is the server's ACL and the client's completion guard read off the same list
+/// (`docs/v2-CONTRACT.md` §"Slice 6").
+pub const RELAY_IS_GONE: &str = "\
+`relay_required`, `relay_required_count`, and `relay_count` are gone: one declaration is the
+whole policy. Name the roles this role may address in `allowed_targets`, and a session of
+this role owes each of them a delivery before it may report a terminal outcome. Drop the
+relay keys; a role that owes nothing leaves `allowed_targets` empty";
+
 /// How a client talks to one role's runtime: `[client.runtime] drive`.
 ///
 /// Drive is a property of the runtime and belongs in the spec. Where the
@@ -184,6 +195,12 @@ pub struct ClientEntry {
     pub max_sessions: u32,
     #[serde(default)]
     pub allowed_senders: Vec<String>,
+    /// The roles this role may address, and the roles a session of it owes a
+    /// delivery to before it may report a terminal outcome. One declaration
+    /// answers both questions: the server gates the ACL on it and the client's
+    /// completion guard measures the session against it, so there is no second
+    /// list to disagree with. Empty is the default, and a role that names no
+    /// target owes nothing (`docs/v2-CONTRACT.md` §"Slice 6").
     #[serde(default)]
     pub allowed_targets: Vec<String>,
     /// The drive and the argv a session runs: `[client.runtime]`.
@@ -195,24 +212,6 @@ pub struct ClientEntry {
     pub intent: IntentPolicy,
     #[serde(default)]
     pub aggregate: String,
-    /// Downstream roles one of this role's sessions must have handed work to
-    /// before it may report a terminal outcome. The client passes the list to
-    /// every session process it spawns, which is what makes the guard a
-    /// property of the spec rather than of a file inside the vendor directory
-    /// `onlyne generate` rewrites. Absent (or empty) is the default: no guard.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relay_required: Option<Vec<String>>,
-    /// The count form of [`Self::relay_required`]: this many distinct
-    /// downstream roles. A non-empty list wins when both keys are present, the
-    /// precedence the guard's own `relay.toml` already had. The spec also
-    /// accepts the guard file's own spelling `relay_required_count`, so the
-    /// two surfaces of one policy do not trade typos.
-    #[serde(
-        default,
-        alias = "relay_required_count",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub relay_count: Option<u32>,
 }
 
 /// `[[gateway]]` entry.
@@ -373,18 +372,15 @@ impl Spec {
 
     /// Parse a `spec.toml` string and set the display name used in errors.
     pub fn parse_named(text: &str, file: &str) -> Result<Self, SpecError> {
-        let mut parsed: toml::Value = text.parse::<toml::Value>().map_err(|err| {
+        let parsed: toml::Value = text.parse::<toml::Value>().map_err(|err| {
             SpecError::parse(
                 file,
                 line_from_span(text, err.span()),
                 err.message().to_string(),
             )
         })?;
-        rewrite_client_relay_count_alias(&mut parsed);
-        // Ahead of the struct conversion, so a file that still carries the fused
-        // key is refused by the move rather than by whatever serde says about a
-        // field nothing declares.
         validate_backend_key(&parsed, text, file)?;
+        validate_relay_keys(&parsed, text, file)?;
         let spec: Spec = parsed.clone().try_into().map_err(|err: toml::de::Error| {
             SpecError::parse(
                 file,
@@ -502,30 +498,6 @@ impl Spec {
     /// Registered role names in document order.
     pub fn role_names(&self) -> Vec<String> {
         self.client.iter().map(|entry| entry.role.clone()).collect()
-    }
-}
-
-/// Move each `[[client]]` `relay_required_count` onto `relay_count` before serde
-/// sees the table. A present `relay_count` keeps its value and the alias is
-/// dropped, so the guard file's own spelling never reads back as an ignored key.
-pub(crate) fn rewrite_client_relay_count_alias(value: &mut toml::Value) {
-    let Some(entries) = value
-        .as_table_mut()
-        .and_then(|table| table.get_mut("client"))
-        .and_then(toml::Value::as_array_mut)
-    else {
-        return;
-    };
-    for entry in entries {
-        let Some(table) = entry.as_table_mut() else {
-            continue;
-        };
-        let Some(alias) = table.remove("relay_required_count") else {
-            continue;
-        };
-        if !table.contains_key("relay_count") {
-            table.insert("relay_count".into(), alias);
-        }
     }
 }
 
@@ -806,6 +778,46 @@ fn validate_backend_key(value: &toml::Value, text: &str, file: &str) -> Result<(
                 key_line_in_array_entry(text, "client", idx, "backend"),
                 BACKEND_IS_GONE,
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse `relay_required`, `relay_count`, and `relay_required_count` wherever
+/// they sit: at the document root, or in any `[[client]]` entry (its own level
+/// or below it). A spec that still carries any of them is refused by name,
+/// following the pattern the loader already uses for a key that no longer
+/// exists. The one declaration is `allowed_targets`: it is both the ACL and the
+/// obligation (`docs/v2-CONTRACT.md` §"Slice 6").
+fn validate_relay_keys(value: &toml::Value, text: &str, file: &str) -> Result<(), SpecError> {
+    const KEYS: &[&str] = &["relay_required", "relay_count", "relay_required_count"];
+    for key in KEYS {
+        if value.as_table().is_some_and(|root| root.contains_key(*key)) {
+            return Err(SpecError::validate(
+                file,
+                crate::locate::root_key_line(text, key),
+                RELAY_IS_GONE,
+            ));
+        }
+    }
+    for (idx, entry) in value
+        .get("client")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        for key in KEYS {
+            if entry
+                .as_table()
+                .is_some_and(|table| table.contains_key(*key))
+            {
+                return Err(SpecError::validate(
+                    file,
+                    crate::locate::key_line_in_array_entry(text, "client", idx, key),
+                    RELAY_IS_GONE,
+                ));
+            }
         }
     }
     Ok(())

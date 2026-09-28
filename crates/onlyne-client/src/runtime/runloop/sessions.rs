@@ -62,6 +62,13 @@ pub(super) async fn settle_session_outcome(
     // — the one nudge, and the settlement when a second turn ends the same way.
     // The agent's own closing line rides along, because the settlement this call
     // may reach writes it into the task's head.
+    //
+    // The turn-ended fact is fed here for the same reason the turn-started fact
+    // is fed where the dispatch path hands a turn to the backend: a self-driven
+    // drive has no heartbeats, so the row's agent phase would otherwise never
+    // reach `idle`, and the never-ran guard that reads it would refuse a
+    // completion the agent files through its tools mount.
+    state.dispatch.feed_turn_ended(&task_id);
     let Some(outcome) = outcome else {
         return dispatch::on_turn_end(&state.dispatch, &task_id, head).await;
     };
@@ -82,6 +89,7 @@ pub(super) async fn settle_session_outcome(
         &task_id,
         terminal,
         head,
+        None,
         // The ending came from this client's own backend, which watched the agent
         // it is reporting: the never-ran guard belongs to the plugin's door, where
         // the claimant and the claim are the same party.

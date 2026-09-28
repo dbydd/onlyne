@@ -156,16 +156,16 @@ wait "$fake_pid" "$client_pid" "$server_pid" 2>/dev/null || true
 rm -rf "$tmp"
 ```
 
-### Use a real agent with the exec backend
+### Use a real agent headlessly
 
 The same server/client topology works without a terminal host. Install a working pi setup and the adapter. At the point where the fake block starts the client and fake agent, run only the client command below and omit the fake agent:
 
 ```bash
 pi install npm:pi-onlyne
-ONLYNE_BACKEND=exec target/debug/onlyne-client run --workspace "$tmp/planner"
+ONLYNE_BACKEND=headless target/debug/onlyne-client run --workspace "$tmp/planner"
 ```
 
-The role's `session_command` already names pi. The client starts one pi process per task, holds its stdin open, and captures stdout/stderr in `<workspace>/.onlyne/logs/session-<task>.log`. The send, ledger, and session commands stay the same. This path needs working model/provider credentials.
+The role's `[client.runtime] command` already names pi. The client starts one pi process per task, holds its stdin open, and captures stdout/stderr in `<workspace>/.onlyne/logs/session-<task>.log`. The send, ledger, and session commands stay the same. This path needs working model/provider credentials.
 
 For a generated workspace, `onlyne server generate` can vendor the repository's `plugins/onlyne-agent-pi` package and write the project-scoped `.pi/settings.json` entry. A user-wide npm install remains inert in ordinary pi sessions because the extension activates only when Onlyne injects `ONLYNE_ROLE`, `ONLYNE_SESSION_ID`, and `ONLYNE_TASK_ID`.
 
@@ -192,7 +192,7 @@ The Orca path requires:
 The launcher uses the repository's local pi adapter package and the binaries under `target/debug`. To run the same real-agent demo headlessly outside Orca:
 
 ```bash
-ONLYNE_BACKEND=exec python3 examples/supervisor/run.py up
+ONLYNE_BACKEND=headless python3 examples/supervisor/run.py up
 ```
 
 The supervisor output is then written under the demo root instead of opening a visible supervisor tab. In another terminal, inspect the demo with:
@@ -231,7 +231,7 @@ sequenceDiagram
 
 1. **Send.** The gated `send` verb opens the server's local admin socket, names the sender and target, and carries an `op_id` idempotency key. A repeat of the same operation returns the durable receipt; a different body under the same key is a conflict.
 2. **Accept and record.** The server validates the envelope, sender, target, and ACL before touching the ledger. An accepted send appends one row and publishes its receipt. The row is `in_flight` when immediately deliverable and `queued` while the role is offline or at capacity.
-3. **Pull and assign.** The role client pulls the oldest eligible task, so the server marks it `in_flight` and binds a delivery ticket. The client accepts capacity, starts the selected backend, and waits for the session's `ready` barrier before sending `assign`. The task text travels in the assignment frame; `{task}` in `session_command` renders the task id, not the message body.
+3. **Pull and assign.** The role client pulls the oldest eligible task, so the server marks it `in_flight` and binds a delivery ticket. The client accepts capacity, starts the session its drive and placement select, and waits for the session's `ready` barrier before sending `assign`. The task text travels in the assignment frame; `{task}` in the role's `[client.runtime] command` renders the task id, not the message body.
 4. **Complete.** An adapter reports a terminal outcome and summary. The pi plugin's `onlyne_complete` tool supplies both. The client records the local task verdict, queues an acknowledgement of the original delivery, releases the session slot, and builds a separate completion envelope for the task's recorded origin.
 5. **Receipt.** Durable client intents flush over TLS in order. The original task row becomes `acked`; the completion receipt is `queued` until the origin client pulls it, then acked without starting another session.
 
@@ -250,7 +250,7 @@ Onlyne's four core message kinds are:
 
 ### Server root
 
-`<server-root>/.onlyne/spec.toml` is the protocol source of truth: server endpoint and certificate pin, registered role keys, ACL edges, prose, concurrency, timeouts, relay policy, session commands, routes, and gateways. Onlyne never edits this file through a runtime API. Append `onlyne-client init` fragments or use `onlyne server generate`, then run `onlyne reload`.
+`<server-root>/.onlyne/spec.toml` is the protocol source of truth: server endpoint and certificate pin, registered role keys, ACL edges, prose, concurrency, timeouts, relay policy, each role's `[client.runtime]` drive and command, routes, and gateways. Onlyne never edits this file through a runtime API. Append `onlyne-client init` fragments or use `onlyne server generate`, then run `onlyne reload`.
 
 The automatic requeue age gate is `[server].requeue_ttl_secs`. It defaults to `0`, which leaves the gate off, and measures queued-row age from `enqueued_at`. When an automatic requeue would happen after that age, the row settles as `expired` with reason `requeue_ttl`; operator-led `repair retry` bypasses the age gate.
 
@@ -268,11 +268,11 @@ The automatic requeue age gate is `[server].requeue_ttl_secs`. It defaults to `0
 
 ### Role workspace
 
-`<workspace>/.onlyne/config.toml` is the role-local configuration: identity, server endpoint, certificate pin, key path, backend, Orca policy, ACP options, and reconnect/stall timers. `cert_pin`, `key_path`, and `server.host` may contain `$NAME` environment references resolved at startup.
+`<workspace>/.onlyne/config.toml` is the role-local configuration: identity, server endpoint, certificate pin, key path, placement, Orca policy, ACP options, and reconnect/stall timers. `cert_pin`, `key_path`, and `server.host` may contain `$NAME` environment references resolved at startup.
 
 ```text
 <workspace>/.onlyne/
-  config.toml                 role and backend configuration
+  config.toml                 role, placement, and ACP configuration
   client.db                   task/session state and durable intents
   run/                        owner-only runtime directory; holds nothing bound
   keys/role.key               role identity key
@@ -281,7 +281,6 @@ The automatic requeue age gate is `[server].requeue_ttl_secs`. It defaults to `0
   logs/session-<task>.log     rendered exec/ACP session output
   logs/session-<task>.events.jsonl
   logs/content.index.jsonl    durable content offsets
-  out/<task>.md               ACP closing report, read and removed by the client
 ```
 
 `onlyne server generate` writes relocatable workspaces: move the directory, then run `onlyne client run --workspace <new-path>`. Server and role clients must run the same Onlyne build. Older schemas and legacy layouts are refused at the door; Onlyne does not migrate them in place.
@@ -400,28 +399,47 @@ graph LR
 
 The server enforces ACL before ledger writes and owns cross-machine routing. Each client owns its role's session execution and writes outbound messages to a durable intent queue before transmission. If the TLS link drops, running sessions keep their local state; queued intents flush in order after reconnection. The admin and adapter sockets bind in the machine-level runtime directory `/tmp/onlyne-<uid>/`, beside a `<digest>.json` registration that names the surface serving them; nothing binds inside a workspace tree.
 
-### Session backends
+### Session drives and placements
 
-Backend selection is:
+What a role's runtime is and where it runs are two separate answers.
 
-```text
-nonempty ONLYNE_BACKEND → workspace config.toml backend → auto detection
+The **drive** is a property of the runtime and lives in that role's spec:
+
+```toml
+[client.runtime]
+drive = "plugin"        # plugin | acp | exec
+command = ["pi", "--session-id", "{session}", "--session-dir", ".pi/sessions", "-ns"]
 ```
 
-| Backend | Host behavior |
+The **placement** is a property of the machine and lives in the role workspace's
+`config.toml`: `herdr`, `orca`, `zellij`, `headless`, or `external`.
+
+Placement selection, highest first:
+
+```text
+nonempty ONLYNE_BACKEND → workspace config.toml placement → probe herdr, orca, zellij → headless
+```
+
+| Placement | Host behavior |
 |---|---|
-| `orca` | Runs the role command in an Orca terminal/tab and retires the tab when the task ends. |
-| `exec` (`headless` alias) | Runs `session_command` as a child process, holds stdin open, and captures output in the task log. |
-| `acp` | Speaks Agent Client Protocol v1 to a child agent. The client owns prompts, streamed updates, permissions, and the closing report file. |
-| `fake` | Runs sessions in process through scripted lifecycle facts; source/testkit use. |
 | `herdr` | Runs sessions in herdr panes. |
+| `orca` | Runs the role command in an Orca terminal/tab and retires the tab when the task ends. |
 | `zellij` | Runs sessions in zellij panes. |
+| `headless` | Runs the role's `[client.runtime] command` as a child process, holds stdin open, and captures output in the task log. |
+| `external` | Starts nothing: the runtime is already resident and mounts on the session's own socket. |
 
-Auto detection probes `herdr`, `orca`, then `zellij`. It never selects `exec`, `acp`, or `fake`; name one explicitly. `headless` parses as `exec`, and stored projections use the name `exec`.
+`fake` is the in-process test runtime, and `exec` is the v1 spelling of `headless`; both
+are reachable through `ONLYNE_BACKEND` alone. An explicit value that names nothing is
+refused by name rather than falling back to the probe, and `onlyne-client run` exits 5.
 
-A pane backend refuses a `session_command` that speaks JSON-RPC on its own stdio (`--acp`, `--mode=rpc`, or `--mode rpc`) before opening a pane. The delivery settles `rejected`, and the complete reason is stored on the ledger row. Configure `backend = "exec"` or `backend = "acp"` for those commands.
+The validator's drive × placement matrix is the one checkpoint: `acp` pairs only with
+`headless`, because stdio carries the ACP channel and cannot also be a pane's terminal.
 
-ACP roles read their local `[acp]` table: `mode`, `model`, `reasoning_effort`, and `permission = "deny" | "allow"` (deny by default). Their conversation lands in the task log and events journal, and every terminal turn writes `<workspace>/.onlyne/out/<task-id>.md`; the client parses that report, routes any handoffs, removes the file, and files the completion.
+ACP roles read their local `[acp]` table: `mode`, `model`, `reasoning_effort`, and
+`permission = "deny" | "allow"` (deny by default). Their conversation lands in the task log
+and events journal, and the session reports through the three tools the client mounts over
+`onlyne mcp` — `onlyne_send`, `onlyne_handoff`, and `onlyne_complete` — which are the same
+three a pi session reaches through its plugin.
 
 ### Adapter protocol
 

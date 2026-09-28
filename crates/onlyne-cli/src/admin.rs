@@ -1,10 +1,13 @@
 //! The bare admin nouns, which talk to the resolved socket like the message verbs.
 
 use onlyne_proto::{
-    AdminOp, ClientOp, EventTier, Frame, HistoryArgs as ProtoHistoryArgs, LedgerQuery, LedgerState,
-    Lifecycle, MsgKind, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, RepairAck, RepairAdopt,
-    RepairFail, RepairRebind, RepairTarget, ResBody, Subscribe, new_id,
+    AdminOp, ClientOp, ErrorCode, Event, EventRow, EventTier, Frame,
+    HistoryArgs as ProtoHistoryArgs, LedgerQuery, LedgerState, Lifecycle, MsgKind, QueryFaultsArgs,
+    QueryRolesArgs, QuerySessionsArgs, RepairAck, RepairAdopt, RepairFail, RepairRebind,
+    RepairTarget, ResBody, Subscribe, new_id,
 };
+use onlyne_server::events::RESYNC_LAG_KIND;
+use onlyne_wire::FrameReader;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
@@ -207,8 +210,9 @@ pub struct GhostsArgs {
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct WatchArgs {
-    /// Event cursor to resume after. Omitting it, or `0`, starts at the current
-    /// head, so the stream carries only what follows the handshake.
+    /// Event cursor to resume after. Omitting it, or `0`, starts at the first
+    /// retained event, so the page carries the window the ledger still holds
+    /// and the stream carries what follows that.
     #[arg(long)]
     pub since: Option<u64>,
     /// Replay tier to subscribe to; repeatable, every tier when omitted.
@@ -216,7 +220,8 @@ pub struct WatchArgs {
     /// rows are best effort, and a lagging subscriber resyncs by querying.
     #[arg(long, value_parser = parse_tier)]
     pub tier: Vec<EventTier>,
-    /// Keep the connection open and print one JSON line per event frame.
+    /// Keep the connection open and print one JSON line per event frame,
+    /// reconnecting from the last frame's cursor whenever the link drops.
     #[arg(long)]
     pub follow: bool,
 }
@@ -446,59 +451,200 @@ pub fn ghosts(flags: &GlobalFlags, args: GhostsArgs) -> i32 {
     )
 }
 
-/// `watch` streams event frames; `--follow` keeps the connection open.
+/// `watch` prints the page its subscription is answered with and stops there;
+/// `--follow` keeps printing what follows the page until it is interrupted.
+///
+/// A page is the first part of a stream, so its rows are printed as the event
+/// frames they are and the cursor the stream carries on from is the last row's.
+/// A `--follow` run that loses its link reconnects from that cursor: the
+/// subscription resumes after it and the page it is answered with carries what
+/// was emitted while the link was down, so a restart costs the follow a pause
+/// and not a gap.
 pub fn watch(flags: &GlobalFlags, args: WatchArgs) -> i32 {
     let Some(target) = runtime::target(flags) else {
         return EXIT_NO_SOCKET;
     };
+    if args.follow && matches!(target.surface, Surface::Client) {
+        return runtime::usage_error(
+            "onlyne watch --follow needs the admin surface: a client link answers one page and \
+             carries on with its own event runloop, so there is nothing here to follow",
+        );
+    }
     runtime::block_on(async move {
         let tiers = if args.tier.is_empty() {
             vec![EventTier::Durable, EventTier::Advisory]
         } else {
-            args.tier
+            args.tier.clone()
         };
-        let subscribe = Subscribe {
-            since_seq: args.since.unwrap_or_default(),
-            tiers,
-            kinds: Vec::new(),
-            roles: Vec::new(),
-        };
-        let request = match target.surface {
-            Surface::Admin => Outbound::admin(new_id(), AdminOp::Watch(subscribe)),
-            Surface::Client => Outbound::client(new_id(), ClientOp::Subscribe(subscribe)),
-        };
-        let mut stream = match runtime::open(flags, &target).await {
-            Ok(stream) => stream,
-            Err(code) => return code,
-        };
-        if let Err(error) = wire::send_frame(&mut stream, &request, flags.timeout_ms).await {
-            return runtime::exchange_error(&error, flags.timeout_ms);
-        }
+        let mut cursor = args.since.unwrap_or_default();
         loop {
-            match wire::recv_frame(&mut stream, flags.timeout_ms).await {
-                Ok(Frame::Ev { seq, event }) => {
-                    let frame: Frame = Frame::Ev { seq, event };
-                    println!(
-                        "{}",
-                        serde_json::to_string(&frame).expect("serialisable frame")
-                    );
-                }
-                Ok(Frame::Res { body, .. }) if !body.ok => {
-                    return runtime::finish(&body, flags);
-                }
-                Ok(Frame::Bye { .. }) => return EXIT_OK,
-                Ok(_) => {}
-                Err(ExchangeError::Timeout) => {
-                    if args.follow {
-                        return runtime::exchange_error(&ExchangeError::Timeout, flags.timeout_ms);
+            // The admin surface carries a stream and answers one page as the
+            // client vocabulary does; the page is the tail of the stream the
+            // two of them hand over.
+            let subscribe = Subscribe {
+                since_seq: cursor,
+                tiers: tiers.clone(),
+                kinds: Vec::new(),
+                roles: Vec::new(),
+            };
+            let request = match target.surface {
+                Surface::Admin => Outbound::admin(new_id(), AdminOp::Subscribe(subscribe)),
+                Surface::Client => Outbound::client(new_id(), ClientOp::Subscribe(subscribe)),
+            };
+            let mut stream = if args.follow {
+                match wire::connect(&target.path, flags.timeout_ms).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        // A socket that is not answering answers again when the
+                        // server does, and the cursor is what makes waiting for
+                        // it harmless.
+                        notice(format!("{}; resuming after {cursor}", error));
+                        tokio::time::sleep(RECONNECT_PAUSE).await;
+                        continue;
                     }
-                    return EXIT_OK;
                 }
-                Err(ExchangeError::Closed) => return EXIT_OK,
-                Err(error) => return runtime::exchange_error(&error, flags.timeout_ms),
+            } else {
+                match runtime::open(flags, &target).await {
+                    Ok(stream) => stream,
+                    Err(code) => return code,
+                }
+            };
+            let mut reader = FrameReader::new();
+            if let Err(error) = wire::send_frame(&mut stream, &request, flags.timeout_ms).await {
+                if !args.follow {
+                    return runtime::exchange_error(&error, flags.timeout_ms);
+                }
+                notice(format!("{}; resuming after {cursor}", describe(&error)));
+                tokio::time::sleep(RECONNECT_PAUSE).await;
+                continue;
             }
+            match wire::recv_stream_frame(&mut reader, &mut stream, flags.timeout_ms).await {
+                Ok(Frame::Res { body, .. }) => {
+                    if !body.ok {
+                        return runtime::finish(&body, flags);
+                    }
+                    match page_frames(&body) {
+                        Ok(frames) => {
+                            for frame in frames {
+                                cursor = cursor.max(frame_seq(&frame));
+                                print_frame(&frame);
+                            }
+                        }
+                        Err(message) => {
+                            return runtime::exchange_error(
+                                &ExchangeError::Wire(ErrorCode::BadFrame, message),
+                                flags.timeout_ms,
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    if !args.follow {
+                        return runtime::exchange_error(&error, flags.timeout_ms);
+                    }
+                    notice(format!("{}; resuming after {cursor}", describe(&error)));
+                    tokio::time::sleep(RECONNECT_PAUSE).await;
+                    continue;
+                }
+            }
+            if !args.follow {
+                return EXIT_OK;
+            }
+            loop {
+                match wire::recv_stream_frame(&mut reader, &mut stream, flags.timeout_ms).await {
+                    Ok(Frame::Ev { seq, event }) => {
+                        if is_lag_notice(&event) {
+                            // Not an event: `seq` is a drop count, not a
+                            // cursor, and the page a reconnect is answered with
+                            // carries what the broadcast dropped.
+                            notice(format!("the stream fell behind; resuming after {cursor}"));
+                            break;
+                        }
+                        cursor = cursor.max(seq);
+                        print_frame(&Frame::Ev { seq, event });
+                    }
+                    Ok(Frame::Bye { .. }) => {
+                        notice(format!(
+                            "the server closed the stream; resuming after {cursor}"
+                        ));
+                        break;
+                    }
+                    Ok(_) => {}
+                    // `--timeout` bounds one read, not the follow: an idle
+                    // stream is a quiet one, not a finished one.
+                    Err(ExchangeError::Timeout) => continue,
+                    Err(error) => {
+                        notice(format!("{}; resuming after {cursor}", describe(&error)));
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(RECONNECT_PAUSE).await;
         }
     })
+}
+
+/// How long a follow waits before dialing the socket again. Long enough that a
+/// server which is down is not dialed in a tight loop, short enough that a
+/// restart costs a pause.
+const RECONNECT_PAUSE: Duration = Duration::from_millis(250);
+
+/// Tell the operator on stderr why the follow is not printing. stdout stays the
+/// stream of event frames and nothing else.
+fn notice(message: impl std::fmt::Display) {
+    eprintln!("onlyne watch: {message}");
+}
+
+/// One line naming why a connection ended.
+fn describe(error: &ExchangeError) -> String {
+    match error {
+        ExchangeError::Timeout => "the socket timed out".to_string(),
+        ExchangeError::Closed => "the link closed".to_string(),
+        ExchangeError::Wire(_, message) => message.clone(),
+    }
+}
+
+/// Whether one frame is the synthetic lag notice rather than an event.
+///
+/// It is the shape `onlyne_net`'s reader reports local queue loss with, and
+/// `onlyne_server::events` is the const both spellings come from.
+fn is_lag_notice(event: &Event) -> bool {
+    matches!(event, Event::Fault(fault) if fault.kind == RESYNC_LAG_KIND)
+}
+
+/// The cursor one frame carries.
+fn frame_seq(frame: &Frame) -> u64 {
+    match frame {
+        Frame::Ev { seq, .. } => *seq,
+        _ => 0,
+    }
+}
+
+/// Print one event frame as the single JSON line a follower reads.
+fn print_frame(frame: &Frame) {
+    println!(
+        "{}",
+        serde_json::to_string(frame).expect("serialisable frame")
+    );
+}
+
+/// The rows of a subscription page as the event frames they are part of.
+///
+/// `created_at` is the one field a page row carries that a live frame does not,
+/// and `history` is the verb that reads rows.
+fn page_frames(body: &ResBody) -> Result<Vec<Frame>, String> {
+    let events = body
+        .data
+        .as_ref()
+        .and_then(|data| data.get("events"))
+        .cloned()
+        .ok_or_else(|| "the subscription answer carries no page".to_string())?;
+    let rows: Vec<EventRow> = serde_json::from_value(events).map_err(|error| error.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| Frame::event(row.seq, row.event))
+        .collect())
 }
 
 /// `history` replays recorded envelopes; it needs the admin surface.

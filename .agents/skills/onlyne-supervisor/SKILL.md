@@ -28,10 +28,9 @@ to you and the spec file.
   run in the foreground, and a supervisor that wants one in the background starts `run`
   itself (a tab, `launchd`, `systemd`).
 - Every request verb prints one JSON line for its answer. `onlyne cluster export-prose`
-  prints the prose raw unless `--json` wraps it in an object, and the `report` family
-  prints labeled lines and opens no socket. Exit codes: 0 ok, 1 failed answer, 2 local
-  validation, 3 no socket, 4 the operator's input was refused (`generate`, and
-  `skill export` declining to overwrite a file), 5 `client run` found no session host,
+  prints the prose raw unless `--json` wraps it in an object. Exit codes: 0 ok, 1 failed
+  answer, 2 local validation, 3 no socket, 4 the operator's input was refused (`generate`,
+  and `skill export` declining to overwrite a file), 5 `client run` found no session host,
   127 missing sibling.
 
 ## Current operating facts
@@ -89,12 +88,12 @@ to you and the spec file.
    it fails: exit 4, and the output is deleted. Move a generated directory wherever you
    want — `mv`, then `onlyne client run --workspace <new-path>` in the foreground;
    whoever wants it backgrounded starts it that way. That is the whole relocation
-   story. A client started inside herdr places sessions in a workspace labelled
-   `onlyne:<cluster>` and a tab named for the role, so before those sessions spawn,
-   point the backend at the workspace you use: `herdr workspace rename <WORKSPACE_ID>
-   onlyne:<cluster>` and `herdr tab rename <TAB_ID> <role>`. A label that differs yields
-   a second workspace, and the client logs a warning naming the label and the workspace
-   it created.
+   story. A client whose placement is herdr places sessions in a workspace labelled
+   `onlyne:<cluster>` and a tab named for the role, and it finds the workspace by that
+   label alone, so rename yours to it before those sessions spawn: `herdr workspace
+   rename <WORKSPACE_ID> onlyne:<cluster>` and `herdr tab rename <TAB_ID> <role>`. A
+   label that differs yields a second workspace, and the client logs a warning naming
+   the label and the workspace it created.
 4. Append the fragments to `spec.toml`, then run `onlyne reload`. `onlyne spec-diff` shows
    the pending delta first. The spec file is the only truth; there is no runtime config API.
 
@@ -126,9 +125,9 @@ eight times) records whatever a script of yours reads beside the ledger, and `--
 child carries the family's root task id, its budget, its origin — the role that sent the root — its
 deadline, and its labels, so the hop that meets the budget is the hop that keeps the work. The
 figures ride `Causality`, so `onlyne ledger` prints `family` and `hop_budget` off the row without a
-script rebuilding them from `parent_task` links, and the assignment a role's plugin receives names
-the hop and the budget inside the task header. A ring that parsed its own counters out of the task
-text reads them here instead.
+script rebuilding them from `parent_task` links. The delivery a role's model reads names neither,
+and a `handoff` that would sit over the budget is refused before the child is minted: the counters
+are read off the ledger, never out of the task text.
 
 - Roles answer by completing the task. The receipt lands in the ledger as `out_head`: the
   first 200 grapheme clusters of the completion body (`head_preview` in
@@ -241,8 +240,8 @@ eligible queued or in-flight rows and returns `conflict` for a settled task.
 A delivery that arrives with the client's accept gate closed is left unanswered: the row
 stays `in_flight`, and the next `hello` that does not claim it puts it back on the queue. A
 refusal (`accepted: false`) is kept for work this client can never serve, such as an
-assignment the plugin declines (`assign rejected`) or a session command the chosen backend
-cannot host.
+assignment the plugin declines (`assign rejected`) or a session the operator's word retired with
+its delivery still in hand (`operator cancel`, `operator recycle`).
 
 A finished session takes its host resource with it. The client closes the pane, tab, zellij
 session, or exec child once that session holds no task and no plugin connection is attached,
@@ -282,12 +281,10 @@ settlement doors write a value on the column. `requeue_exhausted` and `requeue_t
 two gates above. `expired` comes from the deadline sweep on a queued note past its `--ttl`. The
 receiving client's refusal carries its own word there: `session_dead` when the reconnect sweep
 buries a dead session's delivery, `assign rejected` when the plugin declines an assignment,
-whatever `onlyne reject --reason <text>` names, and the literal `rejected` as the fallback, with a
-pane backend's sentence for a session command it cannot host reading, for example, `orca backend
-cannot host a protocol session: --mode rpc speaks JSON-RPC on its own stdio and the pane would
-print the frames; set backend = "exec" or backend = "acp" in the workspace config` (the `--acp`,
-`--mode=rpc`, and `--mode rpc` spellings all trigger it on `herdr`, `orca`, and `zellij`). The
-operator's own `onlyne repair fail --task <id> --reason <text>` and `onlyne repair close --task
+`operator cancel` and `operator recycle` when the client settles a session the operator's word
+retired while it still held the delivery, whatever `onlyne reject --reason <text>` names, and the
+literal `rejected` as the fallback. The operator's own `onlyne repair fail --task <id> --reason
+<text>` and `onlyne repair close --task
 <id> --reason <text>` write that text onto every undelivered row of the task, the close falling
 back to `operator close`. The ack side stays out of it: `onlyne ack --msg-id <id> --reason <text>
 --force --yes-i-am-supervisor-not-other-role`

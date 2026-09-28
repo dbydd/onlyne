@@ -477,8 +477,6 @@ fn welcome() -> Welcome {
         timeout_idle_ms: None,
         intent_attempts: Some(3),
         intent_backoff_ms: Some(vec![10, 20]),
-        relay_required: None,
-        relay_count: None,
         seq: 1,
     }
 }
@@ -500,8 +498,6 @@ fn role_info() -> RoleInfo {
         detail: None,
         edges: Vec::new(),
         aggregate: None,
-        relay_required: None,
-        relay_count: None,
     }
 }
 

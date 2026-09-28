@@ -24,9 +24,14 @@ use onlyne_wire::socket::{
     LocalListener, LocalStream, RegistrationFile, bind_socket_v2, registration_path,
     remove_registration, socket_path, write_registration,
 };
-use onlyne_wire::{read_frame, write_frame};
+use onlyne_wire::{FrameReader, read_frame, write_frame};
 use serde_json::Value;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+
+/// Frames a subscription may queue for one connection before the forwarder
+/// waits for the writer — the depth the role connection gives a client.
+const OUTBOUND_DEPTH: usize = 256;
 
 /// Serve a server started from CLI arguments.
 pub async fn run(init: ServerInit) -> anyhow::Result<()> {
@@ -114,20 +119,42 @@ pub async fn handle(state: Arc<State>, mut stream: LocalStream) -> anyhow::Resul
 }
 
 /// Serve request frames of the admin and gateway vocabularies.
+///
+/// The loop reads a frame or writes one a subscription is owed, so a connection
+/// that carries a stream still answers the requests that arrive on it. The
+/// reader keeps the bytes of a partial frame across a branch `select!` does not
+/// take, which is what makes that choice safe for the next frame.
 pub async fn frame_loop(
     state: Arc<State>,
     mut stream: LocalStream,
     first: Option<Value>,
 ) -> anyhow::Result<()> {
     let mut pending = first;
-    let mut session = Session::default();
+    let (sender, mut outbound) = mpsc::channel::<Frame>(OUTBOUND_DEPTH);
+    let mut session = Session {
+        sender: Some(sender),
+        ..Session::default()
+    };
+    let mut reader = FrameReader::new();
     loop {
-        let value: Value = match pending.take() {
-            Some(value) => value,
-            None => match read_frame(&mut stream).await? {
-                Some(value) => value,
-                None => return Ok(()),
-            },
+        let value: Value = if let Some(value) = pending.take() {
+            value
+        } else {
+            // Nothing is queued: wait for the peer, or for a frame the stream is
+            // owed. A closed outbound channel is this process dropping the
+            // session, so the connection is done either way.
+            loop {
+                tokio::select! {
+                    incoming = reader.next::<_, Value>(&mut stream) => match incoming? {
+                        Some(value) => break value,
+                        None => return Ok(()),
+                    },
+                    outgoing = outbound.recv() => match outgoing {
+                        Some(frame) => write_frame(&mut stream, &frame).await?,
+                        None => return Ok(()),
+                    },
+                }
+            }
         };
         if let Some(pong) = pong_for(&value, &state) {
             write_frame(&mut stream, &pong).await?;

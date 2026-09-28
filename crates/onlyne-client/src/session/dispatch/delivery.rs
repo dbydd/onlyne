@@ -107,8 +107,6 @@ fn open_session(
         &inner.role,
         &session_id,
         task_id,
-        &inner.relay_required,
-        inner.relay_count,
         &inner.topology,
         // One tree answers both halves of this spawn: the cwd below and the
         // socket the plugin dials, so a session whose workspace resolves to a
@@ -246,8 +244,6 @@ fn resume_delivery(
         &inner.role,
         &session_id,
         task_id,
-        &inner.relay_required,
-        inner.relay_count,
         &inner.topology,
         &served_socket(&inner.workspace),
     );
@@ -620,7 +616,15 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
         &attachments,
     );
     match (backend.self_driven(), target) {
-        (true, None) => backend.deliver(&session, &task_id, &text),
+        (true, None) => {
+            // A self-driven drive has no heartbeats, so the dispatch path feeds
+            // the turn-started fact here — the same fact a plugin's beat would
+            // carry — before the backend starts the turn. The never-ran guard
+            // reads the row this writes, so a completion the agent files
+            // through its tools mount during the turn passes it.
+            state.feed_turn_started(&task_id);
+            backend.deliver(&session, &task_id, &text)
+        }
         (true, Some(_)) => Err(anyhow!(
             "self-driven session {session_id} unexpectedly has an adapter transport"
         )),

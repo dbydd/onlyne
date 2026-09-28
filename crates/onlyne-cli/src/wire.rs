@@ -1,6 +1,7 @@
 //! One request frame out, one answer frame in, each bounded by `--timeout`.
 
 use onlyne_proto::{AdminOp, ClientOp, ErrorCode, Frame, ResBody};
+use onlyne_wire::FrameReader;
 use onlyne_wire::socket::{LocalStream, connect_local};
 use serde::{Deserialize, Serialize};
 use std::io::{ErrorKind, Result as IoResult};
@@ -120,6 +121,30 @@ pub async fn recv_frame(stream: &mut LocalStream, timeout_ms: u64) -> Result<Fra
     match timeout(
         Duration::from_millis(timeout_ms),
         onlyne_wire::read_frame::<_, Frame>(stream),
+    )
+    .await
+    {
+        Ok(Ok(Some(frame))) => Ok(frame),
+        Ok(Ok(None)) => Err(ExchangeError::Closed),
+        Ok(Err(error)) => Err(wire_error(&error)),
+        Err(_) => Err(ExchangeError::Timeout),
+    }
+}
+
+/// Read one frame of a stream, bounded by `--timeout`.
+///
+/// [`recv_frame`] keeps a partial frame's bytes inside its own future, so a
+/// timeout that lands mid-frame loses them and every boundary after them. A
+/// stream keeps reading after a timeout, so it reads through a [`FrameReader`]
+/// instead: what has already been read outlives the call that read it.
+pub async fn recv_stream_frame(
+    reader: &mut FrameReader,
+    stream: &mut LocalStream,
+    timeout_ms: u64,
+) -> Result<Frame, ExchangeError> {
+    match timeout(
+        Duration::from_millis(timeout_ms),
+        reader.next::<_, Frame>(stream),
     )
     .await
     {

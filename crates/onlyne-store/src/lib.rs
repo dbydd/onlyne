@@ -9,6 +9,7 @@
 
 mod client;
 mod error;
+mod liveness;
 mod server;
 pub mod session;
 #[cfg(test)]

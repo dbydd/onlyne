@@ -96,6 +96,7 @@ pub async fn on_out(
     task_id: &str,
     outcome: Outcome,
     head: Option<String>,
+    details: Option<String>,
     asked: SettleAuthority,
 ) -> Result<()> {
     if asked == SettleAuthority::PluginReport {
@@ -158,6 +159,7 @@ pub async fn on_out(
                     origin,
                     task_id,
                     head.as_deref(),
+                    details.as_deref(),
                     causality.as_ref(),
                 ),)),
                 session_id,
@@ -360,14 +362,21 @@ fn completion_envelope(
     origin: Option<Principal>,
     task_id: &str,
     head: Option<&str>,
+    details: Option<&str>,
     causality: Option<&Causality>,
 ) -> Option<Envelope> {
     let origin = origin?;
-    // A turn that left no result line still ends its task, and the sender still
-    // gets its answer: an empty body travels as `text: Some("")`, which the
-    // validator accepts, where an absent body would drop the receipt and leave
-    // the origin waiting on a task this role has already retired.
-    let body = Body::text(head.unwrap_or_default());
+    // The body carries the full result when the report named one, falling back
+    // to the one-line summary, and an empty string when neither is present — a
+    // turn that left no result still ends its task, and the sender still gets
+    // its answer as `text: Some("")`, which the validator accepts. The summary
+    // rides alongside in `head`, so a store that keeps a one-line preview
+    // shows it rather than the first clusters of the result.
+    let body = Body {
+        text: Some(details.or(head).unwrap_or_default().to_string()),
+        head: head.map(str::to_string),
+        image: None,
+    };
     let mut causality = causality.cloned().unwrap_or_default();
     causality.task = task_id.to_string();
     causality.parent_task = None;

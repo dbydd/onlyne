@@ -287,6 +287,15 @@ fn image_over_budget() -> Error {
 pub struct Body {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// One display line the sender names for this body, which a reader shows in
+    /// place of a preview of the body's own text. `None` is the ordinary case:
+    /// the body's text is the only content, and a store that keeps a one-line
+    /// preview derives it from the text. A completion that carries its full
+    /// result in `text` and a one-line summary separately sets this, so the
+    /// summary is what a ledger shows rather than the first clusters of the
+    /// result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ImagePart>,
 }
@@ -295,6 +304,7 @@ impl Body {
     pub fn text(text: impl Into<String>) -> Self {
         Body {
             text: Some(text.into()),
+            head: None,
             image: None,
         }
     }
@@ -302,6 +312,7 @@ impl Body {
     pub fn image(data_base64: impl Into<String>, mime: impl Into<String>) -> Self {
         Body {
             text: None,
+            head: None,
             image: Some(ImagePart {
                 data_base64: data_base64.into(),
                 mime: mime.into(),

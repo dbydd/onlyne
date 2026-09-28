@@ -493,3 +493,207 @@ async fn a_tools_frame_is_stamped_from_the_session_the_token_names() {
         error.message,
     );
 }
+
+/// The obligation is the role's `allowed_targets`, and the refusal names every
+/// role still owed and the set the session actually delivered to.
+///
+/// This is the door the two drives reach: the client's own constraints answer
+/// before a completion is applied, so the sentence below is what a model reads.
+/// The live cluster case the contract's acceptance asks for — a real client and
+/// a real server — is not this case; what is pinned here is the sentence's shape
+/// and the transition from refused to accepted as deliveries land.
+#[tokio::test]
+async fn the_relay_guard_names_what_is_owed_and_lets_the_completion_through_once_it_is_paid() {
+    let task = new_task_id();
+    let (state, _backend) = state_with_slot(&task);
+    // The role's own edges: the same list the server gates the ACL on.
+    {
+        let mut inner = state.inner.lock();
+        inner.required_targets = vec!["writer".to_string(), "auditor".to_string()];
+    }
+    let token = state
+        .tools_token(&task)
+        .expect("the session minted its token");
+    let (io, _peer) = connection();
+    state.bind_tools_mount(&token, io.clone()).expect("bind");
+
+    let refusal = state
+        .completion_refusal(Some(&io), &completion(&task))
+        .expect("a session that owes a delivery may not report a terminal outcome");
+    assert_eq!(
+        refusal
+            .error
+            .expect("the refusal carries its error")
+            .message,
+        "relay guard: missing handoff to: writer, auditor (this session delivered to: none)",
+    );
+
+    deliver(&state, &io, "writer");
+    let refusal = state
+        .completion_refusal(Some(&io), &completion(&task))
+        .expect("auditor is still owed, so the completion is still refused");
+    assert_eq!(
+        refusal
+            .error
+            .expect("the refusal carries its error")
+            .message,
+        "relay guard: missing handoff to: auditor (this session delivered to: writer)",
+    );
+
+    deliver(&state, &io, "auditor");
+    assert!(
+        state
+            .completion_refusal(Some(&io), &completion(&task))
+            .is_none(),
+        "a session that delivered to every role it owes meets no refusal",
+    );
+}
+
+/// A role that declares no target owes nothing: the empty list is the
+/// empty-policy case, and its session's first completion is not refused.
+#[tokio::test]
+async fn a_role_that_declares_no_target_owes_nothing() {
+    let task = new_task_id();
+    let (state, _backend) = state_with_slot(&task);
+    {
+        let inner = state.inner.lock();
+        assert!(
+            inner.required_targets.is_empty(),
+            "a role with no declared target owes nothing"
+        );
+    }
+    let token = state
+        .tools_token(&task)
+        .expect("the session minted its token");
+    let (io, _peer) = connection();
+    state.bind_tools_mount(&token, io.clone()).expect("bind");
+    assert!(
+        state
+            .completion_refusal(Some(&io), &completion(&task))
+            .is_none(),
+        "no declared target is no obligation",
+    );
+}
+
+/// One terminal completion for this task, in the shape the door measures.
+fn completion(task: &str) -> onlyne_proto::Report {
+    onlyne_proto::Report::Complete {
+        task_id: task.to_string(),
+        outcome: onlyne_proto::Outcome::Done,
+        head: Some("done".to_string()),
+        details: None,
+        files: Vec::new(),
+        reply_to: None,
+        cluster_ref: None,
+    }
+}
+
+/// One carried delivery to `role`, which is the guard's evidence.
+fn deliver(state: &DispatchState, io: &AdapterIo, role: &str) {
+    let mut envelope = new_envelope(
+        MsgKind::Task,
+        Principal::role("builder"),
+        Principal::role(role),
+        Body::text("carry it on"),
+        Some(Causality::root(new_task_id())),
+    )
+    .expect("a task envelope the protocol accepts");
+    state
+        .stamp_tools_send(io, &mut envelope)
+        .expect("the session's own record stamps the frame");
+    state
+        .plugin_send(io, &envelope)
+        .expect("the client carries the delivery");
+}
+
+/// A session owes its downstream edges, never the role it answers.
+///
+/// A completion is itself a delivery to the role that handed the task over, so
+/// an entry naming that role — the self-addressed line `onlyne-client init`
+/// prints and about twenty fixtures restate, and a ring's return edge — is not
+/// an obligation the session could ever discharge. The exclusion is the origin
+/// alone: a downstream edge beside it still owes its delivery.
+#[tokio::test]
+async fn a_session_owes_its_downstream_edges_and_never_the_role_it_answers() {
+    let task = new_task_id();
+    let (state, _backend) = state_with_slot(&task);
+    // The session serves a task that arrived from `sender`, so that edge is the
+    // origin: named on the list, and never owed.
+    {
+        let mut inner = state.inner.lock();
+        inner.required_targets = vec!["sender".to_string()];
+    }
+    let token = state
+        .tools_token(&task)
+        .expect("the session minted its token");
+    let (io, _peer) = connection();
+    state.bind_tools_mount(&token, io.clone()).expect("bind");
+    assert!(
+        state
+            .completion_refusal(Some(&io), &completion(&task))
+            .is_none(),
+        "the role that handed this session its task is not owed a second delivery",
+    );
+
+    // The same list with a downstream edge beside it: that one is owed, and the
+    // origin is still not named as though it were.
+    {
+        let mut inner = state.inner.lock();
+        inner.required_targets = vec!["sender".to_string(), "downstream".to_string()];
+    }
+    let refusal = state
+        .completion_refusal(Some(&io), &completion(&task))
+        .expect("a downstream edge is still owed");
+    assert_eq!(
+        refusal
+            .error
+            .expect("the refusal carries its error")
+            .message,
+        "relay guard: missing handoff to: downstream (this session delivered to: none)",
+    );
+
+    deliver(&state, &io, "downstream");
+    assert!(
+        state
+            .completion_refusal(Some(&io), &completion(&task))
+            .is_none(),
+        "the downstream delivery settles the obligation",
+    );
+}
+
+/// The self-addressed entry `onlyne-client init` prints owes nothing.
+///
+/// The task came from this client's own role and the list names it, which is the
+/// shape a one-role workspace starts from: without the origin excluded, its
+/// session could never report a terminal outcome at all.
+#[tokio::test]
+async fn a_self_addressed_entry_owes_nothing() {
+    let task = new_task_id();
+    let (state, _backend) = state_with_slot(&task);
+    {
+        let mut inner = state.inner.lock();
+        let key = inner
+            .sessions
+            .keys()
+            .next()
+            .cloned()
+            .expect("the staged session");
+        inner
+            .sessions
+            .get_mut(&key)
+            .expect("the slot the task opened")
+            .origin = Some(Principal::role("planner"));
+        inner.required_targets = vec!["planner".to_string()];
+    }
+    let token = state
+        .tools_token(&task)
+        .expect("the session minted its token");
+    let (io, _peer) = connection();
+    state.bind_tools_mount(&token, io.clone()).expect("bind");
+    assert!(
+        state
+            .completion_refusal(Some(&io), &completion(&task))
+            .is_none(),
+        "a one-role cluster's self-addressed list is not an obligation it could discharge",
+    );
+}

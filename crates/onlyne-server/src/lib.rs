@@ -14,6 +14,7 @@ pub mod ghosts;
 pub mod projection;
 pub mod relay;
 pub mod router;
+pub mod spec_edits;
 pub mod stale;
 pub mod state;
 

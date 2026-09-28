@@ -130,7 +130,7 @@ herdr maps session (inherited) → workspace `onlyne:<cluster>` → tab = role �
 Workspace label `onlyne:<cluster>` and role-name tab are what the backend matches on: a label that differs yields a second workspace, and a tab name that differs yields a second tab.
 Before spawning sessions, rename the workspace and tab the backend should use: `herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>` and `herdr tab rename <TAB_ID> <role>`.
 The client logs a warning naming the label and the created workspace on the create path.
-Spawn: known agent first token → `herdr agent start --kind ... -- <session_command tail>`; remaining commands → `herdr pane run`. `workspace create`/`tab create`/`pane split` pass `--cwd` absolute.
+Spawn: known agent first token → `herdr agent start --kind ... -- <runtime command tail>`; remaining commands → `herdr pane run`. `workspace create`/`tab create`/`pane split` pass `--cwd` absolute.
 Split: `PanePlacement::from_pane_count`, `(count+1).is_power_of_two()` → `right`, remaining counts → `down`, ratio `0.5`.
 Focus: `workspace focus` → `tab focus` → `agent focus <pane_id>` for a managed agent, `pane focus --pane <base_pane> --direction <split_direction>` for a `pane run` shell pane, then `pane get <pane_id>` must report `result.pane.focused`.
 `backend_ref` stores `workspace_id`, `tab_id`, `pane_id`, `agent`, `workspace_label`, `base_pane`, `split_direction`.
@@ -139,7 +139,7 @@ Retirement invariant an editor keeps: a session's host resource (pane, tab, zell
 
 **Client dispatch** (`onlyne-client/src/session/dispatch/`, `onlyne-client/src/session/stall.rs`): the dispatch lock serializes slot, transport, backend, and lifecycle work, and the 250 ms readiness tick (`onlyne-client/src/runtime/runloop/`, `READINESS_POLL_MS` in its `config.rs`) drives `reclaim_exited_resources`. A session is addressed by its own `session_id` and may serve several deliveries in turn, so the two ids are not the same value: the bindings live in their own table, `session_tasks(session_id, task_id, bound_at, released_at)`, and `SessionRow.task_id` is the delivery the session is serving right now, `None` while it holds a process but is bound to nothing (`SessionRow` in `onlyne-proto/src/ops.rs`; `dispatch` in `onlyne-client/src/session/dispatch/delivery.rs`). A task this role already finished settles from the durable record with no second run (`task_completed_here` in `onlyne-client/src/runtime/runloop/sessions.rs`). `StallWatch::note_applied` refreshes an assigned clock; `note_assigned` owns clock creation, so a late observation from a plugin that already answered cannot reopen a stall episode on a settled task. A connection release forgets the progress clocks of the sessions it served, and both `stall_due` and `stall_report` check the stored lifecycle before a `stalled` fault reaches the wire.
 
-The accept gate decides what a delivery the pull brought meets. A gate shut because the link left `Ready` leaves that row in flight: the client answers nothing, and the next `hello` that does not claim the row is what puts it back on the server's queue (`accept_delivery` in `onlyne-client/src/runtime/runloop/sessions.rs`). The client's own refusal (`accepted: false`) settles a row `rejected`, and that terminal answer is kept for work this client cannot serve at all, such as a pane backend meeting a protocol-speaking command.
+The accept gate decides what a delivery the pull brought meets. A gate shut because the link left `Ready` leaves that row in flight: the client answers nothing, and the next `hello` that does not claim the row is what puts it back on the server's queue (`accept_delivery` in `onlyne-client/src/runtime/runloop/sessions.rs`). The client's own refusal (`accepted: false`) settles a row `rejected`, and that terminal answer is kept for work this client cannot serve at all, such as an assignment the plugin itself declines (`assign rejected`) or a session the operator's word retired with the delivery still in hand (`operator cancel`, `operator recycle`).
 
 A task-bound unsettled session is retired after either a dropped connection exceeds
 `[client] reconnect_grace_secs` or an attached transport accepts no frame for three heartbeat
@@ -147,7 +147,11 @@ intervals. Both arms settle the bound task `failed`, refuse its delivery row wit
 `session_dead` (`SESSION_DEAD`, `onlyne-client/src/session/dispatch/retire.rs`), close the host
 resource, and publish the exit, so the server's mirrored row reads `exited` in the same tick.
 
-A pane backend refuses a protocol-speaking command before it spawns: `reject_protocol_command_in_pane` runs on `herdr`, `orca`, and `zellij` once the `{session}`/`{task}` tokens are rendered and before `backend.spawn`, and it fires when the argv holds `--acp`, `--mode=rpc`, or `--mode` followed by `rpc`. The correction belongs in the workspace config; an editor that swaps the backend at spawn time hides a mis-set config behind a silent drift, so the delivery fails and the reason reaches the ledger. Nothing opens: no pane, no process, the task row lands `rejected`, and the row's `reason` carries the whole sentence, byte for byte — `{backend} backend cannot host a protocol session: {token} speaks JSON-RPC on its own stdio and the pane would print the frames; set backend = "exec" or backend = "acp" in the workspace config`. The client hands that text to the server as the refusal reason on the delivery's settle intent (`push_settled` in `onlyne-client/src/session/dispatch/slots.rs` → `store_ack` in `onlyne-client/src/session/dispatch/outbound.rs`, answered by `relay::ack`), and the server writes it into the row through `mark_rejected` (`onlyne-store/src/server.rs`), which is where the operator reads it.
+A drive and a placement pair under one rule, and the configuration validator is that rule's only
+checkpoint: `validate_drive_placement` (`onlyne-config/src/client.rs`) refuses `acp` with every
+placement but `headless`, by name, before any session exists. Nothing refuses a command at spawn
+time: the dispatch-time guard that sniffed a pane's argv for protocol tokens is deleted, and with it
+the refusal of the ordinary `plugin` drive whose command is `pi --mode rpc`.
 
 ## Gates
 
@@ -175,9 +179,10 @@ not model (`requeue-claim.sh`, `two-cluster.sh`, `running-lights.sh`, `gateway-m
 lacks the runtime or the model, so a green line means "passed here" and a skip means
 "not exercised here".
 
-The gate reading in the commit receipt for `282c77a` is 1008 passed, 0 failed, 2 ignored, from
-`cargo test --workspace` with fmt and clippy clean. Per-crate counts move with every phase, so
-this file does not carry them; `cargo test -p <crate>` is what produces one.
+The gate reading in the commit receipt for `aebbe11` is 324 passed, 0 failed, 1 ignored for the
+`onlyne-client` crate, from `ONLYNE_BACKEND=fake cargo test --workspace` with fmt and clippy clean.
+Counts move with every phase, so this file carries the latest receipt rather than a running total;
+`cargo test -p <crate>` is what produces one for a single crate.
 
 The earlier 2026-09-23 sweep from the repository root with `ONLYNE_BIN_DIR=target/release`
 (`lib.sh` derives `BIN_DIR` from `ONLYNE_BIN_DIR`, and `target/debug` is its default) was:
@@ -196,7 +201,7 @@ quoted above; `docs/live-evidence-1.4.0.md` and `Devlogs.md` hold the v1 records
 A bug fix needs its reproduction as an e2e or a table test:
 red before the fix, green after. The live ring demo
 (`examples/supervisor/run.py`) needs a real `pi` on PATH: inside an Orca tab its sessions take
-tabs, and outside one `ONLYNE_BACKEND=exec` runs them headless. Treat it as manual smoke.
+tabs, and outside one `ONLYNE_BACKEND=headless` runs them headless. Treat it as manual smoke.
 
 Socket invariant: the path a daemon binds is the path `socket_path()` returns, and every
 finder — CLI, TUI, fake agent, plugin — resolves through `onlyne-wire`'s socket module

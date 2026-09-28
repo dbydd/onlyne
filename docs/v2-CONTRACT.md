@@ -486,3 +486,217 @@ here from the pi plugin, where they were the plugin's private guard.
 - No file under `.onlyne/out/` is written by any path, and grep finds no reader of it.
 - A `complete` carrying a `details` body over the cap is refused with the cap named, and
   one at the cap passes.
+
+## Slice 4: the spec surface — reads, typed edits, and a streaming admin subscribe
+
+The plan's §"网页前端 onlyne-web" lines 380-383 for the edits, and its v1 finding 7 for the
+subscribe: `AdminOp::Watch` answers one page and the only continuous stream hangs off
+`ClientOp::Subscribe`, so an operator's `onlyne --server-root R watch --follow` waits out its
+timeout and exits 1, and every board polls at 1 Hz.
+
+### Interface
+
+**`AdminOp::SpecGet`** answers the structured `Spec`, the absolute path it was read from, and
+`source_hash` — the hash of the file's **bytes**, so a comment-only edit changes it. That is
+the point: it is the concurrency token a later `SpecApply` is checked against, not a semantic
+fingerprint.
+
+**`AdminOp::SpecApply { base_hash, edits }`** with `edits` a list of typed edits, one shape
+per `SpecEdit` variant: `upsert_role`, `remove_role`, `set_targets`, `set_senders`,
+`set_prose`, `set_session`, `set_runtime`. The server applies them with `toml_edit`, so an
+operator's comments and formatting survive; validates the result in memory with the same
+parser that reads the file; writes it atomically; and reloads. `base_hash` that does not match
+the file answers `conflict` and writes nothing. A result that does not parse answers `invalid`
+with `spec.toml:<line>`, the same voice the loader uses, and writes nothing.
+
+**When an edit takes effect**, because a reader will ask and the answer is not uniform:
+`allowed_targets`, `allowed_senders`, and `max_sessions` immediately; role prose from the next
+session that opens; session policy and the runtime command for sessions opened after the
+reload; placement is the machine's and is only displayed.
+
+**One streaming admin subscribe**, carrying a cursor: the same event classes a client sees —
+durable `ledger_state` and `session_state`, advisory `role_presence`, `gateway_presence`,
+`spec_reloaded`, and `fault`, plus the turn-end family (`turn_end_without_complete`,
+`delivery_blocked`, `handoff`). `onlyne watch --follow` streams until it is interrupted rather
+than waiting out a timeout, and a subscriber that reconnects with its last `seq` resumes with
+no gap and no repeat.
+
+### Acceptance
+
+- `SpecGet`'s `source_hash` changes when a comment changes and not when a file is merely
+  rewritten with identical bytes.
+- A `set_targets` edit keeps every comment in the file, takes effect **without a restart** (a
+  send the ACL refused is accepted straight after), and publishes `spec_reloaded`.
+- A stale `base_hash` answers `conflict` and the file is byte-identical afterwards; an edit
+  that would not parse answers `invalid` naming `spec.toml:<line>`, also byte-identical.
+- `onlyne watch --follow` prints events as they happen and does not exit on its own; a
+  subscriber that drops and resumes from its cursor sees every event exactly once — the
+  plan's "server restart: subscribers resume without a gap" case.
+
+## Slice 5: liveness in memory, and readers that do not queue behind writers
+
+The plan's §"存活与新鲜度" (line 251) and §"网络与并发" (lines 416-417): a heartbeat refreshes
+`last_seen` in memory, the projection reaches disk only when its content changes, and an admin
+query does not wait behind a delivery write.
+
+### Interface
+
+- **A beat with no content change writes nothing.** No store write, no event — only the
+  in-memory `last_seen` moves. The persisted row is refreshed when the projection's content
+  changes, when the session ends, and at an interval the implementation states in one place;
+  that interval is the reader's worst-case staleness and belongs in the doc comment beside it.
+- **`last_seen` stays a readable fact.** `onlyne sessions` shows the live value for a session
+  the server holds in memory and the persisted one otherwise, so a reader still judges
+  freshness for itself rather than being handed a row that froze hours ago.
+- **Admin queries run on a read-only connection pool.** WAL is already on; the point is that a
+  board or a TUI refresh is not queued behind the delivery path's single writer.
+
+### Acceptance
+
+- A session that beats N times without a content change performs **zero** session-row writes
+  (proved by a write counter or an equivalent store-level observation, not by reading the
+  code), while `onlyne sessions` still shows a `last_seen` that advances between reads.
+- An admin read completes while a delivery write is in flight, and it does not use the writer
+  connection.
+- After a stop and a restart, a persisted `last_seen` is no older than the stated interval.
+
+## Slice 6: one declaration per role — the edges are the permission and the obligation
+
+The plan's §"落地顺序" line 550 calls this "声明式路由边取代 `relay_required`, 预算检查移到
+client". The budget check already moved in slice 3c; what is left is the first half, and the
+shape is decided rather than guessed: **one list, both jobs.**
+
+### Interface
+
+**`[[client]].allowed_targets` is the whole of it.** A role may address exactly those roles —
+the server's ACL, unchanged — and a session of that role owes every one of them a delivery
+before it may report a terminal outcome. There is no second declaration to disagree with.
+
+**`relay_required` and `relay_count` are deleted**, together with the `relay_required_count`
+alias the loader rewrites and the count form the guard carried, and with the two keys on the
+wire (`Welcome`, the role summary) that carried them. A spec still naming either is refused by
+name, as a fused key is today — not silently ignored, not aliased into something else.
+
+**The list arrives where the check lives.** The client's relay check needs its own role's
+`allowed_targets`, so the handshake carries it. A session whose role declares no targets owes
+nothing, which is the empty-policy case the guard already had.
+
+**The refusal keeps its shape**: it names every role still owed and the set the session
+actually delivered to, because that sentence is what a model reads and it is the same one
+both drives already see. There is no count form to keep coherent with it.
+
+**Budget stays on `handoff`.** A `send` starts a family and a `handoff` continues one, so the
+hop budget is checked where a family is continued; `send` is never refused for budget. That
+split is already implemented and this slice does not touch it.
+
+### Acceptance
+
+- A role that declares two targets and delivers to one is refused with the refusal naming the
+  missing one; after the second delivery the same completion is accepted — over a real client,
+  not through a unit stub.
+- A role with an empty `allowed_targets` completes freely, on both drives.
+- A spec naming `relay_required` (or `relay_required_count`, or `relay_count`) is refused by
+  name, with no silent acceptance and no second reader left for the key.
+- The ACL is unchanged: addressing a role outside `allowed_targets` is still refused by the
+  server, before any of this.
+
+## Slice 7: event hooks — operator policy outside the delivery path
+
+The plan's §"事件钩子" (lines 336-351) and `AGENTS.md` §14. The end rule only records state; what
+to *do* about a blocked delivery is the operator's policy, and it belongs outside the core.
+
+### The declaration
+
+```toml
+[[hook]]
+on = ["delivery_blocked", "turn_end_without_complete"]
+run = ["./hooks/notify-supervisor.sh"]
+timeout = "10s"
+```
+
+`on` names event classes from the closed set, `run` is a command, `timeout` bounds it. A hook
+never runs for a class it does not name, and a spec naming a class that does not exist is
+refused by name, like any other key the spec declares.
+
+### Delivery
+
+The server spawns `run` with the event as one JSON object on stdin and `ONLYNE_SOCKET` pointing
+at the admin socket, so a script can act without a second discovery step. Delivery is
+**at-least-once**: the server records the last successfully handled `seq` per hook, resumes from
+there after a restart, and a script deduplicates on `seq`. A nonzero exit or a timeout records a
+`hook_failed` fault and **leaves the original event untouched** — a hook is policy, and policy
+failing must not rewrite history.
+
+### The interface this slice must settle: a client event reaches the server's stream
+
+The plan's own example hooks on `delivery_blocked` and `turn_end_without_complete`, and both
+are facts the **client** owns (slice 3c records them through the client's session state). A
+hook runner that lives only on the server therefore cannot serve the plan's own example, so:
+
+- **`ClientOp::PublishEvent { class, payload }` is a thirteenth client-to-server verb.** It is
+  not a report: it carries no `(generation, seq)`, changes no session state, and passes through
+  none of the report gate. The server appends it to its event stream and answers nothing.
+- **`class` is from a closed set, not a free string.** The client may publish only the classes
+  it owns — the turn-end family (`turn_end_without_complete`, `delivery_blocked`, `handoff`) —
+  so a peer cannot invent an event name and a hook cannot bind to a spelling nobody publishes.
+  The server's own classes (`ledger_state`, `session_state`, `fault`, `role_presence`,
+  `gateway_presence`, `spec_reloaded`) are never published by a client.
+- **The server's stream is the owner.** The client publishes and keeps no second copy of a
+  published event; the client's own fault record, which is the client's business, is unchanged.
+
+### Acceptance
+
+- A hook bound to `delivery_blocked` runs exactly once for one blocked delivery, receives that
+  event's JSON on stdin, and can read the admin socket from `ONLYNE_SOCKET` — over a real
+  server, with a real script.
+- A hook that exits nonzero is recorded as a `hook_failed` fault, the event is unchanged, and
+  the next hook bound to the same event still runs.
+- After a restart with a half-processed backlog, the hook resumes from its last successful
+  `seq`: no event skipped, none handled twice.
+- A client publishing an unknown class is refused, and a spec binding a hook to an unknown
+  class is refused by name.
+- A session that triggers no bound event runs no hook process at all.
+
+## Slice 8: the `view` reducer — one state for the TUI and the web
+
+Phase three's first piece, and the plan is explicit about where it lives: **in `onlyne-proto`,
+which takes no tokio dependency** (`docs/v2-PLAN.md` §"crate 划分" line 462, "协议词汇、op、会话
+reducer、`view` reducer；无 tokio"). Both front ends consume it: the TUI inside `onlyne` and
+`onlyne-web` outside it (`§"TUI"` line 395).
+
+### Interface
+
+- **Input is one snapshot plus a stream.** A snapshot is what the admin reads already answer
+  (`status`, `roles`, `sessions`, `ledger`, `faults`); the stream is slice 4's
+  `AdminOp::Subscribe`, carrying the same classes the client sees.
+- **`View` keeps the two axes apart.** The plan's line 249: delivery state
+  (`queued` → `in_flight` → `settled`) and session state (`busy`/`idle`/`suspended`/`closed`)
+  are two axes, and v1 squashed them into one projection row. A reader must be able to see a
+  delivery that settled while its session is suspended without that contradiction being
+  resolved away — it is not one fact.
+- **`update(state, event)` is total and pure**, like the session reducer beside it: no I/O, no
+  clock, no spawning, and an event class it does not know leaves the state unchanged rather
+  than panicking. The front ends own the IO task; the reducer owns nothing but the fold.
+- **A gap is a first-class input.** Slice 4's resync signal — the synthetic `RESYNC_LAG_KIND`
+  fault a subscriber sees when it has fallen behind — marks the view stale rather than being
+  folded in as ordinary news, so a renderer can say "catching up" instead of drawing a state
+  that silently lost events.
+
+### What the three screens need, so the reducer is shaped by them and not by taste
+
+- **Cluster**: roles with presence, sessions busy/idle/suspended, queue depth, and an event
+  tail.
+- **Task**: one family's path across roles — every delivery, every receipt, and the tail of the
+  session log.
+- **Faults**: the open faults and the repair entry points.
+
+### Acceptance
+
+- A golden case pins a snapshot plus a scripted event sequence to an exact `View`: the reducer
+  is pure, so the whole fold is testable without a server, a socket, or a terminal.
+- A case where a delivery settles while its session is suspended keeps both facts visible.
+- Feeding the resync signal marks the view stale, and the next snapshot clears it; the same
+  event sequence *without* the resync never marks it stale, so the flag means what it says.
+- An unknown event class leaves the view unchanged and is not silently rendered as news.
+- `onlyne-proto` still builds without tokio, proved by the crate's own dependency rule rather
+  than by inspection.

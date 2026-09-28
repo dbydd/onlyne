@@ -64,9 +64,10 @@ pub use ops::{
     AckArgs, AdminControl, AdminOp, AdminReport, AdminSend, ByeArgs, ClientOp, ControlArgs,
     ConversationInfo, Delivery, Drive, FreshRead, GatewayOp, GhostSweep, HandshakeArgs, HealthArgs,
     HistoryArgs, LedgerEntry, LedgerQuery, LiveSession, PullArgs, PullReply, QueryFaultsArgs,
-    QueryRolesArgs, QuerySessionsArgs, Receipt, RegisterChannelArgs, RepairAck, RepairAdopt,
-    RepairFail, RepairRebind, RepairTarget, Report, RoleInfo, RoleRuntime, SessionProjection,
-    SessionRow, ShutdownArgs, Subscribe, Welcome,
+    QueryRolesArgs, QuerySessionsArgs, Receipt, RegisterChannelArgs, RemoveRole, RepairAck,
+    RepairAdopt, RepairFail, RepairRebind, RepairTarget, Report, RoleInfo, RoleRuntime,
+    SessionProjection, SessionRow, SetProse, SetRuntime, SetSenders, SetSession, SetTargets,
+    ShutdownArgs, SpecApply, SpecEdit, SpecView, Subscribe, UpsertRole, Welcome,
 };
 
 pub use text::{

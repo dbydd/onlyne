@@ -424,6 +424,7 @@ async fn a_redelivered_finished_task_is_acked_and_runs_nowhere() {
         &task_id,
         Outcome::Done,
         Some("done".into()),
+        None,
         SettleAuthority::PluginReport,
     )
     .await
@@ -489,6 +490,7 @@ async fn a_task_ended_without_a_completion_stays_eligible_for_its_retry() {
         &task_id,
         Outcome::Failed,
         Some("crashed".into()),
+        None,
         SettleAuthority::PluginReport,
     )
     .await

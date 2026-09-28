@@ -29,8 +29,7 @@ impl DispatchState {
                 runtime_refusal: None,
                 max_sessions,
                 session_policy: onlyne_config::SessionPolicy::default(),
-                relay_required: Vec::new(),
-                relay_count: None,
+                required_targets: Vec::new(),
                 backend,
                 store,
                 bridge: Bridge::new(),
@@ -132,6 +131,33 @@ impl DispatchState {
     pub fn session_count(&self) -> usize {
         self.inner.lock().sessions.len()
     }
+
+    /// Feed the turn-started fact for a self-driven session's turn, so the
+    /// row's agent phase reads `running` before the agent can report a
+    /// completion through its tools mount (`docs/v2-CONTRACT.md` §3c). A plugin
+    /// drive feeds this through its heartbeats; a self-driven drive has none,
+    /// so the dispatch path feeds it where it hands the turn to the backend.
+    pub fn feed_turn_started(&self, task_id: &str) {
+        let inner = self.inner.lock();
+        if let Err(error) =
+            crate::reconcile::feed_turn_started(&inner.bridge, &inner.store, task_id)
+        {
+            tracing::warn!(task = %task_id, error = %error, "the turn-start feed did not apply");
+        }
+    }
+
+    /// Feed the turn-ended fact for a self-driven session's turn, so the row's
+    /// agent phase reads `idle` when the turn the drive witnessed ends. The
+    /// never-ran guard reads the same column, so a completion that arrives
+    /// after this feed still passes it.
+    pub fn feed_turn_ended(&self, task_id: &str) {
+        let inner = self.inner.lock();
+        if let Err(error) = crate::reconcile::feed_turn_ended(&inner.bridge, &inner.store, task_id)
+        {
+            tracing::warn!(task = %task_id, error = %error, "the turn-end feed did not apply");
+        }
+    }
+
     pub fn role(&self) -> String {
         self.inner.lock().role.clone()
     }
@@ -338,8 +364,7 @@ impl DispatchState {
             drive: inner.drive.unwrap_or_default(),
             command: inner.command.clone(),
             max_sessions: inner.max_sessions,
-            relay_required: inner.relay_required.clone(),
-            relay_count: inner.relay_count,
+            required_targets: inner.required_targets.clone(),
         }
     }
 
@@ -471,8 +496,7 @@ impl DispatchState {
         let mut inner = self.inner.lock();
         inner.command = slice.command;
         inner.max_sessions = slice.max_sessions;
-        inner.relay_required = slice.relay_required;
-        inner.relay_count = slice.relay_count;
+        inner.required_targets = slice.required_targets;
     }
 
     /// Role prose last cached from `welcome`.

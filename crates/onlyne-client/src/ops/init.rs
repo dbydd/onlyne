@@ -151,12 +151,6 @@ const KNOB_COMMENTS: &str = "\
 # aggregate = \"\"
 # The child-cluster name this role stands for. It is an annotation only: no
 # delivery decision reads it, and a plain role leaves it empty.
-# relay_required = []
-# Downstream roles one of this role's sessions must have handed work to before
-# it may report a terminal outcome. Absent or empty is the default: no guard.
-# relay_count = <n>
-# The count form of relay_required: this many distinct downstream roles. When
-# both keys are present the non-empty list wins.
 # The [client.runtime] table below is the drive and the argv a session runs.
 # `drive` names how the client talks to the runtime: plugin (the default)
 # starts it and lets its plugin dial back, acp runs the agent as a child over

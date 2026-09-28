@@ -316,14 +316,19 @@ pub fn write(
                 return Ok(ProjectionOutcome::skipped());
             };
             if !adds_only_outcome(&stored_projection, &projection) {
-                // A beat that observed nothing new still moves `last_seen`: the
-                // column is what a reader judges this row's freshness by, and a
-                // beat is evidence the session is there even when its projection
-                // did not change. The tuple, `updated_at`, and the event stream
-                // are all left exactly as they were.
-                state
-                    .ledger
-                    .touch_session_last_seen(&row.session_id, Utc::now().timestamp())?;
+                // A beat that observed nothing new is liveness and nothing
+                // else: no store write, no event, and the tuple and
+                // `updated_at` stay exactly where they were. The beat moves
+                // `last_seen` in the store's memory, where every read of the
+                // row picks it up, and reaches the row itself only once the
+                // row is a whole interval behind — which is why this path is
+                // not the per-beat write v1 turned it into (plan §"网络与并发",
+                // v1 finding 6).
+                state.ledger.beat_session(
+                    &row.session_id,
+                    Utc::now().timestamp(),
+                    last_seen_flush_secs(state),
+                )?;
                 return Ok(ProjectionOutcome::skipped());
             }
             let mut write = row.clone();
@@ -465,6 +470,35 @@ fn heartbeat_grace_secs(state: &State) -> u64 {
         .spec_snapshot()
         .map(|spec| spec.server.heartbeat_grace_secs)
         .unwrap_or(onlyne_config::DEFAULT_HEARTBEAT_GRACE_SECS)
+}
+
+/// How far a live session's persisted `last_seen` may lag its beats, in seconds.
+///
+/// This is the reader's worst-case staleness, and the only reason a no-op beat
+/// touches the table at all. A reader of the row is handed the live value while
+/// this process holds one and the persisted value otherwise, so what this
+/// bounds is what a reader sees when the live value is not there: after a
+/// restart, or from anything reading the file rather than the cluster. Within
+/// one presence window the answer is still a fact the live server agrees with;
+/// past it, the row says nothing the cluster has not already outlived.
+///
+/// The number is the presence window the cluster already answers presence
+/// with, `[server] heartbeat_timeout_ms` — thirty seconds unless the spec says
+/// otherwise, which is three of the client's ten-second beats and the same
+/// margin the client's own reconnect sweep takes. Taking the configured window
+/// rather than a constant of our own keeps two answers from existing for one
+/// question: a cluster that beats slowly persists slowly, and one that beats
+/// fast is not handed a row that reads as silence.
+///
+/// Floored at one second: a spec that configures a window below that is asking
+/// for more writes than the beats themselves, which is the v1 cadence this
+/// slice exists to remove.
+fn last_seen_flush_secs(state: &State) -> i64 {
+    let millis = state
+        .spec_snapshot()
+        .map(|spec| spec.server.heartbeat_timeout_ms)
+        .unwrap_or(onlyne_config::DEFAULT_HEARTBEAT_TIMEOUT_MS);
+    (millis / 1000).max(1) as i64
 }
 
 /// Read the session table.

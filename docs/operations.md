@@ -164,7 +164,8 @@ Automatic requeueing is governed by two budget knobs; manual `onlyne repair retr
 
 Evaluate TTL first, then attempt count; each produces one `ledger_state` event.
 
-How to read `reason`: the row keys printed by `onlyne ledger` are `msg_id`, `task`, `state`, `reason`, `out_head`, `body`, `family`, and `hop_budget`. A key appears only when that row has a value; rows and columns without values remain byte-for-byte identical to before. The task detail panel on TUI page 2 appends `reason=<text>` to the end of the ledger row. Values that enter this column include `requeue_exhausted` and `requeue_ttl` from the two gates above; `expired` from the expiration sweep; `session_dead` from the rejection written when a client settles a disconnected session (see “Session ghosts and ownership determination”); `operator cancel` and `operator recycle` from a client settling by itself and rejecting the delivery row it still holds when no one answers the operator's word (see the control section below); and the full rejection text when a pane backend (`herdr` / `orca` / `zellij`) rejects a protocol `session_command` before opening the page (see the final paragraph of “Headless (`exec`) sessions”). Text entered by an operator through `onlyne reject --reason` or `onlyne repair fail --reason` enters this column unchanged. When `onlyne ack` accepts it, that text travels with the settlement event and the row's `reason` remains unchanged. The string `operator ack` is test data in the faults table's `reason` column (the `update_fault_state` case in `crates/onlyne-store/src/tests.rs`); the ledger column has no record of it.
+How to read `reason`: the row keys printed by `onlyne ledger` are `msg_id`, `task`, `state`, `reason`, `out_head`, `body`, `family`, and `hop_budget`. A key appears only when that row has a value; rows and columns without values remain byte-for-byte identical to before. The task detail panel on TUI page 2 appends `reason=<text>` to the end of the ledger row. Values that enter this column include `requeue_exhausted` and `requeue_ttl` from the two gates above; `expired` from the expiration sweep; `session_dead` from the rejection written when a client settles a disconnected session (see “Session ghosts and ownership determination”); `operator cancel` and `operator recycle` from a client settling by itself and rejecting the delivery row it still holds when no one answers the operator's word (see the control section below). Text entered by an operator through `onlyne reject --reason` or `onlyne repair fail --reason` enters this column unchanged. When `onlyne ack` accepts it, that text travels with the settlement event and the row's `reason` remains unchanged. The string `operator ack` is test data in the faults table's `reason` column (the `update_fault_state` case in `crates/onlyne-store/src/tests.rs`); the ledger column has no record of it.
+How to read `reason`: the row keys printed by `onlyne ledger` are `msg_id`, `task`, `state`, `reason`, `out_head`, `body`, `family`, and `hop_budget`. A key appears only when that row has a value; rows and columns without values remain byte-for-byte identical to before. The task detail panel on TUI page 2 appends `reason=<text>` to the end of the ledger row. Values that enter this column include `requeue_exhausted` and `requeue_ttl` from the two gates above; `expired` from the expiration sweep; `session_dead` from the rejection written when a client settles a disconnected session (see “Session ghosts and ownership determination”); and `operator cancel` and `operator recycle` from a client settling by itself and rejecting the delivery row it still holds when no one answers the operator's word (see the control section below). Text entered by an operator through `onlyne reject --reason` or `onlyne repair fail --reason` enters this column unchanged. When `onlyne ack` accepts it, that text travels with the settlement event and the row's `reason` remains unchanged. The string `operator ack` is test data in the faults table's `reason` column (the `update_fault_state` case in `crates/onlyne-store/src/tests.rs`); the ledger column has no record of it.
 
 Both the push-delivery and pull-delivery transitions of `in_flight` emit a `ledger_state` event; at every sampling point, ledger state read offline and the session projection agree with each other.
 
@@ -428,7 +429,9 @@ Each task creates a new Orca terminal. `attach` only refreshes the saved termina
 
 ## Headless (`exec`) sessions
 
-`exec` is the canonical name of the headless backend; `headless` is only a parse alias, while the backend string in projections and events remains `exec`. The selection chain is env `ONLYNE_BACKEND` (nonempty) > `backend` in the workspace's `config.toml` > auto. `exec` / `acp` / `fake` are not selected by host detection and must be enabled by name; `headless` behaves the same way as `exec`.
+A role's drive is how the client talks to its runtime, and it lives in the spec's `[client.runtime]`: `plugin` starts the runtime and lets a plugin inside it dial back, `acp` runs the agent as the client's own child and speaks the Agent Client Protocol on that child's stdio, and `exec` runs the command and reads its exit code. The placement is where this machine displays that process, and it lives in the workspace's `config.toml`. The session's `backend` field carries the backend the pair built: `herdr`, `orca`, `zellij`, `exec` (the `headless` placement), `external`, or `acp`.
+
+Placement resolution is: a nonempty `ONLYNE_BACKEND` naming a placement, then the workspace's `placement` key, then a probe of `herdr`, `orca`, `zellij` in that order, then `headless`. An explicit name that matches nothing is refused by name; it is never replaced by the probe.
 
 The session child's stdout/stderr is merged into `<workspace>/.onlyne/logs/session-<task>.log`. When the process exits, the held `probe` writes at most the last 200 lines of that file (truncated to approximately 16KiB first, then split on whole lines) into `ResourceProbe.detail.output_tail`; if the log is missing or cannot be read, the key is omitted while the `exit` code remains.
 
@@ -437,21 +440,21 @@ The closure ladder is:
 - unix: the session is an independent process group. `close` uses `kill(2)` to signal only the recorded pgid (`backend_ref.pgid`, identical to the leader pid), sends `SIGTERM` first, waits 5 seconds, then sends `SIGKILL`, and finally uses `child.kill` to reap the process. If signaling the group fails, it falls back to the same signal for the leader pid. It refuses to send to pid 0/`-1` (those mean “this process group / every killable process,” not the session). It never kills processes by a cmdline wildcard.
 - windows: spawn uses `CREATE_NEW_PROCESS_GROUP`; shutdown first sends `GenerateConsoleCtrlEvent(CTRL_BREAK)`, waits for the grace period, then calls `child.kill()` (TerminateProcess). CTRL_BREAK fails when the client has no console, so termination proceeds directly. Windows has no SIGTERM; the supervisor performs shutdown by running `onlyne server stop` on the host containing the server root.
 
-`pi --mode rpc` is a typical `session_command` for this backend: the client holds stdin open (EOF means operator departure for rpc), stdout goes to the session log, and the message plane uses the adapter socket rather than the child's stdio.
+`pi --mode rpc` is a typical command for this path: the client holds stdin open (EOF means operator departure for rpc), stdout goes to the session log, and the message plane uses the adapter socket rather than the child's stdio.
 
 ```toml
 # <workspace>/.onlyne/config.toml
-backend = "headless"
+placement = "headless"
 
-# <server-root>/.onlyne/spec.toml [[client]]
-session_command = ["pi", "--mode", "rpc", "--session-id", "{session}"]
+# <server-root>/.onlyne/spec.toml, on this role's [[client]] entry
+[client.runtime]
+drive = "plugin"
+command = ["pi", "--mode", "rpc", "--session-id", "{session}"]
 ```
-
-Protocol-oriented `session_command` values (commands such as `pi --mode rpc` or `agent --acp` that speak JSON-RPC over their own stdio) recognize only the `backend = "exec"` and `backend = "acp"` configurations. When written as `herdr` / `orca` / `zellij`, the client rejects them at delivery and stores the rejection text as the reason in the ledger. To change it, change `backend` in the workspace configuration; the system does not switch it at runtime.
 
 ## ACP session backend
 
-`acp` is an explicitly selected backend: it is not in the host-detection candidate set and is selected by env `ONLYNE_BACKEND=acp` or `backend = "acp"` in the workspace's `config.toml`. `session_command` is that agent's ACP launch command, for example `qoderclicn --acp`.
+`acp` is a drive rather than a placement: the spec's `[client.runtime] drive = "acp"` says the client runs the agent as its own child and speaks ACP on that child's stdio, and `command` in the same table is that agent's launch command, for example `qoderclicn --acp`. It pairs only with `placement = "headless"`, and the configuration validator refuses every other pairing by name, because stdio carries the ACP channel and cannot also be a pane's terminal.
 
 One agent process hosts every session for the role. The process is reused according to the rendered command, and sessions are distinguished by ids assigned by the agent.
 
@@ -494,13 +497,14 @@ requirement, handoff routing, the completion's shape, and `details` ≤ 64 KiB �
 rule enforced in the bridge would refuse differently from the same rule in the pi plugin.
 `docs/v2-CONTRACT.md` §3b and §3c are the specification of those rules.
 
-The payload-v2 file protocol is gone with it: no `<workspace>/.onlyne/out/<task-id>.md`,
-no grammar block injected into the prompt, and no local `onlyne report check|write|path`
-verbs.
+A completion carries `details` and `files` in its own frame (`Report::Complete` in
+`crates/onlyne-proto/src/ops.rs`). The client's guard checks that shape — `details` at or
+under 64 KiB, `files` naming absolute paths — before the completion is filed, and the
+ledger row pins only the head.
 
 ## Session content
 
-ACP sessions have no terminal: the agent is a child process held by the client, and its session is invisible to processes outside the client. What remains is the on-disk journal. `<workspace>/.onlyne/logs/session-<task>.events.jsonl` has one JSON object per line, containing that agent's `session/update` notifications plus the client's own `dispatch`, `payload`, and `turn` records; `<workspace>/.onlyne/logs/session-<task>.log` is the human-readable rendering. `<workspace>/.onlyne/logs/content.index.jsonl` has one metadata line per record, recording its offset and length in the task journal, so role-level content sequence numbers continue after a client restart. All three are ordinary files, local permissions determine who may read or write them, and the client does not provide a live stream to any process outside the session.
+ACP sessions have no terminal: the agent is a child process held by the client, and its session is invisible to processes outside the client. What remains is the on-disk journal. `<workspace>/.onlyne/logs/session-<task>.events.jsonl` has one JSON object per line, containing that agent's `session/update` notifications plus the client's own `dispatch`, `nudge`, and `turn` records; `<workspace>/.onlyne/logs/session-<task>.log` is the human-readable rendering. `<workspace>/.onlyne/logs/content.index.jsonl` has one metadata line per record, recording its offset and length in the task journal, so role-level content sequence numbers continue after a client restart. All three are ordinary files, local permissions determine who may read or write them, and the client does not provide a live stream to any process outside the session.
 
 ## Windows shutdown
 
@@ -675,7 +679,7 @@ live connection、且从未被 pull 的 task、completion、control 行，在 `r
 
 先判 TTL，再判次数，两者都各发一条 `ledger_state` 事件。
 
-`reason` 的读法：`onlyne ledger` 的行键为 `msg_id`、`task`、`state`、`reason`、`out_head`、`body`、`family`、`hop_budget`；该键只在这一行有值时出现，无值的行与列加入之前逐字节一致。TUI 第二页的 task 详情面板在账本行尾追加 `reason=<text>`。落进这一列的取值：`requeue_exhausted` 与 `requeue_ttl` 来自上面两道闸，`expired` 来自到期扫描，`session_dead` 来自 client 结清掉线 session 时写下的拒收（见「会话残影与属主判定」一节），`operator cancel` 与 `operator recycle` 来自 client 在操作者的词无人作答时自行结账、并拒收仍握在手里的投递行（见下方 control 一节），pane 后端（`herdr` / `orca` / `zellij`）在开页前拒收协议 `session_command` 时整句拒收文案落 `rejected` 行（见「Headless（exec）会话」一节末段）；操作者经 `onlyne reject --reason` 或 `onlyne repair fail --reason` 自填的文本原样进这一列，`onlyne ack` 收下时该文本随结清事件走，行上的 `reason` 保持原样。字符串 `operator ack` 是 faults 表 `reason` 列的用例数据（`crates/onlyne-store/src/tests.rs` 的 `update_fault_state` 用例），账本列没有它的记录。
+`reason` 的读法：`onlyne ledger` 的行键为 `msg_id`、`task`、`state`、`reason`、`out_head`、`body`、`family`、`hop_budget`；该键只在这一行有值时出现，无值的行与列加入之前逐字节一致。TUI 第二页的 task 详情面板在账本行尾追加 `reason=<text>`。落进这一列的取值：`requeue_exhausted` 与 `requeue_ttl` 来自上面两道闸，`expired` 来自到期扫描，`session_dead` 来自 client 结清掉线 session 时写下的拒收（见「会话残影与属主判定」一节），`operator cancel` 与 `operator recycle` 来自 client 在操作者的词无人作答时自行结账、并拒收仍握在手里的投递行（见下方 control 一节）；操作者经 `onlyne reject --reason` 或 `onlyne repair fail --reason` 自填的文本原样进这一列，`onlyne ack` 收下时该文本随结清事件走，行上的 `reason` 保持原样。字符串 `operator ack` 是 faults 表 `reason` 列的用例数据（`crates/onlyne-store/src/tests.rs` 的 `update_fault_state` 用例），账本列没有它的记录。
 
 push 投递与 pull 投递的 `in_flight` 翻面都各有一条 `ledger_state` 事件；离线读账的 ledger 状态与会话投影在任何采样点互相对得上。
 
@@ -941,7 +945,9 @@ herdr 的关闭是幂等的：`herdr pane close` 回 `pane_not_found` 记为成�
 
 ## Headless（exec）会话
 
-`exec` 是无头后端的正名；`headless` 只是 parse 别名，投影与事件里的 backend 字符串仍是 `exec`。选择链是 env `ONLYNE_BACKEND`（非空）> 工作区 `config.toml` 的 `backend` > auto。`exec` / `acp` / `fake` 不会被宿主探测选中，须点名启用；`headless` 随 `exec` 同理。
+角色的 drive 是 client 与它的 runtime 通话的方式，住在 spec 的 `[client.runtime]`：`plugin` 由 client 起 runtime、让 runtime 里的插件回拨，`acp` 由 client 把 agent 当自己的子进程起、在它的 stdio 上讲 Agent Client Protocol，`exec` 由 client 跑命令并读它的退出码。placement 是这台机器把这进程摆在哪里，住在工作区 `config.toml`。会话的 `backend` 字段写着这一对造出的后端：`herdr`、`orca`、`zellij`、`exec`（`headless` placement）、`external` 或 `acp`。
+
+placement 的解析次序：非空 `ONLYNE_BACKEND` 点名 placement，其次是工作区的 `placement` 键，其次是按 `herdr`、`orca`、`zellij` 顺序探测，最后 `headless`。点名却不匹配任何名字的取值按名字拒收，绝不回落到探测。
 
 会话子进程的 stdout/stderr 并进 `<workspace>/.onlyne/logs/session-<task>.log`。进程退出时，持柄 `probe` 把该文件尾部最多 200 行（先截约 16KiB 再按整行切）写入 `ResourceProbe.detail.output_tail`；log 缺失或读失败则省略该键，`exit` 码仍在。
 
@@ -950,21 +956,21 @@ herdr 的关闭是幂等的：`herdr pane close` 回 `pane_not_found` 记为成�
 - unix：会话是独立进程组。`close` 用 `kill(2)` 只打记录的 pgid（`backend_ref.pgid`，与 leader pid 相同），先 `SIGTERM`，宽限 5 秒后再 `SIGKILL`，最后 `child.kill` 收尸。组信号失败时退回到对 leader pid 的同名信号。pid 0/`-1` 拒绝发送（那是“本进程组 / 一切可杀进程”，不是会话）。从不按 cmdline 通配杀进程。
 - windows：spawn 带 `CREATE_NEW_PROCESS_GROUP`，停机先 `GenerateConsoleCtrlEvent(CTRL_BREAK)`，宽限后再 `child.kill()`（TerminateProcess）。客户端没有控制台时 CTRL_BREAK 失败，直接走终止。Windows 没有 SIGTERM；关停由 supervisor 在 server root 所在主机执行 `onlyne server stop`。
 
-`pi --mode rpc` 是这条后端的典型 `session_command`：stdin 由 client 持开（EOF 对 rpc 意味着操作者离开），stdout 进 session log，消息面走 adapter socket，不走子进程的 stdio。
+`pi --mode rpc` 是这条路径的典型命令：stdin 由 client 持开（EOF 对 rpc 意味着操作者离开），stdout 进 session log，消息面走 adapter socket，不走子进程的 stdio。
 
 ```toml
 # <workspace>/.onlyne/config.toml
-backend = "headless"
+placement = "headless"
 
-# <server-root>/.onlyne/spec.toml [[client]]
-session_command = ["pi", "--mode", "rpc", "--session-id", "{session}"]
+# <server-root>/.onlyne/spec.toml，写在该 role 的 [[client]] 条目上
+[client.runtime]
+drive = "plugin"
+command = ["pi", "--mode", "rpc", "--session-id", "{session}"]
 ```
-
-协议类 `session_command`（`pi --mode rpc`、`agent --acp` 这类在自己的 stdio 上说 JSON-RPC 的命令）只认 `backend = "exec"` 与 `backend = "acp"` 两种配置；写成 `herdr` / `orca` / `zellij` 时 client 在投递处拒绝，拒绝文案作为 reason 落进 ledger。改法是改工作区配置的 `backend`，运行期不会替你换。
 
 ## ACP 会话后端
 
-`acp` 是显式选择的后端：它不进入宿主探测的候选集，由 env `ONLYNE_BACKEND=acp` 或工作区 `config.toml` 的 `backend = "acp"` 指定。`session_command` 是该 agent 的 ACP 启动命令，例如 `qoderclicn --acp`。
+`acp` 是 drive 而不是 placement：spec 的 `[client.runtime] drive = "acp"` 表示 client 把 agent 当自己的子进程起、在它的 stdio 上讲 ACP，同一张表里的 `command` 就是该 agent 的启动命令，例如 `qoderclicn --acp`。它只与 `placement = "headless"` 配对，配置校验器按名字拒收其他所有组合，因为 stdio 承载 ACP 通道，不可能同时是 pane 的终端。
 
 一个 agent 进程托管该 role 的全部会话，进程按渲染后的命令复用，会话按 agent 分配的 id 区分。
 
@@ -993,11 +999,11 @@ ACP 会话内没有 `onlyne` CLI，也不需要它：client 改为交给它三�
 
 每条约束都以 client 为关卡——跳数预算、relay 要求、转手路由、结项的形状、`details` ≤ 64 KiB——因为写在 bridge 里的规则会与 pi 插件里的同一条规则给出不同的拒绝。这些规则的规格是 `docs/v2-CONTRACT.md` §3b 与 §3c。
 
-payload-v2 文件协议随之删除：没有 `<workspace>/.onlyne/out/<task-id>.md`，prompt 不再注入文法块，也不再有本地的 `onlyne report check|write|path` 动词。
+completion 的 `details` 与 `files` 走它自己的帧（`crates/onlyne-proto/src/ops.rs` 的 `Report::Complete`）。client 的闸门在结清之前判这两个字段的形状——`details` 不超过 64 KiB、`files` 是绝对路径——账本行只留 head。
 
 ## 会话内容
 
-ACP 会话没有终端：agent 是 client 持有的子进程，会话对 client 之外的进程不可见。留下的面是落盘的 journal。`<workspace>/.onlyne/logs/session-<task>.events.jsonl` 每行一个 JSON 对象，内容是该 agent 的 `session/update` 通知，加上 client 自己的 `dispatch`、`payload` 与 `turn` 记录；`<workspace>/.onlyne/logs/session-<task>.log` 是给人看的渲染件。`<workspace>/.onlyne/logs/content.index.jsonl` 每条记录一行元数据，记下它在任务 journal 里的偏移与长度，role 级的内容序号由此在 client 重启后仍可续。三个都是普通文件，谁在读写它们由本机权限决定，client 不向任何会话外的进程提供实时流。
+ACP 会话没有终端：agent 是 client 持有的子进程，会话对 client 之外的进程不可见。留下的面是落盘的 journal。`<workspace>/.onlyne/logs/session-<task>.events.jsonl` 每行一个 JSON 对象，内容是该 agent 的 `session/update` 通知，加上 client 自己的 `dispatch`、`nudge` 与 `turn` 记录；`<workspace>/.onlyne/logs/session-<task>.log` 是给人看的渲染件。`<workspace>/.onlyne/logs/content.index.jsonl` 每条记录一行元数据，记下它在任务 journal 里的偏移与长度，role 级的内容序号由此在 client 重启后仍可续。三个都是普通文件，谁在读写它们由本机权限决定，client 不向任何会话外的进程提供实时流。
 
 ## Windows 关停
 

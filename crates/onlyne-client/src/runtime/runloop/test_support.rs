@@ -64,8 +64,6 @@ pub(super) fn role_info(max_sessions: u32, command: Vec<String>) -> RoleInfo {
         detail: None,
         edges: Vec::new(),
         aggregate: None,
-        relay_required: None,
-        relay_count: None,
     }
 }
 

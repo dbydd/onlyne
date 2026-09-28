@@ -178,15 +178,10 @@ pub(crate) fn client_unknown(value: &toml::Value) -> Vec<String> {
 }
 
 /// The keys one `spec.toml` text carries that `Spec` does not declare.
-///
-/// The `relay_required_count` alias is folded onto `relay_count` first, the same
-/// rewrite the loader applies, so an accepted alias never reads as ignored.
-/// `Err` carries the TOML message a file that does not parse would produce.
 pub fn unknown_spec_keys(text: &str) -> Result<Vec<String>, String> {
-    let mut value: toml::Value = text
+    let value: toml::Value = text
         .parse()
         .map_err(|error: toml::de::Error| error.message().to_string())?;
-    crate::spec::rewrite_client_relay_count_alias(&mut value);
     Ok(spec_unknown(&value))
 }
 

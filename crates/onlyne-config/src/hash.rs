@@ -9,6 +9,17 @@ pub fn spec_hash(bytes: &[u8]) -> String {
     hex_lower(&Sha256::digest(hash_input))
 }
 
+/// Lowercase SHA-256 hex over the bytes as they were read.
+///
+/// Where [`spec_hash`] hashes the canonical form of a parsed document — so a
+/// comment, a key's order, or a blank line leaves it alone — this hashes the
+/// file's own bytes. It is the concurrency token a `spec_apply` request states
+/// as its `base_hash` (`docs/v2-CONTRACT.md` §"Slice 4"): a comment-only edit
+/// moves it, and a file rewritten with identical bytes does not.
+pub fn source_hash(bytes: &[u8]) -> String {
+    hex_lower(&Sha256::digest(bytes))
+}
+
 /// Canonical bytes for a parsed spec.
 ///
 /// Tables are sorted by key, arrays keep document order, and every scalar uses

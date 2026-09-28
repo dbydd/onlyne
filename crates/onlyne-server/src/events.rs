@@ -8,7 +8,7 @@
 use crate::state::{Server, State};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use onlyne_proto::{Event, EventRow, EventTier, Frame, HistoryArgs, Subscribe};
+use onlyne_proto::{Event, EventRow, EventTier, FaultEvent, Frame, HistoryArgs, Subscribe};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
@@ -106,6 +106,17 @@ pub struct ReplayPage {
     /// Cursor the caller asked to resume from.
     pub requested: u64,
     pub notice: Option<ResyncNotice>,
+}
+
+impl ReplayPage {
+    /// The cursor this page leaves a subscriber at: its last row, or the cursor
+    /// it was asked for when the page carried nothing.
+    pub fn cursor(&self) -> u64 {
+        self.rows
+            .last()
+            .map(|row| row.seq)
+            .unwrap_or(self.requested)
+    }
 }
 
 /// Notice for a gap wider than the configured resync bound.
@@ -274,4 +285,131 @@ fn parse_created_at(text: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(text)
         .map(|value| value.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
+}
+
+/// Carry one subscriber's stream on from the page it was answered with.
+///
+/// The receiver is taken **before** the page is read, so an event emitted while
+/// the page was being built is either in the page or on the broadcast — never
+/// missing from both. Every frame at or below the cursor the page ended on is
+/// dropped, so an event that landed on both sides travels once. Together those
+/// are what let a subscriber that reconnects with its last `seq` resume with no
+/// gap and no repeat.
+///
+/// A page is bounded, so a cursor further behind than one page holds leaves rows
+/// that will never be broadcast again; [`catch_up`] carries those first.
+///
+/// A lag ends the stream, as it does for a client: the subscriber reconnects
+/// with the cursor it reached and the next page covers what the broadcast
+/// dropped.
+pub fn spawn_stream(
+    state: &Arc<State>,
+    subscribe: &Subscribe,
+    page: &ReplayPage,
+    sender: mpsc::Sender<Frame>,
+) -> tokio::task::JoinHandle<()> {
+    let filter = EventFilter::from_subscribe(subscribe);
+    let mut receiver = state.subscribe_frames();
+    let mut cursor = page.cursor();
+    let head = page.head;
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        if !catch_up(&state, &filter, &mut cursor, head, &sender).await {
+            return;
+        }
+        loop {
+            match step(receiver.recv().await) {
+                LiveStep::Deliver(frame) => {
+                    if let Frame::Ev { seq, event } = frame.as_ref() {
+                        if *seq <= cursor {
+                            continue;
+                        }
+                        cursor = *seq;
+                        if !filter.matches(event) {
+                            continue;
+                        }
+                    }
+                    if sender.send(frame.as_ref().clone()).await.is_err() {
+                        return;
+                    }
+                }
+                LiveStep::Lagged(dropped) => {
+                    let _ = sender.send(lag_frame(dropped)).await;
+                    return;
+                }
+                LiveStep::Closed => return,
+            }
+        }
+    })
+}
+
+/// Carry the rows a bounded page did not fit, up to the head it was read at.
+///
+/// Returns whether the stream may go on: a ledger that cannot be read and a
+/// subscriber that hung up both end it.
+async fn catch_up(
+    state: &State,
+    filter: &EventFilter,
+    cursor: &mut u64,
+    head: u64,
+    sender: &mpsc::Sender<Frame>,
+) -> bool {
+    while *cursor < head {
+        let rows = match state
+            .ledger
+            .events_since(*cursor as i64, DEFAULT_REPLAY_LIMIT)
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "event catch-up failed; the subscriber resumes by reconnecting");
+                return false;
+            }
+        };
+        if rows.is_empty() {
+            // The ledger retained nothing between the cursor and the head, so
+            // there is nothing left to carry.
+            return true;
+        }
+        for record in rows {
+            let seq = record.seq.max(0) as u64;
+            if seq > head {
+                return true;
+            }
+            *cursor = seq;
+            let event: Event = match serde_json::from_value(record.data) {
+                Ok(event) => event,
+                Err(error) => {
+                    tracing::warn!(%error, seq, "a persisted event did not decode; the subscriber resumes by reconnecting");
+                    return false;
+                }
+            };
+            if !filter.matches(&event) {
+                continue;
+            }
+            if sender.send(Frame::event(seq, event)).await.is_err() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The synthetic frame a subscriber whose cursor fell out of the broadcast
+/// window receives.
+///
+/// It carries the shape `onlyne_net` reports local queue loss with, so a reader
+/// that already understands `onlyne_net::resync_lag_of` reacts the same way: it
+/// re-subscribes from its cursor, and the next page covers everything the
+/// broadcast dropped. `seq` carries the drop count, as it does there, and the
+/// frame is not an event: nothing is persisted and no cursor moves on it.
+fn lag_frame(dropped: u64) -> Frame {
+    Frame::event(
+        dropped,
+        Event::Fault(FaultEvent {
+            kind: RESYNC_LAG_KIND.to_string(),
+            reason: format!("{dropped} events fell out of the server's broadcast"),
+            seq: Some(dropped),
+            ..FaultEvent::default()
+        }),
+    )
 }

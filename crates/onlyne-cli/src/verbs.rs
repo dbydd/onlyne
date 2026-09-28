@@ -318,7 +318,11 @@ fn build_envelope(
     causality: Causality,
     ttl_ms: Option<u64>,
 ) -> Result<Envelope, String> {
-    let body = Body { text, image };
+    let body = Body {
+        text,
+        head: None,
+        image,
+    };
     match new_envelope(kind, from, Principal::role(to), body, Some(causality)) {
         Ok(mut envelope) => {
             envelope.ttl_ms = ttl_ms;

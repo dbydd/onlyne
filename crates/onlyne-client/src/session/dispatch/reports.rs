@@ -315,6 +315,7 @@ pub async fn on_plugin_report(
             task_id,
             outcome,
             head,
+            details,
             ..
         } => {
             // A plugin reports its own ending. The one completion this client has
@@ -335,7 +336,7 @@ pub async fn on_plugin_report(
             } else {
                 SettleAuthority::PluginReport
             };
-            on_out(state, &task_id, outcome, head, asked).await?;
+            on_out(state, &task_id, outcome, head, details, asked).await?;
             false
         }
         Report::Fault {

@@ -110,8 +110,6 @@ fn sample_spec_parses_and_defaults_are_asserted() {
     assert_eq!(planner.intent.attempts, 3);
     assert_eq!(planner.intent.backoff_ms, DEFAULT_BACKOFF_MS);
     assert_eq!(planner.aggregate, "");
-    assert_eq!(planner.relay_required, None);
-    assert_eq!(planner.relay_count, None);
 
     let supervisor = &spec.client[1];
     assert_eq!(supervisor.role, "_supervisor");
@@ -320,8 +318,30 @@ extra = true
     );
 }
 
+/// The three removed spellings are each refused by name. The loader's refusal
+/// names the key, so an operator editing a spec that still carries one learns
+/// which key to delete and what replaces it.
 #[test]
-fn the_guard_alias_is_not_reported_as_ignored() {
+fn relay_required_is_refused_by_name() {
+    let text = format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[client]]
+role = "planner"
+key = "{KEY_A}"
+relay_required = ["writer"]
+"#
+    );
+    let err = Spec::parse_str(&text).expect_err("relay_required must be refused");
+    assert!(err.to_string().contains("relay_required"), "{err}");
+    assert!(err.to_string().contains("allowed_targets"), "{err}");
+}
+
+#[test]
+fn relay_required_count_is_refused_by_name() {
     let text = format!(
         r#"[server]
 name = "cluster-a"
@@ -334,12 +354,28 @@ key = "{KEY_A}"
 relay_required_count = 2
 "#
     );
-    let spec = Spec::parse_str(&text).expect("the alias is a live spelling");
-    assert_eq!(spec.client[0].relay_count, Some(2));
-    assert_eq!(
-        onlyne_config::keys::unknown_spec_keys(&text),
-        Ok(Vec::new())
+    let err = Spec::parse_str(&text).expect_err("relay_required_count must be refused");
+    assert!(err.to_string().contains("relay_required_count"), "{err}");
+    assert!(err.to_string().contains("allowed_targets"), "{err}");
+}
+
+#[test]
+fn relay_count_is_refused_by_name() {
+    let text = format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[client]]
+role = "planner"
+key = "{KEY_A}"
+relay_count = 2
+"#
     );
+    let err = Spec::parse_str(&text).expect_err("relay_count must be refused");
+    assert!(err.to_string().contains("relay_count"), "{err}");
+    assert!(err.to_string().contains("allowed_targets"), "{err}");
 }
 
 #[test]
@@ -599,11 +635,14 @@ allowed_targets = ["planner"]
     );
 }
 
-/// The relay policy is a property of the spec, not of a file inside the vendor
-/// directory `onlyne generate --force` rewrites, so the parser carries it and a
-/// spec that never mentions it stays byte-identical.
+/// One declaration is the whole policy: the edges a role may address are the
+/// edges it owes, and a spec that names no relay key serializes no relay key.
+///
+/// The two halves are read off the same list, so there is nothing left to
+/// disagree with: `allowed_targets` is both the server's ACL and the client's
+/// completion guard, and a role that owes nothing leaves it empty.
 #[test]
-fn the_relay_policy_parses_both_forms_and_absence_stays_off() {
+fn allowed_targets_is_the_whole_policy_and_absence_stays_off() {
     let spec = Spec::parse_str(&format!(
         r#"[server]
 name = "cluster-a"
@@ -613,58 +652,25 @@ cert_pin = "{CERT_HEX}"
 [[client]]
 role = "planner"
 key = "{KEY_A}"
-relay_required = ["writer", "auditor"]
-
-[[client]]
-role = "builder"
-key = "{KEY_B}"
-relay_count = 2
-
-[[client]]
-role = "reviewer"
-key = "{KEY_C}"
-relay_required = ["writer"]
-relay_count = 3
+allowed_targets = ["writer", "auditor"]
 
 [[client]]
 role = "sweeper"
 key = "{KEY_C}"
-relay_required_count = 4
 "#
     ))
     .unwrap();
 
     assert_eq!(
-        spec.client[0].relay_required,
-        Some(vec!["writer".to_string(), "auditor".to_string()])
+        spec.client[0].allowed_targets,
+        vec!["writer".to_string(), "auditor".to_string()]
     );
-    assert_eq!(spec.client[0].relay_count, None);
+    // The role that names no target owes nothing, and that is the whole of an
+    // empty policy: the default list is empty, not a separate "no guard" flag.
+    assert!(spec.client[1].allowed_targets.is_empty());
 
-    assert_eq!(spec.client[1].relay_required, None);
-    assert_eq!(spec.client[1].relay_count, Some(2));
-
-    // Both keys land as written: the guard's own precedence (a non-empty list)
-    // is what makes the list win, so nothing here normalises the pair away.
-    assert_eq!(
-        spec.client[2].relay_required,
-        Some(vec!["writer".to_string()])
-    );
-    assert_eq!(spec.client[2].relay_count, Some(3));
-
-    // The guard file's spelling is an accepted alias, and it lands on the same
-    // field the canonical writers use: a round trip re-emits `relay_count`, so
-    // one policy keeps one hash across the two vocabularies.
-    assert_eq!(spec.client[3].relay_count, Some(4));
-    let round = toml::Value::try_from(&spec.client[3]).unwrap();
-    let round_text = toml::to_string(&round).unwrap();
-    assert!(
-        round_text.contains("relay_count = 4") && !round_text.contains("relay_required_count"),
-        "{round_text}"
-    );
-
-    // Absence is the v1 shape. A spec that never names the guard serializes no
-    // relay key at all, so its canonical bytes — and with them its hash — are
-    // the ones the box already carried.
+    // A spec that never names a relay key serializes none, so its canonical
+    // bytes — and with them its hash — are the ones the box already carried.
     let plain = Spec::parse_str(&format!(
         r#"[server]
 name = "cluster-a"
@@ -680,100 +686,6 @@ key = "{KEY_A}"
     let value = toml::Value::try_from(&plain).unwrap();
     let bytes = String::from_utf8(canonical_bytes(&value)).unwrap();
     assert!(!bytes.contains("relay"), "{bytes}");
-}
-
-fn dotted_relay_required_spec(extra: &str) -> String {
-    format!(
-        r#"[server]
-name = "cluster-a"
-listen = "0.0.0.0:7811"
-cert_pin = "{CERT_HEX}"
-
-[[client]]
-role = "planner"
-key = "{KEY_A}"
-relay_required = ["critic"]
-{extra}
-[client.timeout]
-ready_ms = 30000
-
-[client.intent]
-attempts = 3
-"#
-    )
-}
-
-/// Dotted `[client.timeout]` / `[client.intent]` tables sit beside
-/// `relay_required` in production specs. The parse, a TOML round-trip, and a
-/// second load all stay free of `relay_required_count`.
-#[test]
-fn dotted_client_tables_with_relay_required_round_trip_without_the_alias() {
-    let spec = Spec::parse_str(&dotted_relay_required_spec("")).unwrap();
-    assert_eq!(
-        spec.client[0].relay_required,
-        Some(vec!["critic".to_string()])
-    );
-    assert_eq!(spec.client[0].relay_count, None);
-    let value = toml::Value::try_from(&spec).unwrap();
-    let round_text = toml::to_string(&value).unwrap();
-    assert!(!round_text.contains("relay_required_count"), "{round_text}");
-    Spec::parse_str(&round_text).unwrap();
-}
-
-#[test]
-fn relay_required_count_beside_dotted_tables_fills_relay_count() {
-    let spec = Spec::parse_str(&dotted_relay_required_spec("relay_required_count = 2\n")).unwrap();
-    assert_eq!(spec.client[0].relay_count, Some(2));
-}
-
-#[test]
-fn canonical_relay_count_wins_when_the_alias_is_also_present() {
-    let spec = Spec::parse_str(&dotted_relay_required_spec(
-        "relay_count = 3\nrelay_required_count = 2\n",
-    ))
-    .unwrap();
-    assert_eq!(spec.client[0].relay_count, Some(3));
-}
-
-#[test]
-fn spec_diff_reports_a_changed_relay_policy() {
-    let before = Spec::parse_str(&format!(
-        r#"[server]
-name = "cluster-a"
-listen = "0.0.0.0:7811"
-cert_pin = "{CERT_HEX}"
-
-[[client]]
-role = "planner"
-key = "{KEY_A}"
-relay_required = ["writer"]
-"#
-    ))
-    .unwrap();
-    let after = Spec::parse_str(&format!(
-        r#"[server]
-name = "cluster-a"
-listen = "0.0.0.0:7811"
-cert_pin = "{CERT_HEX}"
-
-[[client]]
-role = "planner"
-key = "{KEY_A}"
-relay_required = ["writer", "auditor"]
-relay_count = 2
-"#
-    ))
-    .unwrap();
-    let diff = SpecDiff::between(&before, &after);
-    assert_eq!(diff.changed_roles.len(), 1);
-    assert_eq!(
-        diff.changed_roles[0].changed_fields,
-        vec!["relay_required", "relay_count"]
-    );
-    assert_eq!(
-        diff.render(),
-        "change role planner: relay_count, relay_required"
-    );
 }
 
 #[test]
@@ -951,30 +863,33 @@ fn the_published_client_schema_carries_acp() {
 }
 
 /// `schema/spec.schema.json` is regenerated by hand (`config-schema`), and the
-/// ignored-key report reads its property names. A field that lands without the
-/// regeneration is a real key the loader then calls unknown.
+/// ignored-key report reads its property names. A property that survives the
+/// slice without the regeneration is a key the loader would still call known.
+///
+/// The three removed spellings have no property left, so the schema cannot
+/// teach an editor a key the loader refuses.
 #[test]
-fn the_published_spec_schema_carries_the_relay_keys() {
+fn the_published_spec_schema_drops_the_relay_keys() {
     let schema: serde_json::Value = serde_json::from_str(onlyne_config::spec_schema()).unwrap();
     let entry = &schema["definitions"]["ClientEntry"];
     assert_eq!(
         entry["required"],
         serde_json::json!(["key", "role"]),
-        "the relay keys stay optional: an old spec that omits them is still valid"
+        "one list is the whole policy, and it stays optional"
     );
+    let properties = entry["properties"]
+        .as_object()
+        .expect("the entry's properties");
+    for key in ["relay_required", "relay_count", "relay_required_count"] {
+        assert!(
+            !properties.contains_key(key),
+            "{key} is gone and must not survive in the published schema: {properties:?}"
+        );
+    }
     assert_eq!(
-        entry["properties"]["relay_required"]["type"],
-        serde_json::json!(["array", "null"])
+        entry["properties"]["allowed_targets"]["items"]["type"], "string",
+        "the one declaration is the list that stayed"
     );
-    assert_eq!(
-        entry["properties"]["relay_required"]["items"]["type"],
-        "string"
-    );
-    assert_eq!(
-        entry["properties"]["relay_count"]["type"],
-        serde_json::json!(["integer", "null"])
-    );
-    assert_eq!(entry["properties"]["relay_count"]["format"], "uint32");
 }
 
 #[test]

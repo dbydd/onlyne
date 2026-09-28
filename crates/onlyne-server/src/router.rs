@@ -11,6 +11,7 @@ use crate::gateway_host;
 use crate::ghosts;
 use crate::projection;
 use crate::relay::{self, RelayReply};
+use crate::spec_edits;
 use crate::state::{self as server_state, State};
 use chrono::Utc;
 use onlyne_config::layout::ServerRoot;
@@ -180,7 +181,6 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
 
 /// Route one admin frame body.
 pub async fn dispatch_admin(state: &Arc<State>, session: &mut Session, op: AdminOp) -> ResBody {
-    let _ = session;
     match op {
         AdminOp::Status(_) => status(state),
         AdminOp::Roles(query) => match roles(state, &query) {
@@ -228,6 +228,21 @@ pub async fn dispatch_admin(state: &Arc<State>, session: &mut Session, op: Admin
             Err(error) => internal(error),
         },
         AdminOp::Reload(_) => reload(state),
+        AdminOp::SpecGet(_) => spec_edits::get(state),
+        AdminOp::SpecApply(edit) => spec_edits::apply(state, &edit),
+        // The one continuous stream on this surface. `watch` answers a page and
+        // stops there; this answers the page and keeps the connection carrying
+        // what follows it, so an operator's `watch --follow` has something to
+        // follow and a board does not have to poll.
+        AdminOp::Subscribe(subscribe) => match events::page_for(state, &subscribe) {
+            Ok(page) => {
+                if let Some(sender) = session.sender.clone() {
+                    events::spawn_stream(state, &subscribe, &page, sender);
+                }
+                ResBody::ok(events::page_json(&page))
+            }
+            Err(error) => internal(error),
+        },
         AdminOp::Send(admin_send) => {
             let mut envelope = *admin_send.envelope;
             envelope.from = Principal::role(admin_send.from.clone());
@@ -406,13 +421,6 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
         timeout_idle_ms: Some(entry.timeout.idle_ms),
         intent_attempts: Some(entry.intent.attempts),
         intent_backoff_ms: Some(entry.intent.backoff_ms.clone()),
-        // The guard's policy travels as the entry wrote it: a list, a count, or
-        // both with the list winning. The client hands it to each session it
-        // spawns, so a spec is enough to arm the guard again after
-        // `onlyne generate` has rewritten the vendor directory the hand-written
-        // `relay.toml` used to sit in.
-        relay_required: entry.relay_required.clone(),
-        relay_count: entry.relay_count,
         seq: state.event_head().max(0) as u64,
     };
     ResBody::ok(serde_json::to_value(welcome).unwrap_or_default())
@@ -548,8 +556,6 @@ pub fn roles(state: &Arc<State>, query: &QueryRolesArgs) -> anyhow::Result<Vec<R
             detail,
             edges: entry.allowed_targets.clone(),
             aggregate: (!entry.aggregate.is_empty()).then(|| entry.aggregate.clone()),
-            relay_required: entry.relay_required.clone(),
-            relay_count: entry.relay_count,
         });
     }
     Ok(rows)

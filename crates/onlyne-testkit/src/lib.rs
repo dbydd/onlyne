@@ -1153,6 +1153,7 @@ pub fn oversized_image_envelope(decoded_len: usize) -> Envelope {
         causality: Some(Causality::root(new_task_id())),
         body: Body {
             text: None,
+            head: None,
             image: Some(onlyne_proto::ImagePart {
                 data_base64: base64::engine::general_purpose::STANDARD.encode(data),
                 mime: "image/png".to_string(),

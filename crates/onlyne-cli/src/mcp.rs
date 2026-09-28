@@ -399,7 +399,11 @@ fn envelope(
     text: &str,
     image: Option<ImagePart>,
 ) -> Result<Envelope, String> {
-    let mut body = Body { text: None, image };
+    let mut body = Body {
+        text: None,
+        head: None,
+        image,
+    };
     if !text.is_empty() {
         body.text = Some(text.to_string());
     }

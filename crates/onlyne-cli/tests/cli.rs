@@ -2323,6 +2323,199 @@ fn pinned_send(op_id: Option<&str>) -> onlyne_proto::AdminSend {
     }
 }
 
+/// `watch --follow` prints event frames as they arrive and does not exit on its
+/// own. The fake server answers the subscribe page and then drips three `ev`
+/// frames onto the connection, holding it open afterwards; a follow that exited
+/// early would print fewer than three, and one that exited on its own would be
+/// gone by the time the test looks.
+// The streaming admin subscribe itself is proven end-to-end against a real
+// admin socket in `onlyne-server` `tests/spec_surface.rs`
+// (`a_subscriber_that_drops_and_resumes_sees_every_event_once`). This
+// binary-level test proves the CLI's `watch --follow` correctly tracks its
+// cursor and resumes from it after a link drop.
+#[test]
+fn watch_follow_prints_events_and_resumes_from_cursor() {
+    // `--socket` names the path directly so the CLI's tree resolution (which
+    // reads a marker the fake listener does not publish) is not in the loop;
+    // `--as admin` selects the admin vocabulary `watch` speaks.
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("s.sock");
+    let _ = std::fs::remove_file(&socket);
+    let listener = bind_local_sync_poll(&socket).unwrap();
+
+    // Server state: which connection is answering, and the cursor the last
+    // subscribe asked to resume from. Atomics rather than a mutex: the server
+    // thread is the only writer, and the test only reads once it is joined.
+    use std::sync::atomic::{AtomicU32, AtomicU64};
+    let conn_count = Arc::new(AtomicU32::new(0));
+    let last_seen_cursor = Arc::new(AtomicU64::new(0));
+    let conn_count_s = conn_count.clone();
+    let last_seen_cursor_s = last_seen_cursor.clone();
+    let server = thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match listener.accept() {
+                Ok(mut stream) => {
+                    let this_conn = conn_count_s.fetch_add(1, Ordering::SeqCst) + 1;
+
+                    let request = read_frame(&mut stream);
+                    let req_id = request["id"].as_str().unwrap_or("r1").to_string();
+
+                    // Read the subscribe request's cursor to verify resume.
+                    // `Frame::Req` flattens the op, so the `AdminOp` fields sit
+                    // beside `id` rather than under it: `args`, not
+                    // `op.args`. Reading the wrong path is what made the first
+                    // fake look like a decode failure.
+                    let since_seq = request["args"]["since_seq"].as_u64().unwrap_or(0);
+                    last_seen_cursor_s.store(since_seq, Ordering::SeqCst);
+
+                    // Connection 1: subscribe from head (since_seq=0), page empty, emit 3, then close.
+                    // Connection 2: subscribe with since_seq=3, page carries 4+5, emit 6+7, hold.
+                    let (page_events, stream_events) = match this_conn {
+                        1 => {
+                            assert_eq!(since_seq, 0, "first connection must subscribe from head");
+                            (vec![], vec![1u64, 2, 3])
+                        }
+                        2 => {
+                            assert_eq!(since_seq, 3, "second connection must resume from cursor 3");
+                            (vec![4u64, 5], vec![6u64, 7])
+                        }
+                        _ => (vec![], vec![]),
+                    };
+
+                    // Write the page (Res frame with flattened ResBody.ok=true).
+                    // Page rows are `EventRow`s: `seq`, `created_at` (RFC3339),
+                    // and the event's flattened `type`/`data`. A bare integer
+                    // is what `page_frames` rejects.
+                    let rows: Vec<serde_json::Value> = page_events
+                        .iter()
+                        .map(|seq| {
+                            serde_json::json!({
+                                "seq": seq,
+                                "created_at": "2026-09-28T00:00:00Z",
+                                "event": {
+                                    "type": "spec_reloaded",
+                                    "data": {"spec_hash": "h", "roles": 0, "gateways": 0, "routes": 0}
+                                }
+                            })
+                        })
+                        .collect();
+                    let page = serde_json::json!({
+                        "f": "res", "id": req_id, "ok": true,
+                        "data": {"since_seq": since_seq, "head": 0, "count": rows.len(), "events": rows, "resync_lag": null}
+                    });
+                    write_frame(&mut stream, &page);
+
+                    // Write stream events (Ev frames with FLATTENED event, not nested "event").
+                    for seq in stream_events {
+                        thread::sleep(Duration::from_millis(100));
+                        let ev = serde_json::json!({
+                            "f": "ev", "seq": seq,
+                            "type": "spec_reloaded",
+                            "data": {"spec_hash": "h", "roles": 0, "gateways": 0, "routes": 0}
+                        });
+                        write_frame(&mut stream, &ev);
+                    }
+
+                    if this_conn == 1 {
+                        // Close the link after the three events, but keep the
+                        // listener bound: a follow that cannot redial learns
+                        // nothing about resuming, it only spins on refusal.
+                        drop(stream);
+                        continue;
+                    }
+                    // The second link stays open, so the follow is still
+                    // following when the test looks to see it alive.
+                    thread::sleep(Duration::from_secs(5));
+                    return;
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() > deadline {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    // RAII guard: kill the child no matter how the test ends, so a follow that
+    // never connects cannot wedge the binary on a pipe the child still holds.
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut guard = KillOnDrop(
+        Command::new(bin())
+            .arg("--socket")
+            .arg(&socket)
+            .args(["--as", "admin", "watch", "--follow"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn onlyne watch --follow"),
+    );
+
+    let stdout = guard.0.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let reader = thread::spawn(move || {
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(stdout);
+        // Expect 7 events total: 3 from conn1 + 2 page rows from conn2 + 2 stream from conn2.
+        for _ in 0..7 {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            let _ = tx.send(line.trim().to_string());
+        }
+    });
+
+    let mut lines = Vec::new();
+    for _ in 0..7 {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(line) => lines.push(line),
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        lines.len(),
+        7,
+        "the follow printed seven event lines (3 + 2 page + 2 stream): {lines:?}"
+    );
+    for (index, line) in lines.iter().enumerate() {
+        let value: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("a printed line is not JSON: {line:?}: {error}"));
+        assert_eq!(value["f"], "ev", "an event frame: {line}");
+        assert_eq!(
+            value["seq"],
+            serde_json::json!(index as u64 + 1),
+            "in order, no gap no repeat: {line}"
+        );
+    }
+
+    // Verify the server saw the cursor resume.
+    assert_eq!(
+        last_seen_cursor.load(Ordering::SeqCst),
+        3,
+        "server must have seen the second subscribe resume from cursor 3"
+    );
+
+    // It is still running: `--follow` ends when it is interrupted, not before.
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        guard.0.try_wait().unwrap().is_none(),
+        "watch --follow did not exit on its own"
+    );
+    // `guard` drops here and kills the child.
+    let _ = reader.join();
+    let _ = server.join();
+}
+
 /// The socket one owner tree's daemon serves: the runtime directory's
 /// `<digest>.sock`, claimed here so the bind cannot meet a leftover name.
 ///

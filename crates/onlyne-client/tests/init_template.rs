@@ -240,13 +240,7 @@ fn uncommenting_the_template_lands_each_key_in_its_own_table() {
         Some("[client.runtime]"),
         "the runtime table is the only block after the comment run:\n{fragment}"
     );
-    for knob in [
-        "# timeout = {",
-        "# intent = {",
-        "# aggregate = ",
-        "# relay_required = ",
-        "# relay_count = ",
-    ] {
+    for knob in ["# timeout = {", "# intent = {", "# aggregate = "] {
         assert!(
             comment_lines(&fragment)
                 .iter()
@@ -320,8 +314,6 @@ fn stripping_the_comments_leaves_exactly_the_live_keys() {
     assert_eq!(planner.aggregate, String::new());
     assert_eq!(planner.timeout, Timeouts::default());
     assert_eq!(planner.intent, IntentPolicy::default());
-    assert_eq!(planner.relay_required, None);
-    assert_eq!(planner.relay_count, None);
 }
 
 /// Every commented default is a claim about `onlyne-config`, and the claim worth
@@ -367,19 +359,20 @@ fn the_documented_defaults_are_the_parsers_defaults() {
         fragment.contains(&format!("# aggregate = {}", toml_string(&entry.aggregate))),
         "the aggregate line quotes the entry default:\n{fragment}"
     );
-    // The relay guard is the knob with two spellings and one default: no guard.
-    // The parser's own answer for a minimal entry is quoted in the block, so the
-    // comment and the code cannot drift apart silently.
-    assert_eq!(entry.relay_required, None);
-    assert_eq!(entry.relay_count, None);
-    assert!(
-        fragment.contains("# relay_required = []"),
-        "the fragment shows the empty-list spelling of that default:\n{fragment}"
+    // The obligation is not a knob. `allowed_targets` is printed as a live key
+    // and it is the whole declaration: the fragment must never teach a relay
+    // key, because the loader refuses one by name.
+    assert_eq!(
+        entry.allowed_targets,
+        Vec::<String>::new(),
+        "no targets is the parser's default for a minimal entry"
     );
-    assert!(
-        fragment.contains("# relay_count = "),
-        "and the count spelling beside it:\n{fragment}"
-    );
+    for key in ["relay_required", "relay_required_count", "relay_count"] {
+        assert!(
+            !fragment.contains(key),
+            "the fragment teaches no {key}: the loader refuses it\n{fragment}"
+        );
+    }
 
     assert!(
         config.contains(&format!(

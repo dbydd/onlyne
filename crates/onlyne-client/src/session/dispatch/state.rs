@@ -26,12 +26,11 @@ pub(super) struct DispatchInner {
     /// work under a policy nobody set.
     pub(super) runtime_refusal: Option<String>,
     pub(super) max_sessions: u32,
-    /// Downstream roles a session of this role owes a handoff to, from the
-    /// server's spec slice (`relay_required`). Empty is the default and means
-    /// the guard is off.
-    pub(super) relay_required: Vec<String>,
-    /// The count form of the same policy (`relay_count`).
-    pub(super) relay_count: Option<u32>,
+    /// The roles a session of this role owes a delivery to, read off the
+    /// server's spec slice (`allowed_targets`): the same list the server gates
+    /// the ACL on is the obligation the completion guard measures a session
+    /// against. Empty is the default and means the role owes nothing.
+    pub(super) required_targets: Vec<String>,
     /// The role's workspace session policy: which deliveries one session serves,
     /// and how long an idle one may wait before its process is released (§10).
     pub(super) session_policy: onlyne_config::SessionPolicy,

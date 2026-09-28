@@ -186,50 +186,59 @@ pub(super) fn record_delivery(inner: &mut DispatchInner, key: &str, to: &Princip
     }
 }
 
-/// The relay guard's refusal, when the session still owes a handoff.
+/// The relay guard's refusal, when the session still owes a delivery.
 ///
-/// The list mode names every role still missing, which is the form the policy
-/// is written in; the count mode counts distinct downstream roles and does not
-/// count a send straight back to the role that handed this task over. The list
-/// wins when both are present. An empty policy guards nothing.
+/// The obligation is the role's own `allowed_targets`: the list the server
+/// gates the ACL on, which the handshake carries (and a reload's role row
+/// re-carries). A session of that role must have delivered to every downstream
+/// name on it before it may report a terminal outcome, and a role that declares
+/// no target owes nothing.
+///
+/// The role this session's task came from is never one of them. The completion
+/// is itself a delivery to that role — the one the ledger books the answer
+/// against — so owing a second one would make the obligation unsatisfiable for
+/// the self-addressed entry `onlyne-client init` prints and about twenty
+/// fixtures restate (`e2e/acp-tools.sh`), and for a ring's return edge
+/// (`e2e/running-lights.sh`). What the exclusion drops is the origin alone, not
+/// the edge: an entry naming a downstream role beside it still owes that one.
+/// An origin this client does not hold as a role — a principal naming none, or
+/// no origin at all — buys no exclusion, which keeps the guard strict wherever
+/// the exclusion cannot be justified.
+///
+/// The refusal names every role still owed and the set the session actually
+/// delivered to. That sentence is what a model reads, and it is the same one
+/// both drives see — the guard is here, where the frame is handled, so the pi
+/// drive and the ACP drive refuse identically.
 fn relay_refusal(inner: &DispatchInner, key: &str) -> Option<String> {
     let slot = inner.sessions.get(key)?;
-    if !inner.relay_required.is_empty() {
-        let missing: Vec<&str> = inner
-            .relay_required
-            .iter()
-            .filter(|role| !slot.delivered_roles.contains(role.as_str()))
-            .map(String::as_str)
-            .collect();
-        if missing.is_empty() {
-            return None;
-        }
-        let delivered = if slot.delivered_roles.is_empty() {
-            "none".to_string()
-        } else {
-            slot.delivered_roles
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        return Some(format!(
-            "relay guard: missing handoff to: {} (this session delivered to: {delivered})",
-            missing.join(", "),
-        ));
+    if inner.required_targets.is_empty() {
+        return None;
     }
-    let count = inner.relay_count.filter(|count| *count > 0)?;
-    let upstream = slot.origin.as_ref().and_then(Principal::role_name);
-    let distinct = slot
-        .delivered_roles
+    let origin = slot.origin.as_ref().and_then(Principal::role_name);
+    let missing: Vec<&str> = inner
+        .required_targets
         .iter()
-        .filter(|role| Some(role.as_str()) != upstream)
-        .count();
-    (distinct < count as usize).then(|| {
-        format!(
-            "relay guard: missing handoff: {distinct} of {count} required distinct downstream roles"
-        )
-    })
+        .filter(|role| {
+            Some(role.as_str()) != origin && !slot.delivered_roles.contains(role.as_str())
+        })
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let delivered = if slot.delivered_roles.is_empty() {
+        "none".to_string()
+    } else {
+        slot.delivered_roles
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Some(format!(
+        "relay guard: missing handoff to: {} (this session delivered to: {delivered})",
+        missing.join(", "),
+    ))
 }
 
 /// The shape rule one completion carries: `details` inside the cap, and `files`

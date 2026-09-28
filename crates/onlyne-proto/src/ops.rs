@@ -509,14 +509,6 @@ pub struct RoleInfo {
     /// The entry's `aggregate` label; a plain role carries no key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregate: Option<String>,
-    /// The entry's `relay_required`: the downstream handoffs a session of this
-    /// role owes before it may report a terminal outcome. A row from a server
-    /// that predates the field omits the key, which reads as no guard.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relay_required: Option<Vec<String>>,
-    /// The entry's `relay_count`; a non-empty list wins when both are present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relay_count: Option<u32>,
 }
 
 /// `query_roles` filter.
@@ -699,6 +691,12 @@ pub struct Welcome {
     /// at line 462 keeps to aggregate roles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregate: Option<String>,
+    /// The entry's `allowed_targets` verbatim, and the whole of this role's
+    /// policy: the server reads it as the ACL, and a client reads it as the
+    /// obligation — a session of this role must have delivered to every name
+    /// here before it may report a terminal outcome. A `*` stays unexpanded and
+    /// a name with no registered role still appears; an empty list is a role
+    /// that owes nothing (`docs/v2-CONTRACT.md` §"Slice 6").
     pub allowed_targets: Vec<String>,
     pub allowed_senders: Vec<String>,
     /// The drive and the argv one session of this role runs, as the spec's
@@ -715,20 +713,6 @@ pub struct Welcome {
     pub intent_attempts: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent_backoff_ms: Option<Vec<u64>>,
-    /// Downstream roles every session of this role must have handed work to
-    /// before it may report a terminal outcome: the entry's `relay_required`.
-    /// The client forwards the list into the environment of each session
-    /// process it spawns, which is what arms the guard off the spec instead of
-    /// off a file inside the vendor directory `onlyne generate` rewrites. A
-    /// server that predates the field omits the key, and a client reads that as
-    /// "no guard" — the behaviour every v1 role had.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relay_required: Option<Vec<String>>,
-    /// The count form of [`Self::relay_required`]: this many distinct
-    /// downstream roles. A non-empty list wins when both are present, which is
-    /// the precedence the guard's own policy reader already had.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relay_count: Option<u32>,
     /// Server event cursor at handshake time.
     pub seq: u64,
 }
@@ -758,6 +742,14 @@ pub enum AdminOp {
     SpecDiff(Value),
     /// Re-read and validate `spec.toml`.
     Reload(Value),
+    /// Read the structured spec, the file it was read from, and the hash of
+    /// that file's bytes.
+    SpecGet(Value),
+    /// Apply typed edits to `spec.toml` and reload the cluster.
+    SpecApply(SpecApply),
+    /// Stream events from a cursor until the connection closes. `watch` answers
+    /// one page; this op keeps the connection carrying every event after it.
+    Subscribe(Subscribe),
     /// Submit an envelope on behalf of `--from <role>`.
     Send(AdminSend),
     /// Issue a control op as `--from <role>`.
@@ -795,6 +787,9 @@ impl AdminOp {
             AdminOp::History(_) => "history",
             AdminOp::SpecDiff(_) => "spec_diff",
             AdminOp::Reload(_) => "reload",
+            AdminOp::SpecGet(_) => "spec_get",
+            AdminOp::SpecApply(_) => "spec_apply",
+            AdminOp::Subscribe(_) => "subscribe",
             AdminOp::Send(_) => "send",
             AdminOp::Control(_) => "control",
             AdminOp::Report(_) => "report",
@@ -821,9 +816,182 @@ impl AdminOp {
                 | AdminOp::Watch(_)
                 | AdminOp::History(_)
                 | AdminOp::SpecDiff(_)
+                | AdminOp::SpecGet(_)
+                | AdminOp::Subscribe(_)
                 | AdminOp::RepairInspect(_)
         )
     }
+}
+
+/// The `spec_get` answer: the spec `spec.toml` parses to, the file it was read
+/// from, and the hash of that file's **bytes**.
+///
+/// The hash is the concurrency token a later [`SpecApply`] is checked against,
+/// not a semantic fingerprint: a comment-only edit moves it, which is the
+/// point (`docs/v2-CONTRACT.md` §"Slice 4"). The spec travels as a JSON object
+/// rather than as a typed field because `onlyne-proto` owns the wire vocabulary
+/// and `onlyne-config` owns the document's shape, the same boundary
+/// [`RoleRuntime`] keeps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct SpecView {
+    /// The absolute path of the file these bytes came from.
+    pub path: String,
+    /// Lowercase SHA-256 over the file's bytes as they were read.
+    pub source_hash: String,
+    /// The parsed document, in `onlyne-config::Spec`'s own field names.
+    pub spec: Value,
+}
+
+/// `spec_apply` request: typed edits over `spec.toml`, checked against the
+/// `source_hash` the caller read.
+///
+/// The server applies them to the document as text, validates the result with
+/// the parser that reads the file, writes it atomically, and reloads. A
+/// `base_hash` that does not match the file answers `conflict` and writes
+/// nothing; a result that does not parse answers `invalid` with
+/// `spec.toml:<line>` and writes nothing too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct SpecApply {
+    /// The `source_hash` [`SpecView`] answered. An empty string is refused
+    /// rather than matched: a caller that read nothing cannot be checked.
+    pub base_hash: String,
+    /// The edits, applied in order. An empty list is refused: a request that
+    /// changes nothing must not rewrite the file.
+    pub edits: Vec<SpecEdit>,
+}
+
+/// One typed edit of `spec.toml`, one shape per field group it writes.
+///
+/// Every edit names its role; the edits that rewrite a role that does not
+/// exist answer `unknown_role` instead of declaring one, so a typo cannot
+/// create an entry. `upsert_role` is the one edit that declares a role, and
+/// the only one that may.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "edit", content = "args")]
+pub enum SpecEdit {
+    UpsertRole(UpsertRole),
+    RemoveRole(RemoveRole),
+    SetTargets(SetTargets),
+    SetSenders(SetSenders),
+    SetProse(SetProse),
+    SetSession(SetSession),
+    SetRuntime(SetRuntime),
+}
+
+impl SpecEdit {
+    /// The edit's wire name, as it appears in the `edit` tag.
+    pub fn name(&self) -> &'static str {
+        match self {
+            SpecEdit::UpsertRole(_) => "upsert_role",
+            SpecEdit::RemoveRole(_) => "remove_role",
+            SpecEdit::SetTargets(_) => "set_targets",
+            SpecEdit::SetSenders(_) => "set_senders",
+            SpecEdit::SetProse(_) => "set_prose",
+            SpecEdit::SetSession(_) => "set_session",
+            SpecEdit::SetRuntime(_) => "set_runtime",
+        }
+    }
+
+    /// The role this edit writes, whoever's entry it is.
+    pub fn role(&self) -> &str {
+        match self {
+            SpecEdit::UpsertRole(edit) => &edit.role,
+            SpecEdit::RemoveRole(edit) => &edit.role,
+            SpecEdit::SetTargets(edit) => &edit.role,
+            SpecEdit::SetSenders(edit) => &edit.role,
+            SpecEdit::SetProse(edit) => &edit.role,
+            SpecEdit::SetSession(edit) => &edit.role,
+            SpecEdit::SetRuntime(edit) => &edit.role,
+        }
+    }
+}
+
+/// `upsert_role`: declare a role, or rewrite the fields this edit names.
+///
+/// Only the keys that are present move. An absent `key` keeps the key an
+/// existing entry carries; an absent `key` on a role that is not declared yet
+/// is refused, because a role entry without one can never authenticate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct UpsertRole {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prose: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin: Option<bool>,
+    /// Sessions this role may run at once. It is enforced off the role row,
+    /// which the reload rewrites, so it takes effect with the reload and
+    /// reaches a client at its next `hello`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<u32>,
+}
+
+/// `remove_role`: drop one `[[client]]` entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct RemoveRole {
+    pub role: String,
+}
+
+/// `set_targets`: replace one role's `allowed_targets` wholesale. An empty list
+/// is a role that reaches no other role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct SetTargets {
+    pub role: String,
+    pub targets: Vec<String>,
+}
+
+/// `set_senders`: replace one role's `allowed_senders` wholesale. An empty list
+/// is a role no other role reaches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct SetSenders {
+    pub role: String,
+    pub senders: Vec<String>,
+}
+
+/// `set_prose`: replace one role's prose, which is what the next session that
+/// opens reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct SetProse {
+    pub role: String,
+    pub prose: String,
+}
+
+/// `set_session`: replace the policy one role's sessions run under — the
+/// `[client.timeout]` and `[client.intent]` halves of its entry. Only the keys
+/// that are present move, and the values reach sessions opened after the
+/// reload. `max_sessions` is not here: it is enforced off the role row and
+/// belongs to [`UpsertRole`], which is the edit whose effect is immediate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct SetSession {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backoff_ms: Option<Vec<u64>>,
+}
+
+/// `set_runtime`: replace one role's `[client.runtime]` table, the drive and
+/// the argv one of its sessions runs. Every role in the tree starts its
+/// sessions from this table, so the values reach sessions opened after the
+/// reload while a running session keeps the command it was started with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct SetRuntime {
+    pub role: String,
+    pub runtime: RoleRuntime,
 }
 
 /// `history` request: read persisted events by cursor.
@@ -1248,11 +1416,12 @@ mod tests {
         assert!(absent.command.is_empty());
     }
 
-    /// The relay slice is additive, so a welcome a server wrote before the keys
-    /// existed still lands, with both keys absent — which is what "no guard"
-    /// means — and a welcome that carries them decodes as written.
+    /// The relay keys are off the wire, and `allowed_targets` is the list the
+    /// client's check reads. A frame a server wrote while the keys still existed
+    /// still lands — serde drops a key no field declares — and an empty list
+    /// decodes as a role that owes nothing.
     #[test]
-    fn a_welcome_without_the_relay_keys_decodes_as_no_guard() {
+    fn a_welcome_carries_allowed_targets_and_no_relay_keys() {
         let mut frame = serde_json::json!({
             "cluster": "cluster-a",
             "server": "srv",
@@ -1271,21 +1440,27 @@ mod tests {
             "intent_backoff_ms": [1000, 2000, 4000],
             "seq": 41,
         });
-        let old: Welcome =
-            serde_json::from_value(frame.clone()).expect("the pre-relay frame lands");
-        assert_eq!(old.relay_required, None);
-        assert_eq!(old.relay_count, None);
-        let encoded = serde_json::to_value(&old).expect("encode the welcome");
+        let welcome: Welcome =
+            serde_json::from_value(frame.clone()).expect("the welcome frame lands");
+        assert_eq!(welcome.allowed_targets, vec!["builder".to_string()]);
+        let encoded = serde_json::to_value(&welcome).expect("encode the welcome");
+        assert_eq!(encoded["allowed_targets"], serde_json::json!(["builder"]));
         assert!(
             encoded.get("relay_required").is_none() && encoded.get("relay_count").is_none(),
-            "an absent policy omits the keys rather than sending null: {encoded}"
+            "the removed keys have no reader left on the frame: {encoded}"
         );
 
+        // A server that wrote the frame while the keys existed still lands: the
+        // list that decides the policy is the one field both ends read.
         frame["relay_required"] = serde_json::json!(["writer"]);
         frame["relay_count"] = serde_json::json!(2);
-        let armed: Welcome = serde_json::from_value(frame).expect("the relay slice lands");
-        assert_eq!(armed.relay_required, Some(vec!["writer".to_string()]));
-        assert_eq!(armed.relay_count, Some(2));
+        let tolerant: Welcome = serde_json::from_value(frame.clone())
+            .expect("a stale relay key is not a decode failure");
+        assert_eq!(tolerant.allowed_targets, welcome.allowed_targets);
+
+        frame["allowed_targets"] = serde_json::json!([]);
+        let owes_nothing: Welcome = serde_json::from_value(frame).expect("an empty list lands");
+        assert!(owes_nothing.allowed_targets.is_empty());
     }
 
     /// The reason column is additive, so a ledger row a server wrote before the
@@ -1328,6 +1503,18 @@ mod tests {
             (AdminOp::History(HistoryArgs::default()), "history"),
             (AdminOp::SpecDiff(Value::Null), "spec_diff"),
             (AdminOp::Reload(Value::Null), "reload"),
+            (AdminOp::SpecGet(Value::Null), "spec_get"),
+            (
+                AdminOp::SpecApply(SpecApply {
+                    base_hash: "e5".into(),
+                    edits: vec![SpecEdit::SetProse(SetProse {
+                        role: "planner".into(),
+                        prose: "plan".into(),
+                    })],
+                }),
+                "spec_apply",
+            ),
+            (AdminOp::Subscribe(Subscribe::default()), "subscribe"),
             (
                 AdminOp::Send(AdminSend {
                     from: "planner".into(),
@@ -1431,6 +1618,9 @@ mod tests {
         }
         assert!(AdminOp::Status(Value::Null).is_readonly());
         assert!(!AdminOp::Reload(Value::Null).is_readonly());
+        assert!(AdminOp::SpecGet(Value::Null).is_readonly());
+        assert!(AdminOp::Subscribe(Subscribe::default()).is_readonly());
+        assert!(!AdminOp::SpecApply(SpecApply::default()).is_readonly());
     }
 
     #[test]

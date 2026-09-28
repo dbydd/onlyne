@@ -106,6 +106,12 @@ FIXTURE_EFFORT='high'
 FAIL_TURN_MARKER='FAILTURN'
 FAIL_STOP='refusal'
 
+# The one sentence §3c hands a turn that ended without a completion. `onlyne
+# client`'s `session/dispatch/transport.rs` carries the same literal, and the
+# case reads it back off the journal's `nudge` record, so a drift between the
+# two is a broken rule rather than a broken case.
+NUDGE_PROSE='If this task is finished, report it with onlyne_complete; if something is missing, say what.'
+
 ws="$tmp/planner"
 gate="$tmp/gate"
 trace="$tmp/agent.trace"
@@ -301,44 +307,97 @@ for _ in $(seq 1 120); do
 done
 rows_any "$tmp/sessions.json" public_lifecycle exited || fail "sessions public_lifecycle must be exited" \
   "sessions=$sessions_out client=$(cat "$tmp/client.log" 2>/dev/null)"
-[ "$(row_value "$tmp/sessions.json" outcome)" = "done" ] || fail "sessions outcome must be done" "$sessions_out"
+# §3c's rule owns this turn's ending, not the drive's judgement of it: the
+# fixture never calls `onlyne_complete`, so both turns — the delivery's and the
+# nudge's — end with nothing but a stop reason. The first earns the delivery's
+# one nudge and the second settles it `blocked`, which is a board's word for
+# waiting rather than for failed. A clean `end_turn` is a fact about the pipe,
+# not a verdict on the task, so this row reads `blocked` and never `done`; the
+# verdict for work a self-driven drive completed arrives through the tools
+# mount, and `acp-tools.sh` is where that is proved.
+[ "$(row_value "$tmp/sessions.json" outcome)" = "blocked" ] \
+  || fail "a turn that never completed must settle blocked, not done" "$sessions_out"
+# The turn-end rule's own journal: the ending that spends the delivery's single
+# nudge, then the blocked settlement. Both are client events in this role's
+# `events` table, and their order is what the rule took them in.
+if ! python3 - "$ws/.onlyne/client.db" "$task" <<'PY'
+import json
+import sqlite3
+import sys
 
-# The journal's two halves, semantically: the client's dispatch first, the
-# agent's four updates in the order it sent them, then the turn record the
-# client writes when it reads the ending.
+db, task = sys.argv[1:3]
+rows = sqlite3.connect("file:%s?mode=ro" % db, uri=True).execute(
+    "SELECT type, data_json FROM events WHERE type IN (?, ?) ORDER BY seq",
+    ("turn_end_without_complete", "delivery_blocked"),
+).fetchall()
+# The nudge is spent exactly once: the first ending carries `nudge: true` and
+# earns the delivery's one sentence, and the second ending carries `nudge:
+# false` and is the one the settlement follows. A rule that nudged twice, or
+# that settled on the first ending, is a different sequence than this one.
+endings = [json.loads(row[1]) for row in rows if row[0] == "turn_end_without_complete"]
+assert [ending["nudge"] for ending in endings] == [True, False], endings
+assert rows[-1][0] == "delivery_blocked", rows
+assert sum(1 for row in rows if row[0] == "delivery_blocked") == 1, rows
+print(
+    "PASS acp-session turn-end: one nudge spent (turn_end_without_complete nudge=true "
+    "then nudge=false), and the settlement that follows is the one delivery_blocked"
+)
+PY
+then
+  fail "the turn-end rule must spend its one nudge and then settle blocked" \
+    "db=$db task=$task client=$(cat "$tmp/client.log" 2>/dev/null)"
+fi
+
+# The journal's two turns, semantically: the client's own dispatch record
+# opens it, the agent's four updates follow in the order it sent them, the turn
+# record the client writes when it reads the ending closes them, and §3c's rule
+# then spends the delivery's one nudge — so the same shape appears a second
+# time under a `nudge` record instead of a `dispatch` one. That is what a
+# session whose agent never completes looks like on disk, and it is the whole
+# of what this drive can say about how the delivery ended.
 journal_report=$(cat "$events" 2>/dev/null || true)
 if ! python3 - "$events" "$task" "$acp_session" "$TASK_PROSE" "$REASONING" "$ANSWER" "$TOOL_TITLE" \
+  "$NUDGE_PROSE" \
   <<'PY'
 import json
 import sys
 
-path, task, session, prose, reasoning, answer, tool_title = sys.argv[1:8]
+path, task, session, prose, reasoning, answer, tool_title, nudge = sys.argv[1:9]
 lines = [line for line in open(path, encoding="utf-8").read().splitlines() if line.strip()]
 records = [json.loads(line) for line in lines]
 
 ours = [record for record in records if "onlyne" in record]
-assert len(ours) == 2, ours
+# Two turns, so four of the client's own records: dispatch, turn, nudge, turn.
+assert len(ours) == 4, ours
 assert records[0] is ours[0], "the dispatch record opens the journal"
-assert records[-1] is ours[1], "the turn record closes the journal"
-dispatch, turn = (record["onlyne"] for record in ours)
+assert records[-1] is ours[3], "the second turn's record closes the journal"
+dispatch, turn, nudged, second = (record["onlyne"] for record in ours)
 assert dispatch["kind"] == "dispatch" and dispatch["task_id"] == task, dispatch
 assert dispatch["prompt"] == f"From planner:\n\n{prose}", dispatch
 assert turn["kind"] == "turn" and turn["task_id"] == task, turn
 assert turn["stop_reason"] == "end_turn", turn
+# The nudge is the client's own sentence, and it is journalled under its own
+# kind so an operator reading the file can tell which turn was which: §3c's
+# one retry, not a second delivery.
+assert nudged["kind"] == "nudge" and nudged["task_id"] == task, nudged
+assert nudged["prompt"] == nudge, nudged
+assert second["kind"] == "turn" and second["task_id"] == task, second
+assert second["stop_reason"] == "end_turn", second
 # The closing message is the head of record: no file stands in for it any more,
 # so the agent's own last line is what the receiving role reads as this turn's
 # answer.
 assert turn["head"] == answer, turn
 
 updates = [record for record in records if "onlyne" not in record]
-assert [update.get("sessionUpdate") for update in updates] == [
+per_turn = [
     "agent_thought_chunk",
     "tool_call",
     "tool_call_update",
     "agent_message_chunk",
-], updates
+]
+assert [update.get("sessionUpdate") for update in updates] == per_turn * 2, updates
 assert all(update.get("sessionId") == session for update in updates), updates
-thought, call, done, message = updates
+thought, call, done, message, _, _, _, _ = updates
 assert thought["content"]["text"] == reasoning, thought
 assert message["content"]["text"] == answer, message
 assert call["toolCallId"] == done["toolCallId"], (call, done)

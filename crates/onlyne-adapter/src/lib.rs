@@ -1723,6 +1723,7 @@ pub fn image_envelope(
         to,
         Body {
             text: None,
+            head: None,
             image: Some(ImagePart {
                 data_base64,
                 mime: mime.into(),

@@ -157,16 +157,16 @@ wait "$fake_pid" "$client_pid" "$server_pid" 2>/dev/null || true
 rm -rf "$tmp"
 ```
 
-### 用 exec backend 运行真实 agent
+### 以无头 placement 运行真实 agent
 
 同样的 server/client 拓扑不需要终端宿主。准备可用的 pi 安装和 adapter 后，在上面启动 client 的位置只运行下面的 client 命令，并省略 fake agent：
 
 ```bash
 pi install npm:pi-onlyne
-ONLYNE_BACKEND=exec target/debug/onlyne-client run --workspace "$tmp/planner"
+ONLYNE_BACKEND=headless target/debug/onlyne-client run --workspace "$tmp/planner"
 ```
 
-角色的 `session_command` 已经指向 pi。client 会为每个任务启动一个 pi 子进程，保持 stdin 打开，并把 stdout/stderr 写到 `<workspace>/.onlyne/logs/session-<task>.log`。发送、账本和 session 查询命令保持不变。这条路径需要可用的模型/提供商凭证。
+角色的 `[client.runtime] command` 已经指向 pi。client 会为每个任务启动一个 pi 子进程，保持 stdin 打开，并把 stdout/stderr 写到 `<workspace>/.onlyne/logs/session-<task>.log`。发送、账本和 session 查询命令保持不变。这条路径需要可用的模型/提供商凭证。
 
 对于生成的工作区，`onlyne server generate` 可以把仓库中的 `plugins/onlyne-agent-pi` 包放进工作区，并写入项目范围的 `.pi/settings.json` 配置项。普通 pi 会话不会因用户级 npm 安装而自动激活扩展；Onlyne 注入 `ONLYNE_ROLE`、`ONLYNE_SESSION_ID` 和 `ONLYNE_TASK_ID` 时它才会挂载。
 
@@ -193,7 +193,7 @@ Orca 路径需要：
 启动器使用仓库本地的 pi adapter 包和 `target/debug` 下的二进制。要在 Orca 外以无头方式运行同一个真实 agent 演示：
 
 ```bash
-ONLYNE_BACKEND=exec python3 examples/supervisor/run.py up
+ONLYNE_BACKEND=headless python3 examples/supervisor/run.py up
 ```
 
 此时 supervisor 输出写入演示根目录，不打开可见的 supervisor 标签页。可以在另一个终端检查演示：
@@ -232,7 +232,7 @@ sequenceDiagram
 
 1. **发送。** 带门禁的 `send` 动词打开 server 的本地 admin socket，指定发送者和目标，并携带 `op_id` 幂等键。相同操作重复发送会得到持久回执；同一个键配不同正文则是 conflict。
 2. **接受并记录。** server 在写账本前验证 envelope、发送者、目标和 ACL。接受后追加一行并发布回执；可立即投递时状态为 `in_flight`，角色离线或达到容量时为 `queued`。
-3. **拉取并分配。** role client 拉取最老的可用任务，server 将其标记为 `in_flight` 并绑定 delivery ticket。client 检查容量、启动所选 backend，等待 session 的 `ready` barrier，再发送 `assign`。任务正文随 assignment frame 传递；`session_command` 中的 `{task}` 渲染为任务 id，不是正文。
+3. **拉取并分配。** role client 拉取最老的可用任务，server 将其标记为 `in_flight` 并绑定 delivery ticket。client 检查容量、启动由 drive 与 placement 选中的 session，等待 session 的 `ready` barrier，再发送 `assign`。任务正文随 assignment frame 传递；角色的 `[client.runtime] command` 中的 `{task}` 渲染为任务 id，不是正文。
 4. **完成。** adapter 报告终态和摘要；pi 插件的 `onlyne_complete` 工具提供这两项。client 记录本地任务结论，排队原始 delivery 的 acknowledgement，释放 session slot，并为账本记录的 origin 创建 completion envelope。
 5. **回执。** client 的持久 intent 在重连后按顺序通过 TLS 发出。原任务行变为 `acked`；completion receipt 在 origin client 拉取前保持 `queued`，拉取后结清，不会启动新的 session。
 
@@ -253,7 +253,7 @@ sequenceDiagram
 
 ### Server root
 
-`<server-root>/.onlyne/spec.toml` 是协议的 source of truth：server endpoint 和证书 pin、注册角色密钥、ACL 边、角色 prose、并发、超时、relay policy、`session_command`、路由和 gateway 配置都在这里。Onlyne 不会通过运行时 API 修改它。追加 `onlyne-client init` 片段或使用 `onlyne server generate`，然后运行 `onlyne reload`。
+`<server-root>/.onlyne/spec.toml` 是协议的 source of truth：server endpoint 和证书 pin、注册角色密钥、ACL 边、角色 prose、并发、超时、relay policy、每个角色的 `[client.runtime]` drive 与 command、路由和 gateway 配置都在这里。Onlyne 不会通过运行时 API 修改它。追加 `onlyne-client init` 片段或使用 `onlyne server generate`，然后运行 `onlyne reload`。
 
 自动重投的年龄闸是 `[server].requeue_ttl_secs`。默认值为 `0`，表示关闭这道闸；启用后从 `enqueued_at` 计算排队行龄。自动重投发生时若已经超过这个年龄，该行会结清为 `expired`，reason 为 `requeue_ttl`；操作员发起的 `repair retry` 不经过这道年龄闸。
 
@@ -271,11 +271,11 @@ sequenceDiagram
 
 ### Role workspace
 
-`<workspace>/.onlyne/config.toml` 是角色本地配置：身份、server endpoint、证书 pin、密钥路径、backend、Orca policy、ACP 选项，以及 reconnect/stall 定时器。`cert_pin`、`key_path` 和 `server.host` 可以使用 `$NAME` 环境引用，启动时解析。
+`<workspace>/.onlyne/config.toml` 是角色本地配置：身份、server endpoint、证书 pin、密钥路径、placement、Orca policy、ACP 选项，以及 reconnect/stall 定时器。`cert_pin`、`key_path` 和 `server.host` 可以使用 `$NAME` 环境引用，启动时解析。
 
 ```text
 <workspace>/.onlyne/
-  config.toml                 角色与 backend 配置
+  config.toml                 角色、placement 与 ACP 配置
   client.db                   task/session 状态与持久 intent
   run/                        owner-only 运行时目录；其中不绑定任何东西
   keys/role.key               角色身份密钥
@@ -284,7 +284,6 @@ sequenceDiagram
   logs/session-<task>.log     exec/ACP session 渲染输出
   logs/session-<task>.events.jsonl
   logs/content.index.jsonl    持久内容偏移
-  out/<task>.md               ACP 结项报告，由 client 读取并删除
 ```
 
 `onlyne server generate` 生成可搬移的工作区：移动目录后运行 `onlyne client run --workspace <new-path>` 即可。server 和 role client 必须使用同一版 Onlyne。旧 schema 和旧布局会在入口拒绝，不会在原地迁移。
@@ -402,28 +401,39 @@ graph LR
 
 server 在写账本前执行 ACL，并负责跨机器路由。每个 client 负责一个角色的 session 执行，并在发送前把出站消息写入持久 intent 队列。TLS 链路断开时，运行中的 session 保留本地状态；重连后队列按顺序发出。admin 与 adapter socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`，旁边是点名其服务面的 `<digest>.json` 注册文件；workspace 树内不再绑定任何东西。
 
-### Session backend
+### Session 的 drive 与 placement
 
-backend 选择顺序是：
+角色的 runtime 是什么、跑在哪里，是两个独立的问题。
 
-```text
-非空 ONLYNE_BACKEND → workspace config.toml 的 backend → auto 探测
+**drive** 是 runtime 的属性，写在那个角色的 spec 里：
+
+```toml
+[client.runtime]
+drive = "plugin"        # plugin | acp | exec
+command = ["pi", "--session-id", "{session}", "--session-dir", ".pi/sessions", "-ns"]
 ```
 
-| Backend | 宿主行为 |
+**placement** 是这台机器的属性，写在角色工作区的 `config.toml` 里：`herdr`、`orca`、`zellij`、`headless` 或 `external`。
+
+placement 的选择次序，从高到低：
+
+```text
+非空 ONLYNE_BACKEND → 工作区 config.toml 的 placement → 探测 herdr、orca、zellij → headless
+```
+
+| Placement | 宿主行为 |
 |---|---|
-| `orca` | 在 Orca terminal/tab 中运行角色命令，任务结束后回收 tab。 |
-| `exec`（`headless` 别名） | 把 `session_command` 作为子进程运行，保持 stdin 打开，并把输出写入任务日志。 |
-| `acp` | 通过 Agent Client Protocol v1 与子 agent 对话；client 负责 prompt、流式更新、权限和结项报告文件。 |
-| `fake` | 在进程内用脚本化生命周期事实运行 session，供源码/testkit 使用。 |
 | `herdr` | 在 herdr pane 中运行 session。 |
+| `orca` | 在 Orca terminal/tab 中运行角色命令，任务结束后回收 tab。 |
 | `zellij` | 在 zellij pane 中运行 session。 |
+| `headless` | 把角色的 `[client.runtime] command` 作为子进程运行，保持 stdin 打开，并把输出写入任务日志。 |
+| `external` | 什么都不启动：runtime 已经常驻，自己挂到该 session 的 socket 上。 |
 
-auto 探测顺序是 `herdr`、`orca`、`zellij`；它不会选择 `exec`、`acp` 或 `fake`，这三个要显式写出。`headless` 解析为 `exec`，存储投影也使用 `exec`。
+`fake` 是进程内的测试 runtime，`exec` 是 `headless` 的 v1 拼法；两者都只能通过 `ONLYNE_BACKEND` 点名。显式点名却不匹配任何名字的取值按名字拒收，绝不回落到探测，`onlyne-client run` 退出码为 5。
 
-pane backend 会在打开页面前拒绝在自己的 stdio 上讲 JSON-RPC 的 `session_command`（`--acp`、`--mode=rpc` 或 `--mode rpc`）。投递会结算为 `rejected`，完整原因写入账本行的 `reason`。这类命令应在工作区配置 `backend = "exec"` 或 `backend = "acp"`。
+校验器的 drive × placement 矩阵是唯一的检查点：`acp` 只与 `headless` 配对，因为 stdio 承载 ACP 通道，不可能同时是 pane 的终端。
 
-ACP 角色读取本地 `[acp]` 表：`mode`、`model`、`reasoning_effort` 和 `permission = "deny" | "allow"`（默认 deny）。对话写入任务日志和 events journal；每个终态回合写入 `<workspace>/.onlyne/out/<task-id>.md`，client 解析报告、路由 handoff、删除文件并登记 completion。
+ACP 角色读取本地 `[acp]` 表：`mode`、`model`、`reasoning_effort` 和 `permission = "deny" | "allow"`（默认 deny）。对话写入任务日志和 events journal，session 通过 client 经 `onlyne mcp` 挂上的三个工具上报——`onlyne_send`、`onlyne_handoff` 和 `onlyne_complete`——与 pi session 经自己插件拿到的三个工具是同一套。
 
 ### Adapter 协议
 

@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"subscribe\",\"args\":{\"since_seq\":7,\"tiers\":[\"durable\"],\"kinds\":[],\"roles\":[]}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "admin subscribe answers one page from since_seq and keeps carrying what follows it, so a follower resuming from its last seq sees no gap and no repeat"
+}

@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"spec_apply\",\"args\":{\"base_hash\":\"e59d6eb492e90ef2eb3b4a5e4588bc44eb7d0c73408d2e39a86e42eee69a669c\",\"edits\":[{\"edit\":\"upsert_role\",\"args\":{\"role\":\"scout\",\"key\":\"ed25519/QzB4OA\"}},{\"edit\":\"set_targets\",\"args\":{\"role\":\"scout\",\"targets\":[\"builder\",\"planner\"]}},{\"edit\":\"set_session\",\"args\":{\"role\":\"planner\",\"ready_ms\":5000,\"attempts\":3}},{\"edit\":\"set_runtime\",\"args\":{\"role\":\"planner\",\"runtime\":{\"drive\":\"acp\",\"command\":[\"pi\",\"--acp\"]}}}]}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "admin spec_apply carries the hash it read and typed edits: a declared role carries the key that declares it, a list is the whole list, and an omitted key does not travel so it does not move"
+}

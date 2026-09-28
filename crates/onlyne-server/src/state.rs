@@ -197,6 +197,12 @@ pub struct Server {
     pub seen_sessions: Mutex<HashSet<String>>,
     pub expiries: RwLock<HashMap<String, DateTime<Utc>>>,
     pub channels: RwLock<HashMap<String, ChannelBinding>>,
+    /// The one writer of `spec.toml` this process holds.
+    ///
+    /// `spec_apply` takes it across its read, its hash check, and its rename, so
+    /// the `base_hash` a request states is a compare-and-swap rather than a
+    /// spot check two racing writers can both pass.
+    pub spec_write: Mutex<()>,
     pub shutdown: Arc<Notify>,
 }
 
@@ -229,6 +235,7 @@ impl Server {
             seen_sessions: Mutex::new(HashSet::new()),
             expiries: RwLock::new(HashMap::new()),
             channels: RwLock::new(HashMap::new()),
+            spec_write: Mutex::new(()),
             shutdown: Arc::new(Notify::new()),
         });
         let hash = spec.semantic_hash();

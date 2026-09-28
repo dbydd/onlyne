@@ -3,8 +3,8 @@
 //! `reconfigure` currently only runs on `welcome`. A live connection that
 //! stays up across `onlyne reload` never sees that frame, so this module
 //! compares the `query_roles` row against the dispatcher's current slice
-//! and calls `reconfigure` only when `runtime`, `max_sessions`, or the relay
-//! policy changed.
+//! and calls `reconfigure` only when `runtime`, `max_sessions`, or the role's
+//! `allowed_targets` changed.
 //!
 //! The drive travels in the slice because it is the runtime's property, read
 //! from the spec's `[client.runtime]`; the placement it pairs with is the
@@ -20,11 +20,10 @@ pub struct RoleSlice {
     pub drive: Drive,
     pub command: Vec<String>,
     pub max_sessions: u32,
-    /// Downstream handoffs a session of this role owes (`relay_required`).
-    pub relay_required: Vec<String>,
-    /// The count form of the same policy (`relay_count`); a non-empty list wins
-    /// when both are present, which is the guard's own precedence.
-    pub relay_count: Option<u32>,
+    /// The roles a session of this role owes a delivery to (`allowed_targets`).
+    /// It is the whole policy, read twice: the server gates the ACL on it, and
+    /// the client's completion guard owes it.
+    pub required_targets: Vec<String>,
 }
 
 impl RoleSlice {
@@ -34,8 +33,7 @@ impl RoleSlice {
             drive: drive_of(runtime.drive),
             command: runtime.command,
             max_sessions: welcome.max_sessions,
-            relay_required: welcome.relay_required.clone().unwrap_or_default(),
-            relay_count: welcome.relay_count,
+            required_targets: welcome.allowed_targets.clone(),
         }
     }
 
@@ -44,8 +42,7 @@ impl RoleSlice {
             drive: drive_of(info.runtime.drive),
             command: info.runtime.command.clone(),
             max_sessions: info.max_sessions,
-            relay_required: info.relay_required.clone().unwrap_or_default(),
-            relay_count: info.relay_count,
+            required_targets: info.edges.clone(),
         }
     }
 }
@@ -73,11 +70,8 @@ pub fn slice_diff(current: &RoleSlice, next: &RoleSlice) -> Vec<&'static str> {
     if current.max_sessions != next.max_sessions {
         fields.push("max_sessions");
     }
-    if current.relay_required != next.relay_required {
-        fields.push("relay_required");
-    }
-    if current.relay_count != next.relay_count {
-        fields.push("relay_count");
+    if current.required_targets != next.required_targets {
+        fields.push("allowed_targets");
     }
     fields
 }

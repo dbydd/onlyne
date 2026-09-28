@@ -2,66 +2,37 @@ use super::*;
 use onlyne_wire::socket::UNIX_SOCKET_PATH_MAX;
 use tempfile::tempdir;
 
-/// The guard reads its policy from the environment before its own
-/// `relay.toml`, so what the client injects is the whole contract between
-/// the spec and a spawned session: the list comma-joined, the count in
-/// decimal, and neither variable at all when the spec names no policy.
+/// The spawn environment carries identity and nothing about the obligation.
+///
+/// The relay check is this client's own (`guards.rs`), read off the role's
+/// `allowed_targets`, so a session process is handed no policy to enforce and
+/// no variable to read one from.
 #[test]
-fn the_spawn_environment_carries_the_relay_policy_it_has() {
-    let plain = session_env(
-        "planner",
-        "s-1",
-        "t-1",
-        &[],
-        None,
-        "cluster-a",
-        Path::new(""),
-    );
+fn the_spawn_environment_carries_no_relay_policy() {
+    let plain = session_env("planner", "s-1", "t-1", "cluster-a", Path::new(""));
     assert_eq!(plain["ONLYNE_SESSION_ID"], "s-1");
     assert_eq!(plain["ONLYNE_TASK_ID"], "t-1");
     assert_eq!(plain["ONLYNE_ROLE"], "planner");
     // The topology name is the address a host backend groups sessions under.
     assert_eq!(plain["ONLYNE_CLUSTER"], "cluster-a");
-    assert!(
-        !plain.contains_key("ONLYNE_RELAY_REQUIRED") && !plain.contains_key("ONLYNE_RELAY_COUNT"),
-        "no policy injects no key at all: {plain:?}"
-    );
     // A surface that answered nothing names nothing: the plugin keeps its own
     // resolution for a hand-started session.
     assert!(!plain.contains_key("ONLYNE_SOCKET"), "{plain:?}");
+    for key in [
+        "ONLYNE_RELAY_REQUIRED",
+        "ONLYNE_RELAY_COUNT",
+        "ONLYNE_RELAY_REQUIRED_COUNT",
+    ] {
+        assert!(
+            !plain.contains_key(key),
+            "the obligation has no second reader, so no variable carries it: {plain:?}"
+        );
+    }
 
-    let listed = session_env(
-        "planner",
-        "s-1",
-        "t-1",
-        &["writer".to_string(), "auditor".to_string()],
-        None,
-        "",
-        Path::new(""),
-    );
-    assert_eq!(listed["ONLYNE_RELAY_REQUIRED"], "writer,auditor");
-    assert!(!listed.contains_key("ONLYNE_RELAY_COUNT"));
     // No welcome yet, so no topology to name: the key stays out rather than
     // arriving empty.
-    assert!(!listed.contains_key("ONLYNE_CLUSTER"));
-
-    let counted = session_env("planner", "s-1", "t-1", &[], Some(2), "", Path::new(""));
-    assert_eq!(counted["ONLYNE_RELAY_COUNT"], "2");
-    assert!(!counted.contains_key("ONLYNE_RELAY_REQUIRED"));
-
-    // Both variables travel when the spec names both forms; the guard's own
-    // precedence is what makes the list win.
-    let both = session_env(
-        "planner",
-        "s-1",
-        "t-1",
-        &["writer".to_string()],
-        Some(2),
-        "",
-        Path::new(""),
-    );
-    assert_eq!(both["ONLYNE_RELAY_REQUIRED"], "writer");
-    assert_eq!(both["ONLYNE_RELAY_COUNT"], "2");
+    let unregistered = session_env("planner", "s-1", "t-1", "", Path::new(""));
+    assert!(!unregistered.contains_key("ONLYNE_CLUSTER"));
 }
 
 /// A workspace whose canonical socket spelling overflows `sun_path` still
@@ -96,7 +67,7 @@ fn a_deep_workspace_hands_the_session_the_short_served_socket() {
     );
     assert_ne!(served, natural, "the socket moved off the canonical path");
 
-    let env = session_env("planner", "s-1", "t-1", &[], None, "", &served);
+    let env = session_env("planner", "s-1", "t-1", "", &served);
     assert_eq!(env["ONLYNE_SOCKET"], served.to_string_lossy().as_ref());
     let spec = SpawnSpec {
         cwd: workspace.clone(),

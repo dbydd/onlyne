@@ -175,6 +175,11 @@ pub async fn on_turn_end(
             }
         }
         Step::Nudge(Nudge::Backend { backend, session }) => {
+            // A self-driven drive has no heartbeats, so the dispatch path
+            // feeds the turn-started fact here — the same fact a plugin's
+            // beat would carry — before the backend starts the turn the
+            // nudge asked for.
+            state.feed_turn_started(task_id);
             match backend.nudge(&session, task_id, NUDGE_TEXT) {
                 Ok(()) => Ok(()),
                 Err(error) => {
@@ -219,6 +224,7 @@ async fn settle(
         task_id,
         Outcome::Blocked,
         closing,
+        None,
         SettleAuthority::ClientOwned,
     )
     .await

@@ -73,6 +73,7 @@ async fn a_refused_replay_releases_the_session_and_keeps_the_first_verdict() {
         &task,
         Outcome::Done,
         Some("first head".into()),
+        None,
         SettleAuthority::ClientOwned,
     )
     .await
@@ -100,6 +101,7 @@ async fn a_refused_replay_releases_the_session_and_keeps_the_first_verdict() {
         &task,
         Outcome::Failed,
         Some("replayed head".into()),
+        None,
         SettleAuthority::ClientOwned,
     )
     .await
@@ -200,6 +202,7 @@ async fn a_guard_refuses_on_no_word_but_the_one_it_reports() {
         &task,
         Outcome::Done,
         Some("head".into()),
+        None,
         SettleAuthority::PluginReport,
     )
     .await
@@ -245,6 +248,7 @@ async fn a_completion_with_no_session_row_still_files_its_verdict() {
         &foreign,
         Outcome::Done,
         Some("a line".into()),
+        None,
         SettleAuthority::ClientOwned,
     )
     .await
@@ -299,6 +303,7 @@ async fn a_held_connection_answering_its_own_frame_keeps_its_buffer_entry() {
         &task,
         Outcome::Done,
         Some("head".into()),
+        None,
         SettleAuthority::ClientOwned,
     )
     .await
@@ -332,6 +337,7 @@ async fn the_first_verdict_keeps_its_receipt() {
         &task,
         Outcome::Done,
         Some("first head".into()),
+        None,
         SettleAuthority::ClientOwned,
     )
     .await
@@ -368,6 +374,7 @@ fn a_settled_task_without_a_result_line_still_files_its_receipt() {
         &task,
         None,
         None,
+        None,
     )
     .expect("an answer with nothing to say is still an answer");
     assert_eq!(quiet.kind, MsgKind::Completion);
@@ -386,6 +393,7 @@ fn a_settled_task_without_a_result_line_still_files_its_receipt() {
         &task,
         Some(""),
         None,
+        None,
     )
     .expect("a blank result line files too");
     assert_eq!(blank.body.text, quiet.body.text);
@@ -396,13 +404,14 @@ fn a_settled_task_without_a_result_line_still_files_its_receipt() {
         &task,
         Some("done"),
         None,
+        None,
     )
     .expect("a result line travels verbatim");
     assert_eq!(said.body.text.as_deref(), Some("done"));
 
     // The one case that stays silent is the one with no sender to answer.
     assert!(
-        completion_envelope("planner", None, &task, Some("done"), None).is_none(),
+        completion_envelope("planner", None, &task, Some("done"), None, None).is_none(),
         "an unaddressed task files no receipt"
     );
 }
@@ -431,6 +440,7 @@ fn a_completion_carries_the_family_figures_of_the_task_it_answers() {
         Some(Principal::role("reviewer")),
         &task,
         Some("done"),
+        None,
         Some(&causality),
     )
     .expect("a settled task answers its sender");

@@ -44,10 +44,9 @@ pub(super) fn served_socket(workspace: &Path) -> PathBuf {
 /// The environment one spawned session process carries.
 ///
 /// The three `ONLYNE_` identity variables are what the plugin mounts with. The
-/// relay pair is the guard's policy as the spec wrote it: a list joined by
-/// commas, and the count in decimal. A policy the spec does not name injects no
-/// variable at all, which is what leaves a hand-written `relay.toml` in charge
-/// of a box that never put the policy in its spec.
+/// obligation a session owes is not among them: the guard is this client's own
+/// (`guards.rs`), read off the role's `allowed_targets`, so there is no policy
+/// for a session process to carry and no variable for it to read.
 ///
 /// `ONLYNE_CLUSTER` names the server's topology and is the address a host
 /// backend groups sessions under. No welcome yet means no variable, and herdr
@@ -62,8 +61,6 @@ pub(super) fn session_env(
     role: &str,
     session_id: &str,
     task_id: &str,
-    relay_required: &[String],
-    relay_count: Option<u32>,
     topology: &str,
     adapter_socket: &Path,
 ) -> BTreeMap<String, String> {
@@ -79,12 +76,6 @@ pub(super) fn session_env(
     }
     if !topology.is_empty() {
         env.insert("ONLYNE_CLUSTER".into(), topology.to_string());
-    }
-    if !relay_required.is_empty() {
-        env.insert("ONLYNE_RELAY_REQUIRED".into(), relay_required.join(","));
-    }
-    if let Some(count) = relay_count {
-        env.insert("ONLYNE_RELAY_COUNT".into(), count.to_string());
     }
     env
 }

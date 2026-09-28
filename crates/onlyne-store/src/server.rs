@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -8,12 +9,13 @@ use onlyne_proto::{
     Outcome, Principal, QueryFaultsArgs, QuerySessionsArgs,
 };
 use rusqlite::types::{Type, Value as SqlValue};
-use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::error::{StoreError, StoreResult};
+use crate::liveness::LiveSessions;
 use crate::transition_allowed;
 
 /// Server store schema revision. The `hop` column set this to 2: the ledger
@@ -453,17 +455,34 @@ pub struct CursorRow {
 pub struct ServerLedger {
     path: PathBuf,
     retention_days: i64,
+    /// The one connection that writes, behind its own lock.
     inner: Arc<Mutex<Connection>>,
+    /// The read-only handles every query runs on, so a reader is never queued
+    /// behind the writer above.
+    readers: ReadPool,
+    /// Writes this store made against `sessions` since it opened: one bump per
+    /// `project_session`, `rebind_session`, `publish_mirror_outcome`, and
+    /// `flush_last_seen`. A heartbeat that landed in memory counts as none.
+    session_rows_written: Arc<AtomicU64>,
+    /// The beats this process took and has not written down.
+    live: Arc<LiveSessions>,
 }
 
 impl ServerLedger {
     pub fn open(path: impl AsRef<Path>, retention_days: u32) -> StoreResult<Self> {
         let path = path.as_ref().to_path_buf();
         let conn = open_connection(&path, SERVER_MARKER, SERVER_DDL, SERVER_SCHEMA_VERSION)?;
+        // The writer above ran the schema gate — the marker check, the DDL, the
+        // in-place column adds — so the readers below only ever open a file
+        // this process has already accepted.
+        let readers = ReadPool::open(&path)?;
         Ok(Self {
             path,
             retention_days: i64::from(retention_days).max(1),
             inner: Arc::new(Mutex::new(conn)),
+            readers,
+            session_rows_written: Arc::new(AtomicU64::new(0)),
+            live: Arc::new(LiveSessions::default()),
         })
     }
 
@@ -493,7 +512,7 @@ impl ServerLedger {
     }
 
     pub fn list_roles(&self) -> StoreResult<Vec<RoleRow>> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         let rows = conn
             .prepare(
                 "SELECT name,key,admin,max_sessions,spec_hash,updated_at FROM roles ORDER BY name",
@@ -526,11 +545,19 @@ impl ServerLedger {
     /// delivery at a time, so taking this one releases whatever the session was
     /// on before. A write the gate refuses changes nothing, the binding
     /// included — the row it was refused by is the newer word.
+    ///
+    /// A write that lands carries the session's `last_seen` forward, so the
+    /// beats it has already outlived are spent: [`crate::liveness`] is told
+    /// what the row now holds and drops the ones that are no longer newer.
     pub fn project_session(&self, write: &SessionWrite) -> StoreResult<bool> {
         let conn = self.conn()?;
+        self.note_session_row_write();
         let tx = conn.unchecked_transaction()?;
         let changed = project_session_conn(&tx, write)?;
         tx.commit()?;
+        if changed {
+            self.live.settle(&write.session_id, write.last_seen);
+        }
         Ok(changed)
     }
 
@@ -544,6 +571,7 @@ impl ServerLedger {
     /// replaced, so it goes first: the operator's word is the newer fact.
     pub fn rebind_session(&self, from_session_id: &str, write: &SessionWrite) -> StoreResult<bool> {
         let conn = self.conn()?;
+        self.note_session_row_write();
         let tx = conn.unchecked_transaction()?;
         if from_session_id != write.session_id {
             tx.execute(
@@ -565,6 +593,12 @@ impl ServerLedger {
         }
         let changed = project_session_conn(&tx, write)?;
         tx.commit()?;
+        if changed {
+            // The row moved, so a beat taken under the old address is no longer
+            // this row's. The write's own clock is what the row now holds.
+            self.live.settle(from_session_id, write.last_seen);
+            self.live.settle(&write.session_id, write.last_seen);
+        }
         Ok(changed)
     }
 
@@ -600,7 +634,7 @@ impl ServerLedger {
     /// At most one binding of a session is open, so the order here only decides
     /// which row a hand-written pair of open bindings answers with.
     pub fn open_binding_of(&self, session_id: &str) -> StoreResult<Option<SessionBindingRow>> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         Ok(conn
             .query_row(
                 "SELECT session_id,task_id,bound_at,released_at FROM session_tasks WHERE session_id=? AND released_at IS NULL ORDER BY bound_at DESC,task_id DESC LIMIT 1",
@@ -613,6 +647,11 @@ impl ServerLedger {
     /// Publish a late mirror verdict when the stored projection bytes still
     /// match the bytes the server compared. The stored tuple remains the
     /// session version while `observed_json` carries the task verdict.
+    ///
+    /// `last_seen` is left where it stands: this write says the projection
+    /// gained a verdict, not that the session was heard from, and the beats
+    /// that were newer than the row keep answering for it
+    /// ([`ServerLedger::beat_session`]).
     pub fn publish_mirror_outcome(
         &self,
         session_id: &str,
@@ -621,6 +660,7 @@ impl ServerLedger {
         updated_at: i64,
     ) -> StoreResult<bool> {
         let conn = self.conn()?;
+        self.note_session_row_write();
         let changed = conn.execute(
             "UPDATE sessions SET observed_json=?,updated_at=? WHERE session_id=? AND observed_json=?",
             params![
@@ -633,16 +673,60 @@ impl ServerLedger {
         Ok(changed == 1)
     }
 
-    /// Refresh only one mirror row's `last_seen`.
+    /// Take one beat for a session whose projection did not change.
     ///
-    /// A beat that observed nothing new is not a projection write: it does not
-    /// move `(generation, seq)`, it does not touch `updated_at`, and it
-    /// publishes no event. It still has to reach the row, because `last_seen`
-    /// is what a reader judges freshness by — a mirror whose `last_seen` froze
-    /// at the last content change is the v1 defect that column exists to fix,
-    /// and it is why the row carries it at all.
-    pub fn touch_session_last_seen(&self, session_id: &str, last_seen: i64) -> StoreResult<bool> {
+    /// This is the whole of v2's liveness rule, and it is deliberately not a
+    /// projection write: `(generation, seq)`, `updated_at`, and the event
+    /// stream are all left exactly as they were, and the beat reaches the row
+    /// only when the row is at least `flush_after_secs` behind — the interval
+    /// the server states beside its call, which is also the reader's worst-case
+    /// staleness. Between those flushes the beat lives in memory, where every
+    /// read of the row picks it up ([`crate::liveness`]).
+    ///
+    /// The caller supplies the interval rather than this store: it is a promise
+    /// about what a reader of `last_seen` is owed, and the server is the layer
+    /// that knows the cluster's presence window. The interval is floored at one
+    /// second, so a spec that asks for a window below it gets one flush per
+    /// second rather than one per beat — the v1 write rate this slice removes.
+    ///
+    /// Answers whether the beat reached the table.
+    pub fn beat_session(
+        &self,
+        session_id: &str,
+        at: i64,
+        flush_after_secs: i64,
+    ) -> StoreResult<bool> {
+        // The memory entry moves first. A reader arriving between the two steps
+        // below must be handed this beat, never the value it replaced.
+        self.live.note(session_id, at);
+        let Some(stored) = self.stored_session_row(session_id)? else {
+            // Nothing to refresh: a beat for a session with no row is not a row
+            // this process can make fresher. The entry stays for the row that
+            // may yet be written, and a row that never appears is read by
+            // nobody.
+            return Ok(false);
+        };
+        if at.saturating_sub(stored.last_seen) < flush_after_secs.max(1) {
+            return Ok(false);
+        }
+        let flushed = self.flush_last_seen(session_id, at)?;
+        if flushed {
+            self.live.settle(session_id, at);
+        }
+        Ok(flushed)
+    }
+
+    /// Write one mirror row's `last_seen`, and nothing else.
+    ///
+    /// The row is the durable half of a beat: what a restarted server, and any
+    /// reader of the file rather than of the cluster, has to judge freshness
+    /// by. A mirror whose `last_seen` froze at the last content change is the
+    /// v1 defect that column exists to fix, and it is why the row carries it at
+    /// all — [`ServerLedger::beat_session`] is the only caller, and it decides
+    /// when the row is worth reaching.
+    fn flush_last_seen(&self, session_id: &str, last_seen: i64) -> StoreResult<bool> {
         let conn = self.conn()?;
+        self.note_session_row_write();
         let changed = conn.execute(
             "UPDATE sessions SET last_seen=? WHERE session_id=?",
             params![unix_to_rfc3339(last_seen), session_id],
@@ -650,9 +734,21 @@ impl ServerLedger {
         Ok(changed == 1)
     }
 
-    /// One mirror row, addressed by its session id.
+    /// One mirror row, addressed by its session id: the live `last_seen` this
+    /// process holds when it has a newer one, the persisted value otherwise.
     pub fn get_session_row(&self, session_id: &str) -> StoreResult<Option<ServerSessionRow>> {
-        let conn = self.conn()?;
+        Ok(self
+            .stored_session_row(session_id)?
+            .map(|row| self.with_live_seen(row)))
+    }
+
+    /// One mirror row exactly as the file holds it.
+    ///
+    /// The liveness layer needs the persisted value on its own — the interval
+    /// is measured from it — and a caller that wants what a reader is handed
+    /// wants [`ServerLedger::get_session_row`] instead.
+    fn stored_session_row(&self, session_id: &str) -> StoreResult<Option<ServerSessionRow>> {
+        let conn = self.read()?;
         let row = conn
             .query_row(
                 &format!(
@@ -666,12 +762,23 @@ impl ServerLedger {
         Ok(row)
     }
 
+    /// The freshest `last_seen` this process can answer for one stored row.
+    ///
+    /// Every read of the table passes through here. A reader must never be
+    /// handed a value the server has already outlived — that is v1's frozen
+    /// mirror, and it is the failure this column was added to end — so the
+    /// answer is the newer of the row's value and the beat held in memory.
+    fn with_live_seen(&self, mut row: ServerSessionRow) -> ServerSessionRow {
+        row.last_seen = self.live.freshest(&row.session_id, row.last_seen);
+        row
+    }
+
     /// The mirror row serving one delivery, read through its binding.
     ///
     /// A reader asks "the session serving this task"; the binding is where that
     /// fact lives, and the row's own `task_id` is derived from it either way.
     pub fn session_row_for_task(&self, task_id: &str) -> StoreResult<Option<ServerSessionRow>> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         let row = conn
             .query_row(
                 &format!(
@@ -682,11 +789,11 @@ impl ServerLedger {
                 session_row,
             )
             .optional()?;
-        Ok(row)
+        Ok(row.map(|row| self.with_live_seen(row)))
     }
 
     pub fn list_sessions(&self, filter: QuerySessionsArgs) -> StoreResult<Vec<ServerSessionRow>> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         let mut clauses = Vec::new();
         let mut args = Vec::new();
         if let Some(task_id) = filter.task_id {
@@ -728,7 +835,10 @@ impl ServerLedger {
             .prepare(&sql)?
             .query_map(params_from_iter(args), session_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        Ok(rows
+            .into_iter()
+            .map(|row| self.with_live_seen(row))
+            .collect())
     }
 
     pub fn append_ledger(&self, row: &LedgerRow) -> StoreResult<Append> {
@@ -784,7 +894,7 @@ impl ServerLedger {
     /// ones `pull` would hand this role, so `note` rows are left out exactly as
     /// `relay::pull` leaves them out (`crates/onlyne-server/src/relay.rs`).
     pub fn queued_count_for(&self, role: &str) -> StoreResult<u32> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         let count = conn
             .query_row(
                 "SELECT COUNT(*) FROM ledger WHERE state=? AND json_extract(to_json,'$.role.role')=? AND kind<>?",
@@ -803,7 +913,7 @@ impl ServerLedger {
     /// `msg_id` plus parsed deadline for every queued or in-flight row whose
     /// `expires_at` is set, oldest deadline first.
     pub fn pending_expiries(&self) -> StoreResult<Vec<(String, DateTime<Utc>)>> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         let rows = conn
             .prepare(
                 "SELECT msg_id, expires_at FROM ledger WHERE state IN ('queued','in_flight') AND expires_at IS NOT NULL ORDER BY expires_at,rowid",
@@ -928,7 +1038,7 @@ impl ServerLedger {
     }
 
     pub fn ledger_query(&self, query: LedgerQuery) -> StoreResult<Vec<LedgerRow>> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         let mut clauses = Vec::new();
         let mut args = Vec::new();
         if let Some(task) = query.task {
@@ -973,7 +1083,7 @@ impl ServerLedger {
     /// one second: `rowid` is the insertion counter, and it makes the order the
     /// ledger's write order without a second copy of that fact.
     pub fn ledger_task(&self, task: &str, limit: u32) -> StoreResult<Vec<LedgerRow>> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         let rows = conn
             .prepare(&format!(
                 "SELECT {LEDGER_COLUMNS} FROM ledger WHERE task=? ORDER BY enqueued_at,rowid LIMIT ?"
@@ -989,12 +1099,12 @@ impl ServerLedger {
     }
 
     pub fn events_since(&self, seq: i64, limit: u32) -> StoreResult<Vec<EventRecord>> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         events_since_conn(&conn, seq, limit)
     }
 
     pub fn event_head(&self) -> StoreResult<i64> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         event_head_conn(&conn)
     }
 
@@ -1048,7 +1158,7 @@ impl ServerLedger {
     }
 
     pub fn faults_query(&self, query: FaultQuery) -> StoreResult<Vec<ServerFaultRow>> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         let mut clauses = Vec::new();
         let mut args = Vec::new();
         if let Some(task_id) = query.task_id {
@@ -1115,7 +1225,7 @@ impl ServerLedger {
     /// the ties inside one second, and it breaks them in the order the pass
     /// wrote them.
     pub fn list_ghost_sweeps(&self, limit: u32) -> StoreResult<Vec<GhostSweepRow>> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         let rows = conn
             .prepare(&ghost_sweeps_list_sql())?
             .query_map(params![sql_limit(limit)], ghost_sweep_row)?
@@ -1124,7 +1234,7 @@ impl ServerLedger {
     }
 
     pub fn cursor_for(&self, role: &str) -> StoreResult<Option<CursorRow>> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         Ok(conn
             .query_row(
                 "SELECT role,last_msg_id,last_seq,updated_at FROM inbox_cursors WHERE role=?",
@@ -1167,7 +1277,7 @@ impl ServerLedger {
         state: LedgerState,
         limit: u32,
     ) -> StoreResult<Vec<LedgerRow>> {
-        let conn = self.conn()?;
+        let conn = self.read()?;
         let rows = conn
             .prepare(&format!(
                 "SELECT {LEDGER_COLUMNS} FROM ledger WHERE state=? AND json_extract(to_json,'$.role.role')=? ORDER BY enqueued_at,rowid LIMIT ?"
@@ -1181,6 +1291,81 @@ impl ServerLedger {
         self.inner
             .lock()
             .map_err(|_| StoreError::Sqlite("database mutex poisoned".to_string()))
+    }
+
+    /// One connection from the read-only pool.
+    ///
+    /// Every statement that only reads goes here rather than through
+    /// [`ServerLedger::conn`]: the writer's lock is held for the whole of a
+    /// write, including the part where SQLite waits on the file lock, and a
+    /// board refresh that shares it waits out the delivery path.
+    fn read(&self) -> StoreResult<MutexGuard<'_, Connection>> {
+        self.readers.get()
+    }
+
+    /// Record one statement this store executed against `sessions`.
+    fn note_session_row_write(&self) {
+        self.session_rows_written.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Statements this store has executed against the `sessions` table.
+    ///
+    /// The projection writes, the mirror-outcome publishes, the liveness
+    /// flushes, and the address moves a rebind makes all count here. It is the
+    /// observation a liveness claim is made against: "a beat that changed
+    /// nothing wrote no row" is answered by this number rather than by reading
+    /// the code, and a test that reads it does not have to be a party to the
+    /// write path.
+    pub fn session_row_writes(&self) -> u64 {
+        self.session_rows_written.load(Ordering::Relaxed)
+    }
+}
+
+/// How many read-only connections the query paths share.
+///
+/// WAL lets readers run beside the writer, so the pool is about *width*: a
+/// board, a TUI, and an operator's `onlyne sessions` are three reads that may
+/// be in flight at once, and four leaves room for the server's own scans
+/// without any of them waiting on another. Each of these is one file handle;
+/// the pool never grows, because every read behind it is a point lookup or an
+/// indexed listing.
+const READ_POOL_SIZE: usize = 4;
+
+/// The read-only handles a query runs on.
+///
+/// These are opened `SQLITE_OPEN_READ_ONLY`, so a statement that tried to write
+/// here would fail instead of quietly becoming a second writer: the one writer
+/// is the connection above, and this pool is the answer to "the reader should
+/// not queue behind it".
+#[derive(Clone, Debug)]
+struct ReadPool {
+    path: PathBuf,
+    conns: Arc<Vec<Mutex<Connection>>>,
+    next: Arc<AtomicUsize>,
+}
+
+impl ReadPool {
+    fn open(path: &Path) -> StoreResult<Self> {
+        let mut conns = Vec::with_capacity(READ_POOL_SIZE);
+        for _ in 0..READ_POOL_SIZE {
+            conns.push(Mutex::new(open_reader(path)?));
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            conns: Arc::new(conns),
+            next: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    /// One connection, round-robin, so two reads in flight land on two.
+    fn get(&self) -> StoreResult<MutexGuard<'_, Connection>> {
+        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.conns.len();
+        self.conns[index].lock().map_err(|_| {
+            StoreError::Sqlite(format!(
+                "read connection mutex poisoned for {}",
+                self.path.display()
+            ))
+        })
     }
 }
 
@@ -1241,6 +1426,21 @@ fn ensure_schema(
     ensure_ledger_requeued(conn)?;
     ensure_ledger_causality_columns(conn)?;
     Ok(())
+}
+
+/// Open one read-only handle on a server database that already exists.
+///
+/// No pragmas and no DDL: the writer set `journal_mode=WAL` on the file and ran
+/// the schema gate before any of these open, and a read-only connection cannot
+/// change either. The busy timeout is the writer's, so a reader that meets a
+/// checkpoint waits it out instead of failing a board refresh.
+fn open_reader(path: &Path) -> StoreResult<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(Duration::from_millis(5000))?;
+    Ok(conn)
 }
 
 /// Add `ledger.expires_at` to a file whose ledger lacks it.
@@ -1786,6 +1986,15 @@ pub fn head_preview(text: &str) -> String {
 }
 
 fn body_head(envelope: &Envelope, body_json: &str) -> String {
+    // An explicit `head` on the body wins: it is the one display line the
+    // sender named, and a body that carries its full result in `text` would
+    // otherwise show the first clusters of the result rather than the line the
+    // caller wrote. A body with no `head` of its own — the CLI's own
+    // completion, a plain delivery — falls back to its text, which is the only
+    // content it has.
+    if let Some(head) = envelope.body.head.as_deref().filter(|h| !h.is_empty()) {
+        return head_preview(head);
+    }
     let text = envelope.body.text.as_deref().unwrap_or(body_json);
     head_preview(text)
 }
