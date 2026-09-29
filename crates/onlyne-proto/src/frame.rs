@@ -172,15 +172,53 @@ impl ErrorCode {
         ErrorCode::Internal,
     ];
 
-    /// Codes where retrying the same request can never succeed.
-    pub fn is_permanent(self) -> bool {
-        !matches!(
-            self,
-            ErrorCode::RecipientOffline
-                | ErrorCode::Duplicate
-                | ErrorCode::Unauthorized
-                | ErrorCode::Internal
-        )
+    /// What a caller should do about this code.
+    ///
+    /// One vocabulary, shared with the network layer's own failures, so a
+    /// refusal read on the wire and a failure read at the socket are answered
+    /// by the same rule. Two functions with the same name and opposite
+    /// verdicts — which is what this and `onlyne_net::is_permanent` were —
+    /// left a reader to work out which one applied before they could act.
+    pub fn retry(self) -> Retry {
+        match self {
+            // The recipient may come back, and the server may be busy.
+            ErrorCode::RecipientOffline | ErrorCode::Internal => Retry::UnderBackoff,
+            // The request landed; asking again returns the same receipt.
+            ErrorCode::Duplicate => Retry::Never,
+            // A key that is not this role's, and a protocol the peer does not
+            // speak, are both fixed by a person: re-key, or upgrade one side.
+            ErrorCode::Unauthorized | ErrorCode::ProtocolVersion => Retry::AfterHuman,
+            _ => Retry::Never,
+        }
+    }
+}
+
+/// What a caller should do about a failure.
+///
+/// The three answers are different actions, not degrees of one. `Never` means
+/// the same call cannot succeed as it stands. `AfterHuman` means it cannot
+/// succeed until someone re-keys a role or upgrades one side, and retrying
+/// through that is a loop that never ends. `UnderBackoff` is the only one a
+/// retry loop acts on by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retry {
+    /// Do not retry. The call cannot succeed as it stands.
+    Never,
+    /// Do not retry yet: a person has to re-key a role or upgrade a side first.
+    AfterHuman,
+    /// Retry under the backoff schedule.
+    UnderBackoff,
+}
+
+impl Retry {
+    /// Whether a retry loop should keep going on its own.
+    pub fn is_transient(self) -> bool {
+        matches!(self, Retry::UnderBackoff)
+    }
+
+    /// Whether the run should end here, and whether a person is why.
+    pub fn ends_the_run(self) -> bool {
+        !self.is_transient()
     }
 }
 
@@ -386,24 +424,40 @@ mod tests {
     }
 
     #[test]
-    fn transient_codes_stay_retryable() {
-        for code in [
-            ErrorCode::RecipientOffline,
-            ErrorCode::Duplicate,
-            ErrorCode::Unauthorized,
-            ErrorCode::Internal,
-        ] {
-            assert!(!code.is_permanent(), "{code} must stay retryable");
+    fn every_code_lands_in_exactly_one_retry_class() {
+        // The three answers are different actions, so each code is asserted
+        // against the one it belongs to. `unauthorized` is the case the old
+        // pair of classifiers disagreed on: it was "retryable" here and
+        // "permanent" in the network layer, and each side had a reason for its
+        // own answer alone. It is `AfterHuman` — a key that is not this role's
+        // is fixed by re-keying, not by asking again.
+        for code in [ErrorCode::RecipientOffline, ErrorCode::Internal] {
+            assert_eq!(code.retry(), Retry::UnderBackoff, "{code} is transient");
+        }
+        for code in [ErrorCode::Unauthorized, ErrorCode::ProtocolVersion] {
+            assert_eq!(
+                code.retry(),
+                Retry::AfterHuman,
+                "{code} waits on a person, not on the clock"
+            );
         }
         for code in [
             ErrorCode::Invalid,
+            ErrorCode::UnknownOp,
             ErrorCode::AclDenied,
             ErrorCode::UnknownRole,
+            ErrorCode::Duplicate,
             ErrorCode::Conflict,
+            ErrorCode::Forbidden,
             ErrorCode::NotAdmin,
-            ErrorCode::ProtocolVersion,
+            ErrorCode::FrameTooLarge,
+            ErrorCode::BadFrame,
         ] {
-            assert!(code.is_permanent(), "{code} can never succeed on retry");
+            assert_eq!(code.retry(), Retry::Never, "{code} cannot succeed again");
+        }
+        // Every code answers, and none is left to a default arm.
+        for code in ErrorCode::ALL {
+            assert!(code.retry().ends_the_run() || code.retry().is_transient());
         }
     }
 

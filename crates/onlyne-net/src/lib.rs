@@ -17,7 +17,7 @@ pub use backoff::Backoff;
 pub use conn::{
     CLOSE_REASON, ClientConn, ConnHandle, ConnReadiness, ConnSettings, DEFAULT_RESYNC_LAG,
     GatewayConn, OUTBOUND_QUEUE_DEPTH, RESYNC_LAG_KIND, TcpListen, TlsConn, accept_tls, dial,
-    is_permanent, resync_lag_of,
+    resync_lag_of, retry_of,
 };
 pub use handshake::{
     Challenge, HandshakeOk, HelloAck, accept, accept_with_timeout, connect, connect_with_timeout,
@@ -44,6 +44,49 @@ mod tests {
         backoff.reset();
         assert_eq!(backoff.next(), Duration::from_secs(1));
         assert_eq!(backoff.with_jitter(1.0), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn the_jittered_delay_lands_between_half_and_the_whole_rung() {
+        let mut backoff = Backoff::new();
+        // A second backoff walking the same ladder in lockstep: each iteration
+        // compares the spread delay against the rung it actually sits on, which
+        // is not the same rung for both once the ladder starts climbing.
+        let mut plain = Backoff::new();
+        for rung in 1u32..=8 {
+            let whole = plain.next();
+            let spread = backoff.next_jittered();
+            let half = whole.mul_f64(0.5);
+            assert!(
+                spread >= half && spread <= whole,
+                "delay {rung}: {spread:?} left the half-to-whole band [{half:?}, {whole:?}]"
+            );
+            assert!(spread <= backoff.cap);
+        }
+    }
+
+    #[test]
+    fn two_backoffs_do_not_walk_the_same_delay() {
+        // The point of the jitter: a cluster that loses its server redials as a
+        // crowd, and without decorrelation every role picks the same second
+        // twice in a row. This asserts the failure it was added to prevent —
+        // two instances, same rung, different delay.
+        let mut first = Backoff::new();
+        let mut second = Backoff::new();
+        first.next_jittered();
+        second.next_jittered();
+        let mut collisions = 0;
+        for _ in 0..32 {
+            let a = first.next_jittered();
+            let b = second.next_jittered();
+            if a == b {
+                collisions += 1;
+            }
+        }
+        assert!(
+            collisions < 4,
+            "two backoff instances collided {collisions} times in 32: the salt is not decorrelating them"
+        );
     }
 
     #[test]

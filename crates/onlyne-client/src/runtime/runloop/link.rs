@@ -8,8 +8,8 @@ use crate::runtime::intent::op_for_intent;
 use crate::session::dispatch::{self, ClientLink};
 use anyhow::{Result, anyhow};
 use onlyne_net::conn::ConnReadiness;
-use onlyne_net::is_permanent;
-use onlyne_proto::{ClientOp, EventTier, Frame, LiveSession, Subscribe};
+use onlyne_net::retry_of;
+use onlyne_proto::{ClientOp, EventTier, Frame, LiveSession, Retry, Subscribe};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -37,15 +37,29 @@ pub(super) async fn link_loop(init: &ClientInit, state: &RunState) -> Result<()>
                 state.dispatch.set_link_up(false);
                 accept_new.store(false, Ordering::SeqCst);
                 if let Some(failure) = link.failure().await {
-                    if is_permanent(&failure) {
-                        return Err(anyhow!("{failure}"));
+                    match retry_of(&failure) {
+                        // Both classes end the run, and which one it is turns
+                        // "the client stopped" into "re-key this role" or
+                        // "these two builds disagree".
+                        Retry::AfterHuman => {
+                            return Err(anyhow!("{failure}: re-key this role or upgrade one side"));
+                        }
+                        Retry::Never => return Err(anyhow!("{failure}")),
+                        Retry::UnderBackoff => {}
                     }
                 }
             }
-            Err(error) if is_permanent(&error) => return Err(anyhow!("{error}")),
-            Err(error) => tracing::warn!(error = %error, "connect failed"),
+            Err(error) => match retry_of(&error) {
+                Retry::AfterHuman => {
+                    return Err(anyhow!("{error}: re-key this role or upgrade one side"));
+                }
+                Retry::Never => return Err(anyhow!("{error}")),
+                Retry::UnderBackoff => tracing::warn!(error = %error, "connect failed"),
+            },
         }
-        let delay = backoff.next();
+        // Jitter, not a fixed ladder: every client that lost the same server
+        // came back on the same second, and the server met them all at once.
+        let delay = backoff.next_jittered();
         tracing::info!(seconds = delay.as_secs(), "reconnecting");
         sleep(delay).await;
     }

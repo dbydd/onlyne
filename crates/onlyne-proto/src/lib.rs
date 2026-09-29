@@ -55,7 +55,7 @@ pub use event::{
 };
 pub use frame::{
     AdminFrame, ErrorCode, ErrorPayload, Frame, GatewayFrame, MAX_ERROR_MESSAGE_BYTES,
-    OP_ID_CONFLICT_MESSAGE, ResBody,
+    OP_ID_CONFLICT_MESSAGE, ResBody, Retry,
 };
 pub use lifecycle::{
     AgentPhase, DeliveryPhase, HostRef, IgnoredReason, LifecycleEvent, Observation, OrcaPane,

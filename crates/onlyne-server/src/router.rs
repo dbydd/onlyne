@@ -66,9 +66,17 @@ impl Session {
 
 /// The refusal a frame earns when it arrives before its `hello`.
 ///
-/// §7 line 310 spells this `invalid` with the message below. `Unauthorized`
-/// belongs to the retryable set of `ErrorCode::is_permanent`, so answering that
-/// code would tell a plugin to keep retrying a handshake it cannot complete.
+/// §7 line 310 spells this `invalid` with the message below, and `invalid` is
+/// the honest code here: a frame that arrived before its `hello` is a fault in
+/// the order of requests, not a claim about identity that a person has to fix.
+/// `unauthorized` would say the second thing, and it is the right answer for the
+/// other case — a key the server does not know, which waits on a re-key.
+///
+/// This used to be justified the other way round, by a classification that
+/// called `unauthorized` retryable and so could not be used. One vocabulary
+/// with three answers — `Retry::Never`, `Retry::AfterHuman`,
+/// `Retry::UnderBackoff` — makes the workaround unnecessary and the reasoning
+/// say what it is actually about.
 pub(crate) fn hello_required() -> ResBody {
     ResBody::err(
         ErrorCode::Invalid,

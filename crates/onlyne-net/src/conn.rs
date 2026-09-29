@@ -11,15 +11,16 @@
 //!   `ErrorPayload::code` names the refusal, and `ResBody::data` keeps the
 //!   earlier receipt that a duplicate `op_id` answer attaches.
 //! - [`NetError::Unauthorized`] and [`NetError::ProtocolVersion`] arrive from
-//!   admission and mean re-key or upgrade. [`is_permanent`] stops the retry loop
-//!   on both of them.
+//!   admission and mean re-key or upgrade. [`retry_of`] answers `AfterHuman` for
+//!   both, which stops the retry loop and says a person is the reason.
 //! - [`NetError::Disconnected`] means the pipe died. The supervisor dials again
 //!   under [`Backoff`], and the fresh connection serves the same handle.
 //! - [`NetError::NotReady`] means the handle sits between connections.
 //! - [`NetError::RequestTimeout`] means the caller's own deadline elapsed.
 
 use onlyne_proto::{
-    ClientOp, ErrorCode, Event, FaultEvent, Frame, GatewayOp, PROTOCOL_VERSION, ResBody, new_id,
+    ClientOp, ErrorCode, Event, FaultEvent, Frame, GatewayOp, PROTOCOL_VERSION, ResBody, Retry,
+    new_id,
 };
 use onlyne_wire::{FrameReader, is_bad_frame, is_too_large, read_frame, write_frame};
 use rustls::pki_types::ServerName;
@@ -704,30 +705,42 @@ async fn establish(plan: &DialPlan) -> Result<ClientTls, NetError> {
     Ok(stream)
 }
 
-/// Report whether a failure must surface to the caller with no retry.
+/// What a retry loop should do about a connection failure.
 ///
-/// `protocol_version` and `unauthorized` reach the caller directly, so a caller
-/// can re-key. A closed handshake and any bare `rejected` answer count as
-/// admission refusals too.
-pub fn is_permanent(error: &NetError) -> bool {
+/// The same [`Retry`] vocabulary `ErrorCode::retry` answers with, because these
+/// are the two places a failure is read: at the socket, and on the wire. They
+/// were two functions of the same name giving opposite answers for
+/// `unauthorized`, and a reader had to know which layer they were looking at
+/// before they could act.
+///
+/// An identity or version failure is `AfterHuman` rather than `Never` on
+/// purpose: both end the run, and saying which one it is turns "the client
+/// stopped" into "re-key this role" or "upgrade one side".
+pub fn retry_of(error: &NetError) -> Retry {
     match error {
         NetError::ProtocolVersion { .. }
         | NetError::Unauthorized(_)
         | NetError::PinMismatch { .. }
         | NetError::MalformedKey(_)
-        | NetError::Crypto(_) => true,
+        | NetError::Crypto(_) => Retry::AfterHuman,
         NetError::Rejected { code, .. } => {
-            code == ErrorCode::Unauthorized.as_str()
+            if code == ErrorCode::Unauthorized.as_str()
                 || code == ErrorCode::ProtocolVersion.as_str()
                 || code == "rejected"
+            {
+                Retry::AfterHuman
+            } else {
+                Retry::Never
+            }
         }
         NetError::HandshakeTimeout
         | NetError::RequestTimeout
         | NetError::NotReady
         | NetError::Disconnected(_)
-        | NetError::FrameTooLarge
-        | NetError::BadFrame
-        | NetError::Io(_) => false,
+        | NetError::Io(_) => Retry::UnderBackoff,
+        // A frame this build could not parse is a protocol violation between
+        // two builds of this program, not a hiccup in the pipe.
+        NetError::FrameTooLarge | NetError::BadFrame => Retry::Never,
     }
 }
 
@@ -907,7 +920,7 @@ async fn run_supervisor<S, P, Op>(
                             break;
                         }
                         Err(error) => {
-                            if is_permanent(&error) {
+                            if retry_of(&error).ends_the_run() {
                                 inner.stop(Some(error)).await;
                                 return;
                             }
@@ -1168,7 +1181,9 @@ mod tests {
             matches!(&error, NetError::Rejected { code, .. } if code == "unauthorized"),
             "expected an unauthorized refusal, got {error:?}"
         );
-        assert!(is_permanent(&error));
+        // A key the server does not know ends the run, and the class says a
+        // person is the reason: re-keying, not retrying, is what unblocks it.
+        assert_eq!(retry_of(&error), Retry::AfterHuman);
         server.await.unwrap();
     }
 
