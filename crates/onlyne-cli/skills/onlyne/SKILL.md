@@ -28,10 +28,9 @@ belongs to supervisor sessions and the spec file. The core detects and records; 
 operator decides retries, recycling, and timeouts. A feature that starts deciding policy
 belongs in a supervisor session, the spec, or a plugin — pick one of those before adding
 code here. Zero compatibility is a product rule: old configs, old databases, and old wire
-versions fail at the door with a verbatim string. A legacy workspace layout exits 2, a database
-whose marker is older exits 1 with `onlyne: unsupported schema; v1.0.0 does not migrate`, and a
-protocol revision outside the accepted range earns the wire code `protocol_version`. A change
-that "also reads the old shape" gets rejected.
+versions fail at the door with a sentence naming what was found. A workspace or a database from
+another revision exits 6, and a protocol revision outside the accepted range earns the wire
+code `protocol_version`. A change that "also reads the old shape" gets rejected.
 
 ## Crate map and dependency law
 
@@ -80,9 +79,9 @@ halt on weakened assertions during a migration.
 
 **Ledger/schema** (`onlyne-store`): `schema_marker(name, version, protocol_version)` is the
 gate; this revision writes client 3, server 5 and protocol 1 (`CLIENT_SCHEMA_VERSION`,
-`SERVER_SCHEMA_VERSION`), and a database carrying an older marker is refused with
-`onlyne: unsupported schema; v1.0.0 does not migrate`. A field change bumps the marker and
-leaves the refuse-at-door string untouched.
+`SERVER_SCHEMA_VERSION`), and a database carrying an older marker is refused with a sentence
+naming the revision it found and the revision this build wants. A field change bumps the
+marker and leaves the refuse-at-door behaviour untouched.
 `acl_allows` runs before the ledger write, so a denied send leaves zero rows and zero
 sender-side intents. The built-in exemption covers only completions addressed to the
 recorded task origin. Widening it needs a spec decision first.
