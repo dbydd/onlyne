@@ -99,8 +99,8 @@ the admin surface only; every message verb already prints JSON.
 
 The `reason` column on a ledger row reaches both read surfaces. `onlyne ledger` projects every
 field of the durable row, and `ROW_FIELD_KEYS` (`onlyne-cli/src/ledger.rs`) names `reason` among
-the keys a caller reads off it; `task_detail_text` in `onlyne-cli/src/tui/ui.rs` appends
-`reason=<text>` to a page-2 row that carries one. `LedgerEntry::reason` (`onlyne-proto/src/ops.rs`)
+the keys a caller reads off it; the TUI's task page prints it in the receipt column of the row
+that settled with one (`receipt` in `onlyne-cli/src/tui/task.rs`). `LedgerEntry::reason` (`onlyne-proto/src/ops.rs`)
 and `LedgerStateEvent::reason` (`onlyne-proto/src/event.rs`) both serialize `#[serde(default,
 skip_serializing_if = "Option::is_none")]`, so a row with nothing to say omits the key and its
 bytes match the pre-column shape, and a stored row without the key decodes as no value. The

@@ -1,40 +1,46 @@
-//! The socket the TUI watches, resolved through the one resolver the verbs use.
+//! The socket the board watches, resolved through the one resolver the verbs use.
 //!
-//! The board only reads the socket's path — the admin frame protocol needs no
-//! surface — so this module is the CLI's [`resolve_socket`] narrowed to a path,
-//! kept separate so the TUI does not depend on the verb vocabulary.
+//! The board speaks the admin vocabulary — the five reads, `subscribe`, and the
+//! ops its operator asks for — so it needs the socket a server binds, not the
+//! one a role's client binds. The path is resolved exactly as every verb
+//! resolves it, and the surface the registration file states is what decides
+//! whether this board may speak: [`NEEDS_ADMIN`] is the same refusal `onlyne
+//! status` gives for the same mistake.
 
-use crate::flags::GlobalFlags;
-use crate::socket;
+use crate::flags::{AsArg, GlobalFlags};
+use crate::socket::{self, NoSocket, SocketTarget};
 use std::path::PathBuf;
 
-pub const NO_SOCKET_MESSAGE: &str = onlyne_proto::NO_SOCKET_MESSAGE;
-
+/// The board's own `--socket`, `--server-root`, `--workspace`, and `--as`.
 #[derive(Debug, Clone, Default)]
 pub struct SocketArgs {
     pub socket: Option<PathBuf>,
     pub server_root: Option<PathBuf>,
     pub workspace: Option<PathBuf>,
+    pub surface_hint: AsArg,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NoSocket;
 
 /// Resolve the socket to watch, in the same precedence order the verbs use:
 /// `--socket`, then `ONLYNE_SOCKET`, then `--server-root`, then `--workspace`
 /// or the current directory walking upward for the owner tree.
-pub fn resolve_socket(args: &SocketArgs) -> Result<PathBuf, NoSocket> {
-    // The board carries no surface hint of its own; the resolver reads the
-    // surface off the registration file, and only the path is needed here.
-    let flags = GlobalFlags::addressing(
+pub fn resolve_socket(args: &SocketArgs) -> Result<SocketTarget, NoSocket> {
+    let mut flags = GlobalFlags::addressing(
         args.socket.clone(),
         args.server_root.clone(),
         args.workspace.clone(),
     );
+    flags.surface_hint = args.surface_hint;
     socket::resolve_socket(&flags)
-        .map(|target| target.path)
-        .map_err(|_| NoSocket)
 }
+
+/// Refusal text is a contract, and this one is `onlyne status`'s word for word:
+/// an operator who reaches a client socket gets the same sentence whichever
+/// noun they used.
+pub const NO_SOCKET_MESSAGE: &str = onlyne_proto::NO_SOCKET_MESSAGE;
+
+/// What the board says when the socket it found is not the admin surface.
+pub const NEEDS_ADMIN: &str = "onlyne: tui needs the admin surface; pass --server-root <dir>, \
+                                or --socket <path> with --as admin";
 
 #[cfg(test)]
 mod tests {
@@ -62,9 +68,9 @@ mod tests {
         let args = SocketArgs {
             socket: Some(PathBuf::from("/tmp/s")),
             server_root: Some(PathBuf::from("/tmp/root")),
-            workspace: None,
+            ..SocketArgs::default()
         };
-        assert_eq!(resolve_socket(&args).unwrap(), PathBuf::from("/tmp/s"));
+        assert_eq!(resolve_socket(&args).unwrap().path, PathBuf::from("/tmp/s"));
     }
 
     /// A server root names the admin socket once its daemon is running, which is
@@ -84,15 +90,20 @@ mod tests {
         fs::write(&socket, "").expect("socket file");
         write_registration(&root, &RegistrationFile::server(&root)).expect("registration");
         let args = SocketArgs {
-            socket: None,
             server_root: Some(root.clone()),
-            workspace: None,
+            ..SocketArgs::default()
         };
-        assert_eq!(resolve_socket(&args).unwrap(), socket);
+        let target = resolve_socket(&args).unwrap();
+        assert_eq!(target.path, socket);
+        assert_eq!(
+            target.surface,
+            crate::socket::Surface::Admin,
+            "a server root is the surface the board needs"
+        );
     }
 
     /// The board is launched from wherever the operator is, so the walk upward
-    /// is what makes `onlyne` work from a source subdirectory.
+    /// is what makes `onlyne tui` work from a source subdirectory.
     #[test]
     fn discovers_workspace_upwards() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -101,12 +112,11 @@ mod tests {
         let nested = root.join("b/c");
         fs::create_dir_all(&nested).expect("nested dir");
         let args = SocketArgs {
-            socket: None,
-            server_root: None,
             workspace: Some(nested),
+            ..SocketArgs::default()
         };
         assert_eq!(
-            resolve_socket(&args).unwrap(),
+            resolve_socket(&args).unwrap().path,
             socket_path(&root).expect("socket path")
         );
     }
@@ -123,13 +133,14 @@ mod tests {
             root.push("role-workspace-with-a-long-name");
         }
         let args = SocketArgs {
-            socket: None,
-            server_root: None,
             workspace: Some(root.join("src")),
+            ..SocketArgs::default()
         };
 
         let deep = started_workspace(&root);
-        let served = resolve_socket(&args).expect("a workspace names its socket");
+        let served = resolve_socket(&args)
+            .expect("a workspace names its socket")
+            .path;
         assert_eq!(served, socket_path(&deep).expect("socket path"));
         assert!(
             served.as_os_str().len() <= onlyne_wire::socket::UNIX_SOCKET_PATH_MAX,
@@ -147,10 +158,9 @@ mod tests {
         let root = dir.path().join("ws");
         fs::create_dir_all(root.join(".onlyne")).expect("owner dir");
         let args = SocketArgs {
-            socket: None,
-            server_root: None,
             workspace: Some(root),
+            ..SocketArgs::default()
         };
-        assert_eq!(resolve_socket(&args), Err(NoSocket));
+        assert!(resolve_socket(&args).is_err());
     }
 }

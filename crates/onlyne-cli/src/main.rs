@@ -39,7 +39,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use std::path::PathBuf;
 
-use crate::flags::GlobalFlags;
+use crate::flags::{AsArg, GlobalFlags};
 
 /// The ledger row shape, shared by `onlyne ledger` and `onlyne server ledger`.
 const LEDGER_LONG_ABOUT: &str = "\
@@ -615,6 +615,21 @@ fn tui(flags: &GlobalFlags, rest: &RestArgs) -> i32 {
     if let Some(workspace) = &flags.workspace {
         args.push("--workspace".to_string());
         args.push(workspace.to_string_lossy().to_string());
+    }
+    // The board's reads are bounded by the same `--timeout` every verb is, and
+    // a `--socket` path with no tree behind it needs the same `--as` hint.
+    args.push("--timeout".to_string());
+    args.push(flags.timeout_ms.to_string());
+    if flags.surface_hint != AsArg::Auto {
+        args.push("--as".to_string());
+        args.push(
+            match flags.surface_hint {
+                AsArg::Auto => "auto",
+                AsArg::Admin => "admin",
+                AsArg::Client => "client",
+            }
+            .to_string(),
+        );
     }
     tui::run(&args)
 }
