@@ -1,5 +1,124 @@
 # Changelog
 
+## 2.0.0 (unreleased)
+
+The v2 rewrite of the routing and session layer. `docs/v2-PLAN.md` is the plan and
+`docs/v2-REMAINING.md` is the state; this entry is what an operator has to act on.
+
+**Breaking.** A 1.4.x server, client or workspace does not run against v2 and is not
+converted.
+
+- **Databases.** The client marker moves 2 → 3 and the server marker 4 → 6. A file
+  from another revision is refused with a sentence naming the revision it carries,
+  the database it is, and the path forward: v2 starts on an empty ledger and rewrites
+  nothing, so the old file stays where the operator left it. The refusal exits **6**,
+  which is new — `1` is "this run failed" and covers a dead peer and a refused op, and
+  a supervisor needs to tell a file it will never read from a run worth retrying. A
+  workspace carrying the pre-v1 layout takes the same code.
+- **Configuration.** The fused `backend` key is gone and is refused by name: `acp`
+  named a drive and `herdr` a placement, and no reader can split the value. It becomes
+  `drive` in the spec's `[client.runtime]` and `placement` in the workspace's
+  `config.toml`, alongside a new `[client.session]` table carrying `scope` and
+  `idle_close`.
+- **The socket moved.** Every local socket binds in one machine-level runtime
+  directory, `/tmp/onlyne-<uid>/` or `ONLYNE_RUNTIME_DIR`, named `<digest>.sock` beside
+  a `<digest>.json` registration. Nothing binds inside a workspace, and a legacy layout
+  is refused rather than read.
+- **The forwarding layer is gone.** `onlyne-server` and `onlyne-client` expose only
+  `run`; every other verb runs inside `onlyne`. Exit `127` keeps exactly one meaning.
+- **`payload-v2` is deleted.** No report file, no grammar, no
+  `onlyne report check|write|path`, and no `onlyne-role-payload-v2` skill. A completion
+  carries `summary` (one display line), `details` (the full result, delivered verbatim)
+  and `files`; the ledger's 200-character head never reaches a model.
+
+**What a role sees change.** A delivery carries source and body and nothing else — no
+task id, hop, budget or generation in the text, and a tool call carries those
+automatically. Role prose moves out of the conversation and into the runtime's
+instruction layer, where it survives compaction. `relay_required` and its two spellings
+are refused: `[[client]].allowed_targets` is now both the permission and the
+obligation, and the hop budget is checked mechanically at the client instead of being
+left to the model. A turn that ends without a completion gets one neutral nudge and
+then settles `oneshot` as `blocked`; there is no reminder ladder and no relay guard in
+the plugin.
+
+**New surfaces.**
+
+- `onlyne-web`, an optional separately-installed front end: each role is a board, the
+  allowed routes are edges, a full graph falls back to a plain kanban, and a dragged
+  edge is a typed `SpecApply` edit rather than a local drawing. It is excluded from the
+  workspace, so the core build needs no Node.
+- The TUI rebuilt on a shared `view` reducer, as three pages and no map.
+- `SpecGet` / `SpecApply` and one continuous `subscribe`.
+- `[[hook]]`: an operator's script runs after an event is persisted, at-least-once.
+
+**Verification.** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+-- -D warnings` and `cargo test --workspace` are green; the scenario suite and the
+e2e scripts pass; and `pi-live.sh` ran against a real pi and a real model call, with
+the ledger reaching `acked` on the model's own summary.
+
+**Known gap — a hosting runtime.** A runtime that owns its own sessions (DSH, any
+desktop agent that already manages many conversations) has an interface and a
+specification in `crates/onlyne-adapter/HOSTING-RUNTIME.md`, and four protocol gaps
+named there, none fixed: the connection is still a session (`assign` carries no
+`session_id`), `Mount` is still untagged where §8 of `AGENTS.md` says it is tagged,
+`Capability` has no `open`/`suspend`/`close`, and `MountKind` has no `cluster` or
+`bridge`. That runtime is being built against the spec on another line. The
+`plugin × external` placement and the registration files it discovers through are in
+the tree; what a hosting runtime needs on top of them is not.
+
+## 2.0.0（未发布）
+
+v2 对路由层与会话层的重写。计划见 `docs/v2-PLAN.md`，状态见 `docs/v2-REMAINING.md`；
+本节只写操作员需要动手的部分。
+
+**不兼容。** 1.4.x 的 server、client 与工作区无法对接 v2，也不会被转换。
+
+- **数据库。** client 标记 2 → 3，server 标记 4 → 6。修订号不符的文件会被拒绝，
+  拒绝句点名它带的修订号、属于哪个库、以及下一步怎么做：v2 以空 ledger 启动，
+  不改写任何东西，旧文件留在原处。该拒绝退 **6**，这是新增的档位——`1` 是"本次运行
+  失败"，涵盖死 peer 与被拒的 op，supervisor 需要把"永远读不了的文件"和"值得
+  重试的运行"分开。v1 之前布局的工作区用同一个码。
+- **配置。** 融合的 `backend` 键已下线，并按名拒绝：`acp` 曾经指 drive，`herdr`
+  曾经指 placement，没有任何读者能把一个值劈开。它变成 spec 的
+  `[client.runtime].drive` 与工作区 `config.toml` 的 `placement`，另新增
+  `[client.session]` 表，携带 `scope` 与 `idle_close`。
+- **socket 搬家。** 所有本地 socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`
+  （或 `ONLYNE_RUNTIME_DIR`），名为 `<digest>.sock`，旁边是 `<digest>.json`
+  注册文件。工作区内部不再绑定任何东西，旧布局被拒绝而不被读取。
+- **转发层下线。** `onlyne-server` 与 `onlyne-client` 只暴露 `run`，其余动词都在
+  `onlyne` 进程内。退出码 `127` 只剩一个含义。
+- **`payload-v2` 下线。** 没有报告文件、没有语法、没有
+  `onlyne report check|write|path`，也没有 `onlyne-role-payload-v2` skill。
+  完成携带 `summary`（一行展示）、`details`（完整结果，原样送达）与 `files`；
+  ledger 那 200 字符的预览永远不进入模型视野。
+
+**角色看到的东西变了。** 投递只带来源和正文——正文里没有 task id、hop、budget、
+generation，这些由工具调用自动携带。角色说明移出会话，进入运行时的指令层，压缩
+后仍在。`relay_required` 及其两种拼写被拒绝：`[[client]].allowed_targets` 现在
+既是权限也是义务，hop 预算由 client 机械检查，不再交给模型。一轮结束而没有完成
+调用，只给一次中性提示，然后 `oneshot` 结算为 `blocked`；插件里的提醒阶梯和
+relay 守卫都不存在了。
+
+**新增界面。** `onlyne-web`，可独立安装的前端：每个角色一个看板，允许的路由是
+边，全连接时退回普通 kanban，拖出一条边是一次带类型的 `SpecApply` 编辑而不是本地
+绘制。它被排除在 workspace 之外，核心构建不需要 Node。TUI 基于共享的 `view`
+reducer 重写为三页、无地图。新增 `SpecGet` / `SpecApply` 与一条连续的 `subscribe`。
+新增 `[[hook]]`：事件落盘后运行操作员的脚本，至少一次投递。
+
+**验证。** `cargo fmt --all --check`、`cargo clippy --workspace --all-targets
+-- -D warnings` 与 `cargo test --workspace` 全绿；场景套件与 e2e 脚本通过；
+`pi-live.sh` 对真实 pi 和一次真实模型调用跑通，ledger 以模型自己的 summary 到达
+`acked`。
+
+**已知缺口——hosting 运行时。** 自己持有会话的运行时（DSH，或任何本来就管理多个
+对话的桌面 agent）的接口与协议规范在
+`crates/onlyne-adapter/HOSTING-RUNTIME.md`，其中列了四个协议缺口，均未修复：
+连接仍然等于会话（`assign` 不带 `session_id`）、`Mount` 仍是 untagged 而
+`AGENTS.md` §8 说它是 tagged 的、`Capability` 没有 `open`/`suspend`/`close`、
+`MountKind` 没有 `cluster` 与 `bridge`。该运行时在另一条线上对着这份规范开发。
+`plugin × external` 放置与它据以发现的注册文件已经在树里；hosting 运行时在其之上
+需要的部分还没有。
+
 ## 1.4.1 release index (English)
 
 **Release:** 1.4.1, dated 2026-09-24. Nineteen workspace crates move to 1.4.1, and

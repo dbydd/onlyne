@@ -6,16 +6,21 @@ Read this file before changing anything. `docs/v2-PLAN.md` is the settled design
 
 ## 0. Status: what has landed
 
-v2 lands in phases. This file describes the v2 contract as a whole, so it necessarily
-describes behavior that is designed but not yet built. Do not read an entry here as a
-claim that the code does it today.
+v2 lands in phases. This file describes the v2 contract as a whole, so a section
+can still describe behavior that is designed and not yet built — `docs/v2-REMAINING.md`
+is the record of what is in which state, and it is the one to read for that.
 
 | phase | content | state |
 |---|---|---|
 | zero | v1 defect fixes on paths v2 keeps | done |
 | one | structure, no behavior change: `onlyne-wire`, runtime-directory sockets and registration files, crate merges and splits, forwarding-layer removal, this file | done |
-| two | behavior: session table rekey and scopes, drive/placement split, delivery rendering, settlement rules, declarative routes, spec edit ops, event hooks | in progress |
-| three | interfaces: `view` reducer, TUI, `onlyne-web` | not started |
+| two | behavior: session table rekey and scopes, drive/placement split, delivery rendering, settlement rules, declarative routes, spec edit ops, event hooks, liveness in memory, one retry classification | done |
+| three | interfaces: `view` reducer, TUI, `onlyne-web` | done |
+
+One phase-two item is done with a named gap rather than closed: a **hosting
+runtime** — one that owns its sessions, like DSH — has an interface and a
+specification (`crates/onlyne-adapter/HOSTING-RUNTIME.md`) and four protocol
+gaps listed there, because that runtime is being built on another line.
 
 Landed in phase one: the `onlyne-wire` crate (frame codec plus the runtime
 directory and registration files), sockets moved out of the workspace tree, the crate
@@ -43,9 +48,29 @@ Landed in phase two, by slice:
 - **payload-v2 is deleted.** No report file, no grammar, no `onlyne report check|write|path`,
   and no `onlyne-role-payload-v2` skill. A completion's `details` rides the completion
   envelope's body to the originator, and an operator reads a task's ending from the ledger.
+- **Declarative route edges.** `[[client]].allowed_targets` is both the ACL and the
+  obligation: a role may address exactly those roles, and a session of that role owes every
+  one of them a delivery before it may report a terminal outcome. `relay_required`,
+  `relay_required_count` and `relay_count` are refused by name, and the hop budget is
+  checked at the client rather than left to the model.
+- **The spec surface.** `SpecGet` returns the parsed spec beside its source hash;
+  `SpecApply` takes typed edits, applies them with `toml_edit` so the operator's comments
+  survive, and reloads. `subscribe` is the one continuous stream, and `spec_reloaded` makes
+  both front ends re-read the registry — a reload usually arrives in the subscribe's replay
+  page, not on the live stream.
+- **Event hooks.** `[[hook]]` in `spec.toml` runs an operator's script after an event is
+  persisted, at-least-once, resuming from the last successful `seq`.
+- **Liveness in memory.** A heartbeat refreshes an in-memory `last_seen`; only a change in
+  projection content is persisted and published, and every mirrored row carries `last_seen`
+  so a reader can judge freshness.
+- **One retry classification.** `onlyne_proto::Retry` answers `Never`, `AfterHuman` or
+  `UnderBackoff`, and both the wire's error codes and the network's failures answer in it.
+  A redial delay is jittered, so a cluster that lost its server does not come back as a crowd.
 
-Still to land in phase two: declarative route edges, `SpecGet`/`SpecApply` with a streaming
-subscribe, event hooks, and liveness held in memory rather than recomputed.
+Landed in phase three: the `view` reducer in `onlyne-proto` that both front ends share,
+the TUI rebuilt on it as three pages and no map, and `onlyne-web` as an optional
+separately-installed binary. `onlyne-web` is excluded from the workspace, so the core
+build needs no Node.
 
 When you finish a phase-one or phase-two item, update this table and the section it
 touches in the same change.

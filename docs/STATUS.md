@@ -9,9 +9,9 @@ The design of record for the current tree is `AGENTS.md` (the execution contract
 `docs/v2-PLAN.md` (the settled design). `CHANGELOG.md` and the `docs/v1-*.md` files are the
 record of v1 and describe a tree that no longer exists on this branch.
 
-v2 lands in phases and phase three has not started, so this file deliberately carries no v2
-phase report. `AGENTS.md` §0 holds the phase table and the per-slice list of what has landed;
-that is where a reader should look to learn what has landed.
+v2 lands in phases, and all four have run. This file still carries no per-slice v2 report:
+`AGENTS.md` §0 holds the phase table and the per-slice list, and `docs/v2-REMAINING.md` holds
+the open items. `CHANGELOG.md`'s 2.0.0 entry is what an operator has to act on.
 
 ## Release receipts
 
@@ -57,13 +57,13 @@ v1.3.0 (tag `v1.3.0`, `5fadaa8`) shipped nineteen crates at 1.3.0. The release t
 
 ## The tree as it stands
 
-Everything below describes `main` with v2 phase two partly landed. Where it disagrees with a
+Everything below describes `main` with all four v2 phases landed. Where it disagrees with a
 release receipt above, the receipt is right about its own tag and wrong about today.
 
 ### Binary shape
 
-Two daemons and the operator entry point, with a fourth binary designed but not built.
-`AGENTS.md` §5 is the table of record; this is the same list in prose.
+Two daemons, the operator entry point, and the optional front end. `AGENTS.md` §5 is the
+table of record; this is the same list in prose.
 
 - `onlyne-server` routes envelopes, holds the ledger, mirrors session state, records faults, and
   exposes the admin operations. Subcommands: `init`, `run`, `status`, `generate`, all on one
@@ -74,8 +74,10 @@ Two daemons and the operator entry point, with a fourth binary designed but not 
   built-in TUI, and the MCP tool bridge for agents. Every verb is implemented in this process.
   The daemons forward nothing — v1 exec'd verbs to sibling binaries and lost the global flags at
   every forwarding point, which is what the merge removed.
-- `onlyne-web` is the optional graphical front end. It is a phase-three entry in `AGENTS.md` §6
-  and is not built yet.
+- `onlyne-web` is the optional graphical front end: boards, the route graph, and typed spec
+  edits over the admin socket. It is built and excluded from the workspace, so the core build
+  needs no Node. It has four known protocol gaps for a *hosting* runtime, listed in
+  `crates/onlyne-adapter/HOSTING-RUNTIME.md`.
 
 There is no gateway process. The four IM gateway plugins and their shared kit are frozen and
 live off this branch; the protocol keeps the `bridge` mount kind for them. Agent plugins and
@@ -87,8 +89,8 @@ inside a workspace tree.
 
 ### Crate state
 
-Eleven crates are active, and `onlyne-web` is the twelfth entry in `AGENTS.md` §6 with nothing
-built behind it yet.
+Eleven crates are workspace members, and `onlyne-web` is the twelfth crate, built and kept
+outside the workspace so the core build needs no Node.
 
 - [x] `onlyne-proto` — protocol vocabulary, ops, errors, events, and the session reducer. No
   tokio.
@@ -126,8 +128,9 @@ v1's wave plan is closed and stays a record: wave 1 (proto, frame, session kerne
 config/layout/store, net), wave 2 (server runtime, client runtime, adapter SDK plus testkit,
 gateway kit), wave 3 (generate, federation path, legacy deletion, docs).
 
-v2 does not use waves. The phase table in `AGENTS.md` §0 is the status of record: phase zero
-done, phase one done, phase two in progress, phase three not started.
+v2 does not use waves. The phase table in `AGENTS.md` §0 is the status of record: all four
+phases done, with one phase-two item closed as a named gap rather than finished — a hosting
+runtime's protocol, specified and not yet implemented.
 
 ### Verification cases
 
@@ -193,8 +196,9 @@ Both jobs are green on `main`.
 本节是上面英文部分的中文镜像，两半必须一致：*发布记录*对应 *Release receipts*，
 *当前这棵树*对应 *The tree as it stands*。设计规范是 `AGENTS.md`（执行契约）与
 `docs/v2-PLAN.md`（已定设计）；`CHANGELOG.md` 与 `docs/v1-*.md` 是 v1 的记录，
-描述的是本分支上已不存在的树。v2 中阶段三尚未开始，因此本文件刻意不写 v2 阶段报告；
-阶段表与逐片已落地清单在 `AGENTS.md` §0，读者要了解已落地内容应看那里。
+描述的是本分支上已不存在的树。v2 四个阶段都已走完，本文件仍不写逐片阶段报告：阶段表与
+逐片已落地清单在 `AGENTS.md` §0，未完成项在 `docs/v2-REMAINING.md`，操作员要动手的部分在
+`CHANGELOG.md` 的 2.0.0 条目。
 
 ### 发布记录
 
@@ -208,13 +212,13 @@ Both jobs are green on `main`.
 
 ### 当前这棵树
 
-以下内容描述 v2 第二阶段部分落地后的 `main`。与上面的发布记录冲突时，发布记录对自己的 tag 是对的，
-对今天则是错的。
+以下内容描述 v2 四个阶段全部落地后的 `main`。与上面的发布记录冲突时，发布记录对自己的 tag
+是对的，对今天则是错的。
 
 #### 二进制结构
 
-本分支上有两个 daemon 和一个操作者入口，另有第四个二进制已设计但尚未构建。规范表格见
-`AGENTS.md` §5，这里是同一份列表的文字版。
+本分支上有两个 daemon、一个操作者入口，以及可选的前端。规范表格见 `AGENTS.md` §5，
+这里是同一份列表的文字版。
 
 - `onlyne-server` 路由 envelope、持有 ledger、镜像 session 状态、记录 fault，并暴露 admin 操作。
   子命令为 `init`、`run`、`status`、`generate`，都对应一个 server root。
@@ -223,7 +227,9 @@ Both jobs are green on `main`.
 - `onlyne` 是操作者入口：查询、admin verb、`init` 与 `generate`、内置 TUI，以及给 agent 用的
   MCP 工具桥。所有 verb 都在这个进程内实现，daemon 不再转发任何东西 —— v1 把 verb exec 到
   兄弟二进制，每一处转发都丢掉全局参数，合并就是为了去掉这一层。
-- `onlyne-web` 是可选的图形前端。它是 `AGENTS.md` §6 中的第三阶段条目，尚未构建。
+- `onlyne-web` 是可选的图形前端：看板、路由图，以及走 admin socket 的带类型 spec 编辑。
+  它已构建，并被排除在 workspace 之外，因此核心构建不需要 Node。hosting 运行时所需的四个
+  协议缺口列在 `crates/onlyne-adapter/HOSTING-RUNTIME.md`。
 
 本分支没有 gateway 进程。四个 IM gateway plugin 及其共享 kit 已冻结并移出本分支；协议为它们
 保留 `bridge` mount kind。Agent plugin 与 bridge plugin 仍通过同一 adapter protocol 使用两种
@@ -234,7 +240,8 @@ socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`（可由 `ONLYNE_RUNT
 
 #### Crate 状态
 
-十一个 crate 在用；`onlyne-web` 是 `AGENTS.md` §6 的第十二个条目，背后还没有实现。
+十一个 crate 是 workspace 成员；`onlyne-web` 是第十二个 crate，已构建，并放在 workspace
+之外，好让核心构建不需要 Node。
 
 - `onlyne-proto` —— 协议词汇、ops、errors、events 与 session reducer。不依赖 tokio。
 - `onlyne-wire` —— 帧编解码、server/client/adapter SDK/CLI/TUI/web 共用的那一套连接实现、
@@ -268,8 +275,8 @@ v1 的 wave plan 已关闭，并作为记录保留：wave 1（proto、frame、se
 config/layout/store、net），wave 2（server 运行时、client 运行时、adapter SDK 与 testkit、
 gateway kit），wave 3（generate、federation 路径、legacy 删除、文档）。
 
-v2 不使用 wave。规范的状态表是 `AGENTS.md` §0 的阶段表：阶段零已完成，阶段一已完成，
-阶段二进行中，阶段三未开始。
+v2 不使用 wave。规范的状态表是 `AGENTS.md` §0 的阶段表：四个阶段都已完成，其中阶段二有
+一项以「写明缺口」而非「做完」收口——hosting 运行时的协议，规范已写，实现未做。
 
 #### 验证用例
 
