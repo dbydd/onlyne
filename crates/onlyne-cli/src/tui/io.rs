@@ -161,17 +161,31 @@ async fn run(
             frame = next_frame(&mut subscription, timeout_ms), if subscription.is_some() => {
                 match frame {
                     Ok(Frame::Ev { seq, event }) => {
-                        if onlyne_proto::view::is_resync_lag(&event) {
-                            // The notice's `seq` is a drop count, not a cursor,
-                            // so the last good cursor is what the reconnect
-                            // asks from: the answer page carries what the
-                            // broadcast dropped.
-                            let _ = events.send(Event::Stream(event));
-                            subscription = None;
-                            ready_at = Instant::now() + RECONNECT_PAUSE;
-                        } else {
+                        // Two events cannot be answered by folding alone, and
+                        // both are answered the same way — re-read the
+                        // snapshot, because it is the only thing that knows the
+                        // registry. A gap lost events; a reload replaced the
+                        // spec without naming the roles in it.
+                        let gap = onlyne_proto::view::is_resync_lag(&event);
+                        let reload =
+                            matches!(*event, onlyne_proto::Event::SpecReloaded(_));
+                        if !gap {
                             cursor = cursor.max(seq);
-                            let _ = events.send(Event::Stream(event));
+                        }
+                        let _ = events.send(Event::Stream(event));
+                        if gap || reload {
+                            subscription = None;
+                            // The notice's `seq` is a drop count, not a
+                            // cursor, so the last good cursor is what the
+                            // reconnect asks from: the answer page carries
+                            // what the broadcast dropped. A reload owes no such
+                            // pause — the spec the operator just changed
+                            // should not sit unread while the link sleeps.
+                            ready_at = if gap {
+                                Instant::now() + RECONNECT_PAUSE
+                            } else {
+                                Instant::now()
+                            };
                         }
                     }
                     Ok(Frame::Bye { .. }) => {
@@ -212,12 +226,28 @@ async fn run(
                 let _ = events.send(Event::Snapshot(Box::new(snapshot)));
                 match subscribe(&path, cursor, timeout_ms).await {
                     Ok((subscription_link, page)) => {
+                        // The page is where a reload most often arrives: the
+                        // snapshot above was read a moment before the page, so
+                        // an operator's edit that landed in that gap is
+                        // delivered here and not on the live stream. A page
+                        // that carries one is answered the same way the stream
+                        // answers it — by re-reading — because the snapshot
+                        // this board was just built from cannot know the
+                        // routes the reload brought.
+                        let mut reread = false;
                         for row in page {
                             cursor = cursor.max(row.seq);
+                            reread |= onlyne_proto::view::is_resync_lag(&row.event)
+                                || matches!(row.event, onlyne_proto::Event::SpecReloaded(_));
                             let _ = events.send(Event::Stream(Box::new(row.event)));
                         }
                         let _ = events.send(Event::Link(Link::Live));
-                        subscription = Some(subscription_link);
+                        if reread {
+                            drop(subscription_link);
+                            ready_at = Instant::now();
+                        } else {
+                            subscription = Some(subscription_link);
+                        }
                     }
                     Err(reason) => {
                         let _ = events.send(Event::Link(Link::Offline(reason)));
