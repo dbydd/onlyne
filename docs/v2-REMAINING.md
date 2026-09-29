@@ -101,12 +101,32 @@ config that still says `backend` must be **refused clearly**, not silently defau
 Done means: a v1 database or a v1-shaped config produces one accurate sentence, a
 dedicated exit code, and a documented manual path. No rewriting of anything.
 
-### C — DSH (phase two, protocol only)
+### C — DSH (phase two, protocol only) — **spec delivered**
 
 `plugins/` holds only `onlyne-agent-pi`. There is no DSH plugin, and per the user's
 decision there will not be one here. `Placement::External` exists and the drive × placement
 matrix accepts `plugin × external` while refusing `acp × external` (stdio is the ACP
 channel) — `onlyne-config/src/client.rs:649-676`.
+
+**`crates/onlyne-adapter/HOSTING-RUNTIME.md` is the deliverable.** It states the interface
+a hosting runtime plugs into — one connection per `(runtime, role)` multiplexing that role's
+sessions, plugin dials client always, discovery by the registration files' `runtime` +
+`placement == external` pair, the `open`/`suspend`/`close` lifecycle, the opaque
+`resume_handle` — and inventories the tree against it.
+
+Four gaps, named and located, none fixed:
+
+- **G1** the connection is still a session: `HelloAck` answers one `session_id`, and
+  `AssignArgs` (`onlyne-proto/src/adapter.rs:373`) carries `task_id` + `generation` but
+  **no `session_id`**. `AGENTS.md` §8 asserted the field was on the wire; it is not, and the
+  AGENTS.md claim was corrected to say so.
+- **G2** `Mount` is `#[serde(untagged)]` and matched first-variant-wins, while `AGENTS.md` §8
+  says mount kinds are tagged and never matched untagged. The code does not do what the
+  document says. `kind` is already on the wire, so matching against it is the smaller fix.
+- **G3** `Capability` has no `open`, `suspend` or `close`; its `resume` means the
+  spawned-runtime statement, not the hosting one.
+- **G4** `Mount::Cluster` exists but `MountKind` has no `Cluster`, and there is no `bridge`.
+  Not on the DSH critical path.
 
 What to deliver instead is the interface that work plugs into, which the pinned session
 already designed (b00:155-181, b86:93-95):

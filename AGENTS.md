@@ -225,8 +225,12 @@ Adapter mount kinds are tagged by `kind`, never matched untagged:
 | `bridge` | an external protocol bridge | deliver inbound messages, receive outbound messages and task state |
 | `cluster`, `admin` | as in v1 | as in v1 |
 
-`assign` carries `session_id` so a multi-session mount can route a delivery to the right
-session. Task bodies travel only in `assign`.
+`assign` carries `task_id` and `generation`, and a multi-session mount needs one
+field it does not have yet: `assign` must carry `session_id` so a runtime holding
+several sessions on one connection can route a delivery to the right one. Task
+bodies travel only in `assign`. `crates/onlyne-adapter/HOSTING-RUNTIME.md` states
+the interface a hosting runtime plugs into, and names that field as its first
+gap.
 
 Exit codes used by user-facing commands:
 
