@@ -85,6 +85,17 @@ impl SessionProjection {
 ///
 /// A beat holding no `projection` is liveness only: the server keeps the
 /// working/running/pending/attached tuple it has always inferred from it.
+///
+/// ## The completion's `details` ceiling
+///
+/// [`Report::Complete::details`] carries a whole result, so it is bounded —
+/// and the bound is declared here, beside the field it limits, because a cap
+/// that lives in one door's code becomes a second cap in the next door's.
+/// Every path that accepts a completion reads this number: a plugin's report,
+/// a tools mount's `onlyne_complete`, and `onlyne complete` on the command
+/// line. A refusal names the cap in bytes.
+pub const DETAILS_MAX_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "data")]
 pub enum Report {
@@ -121,6 +132,11 @@ pub enum Report {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         head: Option<String>,
         /// The full result, delivered verbatim to the next hop and the originator.
+        ///
+        /// Capped at [`DETAILS_MAX_BYTES`]. The cap is a fact about this
+        /// field, so it lives beside it rather than in whichever door happens
+        /// to check it: a plugin, a tools mount and `onlyne complete` all
+        /// refuse the same number, in the same words.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<String>,
         /// Absolute paths of the files the result names.

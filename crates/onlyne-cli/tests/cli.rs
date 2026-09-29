@@ -724,7 +724,7 @@ fn pretty_and_quiet_shape_the_answer() {
 }
 
 /// `--head-from` defaults to `local`, so a `complete` that omits it truncates
-/// `--text` into the head. Both frames reach the role socket, and the head filed
+/// `--summary` into the head. Both frames reach the role socket, and the head filed
 /// with the report is the completion text.
 #[test]
 fn complete_without_head_from_files_a_local_head() {
@@ -745,7 +745,7 @@ fn complete_without_head_from_files_a_local_head() {
             SUPERVISOR_FLAG,
             "--task",
             TEST_TASK,
-            "--text",
+            "--summary",
             "default head source",
             "--outcome",
             "done",
@@ -777,7 +777,7 @@ fn complete_without_head_from_files_a_local_head() {
     assert_eq!(report["args"]["data"]["head"], "default head source");
 }
 
-/// `--head-from ledger` takes the head from the row, so `--text` is optional
+/// `--head-from ledger` takes the head from the row, so `--summary` is optional
 /// there. The run clears clap and the local head rule, and the ledger query frame
 /// is on the wire; the empty completion body then meets the protocol's own rule.
 #[test]
@@ -829,12 +829,12 @@ fn complete_with_ledger_head_omits_text_without_a_flag_error() {
         "the protocol's own body rule ends the run: {stderr}"
     );
     assert!(
-        !stderr.contains("--text"),
-        "`--text` is optional with a ledger head: {stderr}"
+        !stderr.contains("--summary"),
+        "`--summary` is optional with a ledger head: {stderr}"
     );
 }
 
-/// A local head comes from `--text`, so a `complete` naming neither flag is a
+/// A local head comes from `--summary`, so a `complete` naming neither flag is a
 /// local validation failure decided before the socket: exit 2, the flag named on
 /// stderr, stdout empty.
 #[test]
@@ -862,7 +862,7 @@ fn complete_local_head_without_text_names_the_flag() {
     assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
     assert_eq!(
         stderr_of(&output),
-        "onlyne: --text is required with --head-from local\n"
+        "onlyne: --summary is required with --head-from local\n"
     );
     assert!(
         output.stdout.is_empty(),
@@ -893,7 +893,7 @@ fn complete_on_the_admin_surface_files_an_admin_report() {
             "ops",
             "--task",
             TEST_TASK,
-            "--text",
+            "--summary",
             "settled by the operator",
             "--outcome",
             "done",
@@ -983,7 +983,7 @@ fn gated_argv<'a>(verb: &'a str, socket: &'a str) -> Vec<&'a str> {
             "ops",
             "--task",
             TEST_TASK,
-            "--text",
+            "--summary",
             "gate check",
             "--outcome",
             "done",
@@ -1075,7 +1075,7 @@ fn both_supervisor_flags_open_the_gate() {
     }
 
     // `complete`'s head rule is one step past the gate, so a call that opens the
-    // gate with no `--text` is answered by that rule.
+    // gate with no `--summary` is answered by that rule.
     let output = Command::new(bin())
         .current_dir(dir.path())
         .args([
@@ -1098,7 +1098,7 @@ fn both_supervisor_flags_open_the_gate() {
     assert_eq!(output.status.code(), Some(EXIT_VALIDATION));
     assert_eq!(
         stderr_of(&output),
-        "onlyne: --text is required with --head-from local\n",
+        "onlyne: --summary is required with --head-from local\n",
         "`complete` reaches its own head rule once the gate is open"
     );
 }

@@ -132,9 +132,12 @@ are read off the ledger, never out of the task text.
 - Roles answer by completing the task. The receipt lands in the ledger as `out_head`: the
   first 200 grapheme clusters of the completion body (`head_preview` in
   `crates/onlyne-store/src/server.rs`). A pi session's `onlyne_complete` flattens its text to
-  one line before it goes. `onlyne complete --text` carries that text truncated to 200
+  one line before it goes. `onlyne complete --summary` carries that line truncated to 200
   characters (`HEAD_CHARS` in `crates/onlyne-cli/src/verbs.rs`), and `--head-from ledger`
-  reads the head back off the task's own row. A receipt for a task your role dispatched
+  reads the head back off the task's own row. `--details` carries the whole result to
+  the next hop and the originator, capped at the protocol's `details` ceiling, and
+  `--file` names an absolute path the result points at; a details body over the cap is
+  refused before anything is sent. A receipt for a task your role dispatched
   reaches you with no receiver-side grant, and waits in `queued` until your role has a live
   session: those rows are your pull-inbox, `ledger` reads the backlog, and the queue drains
   as your own client pulls.

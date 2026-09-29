@@ -674,17 +674,38 @@ async fn complete_inner(
         return runtime::usage_error(message);
     }
     // The head `complete` files has one of two sources. `--head-from local`
-    // truncates `--text`, and that flag is required there. `--head-from ledger`
-    // reads the row's `out_head`, and `--text` stays an optional payload there.
+    // truncates `--summary`, and that flag is required there. `--head-from
+    // ledger` reads the row's `out_head`, and `--summary` stays optional there.
     let local_head = match args.head_from {
-        HeadFrom::Local => match args.text.as_deref() {
-            Some(text) => Some(head_of(text)),
+        HeadFrom::Local => match args.summary.as_deref() {
+            Some(summary) => Some(head_of(summary)),
             None => {
-                return runtime::usage_error("onlyne: --text is required with --head-from local");
+                return runtime::usage_error(
+                    "onlyne: --summary is required with --head-from local",
+                );
             }
         },
         HeadFrom::Ledger => None,
     };
+    // The cap is checked here, before a socket is opened, because this door
+    // never meets the client's own guard: an admin surface has no session to
+    // measure the report against. The number is the protocol's, so the CLI and
+    // a plugin refuse the same one.
+    if let Some(details) = args.details.as_deref() {
+        if details.len() > onlyne_proto::DETAILS_MAX_BYTES {
+            return runtime::usage_error(format!(
+                "onlyne: --details exceeds the {} byte cap",
+                onlyne_proto::DETAILS_MAX_BYTES
+            ));
+        }
+    }
+    if let Some(path) = args
+        .files
+        .iter()
+        .find(|path| !Path::new(path).is_absolute())
+    {
+        return runtime::usage_error(format!("onlyne: --file must name an absolute path: {path}"));
+    }
     let mut stream = match runtime::open(flags, target).await {
         Ok(stream) => stream,
         Err(code) => return code,
@@ -738,7 +759,10 @@ async fn complete_inner(
             kind: MsgKind::Completion,
             to,
             from: sender.from.clone(),
-            text: args.text,
+            // The envelope's body is the result the originator reads: the full
+            // details when given, the summary otherwise, which is the same
+            // fallback the client's own completion path uses.
+            text: args.details.clone().or_else(|| args.summary.clone()),
             image: None,
             causality,
             ttl_ms: None,
@@ -767,8 +791,8 @@ async fn complete_inner(
         task_id: args.task,
         outcome: args.outcome,
         head: Some(head),
-        details: None,
-        files: Vec::new(),
+        details: args.details,
+        files: args.files,
         reply_to: Some(reply_to),
         // The command line speaks as a role, whose cluster identity comes
         // from the server's spec, so a CLI-authored report never names one.
@@ -1147,10 +1171,18 @@ pub struct CompleteArgs {
     /// Task being completed.
     #[arg(long)]
     pub task: String,
-    /// Completion text. `--head-from local` requires it: that head is this text
-    /// truncated to the character ceiling.
+    /// One-line result. `--head-from local` requires it: that head is this
+    /// summary truncated to the character ceiling.
     #[arg(long)]
-    pub text: Option<String>,
+    pub summary: Option<String>,
+    /// The full result, delivered verbatim to the next hop and the originator.
+    /// Capped at the protocol's `details` ceiling; a larger one is refused
+    /// before anything is sent.
+    #[arg(long)]
+    pub details: Option<String>,
+    /// Absolute path of a file the result names. Repeatable.
+    #[arg(long = "file")]
+    pub files: Vec<String>,
     /// Terminal outcome: done, failed, cancelled.
     #[arg(long, value_parser = parse_outcome)]
     pub outcome: Outcome,

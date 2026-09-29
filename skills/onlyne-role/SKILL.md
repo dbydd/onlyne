@@ -41,7 +41,8 @@ verdict written there answers for a session the plugin is still serving. An `exe
 no plugin, so it runs the CLI form and declares itself with both flags:
 
 ```bash
-onlyne complete --task <task-id> --outcome done --text "<one-line result>" \
+onlyne complete --task <task-id> --outcome done --summary "<one-line result>" \
+  [--details "<the full result>" --file <absolute path>] \
   --force --yes-i-am-supervisor-not-other-role
 ```
 

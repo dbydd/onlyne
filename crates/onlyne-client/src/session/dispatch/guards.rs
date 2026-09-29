@@ -29,10 +29,7 @@ use super::state::{DispatchInner, DispatchState, slot_key_named, slot_key_servin
 use super::transport::serves_session;
 use super::*;
 use onlyne_proto::adapter::HandoffArgs;
-use onlyne_proto::{ErrorCode, Report, ResBody};
-
-/// Ceiling for one completion's `details` payload (§3c: ≤ 64 KiB).
-pub const DETAILS_MAX_BYTES: usize = 64 * 1024;
+use onlyne_proto::{DETAILS_MAX_BYTES, ErrorCode, Report, ResBody};
 
 /// The slot key a connection speaks for, live transport or tools mount alike.
 ///
