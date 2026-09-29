@@ -48,6 +48,70 @@ pub struct Spec {
     pub gateway: Vec<GatewayEntry>,
     #[serde(default)]
     pub route: Vec<RouteEntry>,
+    #[serde(default)]
+    pub hook: Vec<HookEntry>,
+}
+
+/// An event hook declaration: when an event of a class in `on` is
+/// persisted, run `run` with a timeout (`docs/v2-CONTRACT.md` §"Slice 7").
+/// `on` names event classes from the closed set; a class not in the set is
+/// refused by name at load time. `run` is a command argv. `timeout` bounds
+/// the script and is required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct HookEntry {
+    /// Event classes this hook fires for. Each must be one of the classes
+    /// the server emits: the durable/advisory/settlement families.
+    pub on: Vec<String>,
+    /// Command to run; argv. The event JSON (including `seq`) is written to
+    /// stdin, and `ONLYNE_SOCKET` points at the admin socket.
+    pub run: Vec<String>,
+    /// Timeout bounding the script, e.g. "10s", "500ms", "2m". Required.
+    pub timeout: String,
+}
+
+/// The closed set of event classes a hook may bind to (`docs/v2-CONTRACT.md`
+/// §"Slice 7", §14). These are exactly the classes the server's event stream
+/// carries: durable (`ledger_state`, `session_state`), advisory
+/// (`role_presence`, `fault`, `gateway_presence`, `spec_reloaded`), and
+/// settlement (`turn_end_without_complete`, `delivery_blocked`, `handoff`).
+pub const HOOK_EVENT_CLASSES: [&str; 9] = [
+    "ledger_state",
+    "session_state",
+    "fault",
+    "role_presence",
+    "gateway_presence",
+    "spec_reloaded",
+    "turn_end_without_complete",
+    "delivery_blocked",
+    "handoff",
+];
+
+/// Validate that every `on` entry in the raw `[[hook]]` array names a class
+/// in the closed set. A class not in the set is refused by name with the
+/// file and line, like any other removed key (`docs/v2-CONTRACT.md` §"Slice 7").
+fn validate_hook_entries(value: &toml::Value, text: &str, file: &str) -> Result<(), SpecError> {
+    if let Some(hooks) = value.get("hook").and_then(toml::Value::as_array) {
+        for (idx, entry) in hooks.iter().enumerate() {
+            if let Some(on) = entry.get("on").and_then(toml::Value::as_array) {
+                for class in on {
+                    if let Some(s) = class.as_str() {
+                        if !HOOK_EVENT_CLASSES.contains(&s) {
+                            return Err(SpecError::validate(
+                                file,
+                                crate::locate::key_line_in_array_entry(text, "hook", idx, "on"),
+                                format!(
+                                    "hook class '{s}' does not exist; the accepted classes are: {}",
+                                    HOOK_EVENT_CLASSES.join(", ")
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `[server]` section for the cluster.
@@ -381,6 +445,7 @@ impl Spec {
         })?;
         validate_backend_key(&parsed, text, file)?;
         validate_relay_keys(&parsed, text, file)?;
+        validate_hook_entries(&parsed, text, file)?;
         let spec: Spec = parsed.clone().try_into().map_err(|err: toml::de::Error| {
             SpecError::parse(
                 file,
@@ -570,6 +635,26 @@ fn validate(spec: &Spec, value: &toml::Value, text: &str, file: &str) -> Result<
         })?;
     }
 
+    for (idx, hook) in spec.hook.iter().enumerate() {
+        if hook.run.is_empty() {
+            return Err(SpecError::validate(
+                file,
+                key_line_in_array_entry(text, "hook", idx, "run"),
+                "hook run must name a command; an empty argv cannot be spawned",
+            ));
+        }
+        if parse_hook_timeout(&hook.timeout).is_none() {
+            return Err(SpecError::validate(
+                file,
+                key_line_in_array_entry(text, "hook", idx, "timeout"),
+                format!(
+                    "hook timeout '{}' is not a duration; write it as 500ms, 10s, or 2m",
+                    hook.timeout
+                ),
+            ));
+        }
+    }
+
     if !value.is_table() {
         return Err(SpecError::validate(
             file,
@@ -578,6 +663,29 @@ fn validate(spec: &Spec, value: &toml::Value, text: &str, file: &str) -> Result<
         ));
     }
     Ok(())
+}
+
+/// Parse one hook timeout: a whole number with a `ms`, `s`, or `m` suffix.
+///
+/// The bound belongs to the operator, so an unparseable one is a refusal
+/// with the line rather than a default nobody set: a hook whose timeout does
+/// not parse has no bound, and a hook with no bound is a wedged process
+/// holding the runner (`docs/v2-CONTRACT.md` §"Slice 7").
+pub fn parse_hook_timeout(text: &str) -> Option<std::time::Duration> {
+    let (digits, multiplier) = if let Some(rest) = text.strip_suffix("ms") {
+        (rest, 1u64)
+    } else if let Some(rest) = text.strip_suffix('s') {
+        (rest, 1_000)
+    } else {
+        (text.strip_suffix('m')?, 60_000)
+    };
+    let count: u64 = digits.trim().parse().ok()?;
+    if count == 0 {
+        return None;
+    }
+    count
+        .checked_mul(multiplier)
+        .map(std::time::Duration::from_millis)
 }
 
 fn serde_error_line(text: &str, span: Option<std::ops::Range<usize>>, message: &str) -> usize {

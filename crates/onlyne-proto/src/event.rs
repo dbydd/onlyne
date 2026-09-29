@@ -11,6 +11,38 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// A turn ended with its task still open. Published by the client that
+/// witnessed the ending (`docs/v2-CONTRACT.md` §"Slice 7").
+pub const TURN_END_WITHOUT_COMPLETE: &str = "turn_end_without_complete";
+
+/// A delivery settled blocked. Published by the client that witnessed the
+/// settlement (`docs/v2-CONTRACT.md` §"Slice 7").
+pub const DELIVERY_BLOCKED: &str = "delivery_blocked";
+
+/// One turn handed work on instead of finishing. Published by the client
+/// that witnessed the handoff (`docs/v2-CONTRACT.md` §"Slice 7").
+pub const HANDOFF: &str = "handoff";
+
+/// The closed set of classes a client may publish (`ClientOp::PublishEvent`):
+/// the turn-end family and nothing else. A client owns these facts, so the
+/// server carries a client's word for them and never invents one. A class
+/// outside this set is refused by name, so a peer cannot invent an event
+/// name and a hook cannot bind to a spelling nobody publishes
+/// (`docs/v2-CONTRACT.md` §"Slice 7").
+pub const CLIENT_EVENT_CLASSES: [&str; 3] = [TURN_END_WITHOUT_COMPLETE, DELIVERY_BLOCKED, HANDOFF];
+
+/// Build the settlement event a client published, when `class` is in the
+/// closed set. `None` for a class the client may not publish, so the server's
+/// one check refuses by name rather than decode a free string into a variant.
+pub fn client_event(class: &str, payload: Value) -> Option<Event> {
+    Some(match class {
+        TURN_END_WITHOUT_COMPLETE => Event::TurnEndWithoutComplete(payload),
+        DELIVERY_BLOCKED => Event::DeliveryBlocked(payload),
+        HANDOFF => Event::Handoff(payload),
+        _ => return None,
+    })
+}
+
 /// Liveness of a registered role's client connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -214,6 +246,18 @@ pub enum Event {
     },
     /// `spec.toml` was reloaded successfully.
     SpecReloaded(SpecReloaded),
+    /// §3c's turn-end family, published by the client that witnessed it. The
+    /// server carries these on its stream so a hook bound to the class can
+    /// serve the plan's own example, and the client keeps no second copy
+    /// (`docs/v2-CONTRACT.md` §"Slice 7"). `type_name` is the class a hook
+    /// binds to, so the row's `type` column is the class and a hook's `on`
+    /// list filters by it exactly as a subscriber does.
+    TurnEndWithoutComplete(Value),
+    /// A delivery settled blocked: the work waits on something outside the
+    /// delivery, and a board reads it as waiting rather than as failed.
+    DeliveryBlocked(Value),
+    /// One turn handed work on instead of finishing.
+    Handoff(Value),
 }
 
 impl Event {
@@ -225,6 +269,9 @@ impl Event {
             Event::Fault(_) => "fault",
             Event::GatewayPresence { .. } => "gateway_presence",
             Event::SpecReloaded(_) => "spec_reloaded",
+            Event::TurnEndWithoutComplete(_) => TURN_END_WITHOUT_COMPLETE,
+            Event::DeliveryBlocked(_) => DELIVERY_BLOCKED,
+            Event::Handoff(_) => HANDOFF,
         }
     }
 
@@ -237,6 +284,12 @@ impl Event {
             | Event::Fault(_)
             | Event::GatewayPresence { .. }
             | Event::SpecReloaded(_) => EventTier::Advisory,
+            // The settlement family is persisted in `events` and replayable
+            // from a cursor exactly as the durable class is, so a subscriber
+            // that reconnects with its last `seq` resumes with no gap.
+            Event::TurnEndWithoutComplete(_) | Event::DeliveryBlocked(_) | Event::Handoff(_) => {
+                EventTier::Durable
+            }
         }
     }
 }

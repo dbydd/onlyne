@@ -23,9 +23,11 @@
 //! alert, or supervisor callback behind it (§3c).
 //!
 //! Each step publishes a client event, in order: [`TURN_END_WITHOUT_COMPLETE`],
-//! [`DELIVERY_BLOCKED`], [`HANDOFF`]. They land in this client's own `events`
-//! table, which is the plane this build has: no client frame carries a named
-//! event to the server yet.
+//! [`DELIVERY_BLOCKED`], [`HANDOFF`]. They are sent to the server via
+//! `ClientOp::PublishEvent`, which the server appends to its stream and answers
+//! nothing. The server's stream is the single owner of these facts
+//! (`AGENTS.md` §9); a client that keeps a second copy owns nothing that
+//! anything reads, so the local copy is gone (`docs/v2-CONTRACT.md` §"Slice 7").
 
 use super::*;
 
@@ -150,10 +152,13 @@ pub async fn on_turn_end(
     task_id: &str,
     closing: Option<String>,
 ) -> Result<()> {
-    let step = {
+    let (step, ending) = {
         let mut inner = state.inner.lock();
         decide(&mut inner, task_id)?
     };
+    if let Some(op) = ending {
+        state.enqueue_op(&op)?;
+    }
     match step {
         Step::Quiet => Ok(()),
         // The frame, the `inject` check, and the send are `nudge_plugin`'s, so
@@ -211,13 +216,14 @@ async fn settle(
     closing: Option<String>,
     why: &str,
 ) -> Result<()> {
-    {
+    let op = {
         let mut inner = state.inner.lock();
         inner.turn_end.set(task_id, TurnEnd::Blocked);
         let session_id =
             slot_key_serving_task(&inner, task_id).unwrap_or_else(|| task_id.to_string());
-        record_blocked(&inner, task_id, &session_id)?;
-    }
+        record_blocked(&inner, task_id, &session_id)
+    };
+    state.enqueue_op(&op)?;
     tracing::info!(task = %task_id, reason = why, "a delivery settled blocked at its turn end");
     on_out(
         state,
@@ -235,11 +241,11 @@ async fn settle(
 /// The event goes out under the same lock that advances the latch, so two
 /// endings of one delivery cannot interleave their records and the operator
 /// reads them in the order the rule took them.
-fn decide(inner: &mut DispatchInner, task_id: &str) -> Result<Step> {
+fn decide(inner: &mut DispatchInner, task_id: &str) -> Result<(Step, Option<ClientOp>)> {
     prune(inner);
     let Some(key) = slot_key_serving_task(inner, task_id) else {
         tracing::debug!(task = %task_id, "a turn ended for a task no session of this role serves");
-        return Ok(Step::Quiet);
+        return Ok((Step::Quiet, None));
     };
     // A read-only slot serves no state (§1 (b)) and a suspended one has no
     // process or agent at the other end of a sentence.
@@ -250,12 +256,12 @@ fn decide(inner: &mut DispatchInner, task_id: &str) -> Result<Step> {
         .map(|slot| slot.session.clone());
     let Some(session) = session else {
         tracing::debug!(task = %task_id, session = %key, "a turn ended for a session that serves nothing");
-        return Ok(Step::Quiet);
+        return Ok((Step::Quiet, None));
     };
     if stored_task_state(inner, task_id) != TaskState::Pending {
         // The verdict landed first: this ending is the receipt's business.
         inner.turn_end.forget(task_id);
-        return Ok(Step::Quiet);
+        return Ok((Step::Quiet, None));
     }
     let step = match inner.turn_end.of(task_id) {
         // The first ending spends the delivery's one nudge. Whether the drive
@@ -278,17 +284,17 @@ fn decide(inner: &mut DispatchInner, task_id: &str) -> Result<Step> {
         TurnEnd::Nudged => Step::Settle("a second turn ended without a completion"),
         // This delivery already settled here, and nothing about it is left to
         // decide — nor a second record of the same ending to write.
-        TurnEnd::Blocked => return Ok(Step::Quiet),
+        TurnEnd::Blocked => return Ok((Step::Quiet, None)),
     };
-    record_ending(inner, task_id, &key, matches!(step, Step::Nudge(_)))?;
-    Ok(step)
+    let op = record_ending(inner, task_id, &key, matches!(step, Step::Nudge(_)));
+    Ok((step, Some(op)))
 }
 
 /// Publish 3c's `handoff` event for work one turn handed on.
 ///
 /// Called where a handoff is accepted — the plugin's `handoff` frame and the
-/// tools mount's own op — so a turn's three steps read in order in this
-/// client's journal. `hop` is the depth the handed-on task sits at in its
+/// tools mount's own op — so a turn's three steps read in order on the
+/// server's stream. `hop` is the depth the handed-on task sits at in its
 /// family, and `text` is what its recipient will read.
 pub fn record_handoff(
     state: &DispatchState,
@@ -296,7 +302,7 @@ pub fn record_handoff(
     to_role: &str,
     hop: u32,
     text: &str,
-) -> Result<()> {
+) -> ClientOp {
     let inner = state.inner.lock();
     let mut payload = serde_json::json!({
         "task_id": task_id,
@@ -308,39 +314,48 @@ pub fn record_handoff(
     if let Some(session_id) = slot_key_serving_task(&inner, task_id) {
         payload["session_id"] = serde_json::Value::String(session_id);
     }
-    inner.store.append_event(HANDOFF, &payload)?;
-    Ok(())
+    drop(inner);
+    publish(HANDOFF, payload)
 }
 
-/// The ending's own row: which task and session it happened in, and whether
+/// The ending's own op: which task and session it happened in, and whether
 /// this is the ending that spends the delivery's single nudge.
-fn record_ending(
-    inner: &DispatchInner,
-    task_id: &str,
-    session_id: &str,
-    nudge: bool,
-) -> Result<()> {
-    inner.store.append_event(
+fn record_ending(inner: &DispatchInner, task_id: &str, session_id: &str, nudge: bool) -> ClientOp {
+    publish(
         TURN_END_WITHOUT_COMPLETE,
-        &serde_json::json!({
+        serde_json::json!({
             "task_id": task_id,
             "session_id": session_id,
             "role": inner.role.as_str(),
             "nudge": nudge,
         }),
-    )?;
-    Ok(())
+    )
 }
 
-/// The settlement's own row.
-fn record_blocked(inner: &DispatchInner, task_id: &str, session_id: &str) -> Result<()> {
-    inner.store.append_event(
+/// The settlement's own op.
+fn record_blocked(inner: &DispatchInner, task_id: &str, session_id: &str) -> ClientOp {
+    publish(
         DELIVERY_BLOCKED,
-        &serde_json::json!({
+        serde_json::json!({
             "task_id": task_id,
             "session_id": session_id,
             "role": inner.role.as_str(),
         }),
-    )?;
-    Ok(())
+    )
+}
+
+/// The one op that carries a client-owned fact to the server, built here so
+/// the three call sites cannot drift into three spellings of it.
+///
+/// It leaves through the durable intent queue rather than the live link. What
+/// it replaced was a row in the client's own store, so the fact survived a
+/// crash; a frame written to a socket would not, and the client would then owe
+/// the server a fact nobody ever hears. The queue keeps that guarantee — a
+/// publish is on disk before it is sent — and hands the op to the link the
+/// moment the link is up (`docs/v2-CONTRACT.md` §"Slice 7").
+fn publish(class: &str, payload: serde_json::Value) -> ClientOp {
+    ClientOp::PublishEvent(onlyne_proto::PublishEventArgs {
+        class: class.to_string(),
+        payload,
+    })
 }

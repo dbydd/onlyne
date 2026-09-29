@@ -169,6 +169,34 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
                 relay::send(state, &envelope, session.admin, owner.as_deref()),
             )
         }
+        // §3c's turn-end family reaches the server's stream through this one
+        // verb and nothing else: it carries no `(generation, seq)`, passes
+        // through none of the report gate, and changes no session state. The
+        // server appends the event and answers nothing, because the class is
+        // the client's own word and an answer would be a second spelling of
+        // it. A class outside the closed set is refused by name, so a peer
+        // cannot invent an event name and a hook cannot bind to a spelling
+        // nobody publishes (`docs/v2-CONTRACT.md` §"Slice 7").
+        ClientOp::PublishEvent(args) => {
+            if session.role_or_reject().is_err() {
+                return hello_required();
+            }
+            let Some(event) = onlyne_proto::client_event(&args.class, args.payload) else {
+                return ResBody::err(
+                    ErrorCode::Invalid,
+                    format!(
+                        "unknown event class '{}'; a client may publish only {}",
+                        args.class,
+                        onlyne_proto::CLIENT_EVENT_CLASSES.join(", ")
+                    ),
+                    Some("class".to_string()),
+                );
+            };
+            match state.emit(event) {
+                Ok(_) => ResBody::ok(Value::Null),
+                Err(error) => internal(error),
+            }
+        }
         ClientOp::Bye(args) => {
             if let Some(role) = session.role.clone() {
                 relay::disconnect(state, &role).ok();
@@ -632,7 +660,17 @@ pub fn reload_spec(state: &Arc<State>) -> Result<ReloadOutcome, String> {
     if let Err(error) = state.ledger.remove_role_missing_from(&names) {
         return Err(reload_failure(state, &error.to_string()));
     }
-    state.replace_spec(next.clone());
+    if let Some(previous) = state.replace_spec(next.clone())
+        && previous.hook != next.hook
+    {
+        // Hook workers are bound when the server starts, so a reload cannot
+        // rebind them in place. Saying so is the honest answer; silently
+        // running the old policy would be a hook nobody can see is stale
+        // (`docs/v2-CONTRACT.md` §"Slice 7").
+        tracing::warn!(
+            "the [[hook]] table changed; hooks are bound at server start, so restart the server to apply it"
+        );
+    }
     state.replace_acl(acl);
     let event = Event::SpecReloaded(SpecReloaded {
         spec_hash: hash.clone(),

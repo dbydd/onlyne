@@ -203,6 +203,12 @@ pub struct Server {
     /// the `base_hash` a request states is a compare-and-swap rather than a
     /// spot check two racing writers can both pass.
     pub spec_write: Mutex<()>,
+    /// Woken by every published event, so each hook worker scans its backlog.
+    ///
+    /// [`Server::emit`] signals it after appending and broadcasting, never
+    /// waiting on it: a hook is policy and policy must not delay the delivery
+    /// path (`docs/v2-CONTRACT.md` §"Slice 7").
+    pub hook_head: crate::hooks::HookHead,
     pub shutdown: Arc<Notify>,
 }
 
@@ -236,6 +242,7 @@ impl Server {
             expiries: RwLock::new(HashMap::new()),
             channels: RwLock::new(HashMap::new()),
             spec_write: Mutex::new(()),
+            hook_head: crate::hooks::HookHead::new(head),
             shutdown: Arc::new(Notify::new()),
         });
         let hash = spec.semantic_hash();
@@ -400,6 +407,11 @@ impl Server {
             as u64;
         let _ = self.events.send(Arc::new(Frame::event(seq, event)));
         self.event_seq.fetch_max(seq, Ordering::SeqCst);
+        // A hook is policy: the event is published first, and the worker that
+        // runs the operator's script is woken afterwards on its own task.
+        // Nothing here waits on it, so a slow or wedged script cannot delay
+        // the delivery path (`docs/v2-CONTRACT.md` §"Slice 7").
+        self.hook_head.publish(seq);
         Ok(seq)
     }
 

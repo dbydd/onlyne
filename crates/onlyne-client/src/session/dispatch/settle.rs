@@ -448,15 +448,18 @@ impl DispatchState {
         // §4's durable class for this op: which handoff left this client, for
         // whom, and on which hop of the chain. The enqueue above already
         // succeeded, so the event cannot describe a handoff that never was; a
-        // failure here is the event table's own, and the relay has left.
-        if let Err(error) =
-            super::turn_end::record_handoff(self, &args.task_id, &args.to, child.hop, &args.text)
-        {
+        // failure here is the intent table's own, and the relay has left. The
+        // op goes to the server's stream, which is the fact's one owner; the
+        // durable queue is what makes the handoff event survive a crash the way
+        // the client's own row used to (`docs/v2-CONTRACT.md` §"Slice 7").
+        let op =
+            super::turn_end::record_handoff(self, &args.task_id, &args.to, child.hop, &args.text);
+        if let Err(error) = self.enqueue_op(&op) {
             tracing::warn!(
                 task = %args.task_id,
                 to = %args.to,
                 error = %error,
-                "the handoff event was not written"
+                "the handoff event was not queued"
             );
         }
         // The queue path answers with the frame's `op_id`: a connection this

@@ -74,6 +74,13 @@ pub fn event_roles(event: &Event) -> Vec<&str> {
         Event::Fault(fault) => fault.role.as_deref().into_iter().collect(),
         Event::GatewayPresence { gateway, .. } => vec![gateway.as_str()],
         Event::SpecReloaded(_) => Vec::new(),
+        Event::TurnEndWithoutComplete(payload)
+        | Event::DeliveryBlocked(payload)
+        | Event::Handoff(payload) => payload
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -215,6 +222,12 @@ pub fn event_task(event: &Event) -> Option<String> {
         Event::LedgerState(ledger) => ledger.task.clone(),
         Event::Fault(fault) => fault.task_id.clone(),
         Event::RolePresence(_) | Event::GatewayPresence { .. } | Event::SpecReloaded(_) => None,
+        Event::TurnEndWithoutComplete(payload)
+        | Event::DeliveryBlocked(payload)
+        | Event::Handoff(payload) => payload
+            .get("task_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     }
 }
 

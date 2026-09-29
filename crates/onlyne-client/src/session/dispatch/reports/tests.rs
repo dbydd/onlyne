@@ -489,6 +489,19 @@ async fn a_turn_ending_over_an_open_task_nudges_once_and_then_settles() {
             .transports
             .insert(task.clone(), (serving, vec![Capability::Inject]));
     }
+    // The rule's own publications are read where they are queued: the durable
+    // outbound queue, on their way to the server that owns the fact.
+    let queued = || -> Vec<ClientOp> {
+        let inner = state.inner.lock();
+        inner
+            .store
+            .due_intents(chrono::Utc::now(), 64)
+            .expect("read the outbound queue")
+            .iter()
+            .map(crate::runtime::intent::op_for_intent)
+            .collect::<Result<Vec<_>>>()
+            .expect("decode the queued ops")
+    };
 
     // The turn runs, then ends without a completion: the sentence leaves, once.
     beat(&state, &task, "running", 1005).await;
@@ -532,25 +545,37 @@ async fn a_turn_ending_over_an_open_task_nudges_once_and_then_settles() {
         );
     }
 
-    // Each step of the rule is published, in order.
-    let events = {
-        let inner = state.inner.lock();
-        inner.store.events_since(0, 64).expect("read the journal")
-    };
-    let rule: Vec<&str> = events
+    // Each step of the rule is published, in order, on its way to the server.
+    let rule: Vec<String> = queued()
         .iter()
-        .map(|event| event.kind.as_str())
-        .filter(|kind| *kind == TURN_END_WITHOUT_COMPLETE || *kind == DELIVERY_BLOCKED)
+        .filter_map(|op| match op {
+            ClientOp::PublishEvent(args) => Some(args.class.clone()),
+            _ => None,
+        })
         .collect();
     assert_eq!(
         rule,
         vec![
-            TURN_END_WITHOUT_COMPLETE,
-            TURN_END_WITHOUT_COMPLETE,
-            DELIVERY_BLOCKED
+            TURN_END_WITHOUT_COMPLETE.to_string(),
+            TURN_END_WITHOUT_COMPLETE.to_string(),
+            DELIVERY_BLOCKED.to_string(),
         ],
-        "every step of the rule is published, in order: {events:?}"
+        "every step of the rule is published, in order: {rule:?}"
     );
+    // The nudge is a fact about a turn, not a verdict: the first publication
+    // carries `nudge: true` and the second `nudge: false`, so a hook bound to
+    // the class reads which ending spent the delivery's one sentence.
+    let nudges: Vec<bool> = queued()
+        .iter()
+        .filter_map(|op| match op {
+            ClientOp::PublishEvent(args) if args.class == TURN_END_WITHOUT_COMPLETE => args
+                .payload
+                .get("nudge")
+                .and_then(serde_json::Value::as_bool),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(nudges, vec![true, false], "one nudge, then the settlement");
 }
 
 /// A beat that disowns the drain must not clear it.

@@ -700,3 +700,40 @@ reducer、`view` reducer；无 tokio"). Both front ends consume it: the TUI insi
 - An unknown event class leaves the view unchanged and is not silently rendered as news.
 - `onlyne-proto` still builds without tokio, proved by the crate's own dependency rule rather
   than by inspection.
+
+## Slice 9: the TUI, rebuilt on the reducer
+
+The plan's §"TUI" (lines 393-401) and `AGENTS.md` §5 (the CLI owns it, in process). It replaces
+what v1 shipped rather than adding to it.
+
+### Interface
+
+- **`State` is `(View, UiState)`.** `View` is the slice 8 reducer's output and is never written
+  by the front end; `UiState` is what only this screen knows — which page, the selection, the
+  scroll, an open prompt. `update(State, Event) -> State` is the same shape Elm names, and
+  `render(&State, …)` draws it and nothing else.
+- **One IO task.** It owns the admin socket, folds the snapshot and the stream into the reducer,
+  and sends the front end's actions over a channel. The render loop reads state and draws; it
+  never opens a socket, and the 1 Hz poll the plan's line 395 removes is gone because the stream
+  drives the update.
+- **Three pages**, as the plan lists them: cluster (roles with presence, sessions busy / idle /
+  suspended, queue depth, the selected role's column, an event tail), task (one family's path
+  across roles — every delivery, every receipt, the session log's tail), faults (the open faults
+  and their repair entry points).
+- **Operations**: send a task, `focus` (with an explicit `to`), `repair`, `report`. The
+  topology graph and the spec editing are the web's, not this screen's.
+- **Deleted**: v1's force-directed graph — `force.rs`, `layout.rs`, the `explorer/` tree and the
+  map in `model.rs`. The plan says so (line 401), and a second way to place a role's box is the
+  duplicate fact the plan exists to remove.
+
+### Acceptance
+
+- Each page renders from a pinned `View` and the rendered buffer is asserted, not eyeballed: a
+  role's busy/idle/suspended counts, a family's delivery and receipt rows, and an open fault with
+  its repair entry are all in the expected buffer.
+- A stream event changes the rendered page without a poll, and a resync signal from slice 4
+  leaves the screen saying it is catching up rather than drawing a state that lost events.
+- `grep` finds no force-layout source in the TUI, and the crate's line count for the TUI is in
+  the plan's 1,500–2,500 band rather than v1's 4,765.
+- The render path cannot open a socket: the IO task is the only one that holds the admin
+  connection, and a case proves a page renders from a `View` with no server running at all.

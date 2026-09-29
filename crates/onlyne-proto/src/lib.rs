@@ -33,6 +33,7 @@ pub mod frame;
 pub mod lifecycle;
 pub mod ops;
 pub mod text;
+pub mod view;
 
 pub use adapter::{
     AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, ByeNotice, Capability, ClusterMount,
@@ -48,8 +49,9 @@ pub use envelope::{
     new_envelope, new_id, new_op_id, new_task_id, sha256_hex,
 };
 pub use event::{
-    Event, EventRow, EventTier, FaultEvent, GatewayHealth, LedgerState, LedgerStateEvent,
-    Lifecycle, Presence, RolePresence, SessionStateEvent, SpecReloaded,
+    CLIENT_EVENT_CLASSES, DELIVERY_BLOCKED, Event, EventRow, EventTier, FaultEvent, GatewayHealth,
+    HANDOFF, LedgerState, LedgerStateEvent, Lifecycle, Presence, RolePresence, SessionStateEvent,
+    SpecReloaded, TURN_END_WITHOUT_COMPLETE, client_event,
 };
 pub use frame::{
     AdminFrame, ErrorCode, ErrorPayload, Frame, GatewayFrame, MAX_ERROR_MESSAGE_BYTES,
@@ -63,9 +65,9 @@ pub use lifecycle::{
 pub use ops::{
     AckArgs, AdminControl, AdminOp, AdminReport, AdminSend, ByeArgs, ClientOp, ControlArgs,
     ConversationInfo, Delivery, Drive, FreshRead, GatewayOp, GhostSweep, HandshakeArgs, HealthArgs,
-    HistoryArgs, LedgerEntry, LedgerQuery, LiveSession, PullArgs, PullReply, QueryFaultsArgs,
-    QueryRolesArgs, QuerySessionsArgs, Receipt, RegisterChannelArgs, RemoveRole, RepairAck,
-    RepairAdopt, RepairFail, RepairRebind, RepairTarget, Report, RoleInfo, RoleRuntime,
+    HistoryArgs, LedgerEntry, LedgerQuery, LiveSession, PublishEventArgs, PullArgs, PullReply,
+    QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, Receipt, RegisterChannelArgs, RemoveRole,
+    RepairAck, RepairAdopt, RepairFail, RepairRebind, RepairTarget, Report, RoleInfo, RoleRuntime,
     SessionProjection, SessionRow, SetProse, SetRuntime, SetSenders, SetSession, SetTargets,
     ShutdownArgs, SpecApply, SpecEdit, SpecView, Subscribe, UpsertRole, Welcome,
 };
@@ -73,6 +75,11 @@ pub use ops::{
 pub use text::{
     BINARY_NOT_FOUND_PREFIX, LEGACY_WORKSPACE_MESSAGE, NO_SOCKET_MESSAGE,
     UNSUPPORTED_SCHEMA_MESSAGE, binary_not_found,
+};
+pub use view::{
+    BoardColumn, Card, ClusterSummary, DeliveryAxis, DeliveryView, EVENT_TAIL_LIMIT,
+    FAULT_STATE_OPEN, RESYNC_LAG_KIND, SessionCounts, SessionState, SessionView, Snapshot, View,
+    fault_is_open, is_resync_lag, snapshot_to_view, update, update_class,
 };
 
 /// Wire protocol revision, carried in every [`envelope::Envelope`] and handshake.

@@ -97,7 +97,7 @@ to you and the spec file.
 4. Append the fragments to `spec.toml`, then run `onlyne reload`. `onlyne spec-diff` shows
    the pending delta first. The spec file is the only truth; there is no runtime config API.
 
-An existing tree carries a store marker: the server's `state.db` names revision 5 and a
+An existing tree carries a store marker: the server's `state.db` names revision 6 and a
 client's `client.db` names revision 3. A marker answering another revision stops that daemon
 with `onlyne: unsupported schema; v1.0.0 does not migrate`, and a pre-v1 layout stops
 `onlyne client init` with exit 2 and `onlyne: legacy workspace layout; v1.0.0 does not
@@ -156,6 +156,37 @@ onlyne --server-root <root> watch --follow --tier durable  # live stream; tiers:
   the task settles — grants are per task.
 - Completion receipts always reach the role the ledger records as origin, offline queueing
   included. Reporting upward needs no standing edges at all.
+
+## Operator policy lives outside the core
+
+The events you most need to hear about — a turn that ended without completing, a delivery that
+came back `blocked` — are recorded by the client that witnessed them and published onto the
+server's stream. What to *do* about them is your policy, and the spec carries it:
+
+```toml
+[[hook]]
+on = ["delivery_blocked", "turn_end_without_complete"]
+run = ["./hooks/notify-supervisor.sh"]
+timeout = "10s"
+```
+
+- `on` names classes from a closed set: `ledger_state`, `session_state`, `fault`, `role_presence`,
+  `gateway_presence`, `spec_reloaded`, `turn_end_without_complete`, `delivery_blocked`, and
+  `handoff`. A class outside it refuses the whole load by name, with `spec.toml:<line>`, the same
+  treatment a removed key gets.
+- The server spawns `run` for each matching event with the event as one JSON object on stdin
+  (`seq`, `type`, `data`, `created_at`) and `ONLYNE_SOCKET` set to the admin socket, so the script
+  can `onlyne send …` in the same step. A slow script delays nothing: an event reaches every
+  subscriber without waiting on any hook worker.
+- Delivery is at-least-once per hook. The last handled `seq` is recorded and a restart resumes
+  from there, so a script that must not act twice deduplicates on `seq`. A nonzero exit or a
+  timeout records fault `hook_failed` once for that event and leaves the event untouched; the hook
+  returns to it instead of skipping ahead, so a broken script holds only its own backlog while the
+  stream and every other hook carry on.
+- The worker set is read at server start: editing `[[hook]]` needs a restart, and a `reload` that
+  changes the set names it in the log.
+
+`docs/operations.md` §"Event hooks" carries the full table and a worked script.
 
 ## Faults and repair
 
@@ -313,24 +344,30 @@ carries no deadline and stays `queued`; settle it with `repair fail` or
 
 ## Watching with the TUI
 
-`onlyne tui --server-root <root>` opens the two-page board; `1`, `2`, and `Tab` switch
-pages. Page 1 is `roles`, the role network: one labelled box per role, the sessions it
-holds listed inside with the glyph `◌` created, `◐` working, `◔` idle, `●` exited, a `*`
-after the title of a role holding a session that has not exited, and every ACL hop drawn as
-an orthogonal, arrow-tipped line. `hjkl` navigates the map, `j`/`k` stepping the candidate
-hop, `l` walking the highlighted one, and `h` walking back; the arrows pan, `+`/`-` set the
-repulsion, `0` recentres, the wheel zooms, a drag pans, `Enter` opens the role detail, `a`
-switches all/active, `F` opens the selected role's session, `r` refreshes, `q` quits.
-Page 2 is `swarm`: the session graph, an alert strip of the open faults and the status
-notice, the event history, and the detail pane of the selected task with its ledger rows,
-its sessions, and its faults; a settled row's reason joins the row's tail there as
-`reason=<text>`. Page 2's own keys are `↑`/`↓` to select, `g`/`h` for the focus, `^p`/`^n`
-to walk back and forward, `J`/`K` to scroll, `/` to search, `f`, `F`, `t`, `o`, `e`, and
-`a` for the filters and jumps, `PgUp`/`PgDn` to page, `r` to refresh, and `q` to quit.
-`onlyne tui --server-root <root> --once --page 1|2 --state active|all` renders one frame as
-plain text and exits. `active` is the default state filter and keeps the live view; `all` also
-includes settled sessions and ledger rows. On page 2, `--state all` makes a settled row's
-`reason=<text>` visible in the snapshot.
+`onlyne tui --server-root <root>` opens the three-page board in this process, reading the
+admin surface: `1`/`2`/`3` switch pages, `Tab` walks a page's panes, `↑`/`↓` step the
+selected row, `PgUp`/`PgDn` (or `[`/`]`) scroll a pane of lines, and `q` or `Esc` leaves.
+The cluster page lists every role with its presence, the sessions it holds (`sess`), how
+many of them are busy, idle or suspended, and its queue depth; beside it is the selected
+role's board, one row per delivery in the five-column reading (`queued`, `running`,
+`waiting`, `done`, `failed_or_blocked`), and under both is the event tail. `Enter` opens the
+selected card's family on the task page, which is that family's path across roles — every
+delivery by hop, with its verdict and the receipt it settled with — over the tail of the
+session serving the selected delivery. The faults page lists the open faults, the selected
+fault's own fields, and the repair verbs it offers with the key that opens each: `a`
+`repair ack`, `t` `repair retry`, `c` `repair close`, `F` `repair fail`, `i`
+`repair inspect`.
+
+The four operations are forms the board opens on the selection: `s` sends a task (`from`,
+`to`, `body`), `f` focuses (`from`, `to`, `task` — the target is named by hand, not read off
+the selection), `r` reports a task's verdict (`from`, `task`, `outcome`, `head`), and the
+repair keys above. `Enter` submits a form, `Esc` cancels it, `Tab` moves the caret between
+its fields, and the footer's second line prints what the op answered. `^R` re-reads the
+snapshot. Nothing polls: a page moves when the admin stream says the cluster did, and a gap
+in that stream leaves the header saying `catching up` while the snapshot is re-read.
+
+`onlyne tui --server-root <root> --once` renders one frame — the cluster page, from one
+snapshot — as plain text and exits.
 
 ## Clusters under clusters
 

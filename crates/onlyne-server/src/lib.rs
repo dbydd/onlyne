@@ -11,6 +11,7 @@ pub mod faults;
 pub mod gateway_host;
 pub mod generate;
 pub mod ghosts;
+pub mod hooks;
 pub mod projection;
 pub mod relay;
 pub mod router;
@@ -53,6 +54,10 @@ pub async fn serve(state: Arc<crate::state::State>) -> anyhow::Result<()> {
     let sweep_task = spawn_expiry_sweep(state.clone());
     let stale_task = spawn_stale_working_watch(state.clone());
     let ghost_task = spawn_ghost_sweep(state.clone());
+    // One worker per declared `[[hook]]`, each on its own task: a hook is
+    // policy, and policy runs outside the delivery path
+    // (`docs/v2-CONTRACT.md` §"Slice 7").
+    let hook_tasks = hooks::spawn_workers(&state);
     let role_state = state.clone();
     let role_task = tokio::spawn(async move {
         if let Err(error) = role_listener(role_state, listener, tls_config).await {
@@ -75,6 +80,9 @@ pub async fn serve(state: Arc<crate::state::State>) -> anyhow::Result<()> {
         task.abort();
     }
     if let Some(task) = shutdown_task {
+        task.abort();
+    }
+    for task in hook_tasks {
         task.abort();
     }
     if let Err(error) = admin::unlink(&state) {

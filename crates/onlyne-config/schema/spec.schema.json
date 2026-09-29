@@ -21,6 +21,13 @@
         "$ref": "#/definitions/GatewayEntry"
       }
     },
+    "hook": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/HookEntry"
+      }
+    },
     "route": {
       "default": [],
       "type": "array",
@@ -57,6 +64,7 @@
           }
         },
         "allowed_targets": {
+          "description": "The roles this role may address, and the roles a session of it owes a delivery to before it may report a terminal outcome. One declaration answers both questions: the server gates the ACL on it and the client's completion guard measures the session against it, so there is no second list to disagree with. Empty is the default, and a role that names no target owes nothing (`docs/v2-CONTRACT.md` §\"Slice 6\").",
           "default": [],
           "type": "array",
           "items": {
@@ -165,6 +173,35 @@
           "type": "string"
         },
         "platform": {
+          "type": "string"
+        }
+      }
+    },
+    "HookEntry": {
+      "description": "An event hook declaration: when an event of a class in `on` is persisted, run `run` with a timeout (`docs/v2-CONTRACT.md` §\"Slice 7\"). `on` names event classes from the closed set; a class not in the set is refused by name at load time. `run` is a command argv. `timeout` bounds the script and is required.",
+      "type": "object",
+      "required": [
+        "on",
+        "run",
+        "timeout"
+      ],
+      "properties": {
+        "on": {
+          "description": "Event classes this hook fires for. Each must be one of the classes the server emits: the durable/advisory/settlement families.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "run": {
+          "description": "Command to run; argv. The event JSON (including `seq`) is written to stdin, and `ONLYNE_SOCKET` points at the admin socket.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "description": "Timeout bounding the script, e.g. \"10s\", \"500ms\", \"2m\". Required.",
           "type": "string"
         }
       }

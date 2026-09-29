@@ -19,6 +19,12 @@ pub const KIND_REPORT_GAP: &str = "report_gap";
 pub const KIND_HELLO_TIMEOUT: &str = "hello_timeout";
 /// Fault kind recorded when `spec.toml` fails to reload.
 pub const KIND_SPEC_RELOAD_FAILED: &str = "spec_reload_failed";
+/// Fault kind recorded when a hook script exits nonzero or passes its timeout.
+///
+/// The failure is recorded here and the original event is left untouched: a
+/// hook is policy, and policy failing must not rewrite history
+/// (`docs/v2-CONTRACT.md` §"Slice 7").
+pub const KIND_HOOK_FAILED: &str = "hook_failed";
 
 /// The state every freshly recorded fault starts in.
 pub const STATE_OPEN: &str = "open";

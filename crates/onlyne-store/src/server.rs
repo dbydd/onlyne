@@ -37,8 +37,13 @@ use crate::transition_allowed;
 /// A marker-4 file holds rows under the old key and no bindings table, which
 /// cannot be read back as this layout, so it stops at the door on the same
 /// string every other mismatch prints.
+/// Version 6 adds the `hook_cursors` table: an event hook is delivered
+/// at-least-once, so each declared hook records the last event `seq` it
+/// handled successfully and resumes from there after a restart. A marker-5
+/// file holds no such row, so it stops at the door on the same string every
+/// other mismatch prints.
 /// The client store keeps its own revision.
-const SERVER_SCHEMA_VERSION: i64 = 5;
+const SERVER_SCHEMA_VERSION: i64 = 6;
 const PROTOCOL_VERSION: i64 = 1;
 const SERVER_MARKER: &str = "onlyne-server";
 const DEFAULT_LIMIT: i64 = 100;
@@ -199,6 +204,11 @@ CREATE INDEX IF NOT EXISTS ghost_sweeps_swept_at_idx ON ghost_sweeps(swept_at);
 CREATE TABLE IF NOT EXISTS inbox_cursors(
   role TEXT PRIMARY KEY,
   last_msg_id TEXT,
+  last_seq INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hook_cursors(
+  hook TEXT PRIMARY KEY,
   last_seq INTEGER NOT NULL,
   updated_at TEXT NOT NULL
 );"#;
@@ -1251,6 +1261,37 @@ impl ServerLedger {
             "INSERT INTO inbox_cursors(role,last_msg_id,last_seq,updated_at) VALUES(?,?,?,?)
              ON CONFLICT(role) DO UPDATE SET last_msg_id=excluded.last_msg_id,last_seq=excluded.last_seq,updated_at=excluded.updated_at",
             params![role, msg_id, seq, updated_at],
+        )? == 1)
+    }
+
+    /// The last event `seq` one hook handled successfully, `None` for a hook
+    /// this cluster has never run.
+    ///
+    /// This is the resume point of the at-least-once rule: a hook that
+    /// restarted picks up after the last event it handled, so nothing between
+    /// the cursor and the head is skipped (`docs/v2-CONTRACT.md` §"Slice 7").
+    pub fn hook_cursor(&self, hook: &str) -> StoreResult<Option<i64>> {
+        let conn = self.read()?;
+        Ok(conn
+            .query_row(
+                "SELECT last_seq FROM hook_cursors WHERE hook=?",
+                params![hook],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Record the last event `seq` one hook handled successfully. A `seq` at or
+    /// below the recorded one is left alone: a worker that resumed from an
+    /// older row after a failure must not walk the cursor backwards.
+    pub fn set_hook_cursor(&self, hook: &str, seq: i64) -> StoreResult<bool> {
+        let conn = self.conn()?;
+        let updated_at = rfc3339(Utc::now());
+        Ok(conn.execute(
+            "INSERT INTO hook_cursors(hook,last_seq,updated_at) VALUES(?,?,?)
+             ON CONFLICT(hook) DO UPDATE SET last_seq=excluded.last_seq,updated_at=excluded.updated_at
+             WHERE excluded.last_seq > hook_cursors.last_seq",
+            params![hook, seq, updated_at],
         )? == 1)
     }
 

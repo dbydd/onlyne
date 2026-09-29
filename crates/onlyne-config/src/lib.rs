@@ -52,8 +52,9 @@ pub use spec::{
     DEFAULT_INTENT_ATTEMPTS, DEFAULT_KEY_PREFIX, DEFAULT_MAX_SESSIONS, DEFAULT_NOTE_QUEUE,
     DEFAULT_REQUEUE_MAX_ATTEMPTS, DEFAULT_REQUEUE_TTL_SECS, DEFAULT_RESYNC_LAG,
     DEFAULT_STALE_WATCH_SECS, DEFAULT_TEMPLATE_ROOT, DRIVE_NAMES, Drive, GatewayEntry,
-    IntentPolicy, KEY_BYTE_LEN, MsgKindClass, RELAY_IS_GONE, RouteEntry, RouteTarget,
-    RuntimeSection, SUPERVISOR_ROLE, ServerSection, Spec, Timeouts,
+    HOOK_EVENT_CLASSES, HookEntry, IntentPolicy, KEY_BYTE_LEN, MsgKindClass, RELAY_IS_GONE,
+    RouteEntry, RouteTarget, RuntimeSection, SUPERVISOR_ROLE, ServerSection, Spec, Timeouts,
+    parse_hook_timeout,
 };
 pub use template::{
     Placeholders, Template, TemplateError, discover, load_tree, local_override, merge_fragment,

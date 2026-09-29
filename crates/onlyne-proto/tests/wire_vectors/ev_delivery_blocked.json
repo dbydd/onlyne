@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"ev\",\"seq\":7,\"type\":\"delivery_blocked\",\"data\":{\"role\":\"planner\",\"session_id\":\"s1\",\"task_id\":\"11111111-1111-4111-8111-111111111111\"}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "delivery_blocked is a client-owned settlement event a hook can bind to"
+}

@@ -564,6 +564,21 @@ pub struct ByeArgs {
     pub drain_ms: Option<u64>,
 }
 
+/// `publish_event` request: one settlement class the client owns, plus its
+/// payload, delivered to the server's event stream (`docs/v2-CONTRACT.md` §
+/// "Slice 7"). `class` is from [`onlyne_proto::CLIENT_EVENT_CLASSES`]; the
+/// server refuses anything else by name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct PublishEventArgs {
+    /// The event class, one of [`crate::CLIENT_EVENT_CLASSES`].
+    pub class: String,
+    /// The event payload, carried verbatim. A hook reads it off stdin and a
+    /// subscriber sees it in the event's `data`.
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
 /// Handshake request on a role connection (§5, §9).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case", default)]
@@ -629,6 +644,12 @@ pub enum ClientOp {
     QueryFaults(QueryFaultsArgs),
     /// Issue recycle / probe / snapshot / cancel.
     Control(ControlArgs),
+    /// Publish one of the settlement classes to the server's event stream.
+    /// Carries no `(generation, seq)`, no report gate, and no session state:
+    /// it is a client's word about a turn it witnessed, so a hook bound to
+    /// the class can serve the plan's own example (`docs/v2-CONTRACT.md` §
+    /// "Slice 7"). The server appends the event and answers nothing.
+    PublishEvent(PublishEventArgs),
     /// Ordered shutdown.
     Bye(ByeArgs),
 }
@@ -647,6 +668,7 @@ impl ClientOp {
             ClientOp::QueryRoles(_) => "query_roles",
             ClientOp::QueryFaults(_) => "query_faults",
             ClientOp::Control(_) => "control",
+            ClientOp::PublishEvent(_) => "publish_event",
             ClientOp::Bye(_) => "bye",
         }
     }
@@ -1262,6 +1284,13 @@ mod tests {
                 }),
                 "bye",
             ),
+            (
+                ClientOp::PublishEvent(crate::PublishEventArgs {
+                    class: "delivery_blocked".into(),
+                    payload: serde_json::json!({"task_id": "t1", "role": "planner"}),
+                }),
+                "publish_event",
+            ),
         ];
         for (op, name) in &cases {
             assert_eq!(op.name(), *name);
@@ -1271,7 +1300,7 @@ mod tests {
             let back: ClientOp = serde_json::from_value(value).expect("decode");
             assert_eq!(&back, op);
         }
-        assert_eq!(cases.len(), 12);
+        assert_eq!(cases.len(), 13);
     }
 
     // Rejection-path marker only: this pre-v1 `loopback` op name must stay outside the closed vocabulary (plan §8 line 324).

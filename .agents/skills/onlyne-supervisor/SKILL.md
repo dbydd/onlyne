@@ -97,7 +97,7 @@ to you and the spec file.
 4. Append the fragments to `spec.toml`, then run `onlyne reload`. `onlyne spec-diff` shows
    the pending delta first. The spec file is the only truth; there is no runtime config API.
 
-An existing tree carries a store marker: the server's `state.db` names revision 5 and a
+An existing tree carries a store marker: the server's `state.db` names revision 6 and a
 client's `client.db` names revision 3. A marker answering another revision stops that daemon
 with `onlyne: unsupported schema; v1.0.0 does not migrate`, and a pre-v1 layout stops
 `onlyne client init` with exit 2 and `onlyne: legacy workspace layout; v1.0.0 does not
@@ -156,6 +156,37 @@ onlyne --server-root <root> watch --follow --tier durable  # live stream; tiers:
   the task settles — grants are per task.
 - Completion receipts always reach the role the ledger records as origin, offline queueing
   included. Reporting upward needs no standing edges at all.
+
+## Operator policy lives outside the core
+
+The events you most need to hear about — a turn that ended without completing, a delivery that
+came back `blocked` — are recorded by the client that witnessed them and published onto the
+server's stream. What to *do* about them is your policy, and the spec carries it:
+
+```toml
+[[hook]]
+on = ["delivery_blocked", "turn_end_without_complete"]
+run = ["./hooks/notify-supervisor.sh"]
+timeout = "10s"
+```
+
+- `on` names classes from a closed set: `ledger_state`, `session_state`, `fault`, `role_presence`,
+  `gateway_presence`, `spec_reloaded`, `turn_end_without_complete`, `delivery_blocked`, and
+  `handoff`. A class outside it refuses the whole load by name, with `spec.toml:<line>`, the same
+  treatment a removed key gets.
+- The server spawns `run` for each matching event with the event as one JSON object on stdin
+  (`seq`, `type`, `data`, `created_at`) and `ONLYNE_SOCKET` set to the admin socket, so the script
+  can `onlyne send …` in the same step. A slow script delays nothing: an event reaches every
+  subscriber without waiting on any hook worker.
+- Delivery is at-least-once per hook. The last handled `seq` is recorded and a restart resumes
+  from there, so a script that must not act twice deduplicates on `seq`. A nonzero exit or a
+  timeout records fault `hook_failed` once for that event and leaves the event untouched; the hook
+  returns to it instead of skipping ahead, so a broken script holds only its own backlog while the
+  stream and every other hook carry on.
+- The worker set is read at server start: editing `[[hook]]` needs a restart, and a `reload` that
+  changes the set names it in the log.
+
+`docs/operations.md` §"Event hooks" carries the full table and a worked script.
 
 ## Faults and repair
 

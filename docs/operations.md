@@ -175,6 +175,63 @@ When a task that this role has already completed as `Done` is delivered again, t
 
 This decision reads `Done`. A task whose session was terminated, crashed, or was recorded locally as `Failed` can be requeued by `onlyne repair retry` only while it still has eligible `queued` / `in_flight` delivery rows. To rerun a task already rejected by a terminal state such as `session_dead`, the operator sends a new task with the guarded `send` verb. A row already `Done` waits for that acknowledgment and an empty run.
 
+## Event hooks
+
+The turn-end rule records a state; what an operator does about that state is policy, and policy
+lives outside the delivery path. `[[hook]]` is where it is declared: the classes to watch, a
+command, and a bound on that command. The server spawns the command itself, so no scheduler and no
+polling loop sits between an event and the operator's script (`docs/v2-CONTRACT.md` §"Slice 7").
+
+```toml
+# <server-root>/.onlyne/spec.toml
+[[hook]]
+on = ["delivery_blocked", "turn_end_without_complete"]
+run = ["./hooks/notify-supervisor.sh"]
+timeout = "10s"
+```
+
+| Configuration file | Field | Default | Effect |
+|---|---|---|---|
+| `[[hook]]` in `<server-root>/.onlyne/spec.toml` | `on` | — | The event classes this hook fires for, each from the closed set below; a class outside the set refuses the load by name with `spec.toml:<line>` |
+| `[[hook]]` in `<server-root>/.onlyne/spec.toml` | `run` | — | The argv one matching event spawns; an empty argv is refused by name, because there is nothing to spawn |
+| `[[hook]]` in `<server-root>/.onlyne/spec.toml` | `timeout` | — | A whole number with an `ms`, `s`, or `m` suffix bounding one run; a value that does not parse is refused with its line |
+
+Every class the server's stream carries is bindable: `ledger_state`, `session_state`, `fault`,
+`role_presence`, `gateway_presence`, `spec_reloaded`, `turn_end_without_complete`,
+`delivery_blocked`, and `handoff`. The last three are the client's own word — only the client that
+held the session witnessed how a turn ended — and they reach the stream through the client's
+`publish_event` verb, whose class set is exactly those three.
+
+The event arrives as one JSON object on stdin:
+
+```json
+{"seq": 412, "type": "delivery_blocked", "data": {"task_id": "…", "session_id": "…", "role": "planner"}, "created_at": "…"}
+```
+
+`data` is the class's own payload and `seq` is its position in the server's stream. `ONLYNE_SOCKET`
+names the admin socket, so a script acts without a second discovery step:
+
+```bash
+#!/bin/sh
+event=$(cat)
+task=$(printf '%s' "$event" | sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p')
+onlyne send --from _supervisor --to _supervisor --text "blocked: $task" \
+  --force --yes-i-am-supervisor-not-other-role
+```
+
+Delivery is at-least-once. The server records the last `seq` each hook handled successfully, a
+restart resumes from there, and a script that must not act twice deduplicates on `seq`. A run that
+exits nonzero or passes its bound records fault `hook_failed` once for that event and leaves the
+event untouched: a hook is policy, and policy failing must not rewrite history. The hook then goes
+back to the event it failed on rather than stepping over it, so a script that keeps failing holds
+its own backlog — the stream, the delivery path, and every other hook carry on without it.
+
+A hook never runs for a class it does not name, and it never delays an event's publication: the
+server appends, broadcasts, and publishes the new head without waiting on any script. The worker
+set is read when the server starts, so an edit to `[[hook]]` takes effect on the next start; a
+`reload` that changes the set names it in the log rather than pretending a running worker changed
+its policy.
+
 ## Rejection surface
 
 `onlyne ack --msg-id <id> --reason <text> --force --yes-i-am-supervisor-not-other-role` settles a delivery as `acked`.
@@ -403,7 +460,7 @@ Inheritance occurs in exactly one place, `Causality::child_of`: both the CLI's `
 
 `labels` is the only core field the system does not interpret: at most 8 entries, keys no longer than 32 bytes, and values no longer than 256 bytes. `Envelope::validate` rejects an out-of-bounds value and names the field.
 
-New ledger-table columns are added in place, like `expires_at` and `requeued`, so a ledger change alone does not move the schema marker; the marker moves only when a table's own layout changes, and the server's is 5.
+New ledger-table columns are added in place, like `expires_at` and `requeued`, so a ledger change alone does not move the schema marker; the marker moves only when a table's own layout changes, and the server's is 6.
 
 ## Host resource reclamation
 
@@ -689,6 +746,57 @@ push 投递与 pull 投递的 `in_flight` 翻面都各有一条 `ledger_state` �
 
 这道判定读的是 `Done`。会话被终止、崩溃或本地记为 `Failed` 的 task，只有仍有符合条件的 `queued` / `in_flight` 投递行时才可由 `onlyne repair retry` 重投；已被 `session_dead` 等终态拒收的 task 要重跑，操作者用带门禁的 `send` 动词发新 task。已 `Done` 的行等到的是这条 ack 和一次空跑。
 
+## 事件钩子
+
+结束规则负责把状态记清楚；「blocked 之后怎么办」是操作员的策略，放在核心之外。策略写在
+`[[hook]]` 里：监听哪些类、跑哪条命令、这条命令的时限。server 自己 spawn 这条命令，事件与脚本
+之间没有调度器，也没有轮询（`docs/v2-CONTRACT.md` §"Slice 7"）。
+
+```toml
+# <server-root>/.onlyne/spec.toml
+[[hook]]
+on = ["delivery_blocked", "turn_end_without_complete"]
+run = ["./hooks/notify-supervisor.sh"]
+timeout = "10s"
+```
+
+| 配置文件 | 字段 | 默认值 | 作用 |
+|---|---|---|---|
+| `<server-root>/.onlyne/spec.toml` 的 `[[hook]]` | `on` | —— | 该钩子监听的类，每项取自下面的封闭集合；集合之外的类按名字拒收，并带上行号 `spec.toml:<line>` |
+| `<server-root>/.onlyne/spec.toml` 的 `[[hook]]` | `run` | —— | 一个命中的事件 spawn 的命令 argv；空 argv 按名字拒收，因为没有可 spawn 的东西 |
+| `<server-root>/.onlyne/spec.toml` 的 `[[hook]]` | `timeout` | —— | 以 `ms`、`s` 或 `m` 结尾的整数，界定一次运行的时限；解析不了的值带行号拒收 |
+
+server 事件流里的每个类都可以绑定：`ledger_state`、`session_state`、`fault`、`role_presence`、
+`gateway_presence`、`spec_reloaded`、`turn_end_without_complete`、`delivery_blocked` 与
+`handoff`。后三类是 client 自己的说法 —— 一轮以何种方式结束，只有持有那个 session 的 client
+说得清 —— 它们经 client 的 `publish_event` 动词进入事件流，该动词的类集合恰好是这三类。
+
+事件以一个 JSON 对象出现在 stdin：
+
+```json
+{"seq": 412, "type": "delivery_blocked", "data": {"task_id": "…", "session_id": "…", "role": "planner"}, "created_at": "…"}
+```
+
+`data` 是该类自己的负载，`seq` 是它在 server 事件流里的位置。`ONLYNE_SOCKET` 指向 admin socket，
+脚本因此一步就能办事：
+
+```bash
+#!/bin/sh
+event=$(cat)
+task=$(printf '%s' "$event" | sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p')
+onlyne send --from _supervisor --to _supervisor --text "blocked: $task" \
+  --force --yes-i-am-supervisor-not-other-role
+```
+
+投递语义是至少一次：server 按钩子记下最后一个成功的 `seq`，重启后从那里续跑，脚本若要避免重复
+动作就按 `seq` 去重。退出码非 0 或超过时限记一条 fault `hook_failed`（同一事件只记一次），原事件
+本身不动：钩子是策略，策略失败不该改写历史。之后这个钩子回到它失败的那件事上，而不是跳过去，
+因此一直失败的脚本只会拖住它自己的积压 —— 事件流、投递路径和其它钩子照常。
+
+钩子绝不会为它没有点名的类运行，也绝不会拖延事件发布：server 落盘、广播、发布新 head 全程不等
+任何脚本。worker 集合在 server 启动时读取，`[[hook]]` 的改动因此在下一次启动生效；改变集合的
+`reload` 会在日志里点名，而不是假装正在跑的 worker 换了策略。
+
 ## 拒收面
 
 `onlyne ack --msg-id <id> --reason <text> --force --yes-i-am-supervisor-not-other-role` 把一条投递结为 `acked`。
@@ -919,7 +1027,7 @@ onlyne send --hop-budget <n> --label <k=v> --deadline <rfc3339> \
 
 `labels` 是核心唯一不解释的字段：上限 8 条，键不超过 32 字节，值不超过 256 字节，越界由 `Envelope::validate` 拒收并点名字段。
 
-ledger 表新增的列走 in-place 加列，与 `expires_at`、`requeued` 同样处理，因此只加 ledger 列不会推动 schema marker；marker 只在表本身布局变化时前进，server 当前是 5。
+ledger 表新增的列走 in-place 加列，与 `expires_at`、`requeued` 同样处理，因此只加 ledger 列不会推动 schema marker；marker 只在表本身布局变化时前进，server 当前是 6。
 
 ## 宿主资源回收
 

@@ -48,6 +48,18 @@ agent_package = ""
 # template_root sets the template source root under the server root. Read by the generate driver during template discovery. Default: .onlyne/templates.
 template_root = ".onlyne/templates"
 
+# [[hook]] carries operator policy in the same file the core reads: the event classes to watch,
+# the command to spawn, and the bound on one run. A hook fires when the server persists a matching
+# event and never delays the delivery path (docs/v2-CONTRACT.md §"Slice 7").
+# docs/v2-PLAN.md §"事件钩子".
+[[hook]]
+# on lists the classes this hook fires for, each from a closed set: ledger_state, session_state, fault, role_presence, gateway_presence, spec_reloaded, turn_end_without_complete, delivery_blocked, handoff. A class outside that set refuses the load by name, with `spec.toml:<line>`. The last three are the client's own witness of an ending and reach the stream through its publish_event verb. Read by the onlyne-server hook workers, whose set is read at startup.
+on = ["delivery_blocked", "turn_end_without_complete"]
+# run holds the argv one matching event spawns. The event arrives as one JSON object on stdin — seq, type, data, created_at — and ONLYNE_SOCKET names the admin socket, so the script acts with the same `onlyne` binary. An empty argv is refused per entry.
+run = ["./hooks/notify-supervisor.sh"]
+# timeout is one whole number with an ms, s, or m suffix, and it is required per entry. A run that exits nonzero or passes this bound records fault hook_failed once for that event, which itself stays untouched; the hook comes back to that event on its next pass rather than stepping over it. A value that does not parse is refused with its line.
+timeout = "10s"
+
 # docs/v1-PLAN.md §5 line 232
 [[client]]
 # role names this role, the unit of addressing and ACL keying. Read by the server router, the ACL decision, and the generate driver. Default: empty string, refused per entry.

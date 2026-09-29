@@ -378,6 +378,85 @@ relay_count = 2
     assert!(err.to_string().contains("allowed_targets"), "{err}");
 }
 
+/// A spec whose single `[[hook]]` is written from the three lines as given, so
+/// a case can point at the line its own column lands on (7, 8, and 9).
+fn hook_spec(on: &str, run: &str, timeout: &str) -> String {
+    format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[hook]]
+{on}
+{run}
+{timeout}
+"#
+    )
+}
+
+/// The declaration the plan writes reads back field for field
+/// (`docs/v2-PLAN.md` §"事件钩子", `docs/v2-CONTRACT.md` §"Slice 7").
+#[test]
+fn a_hook_declaration_reads_on_run_and_timeout() {
+    let spec = Spec::parse_str(&hook_spec(
+        r#"on = ["delivery_blocked", "turn_end_without_complete"]"#,
+        r#"run = ["./hooks/notify-supervisor.sh"]"#,
+        r#"timeout = "10s""#,
+    ))
+    .expect("the plan's own declaration parses");
+    assert_eq!(spec.hook.len(), 1, "{spec:?}");
+    assert_eq!(
+        spec.hook[0].on,
+        ["delivery_blocked", "turn_end_without_complete"]
+    );
+    assert_eq!(spec.hook[0].run, ["./hooks/notify-supervisor.sh"]);
+    assert_eq!(spec.hook[0].timeout, "10s");
+}
+
+/// A class outside the closed set is refused by name with its line, like any
+/// other key the spec declares: a hook bound to a spelling nobody publishes is
+/// an operator policy that silently never fires (`docs/v2-CONTRACT.md`
+/// §"Slice 7").
+#[test]
+fn a_hook_bound_to_an_unknown_class_is_refused_by_name() {
+    let text = hook_spec(
+        r#"on = ["delivery_blocked", "delivery_blocked_typo"]"#,
+        r#"run = ["./hooks/notify-supervisor.sh"]"#,
+        r#"timeout = "10s""#,
+    );
+    let err = Spec::parse_str(&text).expect_err("a class outside the set is refused");
+    assert!(
+        err.to_string().starts_with("spec.toml:7:"),
+        "the refusal points at the line that carries `on`: {err}"
+    );
+    assert!(err.to_string().contains("delivery_blocked_typo"), "{err}");
+    assert!(
+        err.to_string().contains("delivery_blocked") && err.to_string().contains("handoff"),
+        "the set it accepts comes with the refusal: {err}"
+    );
+}
+
+/// The other two columns refuse the same way, each on its own line: a command
+/// that names nothing cannot be spawned, and a bound that is not a duration
+/// leaves a hook with no bound at all (`docs/v2-CONTRACT.md` §"Slice 7").
+#[test]
+fn an_empty_run_or_an_unparseable_timeout_is_refused_with_its_line() {
+    let empty_run = hook_spec(r#"on = ["fault"]"#, "run = []", r#"timeout = "10s""#);
+    let err = Spec::parse_str(&empty_run).expect_err("a hook with no command is refused");
+    assert!(err.to_string().starts_with("spec.toml:8:"), "{err}");
+    assert!(err.to_string().contains("must name a command"), "{err}");
+
+    let bad_timeout = hook_spec(
+        r#"on = ["fault"]"#,
+        r#"run = ["./hooks/notify.sh"]"#,
+        r#"timeout = "10 seconds""#,
+    );
+    let err = Spec::parse_str(&bad_timeout).expect_err("an unparseable bound is refused");
+    assert!(err.to_string().starts_with("spec.toml:9:"), "{err}");
+    assert!(err.to_string().contains("10 seconds"), "{err}");
+}
+
 #[test]
 fn type_error_has_line_number() {
     let err = Spec::parse_str(&format!(

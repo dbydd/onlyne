@@ -318,26 +318,36 @@ rows_any "$tmp/sessions.json" public_lifecycle exited || fail "sessions public_l
 [ "$(row_value "$tmp/sessions.json" outcome)" = "blocked" ] \
   || fail "a turn that never completed must settle blocked, not done" "$sessions_out"
 # The turn-end rule's own journal: the ending that spends the delivery's single
-# nudge, then the blocked settlement. Both are client events in this role's
-# `events` table, and their order is what the rule took them in.
-if ! python3 - "$ws/.onlyne/client.db" "$task" <<'PY'
+# nudge, then the blocked settlement. Both are facts the client *published*, so
+# they are read back from the server's stream — the one owner of a published
+# event — and their order is what the rule took them in.
+"$ONLYNE" --server-root "$tmp/server" history --task "$task" --limit 500 > "$tmp/turn-end.json" 2>/dev/null \
+  || fail "history query failed" "$(cat "$tmp/turn-end.json" 2>/dev/null)"
+if ! python3 - "$tmp/turn-end.json" <<'PY'
 import json
-import sqlite3
 import sys
 
-db, task = sys.argv[1:3]
-rows = sqlite3.connect("file:%s?mode=ro" % db, uri=True).execute(
-    "SELECT type, data_json FROM events WHERE type IN (?, ?) ORDER BY seq",
-    ("turn_end_without_complete", "delivery_blocked"),
-).fetchall()
+# The history answer is `{"ok":true,"data":{"events":[...]}}`, each row the
+# server's own record: the class is the event's tag and the payload sits beside
+# it. The task filter is the server's, and the rows come in `seq` order.
+rows = json.load(open(sys.argv[1]))["data"]["events"]
+rows = [
+    row
+    for row in rows
+    if row["event"]["type"] in ("turn_end_without_complete", "delivery_blocked")
+]
 # The nudge is spent exactly once: the first ending carries `nudge: true` and
 # earns the delivery's one sentence, and the second ending carries `nudge:
 # false` and is the one the settlement follows. A rule that nudged twice, or
 # that settled on the first ending, is a different sequence than this one.
-endings = [json.loads(row[1]) for row in rows if row[0] == "turn_end_without_complete"]
+endings = [
+    row["event"]["data"]
+    for row in rows
+    if row["event"]["type"] == "turn_end_without_complete"
+]
 assert [ending["nudge"] for ending in endings] == [True, False], endings
-assert rows[-1][0] == "delivery_blocked", rows
-assert sum(1 for row in rows if row[0] == "delivery_blocked") == 1, rows
+assert rows[-1]["event"]["type"] == "delivery_blocked", rows
+assert sum(1 for row in rows if row["event"]["type"] == "delivery_blocked") == 1, rows
 print(
     "PASS acp-session turn-end: one nudge spent (turn_end_without_complete nudge=true "
     "then nudge=false), and the settlement that follows is the one delivery_blocked"
@@ -345,7 +355,7 @@ print(
 PY
 then
   fail "the turn-end rule must spend its one nudge and then settle blocked" \
-    "db=$db task=$task client=$(cat "$tmp/client.log" 2>/dev/null)"
+    "history=$(cat "$tmp/turn-end.json" 2>/dev/null) client=$(cat "$tmp/client.log" 2>/dev/null)"
 fi
 
 # The journal's two turns, semantically: the client's own dispatch record

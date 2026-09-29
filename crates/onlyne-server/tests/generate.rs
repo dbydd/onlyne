@@ -42,6 +42,7 @@ fn spec_with_roles(roles: &[&str]) -> Spec {
         client: roles.iter().map(|role| client_entry(role)).collect(),
         gateway: vec![],
         route: vec![],
+        hook: vec![],
     }
 }
 
