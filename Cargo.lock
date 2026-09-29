@@ -1132,6 +1132,7 @@ name = "onlyne-config"
 version = "1.4.1"
 dependencies = [
  "base64",
+ "onlyne-proto",
  "onlyne-wire",
  "schemars",
  "serde",

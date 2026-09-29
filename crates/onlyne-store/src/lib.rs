@@ -15,7 +15,7 @@ pub mod session;
 #[cfg(test)]
 mod tests;
 pub use client::{CLIENT_DDL, ClientStore, INTENT_FLUSH_BATCH_SIZE, IntentRow, TaskRow};
-pub use error::{StoreError, StoreResult, UNSUPPORTED_SCHEMA};
+pub use error::{StoreError, StoreResult};
 pub use server::{
     Append, CursorRow, EventRecord, FaultQuery, GhostSweepRow, LedgerRow, RoleRow, SERVER_DDL,
     ServerFaultRow, ServerLedger, ServerSessionRow, SessionBindingRow, SessionWrite, rfc3339,

@@ -99,9 +99,10 @@ to you and the spec file.
 
 An existing tree carries a store marker: the server's `state.db` names revision 6 and a
 client's `client.db` names revision 3. A marker answering another revision stops that daemon
-with `onlyne: unsupported schema; v1.0.0 does not migrate`, and a pre-v1 layout stops
-`onlyne client init` with exit 2 and `onlyne: legacy workspace layout; v1.0.0 does not
-migrate` before it writes anything.
+with a sentence naming the revision it found, and a pre-v1 layout stops `onlyne client init`
+before it writes anything. Both exit 6, the code reserved for "this build will not start on a
+file from another revision"; there is no `migrate` command, so the operator moves the old file
+aside and starts again.
 
 ## Dispatch flows downhill
 

@@ -3,7 +3,7 @@
   "no_socket": "onlyne: no onlyne socket found; pass --socket, --server-root, or --workspace",
   "binary_not_found_template": "onlyne: binary not found: <name>",
   "binary_not_found_example": "onlyne: binary not found: onlyne-server",
-  "legacy_workspace": "onlyne: legacy workspace layout; v1.0.0 does not migrate",
-  "unsupported_schema": "onlyne: unsupported schema; v1.0.0 does not migrate",
+  "legacy_workspace": "onlyne: the pre-v1 table(s) io_cursors table; this build does not migrate a workspace — point the client at a workspace `onlyne-client init` has written, and keep this one for reference",
+  "unsupported_schema": "onlyne: the server database carries schema revision 4, which this build cannot read; v2 starts on an empty ledger and rewrites nothing — move the old file aside and start again",
   "causality_required_control": "causality is required for kind control"
 }

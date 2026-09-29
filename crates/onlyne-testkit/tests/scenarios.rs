@@ -1173,11 +1173,13 @@ allowed_targets = ["worker"]"#,
     );
 }
 
-/// Scenario 8: Legacy layout refusal (old workspace layout exits 2 with fixed refusal text)
+/// Scenario 8: Refusal on a workspace from an older layout
 ///
 /// Asserts: onlyne-client init on a workspace with channels/ directory or state.db
-/// containing legacy markers exits with code 2 and exact text "onlyne: legacy workspace
-/// layout; v1.0.0 does not migrate".
+/// containing legacy markers exits with the migration code, and the refusal names
+/// both the marker that decided it and the way forward. The wording itself is not
+/// the contract: the sentence used to name a product version and tell the reader
+/// nothing they could act on.
 ///
 /// Supersedes: crates/onlyne-testkit/e2e/legacy-layout.sh
 #[tokio::test]
@@ -1209,16 +1211,20 @@ async fn scenario_08_legacy_layout_refusal() {
 
     assert_eq!(
         output.status.code(),
-        Some(2),
-        "init must exit 2 on legacy layout"
+        Some(onlyne_proto::EXIT_NEEDS_MIGRATION),
+        "init must exit with the migration code on a workspace from an older layout"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        stderr.trim(),
-        "onlyne: legacy workspace layout; v1.0.0 does not migrate"
+    assert!(
+        stderr.contains("channels directory"),
+        "the refusal must name the marker that decided it: {stderr}"
+    );
+    assert!(
+        stderr.contains("onlyne-client init"),
+        "the refusal must name the remedy: {stderr}"
     );
 
-    println!("✓ Scenario 8: legacy layout refusal [exit 2, exact refusal text]");
+    println!("✓ Scenario 8: older-layout refusal [exit 6, names marker and remedy]");
 }
 
 /// Scenario 9: Heartbeat watch (role connected, session silent, fault recorded)

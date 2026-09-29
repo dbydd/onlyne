@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use onlyne_config::Spec;
-use onlyne_config::layout::{LEGACY_WORKSPACE_MESSAGE, RoleWorkspace, ServerRoot, detect_legacy};
+use onlyne_config::layout::{RoleWorkspace, ServerRoot, detect_legacy};
 use onlyne_net::KeyPair;
 use std::path::{Path, PathBuf};
 
@@ -46,6 +46,23 @@ pub struct InitArgs {
     pub prose: String,
 }
 
+/// The workspace `init` was pointed at is one this build will not write into.
+///
+/// A type rather than a string, because the caller answers it with its own exit
+/// code: refusing to start on a tree from another revision is a different
+/// situation from a run that failed, and a supervisor needs to tell them apart.
+/// Matching on `"legacy workspace"` compared a sentence.
+#[derive(Debug)]
+pub struct LegacyWorkspace;
+
+impl std::fmt::Display for LegacyWorkspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("legacy workspace")
+    }
+}
+
+impl std::error::Error for LegacyWorkspace {}
+
 /// the reconnect window `init` seeds (as a comment) among the top-level keys of
 /// a fresh workspace config, above the `[server]` header beside `backend`. The
 /// key and its default are the ones `onlyne-config`'s `ClientConfig` declares,
@@ -83,9 +100,12 @@ fn server_section(root: &Path) -> Result<(String, String, String)> {
 }
 
 pub async fn init(args: InitArgs) -> Result<String> {
-    if detect_legacy(&args.workspace).is_some() {
-        eprint!("{LEGACY_WORKSPACE_MESSAGE}");
-        return Err(anyhow!("legacy workspace"));
+    if let Some(reason) = detect_legacy(&args.workspace) {
+        eprintln!(
+            "{}",
+            onlyne_proto::legacy_workspace_message(&[reason.to_string()])
+        );
+        return Err(anyhow::Error::new(LegacyWorkspace));
     }
     let workspace = RoleWorkspace::resolve(&args.workspace);
     workspace.bootstrap()?;

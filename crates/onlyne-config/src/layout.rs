@@ -18,12 +18,12 @@ use std::{
 
 use onlyne_wire::socket::{SOCKET_FILE_NAME, SocketEndpoint, create_dir};
 
-/// Exit code for binaries that refuse a legacy workspace layout.
-pub const LEGACY_WORKSPACE_EXIT_CODE: i32 = 2;
-
-/// Byte-exact legacy refusal text printed by binaries before exit 2.
-pub const LEGACY_WORKSPACE_MESSAGE: &str =
-    "onlyne: legacy workspace layout; v1.0.0 does not migrate";
+/// Exit code for binaries that refuse a workspace from an older layout.
+///
+/// The same code the schema refusal takes, because it is the same situation
+/// read from the other end: this build will not start on a tree it did not
+/// write, and no command converts one.
+pub const LEGACY_WORKSPACE_EXIT_CODE: i32 = onlyne_proto::EXIT_NEEDS_MIGRATION;
 
 /// Legacy marker that makes v1 bootstrap abort.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,8 +80,15 @@ pub fn detect_legacy_with_probe(
 }
 
 /// Print the legacy refusal message and terminate the process.
-pub fn exit_legacy_workspace() -> ! {
-    eprintln!("{LEGACY_WORKSPACE_MESSAGE}");
+///
+/// The sentence names the marker that decided it, so an operator who has two
+/// candidate directories can tell which one was refused without reading the
+/// source.
+pub fn exit_legacy_workspace(reason: LegacyReason) -> ! {
+    eprintln!(
+        "{}",
+        onlyne_proto::legacy_workspace_message(&[reason.to_string()])
+    );
     std::process::exit(LEGACY_WORKSPACE_EXIT_CODE);
 }
 
@@ -243,8 +250,8 @@ impl ServerRoot {
     /// runtime directory, which [`bind_socket`] creates and verifies; call
     /// [`apply_private_mode`](onlyne_wire::socket::apply_private_mode) after writing `key_path()`.
     pub fn bootstrap(&self) -> io::Result<()> {
-        if detect_legacy(&self.root).is_some() {
-            exit_legacy_workspace();
+        if let Some(reason) = detect_legacy(&self.root) {
+            exit_legacy_workspace(reason);
         }
         create_dir(&self.onlyne, None)?;
         create_dir(&self.run_dir(), Some(0o700))?;
@@ -400,8 +407,8 @@ impl RoleWorkspace {
     /// runtime directory, which [`bind_socket`] creates and verifies; call
     /// [`apply_private_mode`](onlyne_wire::socket::apply_private_mode) after writing `key_path()`.
     pub fn bootstrap(&self) -> io::Result<()> {
-        if detect_legacy(&self.root).is_some() {
-            exit_legacy_workspace();
+        if let Some(reason) = detect_legacy(&self.root) {
+            exit_legacy_workspace(reason);
         }
         create_dir(&self.onlyne, None)?;
         create_dir(&self.run_dir(), Some(0o700))?;
@@ -454,17 +461,33 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     #[test]
-    fn legacy_refusal_message_is_byte_exact_without_trailing_newline() {
-        let expected = "onlyne: legacy workspace layout; v1.0.0 does not migrate";
-        assert_eq!(LEGACY_WORKSPACE_MESSAGE, expected);
-        assert!(!LEGACY_WORKSPACE_MESSAGE.ends_with('\n'));
-        assert_eq!(
-            LEGACY_WORKSPACE_MESSAGE.as_bytes(),
-            b"onlyne: legacy workspace layout; v1.0.0 does not migrate"
+    fn the_legacy_refusal_names_the_marker_and_the_remedy() {
+        // Not a byte pin. The sentence has to do two things an operator can act
+        // on — say which marker decided it, and say what to do instead — and the
+        // exact wording is free to change. A test that froze the old string
+        // would have kept "v1.0.0 does not migrate", which names the wrong
+        // product and offers no way forward.
+        let message =
+            onlyne_proto::legacy_workspace_message(&[LegacyReason::IoCursorsTable.to_string()]);
+        assert!(
+            message.contains("io_cursors"),
+            "the refusal does not name the marker: {message}"
         );
+        assert!(
+            message.contains("onlyne-client init"),
+            "the refusal names no remedy: {message}"
+        );
+        assert!(!message.ends_with('\n'), "the refusal ends with a newline");
+    }
+
+    #[test]
+    fn the_legacy_refusal_and_the_schema_refusal_share_one_exit_code() {
+        // A supervisor reads one code off either refusal, so a workspace from
+        // an older layout and a database from an older revision must not look
+        // like two different problems to whatever is watching the process.
         assert_eq!(
-            format!("{LEGACY_WORKSPACE_MESSAGE}\n").len(),
-            expected.len() + 1
+            LEGACY_WORKSPACE_EXIT_CODE,
+            onlyne_proto::EXIT_NEEDS_MIGRATION
         );
     }
 

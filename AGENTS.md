@@ -230,14 +230,35 @@ session. Task bodies travel only in `assign`.
 
 Exit codes used by user-facing commands:
 
-- 2: legacy workspace layout
+- 2: local validation failure — a bad flag, an unknown verb, a missing gate flag
 - 3: socket resolution failure
 - 4: template, generation, or operator-input refusal
 - 5: no supported terminal host found
+- 6: this build refuses to start on a database or workspace from another revision
 - 127: missing binary
 
-Refusal text is a contract. A test that pins a fixed refusal line is pinning behavior, not
-wording, and stays.
+`6` is separate from `1` on purpose. `1` is "this run failed" and covers a dead peer and a
+refused op; a file from another revision fails the same way forever, so a supervisor has to be
+able to tell the two apart.
+
+### The v2 upgrade path
+
+v2 has no migration command, and that is the decision rather than an omission. A cluster is
+drained, the old files are moved aside by hand, and the new build starts on an empty ledger.
+Nothing is rewritten and no history is converted.
+
+What v2 owes the operator instead is an accurate refusal. Each one names what was found, which
+file it was found in, and what to do next:
+
+- a database whose marker names another schema or protocol revision, or which carries a table
+  this build does not know;
+- a workspace carrying the pre-v1 layout.
+
+The sentence does not name a product version. "unsupported schema; v1.0.0 does not migrate"
+told a v2 operator which *old* product they had, and nothing they could act on.
+
+Tests assert that a refusal names the marker and the remedy, not its exact bytes: freezing a
+sentence pins wording, and the two facts above are the behavior.
 
 ## 9. Ownership of facts
 
@@ -357,11 +378,13 @@ Server database: `schema_marker`, `roles`, `sessions`, `session_tasks`, `ledger`
 Client database: `schema_marker`, `sessions`, `session_tasks`, `task`, `intents`,
 `out_head_cache`, `prose_cache`, `config_cache`.
 
-Both databases take a version bump in v2. A v1 database is refused with a pointer to
-`onlyne migrate`, which handles configuration — splitting `backend` into the spec's
-`drive` and the workspace config's `placement`, adding `[client.session]` — and rebuilds
-role workspaces. Ledger history does not migrate: v2 starts on an empty database and the
-v1 file stays beside it for reading. Drain the cluster before upgrading.
+Both databases take a version bump in v2, and there is no `onlyne migrate`: the upgrade is
+manual. Drain the cluster, move the old `state.db` and `client.db` aside, and start again —
+v2 writes a fresh ledger and the old files stay where they are for reading. The one piece of
+configuration that cannot be read past is the fused `backend` key, and it is refused by name:
+`acp` named a drive, `herdr` named a placement, and no reader can split the value. It becomes
+`drive` in the spec's `[client.runtime]` and `placement` in the workspace's `config.toml`,
+alongside a new `[client.session]` table. See §8a for what the refusal says.
 
 ## 14. Events
 

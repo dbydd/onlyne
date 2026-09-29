@@ -15,7 +15,7 @@ locally, because the other side of the interface is being written at the same ti
 - A refusal is a contract: its code and its text are asserted by tests. Do not reword one
   without changing the test in the same change.
 - Schema changes bump the marker in the same change that changes the DDL, and the
-  `unsupported schema` refusal stays byte-exact.
+  refusal names the revision it found beside the one this build wants.
 - Every slice leaves the workspace green: `cargo fmt --all --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
 
@@ -162,8 +162,11 @@ externally visible contract:
   `updated_at`, publishes no event, and still answers a reader with the `last_seen` it
   holds.
 
-A v1 database (marker 4 server / 2 client) is refused with the byte-exact
-`onlyne: unsupported schema; v1.0.0 does not migrate`.
+A v1 database (marker 4 server / 2 client) is refused with a sentence naming the
+revision it carries, the database it is, and the manual path: the old file stays, the
+new build starts on an empty ledger. There is no `migrate` verb. The exit code is
+`EXIT_NEEDS_MIGRATION` (6), shared with the older-layout refusal, so a supervisor can
+tell "this file is not mine" from "this run failed".
 
 ---
 

@@ -97,6 +97,16 @@ mod ledger_gates {
         assert_eq!(marker, ("onlyne-client".to_string(), 3, 1));
     }
 
+    /// The schema revision a file this build wrote carries, read back from the
+    /// file rather than from a constant, so a refusal assertion states what the
+    /// operator is told against the revision that is actually current.
+    fn marker_version(path: &std::path::Path) -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row("SELECT version FROM schema_marker", [], |r| r.get(0))
+            .unwrap()
+    }
+
     #[test]
     fn server_refuses_legacy_and_wrong_marker() {
         let (_dir, legacy_path) = temp_db("server-legacy.db");
@@ -104,7 +114,16 @@ mod ledger_gates {
         conn.execute("CREATE TABLE io_cursors(id TEXT PRIMARY KEY)", [])
             .unwrap();
         let err = ServerLedger::open(&legacy_path, 14).unwrap_err();
-        assert_eq!(err.to_string(), crate::UNSUPPORTED_SCHEMA);
+        assert_eq!(
+            err,
+            StoreError::unsupported_schema(
+                "server",
+                onlyne_proto::SchemaMismatch::LegacyTables {
+                    names: vec!["io_cursors".to_string()]
+                }
+            ),
+            "a pre-v1 table is reported as itself, not as a generic refusal"
+        );
 
         let (_dir, marker_path) = temp_db("server-marker.db");
         let conn = Connection::open(&marker_path).unwrap();
@@ -115,7 +134,22 @@ mod ledger_gates {
         )
         .unwrap();
         let err = ServerLedger::open(&marker_path, 14).unwrap_err();
-        assert_eq!(err.to_string(), crate::UNSUPPORTED_SCHEMA);
+        // The revision the file carries is the half the operator acts on, so the
+        // refusal carries it rather than a bare "unsupported". The revision it
+        // asks for is read back out of a file this build just wrote, so the
+        // assertion cannot drift when the schema moves on.
+        let (_fresh_dir, fresh_path) = temp_db("server-fresh.db");
+        ServerLedger::open(&fresh_path, 14).unwrap();
+        assert_eq!(
+            err,
+            StoreError::unsupported_schema(
+                "server",
+                onlyne_proto::SchemaMismatch::Version {
+                    found: 4,
+                    expected: marker_version(&fresh_path)
+                }
+            )
+        );
     }
 
     #[test]
@@ -125,7 +159,18 @@ mod ledger_gates {
         conn.execute("CREATE TABLE io_cursors(id TEXT PRIMARY KEY)", [])
             .unwrap();
         let err = ClientStore::open(&legacy_path).unwrap_err();
-        assert_eq!(err.to_string(), crate::UNSUPPORTED_SCHEMA);
+        // The client and the server share one gate, so the sentence names which
+        // database refused: a client that says "the server database" sends an
+        // operator to the wrong tree.
+        assert_eq!(
+            err,
+            StoreError::unsupported_schema(
+                "client",
+                onlyne_proto::SchemaMismatch::LegacyTables {
+                    names: vec!["io_cursors".to_string()]
+                }
+            )
+        );
 
         let (_dir, marker_path) = temp_db("client-marker.db");
         let conn = Connection::open(&marker_path).unwrap();
@@ -136,7 +181,18 @@ mod ledger_gates {
         )
         .unwrap();
         let err = ClientStore::open(&marker_path).unwrap_err();
-        assert_eq!(err.to_string(), crate::UNSUPPORTED_SCHEMA);
+        let (_fresh_dir, fresh_path) = temp_db("client-fresh.db");
+        ClientStore::open(&fresh_path).unwrap();
+        assert_eq!(
+            err,
+            StoreError::unsupported_schema(
+                "client",
+                onlyne_proto::SchemaMismatch::Version {
+                    found: 2,
+                    expected: marker_version(&fresh_path)
+                }
+            )
+        );
     }
 
     #[test]

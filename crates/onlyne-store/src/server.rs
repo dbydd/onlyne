@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use onlyne_proto::text::SchemaMismatch;
 use onlyne_proto::{
     Envelope, Event, FaultEvent, LedgerQuery, LedgerState, LedgerStateEvent, Lifecycle, MsgKind,
     Outcome, Principal, QueryFaultsArgs, QuerySessionsArgs,
@@ -481,7 +482,13 @@ pub struct ServerLedger {
 impl ServerLedger {
     pub fn open(path: impl AsRef<Path>, retention_days: u32) -> StoreResult<Self> {
         let path = path.as_ref().to_path_buf();
-        let conn = open_connection(&path, SERVER_MARKER, SERVER_DDL, SERVER_SCHEMA_VERSION)?;
+        let conn = open_connection(
+            &path,
+            "server",
+            SERVER_MARKER,
+            SERVER_DDL,
+            SERVER_SCHEMA_VERSION,
+        )?;
         // The writer above ran the schema gate — the marker check, the DDL, the
         // in-place column adds — so the readers below only ever open a file
         // this process has already accepted.
@@ -1415,6 +1422,7 @@ impl ReadPool {
 /// that a change to either DDL would invalidate for both.
 pub(crate) fn open_connection(
     path: &Path,
+    which: &'static str,
     marker: &str,
     ddl: &str,
     schema_version: i64,
@@ -1425,19 +1433,28 @@ pub(crate) fn open_connection(
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_millis(5000))?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-    ensure_schema(&conn, marker, ddl, schema_version)?;
+    ensure_schema(&conn, which, marker, ddl, schema_version)?;
     Ok(conn)
 }
 
 fn ensure_schema(
     conn: &Connection,
+    which: &'static str,
     marker: &str,
     ddl: &str,
     schema_version: i64,
 ) -> StoreResult<()> {
     let tables = user_tables(conn)?;
-    if tables.iter().any(|name| is_legacy_table(name)) {
-        return Err(StoreError::unsupported_schema());
+    let legacy: Vec<String> = tables
+        .iter()
+        .filter(|name| is_legacy_table(name))
+        .cloned()
+        .collect();
+    if !legacy.is_empty() {
+        return Err(StoreError::unsupported_schema(
+            which,
+            SchemaMismatch::LegacyTables { names: legacy },
+        ));
     }
     conn.execute_batch(SCHEMA_MARKER_DDL)?;
     let marker_row = conn
@@ -1448,13 +1465,40 @@ fn ensure_schema(
         )
         .optional()?;
     match marker_row {
-        Some((version, PROTOCOL_VERSION)) if version == schema_version => {}
-        Some(_) => return Err(StoreError::unsupported_schema()),
+        Some((version, protocol)) if version == schema_version && protocol == PROTOCOL_VERSION => {}
+        Some((version, protocol)) => {
+            // The two revisions are reported apart: a file from an older build
+            // and a file from a build that speaks another protocol are different
+            // problems, and an operator who is told only "unsupported" has to
+            // guess which one they have.
+            return Err(if version != schema_version {
+                StoreError::unsupported_schema(
+                    which,
+                    SchemaMismatch::Version {
+                        found: version,
+                        expected: schema_version,
+                    },
+                )
+            } else {
+                StoreError::unsupported_schema(
+                    which,
+                    SchemaMismatch::Protocol {
+                        found: protocol,
+                        expected: PROTOCOL_VERSION,
+                    },
+                )
+            });
+        }
         None => {
             let marker_count: i64 =
                 conn.query_row("SELECT COUNT(*) FROM schema_marker", [], |r| r.get(0))?;
             if marker_count > 0 || !tables.is_empty() {
-                return Err(StoreError::unsupported_schema());
+                return Err(StoreError::unsupported_schema(
+                    which,
+                    SchemaMismatch::NotEmpty {
+                        tables: tables.len(),
+                    },
+                ));
             }
             conn.execute(
                 "INSERT INTO schema_marker(name,version,protocol_version) VALUES(?,?,?)",

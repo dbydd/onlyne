@@ -1,29 +1,42 @@
 use std::fmt;
 
-pub const UNSUPPORTED_SCHEMA: &str = "onlyne: unsupported schema; v1.0.0 does not migrate";
+use onlyne_proto::text::{SchemaMismatch, unsupported_schema_message};
 
 pub type StoreResult<T> = std::result::Result<T, StoreError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
-    UnsupportedSchema(String),
+    /// The file is not one this build can open, and `which` names it: `"server"`
+    /// or `"client"`. The reason travels with the error so the sentence can
+    /// name the revision that was found, which is the half an operator acts on.
+    UnsupportedSchema {
+        /// Which database refused the open.
+        which: &'static str,
+        /// What the marker or the table list actually said.
+        mismatch: SchemaMismatch,
+    },
     NotFound,
     Busy,
     Sqlite(String),
     Serialization(String),
-    InvalidState { from: String, to: String },
+    InvalidState {
+        from: String,
+        to: String,
+    },
 }
 
 impl StoreError {
-    pub(crate) fn unsupported_schema() -> Self {
-        StoreError::UnsupportedSchema(UNSUPPORTED_SCHEMA.to_string())
+    pub(crate) fn unsupported_schema(which: &'static str, mismatch: SchemaMismatch) -> Self {
+        StoreError::UnsupportedSchema { which, mismatch }
     }
 }
 
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StoreError::UnsupportedSchema(message) => f.write_str(message),
+            StoreError::UnsupportedSchema { which, mismatch } => {
+                f.write_str(&unsupported_schema_message(which, mismatch))
+            }
             StoreError::NotFound => f.write_str("not found"),
             StoreError::Busy => f.write_str("database busy"),
             StoreError::Sqlite(message) => write!(f, "sqlite: {message}"),

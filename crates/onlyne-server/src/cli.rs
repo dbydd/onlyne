@@ -315,7 +315,7 @@ async fn run_command(root: &Path, output: Output) -> i32 {
         Ok(server) => server,
         Err(error) => {
             eprintln!("onlyne-server: {error:#}");
-            return 1;
+            return exit_for(&error);
         }
     };
     if output.json {
@@ -335,9 +335,24 @@ async fn run_command(root: &Path, output: Output) -> i32 {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("onlyne-server: {error:#}");
-            1
+            exit_for(&error)
         }
     }
+}
+
+/// The exit code one startup failure earns.
+///
+/// A database this build cannot read is not "this run failed" — retrying it
+/// unchanged fails the same way forever — so it takes its own code and a
+/// supervisor can stop asking. Everything else is a plain failure.
+fn exit_for(error: &anyhow::Error) -> i32 {
+    if error
+        .downcast_ref::<onlyne_store::StoreError>()
+        .is_some_and(|store| matches!(store, onlyne_store::StoreError::UnsupportedSchema { .. }))
+    {
+        return onlyne_proto::EXIT_NEEDS_MIGRATION;
+    }
+    1
 }
 
 /// The registration `root`'s daemon published, when one is readable.

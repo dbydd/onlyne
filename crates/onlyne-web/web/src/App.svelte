@@ -5,7 +5,7 @@
   import GridView from './lib/components/GridView.svelte';
   import GraphView from './lib/components/GraphView.svelte';
   import { connect, app } from './lib/store.svelte';
-  import { degraded } from './lib/layout';
+  import { degraded, routesOf } from './lib/layout';
   import type { ClusterSummary } from './gen/View';
 
   let token = $state('');
@@ -24,6 +24,11 @@
   });
 
   const cluster = $derived((app.view.cluster ?? {}) as ClusterSummary);
+  // The header counts the edges the graph draws, not the server's `[[route]]`
+  // table. The contract calls `allowed_targets` the allowed route
+  // (`docs/v2-CONTRACT.md` §Slice 10), so a header reading the other table said
+  // "0 routes" above a graph with two edges drawn on it.
+  const routes = $derived(routesOf(app.boards).length);
   const effective = $derived(dense ? 'grid' : app.mode);
   const lastEvent = $derived(app.view.event_tail?.[0]);
 </script>

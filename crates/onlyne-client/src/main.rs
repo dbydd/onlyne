@@ -114,6 +114,14 @@ enum AgentCommand {
     },
 }
 
+/// Whether this failure is a database this build cannot read, which is a
+/// refusal to start rather than a run that failed.
+fn is_schema_refusal(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<onlyne_store::StoreError>()
+        .is_some_and(|store| matches!(store, onlyne_store::StoreError::UnsupportedSchema { .. }))
+}
+
 #[tokio::main]
 async fn main() {
     init_logging();
@@ -136,7 +144,15 @@ async fn main() {
                 print!("{fragment}");
                 0
             }
-            Err(error) if error.to_string() == "legacy workspace" => 2,
+            Err(error)
+                if error
+                    .downcast_ref::<onlyne_client::ops::init::LegacyWorkspace>()
+                    .is_some() =>
+            {
+                // The sentence was already printed by `init`, which knows which
+                // marker decided it. This only picks the code.
+                onlyne_proto::EXIT_NEEDS_MIGRATION
+            }
             Err(error) => {
                 eprintln!("onlyne-client: {error}");
                 1
@@ -186,6 +202,10 @@ async fn main() {
                     {
                         eprintln!("{error}");
                         5
+                    }
+                    Err(error) if is_schema_refusal(&error) => {
+                        eprintln!("onlyne-client: {error:#}");
+                        onlyne_proto::EXIT_NEEDS_MIGRATION
                     }
                     Err(error) => {
                         // `:#` prints the whole chain, which is where a bind
@@ -304,7 +324,12 @@ fn local_roles(workspace: &Path) -> i32 {
         Ok(store) => store,
         Err(error) => {
             eprintln!("onlyne-client: {error}");
-            return 1;
+            return match error {
+                onlyne_store::StoreError::UnsupportedSchema { .. } => {
+                    onlyne_proto::EXIT_NEEDS_MIGRATION
+                }
+                _ => 1,
+            };
         }
     };
     let cli = LocalCli::new(IntentMachine::new(store, 0, Vec::new()));

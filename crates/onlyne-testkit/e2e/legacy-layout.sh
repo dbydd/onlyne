@@ -20,8 +20,13 @@ set +e
 out=$("$client" init --workspace "$dir" --role planner --server-root "$tmp/no-server" 2>"$tmp/stderr.txt")
 code=$?
 set -e
-[ "$code" = "2" ] || fail "init must exit 2 on legacy layout, got $code" "$out$(cat "$tmp/stderr.txt")"
-[ "$(cat "$tmp/stderr.txt")" = "onlyne: legacy workspace layout; v1.0.0 does not migrate" ] || fail "stderr must be byte-exact legacy refusal" "$(cat "$tmp/stderr.txt")"
+[ "$code" = "6" ] || fail "init must exit 6 on a workspace from an older layout, got $code" "$out$(cat "$tmp/stderr.txt")"
+# The refusal has to name the marker that decided it and the way forward; the
+# exact wording is not the contract, so it is checked for those two facts rather
+# than frozen. A v1 sentence naming a product version told the reader nothing
+# they could act on.
+grep -q "channels directory" "$tmp/stderr.txt" || fail "the refusal must name the marker" "$(cat "$tmp/stderr.txt")"
+grep -q "onlyne-client init" "$tmp/stderr.txt" || fail "the refusal must name the remedy" "$(cat "$tmp/stderr.txt")"
 after=$(cd "$tmp" && find legacy | sort)
 [ "$before" = "$after" ] || fail "no file may be created on legacy refusal" "$(diff <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
 echo "PASS legacy-layout"

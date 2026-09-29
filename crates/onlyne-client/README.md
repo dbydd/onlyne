@@ -48,7 +48,7 @@ operators read; nothing binds there.
 removes it: a registration outliving its surface is what an external runtime's
 plugin reads as a live client.
 
-`init` never writes `spec.toml`. A workspace holding the pre-v1 layout is refused before any write: exit 2 and the byte-exact line `onlyne: legacy workspace layout; v1.0.0 does not migrate`.
+`init` never writes `spec.toml`. A workspace holding the pre-v1 layout is refused before any write: exit 6, and one line naming the marker that decided it plus the way forward. There is no `migrate` command — point the client at a workspace `init` has written and keep the old one for reference.
 
 Three config values take a `$NAME` spelling: `cert_pin`, `key_path`, and `[server] host`. At startup `run` reads the environment variable named after the `$`, then puts its value where the config line sits. The gateway plugins use that same idiom for platform tokens. A name the environment carries no value for — absent, or present and blank — stops the launch with exit 1 and one line on stderr naming both the field and the variable: `onlyne-client: missing secret $ONLYNE_CERT for cert_pin; set the environment variable`. A value with no leading `$` travels verbatim, so a literal `$` inside a value stays part of the string.
 
@@ -266,7 +266,7 @@ Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind
 
 `run` 先绑定 socket，再发布注册文件，运行结束时将其删除：一份比其服务面活得更久的注册文件，正是外部运行时插件读作"客户端在线"的依据。
 
-`init` 绝不会写入 `spec.toml`。如果工作区采用 v1 之前的布局，程序会在任何写入之前拒绝处理：退出码为 2，并逐字节输出 `onlyne: legacy workspace layout; v1.0.0 does not migrate`。
+`init` 绝不会写入 `spec.toml`。如果工作区采用 v1 之前的布局，程序会在任何写入之前拒绝处理：退出码为 6，并输出一行，指明决定它的标志以及下一步该做什么。没有 `migrate` 子命令——把 client 指向 `init` 写出的工作区，旧的那份留作参考。
 
 三个配置值支持 `$NAME` 写法：`cert_pin`、`key_path` 和 `[server] host`。启动时，`run` 读取以 `$` 之后名称命名的环境变量，再把其值填入配置行所在位置。网关插件也以相同方式处理平台令牌。如果某个名称对应的环境变量没有值——不存在，或存在但为空白——启动会停止，退出码为 1，并在 stderr 输出一行，同时指明字段和变量：`onlyne-client: missing secret $ONLYNE_CERT for cert_pin; set the environment variable`。不以 `$` 开头的值会原样传递，因此值中的字面量 `$` 仍是字符串的一部分。
 

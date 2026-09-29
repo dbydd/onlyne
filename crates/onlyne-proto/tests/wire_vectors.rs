@@ -558,10 +558,22 @@ fn protocol_text_vectors_match_the_crate_constants() {
 
     assert_eq!(string("op_id_conflict"), OP_ID_CONFLICT_MESSAGE);
     assert_eq!(string("no_socket"), text::NO_SOCKET_MESSAGE);
-    assert_eq!(string("legacy_workspace"), text::LEGACY_WORKSPACE_MESSAGE);
+    // The two refusals name what was found, so the vectors carry one concrete
+    // instance of each rather than a template: a reader comparing this file
+    // against the tree should see the sentence an operator actually gets.
+    assert_eq!(
+        string("legacy_workspace"),
+        text::legacy_workspace_message(&["io_cursors table".to_string()])
+    );
     assert_eq!(
         string("unsupported_schema"),
-        text::UNSUPPORTED_SCHEMA_MESSAGE
+        text::unsupported_schema_message(
+            "server",
+            &text::SchemaMismatch::Version {
+                found: 4,
+                expected: 6
+            }
+        )
     );
     assert_eq!(
         string("binary_not_found_example"),

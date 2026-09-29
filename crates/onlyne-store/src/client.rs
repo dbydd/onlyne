@@ -203,7 +203,13 @@ pub struct ClientStore {
 impl ClientStore {
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
         let path = path.as_ref().to_path_buf();
-        let conn = open_connection(&path, CLIENT_MARKER, CLIENT_DDL, CLIENT_SCHEMA_VERSION)?;
+        let conn = open_connection(
+            &path,
+            "client",
+            CLIENT_MARKER,
+            CLIENT_DDL,
+            CLIENT_SCHEMA_VERSION,
+        )?;
         Ok(Self {
             path,
             inner: Arc::new(Mutex::new(conn)),

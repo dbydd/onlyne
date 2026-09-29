@@ -74,8 +74,8 @@ pub use ops::{
 };
 
 pub use text::{
-    BINARY_NOT_FOUND_PREFIX, LEGACY_WORKSPACE_MESSAGE, NO_SOCKET_MESSAGE,
-    UNSUPPORTED_SCHEMA_MESSAGE, binary_not_found,
+    BINARY_NOT_FOUND_PREFIX, EXIT_NEEDS_MIGRATION, NO_SOCKET_MESSAGE, SchemaMismatch,
+    binary_not_found, legacy_workspace_message, unsupported_schema_message,
 };
 pub use view::{
     BoardColumn, Card, ClusterSummary, DeliveryAxis, DeliveryView, EVENT_TAIL_LIMIT,
