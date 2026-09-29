@@ -1,0 +1,46 @@
+[package]
+name = "onlyne-web"
+version = "1.4.1"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "The optional graphical front end: boards and the route graph over one view reducer"
+publish = false
+
+# This crate deliberately stands outside the workspace (`exclude` in the root
+# `Cargo.toml`): its dependency tree — axum and a Node-made bundle behind
+# `rust-embed` — is not something the core build should need. Dependencies are
+# pinned here, not inherited, for the same reason (`docs/v2-PLAN.md` line 391).
+
+[dependencies]
+onlyne-proto = { path = "../onlyne-proto" }
+onlyne-wire = { path = "../onlyne-wire" }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "time", "sync"] }
+rust-embed = { version = "8", features = ["compression"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"
+rand = "0.8"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tower = "0.5"
+
+[dev-dependencies]
+onlyne-testkit = { path = "../onlyne-testkit" }
+http-body-util = "0.1"
+tempfile = "3"
+chrono = { version = "0.4", features = ["serde"] }
+
+[build-dependencies]
+
+[lib]
+name = "onlyne_web"
+path = "src/lib.rs"
+
+[[bin]]
+name = "onlyne-web"
+path = "src/main.rs"
+
+[[bin]]
+name = "gen-schema"
+path = "src/bin/gen-schema.rs"

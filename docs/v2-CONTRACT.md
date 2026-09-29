@@ -737,3 +737,51 @@ what v1 shipped rather than adding to it.
   the plan's 1,500–2,500 band rather than v1's 4,765.
 - The render path cannot open a socket: the IO task is the only one that holds the admin
   connection, and a case proves a page renders from a `View` with no server running at all.
+
+## Slice 10: `onlyne-web` — the optional graphical front end
+
+The plan's §"网页前端 onlyne-web" (lines 353-391) is the design and it is specific. This slice
+implements it; the plan wins on any disagreement.
+
+### Shape
+
+- A **separately installed, optional** binary. It is **not** in the workspace's `default-members`,
+  so the core build never needs Node, and a build without the static assets **fails loudly**
+  rather than serving an empty page.
+- Svelte 5 + Vite, the bundle embedded with `rust-embed`. Dependencies: `onlyne-proto`,
+  `onlyne-wire`, `axum`, `tokio`, `rust-embed`.
+- Every role is a **board**; the board's columns are the joint projection of the two axes the
+  reducer keeps apart (queued, running, waiting, done, failed-or-blocked); a card is one delivery
+  and one family's cards are strung across boards by thin lines. The header carries the role's
+  busy / idle / suspended counts.
+- The graph renders boards as nodes and allowed routes as edges, zoomable, pannable, and
+  draggable, with a dragged line *adding* an allowed route — which is a `SpecApply` edit, not a
+  local drawing. Coordinates live in the front end's own display file; the spec holds semantics
+  only. Past a density threshold the edges are hidden and the boards become a grid, which is the
+  same view as the full-connected case.
+- Writing a task from the GUI is a send from the reserved `_supervisor` role, so receipts land
+  in a board rendered as the operator's.
+
+### The security floor is a requirement, not a preference
+
+The admin surface can send tasks, edit the spec and shut the cluster down, so:
+
+- bind `127.0.0.1` by default, and refuse to bind anything else without an explicit flag;
+- mint a random token at startup, print it, carry it in the `--open` URL, and verify it on
+  every request including the asset requests;
+- validate `Host` and `Origin` so a rebound name cannot reach it, and set no CORS headers at
+  all.
+
+### Acceptance
+
+- A browser session shows three roles as three boards with their counts and cards, built from
+  the snapshot and the same streaming subscribe the TUI uses — one reducer, two front ends, with
+  a case proving the web's rendered state comes from `onlyne_proto::view` and not a second fold.
+- A request without the token is refused; a request with a rebound `Host` is refused; a request
+  with a foreign `Origin` is refused; and no response carries a CORS header.
+- Writing a task from a board produces a `_supervisor` send and its receipt appears on the
+  operator's board.
+- Dragging an edge in the graph produces a `SpecApply` edit that a second browser sees after the
+  reload, and the spec's own comments survive the edit.
+- The crate builds without Node in the default workspace build, and `cargo build -p onlyne-web`
+  without the assets fails with a message naming what is missing.

@@ -3,6 +3,12 @@ resolver = "2"
 # `plugins/` holds only `onlyne-agent-pi`, a pure-Node package with no
 # Cargo.toml, so the member glob stays inside `crates/`.
 members = ["crates/*"]
+# The optional graphical front end builds its own dependency tree (axum, and a
+# Node-made bundle behind `rust-embed`), so it stays out of the workspace: the
+# core build — `cargo build` and `cargo build --workspace` alike — never needs
+# Node or axum, and `cargo build -p onlyne-web` inside `crates/onlyne-web` is
+# the step that does (`docs/v2-PLAN.md` line 391).
+exclude = ["crates/onlyne-web"]
 default-members = [
   "crates/onlyne-wire",
   "crates/onlyne-proto",

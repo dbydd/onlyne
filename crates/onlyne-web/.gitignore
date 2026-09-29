@@ -1,0 +1,11 @@
+# The optional front end's toolchain and its build output stay out of the index:
+# `node_modules` is installed by npm, and `assets/dist` is what `npm run build`
+# produces for `rust-embed` to embed. Neither is source, and the crate's build
+# script names the npm command when the bundle is missing — which is only a real
+# failure if the bundle is not committed.
+/node_modules/
+/web/node_modules/
+/web/schema/
+/web/src/gen/
+/target/
+/assets/
