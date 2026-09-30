@@ -345,10 +345,24 @@ in `spec.toml` can assert that half either; it is the agent's to keep.
 
 The tell that a pool is *not* being reused is a `role` role whose `onlyne sessions` shows
 a new `session_id` per delivery and none of them left standing. A pool that works looks
-like one row reading `lifecycle=idle` with `resource=attached` between deliveries. Before
-reading either as a client defect, check whether the agent process is still running —
-and read the client log for `the delivery joined the session its scope keeps for it`,
-which is the client's own line for a reuse and appears only when one happened.
+like one row reading `lifecycle=idle` with `resource=attached` between deliveries, and
+the client log carries `the delivery joined the session its scope keeps for it` once
+per reuse.
+
+**A pool that empties and a tab that never closes have one cause, and it reads like
+neither.** The scope rides the assignment as `assign.scope`, so a runtime can only act
+on it if the **client binary** stamps it — re-vendoring the plugin is not the same
+install. A client too old to stamp it sends a frame with no scope, the runtime reads
+that as `oneshot` by design, and every session then leaves on completion. The signature
+is unmistakable in the client log: `stays idle` followed three to seven seconds later
+by `retiring idle session resource`, for every delivery, with the tab going away each
+time. A pool that empties *and* a tab that closes together means the binary is behind,
+not that the two problems cancelled.
+
+The same log line is how a reclaimed resource looks from the outside: an `idle_close`
+non-zero on a runtime that declares no `resume` suspends a session that cannot be
+brought back, which reads as a pool member vanishing for no stated reason. So when a
+`role` pool misbehaves, read those two lines before reading anything else.
 
 ### Orca sessions
 
