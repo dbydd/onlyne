@@ -30,6 +30,10 @@ converted.
   `onlyne report check|write|path`, and no `onlyne-role-payload-v2` skill. A completion
   carries `summary` (one display line), `details` (the full result, delivered verbatim)
   and `files`; the ledger's 200-character head never reaches a model.
+- **`herdr` is gone.** Opening enough herdr panes wedges the system tty, so the
+  placement is removed rather than capped: the backend, `Placement::Herdr`, both
+  placement name lists, and the `herdr-live` e2e case. The probe order is `orca`,
+  then `zellij`, then `headless`. A workspace naming `herdr` is refused by name.
 
 **What a role sees change.** A delivery carries source and body and nothing else — no
 task id, hop, budget or generation in the text, and a tool call carries those
@@ -52,19 +56,33 @@ the plugin.
 - `[[hook]]`: an operator's script runs after an event is persisted, at-least-once.
 
 **Verification.** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
--- -D warnings` and `cargo test --workspace` are green; the scenario suite and the
-e2e scripts pass; and `pi-live.sh` ran against a real pi and a real model call, with
-the ledger reaching `acked` on the model's own summary.
+-- -D warnings` and `cargo test --workspace` are green at 1002 passing. `pi-live.sh` runs
+a real pi against a real model call: the ledger reaches `acked` on the model's own
+summary, the session projects `exited`/`done`, the rendered delivery and the role prose
+are in pi's own session file, and the client drains on SIGTERM. `orca-live.sh` builds a
+real Orca tab, drives a delivery through a plugin that mounted inside it, and asserts
+the tombstone and that nothing is left behind — four consecutive passes.
 
-**Known gap — a hosting runtime.** A runtime that owns its own sessions (DSH, any
-desktop agent that already manages many conversations) has an interface and a
-specification in `crates/onlyne-adapter/HOSTING-RUNTIME.md`, and four protocol gaps
-named there, none fixed: the connection is still a session (`assign` carries no
-`session_id`), `Mount` is still untagged where §8 of `AGENTS.md` says it is tagged,
-`Capability` has no `open`/`suspend`/`close`, and `MountKind` has no `cluster` or
-`bridge`. That runtime is being built against the spec on another line. The
-`plugin × external` placement and the registration files it discovers through are in
-the tree; what a hosting runtime needs on top of them is not.
+**A runtime that owns its sessions.** A runtime that was already resident — DSH, any
+desktop agent that already manages many conversations — cannot be handed a session,
+because there is no process to start. It declares `open`, `suspend` or `close`, and
+from then on the client asks: at mount the connection registers and is given nothing,
+and each session the role opens is put to it as an `open` request. The runtime answers
+with the name it calls that conversation and an opaque handle for finding it again; the
+client stores the handle without reading it and hands it back when the same family
+needs a session again. Nothing composes a history summary for a runtime that cannot
+resume, because a summary this process wrote is context the model never produced.
+
+This also changed what one connection means. A parked plugin connection used to be
+handed the next staged session and served that session alone; a standing one is asked,
+and serves every session the role opens. `assign` carries `session_id` for the routing,
+a mount is read as the variant its `kind` names, and `cluster` and `bridge` are kinds
+at last rather than variants with no name to declare.
+
+A runtime declaring none of the three capabilities is a spawned agent, and every path
+it takes is the one it took before. `crates/onlyne-adapter/HOSTING-RUNTIME.md` states
+the interface in full; the two gaps it still names are the connection's own identity
+and the runtime name a mount carries.
 
 ## 2.0.0（未发布）
 
@@ -91,6 +109,10 @@ v2 对路由层与会话层的重写。计划见 `docs/v2-PLAN.md`，状态见 `
   `onlyne report check|write|path`，也没有 `onlyne-role-payload-v2` skill。
   完成携带 `summary`（一行展示）、`details`（完整结果，原样送达）与 `files`；
   ledger 那 200 字符的预览永远不进入模型视野。
+- **`herdr` 下线。** 开够多的 herdr pane 会卡死系统 tty，所以是删掉这个 placement
+  而不是给它设上限：后端模块、`Placement::Herdr`、两个 placement 名单常量，以及
+  `herdr-live` 这个 e2e 用例全部移除。探测顺序变为 `orca` → `zellij` →
+  `headless`。工作区写 `herdr` 会被按名拒绝。
 
 **角色看到的东西变了。** 投递只带来源和正文——正文里没有 task id、hop、budget、
 generation，这些由工具调用自动携带。角色说明移出会话，进入运行时的指令层，压缩
@@ -110,14 +132,22 @@ reducer 重写为三页、无地图。新增 `SpecGet` / `SpecApply` 与一条�
 `pi-live.sh` 对真实 pi 和一次真实模型调用跑通，ledger 以模型自己的 summary 到达
 `acked`。
 
-**已知缺口——hosting 运行时。** 自己持有会话的运行时（DSH，或任何本来就管理多个
-对话的桌面 agent）的接口与协议规范在
-`crates/onlyne-adapter/HOSTING-RUNTIME.md`，其中列了四个协议缺口，均未修复：
-连接仍然等于会话（`assign` 不带 `session_id`）、`Mount` 仍是 untagged 而
-`AGENTS.md` §8 说它是 tagged 的、`Capability` 没有 `open`/`suspend`/`close`、
-`MountKind` 没有 `cluster` 与 `bridge`。该运行时在另一条线上对着这份规范开发。
-`plugin × external` 放置与它据以发现的注册文件已经在树里；hosting 运行时在其之上
-需要的部分还没有。
+**自己持有会话的运行时。** 一个本来就常驻的运行时——DSH，或任何本来就管理多个对话
+的桌面 agent——不能被「递交」一个会话，因为没有进程可供启动。它声明 `open`、
+`suspend` 或 `close`，此后 client 改为「询问」：连接在挂载时只登记，不拿到任何
+东西；这个角色要开的每个会话都以 `open` 请求送到它面前。运行时回答它自己管这个
+对话叫什么，以及一个日后找回它的 opaque handle；client 存下 handle 而不读它，
+同一家族下次需要会话时再交还。client 绝不为无法 resume 的运行时拼装历史摘要——
+client 自己写的摘要是模型从未产出过的上下文。
+
+这也改掉了一条连接的含义。原先 park 的插件连接会被递交下一个暂存会话、且只服务那
+一个会话；常驻连接是被询问的，服务这个角色开的每个会话。`assign` 带上了
+`session_id` 供路由，mount 按它 `kind` 指名的变体解码，`cluster` 与 `bridge` 终于
+是 kind，而不再是无法声明名字的变体。
+
+三个 capability 一个都不声明的运行时就是被启动的 agent，它走的每条路都和从前一样。
+`crates/onlyne-adapter/HOSTING-RUNTIME.md` 写完整接口；它仍然点名的两个缺口是连接
+自身的身份，以及 mount 携带的运行时名。
 
 ## 1.4.1 release index (English)
 
