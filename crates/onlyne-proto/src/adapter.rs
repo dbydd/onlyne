@@ -60,8 +60,32 @@ pub enum Capability {
     Typing,
     /// Enumerate real conversations during `register_channel`.
     Conversations,
-    /// Keep session conversation in the runtime store so its process can be released and resumed.
+    /// Keep session conversation in the runtime store so its process can be
+    /// released and resumed.
+    ///
+    /// This is a statement about a **spawned** runtime: the client started the
+    /// process, the conversation outlives it, and resuming means starting the
+    /// same argv again with the session's own key. It is not what a hosting
+    /// runtime does — a runtime that was already resident never released the
+    /// conversation, so it has nothing to resume. The three below are what
+    /// separates the two.
     Resume,
+    /// Open a session on request: the host asks this runtime for a conversation
+    /// and the runtime names one back.
+    ///
+    /// A runtime declaring it is **hosting**: it owns its sessions rather than
+    /// serving the one the client spawned it for, and the connection it holds is
+    /// this role's standing transport instead of one session's. A runtime
+    /// declaring none of the three is spawned, and everything the host does with
+    /// it is exactly what it did before.
+    Open,
+    /// Keep a session's process released while its conversation stays where the
+    /// runtime keeps it.
+    Suspend,
+    /// End a session, for the same reason [`Capability::Suspend`] exists and with
+    /// the same answer when it cannot: a refusal, never silence. A dropped
+    /// `close` reads to the host as a session that will not let go.
+    Close,
 }
 
 impl Capability {
@@ -75,10 +99,13 @@ impl Capability {
             Capability::Typing => "typing",
             Capability::Conversations => "conversations",
             Capability::Resume => "resume",
+            Capability::Open => "open",
+            Capability::Suspend => "suspend",
+            Capability::Close => "close",
         }
     }
 
-    pub const ALL: [Capability; 8] = [
+    pub const ALL: [Capability; 11] = [
         Capability::Register,
         Capability::Report,
         Capability::Inject,
@@ -87,7 +114,27 @@ impl Capability {
         Capability::Typing,
         Capability::Conversations,
         Capability::Resume,
+        Capability::Open,
+        Capability::Suspend,
+        Capability::Close,
     ];
+
+    /// The capabilities that make a runtime **hosting** rather than spawned.
+    ///
+    /// One of these three is the whole difference between a runtime that serves
+    /// the session the client started it for and one that owns its sessions and
+    /// is asked for them. The test is a declaration rather than a setting,
+    /// because the runtime is the only party that knows: a client that assumed
+    /// it could ask a pi process for a second conversation would find out from
+    /// silence.
+    pub const HOSTING: [Capability; 3] = [Capability::Open, Capability::Suspend, Capability::Close];
+
+    /// Whether this runtime declared that the host may ask it for a session.
+    pub fn is_hosting(capabilities: &[Capability]) -> bool {
+        Self::HOSTING
+            .iter()
+            .any(|wanted| capabilities.contains(wanted))
+    }
 }
 
 impl std::fmt::Display for Capability {
@@ -558,6 +605,49 @@ pub type WelcomeSlice = Welcome;
 mod tests {
     use super::*;
     use crate::envelope::{Body, MsgKind, Principal, new_envelope, new_task_id};
+
+    #[test]
+    fn every_capability_round_trips_through_its_wire_name() {
+        for capability in Capability::ALL {
+            let value = serde_json::to_value(capability).expect("encode");
+            assert_eq!(
+                value,
+                serde_json::Value::String(capability.as_str().to_string()),
+                "{capability} does not encode as its own name"
+            );
+            let back: Capability = serde_json::from_value(value).expect("decode");
+            assert_eq!(back, capability);
+        }
+    }
+
+    #[test]
+    fn a_runtime_is_hosting_only_by_declaring_one_of_the_three() {
+        // The declaration is the whole test. A client that assumed it could ask a
+        // pi process for a second conversation would find out from silence, so
+        // the side that knows — the runtime — has to say so, and a runtime that
+        // says nothing keeps every behaviour it had.
+        for capability in Capability::HOSTING {
+            assert!(
+                Capability::is_hosting(&[capability]),
+                "{capability} alone is a hosting declaration"
+            );
+        }
+        for spawned in [
+            vec![],
+            vec![Capability::Register, Capability::Report, Capability::Inject],
+            vec![
+                Capability::Register,
+                Capability::Report,
+                Capability::Inject,
+                Capability::Resume,
+            ],
+        ] {
+            assert!(
+                !Capability::is_hosting(&spawned),
+                "a runtime that declared none of the three is not hosting: {spawned:?}"
+            );
+        }
+    }
 
     fn note(text: &str) -> Envelope {
         new_envelope(
