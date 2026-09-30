@@ -149,12 +149,38 @@ onlyne --server-root <root> watch --follow --tier durable  # live stream; tiers:
   registered role is reachable; name a list there and the reach is exactly that list. The
   receiver's `allowed_senders` is read on no row of yours, so dispatch and repair start at
   `send`, with no spec edit first.
-- Keep inbound edges to your role on ring and worker edges only. A role that can message
-  `_supervisor` turns you into a work queue. When one task genuinely needs a live uplink,
-  add `_supervisor` to that role's `allowed_targets`, run `reload`, then drop the edge once
-  the task settles — grants are per task.
-- Completion receipts always reach the role the ledger records as origin, offline queueing
-  included. Reporting upward needs no standing edges at all.
+- `_supervisor` is your inbox, and a backlog is what an inbox is for. The entry is a logical
+  signature node: `command = []`, so no client ever dials it, no session is ever opened for
+  it, and it reads `offline` for the life of the cluster. That is not a broken role, not a
+  leak, and not dirty data. Your seat is yours to start and stop and it is longer-lived than
+  the swarm it supervises, so whatever arrived while you were gone is exactly what you came
+  back for. The ledger is durable, `onlyne --server-root <root> ledger` reads the whole
+  backlog, and `queued: N` on the role reads as "N items are waiting for me". Drain it first
+  on every start, before you dispatch anything new.
+- A supervisor that runs as a client — a real `command` naming a runtime — drains those same
+  rows by pulling them into its own session, and that is the right shape when you want the
+  work delivered rather than collected. It is the wrong shape when your lifetime is the
+  user's to manage, because a client-held inbox only holds what its own process was there to
+  take. A row sitting at `queued` for an hour is a message that arrived safely and is still
+  waiting.
+- Nothing wakes you. There is no resident process and no "deliver to me and I start", so
+  timeliness belongs to a hook rather than to the queue: bind `[[hook]]` to `ledger_state` and
+  filter the event on `data.to.role.role == "_supervisor"` to learn the moment work lands, and
+  let the script carry it to whatever is actually running. The worker set is read at server
+  start, so changing `[[hook]]` needs a restart.
+- The one thing that can shorten an inbox is a TTL you set yourself. `requeue_ttl_secs` under
+  `[server]` defaults to `0`, which expires nothing: a queued receipt for a role with no live
+  connection waits indefinitely. Set it positive and `_supervisor` — permanently disconnected —
+  has every queued receipt to it eligible for expiry once that TTL passes, so the clock reaches
+  your inbox whether or not you meant it to. That one setting is the whole of it: `--ttl` is
+  read only on a `--note` send, so a dispatched task carries no deadline of its own, and a row
+  that has already been handed out and returned is owned by its own requeue gate rather than by
+  the TTL.
+- Completion receipts for a task you dispatched always reach you, offline queueing included:
+  the ledger's recorded origin is the path, and it needs no standing edge. A role completing
+  work it was handed from *another* role is a different path — that one reads
+  `allowed_targets`, so keep `_supervisor` in the `allowed_targets` of the roles whose
+  receipts you want to collect.
 
 ## Operator policy lives outside the core
 
