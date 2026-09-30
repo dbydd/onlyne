@@ -333,6 +333,31 @@ idle_close = "2h"
 | `task` | every delivery one task family sends this role | idle timeout or operator close | resumes the same conversation where the runtime supports it |
 | `role` | a standing session pool for the role, at most `max_sessions` active | operator close or recycle | as above |
 
+**A session that serves nothing is kept only while its runtime keeps it.** Both `task`
+and `role` promise a session that outlives the delivery it served, and a pooled member
+that is gone is not reused — the next delivery opens a second conversation for one role.
+So a scope is a promise about the runtime, and a runtime has to be able to keep it in
+one of exactly two shapes:
+
+- **Resident.** The process stays, its socket stays open, and it does not send
+  `detach` when it runs out of work. A connection that merely ends starts
+  `[client] reconnect_grace_secs` and the session is retired when that window passes; a
+  `detach` that arrives with no task bound retires it at once, because the protocol has
+  no other way to read "I am leaving" from a session with nothing left to serve. This is
+  the shape `role` needs when `idle_close = 0`.
+- **Resumable.** The runtime declares `resume`, so a non-zero `idle_close` suspends the
+  process — the conversation stays in the runtime's own store, the slot stops spending
+  capacity — and the scope's next delivery resumes it. `suspend` is the frame that asks
+  for the release; without both capabilities the idle timeout has nothing to do and the
+  session simply waits for the runtime to leave.
+
+A runtime that is neither stays resident by obligation alone, which is a property of
+the agent and not something the spec can assert: `pi` run as `pi --mode rpc` exits when
+the conversation it was given ends, and declares `register`, `report`, `inject` and
+`recycle` with no `resume`. A `role` pool in front of it is therefore always empty, and
+every delivery opens its own session. Nothing in the client is wrong here — the scope
+was asked to keep a session whose runtime had already left.
+
 Scope takes effect entirely on the client: the server delivers by role, the client decides
 which session takes it, and the server keeps zero orchestration.
 

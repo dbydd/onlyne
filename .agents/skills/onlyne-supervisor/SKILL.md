@@ -304,6 +304,41 @@ session, or exec child once that session holds no task and no plugin connection 
 and the client log records the closure with `retiring idle session resource`. An idle pane
 still open in front of you means the owning client is down.
 
+**A scope that keeps sessions is the one thing that overrides the rule above, and it
+overrides it by making the runtime hold on.** `[client.session] scope = "task"` or
+`"role"` promises a session that outlives the delivery it served, so that session is not
+closed when the work lands — and a `role` pool hands the next delivery to a member that
+is still there. The client never reclaims a member on its own: a task-free session is
+exempt from the three-heartbeat silence sweep by name, and one whose connection is still
+attached is exempt from the reclamation sweep. What ends a member is the runtime leaving,
+in one of two ways, both of which reach the same log line above:
+
+- its process exits or its socket ends, which starts `[client] reconnect_grace_secs` (60
+  default) and retires the session when that window passes;
+- it sends `detach`, which for a session holding no task retires it **at once** — the
+  protocol has no other way to read "I am leaving" from a session with nothing left to
+  serve, so a graceful goodbye is taken as a final one.
+
+So a `role` pool needs a runtime in one of exactly two shapes. **Resident**: the process
+and its socket stay, and it does not `detach` when it runs out of work — that is what
+`idle_close = 0` asks for. **Resumable**: the runtime declares `resume`, so a non-zero
+`idle_close` suspends it instead, the conversation stays in the runtime's own store, and
+the next delivery resumes that conversation rather than starting a new one. `suspend` is
+the frame that asks for the release; a runtime declaring neither simply waits for its
+agent to leave.
+
+**`pi` is neither.** Run as `pi --mode rpc` it exits when the conversation it was given
+ends, and it declares `register`, `report`, `inject` and `recycle` with no `resume`. A
+`role` pool in front of it is therefore always empty, every delivery opens its own
+session, and every session you see closed afterwards was closed correctly. The scope was
+asked to keep a session whose runtime had already left — which is a fact about the
+agent, not a fault in the client, and nothing in `spec.toml` can assert it for you.
+
+The tell is a `role` role whose `onlyne sessions` shows a new `session_id` per delivery
+and none of them `gone`: the pool is not being consulted because there is nothing in it
+to consult. Before reading that as a client defect, check whether the agent is still
+running.
+
 ### Orca sessions
 
 Orca creates one new terminal for each task. `attach` refreshes a persisted terminal handle; it
