@@ -12,7 +12,9 @@ The test kit provides three fixtures for adapter protocol conformance: `HostSim`
 
 Supported steps are `wait_assign`, `report` (`ready` or `heartbeat`), `complete`, `fail`, `exit`, `sleep_ms`, `assert_prose_equals`, `assert_field`, and `echo_prose_to`. An unknown step fails with a message naming the step. `--capabilities` takes a comma-separated capability list and overrides the script hello list. `--workspace DIR` derives the adapter socket from the workspace root alone — `<runtime-dir>/<digest>.sock`, where the runtime directory is `/tmp/onlyne-<uid>/` unless `$ONLYNE_RUNTIME_DIR` replaces it, and `<digest>` is the first 16 hex characters of `sha256` over the canonical root — and reads the mount role from `DIR/.onlyne/config.toml`. There is no length rule and nothing is bound in the tree. `--socket PATH` overrides the socket, and `--role NAME` overrides the role. `--once` exits after the script completes.
 
-One process serves one session. The client hands the plugin that mounts naming no session the next session it stages, and that connection then serves that session alone — a task redelivered later is handed to a session of its own, and a session no process ever mounted is left for the grace sweep — so a case that stages several sessions starts one `onlyne-agent-fake` per session.
+One process serves every session it is given, not one. A plugin that mounts naming no session is handed the next session the role stages, and a later staging is handed to the same connection: a task redelivered later gets a session of its own, and a session no process ever mounted is left for the grace sweep. A case that wants one agent per session should say so by scripting one, because the client no longer forces it.
+
+A plugin that declares `open` in its hello is the other shape entirely: it is never handed a session. It registers, and each session the role opens goes to it as an `open` request it has to answer — see `crates/onlyne-adapter/HOSTING-RUNTIME.md`. Two script steps exist for that: `mark_mounted` writes a file so a case can wait for the mount, and `require_opened` fails the script when the client never asked, which is the only way a case can tell an asked-for session from a handed-over one.
 
 Two script preconditions the client enforces, both of which now fail loudly instead of hanging. A script whose first step is `wait_assign` must declare the `inject` capability in its hello. And a script that reaches `complete` must have reported a heartbeat first: the client records a turn only from a heartbeat whose agent phase reads `running`, so a completion for a session that never ran one is refused whole (`settle_without_turn`) while the task stays open. The refusal names the step to add.
 
@@ -50,7 +52,13 @@ Fake-backend cases run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the 
 
 支持的步骤包括 `wait_assign`、`report`（`ready` 或 `heartbeat`）、`complete`、`fail`、`exit`、`sleep_ms`、`assert_prose_equals`、`assert_field` 和 `echo_prose_to`。遇到未知步骤时，执行会失败并给出一条指明该步骤名称的消息。`--capabilities` 接受以逗号分隔的能力列表，并覆盖脚本 hello 中的能力列表。`--workspace DIR` 仅从工作区根路径推导适配器套接字——`<runtime-dir>/<digest>.sock`，其中运行时目录默认为 `/tmp/onlyne-<uid>/`，除非 `$ONLYNE_RUNTIME_DIR` 替换它，`<digest>` 是规范根路径 `sha256` 的前 16 个十六进制字符——并从 `DIR/.onlyne/config.toml` 读取挂载角色。不存在路径长度规则，目录树中也不绑定任何东西。`--socket PATH` 覆盖套接字，`--role NAME` 覆盖角色。`--once` 会在脚本完成后退出。
 
-一个进程服务一个会话。如果客户端交给挂载插件的插件未指定会话名称，客户端会交出它接下来准备的会话；该连接随后仅为这个会话服务。之后重新投递的任务会被交给它自己的会话，而从未被任何进程挂载的会话会保留给宽限期清扫。因此，一个准备多个会话的用例需要为每个会话启动一个 `onlyne-agent-fake`。
+一个进程服务的是递给它的每个会话，不是一个。未指定会话名称就挂载的插件，会被递上这个角色接下来暂存的会话；之后再暂存的会话仍然交给同一条连接。之后重新投递的任务会拿到自己的会话，而从未被任何进程挂载的会话保留给宽限期清扫。需要「一个代理一个会话」的用例应当用脚本明说，因为 client 不再强制这一点。
+
+在 hello 里声明 `open` 的插件是完全另一种形状：它永远不会被递交会话。它只登记，
+这个角色要开的每个会话都以 `open` 请求送到它面前，由它作答——见
+`crates/onlyne-adapter/HOSTING-RUNTIME.md`。脚本为此有两个步骤：`mark_mounted`
+写一个文件，让用例可以等挂载落地；`require_opened` 在 client 从没问过时让脚本失
+败，这是用例唯一能分辨「被问到的会话」与「被递交的会话」的办法。
 
 client 强制两条脚本前提，现在两者都会直接大声失败，而不是挂住。首个步骤为
 `wait_assign` 的脚本必须在 hello 中声明 `inject` 能力。而走到 `complete` 的脚本

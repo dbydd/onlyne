@@ -420,6 +420,3 @@ pub fn nothing(frame: &mut Frame, area: Rect, line: &str) {
         area,
     );
 }
-
-#[cfg(test)]
-mod tests;

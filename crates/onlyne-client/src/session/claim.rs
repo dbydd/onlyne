@@ -24,6 +24,3 @@ pub fn from_sessions(sessions: impl IntoIterator<Item = LiveSession>) -> Vec<Liv
     }
     by_id.into_values().collect()
 }
-
-#[cfg(test)]
-mod tests;

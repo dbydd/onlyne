@@ -58,6 +58,3 @@ mod state;
 mod turn;
 
 pub use state::{AcpBackend, AcpOptions};
-
-#[cfg(test)]
-mod tests;

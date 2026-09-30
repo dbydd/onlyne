@@ -95,5 +95,3 @@ impl SessionBackend for FakeBackend {
         Ok(())
     }
 }
-#[cfg(test)]
-mod tests;

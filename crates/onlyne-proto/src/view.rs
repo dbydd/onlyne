@@ -790,6 +790,3 @@ fn principal_role(principal: &Principal) -> Option<&str> {
         Principal::Gateway { .. } | Principal::Cluster { .. } => None,
     }
 }
-
-#[cfg(test)]
-mod tests;

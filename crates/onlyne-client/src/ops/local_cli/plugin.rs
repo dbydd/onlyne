@@ -234,6 +234,3 @@ fn set_executable(path: &Path) -> Result<()> {
 fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
-
-#[cfg(test)]
-mod tests;

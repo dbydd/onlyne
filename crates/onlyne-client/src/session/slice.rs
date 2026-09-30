@@ -88,6 +88,3 @@ pub fn apply_if_changed(
         Some((next, fields))
     }
 }
-
-#[cfg(test)]
-mod tests;

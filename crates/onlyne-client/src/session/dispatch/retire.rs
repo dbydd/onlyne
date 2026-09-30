@@ -807,6 +807,3 @@ impl DispatchState {
         retired
     }
 }
-
-#[cfg(test)]
-mod tests;

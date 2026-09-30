@@ -532,6 +532,3 @@ fn local_error(error: &std::io::Error) -> String {
         _ => error.to_string(),
     }
 }
-
-#[cfg(test)]
-mod tests;

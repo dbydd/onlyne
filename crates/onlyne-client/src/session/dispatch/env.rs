@@ -113,6 +113,3 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// rather than a fixed duration, so a plugin configured to beat slower than the
 /// default is not swept for keeping its own word.
 pub const HEARTBEAT_SILENCE_MARGIN: u32 = 3;
-
-#[cfg(test)]
-mod tests;

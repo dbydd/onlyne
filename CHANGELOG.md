@@ -56,7 +56,10 @@ the plugin.
 - `[[hook]]`: an operator's script runs after an event is persisted, at-least-once.
 
 **Verification.** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
--- -D warnings` and `cargo test --workspace` are green at 1002 passing. `pi-live.sh` runs
+-- -D warnings` and `cargo test --workspace` are green at 87 passing in under twenty
+seconds, which is the size and the runtime `docs/v2-PLAN.md` §17 asks for: one
+scenario binary, the wire and config contract pins, and table-driven cases for the
+pure functions, with the per-crate unit tests that restated them gone. `pi-live.sh` runs
 a real pi against a real model call: the ledger reaches `acked` on the model's own
 summary, the session projects `exited`/`done`, the rendered delivery and the role prose
 are in pi's own session file, and the client drains on SIGTERM. `orca-live.sh` builds a

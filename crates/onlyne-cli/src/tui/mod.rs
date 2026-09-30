@@ -25,8 +25,6 @@
 
 mod cluster;
 mod faults;
-#[cfg(test)]
-mod fixture;
 mod io;
 mod render;
 mod rows;

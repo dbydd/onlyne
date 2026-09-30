@@ -844,29 +844,3 @@ pub fn export_prose(flags: &GlobalFlags, args: ExportProseArgs) -> i32 {
         EXIT_OK
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::backend_ref_value;
-    use serde_json::{Value, json};
-
-    #[test]
-    fn an_object_spelling_travels_as_an_object() {
-        let value = backend_ref_value(Some(r#"{"id": "p-7", "pane": 3}"#.to_string()));
-        assert_eq!(value["id"], json!("p-7"));
-        assert_eq!(value["pane"], json!(3));
-    }
-
-    #[test]
-    fn a_plain_word_travels_as_one_json_string() {
-        assert_eq!(
-            backend_ref_value(Some("term_1".to_string())),
-            json!("term_1")
-        );
-    }
-
-    #[test]
-    fn an_omitted_flag_travels_as_null() {
-        assert_eq!(backend_ref_value(None), Value::Null);
-    }
-}

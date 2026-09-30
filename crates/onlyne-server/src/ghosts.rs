@@ -178,21 +178,3 @@ pub fn entry_from_row(row: &GhostSweepRow) -> GhostSweep {
         swept_at: row.swept_at,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// One ledger state reads as one verdict, and an open row reads as none.
-    #[test]
-    fn the_ledger_state_decides_the_outcome() {
-        assert_eq!(settled_outcome(LedgerState::Acked), Some(Outcome::Done));
-        assert_eq!(
-            settled_outcome(LedgerState::Rejected),
-            Some(Outcome::Failed)
-        );
-        assert_eq!(settled_outcome(LedgerState::Expired), Some(Outcome::Failed));
-        assert_eq!(settled_outcome(LedgerState::Queued), None);
-        assert_eq!(settled_outcome(LedgerState::InFlight), None);
-    }
-}

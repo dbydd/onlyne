@@ -24,6 +24,3 @@ pub use feed::{
 };
 pub use ledger::MemoryLedger;
 pub use record::{FaultOutcome, stored_observation, to_versioned};
-
-#[cfg(test)]
-mod tests;

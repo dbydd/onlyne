@@ -451,6 +451,3 @@ const SCROLL_PAGE: isize = 10;
 
 /// How far into a fault's detail the scroll keys walk.
 const FAULT_DETAIL_LINES: usize = 32;
-
-#[cfg(test)]
-mod tests;

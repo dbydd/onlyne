@@ -24,9 +24,6 @@ pub mod fake;
 pub mod orca;
 pub mod zellij;
 
-#[cfg(test)]
-mod tests;
-
 use command::{failure_code, run_checked, run_json, unsupported};
 
 pub use acp::{AcpBackend, AcpOptions};

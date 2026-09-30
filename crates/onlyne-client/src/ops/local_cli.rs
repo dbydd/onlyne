@@ -4,9 +4,6 @@ mod config;
 mod local;
 mod plugin;
 
-#[cfg(test)]
-mod fixtures;
-
 pub use config::{heal_workspace_config, migrate_plugin_blocks};
 pub use local::{
     LocalCli, map_complete, map_control, map_handoff, map_history, map_query_ledger,

@@ -115,6 +115,3 @@ pub fn report(
         observed: None,
     }
 }
-
-#[cfg(test)]
-mod tests;

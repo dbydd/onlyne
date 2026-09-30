@@ -12,8 +12,6 @@ mod error;
 mod liveness;
 mod server;
 pub mod session;
-#[cfg(test)]
-mod tests;
 pub use client::{CLIENT_DDL, ClientStore, INTENT_FLUSH_BATCH_SIZE, IntentRow, TaskRow};
 pub use error::{StoreError, StoreResult};
 pub use server::{

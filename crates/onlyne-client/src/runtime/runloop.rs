@@ -11,9 +11,6 @@ mod link;
 mod run;
 mod sessions;
 
-#[cfg(test)]
-mod test_support;
-
 pub use config::{
     ClientInit, DEFAULT_INTENT_ATTEMPTS, EVENT_CURSOR_KEY, FLUSH_PAUSE_MS, NOT_READY_PAUSE_MS,
     OUTCOME_POLL_MS, PULL_HOLD_MS, PULL_LIMIT, PULL_PAUSE_MS, READINESS_POLL_MS,

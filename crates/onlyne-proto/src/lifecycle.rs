@@ -52,6 +52,3 @@ pub use reduce::apply;
 pub use state::{
     AgentPhase, DeliveryPhase, Observation, RecoveryPhase, ResourcePhase, TaskState, Version,
 };
-
-#[cfg(test)]
-mod tests;

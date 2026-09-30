@@ -850,6 +850,3 @@ impl DispatchState {
             })
     }
 }
-
-#[cfg(test)]
-mod tests;

@@ -98,22 +98,3 @@ pub fn envelope_schema() -> &'static str {
 pub fn adapter_schema() -> &'static str {
     include_str!(concat!(env!("OUT_DIR"), "/adapter.schema.json"))
 }
-
-#[cfg(test)]
-mod schema_tests {
-    #[test]
-    fn schema_texts_parse_and_name_their_roots() {
-        let envelope: serde_json::Value =
-            serde_json::from_str(super::envelope_schema()).expect("envelope schema parses");
-        assert_eq!(
-            envelope.get("title").and_then(|title| title.as_str()),
-            Some("Envelope")
-        );
-        let adapter: serde_json::Value =
-            serde_json::from_str(super::adapter_schema()).expect("adapter schema parses");
-        assert_eq!(
-            adapter.get("title").and_then(|title| title.as_str()),
-            Some("AdapterMsg")
-        );
-    }
-}

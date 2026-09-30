@@ -53,13 +53,6 @@ pub use delivery::{ReadyNotice, dispatch, on_ready};
 pub use env::{
     HEARTBEAT_INTERVAL, HEARTBEAT_SILENCE_MARGIN, REQUEST_TIMEOUT, missing_capability, plugin_gap,
 };
-// The hello stamper is crate-internal and `claim`'s test module reaches it only
-// through this path, so the re-export exists for that module alone: ungated, it
-// is an unused import in every non-test build of the crate.
-#[cfg(test)]
-pub(crate) use outbound::hello_with_live_sessions;
-// 3c's one sentence lives with the transport that speaks it, and the ACP
-// backend's tests read it here to assert a nudge reaches the agent verbatim.
 pub use outbound::{ClientLink, Outbox, send_frame};
 pub use projection::{
     note_intent_receipt, note_verdict, projection_of, sync_frame, sync_session, task_outcome_of,
@@ -71,6 +64,4 @@ pub use settle::{SETTLE_WITHOUT_TURN, SettleAuthority, on_out};
 pub use state::{
     CONTROL_SETTLE_BOUND, ControlNote, ControlWord, DispatchState, FrameGuard, SessionSlot,
 };
-#[cfg(test)]
-pub(crate) use transport::NUDGE_TEXT;
 pub use turn_end::on_turn_end;

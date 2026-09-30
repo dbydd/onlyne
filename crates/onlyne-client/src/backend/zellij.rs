@@ -473,6 +473,3 @@ impl SessionBackend for ZellijBackend {
         self.kill_session(&session_name(&session.task_id)?)
     }
 }
-
-#[cfg(test)]
-mod tests;

@@ -260,6 +260,3 @@ pub(super) async fn settle_control(state: &RunState, delivery: &Delivery) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

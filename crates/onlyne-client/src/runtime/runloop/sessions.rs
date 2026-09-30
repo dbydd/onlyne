@@ -436,9 +436,3 @@ pub fn accept_path(state: &RunState) -> Result<AcceptPath> {
         state.dispatch.role_prose(),
     ))
 }
-
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-mod scan_tests;

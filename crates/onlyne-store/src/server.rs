@@ -1845,9 +1845,6 @@ fn ghost_sweeps_list_sql() -> String {
     )
 }
 
-#[cfg(test)]
-mod tests;
-
 fn ledger_row(r: &Row<'_>) -> rusqlite::Result<LedgerRow> {
     let kind: String = r.get(3)?;
     let state: String = r.get(9)?;

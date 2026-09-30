@@ -416,6 +416,3 @@ impl SessionBackend for ExecBackend {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

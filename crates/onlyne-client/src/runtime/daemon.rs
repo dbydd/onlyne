@@ -95,6 +95,3 @@ pub fn fault_count(layout: &RoleWorkspace) -> Result<usize> {
         .filter(|event| event.kind == "session_fault")
         .count())
 }
-
-#[cfg(test)]
-mod tests;

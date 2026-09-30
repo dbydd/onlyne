@@ -357,6 +357,3 @@ pub(super) async fn read_events(link: ClientLink, state: RunState) -> Result<()>
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

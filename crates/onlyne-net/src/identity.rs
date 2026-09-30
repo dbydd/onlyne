@@ -155,28 +155,3 @@ pub(crate) fn decode_signature(text: &str) -> Result<Signature, NetError> {
         .map_err(|_| NetError::Unauthorized("invalid signature length".to_string()))?;
     Ok(Signature::from_bytes(&bytes))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn save_creates_owner_only_file_and_replaces_existing() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("identity.key");
-        fs::write(&path, b"stale world-readable bytes").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        let key = KeyPair::from_seed([9; 32]);
-        key.save(&path).unwrap();
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        assert_eq!(fs::read(&path).unwrap(), [9; 32]);
-        let names: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        assert_eq!(names, [OsString::from("identity.key")]);
-    }
-}

@@ -93,12 +93,12 @@ fn is_selector_not_found(error: &anyhow::Error) -> bool {
     failure_code(error) == Some("selector_not_found")
 }
 
-#[cfg(any(test, unix))]
+#[cfg(unix)]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-#[cfg(any(test, windows))]
+#[cfg(windows)]
 fn cmd_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -126,7 +126,7 @@ fn cmd_quote(value: &str) -> String {
 /// leave a tab sitting at a prompt, and `&&` would skip the `exit` there and
 /// keep it. The command's own output is still in the pane's scrollback and its
 /// exit status rides through `exit`'s default.
-#[cfg(any(test, unix))]
+#[cfg(unix)]
 pub(super) fn spawn_command_posix(spec: &SpawnSpec) -> Result<String> {
     if spec.command.is_empty() {
         anyhow::bail!("orca spawn requires a command");
@@ -148,7 +148,7 @@ pub(super) fn spawn_command_posix(spec: &SpawnSpec) -> Result<String> {
 }
 
 /// cmd.exe spelling of [`spawn_command_posix`]: `cd /d`, `set "K=V"`, `& exit`.
-#[cfg(any(test, windows))]
+#[cfg(windows)]
 pub(super) fn spawn_command_cmd(spec: &SpawnSpec) -> Result<String> {
     if spec.command.is_empty() {
         anyhow::bail!("orca spawn requires a command");

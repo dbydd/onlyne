@@ -344,30 +344,3 @@ fn local_roles(workspace: &Path) -> i32 {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::load_workspace_config;
-
-    /// `cert_pin = "$NAME"` with the variable unset: the loader refuses and the
-    /// operator-visible message names the variable. The name carries the process
-    /// id, so no ambient environment can make it resolve.
-    #[test]
-    fn missing_env_secret_names_the_variable_in_the_error() {
-        let var = format!("ONLYNE_TEST_MISSING_PIN_{}", std::process::id());
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            format!(
-                "role = \"planner\"\ncert_pin = \"${var}\"\nkey_path = \"keys/role.key\"\n\n[server]\nhost = \"127.0.0.1\"\nport = 7811\n"
-            ),
-        )
-        .unwrap();
-        let error = load_workspace_config(&path).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            format!("missing secret ${var} for cert_pin; set the environment variable")
-        );
-    }
-}

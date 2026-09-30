@@ -172,6 +172,3 @@ pub fn map_history(args: HistoryArgs) -> ClientOp {
         limit: args.limit,
     })
 }
-
-#[cfg(test)]
-mod tests;

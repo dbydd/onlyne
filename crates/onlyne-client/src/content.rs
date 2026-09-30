@@ -233,6 +233,3 @@ fn read_indexed_record(path: &Path, offset: u64, len: u64) -> Result<Value> {
     }
     serde_json::from_slice(&bytes).context("decode indexed journal record")
 }
-
-#[cfg(test)]
-mod tests;

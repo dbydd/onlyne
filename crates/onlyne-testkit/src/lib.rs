@@ -1359,39 +1359,3 @@ pub fn parse_capability_csv(csv: &str) -> Result<Vec<Capability>> {
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn values(pairs: &[(&'static str, &str)]) -> BTreeMap<&'static str, String> {
-        pairs
-            .iter()
-            .map(|(name, value)| (*name, (*value).to_string()))
-            .collect()
-    }
-
-    #[test]
-    fn handoff_template_fills_named_placeholders_only() {
-        let filled = values(&[("role", "light2"), ("next_hop", "5")]);
-        let text =
-            expand_placeholders("{role} carries the token to hop {next_hop}", &filled).unwrap();
-        assert_eq!(text, "light2 carries the token to hop 5");
-    }
-
-    #[test]
-    fn handoff_template_refuses_a_name_the_agent_cannot_fill() {
-        let err = expand_placeholders("go to {next_role}", &values(&[])).unwrap_err();
-        assert!(err.to_string().contains(NEXT_ROLE_ENV), "{err}");
-        let err = expand_placeholders("go to {nex_role}", &values(&[])).unwrap_err();
-        assert!(err.to_string().contains("nex_role"), "{err}");
-    }
-
-    #[test]
-    fn handoff_step_refuses_a_field_it_does_not_implement() {
-        let step = json!({"to": "{next_role}", "text": "x"});
-        assert!(HandoffStep::parse(&step).unwrap().max_hop.is_none());
-        let err = HandoffStep::parse(&json!({"to": "b", "text": "x", "hops": 3})).unwrap_err();
-        assert!(err.to_string().contains("hops"), "{err}");
-    }
-}

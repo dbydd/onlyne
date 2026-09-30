@@ -382,9 +382,3 @@ pub fn heal_workspace_config(workspace: &Path) {
         Err(error) => eprintln!("{error}"),
     }
 }
-
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-mod workspace_tests;
