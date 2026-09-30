@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::flags::GlobalFlags;
 use crate::runtime::{self, EXIT_ANSWER_FAILED, EXIT_NO_SOCKET, EXIT_OK};
-use crate::socket::{SocketTarget, Surface};
+use crate::socket::{NoSocket, SocketTarget, Surface, resolve_socket};
 use crate::wire::{self, ExchangeError, Outbound};
 
 /// the two things an operator must not confuse from the foot of `onlyne repair
@@ -703,26 +703,47 @@ async fn status_probe(target: &SocketTarget, timeout_ms: u64) -> Probe {
 
 /// `wait-ready` polls `status` every interval until the answer is `ok: true`
 /// or the timeout bound elapses.
+///
+/// The socket is resolved inside the loop, every poll, because the server
+/// registers it some time after it is launched: resolving once up front asks
+/// the registry a question whose answer is "not yet" for exactly as long as this
+/// verb is supposed to keep waiting, and the one verb whose job is to wait for a
+/// server to appear was the one that refused while the server was still coming
+/// up. A surface the caller named wrongly is a different thing — that is a
+/// mistake in the command line, not a timing — so it still fails at once.
+///
+/// A missing registration is not printed on each poll. "The server has not
+/// registered yet" is the expected state here, and a line of it every
+/// `--interval-ms` would bury the answer the verb exists to give.
 pub fn wait_ready(flags: &GlobalFlags, args: WaitReadyArgs) -> i32 {
-    let target = match admin_surface(flags, "wait-ready") {
-        Ok(target) => target,
-        Err(code) => return code,
-    };
     runtime::block_on(async move {
         let bound = Duration::from_millis(flags.timeout_ms);
         let interval = Duration::from_millis(args.interval_ms.max(1));
         let started = Instant::now();
         loop {
-            match status_probe(&target, flags.timeout_ms).await {
-                Probe::Ready(body) => return runtime::finish(&body, flags),
-                _ => {
-                    if started.elapsed() + interval > bound {
-                        break;
+            match resolve_socket(flags) {
+                Ok(target) if target.surface == Surface::Admin => {
+                    if let Probe::Ready(body) = status_probe(&target, flags.timeout_ms).await {
+                        return runtime::finish(&body, flags);
                     }
-                    tokio::time::sleep(interval).await;
                 }
+                Ok(_) => {
+                    return runtime::usage_error(
+                        "onlyne: wait-ready needs the admin surface; pass \
+                         --server-root <dir>, or --socket <path> with --as admin",
+                    );
+                }
+                Err(NoSocket) => {}
             }
+            if started.elapsed() + interval > bound {
+                break;
+            }
+            tokio::time::sleep(interval).await;
         }
+        // The bound elapsed, so the server is not up. Say so, and say what would
+        // have helped: a caller that pointed at a root that is not a server root
+        // waits the full timeout and then gets the same sentence as one that
+        // simply started slowly.
         eprintln!("onlyne: server not ready after {}ms", flags.timeout_ms);
         EXIT_ANSWER_FAILED
     })
