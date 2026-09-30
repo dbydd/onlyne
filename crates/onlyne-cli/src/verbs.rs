@@ -933,11 +933,11 @@ async fn control_inner(
 
 /// Drive one control op on the admin surface.
 ///
-/// Without `--to` the op goes to the role that owns the task, read out of the
-/// task's own session row before anything is written: the row already names the
-/// role a control op has to reach, so no caller has to state it twice. A task
-/// whose session row names no role has nobody to answer the op, and the verb
-/// refuses with nothing written.
+/// Without `--to` the op goes to the role that owns the task, read before
+/// anything is written: the task's own records already name the role a control
+/// op has to reach, so no caller has to state it twice. A task neither of them
+/// places has nobody to answer the op, and the verb refuses with nothing
+/// written.
 async fn admin_control(
     flags: &GlobalFlags,
     target: &SocketTarget,
@@ -952,11 +952,12 @@ async fn admin_control(
     let to = match to {
         // An explicit `--to` is the whole answer, so nothing is read to reach it.
         Some(to) => to,
-        None => match owning_role(&mut stream, flags, op.task_id()).await {
+        None => match owning_role(&mut stream, flags, target, op.task_id()).await {
             Ok(Some(role)) => role,
             Ok(None) => {
                 eprintln!(
-                    "onlyne: no session owns task {}; pass --to <role> to say where the control goes",
+                    "onlyne: no session and no ledger row name an owner for task {}; \
+                     pass --to <role> to say where the control goes",
                     op.task_id()
                 );
                 return EXIT_REFUSAL;
@@ -975,16 +976,26 @@ async fn admin_control(
     run_on(&mut stream, flags, &request).await
 }
 
-/// The role that owns `task`, read through `query_sessions`.
+/// The role a control op for `task` has to reach.
 ///
-/// The read is the one `onlyne sessions --task` answers with, and the column is
-/// the one the server reads when it resolves a control op's owner. `Ok(None)` is
-/// an answer that names no owner: no session row for the task, or a row carrying
-/// no role. `Err` carries the exit code of an exchange that has already reported
-/// itself.
+/// The session row is the precise answer: it names the role that is running the
+/// session serving the task right now. It is a projection the owning client
+/// writes asynchronously, though, so a row is absent for a delivery that has not
+/// been picked up yet, and for one whose client is between links. The ledger row
+/// is the server's own record of who was asked to do the work, and §9 makes the
+/// ledger the owner of that fact, so the ledger answers when the projection
+/// cannot.
+///
+/// A session row is still read first, and it wins where both exist: a control op
+/// should reach the role running the session, which is not the role that was
+/// originally addressed if the work was handed on.
+///
+/// `Ok(None)` means neither record names a role. `Err` carries the exit code of an
+/// exchange that has already reported itself.
 async fn owning_role(
     stream: &mut onlyne_wire::socket::LocalStream,
     flags: &GlobalFlags,
+    target: &SocketTarget,
     task: &str,
 ) -> Result<Option<String>, i32> {
     let filter = QuerySessionsArgs {
@@ -1000,7 +1011,28 @@ async fn owning_role(
     if !body.ok {
         return Err(runtime::finish(&body, flags));
     }
-    Ok(owner_of(&body))
+    if let Some(role) = owner_of(&body) {
+        return Ok(Some(role));
+    }
+    let rows = match ledger::query(
+        &mut *stream,
+        flags.timeout_ms,
+        target,
+        new_id(),
+        LedgerQuery {
+            task: Some(task.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => return Err(runtime::exchange_error(&error, flags.timeout_ms)),
+    };
+    Ok(ledger::deepest(&rows).and_then(|row| {
+        ledger::row_principal(row, "to")
+            .and_then(|principal| principal.role_name().map(str::to_string))
+    }))
 }
 
 /// The owning role out of a `query_sessions` answer.
