@@ -221,7 +221,7 @@ async fn settle(
         inner.turn_end.set(task_id, TurnEnd::Blocked);
         let session_id =
             slot_key_serving_task(&inner, task_id).unwrap_or_else(|| task_id.to_string());
-        record_blocked(&inner, task_id, &session_id)
+        record_blocked(&inner, task_id, &session_id, why)
     };
     state.enqueue_op(&op)?;
     tracing::info!(task = %task_id, reason = why, "a delivery settled blocked at its turn end");
@@ -332,14 +332,23 @@ fn record_ending(inner: &DispatchInner, task_id: &str, session_id: &str, nudge: 
     )
 }
 
-/// The settlement's own op.
-fn record_blocked(inner: &DispatchInner, task_id: &str, session_id: &str) -> ClientOp {
+/// The settlement's own op: which task and session it happened in, and why.
+///
+/// The reason is the one thing an operator reading a `delivery_blocked` event
+/// cannot get anywhere else. The caller has it in hand — it is what this
+/// client's own log line names — and a hook bound to the class is handed the
+/// payload verbatim, so leaving it out made the event answer *that* a delivery
+/// stopped and not *why*, which is the half that needs a human. A completion
+/// row says the same thing the other way round: its `out_head` is empty, because
+/// a session that never completed has no head to write.
+fn record_blocked(inner: &DispatchInner, task_id: &str, session_id: &str, why: &str) -> ClientOp {
     publish(
         DELIVERY_BLOCKED,
         serde_json::json!({
             "task_id": task_id,
             "session_id": session_id,
             "role": inner.role.as_str(),
+            "reason": why,
         }),
     )
 }

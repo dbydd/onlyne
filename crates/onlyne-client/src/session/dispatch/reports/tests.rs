@@ -257,4 +257,25 @@ async fn a_turn_ending_over_an_open_task_nudges_once_and_then_settles() {
         })
         .collect();
     assert_eq!(nudges, vec![true, false], "one nudge, then the settlement");
+
+    // The settlement names why. A hook bound to `delivery_blocked` is handed the
+    // payload verbatim and gets nothing else to go on: the completion row this
+    // settlement writes has an empty `out_head`, because a session that never
+    // completed has no head, so the event is the only place the reason can be.
+    let why: Vec<String> = queued()
+        .iter()
+        .filter_map(|op| match op {
+            ClientOp::PublishEvent(args) if args.class == DELIVERY_BLOCKED => args
+                .payload
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(why.len(), 1, "the settlement publishes one reason");
+    assert!(
+        !why[0].is_empty(),
+        "a settlement that names no reason leaves a hook with the fact and none of the cause"
+    );
 }
