@@ -351,12 +351,16 @@ one of exactly two shapes:
   for the release; without both capabilities the idle timeout has nothing to do and the
   session simply waits for the runtime to leave.
 
-A runtime that is neither stays resident by obligation alone, which is a property of
-the agent and not something the spec can assert: `pi` run as `pi --mode rpc` exits when
-the conversation it was given ends, and declares `register`, `report`, `inject` and
-`recycle` with no `resume`. A `role` pool in front of it is therefore always empty, and
-every delivery opens its own session. Nothing in the client is wrong here — the scope
-was asked to keep a session whose runtime had already left.
+Residency is a property of the agent and not something a spec can assert, so it is the
+plugin's own decision to make and the client's to honour. `pi` is the worked example:
+it used to end its process the moment a delivery settled, which emptied every pool in
+front of it, and it now stays — it stops its heartbeat with the last task it was given,
+which is the half the client already expects, and it lets the client close. What it does
+not do is declare `resume`: `pi --mode rpc` keeps its conversation in a session file,
+and a plugin that says so would let a non-zero `idle_close` release the process and the
+next delivery resume the same conversation rather than starting a new one. Until one
+does, `role` in front of `pi` works resident and `idle_close = 0` is the setting that
+keeps it that way.
 
 Scope takes effect entirely on the client: the server delivers by role, the client decides
 which session takes it, and the server keeps zero orchestration.

@@ -327,17 +327,21 @@ the next delivery resumes that conversation rather than starting a new one. `sus
 the frame that asks for the release; a runtime declaring neither simply waits for its
 agent to leave.
 
-**`pi` is neither.** Run as `pi --mode rpc` it exits when the conversation it was given
-ends, and it declares `register`, `report`, `inject` and `recycle` with no `resume`. A
-`role` pool in front of it is therefore always empty, every delivery opens its own
-session, and every session you see closed afterwards was closed correctly. The scope was
-asked to keep a session whose runtime had already left — which is a fact about the
-agent, not a fault in the client, and nothing in `spec.toml` can assert it for you.
+**`pi` is resident and not resumable.** It no longer ends its process when a delivery
+settles — it stops its heartbeat with the last task and lets the client close what the
+scope says to close — so a `role` pool in front of it holds its member, and the same
+conversation takes the next delivery. It declares `register`, `report`, `inject` and
+`recycle` with **no `resume`**, so the other door is shut: there is no setting that
+releases its process and brings the conversation back, and `idle_close` has to stay `0`
+rather than name a bound. Nothing in `spec.toml` can assert either half; both are the
+agent's to keep.
 
-The tell is a `role` role whose `onlyne sessions` shows a new `session_id` per delivery
-and none of them `gone`: the pool is not being consulted because there is nothing in it
-to consult. Before reading that as a client defect, check whether the agent is still
-running.
+The tell that a pool is *not* being reused is a `role` role whose `onlyne sessions` shows
+a new `session_id` per delivery and none of them left standing. A pool that works looks
+like one row reading `lifecycle=idle` with `resource=attached` between deliveries. Before
+reading either as a client defect, check whether the agent process is still running —
+and read the client log for `the delivery joined the session its scope keeps for it`,
+which is the client's own line for a reuse and appears only when one happened.
 
 ### Orca sessions
 

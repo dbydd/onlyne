@@ -807,8 +807,9 @@ test("an explicit tool outcome wins and a second completion is refused", async (
   const completes = host.of("report").filter((report) => report.kind === "complete");
   assert.equal(completes.length, 1);
   assert.equal(completes[0].data.outcome, "failed");
-  // One session asks for one exit, even when a second completion is refused.
-  assert.deepEqual(surface.calls.exits, ["failed"]);
+  // A completion never ends the process — the client closes what its scope says
+  // to close — so the second, refused completion has no exit to suppress either.
+  assert.deepEqual(surface.calls.exits, []);
 });
 
 // A refused report handed nothing over: the task stays open, the tool caller
@@ -833,7 +834,7 @@ test("a refused completion report leaves the task open for the retry", async () 
   assert.equal(completes.length, 2, "the retry reported again");
   assert.deepEqual(agent.status().tasks, []);
   assert.equal(agent.status().stats.completions, 1);
-  assert.deepEqual(surface.calls.exits, ["done"]);
+  assert.deepEqual(surface.calls.exits, [], "a settled delivery leaves the session to the client");
 });
 
 // The completion body is what the tool call handed over. The sentence a turn
@@ -914,7 +915,7 @@ test("the exit waits for the client's acknowledgement of the completion report",
 
   host.releaseReports();
   await completion;
-  assert.deepEqual(surface.calls.exits, ["done"]);
+  assert.deepEqual(surface.calls.exits, [], "the landed report does not end the process either");
 });
 
 test("a reconnect beat re-derives the phase from the surface", async () => {
@@ -1146,10 +1147,11 @@ test("a completion reported while the socket is down is flushed after reconnect"
   assert.equal(complete.data.head, "done offline");
   assert.equal(agent.status().connected, true, "the plugin re-hellos after a disconnect");
   const hellos = host.of("hello");
-  // The flusher's acknowledgement is the handover the queued report was
-  // waiting for, so the process leaves once it lands.
-  await waitFor(() => (surface.calls.exits.length === 1 ? true : null));
-  assert.deepEqual(surface.calls.exits, ["done"]);
+  // The flusher's acknowledgement is the handover the queued report was waiting
+  // for. The process stays: a delivery that lands leaves the session standing,
+  // and what closes it is the client's own scope, not this report.
+  assert.deepEqual(surface.calls.exits, [], "the flushed report does not end the process");
+  assert.equal(agent.status().stats.completions, 1, "and it counted once, not twice");
   assert.equal(hellos.length, 2);
   assert.deepEqual(hellos[1].mount, hellos[0].mount);
 });

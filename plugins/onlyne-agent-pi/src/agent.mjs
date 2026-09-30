@@ -1038,11 +1038,24 @@ export class OnlyneAgent {
    * line the ledger keeps.
    *
    * @param {{ exitProcess?: boolean, details?: string | null, files?: string[] }} [options]
-   *   `exitProcess: false` is the recycle path, which ends the process after
-   *   its own detach frame instead.
+   *   `exitProcess: true` is the recycle path, which ends the process after its
+   *   own detach frame instead.
    */
   async complete(taskId, outcome, head, options = {}) {
-    const exitProcess = options.exitProcess ?? true;
+    // A completed delivery does not end this process. The client owns every
+    // close, and it knows things this process cannot: `[client.session] scope`
+    // says whether a session outlives the delivery that opened it. `oneshot`
+    // settles and the client closes the tab or the child; `task` and `role` keep
+    // the session for the next delivery of the family or the next member of the
+ // pool, and a self-exit here empties that pool — a `role` role ends up opening
+    // one session per delivery, which is what `oneshot` means.
+    //
+    // The client's own code already assumes this shape: it stops its heartbeat
+    // with the last task it was given and is explicit that a task-free session
+    // that has gone quiet is an agent waiting for work by design
+    // (`crates/onlyne-client/src/session/dispatch/retire.rs`). Stopping the
+    // heartbeat below is that half; not leaving is this one.
+    const exitProcess = options.exitProcess ?? false;
     const details = typeof options.details === "string" && options.details.length > 0 ? options.details : null;
     const files = Array.isArray(options.files) ? options.files : [];
     const normalized = normalizeOutcome(outcome);
