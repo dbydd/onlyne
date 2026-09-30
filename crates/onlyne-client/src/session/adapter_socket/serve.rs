@@ -570,9 +570,20 @@ impl AdapterSocket {
         capabilities: Vec<Capability>,
     ) {
         let Some(session_id) = session_id else {
-            self.dispatch.park_transport(io, capabilities);
+            // A runtime that declared `open`, `suspend` or `close` owns its
+            // sessions, so its connection is this role's standing transport: it
+            // joins no queue, is consumed by no claim, and the sessions this role
+            // opens reach it through `hand_staged`. Everything else is a spawned
+            // agent waiting for the next session, which is what the park has
+            // always meant, and a role whose only runtime is pi behaves exactly
+            // as it did before this branch existed.
+            if Capability::is_hosting(&capabilities) {
+                self.dispatch.stand_transport(io, capabilities);
+            } else {
+                self.dispatch.park_transport(io, capabilities);
+            }
             // Work that arrived ahead of this agent is staged with a payload and
-            // no connection. The park is that connection now, so the wait ends
+            // no connection. The connection is available now, so the wait ends
             // here, and the claim binds the session to this plugin.
             let Some(staged) = self.dispatch.staged_without_transport() else {
                 return;

@@ -68,6 +68,23 @@ pub(super) struct DispatchInner {
     /// bye, so the role silently lost a worker that was waiting to be told.
     /// `revived` has held several connections the same way from the start.
     pub(super) parked: Vec<(AdapterIo, Vec<Capability>)>,
+    /// Connections from **hosting** runtimes: ones that declared `open`,
+    /// `suspend` or `close` and own their sessions rather than serving the one
+    /// the client started them for.
+    ///
+    /// This is not the park with a different name. A parked connection is a
+    /// *worker* waiting for one job — `claim_parked_transport` takes the oldest
+    /// off the queue and that connection is spent, which is right for an agent
+    /// the client spawned for a single session. A hosting connection is a shared
+    /// resource: it takes no job off a queue because it is not waiting for one,
+    /// and it serves whatever sessions the role opens. Putting one in `parked`
+    /// would let the first staged session consume it, and the role's other three
+    /// sessions would have nothing to run on.
+    ///
+    /// A role can hold both, and the order they are consulted in is
+    /// `hand_staged`'s: a parked agent was spawned for the work in hand, so it
+    /// is the more specific match, and a hosting connection is the fallback.
+    pub(super) standing: Vec<(AdapterIo, Vec<Capability>)>,
     /// Zero-activity clock for running tasks. Applied persists refresh it.
     pub(super) stall: crate::session::stall::StallWatch,
     /// A plugin connection that mounted a session a live connection already

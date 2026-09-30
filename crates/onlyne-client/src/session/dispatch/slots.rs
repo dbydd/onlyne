@@ -41,6 +41,7 @@ impl DispatchState {
                 topology: String::new(),
                 transports: HashMap::new(),
                 parked: Vec::new(),
+                standing: Vec::new(),
                 stall: crate::session::stall::StallWatch::new(),
                 revived: Vec::new(),
                 control_settles: Vec::new(),

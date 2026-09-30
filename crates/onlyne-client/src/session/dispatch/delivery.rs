@@ -718,9 +718,15 @@ impl DispatchState {
             .await?;
             return Ok(true);
         }
+        // Three sources, in the order that keeps every role's behaviour the
+        // shape it had: the session's own transport, then a parked agent — one
+        // the client spawned for work in hand, so it is the more specific match —
+        // and only then a standing connection from a hosting runtime, which
+        // serves whatever the role opens and was never waiting for a job.
         let transport = self
             .session_transport(session_id)
-            .or_else(|| self.claim_parked_transport(session_id));
+            .or_else(|| self.claim_parked_transport(session_id))
+            .or_else(|| self.claim_standing_transport(session_id));
         let Some((io, capabilities)) = transport else {
             return Ok(false);
         };

@@ -557,6 +557,55 @@ impl DispatchState {
         None
     }
 
+    /// Hold `io` as this role's **standing** transport.
+    ///
+    /// A hosting runtime's connection is not a worker waiting for one job, so it
+    /// does not join [`Self::park_transport`]'s queue: a claim takes the oldest
+    /// entry and spends it, and a role whose hosting runtime serves four
+    /// sessions would have nothing left for the other three. It is held here
+    /// instead, where [`Self::claim_standing_transport`] can lend it to any
+    /// session with no transport of its own — as many times as the role opens
+    /// sessions.
+    ///
+    /// A connection already standing is refreshed where it stands, the rule the
+    /// park uses too: a mount that says this twice is one runtime re-helloing.
+    pub fn stand_transport(&self, io: AdapterIo, capabilities: Vec<Capability>) {
+        let mut inner = self.inner.lock();
+        let standing = inner
+            .standing
+            .iter()
+            .position(|(held, _)| held.same_connection(&io));
+        match standing {
+            Some(index) => inner.standing[index].1 = capabilities,
+            None => inner.standing.push((io, capabilities)),
+        }
+    }
+
+    /// Lend a standing connection to one session, and record it as that
+    /// session's transport.
+    ///
+    /// The same judgement every other binding path runs, run on each standing
+    /// connection in turn: a session another live connection already serves is
+    /// not taken, and this one is not spent either way — nothing was reserved
+    /// for it, so a refusal costs the role nothing and the next staged session
+    /// asks again.
+    pub(super) fn claim_standing_transport(
+        &self,
+        session_id: &str,
+    ) -> Option<(AdapterIo, Vec<Capability>)> {
+        let mut inner = self.inner.lock();
+        for (io, capabilities) in inner.standing.clone() {
+            if !note_binding_locked(&mut inner, session_id, &io) {
+                continue;
+            }
+            inner
+                .transports
+                .insert(session_id.to_string(), (io.clone(), capabilities.clone()));
+            return Some((io, capabilities));
+        }
+        None
+    }
+
     /// The connection that serves one session, when its plugin is attached.
     ///
     /// A plugin names the session it was spawned for, and the slot's key is the
