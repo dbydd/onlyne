@@ -285,6 +285,7 @@ fn platform_payload_stays_on_gateway_side() {
         task_id: "task-1".to_string(),
         generation: 1,
         session_id: None,
+        scope: None,
         parent: None,
     };
     let serialized = serde_json::to_value(&propagated).expect("serialize propagated");

@@ -159,6 +159,11 @@ export class OnlyneAgent {
     this.lastError = null;
     /** Whether pi has already been asked to end this process (`exitSession`). */
     this.exitRequested = false;
+    /**
+     * The role's `[client.session] scope` as the last assignment carried it.
+     * @type {string | null}
+     */
+    this.scope = null;
     this.stats = { assigns: 0, duplicates: 0, injections: 0, completions: 0, reports: 0, reconnects: 0, recycles: 0 };
   }
 
@@ -714,7 +719,24 @@ export class OnlyneAgent {
 
   // ------------------------------------------------------------ host → plugin
 
+  /**
+   * Whether this role's scope keeps a session past the delivery it served.
+   *
+   * `oneshot` is finished and this process should end — which is also the only
+   * way this runtime's own store gets flushed, because the teardown that writes
+   * it runs at `agent_settled`. `task` and `role` want the opposite: the session
+   * outlives the delivery, the process stays, and the conversation is what the
+   * next delivery lands in.
+   *
+   * A frame from before the field carries no scope, and is read as `oneshot`:
+   * that is what every such frame meant.
+   */
+  keepsSession() {
+    return this.scope === "task" || this.scope === "role";
+  }
+
   async onAssign(args) {
+    if (typeof args.scope === "string" && args.scope) this.scope = args.scope;
     const envelope = args.envelope ?? {};
     const taskId = args.task_id ?? envelope.causality?.task ?? null;
     if (!taskId) {
@@ -1042,20 +1064,24 @@ export class OnlyneAgent {
    *   own detach frame instead.
    */
   async complete(taskId, outcome, head, options = {}) {
-    // A completed delivery does not end this process. The client owns every
-    // close, and it knows things this process cannot: `[client.session] scope`
-    // says whether a session outlives the delivery that opened it. `oneshot`
-    // settles and the client closes the tab or the child; `task` and `role` keep
-    // the session for the next delivery of the family or the next member of the
- // pool, and a self-exit here empties that pool — a `role` role ends up opening
-    // one session per delivery, which is what `oneshot` means.
+    // A delivery ends this process when the role's scope says the session is
+    // finished, and not otherwise. Both halves of that are load-bearing:
     //
-    // The client's own code already assumes this shape: it stops its heartbeat
-    // with the last task it was given and is explicit that a task-free session
-    // that has gone quiet is an agent waiting for work by design
-    // (`crates/onlyne-client/src/session/dispatch/retire.rs`). Stopping the
-    // heartbeat below is that half; not leaving is this one.
-    const exitProcess = options.exitProcess ?? false;
+    // Leaving when the scope keeps the session empties the pool — a `role` role
+    // then opens one session per delivery, which is what `oneshot` means and the
+    // opposite of what the operator asked for.
+    //
+    // Staying when the scope does not keep it leaks the host resource. The
+    // client retires a session while its agent is still reachable — that is how
+    // a pool member survives — so a resident runtime holds its pane open
+    // forever. Its own comment says the exemption belongs to a kept session, and
+    // the scope is what says which one this is.
+    //
+    // And the leave has to be this process's own. The client's teardown is a pane
+    // kill, and a runtime killed mid-teardown loses whatever it had not yet
+    // written: pi flushes its session file as it shuts down, so the graceful exit
+    // is the only one that keeps the completion entry.
+    const exitProcess = options.exitProcess ?? !this.keepsSession();
     const details = typeof options.details === "string" && options.details.length > 0 ? options.details : null;
     const files = Array.isArray(options.files) ? options.files : [];
     const normalized = normalizeOutcome(outcome);

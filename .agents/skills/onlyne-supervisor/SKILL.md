@@ -327,14 +327,21 @@ the next delivery resumes that conversation rather than starting a new one. `sus
 the frame that asks for the release; a runtime declaring neither simply waits for its
 agent to leave.
 
-**`pi` is resident and not resumable.** It no longer ends its process when a delivery
-settles — it stops its heartbeat with the last task and lets the client close what the
-scope says to close — so a `role` pool in front of it holds its member, and the same
-conversation takes the next delivery. It declares `register`, `report`, `inject` and
-`recycle` with **no `resume`**, so the other door is shut: there is no setting that
-releases its process and brings the conversation back, and `idle_close` has to stay `0`
-rather than name a bound. Nothing in `spec.toml` can assert either half; both are the
-agent's to keep.
+**`pi` reads the scope and acts on it.** Each `assign` carries the role's scope, and
+the plugin ends its own process under `oneshot` and stays under `task` or `role` — so a
+`role` pool in front of it holds its member and the same conversation takes the next
+delivery, while a `oneshot` session leaves and takes its pane with it. That second half
+is not a detail: the client retires a session while its agent is still reachable,
+because that exemption is what keeps a pool member alive, so a runtime that stayed
+under `oneshot` would hold its pane open forever. The leave also has to be the
+runtime's own, because the client's teardown is a pane kill and a runtime killed
+mid-teardown loses what it had not yet written — pi flushes its session file as it
+shuts down.
+
+`pi` declares `register`, `report`, `inject` and `recycle` with **no `resume`**, so the
+other door is shut to it: there is no setting that releases its process and brings the
+conversation back, and `idle_close` has to stay `0` rather than name a bound. Nothing
+in `spec.toml` can assert that half either; it is the agent's to keep.
 
 The tell that a pool is *not* being reused is a `role` role whose `onlyne sessions` shows
 a new `session_id` per delivery and none of them left standing. A pool that works looks

@@ -601,6 +601,23 @@ pub struct AssignArgs {
     /// connection, one conversation, which is what every runtime did before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// The role's `[client.session] scope`, the same lowercase word the config
+    /// and `OpenArgs` carry.
+    ///
+    /// A runtime needs it because the two scopes want opposite things from the
+    /// moment a delivery lands. `oneshot` is finished: the runtime should end its
+    /// own process, which is also the only way its own store gets flushed —
+    /// killing it instead loses whatever the runtime had not yet written. `task`
+    /// and `role` want the opposite: the session outlives this delivery, so the
+    /// process stays and the conversation is what the next delivery lands in.
+    ///
+    /// The client cannot decide this for the runtime either way. Retiring a
+    /// session keeps its resource while the agent is still reachable, so a
+    /// runtime that stays mounted keeps its pane open forever; and closing the
+    /// pane from here kills a runtime before it has written its own last words.
+    /// So the scope rides the assignment and the runtime acts on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     /// Envelope of the task that caused this one, when downstream.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<Box<Envelope>>,

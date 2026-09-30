@@ -807,9 +807,10 @@ test("an explicit tool outcome wins and a second completion is refused", async (
   const completes = host.of("report").filter((report) => report.kind === "complete");
   assert.equal(completes.length, 1);
   assert.equal(completes[0].data.outcome, "failed");
-  // A completion never ends the process — the client closes what its scope says
-  // to close — so the second, refused completion has no exit to suppress either.
-  assert.deepEqual(surface.calls.exits, []);
+  // One session asks for one exit, even when a second completion is refused.
+  // The assignment carried no scope, which is read as `oneshot`, so this process
+  // is finished and leaves.
+  assert.deepEqual(surface.calls.exits, ["failed"]);
 });
 
 // A refused report handed nothing over: the task stays open, the tool caller
@@ -834,7 +835,7 @@ test("a refused completion report leaves the task open for the retry", async () 
   assert.equal(completes.length, 2, "the retry reported again");
   assert.deepEqual(agent.status().tasks, []);
   assert.equal(agent.status().stats.completions, 1);
-  assert.deepEqual(surface.calls.exits, [], "a settled delivery leaves the session to the client");
+  assert.deepEqual(surface.calls.exits, ["done"]);
 });
 
 // The completion body is what the tool call handed over. The sentence a turn
@@ -915,7 +916,7 @@ test("the exit waits for the client's acknowledgement of the completion report",
 
   host.releaseReports();
   await completion;
-  assert.deepEqual(surface.calls.exits, [], "the landed report does not end the process either");
+  assert.deepEqual(surface.calls.exits, ["done"]);
 });
 
 test("a reconnect beat re-derives the phase from the surface", async () => {
@@ -1122,6 +1123,87 @@ test("recycle settles the task, detaches and asks pi to exit", async () => {
   assert.equal(host.connections, connections, "a recycled agent must not reconnect");
 });
 
+// The scope an assignment carries decides whether this process outlives the
+// delivery it just served, and both answers are load-bearing against a
+// different failure. `oneshot` leaving is the older half and every case above
+// covers it; what is new here is a runtime that stays, because a `role` pool in
+// front of a runtime that leaves is always empty.
+test("a scope that keeps the session holds this process open after the delivery settles", async () => {
+  for (const scope of ["task", "role"]) {
+    const { agent, host, surface } = await startAgent();
+    agent.start();
+    await waitFor(() => host.of("report").length >= 1);
+    // `assignArgs()` hands back the shared frame's own args object when a frame
+    // is installed, so a test that writes to it is writing to every case after
+    // it. Clone before saying anything about the scope.
+    const args = structuredClone(assignArgs());
+    args.scope = scope;
+    host.notify("assign", args);
+    await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+    agent.onTurnStart();
+    agent.onTurnEnd();
+    agent.noteAssistantText("OK");
+
+    await agent.completeFromTool({ outcome: "done", summary: `kept by ${scope}` });
+    const complete = host.of("report").find((report) => report.kind === "complete");
+    assert.equal(complete.data.head, `kept by ${scope}`, `${scope}: the report landed`);
+    assert.deepEqual(
+      surface.calls.exits,
+      [],
+      `${scope}: the session outlives this delivery, so the process stays`,
+    );
+    // The heartbeat stops with the last task — that is the half the client
+    // already expects, and it is why a task-free session is exempt from its
+    // silence sweep. What must not happen is the process leaving.
+    assert.equal(agent.heartbeatHandle, null, `${scope}: the heartbeat stopped with the task`);
+  }
+});
+
+// The other direction, and it is a leak rather than a lost pool: a runtime that
+// stays under a scope that finishes holds its pane open, because the client
+// retires a session while its agent is still reachable.
+test("a scope that does not keep the session takes this process with it", async () => {
+  for (const scope of ["oneshot", undefined]) {
+    const { agent, host, surface } = await startAgent();
+    agent.start();
+    await waitFor(() => host.of("report").length >= 1);
+    const args = structuredClone(assignArgs());
+    if (scope !== undefined) args.scope = scope;
+    host.notify("assign", args);
+    await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+    agent.onTurnStart();
+    agent.onTurnEnd();
+    agent.noteAssistantText("OK");
+
+    await agent.completeFromTool({ outcome: "done", summary: "finished" });
+    const label = scope ?? "a frame with no scope";
+    assert.deepEqual(
+      surface.calls.exits,
+      ["done"],
+      `${label}: read as oneshot, so the process leaves and its store is flushed`,
+    );
+  }
+});
+
+// The scope is the last assignment's word, so a re-offer of a delivery under a
+// different scope moves the decision rather than leaving a stale one behind.
+test("the scope the newest assignment named is the one the exit reads", async () => {
+  const { agent, host, surface } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  const kept = structuredClone(assignArgs());
+  kept.scope = "role";
+  host.notify("assign", kept);
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+  assert.equal(agent.keepsSession(), true);
+
+  const second = secondTaskArgs();
+  second.scope = "oneshot";
+  host.notify("assign", second);
+  await waitFor(() => (host.of("assign_ack").length >= 2 ? true : null));
+  assert.equal(agent.keepsSession(), false, "the newest word wins");
+});
+
 test("a completion reported while the socket is down is flushed after reconnect", async () => {
   const { agent, host, surface } = await startAgent();
   agent.start();
@@ -1147,11 +1229,10 @@ test("a completion reported while the socket is down is flushed after reconnect"
   assert.equal(complete.data.head, "done offline");
   assert.equal(agent.status().connected, true, "the plugin re-hellos after a disconnect");
   const hellos = host.of("hello");
-  // The flusher's acknowledgement is the handover the queued report was waiting
-  // for. The process stays: a delivery that lands leaves the session standing,
-  // and what closes it is the client's own scope, not this report.
-  assert.deepEqual(surface.calls.exits, [], "the flushed report does not end the process");
-  assert.equal(agent.status().stats.completions, 1, "and it counted once, not twice");
+  // The flusher's acknowledgement is the handover the queued report was
+  // waiting for, so the process leaves once it lands.
+  await waitFor(() => (surface.calls.exits.length === 1 ? true : null));
+  assert.deepEqual(surface.calls.exits, ["done"]);
   assert.equal(hellos.length, 2);
   assert.deepEqual(hellos[1].mount, hellos[0].mount);
 });

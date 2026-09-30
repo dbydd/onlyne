@@ -1225,10 +1225,11 @@ pub fn sample_assign(text: &str, prose: &str) -> AssignArgs {
         text: format!("From planner:\n\n{text}"),
         attachments: Vec::new(),
         envelope: Box::new(envelope),
-        // No session: this fixture stands for a frame from a host that predates
-        // the field, which is the shape a runtime must still read as its only
-        // conversation.
+        // Neither field: this fixture stands for a frame from a host that
+        // predates them, which is the shape a runtime must still read as its
+        // only conversation and no scope at all.
         session_id: None,
+        scope: None,
         parent: None,
     }
 }

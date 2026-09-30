@@ -200,6 +200,13 @@ fn open_session(
 /// server's gate would take nothing at the watermark it already holds, and the
 /// row an operator reads would keep naming the delivery this session has
 /// finished.
+/// The scope word an assignment carries: the config's own spelling, so the
+/// runtime compares against what the operator wrote rather than a second
+/// vocabulary of this crate's own.
+fn scope_word(scope: &onlyne_config::SessionScope) -> String {
+    scope.as_str().to_string()
+}
+
 fn bind_delivery(
     inner: &mut DispatchInner,
     key: &str,
@@ -666,6 +673,7 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
                 task_id,
                 generation,
                 session_id: Some(session_id.to_string()),
+                scope: Some(scope_word(&state.session_policy().scope)),
                 parent: None,
             };
             target
@@ -827,6 +835,7 @@ impl DispatchState {
             task_id,
             generation,
             session_id: Some(session_id.to_string()),
+            scope: Some(scope_word(&self.session_policy().scope)),
             parent: None,
         };
         io.notify(AdapterMsg::Host(HostOp::Assign(assign)))
