@@ -570,7 +570,22 @@ impl DispatchState {
             .sessions
             .iter()
             .filter(|(key, slot)| {
-                slot.task_id.is_none()
+                // A suspended session is not an exited one. Its process is gone
+                // *because* it was released, its conversation is what the
+                // family's next delivery is for, and the row it published says
+                // `idle` for exactly that reason — `binding_task_state` answers
+                // `Pending` for a slot that serves nothing and whose scope keeps
+                // it, so the two derivations of "is this over" disagree here.
+                //
+                // This sweep asks the other one, and it asks about the *work*:
+                // a suspended session's delivery is finished, so it reads
+                // `Exited` and the slot is retired within a tick. The family's
+                // next delivery then finds nothing to resume and opens a second
+                // conversation for one chain — which is the failure this filter
+                // existed to prevent, reached through the sweep that was meant
+                // to clean up after a session that was already gone.
+                !slot.suspended
+                    && slot.task_id.is_none()
                     && session_exited(&inner, &slot.session.task_id)
                     && !has_attached_transport(&inner, key, slot)
             })

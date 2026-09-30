@@ -54,8 +54,15 @@ fi
 # check, and it is the only probe that cannot go green on a broken credential.
 probe_dir="$tmp/probe"
 mkdir -p "$probe_dir"
+#
+# The model is named, not inherited: the acceptance criterion names one, and a
+# case that silently ran on whatever pi's own default happened to be would prove
+# only that some model answered. `axonhub/generic-writer` is the first entry in
+# the `axonhub` provider's model list that `pi --list-models` reads out of
+# `~/.pi/agent/autoprovider.json`, so the case names the id it means.
+PI_MODEL=${PI_LIVE_MODEL:-axonhub/generic-writer}
 probe_ok=false
-if (cd "$probe_dir" && timeout 180 pi -ns -nc --no-session -p 'reply with exactly: PI_ONLYNE_PROBE_OK' >"$tmp/probe.out" 2>"$tmp/probe.err"); then
+if (cd "$probe_dir" && timeout 180 pi -ns -nc --no-session --model "$PI_MODEL" -p 'reply with exactly: PI_ONLYNE_PROBE_OK' >"$tmp/probe.out" 2>"$tmp/probe.err"); then
   grep -q "PI_ONLYNE_PROBE_OK" "$tmp/probe.out" && probe_ok=true
 fi
 # The probe output goes to a file rather than a pipe: a `grep -q` that matches
@@ -82,7 +89,7 @@ fi
 #   * `--session-dir` keeps a session file the case can grep, which is how the
 #     injected `assign` is proven to have reached pi's context.
 mkdir -p "$tmp/planner/.pi/sessions"
-SESSION_COMMAND='["pi", "--mode", "rpc", "--session-id", "{session}", "--session-dir", "'"$tmp"'/planner/.pi/sessions", "-e", "'"$PLUGIN_DIR"'", "-ns", "-nc"]'
+SESSION_COMMAND='["pi", "--mode", "rpc", "--session-id", "{session}", "--session-dir", "'"$tmp"'/planner/.pi/sessions", "-e", "'"$PLUGIN_DIR"'", "--model", "'"$PI_MODEL"'", "-ns", "-nc"]'
 
 setup_cluster "$tmp/server" "$tmp/planner" planner cluster "" "$E2E_PROSE" 'allowed_senders = ["*", "planner"]
 allowed_targets = ["planner"]
@@ -170,7 +177,7 @@ case "$out_head" in
   *OK*) ;;
   *) fail "ledger out_head must contain the model's OK" "out_head=$out_head ledger=$ledger_out" ;;
 esac
-printf 'PASS pi-live ledger: acked, out_head=%s\n' "$out_head"
+printf 'PASS pi-live ledger: acked on %s, out_head=%s\n' "$PI_MODEL" "$out_head"
 
 # 1b. The agent ran as a child of the client, not as something the case started
 #     itself: the exec backend appends the child's stdio to the workspace log,

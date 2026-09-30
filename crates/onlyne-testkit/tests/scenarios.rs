@@ -2121,14 +2121,27 @@ allowed_targets = ["worker"]"#,
                 task_id: Some(session_id.clone()),
                 ..Default::default()
             },
+            // `resource == Closed` alone is not the precondition this scenario
+            // needs. Two different paths close a resource: the sweep's `Suspend`,
+            // which keeps the generation live and so projects `idle` — the
+            // session is suspended and the family's next delivery resumes it —
+            // and an agent's own exit, which kills the generation and projects
+            // `exited`, after which the only honest answer is a new session.
+            //
+            // Waiting on the resource alone accepted either, so a run that lost
+            // the race proceeded to a new conversation and failed 30 seconds
+            // later on a symptom two steps from its cause. The lifecycle is what
+            // says which of the two happened.
             |rows| {
-                rows.iter()
-                    .any(|row| row.projection.resource == onlyne_proto::ResourcePhase::Closed)
+                rows.iter().any(|row| {
+                    row.projection.resource == onlyne_proto::ResourcePhase::Closed
+                        && row.public_lifecycle == onlyne_proto::Lifecycle::Idle
+                })
             },
             Duration::from_secs(15),
         )
         .await
-        .expect("session suspended");
+        .expect("session suspended rather than exited");
 
     cluster
         .start_fake_agent(&worker_ws, &serve_repeated(true, 1))
