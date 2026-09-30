@@ -40,7 +40,7 @@
 
 use crate::envelope::{MsgKind, Outcome, Principal};
 use crate::event::{
-    Event, FaultEvent, LedgerState, LedgerStateEvent, Lifecycle, SessionStateEvent,
+    Event, FaultEvent, LedgerState, LedgerStateEvent, Lifecycle, Presence, SessionStateEvent,
 };
 use crate::lifecycle::{AgentPhase, DeliveryPhase, RecoveryPhase, ResourcePhase};
 use crate::ops::{LedgerEntry, RoleInfo, SessionRow};
@@ -702,6 +702,17 @@ pub fn update(mut view: View, event: &Event) -> View {
                 role.aggregate = reported.aggregate.clone();
                 role.detail = reported.detail.clone();
             }
+            // The summary's connected count is the registry read again: every
+            // row that is not offline holds a client connection. Folding it
+            // here keeps the header at the stream's truth — a snapshot taken
+            // between two clients' re-registrations would otherwise pin the
+            // count to a moment the stream has since left behind.
+            view.cluster.connected_roles = Some(
+                view.roles
+                    .values()
+                    .filter(|role| role.state != Presence::Offline)
+                    .count() as u64,
+            );
             true
         }
         Event::SessionState(reported) => {
