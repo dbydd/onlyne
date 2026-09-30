@@ -9,8 +9,6 @@
 //! GET  /api/view      the folded view and the boards read off it
 //! GET  /api/stream    SSE: the view as the stream moves it, cursor-carried
 //! POST /api/op        one admin op: send, control, repair, report, spec edit
-//! GET  /api/layout    the display file the graph's coordinates live in
-//! PUT  /api/layout    save dragged coordinates (the spec keeps semantics)
 //! ```
 //!
 //! ## The security floor
@@ -23,7 +21,6 @@
 //! explicit flag that widening takes.
 
 use crate::admin::{exchange, Link, LinkState, OpError};
-use crate::layout::LayoutStore;
 use crate::ops::WebOp;
 use crate::render::boards;
 use axum::extract::State;
@@ -41,7 +38,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub mod admin;
-pub mod layout;
 pub mod ops;
 pub mod render;
 
@@ -71,8 +67,6 @@ pub struct App {
     pub bind: SocketAddr,
     /// The folded view and the link's own health.
     pub link: Link,
-    /// The display file the graph's coordinates live in.
-    pub layout: Arc<LayoutStore>,
     /// The `Host` values a request may name: the bound address's own
     /// spellings, and `localhost` only when the bind serves loopback.
     pub allowed_hosts: Vec<String>,
@@ -88,30 +82,10 @@ impl App {
             token,
             bind,
             link,
-            layout: Arc::new(LayoutStore::default()),
             allowed_hosts: allowed_hosts(bind),
         })
     }
 
-    /// Assemble with an explicit display file, for `--layout` and for tests.
-    pub fn with_layout(
-        socket: PathBuf,
-        timeout_ms: u64,
-        token: String,
-        bind: SocketAddr,
-        layout: LayoutStore,
-    ) -> Arc<Self> {
-        let link = admin::spawn(socket.clone(), timeout_ms);
-        Arc::new(App {
-            socket,
-            timeout_ms,
-            token,
-            bind,
-            link,
-            layout: Arc::new(layout),
-            allowed_hosts: allowed_hosts(bind),
-        })
-    }
 
     /// The router, guard and all.
     pub fn router(self: &Arc<Self>) -> Router {
@@ -121,7 +95,6 @@ impl App {
             .route("/api/view", get(api_view))
             .route("/api/stream", get(api_stream))
             .route("/api/op", post(api_op))
-            .route("/api/layout", get(api_layout).put(api_layout_put))
             .fallback(static_asset)
             .layer(middleware::from_fn_with_state(Arc::clone(&state), guard))
             .with_state(state)
@@ -347,12 +320,11 @@ async fn api_op(State(app): State<Arc<App>>, Json(op): Json<WebOp>) -> Response 
         }
     };
     match exchange(&app.socket, admin, app.timeout_ms).await {
-        Ok(data) => {
-            if let Some(path) = data.get("path").and_then(Value::as_str) {
-                app.layout.adopt_server_root(path);
-            }
-            Json(data).into_response()
-        }
+        // A `spec_get` used to be the moment the layout file's place was
+        // learned, so its answer carried a path the browser never saw. Nothing
+        // here reads a path any more: where a board sits is the tab's own
+        // memory, and the spec keeps semantics.
+        Ok(data) => Json(data).into_response(),
         Err(OpError::Refused { code, message }) => {
             error_body(StatusCode::CONFLICT, &code, &message)
         }
@@ -368,20 +340,6 @@ fn error_body(status: StatusCode, code: &str, message: &str) -> Response {
         Json(json!({ "error": { "code": code, "message": message } })),
     )
         .into_response()
-}
-
-async fn api_layout(State(app): State<Arc<App>>) -> Response {
-    Json(app.layout.get()).into_response()
-}
-
-async fn api_layout_put(
-    State(app): State<Arc<App>>,
-    Json(layout): Json<crate::layout::Layout>,
-) -> Response {
-    match app.layout.put(layout) {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(reason) => error_body(StatusCode::INTERNAL_SERVER_ERROR, "layout", &reason),
-    }
 }
 
 // ---- the bundle

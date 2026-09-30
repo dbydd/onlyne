@@ -23,10 +23,20 @@
   const { fitView } = useSvelteFlow();
   const nodesInitialized = useNodesInitialized();
 
+  // The key already fitted, so a fit happens once per applied layout.
+  //
+  // This was a loop, and the depth limit is what it looked like from outside:
+  // `fitView` moves the viewport, moving the viewport re-measures the nodes,
+  // re-measuring flips `nodesInitialized`, and the effect below — which waits for
+  // that flag — called `fitView` again. Recording the key *before* the call ends
+  // it: the re-run this provokes finds the layout already fitted and returns.
+  let fitted = $state(-1);
+
   $effect(() => {
-    if (fitKey === 0 || !nodesInitialized.current) {
+    if (fitKey === 0 || fitKey === fitted || !nodesInitialized.current) {
       return;
     }
+    fitted = fitKey;
     void fitView({ padding: 0.2, minZoom: 0.2, maxZoom: 2 });
   });
 </script>

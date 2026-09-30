@@ -59,28 +59,9 @@ function refusalOf(body: unknown, fallbackCode: string): Refused {
   return new Refused(fallbackCode, 'the op failed');
 }
 
+/// Where a board sits. The tab's own memory holds these; nothing about a
+/// coordinate belongs to the cluster.
 export interface NodePos {
   x: number;
   y: number;
-}
-
-export interface Layout {
-  nodes: Record<string, NodePos>;
-}
-
-export async function getLayout(token: string): Promise<Layout> {
-  const response = await fetch(withToken('/api/layout', token));
-  if (!response.ok) throw new Error(`layout: ${response.status}`);
-  const layout = (await response.json()) as Layout;
-  return { nodes: layout?.nodes ?? {} };
-}
-
-export async function putLayout(token: string, nodes: Record<string, NodePos>): Promise<void> {
-  await fetch(withToken('/api/layout', token), {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    // The whole body is a `Layout`; `satisfies Layout['nodes']` asked whether
-    // the wrapper itself was a node map, which it is not.
-    body: JSON.stringify({ nodes } satisfies Layout),
-  });
 }

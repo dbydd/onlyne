@@ -12,14 +12,13 @@ use onlyne_wire::socket::{read_registration, socket_path, RegistrationKind};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 
 const USAGE: &str = "\
 onlyne-web — the optional graphical front end
 
 USAGE:
     onlyne-web [--server-root <dir> | --socket <path> | --workspace <dir>]
-               [--bind <addr:port>] [--timeout <ms>] [--layout <file>] [--open]
+               [--bind <addr:port>] [--timeout <ms>] [--open]
 
 The bind is 127.0.0.1 with an assigned port unless --bind names another one,
 which is the explicit flag a non-loopback bind requires. A random token is
@@ -32,7 +31,6 @@ fn main() {
     let mut workspace: Option<PathBuf> = None;
     let mut bind: Option<SocketAddr> = None;
     let mut timeout_ms: u64 = 8000;
-    let mut layout: Option<PathBuf> = None;
     let mut open = false;
     let mut index = 0;
     while index < args.len() {
@@ -55,7 +53,6 @@ fn main() {
                 Ok(ms) => timeout_ms = ms,
                 Err(_) => die(&format!("{arg} wants a number of milliseconds")),
             },
-            "--layout" => layout = Some(PathBuf::from(value())),
             "--open" => open = true,
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -92,24 +89,7 @@ fn main() {
         let served = listener
             .local_addr()
             .expect("a bound listener names its address");
-        let layout_store = layout
-            .map(onlyne_web::layout::LayoutStore::at)
-            .unwrap_or_default();
-        let app = App::with_layout(
-            socket.clone(),
-            timeout_ms,
-            token.clone(),
-            served,
-            layout_store,
-        );
-        // The display file lives beside the spec when the server can name it;
-        // a server that is down is retried by the first spec read the browser
-        // performs.
-        let layout_ref = Arc::clone(&app.layout);
-        let socket_clone = socket.clone();
-        tokio::spawn(async move {
-            let _ = onlyne_web::layout::discover_root(&socket_clone, timeout_ms, &layout_ref).await;
-        });
+        let app = App::new(socket.clone(), timeout_ms, token.clone(), served);
         let url = format!("http://{served}/?token={token}");
         println!("onlyne-web: serving {url}");
         println!("onlyne-web: watching {}", socket.display());
