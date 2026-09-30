@@ -236,9 +236,9 @@ pub struct RegistrationFile {
     /// server root. `null` in JSON.
     #[serde(default)]
     pub runtime: Option<String>,
-    /// Where this machine displays the role's runtime process (`herdr`,
-    /// `orca`, `zellij`, `headless`, `external`); `None` for a server root, and
-    /// for a client that published its registration before it resolved one.
+    /// Where this machine displays the role's runtime process (`orca`, `zellij`,
+    /// `headless`, `external`); `None` for a server root, and for a client that
+    /// published its registration before it resolved one.
     ///
     /// Placement is a property of the machine, which is why it is recorded
     /// here: an external runtime's plugin reads the registrations in this

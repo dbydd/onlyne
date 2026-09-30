@@ -176,7 +176,7 @@ The plan's §"驱动与放置" lines 253-289.
 
 v1's `backend` enum presses two questions into one value: *how the client talks to the
 runtime* (`acp` is a way of talking) and *where the runtime process is displayed*
-(`herdr`, `orca`, `zellij` are places). `headless` is `exec` under another name. A role
+(`orca`, `zellij` are places). `headless` is `exec` under another name. A role
 therefore cannot say "an ACP agent, started by the client, with no pane", which is the
 ordinary ACP shape.
 
@@ -199,10 +199,10 @@ command = ["pi", "--mode", "rpc", …]   # placeholders {session} and {task} kee
 (`<workspace>/.onlyne/config.toml`):
 
 ```toml
-placement = "herdr"       # herdr | orca | zellij | headless | external
+placement = "orca"        # orca | zellij | headless | external
 ```
 
-An absent `placement` probes `herdr`, `orca`, `zellij` in that order and falls back to
+An absent `placement` probes `orca`, `zellij` in that order and falls back to
 `headless`. An absent `drive` is `plugin`, which is what every role in the tree is today.
 
 The `backend` key is **deleted** from both files. A configuration that still carries it is
@@ -302,12 +302,11 @@ second spelling of them:
 
   For ACP that file is **`<workspace>/AGENTS.md`**, in a delimited client-owned
   block: replaced when present, appended when absent, and no operator byte
-  outside the block is ever touched. `onlyne-acp` carries no instruction field,
-  so a file is the only vehicle, and the agents.md convention is the one this
-  repository's own world uses. **Known gap:** agents differ in which filename
-  they read — claude-code reads `CLAUDE.md` — so an agent that reads another name
-  will not see the prose until the filename is wired to the spec's agent package,
-  which is its own slice rather than a table of guesses written now.
+  outside the block is ever touched — the client rewrites the block, not the
+  file. The block exists because `onlyne-acp` has no instruction field on
+  `session/new`, so the prose has to ride in a file the runtime reads.
+  **Residual gap:** an ACP agent that reads neither `AGENTS.md` nor `CLAUDE.md`
+  gets no role prose. Claude Code supports `AGENTS.md`, so it sees it.
 - **payload-v2 is deleted**: `out/<task-id>.md`, the grammar block, `onlyne report
   check|write|path`, and the `onlyne-role-payload-v2` skill all go. Its invariants (one
   verdict per turn, handoff lines naming their recipient) move into the client-side check

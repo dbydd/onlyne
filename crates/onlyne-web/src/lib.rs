@@ -167,6 +167,19 @@ async fn guard(
             );
         }
     }
+    // The favicon is the one request a browser makes that no page references
+    // and no token can reach: it is asked for on its own, carrying nothing of
+    // the document's query, so the check below refused it 401 on every page
+    // load. 401 says "unauthenticated", which misreports what is actually true
+    // — the file does not exist — and a console full of 401s buries a real
+    // refusal. The bundle ships no icon, so the honest answer is the 404
+    // `serve_asset` gives a missing file; an icon added to the bundle later is
+    // served here without anyone editing this. Nothing is given up: an icon is
+    // public, the `Host` and `Origin` names still stand above, and no API
+    // route is reachable on this path.
+    if request.uri().path() == "/favicon.ico" {
+        return serve_asset("favicon.ico");
+    }
     let offered = query_token(request.uri())
         .map(str::to_string)
         .or_else(|| bearer_token(request.headers()));

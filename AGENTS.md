@@ -114,7 +114,7 @@ One word, one meaning, in prose and in code:
 | runtime | the program that actually runs the model conversation: pi, DSH, an ACP agent |
 | session | one conversation inside a runtime; one session may serve several deliveries in turn |
 | drive | how the client talks to the runtime: `plugin`, `acp`, `exec` |
-| placement | where the runtime process is displayed: `herdr`, `orca`, `zellij`, `headless`, `external` |
+| placement | where the runtime process is displayed: `orca`, `zellij`, `headless`, `external` |
 | plugin | an extension inside a runtime that speaks the adapter protocol to the client |
 | binding | the correspondence between one delivery and one session |
 | task family | a chain of handoffs keyed by `causality.family` |
@@ -241,21 +241,24 @@ carries `req`, `res`, `ev`, `ack`, `ping`, `pong`, and `bye`. A frame above
 `recipient_offline`, `duplicate`, `conflict`, `unauthorized`, `forbidden`, `not_admin`,
 `frame_too_large`, `bad_frame`, `protocol_version`, `internal`.
 
-Adapter mount kinds are tagged by `kind`, never matched untagged:
+Adapter mount kinds are tagged by `kind`, and the kind names the variant: `hello` is
+decoded by reading `kind` and `mount` together, so a mount that no kind can name cannot
+be sent at all. `cluster` and `bridge` are names that existed as mount variants before
+they were kinds, which is why the enum carries both spellings.
 
 | kind | mounted by | may do |
 |---|---|---|
-| `runtime` | a runtime plugin | hold one or more sessions. A plugin declaring the `open` capability accepts `open`, `resume`, `suspend`, `close`; one that does not serves only the session that started it |
+| `agent` | a runtime plugin | hold one or more sessions. A plugin declaring the `open` capability is asked for each session the role opens (`open`) and is never handed one; one that does not is a spawned agent the client hands the next staged session to, and serves only that session |
 | `tools` | `onlyne mcp` | call `send`, `handoff`, `complete` for one existing session, mounted with a per-session token the client issues through the environment |
 | `bridge` | an external protocol bridge | deliver inbound messages, receive outbound messages and task state |
-| `cluster`, `admin` | as in v1 | as in v1 |
+| `cluster`, `admin` | as in v1; neither grants a plugin op on the socket | as in v1 |
 
-`assign` carries `task_id` and `generation`, and a multi-session mount needs one
-field it does not have yet: `assign` must carry `session_id` so a runtime holding
-several sessions on one connection can route a delivery to the right one. Task
-bodies travel only in `assign`. `crates/onlyne-adapter/HOSTING-RUNTIME.md` states
-the interface a hosting runtime plugs into, and names that field as its first
-gap.
+`assign` carries `task_id`, `generation` and `session_id`. The session id is what a
+runtime holding several conversations on one connection routes by, and a frame from a
+host that predates it omits it — which such a runtime reads as its only conversation,
+because that is the only one it had. Task bodies travel only in `assign`.
+`crates/onlyne-adapter/HOSTING-RUNTIME.md` states the interface a hosting runtime plugs
+into.
 
 Exit codes used by user-facing commands:
 
@@ -352,12 +355,12 @@ command = ["pi"]
 
 ```toml
 # <workspace>/.onlyne/config.toml
-placement = "herdr"       # herdr | orca | zellij | headless | external
+placement = "orca"        # orca | zellij | headless | external
 ```
 
 | drive × placement | who starts the runtime | sessions per process |
 |---|---|---|
-| plugin × herdr / orca / zellij / headless | client starts it in a pane or in the background; the plugin dials back | 1 |
+| plugin × orca / zellij / headless | client starts it in a pane or in the background; the plugin dials back | 1 |
 | plugin × external | the runtime is already resident; its plugin dials the client | several |
 | acp × headless | client starts it as a child and speaks ACP over stdio | several |
 | exec × any | client starts it | 1 |
@@ -411,7 +414,7 @@ Both databases take a version bump in v2, and there is no `onlyne migrate`: the 
 manual. Drain the cluster, move the old `state.db` and `client.db` aside, and start again —
 v2 writes a fresh ledger and the old files stay where they are for reading. The one piece of
 configuration that cannot be read past is the fused `backend` key, and it is refused by name:
-`acp` named a drive, `herdr` named a placement, and no reader can split the value. It becomes
+`acp` named a drive, `orca` named a placement, and no reader can split the value. It becomes
 `drive` in the spec's `[client.runtime]` and `placement` in the workspace's `config.toml`,
 alongside a new `[client.session]` table. See §8a for what the refusal says.
 
@@ -475,8 +478,9 @@ wire, ledger rows, event order, exit codes, fixed refusal text, delivery text.
 which brings up a real server and real clients in a temporary directory with a fake
 runtime mounted on a real socket. The scenarios live in one test binary and guard:
 delivery loop, handoff chain, permissions, idempotency, link-drop recovery, server
-restart, session scopes, spec edits, delivery text, large-frame interleaving, migration
-refusal, heartbeat watchdog, plugin conformance.
+restart, session scopes, a hosting runtime serving every session from one connection,
+spec edits, delivery text, large-frame interleaving, migration refusal, heartbeat
+watchdog, plugin conformance.
 
 The scenario suite is the safety net for the rewrite: it runs against v1 behavior first,
 and each crate's v1 unit tests are deleted as that crate is rewritten rather than ported.
@@ -485,7 +489,7 @@ Shell acceptance scripts are deleted once the corresponding scenario lands.
 Otherwise:
 
 - Table-driven tests for pure functions live at the bottom of the file under test.
-- Real-runtime cases (herdr, orca, pi) are `#[ignore]`d and run by hand before a release.
+- Real-runtime cases (orca, pi) are `#[ignore]`d and run by hand before a release.
 - Static gates: fmt, clippy, and the binary firewall.
 - Scale target: 60–100 test functions, well under a minute locally.
 

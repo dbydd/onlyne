@@ -69,9 +69,9 @@ pub struct ClientInit {
     /// The placement this run was told to use: `onlyne-client run` passes the
     /// workspace `config.toml`'s `placement` key, and an embedding passes
     /// whatever it resolved — the scenario suite passes the in-process
-    /// `fake` runtime. `None` probes herdr, orca, zellij in that order and
-    /// falls back to `headless`. `ONLYNE_BACKEND` in the process environment
-    /// takes precedence when it names a placement.
+    /// `fake` runtime. `None` probes orca, then zellij, and falls back to
+    /// `headless`. `ONLYNE_BACKEND` in the process environment takes precedence
+    /// when it names a placement.
     pub placement: Option<SessionPlacement>,
     /// The workspace config's `[acp]` table. Only the ACP session backend reads
     /// it: the mode, model and reasoning effort handed to the agent when a
