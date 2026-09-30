@@ -6,9 +6,6 @@
 import { getView, postOp, Refused } from './api';
 import type { View } from '../gen/View';
 import type { Board } from '../gen/Board';
-import type { WebOp } from '../gen/WebOp';
-
-export type Mode = 'graph' | 'grid';
 
 export const app = $state({
   token: '',
@@ -18,7 +15,6 @@ export const app = $state({
   view: { cluster: {}, roles: {}, sessions: {}, deliveries: {}, faults: {}, event_tail: [], stale: false } as unknown as View,
   boards: [] as Board[],
   selectedFamily: null as string | null,
-  mode: 'graph' as Mode,
   notice: '',
 });
 
@@ -76,15 +72,6 @@ function openStream() {
     // current frame only if we are behind it.
     reconnectTimer = window.setTimeout(() => connect(token), 1000);
   };
-}
-
-export async function sendOp(op: WebOp): Promise<unknown> {
-  try {
-    return await postOp(app.token, op);
-  } catch (error) {
-    setNotice(`refused: ${refusalText(error)}`);
-    throw error;
-  }
 }
 
 /// The `spec_get` answer, guarded at the two fields the edit needs.

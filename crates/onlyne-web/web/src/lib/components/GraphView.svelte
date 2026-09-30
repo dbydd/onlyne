@@ -22,10 +22,16 @@
   import BoardNode from './BoardNode.svelte';
   import FitOnLayout from './FitOnLayout.svelte';
   import { addRoute, app } from '../store.svelte';
-  import { degraded, layeredStart, readPlaces, routesOf, writePlaces } from '../layout';
-
-  const NODE_W = 240;
-  const NODE_H = 190;
+  import {
+    NODE_H,
+    NODE_W,
+    degraded,
+    layeredStart,
+    readPlaces,
+    roleBoards,
+    routesOf,
+    writePlaces,
+  } from '../layout';
 
   const nodeTypes = { board: BoardNode };
 
@@ -45,7 +51,10 @@
   let laying = false;
 
   $effect(() => {
-    const boards = app.boards;
+    // The operator's board is a logical node, not a box: the canvas draws the
+    // roles and the routes they declare, and the operator speaks through the
+    // boards' own send affordance.
+    const boards = roleBoards(app.boards);
     const routes = routesOf(boards);
     // The stroke and the arrowhead are named rather than inherited. A line whose
     // colour comes from a stylesheet nobody wrote is a line nobody has seen, and
@@ -54,15 +63,17 @@
     // They dim when the graph is crowded, which is what the header's notice says
     // they do — a notice naming a treatment the canvas did not apply was its own
     // small lie.
-    const faint = degraded(boards);
-    const stroke = faint ? 'rgba(150,160,180,0.28)' : 'rgba(150,175,220,0.75)';
+    const faint = degraded(app.boards);
+    const stroke = faint ? 'rgba(140,152,175,0.22)' : 'rgba(112,146,220,0.7)';
     edges = routes.map((route) => ({
       id: `${route.source}->${route.target}`,
       source: route.source,
       target: route.target,
+      // The bezier is the flow's own default: a route reads as a current
+      // between two boards rather than as wiring in a trench.
       type: 'default',
-      style: { stroke },
-      markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 },
+      style: { stroke, strokeWidth: faint ? 1 : 1.5 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 11, height: 11 },
     }));
     sync(boards);
     const roles = boards.map((board) => board.role).join(',');
@@ -133,7 +144,7 @@
     // The tab's own memory, written when the operator lets go rather than on
     // every frame: a drag emits a position change per pointer move.
     writePlaces(saved);
-    sync(app.boards);
+    sync(roleBoards(app.boards));
   }
 
   function onConnect(connection: Connection) {
@@ -149,7 +160,7 @@
     const places = readPlaces();
     if (Object.keys(places).length === 0) return;
     Object.assign(saved, places);
-    sync(app.boards);
+    sync(roleBoards(app.boards));
     fitKey += 1;
   });
 </script>

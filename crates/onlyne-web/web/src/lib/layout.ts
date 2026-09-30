@@ -39,6 +39,15 @@ export function routesOf(boards: Board[]): RouteEdge[] {
   return edges;
 }
 
+/// The boards the canvas draws. The operator's is not one of them: `_supervisor`
+/// is a logical node — the standing name for whoever runs the cluster, agent or
+/// human — with a built-in reach to every role and no process behind it. Drawing
+/// it would put a box on the canvas for the person looking at the canvas, and a
+/// fan of edges for a path that needs no declaration.
+export function roleBoards(boards: Board[]): Board[] {
+  return boards.filter((board) => !board.operator);
+}
+
 /// When the edges dim.
 ///
 /// A share alone reads a two-role cluster as dense: both roles route to each
@@ -51,16 +60,23 @@ export const DENSITY_ROLES = 4;
 export const DENSITY_ABSOLUTE = 64;
 
 export function degraded(boards: Board[]): boolean {
-  const roles = boards.length;
-  const drawn = routesOf(boards).length;
-  if (drawn >= DENSITY_ABSOLUTE) return true;
+  // Measured over the boards the canvas draws: the operator's logical board
+  // adds a role and no edge, so counting it thins the share and a crowded
+  // graph reads as calm.
+  const drawn = roleBoards(boards);
+  const roles = drawn.length;
+  const edges = routesOf(drawn).length;
+  if (edges >= DENSITY_ABSOLUTE) return true;
   if (roles < DENSITY_ROLES) return false;
   const possible = (roles * (roles - 1)) / 2;
-  return possible > 0 && drawn / possible >= DENSITY_SHARE;
+  return possible > 0 && edges / possible >= DENSITY_SHARE;
 }
 
-const NODE_W = 260;
-const NODE_H = 210;
+/// A board's box, in one place. elk lays the graph out with these numbers and
+/// the node paints itself with them, so a second pair drifting from the first is
+/// a layout that reserves space the card does not fill.
+export const NODE_W = 260;
+export const NODE_H = 240;
 
 /// The layered start elkjs gives a graph whose boards have no place, because
 /// most routes have a direction (`docs/v2-PLAN.md` line 388).

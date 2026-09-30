@@ -7,6 +7,9 @@
   // them once the graph grew — an application deciding how its own surface reads
   // is the same class of thing as a layout that resets itself.
   import { onMount } from 'svelte';
+  import EventsPanel from './lib/components/EventsPanel.svelte';
+  import LedgerPanel from './lib/components/LedgerPanel.svelte';
+  import SessionsPanel from './lib/components/SessionsPanel.svelte';
   import GraphView from './lib/components/GraphView.svelte';
   import { connect, app } from './lib/store.svelte';
   import { degraded, routesOf } from './lib/layout';
@@ -17,6 +20,12 @@
   // Dense is a reading, not a mode: the edges dim and the boards stay, because
   // the layout the operator dragged is worth more than the lines.
   let dense = $derived(degraded(app.boards));
+
+  // The three flanks the TUI reads live on. Each is a reading, so each is
+  // dismissible: the graph is the surface, the panels are its margins.
+  let sessions = $state(true);
+  let ledger = $state(true);
+  let events = $state(true);
 
   onMount(() => {
     const given = new URLSearchParams(window.location.search).get('token');
@@ -54,18 +63,35 @@
       {cluster.connected_roles ?? 0}/{cluster.role_count ?? 0} roles ·
       {routes} routes
     </span>
+    <span class="toggles">
+      <button class:off={!sessions} onclick={() => (sessions = !sessions)}>sessions</button>
+      <button class:off={!ledger} onclick={() => (ledger = !ledger)}>ledger</button>
+      <button class:off={!events} onclick={() => (events = !events)}>events</button>
+    </span>
     {#if dense}
       <span class="dense">dense — edges dimmed, boards kept</span>
     {/if}
   </header>
 
-  <main class="content graph">
-    {#if app.boards.length > 0}
-      <GraphView />
-    {:else}
-      <p class="waiting">waiting for the first board…</p>
+  <main class="body">
+    {#if sessions}
+      <SessionsPanel />
+    {/if}
+    <section class="content graph">
+      {#if app.boards.length > 0}
+        <GraphView />
+      {:else}
+        <p class="waiting">waiting for the first board…</p>
+      {/if}
+    </section>
+    {#if ledger}
+      <LedgerPanel />
     {/if}
   </main>
+
+  {#if events}
+    <EventsPanel />
+  {/if}
 
   <footer class="bar foot">
     <span class="notice">{app.notice}</span>
