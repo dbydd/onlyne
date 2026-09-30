@@ -28,11 +28,6 @@ ratatui = { version = "0.29", default-features = false, features = ["crossterm"]
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-
-[dev-dependencies]
-onlyne-net = { workspace = true }
-tempfile = { workspace = true }
-
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",

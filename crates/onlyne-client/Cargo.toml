@@ -44,7 +44,3 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
     "Win32_System_Threading",
 ] }
-
-[dev-dependencies]
-onlyne-testkit = { path = "../onlyne-testkit", version = "2.0.0" }
-tempfile = "3.0"
