@@ -1,8 +1,7 @@
 // The parts below open with `use super::*`, so this module keeps the imports
 // the single-file version shared with them: the std and serde names every part
-// builds on, plus the two seams read through `super::` — the CLI-command
-// helpers the process backends drive, and the host probe the herdr backend
-// reads.
+// builds on, plus the seams read through `super::` — the CLI-command helpers
+// the process backends drive and the host probe.
 use anyhow::Result;
 use onlyne_proto::lifecycle::TaskState;
 use serde::{Deserialize, Serialize};
@@ -22,7 +21,6 @@ pub mod acp;
 pub mod exec;
 pub mod external;
 pub mod fake;
-pub mod herdr;
 pub mod orca;
 pub mod zellij;
 
@@ -30,11 +28,9 @@ pub mod zellij;
 mod tests;
 
 use command::{failure_code, run_checked, run_json, unsupported};
-use select::herdr_host_present;
 
 pub use acp::{AcpBackend, AcpOptions};
 pub use command::CommandFailure;
-pub use herdr::HerdrBackend;
 pub use orca::WorktreePolicy;
 pub use outcome::{OutcomeFeed, OutcomeSink};
 pub use port::{CommandOutput, ProcessRunner, Runner, SessionBackend};

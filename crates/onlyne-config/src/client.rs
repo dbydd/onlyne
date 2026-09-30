@@ -43,10 +43,10 @@ pub struct ClientConfig {
     /// disables the sweep.
     #[serde(default = "default_reconnect_grace_secs")]
     pub reconnect_grace_secs: u64,
-    /// Where this machine displays the role's runtime process (`herdr` |
-    /// `orca` | `zellij` | `headless` | `external`). Absent probes herdr, orca,
-    /// zellij in that order and falls back to `headless`. The process
-    /// environment `ONLYNE_BACKEND` takes precedence when it is nonempty.
+    /// Where this machine displays the role's runtime process (`orca` |
+    /// `zellij` | `headless` | `external`). Absent probes orca, zellij in that
+    /// order and falls back to `headless`. The process environment
+    /// `ONLYNE_BACKEND` takes precedence when it is nonempty.
     ///
     /// Placement is a property of the machine and lives here; the drive is a
     /// property of the runtime and lives in the spec's `[client.runtime]`
@@ -61,15 +61,13 @@ pub struct ClientConfig {
 /// Where the role's runtime process is displayed on this machine.
 ///
 /// Placement depends on which terminal host the machine has and lives in that
-/// machine's workspace config. An absent `placement` probes the three pane
+/// machine's workspace config. An absent `placement` probes the pane
 /// hosts in [`PLACEMENT_PROBE_ORDER`] and falls back to [`Placement::Headless`]
 /// (`docs/v2-PLAN.md` §"驱动与放置").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[schemars(rename_all = "lowercase")]
 pub enum Placement {
-    /// A herdr pane.
-    Herdr,
     /// An Orca tab.
     Orca,
     /// A zellij pane.
@@ -83,17 +81,15 @@ pub enum Placement {
 
 /// Every value a workspace `placement` accepts, in the order a refusal names
 /// them.
-pub const PLACEMENT_NAMES: &str = "herdr|orca|zellij|headless|external";
+pub const PLACEMENT_NAMES: &str = "orca|zellij|headless|external";
 
 /// What an absent `placement` probes, in order, before it falls back to
 /// [`Placement::Headless`].
-pub const PLACEMENT_PROBE_ORDER: [Placement; 3] =
-    [Placement::Herdr, Placement::Orca, Placement::Zellij];
+pub const PLACEMENT_PROBE_ORDER: [Placement; 2] = [Placement::Orca, Placement::Zellij];
 
 impl Placement {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Herdr => "herdr",
             Self::Orca => "orca",
             Self::Zellij => "zellij",
             Self::Headless => "headless",
@@ -103,7 +99,6 @@ impl Placement {
 
     pub fn parse(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
-            "herdr" => Some(Self::Herdr),
             "orca" => Some(Self::Orca),
             "zellij" => Some(Self::Zellij),
             "headless" => Some(Self::Headless),
@@ -547,7 +542,7 @@ fn session_key_line(text: &str, key: &str, value: &toml::Value) -> usize {
 
 /// Refuse the fused `backend` key.
 ///
-/// The key cannot be read past: `acp` names a drive, `herdr` a placement, and
+/// The key cannot be read past: `acp` names a drive, `orca` a placement, and
 /// `headless` was either. A client that keeps running against a value nobody
 /// split is the failure this refusal removes, so the line and both
 /// replacements are named instead (`docs/v2-CONTRACT.md` §"Slice 2").
@@ -580,7 +575,7 @@ fn carries_backend(value: &toml::Value) -> bool {
     }
 }
 
-/// `placement` is `herdr` | `orca` | `zellij` | `headless` | `external`. The
+/// `placement` is `orca` | `zellij` | `headless` | `external`. The
 /// refusal points at the line that carries the rejected value.
 ///
 /// The check runs on the parsed document, before the struct conversion, so a
@@ -595,7 +590,7 @@ fn validate_placement(parsed: &toml::Value, text: &str, file: &str) -> Result<()
             file,
             placement_line(text, placement),
             format!(
-                "placement must be one of `herdr`, `orca`, `zellij`, `headless`, `external`, got {}",
+                "placement must be one of `orca`, `zellij`, `headless`, `external`, got {}",
                 toml_literal(placement)
             ),
         ));
@@ -646,28 +641,25 @@ mod tests {
     ///
     /// ```text
     /// drive  x placement                                verdict
-    /// plugin x herdr | orca | zellij | headless         accepted
+    /// plugin x orca | zellij | headless                 accepted
     /// plugin x external                                 accepted
     /// acp    x headless                                 accepted
-    /// acp    x herdr | orca | zellij | external         refused  (stdio is the ACP channel)
+    /// acp    x orca | zellij | external                 refused  (stdio is the ACP channel)
     /// exec   x any placement                            accepted
     /// ```
     #[test]
     fn the_drive_placement_matrix_accepts_the_plans_four_rows_and_refuses_the_rest() {
         use Drive::{Acp, Exec, Plugin};
-        use Placement::{External, Headless, Herdr, Orca, Zellij};
-        let matrix: [(Drive, Placement, bool); 15] = [
-            (Plugin, Herdr, true),
+        use Placement::{External, Headless, Orca, Zellij};
+        let matrix: [(Drive, Placement, bool); 12] = [
             (Plugin, Orca, true),
             (Plugin, Zellij, true),
             (Plugin, Headless, true),
             (Plugin, External, true),
             (Acp, Headless, true),
-            (Acp, Herdr, false),
             (Acp, Orca, false),
             (Acp, Zellij, false),
             (Acp, External, false),
-            (Exec, Herdr, true),
             (Exec, Orca, true),
             (Exec, Zellij, true),
             (Exec, Headless, true),
@@ -710,8 +702,8 @@ mod tests {
         // Surrounding space is trimmed, so a pasted value with a stray newline
         // still names its placement rather than refusing the whole run.
         assert_eq!(
-            Placement::parse(" herdr\n"),
-            Some(Placement::Herdr),
+            Placement::parse(" orca\n"),
+            Some(Placement::Orca),
             "the value is trimmed before it is read"
         );
         // `fake` is not a placement a workspace may name: the test-only runtime

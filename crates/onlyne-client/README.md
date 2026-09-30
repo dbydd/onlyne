@@ -15,7 +15,7 @@ One workspace, one role, one daemon. The role runs many sessions at once.
 | `watch --workspace <dir>` | Reserved for the live role runtime. |
 | `history --workspace <dir>` | Reserved for the live role runtime. |
 
-`run` is the only launch verb, and it stays in the foreground. `--workspace` takes a relative path and resolves it to an absolute path before use, so the daemon, its generated sessions, and herdr's `--cwd` all read one location. A supervisor that wants the client in the background owns that decision — a visible terminal tab, `launchd`, `nohup` — so the client never detaches, writes no pid file, and nothing signals it by number. A `run` whose adapter socket cannot be bound ends there with exit 1 and names the failure on stderr; an `accept` error after a successful bind logs at `error` level (`adapter socket accept failed; retrying`) and retries every 100 ms with the listener held.
+`run` is the only launch verb, and it stays in the foreground. `--workspace` takes a relative path and resolves it to an absolute path before use, so the daemon and its generated sessions all read one location. A supervisor that wants the client in the background owns that decision — a visible terminal tab, `launchd`, `nohup` — so the client never detaches, writes no pid file, and nothing signals it by number. A `run` whose adapter socket cannot be bound ends there with exit 1 and names the failure on stderr; an `accept` error after a successful bind logs at `error` level (`adapter socket accept failed; retrying`) and retries every 100 ms with the listener held.
 `status` prints `onlyne: client running uptime <n>s socket <path> faults <n>`. The `<path>` is the served socket in the machine-level runtime directory, `/tmp/onlyne-<uid>/<digest>.sock` (`$ONLYNE_RUNTIME_DIR` overriding the directory), where `<digest>` is the first 16 hex characters of `sha256` over the workspace's canonical root. The uptime is the age of the `<digest>.json` registration that client published, and a client counts as running only when that socket answers an `admin` `hello`, so a socket an unclean exit left behind reads as not running. When the answering client holds no server link it adds `onlyne: client not connected` on stderr.
 
 The printed `[[client]]` fragment is a complete role entry: it carries `role`, `key`, `admin`, `max_sessions`, the ACL lists, `prose`, and `[client.runtime]` drive and command. Paste it into `spec.toml` and reload; the client can then spawn sessions for that role.
@@ -73,8 +73,7 @@ Selection is env `ONLYNE_BACKEND` (nonempty) > workspace `config.toml` `placemen
 
 | name | parse aliases | how it is chosen | notes |
 | --- | --- | --- | --- |
-| `herdr` | | env, config, or auto probe (first) | pane host |
-| `orca` | | env, config, or auto probe | tab host |
+| `orca` | | env, config, or auto probe (first) | tab host |
 | `zellij` | | env, config, or auto probe | pane host; probe maps EXITED / `exit_status` |
 | `headless` | | env or config only | machine placement for exec and ACP drives |
 | `external` | | env or config only | externally managed placement |
@@ -83,22 +82,6 @@ Selection is env `ONLYNE_BACKEND` (nonempty) > workspace `config.toml` `placemen
 A nonempty value that names a placement selects it. The spec's `[client.runtime] drive` names `plugin`, `acp`, or `exec`; `acp` requires `headless`. An unknown explicit `ONLYNE_BACKEND` value makes `onlyne-client run` exit 5.
 
 `fake` runs sessions in-process and needs no external tool; the end-to-end scripts set `ONLYNE_BACKEND=fake`. The `exec` drive spawns the role's `[client.runtime] command` as a child of the client, holds stdin open, and appends the child's output to `.onlyne/logs/session-<task>.log`. On child exit, `probe` may fill `detail.output_tail` (at most 200 lines / 16 KiB). `crates/onlyne-testkit/e2e/pi-live.sh` and `exec-headless.sh` set this path. Windows close uses `CREATE_NEW_PROCESS_GROUP` plus `CTRL_BREAK`, then `kill`; a process with no console terminates the child directly. Operator-facing graceful stop of the daemons is `onlyne shutdown`.
-
-### herdr
-
-A herdr session is inherited from the client process environment; a pi child running in a pane inherits it too. One server root/topology maps to one herdr workspace labelled `onlyne:<cluster>`. `<cluster>` is the server's own `[server] name`, which the client reads from `welcome.cluster` and passes to every pane it creates as `ONLYNE_CLUSTER`. One role maps to one tab. One onlyne session maps to one pane. Close is `herdr pane close`, and a `pane_not_found` answer is that close succeeding, logged `herdr pane already closed` at debug. Ids look like `wF`, `wF:t1`, `wF:p1`. A named session such as `onlyne-test` is the `HERDR_SESSION` value already in the client environment. The backend addresses a workspace by the label `onlyne:<cluster>` and a tab by the role's own name. An operator who wants a particular workspace or tab used renames it before the client spawns sessions: `herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>` and `herdr tab rename <TAB_ID> <role>`. A workspace label that differs yields a second workspace, a tab name that differs yields a second tab, and the client logs a warning naming the label and the created workspace each time it takes that create path.
-
-The client persists that address on the `sessions` row as `backend_ref`:
-
-```json
-{"herdr":{"workspace_id":"wF","tab_id":"wF:t1","pane_id":"wF:p1","agent":"onlyne-planner-abcd1234","workspace_label":"onlyne:lab","base_pane":"wF:p1","split_direction":"right"}}
-```
-
-Spawn uses two tracks. When the first token of `session_command` matches a known agent name (`pi`, `omp`, and the rest of herdr's `--kind` table), the backend runs `herdr agent start <name> --kind <k> --pane <id> --timeout 25000 -- --session-id <id> --session-dir .pi/sessions`: `--kind` selects the executable named by token 0, and the remaining `session_command` tokens travel after the `--` separator, the call shape herdr 0.9.0 documents. Commands whose first token is absent from that table run `herdr pane run <pane_id> '<one shell line>'`. `pane run` emits no JSON. The command is `shell_quote`d into a single argv token. The client injects `ONLYNE_SOCKET`, the served adapter-socket path, into every session it spawns, so a shell inside a role pane reaches `onlyne` verbs without spelling the socket. `workspace create`, `tab create`, and `pane split` pass `--cwd` absolute, the spelling herdr resolves against its own working directory.
-
-Split direction is `PanePlacement::from_pane_count`. `(count + 1).is_power_of_two()` maps to `right`. Remaining counts map to `down`. Ratio is `0.5`. `count` is `result.tabs[].pane_count` from `herdr tab list --workspace W`. A missing field is `0`. The production spawn path passes `placement: None`, so the backend reads that live count.
-
-Focus issues `herdr workspace focus <workspace_id>`, then `herdr tab focus <tab_id>` (positional arguments; the tab restores its last focused pane). A managed-agent pane then takes `herdr agent focus <pane_id>`. `agent focus` accepts a managed agent. A shell pane from `pane run` answers `agent_not_found`, so that track walks `herdr pane focus --pane <base_pane> --direction <split_direction>`: the neighbour of the anchor the split recorded. `herdr pane get <pane_id>` is the confirmation step; `result.pane.focused` must be true, and a hop landing elsewhere reports the pane holding focus. The control plane is `ControlOp::Focus{task_id}`; a failed backend `focus()` records `Report::Fault{kind:"focus"}`. CLI: `onlyne control --from <role> focus --task <id>`. TUI: `F`.
 
 A role at `max_sessions` keeps pulling with `control_only`, which is the path that lets `focus`, `recycle`, and `cancel` reach the session occupying the last free slot.
 
@@ -113,11 +96,7 @@ An agent that mounts naming no session — the always-running plugin — parks a
 | `placement` | selected placement name, or `null` |
 | `placement_selection` | `explicit`, `config`, `probe`, or `fallback` |
 | `explicit` | raw `ONLYNE_BACKEND` when nonempty |
-| `binary` | CLI path or name for herdr/orca/zellij; `null` for exec, fake, and no host |
-| `session` | `HERDR_SESSION` |
-| `workspace_id` | `HERDR_WORKSPACE_ID` |
-| `tab_id` | `HERDR_TAB_ID` |
-| `pane_id` | `HERDR_PANE_ID` |
+| `binary` | CLI path or name for orca/zellij; `null` for exec, fake, and no host |
 | `refusal` | present only when an explicit placement name is unknown |
 
 A missing placement yields `placement: null` and exit 0. `refusal` is present only for an unknown explicit name. The verb is a pre-deploy check.
@@ -238,7 +217,7 @@ Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind
 | `watch --workspace <dir>` | 为实时角色运行时保留。 |
 | `history --workspace <dir>` | 为实时角色运行时保留。 |
 
-`run` 是唯一的启动动词，并始终留在前台。`--workspace` 接受相对路径，并在使用前将其解析为绝对路径，因此守护进程、它所生成的会话以及 herdr 的 `--cwd` 都会读取同一位置。需要让客户端在后台运行的管理器负责这一决定——可见终端标签页、`launchd`、`nohup`——客户端自身不会分离、不写 pid 文件，也没有东西按编号向其发送信号。无法绑定适配器 socket 的 `run` 会就此结束，退出码为 1，并在 stderr 指明失败原因；成功绑定后出现 `accept` 错误时，会以 `error` 级别记录（`adapter socket accept failed; retrying`），并保持监听器、每 100 ms 重试一次。
+`run` 是唯一的启动动词，并始终留在前台。`--workspace` 接受相对路径，并在使用前将其解析为绝对路径，因此守护进程与它所生成的会话都读取同一位置。需要让客户端在后台运行的管理器负责这一决定——可见终端标签页、`launchd`、`nohup`——客户端自身不会分离、不写 pid 文件，也没有东西按编号向其发送信号。无法绑定适配器 socket 的 `run` 会就此结束，退出码为 1，并在 stderr 指明失败原因；成功绑定后出现 `accept` 错误时，会以 `error` 级别记录（`adapter socket accept failed; retrying`），并保持监听器、每 100 ms 重试一次。
 `status` 打印 `onlyne: client running uptime <n>s socket <path> faults <n>`。`<path>` 是机器级运行时目录中的已提供服务 socket，即 `/tmp/onlyne-<uid>/<digest>.sock`（`$ONLYNE_RUNTIME_DIR` 可覆盖该目录），其中 `<digest>` 是工作区规范根路径 `sha256` 的前 16 个十六进制字符。运行时长取自该 client 发布的 `<digest>.json` 注册文件的存续时间；只有该 socket 回应 `admin` `hello` 时，客户端才计为运行中，因此异常退出遗留的 socket 文件会显示为未运行。作出响应的客户端若没有服务器链接，会在 stderr 附加 `onlyne: client not connected`。
 
 打印出的 `[[client]]` 片段是完整的角色条目：其中包含 `role`、`key`、`admin`、`max_sessions`、ACL 列表、`prose` 和 `session_command`。将其粘贴到 `spec.toml` 并重新加载后，客户端便可为该角色生成会话。
@@ -291,32 +270,15 @@ Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind
 
 | 名称 | 解析别名 | 选择方式 | 备注 |
 | --- | --- | --- | --- |
-| `herdr` | | 环境变量、配置或 auto 探测（首个） | 窗格主机 |
-| `orca` | | 环境变量、配置或 auto 探测 | 标签页主机 |
+| `orca` | | 环境变量、配置或 auto 探测（首个） | 标签页主机 |
 | `zellij` | | 环境变量、配置或 auto 探测 | 窗格主机；探测会映射 EXITED / `exit_status` |
 | `exec` | `headless` | 仅环境变量或配置 | 投影将后端记录为 `exec` |
 | `fake` | | 仅环境变量或配置 | 进程内运行，用于测试 |
-| `auto` | 空字符串 | 环境变量和配置均为空时的默认值 | 依次探测 herdr、orca、zellij |
+| `auto` | 空字符串 | 环境变量和配置均为空时的默认值 | 依次探测 orca、zellij |
 
-非空值若为 `herdr`、`orca`、`zellij`、`exec`/`headless` 或 `fake`，就会选择相应后端。auto 从不发现 `exec` 和 `fake`。没有匹配项时，`onlyne-client run` 退出 5，并写入 `onlyne: no supported host detected; run inside herdr, orca, or zellij, or set ONLYNE_BACKEND`。
+非空值若为 `orca`、`zellij`、`exec`/`headless` 或 `fake`，就会选择相应后端。auto 从不发现 `exec` 和 `fake`。没有匹配项时，`onlyne-client run` 退出 5，并写入 `onlyne: no supported host detected; run inside orca or zellij, or set ONLYNE_BACKEND`。
 
 `fake` 在进程内运行会话，无需外部工具；端到端脚本会设置 `ONLYNE_BACKEND=fake`。`exec` 将角色的 `session_command` 作为客户端的子进程生成，保持 stdin 打开，并把子进程输出追加到 `.onlyne/logs/session-<task>.log`。子进程退出时，`probe` 可以填充 `detail.output_tail`（最多 200 行 / 16 KiB）。`crates/onlyne-testkit/e2e/pi-live.sh` 和 `exec-headless.sh` 会设置此路径。在 Windows 上关闭时，使用 `CREATE_NEW_PROCESS_GROUP` 加 `CTRL_BREAK`，然后 `kill`；没有控制台的进程会直接终止子进程。面向操作者、用于优雅停止守护进程的命令是 `onlyne shutdown`。
-
-### herdr
-
-herdr 会话从客户端进程环境继承；在窗格中运行的 pi 子进程也会继承它。一个服务器根节点/拓扑对应一个标签为 `onlyne:<cluster>` 的 herdr 工作区。`<cluster>` 是服务器自身的 `[server] name`；客户端从 `welcome.cluster` 读取它，并作为 `ONLYNE_CLUSTER` 传给所创建的每个窗格。一个角色对应一个标签页。一个 onlyne 会话对应一个窗格。关闭方式是 `herdr pane close`；收到 `pane_not_found` 表示关闭成功，并以 debug 级别记录 `herdr pane already closed`。Id 形如 `wF`、`wF:t1`、`wF:p1`。诸如 `onlyne-test` 的命名会话就是客户端环境中已有的 `HERDR_SESSION` 值。后端以标签 `onlyne:<cluster>` 寻址工作区，以角色自身名称寻址标签页。需要使用特定工作区或标签页的操作者，应在客户端生成会话前重命名它：`herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>` 和 `herdr tab rename <TAB_ID> <role>`。工作区标签不同会创建第二个工作区，标签页名称不同会创建第二个标签页；每次走创建路径时，客户端都会记录警告，指明该标签和所创建的工作区。
-
-客户端将该地址作为 `backend_ref` 持久化在 `sessions` 行上：
-
-```json
-{"herdr":{"workspace_id":"wF","tab_id":"wF:t1","pane_id":"wF:p1","agent":"onlyne-planner-abcd1234","workspace_label":"onlyne:lab","base_pane":"wF:p1","split_direction":"right"}}
-```
-
-生成进程使用两条路径。当 `session_command` 的第一个词元与已知代理名称（`pi`、`omp` 以及 herdr `--kind` 表中的其余名称）匹配时，后端运行 `herdr agent start <name> --kind <k> --pane <id> --timeout 25000 -- --session-id <id> --session-dir .pi/sessions`：`--kind` 选择词元 0 指定的可执行文件，`session_command` 的其余词元位于 `--` 分隔符之后；这是 herdr 0.9.0 记录的调用形式。第一个词元不在该表中的命令会运行 `herdr pane run <pane_id> '<one shell line>'`。`pane run` 不发出 JSON。命令经 `shell_quote` 处理，成为单个 argv 词元。客户端会把自己生成的每个会话都注入 `ONLYNE_SOCKET`（所提供服务的适配器 socket 路径），这样角色窗格内的 shell 无需写明 socket 路径即可调用 `onlyne` 动词。`workspace create`、`tab create` 和 `pane split` 接收绝对路径形式的 `--cwd`，herdr 会相对于自身工作目录解析它。
-
-拆分方向由 `PanePlacement::from_pane_count` 决定。`(count + 1).is_power_of_two()` 对应 `right`，其余计数对应 `down`。比例为 `0.5`。`count` 来自 `herdr tab list --workspace W` 的 `result.tabs[].pane_count`。字段缺失时取 `0`。生产环境中的生成路径传入 `placement: None`，因此后端会读取实时计数。
-
-聚焦会依次发出 `herdr workspace focus <workspace_id>` 和 `herdr tab focus <tab_id>`（位置参数；标签页会恢复上次聚焦的窗格）。对于托管代理窗格，接着执行 `herdr agent focus <pane_id>`。`agent focus` 接受托管代理。由 `pane run` 创建的 shell 窗格会回答 `agent_not_found`，因此该路径执行 `herdr pane focus --pane <base_pane> --direction <split_direction>`：沿拆分时记录的锚点方向移动到相邻窗格。`herdr pane get <pane_id>` 是确认步骤；`result.pane.focused` 必须为 true，如果跳转落在其他位置，则报告当前持有焦点的窗格。控制面是 `ControlOp::Focus{task_id}`；后端 `focus()` 失败会记录 `Report::Fault{kind:"focus"}`。CLI：`onlyne control --from <role> focus --task <id>`。TUI：`F`。
 
 角色达到 `max_sessions` 后，仍会通过 `control_only` 拉取；这条路径可让 `focus`、`recycle` 和 `cancel` 到达占用最后一个空槽位的会话。
 
@@ -331,11 +293,7 @@ herdr 会话从客户端进程环境继承；在窗格中运行的 pi 子进程�
 | `host` | 所选后端名称，或 `null` |
 | `backend_selection` | `explicit`、`env` 或 `none` |
 | `explicit` | 非空时的原始 `ONLYNE_BACKEND` |
-| `binary` | herdr/orca/zellij 的 CLI 路径或名称；对于 exec、fake 和无主机情况为 `null` |
-| `session` | `HERDR_SESSION` |
-| `workspace_id` | `HERDR_WORKSPACE_ID` |
-| `tab_id` | `HERDR_TAB_ID` |
-| `pane_id` | `HERDR_PANE_ID` |
+| `binary` | orca/zellij 的 CLI 路径或名称；对于 exec、fake 和无主机情况为 `null` |
 | `refusal` | `NO_SUPPORTED_HOST` 行；当 `host` 为 `null` 时存在 |
 
 未检测到主机会得到 `host: null` 和 `refusal`，并退出 0。该动词用于部署前检查。

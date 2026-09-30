@@ -55,12 +55,6 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 fn placement_detection_uses_explicit_declared_probe_then_fallback() {
     let cases = [
         (
-            env(&[("ONLYNE_BACKEND", "herdr")]),
-            None,
-            SessionPlacement::Named(onlyne_config::Placement::Herdr),
-            SelectionSource::Explicit,
-        ),
-        (
             env(&[("ONLYNE_BACKEND", "exec")]),
             None,
             SessionPlacement::Named(onlyne_config::Placement::Headless),
@@ -83,7 +77,7 @@ fn placement_detection_uses_explicit_declared_probe_then_fallback() {
         // told to use. The scenario suite relies on it to name the in-process
         // runtime on a host that has a terminal host of its own.
         (
-            env(&[("HERDR_ENV", "1"), ("HERDR_SESSION", "s")]),
+            env(&[("ORCA_PANE_KEY", "tab:leaf")]),
             Some(SessionPlacement::Fake),
             SessionPlacement::Fake,
             SelectionSource::Declared,
@@ -94,18 +88,6 @@ fn placement_detection_uses_explicit_declared_probe_then_fallback() {
             Some(SessionPlacement::Fake),
             SessionPlacement::Named(onlyne_config::Placement::Orca),
             SelectionSource::Explicit,
-        ),
-        (
-            env(&[("HERDR_ENV", "1"), ("HERDR_SESSION", "s")]),
-            None,
-            SessionPlacement::Named(onlyne_config::Placement::Herdr),
-            SelectionSource::Probe,
-        ),
-        (
-            env(&[("ORCA_PANE_KEY", "tab:leaf")]),
-            None,
-            SessionPlacement::Named(onlyne_config::Placement::Orca),
-            SelectionSource::Probe,
         ),
         (
             env(&[("ZELLIJ", "1")]),
@@ -129,9 +111,7 @@ fn placement_detection_uses_explicit_declared_probe_then_fallback() {
 
 #[test]
 fn placement_parse_and_unknown_explicit_name_are_precise() {
-    for name in [
-        "herdr", "orca", "zellij", "headless", "external", "exec", "fake",
-    ] {
+    for name in ["orca", "zellij", "headless", "external", "exec", "fake"] {
         assert!(SessionPlacement::parse(name).is_some(), "{name}");
     }
     for name in ["acp", "auto", "garbage"] {
@@ -148,12 +128,10 @@ fn backend_matrix_validates_drive_and_placement_pairs() {
     let runner = Arc::new(ProbeRunner::default());
     let acp = AcpOptions::default();
     let cells = [
-        (Drive::Plugin, Placement::Herdr, "herdr"),
         (Drive::Plugin, Placement::Orca, "orca"),
         (Drive::Plugin, Placement::Zellij, "zellij"),
         (Drive::Plugin, Placement::Headless, "exec"),
         (Drive::Plugin, Placement::External, "external"),
-        (Drive::Exec, Placement::Herdr, "herdr"),
         (Drive::Exec, Placement::Orca, "orca"),
         (Drive::Exec, Placement::Zellij, "zellij"),
         (Drive::Exec, Placement::Headless, "exec"),
@@ -307,8 +285,8 @@ fn run_json_unwraps_result_and_names_a_refusal() {
     );
 }
 
-/// Herdr answers a refusal with a JSON document on stderr and an empty
-/// stdout, so the code the backends branch on has to come from there.
+/// Orca answers a refusal with a JSON document on stdout, so the code the
+/// backends branch on has to come from there.
 #[test]
 fn command_failure_reads_a_code_from_the_stderr_document() {
     let output = CommandOutput {
@@ -316,11 +294,11 @@ fn command_failure_reads_a_code_from_the_stderr_document() {
         stdout: Vec::new(),
         stderr: br#"{"error":{"code":"agent_not_found","message":"agent target wF:p2 not found"},"id":"cli:agent:focus"}"#.to_vec(),
     };
-    let failure = command_failure("herdr agent focus wF:p2", &output, None);
+    let failure = command_failure("orca tab focus wF:t1", &output, None);
     assert_eq!(failure.code(), Some("agent_not_found"));
     assert_eq!(
         failure.to_string(),
-        "runtime command failed: herdr agent focus wF:p2 (status 1, agent_not_found): agent target wF:p2 not found"
+        "runtime command failed: orca tab focus wF:t1 (status 1, agent_not_found): agent target wF:p2 not found"
     );
 }
 
@@ -333,10 +311,10 @@ fn command_failure_keeps_plain_stderr_text() {
         stdout: Vec::new(),
         stderr: b"unknown option: --bogus".to_vec(),
     };
-    let failure = command_failure("herdr pane split", &output, None);
+    let failure = command_failure("orca tab close wF:t1", &output, None);
     assert_eq!(failure.code(), None);
     assert_eq!(
         failure.to_string(),
-        "runtime command failed: herdr pane split (status 2): unknown option: --bogus"
+        "runtime command failed: orca tab close wF:t1 (status 2): unknown option: --bogus"
     );
 }

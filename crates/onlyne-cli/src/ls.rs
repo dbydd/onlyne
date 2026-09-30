@@ -256,7 +256,7 @@ mod tests {
             pid,
             version: "1.4.1".to_string(),
             runtime: Some("pi".to_string()),
-            placement: Some("herdr".to_string()),
+            placement: Some("orca".to_string()),
         }
     }
 
@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(listed_client.role.as_deref(), Some("planner"));
         assert_eq!(listed_client.runtime.as_deref(), Some("pi"));
         assert_eq!(listed_server.placement, None);
-        assert_eq!(listed_client.placement.as_deref(), Some("herdr"));
+        assert_eq!(listed_client.placement.as_deref(), Some("orca"));
     }
 
     /// `--json` is a list of the same fields the table prints, so a script

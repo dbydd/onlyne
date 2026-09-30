@@ -2,7 +2,7 @@
 //! this client, instead of as a program inside a terminal.
 //!
 //! The other backends start a session command in a place a human can read —
-//! a zellij pane, an Orca tab, a herdr split, an `exec` child whose stdout is a
+//! a zellij pane, an Orca tab, an `exec` child whose stdout is a
 //! log file — and a mounted plugin inside that place reports the session's state
 //! back. An ACP agent has no place and mounts nothing: it is a process that
 //! speaks a turn protocol on a pipe, so this backend owns both halves the plugin

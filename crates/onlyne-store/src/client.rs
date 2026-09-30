@@ -45,7 +45,7 @@ pub const CLIENT_DDL: &str = r#"-- The client's own mirror of the sessions it ho
 --
 -- Two columns are the client's alone, because only the process that holds a
 -- session can answer them: `backend` names the backend that ran it (`acp`,
--- `exec`, `herdr`, `external`, … — which one comes from the role's drive under
+-- `exec`, `orca`, `external`, … — which one comes from the role's drive under
 -- the placement this machine resolved) and `backend_ref` is the reference that
 -- backend answers to. There is no `role` column: one client serves one role,
 -- and the workspace config owns that fact.

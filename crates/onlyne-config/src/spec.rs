@@ -159,7 +159,7 @@ pub struct ServerSection {
 pub const BACKEND_IS_GONE: &str = "\
 `backend` is gone: a drive belongs in the spec's `[client.runtime]` (`drive = \"plugin\"`,
 `\"acp\"`, or `\"exec\"`, with the argv in `command`) and a placement belongs in the role
-workspace's `config.toml` (`placement = \"herdr\"`, `\"orca\"`, `\"zellij\"`, `\"headless\"`, or
+workspace's `config.toml` (`placement = \"orca\"`, `\"zellij\"`, `\"headless\"`, or
 `\"external\"`)";
 
 /// Why a document may not carry `relay_required`, `relay_required_count`, or
@@ -859,7 +859,7 @@ fn validate_duplicate_gateways(spec: &Spec, text: &str, file: &str) -> Result<()
 ///
 /// A file that still carries `backend` is refused rather than read past,
 /// because the value it holds cannot be split by a reader: `acp` names a drive,
-/// `herdr` a placement, and `headless` was either. A cluster that keeps
+/// `orca` a placement, and `headless` was either. A cluster that keeps
 /// running under a policy nobody set is exactly the failure this refusal
 /// removes (`docs/v2-CONTRACT.md` §"Slice 2").
 fn validate_backend_key(value: &toml::Value, text: &str, file: &str) -> Result<(), SpecError> {

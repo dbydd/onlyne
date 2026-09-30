@@ -262,7 +262,7 @@ cert_pin = "{CERT_HEX}"
 [[client]]
 role = "planner"
 key = "{KEY_A}"
-backend = "herdr"
+backend = "orca"
 "#
     ))
     .unwrap_err();
@@ -905,7 +905,7 @@ fn the_published_client_schema_carries_placement_and_drops_backend() {
         .iter()
         .filter_map(|arm| arm["enum"][0].as_str())
         .collect();
-    assert_eq!(names, ["herdr", "orca", "zellij", "headless", "external"]);
+    assert_eq!(names, ["orca", "zellij", "headless", "external"]);
     // The ignored-key report reads these names, so a key the schema does not
     // name is one the loader calls unknown.
     assert_eq!(

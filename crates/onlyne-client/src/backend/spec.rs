@@ -56,15 +56,6 @@ pub struct PanePlacement {
     pub ratio: f64,
 }
 
-impl SplitDirection {
-    pub fn as_herdr(self) -> &'static str {
-        match self {
-            Self::Right => "right",
-            Self::Down => "down",
-        }
-    }
-}
-
 impl PanePlacement {
     /// A split that brings the pane count to a power of two goes right.
     /// Every other split goes down. Ratio is always 0.5.

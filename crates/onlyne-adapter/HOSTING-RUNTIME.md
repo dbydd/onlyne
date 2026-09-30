@@ -80,7 +80,7 @@ together say *this process serves this role and is not going away*.
 That pair is why a hosting runtime needs no configuration file listing the roles
 it serves. A runtime registers itself under its own name; a client that is not
 named by that name, or whose placement is not `external`, is not served by it.
-A client whose placement is `herdr` is running a process the client owns, and
+A client whose placement is `orca` is running a process the client owns, and
 dialling it from an already-resident runtime would be two owners for one
 session.
 
@@ -161,17 +161,15 @@ sessions:
 }}
 ```
 
-**`assign` does not carry `session_id` today.** It carries `task_id` and
-`generation`, and the session is the one the connection was opened for — which
-is exactly what makes the current protocol single-session. `AGENTS.md` §8 states
-that "`assign` carries `session_id` so a multi-session mount can route a delivery
-to the right session"; the field is not in `AssignArgs`
-(`onlyne-proto/src/adapter.rs:373`). This is gap G1's sharpest edge and it is
-the one field a hosting runtime cannot work around.
+**Landed.** `assign` carries `session_id` beside `task_id` and `generation`, and
+the client fills it in at both sites that build one. The field is optional on the
+wire, so a frame from a host that predates it still decodes — and a runtime
+reading such a frame serves it as the only conversation it has, which is what
+every runtime had before. A spawned plugin that ignores it is unaffected: on its
+connection the field always names the session it already has.
 
-Adding it is additive: `task_id` and `generation` stay, `session_id` joins them,
-and a spawned plugin that ignores it is unaffected because on its connection the
-field always names the session it already has.
+This was gap G1's sharpest edge and the one field a hosting runtime could not
+work around.
 
 The runtime renders nothing of its own. The delivery text is the client's, and
 it is the same whichever drive delivered it.

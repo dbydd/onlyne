@@ -112,8 +112,8 @@ pub(super) fn run_json(
 
 /// The structured failure for one refused (or body-less) CLI answer.
 ///
-/// Herdr writes its error document to stderr with an empty stdout, Orca writes
-/// `{"ok":false,…}` to stdout. Both shapes are decoded so
+/// Orca writes `{"ok":false,…}` to stdout; a host that answers with plain text
+/// on stderr is read the same way. Both shapes are decoded so
 /// [`CommandFailure::code`] carries the machine-readable code either way.
 pub(super) fn command_failure(
     command: &str,

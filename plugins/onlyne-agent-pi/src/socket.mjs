@@ -32,7 +32,7 @@
 //     last, and only a single matching client is an answer — several clients
 //     running pi sessions are refused by name rather than picked from, because
 //     a wrong pick dials a client that serves another role's sessions. (The
-//     field carries the session backend a client spawns under, `herdr`/`orca`/
+//     field carries the session backend a client spawns under, `orca`/
 //     `acp`/`exec`, so today it names this plugin's runtime only where that
 //     backend is pi itself.)
 //  3. nothing at all: `SocketResolutionError` naming the workspace, the

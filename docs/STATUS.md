@@ -104,7 +104,7 @@ outside the workspace so the core build needs no Node.
 - [x] `onlyne-adapter` — the plugin SDK and the protocol schema.
 - [x] `onlyne-server` — the server daemon: router, relay, projection, faults, admin, generate.
 - [x] `onlyne-client` — the client daemon: runloop, intents, adapter socket, dispatch, the
-  renderer that builds the text a model reads, and the session backends (zellij, Orca, herdr,
+  renderer that builds the text a model reads, and the session backends (zellij, Orca,
   exec, acp, fake, external), selected by the role's `[client.runtime]` drive against the
   workspace's `placement`.
 - [x] `onlyne-cli` — the `onlyne` binary: the CLI verbs, the built-in TUI, `mcp`.
@@ -153,7 +153,7 @@ progress is readable from the file itself.
 `acp-agent.py`, run with `ONLYNE_BACKEND=fake BIN_DIR=target/debug` from the repository root. The
 shapes the suite does not model fall into three groups:
 
-- *live* — `pi-live.sh`, `orca-live.sh`, `herdr-live.sh`, and `handoff-live.sh`. Each needs a
+- *live* — `pi-live.sh`, `orca-live.sh`, and `handoff-live.sh`. Each needs a
   real runtime or a model on the host and prints `SKIP` with exit 0 when it is not there, so a
   green line means "passed here" and a skip means "not exercised here".
 - *ACP* — `acp-session.sh`, the scripted ACP v1 agent.
@@ -253,7 +253,7 @@ socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`（可由 `ONLYNE_RUNT
 - `onlyne-adapter` —— plugin SDK 与协议 schema。
 - `onlyne-server` —— server daemon：router、relay、projection、faults、admin、generate。
 - `onlyne-client` —— client daemon：runloop、intents、adapter socket、dispatch、渲染模型读到的那段
-  文本的渲染器，以及 session backends（zellij、Orca、herdr、exec、acp、fake、external）——
+  文本的渲染器，以及 session backends（zellij、Orca、exec、acp、fake、external）——
   由 role 的 `[client.runtime]` drive 与工作区的 `placement` 选定。
 - `onlyne-cli` —— `onlyne` 二进制：CLI verb、内置 TUI、`mcp`。
 - `onlyne-testkit` —— scenario harness、fake runtime、conformance fixture。
@@ -295,7 +295,7 @@ runtime 不支持 `resume` 时空闲 session 的进程保留、只刷新 `last_s
 `crates/onlyne-testkit/e2e/` 下的 shell 用例连同 `lib.sh` 与脚本化 ACP 对端 `acp-agent.py`，
 从仓库根目录以 `ONLYNE_BACKEND=fake BIN_DIR=target/debug` 运行。suite 建模不了的形态分三类：
 
-- *live* —— `pi-live.sh`、`orca-live.sh`、`herdr-live.sh`、`handoff-live.sh`。每个都需要真实
+- *live* —— `pi-live.sh`、`orca-live.sh`、`handoff-live.sh`。每个都需要真实
   runtime 或主机上的模型，条件不满足时打印 `SKIP` 并以 0 退出，因此绿色行表示“在这里过了”，
   skip 表示“这里没跑到”。
 - *ACP* —— `acp-session.sh`，即脚本化的 ACP v1 agent。

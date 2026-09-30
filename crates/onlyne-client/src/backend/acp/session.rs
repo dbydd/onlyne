@@ -25,12 +25,12 @@ const TURN_CLOSE_BUDGET: Duration = Duration::from_secs(60);
 /// The instruction file a role's prose is written into.
 ///
 /// The `agents.md` convention's own name, and the file this repository's own
-/// world uses. It is a choice rather than a certainty: `onlyne-acp` carries no
-/// instruction field, so a file is the only vehicle, and an agent that reads
-/// another name — claude-code reads `CLAUDE.md` — will not see the prose until
-/// the filename is wired to the spec's agent package, which is its own slice
-/// (`docs/v2-CONTRACT.md` §3b, the known gap). Whoever wires it meets the
-/// choice here, at the line that makes it.
+/// world uses. A file is the only vehicle: `onlyne-acp` has no instruction
+/// field on `session/new`, so the prose has to ride in a file the runtime
+/// reads. Claude Code supports `AGENTS.md`, so the prose lands.
+///
+/// The residual gap is narrow: an ACP agent that reads neither `AGENTS.md` nor
+/// `CLAUDE.md` gets no role prose at all.
 const PROSE_FILE: &str = "AGENTS.md";
 
 /// The marker pair one client-owned prose block sits between.

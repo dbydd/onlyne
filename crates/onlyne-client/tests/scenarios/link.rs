@@ -156,7 +156,7 @@ async fn pinned_tls_link_fetches_welcome_and_caches_prose() {
         key_path.clone(),
         certificate.spki_pin.clone(),
     )
-    // A CI machine and an `env -u` local run have no herdr/orca/zellij to probe,
+    // A CI machine and an `env -u` local run have no orca/zellij to probe,
     // and this test needs no runtime of its own: the in-process `fake` runtime
     // is what the pre-split `backend = "fake"` named, and it is reachable here
     // by declaration, because no workspace config may name it.

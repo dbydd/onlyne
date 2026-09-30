@@ -146,7 +146,7 @@ fn uncommenting_the_template_lands_each_key_in_its_own_table() {
         .filter(|line| line.starts_with('#'))
         .collect::<Vec<_>>()
         .join("\n");
-    for name in ["herdr", "orca", "zellij", "headless", "external"] {
+    for name in ["orca", "zellij", "headless", "external"] {
         assert!(
             range.contains(name),
             "the placement comment names {name}, a value an operator may write: {range}"

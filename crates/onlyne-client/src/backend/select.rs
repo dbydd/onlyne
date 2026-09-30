@@ -9,13 +9,6 @@ fn env_nonempty(env: &BTreeMap<String, String>, key: &str) -> bool {
     env.get(key).is_some_and(|value| !value.is_empty())
 }
 
-pub(super) fn herdr_host_present(env: &BTreeMap<String, String>) -> bool {
-    env.get("HERDR_ENV").is_some_and(|value| value == "1")
-        && (env_nonempty(env, "HERDR_SOCKET_PATH")
-            || env_nonempty(env, "HERDR_SESSION")
-            || env_nonempty(env, "HERDR_WORKSPACE_ID"))
-}
-
 fn orca_host_present(env: &BTreeMap<String, String>) -> bool {
     env_nonempty(env, "ORCA_PANE_KEY")
         || env_nonempty(env, "ORCA_TERMINAL_HANDLE")
@@ -27,11 +20,9 @@ fn zellij_host_present(env: &BTreeMap<String, String>) -> bool {
 }
 
 /// The pane this process is already inside, if any: what an absent `placement`
-/// probes, in the plan's order (herdr, orca, zellij).
+/// probes, in the plan's order (orca, zellij).
 fn probed_placement(env: &BTreeMap<String, String>) -> Option<Placement> {
-    if herdr_host_present(env) {
-        Some(Placement::Herdr)
-    } else if orca_host_present(env) {
+    if orca_host_present(env) {
         Some(Placement::Orca)
     } else if zellij_host_present(env) {
         Some(Placement::Zellij)
@@ -45,7 +36,7 @@ fn probed_placement(env: &BTreeMap<String, String>) -> Option<Placement> {
 /// Precedence, highest first: a nonempty `ONLYNE_BACKEND` that names a
 /// placement, the placement this run declared — the workspace config's
 /// `placement` key for `onlyne-client run`, an embedding's own answer
-/// otherwise — then the probe over the three pane hosts, and finally `headless`
+/// otherwise — then the probe over the pane hosts, and finally `headless`
 /// — the fallback the plan fixes for a machine with no terminal host
 /// (`docs/v2-PLAN.md` §"驱动与放置").
 ///
@@ -103,12 +94,6 @@ pub fn doctor_report(env: &BTreeMap<String, String>) -> Value {
         SelectionSource::Fallback => "fallback",
     });
     let binary = match placement {
-        Some("herdr") => Some(
-            env.get("HERDR_BIN_PATH")
-                .filter(|value| !value.is_empty())
-                .cloned()
-                .unwrap_or_else(|| "herdr".into()),
-        ),
         Some("orca") => Some(
             env.get("ORCA_CLI_COMMAND")
                 .filter(|value| !value.is_empty())
@@ -129,10 +114,6 @@ pub fn doctor_report(env: &BTreeMap<String, String>) -> Value {
         "placement": placement,
         "placement_selection": selection,
         "binary": binary,
-        "session": env.get("HERDR_SESSION").filter(|value| !value.is_empty()),
-        "workspace_id": env.get("HERDR_WORKSPACE_ID").filter(|value| !value.is_empty()),
-        "tab_id": env.get("HERDR_TAB_ID").filter(|value| !value.is_empty()),
-        "pane_id": env.get("HERDR_PANE_ID").filter(|value| !value.is_empty()),
         "explicit": found.and_then(|detected| detected.explicit.clone()),
     });
     if let Err(error) = &detected {
@@ -149,7 +130,7 @@ pub fn doctor_report(env: &BTreeMap<String, String>) -> Value {
 ///
 /// | drive | placement | who starts the runtime |
 /// |---|---|---|
-/// | plugin | herdr / orca / zellij | the client, in that pane; the plugin dials back |
+/// | plugin | orca / zellij | the client, in that pane; the plugin dials back |
 /// | plugin | headless | the client, in the background; the plugin dials back |
 /// | plugin | external | nobody: the resident runtime dials in |
 /// | acp | headless | the client, as a child it speaks ACP to on stdio |
@@ -172,7 +153,6 @@ pub fn backend_for(
     }
     Ok(match placement {
         SessionPlacement::Fake => Box::new(fake::FakeBackend::new()),
-        SessionPlacement::Named(Placement::Herdr) => Box::new(herdr::HerdrBackend::new(runner)),
         SessionPlacement::Named(Placement::Orca) => {
             Box::new(orca::OrcaBackend::with_policy(runner, policy))
         }

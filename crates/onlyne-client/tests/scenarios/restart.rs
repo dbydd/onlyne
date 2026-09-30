@@ -363,7 +363,7 @@ async fn fixture(cluster: Cluster, adjust: impl FnOnce(ClientInit) -> ClientInit
             &key_path,
             certificate.spki_pin.clone(),
         )
-        // CI and `env -u` local runs have no herdr/orca/zellij; `fake` is the
+        // CI and `env -u` local runs have no orca/zellij; `fake` is the
         // backend that needs no host surface, and the session this case stages
         // answers through the plugin the test mounts. It is also the backend the
         // pre-split `backend = "fake"` named: no workspace config may name it, so

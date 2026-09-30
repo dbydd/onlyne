@@ -99,7 +99,7 @@ Onlyne 是 agent 集群的本地消息与路由层。一个 server 持有一个 
 
 **同一种连接实现了四遍。** 请求-应答-通知这个模式在 net 的 `ConnHandle`、adapter 的 `AdapterIo`、CLI 的 `wire.rs`、TUI 的请求循环里各写了一份，超时和失败语义各不相同。第一组的 1、5、8 分属其中两份，修好一份不会带动另外三份。
 
-**一个词承载多个概念。** `session` 在 v1 里同时指终端 pane、ACP 的 sessionId、server 以 task_id 为键的投影行、插件上报的 session_id。`backend` 枚举把「进程显示在哪里」和「client 怎么跟它说话」压成一个值：`herdr`、`orca`、`zellij` 是显示位置，`acp` 是通信方式，`headless` 是 `exec` 的别名（`onlyne-session/src/backend/select.rs:111-113`）。会话管理这一块最容易乱，根就在这两处。
+**一个词承载多个概念。** `session` 在 v1 里同时指终端 pane、ACP 的 sessionId、server 以 task_id 为键的投影行、插件上报的 session_id。`backend` 枚举把「进程显示在哪里」和「client 怎么跟它说话」压成一个值：`orca`、`zellij` 是显示位置，`acp` 是通信方式，`headless` 是 `exec` 的别名（`onlyne-session/src/backend/select.rs:111-113`）。会话管理这一块最容易乱，根就在这两处。
 
 **协议文本在塑造 agent 的自我认知。** 这正是「agent 收到消息后认为自己只是一个 pass」的来源，详见第二部分「投递格式与角色能力」。
 
@@ -152,7 +152,7 @@ v2 全文和代码统一用下表的词，一个词一个意思：
 | 运行时 | 真正跑模型对话的程序：pi、DSH、某个 ACP agent |
 | 会话 | 运行时里的一段对话；一个会话可以先后服务多个投递 |
 | 驱动 | client 与运行时说话的方式：`plugin`、`acp`、`exec` |
-| 放置 | 运行时进程显示在哪里：`herdr`、`orca`、`zellij`、`headless`、`external` |
+| 放置 | 运行时进程显示在哪里：`orca`、`zellij`、`headless`、`external` |
 | 插件 | 运行时内部、经 adapter 协议与 client 对话的扩展 |
 | 绑定 | 一次投递与一个会话的对应关系 |
 | 任务族 | 以 `causality.family` 为键的一串转交 |
@@ -263,12 +263,12 @@ command = ["pi"]          # 占位符沿用 v1 的 {session}、{task}
 
 ```toml
 # <workspace>/.onlyne/config.toml
-placement = "herdr"       # herdr | orca | zellij | headless | external；省略时按 herdr、orca、zellij 顺序探测
+placement = "orca"        # orca | zellij | headless | external；省略时按 orca、zellij 顺序探测
 ```
 
 | drive × placement | 谁启动运行时 | 一个进程几个会话 | 典型 |
 |---|---|---|---|
-| plugin × herdr / orca / zellij / headless | client 在 pane 里或后台启动，插件回拨 client | 1 | pi |
+| plugin × orca / zellij / headless | client 在 pane 里或后台启动，插件回拨 client | 1 | pi |
 | plugin × external | 运行时自己常驻，插件主动连 client | 多个 | DSH |
 | acp × headless | client 以子进程启动，经 stdio 说 ACP | 多个 | ACP agent |
 | exec × 任意放置 | client 启动 | 1 | 脚本、一次性 CLI |
@@ -499,7 +499,7 @@ src/
   adapter.rs     插件 socket
   driver.rs      Driver trait
   driver/        plugin.rs  acp.rs  exec.rs
-  placement.rs   herdr / orca / zellij / headless / external
+  placement.rs   orca / zellij / headless / external
 ```
 
 约 13 个文件，每个 300–1,200 行。v1 是 37 个生产文件加 21 个 sidecar 测试文件。
@@ -529,7 +529,7 @@ src/
 其余：
 
 - 纯函数的表驱动测试写在被测文件底部：帧编解码的畸形输入、spec 解析错误行号、ledger 与会话状态转移表、投递模板。
-- 真实运行时用例（herdr、orca、pi）标 `#[ignore]`，发布前手动跑。
+- 真实运行时用例（orca、pi）标 `#[ignore]`，发布前手动跑。
 - 静态检查：fmt、clippy、二进制防火墙（`cargo tree` 脚本）。
 - 规模目标：60–100 个测试函数、6,000–8,000 行，本机全量一分钟以内。
 

@@ -88,12 +88,7 @@ to you and the spec file.
    it fails: exit 4, and the output is deleted. Move a generated directory wherever you
    want — `mv`, then `onlyne client run --workspace <new-path>` in the foreground;
    whoever wants it backgrounded starts it that way. That is the whole relocation
-   story. A client whose placement is herdr places sessions in a workspace labelled
-   `onlyne:<cluster>` and a tab named for the role, and it finds the workspace by that
-   label alone, so rename yours to it before those sessions spawn: `herdr workspace
-   rename <WORKSPACE_ID> onlyne:<cluster>` and `herdr tab rename <TAB_ID> <role>`. A
-   label that differs yields a second workspace, and the client logs a warning naming
-   the label and the workspace it created.
+   story.
 4. Append the fragments to `spec.toml`, then run `onlyne reload`. `onlyne spec-diff` shows
    the pending delta first. The spec file is the only truth; there is no runtime config API.
 

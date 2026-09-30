@@ -90,19 +90,18 @@ An existing client does not need to restart.
 
 `crates/onlyne-testkit/e2e/reconnect-requeue.sh` covers the pending-then-offer-again path with `max_sessions = 2` and three tasks.
 
-Control still reaches the role at full capacity. `a_control_only_pull_hands_the_command_and_leaves_the_work_queued` in `crates/onlyne-server/tests/delivery.rs` pins this at the protocol level, and step d of `crates/onlyne-testkit/e2e/herdr-live.sh` verifies it once on a live host: the case's role uses the seed value `max_sessions = 1`, its only slot is occupied by a `sleep`, and `control focus` still reaches the session's pane.
+Control still reaches the role at full capacity. `a_control_only_pull_hands_the_command_and_leaves_the_work_queued` in `crates/onlyne-server/tests/delivery.rs` pins this at the protocol level, and `crates/onlyne-testkit/e2e/orca-live.sh` verifies it once on a live host: the case's role uses the seed value `max_sessions = 1`, its only slot is occupied by a `sleep`, and `control focus` still reaches the session's tab.
 
 ## Focus
 
 `onlyne control --from <role> focus --task <id> --force --yes-i-am-supervisor-not-other-role` brings a session's pane to the foreground. The TUI entry point is `F`, and it acts on the selected row.
 
-The control plane uses `ControlOp::Focus{task_id}`, with ledger row `kind = control`. The command reaches the session's `backend_ref`. The herdr backend follows a three-stage chain: `herdr workspace focus <W>`, `herdr tab focus <T>`, and then a third stage that branches according to the pane's origin. A managed agent uses `herdr agent focus <pane_id>`; a shell pane launched by `herdr pane run` uses `herdr pane focus --pane <base_pane> --direction <split_direction>`. Those two values were recorded when the pane was split. `base_pane` and `split_direction` are stored in `backend_ref`, so the anchors live with the pane.
+The control plane uses `ControlOp::Focus{task_id}`, with ledger row `kind = control`. The command reaches the session's `backend_ref`, and each pane host brings its own surface forward: the orca backend runs `orca terminal switch --terminal <handle> --json`, and the zellij backend focuses the pane it recorded for the session. The handle the session was spawned into is stored in `backend_ref`, so the target lives with the session.
 
-`herdr pane get <pane_id>` confirms the final step. Delivery succeeds only when `result.pane.focused` is true. If focus lands elsewhere, the command reports an error and names the pane that currently holds focus. A `focus()` failure records a `Report::Fault{kind:"focus"}`, and the TUI prints the backend's original text in that row's feedback field.
+Delivery succeeds only when the host reports the switch as ok. If focus lands elsewhere, the command reports an error. A `focus()` failure records a `Report::Fault{kind:"focus"}`, and the TUI prints the backend's original text in that row's feedback field.
 
 `--from` is a global flag on the admin plane and is written after `control`. The ACL for the focus command follows the same rule as delivery: a role with a `send` edge to the target controls the target session, while `ControlOp::Broadcast` requires a global edge.
 
-The herdr backend recognizes a workspace by label (`onlyne:<cluster>`) and a tab by name (the role's own name). To place a session in the workspace and role tab currently at hand, rename them before launching the session: `herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>` and `herdr tab rename <TAB_ID> <role>`. A workspace with a mismatched label receives a second workspace, and a mismatched tab name receives a second tab. The client then logs a warning naming the label and the newly created workspace.
 
 ## Fault recovery
 
@@ -464,7 +463,7 @@ New ledger-table columns are added in place, like `expires_at` and `requeued`, s
 
 ## Host resource reclamation
 
-When a session ends, its host resources are reclaimed: the client closes the herdr pane, Orca tab, zellij session, or exec child process when the session holds no task and has no plugin transport attached. After settlement, an empty shell left in a role tab is removed by these three paths; manual `herdr pane close` is the fallback.
+When a session ends, its host resources are reclaimed: the client closes the Orca tab, zellij session, or exec child process when the session holds no task and has no plugin transport attached. After settlement, an empty shell left in a role tab is removed by these three paths.
 
 There are three trigger paths:
 
@@ -476,7 +475,6 @@ After settlement, a session accepts no new task: one task uses one session, the 
 
 Each reclamation first refreshes a stale ref through `backend.attach` while the stored resource state remains open, projects `resource_closed`, and writes one `retiring idle session resource` line in the client log with the fields `task`, `backend`, `resource`, and `reason`; the slot is then removed from the tracking table. A close failure records a warning, and the run continues normally.
 
-Closure in herdr is idempotent: a `pane_not_found` response to `herdr pane close` is recorded as success, and the log records one debug line, `herdr pane already closed`, with the fields `task` and `pane`. A workspace that has already disappeared reads as closed afterward.
 
 The meaning of `stalled` therefore narrows to true silence: a `stalled` with `no applied progress` for a completed task disappears from this surface, and `stalled` in the fault table now describes only sessions that are still running. See the progress-clock entry in the previous section for the criterion.
 
@@ -486,9 +484,9 @@ Each task creates a new Orca terminal. `attach` only refreshes the saved termina
 
 ## Headless (`exec`) sessions
 
-A role's drive is how the client talks to its runtime, and it lives in the spec's `[client.runtime]`: `plugin` starts the runtime and lets a plugin inside it dial back, `acp` runs the agent as the client's own child and speaks the Agent Client Protocol on that child's stdio, and `exec` runs the command and reads its exit code. The placement is where this machine displays that process, and it lives in the workspace's `config.toml`. The session's `backend` field carries the backend the pair built: `herdr`, `orca`, `zellij`, `exec` (the `headless` placement), `external`, or `acp`.
+A role's drive is how the client talks to its runtime, and it lives in the spec's `[client.runtime]`: `plugin` starts the runtime and lets a plugin inside it dial back, `acp` runs the agent as the client's own child and speaks the Agent Client Protocol on that child's stdio, and `exec` runs the command and reads its exit code. The placement is where this machine displays that process, and it lives in the workspace's `config.toml`. The session's `backend` field carries the backend the pair built: `orca`, `orca`, `zellij`, `exec` (the `headless` placement), `external`, or `acp`.
 
-Placement resolution is: a nonempty `ONLYNE_BACKEND` naming a placement, then the workspace's `placement` key, then a probe of `herdr`, `orca`, `zellij` in that order, then `headless`. An explicit name that matches nothing is refused by name; it is never replaced by the probe.
+Placement resolution is: a nonempty `ONLYNE_BACKEND` naming a placement, then the workspace's `placement` key, then a probe of `orca`, `zellij` in that order, then `headless`. An explicit name that matches nothing is refused by name; it is never replaced by the probe.
 
 The session child's stdout/stderr is merged into `<workspace>/.onlyne/logs/session-<task>.log`. When the process exits, the held `probe` writes at most the last 200 lines of that file (truncated to approximately 16KiB first, then split on whole lines) into `ResourceProbe.detail.output_tail`; if the log is missing or cannot be read, the key is omitted while the `exit` code remains.
 
@@ -659,19 +657,18 @@ spec 改完后执行 `onlyne reload` 生效。
 
 `crates/onlyne-testkit/e2e/reconnect-requeue.sh` 用 `max_sessions = 2` 和三条 task 覆盖挂账再 offer 路径。
 
-满容量时 control 仍到达这一条，由 `crates/onlyne-server/tests/delivery.rs` 的 `a_control_only_pull_hands_the_command_and_leaves_the_work_queued` 在协议面钉住，并由 `crates/onlyne-testkit/e2e/herdr-live.sh` 的 d 步在活宿主上验一次：该 case 的 role 用种子值 `max_sessions = 1`，唯一槽被一条 `sleep` 占满，`control focus` 依然落到 session 的 pane。
+满容量时 control 仍到达这一条，由 `crates/onlyne-server/tests/delivery.rs` 的 `a_control_only_pull_hands_the_command_and_leaves_the_work_queued` 在协议面钉住，并由 `crates/onlyne-testkit/e2e/orca-live.sh` 在活宿主上验一次：该 case 的 role 用种子值 `max_sessions = 1`，唯一槽被一条 `sleep` 占满，`control focus` 依然落到 session 的标签页。
 
 ## 焦点
 
 `onlyne control --from <role> focus --task <id> --force --yes-i-am-supervisor-not-other-role` 把某个 session 的 pane 摆到前台。TUI 的入口是 `F`，作用在选中的那一行上。
 
-控制平面用 `ControlOp::Focus{task_id}`，账本行 `kind = control`。命令落到 session 的 `backend_ref`，herdr 后端按三段链路走：`herdr workspace focus <W>`、`herdr tab focus <T>`、第三段按 pane 的来历分岔 —— managed agent 走 `herdr agent focus <pane_id>`，`herdr pane run` 拉起的 shell pane 走 `herdr pane focus --pane <base_pane> --direction <split_direction>`，这两个值是分屏时记下的。`base_pane` 与 `split_direction` 存在 `backend_ref` 里，所以锚点跟着 pane 活。
+控制平面用 `ControlOp::Focus{task_id}`，账本行 `kind = control`。命令落到 session 的 `backend_ref`，由各窗格宿主把自己的表面切到前台：orca 后端跑 `orca terminal switch --terminal <handle> --json`，zellij 后端聚焦它为该 session 记下的 pane。会话生成时落进去的句柄存在 `backend_ref` 里，所以目标跟 session 一起走。
 
-`herdr pane get <pane_id>` 是确认那一步。`result.pane.focused` 为 true 才算送达；落在别处时命令报错，并指名当前持焦的 pane。`focus()` 失败记一条 `Report::Fault{kind:"focus"}`，TUI 把后端原文打在这一行的反馈位。
+宿主报 ok 才算送达；落在别处时命令报错。`focus()` 失败记一条 `Report::Fault{kind:"focus"}`，TUI 把后端原文打在这一行的反馈位。
 
 `--from` 是 admin 面的全局旗标，写在 `control` 之后。焦点命令的 ACL 与投递同口径：对目标有 `send` 边的 role 掌握该目标会话的控制权，`ControlOp::Broadcast` 需要全局边。
 
-herdr 后端按 label 认 workspace（`onlyne:<cluster>`），按名字认 tab（role 自己的名字）。想让 session 落进手上这个 workspace 与 role tab，操作者在拉起 session 之前先改名：`herdr workspace rename <WORKSPACE_ID> onlyne:<cluster>`、`herdr tab rename <TAB_ID> <role>`。label 对不上的 workspace 会拿到第二个 workspace，tab 名对不上会拿到第二个 tab，这时 client 打一条 warning，点名该 label 与新建出来的 workspace。
 
 ## 故障恢复
 
@@ -1031,7 +1028,7 @@ ledger 表新增的列走 in-place 加列，与 `expires_at`、`requeued` 同样
 
 ## 宿主资源回收
 
-一条会话结束，它的宿主资源跟着回收：herdr pane、Orca 标签页、zellij session、exec 子进程在“该会话不持任务且无 plugin transport 挂载”时由 client 关闭。会话结清后留在 role tab 里的空 shell 由这三条路径收走，手工 `herdr pane close` 退到兜底位置。
+一条会话结束，它的宿主资源跟着回收：Orca 标签页、zellij session、exec 子进程在“该会话不持任务且无 plugin transport 挂载”时由 client 关闭。会话结清后留在 role tab 里的空 shell 由这三条路径收走。
 
 三条触发路径：
 
@@ -1043,7 +1040,6 @@ ledger 表新增的列走 in-place 加列，与 `expires_at`、`requeued` 同样
 
 每一次回收在存储资源状态仍为开时先经 `backend.attach` 刷新过期 ref，投影 `resource_closed`，并在 client 日志记一行 `retiring idle session resource`，字段是 `task`、`backend`、`resource`、`reason`；槽位随后从跟踪表里移除。关闭失败落一条 warning，run 照常继续。
 
-herdr 的关闭是幂等的：`herdr pane close` 回 `pane_not_found` 记为成功，日志落一行 debug `herdr pane already closed`，字段 `task` 与 `pane`。一个已经消失的 workspace 在此之后读作已关闭。
 
 `stalled` 的含义因此收窄到真实静默：一条已完成的任务带 `no applied progress` 的 `stalled` 从这条面上消失，fault 表里的 `stalled` 只描述仍在跑的会话。判据细节见上一节的进展时钟条目。
 
@@ -1053,9 +1049,9 @@ herdr 的关闭是幂等的：`herdr pane close` 回 `pane_not_found` 记为成�
 
 ## Headless（exec）会话
 
-角色的 drive 是 client 与它的 runtime 通话的方式，住在 spec 的 `[client.runtime]`：`plugin` 由 client 起 runtime、让 runtime 里的插件回拨，`acp` 由 client 把 agent 当自己的子进程起、在它的 stdio 上讲 Agent Client Protocol，`exec` 由 client 跑命令并读它的退出码。placement 是这台机器把这进程摆在哪里，住在工作区 `config.toml`。会话的 `backend` 字段写着这一对造出的后端：`herdr`、`orca`、`zellij`、`exec`（`headless` placement）、`external` 或 `acp`。
+角色的 drive 是 client 与它的 runtime 通话的方式，住在 spec 的 `[client.runtime]`：`plugin` 由 client 起 runtime、让 runtime 里的插件回拨，`acp` 由 client 把 agent 当自己的子进程起、在它的 stdio 上讲 Agent Client Protocol，`exec` 由 client 跑命令并读它的退出码。placement 是这台机器把这进程摆在哪里，住在工作区 `config.toml`。会话的 `backend` 字段写着这一对造出的后端：`orca`、`zellij`、`exec`（`headless` placement）、`external` 或 `acp`。
 
-placement 的解析次序：非空 `ONLYNE_BACKEND` 点名 placement，其次是工作区的 `placement` 键，其次是按 `herdr`、`orca`、`zellij` 顺序探测，最后 `headless`。点名却不匹配任何名字的取值按名字拒收，绝不回落到探测。
+placement 的解析次序：非空 `ONLYNE_BACKEND` 点名 placement，其次是工作区的 `placement` 键，其次是按 `orca`、`zellij` 顺序探测，最后 `headless`。点名却不匹配任何名字的取值按名字拒收，绝不回落到探测。
 
 会话子进程的 stdout/stderr 并进 `<workspace>/.onlyne/logs/session-<task>.log`。进程退出时，持柄 `probe` 把该文件尾部最多 200 行（先截约 16KiB 再按整行切）写入 `ResourceProbe.detail.output_tail`；log 缺失或读失败则省略该键，`exit` 码仍在。
 

@@ -13,12 +13,10 @@ manifest, so `cargo run --example <name>` finds nothing to build here.
 | `crates/onlyne-testkit/e2e/idempotency.sh` | duplicate and conflict answers for one repeated `op_id` |
 | `crates/onlyne-testkit/e2e/legacy-layout.sh` | refusal of a pre-v1 workspace, exit code 2 |
 | `crates/onlyne-testkit/e2e/running-lights.sh` | a six-role ring: a token handed on with `onlyne handoff` twelve times, and two TUI frames of it moving |
-| `crates/onlyne-testkit/e2e/herdr-live.sh` | the herdr backend against a live herdr session: workspace per server root, role tab, split pane, `control focus`, drain |
 
 `crates/onlyne-testkit/e2e/lib.sh` holds the shared helpers. Callers set `SRC` and `tmp` first. Every
-script in the table above except `herdr-live.sh` runs with `ONLYNE_BACKEND=fake` and the `fake`
-gateway; `orca-live.sh` and `pi-live.sh` pick their own host the same way `herdr-live.sh` does.
-`herdr-live.sh` needs a sacrificial herdr session and takes `HERDR_SESSION` (default `onlyne-test`).
+script in the table above runs with `ONLYNE_BACKEND=fake` and the `fake`
+gateway, except `orca-live.sh` and `pi-live.sh`, which pick their own host.
 No real platform credential enters the run.
 
 ```bash
@@ -54,9 +52,8 @@ pre-v1 守护进程已经移除，随之移除的还有它的示例集。根目�
 | `crates/onlyne-testkit/e2e/idempotency.sh` | 对一个重复的 `op_id` 给出重复应答和冲突应答 |
 | `crates/onlyne-testkit/e2e/legacy-layout.sh` | 拒绝 pre-v1 工作区，退出代码为 2 |
 | `crates/onlyne-testkit/e2e/running-lights.sh` | 一个由六个角色组成的环：使用 `onlyne handoff` 传递令牌十二次，以及令牌移动过程中的两个 TUI 帧 |
-| `crates/onlyne-testkit/e2e/herdr-live.sh` | 针对实时 herdr 会话的 herdr 后端：每个服务器根目录一个工作区、角色标签页、拆分窗格、`control focus`、排空 |
 
-`crates/onlyne-testkit/e2e/lib.sh` 包含共享辅助函数。调用方必须先设置 `SRC` 和 `tmp`。表中除 `herdr-live.sh` 外的每个脚本都使用 `ONLYNE_BACKEND=fake` 和 `fake` 网关运行；`orca-live.sh` 和 `pi-live.sh` 以与 `herdr-live.sh` 相同的方式自行选择主机。`herdr-live.sh` 需要一个用作祭品的 herdr 会话，并接受 `HERDR_SESSION`（默认值为 `onlyne-test`）。运行过程中不会输入任何真实的平台凭据。
+`crates/onlyne-testkit/e2e/lib.sh` 包含共享辅助函数。调用方必须先设置 `SRC` 和 `tmp`。表中每个脚本都使用 `ONLYNE_BACKEND=fake` 和 `fake` 网关运行，只有 `orca-live.sh` 与 `pi-live.sh` 自行选择主机。运行过程中不会输入任何真实的平台凭据。
 
 ```bash
 cargo build --workspace

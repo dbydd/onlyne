@@ -18,7 +18,7 @@
 //!   operator, and only this client's record of the session ends here.
 //!
 //! The death window of such a session is the adapter transport's, exactly as it
-//! is for a `plugin × herdr` session: a plugin that never mounts is retired by
+//! is for a `plugin × orca` session: a plugin that never mounts is retired by
 //! `[client] reconnect_grace_secs`, not by a `try_wait` this backend cannot run.
 
 use super::*;

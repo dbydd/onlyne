@@ -413,17 +413,16 @@ drive = "plugin"        # plugin | acp | exec
 command = ["pi", "--session-id", "{session}", "--session-dir", ".pi/sessions", "-ns"]
 ```
 
-**placement** 是这台机器的属性，写在角色工作区的 `config.toml` 里：`herdr`、`orca`、`zellij`、`headless` 或 `external`。
+**placement** 是这台机器的属性，写在角色工作区的 `config.toml` 里：`orca`、`zellij`、`headless` 或 `external`。
 
 placement 的选择次序，从高到低：
 
 ```text
-非空 ONLYNE_BACKEND → 工作区 config.toml 的 placement → 探测 herdr、orca、zellij → headless
+非空 ONLYNE_BACKEND → 工作区 config.toml 的 placement → 探测 orca、zellij → headless
 ```
 
 | Placement | 宿主行为 |
 |---|---|
-| `herdr` | 在 herdr pane 中运行 session。 |
 | `orca` | 在 Orca terminal/tab 中运行角色命令，任务结束后回收 tab。 |
 | `zellij` | 在 zellij pane 中运行 session。 |
 | `headless` | 把角色的 `[client.runtime] command` 作为子进程运行，保持 stdin 打开，并把输出写入任务日志。 |
