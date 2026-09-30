@@ -916,3 +916,6 @@ fn send_is_authorised(inner: &DispatchInner, envelope: &Envelope) -> Result<()> 
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

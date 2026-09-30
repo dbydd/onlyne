@@ -509,3 +509,5 @@ fn task_id_of(report: &Report) -> &str {
         Report::Fault { .. } => "",
     }
 }
+#[cfg(test)]
+mod tests;

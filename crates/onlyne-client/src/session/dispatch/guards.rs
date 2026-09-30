@@ -325,3 +325,99 @@ fn hop_refusal(inner: &DispatchInner, key: &str, what: &str) -> Option<ResBody> 
         )
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::shape_refusal;
+    use onlyne_proto::{DETAILS_MAX_BYTES, Outcome, Report};
+
+    /// One completion's shape, at the client's own door.
+    ///
+    /// The plan names this case by hand: "`complete` carrying a `details` body
+    /// over the cap is refused with the cap named, and one at the cap passes"
+    /// (`docs/v2-CONTRACT.md` §3c). The boundary is `>` and not `>=`, so the
+    /// table carries the exact cap and one byte over it — a guard that read
+    /// `>=` would refuse a completion the plan says passes, and a model would be
+    /// told it had written too much when it had written exactly the limit.
+    #[test]
+    fn a_completion_at_the_cap_passes_and_one_byte_over_it_is_refused() {
+        let at_cap = "x".repeat(DETAILS_MAX_BYTES);
+        let over = "x".repeat(DETAILS_MAX_BYTES + 1);
+
+        let at = shape_refusal(&complete(Some(at_cap.clone()), &[]));
+        assert_eq!(at, None, "the cap itself is inside the cap");
+
+        let over = shape_refusal(&complete(Some(over), &[]));
+        let (message, field) = over.expect("one byte over the cap is refused");
+        assert_eq!(field, "details", "the refusal names the field");
+        assert!(
+            message.contains(&DETAILS_MAX_BYTES.to_string()),
+            "the refusal names the cap it measured against, so the model can \
+             count its own bytes: {message}"
+        );
+
+        // No details at all is not a zero-length details: an absent field is
+        // absent, and a cap that read `None` as empty would refuse a completion
+        // that simply reported nothing.
+        assert_eq!(shape_refusal(&complete(None, &[])), None);
+    }
+
+    /// `files` names paths the model is expected to read.
+    ///
+    /// A relative path resolves against whatever the runtime's working directory
+    /// happens to be — a pane, a tab, a child's cwd — so a completion carrying
+    /// one points the next agent at a file that is not there, and the delivery
+    /// reads as a truncated result rather than a wrong one. The refusal quotes
+    /// the offending path so the model can see which of its own entries was the
+    /// problem.
+    #[test]
+    fn a_file_that_is_not_an_absolute_path_is_refused_by_name() {
+        let refused = shape_refusal(&complete(
+            None,
+            &["relative/out.txt".to_string(), "/abs/ok.txt".to_string()],
+        ));
+        let (message, field) = refused.expect("a relative path is refused");
+        assert_eq!(field, "files", "the refusal names the field");
+        assert!(
+            message.contains("relative/out.txt"),
+            "the refusal quotes the path: {message}"
+        );
+
+        assert_eq!(
+            shape_refusal(&complete(None, &["/abs/a.png".to_string()])),
+            None,
+            "an absolute path is the shape the contract asks for"
+        );
+        assert_eq!(
+            shape_refusal(&complete(None, &[])),
+            None,
+            "no files, no rule"
+        );
+    }
+
+    /// The shape rule reads one report, and a report that is not a completion has
+    /// no shape to check.
+    #[test]
+    fn a_report_that_is_not_a_completion_is_never_refused_for_shape() {
+        let ready = Report::Ready {
+            task_id: "t-1".to_string(),
+            session_id: "s-1".to_string(),
+            generation: 1,
+            seq: 7,
+            cluster_ref: None,
+        };
+        assert_eq!(shape_refusal(&ready), None);
+    }
+
+    fn complete(details: Option<String>, files: &[String]) -> Report {
+        Report::Complete {
+            task_id: "t-1".to_string(),
+            outcome: Outcome::Done,
+            head: Some("done".to_string()),
+            details,
+            files: files.to_vec(),
+            reply_to: None,
+            cluster_ref: None,
+        }
+    }
+}
