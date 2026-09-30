@@ -269,24 +269,25 @@ second spelling of them:
   rendered. The path in the text has to name a file that exists, and a plugin
   that both wrote the file and injected the path could name one that does not.
   A failed write drops the line and leaves the rest of the delivery standing.
-- **Upstream reference material has no producer yet.** The template renders the
-  block, `render` takes it as an optional input, and no path in the tree fills
-  it: `complete(details)` delivering to the next hop is 3b/3c, and the envelope
-  or frame field it rides is that slice's to settle. Until then every delivery
-  renders the no-reference shape.
+- **Upstream reference material has no producer, and is not going to get one.**
+  The template renders the block and `render` takes it as an optional input, but
+  nothing in the tree fills it, so every delivery renders the no-reference shape.
+  That is the decision rather than a gap: **moving material between roles is the
+  roles' business, and Onlyne does not take on the file system.** A role that wants
+  the next one to have something hands it over the way it hands over anything
+  else — it writes the material where both roles can reach it and names the path
+  in its `handoff` text, which is a body any reader can open. The attachments
+  block already does this for a file that rides the envelope.
 
-  **3b/3c settled this by deferring it, and the reason is a real choice rather
-  than an omission.** Two answers are defensible — the reference is the sending
-  session's own `details`, or it is the body of the envelope that session is
-  serving, which is what the golden text above shows (`Reference material from
-  reviewer` under a task sent by *planner*). They differ in whose words travel
-  and in where the attribution goes, since the reference's `from` is not the
-  envelope's sender in the second reading; and a handoff can be minted before
-  the session completes, so the value has to be answerable at envelope-build
-  time. `details` therefore goes upward only for now — the completion envelope's
-  body, read by the originator — and the reference's own slice carries the
-  two-client chain as its proof (A→B task, B completes with `details`, A reads
-  the body; B→C handoff shows the reference).
+  Two answers were once defensible for the field itself — the sending session's own
+  `details`, or the body of the envelope that session is serving, which is what
+  the golden text above shows (`Reference material from reviewer` under a task
+  sent by *planner*). Neither earns a frame. They differ in whose words travel and
+  in where the attribution goes, since the reference's `from` is not the envelope's
+  sender in the second reading; and a handoff can be minted before the session
+  completes, so either value is unavailable at envelope-build time exactly when a
+  dispatch needs it. `details` goes upward — the completion envelope's body, read by
+  the originator — and material moves by path.
 
 ### 3b. Obligations as tools
 

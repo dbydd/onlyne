@@ -290,7 +290,7 @@ export default function onlyne(pi: ExtensionAPI) {
       log(`socket unresolved: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (socketPath === null) return;
-    surface = createSurface({ pi, log, context: () => context });
+    surface = createSurface({ pi, log, context: () => context, sessionId: identity.sessionId });
     agent = new OnlyneAgent({
       socketPath,
       cwd: ctx.cwd,

@@ -114,6 +114,17 @@ for a role where one exists (`onlyne_send` for `send`, `onlyne_handoff` for `han
 `repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, `reload`, `status`, and
 `shutdown` carry no such flag.
 
+**Material moves by path, not through the envelope.** A delivery's template renders an
+optional block quoting an upstream role's result, and nothing in the tree fills it —
+that is the decision, not a gap: moving material between roles is the roles' business
+and Onlyne does not take on the file system. A role that wants the next one to have
+something writes it where both roles can reach it and names the path in its `handoff`
+text, which is a body any reader can open. A file that rides the envelope rides in
+`attachments` instead, and the client has already written it by the time the text
+names it. So a digest fifteen pages long goes over as a path in the handoff, not as a
+quoted block; a small result that belongs in the conversation goes in the `handoff`
+body itself.
+
 A task family carries its own metadata, and you set it where the run starts. `onlyne ... send
 --hop-budget <n>` records the hops the family may spend, `--label <k=v>` (repeat the flag up to
 eight times) records whatever a script of yours reads beside the ledger, and `--deadline

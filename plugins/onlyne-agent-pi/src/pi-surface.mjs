@@ -15,9 +15,11 @@
 //   pending       ctx.hasPendingMessages()
 //   toolNames     pi.getAllTools()          (background-work.mjs)
 //   eventBus      pi.events                 (background-work.mjs)
+//   subagentRegistry  ~/.pi/subagents/missions  (background-subagents.mjs)
 //   registerTool / registerCommand are probed by index.ts itself.
 
 import { WIDGET_KEY } from "./activity.mjs";
+import { createSubagentProbe } from "./background-subagents.mjs";
 import { createBackgroundProbe } from "./background-work.mjs";
 
 /**
@@ -29,9 +31,9 @@ import { createBackgroundProbe } from "./background-work.mjs";
 export const PROSE_SECTION = "onlyne-role-prose";
 
 /**
- * @param {{ pi: any, log: (line: string) => void, context: () => any }} options
+ * @param {{ pi: any, log: (line: string) => void, context: () => any, sessionId?: string | null }} options
  */
-export function createSurface({ pi, log, context }) {
+export function createSurface({ pi, log, context, sessionId = null }) {
   const has = (value) => typeof value === "function";
   const ctx = () => {
     try {
@@ -64,6 +66,31 @@ export function createSurface({ pi, log, context }) {
     getToolNames: has(pi.getAllTools) ? () => (pi.getAllTools() ?? []).map((tool) => tool?.name) : null,
     log,
   });
+
+  // The second family of off-loop work: `Agent` calls, which return a handle and
+  // leave a subagent running with no tool event to bracket it. Scoped to this
+  // session's own missions when the plugin knows its id.
+  const subagents = createSubagentProbe({
+    getSessionId: () => sessionId,
+    log,
+  });
+
+  /**
+   * Live work in either extension holds the turn open. Both probes fail safe on
+   * their own, and a throw from either is caught here, so a broken probe still
+   * resolves to "not running" and the session proceeds.
+   * @returns {Promise<boolean>}
+   */
+  const backgroundRunning = async () => {
+    try {
+      const answers = await Promise.all([background.running(), subagents.running()]);
+      return answers.some(Boolean);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`background work probe failed: ${message}`);
+      return false;
+    }
+  };
 
   const available = {
     wakeUser: has(pi.sendUserMessage),
@@ -222,12 +249,12 @@ export function createSurface({ pi, log, context }) {
     },
     /**
      * The phase rule in one place: idle means waiting for user input, and a
-     * background-task extension holding live work keeps the session running
-     * even while pi itself waits.
+     * background extension holding live work — a `bg_*` task or a subagent
+     * mission — keeps the session running even while pi itself waits.
      */
     async waitingForInput() {
       if (!piWaitsForInput()) return false;
-      return !(await background.running());
+      return !(await backgroundRunning());
     },
     closeBackground() {
       background.close();

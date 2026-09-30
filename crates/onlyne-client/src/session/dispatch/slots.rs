@@ -124,6 +124,17 @@ impl DispatchState {
         true
     }
 
+    /// Whether this client holds a session this name answers to.
+    ///
+    /// A mount names the session it was spawned for, and a plugin that outlived
+    /// a restart still names the one it was serving when it redials — to a client
+    /// that has no memory of it, because nothing here rebuilds slots from the
+    /// store. So this is a question with a real "no", and the caller needs to be
+    /// able to ask it before it binds anything under that name.
+    pub fn knows_session(&self, session_id: &str) -> bool {
+        super::state::slot_key_named(&self.inner.lock(), session_id).is_some()
+    }
+
     /// The role's `[client.session]` policy.
     pub fn session_policy(&self) -> onlyne_config::SessionPolicy {
         self.inner.lock().session_policy.clone()

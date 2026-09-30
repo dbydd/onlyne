@@ -430,7 +430,11 @@ session, and the few tools it registers. Both are contracts.
   Attachments: /abs/path/a.png
   ```
 
-  Model-visible template text is English, matching the runtime's system prompt.
+  Model-visible template text is English, matching the runtime's system prompt. The
+  reference block is rendered and nothing fills it: moving material between roles is
+  the roles' business, and Onlyne does not take on the file system. A role hands
+  material over by writing it where both roles can reach it and naming the path in its
+  `handoff` text.
 
 - **Role prose goes into the runtime's instruction layer**, not into one conversation message. For plugin drives, through the runtime's system-prompt extension point. For ACP drives, `session/new` has no system-prompt field, so the client writes role prose into the workspace instruction file before opening the session.
 - **Protocol obligations are tools.** Tool descriptions state effect and precondition, nothing else.

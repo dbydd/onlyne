@@ -636,7 +636,25 @@ impl AdapterSocket {
         io: AdapterIo,
         capabilities: Vec<Capability>,
     ) {
-        let Some(session_id) = session_id else {
+        // A mount names the session it was spawned for, and a plugin that
+        // outlived a restart still names the one it was serving when it redials —
+        // to a client that has no memory of it, because nothing here rebuilds
+        // slots from the store. Binding the transport under that name gives this
+        // connection a session nothing will ever serve: no payload reaches it, and
+        // every beat it sends lands on a refusal. So the name is dropped and the
+        // mount parks like one that named nothing, which is what it is to a client
+        // holding no such slot. The agent keeps its conversation and takes the
+        // next staged delivery.
+        let named = session_id.filter(|id| self.dispatch.knows_session(id));
+        if session_id.is_some() && named.is_none() {
+            tracing::warn!(
+                session = ?session_id,
+                capabilities = ?capabilities,
+                "a plugin named a session this client holds no slot for; it is parked for the \
+                 next staged delivery rather than bound to a name nothing will serve"
+            );
+        }
+        let Some(session_id) = named else {
             // A runtime that declared `open`, `suspend` or `close` owns its
             // sessions, so its connection is this role's standing transport: it
             // joins no queue and is consumed by no claim. It is also handed
