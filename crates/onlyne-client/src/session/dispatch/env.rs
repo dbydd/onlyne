@@ -49,8 +49,8 @@ pub(super) fn served_socket(workspace: &Path) -> PathBuf {
 /// for a session process to carry and no variable for it to read.
 ///
 /// `ONLYNE_CLUSTER` names the server's topology and is the address a host
-/// backend groups sessions under. No welcome yet means no variable, and herdr
-/// then keeps its own default-labelled workspace.
+/// backend groups sessions under. No welcome yet means no variable, and a pane
+/// host then keeps its own default-labelled tree.
 ///
 /// `ONLYNE_SOCKET` is the path the client is serving: the same accessor the
 /// daemon bound, so a short endpoint reaches the session as the served path and

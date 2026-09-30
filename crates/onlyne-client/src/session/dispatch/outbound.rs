@@ -341,7 +341,7 @@ impl DispatchState {
     /// Record the server's topology name, read from `welcome.cluster`.
     ///
     /// Each spawned session carries it as `ONLYNE_CLUSTER`, which is how a host
-    /// backend (herdr) addresses the tree it splits panes into. The runloop calls
+    /// backend addresses the tree it splits panes into. The runloop calls
     /// this on every welcome, so a server that reloads under a new name is
     /// followed by the sessions spawned after that point.
     pub fn set_topology(&self, cluster: &str) {

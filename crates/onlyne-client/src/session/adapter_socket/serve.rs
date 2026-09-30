@@ -10,6 +10,13 @@ use onlyne_proto::{
 };
 use onlyne_wire::socket::LocalStream;
 
+/// How often a hosting connection looks for a session the client staged for it.
+///
+/// The runloop's own readiness tick is the same order of magnitude, and a
+/// delivery that finds no session is already a wait rather than a refusal, so
+/// the session opens on the next tick and not before.
+const HOSTING_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
 impl AdapterSocket {
     /// Serve one accepted connection on whichever surface it opened.
     ///
@@ -243,7 +250,26 @@ impl AdapterSocket {
                 .await;
         }
         let mut graceful_detach = false;
-        while let Some(frame) = connection.inbound.recv().await {
+        // A hosting runtime is asked for a session rather than left to find one:
+        // the client stages a session with no transport, and the connection that
+        // stands for this role is the one that can serve it. Nothing inbound
+        // would otherwise wake this loop — the `assign` that would tell the
+        // runtime about the delivery is exactly what cannot be sent, because the
+        // session has no transport yet — so the tick is what closes the circle.
+        let hosting = Capability::is_hosting(&capabilities);
+        loop {
+            let frame = tokio::select! {
+                frame = connection.inbound.recv() => match frame {
+                    Some(frame) => frame,
+                    None => break,
+                },
+                _ = tokio::time::sleep(HOSTING_POLL), if hosting => {
+                    if let Err(error) = self.offer_staged(&io, capabilities.clone()).await {
+                        tracing::warn!(error = %error, "a standing runtime could not be offered a session");
+                    }
+                    continue;
+                }
+            };
             let id = frame.id.unwrap_or_default();
             // A tools mount speaks for a session while that session lives, and
             // the token dies with it: the check runs before every frame, and a
@@ -551,6 +577,47 @@ impl AdapterSocket {
         }
     }
 
+    /// Offer this standing connection a session the client staged with no
+    /// transport, and take the answer to `open`.
+    ///
+    /// The host named the session when it staged it, because that is the key
+    /// every other lookup uses. The runtime names the conversation it opened, and
+    /// hands back an opaque handle for finding it again — both go beside the host's
+    /// name rather than replacing it.
+    ///
+    /// Nothing here composes a history summary for a runtime that cannot resume.
+    /// A session with no handle is one the runtime will open fresh next time,
+    /// and a summary this process invented is context the model never produced.
+    async fn offer_staged(&self, io: &AdapterIo, capabilities: Vec<Capability>) -> Result<()> {
+        let Some(staged) = self.dispatch.staged_hosting_session() else {
+            return Ok(());
+        };
+        let asked = self.dispatch.hosting_open_args(&staged);
+        let answer = io
+            .request(AdapterMsg::Host(HostOp::Open(asked)))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if !answer.ok {
+            tracing::warn!(
+                session = %staged,
+                "a hosting runtime refused to open a session; the delivery waits"
+            );
+            return Ok(());
+        }
+        let opened: onlyne_proto::OpenedArgs =
+            serde_json::from_value(answer.data.unwrap_or(serde_json::Value::Null))?;
+        if self
+            .dispatch
+            .hosted_session_ready(&staged, &opened, io.clone(), capabilities)
+        {
+            // The transport exists now, so the payload the slot has been holding
+            // goes out on it. This is the same hand-off a mount performs for a
+            // session that was waiting when it arrived.
+            let _ = self.dispatch.hand_staged(&staged).await;
+        }
+        Ok(())
+    }
+
     /// Bind a freshly mounted plugin to the session it names, or park it.
     ///
     /// A mount that names its session is that session's transport: the
@@ -572,16 +639,18 @@ impl AdapterSocket {
         let Some(session_id) = session_id else {
             // A runtime that declared `open`, `suspend` or `close` owns its
             // sessions, so its connection is this role's standing transport: it
-            // joins no queue, is consumed by no claim, and the sessions this role
-            // opens reach it through `hand_staged`. Everything else is a spawned
-            // agent waiting for the next session, which is what the park has
-            // always meant, and a role whose only runtime is pi behaves exactly
-            // as it did before this branch existed.
+            // joins no queue and is consumed by no claim. It is also handed
+            // nothing here — a session reaches it by being asked for, on the
+            // runloop's tick, and a hand-over at mount time would bind it a
+            // session the runtime never opened and never named. Everything else
+            // is a spawned agent waiting for the next session, which is what the
+            // park has always meant, and a role whose only runtime is pi behaves
+            // exactly as it did before this branch existed.
             if Capability::is_hosting(&capabilities) {
                 self.dispatch.stand_transport(io, capabilities);
-            } else {
-                self.dispatch.park_transport(io, capabilities);
+                return;
             }
+            self.dispatch.park_transport(io, capabilities);
             // Work that arrived ahead of this agent is staged with a payload and
             // no connection. The connection is available now, so the wait ends
             // here, and the claim binds the session to this plugin.

@@ -17,7 +17,7 @@ use onlyne_proto::adapter::HandoffArgs;
 use onlyne_proto::{
     AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, Capability, Causality, Delivery,
     DetachArgs, Envelope, ErrorCode, HealthArgs, HelloAck, HelloArgs, HostOp, IMAGE_DATA_MAX_BYTES,
-    LedgerState, Mount, MsgKind, Outcome, PROTOCOL_VERSION, Principal, Receipt,
+    LedgerState, Mount, MsgKind, OpenArgs, Outcome, PROTOCOL_VERSION, Principal, Receipt,
     RegisterChannelArgs, RenderSendArgs, Report, ResBody, ServerInfo, SessionRegisterArgs,
     TypingArgs, new_envelope, new_id, new_op_id, new_task_id,
 };
@@ -68,6 +68,9 @@ struct HostSimState {
     receipts: HashMap<String, (String, Receipt)>,
     recovery: Option<String>,
     missing_capabilities: Vec<Capability>,
+    /// Every session this runtime was asked to open, in order. A hosting test
+    /// reads it to say the client asked once rather than twice.
+    opened: Vec<String>,
 }
 
 pub struct HostSim {
@@ -170,6 +173,11 @@ impl HostSim {
 
     pub async fn set_watermark(&self, watermark: (u64, u64)) {
         self.state.lock().await.watermark = watermark;
+    }
+
+    /// The sessions this runtime was asked to open, in order.
+    pub async fn opened_sessions(&self) -> Vec<String> {
+        self.state.lock().await.opened.clone()
     }
 
     pub async fn missing_capabilities(&self) -> Vec<Capability> {
@@ -389,6 +397,32 @@ impl Host for HostSim {
         Ok(())
     }
 
+    /// Open a session inside the process that is already running, and answer the
+    /// client with a name and a handle a later open can hand back.
+    ///
+    /// The handle is this fake's own word for where the conversation is, which is
+    /// the whole point: the client stores it unread and gives it back. A runtime
+    /// that resumes by handle is the `task` scope; one that answers without one
+    /// is a fresh conversation every time, and the client must not paper over the
+    /// difference with a summary of its own.
+    async fn open_session(
+        &self,
+        args: &OpenArgs,
+    ) -> std::result::Result<Value, (ErrorCode, String)> {
+        self.record("open", serde_json::to_value(args).unwrap_or(Value::Null))
+            .await;
+        self.state.lock().await.opened.push(args.session_id.clone());
+        let handle = match args.resume_handle.as_deref() {
+            Some(handle) => handle.to_string(),
+            None => format!("sim-conv-{}", self.state.lock().await.opened.len()),
+        };
+        Ok(json!({
+            "session_id": args.session_id,
+            "conversation": handle,
+            "resume_handle": handle,
+        }))
+    }
+
     async fn assign_ack(
         &self,
         ack: &AssignAckArgs,
@@ -518,6 +552,13 @@ pub struct FakeAgent {
     pub capabilities: Vec<Capability>,
     pub script: AgentScript,
     pub workspace: PathBuf,
+    /// Every session the host asked this runtime to open, in order.
+    ///
+    /// The reader writes it when it answers an `open`; a `require_opened` step
+    /// reads it. Without the shared ledger a script could only see the wait for
+    /// an assign, which a parked connection serves too — so a scenario could not
+    /// tell an asked-for session from a handed-over one.
+    pub opened: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
 }
 
 impl FakeAgent {
@@ -532,6 +573,7 @@ impl FakeAgent {
             capabilities,
             script,
             workspace: workspace.into(),
+            opened: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -579,10 +621,42 @@ impl FakeAgent {
                 if value.as_bool() != Some(true) {
                     bail!("wait_assign must be true");
                 }
-                state.last_assign = Some(wait_for_assign(handle).await.context("wait assign")?);
+                state.last_assign = Some(
+                    wait_for_assign(handle, &self.opened)
+                        .await
+                        .context("wait assign")?,
+                );
                 // Each assignment opens its own turn, and the script's next one
                 // has to report a beat before it may complete: see `complete`.
                 state.turn_reported = false;
+            }
+            "mark_mounted" => {
+                // A file the case can wait on. `wait_role_online` answers for the
+                // client's server link, which says nothing about whether a plugin
+                // has mounted, and a delivery sent in that gap is staged before
+                // the runtime exists to be asked — which reads as a hosting
+                // failure and is not one.
+                let file = value
+                    .as_str()
+                    .ok_or_else(|| anyhow!("mark_mounted requires a path"))?;
+                let path = path_in_workspace(&self.workspace, file);
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent).await.ok();
+                }
+                tokio::fs::write(&path, b"mounted").await?;
+            }
+            "require_opened" => {
+                // The client asks a standing runtime for its session instead of
+                // handing the next staged one to whoever mounted. A script that
+                // needs the ask says so here, because the wait below is not a
+                // witness for it: a parked connection is handed a session too.
+                let opened = self.opened.lock().await.clone();
+                if opened.is_empty() {
+                    bail!(
+                        "the client never asked this runtime for a session: it was \
+                         handed one instead, so the mount was treated as parked"
+                    );
+                }
             }
             "report" => {
                 let kind = value
@@ -881,16 +955,32 @@ fn value_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
 /// scenario's whole timeout and reports nothing about why, which is how three
 /// scripts kept a capability set their own steps could never work under. The
 /// frame is the answer, so the fixture names it here.
-async fn wait_for_assign(handle: &AgentHandle) -> Result<AssignArgs> {
+async fn wait_for_assign(
+    handle: &AgentHandle,
+    opened: &std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+) -> Result<AssignArgs> {
     loop {
-        match handle.next_host_op().await? {
-            HostOp::Assign(assign) => return Ok(assign),
-            HostOp::ConfigGet(args) if args.key.starts_with("stdin:") => bail!(
+        match handle.next_host_frame().await? {
+            // The host asked for a session because it had none to hand over. A
+            // runtime that answers here is the reason a session exists at all:
+            // naming the conversation is what lets the same family find it again.
+            (Some(reply_to), HostOp::Open(args)) => {
+                let mut log = opened.lock().await;
+                log.push(args.session_id.clone());
+                let conversation = format!("sim-conv-{}", log.len());
+                handle
+                    .answer_open(reply_to, &args.session_id, &conversation)
+                    .await?;
+            }
+            (_, HostOp::Assign(assign)) => return Ok(assign),
+            (_, HostOp::ConfigGet(args)) if args.key.starts_with("stdin:") => bail!(
                 "the host delivered the task through this plugin's stdin ({}), so no `assign` \
                  will arrive: the script's hello must declare the `inject` capability",
                 args.key
             ),
-            HostOp::Bye(bye) => bail!("the host said goodbye before an assign: {}", bye.reason),
+            (_, HostOp::Bye(bye)) => {
+                bail!("the host said goodbye before an assign: {}", bye.reason)
+            }
             _ => {}
         }
     }
@@ -1135,6 +1225,10 @@ pub fn sample_assign(text: &str, prose: &str) -> AssignArgs {
         text: format!("From planner:\n\n{text}"),
         attachments: Vec::new(),
         envelope: Box::new(envelope),
+        // No session: this fixture stands for a frame from a host that predates
+        // the field, which is the shape a runtime must still read as its only
+        // conversation.
+        session_id: None,
         parent: None,
     }
 }

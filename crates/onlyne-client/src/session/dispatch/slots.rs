@@ -580,6 +580,60 @@ impl DispatchState {
         )
     }
 
+    /// One staged session this role's standing runtime can be offered.
+    ///
+    /// The mirror of [`Self::staged_without_transport`], narrowed to a session
+    /// that has no transport *because* a hosting runtime will supply one. A
+    /// session another connection already serves is not offered, and a session
+    /// whose work is already in flight is not either — a runtime must never be
+    /// asked to open a second conversation for a chain that has one.
+    pub fn staged_hosting_session(&self) -> Option<String> {
+        let inner = self.inner.lock();
+        inner
+            .sessions
+            .iter()
+            .find(|(key, slot)| {
+                slot.payload.is_some()
+                    && slot.session.backend == "hosting"
+                    && !inner
+                        .transports
+                        .keys()
+                        .any(|session| super::transport::names_session(key, slot, session))
+            })
+            .map(|(key, _)| key.clone())
+    }
+
+    /// What to ask a hosting runtime for, by the name this client gave the
+    /// session.
+    ///
+    /// The resume handle of the family's previous session rides along when there
+    /// is one, so a `task`-scoped runtime hands back the conversation it already
+    /// holds rather than opening a second one for the same chain. Nothing reads
+    /// the handle here: it is the runtime's own word for where its conversation
+    /// is, and this client stores it and gives it back.
+    pub fn hosting_open_args(&self, session_id: &str) -> onlyne_proto::OpenArgs {
+        let inner = self.inner.lock();
+        let slot = inner.sessions.get(session_id);
+        let (task_id, family, prose) = match slot {
+            Some(slot) => (slot.task_id.clone(), slot.family.clone(), String::new()),
+            None => (Some(session_id.to_string()), None, String::new()),
+        };
+        let handle = inner
+            .sessions
+            .iter()
+            .filter(|(key, other)| other.family == family && *key != session_id)
+            .filter_map(|(_, other)| other.resume_handle.clone())
+            .next();
+        onlyne_proto::OpenArgs {
+            session_id: session_id.to_string(),
+            task_id: task_id.unwrap_or_else(|| session_id.to_string()),
+            scope: format!("{:?}", inner.session_policy.scope).to_lowercase(),
+            family,
+            prose,
+            resume_handle: handle,
+        }
+    }
+
     /// The task of one session that holds a payload with no connection bound.
     ///
     /// A work item that arrives before its always-running agent mounts waits in

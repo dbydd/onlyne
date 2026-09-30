@@ -23,6 +23,7 @@ fn slot(task: &str, read_only: bool, dropped_at: Option<Instant>) -> SessionSlot
         suspended: false,
         opened_at: Instant::now(),
         command: Vec::new(),
+        resume_handle: None,
         session: session_ref(task),
         task_id: Some(task.to_string()),
         ready: !read_only,

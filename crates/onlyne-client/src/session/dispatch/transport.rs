@@ -563,9 +563,9 @@ impl DispatchState {
     /// does not join [`Self::park_transport`]'s queue: a claim takes the oldest
     /// entry and spends it, and a role whose hosting runtime serves four
     /// sessions would have nothing left for the other three. It is held here
-    /// instead, where [`Self::claim_standing_transport`] can lend it to any
-    /// session with no transport of its own — as many times as the role opens
-    /// sessions.
+    /// instead, where [`Self::staged_hosting_session`] finds it: the connection
+    /// is asked for each session the role opens, and one connection serves as
+    /// many as the role needs.
     ///
     /// A connection already standing is refreshed where it stands, the rule the
     /// park uses too: a mount that says this twice is one runtime re-helloing.
@@ -581,29 +581,38 @@ impl DispatchState {
         }
     }
 
-    /// Lend a standing connection to one session, and record it as that
-    /// session's transport.
+    /// Take the answer to an `open` a hosting runtime gave, and bind the
+    /// connection that asked.
     ///
-    /// The same judgement every other binding path runs, run on each standing
-    /// connection in turn: a session another live connection already serves is
-    /// not taken, and this one is not spent either way — nothing was reserved
-    /// for it, so a refusal costs the role nothing and the next staged session
-    /// asks again.
-    pub(super) fn claim_standing_transport(
+    /// The host named the session when it staged it, and the runtime names the
+    /// conversation it opened. Both are kept: the slot stays under the host's name
+    /// — that is the key every other lookup uses, and `session_tasks` binds through
+    /// it — while the runtime's own name and its resume handle go beside it, so the
+    /// next `open` for this family hands the handle back and the runtime resumes
+    /// rather than starting a second conversation for one chain.
+    ///
+    /// The transport is written here because the judgement has already run: the
+    /// runtime answered an `open`, and a refusal now would have to leave no
+    /// binding behind.
+    pub(crate) fn hosted_session_ready(
         &self,
         session_id: &str,
-    ) -> Option<(AdapterIo, Vec<Capability>)> {
+        opened: &onlyne_proto::OpenedArgs,
+        io: AdapterIo,
+        capabilities: Vec<Capability>,
+    ) -> bool {
         let mut inner = self.inner.lock();
-        for (io, capabilities) in inner.standing.clone() {
-            if !note_binding_locked(&mut inner, session_id, &io) {
-                continue;
-            }
-            inner
-                .transports
-                .insert(session_id.to_string(), (io.clone(), capabilities.clone()));
-            return Some((io, capabilities));
+        let Some(slot) = inner.sessions.get_mut(session_id) else {
+            return false;
+        };
+        if !opened.session_id.is_empty() {
+            slot.session.backend_ref = serde_json::Value::String(opened.session_id.clone());
         }
-        None
+        slot.resume_handle = opened.resume_handle.clone();
+        inner
+            .transports
+            .insert(session_id.to_string(), (io, capabilities));
+        true
     }
 
     /// The connection that serves one session, when its plugin is attached.

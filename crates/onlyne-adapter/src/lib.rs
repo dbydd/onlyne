@@ -46,8 +46,8 @@ use futures_util::Stream;
 use onlyne_proto::{
     AdapterMsg, AgentMount, AssignAckArgs, AssignArgs, Body, ByeNotice, ConfigGetArgs, Delivery,
     DetachArgs, Envelope, ErrorCode, GatewayHealth, GatewayMount, HELLO_REQUIRED_MESSAGE,
-    HealthArgs, HostOp, ImagePart, Outcome, PluginOp, Principal, Receipt, RegisterChannelArgs,
-    RenderSendArgs, Report, ResBody, SessionRegisterArgs, TypingArgs,
+    HealthArgs, HostOp, ImagePart, OpenArgs, Outcome, PluginOp, Principal, Receipt,
+    RegisterChannelArgs, RenderSendArgs, Report, ResBody, SessionRegisterArgs, TypingArgs,
 };
 use onlyne_wire::{FrameReader, read_frame, write_frame};
 // The crate root names `PluginOp` and its siblings; `HandoffArgs` is reached by
@@ -1138,6 +1138,38 @@ pub trait Host: Send + Sync {
     async fn detach(&self, _args: &DetachArgs) -> std::result::Result<(), (ErrorCode, String)> {
         Err((ErrorCode::UnknownOp, "detach is unsupported".to_string()))
     }
+
+    /// Answer an op the host originated, for a runtime that owns its own
+    /// sessions.
+    ///
+    /// Most of these travel as notifications, but the ones a host needs an answer
+    /// to are requests: a client that asked for a session waits for one, and a
+    /// dropped frame is a delivery that never runs. `open` is the first of them.
+    /// The default refuses rather than drops, so a runtime that does not
+    /// implement one says so instead of leaving the host to time out.
+    async fn host_op(&self, op: &HostOp) -> std::result::Result<Value, (ErrorCode, String)> {
+        match op {
+            HostOp::Open(args) => self.open_session(args).await,
+            other => Err((
+                ErrorCode::UnknownOp,
+                format!("{} is unsupported on this runtime", other.name()),
+            )),
+        }
+    }
+
+    /// Open a session, for a runtime that declared `open` and owns its sessions.
+    ///
+    /// The host asks rather than spawning because the runtime is already
+    /// resident. It names the session it wants; the answer carries the name the
+    /// runtime knows the conversation by, and an opaque handle for finding it
+    /// again. Nothing composes a history summary for a runtime that cannot
+    /// resume — a summary the host wrote is context the model never produced.
+    async fn open_session(
+        &self,
+        _args: &OpenArgs,
+    ) -> std::result::Result<Value, (ErrorCode, String)> {
+        Err((ErrorCode::UnknownOp, "open is unsupported".to_string()))
+    }
 }
 
 pub struct HostDispatcher<H> {
@@ -1195,7 +1227,13 @@ where
         mut inbound: mpsc::Receiver<IncomingFrame>,
     ) -> Result<()> {
         while let Some(frame) = inbound.recv().await {
-            if let AdapterMsg::Plugin(op) = frame.msg {
+            if let AdapterMsg::Host(op) = frame.msg {
+                let Some(id) = frame.id else { continue };
+                let body = result_to_body(self.host.host_op(&op).await);
+                if io.respond(id, body).await.is_err() {
+                    break;
+                }
+            } else if let AdapterMsg::Plugin(op) = frame.msg {
                 let body = self.dispatch(op).await;
                 if let Some(id) = frame.id {
                     io.respond(id, body).await?;
@@ -1218,7 +1256,9 @@ where
                     | PluginOp::Handoff(_)
                     | PluginOp::Detach(_)
             ),
-            MountKind::Gateway => matches!(
+            // `bridge` is the wire name for the gateway surface, so it is the
+            // gateway's op set under the name the frozen crates speak.
+            MountKind::Gateway | MountKind::Bridge => matches!(
                 op,
                 PluginOp::Deliver(_)
                     | PluginOp::RegisterChannel(_)
@@ -1233,7 +1273,12 @@ where
                     | PluginOp::Report(_)
                     | PluginOp::Detach(_)
             ),
-            MountKind::Admin => false,
+            // A cluster mount names a surface that grants nothing on this
+            // socket, and an admin probe is not a plugin at all. Both are refused
+            // by name rather than left to a default arm, so a new kind cannot
+            // inherit the wrong set by being added to the enum and forgotten
+            // here.
+            MountKind::Cluster | MountKind::Admin => false,
         };
         if allowed {
             Ok(())
@@ -1324,10 +1369,20 @@ impl AgentHandle {
     }
 
     pub async fn next_host_op(&self) -> Result<HostOp> {
+        self.next_host_frame().await.map(|(_, op)| op)
+    }
+
+    /// The next host op, with the id of the frame it arrived in.
+    ///
+    /// A notification carries no id and a request does, and a runtime that owns
+    /// its sessions has to answer the requests: a host that asked for a session
+    /// waits, and a dropped frame is a delivery that never runs. Reading the op
+    /// alone loses the id, so a caller that may have to answer asks for this.
+    pub async fn next_host_frame(&self) -> Result<(Option<u64>, HostOp)> {
         let mut inbound = self.inbound.lock().await;
         match inbound.recv().await {
             Some(frame) => match frame.msg {
-                AdapterMsg::Host(op) => Ok(op),
+                AdapterMsg::Host(op) => Ok((frame.id, op)),
                 AdapterMsg::Res(body) => Err(AdapterError::Protocol(body)),
                 AdapterMsg::Plugin(_) => Err(AdapterError::Unexpected(
                     "plugin op on client inbound".to_string(),
@@ -1335,6 +1390,27 @@ impl AgentHandle {
             },
             None => Err(AdapterError::Closed),
         }
+    }
+
+    /// Answer a host request, naming the conversation the runtime opened and a
+    /// handle it will accept on a later `open`.
+    ///
+    /// The handle is the runtime's own word for where its conversation is. The
+    /// client stores it without reading it and hands it back on the next ask,
+    /// which is what lets one family keep one conversation across a client
+    /// restart — a runtime that cannot resume answers without one, and the client
+    /// does not paper over the difference with a summary of its own.
+    pub async fn answer_open(&self, reply_to: u64, session_id: &str, handle: &str) -> Result<()> {
+        self.io
+            .respond(
+                reply_to,
+                ResBody::ok(json!({
+                    "session_id": session_id,
+                    "conversation": handle,
+                    "resume_handle": handle,
+                })),
+            )
+            .await
     }
 
     pub fn assign_stream(&self) -> Pin<Box<dyn Stream<Item = AssignArgs> + Send + '_>> {

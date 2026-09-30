@@ -37,6 +37,17 @@ pub enum MountKind {
     Tools,
     /// Local operator tooling on the server socket.
     Admin,
+    /// Cluster-level tooling on the server socket.
+    ///
+    /// `Mount::Cluster` has existed since v1 and carried `role`, which is also
+    /// what `AgentMount` carries — so under untagged decoding a cluster mount
+    /// was told apart from an agent mount only by a field the earlier variant
+    /// happened to deny. Naming the kind is what makes that unnecessary.
+    Cluster,
+    /// The protocol name for a platform bridge, kept after the IM gateway
+    /// crates were frozen (`AGENTS.md` §6). It carries a `GatewayMount`: the
+    /// wire shape did not change, only the name the kind goes by.
+    Bridge,
 }
 
 /// Optional plugin abilities. Absence of an entry is a declared gap: the host
@@ -201,17 +212,17 @@ pub struct ToolsMount {
 ///
 /// The enum is untagged, so the wire form is the plan's own `hello` example at
 /// §7 line 298 — `"mount":{"role":"planner","session":"8b1c..."}` — with `kind`
-/// beside it in the same args object rather than nested under a tag.
+/// beside it in the same args object rather than nested under a tag. `kind` is
+/// not decoration: it is what names the variant, so the two are read together by
+/// [`HelloArgs`]'s own decoder rather than the enum guessing.
 ///
-/// Untagged matching is first-match-wins, so the variant order below is the
-/// disambiguation rule: `Agent`, then `Gateway`, then `Cluster`, then `Tools`,
-/// then `Admin`.
-/// Each payload denies unknown fields, and that guard is what makes the order
-/// safe to read rather than a silent mis-decode: `AgentMount` and `ClusterMount`
-/// both carry `role`, so without it a cluster mount would decode as an agent
-/// mount. A new field belongs to the earliest variant that owns it, and making
-/// one collide with an earlier variant's set is a wire change this list must be
-/// updated for.
+/// [`Mount::decode`] is the one place that pairing lives, and it is what every
+/// connection on the wire goes through. The `untagged` derive stays for a caller
+/// that holds a mount on its own, and it is first-match-wins there: the variant
+/// order above is the disambiguation rule for that path, and each payload denies
+/// unknown fields, which is what keeps the order a decision rather than a silent
+/// mis-decode. `AgentMount` and `ClusterMount` both carry `role`, so without
+/// that guard they would be told apart by nothing.
 ///
 /// A bare `Admin` mount serializes as JSON `null`; the sibling `kind` field is
 /// what identifies it.
@@ -226,8 +237,43 @@ pub enum Mount {
     Admin,
 }
 
+impl Mount {
+    /// Read a mount payload as the variant its `kind` names.
+    ///
+    /// The kind and the payload are one fact split across two fields of the same
+    /// args object, and a receiver that needs the kind — which every dispatch
+    /// does — cannot get it from the payload. Each payload already denies the
+    /// fields its siblings own, so guessing by shape is *safe*: a cluster mount
+    /// that also carried a `session` would be refused rather than read as an
+    /// agent mount. What shape-guessing cannot do is express a kind at all. A
+    /// mount with no name in [`MountKind`] has no wire spelling, and a peer
+    /// holding one has to declare a kind it is not.
+    ///
+    /// An `admin` mount carries no data, so a payload beside it is a peer that
+    /// says one thing and means another, and that is worth failing on.
+    pub fn decode(kind: MountKind, value: serde_json::Value) -> Result<Mount, serde_json::Error> {
+        use serde::de::Error as _;
+        use serde_json::Value;
+        match (kind, value) {
+            (MountKind::Admin, Value::Null) => Ok(Mount::Admin),
+            (MountKind::Admin, other) => Err(serde_json::Error::custom(format!(
+                "an admin mount carries no payload, and this one carries {other}"
+            ))),
+            (MountKind::Agent, value) => Ok(Mount::Agent(serde_json::from_value(value)?)),
+            (MountKind::Tools, value) => Ok(Mount::Tools(serde_json::from_value(value)?)),
+            (MountKind::Cluster, value) => Ok(Mount::Cluster(serde_json::from_value(value)?)),
+            // `bridge` is the wire name for what the enum still calls a gateway.
+            // The gateway crates are frozen and were not renamed, and renaming
+            // the payload with them would be a wire change nobody asked for.
+            (MountKind::Gateway | MountKind::Bridge, value) => {
+                Ok(Mount::Gateway(serde_json::from_value(value)?))
+            }
+        }
+    }
+}
+
 /// `hello` arguments from any adapter connection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case", default)]
 pub struct HelloArgs {
     pub protocol: u16,
@@ -239,6 +285,48 @@ pub struct HelloArgs {
     pub capabilities: Vec<Capability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mount: Option<Mount>,
+}
+
+/// The wire shape, read with the mount left undecoded.
+///
+/// `kind` has to be read before `mount` can be, and a derived `Deserialize`
+/// would decode the fields in the order the derive chooses. The `mount` field
+/// therefore stays a `Value` here and is read by the variant its `kind` names.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "snake_case", default)]
+struct HelloArgsWire {
+    protocol: u16,
+    plugin: String,
+    version: String,
+    kind: MountKind,
+    capabilities: Vec<Capability>,
+    mount: Option<serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for HelloArgs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let wire = HelloArgsWire::deserialize(deserializer)?;
+        // An absent mount and a null one read the same, which is what an admin
+        // probe sends. A non-null payload beside an admin kind is refused by
+        // `decode` rather than dropped: a peer that says one thing and means
+        // another is worth failing on.
+        let mount = match wire.mount {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => Some(Mount::decode(wire.kind, value).map_err(D::Error::custom)?),
+        };
+        Ok(HelloArgs {
+            protocol: wire.protocol,
+            plugin: wire.plugin,
+            version: wire.version,
+            kind: wire.kind,
+            capabilities: wire.capabilities,
+            mount,
+        })
+    }
 }
 
 impl HelloArgs {
@@ -372,6 +460,22 @@ pub enum HostOp {
     /// no copy, composes none, and does not reset its turn bookkeeping. Its
     /// response claims only that the sentence was handed over.
     Nudge { task_id: String, text: String },
+    /// Open a session on a runtime that owns its own.
+    ///
+    /// Sent only to a connection whose runtime declared `open`, and only when
+    /// the client needs a session and would otherwise start a process for it. A
+    /// hosting runtime is already resident: asking it is the whole difference
+    /// between one process serving a role's sessions and the client spawning
+    /// one process per session, which is the shape this capability exists to
+    /// avoid.
+    ///
+    /// The answer carries the `session_id` the runtime knows the conversation
+    /// by, and an optional `resume_handle` — whatever *this* runtime needs to
+    /// find that conversation again, which the client stores without reading.
+    /// A runtime that cannot resume says so by omitting the handle, and the
+    /// client opens a fresh conversation rather than composing a history summary
+    /// to stand in for one.
+    Open(OpenArgs),
     /// The host is going away.
     Bye(ByeNotice),
 }
@@ -386,9 +490,56 @@ impl HostOp {
             HostOp::Recycle(_) => "recycle",
             HostOp::ConfigGet(_) => "config_get",
             HostOp::Nudge { .. } => "nudge",
+            HostOp::Open(_) => "open",
             HostOp::Bye(_) => "bye",
         }
     }
+}
+
+/// `open`: the host asking a hosting runtime for one session.
+///
+/// The `scope` travels because it is the runtime's own decision what a session
+/// *is* on its side — a fresh conversation, or a family it already holds — and
+/// because `max_sessions` is the host's count while the runtime may be serving
+/// this role from a pool of its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct OpenArgs {
+    /// The session the host is opening. The runtime echoes it back, so a
+    /// connection carrying several sessions has one name for each.
+    pub session_id: String,
+    /// The delivery the session is being opened for.
+    pub task_id: String,
+    /// The scope the role runs in: `oneshot`, `task` or `role`.
+    pub scope: String,
+    /// The task family, so a `task` scope can hand back the conversation it
+    /// already holds rather than opening a second one for one chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    /// The role's own instruction text, for a runtime that has no instruction
+    /// file of its own to put it in.
+    #[serde(default)]
+    pub prose: String,
+    /// The handle this client stored for the family's previous session, so a
+    /// `task` scope can hand back the conversation the runtime already holds
+    /// instead of opening a second one for one chain. Opaque in both directions:
+    /// the host stores what the runtime said and gives it back unread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_handle: Option<String>,
+}
+
+/// The answer to [`HostOp::Open`]: the session the runtime opened.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct OpenedArgs {
+    /// The session, as the host named it. A runtime that opened a different one
+    /// answers with its own, and the host binds to that.
+    pub session_id: String,
+    /// Whatever this runtime needs to find the conversation again. Opaque to the
+    /// host: it is stored beside the session and handed back on the next
+    /// `open` for the same family, and nothing reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_handle: Option<String>,
 }
 
 /// `assign` payload: the envelope plus the role prose that frames it.
@@ -436,6 +587,20 @@ pub struct AssignArgs {
     pub attachments: Vec<String>,
     pub task_id: String,
     pub generation: u64,
+    /// The session this delivery is for.
+    ///
+    /// A runtime that declared `open` opens one conversation and may keep it
+    /// across several deliveries, so a task id is not enough to say where the
+    /// work goes: the same task retried, or a family served by one conversation
+    /// over several turns, both land in one session. The session id is the key
+    /// every other lookup uses, and a mount serving several sessions has no other
+    /// way to route.
+    ///
+    /// Absent from a frame written by a host that predates it, and a runtime
+    /// reading such a frame serves it as the only session it has — one
+    /// connection, one conversation, which is what every runtime did before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Envelope of the task that caused this one, when downstream.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<Box<Envelope>>,
@@ -658,6 +823,65 @@ mod tests {
             None,
         )
         .expect("note")
+    }
+
+    /// A `hello` names its mount twice, and both names have to be honoured.
+    ///
+    /// The kind is what dispatch matches on, so a mount whose kind has no name
+    /// in [`MountKind`] cannot be sent honestly: a peer holding a `Cluster` mount
+    /// had to declare `agent`, and the host then ran the cluster's ops against
+    /// the agent's rules. Reading the pair together is what lets a kind say which
+    /// variant it means, and refusing a pair that does not fit is what keeps a
+    /// declared kind from being a claim the payload contradicts.
+    #[test]
+    fn a_hello_mount_is_read_as_the_variant_its_kind_names() {
+        let hello: HelloArgs = serde_json::from_value(serde_json::json!({
+            "plugin": "p",
+            "kind": "cluster",
+            "mount": {"cluster": "cluster-b", "role": "cluster-b"},
+        }))
+        .expect("a cluster hello decodes");
+        assert!(
+            matches!(hello.mount, Some(Mount::Cluster(_))),
+            "kind named cluster, so the mount is a cluster mount: {:?}",
+            hello.mount
+        );
+
+        // `bridge` is the name the frozen gateway crates speak; the payload is
+        // still a gateway's, and the enum was not renamed with them.
+        let hello: HelloArgs = serde_json::from_value(serde_json::json!({
+            "plugin": "p",
+            "kind": "bridge",
+            "mount": {"gateway": "gw1", "platform": "telegram"},
+        }))
+        .expect("a bridge hello decodes");
+        assert!(matches!(hello.mount, Some(Mount::Gateway(_))));
+
+        // A kind that does not own the payload beside it is refused rather than
+        // taken by whichever variant fits. The payload guards would refuse it
+        // anyway, so this is the same answer reached by the shorter path — and the
+        // reason an admin probe carrying a role is an error rather than silence.
+        serde_json::from_value::<HelloArgs>(serde_json::json!({
+            "plugin": "p",
+            "kind": "tools",
+            "mount": {"role": "planner"},
+        }))
+        .expect_err("a tools mount that carries an agent's fields is refused");
+        serde_json::from_value::<HelloArgs>(serde_json::json!({
+            "plugin": "p",
+            "kind": "admin",
+            "mount": {"role": "planner"},
+        }))
+        .expect_err("an admin mount that carries a payload is refused");
+
+        // An admin probe carries no payload at all, and that is the ordinary
+        // shape: the mount is absent rather than null.
+        let hello: HelloArgs = serde_json::from_value(serde_json::json!({
+            "plugin": "p",
+            "kind": "admin",
+        }))
+        .expect("an admin hello decodes");
+        assert_eq!(hello.mount, None);
     }
 
     #[test]

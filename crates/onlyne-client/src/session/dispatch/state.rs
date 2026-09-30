@@ -49,7 +49,7 @@ pub(super) struct DispatchInner {
     pub(super) cluster_ref: String,
     /// The server's topology name, read from `welcome.cluster` (the server's own
     /// `spec.toml [server] name`). A host backend uses it as the address of the
-    /// tree it puts sessions into: herdr keeps one workspace per server root,
+    /// tree it puts sessions into: a pane host keeps one tree per server root,
     /// labelled after this name. Empty until the first welcome arrives.
     pub(super) topology: String,
     /// The adapter connection serving each session of this role, keyed by the
@@ -214,6 +214,14 @@ pub struct SessionSlot {
     /// freshly rendered one, because the command carries the runtime's own key
     /// for the conversation and may interpolate the delivery into it.
     pub(super) command: Vec<String>,
+    /// What a hosting runtime called the conversation it opened, opaque to this
+    /// client: stored beside the session, handed back on the next `open` for the
+    /// same family, and read by nothing here. A session without one is a
+    /// conversation the runtime cannot find again, and the client starts a fresh
+    /// one rather than composing a history summary to stand in for it — a summary
+    /// this process wrote is context the model did not produce, which is the rot
+    /// the whole delivery design exists to avoid.
+    pub(super) resume_handle: Option<String>,
     /// This session's scope keeps it alive after a delivery settles.
     ///
     /// `oneshot` does not: that session's own id is the delivery that opened it,

@@ -242,6 +242,7 @@ fn a_read_only_slot_never_holds_the_handle_of_the_task_it_lost() {
         suspended: false,
         opened_at: Instant::now(),
         command: Vec::new(),
+        resume_handle: None,
         session: SessionRef {
             task_id: task.clone(),
             backend: "fake".into(),

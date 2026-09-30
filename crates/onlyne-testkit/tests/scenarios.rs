@@ -2424,6 +2424,23 @@ fn serve_once(resume: bool) -> AgentScript {
     }
 }
 
+/// A runtime that owns its own sessions: it declares `open`, so the client asks
+/// it for a session instead of starting a process to get one.
+fn serve_hosting(turns: u64) -> AgentScript {
+    let mut script = serve_repeated(false, turns);
+    script
+        .hello
+        .capabilities
+        .push(onlyne_proto::Capability::Open);
+    // After the first `wait_assign`, which is the first thing that could only
+    // arrive on a transport the ask created.
+    script
+        .steps
+        .insert(0, json!({"mark_mounted": "hosting-mounted.marker"}));
+    script.steps.insert(2, json!({"require_opened": true}));
+    script
+}
+
 fn serve_repeated(resume: bool, turns: u64) -> AgentScript {
     serve_repeated_with_delay(resume, turns, 0)
 }
@@ -2485,4 +2502,115 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()
         }
     }
     Ok(())
+}
+
+/// Scenario 19: a standing runtime serves every session; one connection is
+/// enough for two.
+///
+/// A parked connection serves exactly one session — that is the rule the rest of
+/// this suite is written against, and why a case needing two concurrent sessions
+/// starts two agents. A runtime that declared `open` is not parked: the client
+/// stages each session and asks the connection that is already there, so the
+/// same process serves the second session too. Two deliveries in two families is
+/// what separates the two paths: under parking the second session finds no
+/// transport and waits out the grace period, and the run ends with one `acked`
+/// row and one abandoned.
+#[tokio::test]
+async fn scenario_19_a_standing_runtime_serves_every_session_from_one_connection() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker"]
+max_sessions = 4"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+    // One process, two turns. Under parking the second turn has no session to
+    // serve and the run hangs; here the client asks the same connection twice.
+    cluster
+        .start_fake_agent(&worker_ws, &serve_hosting(2))
+        .await
+        .expect("start standing agent");
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+    // The client asks a runtime that is already connected. A delivery sent
+    // before the mount has landed finds no standing connection, and the client
+    // spawning a process for it is the correct answer to *that* question, not a
+    // hosting one — so the case waits for the mount rather than racing it.
+    for _ in 0..200 {
+        if worker_ws.join("hosting-mounted.marker").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        worker_ws.join("hosting-mounted.marker").exists(),
+        "the runtime never mounted"
+    );
+
+    let mut tasks = Vec::new();
+    for (index, family) in ["family-one", "family-two"].iter().enumerate() {
+        let receipt = cluster
+            .admin_send_with_family("worker", "worker", &format!("work {index}"), family)
+            .await
+            .expect("send delivery");
+        let task = task_of(&receipt);
+        cluster
+            .poll_ledger(
+                LedgerQuery {
+                    task: Some(task.clone()),
+                    ..Default::default()
+                },
+                |rows| rows.iter().any(|row| row.state == LedgerState::Acked),
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("delivery acked");
+        tasks.push(task);
+    }
+
+    // Two families, two sessions, and the second one is Attached rather than
+    // left staged with no transport.
+    let mut sessions = Vec::new();
+    for task in &tasks {
+        let rows = cluster
+            .poll_sessions(
+                QuerySessionsArgs {
+                    task_id: Some(task.clone()),
+                    ..Default::default()
+                },
+                |rows| !rows.is_empty(),
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("session row");
+        assert_eq!(rows.len(), 1, "one delivery, one session");
+        assert_eq!(
+            rows[0].projection.resource,
+            onlyne_proto::ResourcePhase::Attached,
+            "the standing connection carries every session"
+        );
+        sessions.push(rows[0].session_id.clone());
+    }
+    assert_ne!(sessions[0], sessions[1], "two families, two conversations");
+    println!("✓ Scenario 19: standing runtime [one connection served both sessions]");
 }

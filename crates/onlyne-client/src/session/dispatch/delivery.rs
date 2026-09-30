@@ -118,17 +118,36 @@ fn open_session(
     // the session's own state is the only other place it lives: a capability
     // never reaches a log, a fault, or a ledger row (`docs/v2-CONTRACT.md` §3b).
     let tools_token = mint_tools_token();
-    let session = inner.backend.spawn(SpawnSpec {
-        cwd: inner.workspace.clone(),
-        task_id: session_id.clone(),
-        command: command.clone(),
-        env,
-        tools_token: tools_token.clone(),
-        prose: prose.to_string(),
-        focus: None,
-        placement: None,
-        rename: None,
-    })?;
+    // A hosting runtime is already resident, so the host does not start a
+    // process for this session — it asks. The slot is staged either way: the slot
+    // is what the delivery, the session row and the scope all name. What differs
+    // is whether a `SpawnSpec` went out first.
+    //
+    // The staged `SessionRef` is the host's own name for the session and carries
+    // no command, because there is no argv to carry — the process belongs to the
+    // runtime. The connection answers `open` with whatever *it* calls that
+    // conversation, and `hosted_session_ready` puts the two together.
+    let hosted = !inner.standing.is_empty();
+    let session = if hosted {
+        SessionRef {
+            task_id: session_id.clone(),
+            backend: "hosting".into(),
+            backend_ref: serde_json::Value::Null,
+            generation: 1,
+        }
+    } else {
+        inner.backend.spawn(SpawnSpec {
+            cwd: inner.workspace.clone(),
+            task_id: session_id.clone(),
+            command: command.clone(),
+            env,
+            tools_token: tools_token.clone(),
+            prose: prose.to_string(),
+            focus: None,
+            placement: None,
+            rename: None,
+        })?
+    };
     let family = scope::keys_on_family(inner.session_policy.scope).then(|| family.to_string());
     // Everything that can still refuse this delivery runs inside `stage_slot`,
     // and a refusal past this line leaves a live pane, tab, or child process
@@ -149,8 +168,13 @@ fn open_session(
         causality,
         envelope,
     ) {
+        // A hosted session never opened a resource, so there is none to hand
+        // back: the runtime owns the process and the `open` that fails undoes
+        // itself on that side.
         let backend = Arc::clone(&inner.backend);
-        if let Err(close_error) = backend.close(&session, crate::backend::CloseReason::Fault, false)
+        if !hosted
+            && let Err(close_error) =
+                backend.close(&session, crate::backend::CloseReason::Fault, false)
         {
             tracing::warn!(
                 task = %task_id,
@@ -399,6 +423,11 @@ fn stage_slot(
             spawned.session.task_id.clone(),
             SessionSlot {
                 session: spawned.session.clone(),
+                // A session the host asked a hosting runtime for is named by the
+                // host until the runtime answers `open`; nothing may resume it
+                // before that, and a session with no handle is one the runtime
+                // will open fresh next time.
+                resume_handle: None,
                 task_id: Some(task_id.to_string()),
                 ready: false,
                 payload: Some(envelope.clone()),
@@ -636,6 +665,7 @@ pub async fn on_ready(state: &DispatchState, notice: ReadyNotice, prose: &str) -
                 attachments,
                 task_id,
                 generation,
+                session_id: Some(session_id.to_string()),
                 parent: None,
             };
             target
@@ -720,13 +750,13 @@ impl DispatchState {
         }
         // Three sources, in the order that keeps every role's behaviour the
         // shape it had: the session's own transport, then a parked agent — one
-        // the client spawned for work in hand, so it is the more specific match —
-        // and only then a standing connection from a hosting runtime, which
-        // serves whatever the role opens and was never waiting for a job.
+        // the client spawned for work in hand, so it is the more specific match.
+        // A hosting runtime's connection is not a third source here: the session
+        // reaches it by being asked for, so a connection that has already been
+        // lent one is lent nothing by this path.
         let transport = self
             .session_transport(session_id)
-            .or_else(|| self.claim_parked_transport(session_id))
-            .or_else(|| self.claim_standing_transport(session_id));
+            .or_else(|| self.claim_parked_transport(session_id));
         let Some((io, capabilities)) = transport else {
             return Ok(false);
         };
@@ -796,6 +826,7 @@ impl DispatchState {
             attachments,
             task_id,
             generation,
+            session_id: Some(session_id.to_string()),
             parent: None,
         };
         io.notify(AdapterMsg::Host(HostOp::Assign(assign)))

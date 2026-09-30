@@ -260,6 +260,7 @@ fn serving_slot(state: &DispatchState, task: &str, msg_id: &str) {
             suspended: false,
             opened_at: Instant::now(),
             command: Vec::new(),
+            resume_handle: None,
             session: SessionRef {
                 task_id: task.to_string(),
                 backend: "fake".into(),
@@ -876,6 +877,7 @@ async fn a_beat_from_a_held_connection_refreshes_liveness_and_applies_no_state()
                 suspended: false,
                 opened_at: Instant::now(),
                 command: Vec::new(),
+                resume_handle: None,
                 session,
                 task_id: Some(task.clone()),
                 ready: true,
@@ -959,6 +961,7 @@ async fn a_no_op_beat_still_stamps_the_liveness_clock() {
                 suspended: false,
                 opened_at: Instant::now(),
                 command: Vec::new(),
+                resume_handle: None,
                 session,
                 task_id: Some(task.clone()),
                 ready: true,
