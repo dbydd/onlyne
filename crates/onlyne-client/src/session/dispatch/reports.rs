@@ -188,9 +188,19 @@ pub async fn on_plugin_report(
                     // task is still bound and unsettled, so the demotion keeps its
                     // own retirement.
                     note_beat(&mut inner, &task_id, Instant::now());
+                    // The wording is the load-bearing part here. An earlier
+                    // sentence said "serving no such session", and it is wrong
+                    // about the commonest case that reaches here: a pooled
+                    // session that settled its delivery still has the plugin
+                    // holding and beating for that task, so every beat lands
+                    // here while the session sits in the pool reading perfectly
+                    // healthy. Read literally it says the client lost a session
+                    // it still has, and an operator chasing that looks for a
+                    // leak instead of reading the line for what it is.
                     tracing::warn!(
                         task = %task_id,
-                        "a beat from a connection serving no such session refreshes the liveness stamp and applies no state"
+                        "a beat arrived on a connection that is not this task's transport: \
+                         the liveness stamp is refreshed and no state is applied"
                     );
                     // A beat that speaks for no session of this role witnessed no
                     // ending this client may act on.
