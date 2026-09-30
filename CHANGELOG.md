@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 (unreleased)
+## 2.0.0 (2026-09-30)
 
 The v2 rewrite of the routing and session layer. `docs/v2-PLAN.md` is the plan and
 `docs/v2-REMAINING.md` is the state; this entry is what an operator has to act on.
@@ -87,7 +87,7 @@ it takes is the one it took before. `crates/onlyne-adapter/HOSTING-RUNTIME.md` s
 the interface in full; the two gaps it still names are the connection's own identity
 and the runtime name a mount carries.
 
-## 2.0.0（未发布）
+## 2.0.0（2026-09-30）
 
 v2 对路由层与会话层的重写。计划见 `docs/v2-PLAN.md`，状态见 `docs/v2-REMAINING.md`；
 本节只写操作员需要动手的部分。

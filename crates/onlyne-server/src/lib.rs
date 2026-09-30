@@ -1,4 +1,4 @@
-//! Onlyne v1 server: routing, ledger, delivery, gateway host, admin socket.
+//! Onlyne server: routing, ledger, delivery, gateway host, admin socket.
 //!
 //! [`serve`] starts the three listeners and returns when the server is asked to
 //! shut down: the role TCP plus TLS listener, and the run socket that serves the

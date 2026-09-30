@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Onlyne v1 cluster spec and client config: strict TOML parsing, validation, reload diffs"
+description = "Onlyne cluster spec and client config: strict TOML parsing, validation, reload diffs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

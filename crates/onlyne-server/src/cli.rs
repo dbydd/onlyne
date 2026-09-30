@@ -15,7 +15,7 @@ use crate::generate::{GenerateArgs, GenerateError, generate};
 use crate::{Server, ServerInit};
 
 #[derive(Debug, Parser)]
-#[command(name = "onlyne-server", version, about = "Onlyne v1 routing daemon")]
+#[command(name = "onlyne-server", version, about = "Onlyne routing daemon")]
 struct Cli {
     /// Emit progress as one JSON object per line on stderr.
     #[arg(long, global = true)]
@@ -261,7 +261,7 @@ fn cluster_name(root: &Path) -> String {
 
 fn spec_template(name: &str, listen: &str, cert_pin: &str) -> String {
     format!(
-        "# Onlyne v1 cluster spec. Written by `onlyne-server init`.\n\
+        "# Onlyne cluster spec. Written by `onlyne-server init`.\n\
          #\n\
          # `name` is the cluster name handed to every client.\n\
          # `listen` is the TCP address the routing daemon binds.\n\

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Onlyne v1 wire seam: length-prefixed JSON frames and the local socket endpoint"
+description = "Onlyne wire seam: length-prefixed JSON frames and the local socket endpoint"
 
 [dependencies]
 interprocess = { workspace = true }

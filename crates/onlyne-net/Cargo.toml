@@ -5,13 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Onlyne v1 transport, TLS identity, admission, and reconnect backoff"
+description = "Onlyne transport, TLS identity, admission, and reconnect backoff"
 
 [dependencies]
 base64 = "0.22.1"
 ed25519-dalek = { version = "2.1.1", default-features = false, features = ["std", "rand_core"] }
-onlyne-wire = { path = "../onlyne-wire", version = "1.4.1" }
-onlyne-proto = { path = "../onlyne-proto", version = "1.4.1" }
+onlyne-wire = { path = "../onlyne-wire", version = "2.0.0" }
+onlyne-proto = { path = "../onlyne-proto", version = "2.0.0" }
 rand = "0.8.6"
 rcgen = { version = "0.13.2", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23.40", default-features = false, features = ["ring", "std"] }

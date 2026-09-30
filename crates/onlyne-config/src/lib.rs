@@ -1,4 +1,4 @@
-//! Onlyne v1.0.0 cluster spec and client configuration.
+//! Onlyne cluster spec and client configuration.
 //!
 //! `<server-root>/.onlyne/spec.toml` is the cluster's single source of truth. The
 //! file is written by humans and by `onlyne server generate`. This crate parses it,

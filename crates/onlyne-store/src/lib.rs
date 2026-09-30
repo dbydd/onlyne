@@ -1,4 +1,4 @@
-//! SQLite persistence for Onlyne v1.0.0.
+//! SQLite persistence for Onlyne.
 //!
 //! ## Schema versus plan
 //!

@@ -1,4 +1,4 @@
-//! Onlyne v1 wire protocol (decisions D3, D4, D8, D9, D10, D11, D16).
+//! Onlyne wire protocol (decisions D3, D4, D8, D9, D10, D11, D16).
 //!
 //! Pure data: every type here is serde-only, so the protocol travels into the
 //! server, the client, the gateway plugins, and the machine-readable schema

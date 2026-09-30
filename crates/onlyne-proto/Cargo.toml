@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Onlyne v1 wire protocol: envelopes, frames, events, ops, error codes, JSON Schema export"
+description = "Onlyne wire protocol: envelopes, frames, events, ops, error codes, JSON Schema export"
 build = "build.rs"
 
 [dependencies]

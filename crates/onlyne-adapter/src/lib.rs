@@ -1,4 +1,4 @@
-//! Adapter SDK for the Onlyne v1 local socket.
+//! Adapter SDK for the Onlyne local socket.
 //!
 //! One protocol is mounted by agent plugins on role client sockets and by
 //! platform gateways on server sockets.

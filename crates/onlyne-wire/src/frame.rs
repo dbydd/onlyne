@@ -1,4 +1,4 @@
-//! Length-prefixed JSON framing for Onlyne v1 (decision D8).
+//! Length-prefixed JSON framing for Onlyne (decision D8).
 //!
 //! A frame is a `u32 big-endian byte length` followed by that many bytes of
 //! UTF-8 JSON. One connection carries request, response, and event frames side

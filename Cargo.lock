@@ -1041,7 +1041,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onlyne-acp"
-version = "1.4.1"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1052,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-adapter"
-version = "1.4.1"
+version = "2.0.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1069,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-cli"
-version = "1.4.1"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1094,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-client"
-version = "1.4.1"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1129,7 +1129,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-config"
-version = "1.4.1"
+version = "2.0.0"
 dependencies = [
  "base64",
  "onlyne-proto",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-net"
-version = "1.4.1"
+version = "2.0.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-proto"
-version = "1.4.1"
+version = "2.0.0"
 dependencies = [
  "base64",
  "chrono",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-server"
-version = "1.4.1"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-store"
-version = "1.4.1"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1230,7 +1230,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-testkit"
-version = "1.4.1"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1253,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-wire"
-version = "1.4.1"
+version = "2.0.0"
 dependencies = [
  "interprocess",
  "libc",

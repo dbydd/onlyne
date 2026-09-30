@@ -1,11 +1,11 @@
 [package]
 name = "onlyne-cli"
-version = "1.4.1"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Onlyne v1 human entrypoint: the daemons' CLI and the admin-socket observation board"
+description = "Onlyne human entrypoint: the daemons' CLI and the admin-socket observation board"
 
 [[bin]]
 name = "onlyne"
