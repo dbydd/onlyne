@@ -131,6 +131,14 @@ pub fn class_of(kind: MsgKind) -> MsgClass {
 pub fn resolve_target(spec: &Spec, to: &Principal) -> Result<String, RelayReject> {
     match to {
         Principal::Role { role, .. } => {
+            // The operator is a destination whether or not the spec declares
+            // it: a task the operator dispatched completes back to
+            // `_supervisor`, and refusing the name would strand every such
+            // completion at the gate. The ACL keeps the narrowness rule for the
+            // declared case.
+            if role == onlyne_net::OPERATOR_ROLE {
+                return Ok(role.clone());
+            }
             if spec.role_names().iter().any(|name| name == role) {
                 Ok(role.clone())
             } else {
@@ -177,6 +185,12 @@ pub fn resolve_target(spec: &Spec, to: &Principal) -> Result<String, RelayReject
 pub fn resolve_sender(spec: &Spec, from: &Principal) -> Result<(), RelayReject> {
     match from {
         Principal::Role { role, .. } => {
+            // The operator's standing is built in (see `check_acl` and
+            // `onlyne_net::acl_allows`): the reserved name sends even when the
+            // spec never declares it.
+            if role == onlyne_net::OPERATOR_ROLE {
+                return Ok(());
+            }
             if spec.role_names().iter().any(|name| name == role) {
                 Ok(())
             } else {

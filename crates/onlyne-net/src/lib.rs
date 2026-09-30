@@ -11,7 +11,8 @@ pub mod identity;
 pub mod tls;
 
 pub use acl::{
-    AclDeny, AclDenyReason, AclEdge, AclTable, MsgClass, RoleAcl, acl_allows, table_from,
+    AclDeny, AclDenyReason, AclEdge, AclTable, MsgClass, OPERATOR_ROLE, RoleAcl, acl_allows,
+    table_from,
 };
 pub use backoff::Backoff;
 pub use conn::{

@@ -239,6 +239,16 @@ pub struct AclDeny {
 /// `owner` is the task owner the caller resolved from `causality.task`. The
 /// `field` values `from.role`, `to.role`, and `admin` travel to the wire in
 /// `ErrorPayload::field`, so callers must not rename them.
+///
+/// The operator's standing is built in, not declared. `_supervisor` names
+/// whoever runs the cluster — agent or human — rather than a process, so a
+/// cluster that never carried a `[[client]]` entry for it still answers its
+/// sends: to every registered role, in every class, `admin` implied. Its inbox
+/// is the same standing read the other way: a registered role's delivery to the
+/// undeclared operator carries, because a task the operator dispatched has
+/// nowhere else to return. A declared `_supervisor` is an ordinary role; the
+/// spec's own rows govern it, and an explicit narrowing of its `allowed_targets`
+/// holds.
 pub fn acl_allows(
     table: &AclTable,
     from: &str,
@@ -246,6 +256,20 @@ pub fn acl_allows(
     class: MsgClass,
     owner: Option<&str>,
 ) -> Result<(), AclDeny> {
+    if from == OPERATOR_ROLE && !table.roles.contains_key(from) {
+        return table.roles.get(to).map(|_| ()).ok_or_else(|| AclDeny {
+            reason: AclDenyReason::UnknownRole,
+            field: "to.role",
+            detail: format!("unknown target role {to}"),
+        });
+    }
+    if to == OPERATOR_ROLE && !table.roles.contains_key(to) {
+        return table.roles.get(from).map(|_| ()).ok_or_else(|| AclDeny {
+            reason: AclDenyReason::UnknownRole,
+            field: "from.role",
+            detail: format!("unknown sender role {from}"),
+        });
+    }
     table.roles.get(from).ok_or_else(|| AclDeny {
         reason: AclDenyReason::UnknownRole,
         field: "from.role",
@@ -276,4 +300,75 @@ pub fn acl_allows(
         });
     }
     Ok(())
+}
+
+/// The operator's reserved name. `onlyne_config::SUPERVISOR_ROLE` owns the
+/// word; this crate sits below `onlyne-config` in the layering and spells the
+/// one reserved string locally, so the evaluator and the server's principal
+/// resolvers answer it identically.
+pub const OPERATOR_ROLE: &str = "_supervisor";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: &str = "ed25519/AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+
+    /// The undeclared operator's standing, and the rules it does not touch.
+    #[test]
+    fn the_undeclared_operator_reaches_every_registered_role() {
+        let table = AclTable::new(
+            [
+                ("planner".to_string(), KEY.to_string(), false),
+                ("scriber".to_string(), KEY.to_string(), false),
+            ],
+            [AclEdge {
+                from: "planner".to_string(),
+                to: "scriber".to_string(),
+                class: MsgClass::Any,
+                admin: false,
+            }],
+        )
+        .unwrap();
+        for class in [MsgClass::Any, MsgClass::Note, MsgClass::Control] {
+            assert!(acl_allows(&table, "_supervisor", "planner", class, None).is_ok());
+        }
+        // The inbox is the same standing read the other way: a registered
+        // role's delivery to the undeclared operator carries.
+        for class in [MsgClass::Any, MsgClass::Note, MsgClass::Control] {
+            assert!(acl_allows(&table, "planner", "_supervisor", class, None).is_ok());
+        }
+        // An unregistered sender is still an unregistered sender.
+        let deny = acl_allows(&table, "ghost", "_supervisor", MsgClass::Any, None).unwrap_err();
+        assert_eq!(deny.reason, AclDenyReason::UnknownRole);
+        // An unregistered target stays unregistered.
+        let deny = acl_allows(&table, "_supervisor", "ghost", MsgClass::Any, None).unwrap_err();
+        assert_eq!(deny.reason, AclDenyReason::UnknownRole);
+        // The operator's standing grants nothing to an ordinary role.
+        let deny = acl_allows(&table, "scriber", "planner", MsgClass::Any, None).unwrap_err();
+        assert_eq!(deny.reason, AclDenyReason::TargetNotAllowed);
+    }
+
+    /// A declared `_supervisor` is governed by its own rows, so an explicit
+    /// narrowing holds.
+    #[test]
+    fn a_declared_operator_keeps_its_declared_reach() {
+        let table = AclTable::new(
+            [
+                ("_supervisor".to_string(), KEY.to_string(), true),
+                ("planner".to_string(), KEY.to_string(), false),
+                ("scriber".to_string(), KEY.to_string(), false),
+            ],
+            [AclEdge {
+                from: "_supervisor".to_string(),
+                to: "planner".to_string(),
+                class: MsgClass::Any,
+                admin: true,
+            }],
+        )
+        .unwrap();
+        assert!(acl_allows(&table, "_supervisor", "planner", MsgClass::Any, None).is_ok());
+        let deny = acl_allows(&table, "_supervisor", "scriber", MsgClass::Any, None).unwrap_err();
+        assert_eq!(deny.reason, AclDenyReason::TargetNotAllowed);
+    }
 }
