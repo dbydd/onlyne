@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 (2026-09-30)
+## 2.0.0 (2026-10-01)
 
 The v2 rewrite of the routing and session layer. `docs/v2-PLAN.md` is the plan and
 `docs/v2-REMAINING.md` is the state; this entry is what an operator has to act on.
@@ -51,17 +51,29 @@ the plugin.
   allowed routes are edges, a full graph falls back to a plain kanban, and a dragged
   edge is a typed `SpecApply` edit rather than a local drawing. It is excluded from the
   workspace, so the core build needs no Node.
+  The board carries a composer, so the operator dispatches as `_supervisor` without
+  leaving the graph, and a route is withdrawn the way it was declared: right-click the
+  edge, or select it and press delete — the same `set_targets` edit runs both ways.
+  The operator's own board is never drawn: `_supervisor` is a logical node, and its
+  reach is built in — a cluster that never declared `_supervisor` still answers its
+  sends and delivers its receipts, while a declared one stays governed by its own
+  rows. The reads the TUI carries are margins around the graph — sessions on the
+  left, the ledger on the right, the event tail and open faults along the bottom —
+  each dismissible, each opening filtered to what is still owed. A board's box is
+  fixed and its list scrolls inside, so the layout an operator arranged is not
+  rewritten by the cluster's own activity.
 - The TUI rebuilt on a shared `view` reducer, as three pages and no map.
 - `SpecGet` / `SpecApply` and one continuous `subscribe`.
 - `[[hook]]`: an operator's script runs after an event is persisted, at-least-once.
 
 **Verification.** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
--- -D warnings` and `cargo test --workspace` are green at 96 passing in under a
+-- -D warnings` and `cargo test --workspace` are green at 98 passing in under a
 minute, which is the size and the runtime `docs/v2-PLAN.md` §17 asks for: one
 scenario binary, the wire and config contract pins, the table-driven cases for the
-pure functions, and nine more on the four places a written rule would otherwise have
-had no test behind it — the delivery template, the turn-end rule, the completion
-shape gate and the relay guard. `pi-live.sh` runs
+pure functions, and eleven more on the five places a written rule would otherwise
+have had no test behind it — the delivery template, the turn-end rule, the
+completion shape gate, the relay guard, and the operator's built-in standing.
+`pi-live.sh` runs
 a real pi against a real model call: the ledger reaches `acked` on the model's own
 summary, the session projects `exited`/`done`, the rendered delivery and the role prose
 are in pi's own session file, and the client drains on SIGTERM. `orca-live.sh` builds a
@@ -89,7 +101,7 @@ it takes is the one it took before. `crates/onlyne-adapter/HOSTING-RUNTIME.md` s
 the interface in full; the two gaps it still names are the connection's own identity
 and the runtime name a mount carries.
 
-## 2.0.0（2026-09-30）
+## 2.0.0（2026-10-01）
 
 v2 对路由层与会话层的重写。计划见 `docs/v2-PLAN.md`，状态见 `docs/v2-REMAINING.md`；
 本节只写操作员需要动手的部分。
@@ -128,8 +140,14 @@ relay 守卫都不存在了。
 
 **新增界面。** `onlyne-web`，可独立安装的前端：每个角色一个看板，允许的路由是
 边，全连接时退回普通 kanban，拖出一条边是一次带类型的 `SpecApply` 编辑而不是本地
-绘制。它被排除在 workspace 之外，核心构建不需要 Node。TUI 基于共享的 `view`
-reducer 重写为三页、无地图。新增 `SpecGet` / `SpecApply` 与一条连续的 `subscribe`。
+绘制。看板自带 composer，操作者不离开图即可用 `_supervisor` 派活；route 的撤销与
+声明同一个手势——右键那条边，或点选后按删除键，跑的是同一个 `set_targets` 编辑。
+operator 自己的看板永远不画：`_supervisor` 是逻辑节点，其可达性是内置的——从未声明
+过 `_supervisor` 的集群也照常接收它的派发与回执，声明了的集群仍按自己的行走。TUI
+的三份读数成为图四周的边栏——左 sessions、右 ledger、底部事件与未决 fault——各自
+可收起，默认只显示仍未结清的部分。看板的框是固定的，列表在框内滚动，操作者摆好的
+布局不会被集群自身的活动重写。TUI 基于共享的 `view` reducer 重写为三页、无地图。
+新增 `SpecGet` / `SpecApply` 与一条连续的 `subscribe`。
 新增 `[[hook]]`：事件落盘后运行操作员的脚本，至少一次投递。
 
 **验证。** `cargo fmt --all --check`、`cargo clippy --workspace --all-targets
