@@ -173,7 +173,7 @@ v2 全文和代码统一用下表的词，一个词一个意思：
 - **删除转发层。** v1 的 `onlyne` 把一部分动词 exec 给兄弟二进制，每个转发点都会丢全局 flag（第二组第一条）。v2 的守护进程二进制只暴露 `run`，其余动词全部在 `onlyne` 进程内实现；退出码 127 只剩「找不到二进制」一个含义。
 - **不提供 `start`/`stop`。** 常驻交给终端宿主或 launchd/systemd，Onlyne 负责前台运行。
 - **TUI 是唯一的合并特例。** 在能解析出集群的 TTY 上，不带子命令运行 `onlyne` 直接进入集群视图，新用户第一眼看到的就是集群状态。其余情况打印帮助。
-- **按调用者分面。** 操作员与 supervisor 用 admin socket 上的动词：`send`、`control`、`repair`、`report`、`spec`、`ls`。角色在会话里的动作只经插件工具或 `onlyne mcp`：`onlyne_send`、`onlyne_handoff`、`onlyne_complete`。v1 用 `--force --yes-i-am-supervisor-not-other-role` 区分两类调用者，这组 flag 随角色侧 CLI 动词一起删除。
+- **按调用者分面。** 操作员与 supervisor 用 admin socket 上的动词：`send`、`control`、`repair`、`report`、`spec`、`ls`。角色在会话里的动作只经插件工具或 `onlyne mcp`：`onlyne_send`、`onlyne_handoff`、`onlyne_complete`。v1 用 `--force --yes-i-am-supervisor-not-other-role` 区分两类调用者，这组 flag 随角色侧 CLI 动词一起删除。〔**未实施**：2.0.0 的 `send`/`reply`/`handoff`/`complete`/`ack`/`reject`/`control` 七个动词仍要求两旗标同时在场，缺任一在解析 socket 之前退 2（`supervisor_gate`）。删旗标＝把「谁在调用」这道判定交回给猜测，与本节第一句冲突，故撤回删除计划：分面靠动词归属，旗标是它的机器可检形式。〕
 - **新增 `AdminOp::Report`。** 操作员代会话提交结论或投影，走与会话自报相同的结算路径，事件里记为 admin 主体。对应动词 `onlyne report`，取代在 admin 面失效的 `onlyne complete`（第一组 3）。payload-v2 的文件动词族随文件协议一起删除，`report` 这个名字归 admin。
 - **`exec` 驱动的结论来自进程本身。** 退出码 0 为 done、非 0 为 failed，stdout 最后一行为 head。`PROTOCOL.md:51` 在 v1 已经写下这条规则，v2 把它定为 exec 驱动的唯一路径；程序支持 MCP 时可以挂 `onlyne mcp`。
 

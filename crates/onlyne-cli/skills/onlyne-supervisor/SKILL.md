@@ -92,12 +92,21 @@ to you and the spec file.
 4. Append the fragments to `spec.toml`, then run `onlyne reload`. `onlyne spec-diff` shows
    the pending delta first. The spec file is the only truth; there is no runtime config API.
 
+A key `Spec` does not know is **warned about and ignored**, not rejected: the server starts and
+the setting silently keeps its default, which is how a config that looks like it took effect
+does nothing. `onlyne-server run` prints one `ignoring unknown key \`<path>\`` warning per such
+key on startup, so read those lines after every spec edit — a key a release deleted (v1's
+`[client.timeout].running_ms` is one) looks exactly like a key that works. `onlyne schema spec`
+prints the field set this build reads; value errors, by contrast, are real failures that name
+the line (`spec.toml:10: cert_pin digest must be base64 or lowercase hex`).
+
 An existing tree carries a store marker: the server's `state.db` names revision 6 and a
 client's `client.db` names revision 3. A marker answering another revision stops that daemon
-with a sentence naming the revision it found (exit 6, the code reserved for "this build will
-not start on a file from another revision"), and a legacy workspace stops `onlyne client
-init` before it writes anything (exit 2, a local validation failure). There is no `migrate`
-command, so the operator moves the old file aside and starts again.
+with a sentence naming the revision it found, and a legacy workspace stops `onlyne client init`
+before it writes anything. Both exit 6 (`EXIT_NEEDS_MIGRATION`), the code reserved for "this
+build will not start on a file from another revision"; there is no `migrate` command, so the
+operator moves the old file aside and starts again. Exit 2 is a different door: a bad flag, an
+unknown verb, or a missing supervisor gate flag.
 
 ## Dispatch flows downhill
 
