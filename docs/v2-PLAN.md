@@ -164,18 +164,18 @@ v2 全文和代码统一用下表的词，一个词一个意思：
 | 二进制 | 职责 | 子命令 |
 |---|---|---|
 | `onlyne` | 运维入口：查询、admin 操作、init/generate、内置 TUI、给 agent 用的 MCP 工具桥 | 全部动词 |
-| `onlyne-server` | 一个 server root 的前台守护进程 | `run` |
-| `onlyne-client` | 一个角色的前台守护进程 | `run` |
-| `onlyne-web` | 可选安装的图形前端 | `serve` |
+| `onlyne-server` | 一个 server root：守护进程加上作用于它的文件动词 | `run`、`init`、`status`、`generate` |
+| `onlyne-client` | 一个角色：守护进程加上作用于工作区的文件动词 | `run`、`init`、`status`、`roles`、`sessions`、`watch`、`history`、`agent`、`doctor` |
+| `onlyne-web` | 可选安装的图形前端 | 无子命令，flag 直取（`--bind`、`--open`） |
 
 规则：
 
-- **删除转发层。** v1 的 `onlyne` 把一部分动词 exec 给兄弟二进制，每个转发点都会丢全局 flag（第二组第一条）。v2 的守护进程二进制只暴露 `run`，其余动词全部在 `onlyne` 进程内实现；退出码 127 只剩「找不到二进制」一个含义。
+- **删除转发层。** v1 的 `onlyne` 把一部分动词 exec 给兄弟二进制，每个转发点都会丢全局 flag（第二组第一条）。〔**未实施**（2026-10-01 核）：admin 面已全部进程内，剩下三条 exec 路径仍在——`onlyne client <任意参数>`（整组原样转发）、`onlyne client run`、`onlyne server run`；`onlyne-server` 仍暴露 `init`/`status`/`generate`，`onlyne-client` 仍暴露 `init`/`status`/`roles`/`sessions`/`watch`/`history`/`agent`/`doctor`。127 仍是「找不到二进制」一个含义，而转发点丢全局 flag 那个缺陷已修：`onlyne client init` 的实测行为等于 `onlyne-client init`。〕
 - **不提供 `start`/`stop`。** 常驻交给终端宿主或 launchd/systemd，Onlyne 负责前台运行。
-- **TUI 是唯一的合并特例。** 在能解析出集群的 TTY 上，不带子命令运行 `onlyne` 直接进入集群视图，新用户第一眼看到的就是集群状态。其余情况打印帮助。
-- **按调用者分面。** 操作员与 supervisor 用 admin socket 上的动词：`send`、`control`、`repair`、`report`、`spec`、`ls`。角色在会话里的动作只经插件工具或 `onlyne mcp`：`onlyne_send`、`onlyne_handoff`、`onlyne_complete`。v1 用 `--force --yes-i-am-supervisor-not-other-role` 区分两类调用者，这组 flag 随角色侧 CLI 动词一起删除。〔**未实施**：2.0.0 的 `send`/`reply`/`handoff`/`complete`/`ack`/`reject`/`control` 七个动词仍要求两旗标同时在场，缺任一在解析 socket 之前退 2（`supervisor_gate`）。删旗标＝把「谁在调用」这道判定交回给猜测，与本节第一句冲突，故撤回删除计划：分面靠动词归属，旗标是它的机器可检形式。〕
-- **新增 `AdminOp::Report`。** 操作员代会话提交结论或投影，走与会话自报相同的结算路径，事件里记为 admin 主体。对应动词 `onlyne report`，取代在 admin 面失效的 `onlyne complete`（第一组 3）。payload-v2 的文件动词族随文件协议一起删除，`report` 这个名字归 admin。
-- **`exec` 驱动的结论来自进程本身。** 退出码 0 为 done、非 0 为 failed，stdout 最后一行为 head。`PROTOCOL.md:51` 在 v1 已经写下这条规则，v2 把它定为 exec 驱动的唯一路径；程序支持 MCP 时可以挂 `onlyne mcp`。
+- **TUI 是唯一的合并特例。** 在能解析出集群的 TTY 上，不带子命令运行 `onlyne` 直接进入集群视图，新用户第一眼看到的就是集群状态。其余情况打印帮助。〔**未实施**（2026-10-01 核）：`main.rs:490` 无 TTY 分支，裸 `onlyne` 把 help 写 stderr 并退 2；集群视图在 `onlyne tui`。〕
+- **按调用者分面。** 操作员与 supervisor 用 admin socket 上的动词：`send`、`reply`、`complete`、`ack`、`reject`、`handoff`、`control`、`repair`、`spec_diff`、`reload`、`ls`、`who`、`ping`、`watch`、`ledger`。〔**部分实施**（2026-10-01 核）：`AdminOp::Report` 存在且 admin 面由 `onlyne complete` 发出（`verbs.rs:804-811`），但没有 `onlyne report` 动词；也没有 `spec` 动词，取而代之的是 `spec_diff` 与 `reload`。〕角色在会话里的动作只经插件工具或 `onlyne mcp`：`onlyne_send`、`onlyne_handoff`、`onlyne_complete`。v1 用 `--force --yes-i-am-supervisor-not-other-role` 区分两类调用者，这组 flag 随角色侧 CLI 动词一起删除。〔**未实施**：2.0.0 的 `send`/`reply`/`handoff`/`complete`/`ack`/`reject`/`control` 七个动词仍要求两旗标同时在场，缺任一在解析 socket 之前退 2（`supervisor_gate`）。删旗标＝把「谁在调用」这道判定交回给猜测，与本节第一句冲突，故撤回删除计划：分面靠动词归属，旗标是它的机器可检形式。〕
+- **新增 `AdminOp::Report`。** 操作员代会话提交结论或投影，走与会话自报相同的结算路径，事件里记为 admin 主体。对应动词原定 `onlyne report`。〔**改道**（2026-10-01 核）：admin 面上 `onlyne complete` 本身即 report（包成 `AdminOp::Report`），`onlyne report` 不存在；角色侧失效的才是它。〕payload-v2 的文件动词族随文件协议一起删除，`report` 这个名字归 admin。
+- **`exec` 驱动的结论来自进程本身。** 退出码 0 为 done、非 0 为 failed，stdout 最后一行为 head。`PROTOCOL.md:51` 在 v1 已经写下这条规则，v2 把它定为 exec 驱动的唯一路径；程序支持 MCP 时可以挂 `onlyne mcp`。〔**未实施**（2026-10-01 核）：`backend/exec.rs` 没有 `outcomes()` 覆写，全仓无「exit 0 → Outcome::Done」映射；exec 会话与其他 drive 一样按 §12 的 turn-end 规则结算，子进程退出码与输出尾只进 probe 的 `detail["exit"]`/`output_tail`。〕
 
 ### server、client、会话的重新划分
 
@@ -211,7 +211,8 @@ v1 的 server 会话表以 task_id 为键（`projection.rs:312-318` 在缺 sessi
 
 ```toml
 [[client]]
-name = "builder"
+role = "builder"
+key = "ed25519/<43 base64 chars>"
 max_sessions = 2
 
 [client.session]
@@ -279,12 +280,13 @@ adapter 挂载类型按 `kind` 打标签，修复第一组 16 的 untagged 匹�
 
 | kind | 挂载者 | 可做的事 |
 |---|---|---|
-| `runtime` | 运行时插件 | 持有一个或多个会话。声明 `open` 能力的（DSH）接受 client 下发的 `open`、`resume`、`suspend`、`close`；不声明的（pi）只服务启动它的那个会话 |
+| `agent` | 运行时插件 | 持有一个或多个会话。声明 `open` 能力的（DSH）接受 client 下发的 `open`、`resume`、`suspend`、`close`；不声明的（pi）只服务启动它的那个会话。〔线上 tag 是 `agent`，本表原写的 `runtime` 从未上过线〕 |
+| `gateway` | 一个外部协议网关 | 投递入站消息、接收出站消息与任务状态，以及 `register_channel`、`health`、`typing` |
 | `tools` | `onlyne mcp` | 只能为一个已存在的会话调用 `send`、`handoff`、`complete`；凭 client 按会话签发、经环境变量传入的令牌挂载 |
 | `bridge` | 外部协议桥 | 投递入站消息、接收出站消息与任务状态 |
 | `cluster`、`admin` | 同 v1 | 同 v1 |
 
-`assign` 增加 `session_id`，多会话挂载靠它把投递送进对应会话。`config_get` 删除「`stdin:` 键携带任务正文」这个重载（`PROTOCOL.md:53`），任务正文只走 `assign`。
+`assign` 增加 `session_id`，多会话挂载靠它把投递送进对应会话。`config_get` 删除「`stdin:` 键携带任务正文」这个重载（`PROTOCOL.md:53`），任务正文只走 `assign`。〔`stdin:` 删减**未实施**（2026-10-01 核）：`session/dispatch/delivery.rs:684-691` 仍对未声明 `Capability::Inject` 的挂载发 `ConfigGetArgs{key:"stdin:<text>"}`，`PROTOCOL.md:52-54` 与 testkit 都按它工作——没声明 inject 的插件靠它拿正文。〕
 
 external 放置的连接方向统一为插件连 client。external 运行时的插件读取运行目录里的注册文件（见「工作区、socket 与模板目录」），给每个 `runtime` 字段与自己匹配的 client 各建一条连接：每条连接服务一个角色，一条连接上复用多个会话。一个 DSH 服务多个角色，每个角色的 client 保持单一职责，「多个 role 只需要与一个插件通信」由此成立。
 
@@ -447,11 +449,11 @@ Windows（v2.1）：注册文件机制不变，`<digest>.json` 里写命名管�
 
 | v1 | v2 |
 |---|---|
-| `.onlyne/ws/<topology>/<role>/` | `.onlyne/workspaces/<topology>/<role>/` |
+| `.onlyne/ws/<topology>/<role>/` | 保持 `ws`（改名 `workspaces` 未实施：`ServerLayoutSpec::ws_dir` 默认值就是 `ws`，`generate --out` 的默认也是它），已撤回 |
 | `.onlyne/run/s`、`run/socket`、`run/server.pid` | 删除，进运行目录的注册文件 |
 | `.onlyne/state.db` | 保持 `state.db`（改名 `server.db` 未实施，发货件即 `state.db`，已撤回） |
 | `.onlyne/out/<task-id>.md` | 删除（payload-v2 下线） |
-| `logs/session-<task>.log`、`.events.jsonl` | `logs/session-<session-id>.log`、`.events.jsonl`：一个会话可以服务多个投递，投递边界记在日志内容里 |
+| `logs/session-<task>.log`、`.events.jsonl` | 按 session 改名**未实施**（2026-10-01 核）：`layout.rs:342-351` 两函数形参即 `task_id`，调用点（`backend/exec.rs:300`、`backend/acp/journal.rs:225-226`）都传 task id；一个会话服务多次投递时每个投递各一份日志，投递边界记在日志内容里 |
 
 `keys/`、`logs/`、`cache/`、`templates/`、`agent/<pkg>/` 与模板的组织方式保持不变。
 

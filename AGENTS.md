@@ -135,16 +135,16 @@ not add a heavyweight dependency for a single type or a single helper.
 | binary | responsibility | subcommands |
 |---|---|---|
 | `onlyne` | operator entrypoint: queries, admin operations, `init`/`generate`, built-in TUI, the MCP tool bridge for agents | all verbs |
-| `onlyne-server` | foreground daemon for one server root | `run` |
-| `onlyne-client` | foreground daemon for one role | `run` |
-| `onlyne-web` | optional graphical front end (phase three) | `serve` |
+| `onlyne-server` | one server root: the daemon plus the file verbs over it | `run`, `init`, `status`, `generate` |
+| `onlyne-client` | one role: the daemon plus the file verbs over a workspace | `run`, `init`, `status`, `roles`, `sessions`, `watch`, `history`, `agent`, `doctor` |
+| `onlyne-web` | optional graphical front end (phase three) | none; flags only (`--bind`, `--open`) |
 
 Rules:
 
-- **No forwarding layer.** The daemon binaries expose only `run`. Every other verb is implemented inside the `onlyne` process. Exit code 127 keeps exactly one meaning: a missing binary. v1 exec'd some verbs to sibling binaries and dropped the global flags at every forwarding point.
+- **Forwarding is gone from the admin face, not from the process tree.** Every admin verb runs inside the `onlyne` process, but `onlyne client <anything>`, `onlyne client run`, and `onlyne server run` still exec a sibling binary — the `client` group forwards every remaining argument verbatim. Exit code 127 therefore still means one thing: that sibling binary is missing. v1's other defect, dropping the global flags at a forwarding point, is fixed: measured `onlyne client init` behaves as `onlyne-client init`.
 - **No `start`/`stop`.** Staying resident belongs to the terminal host or to launchd/systemd. Onlyne runs in the foreground.
-- **The TUI is the one merged special case.** On a TTY where a cluster resolves, `onlyne` with no subcommand enters the cluster view. Everything else prints help.
-- **Verbs are split by caller.** Operators and supervisors use admin-socket verbs: `send`, `control`, `repair`, `report`, `spec`, `ls`. A role's in-session actions go only through plugin tools or `onlyne mcp`: `onlyne_send`, `onlyne_handoff`, `onlyne_complete`.
+- **The TUI is a verb, not a default.** `onlyne tui` opens the cluster view. Bare `onlyne` prints help to stderr and exits 2; there is no TTY branch.
+- **Verbs are split by caller.** Operators and supervisors use admin-socket verbs: `send`, `reply`, `complete`, `ack`, `reject`, `handoff`, `control`, `repair`, `spec_diff`, `reload`, `ls`, `who`, `ping`, `watch`, `ledger`, `gateway status`. An operator reports a conclusion with `onlyne complete`, which on the admin face becomes `AdminOp::Report`; there is no `onlyne report` verb. A role's in-session actions go only through plugin tools or `onlyne mcp`: `onlyne_send`, `onlyne_handoff`, `onlyne_complete`.
 
 ## 6. Crate layout
 
@@ -190,7 +190,7 @@ Server root, selected by `onlyne-server run --root <dir>`:
   logs/server.log
   keys/server.key
   templates/<topology>/<role>/
-  workspaces/<topology>/<role>/
+  ws/<topology>/<role>/
   cache/
 ```
 
@@ -209,8 +209,8 @@ Role workspace, selected by `onlyne-client run --workspace <dir>`:
   config.toml
   client.db
   logs/client.log
-  logs/session-<session-id>.log
-  logs/session-<session-id>.events.jsonl
+  logs/session-<task-id>.log
+  logs/session-<task-id>.events.jsonl
   logs/content.index.jsonl
   keys/role.key
   agent/<pkg>/
@@ -224,7 +224,7 @@ characters of the SHA-256 of the canonical workspace path. The whole path is abo
 bytes, far under the `sun_path` bound, which is why v1's two rules — bind `run/s` when it
 fits, a derived path when it does not — collapse into this one.
 
-The registration file records `kind`, `role`, `root`, `pid`, `version`, and `runtime`. It
+The registration file records `kind`, `role`, `root`, `pid`, `version`, `runtime`, and `placement`. It
 is what lets the CLI tell which surface a socket serves, lets `onlyne ls` list every
 server and client on the machine, and lets an external runtime's plugin discover clients.
 
@@ -257,6 +257,7 @@ they were kinds, which is why the enum carries both spellings.
 | kind | mounted by | may do |
 |---|---|---|
 | `agent` | a runtime plugin | hold one or more sessions. A plugin declaring the `open` capability is asked for each session the role opens (`open`) and is never handed one; one that does not is a spawned agent the client hands the next staged session to, and serves only that session |
+| `gateway` | one external protocol gateway | deliver inbound messages, receive outbound messages and task state, plus `register_channel`, `health`, `typing` |
 | `tools` | `onlyne mcp` | call `send`, `handoff`, `complete` for one existing session, mounted with a per-session token the client issues through the environment |
 | `bridge` | an external protocol bridge | deliver inbound messages, receive outbound messages and task state |
 | `cluster`, `admin` | as in v1; neither grants a plugin op on the socket | as in v1 |
@@ -273,7 +274,7 @@ Exit codes used by user-facing commands:
 - 2: local validation failure — a bad flag, an unknown verb, a missing gate flag
 - 3: socket resolution failure
 - 4: template, generation, or operator-input refusal
-- 5: no supported terminal host found
+- 5: `client run` was given a placement name outside `orca`, `zellij`, `headless`, `external` (a failed probe falls back to `headless` instead of exiting)
 - 6: this build refuses to start on a database or workspace from another revision
 - 127: missing binary
 
@@ -327,7 +328,8 @@ Per-role configuration, three scopes coexisting:
 
 ```toml
 [[client]]
-name = "builder"
+role = "builder"
+key = "ed25519/<43 base64 chars>"
 max_sessions = 2
 
 [client.session]
@@ -446,7 +448,7 @@ session, and the few tools it registers. Both are contracts.
 
 - **Role prose goes into the runtime's instruction layer**, not into one conversation message. For plugin drives, through the runtime's system-prompt extension point. For ACP drives, `session/new` has no system-prompt field, so the client writes role prose into the workspace instruction file before opening the session.
 - **Protocol obligations are tools.** Tool descriptions state effect and precondition, nothing else.
-- **`complete(outcome, summary, details?, files?)`.** `summary` is one display line; `details` is the full result, up to 64 KiB, delivered verbatim to the next hop and the originator; `files` is a list of absolute paths. The ledger's 200-character head is a display field and appears in no model-visible text.
+- **`complete(outcome, summary, details?, files?)`.** `summary` is one display line; `details` is the full result, up to 64 KiB, delivered verbatim to the next hop and the originator; `files` is a list of absolute paths. The ledger's 200-grapheme-cluster head is a display field and appears in no model-visible text.
 - **One rule for "the turn ended".** An explicit `complete` is the main path. A turn that ends without one gets a single neutral nudge. A second turn ending without one settles `oneshot` as `blocked`, while `task` and `role` sessions go idle. Every step emits an event; what to do about it belongs to hooks, not to the delivery path.
 - **Constraints are enforced on the client**, when it handles the tool call, and a refusal tells the model what is missing.
 
@@ -456,10 +458,11 @@ golden-text test guards it.
 ## 13. Persistence
 
 Server database: `schema_marker`, `roles`, `sessions`, `session_tasks`, `ledger`, `events`,
-`faults`, `ghost_sweeps`, `inbox_cursors`.
+`faults`, `ghost_sweeps`, `hook_cursors`, `inbox_cursors`. `hook_cursors(hook, last_seq,
+updated_at)` holds §14's per-hook last delivered sequence.
 
 Client database: `schema_marker`, `sessions`, `session_tasks`, `task`, `intents`,
-`out_head_cache`, `prose_cache`, `config_cache`.
+`out_head_cache`, `prose_cache`, `config_cache`, `faults`, `events`.
 
 Both databases take a version bump in v2, and there is no `onlyne migrate`: the upgrade is
 manual. Drain the cluster, move the old `state.db` and `client.db` aside, and start again —
@@ -467,7 +470,7 @@ v2 writes a fresh ledger and the old files stay where they are for reading. The 
 configuration that cannot be read past is the fused `backend` key, and it is refused by name:
 `acp` named a drive, `orca` named a placement, and no reader can split the value. It becomes
 `drive` in the spec's `[client.runtime]` and `placement` in the workspace's `config.toml`,
-alongside a new `[client.session]` table. See §8a for what the refusal says.
+alongside a new `[client.session]` table. See §8 *The v2 upgrade path* for what the refusal says.
 
 ## 14. Events
 
@@ -475,7 +478,7 @@ The server provides a local pub/sub stream.
 
 - durable: `ledger_state`, `session_state`
 - advisory: `role_presence`, `fault`, `gateway_presence`, `spec_reloaded`
-- settlement: `turn_end_without_complete`, `delivery_blocked`, `handoff`
+- settlement: `turn_end_without_complete`, `delivery_blocked`, `handoff` — three names for hook selection; in `subscribe` they are `durable`
 
 Local clients subscribe and resync with a cursor. This is not an internet-scale bus; keep
 it local and simple.

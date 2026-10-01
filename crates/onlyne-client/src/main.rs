@@ -39,7 +39,8 @@ enum Command {
     /// Create a role workspace and print its `[[client]]` spec fragment. Writes
     /// `.onlyne/config.toml` and `.onlyne/keys/role.key` under `--workspace`,
     /// takes `cert_pin` and the endpoint from `--server-root`'s spec, and appends
-    /// nothing to that spec. Exits 2 on a legacy workspace.
+    /// nothing to that spec. Exits 6 on a legacy workspace, the code reserved
+    /// for a file from another revision; exit 2 is a local validation failure.
     Init {
         #[arg(long)]
         workspace: PathBuf,
