@@ -32,7 +32,7 @@ A read without `--fresh` is byte-for-byte identical to the previous behavior: it
 
 `onlyne spec_diff` compares the running spec with the spec on disk.
 
-`onlyne tui --server-root <root> --once --page <1|2> --state <active|all>` renders one plain-text frame and exits. `active` is the default filter and keeps only the active view; `all` also includes settled sessions and ledger rows. Page 2 with `--state all` shows the `reason=<text>` of settled rows directly.
+`onlyne tui --server-root <root> --once` renders one plain-text frame of the live cluster page and exits; `--once` is the only flag the board takes. Pages and filters are chosen with the `1`/`2`/`3` keys inside the board.
 
 ## Reading the served socket
 
@@ -90,11 +90,11 @@ An existing client does not need to restart.
 
 `crates/onlyne-testkit/e2e/reconnect-requeue.sh` covers the pending-then-offer-again path with `max_sessions = 2` and three tasks.
 
-Control still reaches the role at full capacity. `a_control_only_pull_hands_the_command_and_leaves_the_work_queued` in `crates/onlyne-server/tests/delivery.rs` pins this at the protocol level, and `crates/onlyne-testkit/e2e/orca-live.sh` verifies it once on a live host: the case's role uses the seed value `max_sessions = 1`, its only slot is occupied by a `sleep`, and `control focus` still reaches the session's tab.
+Control still reaches the role at full capacity. The `control_only` gate in `crates/onlyne-server/src/relay.rs` handles a control frame at the protocol level, and `crates/onlyne-testkit/e2e/orca-live.sh` verifies it once on a live host: the case's role uses the seed value `max_sessions = 1`, its only slot is occupied by a `sleep`, and `control focus` still reaches the session's tab.
 
 ## Focus
 
-`onlyne control --from <role> focus --task <id> --force --yes-i-am-supervisor-not-other-role` brings a session's pane to the foreground. The TUI entry point is `F`, and it acts on the selected row.
+`onlyne control --from <role> focus --task <id> --force --yes-i-am-supervisor-not-other-role` brings a session's pane to the foreground. The TUI entry point is `f` on the cluster and task pages, and it acts on the selected row (on the faults page `F` is `repair fail`).
 
 The control plane uses `ControlOp::Focus{task_id}`, with ledger row `kind = control`. The command reaches the session's `backend_ref`, and each pane host brings its own surface forward: the orca backend runs `orca terminal switch --terminal <handle> --json`, and the zellij backend focuses the pane it recorded for the session. The handle the session was spawned into is stored in `backend_ref`, so the target lives with the session.
 
@@ -163,7 +163,6 @@ Automatic requeueing is governed by two budget knobs; manual `onlyne repair retr
 
 Evaluate TTL first, then attempt count; each produces one `ledger_state` event.
 
-How to read `reason`: the row keys printed by `onlyne ledger` are `msg_id`, `task`, `state`, `reason`, `out_head`, `body`, `family`, and `hop_budget`. A key appears only when that row has a value; rows and columns without values remain byte-for-byte identical to before. The task detail panel on TUI page 2 appends `reason=<text>` to the end of the ledger row. Values that enter this column include `requeue_exhausted` and `requeue_ttl` from the two gates above; `expired` from the expiration sweep; `session_dead` from the rejection written when a client settles a disconnected session (see “Session ghosts and ownership determination”); `operator cancel` and `operator recycle` from a client settling by itself and rejecting the delivery row it still holds when no one answers the operator's word (see the control section below). Text entered by an operator through `onlyne reject --reason` or `onlyne repair fail --reason` enters this column unchanged. When `onlyne ack` accepts it, that text travels with the settlement event and the row's `reason` remains unchanged. The string `operator ack` is test data in the faults table's `reason` column (the `update_fault_state` case in `crates/onlyne-store/src/tests.rs`); the ledger column has no record of it.
 How to read `reason`: the row keys printed by `onlyne ledger` are `msg_id`, `task`, `state`, `reason`, `out_head`, `body`, `family`, and `hop_budget`. A key appears only when that row has a value; rows and columns without values remain byte-for-byte identical to before. The task detail panel on TUI page 2 appends `reason=<text>` to the end of the ledger row. Values that enter this column include `requeue_exhausted` and `requeue_ttl` from the two gates above; `expired` from the expiration sweep; `session_dead` from the rejection written when a client settles a disconnected session (see “Session ghosts and ownership determination”); and `operator cancel` and `operator recycle` from a client settling by itself and rejecting the delivery row it still holds when no one answers the operator's word (see the control section below). Text entered by an operator through `onlyne reject --reason` or `onlyne repair fail --reason` enters this column unchanged. When `onlyne ack` accepts it, that text travels with the settlement event and the row's `reason` remains unchanged. The string `operator ack` is test data in the faults table's `reason` column (the `update_fault_state` case in `crates/onlyne-store/src/tests.rs`); the ledger column has no record of it.
 
 Both the push-delivery and pull-delivery transitions of `in_flight` emit a `ledger_state` event; at every sampling point, ledger state read offline and the session projection agree with each other.
@@ -359,7 +358,7 @@ When the retrying session completes, its buffer and its own handoff are merged b
 
 After merged delivery, the read-only connection receives `bye` and is removed. If it still holds its own slot, that slot is retired as `Replaced`. The completion is settled only once; this step neither settles nor releases again.
 
-There is one exception: if the report that caused this merge arrived on this read-only connection, it receives no `bye` during this round. The client first writes the response to that report, and connection teardown is left to its own `detach` frame or socket closure. The plugin handles `bye` by disconnecting the socket and marking every in-flight request as failed. A `bye` that arrives before the response makes an already recorded completion read as failed, so the agent resends its terminal state. `a_read_only_completion_is_answered_before_any_bye` in `crates/onlyne-client/tests/scenarios/reconnect.rs` pins the order.
+There is one exception: if the report that caused this merge arrived on this read-only connection, it receives no `bye` during this round. The client first writes the response to that report, and connection teardown is left to its own `detach` frame or socket closure. The plugin handles `bye` by disconnecting the socket and marking every in-flight request as failed. A `bye` that arrives before the response makes an already recorded completion read as failed, so the agent resends its terminal state. The reconnect scenarios in `crates/onlyne-testkit/tests/scenarios.rs` pin the order.
 
 The kind field in the faults table stores the text `stale_working`, `heartbeat_missing`, `heartbeat_after_complete`, and `stalled`.
 
@@ -395,7 +394,7 @@ The reason is required for both `onlyne control --task <id> recycle --reason <te
 
 `onlyne control` on the admin plane does not require `--to`: by default the CLI first reads the task's session row and sends control to the owning role. When `--to <role>` is supplied explicitly, it is used directly without another frame read.
 
-When no session for a task belongs to any role, the command rejects before writing anything, exits with code 4, and writes this exact stderr text: `onlyne: no session owns task <id>; pass --to <role> to say where the control goes`.
+When no session for a task belongs to any role, the command rejects before writing anything, exits with code 4, and writes this stderr text: `onlyne: no session and no ledger row name an owner for task <id>; pass --to <role> to say where the control goes`.
 
 `recycle` and `cancel` settle a task with the operator's word: the client asks the plugin to finish and close the host resources, and settlement occurs when the plugin report lands. If the plugin never answers, after three heartbeat intervals (`CONTROL_SETTLE_BOUND`) the client settles by itself using the operator's word, records `cancelled` for `cancel` and `failed` for `recycle`, and rejects the delivery row it still holds with `operator cancel` / `operator recycle`.
 
@@ -438,7 +437,7 @@ The CLI gate belongs to supervisors and to `exec` roles whose sessions have no p
 
 An `exec` role uses the CLI form and identifies itself with those two flags.
 
-The read verbs `repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, and `status`, plus `reload` and `shutdown`, do not carry those two flags.
+The read verbs `repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, and `status`, plus `reload`, do not carry those two flags. There is no `shutdown` verb: both daemons run in the foreground and the terminal host owns stopping them.
 
 ## Task families and metadata
 
@@ -493,7 +492,7 @@ The session child's stdout/stderr is merged into `<workspace>/.onlyne/logs/sessi
 The closure ladder is:
 
 - unix: the session is an independent process group. `close` uses `kill(2)` to signal only the recorded pgid (`backend_ref.pgid`, identical to the leader pid), sends `SIGTERM` first, waits 5 seconds, then sends `SIGKILL`, and finally uses `child.kill` to reap the process. If signaling the group fails, it falls back to the same signal for the leader pid. It refuses to send to pid 0/`-1` (those mean “this process group / every killable process,” not the session). It never kills processes by a cmdline wildcard.
-- windows: spawn uses `CREATE_NEW_PROCESS_GROUP`; shutdown first sends `GenerateConsoleCtrlEvent(CTRL_BREAK)`, waits for the grace period, then calls `child.kill()` (TerminateProcess). CTRL_BREAK fails when the client has no console, so termination proceeds directly. Windows has no SIGTERM; the supervisor performs shutdown by running `onlyne server stop` on the host containing the server root.
+- windows: spawn uses `CREATE_NEW_PROCESS_GROUP`; shutdown first sends `GenerateConsoleCtrlEvent(CTRL_BREAK)`, waits for the grace period, then calls `child.kill()` (TerminateProcess). CTRL_BREAK fails when the client has no console, so termination proceeds directly. Windows has no SIGTERM; the supervisor stops the server from the host that runs it — Ctrl-C, a console close, or terminating the process — and no `onlyne` verb stops a daemon.
 
 `pi --mode rpc` is a typical command for this path: the client holds stdin open (EOF means operator departure for rpc), stdout goes to the session log, and the message plane uses the adapter socket rather than the child's stdio.
 
@@ -563,7 +562,7 @@ ACP sessions have no terminal: the agent is a child process held by the client, 
 
 ## Windows shutdown
 
-Windows has no SIGTERM / SIGHUP. `tokio::signal::windows::ctrl_c` connects to the existing SIGINT shutdown path. The supervisor performs shutdown by running `onlyne server stop` on the host containing the server root; spec hot reload uses `onlyne reload`. See the previous section for the exec-session child-process kill ladder.
+Windows has no SIGTERM / SIGHUP. `tokio::signal::windows::ctrl_c` connects to the existing SIGINT shutdown path. The supervisor stops the server the way it stops anything else on that host — Ctrl-C, a console close, or terminating the process — because no `onlyne` verb stops a daemon; spec hot reload uses `onlyne reload`. See the previous section for the exec-session child-process kill ladder.
 
 On Windows the runtime directory holds a marker and a registration instead of a filesystem socket, and the named-pipe name is derived from the lowercase sha256 of the tree's lexical-absolute form. `--socket \\.\pipe\` passes through unchanged. `ERROR_PIPE_BUSY` is retried within the CLI `--timeout`. On Unix, AF_UNIX remains a filesystem UDS.
 
@@ -599,7 +598,7 @@ Onlyne 运维以 server 账本、client 工作区、admin 本地 socket 为边�
 
 `onlyne spec_diff` 对比运行中 spec 与磁盘 spec。
 
-`onlyne tui --server-root <root> --once --page <1|2> --state <active|all>` 渲染一帧纯文本后退出。`active` 是默认过滤，只保留活动视图；`all` 还包含已结清的 session 与账本行。第 2 页配合 `--state all` 可以直接读到已结清行的 `reason=<text>`。
+`onlyne tui --server-root <root> --once` 渲染一帧纯文本的集群页后退出；`--once` 是看板唯一接受的旗标，翻页与换过滤在板内按 `1`/`2`/`3`。
 
 ## 服务路径的读法
 

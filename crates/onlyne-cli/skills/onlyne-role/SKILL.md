@@ -50,10 +50,12 @@ onlyne complete --task <task-id> --outcome done --summary "<one-line result>" \
   completion body (`head_preview` in `crates/onlyne-store/src/server.rs`), flattened to one
   line before it goes. It is the display line everything upstream reads, so put the result
   there; a `summary` that carries nothing files your last assistant text as the head instead.
-- `outcome` is `done`, `failed`, `cancelled`, or `blocked`. Provable impossibility →
-  `failed`, with the reason in `summary`; something outside this session that stops the work
-  → `blocked`. A mounted pi session answers through the `onlyne_complete` tool, which is the
-  only path to `done`.
+- `outcome` on the `onlyne_complete` tool is `done`, `failed`, `cancelled`, or `blocked`:
+  provable impossibility → `failed`, with the reason in `summary`; something outside this
+  session that stops the work → `blocked`. The CLI's `--outcome` accepts only the first three,
+  so an `exec` session that hits an outside block reports `failed` and says why in `summary`.
+  A mounted pi session answers through the `onlyne_complete` tool, which is the only path to
+  `done`.
 - `details`, at or under 64 KiB, carries the full result and `files` names the absolute
   paths it rests on; both travel with the completion as they stand.
 - A plain `exec` session carries no plugin: `onlyne complete` is yours to run before you

@@ -16,9 +16,9 @@ the working directory: `onlyne-supervisor`, `onlyne-role`, and `onlyne`, this fi
 (`include_str!` in `crates/onlyne-cli/src/skill.rs`, over the three regular files under
 `crates/onlyne-cli/skills/`), so an installed binary answers with the skills of its own version,
 over no network and with no checkout. Regular files keep the packaged manuals intact across
-checkout and archive tools, and `the_crate_copies_are_the_repository_copies` asserts that every
-compiled copy is byte-identical to its source manual. A destination file whose bytes already
-match is reported `unchanged` and left alone; a differing file stops the run before any write, with exit 4 and
+checkout and archive tools: the bytes a copy carries are the bytes compiled in, so `skill
+export` from that binary reproduces its source manual exactly. A destination file whose bytes
+already match is reported `unchanged` and left alone; a differing file stops the run before any write, with exit 4 and
 `onlyne: refusing to overwrite <path>; pass --force`; `--force` rewrites it.
 
 ## Product boundary (AGENTS.md §0)
@@ -73,13 +73,13 @@ the regenerated schema that `gen-schema` just wrote.
 
 **Lifecycle** (`onlyne-proto/src/lifecycle/`): `apply()` and `is_legal()` are a
 table-tested reducer — five axes (`agent`, `delivery`, `resource`, `recovery`, and the
-generation's liveness), 20 `LifecycleEvent` variants, versions `(generation, seq)`. A new
+generation's liveness), 22 `LifecycleEvent` variants, versions `(generation, seq)`. A new
 transition needs its table rows in the same commit. Reviewers
 halt on weakened assertions during a migration.
 
 **Ledger/schema** (`onlyne-store`): `schema_marker(name, version, protocol_version)` is the
-gate; this revision writes client 3, server 5 and protocol 1 (`CLIENT_SCHEMA_VERSION`,
-`SERVER_SCHEMA_VERSION`), and a database carrying an older marker is refused with a sentence
+gate; this revision writes client 3, server 6 and protocol 1 (`CLIENT_SCHEMA_VERSION`,
+`SERVER_SCHEMA_VERSION = 6`), and a database carrying an older marker is refused with a sentence
 naming the revision it found and the revision this build wants. A field change bumps the
 marker and leaves the refuse-at-door behaviour untouched.
 `acl_allows` runs before the ledger write, so a denied send leaves zero rows and zero
@@ -158,7 +158,8 @@ line above its attribute, so the port's progress reads off the file itself.
 one server, and the two-root case is `e2e/two-cluster.sh`.
 
 **The shell cases are what the suite has not absorbed.** `crates/onlyne-testkit/e2e/` holds
-eighteen scripts beside `lib.sh` and the scripted ACP peer `acp-agent.py`. They are the live faces
+nineteen scripts beside `lib.sh` and two scripted ACP peers, `acp-agent.py` and
+`acp-tools-agent.py`. They are the live faces
 (`pi-live.sh`, `orca-live.sh`, `handoff-live.sh`), the ACP case
 (`acp-session.sh`), and the real-process or two-root shapes the harness does
 not model (`requeue-claim.sh`, `two-cluster.sh`, `running-lights.sh`, `gateway-mount.sh`,

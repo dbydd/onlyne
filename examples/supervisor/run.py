@@ -327,12 +327,49 @@ def client_running(workspace: Path) -> bool:
     return "client running" in out
 
 
+def server_pid_file() -> Path:
+    """Driver-owned pid file for the `run` process this script backgrounded."""
+    return CLUSTER / "server.pid"
+
+
 def start_server() -> None:
+    """Background one `onlyne-server run` for the root.
+
+    There is no start verb: `run` is the only launch path and stays in the
+    foreground, so the driver owns the backgrounding the same way it does for
+    the clients, and SIGTERM is how `stop_all` brings it down.
+    """
     if server_running():
         say("server already running")
         return
-    run([ONLYNE, "server", "start", "--root", CLUSTER])
+    log = CLUSTER / "logs" / "server.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a") as out:
+        child = subprocess.Popen(
+            [str(BIN / "onlyne-server"), "run", "--root", str(CLUSTER)],
+            cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=out,
+            stderr=subprocess.STDOUT, start_new_session=True)
+    server_pid_file().write_text(f"{child.pid}\n")
     run([ONLYNE, "--server-root", CLUSTER, "wait-ready"])
+
+
+def stop_server() -> None:
+    """SIGTERM the backgrounded server this driver started, and wait it out."""
+    pid_file = server_pid_file()
+    if not pid_file.is_file():
+        return
+    pid = int(pid_file.read_text().strip())
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    pid_file.unlink(missing_ok=True)
 
 
 def client_pid_file(workspace: Path) -> Path:
@@ -546,7 +583,7 @@ def stop_all() -> None:
         say(f"closed {len(closed)} session tab(s)")
     for role in RING:
         stop_client(WS / role)
-    call_ok([ONLYNE, "server", "stop", "--root", CLUSTER])
+    stop_server()
     say("stopped")
 
 

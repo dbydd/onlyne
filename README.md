@@ -2,7 +2,7 @@
 
 **Message plumbing for coding-agent teams, running on your own machines.**
 
-Onlyne ties a fleet of coding agents into a durable cluster. A **server** routes messages between roles and records every delivery in an append-only ledger. A **client** in each role workspace runs that role's coding-agent sessions. Optional **gateway** processes connect Telegram, Feishu, QQ, or WeChat through the same message model. Agents keep their own runtimes and make the decisions; Onlyne provides routing, queueing, session transport, receipts, and an auditable record.
+Onlyne ties a fleet of coding agents into a durable cluster. A **server** routes messages between roles and records every delivery in an append-only ledger. A **client** in each role workspace runs that role's coding-agent sessions. A **gateway** mount vocabulary is reserved in the spec for Telegram, Feishu, QQ, and WeChat; the platform hosts are frozen off this branch, and `onlyne gateway status` is the only surface that answers. Agents keep their own runtimes and make the decisions; Onlyne provides routing, queueing, session transport, receipts, and an auditable record.
 
 [中文文档](README.zh-CN.md) · English is the default reading copy.
 
@@ -60,7 +60,7 @@ list before it writes a binary:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dbydd/onlyne/main/packaging/install.sh | sh
-# PREFIX=~/.local sh packaging/install.sh v1.4.1   # one tag, another prefix
+# PREFIX=~/.local sh packaging/install.sh <tag>   # one tag, another prefix
 ```
 
 The same archives are what Homebrew installs. The release pipeline renders
@@ -88,7 +88,7 @@ onlyne skill export --set supervisor        # supervisor handbook
 onlyne skill export --dest /path/to/skills
 ```
 
-`skill export` writes every handbook as an ordinary regular file. The repository's compiled copies use the same rule, and a repository test keeps all four byte-identical to their source manuals. Matching files are left unchanged. A differing file stops the export; pass `--force` to replace it. `npx skills add dbydd/onlyne` and `npx skills add ./` install the same repository documents through the skills CLI.
+`skill export` writes every handbook as an ordinary regular file, and the bytes it writes are the ones compiled into the binary (`include_str!` over the three manuals under `crates/onlyne-cli/skills/`), so an installed binary answers with its own version's text. Matching files are left unchanged. A differing file stops the export; pass `--force` to replace it. `npx skills add dbydd/onlyne` and `npx skills add ./` install the same repository documents through the skills CLI.
 
 ## Shortest local task: fake backend
 
@@ -318,12 +318,11 @@ The client injects the actual served path as `ONLYNE_SOCKET` into every session.
 ### Lifecycle and observation
 
 ```bash
-# Server: foreground, detached, and stopped explicitly
+# Server: foreground only. There is no start/stop verb; the terminal host or
+# launchd/systemd owns staying resident.
 onlyne server run   --root <server-root>
-onlyne server start --root <server-root>
-onlyne server stop  --root <server-root>
 
-# Client: foreground; this daemon has no start/stop verb
+# Client: foreground; same rule
 onlyne client run    --workspace <workspace>
 onlyne client status --workspace <workspace>
 onlyne-client doctor                         # host detection JSON; always exits 0
@@ -342,11 +341,10 @@ onlyne --server-root <root> reload
 
 # TUI: interactive board, or one plain-text frame
 onlyne tui --server-root <root>
-onlyne tui --server-root <root> --once --page 1 --state active
-onlyne tui --server-root <root> --once --page 2 --state all
+onlyne tui --server-root <root> --once
 ```
 
-TUI page 1 is the role network and live sessions. Page 2 is the task/session graph with faults, history, ledger rows, and task detail. A one-frame snapshot names its state filter explicitly: `active` is the default and keeps the live view, while `all` also includes settled sessions and ledger rows. On page 2, `--state all` makes a settled row's `reason=<text>` visible. The TUI observes the admin socket and does not carry messages.
+`--once` is the only flag the board takes: it renders the live cluster page as one plain-text frame and exits. Page 1 is the role network and live sessions. Page 2 is the task/session graph with faults, history, ledger rows, and task detail. Pages and filters are chosen with the `1`/`2`/`3` keys inside the board, not with flags; on page 2 the settled view is where a row's `reason=<text>` shows. The TUI observes the admin socket and does not carry messages.
 
 ### Supervisor gate
 
@@ -379,8 +377,9 @@ onlyne --server-root <root> repair ack    --fault-id <id> --reason <text>
 The IM gateway host and its four platform plugins are frozen and live off this branch: v2
 generalized the gateway mount into a `bridge` mount, and the protocol keeps that mount kind
 without a host to drive it. `onlyne gateway status` is what the CLI still answers — a read-only
-view of the mounts the server has registered. A `[[gateway]]` entry in `spec.toml`, an `auth`
-verb, and a per-platform `run` process are v1 surfaces that no longer exist on this branch.
+view of the mounts the server has registered. The `[[gateway]]` entry itself still loads and is
+reported — write one with a legal key and `onlyne gateway status` lists it — while the `auth`
+verb and the per-platform `run` process are v1 surfaces that no longer exist on this branch.
 
 ## Architecture
 

@@ -42,9 +42,9 @@ to you and the spec file.
     onlyne-cli onlyne-server onlyne-client onlyne-testkit
   ```
 
-- `onlyne version` reports the CLI package, protocol, and sibling binary paths. The testkit
-  command does not accept `--version`; read `onlyne version` for the installed package
-  inventory. The TUI is a verb of the `onlyne` binary, not a separate one.
+- `onlyne version` reports the CLI package, protocol, and sibling binary paths. Neither testkit
+  command (`onlyne-agent-fake`, `onlyne-gateway-fake`) accepts `--version`; read `onlyne
+  version` for the installed package inventory. The TUI is a verb of the `onlyne` binary, not a separate one.
 - `onlyne schema spec` and `onlyne schema client` print the compiled JSON Schema of
   `<server-root>/.onlyne/spec.toml` and `<workspace>/.onlyne/config.toml`; `--pretty` indents
   the same document. The keys, their types, and which of them are required come out of the
@@ -133,8 +133,9 @@ Seven verbs require both flags: `send`, `reply`, `handoff`, `complete`, `ack`, `
 call stands outside that role's plugin session. The refusal names the plugin tool that answers
 for a role where one exists (`onlyne_send` for `send`, `onlyne_handoff` for `handoff`,
 `onlyne_complete` for `complete`). A call missing either flag exits 2 before it opens a socket.
-`repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, `reload`, `status`, and
-`shutdown` carry no such flag.
+`repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, `reload`, and `status`
+carry no such flag. There is no `shutdown` verb: both daemons run in the foreground and the
+terminal host owns stopping them.
 
 **Material moves by path, not through the envelope.** A delivery's template renders an
 optional block quoting an upstream role's result, and nothing in the tree fills it —
@@ -230,8 +231,8 @@ timeout = "10s"
 
 - `on` names classes from a closed set: `ledger_state`, `session_state`, `fault`, `role_presence`,
   `gateway_presence`, `spec_reloaded`, `turn_end_without_complete`, `delivery_blocked`, and
-  `handoff`. A class outside it refuses the whole load by name, with `spec.toml:<line>`, the same
-  treatment a removed key gets.
+  `handoff`. A class outside it refuses the whole load by name, with `spec.toml:<line>` — a hard
+  refusal, unlike the unknown keys the spec carries past with one warning line each.
 - The server spawns `run` for each matching event with the event as one JSON object on stdin
   (`seq`, `type`, `data`, `created_at`) and `ONLYNE_SOCKET` set to the admin socket, so the script
   can `onlyne send …` in the same step. A slow script delays nothing: an event reaches every
