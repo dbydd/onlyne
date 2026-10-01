@@ -97,8 +97,21 @@ the setting silently keeps its default, which is how a config that looks like it
 does nothing. `onlyne-server run` prints one `ignoring unknown key \`<path>\`` warning per such
 key on startup, so read those lines after every spec edit — a key a release deleted (v1's
 `[client.timeout].running_ms` is one) looks exactly like a key that works. `onlyne schema spec`
-prints the field set this build reads; value errors, by contrast, are real failures that name
-the line (`spec.toml:10: cert_pin digest must be base64 or lowercase hex`).
+prints the field set this build reads.
+
+Two kinds of key are not that class, and both name the line (`spec.toml:7: <sentence>`): a real
+key holding a wrong value, and the keys v2 retired by name. `backend`, `relay_required`,
+`relay_required_count`, and `relay_count` are refused before the schema pass, at the root and
+inside a `[[client]]` entry alike, with `BACKEND_IS_GONE` or `RELAY_IS_GONE` — so a spec left
+over from v1 is told what to delete instead of quietly keeping a setting that does nothing.
+`RELAY_IS_GONE` also carries the replacement: `allowed_targets` is both the permission and the
+obligation, so a role owes each of its listed targets a delivery before it may report a terminal
+outcome, and a role that owes nothing leaves the list empty.
+
+Which number comes back is the door's: the merged `onlyne` verbs report 4 (operator input or
+generation refused), the daemon binaries `onlyne-server` and `onlyne-client` report 1 (the run
+failed), and an admin-socket verb asked before the server has read the spec reports 3 (no
+socket). The sentence is identical in all three, so read it rather than the code.
 
 An existing tree carries a store marker: the server's `state.db` names revision 6 and a
 client's `client.db` names revision 3. A marker answering another revision stops that daemon
