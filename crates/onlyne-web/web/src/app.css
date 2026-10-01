@@ -203,6 +203,16 @@ main.body section.content {
 .svelte-flow__pane {
   cursor: default;
 }
+/* A route under the cursor declares itself before it is withdrawn: the
+   !important is what lets the stylesheet beat the stroke the edge carries
+   inline. */
+.svelte-flow__edge.route {
+  cursor: pointer;
+}
+.svelte-flow__edge.route:hover .svelte-flow__edge-path {
+  stroke: rgba(150, 185, 255, 0.95) !important;
+  stroke-width: 2px !important;
+}
 
 .content {
   flex: 1;

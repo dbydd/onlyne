@@ -116,17 +116,13 @@ function isConflict(error: unknown): boolean {
   return error instanceof Refused && error.code === 'conflict';
 }
 
-/// Add one allowed route by applying the typed edit the server knows, with
-/// one retry when the spec moved under the hash we read.
-export async function addRoute(role: string, target: string) {
+/// Replace one role's `allowed_targets` wholesale, with one retry when the
+/// spec moved under the hash we read. Both directions a dragged line can
+/// take — declaring a route and withdrawing it — are this one typed edit,
+/// so the retry and the notice live here and nowhere else.
+async function setTargets(role: string, targets: Array<string>, notice: string) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const view = asSpecView(await postOp(app.token, { op: 'spec_get' }));
-    const entry = view.spec.client?.find((client) => client.role === role);
-    const targets = entry?.allowed_targets ?? [];
-    if (targets.includes(target)) {
-      setNotice(`${role} → ${target} is already allowed`);
-      return;
-    }
     try {
       // The body travels under `args`, as every op that carries one does —
       // `base_hash` and `edits` at the top level are not the shape the server
@@ -135,10 +131,10 @@ export async function addRoute(role: string, target: string) {
         op: 'spec_apply',
         args: {
           base_hash: view.source_hash,
-          edits: [{ edit: 'set_targets', args: { role, targets: [...targets, target] } }],
+          edits: [{ edit: 'set_targets', args: { role, targets } }],
         },
       });
-      setNotice(`allowed ${role} → ${target}; the spec reloaded`);
+      setNotice(notice);
       return;
     } catch (error) {
       if (isConflict(error) && attempt === 0) continue;
@@ -146,6 +142,35 @@ export async function addRoute(role: string, target: string) {
       return;
     }
   }
+}
+
+/// Declare one allowed route: the affordance a dragged line from one board's
+/// port to another's carries out.
+export async function addRoute(role: string, target: string) {
+  const view = asSpecView(await postOp(app.token, { op: 'spec_get' }));
+  const entry = view.spec.client?.find((client) => client.role === role);
+  const targets = entry?.allowed_targets ?? [];
+  if (targets.includes(target)) {
+    setNotice(`${role} → ${target} is already allowed`);
+    return;
+  }
+  await setTargets(role, [...targets, target], `allowed ${role} → ${target}; the spec reloaded`);
+}
+
+/// Withdraw one declared route: the same line, removed.
+export async function removeRoute(role: string, target: string) {
+  const view = asSpecView(await postOp(app.token, { op: 'spec_get' }));
+  const entry = view.spec.client?.find((client) => client.role === role);
+  const targets = entry?.allowed_targets ?? [];
+  if (!targets.includes(target)) {
+    setNotice(`${role} → ${target} is not a declared route`);
+    return;
+  }
+  await setTargets(
+    role,
+    targets.filter((candidate) => candidate !== target),
+    `removed ${role} → ${target}; the spec reloaded`,
+  );
 }
 
 /// Write a task to a board: a `_supervisor` send, so its receipt lands on the

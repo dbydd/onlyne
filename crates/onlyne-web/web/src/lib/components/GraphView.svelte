@@ -21,7 +21,7 @@
   import type { Connection, Edge, Node, NodeChange } from '@xyflow/svelte';
   import BoardNode from './BoardNode.svelte';
   import FitOnLayout from './FitOnLayout.svelte';
-  import { addRoute, app } from '../store.svelte';
+  import { addRoute, app, removeRoute } from '../store.svelte';
   import {
     NODE_H,
     NODE_W,
@@ -72,6 +72,8 @@
       // The bezier is the flow's own default: a route reads as a current
       // between two boards rather than as wiring in a trench.
       type: 'default',
+      deletable: true,
+      class: 'route',
       style: { stroke, strokeWidth: faint ? 1 : 1.5 },
       markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 11, height: 11 },
     }));
@@ -121,6 +123,7 @@
       data: { board: app.boards.find((candidate) => candidate.role === board.role) },
       width: NODE_W,
       height: NODE_H,
+      deletable: false,
     }));
   }
 
@@ -153,6 +156,20 @@
     }
   }
 
+  /// Withdrawing is the dragged line read the other way: the route leaves the
+  /// role's `allowed_targets` by the same typed edit that declared it.
+  function onEdgeContextMenu({ edge, event }: { edge: Edge; event: MouseEvent }) {
+    event.preventDefault();
+    void removeRoute(edge.source, edge.target);
+  }
+
+  /// The keyboard shares the gesture: a selected route and a delete key go
+  /// through the same withdrawal. Nodes are not deletable, so a board can
+  /// never leave the canvas this way.
+  function onDelete({ edges: removed }: { nodes: Node[]; edges: Edge[] }) {
+    for (const edge of removed) void removeRoute(edge.source, edge.target);
+  }
+
   // This tab's places, read once on mount. An effect would be the wrong
   // instrument for a read that happens once, and a mount cannot form the cycle
   // the note at the top describes.
@@ -171,6 +188,8 @@
   {nodeTypes}
   {onNodesChange}
   {onConnect}
+  {onDelete}
+  onedgecontextmenu={onEdgeContextMenu}
   onnodedragstop={onNodeDragStop}
   minzoom={0.2}
   maxzoom={2}
