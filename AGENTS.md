@@ -186,13 +186,21 @@ Server root, selected by `onlyne-server run --root <dir>`:
 ```text
 <server-root>/.onlyne/
   spec.toml
-  server.db
+  state.db
   logs/server.log
   keys/server.key
   templates/<topology>/<role>/
   workspaces/<topology>/<role>/
   cache/
 ```
+
+The ledger keeps v1's filename. The plan's directory-rename table listed a rename to `server.db`
+for symmetry with `client.db`, and it was never implemented: the shipped 2.0.0 build opens
+`<root>/.onlyne/state.db` (`ServerLayout::state_db_path`). Renaming it now would break every
+operator script written against a released version for the sake of a name, so the plan row is
+withdrawn and the asymmetric name is the contract. An operator looking for v1 leftovers has to
+read the marker, not the filename: `onlyne-server/6/1` is this build's empty ledger and is
+live, `onlyne-server/4/1` is the old one.
 
 Role workspace, selected by `onlyne-client run --workspace <dir>`:
 

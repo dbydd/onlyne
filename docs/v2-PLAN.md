@@ -449,7 +449,7 @@ Windows（v2.1）：注册文件机制不变，`<digest>.json` 里写命名管�
 |---|---|
 | `.onlyne/ws/<topology>/<role>/` | `.onlyne/workspaces/<topology>/<role>/` |
 | `.onlyne/run/s`、`run/socket`、`run/server.pid` | 删除，进运行目录的注册文件 |
-| `.onlyne/state.db` | `.onlyne/server.db`（与 `client.db` 对称） |
+| `.onlyne/state.db` | 保持 `state.db`（改名 `server.db` 未实施，发货件即 `state.db`，已撤回） |
 | `.onlyne/out/<task-id>.md` | 删除（payload-v2 下线） |
 | `logs/session-<task>.log`、`.events.jsonl` | `logs/session-<session-id>.log`、`.events.jsonl`：一个会话可以服务多个投递，投递边界记在日志内容里 |
 
