@@ -66,6 +66,16 @@ the plugin.
 - `SpecGet` / `SpecApply` and one continuous `subscribe`.
 - `[[hook]]`: an operator's script runs after an event is persisted, at-least-once.
 
+**Release receipt.** The eleven workspace crates reached crates.io at 2.0.0 on
+2026-10-01, none yanked, through `cargo publish --locked -p onlyne-<crate>` at tag
+`v2.0.0` (`114bf7a`) — acp and proto first because the registry answers a dependent's
+own upload only after its floor is live; store, testkit, client, server and cli
+landed on the second pass once their floors were. `onlyne-web` stays unpublished
+(`publish = false`; the bundle rides the binary). `pi-onlyne` goes to npm at 2.0.0
+alongside. A fresh consumer project outside this workspace pinned `=2.0.0` on the
+five shipped-binary crates and resolved the whole graph from the registry, finishing
+`cargo check` in 12 seconds.
+
 **Verification.** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
 -- -D warnings` and `cargo test --workspace` are green at 98 passing in under a
 minute, which is the size and the runtime `docs/v2-PLAN.md` §17 asks for: one
