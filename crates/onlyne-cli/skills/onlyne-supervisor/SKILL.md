@@ -92,12 +92,12 @@ to you and the spec file.
 4. Append the fragments to `spec.toml`, then run `onlyne reload`. `onlyne spec-diff` shows
    the pending delta first. The spec file is the only truth; there is no runtime config API.
 
-An existing tree carries a store marker: the server's `state.db` names revision 6 and a
+An existing tree carries a store marker: the server's `server.db` names revision 6 and a
 client's `client.db` names revision 3. A marker answering another revision stops that daemon
-with a sentence naming the revision it found, and a pre-v1 layout stops `onlyne client init`
-before it writes anything. Both exit 6, the code reserved for "this build will not start on a
-file from another revision"; there is no `migrate` command, so the operator moves the old file
-aside and starts again.
+with a sentence naming the revision it found (exit 6, the code reserved for "this build will
+not start on a file from another revision"), and a legacy workspace stops `onlyne client
+init` before it writes anything (exit 2, a local validation failure). There is no `migrate`
+command, so the operator moves the old file aside and starts again.
 
 ## Dispatch flows downhill
 
