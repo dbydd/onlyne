@@ -274,7 +274,7 @@ Exit codes used by user-facing commands:
 - 2: local validation failure — a bad flag, an unknown verb, a missing gate flag
 - 3: socket resolution failure
 - 4: template, generation, or operator-input refusal
-- 5: `client run` was given a placement name outside `orca`, `zellij`, `headless`, `external` (a failed probe falls back to `headless` instead of exiting)
+- 5: `client run` got a placement name outside `orca`, `zellij`, `headless`, `external` through `ONLYNE_BACKEND`; the same bad name in the workspace's `config.toml` is an ordinary config error and exits 1. A failed probe falls back to `headless` instead of exiting, and `ONLYNE_BACKEND=auto` counts as unset.
 - 6: this build refuses to start on a database or workspace from another revision
 - 127: missing binary
 
