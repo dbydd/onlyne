@@ -30,7 +30,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Rust 1.99 reports `double_must_use` on async-trait's generated futures.
+      # The source has no redundant must-use attributes, so keep warnings strict
+      # and exempt this macro expansion lint.
+      - run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::double_must_use
       - run: cargo test --workspace
       # A tag that does not name the workspace version is a release nobody can
       # reproduce from the source, so it fails here rather than at install time.
