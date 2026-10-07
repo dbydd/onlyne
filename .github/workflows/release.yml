@@ -14,9 +14,9 @@ permissions:
   contents: write
 
 env:
-# The three binaries a release ships. `onlyne` is the entrypoint; it execs the
-# two daemons and runs the observation board in process.
-BINS: onlyne onlyne-server onlyne-client
+  # The three binaries a release ships. `onlyne` is the entrypoint; it execs the
+  # two daemons and runs the observation board in process.
+  BINS: onlyne onlyne-server onlyne-client
 
 jobs:
   verify:
