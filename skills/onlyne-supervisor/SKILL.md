@@ -35,16 +35,20 @@ to you and the spec file.
 
 ## Current operating facts
 
-- Install the current published registry set with:
+- Install the 2.1.0 registry set with:
 
   ```bash
   cargo install --locked \
-    onlyne-cli onlyne-server onlyne-client onlyne-testkit
+    onlyne-cli@2.1.0 onlyne-server@2.1.0 onlyne-client@2.1.0 onlyne-testkit@2.1.0
   ```
 
-- `onlyne version` reports the CLI package, protocol, and sibling binary paths. The testkit
-  command does not accept `--version`; read `onlyne version` for the installed package
-  inventory. The TUI is a verb of the `onlyne` binary, not a separate one.
+  Install the four crates at the same version.
+  Run `onlyne --version`, `onlyne-server --version`, and `onlyne-client --version` after installation.
+  Each command must report `2.1.0`.
+
+- `onlyne version` reports the CLI package, protocol, and sibling binary paths. Neither testkit
+  command (`onlyne-agent-fake`, `onlyne-gateway-fake`) accepts `--version`; read `onlyne
+  version` for the installed package inventory. The TUI is a verb of the `onlyne` binary, not a separate one.
 - `onlyne schema spec` and `onlyne schema client` print the compiled JSON Schema of
   `<server-root>/.onlyne/spec.toml` and `<workspace>/.onlyne/config.toml`; `--pretty` indents
   the same document. The keys, their types, and which of them are required come out of the
@@ -92,12 +96,34 @@ to you and the spec file.
 4. Append the fragments to `spec.toml`, then run `onlyne reload`. `onlyne spec-diff` shows
    the pending delta first. The spec file is the only truth; there is no runtime config API.
 
+A key `Spec` does not know is **warned about and ignored**, not rejected: the server starts and
+the setting silently keeps its default, which is how a config that looks like it took effect
+does nothing. `onlyne-server run` prints one `ignoring unknown key \`<path>\`` warning per such
+key on startup, so read those lines after every spec edit — a key a release deleted (v1's
+`[client.timeout].running_ms` is one) looks exactly like a key that works. `onlyne schema spec`
+prints the field set this build reads.
+
+Two kinds of key are not that class, and both name the line (`spec.toml:7: <sentence>`): a real
+key holding a wrong value, and the keys v2 retired by name. `backend`, `relay_required`,
+`relay_required_count`, and `relay_count` are refused before the schema pass, at the root and
+inside a `[[client]]` entry alike, with `BACKEND_IS_GONE` or `RELAY_IS_GONE` — so a spec left
+over from v1 is told what to delete instead of quietly keeping a setting that does nothing.
+`RELAY_IS_GONE` also carries the replacement: `allowed_targets` is both the permission and the
+obligation, so a role owes each of its listed targets a delivery before it may report a terminal
+outcome, and a role that owes nothing leaves the list empty.
+
+Which number comes back is the door's: the merged `onlyne` verbs report 4 (operator input or
+generation refused), the daemon binaries `onlyne-server` and `onlyne-client` report 1 (the run
+failed), and an admin-socket verb asked before the server has read the spec reports 3 (no
+socket). The sentence is identical in all three, so read it rather than the code.
+
 An existing tree carries a store marker: the server's `state.db` names revision 6 and a
 client's `client.db` names revision 3. A marker answering another revision stops that daemon
-with a sentence naming the revision it found, and a pre-v1 layout stops `onlyne client init`
-before it writes anything. Both exit 6, the code reserved for "this build will not start on a
-file from another revision"; there is no `migrate` command, so the operator moves the old file
-aside and starts again.
+with a sentence naming the revision it found, and a legacy workspace stops `onlyne client init`
+before it writes anything. Both exit 6 (`EXIT_NEEDS_MIGRATION`), the code reserved for "this
+build will not start on a file from another revision"; there is no `migrate` command, so the
+operator moves the old file aside and starts again. Exit 2 is a different door: a bad flag, an
+unknown verb, or a missing supervisor gate flag.
 
 ## Dispatch flows downhill
 
@@ -111,8 +137,9 @@ Seven verbs require both flags: `send`, `reply`, `handoff`, `complete`, `ack`, `
 call stands outside that role's plugin session. The refusal names the plugin tool that answers
 for a role where one exists (`onlyne_send` for `send`, `onlyne_handoff` for `handoff`,
 `onlyne_complete` for `complete`). A call missing either flag exits 2 before it opens a socket.
-`repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, `reload`, `status`, and
-`shutdown` carry no such flag.
+`repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, `reload`, and `status`
+carry no such flag. There is no `shutdown` verb: both daemons run in the foreground and the
+terminal host owns stopping them.
 
 **Material moves by path, not through the envelope.** A delivery's template renders an
 optional block quoting an upstream role's result, and nothing in the tree fills it —
@@ -208,8 +235,8 @@ timeout = "10s"
 
 - `on` names classes from a closed set: `ledger_state`, `session_state`, `fault`, `role_presence`,
   `gateway_presence`, `spec_reloaded`, `turn_end_without_complete`, `delivery_blocked`, and
-  `handoff`. A class outside it refuses the whole load by name, with `spec.toml:<line>`, the same
-  treatment a removed key gets.
+  `handoff`. A class outside it refuses the whole load by name, with `spec.toml:<line>` — a hard
+  refusal, unlike the unknown keys the spec carries past with one warning line each.
 - The server spawns `run` for each matching event with the event as one JSON object on stdin
   (`seq`, `type`, `data`, `created_at`) and `ONLYNE_SOCKET` set to the admin socket, so the script
   can `onlyne send …` in the same step. A slow script delays nothing: an event reaches every
@@ -310,10 +337,10 @@ refusal (`accepted: false`) is kept for work this client can never serve, such a
 assignment the plugin declines (`assign rejected`) or a session the operator's word retired with
 its delivery still in hand (`operator cancel`, `operator recycle`).
 
-A finished session takes its host resource with it. The client closes the pane, tab, zellij
-session, or exec child once that session holds no task and no plugin connection is attached,
-and the client log records the closure with `retiring idle session resource`. An idle pane
-still open in front of you means the owning client is down.
+A finished session takes its host resource with it. The client closes the pane, tab, tern
+block, zellij session, or exec child once that session holds no task and no plugin connection
+is attached, and the client log records the closure with `retiring idle session resource`. An
+idle pane still open in front of you means the owning client is down.
 
 **A scope that keeps sessions is the one thing that overrides the rule above, and it
 overrides it by making the runtime hold on.** `[client.session] scope = "task"` or
@@ -375,7 +402,7 @@ non-zero on a runtime that declares no `resume` suspends a session that cannot b
 brought back, which reads as a pool member vanishing for no stated reason. So when a
 `role` pool misbehaves, read those two lines before reading anything else.
 
-### Orca sessions
+### Orca and Tern sessions
 
 Orca creates one new terminal for each task. `attach` refreshes a persisted terminal handle; it
 does not relay into an arbitrary existing session. Spawning requires a running Orca app, an
@@ -383,6 +410,17 @@ does not relay into an arbitrary existing session. Spawning requires a running O
 tab with the matching worktree environment (`ORCA_WORKTREE_ID` under the host policy). A
 `[single-instance]` CLI error is the immediate spawn refusal. The exact `session_dead` rejection
 comes later from the client's retirement sweep after a slot exists.
+
+Tern runs each session as a block inside the role's tab: one Tern session per cluster, one tab
+per role, and the block is retired when the session ends. Set it with `placement = "tern"` in the
+role workspace's `config.toml`, or with `ONLYNE_BACKEND=tern`; an absent `placement` probes
+`tern`, `orca`, `zellij` in that order and falls back to `headless`, so a machine with Tern uses
+it without a line of config. The `onlyne` board that watches your clusters inside Tern ships in
+this repository at `integrations/tern-plugin`: `tern plugin install integrations/tern-plugin`
+installs it, or `tern plugin link integrations/tern-plugin` loads that directory in place and
+reloads on every save. It is a supervisor face — it runs the same admin verbs this document names
+(`status`, `roles`, `sessions`, `faults`, `control`, `repair`) as one-shot `onlyne` processes
+against each root.
 
 Automatic re-delivery rides two spec gates: `[server].requeue_max_attempts` (0 unlimited) lands
 a returned in-flight row as `rejected` with reason `requeue_exhausted`, and

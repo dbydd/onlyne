@@ -18,14 +18,14 @@ enum Command {
     /// Run one role client against its workspace config.
     ///
     /// A session is displayed somewhere, and that placement is this machine's:
-    /// absent from the workspace config, it probes orca, then zellij, and falls
+    /// absent from the workspace config, it probes tern, then orca, then zellij, and falls
     /// back to running the runtime in the background. A name
     /// neither the environment nor the config knows stops the run at startup
     /// with exit 5.
     #[command(
         after_help = "config: --workspace names the role workspace; its `.onlyne/config.toml` \
-                      carries `placement` (orca|zellij|headless|external; absent probes \
-                      orca, zellij and falls back to headless, and a nonempty \
+                      carries `placement` (orca|zellij|tern|headless|external; absent probes \
+                      tern, orca, zellij and falls back to headless, and a nonempty \
                       ONLYNE_BACKEND wins) and, for a role whose spec drives it with acp, the \
                       `[acp]` table: `mode`, `model`, `reasoning_effort` (each validated by \
                       the agent, empty keeps its default) and `permission` (`deny`, the \

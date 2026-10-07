@@ -411,18 +411,19 @@ command = ["pi", "--session-id", "{session}", "--session-dir", ".pi/sessions", "
 ```
 
 The **placement** is a property of the machine and lives in the role workspace's
-`config.toml`: `orca`, `zellij`, `headless`, or `external`.
+`config.toml`: `orca`, `zellij`, `tern`, `headless`, or `external`.
 
 Placement selection, highest first:
 
 ```text
-nonempty ONLYNE_BACKEND → workspace config.toml placement → probe orca, zellij → headless
+nonempty ONLYNE_BACKEND → workspace config.toml placement → probe tern, orca, zellij → headless
 ```
 
 | Placement | Host behavior |
 |---|---|
 | `orca` | Runs the role command in an Orca terminal/tab and retires the tab when the task ends. |
 | `zellij` | Runs sessions in zellij panes. |
+| `tern` | Runs each session as a block in the role's tab — one Tern session per cluster, one tab per role — and retires the block when the session ends. |
 | `headless` | Runs the role's `[client.runtime] command` as a child process, holds stdin open, and captures output in the task log. |
 | `external` | Starts nothing: the runtime is already resident and mounts on the session's own socket. |
 

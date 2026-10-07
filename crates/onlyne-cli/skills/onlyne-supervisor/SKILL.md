@@ -35,12 +35,16 @@ to you and the spec file.
 
 ## Current operating facts
 
-- Install the current published registry set with:
+- Install the 2.1.0 registry set with:
 
   ```bash
   cargo install --locked \
-    onlyne-cli onlyne-server onlyne-client onlyne-testkit
+    onlyne-cli@2.1.0 onlyne-server@2.1.0 onlyne-client@2.1.0 onlyne-testkit@2.1.0
   ```
+
+  Install the four crates at the same version.
+  Run `onlyne --version`, `onlyne-server --version`, and `onlyne-client --version` after installation.
+  Each command must report `2.1.0`.
 
 - `onlyne version` reports the CLI package, protocol, and sibling binary paths. Neither testkit
   command (`onlyne-agent-fake`, `onlyne-gateway-fake`) accepts `--version`; read `onlyne
@@ -333,10 +337,10 @@ refusal (`accepted: false`) is kept for work this client can never serve, such a
 assignment the plugin declines (`assign rejected`) or a session the operator's word retired with
 its delivery still in hand (`operator cancel`, `operator recycle`).
 
-A finished session takes its host resource with it. The client closes the pane, tab, zellij
-session, or exec child once that session holds no task and no plugin connection is attached,
-and the client log records the closure with `retiring idle session resource`. An idle pane
-still open in front of you means the owning client is down.
+A finished session takes its host resource with it. The client closes the pane, tab, tern
+block, zellij session, or exec child once that session holds no task and no plugin connection
+is attached, and the client log records the closure with `retiring idle session resource`. An
+idle pane still open in front of you means the owning client is down.
 
 **A scope that keeps sessions is the one thing that overrides the rule above, and it
 overrides it by making the runtime hold on.** `[client.session] scope = "task"` or
@@ -398,7 +402,7 @@ non-zero on a runtime that declares no `resume` suspends a session that cannot b
 brought back, which reads as a pool member vanishing for no stated reason. So when a
 `role` pool misbehaves, read those two lines before reading anything else.
 
-### Orca sessions
+### Orca and Tern sessions
 
 Orca creates one new terminal for each task. `attach` refreshes a persisted terminal handle; it
 does not relay into an arbitrary existing session. Spawning requires a running Orca app, an
@@ -406,6 +410,17 @@ does not relay into an arbitrary existing session. Spawning requires a running O
 tab with the matching worktree environment (`ORCA_WORKTREE_ID` under the host policy). A
 `[single-instance]` CLI error is the immediate spawn refusal. The exact `session_dead` rejection
 comes later from the client's retirement sweep after a slot exists.
+
+Tern runs each session as a block inside the role's tab: one Tern session per cluster, one tab
+per role, and the block is retired when the session ends. Set it with `placement = "tern"` in the
+role workspace's `config.toml`, or with `ONLYNE_BACKEND=tern`; an absent `placement` probes
+`tern`, `orca`, `zellij` in that order and falls back to `headless`, so a machine with Tern uses
+it without a line of config. The `onlyne` board that watches your clusters inside Tern ships in
+this repository at `integrations/tern-plugin`: `tern plugin install integrations/tern-plugin`
+installs it, or `tern plugin link integrations/tern-plugin` loads that directory in place and
+reloads on every save. It is a supervisor face — it runs the same admin verbs this document names
+(`status`, `roles`, `sessions`, `faults`, `control`, `repair`) as one-shot `onlyne` processes
+against each root.
 
 Automatic re-delivery rides two spec gates: `[server].requeue_max_attempts` (0 unlimited) lands
 a returned in-flight row as `rejected` with reason `requeue_exhausted`, and

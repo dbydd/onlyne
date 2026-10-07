@@ -1,108 +1,152 @@
 <script lang="ts">
-  // The app's one shell: the cluster header, the boards drawn as one graph, and
-  // the notice line.
-  //
-  // There is one view. There used to be a graph and a boards grid and a toggle
-  // between them, and a density rule that switched the operator's choice for
-  // them once the graph grew — an application deciding how its own surface reads
-  // is the same class of thing as a layout that resets itself.
-  import { onMount } from 'svelte';
-  import EventsPanel from './lib/components/EventsPanel.svelte';
-  import LedgerPanel from './lib/components/LedgerPanel.svelte';
-  import SessionsPanel from './lib/components/SessionsPanel.svelte';
-  import GraphView from './lib/components/GraphView.svelte';
-  import { connect, app } from './lib/store.svelte';
-  import { degraded, routesOf } from './lib/layout';
-  import type { ClusterSummary } from './gen/View';
+  // The shell: a header, the graph with its dock under it, and the inspector
+  // beside both. Everything here is one of those four, so the file stays the
+  // wiring and the reading order.
+  import IconContext from 'phosphor-svelte/lib/IconContext';
+  import Gate from './chrome/Gate.svelte';
+  import Palette from './chrome/Palette.svelte';
+  import Toasts from './chrome/Toasts.svelte';
+  import TopBar from './chrome/TopBar.svelte';
+  import Dock from './dock/Dock.svelte';
+  import GraphCanvas from './graph/GraphCanvas.svelte';
+  import { cluster } from './lib/state/cluster.svelte';
+  import { spec } from './lib/state/spec.svelte';
+  import { ui } from './lib/state/ui.svelte';
+  import Inspector from './shell/Inspector.svelte';
+  import Shortcuts from './shell/Shortcuts.svelte';
 
-  let token = $state('');
+  /// One stroke weight and one size for every glyph on the surface.
+  const ICONS = { size: '1.05em', weight: 'regular' } as const;
 
-  // Dense is a reading, not a mode: the edges dim and the boards stay, because
-  // the layout the operator dragged is worth more than the lines.
-  let dense = $derived(degraded(app.boards));
+  /// The token rides the query string of the URL the process printed. It stays
+  /// in the address bar on purpose: a reload has no other way to get it, and
+  /// the bind is loopback unless the operator widened it (`--bind`).
+  const token = new URLSearchParams(window.location.search).get('token') ?? '';
+  if (token) cluster.connect(token);
 
-  // The three flanks the TUI reads live on. Each is a reading, so each is
-  // dismissible: the graph is the surface, the panels are its margins.
-  let sessions = $state(true);
-  let ledger = $state(true);
-  let events = $state(true);
-
-  onMount(() => {
-    const given = new URLSearchParams(window.location.search).get('token');
-    if (given) {
-      token = given;
-      connect(given);
-    }
+  /// The spec cache: read once, then again whenever the cluster says the file
+  /// moved — a typed edit from this surface, or someone editing `spec.toml`.
+  $effect(() => {
+    const hash = cluster.view.cluster?.spec_hash ?? '';
+    if (cluster.live && hash !== '' && !spec.current(hash)) void spec.refresh(cluster.token, hash);
   });
 
-  const cluster = $derived((app.view.cluster ?? {}) as ClusterSummary);
-  // The header counts the edges the graph draws, not the server's `[[route]]`
-  // table. The contract calls `allowed_targets` the allowed route
-  // (`docs/v2-CONTRACT.md` §Slice 10), so a header reading the other table said
-  // "0 routes" above a graph with two edges drawn on it. Both figures were
-  // computed; the header read the server's anyway.
-  const routes = $derived(routesOf(app.boards).length);
-  const lastEvent = $derived(app.view.event_tail?.[0]);
+  /// The tab's title carries the two facts worth reading from another window.
+  $effect(() => {
+    const name = cluster.view.cluster?.cluster ?? '';
+    const faults = cluster.openFaults.length;
+    document.title = ['onlyne', name, faults > 0 ? `${faults} faults` : ''].filter(Boolean).join(' · ');
+  });
+
+  /// Nothing has arrived yet: the frame draws its own shape rather than an
+  /// empty canvas that looks like a cluster with no roles.
+  const booting = $derived(cluster.lastFrameAt === 0);
 </script>
 
 {#if !token}
-  <main class="gate">
-    <h1>onlyne</h1>
-    <p>
-      this surface needs its startup token — open the URL the server printed
-      (<code>http://127.0.0.1:&lt;port&gt;/?token=…</code>)
-    </p>
-  </main>
+  <Gate mode="no-token" detail="" />
+{:else if cluster.transport === 'refused'}
+  <Gate mode="refused" detail={cluster.detail} />
 {:else}
-  <header class="bar">
-    <h1>onlyne{cluster.cluster ? ` · ${cluster.cluster}` : ''}</h1>
-    <span class="status" class:live={app.connected}>
-      {app.view.stale ? 'catching up…' : app.link}
-    </span>
-    <span class="meta">
-      {cluster.connected_roles ?? 0}/{cluster.role_count ?? 0} roles ·
-      {routes} routes
-    </span>
-    <span class="toggles">
-      <button class:off={!sessions} onclick={() => (sessions = !sessions)}>sessions</button>
-      <button class:off={!ledger} onclick={() => (ledger = !ledger)}>ledger</button>
-      <button class:off={!events} onclick={() => (events = !events)}>events</button>
-    </span>
-    {#if dense}
-      <span class="dense">dense — edges dimmed, boards kept</span>
-    {/if}
-  </header>
-
-  <main class="body">
-    {#if sessions}
-      <SessionsPanel />
-    {/if}
-    <section class="content graph">
-      {#if app.boards.length > 0}
-        <GraphView />
-      {:else}
-        <p class="waiting">waiting for the first board…</p>
-      {/if}
-    </section>
-    {#if ledger}
-      <LedgerPanel />
-    {/if}
-  </main>
-
-  {#if events}
-    <EventsPanel />
-  {/if}
-
-  <footer class="bar foot">
-    <span class="notice">{app.notice}</span>
-    {#if lastEvent}
-      <span class="tail">
-        last event · seq {lastEvent.seq ?? ''} {lastEvent.type ?? ''}
-      </span>
-    {/if}
-    {#if Object.keys(app.view.faults ?? {}).length > 0}
-      <span class="faults">{Object.keys(app.view.faults ?? {}).length} open faults</span>
-    {/if}
-    <span class="cursor">cursor {app.cursor}</span>
-  </footer>
+  <IconContext values={ICONS}>
+    <div class="app">
+      <TopBar />
+      <main class="stage">
+        <section class="canvas">
+          {#if booting}
+            <div class="boot" aria-label="connecting">
+              <div class="skeleton" style="width: 232px; height: 116px"></div>
+              <div class="skeleton" style="width: 232px; height: 116px"></div>
+              <div class="skeleton" style="width: 232px; height: 116px"></div>
+            </div>
+          {:else}
+            <GraphCanvas />
+          {/if}
+        </section>
+        <Dock />
+      </main>
+      <aside class="inspector" class:open={ui.selection !== null} inert={ui.selection === null}>
+        <div class="inner">
+          <Inspector />
+        </div>
+      </aside>
+    </div>
+    <Palette />
+    <Toasts />
+    <Shortcuts />
+  </IconContext>
 {/if}
+
+<style>
+  .app {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-rows: var(--topbar-h) 1fr;
+    height: 100%;
+    overflow: hidden;
+  }
+  .app :global(> header) {
+    grid-column: 1 / -1;
+  }
+  .stage {
+    display: grid;
+    grid-template-rows: 1fr auto;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .canvas {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    background: var(--bg);
+  }
+  .boot {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--s-4);
+    opacity: 0.5;
+  }
+  /* The panel slides; the column width is what moves, so the canvas resizes
+     with it and nothing overlaps. */
+  .inspector {
+    width: 0;
+    overflow: hidden;
+    border-left: 1px solid transparent;
+    background: var(--panel);
+    transition:
+      width var(--t-med) var(--ease),
+      border-color var(--t-med) var(--ease);
+  }
+  .inspector.open {
+    width: var(--inspector-w);
+    border-left-color: var(--line);
+  }
+  .inner {
+    width: var(--inspector-w);
+    height: 100%;
+  }
+  @media (max-width: 900px) {
+    .inspector {
+      position: fixed;
+      top: var(--topbar-h);
+      right: 0;
+      bottom: 0;
+      z-index: var(--z-inspector);
+      box-shadow: var(--shadow-pop);
+      width: min(var(--inspector-w), 92vw);
+      transform: translateX(100%);
+      transition: transform var(--t-med) var(--ease);
+    }
+    .inspector.open {
+      width: min(var(--inspector-w), 92vw);
+      transform: none;
+    }
+    .inner {
+      width: 100%;
+    }
+  }
+</style>

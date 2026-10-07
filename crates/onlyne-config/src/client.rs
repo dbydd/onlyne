@@ -44,9 +44,9 @@ pub struct ClientConfig {
     #[serde(default = "default_reconnect_grace_secs")]
     pub reconnect_grace_secs: u64,
     /// Where this machine displays the role's runtime process (`orca` |
-    /// `zellij` | `headless` | `external`). Absent probes orca, zellij in that
-    /// order and falls back to `headless`. The process environment
-    /// `ONLYNE_BACKEND` takes precedence when it is nonempty.
+    /// `zellij` | `tern` | `headless` | `external`). Absent probes tern,
+    /// orca, zellij in that order and falls back to `headless`. The process
+    /// environment `ONLYNE_BACKEND` takes precedence when it is nonempty.
     ///
     /// Placement is a property of the machine and lives here; the drive is a
     /// property of the runtime and lives in the spec's `[client.runtime]`
@@ -72,6 +72,9 @@ pub enum Placement {
     Orca,
     /// A zellij pane.
     Zellij,
+    /// A Tern pane: a tab in a Tern session, with the runtime's own blocks
+    /// split inside it.
+    Tern,
     /// No pane: the client starts the runtime in the background.
     Headless,
     /// No process of the client's own: a runtime that is already resident dials
@@ -81,17 +84,24 @@ pub enum Placement {
 
 /// Every value a workspace `placement` accepts, in the order a refusal names
 /// them.
-pub const PLACEMENT_NAMES: &str = "orca|zellij|headless|external";
+pub const PLACEMENT_NAMES: &str = "orca|zellij|tern|headless|external";
 
 /// What an absent `placement` probes, in order, before it falls back to
 /// [`Placement::Headless`].
-pub const PLACEMENT_PROBE_ORDER: [Placement; 2] = [Placement::Orca, Placement::Zellij];
+///
+/// Tern comes first because its marker describes the pane this process is
+/// inside, while an `ORCA_*` value is inherited by a daemon out of whatever
+/// pane started it. The pane the process is in wins over the pane that started
+/// the client.
+pub const PLACEMENT_PROBE_ORDER: [Placement; 3] =
+    [Placement::Tern, Placement::Orca, Placement::Zellij];
 
 impl Placement {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Orca => "orca",
             Self::Zellij => "zellij",
+            Self::Tern => "tern",
             Self::Headless => "headless",
             Self::External => "external",
         }
@@ -101,6 +111,7 @@ impl Placement {
         match name.trim().to_ascii_lowercase().as_str() {
             "orca" => Some(Self::Orca),
             "zellij" => Some(Self::Zellij),
+            "tern" => Some(Self::Tern),
             "headless" => Some(Self::Headless),
             "external" => Some(Self::External),
             _ => None,
@@ -575,7 +586,7 @@ fn carries_backend(value: &toml::Value) -> bool {
     }
 }
 
-/// `placement` is `orca` | `zellij` | `headless` | `external`. The
+/// `placement` is `orca` | `zellij` | `tern` | `headless` | `external`. The
 /// refusal points at the line that carries the rejected value.
 ///
 /// The check runs on the parsed document, before the struct conversion, so a
@@ -590,7 +601,8 @@ fn validate_placement(parsed: &toml::Value, text: &str, file: &str) -> Result<()
             file,
             placement_line(text, placement),
             format!(
-                "placement must be one of `orca`, `zellij`, `headless`, `external`, got {}",
+                "placement must be one of `orca`, `zellij`, `tern`, `headless`, \
+                 `external`, got {}",
                 toml_literal(placement)
             ),
         ));

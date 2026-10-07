@@ -152,7 +152,7 @@ v2 全文和代码统一用下表的词，一个词一个意思：
 | 运行时 | 真正跑模型对话的程序：pi、DSH、某个 ACP agent |
 | 会话 | 运行时里的一段对话；一个会话可以先后服务多个投递 |
 | 驱动 | client 与运行时说话的方式：`plugin`、`acp`、`exec` |
-| 放置 | 运行时进程显示在哪里：`orca`、`zellij`、`headless`、`external` |
+| 放置 | 运行时进程显示在哪里：`orca`、`zellij`、`tern`、`headless`、`external` |
 | 插件 | 运行时内部、经 adapter 协议与 client 对话的扩展 |
 | 绑定 | 一次投递与一个会话的对应关系 |
 | 任务族 | 以 `causality.family` 为键的一串转交 |
@@ -264,12 +264,12 @@ command = ["pi"]          # 占位符沿用 v1 的 {session}、{task}
 
 ```toml
 # <workspace>/.onlyne/config.toml
-placement = "orca"        # orca | zellij | headless | external；省略时按 orca、zellij 顺序探测
+placement = "orca"        # orca | zellij | tern | headless | external；省略时按 tern、orca、zellij 顺序探测
 ```
 
 | drive × placement | 谁启动运行时 | 一个进程几个会话 | 典型 |
 |---|---|---|---|
-| plugin × orca / zellij / headless | client 在 pane 里或后台启动，插件回拨 client | 1 | pi |
+| plugin × orca / zellij / tern / headless | client 在 pane 里或后台启动，插件回拨 client | 1 | pi |
 | plugin × external | 运行时自己常驻，插件主动连 client | 多个 | DSH |
 | acp × headless | client 以子进程启动，经 stdio 说 ACP | 多个 | ACP agent |
 | exec × 任意放置 | client 启动 | 1 | 脚本、一次性 CLI |
@@ -373,9 +373,13 @@ POST /api/op        一个 admin op：send、control、repair、report、spec �
 **看板语义：**
 
 - 列 = 投递状态与会话状态的联合投影：排队 | 运行 | 等待 | 完成 | 失败或阻塞。
-- 卡片 = 本角色上的一次投递。同一任务族的卡片跨看板以细线串联，选中一张时高亮整条链。
-- 看板头显示会话的忙、闲、挂起数。
-- 写任务的发送方是保留角色 `_supervisor`（`spec.rs:39`），回执落到 `_supervisor` 的队列，web 把这个队列渲染成「操作员」看板。
+- 卡片 = 本角色上的一次投递。选中一张时，整条家族链在画布上以带步号的虚线画出，链外的一切压暗。
+- 看板显示会话的忙、闲、挂起数，以及当前占用的 slot（`max_sessions` 个格子，按状态填充）。
+- 写任务的发送方是保留角色 `_supervisor`（`spec.rs:39`），回执落到 `_supervisor` 的队列。**这个队列不是一个看板**：`_supervisor` 是逻辑节点，画布不为它画盒子。回执在底部 Ledger 的 `Inbox` 过滤里读，也就是「我发出去的东西现在怎样了」。
+
+**一个界面，五个主体。** 画布是主面；右边检查器按选中项切换，五种形态：角色、一次投递、一条 fault、一条已声明路由、以及声明新角色的表单。底部 dock 四个页签（Ledger / Sessions / Events / Faults）。检查器不再是「角色专用」：角色、投递、fault 各有一套动词，路由可在此撤销，spec 编辑按字段组分成八个控件。
+
+**操作者能做的事。** 除了写任务与改 spec，界面把 admin 面的 repair 动词摆到台前：`focus`（把某个 session 指向一个任务）、`repair_retry` / `repair_fail` / `repair_close`（后两个两步确认）、`repair_inspect`（读 reducer 观察，不改状态）、`report`（操作者自己给任务结案）、`repair_ack`（fault 归位）。哪些动词出现由投递状态决定，判断集中在一处。
 
 **配置编辑：**
 
@@ -387,10 +391,14 @@ POST /api/op        一个 admin op：send、control、repair、report、spec �
 **图：**
 
 - 节点是看板（HTML 组件），用 Svelte Flow（`@xyflow/svelte`）渲染，支持缩放、平移、拖动、连线；拖一条线等于新增一条允许的路由。
-- 初始布局用 elkjs 的分层算法（大多数路由有方向），之后以用户拖动为准。坐标存在 web 自己的展示文件里，spec 只存语义。
-- 边数超过阈值（接近全连接）时隐藏边、改网格排列，即普通看板。
+- 初始布局用 elkjs 的分层算法（大多数路由有方向），之后以用户拖动为准。坐标是**这个标签页自己的记忆**（`sessionStorage`），不是文件：spec 只存语义，而一个展示文件换来的是与浏览器抢写的写入路径和一次「答 ok 却丢掉拖动」的竞态。
+- 边数超过阈值（接近全连接）时**把边压暗，看板留在原处**。隐藏边再改网格排列等于替操作者决定界面怎么读；压暗只是一个读数，图还是那张图。
+- 路由是一条有向线；反向流量（completion 回家）不画成第二条边，它在接收方的流水计数和家族链里读。
+- 画布上的线只在有未结清的投递时流动（虚线动画）并带计数；家族链是另一层，画在路由之上。
 
 **构建：** Svelte 5 + Vite 打包静态资源，`rust-embed` 嵌进二进制。`onlyne-web` 不在 workspace 的 `default-members` 里，核心构建不需要 Node；静态资源缺失时该 crate 明确报错。依赖：`onlyne-proto`、`onlyne-wire`、`axum`、`tokio`、`rust-embed`。
+
+**字体与图标。** Geist / Geist Mono 的 latin 子集与 phosphor 图标随包进来。安全底线决定了它们必须**内联**：令牌只改写文档自己的 `/assets/` 引用，stylesheet 里 `url()` 取的字体到 guard 面前没有令牌，只会被 401。所以 `vite.config.ts` 把 `assetsInlineLimit` 提到子集之上，字体以 `data:` URI 进 CSS；favicon 同样是内联的 data URI。（Geist 的 latin 子集不含 U+2192，界面用图标或 `to` 表示方向。）
 
 ### TUI
 
@@ -501,7 +509,7 @@ src/
   adapter.rs     插件 socket
   driver.rs      Driver trait
   driver/        plugin.rs  acp.rs  exec.rs
-  placement.rs   orca / zellij / headless / external
+  placement.rs   orca / zellij / tern / headless / external
 ```
 
 约 13 个文件，每个 300–1,200 行。v1 是 37 个生产文件加 21 个 sidecar 测试文件。

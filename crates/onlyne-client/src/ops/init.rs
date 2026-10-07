@@ -14,9 +14,10 @@ use std::path::{Path, PathBuf};
 /// lives in the server's `spec.toml` (`[client.runtime]`), which is why no
 /// drive is seeded here.
 const PLACEMENT_COMMENTS: &str = "\
-# Where this machine displays the role's runtime: orca | zellij |
-# headless | external. An absent value probes orca, zellij in that order
-# and falls back to headless; a nonempty ONLYNE_BACKEND wins over this key.
+# Where this machine displays the role's runtime: orca | zellij | tern |
+# headless | external. An absent value probes tern, orca, zellij in that
+# order and falls back to headless; a nonempty ONLYNE_BACKEND wins over this
+# key.
 # placement = \"headless\"
 ";
 

@@ -1,0 +1,28 @@
+/* The Onlyne Board block. Colors come from Tern's tone variables, so light
+   and dark themes both follow. Rules are scoped by the block's surface
+   attribute, so the sheet touches nothing else. */
+
+/* Cluster and row rules read as separators, not boxes. */
+.sf-main[data-surface='plugin.onlyne.board'] [data-role='onlyne.root'] {
+	margin-top: 6px;
+}
+
+/* A root's last problem line sits apart from the data under it. */
+.sf-main[data-surface='plugin.onlyne.board'] [data-role='onlyne.problem'] {
+	padding: 2px 6px;
+	border-radius: 4px;
+	background: rgb(from var(--sf-warn) r g b/10%);
+}
+
+/* A root that left both sources is a warning the reader must not miss. */
+.sf-main[data-surface='plugin.onlyne.board'] [data-role='onlyne.down'] {
+	padding: 2px 6px;
+	border-radius: 4px;
+	background: rgb(from var(--sf-bad) r g b/12%);
+}
+
+/* Clickable badges say so on hover. */
+.sf-main[data-surface='plugin.onlyne.board'] [data-role^='onlyne.act.']:hover {
+	filter: brightness(1.15);
+	cursor: pointer;
+}

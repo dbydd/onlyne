@@ -1,0 +1,13 @@
+schema = 1
+id = "onlyne"
+name = "Onlyne Board"
+version = "0.1.0"
+description = "One board over every local Onlyne cluster: roles, sessions, faults, and the supervisor actions that reach them."
+icon = "radar"
+host = "host.luau"
+window = "window.luau"
+styles = ["onlyne.css"]
+
+[[blocks]]
+id = "board"
+title = "Onlyne Board"

@@ -169,8 +169,8 @@ pub struct DeliveryView {
     pub task_id: Option<String>,
     /// The family's root task id and the hop this row sits at, read off the
     /// stored envelope's causality. The `ledger` read owns these; a row this
-    /// view first saw on the stream carries none of them, and the next snapshot
-    /// fills them in.
+    /// view first saw on the stream carries none of them, and either the next
+    /// snapshot or a [`View::merge_ledger`] of one ledger read fills them in.
     pub family: Option<String>,
     pub hop: Option<u32>,
     pub origin: Option<String>,
@@ -185,7 +185,8 @@ pub struct DeliveryView {
     pub reason: Option<String>,
     pub out_head: Option<String>,
     /// When the row was accepted. Absent on a row first seen on the stream,
-    /// which carries no clock.
+    /// which carries no clock; a [`View::merge_ledger`] of one ledger read puts
+    /// it back.
     pub enqueued_at: Option<DateTime<Utc>>,
     pub acked_at: Option<DateTime<Utc>>,
 }
@@ -261,6 +262,36 @@ impl DeliveryView {
         self.state = reported.state;
         self.outcome = reported.outcome;
         self.reason = reported.reason.clone();
+    }
+
+    /// Fill the causality columns a row born on the stream never carried,
+    /// from a `ledger` read of that same row. True when a column moved.
+    ///
+    /// This is the other half of [`Self::absorb`], and the two are written the
+    /// way they run: the event owns the state columns and the read owns the
+    /// ones a transition does not carry, and each leaves the other's alone.
+    /// Nothing here is unconditional. A row the snapshot already read carries
+    /// these columns and keeps them, and the only field this may overwrite is
+    /// one that is `None` and that the read has a value for — so a re-read can
+    /// restore a column without ever contradicting what a stream event said,
+    /// and a row already complete is a no-op rather than a second opinion. A
+    /// column the read has nothing for stays empty: filling it with the same
+    /// absence is not a fill, and reporting one would arm a heal that has
+    /// nothing left to find.
+    fn absorb_causality(&mut self, entry: &LedgerEntry) -> bool {
+        let mut filled = false;
+        // `entry` names the row by key, and the map lookup already matched it,
+        // so `msg_id` itself never needs this: it is the one column both
+        // sources agree on by construction, and the caller keys on it.
+        filled |= fill_absent(&mut self.family, entry.family.clone());
+        filled |= fill_absent(&mut self.hop, Some(entry.hop));
+        filled |= fill_absent(&mut self.origin, entry.origin.clone());
+        filled |= fill_absent(&mut self.attempt, Some(entry.attempt));
+        filled |= fill_absent(&mut self.out_head, entry.out_head.clone());
+        filled |= fill_absent(&mut self.enqueued_at, Some(entry.enqueued_at));
+        filled |= fill_absent(&mut self.acked_at, entry.acked_at);
+        filled |= fill_absent(&mut self.reason, entry.reason.clone());
+        filled
     }
 }
 
@@ -615,6 +646,28 @@ impl View {
             _ => false,
         })
     }
+
+    /// Fill the causality columns of rows this view first saw on the stream.
+    ///
+    /// A `ledger_state` event is a transition: it carries no family, no hop
+    /// and no clock, so a row born from one is untraceable until the ledger is
+    /// read again. This fills those columns and touches nothing else. Rows the
+    /// view does not hold are ignored: the projection is the union of what the
+    /// snapshot and the stream said, and a merge is not a fourth source.
+    ///
+    /// Returns how many rows a column moved on, which is the caller's cue for
+    /// whether another read is worth arming — a read that filled nothing has
+    /// already said everything the ledger holds.
+    pub fn merge_ledger(&mut self, ledger: &[LedgerEntry]) -> usize {
+        ledger
+            .iter()
+            .filter(|entry| {
+                self.deliveries
+                    .get_mut(&entry.msg_id)
+                    .is_some_and(|delivery| delivery.absorb_causality(entry))
+            })
+            .count()
+    }
 }
 
 /// Whether a fault is one no repair verb has moved.
@@ -799,5 +852,189 @@ fn principal_role(principal: &Principal) -> Option<&str> {
     match principal {
         Principal::Role { role, .. } => Some(role.as_str()),
         Principal::Gateway { .. } | Principal::Cluster { .. } => None,
+    }
+}
+
+/// Put a read's value into a column that carries none, and report whether it
+/// landed.
+///
+/// Both halves are required: a slot that already holds something is the source
+/// that owns it, and a read with nothing to say leaves the column empty rather
+/// than counting the same absence as progress.
+fn fill_absent<T>(slot: &mut Option<T>, value: Option<T>) -> bool {
+    match (slot.is_none(), value) {
+        (true, Some(value)) => {
+            *slot = Some(value);
+            true
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LedgerEntry, Principal, Snapshot, View, snapshot_to_view, update};
+    use crate::envelope::MsgKind;
+    use crate::event::{Event, LedgerState, LedgerStateEvent};
+    use chrono::{DateTime, Utc};
+
+    /// Where the row under assertion came from. This is the whole subject of
+    /// the merge: only a stream-born row is missing the columns a `ledger`
+    /// read owns, and a row the snapshot read has them all already.
+    #[derive(Clone, Copy)]
+    enum Born {
+        /// Folded off one `ledger_state` event for a row no read had seen.
+        Stream,
+        /// Read off the `ledger` of an opening snapshot.
+        Snapshot,
+    }
+
+    struct Case {
+        name: &'static str,
+        born: Born,
+        /// The `msg_id`s this read answers with.
+        read: &'static [&'static str],
+        /// How many rows a column moved on.
+        filled: usize,
+    }
+
+    /// A pinned instant, so a folded clock compares by value and not by when
+    /// the test happened to run.
+    fn fixed_time() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-09-29T00:00:00Z")
+            .expect("a fixed timestamp")
+            .with_timezone(&Utc)
+    }
+
+    /// One `ledger` read's row, as the admin answer carries it.
+    fn entry(msg_id: &str) -> LedgerEntry {
+        LedgerEntry {
+            msg_id: msg_id.to_string(),
+            op_id: Some("o-1".into()),
+            kind: MsgKind::Task,
+            from: Principal::role("_supervisor"),
+            to: Principal::role("planner"),
+            task: Some("t1".into()),
+            parent_task: None,
+            hop: 2,
+            family: Some("t1".into()),
+            hop_budget: Some(8),
+            origin: Some("_supervisor".into()),
+            deadline: None,
+            labels: None,
+            attempt: 1,
+            state: LedgerState::Queued,
+            reason: None,
+            out_head: Some("h-1".into()),
+            body_json: None,
+            enqueued_at: fixed_time(),
+            acked_at: None,
+        }
+    }
+
+    /// The transition a `ledger_state` event carries: what changed, and none of
+    /// the columns above.
+    fn transition(msg_id: &str) -> Event {
+        Event::LedgerState(LedgerStateEvent {
+            msg_id: msg_id.to_string(),
+            op_id: Some("o-1".into()),
+            kind: MsgKind::Task,
+            from: Principal::role("_supervisor"),
+            to: Principal::role("planner"),
+            task: Some("t1".into()),
+            state: LedgerState::InFlight,
+            outcome: None,
+            reason: None,
+        })
+    }
+
+    /// A view holding one row the opening `ledger` read described in full.
+    fn view_with_read_row(msg_id: &str) -> View {
+        snapshot_to_view(&Snapshot {
+            ledger: vec![entry(msg_id)],
+            ..Snapshot::default()
+        })
+    }
+
+    /// A `ledger` read fills the columns a stream-born row never had, and
+    /// touches nothing else: not a column the event owns, not a row the view
+    /// already read whole, not a row the read does not name, and not the tail.
+    #[test]
+    fn a_ledger_read_fills_only_what_a_stream_born_row_is_missing() {
+        let cases = [
+            Case {
+                name: "a row born on the stream gains its causality and its clock",
+                born: Born::Stream,
+                read: &["m1"],
+                filled: 1,
+            },
+            Case {
+                name: "a row the snapshot already read whole is left alone",
+                born: Born::Snapshot,
+                read: &["m1"],
+                filled: 0,
+            },
+            Case {
+                name: "a row this read does not name is left alone",
+                born: Born::Snapshot,
+                read: &["m9"],
+                filled: 0,
+            },
+            Case {
+                name: "the count is the rows filled, not the rows read",
+                born: Born::Stream,
+                read: &["m1", "m9"],
+                filled: 1,
+            },
+        ];
+
+        for case in cases {
+            let mut view = match case.born {
+                Born::Stream => update(View::default(), &transition("m1")),
+                Born::Snapshot => view_with_read_row("m1"),
+            };
+            let ledger: Vec<LedgerEntry> = case.read.iter().map(|id| entry(id)).collect();
+            let before = view.clone();
+
+            let filled = view.merge_ledger(&ledger);
+
+            assert_eq!(
+                filled, case.filled,
+                "{}: the count is the rows a column moved on",
+                case.name
+            );
+            let delivery = view.deliveries.get("m1").expect("the view still holds m1");
+            match case.born {
+                Born::Stream => {
+                    assert_eq!(delivery.family.as_deref(), Some("t1"), "{}", case.name);
+                    assert_eq!(delivery.hop, Some(2), "{}", case.name);
+                    assert_eq!(
+                        delivery.origin.as_deref(),
+                        Some("_supervisor"),
+                        "{}",
+                        case.name
+                    );
+                    assert_eq!(delivery.attempt, Some(1), "{}", case.name);
+                    assert_eq!(delivery.out_head.as_deref(), Some("h-1"), "{}", case.name);
+                    assert_eq!(delivery.enqueued_at, Some(fixed_time()), "{}", case.name);
+                    // The columns the event owns stay the event's, and the two
+                    // columns this read has no word for stay empty.
+                    assert_eq!(delivery.state, LedgerState::InFlight, "{}", case.name);
+                    assert_eq!(delivery.acked_at, None, "{}", case.name);
+                    assert_eq!(delivery.reason, None, "{}", case.name);
+                }
+                Born::Snapshot => assert_eq!(
+                    delivery,
+                    before.deliveries.get("m1").expect("the row was there"),
+                    "{}: a row with nothing missing does not move",
+                    case.name
+                ),
+            }
+            // A read is not a source of rows: what the view holds is still the
+            // union of the snapshot and the stream, and nothing else.
+            assert_eq!(view.deliveries.len(), 1, "{}", case.name);
+            assert_eq!(view.event_tail, before.event_tail, "{}", case.name);
+            assert_eq!(view.stale, before.stale, "{}", case.name);
+        }
     }
 }

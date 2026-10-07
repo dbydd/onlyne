@@ -1,0 +1,421 @@
+/* Base layer: reset, typography, the tone system, and the few control classes
+ * every slice shares. Component-specific rules stay in the component. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 var(--fs-12) / 1.5 var(--font-ui);
+  font-feature-settings: 'cv11', 'ss01';
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+code,
+kbd,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+}
+
+/* Figures line up in columns. */
+.num,
+.mono {
+  font-variant-numeric: tabular-nums;
+}
+
+.muted {
+  color: var(--ink-3);
+}
+
+.eyebrow {
+  font-size: var(--fs-11);
+  font-weight: 500;
+  color: var(--ink-3);
+  letter-spacing: 0.01em;
+}
+
+.trunc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- Tone: one attribute gives an element the status palette. */
+
+[data-tone] {
+  --tone: var(--ink-2);
+  --tone-wash: oklch(1 0 0 / 0.06);
+  --tone-line: var(--line-strong);
+}
+[data-tone='run'] {
+  --tone: var(--run);
+  --tone-wash: var(--run-wash);
+  --tone-line: var(--run-line);
+}
+[data-tone='wait'] {
+  --tone: var(--wait);
+  --tone-wash: var(--wait-wash);
+  --tone-line: var(--wait-line);
+}
+[data-tone='done'] {
+  --tone: var(--done);
+  --tone-wash: var(--done-wash);
+  --tone-line: var(--done-line);
+}
+[data-tone='fail'] {
+  --tone: var(--fail);
+  --tone-wash: var(--fail-wash);
+  --tone-line: var(--fail-line);
+}
+[data-tone='queue'] {
+  --tone: var(--queue);
+  --tone-wash: var(--queue-wash);
+  --tone-line: var(--queue-line);
+}
+[data-tone='off'] {
+  --tone: var(--off);
+  --tone-wash: var(--off-wash);
+  --tone-line: var(--off-line);
+}
+
+/* ---- Chip: a short label. Tone tints it. */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--r-1);
+  background: var(--tone-wash, oklch(1 0 0 / 0.06));
+  color: var(--tone, var(--ink-2));
+  font-size: var(--fs-11);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.chip.line {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--tone-line, var(--line));
+}
+.chip.mono {
+  font-size: 10.5px;
+}
+
+/* ---- Dot: a status light. `pulse` only while the thing is live. */
+
+.dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tone, var(--ink-4));
+}
+.dot.ring {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--tone, var(--ink-4));
+}
+.dot.pulse {
+  animation: dot-pulse 1.8s ease-in-out infinite;
+}
+
+/* ---- Buttons. */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-2);
+  background: var(--raised);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+  font-size: var(--fs-12);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    background var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease),
+    transform var(--t-fast) var(--ease);
+}
+.btn:hover:not(:disabled) {
+  background: var(--hover);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn.primary {
+  background: var(--bone);
+  color: var(--bone-ink);
+  box-shadow: none;
+}
+.btn.primary:hover:not(:disabled) {
+  background: oklch(0.97 0.012 85);
+}
+.btn.ghost {
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink-2);
+}
+.btn.ghost:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+}
+.btn.danger {
+  color: var(--fail);
+  box-shadow: inset 0 0 0 1px var(--fail-line);
+  background: transparent;
+}
+.btn.danger:hover:not(:disabled) {
+  background: var(--fail-wash);
+}
+.btn.danger.armed {
+  background: var(--fail);
+  color: oklch(0.16 0.02 22);
+  box-shadow: none;
+}
+.btn.sm {
+  height: 24px;
+  padding: 0 8px;
+  font-size: var(--fs-11);
+}
+.btn.icon {
+  width: 28px;
+  padding: 0;
+}
+.btn.icon.sm {
+  width: 24px;
+}
+.btn[aria-busy='true'] {
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+/* ---- Form controls. */
+
+.input,
+.textarea,
+.select {
+  width: 100%;
+  min-width: 0;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-2);
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+  font-size: var(--fs-12);
+  transition: box-shadow var(--t-fast) var(--ease);
+}
+.input,
+.select {
+  height: 28px;
+}
+.textarea {
+  padding: 6px 8px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--ink-3);
+}
+.input:hover,
+.textarea:hover,
+.select:hover {
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+.input:focus-visible,
+.textarea:focus-visible,
+.select:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--focus);
+}
+.input[aria-invalid='true'],
+.textarea[aria-invalid='true'] {
+  box-shadow: inset 0 0 0 1px var(--fail-line);
+}
+
+.field {
+  display: grid;
+  gap: 4px;
+}
+.field > .label {
+  font-size: var(--fs-11);
+  font-weight: 500;
+  color: var(--ink-2);
+}
+.field > .hint {
+  font-size: var(--fs-11);
+  color: var(--ink-3);
+}
+.field > .error {
+  font-size: var(--fs-11);
+  color: var(--fail);
+}
+
+/* ---- Key cap. */
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--r-1);
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink-3);
+  font: 500 10.5px / 1 var(--font-mono);
+}
+
+/* ---- Skeleton: the shape of the thing that is about to arrive. */
+
+.skeleton {
+  border-radius: var(--r-2);
+  background: linear-gradient(90deg, var(--raised) 0%, var(--hover) 50%, var(--raised) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+/* ---- Scrollbars, focus. */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--line-strong);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+::selection {
+  background: oklch(0.86 0.06 85 / 0.28);
+}
+
+/* ---- Keyframes. Each one is a state change, none is decoration. */
+
+@keyframes dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+@keyframes flow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes settle {
+  0% {
+    box-shadow: 0 0 0 0 var(--tone-line, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 10px transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

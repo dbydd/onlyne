@@ -13,8 +13,8 @@
 //! key this build ignores. A key added to the example and retired from the
 //! schema at the same time cannot merge quietly.
 
+use onlyne_config::Spec;
 use onlyne_config::keys::{unknown_client_keys, unknown_spec_keys};
-use onlyne_config::{ClientConfig, Spec};
 
 const EXAMPLE_SPEC: &str = include_str!("../../../.onlyne.example/spec.toml");
 const EXAMPLE_CLIENT: &str =

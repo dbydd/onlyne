@@ -159,7 +159,7 @@ pub struct ServerSection {
 pub const BACKEND_IS_GONE: &str = "\
 `backend` is gone: a drive belongs in the spec's `[client.runtime]` (`drive = \"plugin\"`,
 `\"acp\"`, or `\"exec\"`, with the argv in `command`) and a placement belongs in the role
-workspace's `config.toml` (`placement = \"orca\"`, `\"zellij\"`, `\"headless\"`, or
+workspace's `config.toml` (`placement = \"orca\"`, `\"zellij\"`, `\"tern\"`, `\"headless\"`, or
 `\"external\"`)";
 
 /// Why a document may not carry `relay_required`, `relay_required_count`, or

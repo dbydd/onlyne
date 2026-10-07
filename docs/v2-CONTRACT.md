@@ -199,10 +199,10 @@ command = ["pi", "--mode", "rpc", …]   # placeholders {session} and {task} kee
 (`<workspace>/.onlyne/config.toml`):
 
 ```toml
-placement = "orca"        # orca | zellij | headless | external
+placement = "orca"        # orca | zellij | tern | headless | external
 ```
 
-An absent `placement` probes `orca`, `zellij` in that order and falls back to
+An absent `placement` probes `tern`, `orca`, `zellij` in that order and falls back to
 `headless`. An absent `drive` is `plugin`, which is what every role in the tree is today.
 
 The `backend` key is **deleted** from both files. A configuration that still carries it is

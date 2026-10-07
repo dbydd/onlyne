@@ -1,5 +1,69 @@
 # Changelog
 
+## Unreleased
+
+## 2.1.0 (2026-10-07)
+
+- **Tern placement.** `onlyne-client` accepts `placement = "tern"` and probes Tern before Orca
+  and zellij. The backend drives Tern 0.4.5 through its current CLI.
+- **Tern board.** `integrations/tern-plugin` provides the `onlyne.board` block. It polls server
+  roots and shows roles, sessions, and faults. Confirmed actions use the Onlyne supervisor CLI.
+- **Skills.** The bundled development, supervisor, and role skills describe Tern and the board.
+  `onlyne skill export --force` installs the skills that this binary ships.
+
+**`onlyne-web` rebuilt.** The optional front end is the same product with the
+same three endpoints and the same one reducer, and the surface it draws is new.
+Nothing in the protocol, the spec, the databases or the CLI moved; this is a
+front-end change, and an operator who never opens the browser sees nothing.
+
+- **One view, five subjects.** The canvas is the surface: a board per role, a
+  line per declared route. The inspector beside it shows whatever is selected —
+  a board, one delivery, a fault, a declared route, or the form that declares a
+  role — and the bottom dock carries the four reads (ledger, sessions, events,
+  faults). The old fixed left-sessions/right-ledger margins are gone; the
+  ledger gained `Live | All | Inbox`, and `Inbox` is where the operator's own
+  receipts are read now that `_supervisor` is no longer drawn as a board.
+- **The operator's authority is on the surface.** `focus`, `repair_retry`,
+  `repair_fail`, `repair_close`, `repair_inspect`, `report` and `repair_ack`
+  are reachable per row, with the verbs offered following the delivery's state.
+  The two that take something away arm on a second click.
+- **The spec edits by field group.** Role prose, `max_sessions`, the
+  timeout/intent policy, the runtime argv, `allowed_targets`, `allowed_senders`,
+  declaring a role and removing one each save their own typed edit, so a save
+  moves only what was edited. The edits are built from the read whose hash they
+  name, and a `conflict` is retried once from a fresh read.
+- **A task is a chain, drawn.** Selecting a delivery draws its whole family
+  across the boards as numbered dashed steps — including a completion reporting
+  home, which is not a declared route — and dims everything off the chain.
+- **The route graph says more with less.** A route's line carries the count of
+  unsettled deliveries on it and flows while any is in flight. A crowded graph
+  dims its lines and keeps the boards where the operator put them, rather than
+  re-arranging itself; a wildcard route is reported once as "reaches every
+  role" instead of drawn as a fan.
+- **Fonts and icons ship in the bundle.** Geist and Geist Mono (latin subset)
+  and phosphor icons are inlined as data URIs. This is forced by the security
+  floor rather than chosen for looks: the guard admits a request only with the
+  startup token, and the token is spliced into the document's own `/assets/`
+  references and nowhere else, so a font named by a `url()` inside the
+  stylesheet is fetched with no token and refused 401.
+- **Three defects fixed.** The event tail rendered every event as its bare type
+  name, because the panel read the payload's fields one level above where the
+  wire puts them. The footer counted every fault it held as open, including the
+  ones a repair verb had already moved. And the ledger was sorted by `msg_id`,
+  which is a uuid v4 and carries no order — it is now sorted by the row's own
+  clock, falling back to when this tab first saw it.
+- **A stream-born row now gets its family back.** A `ledger_state` event is a
+  transition: it carries what changed and not the row's causality, so a
+  delivery the web link first saw on the stream had no `family`, no `hop`, no
+  title and no clock until the next reconnect. Measured before the fix, 93 of
+  107 deliveries on a live cluster were untraceable — every one of them work
+  created after the page loaded. The link now arms a single debounced
+  `ledger`-only read when a folded event leaves a row without its family and
+  merges the columns the transition does not own (`View::merge_ledger`,
+  `DeliveryView::absorb_causality`). The subscription is untouched, so the
+  event tail the browser is drawing survives; a failed read is disarmed rather
+  than retried by its own timer. Same cluster after: 16 of 16 rows traceable.
+
 ## 2.0.0 (2026-10-01)
 
 The v2 rewrite of the routing and session layer. `docs/v2-PLAN.md` is the plan and

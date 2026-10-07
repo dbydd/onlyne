@@ -16,9 +16,9 @@ the working directory: `onlyne-supervisor`, `onlyne-role`, and `onlyne`, this fi
 (`include_str!` in `crates/onlyne-cli/src/skill.rs`, over the three regular files under
 `crates/onlyne-cli/skills/`), so an installed binary answers with the skills of its own version,
 over no network and with no checkout. Regular files keep the packaged manuals intact across
-checkout and archive tools, and `the_crate_copies_are_the_repository_copies` asserts that every
-compiled copy is byte-identical to its source manual. A destination file whose bytes already
-match is reported `unchanged` and left alone; a differing file stops the run before any write, with exit 4 and
+checkout and archive tools: the bytes a copy carries are the bytes compiled in, so `skill
+export` from that binary reproduces its source manual exactly. A destination file whose bytes
+already match is reported `unchanged` and left alone; a differing file stops the run before any write, with exit 4 and
 `onlyne: refusing to overwrite <path>; pass --force`; `--force` rewrites it.
 
 ## Product boundary (AGENTS.md §0)
@@ -45,7 +45,7 @@ onlyne-adapter   the one adapter protocol SDK (agent side and bridge side)
 onlyne-acp       ACP v1 client: JSON-RPC over an agent's own stdio
 onlyne-server    the server daemon, `run` only
 onlyne-client    the client daemon, `run` only, owning the session backends
-                 (orca|zellij|exec|acp|fake) and the reconcile bridge
+                 (orca|zellij|tern|exec|acp|fake) and the reconcile bridge
 onlyne-cli       the `onlyne` binary: every verb, the built-in TUI (crates/onlyne-cli/src/tui/),
                  `mcp`, and the compiled handbooks
 onlyne-testkit   the scenario harness, the fake runtime, the conformance fixtures
@@ -73,13 +73,13 @@ the regenerated schema that `gen-schema` just wrote.
 
 **Lifecycle** (`onlyne-proto/src/lifecycle/`): `apply()` and `is_legal()` are a
 table-tested reducer — five axes (`agent`, `delivery`, `resource`, `recovery`, and the
-generation's liveness), 20 `LifecycleEvent` variants, versions `(generation, seq)`. A new
+generation's liveness), 22 `LifecycleEvent` variants, versions `(generation, seq)`. A new
 transition needs its table rows in the same commit. Reviewers
 halt on weakened assertions during a migration.
 
 **Ledger/schema** (`onlyne-store`): `schema_marker(name, version, protocol_version)` is the
-gate; this revision writes client 3, server 5 and protocol 1 (`CLIENT_SCHEMA_VERSION`,
-`SERVER_SCHEMA_VERSION`), and a database carrying an older marker is refused with a sentence
+gate; this revision writes client 3, server 6 and protocol 1 (`CLIENT_SCHEMA_VERSION`,
+`SERVER_SCHEMA_VERSION = 6`), and a database carrying an older marker is refused with a sentence
 naming the revision it found and the revision this build wants. A field change bumps the
 marker and leaves the refuse-at-door behaviour untouched.
 `acl_allows` runs before the ledger write, so a denied send leaves zero rows and zero
@@ -108,11 +108,11 @@ with-value shape keeps its fixtures under `crates/onlyne-proto/tests/wire_vector
 
 **Backend** (`onlyne-client/src/backend/`): capabilities `{spawn,attach,probe,close,
 focus,rename}`. A missing capability degrades through faults, never panics.
-`placement` names `orca | zellij | headless | external`; `ONLYNE_BACKEND` takes precedence
+`placement` names `orca | zellij | tern | headless | external`; `ONLYNE_BACKEND` takes precedence
 over the workspace placement. `fake` is the in-process test runtime. The spec's
 `[client.runtime] drive` names `plugin | acp | exec`; `acp` requires `headless`. Selection order is
-a nonempty process `ONLYNE_BACKEND`, then workspace placement, then probe orca, zellij, and
-fallback to headless. The workspace `[acp]` table
+a nonempty process `ONLYNE_BACKEND`, then workspace placement, then probe tern, orca, zellij,
+and fallback to headless. The workspace `[acp]` table
 (`AcpSection` in `onlyne-config/src/client.rs`) carries `mode`, `model`, `reasoning_effort` and
 `permission` (`deny` default, `allow`), and the ACP backend is its only reader. An ACP session
 opens no pane: the client drives the agent with `session/prompt` and reads the streamed
@@ -121,7 +121,7 @@ opens no pane: the client drives the agent with `session/prompt` and reads the s
 `ONLYNE_BACKEND` value makes `onlyne-client run` exit 5. `onlyne-client doctor` prints placement
 selection JSON and exits 0.
 The adapter socket lives in the machine-level runtime directory — `/tmp/onlyne-<uid>/<digest>.sock`, with `$ONLYNE_RUNTIME_DIR` overriding the directory and `<digest>` the first 16 hex characters of `sha256` over the workspace's canonical root — so no path length rule applies; `run` exits 1 with `onlyne-client: bind the workspace socket <canonical path>: <detail>` when the bind fails — the detail names the bound path, its length, the runtime directory, and the OS reason — and a later `accept` error logs at `error` level and retries every 100 ms.
-Retirement invariant an editor keeps: a session's host resource (tab, zellij session, exec child) is closed when the session holds no task and no plugin transport is attached. The client owns the closes (`retire_idle_locked` in `onlyne-client/src/session/dispatch/retire.rs`), and a backend's `close` must stay safe to call on a resource the host already dropped.
+Retirement invariant an editor keeps: a session's host resource (tab, tern block, zellij session, exec child) is closed when the session holds no task and no plugin transport is attached. The client owns the closes (`retire_idle_locked` in `onlyne-client/src/session/dispatch/retire.rs`), and a backend's `close` must stay safe to call on a resource the host already dropped.
 Control reaches a full role: a client at `max_sessions` pulls with `control_only`, so `focus`/`recycle`/`cancel` land on the session holding the last slot, and task rows stay `queued`.
 
 **Client dispatch** (`onlyne-client/src/session/dispatch/`, `onlyne-client/src/session/stall.rs`): the dispatch lock serializes slot, transport, backend, and lifecycle work, and the 250 ms readiness tick (`onlyne-client/src/runtime/runloop/`, `READINESS_POLL_MS` in its `config.rs`) drives `reclaim_exited_resources`. A session is addressed by its own `session_id` and may serve several deliveries in turn, so the two ids are not the same value: the bindings live in their own table, `session_tasks(session_id, task_id, bound_at, released_at)`, and `SessionRow.task_id` is the delivery the session is serving right now, `None` while it holds a process but is bound to nothing (`SessionRow` in `onlyne-proto/src/ops.rs`; `dispatch` in `onlyne-client/src/session/dispatch/delivery.rs`). A task this role already finished settles from the durable record with no second run (`task_completed_here` in `onlyne-client/src/runtime/runloop/sessions.rs`). `StallWatch::note_applied` refreshes an assigned clock; `note_assigned` owns clock creation, so a late observation from a plugin that already answered cannot reopen a stall episode on a settled task. A connection release forgets the progress clocks of the sessions it served, and both `stall_due` and `stall_report` check the stored lifecycle before a `stalled` fault reaches the wire.
@@ -158,7 +158,8 @@ line above its attribute, so the port's progress reads off the file itself.
 one server, and the two-root case is `e2e/two-cluster.sh`.
 
 **The shell cases are what the suite has not absorbed.** `crates/onlyne-testkit/e2e/` holds
-eighteen scripts beside `lib.sh` and the scripted ACP peer `acp-agent.py`. They are the live faces
+nineteen scripts beside `lib.sh` and two scripted ACP peers, `acp-agent.py` and
+`acp-tools-agent.py`. They are the live faces
 (`pi-live.sh`, `orca-live.sh`, `handoff-live.sh`), the ACP case
 (`acp-session.sh`), and the real-process or two-root shapes the harness does
 not model (`requeue-claim.sh`, `two-cluster.sh`, `running-lights.sh`, `gateway-mount.sh`,
@@ -184,6 +185,11 @@ acp-payload-v2 0
 
 This dated sweep is v1 evidence and is kept as such. The current reading is the workspace gate
 quoted above; `docs/live-evidence-1.4.0.md` and `Devlogs.md` hold the v1 records.
+
+The board that watches clusters inside Tern ships in this repository at
+`integrations/tern-plugin`: `tern plugin install integrations/tern-plugin` installs it, or
+`tern plugin link integrations/tern-plugin` loads that directory in place and reloads on
+every save.
 
 A bug fix needs its reproduction as an e2e or a table test:
 red before the fix, green after. The live ring demo

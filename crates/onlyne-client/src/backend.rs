@@ -22,6 +22,7 @@ pub mod exec;
 pub mod external;
 pub mod fake;
 pub mod orca;
+pub mod tern;
 pub mod zellij;
 
 use command::{failure_code, run_checked, run_json, unsupported};
@@ -37,3 +38,4 @@ pub use spec::{
     SessionOutcome, SessionPlacement, SessionRef, SpawnSpec, SplitDirection, UnknownPlacement,
     unknown_placement,
 };
+pub use tern::TernBackend;

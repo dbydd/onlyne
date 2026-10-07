@@ -114,7 +114,7 @@ One word, one meaning, in prose and in code:
 | runtime | the program that actually runs the model conversation: pi, DSH, an ACP agent |
 | session | one conversation inside a runtime; one session may serve several deliveries in turn |
 | drive | how the client talks to the runtime: `plugin`, `acp`, `exec` |
-| placement | where the runtime process is displayed: `orca`, `zellij`, `headless`, `external` |
+| placement | where the runtime process is displayed: `orca`, `zellij`, `tern`, `headless`, `external` |
 | plugin | an extension inside a runtime that speaks the adapter protocol to the client |
 | binding | the correspondence between one delivery and one session |
 | task family | a chain of handoffs keyed by `causality.family` |
@@ -274,7 +274,7 @@ Exit codes used by user-facing commands:
 - 2: local validation failure — a bad flag, an unknown verb, a missing gate flag
 - 3: socket resolution failure
 - 4: template, generation, or operator-input refusal
-- 5: `client run` got a placement name outside `orca`, `zellij`, `headless`, `external` through `ONLYNE_BACKEND`; the same bad name in the workspace's `config.toml` is an ordinary config error and exits 1. A failed probe falls back to `headless` instead of exiting, and `ONLYNE_BACKEND=auto` counts as unset.
+- 5: `client run` got a placement name outside `orca`, `zellij`, `tern`, `headless`, `external` through `ONLYNE_BACKEND`; the same bad name in the workspace's `config.toml` is an ordinary config error and exits 1. A failed probe falls back to `headless` instead of exiting, and `ONLYNE_BACKEND=auto` counts as unset.
 - 6: this build refuses to start on a database or workspace from another revision
 - 127: missing binary
 
@@ -404,12 +404,12 @@ command = ["pi"]
 
 ```toml
 # <workspace>/.onlyne/config.toml
-placement = "orca"        # orca | zellij | headless | external
+placement = "orca"        # orca | zellij | tern | headless | external
 ```
 
 | drive × placement | who starts the runtime | sessions per process |
 |---|---|---|
-| plugin × orca / zellij / headless | client starts it in a pane or in the background; the plugin dials back | 1 |
+| plugin × orca / zellij / tern / headless | client starts it in a pane or in the background; the plugin dials back | 1 |
 | plugin × external | the runtime is already resident; its plugin dials the client | several |
 | acp × headless | client starts it as a child and speaks ACP over stdio | several |
 | exec × any | client starts it | 1 |

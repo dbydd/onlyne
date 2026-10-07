@@ -87,10 +87,10 @@ directory). Nothing binds inside a workspace tree; `<root>/.onlyne/run/s` is
 the spelling operators read, not a path a daemon serves.
 
 Session placement and drive (read by `onlyne client run`): `placement` is the
-role workspace's `config.toml` key and accepts `orca | zellij | headless
-| external`; `ONLYNE_BACKEND` takes precedence over it. `fake` is the in-process
-test runtime. The spec's `[client.runtime] drive` accepts `plugin | acp | exec`,
-and `acp` requires `placement = \"headless\"`.";
+role workspace's `config.toml` key and accepts `orca | zellij | tern
+| headless | external`; `ONLYNE_BACKEND` takes precedence over it. `fake` is the
+in-process test runtime. The spec's `[client.runtime] drive` accepts
+`plugin | acp | exec`, and `acp` requires `placement = \"headless\"`.";
 
 #[derive(Parser, Debug, Clone)]
 #[command(

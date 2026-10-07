@@ -58,7 +58,7 @@
       ]
     },
     "placement": {
-      "description": "Where this machine displays the role's runtime process (`orca` | `zellij` | `headless` | `external`). Absent probes orca, zellij in that order and falls back to `headless`. The process environment `ONLYNE_BACKEND` takes precedence when it is nonempty.\n\nPlacement is a property of the machine and lives here; the drive is a property of the runtime and lives in the spec's `[client.runtime]` (`docs/v2-PLAN.md` §\"驱动与放置\").",
+      "description": "Where this machine displays the role's runtime process (`orca` | `zellij` | `tern` | `headless` | `external`). Absent probes tern, orca, zellij in that order and falls back to `headless`. The process environment `ONLYNE_BACKEND` takes precedence when it is nonempty.\n\nPlacement is a property of the machine and lives here; the drive is a property of the runtime and lives in the spec's `[client.runtime]` (`docs/v2-PLAN.md` §\"驱动与放置\").",
       "default": null,
       "anyOf": [
         {
@@ -175,6 +175,13 @@
           "type": "string",
           "enum": [
             "zellij"
+          ]
+        },
+        {
+          "description": "A Tern pane: a tab in a Tern session, with the runtime's own blocks split inside it.",
+          "type": "string",
+          "enum": [
+            "tern"
           ]
         },
         {

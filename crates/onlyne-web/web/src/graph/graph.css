@@ -1,0 +1,141 @@
+/* The canvas' own theme: the flow's variables pointed at this surface's tokens,
+ * so the grid, the controls and the arrowheads are the same graphite as
+ * everything else and no component has to carry a colour literal.
+ *
+ * The arrowhead is why this file exists at all. `@xyflow/svelte` renders a
+ * marker element and paints it from `--xy-edge-stroke`, and an edge's `style`
+ * prop is typed `string` in this version — so an arrow coloured from a
+ * component would be a style object the compiler rejects and a paint the theme
+ * cannot see. */
+.svelte-flow {
+  --xy-edge-stroke-default: var(--line-strong);
+  --xy-edge-stroke-selected-default: var(--ink);
+  --xy-connectionline-stroke-default: var(--ink-3);
+  --xy-attribution-background-color: transparent;
+  --xy-background-pattern-dot-color: var(--line);
+  background: var(--bg);
+}
+
+.svelte-flow__attribution {
+  display: none;
+}
+
+/* The panes own the drag gestures, so the cursor says which one is armed. */
+.svelte-flow__pane {
+  cursor: default;
+}
+
+.svelte-flow__node {
+  cursor: pointer;
+}
+
+/* A route is a reading until it is not: the pointer only becomes a hand over
+ * the line itself, because a hand everywhere would suggest the whole canvas
+ * withdraws routes. */
+.svelte-flow__edge-path.route-edge {
+  stroke: var(--line-strong);
+  stroke-width: 1.5;
+  transition: stroke var(--t-fast) var(--ease);
+}
+.svelte-flow__edge.route-edge:hover .svelte-flow__edge-path.route-edge {
+  stroke: var(--ink);
+}
+.svelte-flow__edge-path.route-edge.selected {
+  stroke: var(--ink);
+  stroke-width: 1.75;
+}
+.svelte-flow__edge-path.route-edge.flowing {
+  stroke: var(--run);
+  stroke-dasharray: 6 6;
+  animation: flow 1.2s linear infinite;
+}
+.svelte-flow__edge-path.route-edge.crowded,
+.svelte-flow__edge-path.route-edge.trace-dim {
+  stroke: var(--line);
+  opacity: 0.55;
+}
+
+.route-load {
+  pointer-events: none;
+}
+.route-count {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: var(--r-1);
+  background: var(--panel);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--run);
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The trace rides over the routes: its own layer, its own weight. */
+.svelte-flow__edge-path.trace-edge {
+  stroke: var(--ink);
+  stroke-width: 1.75;
+  stroke-dasharray: 3 5;
+}
+.trace-label {
+  pointer-events: none;
+}
+.trace-steps {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: var(--r-1);
+  background: var(--raised);
+  box-shadow: inset 0 0 0 1px var(--tone-line, var(--line-strong));
+  color: var(--tone, var(--ink));
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* Handles: small by default, generous under the pointer. `connectradius` on
+ * the flow widens what counts as a grab; this widens what it looks like. */
+.svelte-flow__handle.role-handle {
+  width: 7px;
+  height: 7px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--line-strong);
+  transition:
+    width var(--t-fast) var(--ease),
+    height var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.svelte-flow__node:hover .svelte-flow__handle.role-handle {
+  width: 11px;
+  height: 11px;
+  background: var(--ink);
+}
+
+/* The flow's controls, in the surface's own idiom. */
+.svelte-flow__controls {
+  box-shadow: none;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  overflow: hidden;
+  background: var(--panel);
+}
+.svelte-flow__controls-button {
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--panel);
+  fill: var(--ink-2);
+  width: 26px;
+  height: 26px;
+}
+.svelte-flow__controls-button:hover {
+  background: var(--hover);
+  fill: var(--ink);
+}
+.svelte-flow__controls-button:last-child {
+  border-bottom: 0;
+}
+.svelte-flow__controls-button svg {
+  fill: currentColor;
+}

@@ -73,7 +73,8 @@ Selection is env `ONLYNE_BACKEND` (nonempty) > workspace `config.toml` `placemen
 
 | name | parse aliases | how it is chosen | notes |
 | --- | --- | --- | --- |
-| `orca` | | env, config, or auto probe (first) | tab host |
+| `tern` | | env, config, or auto probe (first) | macOS tab host; drives the `tern` CLI, `TERN_COMMAND` or `/Applications/Tern.app/Contents/MacOS/tern` |
+| `orca` | | env, config, or auto probe | tab host |
 | `zellij` | | env, config, or auto probe | pane host; probe maps EXITED / `exit_status` |
 | `headless` | | env or config only | machine placement for exec and ACP drives |
 | `external` | | env or config only | externally managed placement |
@@ -96,7 +97,7 @@ An agent that mounts naming no session — the always-running plugin — parks a
 | `placement` | selected placement name, or `null` |
 | `placement_selection` | `explicit`, `config`, `probe`, or `fallback` |
 | `explicit` | raw `ONLYNE_BACKEND` when nonempty |
-| `binary` | CLI path or name for orca/zellij; `null` for exec, fake, and no host |
+| `binary` | CLI path or name for orca/zellij/tern; `null` for exec, fake, and no host |
 | `refusal` | present only when an explicit placement name is unknown |
 
 A missing placement yields `placement: null` and exit 0. `refusal` is present only for an unknown explicit name. The verb is a pre-deploy check.

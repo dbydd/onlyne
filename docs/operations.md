@@ -462,7 +462,7 @@ New ledger-table columns are added in place, like `expires_at` and `requeued`, s
 
 ## Host resource reclamation
 
-When a session ends, its host resources are reclaimed: the client closes the Orca tab, zellij session, or exec child process when the session holds no task and has no plugin transport attached. After settlement, an empty shell left in a role tab is removed by these three paths.
+When a session ends, its host resources are reclaimed: the client closes the Orca tab, Tern block, zellij session, or exec child process when the session holds no task and has no plugin transport attached. After settlement, an empty shell left in a role tab is removed by these three paths.
 
 There are three trigger paths:
 
@@ -483,9 +483,9 @@ Each task creates a new Orca terminal. `attach` only refreshes the saved termina
 
 ## Headless (`exec`) sessions
 
-A role's drive is how the client talks to its runtime, and it lives in the spec's `[client.runtime]`: `plugin` starts the runtime and lets a plugin inside it dial back, `acp` runs the agent as the client's own child and speaks the Agent Client Protocol on that child's stdio, and `exec` runs the command and reads its exit code. The placement is where this machine displays that process, and it lives in the workspace's `config.toml`. The session's `backend` field carries the backend the pair built: `orca`, `orca`, `zellij`, `exec` (the `headless` placement), `external`, or `acp`.
+A role's drive is how the client talks to its runtime, and it lives in the spec's `[client.runtime]`: `plugin` starts the runtime and lets a plugin inside it dial back, `acp` runs the agent as the client's own child and speaks the Agent Client Protocol on that child's stdio, and `exec` runs the command and reads its exit code. The placement is where this machine displays that process, and it lives in the workspace's `config.toml`. The session's `backend` field carries the backend the pair built: `orca`, `tern`, `zellij`, `exec` (the `headless` placement), `external`, or `acp`.
 
-Placement resolution is: a nonempty `ONLYNE_BACKEND` naming a placement, then the workspace's `placement` key, then a probe of `orca`, `zellij` in that order, then `headless`. An explicit name that matches nothing is refused by name; it is never replaced by the probe.
+Placement resolution is: a nonempty `ONLYNE_BACKEND` naming a placement, then the workspace's `placement` key, then a probe of `tern`, `orca`, `zellij` in that order, then `headless`. An explicit name that matches nothing is refused by name; it is never replaced by the probe.
 
 The session child's stdout/stderr is merged into `<workspace>/.onlyne/logs/session-<task>.log`. When the process exits, the held `probe` writes at most the last 200 lines of that file (truncated to approximately 16KiB first, then split on whole lines) into `ResourceProbe.detail.output_tail`; if the log is missing or cannot be read, the key is omitted while the `exit` code remains.
 
@@ -1027,7 +1027,7 @@ ledger 表新增的列走 in-place 加列，与 `expires_at`、`requeued` 同样
 
 ## 宿主资源回收
 
-一条会话结束，它的宿主资源跟着回收：Orca 标签页、zellij session、exec 子进程在“该会话不持任务且无 plugin transport 挂载”时由 client 关闭。会话结清后留在 role tab 里的空 shell 由这三条路径收走。
+一条会话结束，它的宿主资源跟着回收：Orca 标签页、Tern block、zellij session、exec 子进程在“该会话不持任务且无 plugin transport 挂载”时由 client 关闭。会话结清后留在 role tab 里的空 shell 由这三条路径收走。
 
 三条触发路径：
 
@@ -1048,9 +1048,9 @@ ledger 表新增的列走 in-place 加列，与 `expires_at`、`requeued` 同样
 
 ## Headless（exec）会话
 
-角色的 drive 是 client 与它的 runtime 通话的方式，住在 spec 的 `[client.runtime]`：`plugin` 由 client 起 runtime、让 runtime 里的插件回拨，`acp` 由 client 把 agent 当自己的子进程起、在它的 stdio 上讲 Agent Client Protocol，`exec` 由 client 跑命令并读它的退出码。placement 是这台机器把这进程摆在哪里，住在工作区 `config.toml`。会话的 `backend` 字段写着这一对造出的后端：`orca`、`zellij`、`exec`（`headless` placement）、`external` 或 `acp`。
+角色的 drive 是 client 与它的 runtime 通话的方式，住在 spec 的 `[client.runtime]`：`plugin` 由 client 起 runtime、让 runtime 里的插件回拨，`acp` 由 client 把 agent 当自己的子进程起、在它的 stdio 上讲 Agent Client Protocol，`exec` 由 client 跑命令并读它的退出码。placement 是这台机器把这进程摆在哪里，住在工作区 `config.toml`。会话的 `backend` 字段写着这一对造出的后端：`orca`、`zellij`、`tern`、`exec`（`headless` placement）、`external` 或 `acp`。
 
-placement 的解析次序：非空 `ONLYNE_BACKEND` 点名 placement，其次是工作区的 `placement` 键，其次是按 `orca`、`zellij` 顺序探测，最后 `headless`。点名却不匹配任何名字的取值按名字拒收，绝不回落到探测。
+placement 的解析次序：非空 `ONLYNE_BACKEND` 点名 placement，其次是工作区的 `placement` 键，其次是按 `tern`、`orca`、`zellij` 顺序探测，最后 `headless`。点名却不匹配任何名字的取值按名字拒收，绝不回落到探测。
 
 会话子进程的 stdout/stderr 并进 `<workspace>/.onlyne/logs/session-<task>.log`。进程退出时，持柄 `probe` 把该文件尾部最多 200 行（先截约 16KiB 再按整行切）写入 `ResourceProbe.detail.output_tail`；log 缺失或读失败则省略该键，`exit` 码仍在。
 

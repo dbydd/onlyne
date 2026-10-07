@@ -19,16 +19,57 @@ fn zellij_host_present(env: &BTreeMap<String, String>) -> bool {
     env.contains_key("ZELLIJ")
 }
 
+/// The Tern CLI this client drives when `TERN_COMMAND` names none.
+///
+/// Tern 0.4.5 installs the bundle binary and links it as `~/.local/bin/tern`;
+/// the default stays absolute anyway, so resolution never depends on `PATH`:
+/// a stray entry there can never silently drive this client's panes.
+pub(crate) const TERN_BINARY: &str = "/Applications/Tern.app/Contents/MacOS/tern";
+
 /// The pane this process is already inside, if any: what an absent `placement`
-/// probes, in the plan's order (orca, zellij).
+/// probes, in the plan's order (tern, orca, zellij).
 fn probed_placement(env: &BTreeMap<String, String>) -> Option<Placement> {
-    if orca_host_present(env) {
-        Some(Placement::Orca)
-    } else if zellij_host_present(env) {
-        Some(Placement::Zellij)
-    } else {
-        None
+    onlyne_config::PLACEMENT_PROBE_ORDER
+        .into_iter()
+        .find(|placement| host_present(*placement, env))
+}
+
+/// Whether this host's own marker says the process is inside one of its panes.
+///
+/// The probe is about the pane, not about the client's reach: the backend still
+/// asks the host itself whether it answers (`TernBackend::available` runs
+/// `tern ls --json`). A pane marker names where this process sits; it says
+/// nothing about which window a later session may be driven into.
+fn host_present(placement: Placement, env: &BTreeMap<String, String>) -> bool {
+    match placement {
+        Placement::Orca => orca_host_present(env),
+        Placement::Zellij => zellij_host_present(env),
+        Placement::Tern => {
+            env.get("TERM_PROGRAM")
+                .is_some_and(|program| program == "tern")
+                || env_nonempty(env, "TERN_PANE")
+        }
+        Placement::Headless | Placement::External => false,
     }
+}
+
+/// The host CLI this placement drives, `None` for a placement with no host
+/// binary of its own.
+fn host_binary(placement: Placement, env: &BTreeMap<String, String>) -> Option<String> {
+    let (override_key, fallback): (&str, &str) = match placement {
+        Placement::Orca => ("ORCA_CLI_COMMAND", "orca"),
+        Placement::Zellij => ("ZELLIJ_COMMAND", "zellij"),
+        Placement::Tern => ("TERN_COMMAND", TERN_BINARY),
+        // `headless` and `external` run or drive a command the role config
+        // names, so there is no host binary to report.
+        Placement::Headless | Placement::External => return None,
+    };
+    Some(
+        env.get(override_key)
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .unwrap_or_else(|| fallback.into()),
+    )
 }
 
 /// Resolve the placement this client runs under.
@@ -93,23 +134,9 @@ pub fn doctor_report(env: &BTreeMap<String, String>) -> Value {
         SelectionSource::Probe => "probe",
         SelectionSource::Fallback => "fallback",
     });
-    let binary = match placement {
-        Some("orca") => Some(
-            env.get("ORCA_CLI_COMMAND")
-                .filter(|value| !value.is_empty())
-                .cloned()
-                .unwrap_or_else(|| "orca".into()),
-        ),
-        Some("zellij") => Some(
-            env.get("ZELLIJ_COMMAND")
-                .filter(|value| !value.is_empty())
-                .cloned()
-                .unwrap_or_else(|| "zellij".into()),
-        ),
-        // `headless`, `external` and `fake` run or drive a command the role
-        // config names, so there is no host binary to report.
-        _ => None,
-    };
+    let binary = found
+        .and_then(|detected| detected.placement.named())
+        .and_then(|named| host_binary(named, env));
     let mut report = serde_json::json!({
         "placement": placement,
         "placement_selection": selection,
@@ -130,7 +157,7 @@ pub fn doctor_report(env: &BTreeMap<String, String>) -> Value {
 ///
 /// | drive | placement | who starts the runtime |
 /// |---|---|---|
-/// | plugin | orca / zellij | the client, in that pane; the plugin dials back |
+/// | plugin | orca / zellij / tern | the client, in that pane; the plugin dials back |
 /// | plugin | headless | the client, in the background; the plugin dials back |
 /// | plugin | external | nobody: the resident runtime dials in |
 /// | acp | headless | the client, as a child it speaks ACP to on stdio |
@@ -157,6 +184,7 @@ pub fn backend_for(
             Box::new(orca::OrcaBackend::with_policy(runner, policy))
         }
         SessionPlacement::Named(Placement::Zellij) => Box::new(zellij::ZellijBackend::new(runner)),
+        SessionPlacement::Named(Placement::Tern) => Box::new(tern::TernBackend::new(runner)),
         SessionPlacement::Named(Placement::Headless) => match drive {
             onlyne_config::Drive::Acp => Box::new(acp::AcpBackend::new(acp.clone())),
             onlyne_config::Drive::Plugin | onlyne_config::Drive::Exec => {

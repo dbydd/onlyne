@@ -16,8 +16,8 @@
 
 use onlyne_proto::view::{is_resync_lag, Snapshot, View};
 use onlyne_proto::{
-    AdminOp, ErrorCode, EventRow, EventTier, Frame, Frame as ClientFrame, LedgerQuery, Principal,
-    QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, ResBody, Subscribe,
+    AdminOp, ErrorCode, EventRow, EventTier, Frame, Frame as ClientFrame, LedgerEntry, LedgerQuery,
+    Principal, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs, ResBody, Subscribe,
 };
 
 use onlyne_wire::socket::{connect_local, LocalStream};
@@ -39,6 +39,11 @@ const RECONNECT_PAUSE: Duration = Duration::from_millis(250);
 /// frame: the snapshot is the resync, the subscription is what stays current.
 const SNAPSHOT_LIMIT: u32 = 200;
 
+/// How long a row the stream minted waits before its causality is read off the
+/// ledger. A burst of sends settles into one read, and the pause is short
+/// enough that a single operator action is traced while the operator watches.
+const HEAL_PAUSE: Duration = Duration::from_millis(250);
+
 /// Whether this event replaced the spec, so the registry must be re-read.
 ///
 /// A `spec_reloaded` event carries the new counts and hash but no role list, so
@@ -49,6 +54,23 @@ const SNAPSHOT_LIMIT: u32 = 200;
 /// to one match rather than two.
 fn is_spec_reload(event: &onlyne_proto::Event) -> bool {
     matches!(event, onlyne_proto::Event::SpecReloaded(_))
+}
+
+/// Whether this event just left its row without the family the browser's trace
+/// is drawn from.
+///
+/// A `ledger_state` event is a transition and carries no causality, so a row
+/// this view had never read arrives with `family` empty. A row the snapshot
+/// already read keeps the family it was read with, whatever the event says —
+/// and the fold never clears it — so this is true only for the rows a
+/// transition minted, which are exactly the rows owed one ledger read.
+fn needs_heal(view: &View, event: &onlyne_proto::Event) -> bool {
+    let onlyne_proto::Event::LedgerState(reported) = event else {
+        return false;
+    };
+    view.deliveries
+        .get(&reported.msg_id)
+        .is_some_and(|delivery| delivery.family.is_none())
 }
 
 /// What the link task last said about the admin connection. `View::stale` is
@@ -115,6 +137,10 @@ async fn run(socket: PathBuf, timeout_ms: u64, publish: watch::Sender<Arc<LinkSt
     let mut cursor: u64 = 0;
     let mut subscription: Option<Subscription> = None;
     let mut ready_at = Instant::now();
+    // When a row born on the stream is due its one ledger read, if one is
+    // pending. `None` means idle, and a fresh snapshot has already filled
+    // every row it read, so the reconnect clears it with the view.
+    let mut heal_at: Option<Instant> = None;
     let mut view = View::default();
     loop {
         tokio::select! {
@@ -142,9 +168,25 @@ async fn run(socket: PathBuf, timeout_ms: u64, publish: watch::Sender<Arc<LinkSt
                         // board that kept the old ones would offer an edge the
                         // spec no longer allows.
                         let reread = gap || is_spec_reload(&event);
+                        // A `ledger_state` event is a transition: it carries no
+                        // family, no hop and no clock, so a row this view had
+                        // never read arrives with all eight of them empty and
+                        // the browser's family trace has nothing to draw.
+                        // The ledger owns those columns, so the row is owed one
+                        // read — armed only when none is pending, so a burst of
+                        // sends costs one read rather than one per event, and
+                        // so the deadline is never pushed out from under a
+                        // heal that is already due.
+                        if needs_heal(&view, &event) && heal_at.is_none() {
+                            heal_at = Some(Instant::now() + HEAL_PAUSE);
+                        }
                         send(&publish, view.clone(), cursor, LinkStatus::Live);
                         if reread {
                             subscription = None;
+                            // The snapshot this reconnect is about to take
+                            // fills every row it reads, so a pending heal is
+                            // the snapshot's work now, not this loop's.
+                            heal_at = None;
                             ready_at = if gap {
                                 Instant::now() + RECONNECT_PAUSE
                             } else {
@@ -201,10 +243,18 @@ async fn run(socket: PathBuf, timeout_ms: u64, publish: watch::Sender<Arc<LinkSt
                             cursor = cursor.max(row.seq);
                             reread |= is_resync_lag(&row.event) || is_spec_reload(&row.event);
                             view = onlyne_proto::view::update(view, &row.event);
+                            // A page can carry the very events the snapshot
+                            // did not include, so a row minted here is owed the
+                            // same one ledger read a row minted on the live
+                            // stream is.
+                            if needs_heal(&view, &row.event) && heal_at.is_none() {
+                                heal_at = Some(Instant::now() + HEAL_PAUSE);
+                            }
                         }
                         send(&publish, view.clone(), cursor, LinkStatus::Live);
                         if reread {
                             drop(link);
+                            heal_at = None;
                             ready_at = Instant::now();
                         } else {
                             subscription = Some(link);
@@ -213,6 +263,20 @@ async fn run(socket: PathBuf, timeout_ms: u64, publish: watch::Sender<Arc<LinkSt
                     Err(reason) => {
                         send(&publish, view.clone(), cursor, LinkStatus::Offline(reason));
                     }
+                }
+            }
+            _ = tokio::time::sleep_until(heal_at.unwrap_or(Instant::now() + HEAL_PAUSE)), if heal_at.is_some() => {
+                // The deadline is cleared before the read, so a failed read
+                // cannot spin this branch: a heal is not retried by its own
+                // timer, it is re-armed by the next ledger event that leaves a
+                // row without its family. Nothing here drops the subscription
+                // or replaces the view — a full re-read would throw away the
+                // event tail the browser is drawing — the merge only fills the
+                // columns a stream-born row is missing.
+                heal_at = None;
+                if let Ok(rows) = read_ledger(&socket, timeout_ms).await {
+                    view.merge_ledger(&rows);
+                    send(&publish, view.clone(), cursor, LinkStatus::Live);
                 }
             }
         }
@@ -297,6 +361,30 @@ pub async fn read_snapshot(socket: &Path, timeout_ms: u64) -> Result<Snapshot, S
         ledger,
         faults,
     })
+}
+
+/// Read the `ledger` alone — the one read a heal needs.
+///
+/// A row the stream minted carries no family and no clock, and the ledger owns
+/// both, so a heal that wants those columns reads this and nothing else: the
+/// other four reads would cost four more round trips to fill nothing. The
+/// window is [`SNAPSHOT_LIMIT`], the same one the snapshot's own `ledger` read
+/// uses, so a merge sees the rows the snapshot would have shown and not a
+/// narrower page of them.
+async fn read_ledger(socket: &Path, timeout_ms: u64) -> Result<Vec<LedgerEntry>, String> {
+    let mut stream = connect(socket, timeout_ms)
+        .await
+        .map_err(|error| local_error(&error))?;
+    read_list(
+        &mut stream,
+        AdminOp::Ledger(LedgerQuery {
+            limit: SNAPSHOT_LIMIT,
+            ..LedgerQuery::default()
+        }),
+        "ledger",
+        timeout_ms,
+    )
+    .await
 }
 
 /// Open the streaming subscription from a cursor and read the page it answers

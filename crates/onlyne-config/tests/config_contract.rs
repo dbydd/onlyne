@@ -230,6 +230,32 @@ port = 7811
     assert_eq!(configured.placement, Some(Placement::Headless));
 }
 
+/// `tern` is a pane host like Orca and zellij: the key accepts it, the enum
+/// parses it back, and the probe order that a refusal names puts it first
+/// because Tern's marker describes the pane this process is inside rather than
+/// the pane that started the client.
+#[test]
+fn client_placement_reads_tern() {
+    let config = ClientConfig::parse_str(
+        r#"role = "planner"
+cert_pin = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
+key_path = "keys/role.key"
+placement = "tern"
+
+[server]
+host = "127.0.0.1"
+port = 7811
+"#,
+    )
+    .unwrap();
+    assert_eq!(config.placement, Some(Placement::Tern));
+    assert_eq!(Placement::parse("Tern"), Some(Placement::Tern));
+    assert_eq!(
+        onlyne_config::PLACEMENT_PROBE_ORDER,
+        [Placement::Tern, Placement::Orca, Placement::Zellij]
+    );
+}
+
 /// The fused key is refused in both files, with its own line and both
 /// replacements named: a cluster that keeps running under a policy nobody set
 /// is the failure this refusal exists to remove (`docs/v2-CONTRACT.md`
@@ -905,7 +931,7 @@ fn the_published_client_schema_carries_placement_and_drops_backend() {
         .iter()
         .filter_map(|arm| arm["enum"][0].as_str())
         .collect();
-    assert_eq!(names, ["orca", "zellij", "headless", "external"]);
+    assert_eq!(names, ["orca", "zellij", "tern", "headless", "external"]);
     // The ignored-key report reads these names, so a key the schema does not
     // name is one the loader calls unknown.
     assert_eq!(

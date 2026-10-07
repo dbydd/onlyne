@@ -23,6 +23,12 @@ you are handed belongs to it. Do the work, then report it with a completion.
   and `role` keeps a pool and hands the next delivery to whichever session has waited
   longest. An idle session keeps its row, and this client may release its process and bring
   it back for the next delivery.
+- Where your process is displayed is the workspace's `placement`: `orca`, `zellij`, `tern`,
+  `headless`, or `external`, and it is the machine's property, not yours to set — `tern` runs
+  you as one block in your role's tab, and an absent `placement` probes `tern`, `orca`,
+  `zellij` in that order and falls back to `headless`, so a machine with Tern needs no line
+  of config to put you there. A nonempty `ONLYNE_BACKEND` names the placement over the
+  workspace key, and `client run` exits 5 naming the value when that name matches nothing.
 
 ## Reporting: completion is the receipt
 
