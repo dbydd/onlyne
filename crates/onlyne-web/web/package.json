@@ -1,7 +1,7 @@
 {
   "name": "onlyne-web-ui",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.1.1",
   "type": "module",
   "description": "The boards and the route graph: renders the view onlyne-web folds, sends ops back",
   "scripts": {

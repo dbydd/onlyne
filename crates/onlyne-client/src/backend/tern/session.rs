@@ -2,7 +2,7 @@
 //! implementation.
 
 use super::cli::default_command;
-use super::policy::{TernRef, session_label, split_word};
+use super::policy::{Site, TernRef, session_label, split_word};
 use crate::backend::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -66,32 +66,66 @@ impl SessionBackend for TernBackend {
             anyhow::bail!("tern spawn requires a command");
         }
         let label = session_label(&spec);
-        let session_id = self.find_or_create_session(&spec)?;
-        let tab = self.find_or_create_tab(&session_id, &spec)?;
-        // Tern takes no ratio, so the placement contributes its direction and
-        // nothing else. The pane count still decides the default direction, as
-        // it did for herdr: a split bringing the count to a power of two goes
-        // right, every other one down.
-        let placement = spec
-            .placement
-            .unwrap_or_else(|| PanePlacement::from_pane_count(tab.pane_count));
-        tracing::info!(
-            pane_count = tab.pane_count,
-            direction = split_word(placement.direction),
-            "tern block split (tern takes no split ratio)"
-        );
-        let pane_id =
-            self.split_and_start(&tab.base_pane, &spec, placement, &session_id, &tab.tab_id)?;
+        let (session_id, tab_id, base_pane, direction, pane_id) = match self.role_site(&spec)? {
+            // A launch already holds the agent: it is its own base, and the
+            // direction keeps the word a first split beside it would take,
+            // so the field reads the shape every ref carries. A found tab
+            // needs the split, and its block count picks the default
+            // direction as it did for herdr — a split bringing the count to
+            // a power of two goes right, every other one down. Tern takes no
+            // ratio, so the placement contributes its direction and nothing
+            // else.
+            Site::Launched {
+                session_id,
+                tab_id,
+                ref pane_id,
+            } => (
+                session_id,
+                tab_id,
+                pane_id.clone(),
+                split_word(PanePlacement::from_pane_count(0).direction),
+                pane_id.clone(),
+            ),
+            Site::Found {
+                session_id,
+                tab_id,
+                base_pane,
+                pane_count,
+            } => {
+                // Tern takes no ratio, so the placement contributes its
+                // direction and nothing else. The pane count still decides
+                // the default direction, as it did for herdr: a split
+                // bringing the count to a power of two goes right, every
+                // other one down.
+                let placement = spec
+                    .placement
+                    .unwrap_or_else(|| PanePlacement::from_pane_count(pane_count));
+                tracing::info!(
+                    pane_count,
+                    direction = split_word(placement.direction),
+                    "tern block split (tern takes no split ratio)"
+                );
+                let pane_id =
+                    self.split_and_start(&base_pane, &spec, placement, &session_id, &tab_id)?;
+                (
+                    session_id,
+                    tab_id,
+                    base_pane,
+                    split_word(placement.direction),
+                    pane_id,
+                )
+            }
+        };
         Ok(SessionRef {
             task_id: spec.task_id.clone(),
             backend: self.name().into(),
             backend_ref: TernRef {
                 session_id,
-                tab_id: tab.tab_id,
+                tab_id,
+                base_pane,
                 pane_id,
                 session_label: label,
-                base_pane: tab.base_pane,
-                split_direction: split_word(placement.direction).to_string(),
+                split_direction: direction.to_string(),
             }
             .to_value(),
             generation: 1,

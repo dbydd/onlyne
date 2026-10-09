@@ -263,7 +263,21 @@ pub async fn on_plugin_report(
                                 &inner.store,
                                 &task_id,
                                 &LifecycleEvent::Heartbeat {
-                                    v: Version::new(generation, seq),
+                                    // The row's watermark is shared with this
+                                    // client's own feeds (bind, ready, settle,
+                                    // resume), which advance it past anything a
+                                    // long-lived reporter has counted to. The
+                                    // replay fence above already answered whether
+                                    // this frame is new, so the version the
+                                    // reducer sees only has to clear the row: a
+                                    // session that serves a second delivery keeps
+                                    // its process, and its next beat would
+                                    // otherwise read as stale and never record
+                                    // the turn the settle door asks for.
+                                    v: Version::new(
+                                        generation,
+                                        seq.max(stored.version.seq.saturating_add(1)),
+                                    ),
                                     body: composed,
                                 },
                             )?;

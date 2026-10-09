@@ -130,6 +130,46 @@ fn verdict(state: &DispatchState, task: &str) -> (TaskState, Option<String>) {
     )
 }
 
+/// A session that serves a second delivery keeps its process, so its reporter's
+/// sequence still counts from the first delivery while this client's own feeds
+/// (bind, ready, settle) have moved the row's watermark past it. The beat of the
+/// new turn is a new fact and has to reach the row, because the settle door
+/// reads the row to learn that a turn ran.
+#[tokio::test]
+async fn a_beat_below_the_rows_watermark_still_records_a_new_turn() {
+    let dir = tempdir().expect("tempdir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    {
+        let inner = state.inner.lock();
+        let row = inner
+            .store
+            .get_session(&task)
+            .expect("read the row")
+            .expect("the seeded row");
+        inner
+            .store
+            .bump_session_version(
+                &task,
+                row.generation.max(0) as u64,
+                row.seq.max(0) as u64 + 2000,
+            )
+            .expect("the client's own feeds moved the watermark");
+    }
+
+    beat(&state, &task, "running", 1001).await;
+
+    let inner = state.inner.lock();
+    let row = inner.store.get_session(&task).expect("read the row");
+    let observed = stored_observation(&inner.store, row.as_ref());
+    assert_eq!(
+        observed.agent,
+        AgentPhase::Running,
+        "a new beat whose sequence sits below the client's own watermark must still move the row"
+    );
+}
+
 /// An idle beat over an open task with no receipt is the design's
 /// `idle_waiting` (§2.2, §4.2): the turn ended without a completion exit, and
 /// the plugin answers by sending the assignment again.

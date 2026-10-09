@@ -313,8 +313,13 @@ pub(super) fn release_locked(
     {
         if let Some(reason) = reason {
             if resource != "detached" && resource != "closed" {
-                feed_resource_closed(&inner.bridge, &inner.store, task_id)?;
                 inner.backend.close(&slot.session, reason, false)?;
+                // Persist the close only after the host accepted it. A failed
+                // pane close must leave the row attached and the slot present,
+                // so a later recycle or shutdown can retry the same resource.
+                // Writing `closed` first makes every later path skip the only
+                // close attempt and strands the host pane permanently.
+                feed_resource_closed(&inner.bridge, &inner.store, task_id)?;
             }
             // The agent goes with the resource: this path closes a session whose work an
             // operator ended or whose backend faulted, and the slot below leaves the map in

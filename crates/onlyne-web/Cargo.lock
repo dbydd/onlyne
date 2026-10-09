@@ -886,7 +886,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onlyne-adapter"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -902,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-config"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "base64",
  "onlyne-proto",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-proto"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "base64",
  "chrono",
@@ -931,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-testkit"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-web"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axum",
  "chrono",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "onlyne-wire"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "interprocess",
  "libc",

@@ -7,6 +7,65 @@ use super::session::TernBackend;
 use crate::backend::*;
 
 impl TernBackend {
+    /// Launch the agent as a new session's or tab's only block — the whole
+    /// answer to a missing session or tab.
+    ///
+    /// `tern new session` and `tern new tab` create the container and launch
+    /// the command in its first block as one call, so the agent is the first
+    /// thing the role tab ever held and no anchor shell is made for it. The
+    /// argv travels after `--`, environment prefixed inside the pane's shell
+    /// ([`launch_argv`]), exactly as a split carries it.
+    ///
+    /// The placement's direction is not sent: there is no split to take one.
+    /// A `new tab` answer's session is checked against `expected_session` —
+    /// the same check [`split_and_start`] makes — because a `--window` that
+    /// addressed another window would strand the block beyond this backend's
+    /// reach; a `new session` names no session to check against.
+    pub(super) fn launch(
+        &self,
+        prefix: Vec<String>,
+        expected_session: Option<&str>,
+        spec: &SpawnSpec,
+    ) -> Result<Value> {
+        let mut args = prefix;
+        args.extend([
+            "--cwd".into(),
+            absolute_cwd(&spec.cwd),
+            "--keep-open".into(),
+            "--json".into(),
+            "--".into(),
+        ]);
+        args.extend(launch_argv(spec));
+        let created = self.json(args)?;
+        if let Some(expected) = expected_session {
+            if let Some(created_session) = created_id(&created, "session") {
+                if created_session != expected {
+                    anyhow::bail!(
+                        "tern answered in session {created_session}, not {expected}: the \
+                             TERN_WINDOW_KEY this client used addresses another window"
+                    );
+                }
+            }
+        }
+        Ok(created)
+    }
+
+    /// Close the one block this spawn created, keeping the original error.
+    ///
+    /// A post-create failure — a refused rename, an answer from another
+    /// window — must not leave a live agent pane nothing addresses. The close
+    /// is best-effort and its failures logged, never reported instead of the
+    /// failure that caused it; nothing else this call may have touched — a
+    /// session or tab holding no other block — is deleted, because onlyne
+    /// never deletes a host resource it did not name as its own.
+    pub(super) fn close_created(&self, pane_id: &str) {
+        let _ = self
+            .json(vec!["close".into(), pane_id.into(), "--json".into()])
+            .inspect_err(|error| {
+                tracing::warn!(pane_id, error = %error, "tern left a spawn's own block open");
+            });
+    }
+
     /// Split a new block beside `base_pane` and put the session command in it.
     ///
     /// `tern split BLOCK right|down` creates the block and launches in it as

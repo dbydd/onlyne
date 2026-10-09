@@ -257,6 +257,12 @@ impl AdapterSocket {
         // runtime about the delivery is exactly what cannot be sent, because the
         // session has no transport yet — so the tick is what closes the circle.
         let hosting = Capability::is_hosting(&capabilities);
+        // The loop's own errors (a reply that cannot be written is the usual one,
+        // and it is exactly what a dying plugin causes) end the loop and nothing
+        // else. The release below is what removes this connection's transport and
+        // starts the drop clock, so it runs on every way out and the loop's result
+        // is returned after it.
+        let served: Result<()> = async {
         loop {
             let frame = tokio::select! {
                 frame = connection.inbound.recv() => match frame {
@@ -386,13 +392,15 @@ impl AdapterSocket {
                 AdapterMsg::Plugin(PluginOp::Detach(_)) => {
                     // A detach that carries an id is a request like any other
                     // and is answered before the connection is let go; the
-                    // answer is queued ahead of the writer's end of stream.
+                    // answer is queued ahead of the writer's end of stream. The
+                    // plugin said it is leaving before the reply is written, so a
+                    // reply that cannot be written is still a graceful goodbye.
+                    graceful_detach = true;
                     if frame.id.is_some() {
                         io.respond(id, ResBody::ok(serde_json::Value::Null))
                             .await
                             .map_err(|e| anyhow::anyhow!(e))?;
                     }
-                    graceful_detach = true;
                     break;
                 }
                 AdapterMsg::Plugin(PluginOp::Hello(_)) => {
@@ -477,6 +485,9 @@ impl AdapterSocket {
                 }
             }
         }
+        Ok::<(), anyhow::Error>(())
+        }
+        .await;
         if tools {
             // A tools mount holds no slot and no resource: its binding goes with
             // the connection, and nothing else does. No retirement runs, no exit
@@ -539,7 +550,7 @@ impl AdapterSocket {
                 }
             }
         }
-        Ok(())
+        served
     }
 
     /// Answer one `report` frame from a `tools` mount.

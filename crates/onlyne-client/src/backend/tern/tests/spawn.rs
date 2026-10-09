@@ -15,49 +15,80 @@ fn split_call(backend: &TernBackend, script: &Arc<Script>, spec: &SpawnSpec) -> 
 }
 
 #[test]
-fn spawn_creates_the_cluster_session_the_role_tab_and_the_block() {
-    // Nothing exists: the session, the tab and the block are all created, and
-    // the ref names the three ids the answers gave.
+fn spawn_launches_the_agent_as_a_fresh_sessions_first_block() {
+    // Nothing exists: the session is created by launching the agent into it —
+    // `new session … -- <launch>` — and the agent's block renames its tab to
+    // the role. No anchor shell is made, so there is no split call at all,
+    // and the ref's base is the agent's own block.
     let script = Script::default()
         .reply("ls --json", listing(vec![]))
-        .reply("new session", created(2147483648, 2147483649, 2147483650))
-        .reply("ls --json", listing(vec![]))
-        .reply("new tab", created(2147483648, 2147483651, 2147483652))
-        .reply("rename 2147483652 planner", "{}")
-        .reply("split", created(2147483648, 2147483651, 2147483660));
+        .reply("new session", created(2147483648, 2147483651, 2147483652))
+        .reply("rename 2147483652 planner", "{}");
     let (backend, script) = backend(script);
     let session = backend.spawn(spec()).unwrap();
     let tern = &session.backend_ref["tern"];
     assert_eq!(tern["session_id"], "2147483648");
     assert_eq!(tern["tab_id"], "2147483651");
-    assert_eq!(tern["pane_id"], "2147483660");
+    assert_eq!(tern["pane_id"], "2147483652");
     assert_eq!(tern["session_label"], "onlyne:lab");
+    // The agent is its own base: a first block has nothing else to sit
+    // beside, and the direction keeps the word a first split would take.
     assert_eq!(tern["base_pane"], "2147483652");
     assert_eq!(tern["split_direction"], "right");
     let calls = script.calls();
-    // Six calls: the listing that finds no session, the create, the listing
-    // that finds no tab in the session it just made, the create, the tab
-    // rename, and the split.
-    // The tab answer's own block is the one the split goes beside.
+    // Three calls: the listing that finds no session, the launch, the rename
+    // of the tab the launch made. No listing re-read and no split: the launch
+    // answer names the one block it made.
+    assert_eq!(calls.len(), 3, "{calls:?}");
     assert!(calls[0].ends_with("ls --json"), "{calls:?}");
     assert!(
-        calls[1].contains("new session onlyne:lab --cwd /w --keep-open --json"),
+        calls[1].contains(
+            "new session onlyne:lab --cwd /w --keep-open --json -- env ONLYNE_CLUSTER=lab \
+             ONLYNE_ROLE=planner pi --session-id a b",
+        ),
         "{:?}",
         calls[1]
     );
-    assert!(calls[2].ends_with("ls --json"), "{calls:?}");
+    assert!(calls[2].contains("rename 2147483652 planner"), "{calls:?}");
+}
+
+#[test]
+fn spawn_creates_the_tab_inside_a_session_it_found() {
+    // The session is found by name and the role tab is not there: the agent
+    // launches into a new tab of the found session, and its block renames
+    // the tab. No `new session` and no split — the agent is the tab's first
+    // and only block.
+    let existing = listing(vec![session(
+        2147483648,
+        Some("onlyne:lab"),
+        vec![tab(2147483649, Some("other"), &[700], None)],
+    )]);
+    let script = Script::default()
+        .reply("ls --json", existing.clone())
+        .reply("ls --json", existing)
+        .reply("new tab", created(2147483648, 2147483651, 2147483652))
+        .reply("rename 2147483652 planner", "{}");
+    let (backend, script) = backend(script);
+    let session = backend.spawn(spec()).unwrap();
+    let tern = &session.backend_ref["tern"];
+    assert_eq!(tern["session_id"], "2147483648");
+    assert_eq!(tern["tab_id"], "2147483651");
+    assert_eq!(tern["pane_id"], "2147483652");
+    assert_eq!(tern["base_pane"], "2147483652");
+    let calls = script.calls();
+    // Three calls: the listing, the launch into a tab of the found session,
+    // the rename of the tab the launch made.
+    assert_eq!(calls.len(), 3, "{calls:?}");
     assert!(
-        calls[3].contains("new tab 2147483648 --cwd /w --keep-open --json"),
-        "{:?}",
-        calls[3]
+        calls.iter().all(|call| !call.contains("new session")),
+        "{calls:?}"
     );
-    // A count of 0 blocks plans a right split at 0.5, and tern takes the
-    // direction with no ratio.
     assert!(
-        calls[5].contains("split 2147483652 right --cwd /w --keep-open --json"),
+        calls[1].contains("new tab 2147483648 --cwd /w --keep-open --json -- env"),
         "{:?}",
-        calls[5]
+        calls[1]
     );
+    assert!(calls[2].contains("rename 2147483652 planner"), "{calls:?}");
 }
 
 #[test]
@@ -79,41 +110,76 @@ fn spawn_reuses_the_session_and_the_role_tab_when_they_exist() {
     let tern = &session.backend_ref["tern"];
     assert_eq!(tern["session_id"], "2147483648");
     assert_eq!(tern["tab_id"], "2147483649");
+    assert_eq!(tern["pane_id"], "2147483660");
     assert_eq!(tern["base_pane"], "701");
     let calls = script.calls();
-    assert_eq!(calls.len(), 3, "{calls:?}");
+    // Two calls: one listing resolves both the session and its role tab, and
+    // the split is the only write.
+    assert_eq!(calls.len(), 2, "{calls:?}");
     assert!(
         !calls.iter().any(|call| call.contains("new ")),
         "a found session and tab must not be re-created: {calls:?}"
     );
     // Two blocks, so the pane count plans a down split at 0.5 — a
     // power-of-two count goes right, every other count goes down.
-    assert!(calls[2].contains("split 701 down"), "{:?}", calls[2]);
+    assert!(calls[1].contains("split 701 down"), "{:?}", calls[1]);
 }
 
 #[test]
-fn spawn_creates_the_tab_inside_a_session_it_found() {
-    // The session is found by name and the role tab is not there: one create
-    // call, naming the session it belongs to.
+fn a_second_spawn_of_a_role_adds_one_pane_to_the_role_tab() {
+    // One agent already holds the role tab: the next spawn of the same role
+    // adds exactly one block beside it, launching nothing new.
     let existing = listing(vec![session(
         2147483648,
         Some("onlyne:lab"),
-        vec![tab(2147483649, Some("other"), &[700], None)],
+        vec![tab(2147483649, Some("planner"), &[700], Some(0))],
     )]);
     let script = Script::default()
         .reply("ls --json", existing.clone())
         .reply("ls --json", existing)
-        .reply("new tab", created(2147483648, 2147483651, 2147483652))
-        .reply("rename 2147483652 planner", "{}")
-        .reply("split", created(2147483648, 2147483651, 2147483660));
+        .reply("split", created(2147483648, 2147483649, 2147483660));
     let (backend, script) = backend(script);
-    backend.spawn(spec()).unwrap();
+    let session = backend.spawn(spec()).unwrap();
+    let tern = &session.backend_ref["tern"];
+    assert_eq!(tern["pane_id"], "2147483660");
+    assert_eq!(tern["base_pane"], "700");
+    let calls = script.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(
+        !calls.iter().any(|call| call.contains("new ")),
+        "an existing role tab takes only a split: {calls:?}"
+    );
+    // One existing block means the split brings the count to two — a
+    // power of two, so right.
+    assert!(calls[1].contains("split 700 right"), "{:?}", calls[1]);
+}
+
+#[test]
+fn a_failed_rename_closes_the_block_the_spawn_created() {
+    // The agent's block is the only thing a fresh spawn creates. When the
+    // rename that names its tab is refused, the spawn fails and closes its
+    // own block rather than leave a live pane nothing addresses — reporting
+    // the rename's error, never the cleanup's.
+    let script = Script::default()
+        .reply("ls --json", listing(vec![]))
+        .reply("new session", created(2147483648, 2147483651, 2147483652))
+        .refused(
+            "rename 2147483652",
+            "tern rename: no block is called `2147483652`",
+        )
+        .reply("close 2147483652", "{}");
+    let (backend, script) = backend(script);
+    let error = backend.spawn(spec()).unwrap_err();
+    assert!(error.to_string().contains("no block is called"), "{error}");
     let calls = script.calls();
     assert!(
-        calls.iter().all(|call| !call.contains("new session")),
-        "{calls:?}"
+        calls.iter().any(|call| call.contains("close 2147483652")),
+        "the spawn's own block is closed on failure: {calls:?}"
     );
-    assert!(calls[2].contains("new tab 2147483648"), "{:?}", calls[2]);
+    assert!(
+        calls.iter().all(|call| !call.contains("kill session")),
+        "foreign sessions and tabs are never deleted: {calls:?}"
+    );
 }
 
 #[test]
@@ -161,6 +227,27 @@ fn split_refuses_a_block_in_another_session() {
             "2147483649",
         )
         .unwrap_err();
+    assert!(
+        error.to_string().contains("session 99999, not 2147483648"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_tab_launch_refuses_an_answer_from_another_session() {
+    // The same window check the split makes: a `new tab` answered in another
+    // window's session would strand the block where no ref could reach it.
+    let existing = listing(vec![session(
+        2147483648,
+        Some("onlyne:lab"),
+        vec![tab(2147483649, Some("other"), &[700], None)],
+    )]);
+    let script = Script::default()
+        .reply("ls --json", existing.clone())
+        .reply("ls --json", existing)
+        .reply("new tab", created(99999, 2147483651, 2147483652));
+    let (backend, _) = backend(script);
+    let error = backend.spawn(spec()).unwrap_err();
     assert!(
         error.to_string().contains("session 99999, not 2147483648"),
         "{error}"

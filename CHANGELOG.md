@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased
+## 2.1.1 (2026-10-09)
+
+- **Tern spawn owns one block.** A spawn that finds no cluster session or no role tab launches the
+  agent directly as the session's or tab's first block; only an existing role tab takes a split. No
+  scaffolding shell is opened as a split anchor any more, so a session whose pane closes leaves no
+  orphan shell behind. A post-create failure closes the block the spawn made and preserves the error.
+- **A retained session's second delivery settles.** The row's watermark is shared with the client's
+  own feeds, which outran a long-lived reporter's sequence; the beat of a new turn then read as stale,
+  the settle door saw no turn, and the task stayed open until the silence sweep failed it. The
+  heartbeat's version now clears the row while the replay fence still refuses repeats, so `task` and
+  `role` scopes keep one session across deliveries (`scenario_14`, `scenario_17` assert the second
+  delivery reaches `acked`).
+- **A failed adapter reply still releases the connection.** The frame loop's errors returned past the
+  release footer, leaving a stale transport that blocked every reaper for a settled session; the loop
+  now returns through the footer on every path, and a detach whose reply cannot be written is still
+  graceful.
+- **A failed pane close is retried, not buried.** `release_locked` stamped the row closed before the
+  host close ran, so one transient close failure stranded the pane forever. The close runs first now;
+  a failure leaves the row attached and the slot in place for the next recycle or shutdown.
 
 ## 2.1.0 (2026-10-07)
 

@@ -1,7 +1,6 @@
 //! Tern's own policy: what a session, a tab and a block are called, and how
 //! each is found or created.
 
-use super::cli::absolute_cwd;
 use super::session::TernBackend;
 use crate::backend::*;
 
@@ -14,9 +13,12 @@ use crate::backend::*;
 /// because a tab id names no block. So the three ids stay in three fields with
 /// three spellings, and no call ever passes one where another belongs.
 ///
-/// `base_pane` is the block that was split. `split_direction` is the word sent
-/// to `tern split`: `right` or `down`. Tern takes no ratio, so the placement's
-/// ratio is not recorded — there is nothing on the host to replay it into.
+/// `base_pane` is the block the pane was placed against: the block that was
+/// split, or the pane itself when it launched as a fresh tab's first block —
+/// there was no split, and the pane is its own base. `split_direction` is the
+/// word a split beside that base takes: `right` or `down`. Tern takes no
+/// ratio, so the placement's ratio is not recorded — there is nothing on the
+/// host to replay it into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TernRef {
     pub(super) session_id: String,
@@ -234,103 +236,119 @@ fn decode_block(row: &Value) -> Option<BlockRow> {
 }
 
 impl TernBackend {
-    /// The cluster's Tern session, found by name or created.
-    pub(super) fn find_or_create_session(&self, spec: &SpawnSpec) -> Result<String> {
+    /// Resolve the cluster session and the role tab by listing, creating
+    /// either with the agent itself as the first block when missing.
+    pub(super) fn role_site(&self, spec: &SpawnSpec) -> Result<Site> {
         let label = session_label(spec);
+        let role = role(spec);
         let listing = self.listing()?;
-        if let Some(session) = listing
+        let Some(session) = listing
             .sessions
             .iter()
             .find(|session| session.name.as_deref() == Some(label.as_str()))
-        {
-            return Ok(session.id.clone());
-        }
-        let created = self.json(vec![
-            "new".into(),
-            "session".into(),
-            label.clone(),
-            "--cwd".into(),
-            absolute_cwd(&spec.cwd),
-            "--keep-open".into(),
-            "--json".into(),
-        ])?;
+        else {
+            return self.launch_session(&label, &role, spec);
+        };
+        let Some(tab) = session
+            .tabs
+            .iter()
+            .find(|tab| tab.name.as_deref() == Some(role.as_str()))
+        else {
+            return self.launch_tab(&session.id, &role, spec);
+        };
+        Ok(Site::Found {
+            session_id: session.id.clone(),
+            tab_id: tab.id.clone(),
+            base_pane: base_block(tab)?,
+            pane_count: tab.blocks.len(),
+        })
+    }
+
+    /// A missing cluster session: `new session LABEL … -- <launch>` makes the
+    /// agent the session's first block, and the block renames its tab to the
+    /// role.
+    fn launch_session(&self, label: &str, role: &str, spec: &SpawnSpec) -> Result<Site> {
+        let created = self.launch(
+            vec!["new".into(), "session".into(), label.to_string()],
+            None,
+            spec,
+        )?;
         let session_id = created_id(&created, "session")
             .ok_or_else(|| anyhow::anyhow!("tern new session returned no session id"))?;
+        let tab_id = created_id(&created, "tab")
+            .ok_or_else(|| anyhow::anyhow!("tern new session returned no tab id"))?;
+        let pane_id = self.launched_block(&created, &tab_id)?;
         // The lookup keys on the name alone, so a session holding this
         // cluster's blocks under another name reads as absent here and gains a
         // named sibling. The warning names both, and the rename that makes the
         // next spawn find the operator's session.
         tracing::warn!(
-            label = label.as_str(),
+            label,
             session_id = session_id.as_str(),
             "tern created a session for {label}; rename it with \
              `tern rename {session_id} {label}` before spawning again"
         );
-        Ok(session_id)
+        self.name_tab(&pane_id, role)?;
+        Ok(Site::Launched {
+            session_id,
+            tab_id,
+            pane_id,
+        })
     }
 
-    /// The role's tab inside `session_id`, found by name or created, with the
-    /// block to split beside and the tab's block count.
-    ///
-    /// A found tab whose blocks all failed to decode reports no block to
-    /// split, which the caller turns into an error naming the tab — a role tab
-    /// that cannot be split is not something to paper over with a new tab.
-    pub(super) fn find_or_create_tab(&self, session_id: &str, spec: &SpawnSpec) -> Result<TabSlot> {
-        let role = role(spec);
-        let listing = self.listing()?;
-        if let Some(session) = listing
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-        {
-            if let Some(tab) = session
-                .tabs
-                .iter()
-                .find(|tab| tab.name.as_deref() == Some(role.as_str()))
-            {
-                let base = base_block(tab)?;
-                return Ok(TabSlot {
-                    tab_id: tab.id.clone(),
-                    base_pane: base,
-                    pane_count: tab.blocks.len(),
-                });
-            }
-        }
-        let created = self.json(vec![
-            "new".into(),
-            "tab".into(),
-            session_id.to_string(),
-            "--cwd".into(),
-            absolute_cwd(&spec.cwd),
-            "--keep-open".into(),
-            "--json".into(),
-        ])?;
+    /// A missing role tab: `new tab SESSION … -- <launch>` makes the agent
+    /// the tab's only block.
+    fn launch_tab(&self, session_id: &str, role: &str, spec: &SpawnSpec) -> Result<Site> {
+        let created = self.launch(
+            vec!["new".into(), "tab".into(), session_id.to_string()],
+            Some(session_id),
+            spec,
+        )?;
         let tab_id = created_id(&created, "tab")
             .ok_or_else(|| anyhow::anyhow!("tern new tab returned no tab id"))?;
-        // A new tab holds exactly one block, and `new tab` names it. A build
-        // that answered without one would leave nothing to split, so the call
-        // is verified against the listing rather than trusted.
-        let base = match created_id(&created, "block") {
-            Some(block) => block,
+        let pane_id = self.launched_block(&created, &tab_id)?;
+        self.name_tab(&pane_id, role)?;
+        Ok(Site::Launched {
+            session_id: session_id.to_string(),
+            tab_id,
+            pane_id,
+        })
+    }
+
+    /// The block a launch created: the id the answer named, or the sole block
+    /// of the tab it made.
+    ///
+    /// A new session or tab holds exactly one block — the launched program —
+    /// so a build that answers without a block id still leaves exactly one
+    /// block to find, and a listing is what names it.
+    fn launched_block(&self, created: &Value, tab_id: &str) -> Result<String> {
+        match created_id(created, "block") {
+            Some(block) => Ok(block),
             None => self
                 .listing()?
-                .tab(&tab_id)?
+                .tab(tab_id)?
                 .blocks
                 .first()
                 .map(|block| block.id.clone())
                 .ok_or_else(|| {
-                    anyhow::anyhow!("tern new tab {tab_id} made a tab with no block to split")
-                })?,
-        };
-        // Tern's `new tab` has no name argument. `rename BLOCK NAME` is the
-        // host's tab-rename operation, so apply it immediately to the tab's
-        // first block; later session blocks remain in the role-named tab.
-        self.rename_tab(&base, &role)?;
-        Ok(TabSlot {
-            tab_id,
-            base_pane: base,
-            pane_count: 1,
-        })
+                    anyhow::anyhow!("tern tab {tab_id} holds no block and the launch named none")
+                }),
+        }
+    }
+
+    /// Name a fresh tab after its role, closing the launch's block when the
+    /// rename fails.
+    ///
+    /// The block is the only thing this spawn created, and a stranded unnamed
+    /// pane would be one no later ref could address. The session and the tab
+    /// stay: they hold nothing else of this spawn's, and onlyne never deletes
+    /// a host resource it did not make here.
+    fn name_tab(&self, pane_id: &str, role: &str) -> Result<()> {
+        if let Err(error) = self.rename_tab(pane_id, role) {
+            self.close_created(pane_id);
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(super) fn listing(&self) -> Result<Listing> {
@@ -353,14 +371,6 @@ impl TernBackend {
     }
 }
 
-/// What `find_or_create_tab` resolves: the tab, the block to split, and how
-/// many blocks it holds.
-pub(super) struct TabSlot {
-    pub(super) tab_id: String,
-    pub(super) base_pane: String,
-    pub(super) pane_count: usize,
-}
-
 /// The block a new pane is split beside: the tab's focused one, else its
 /// first.
 ///
@@ -375,6 +385,33 @@ fn base_block(tab: &TabRow) -> Result<String> {
         .or_else(|| tab.blocks.first())
         .map(|block| block.id.clone())
         .ok_or_else(|| anyhow::anyhow!("tern tab {} has no block to split", tab.id))
+}
+
+/// Where this spawn's block goes, as one listing and Tern's own answers
+/// decided.
+///
+/// The ownership rule this backend keeps: the only block a spawn creates is
+/// the agent's. A missing cluster session is created with the agent as its
+/// first block (`new session … -- <launch>`), a missing role tab with the
+/// agent as its only block (`new tab … -- <launch>`) — no default shell is
+/// ever made merely to have something to split beside. Only an existing role
+/// tab takes a split, beside the block [`base_block`] chooses.
+pub(super) enum Site {
+    /// The agent was launched as a new session's or tab's first block.
+    /// Nothing was split.
+    Launched {
+        session_id: String,
+        tab_id: String,
+        pane_id: String,
+    },
+    /// The role tab existed; the block to split beside and the tab's block
+    /// count come with it.
+    Found {
+        session_id: String,
+        tab_id: String,
+        base_pane: String,
+        pane_count: usize,
+    },
 }
 
 impl Listing {

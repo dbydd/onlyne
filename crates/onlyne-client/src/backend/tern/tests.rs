@@ -12,6 +12,7 @@ use std::sync::Arc;
 mod cli;
 mod close;
 mod focus;
+mod lifecycle;
 mod probe;
 mod spawn;
 

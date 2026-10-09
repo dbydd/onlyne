@@ -1868,6 +1868,17 @@ max_sessions = 2"#,
         .await
         .expect("second family session");
     assert_eq!(second_row[0].session_id, session_id);
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(second_task.clone()),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Acked),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the second delivery of the family settles in the reused session");
 
     cluster
         .start_fake_agent(&worker_ws, &serve_repeated(false, 1))
@@ -2279,6 +2290,17 @@ max_sessions = 2"#,
         .await
         .expect("family continuation row");
     assert_eq!(resumed[0].session_id, session_id);
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(second_task),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Acked),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the continuation settles in the process that stayed");
     println!("✓ Scenario 17: no resume [idle process stays, family reuses session]");
 }
 
