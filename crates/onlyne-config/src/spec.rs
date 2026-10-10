@@ -163,15 +163,15 @@ workspace's `config.toml` (`placement = \"orca\"`, `\"zellij\"`, `\"tern\"`, `\"
 `\"external\"`)";
 
 /// Why a document may not carry `relay_required`, `relay_required_count`, or
-/// `relay_count` any more, and what one declaration replaces all three. The
-/// edges a role may address are already the edges it owes: `allowed_targets`
-/// is the server's ACL and the client's completion guard read off the same list
-/// (`docs/v2-CONTRACT.md` §"Slice 6").
+/// `relay_count` any more, and what replaces all three. None of them was a
+/// declaration of the ACL, so none of them belongs beside one: reach is
+/// `allowed_targets` and the obligation a session owes before it may report a
+/// terminal outcome is `owes_targets` (`docs/v2-CONTRACT.md` §"Slice 6").
 pub const RELAY_IS_GONE: &str = "\
-`relay_required`, `relay_required_count`, and `relay_count` are gone: one declaration is the
-whole policy. Name the roles this role may address in `allowed_targets`, and a session of
-this role owes each of them a delivery before it may report a terminal outcome. Drop the
-relay keys; a role that owes nothing leaves `allowed_targets` empty";
+`relay_required`, `relay_required_count`, and `relay_count` are gone, and no single key
+replaces them. Name the roles this role may address in `allowed_targets`, and the roles a
+session of it owes a delivery to in `owes_targets`; a role that owes nothing omits
+`owes_targets`";
 
 /// How a client talks to one role's runtime: `[client.runtime] drive`.
 ///
@@ -259,14 +259,19 @@ pub struct ClientEntry {
     pub max_sessions: u32,
     #[serde(default)]
     pub allowed_senders: Vec<String>,
-    /// The roles this role may address, and the roles a session of it owes a
-    /// delivery to before it may report a terminal outcome. One declaration
-    /// answers both questions: the server gates the ACL on it and the client's
-    /// completion guard measures the session against it, so there is no second
-    /// list to disagree with. Empty is the default, and a role that names no
-    /// target owes nothing (`docs/v2-CONTRACT.md` §"Slice 6").
+    /// The roles this role may address. This is the server's ACL and nothing
+    /// else: reach is permission, and permission never compels a delivery
+    /// (`docs/v2-CONTRACT.md` §"Slice 6").
     #[serde(default)]
     pub allowed_targets: Vec<String>,
+    /// The roles a session of this role owes a delivery to before it may
+    /// report a terminal outcome. The obligation is declared here, separately
+    /// from reach, because reach is permission and permission is not a duty:
+    /// a role that may address ten others does not owe all ten a handoff.
+    /// Absent or empty is the default, and it owes nothing; every name must be
+    /// addressable through `allowed_targets`, or the loader refuses the spec.
+    #[serde(default)]
+    pub owes_targets: Vec<String>,
     /// The drive and the argv a session runs: `[client.runtime]`.
     #[serde(default)]
     pub runtime: RuntimeSection,
@@ -445,6 +450,7 @@ impl Spec {
         })?;
         validate_backend_key(&parsed, text, file)?;
         validate_relay_keys(&parsed, text, file)?;
+        validate_owes_targets(&parsed, text, file)?;
         validate_hook_entries(&parsed, text, file)?;
         let spec: Spec = parsed.clone().try_into().map_err(|err: toml::de::Error| {
             SpecError::parse(
@@ -737,6 +743,7 @@ fn locate_table_line(text: &str, field: &str) -> usize {
         "max_sessions",
         "allowed_senders",
         "allowed_targets",
+        "owes_targets",
         "session_command",
         "timeout",
         "intent",
@@ -895,8 +902,9 @@ fn validate_backend_key(value: &toml::Value, text: &str, file: &str) -> Result<(
 /// they sit: at the document root, or in any `[[client]]` entry (its own level
 /// or below it). A spec that still carries any of them is refused by name,
 /// following the pattern the loader already uses for a key that no longer
-/// exists. The one declaration is `allowed_targets`: it is both the ACL and the
-/// obligation (`docs/v2-CONTRACT.md` §"Slice 6").
+/// exists. The two declarations that replaced them are `allowed_targets`
+/// (reach) and `owes_targets` (the obligation)
+/// (`docs/v2-CONTRACT.md` §"Slice 6").
 fn validate_relay_keys(value: &toml::Value, text: &str, file: &str) -> Result<(), SpecError> {
     const KEYS: &[&str] = &["relay_required", "relay_count", "relay_required_count"];
     for key in KEYS {
@@ -924,6 +932,68 @@ fn validate_relay_keys(value: &toml::Value, text: &str, file: &str) -> Result<()
                     file,
                     crate::locate::key_line_in_array_entry(text, "client", idx, key),
                     RELAY_IS_GONE,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an `owes_targets` entry the role cannot address.
+///
+/// The obligation is enforced by refusing a completion, so a name the ACL
+/// never lets the session reach would make every terminal outcome impossible:
+/// the session could never deliver, and the guard would never let it finish.
+/// Every name must be reachable — through `allowed_targets`, through `"*"`,
+/// or as the role's own name, which the ACL always admits.
+fn validate_owes_targets(value: &toml::Value, text: &str, file: &str) -> Result<(), SpecError> {
+    let clients = value
+        .get("client")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate();
+    for (idx, entry) in clients {
+        let Some(table) = entry.as_table() else {
+            continue;
+        };
+        let names = |key: &str| -> Vec<String> {
+            table
+                .get(key)
+                .and_then(toml::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(toml::Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let owes = names("owes_targets");
+        if owes.is_empty() {
+            continue;
+        }
+        let role = table
+            .get("role")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        let allowed = names("allowed_targets");
+        // A supervisor with an empty list reaches every registered role, which
+        // is the one-sided reach its own ACL row keeps.
+        let universal = allowed.iter().any(|name| name == "*")
+            || (role == SUPERVISOR_ROLE && allowed.is_empty());
+        for name in owes {
+            let reachable = universal || name == role || allowed.contains(&name);
+            if !reachable {
+                return Err(SpecError::validate(
+                    file,
+                    crate::locate::key_line_in_array_entry(text, "client", idx, "owes_targets"),
+                    format!(
+                        "`owes_targets` names `{name}`, which `allowed_targets` does not reach; \
+                         the session could never deliver what it owes. Add `{name}` to \
+                         `allowed_targets` (or `\"*\"`), or drop it from `owes_targets`"
+                    ),
                 ));
             }
         }

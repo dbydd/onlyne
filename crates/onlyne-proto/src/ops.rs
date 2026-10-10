@@ -522,6 +522,11 @@ pub struct RoleInfo {
     /// name with no registered role still appears.
     #[serde(default)]
     pub edges: Vec<String>,
+    /// The entry's `owes_targets` verbatim: the roles a session of this role
+    /// owes a delivery to before it may report a terminal outcome. An absent
+    /// key and an empty list both mean the role owes nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owes_targets: Vec<String>,
     /// The entry's `aggregate` label; a plain role carries no key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregate: Option<String>,
@@ -729,13 +734,18 @@ pub struct Welcome {
     /// at line 462 keeps to aggregate roles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregate: Option<String>,
-    /// The entry's `allowed_targets` verbatim, and the whole of this role's
-    /// policy: the server reads it as the ACL, and a client reads it as the
-    /// obligation — a session of this role must have delivered to every name
-    /// here before it may report a terminal outcome. A `*` stays unexpanded and
-    /// a name with no registered role still appears; an empty list is a role
-    /// that owes nothing (`docs/v2-CONTRACT.md` §"Slice 6").
+    /// The entry's `allowed_targets` verbatim: this role's reach, which the
+    /// server reads as the ACL. A `*` stays unexpanded and a name with no
+    /// registered role still appears
+    /// (`docs/v2-CONTRACT.md` §"Slice 6").
     pub allowed_targets: Vec<String>,
+    /// The entry's `owes_targets` verbatim: the roles a session of this role
+    /// must have delivered to before it may report a terminal outcome. Reach
+    /// is permission and never compels a delivery, so the obligation is its
+    /// own declaration. An absent key and an empty list both mean the role
+    /// owes nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owes_targets: Vec<String>,
     pub allowed_senders: Vec<String>,
     /// The drive and the argv one session of this role runs, as the spec's
     /// `[client.runtime]` table wrote them. An absent key is a server that
@@ -808,6 +818,8 @@ pub enum AdminOp {
     RepairClose(RepairTarget),
     /// Mark a fault handled.
     RepairAck(RepairAck),
+    /// Mark every matching open fault handled.
+    RepairAckMany(RepairAckMany),
     /// Ordered shutdown of the server.
     Shutdown(ShutdownArgs),
 }
@@ -838,6 +850,7 @@ impl AdminOp {
             AdminOp::RepairFail(_) => "repair_fail",
             AdminOp::RepairClose(_) => "repair_close",
             AdminOp::RepairAck(_) => "repair_ack",
+            AdminOp::RepairAckMany(_) => "repair_ack_many",
             AdminOp::Shutdown(_) => "shutdown",
         }
     }
@@ -912,6 +925,7 @@ pub enum SpecEdit {
     UpsertRole(UpsertRole),
     RemoveRole(RemoveRole),
     SetTargets(SetTargets),
+    SetOwesTargets(SetOwesTargets),
     SetSenders(SetSenders),
     SetProse(SetProse),
     SetSession(SetSession),
@@ -925,6 +939,7 @@ impl SpecEdit {
             SpecEdit::UpsertRole(_) => "upsert_role",
             SpecEdit::RemoveRole(_) => "remove_role",
             SpecEdit::SetTargets(_) => "set_targets",
+            SpecEdit::SetOwesTargets(_) => "set_owes_targets",
             SpecEdit::SetSenders(_) => "set_senders",
             SpecEdit::SetProse(_) => "set_prose",
             SpecEdit::SetSession(_) => "set_session",
@@ -938,6 +953,7 @@ impl SpecEdit {
             SpecEdit::UpsertRole(edit) => &edit.role,
             SpecEdit::RemoveRole(edit) => &edit.role,
             SpecEdit::SetTargets(edit) => &edit.role,
+            SpecEdit::SetOwesTargets(edit) => &edit.role,
             SpecEdit::SetSenders(edit) => &edit.role,
             SpecEdit::SetProse(edit) => &edit.role,
             SpecEdit::SetSession(edit) => &edit.role,
@@ -980,6 +996,16 @@ pub struct RemoveRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case", default)]
 pub struct SetTargets {
+    pub role: String,
+    pub targets: Vec<String>,
+}
+
+/// `set_owes_targets`: replace one role's `owes_targets` wholesale — the roles
+/// a session of it owes a delivery to before it may report a terminal outcome.
+/// An empty list is a role that owes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct SetOwesTargets {
     pub role: String,
     pub targets: Vec<String>,
 }
@@ -1116,6 +1142,27 @@ pub struct RepairFail {
 #[serde(rename_all = "snake_case", default)]
 pub struct RepairAck {
     pub fault_id: i64,
+    pub reason: String,
+}
+
+/// `repair_ack_many`: close every open fault the filter names, with the
+/// per-row reason recorded as the given one.
+///
+/// Both filters are optional and the empty shape is an error at the door —
+/// "every fault" is never a sentence a sweep should mean. `kind` names the
+/// fault kind verbatim (`heartbeat_missing`, `stalled`, …), `before` closes
+/// only rows whose `created_at` is strictly older than the RFC 3339 instant,
+/// and `limit` caps the pass so one call moves a bounded batch; an absent
+/// limit is the protocol cap of one page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct RepairAckMany {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
     pub reason: String,
 }
 

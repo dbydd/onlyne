@@ -108,9 +108,9 @@ key holding a wrong value, and the keys v2 retired by name. `backend`, `relay_re
 `relay_required_count`, and `relay_count` are refused before the schema pass, at the root and
 inside a `[[client]]` entry alike, with `BACKEND_IS_GONE` or `RELAY_IS_GONE` — so a spec left
 over from v1 is told what to delete instead of quietly keeping a setting that does nothing.
-`RELAY_IS_GONE` also carries the replacement: `allowed_targets` is both the permission and the
-obligation, so a role owes each of its listed targets a delivery before it may report a terminal
-outcome, and a role that owes nothing leaves the list empty.
+`RELAY_IS_GONE` also carries the replacement: the reach is `allowed_targets`, and the obligation
+a session owes before it may report a terminal outcome is `owes_targets` — its own declaration,
+so a role that owes nothing omits it and a reach alone compels no delivery.
 
 Which number comes back is the door's: the merged `onlyne` verbs report 4 (operator input or
 generation refused), the daemon binaries `onlyne-server` and `onlyne-client` report 1 (the run
@@ -261,6 +261,7 @@ onlyne --server-root <root> repair fail --task <id> --reason <text>
 onlyne --server-root <root> repair adopt --task <id> --backend <name> --reason <text>
 onlyne --server-root <root> repair rebind --task <id> --session-id <id> --backend <name> --reason <text>
 onlyne --server-root <root> repair ack --fault-id <n> --reason <text>
+onlyne --server-root <root> repair ack-many --kind <kind> [--before <rfc3339>] --reason <text>
 ```
 
 The core detects and records; recovery is your call. `repair retry` handles eligible `queued`
@@ -299,6 +300,12 @@ inside ten seconds and clears the flag on its own. `heartbeat_after_complete` sa
 kept talking after its completion landed; `control recycle` ends the straggler, and the row's own
 history keeps the settled completion either way. Both kinds open once per task and stay open
 until you `repair ack` them, so the fault table doubles as your to-do list.
+
+`repair ack-many` closes a batch: it answers `{"acked": <n>, "fault_ids": [...]}` and each
+closed row emits its own `fault` event carrying the given reason, so a notify hook sees one
+line per row. Give `--kind`, `--before`, or both — the empty filter is refused rather than read
+as "every fault" — and `--limit` caps one pass (default 1000), so a long backlog drains in
+bounded calls instead of one statement over the whole table.
 
 `stalled` is the client's own report: a session whose projection tuple froze for
 `stall_report_secs` (1800 default, 0 disables) faults once per episode. No-op beats keep the

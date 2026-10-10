@@ -64,7 +64,7 @@
           }
         },
         "allowed_targets": {
-          "description": "The roles this role may address, and the roles a session of it owes a delivery to before it may report a terminal outcome. One declaration answers both questions: the server gates the ACL on it and the client's completion guard measures the session against it, so there is no second list to disagree with. Empty is the default, and a role that names no target owes nothing (`docs/v2-CONTRACT.md` §\"Slice 6\").",
+          "description": "The roles this role may address. This is the server's ACL and nothing else: reach is permission, and permission never compels a delivery (`docs/v2-CONTRACT.md` §\"Slice 6\").",
           "default": [],
           "type": "array",
           "items": {
@@ -94,6 +94,14 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
+        },
+        "owes_targets": {
+          "description": "The roles a session of this role owes a delivery to before it may report a terminal outcome. The obligation is declared here, separately from reach, because reach is permission and permission is not a duty: a role that may address ten others does not owe all ten a handoff. Absent or empty is the default, and it owes nothing; every name must be addressable through `allowed_targets`, or the loader refuses the spec.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "prose": {
           "default": "",

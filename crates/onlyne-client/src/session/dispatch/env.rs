@@ -45,8 +45,8 @@ pub(super) fn served_socket(workspace: &Path) -> PathBuf {
 ///
 /// The three `ONLYNE_` identity variables are what the plugin mounts with. The
 /// obligation a session owes is not among them: the guard is this client's own
-/// (`guards.rs`), read off the role's `allowed_targets`, so there is no policy
-/// for a session process to carry and no variable for it to read.
+/// (`guards.rs`), read off the role's `owes_targets`, so there is no policy for
+/// a session process to carry and no variable for it to read.
 ///
 /// `ONLYNE_CLUSTER` names the server's topology and is the address a host
 /// backend groups sessions under. No welcome yet means no variable, and a pane

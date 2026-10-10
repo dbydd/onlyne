@@ -563,30 +563,41 @@ query does not wait behind a delivery write.
   connection.
 - After a stop and a restart, a persisted `last_seen` is no older than the stated interval.
 
-## Slice 6: one declaration per role — the edges are the permission and the obligation
+## Slice 6: reach and obligation, one declaration each
 
 The plan's §"落地顺序" line 550 calls this "声明式路由边取代 `relay_required`, 预算检查移到
-client". The budget check already moved in slice 3c; what is left is the first half, and the
-shape is decided rather than guessed: **one list, both jobs.**
+client". The budget check already moved in slice 3c. The first half was built as **one list,
+both jobs**, and that fused shape was corrected on 2026-10-10: a permission that compels is
+not a route. A role that may address ten others owes none of them anything until it says so,
+and a deployment that wants a forced handoff writes the obligation down.
 
 ### Interface
 
-**`[[client]].allowed_targets` is the whole of it.** A role may address exactly those roles —
-the server's ACL, unchanged — and a session of that role owes every one of them a delivery
-before it may report a terminal outcome. There is no second declaration to disagree with.
+**`[[client]].allowed_targets` is the ACL.** A role may address exactly those roles — the
+server's gate, unchanged — and nothing about the list obliges a delivery.
+
+**`[[client]].owes_targets` is the obligation.** A session of that role must have delivered to
+every name on it before it may report a terminal outcome. Absent or empty is the default and
+owes nothing; every name must be reachable through `allowed_targets` (through `"*"`, or as the
+role's own name), or the loader refuses the spec by name — an obligation the ACL forbids would
+make every terminal outcome impossible.
+
+**The obligation keeps the fused shape's satisfiability rules.** The role the task arrived
+from is never owed a second delivery — completing is that delivery — so a self-addressed entry
+or a ring's return edge asks nothing. The refusal keeps its shape: it names every role still
+owed and the set the session actually delivered to.
 
 **`relay_required` and `relay_count` are deleted**, together with the `relay_required_count`
-alias the loader rewrites and the count form the guard carried, and with the two keys on the
-wire (`Welcome`, the role summary) that carried them. A spec still naming either is refused by
-name, as a fused key is today — not silently ignored, not aliased into something else.
+alias, and a spec still naming any of them is refused by name. The replacement refusal names
+both keys that took their place.
 
-**The list arrives where the check lives.** The client's relay check needs its own role's
-`allowed_targets`, so the handshake carries it. A session whose role declares no targets owes
-nothing, which is the empty-policy case the guard already had.
+**Both declarations arrive where the check lives.** The handshake's slice and the role summary
+carry `allowed_targets` and `owes_targets` beside each other, and the client's completion guard
+reads the obligation alone.
 
-**The refusal keeps its shape**: it names every role still owed and the set the session
-actually delivered to, because that sentence is what a model reads and it is the same one
-both drives already see. There is no count form to keep coherent with it.
+**The guard is one checkpoint, both drives.** The client's door refuses a completion that still
+owes a role — the plugin drive at the agent connection and the ACP drive at the tools mount —
+so the sentence a model reads does not change with the drive.
 
 **Budget stays on `handoff`.** A `send` starts a family and a `handoff` continues one, so the
 hop budget is checked where a family is continued; `send` is never refused for budget. That
@@ -594,12 +605,15 @@ split is already implemented and this slice does not touch it.
 
 ### Acceptance
 
-- A role that declares two targets and delivers to one is refused with the refusal naming the
-  missing one; after the second delivery the same completion is accepted — over a real client,
-  not through a unit stub.
-- A role with an empty `allowed_targets` completes freely, on both drives.
+- A role that declares two owed targets and delivers to one is refused with the refusal naming
+  the missing one; after the second delivery the same completion is accepted — over a real
+  client, not through a unit stub.
+- A role with a non-empty reach and no `owes_targets` completes freely, on both drives
+  (`scenario_20`).
+- A role that declares an obligation it cannot pay has its completion refused at the door, and
+  the grace buries the delivery the refusal left open (`scenario_20`).
 - A spec naming `relay_required` (or `relay_required_count`, or `relay_count`) is refused by
-  name, with no silent acceptance and no second reader left for the key.
+  name, and one whose `owes_targets` outruns its reach is refused by name with the remedy.
 - The ACL is unchanged: addressing a role outside `allowed_targets` is still refused by the
   server, before any of this.
 

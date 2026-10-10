@@ -1174,6 +1174,59 @@ impl ServerLedger {
         )? == 1)
     }
 
+    /// Close every open fault the batch filter names, and answer the ids that
+    /// this call closed.
+    ///
+    /// The select and the update are one transaction, so the answer is exact:
+    /// a row another writer closed between the two steps is not counted, and
+    /// no counted row is left open. An absent `kind` and an absent `before`
+    /// are refused here as at the door — the empty filter is never a sweep.
+    pub fn ack_faults_batch(
+        &self,
+        kind: Option<&str>,
+        before: Option<String>,
+        limit: u32,
+    ) -> StoreResult<Vec<i64>> {
+        if kind.is_none() && before.is_none() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "repair_ack_many needs --kind or --before; refusing every fault".to_string(),
+            )
+            .into());
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let mut clauses = vec!["state='open'".to_string()];
+        let mut args: Vec<SqlValue> = Vec::new();
+        if let Some(kind) = kind {
+            clauses.push("kind=?".to_string());
+            args.push(SqlValue::Text(kind.to_string()));
+        }
+        if let Some(before) = before {
+            clauses.push("created_at<?".to_string());
+            args.push(SqlValue::Text(before));
+        }
+        let where_clause = where_sql(&clauses);
+        args.push(SqlValue::Integer(sql_limit(limit)));
+        let ids: Vec<i64> = {
+            let sql = format!("SELECT id FROM faults{where_clause} ORDER BY id LIMIT ?");
+            let mut stmt = tx.prepare(&sql)?;
+            stmt.query_map(params_from_iter(&args), |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut closed = Vec::new();
+        for id in ids {
+            let n = tx.execute(
+                "UPDATE faults SET state='acked' WHERE id=? AND state='open'",
+                params![id],
+            )?;
+            if n == 1 {
+                closed.push(id);
+            }
+        }
+        tx.commit()?;
+        Ok(closed)
+    }
+
     pub fn faults_query(&self, query: FaultQuery) -> StoreResult<Vec<ServerFaultRow>> {
         let conn = self.read()?;
         let mut clauses = Vec::new();

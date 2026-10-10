@@ -404,6 +404,109 @@ relay_count = 2
     assert!(err.to_string().contains("allowed_targets"), "{err}");
 }
 
+/// The obligation is its own declaration: after the relay keys were removed,
+/// reach alone (`allowed_targets`) does not tell a role whom it owes, so
+/// `owes_targets` carries the obligation and defaults to empty — meaning a
+/// role that declares only reach owes nothing.
+#[test]
+fn owes_targets_is_its_own_declaration_and_defaults_to_empty() {
+    let with_owes = format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[client]]
+role = "planner"
+key = "{KEY_A}"
+allowed_targets = ["builder", "reviewer"]
+owes_targets = ["builder"]
+"#
+    );
+    let spec = Spec::parse_str(&with_owes).expect("owes_targets parses");
+    assert_eq!(spec.client[0].allowed_targets, ["builder", "reviewer"]);
+    assert_eq!(
+        spec.client[0].owes_targets,
+        ["builder"],
+        "reach and obligation are separate lists"
+    );
+
+    let without_owes = format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[client]]
+role = "planner"
+key = "{KEY_A}"
+allowed_targets = ["builder", "reviewer"]
+"#
+    );
+    let spec = Spec::parse_str(&without_owes).expect("a reach-only role parses");
+    assert!(
+        spec.client[0].owes_targets.is_empty(),
+        "a role that declares only reach owes nothing"
+    );
+}
+
+/// The obligation is enforced by refusing a completion, so it has to be
+/// satisfiable: a name the ACL never lets the session reach would make every
+/// terminal outcome impossible. The loader refuses it and names the remedy.
+#[test]
+fn owes_targets_beyond_the_declared_reach_is_refused() {
+    let text = format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[client]]
+role = "planner"
+key = "{KEY_A}"
+allowed_targets = ["builder"]
+owes_targets = ["builder", "reviewer"]
+"#
+    );
+    let err = Spec::parse_str(&text).expect_err("an unreachable obligation must be refused");
+    let message = err.to_string();
+    assert!(message.contains("owes_targets"), "{message}");
+    assert!(message.contains("reviewer"), "{message}");
+    assert!(message.contains("allowed_targets"), "{message}");
+}
+
+/// A wildcard reach covers every other role, so an obligation inside it
+/// loads, and so does the role's own name, which the ACL always admits.
+#[test]
+fn owes_targets_inside_a_reach_loads() {
+    let text = format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[client]]
+role = "planner"
+key = "{KEY_A}"
+allowed_targets = ["*"]
+owes_targets = ["builder", "reviewer"]
+
+[[client]]
+role = "writer"
+key = "{KEY_B}"
+allowed_targets = []
+owes_targets = ["writer"]
+"#
+    );
+    let spec = Spec::parse_str(&text).expect("a reachable obligation loads");
+    assert_eq!(spec.client[0].owes_targets, ["builder", "reviewer"]);
+    assert_eq!(
+        spec.client[1].owes_targets,
+        ["writer"],
+        "a role's own name is always addressable"
+    );
+}
+
 /// A spec whose single `[[hook]]` is written from the three lines as given, so
 /// a case can point at the line its own column lands on (7, 8, and 9).
 fn hook_spec(on: &str, run: &str, timeout: &str) -> String {
@@ -740,14 +843,14 @@ allowed_targets = ["planner"]
     );
 }
 
-/// One declaration is the whole policy: the edges a role may address are the
-/// edges it owes, and a spec that names no relay key serializes no relay key.
+/// Reach and obligation are separate declarations, and a spec that names no
+/// relay key serializes no relay key.
 ///
-/// The two halves are read off the same list, so there is nothing left to
-/// disagree with: `allowed_targets` is both the server's ACL and the client's
-/// completion guard, and a role that owes nothing leaves it empty.
+/// `allowed_targets` is the server's ACL and nothing else, so the default that
+/// matters here is that a role which names no obligation owes none: the
+/// obligation's own default is the empty `owes_targets`.
 #[test]
-fn allowed_targets_is_the_whole_policy_and_absence_stays_off() {
+fn allowed_targets_is_reach_and_absence_stays_off() {
     let spec = Spec::parse_str(&format!(
         r#"[server]
 name = "cluster-a"
@@ -770,8 +873,8 @@ key = "{KEY_C}"
         spec.client[0].allowed_targets,
         vec!["writer".to_string(), "auditor".to_string()]
     );
-    // The role that names no target owes nothing, and that is the whole of an
-    // empty policy: the default list is empty, not a separate "no guard" flag.
+    // The role that names no obligation owes nothing: both declarations
+    // default to the empty list, not to a separate "no guard" flag.
     assert!(spec.client[1].allowed_targets.is_empty());
 
     // A spec that never names a relay key serializes none, so its canonical
@@ -972,7 +1075,8 @@ fn the_published_client_schema_carries_acp() {
 /// slice without the regeneration is a key the loader would still call known.
 ///
 /// The three removed spellings have no property left, so the schema cannot
-/// teach an editor a key the loader refuses.
+/// teach an editor a key the loader refuses; reach and obligation are two
+/// properties, each optional.
 #[test]
 fn the_published_spec_schema_drops_the_relay_keys() {
     let schema: serde_json::Value = serde_json::from_str(onlyne_config::spec_schema()).unwrap();
@@ -980,7 +1084,7 @@ fn the_published_spec_schema_drops_the_relay_keys() {
     assert_eq!(
         entry["required"],
         serde_json::json!(["key", "role"]),
-        "one list is the whole policy, and it stays optional"
+        "both declarations stay optional"
     );
     let properties = entry["properties"]
         .as_object()
@@ -993,7 +1097,16 @@ fn the_published_spec_schema_drops_the_relay_keys() {
     }
     assert_eq!(
         entry["properties"]["allowed_targets"]["items"]["type"], "string",
-        "the one declaration is the list that stayed"
+        "reach is a list"
+    );
+    assert_eq!(
+        entry["properties"]["owes_targets"]["items"]["type"], "string",
+        "the obligation is its own list"
+    );
+    assert_eq!(
+        entry["properties"]["owes_targets"]["default"],
+        serde_json::json!([]),
+        "a role that declares no obligation owes nothing"
     );
 }
 

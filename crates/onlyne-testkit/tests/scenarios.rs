@@ -2424,6 +2424,17 @@ fn append_client_session_config(workspace: &std::path::Path, scope: &str, idle_c
     std::fs::write(config, text).expect("write client session config");
 }
 
+/// Insert top-level keys ahead of the file's tables: a bare key appended after
+/// a table header belongs to that table, which is how this wrote
+/// `server.reconnect_grace_secs` for a moment.
+fn prepend_client_config(workspace: &std::path::Path, text: &str) {
+    let config = workspace.join(".onlyne/config.toml");
+    let body = std::fs::read_to_string(&config).expect("read client config");
+    let mut full = text.to_string();
+    full.push_str(&body);
+    std::fs::write(config, full).expect("write client config");
+}
+
 fn serve_once(resume: bool) -> AgentScript {
     let mut capabilities = vec![
         onlyne_proto::Capability::Register,
@@ -2635,4 +2646,146 @@ max_sessions = 4"#,
     }
     assert_ne!(sessions[0], sessions[1], "two families, two conversations");
     println!("✓ Scenario 19: standing runtime [one connection served both sessions]");
+}
+
+/// Scenario 20: reach is permission and never compels a delivery; the
+/// obligation is `owes_targets` alone, and it is enforced at the door.
+///
+/// One declaration used to do both jobs, so a role that could address ten
+/// others owed all ten a handoff before it could complete — the shape that
+/// forces a broadcast (or a junk note) per delivery. Here `reach` may address
+/// `peer` and owes nothing: its completion settles with no delivery at all.
+/// `owed` declares the obligation and cannot deliver it: its completion is
+/// refused, the runtime that cannot pay dies with it, and the reconnect grace
+/// settles the delivery `session_dead` — the refusal is the door's, not the
+/// row's.
+#[tokio::test]
+async fn scenario_20_reach_is_permission_and_the_obligation_is_declared() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let reach_ws = cluster
+        .register_role(
+            "reach",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "reach"]
+allowed_targets = ["peer"]"#,
+            ),
+        )
+        .await
+        .expect("register reach");
+    let owed_ws = cluster
+        .register_role(
+            "owed",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "owed"]
+allowed_targets = ["peer"]
+owes_targets = ["peer"]"#,
+            ),
+        )
+        .await
+        .expect("register owed");
+    cluster
+        .register_role(
+            "peer",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "peer"]
+allowed_targets = ["peer"]"#,
+            ),
+        )
+        .await
+        .expect("register peer");
+    // `reconnect_grace_secs` is a top-level key of the workspace config, and
+    // the grace is what settles the delivery a refused completion leaves open.
+    prepend_client_config(&owed_ws, "reconnect_grace_secs = 1\n");
+    cluster
+        .start_client(&reach_ws)
+        .await
+        .expect("start reach client");
+    cluster
+        .start_client(&owed_ws)
+        .await
+        .expect("start owed client");
+    cluster
+        .start_fake_agent(&reach_ws, &serve_repeated(false, 1))
+        .await
+        .expect("start reach agent");
+    // One turn, one completion: the script never hands anything on.
+    let owed_script = AgentScript {
+        hello: ScriptHello {
+            capabilities: vec![
+                onlyne_proto::Capability::Register,
+                onlyne_proto::Capability::Report,
+                onlyne_proto::Capability::Inject,
+            ],
+        },
+        steps: vec![
+            json!({"wait_assign": true}),
+            json!({"report": "ready"}),
+            json!({"report": "heartbeat"}),
+            json!({"complete": {"outcome": "done", "head": "owed done"}}),
+        ],
+        repeat: false,
+    };
+    cluster
+        .start_fake_agent(&owed_ws, &owed_script)
+        .await
+        .expect("start owed agent");
+    cluster
+        .wait_role_online("reach")
+        .await
+        .expect("reach online");
+    cluster.wait_role_online("owed").await.expect("owed online");
+
+    // Reach: the completion settles with `peer` never addressed.
+    let receipt = cluster
+        .admin_send("reach", "reach", "reach only")
+        .await
+        .expect("send reach delivery");
+    let reach_task = task_of(&receipt);
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(reach_task),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Acked),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("a reach-only completion settles");
+
+    // Owed: the completion is refused at the door, the runtime exits with the
+    // refusal, and the grace settles the delivery as the death it is.
+    let receipt = cluster
+        .admin_send("owed", "owed", "owed but unpaid")
+        .await
+        .expect("send owed delivery");
+    let owed_task = task_of(&receipt);
+    let rows = cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(owed_task),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Rejected),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("an unpaid obligation never settles as done");
+    assert!(
+        rows.iter().any(|row| row.state == LedgerState::Rejected
+            && row.reason.as_deref() == Some("session_dead")),
+        "the grace buries the delivery the refusal left open: {rows:#?}"
+    );
+    println!("✓ Scenario 20: reach does not compel; a declared obligation does");
 }

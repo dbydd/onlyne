@@ -481,6 +481,9 @@ fn every_server_statement_runs_against_the_server_schema() {
         .ack_fault(fault_id)
         .describe("UPDATE faults SET state='acked' WHERE id=?");
     store
+        .ack_faults_batch(Some("probe_dead"), None, 10)
+        .describe("SELECT id FROM faults WHERE state='open' AND kind=? LIMIT ?");
+    store
         .cursor_for("worker")
         .describe("SELECT role,last_msg_id,last_seq,updated_at FROM inbox_cursors");
     store
@@ -488,4 +491,79 @@ fn every_server_statement_runs_against_the_server_schema() {
         .describe("INSERT INTO inbox_cursors(...) ON CONFLICT(role)");
 
     assert!(store.event_head().unwrap() >= 1);
+}
+
+/// The batch ack closes exactly what its filter names, once.
+///
+/// The kind filter, the age bound, and the limit are the whole policy an
+/// `ack-many` call carries; the empty filter is refused rather than read as
+/// "every fault", and a row this call already closed is not reported twice.
+#[test]
+fn the_batch_ack_closes_only_what_the_filter_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ServerLedger::open(dir.path().join("server.db"), 14).unwrap();
+    let fault = |kind: &str, created_at: i64| ServerFaultRow {
+        id: 0,
+        task_id: None,
+        role: Some("worker".to_string()),
+        session_id: None,
+        generation: None,
+        seq: None,
+        desired_json: None,
+        observed_json: None,
+        intent: None,
+        attempt: None,
+        backend_ref: None,
+        kind: kind.to_string(),
+        reason: "recorded".to_string(),
+        state: "open".to_string(),
+        created_at,
+    };
+    let old = 1_700_000_000i64;
+    let new = 1_800_000_000i64;
+    let old_beat = store
+        .record_fault(&fault("heartbeat_missing", old))
+        .unwrap();
+    let new_beat = store
+        .record_fault(&fault("heartbeat_missing", new))
+        .unwrap();
+    let stalled = store.record_fault(&fault("stalled", old)).unwrap();
+
+    let empty = store.ack_faults_batch(None, None, 10);
+    assert!(
+        empty.is_err(),
+        "the empty filter must never mean every fault"
+    );
+
+    let closed = store
+        .ack_faults_batch(
+            Some("heartbeat_missing"),
+            Some("2026-01-01T00:00:00+00:00".to_string()),
+            10,
+        )
+        .unwrap();
+    assert_eq!(
+        closed,
+        vec![old_beat],
+        "the age bound keeps the newer beat open"
+    );
+
+    let again = store
+        .ack_faults_batch(
+            Some("heartbeat_missing"),
+            Some("2026-01-01T00:00:00+00:00".to_string()),
+            10,
+        )
+        .unwrap();
+    assert!(again.is_empty(), "a closed row is not closed twice");
+
+    let by_kind = store.ack_faults_batch(Some("stalled"), None, 10).unwrap();
+    assert_eq!(by_kind, vec![stalled], "the kind filter is the whole bound");
+
+    let open = store.open_faults().unwrap();
+    assert_eq!(
+        open.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![new_beat],
+        "only the fault outside both filters stays open"
+    );
 }

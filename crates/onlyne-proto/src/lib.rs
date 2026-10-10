@@ -67,10 +67,10 @@ pub use ops::{
     ConversationInfo, DETAILS_MAX_BYTES, Delivery, Drive, FreshRead, GatewayOp, GhostSweep,
     HandshakeArgs, HealthArgs, HistoryArgs, LedgerEntry, LedgerQuery, LiveSession,
     PublishEventArgs, PullArgs, PullReply, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs,
-    Receipt, RegisterChannelArgs, RemoveRole, RepairAck, RepairAdopt, RepairFail, RepairRebind,
-    RepairTarget, Report, RoleInfo, RoleRuntime, SessionProjection, SessionRow, SetProse,
-    SetRuntime, SetSenders, SetSession, SetTargets, ShutdownArgs, SpecApply, SpecEdit, SpecView,
-    Subscribe, UpsertRole, Welcome,
+    Receipt, RegisterChannelArgs, RemoveRole, RepairAck, RepairAckMany, RepairAdopt, RepairFail,
+    RepairRebind, RepairTarget, Report, RoleInfo, RoleRuntime, SessionProjection, SessionRow,
+    SetOwesTargets, SetProse, SetRuntime, SetSenders, SetSession, SetTargets, ShutdownArgs,
+    SpecApply, SpecEdit, SpecView, Subscribe, UpsertRole, Welcome,
 };
 
 pub use text::{

@@ -110,12 +110,12 @@ other side, and `image` attaches one image, 2 MiB of decoded bytes. The server g
 every route on your spec entry's `allowed_targets`, and any other name returns `acl_denied` before
 a row exists. Ring and fan-out shapes live in your prose. The mechanics here never change.
 
-That one list is your obligation as well as your reach: before you report a terminal outcome
-your session must have delivered to every *downstream* role the list names. The role that handed
-you the task is never one of them — completing is itself the delivery back to it — so a
-self-addressed entry, or a ring's return edge, asks nothing of you. A completion that still owes
-a role is refused, and the refusal names the roles you have not reached yet and the ones you
-have; an entry that names no target owes nothing. There is no separate switch to declare.
+That reach is permission, not a duty. What your session owes before it may report a terminal
+outcome is its entry's `owes_targets` — its own list, apart from the reach, and often empty.
+The role that handed you the task is never owed one of them — completing is itself the delivery
+back to it — so a self-addressed entry, or a ring's return edge, asks nothing of you. A
+completion that still owes a role is refused, and the refusal names the roles you have not
+reached yet and the ones you have; an entry that names no obligation owes nothing.
 
 ## Rules of the ring
 

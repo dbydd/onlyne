@@ -27,9 +27,9 @@ pub(super) struct DispatchInner {
     pub(super) runtime_refusal: Option<String>,
     pub(super) max_sessions: u32,
     /// The roles a session of this role owes a delivery to, read off the
-    /// server's spec slice (`allowed_targets`): the same list the server gates
-    /// the ACL on is the obligation the completion guard measures a session
-    /// against. Empty is the default and means the role owes nothing.
+    /// server's spec slice (`owes_targets`): the obligation is its own
+    /// declaration, separate from the `allowed_targets` the server gates the
+    /// ACL on. Empty is the default and means the role owes nothing.
     pub(super) required_targets: Vec<String>,
     /// The role's workspace session policy: which deliveries one session serves,
     /// and how long an idle one may wait before its process is released (§10).

@@ -66,8 +66,9 @@
 
 <div class="routes">
   <p class="rule">
-    <code>allowed_targets</code> is the permission and the obligation both: a session owes every role listed here a delivery
-    before it may report a terminal outcome. An empty list means this role addresses nobody.
+    <code>allowed_targets</code> is the permission: the roles this one may address. What a session
+    owes before it may report a terminal outcome is <code>owes_targets</code>, its own list. An empty
+    <code>allowed_targets</code> means this role addresses nobody.
   </p>
 
   <ul class="chips">

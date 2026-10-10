@@ -2,9 +2,10 @@ use super::*;
 
 use super::outbound::{store_ack, transport_envelope};
 use super::projection::{note_verdict, phase, sync_session};
-use super::retire::{PendingClose, close_retired, release_locked, retire_idle_locked};
+use super::retire::{PendingClose, close_retired, keeps_idle, release_locked, retire_idle_locked};
 use super::state::{
-    DispatchInner, DispatchState, slot_key_named, slot_key_serving_task, slot_task,
+    DispatchInner, DispatchState, has_attached_transport, slot_key_named, slot_key_serving_task,
+    slot_task,
 };
 use super::transport::{names_session, serves_session};
 use onlyne_proto::ErrorCode;
@@ -189,6 +190,8 @@ pub async fn on_out(
     // so it is retired here. The settled account above is the whole settlement:
     // nothing here settles or releases this task a second time.
     retire_revived(state, task_id).await;
+    // The leave request a settled delivery owes its runtime.
+    request_runtime_exit(state, &session_id).await;
     // The terminal receipt leaves as its own envelope, so the origin — a role
     // or a gateway conversation — learns the outcome (plan §3 `Completion`).
     // It rides the intent queue, which is what makes a completion survive the
@@ -197,6 +200,39 @@ pub async fn on_out(
         transport_envelope(state, &envelope).await?;
     }
     sync_session(state, &session_id).await
+}
+
+/// Ask the runtime behind a settled delivery to leave, when its scope does not
+/// keep the session.
+///
+/// `complete` is the plugin's own exit handover, and a plugin that takes it
+/// leaves by itself. The other endings have no such handover — a failed report,
+/// and a delivery this client settles `blocked` at its turn end — so without
+/// this request the process behind a non-kept session stays reachable forever:
+/// the retirement keeps a session with an attached transport (rightly, that
+/// exemption is how a pool member lives), so nothing else would ever ask it to
+/// go, and the pane stays open beside a row that already reads `exited`.
+///
+/// Only a slot the scope does not keep and that serves no delivery is asked. A
+/// `task`/`role` member between deliveries is not a leftover, and a session no
+/// connection serves is the reconnect or silence sweep's to end.
+async fn request_runtime_exit(state: &DispatchState, session_id: &str) {
+    let due = {
+        let inner = state.inner.lock();
+        match slot_key_named(&inner, session_id) {
+            Some(key) => inner.sessions.get(&key).is_some_and(|slot| {
+                !keeps_idle(&inner, &key)
+                    && slot.task_id.is_none()
+                    && has_attached_transport(&inner, &key, slot)
+            }),
+            None => false,
+        }
+    };
+    if due {
+        state
+            .recycle_plugin(session_id, "delivery ended", None)
+            .await;
+    }
 }
 
 /// Drain one session's completion and file its task's verdict, answered with

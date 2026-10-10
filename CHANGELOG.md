@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.1.2 (2026-10-10)
+
+- **`repair ack-many` closes faults in batches.** `onlyne repair ack-many --kind <kind>
+  [--before <rfc3339>] [--limit <n>] --reason <text>` acknowledges every open fault the filter
+  names, answers `{"acked": n, "fault_ids": [...]}`, and emits one `fault` event per closed row.
+  The empty filter is refused: "every fault" is never a sweep a single call should mean.
+- **Reach and obligation are two declarations.** `[[client]].allowed_targets` is the ACL alone:
+  permission to address a role, and nothing more. What a session owes before it may report a
+  terminal outcome is `[[client]].owes_targets`, its own optional list — absent or empty owes
+  nothing. A name in `owes_targets` the reach cannot satisfy refuses the spec at load, with the
+  remedy. Operators migrating a spec that relied on the fused list: copy the roles each session
+  really owed from `allowed_targets` into `owes_targets`, and leave the rest as reach.
+  `relay_required`, `relay_required_count`, and `relay_count` stay refused by name.
+- **The completion guard is one checkpoint, both drives.** The relay check and the completion's
+  shape rule now answer on the plugin drive's report door as well as the tools mount's; the
+  agent connection's completions were measured by neither before, so a declared obligation had
+  no enforcement outside ACP and a `details` over the cap sailed through pi.
+- **A settled session its scope does not keep asks its runtime to leave.** A `blocked` settle
+  and a failed report have no completion handover, and the retirement keeps a session with an
+  attached transport, so those endings left the process and its pane beside a row that read
+  `exited`. The settle path now sends the runtime a leave request, and only for a session the
+  scope does not keep.
+- **An operator close reaches a settled session's process.** `repair close` looked up a slot by
+  the task it serves; after the delivery settled the slot serves none, so the command changed
+  the books and left the pane. The lookup falls back to the session the task id names, and only
+  for a session its scope does not keep.
+
 ## 2.1.1 (2026-10-09)
 
 - **Tern spawn owns one block.** A spawn that finds no cluster session or no role tab launches the

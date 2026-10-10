@@ -48,11 +48,14 @@ Landed in phase two, by slice:
 - **payload-v2 is deleted.** No report file, no grammar, no `onlyne report check|write|path`,
   and no `onlyne-role-payload-v2` skill. A completion's `details` rides the completion
   envelope's body to the originator, and an operator reads a task's ending from the ledger.
-- **Declarative route edges.** `[[client]].allowed_targets` is both the ACL and the
-  obligation: a role may address exactly those roles, and a session of that role owes every
-  one of them a delivery before it may report a terminal outcome. `relay_required`,
-  `relay_required_count` and `relay_count` are refused by name, and the hop budget is
-  checked at the client rather than left to the model.
+- **Declarative route edges.** Reach and obligation are two declarations.
+  `[[client]].allowed_targets` is the ACL — a role may address exactly those roles — and
+  `[[client]].owes_targets` is the obligation: a session of that role owes those roles a
+  delivery before it may report a terminal outcome. Absent `owes_targets` owes nothing, an
+  obligation the reach cannot satisfy is refused at load, and the client's completion guard
+  enforces it on both drives at one checkpoint. `relay_required`, `relay_required_count` and
+  `relay_count` are refused by name, and the hop budget is checked at the client rather than
+  left to the model.
 - **The spec surface.** `SpecGet` returns the parsed spec beside its source hash;
   `SpecApply` takes typed edits, applies them with `toml_edit` so the operator's comments
   survive, and reloads. `subscribe` is the one continuous stream, and `spec_reloaded` makes

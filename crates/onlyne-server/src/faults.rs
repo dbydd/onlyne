@@ -29,6 +29,9 @@ pub const KIND_HOOK_FAILED: &str = "hook_failed";
 /// The state every freshly recorded fault starts in.
 pub const STATE_OPEN: &str = "open";
 
+/// How many rows one `repair_ack_many` without a `--limit` may close.
+pub const ACK_MANY_PAGE: u32 = 1000;
+
 /// One fault about to be recorded.
 #[derive(Debug, Clone, Default)]
 pub struct FaultDraft {
@@ -389,6 +392,40 @@ pub fn repair(state: &Arc<State>, op: &AdminOp) -> anyhow::Result<Result<Value, 
             };
             state.emit(Event::Fault(event))?;
             Ok(Ok(json!({ "fault_id": ack.fault_id, "state": "acked" })))
+        }
+        AdminOp::RepairAckMany(batch) => {
+            // The reason rides each closed row's fault event, the way a single
+            // ack's reason does; the ids answer which rows this call closed.
+            let closed = state.ledger.ack_faults_batch(
+                batch.kind.as_deref(),
+                batch.before.map(|at| at.to_rfc3339()),
+                batch.limit.unwrap_or(ACK_MANY_PAGE),
+            )?;
+            for id in &closed {
+                let row = state
+                    .ledger
+                    .faults_query(FaultQuery {
+                        limit: 1,
+                        ..FaultQuery::default()
+                    })?
+                    .into_iter()
+                    .find(|row| row.id == *id);
+                let event = match row {
+                    Some(row) => event_from_row(&row, Some("acked")),
+                    None => FaultEvent {
+                        id: *id,
+                        state: Some("acked".to_string()),
+                        reason: batch.reason.clone(),
+                        ..FaultEvent::default()
+                    },
+                };
+                state.emit(Event::Fault(event))?;
+            }
+            Ok(Ok(json!({
+                "acked": closed.len(),
+                "fault_ids": closed,
+                "state": "acked",
+            })))
         }
         _ => Ok(Err(RelayReject::new(
             ErrorCode::UnknownOp,

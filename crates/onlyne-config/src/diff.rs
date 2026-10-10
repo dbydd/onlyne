@@ -224,6 +224,9 @@ fn changed_client_fields(before: &ClientEntry, after: &ClientEntry) -> Vec<Strin
     if before.allowed_targets != after.allowed_targets {
         fields.push("allowed_targets".to_string());
     }
+    if before.owes_targets != after.owes_targets {
+        fields.push("owes_targets".to_string());
+    }
     if before.runtime != after.runtime {
         fields.push("runtime".to_string());
     }

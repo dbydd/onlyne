@@ -76,6 +76,8 @@ max_sessions = 3
 allowed_senders = ["*"]
 # allowed_targets lists roles this role may reach. Read by acl_allows before the ledger write. Default: empty list, which denies every target. ["*"] admits every registered role. On the entry of a role named `_supervisor` this list is the only gate: an empty one reaches every registered role, and a non-empty one names the reachable roles exactly.
 allowed_targets = ["builder", "reviewer", "_supervisor"]
+# owes_targets lists the roles a session of this role owes a delivery to before it may report a terminal outcome: the completion guard refuses while any name on it has not received a delivery from that session. Reach is permission and never compels one, so the obligation is its own declaration. Default: empty list, which owes nothing. Every name must be reachable through allowed_targets, through "*", or as the role's own name — the loader refuses an obligation the ACL could never satisfy.
+owes_targets = ["builder"]
 # aggregate marks this role as the representative of an external cluster. Read by the server and the generate driver as an annotation. Default: empty string, which marks a local role.
 aggregate = ""
 # reconnect_grace_secs is not a key of this file. The window a dropped plugin connection may stay away before its role client retires the task-free session it left behind is read from that role's own workspace `.onlyne/config.toml` (Default: 60 seconds; 0 disables the sweep). A key this schema does not know is warned about and ignored, so a line here would start the server and quietly do nothing; a wrong value on a real key refuses the start; and the keys v2 retired by name (`backend`, `relay_required`, `relay_required_count`, `relay_count`) are refused by name with BACKEND_IS_GONE or RELAY_IS_GONE.

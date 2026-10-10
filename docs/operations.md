@@ -127,6 +127,8 @@ Both verbs follow the same rule for `--backend-ref`: a value that parses entirel
 
 `onlyne repair ack --fault-id <fault-id> --reason <reason>` acknowledges a fault.
 
+`onlyne repair ack-many --reason <reason> [--kind <kind>] [--before <rfc3339>] [--limit <n>]` acknowledges every open fault the filter names in one call. One of `--kind` or `--before` is required; the empty filter is refused rather than read as "every fault". `--kind` matches the fault kind verbatim (`heartbeat_missing`, `stalled`, …), `--before` closes only rows created strictly before that instant, and `--limit` caps the pass (default 1000). The answer is `{"acked": <n>, "fault_ids": [...], "state": "acked"}`, and each closed row emits its own `fault` event with the given reason.
+
 The repair family uses the admin plane, which is the server root's runtime socket at `<runtime-dir>/<digest>.sock`.
 
 The repair family does not pass through the role workspace's adapter socket.
@@ -692,6 +694,8 @@ fault 通过 advisory `Event::Fault` 推给观察者。
 `onlyne repair close --task <id> --reason <reason>` 关闭恢复工作。
 
 `onlyne repair ack --fault-id <fault-id> --reason <reason>` 确认一条 fault。
+
+`onlyne repair ack-many --reason <reason> [--kind <kind>] [--before <rfc3339>] [--limit <n>]` 一次确认过滤命中的全部 open fault。`--kind` 与 `--before` 至少给一个，空过滤被拒绝而不是读成「全部」。`--kind` 按 fault 类型原文匹配（`heartbeat_missing`、`stalled` 等），`--before` 只关创建时间严格早于该时刻的行，`--limit` 限制单次批量（默认 1000）。应答为 `{"acked": <n>, "fault_ids": [...], "state": "acked"}`，每条被关的行各发一条带该 reason 的 `fault` 事件。
 
 repair 族走 admin 面，也就是 server root 在运行目录里的那条 socket：`<runtime-dir>/<digest>.sock`。
 

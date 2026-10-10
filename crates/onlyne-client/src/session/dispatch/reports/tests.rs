@@ -319,3 +319,174 @@ async fn a_turn_ending_over_an_open_task_nudges_once_and_then_settles() {
         "a settlement that names no reason leaves a hook with the fact and none of the cause"
     );
 }
+
+/// One settled session with its runtime still on the wire, the shape every
+/// non-completion ending leaves: the delivery is over and the process behind it
+/// is still reachable.
+async fn settled_with_attached_runtime(
+    state: &DispatchState,
+    task: &str,
+) -> (
+    AdapterIo,
+    tokio::sync::mpsc::Receiver<onlyne_adapter::IncomingFrame>,
+) {
+    seeded_ready(state, task);
+    opened_task(state, task);
+    serving_slot(state, task, "msg-open");
+    {
+        let inner = state.inner.lock();
+        crate::reconcile::feed_resource_attached(&inner.bridge, &inner.store, task)
+            .expect("the resource is attached");
+    }
+    let (client_side, test_side) = tokio::io::duplex(4096);
+    let serving = AdapterIo::new(client_side, Duration::from_secs(5), Duration::from_secs(5));
+    let (plugin, inbound) =
+        AdapterIo::new_with_inbound(test_side, Duration::from_secs(5), Duration::from_secs(5));
+    {
+        let mut inner = state.inner.lock();
+        inner
+            .transports
+            .insert(task.to_string(), (serving, vec![Capability::Recycle]));
+    }
+    (plugin, inbound)
+}
+
+/// A delivery its scope does not keep ends the session, and the runtime is told
+/// so even when no completion exit ran.
+///
+/// A `blocked` settle and a failed report have no handover of their own, and the
+/// retirement keeps a session with an attached transport — rightly, that
+/// exemption is how a pool member lives — so without the leave request the
+/// process and its pane stayed for as long as the client ran.
+#[tokio::test]
+async fn a_settled_non_kept_session_asks_its_runtime_to_leave() {
+    let dir = tempdir().expect("tempdir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    let (_plugin, mut inbound) = settled_with_attached_runtime(&state, &task).await;
+
+    on_out(
+        &state,
+        &task,
+        Outcome::Blocked,
+        Some("waiting on the outside".to_string()),
+        None,
+        SettleAuthority::ClientOwned,
+    )
+    .await
+    .expect("the ending settles");
+
+    match tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+        .await
+        .expect("a leave request reaches the runtime")
+        .expect("the connection stays open")
+        .msg
+    {
+        AdapterMsg::Host(HostOp::Recycle(args)) => {
+            assert_eq!(args.task_id, task, "the request names the session it frees");
+            assert_eq!(args.outcome, None, "the leave request settles nothing");
+        }
+        other => panic!("a settled non-kept session owes its runtime a leave request: {other:?}"),
+    }
+    let inner = state.inner.lock();
+    assert!(
+        inner
+            .sessions
+            .get(&task)
+            .is_some_and(|slot| slot.task_id.is_none()),
+        "the session waits for its runtime to leave"
+    );
+}
+
+/// The leave request is for sessions the scope does not keep. A `task`/`role`
+/// member between deliveries is a pool member, and asking it to go would empty
+/// the pool this client just promised its family.
+#[tokio::test]
+async fn a_kept_session_between_deliveries_is_not_asked_to_leave() {
+    let dir = tempdir().expect("tempdir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    let (_plugin, mut inbound) = settled_with_attached_runtime(&state, &task).await;
+    {
+        let mut inner = state.inner.lock();
+        inner
+            .sessions
+            .get_mut(&task)
+            .expect("the staged slot")
+            .keeps_idle = true;
+    }
+
+    on_out(
+        &state,
+        &task,
+        Outcome::Done,
+        Some("finished".to_string()),
+        None,
+        SettleAuthority::ClientOwned,
+    )
+    .await
+    .expect("the ending settles");
+
+    assert!(
+        inbound.try_recv().is_err(),
+        "a kept session between deliveries is not asked to leave"
+    );
+    let inner = state.inner.lock();
+    assert!(
+        inner.sessions.contains_key(&task),
+        "the kept session stays for its family's next delivery"
+    );
+}
+
+/// An operator's close reaches a settled session's process.
+///
+/// The slot serves no task once its delivery settled, so a lookup that only
+/// asks for a bound task would find nothing to close: the task's row moved and
+/// the runtime and its pane stayed. The close falls back to the session the
+/// task id names, and the resource ends.
+#[tokio::test]
+async fn a_close_reaches_a_settled_session_that_serves_no_task() {
+    let dir = tempdir().expect("tempdir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    let (_plugin, mut inbound) = settled_with_attached_runtime(&state, &task).await;
+    on_out(
+        &state,
+        &task,
+        Outcome::Done,
+        Some("finished".to_string()),
+        None,
+        SettleAuthority::ClientOwned,
+    )
+    .await
+    .expect("the ending settles");
+    let _leave = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+        .await
+        .expect("the leave request leaves first")
+        .expect("the connection stays open");
+
+    {
+        let mut inner = state.inner.lock();
+        super::super::retire::release_locked(
+            &mut inner,
+            &task,
+            Some(crate::backend::CloseReason::Cancelled),
+        )
+        .expect("the operator's close");
+        assert!(
+            !inner.sessions.contains_key(&task),
+            "the closed session leaves this client's books"
+        );
+    }
+    let inner = state.inner.lock();
+    let row = inner
+        .store
+        .get_session(&task)
+        .expect("read the row")
+        .expect("the session row");
+    assert_eq!(row.agent_state, "gone", "the close feeds the agent's exit");
+    assert_eq!(
+        row.resource_state, "closed",
+        "the close reaches the resource the settled session left behind"
+    );
+}

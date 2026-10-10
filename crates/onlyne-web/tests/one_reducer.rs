@@ -50,6 +50,7 @@ fn role_info(name: &str, edges: Vec<&str>) -> onlyne_proto::RoleInfo {
         sessions: 0,
         queued: 0,
         edges: edges.into_iter().map(String::from).collect(),
+        owes_targets: Vec::new(),
         detail: None,
         aggregate: None,
     }

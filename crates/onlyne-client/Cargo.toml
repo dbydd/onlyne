@@ -1,6 +1,6 @@
 [package]
 name = "onlyne-client"
-version = "2.1.1"
+version = "2.1.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -8,14 +8,14 @@ repository.workspace = true
 description = "Onlyne client: role runtime, dispatch, intent, adapter socket"
 
 [dependencies]
-onlyne-wire = { path = "../onlyne-wire", version = "2.1.1" }
-onlyne-proto = { path = "../onlyne-proto", version = "2.1.1" }
-onlyne-store = { path = "../onlyne-store", version = "2.1.1" }
-onlyne-config = { path = "../onlyne-config", version = "2.1.1" }
+onlyne-wire = { path = "../onlyne-wire", version = "2.1.2" }
+onlyne-proto = { path = "../onlyne-proto", version = "2.1.2" }
+onlyne-store = { path = "../onlyne-store", version = "2.1.2" }
+onlyne-config = { path = "../onlyne-config", version = "2.1.2" }
 interprocess = { workspace = true }
-onlyne-acp = { path = "../onlyne-acp", version = "2.1.1" }
-onlyne-adapter = { path = "../onlyne-adapter", version = "2.1.1" }
-onlyne-net = { path = "../onlyne-net", version = "2.1.1" }
+onlyne-acp = { path = "../onlyne-acp", version = "2.1.2" }
+onlyne-adapter = { path = "../onlyne-adapter", version = "2.1.2" }
+onlyne-net = { path = "../onlyne-net", version = "2.1.2" }
 anyhow = "1.0"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }

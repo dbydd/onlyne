@@ -18,8 +18,8 @@ use crate::state::State;
 use onlyne_config::layout::ServerRoot;
 use onlyne_config::{Drive as FileDrive, RuntimeSection, Spec, source_hash};
 use onlyne_proto::{
-    Drive as WireDrive, ErrorCode, RemoveRole, ResBody, RoleRuntime, SetProse, SetRuntime,
-    SetSenders, SetSession, SetTargets, SpecApply, SpecEdit, SpecView, UpsertRole,
+    Drive as WireDrive, ErrorCode, RemoveRole, ResBody, RoleRuntime, SetOwesTargets, SetProse,
+    SetRuntime, SetSenders, SetSession, SetTargets, SpecApply, SpecEdit, SpecView, UpsertRole,
 };
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -237,6 +237,7 @@ fn apply_edits(document: &mut DocumentMut, edits: &[SpecEdit]) -> Result<(), Ref
             SpecEdit::UpsertRole(edit) => upsert_role(document, edit)?,
             SpecEdit::RemoveRole(edit) => remove_role(document, edit)?,
             SpecEdit::SetTargets(edit) => set_targets(document, edit)?,
+            SpecEdit::SetOwesTargets(edit) => set_owes_targets(document, edit)?,
             SpecEdit::SetSenders(edit) => set_senders(document, edit)?,
             SpecEdit::SetProse(edit) => set_prose(document, edit)?,
             SpecEdit::SetSession(edit) => set_session(document, edit)?,
@@ -338,6 +339,12 @@ fn remove_role(document: &mut DocumentMut, edit: &RemoveRole) -> Result<(), Refu
 fn set_targets(document: &mut DocumentMut, edit: &SetTargets) -> Result<(), Refusal> {
     let entry = require_entry(document, &edit.role)?;
     set_string_array(entry, "allowed_targets", &edit.targets)
+}
+
+/// `set_owes_targets`: replace the roles this role's sessions owe a delivery to.
+fn set_owes_targets(document: &mut DocumentMut, edit: &SetOwesTargets) -> Result<(), Refusal> {
+    let entry = require_entry(document, &edit.role)?;
+    set_string_array(entry, "owes_targets", &edit.targets)
 }
 
 /// `set_senders`: replace the roles that reach this one.

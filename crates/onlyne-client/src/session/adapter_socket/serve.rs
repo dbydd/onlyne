@@ -327,6 +327,15 @@ impl AdapterSocket {
                 AdapterMsg::Plugin(PluginOp::Report(report)) => {
                     let body = if tools {
                         self.tools_report(&io, report).await
+                    } else if let Some(refusal) = self.dispatch.completion_refusal(Some(&io), &report)
+                    {
+                        // The client's own constraints answer before the frame is
+                        // applied, the same `ResBody` the tools door hands its own
+                        // mount (`docs/v2-CONTRACT.md` §3b): one checkpoint, both
+                        // drives. A refusal is the failed tool call it is — the
+                        // plugin raises it to the model, and nothing half-written
+                        // is left on the row.
+                        refusal
                     } else {
                         let result = match report {
                             Report::Ready {

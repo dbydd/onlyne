@@ -185,11 +185,12 @@ pub(super) fn record_delivery(inner: &mut DispatchInner, key: &str, to: &Princip
 
 /// The relay guard's refusal, when the session still owes a delivery.
 ///
-/// The obligation is the role's own `allowed_targets`: the list the server
-/// gates the ACL on, which the handshake carries (and a reload's role row
-/// re-carries). A session of that role must have delivered to every downstream
-/// name on it before it may report a terminal outcome, and a role that declares
-/// no target owes nothing.
+/// The obligation is the role's own `owes_targets`: its own declaration,
+/// carried by the handshake (and re-carried by a reload's role row), separate
+/// from the `allowed_targets` the server gates the ACL on. Reach is permission
+/// and never compels a delivery. A session of that role must have delivered to
+/// every downstream name on the list before it may report a terminal outcome,
+/// and a role that declares none owes nothing.
 ///
 /// The role this session's task came from is never one of them. The completion
 /// is itself a delivery to that role — the one the ledger books the answer

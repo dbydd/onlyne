@@ -3,8 +3,8 @@
 use onlyne_proto::{
     AdminOp, ClientOp, ErrorCode, Event, EventRow, EventTier, Frame,
     HistoryArgs as ProtoHistoryArgs, LedgerQuery, LedgerState, Lifecycle, MsgKind, QueryFaultsArgs,
-    QueryRolesArgs, QuerySessionsArgs, RepairAck, RepairAdopt, RepairFail, RepairRebind,
-    RepairTarget, ResBody, Subscribe, new_id,
+    QueryRolesArgs, QuerySessionsArgs, RepairAck, RepairAckMany, RepairAdopt, RepairFail,
+    RepairRebind, RepairTarget, ResBody, Subscribe, new_id,
 };
 use onlyne_server::events::RESYNC_LAG_KIND;
 use onlyne_wire::FrameReader;
@@ -53,6 +53,10 @@ pub enum RepairVerb {
     Close(RepairTargetArgs),
     /// Close one fault record by id as handled, leaving ledger rows alone.
     Ack(RepairAckArgs),
+    /// Close every open fault the filter names as handled. One of `--kind` or
+    /// `--before` is required: the empty filter is refused rather than read as
+    /// "every fault".
+    AckMany(RepairAckManyArgs),
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -113,6 +117,22 @@ pub struct RepairFailArgs {
 pub struct RepairAckArgs {
     #[arg(long = "fault-id")]
     pub fault_id: i64,
+    #[arg(long)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct RepairAckManyArgs {
+    /// Fault kind to close verbatim (`heartbeat_missing`, `stalled`, …).
+    #[arg(long)]
+    pub kind: Option<String>,
+    /// Close only faults created strictly before this RFC 3339 instant.
+    #[arg(long)]
+    pub before: Option<String>,
+    /// Cap the pass at this many rows (default 1000).
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Recorded as the reason on every row this verb closes.
     #[arg(long)]
     pub reason: String,
 }
@@ -794,6 +814,31 @@ pub fn repair(flags: &GlobalFlags, verb: RepairVerb) -> i32 {
             fault_id: args.fault_id,
             reason: args.reason,
         }),
+        RepairVerb::AckMany(args) => {
+            if args.kind.is_none() && args.before.is_none() {
+                return runtime::usage_error(
+                    "onlyne: repair ack-many needs --kind or --before; refusing every fault"
+                        .to_string(),
+                );
+            }
+            let before = match args.before {
+                Some(text) => match chrono::DateTime::parse_from_rfc3339(&text) {
+                    Ok(parsed) => Some(parsed.with_timezone(&chrono::Utc)),
+                    Err(error) => {
+                        return runtime::usage_error(format!(
+                            "onlyne: --before needs an RFC 3339 timestamp: {error}"
+                        ));
+                    }
+                },
+                None => None,
+            };
+            AdminOp::RepairAckMany(RepairAckMany {
+                kind: args.kind,
+                before,
+                limit: args.limit,
+                reason: args.reason,
+            })
+        }
     };
     admin(flags, "repair", op)
 }

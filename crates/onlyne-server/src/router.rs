@@ -307,7 +307,8 @@ pub async fn dispatch_admin(state: &Arc<State>, session: &mut Session, op: Admin
         | AdminOp::RepairRetry(_)
         | AdminOp::RepairFail(_)
         | AdminOp::RepairClose(_)
-        | AdminOp::RepairAck(_) => match faults::repair(state, &op) {
+        | AdminOp::RepairAck(_)
+        | AdminOp::RepairAckMany(_) => match faults::repair(state, &op) {
             Ok(Ok(value)) => ResBody::ok(value),
             Ok(Err(reject)) => reject.body(),
             Err(error) => internal(error),
@@ -451,6 +452,7 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
         prose: entry.prose.clone(),
         spec_hash: spec.semantic_hash(),
         allowed_targets: entry.allowed_targets.clone(),
+        owes_targets: entry.owes_targets.clone(),
         allowed_senders: entry.allowed_senders.clone(),
         runtime: Some(role_runtime(&entry.runtime)),
         timeout_ready_ms: Some(entry.timeout.ready_ms),
@@ -591,6 +593,7 @@ pub fn roles(state: &Arc<State>, query: &QueryRolesArgs) -> anyhow::Result<Vec<R
             queued,
             detail,
             edges: entry.allowed_targets.clone(),
+            owes_targets: entry.owes_targets.clone(),
             aggregate: (!entry.aggregate.is_empty()).then(|| entry.aggregate.clone()),
         });
     }

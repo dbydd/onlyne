@@ -4,7 +4,7 @@ use super::outbound::store_ack;
 use super::projection::stored_task_state;
 use super::state::{
     DispatchInner, DispatchState, forget_tools_binding, has_attached_transport, session_exited,
-    slot_key_serving_task,
+    slot_key_named, slot_key_serving_task,
 };
 use super::transport::{held_read_only, names_session};
 
@@ -308,8 +308,16 @@ pub(super) fn release_locked(
         .get_session(task_id)?
         .map(|row| row.resource_state)
         .unwrap_or_else(|| "detached".to_string());
-    if let Some((key, slot)) = slot_key_serving_task(inner, task_id)
-        .and_then(|key| inner.sessions.get(&key).map(|slot| (key, slot.clone())))
+    // A client-held session is named by the delivery it was born for, and once
+    // that delivery settled the slot serves no task. An operator's close still
+    // has to reach the process it left behind, so the lookup falls back to the
+    // session that id names — but only for a session its scope does not keep: a
+    // pool member between deliveries is not a leftover, and the operator's word
+    // on an old settled task of one is not its ending.
+    let key = slot_key_serving_task(inner, task_id)
+        .or_else(|| slot_key_named(inner, task_id).filter(|key| !keeps_idle(inner, key)));
+    if let Some((key, slot)) =
+        key.and_then(|key| inner.sessions.get(&key).map(|slot| (key, slot.clone())))
     {
         if let Some(reason) = reason {
             if resource != "detached" && resource != "closed" {
