@@ -3,29 +3,29 @@
 class Onlyne < Formula
   desc "Workspace-scoped channel and routing layer for agents"
   homepage "https://github.com/dbydd/onlyne"
-  url "https://github.com/dbydd/onlyne/releases/download/v2.1.1/onlyne-2.1.1-aarch64-apple-darwin.tar.gz"
-  version "2.1.1"
+  url "https://github.com/dbydd/onlyne/releases/download/v2.1.2/onlyne-2.1.2-aarch64-apple-darwin.tar.gz"
+  version "2.1.2"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/dbydd/onlyne/releases/download/v2.1.1/onlyne-2.1.1-aarch64-apple-darwin.tar.gz"
-      sha256 "dfa1605f90610f8ec019fd99009ddffccad27bf3c44613b3bd80e54f8b0243d6"
+      url "https://github.com/dbydd/onlyne/releases/download/v2.1.2/onlyne-2.1.2-aarch64-apple-darwin.tar.gz"
+      sha256 "42f3c4cc4f6caa4650adb2619f50a98a27b74ccc63adef5681465ea5894f9aa7"
     end
     on_intel do
-      url "https://github.com/dbydd/onlyne/releases/download/v2.1.1/onlyne-2.1.1-x86_64-apple-darwin.tar.gz"
-      sha256 "38869590fa016cfca369d9f6fa6b397e0fe5e107f7f5b380560dfecc4baa66b9"
+      url "https://github.com/dbydd/onlyne/releases/download/v2.1.2/onlyne-2.1.2-x86_64-apple-darwin.tar.gz"
+      sha256 "d3c1974d911e348903110387c7781e8e1bccb7a9f141e00a2361c3aa68c7f703"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/dbydd/onlyne/releases/download/v2.1.1/onlyne-2.1.1-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "ca44c2af81ff1357eae9ba6b180dd7af98a39cc0292b9f31c2f4680fff163632"
+      url "https://github.com/dbydd/onlyne/releases/download/v2.1.2/onlyne-2.1.2-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "17242217c1cc7830bf25823038e84af6925b0b39cac3909f29511c3ed37abd69"
     end
     on_intel do
-      url "https://github.com/dbydd/onlyne/releases/download/v2.1.1/onlyne-2.1.1-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "6b1c8d4bfcae6ea57745e60f897e8ff8b0d4a4b70c2d0ffefef3d71db8e53465"
+      url "https://github.com/dbydd/onlyne/releases/download/v2.1.2/onlyne-2.1.2-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "30efe13faf3a91fb48108f932cf87fb3fb9a611792c7d9e590f0f2699dae670a"
     end
   end
 
