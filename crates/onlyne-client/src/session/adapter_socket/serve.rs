@@ -1,6 +1,6 @@
 use super::socket::AdapterSocket;
 use crate::session::dispatch::{
-    DispatchState, ReadyNotice, on_plugin_report, on_ready, sync_frame, sync_session,
+    DispatchState, ReadyNotice, SettledNotice, on_plugin_report, on_ready, sync_frame, sync_session,
 };
 use anyhow::{Context, Result};
 use onlyne_adapter::{AdapterIo, AdapterServer, ServerConnection};
@@ -99,7 +99,7 @@ impl AdapterSocket {
                     None => result_to_body(
                         on_plugin_report(&self.dispatch, None, report)
                             .await
-                            .map(|()| serde_json::Value::Null),
+                            .map(report_answer),
                     ),
                 }
             }
@@ -364,7 +364,7 @@ impl AdapterSocket {
                             // serves.
                             other => on_plugin_report(&self.dispatch, Some(&io), other)
                                 .await
-                                .map(|()| serde_json::Value::Null),
+                                .map(report_answer),
                         };
                         result_to_body(result)
                     };
@@ -592,7 +592,7 @@ impl AdapterSocket {
             return refusal;
         }
         match on_plugin_report(&self.dispatch, Some(io), report).await {
-            Ok(()) => ResBody::ok(serde_json::Value::Null),
+            Ok(answered) => ResBody::ok(report_answer(answered)),
             Err(error) => ResBody::err(ErrorCode::Internal, error.to_string(), None),
         }
     }
@@ -712,6 +712,19 @@ fn result_to_body(result: Result<serde_json::Value>) -> ResBody {
     match result {
         Ok(value) => ResBody::ok(value),
         Err(error) => ResBody::err(ErrorCode::Internal, error.to_string(), None),
+    }
+}
+
+/// The body one `report` frame is answered with.
+///
+/// A completion that met a standing verdict carries it
+/// ([`SettledNotice::answer`]), which is how a session that reports into a task
+/// somebody else already answered learns it was not the one who settled it.
+/// Every other report answers `null`: applied, and nothing more to say.
+fn report_answer(answered: Option<SettledNotice>) -> serde_json::Value {
+    match answered {
+        Some(notice) => notice.answer(),
+        None => serde_json::Value::Null,
     }
 }
 

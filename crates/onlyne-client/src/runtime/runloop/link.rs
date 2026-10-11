@@ -1,4 +1,6 @@
-use super::config::{ClientInit, FLUSH_PAUSE_MS, READINESS_POLL_MS, RunState, reconnect_backoff};
+use super::config::{
+    ClientInit, FLUSH_PAUSE_MS, READINESS_POLL_MS, RunState, SUSPEND_GAP_MS, reconnect_backoff,
+};
 use super::run::pull_ack_loop;
 use super::sessions::{
     refresh_role_slice, scan_control_settles, scan_idle_sessions, scan_reclaimed_resources,
@@ -12,7 +14,7 @@ use onlyne_net::retry_of;
 use onlyne_proto::{ClientOp, EventTier, Frame, LiveSession, Retry, Subscribe};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 /// Keep the server link up until a permanent failure ends the run.
@@ -104,8 +106,28 @@ pub(super) async fn run_link(init: &ClientInit, link: &ClientLink, state: &RunSt
 /// Follow the connection state and re-run the post-reconnect order.
 pub(super) async fn watch_readiness(link: ClientLink, state: RunState) -> Result<()> {
     let mut ready = true;
+    // The moment the previous pass began, kept so the next one can tell a tick
+    // that was merely late from a process that was not running at all.
+    let mut last_tick = Instant::now();
     loop {
         sleep(Duration::from_millis(READINESS_POLL_MS)).await;
+        let now = Instant::now();
+        if now.saturating_duration_since(last_tick) > Duration::from_millis(SUSPEND_GAP_MS) {
+            // The machine slept, or something held this runtime still for far
+            // longer than a tick. Either way the two durations the sweeps below
+            // compare are about a stretch of time in which no agent of this
+            // client could do anything, so they are rebased before they are
+            // read (`DispatchState::note_resume`): a session that went quiet
+            // when the lid closed is not a session that went quiet while alive.
+            let late = now.saturating_duration_since(last_tick);
+            let rebased = state.dispatch.note_resume(last_tick, now);
+            tracing::warn!(
+                late_secs = late.as_secs(),
+                rebased,
+                "the readiness tick came back late; the liveness windows were rebased"
+            );
+        }
+        last_tick = now;
         scan_reclaimed_resources(&state).await;
         scan_stalls(&state).await;
         scan_reconnect_grace(&state).await;

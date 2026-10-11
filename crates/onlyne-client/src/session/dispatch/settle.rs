@@ -16,6 +16,83 @@ use onlyne_proto::adapter::HandoffArgs;
 /// reading that refused the frame.
 pub const SETTLE_WITHOUT_TURN: &str = "settle_without_turn";
 
+/// The standing verdict a completion met, when its task had already taken one.
+///
+/// A completion that arrives behind a standing verdict is answered, not
+/// refused: a plugin treats a failed report as a link that died and sends the
+/// same terminal fact again, so the frame is still applied and its answer
+/// carries this notice instead (`Report::Complete`'s answer in
+/// `adapter_socket`). It is what lets the reporting session see that the task
+/// was settled before its call — by a subagent, by an earlier turn's failure,
+/// by a sweep — rather than reading the client's silence as "your report
+/// landed". A model that can read the difference keeps working through the
+/// escape the situation actually has (a new family, `onlyne_send kind=task`)
+/// instead of reporting into a row nobody will move.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettledNotice {
+    /// The verdict the task keeps, in `TaskState`'s own tag.
+    pub state: TaskState,
+    /// When that verdict was stamped (RFC 3339, the store's own spelling).
+    pub settled_at: Option<String>,
+    /// The display line the standing verdict wrote, when it wrote one.
+    pub head: Option<String>,
+}
+
+impl SettledNotice {
+    /// The answer body one completion-behind-a-verdict earns.
+    ///
+    /// `{"already_settled": {"state": "failed", "settled_at": "...", "head":
+    /// "..."}}` — one field, named for what happened, so a reader that knows
+    /// nothing about this client can still tell an applied report from one the
+    /// task had already answered.
+    pub fn answer(&self) -> serde_json::Value {
+        serde_json::json!({
+            "already_settled": {
+                "state": self.state,
+                "settled_at": self.settled_at,
+                "head": self.head,
+            }
+        })
+    }
+}
+
+/// A lifecycle enum's own wire word, the tag the store and the ledger store.
+fn state_word(state: TaskState) -> String {
+    match serde_json::to_value(state) {
+        Ok(serde_json::Value::String(text)) => text,
+        // Every `TaskState` variant is a unit variant, so this arm is
+        // unreachable for this enum and is kept only because the conversion is
+        // written generically. A debug spelling is still a sentence a model can
+        // read, which is the whole job here.
+        _ => format!("{state:?}").to_lowercase(),
+    }
+}
+
+/// The verdict a task's own row carries, read under a caller's lock.
+fn settled_notice_locked(inner: &DispatchInner, task_id: &str) -> Option<SettledNotice> {
+    let record = inner.store.task(task_id).ok().flatten()?;
+    let settled_at = record.settled_at?;
+    let head = inner
+        .store
+        .out_head(task_id)
+        .ok()
+        .flatten()
+        .filter(|head| !head.is_empty());
+    Some(SettledNotice {
+        state: record.task_state,
+        settled_at: Some(settled_at),
+        head,
+    })
+}
+
+/// One settled notice in the words a refusal reads: `failed at 2026-10-11T…`.
+fn settled_label(notice: &SettledNotice) -> String {
+    match notice.settled_at.as_deref() {
+        Some(at) => format!("{} at {}", state_word(notice.state), at),
+        None => state_word(notice.state),
+    }
+}
+
 /// Who asked for one settle, which is what decides whether the never-ran guard
 /// reads it.
 ///
@@ -432,6 +509,19 @@ fn completion_envelope(
 }
 
 impl DispatchState {
+    /// The verdict a task already carries, when this client has one for it.
+    ///
+    /// The task's own row is the only place a verdict lives, and it is read
+    /// here for the two doors that must not invent one: a completion arriving
+    /// behind it (answered with [`SettledNotice::answer`]) and a handoff for a
+    /// closed family (refused with the same reading spelled out). A read that
+    /// fails or finds nothing answers `None`, which is the caller's own
+    /// sentence — an id this role never held is not this client's to explain.
+    pub fn settled_notice(&self, task_id: &str) -> Option<SettledNotice> {
+        let inner = self.inner.lock();
+        settled_notice_locked(&inner, task_id)
+    }
+
     /// Take one plugin `handoff` frame and answer what the plugin is told.
     ///
     /// The frame names the task the session is handing on and the role it goes
@@ -446,7 +536,11 @@ impl DispatchState {
     ///
     /// A frame is answered only for the connection serving the task it names.
     /// An unknown task and a foreign connection earn the same code and the same
-    /// field, and their messages say which of the two refused the frame.
+    /// field, and their messages say which of the two refused the frame. The
+    /// third reading is the task's own: a handoff follows a live family, so a
+    /// task this client has already settled is refused with its state and the
+    /// door out (a new family) — the session still holding it has no other way
+    /// to learn that its verdict landed before this frame did.
     pub fn plugin_handoff(&self, io: &AdapterIo, args: HandoffArgs) -> ResBody {
         let (role, parent) = {
             let inner = self.inner.lock();
@@ -457,11 +551,15 @@ impl DispatchState {
                     .map(|slot| (key, slot.causality.clone()))
             });
             let Some((key, parent)) = found else {
-                return ResBody::err(
-                    ErrorCode::Invalid,
-                    format!("no session serves task {}", args.task_id),
-                    Some("task_id".into()),
-                );
+                let message = match settled_notice_locked(&inner, &args.task_id) {
+                    Some(notice) => format!(
+                        "task {} is already settled ({}); its family is closed — start a new one with onlyne_send kind=task",
+                        args.task_id,
+                        settled_label(&notice),
+                    ),
+                    None => format!("no session serves task {}", args.task_id),
+                };
+                return ResBody::err(ErrorCode::Invalid, message, Some("task_id".into()));
             };
             if !serves_session(&inner, &key, io) {
                 return ResBody::err(

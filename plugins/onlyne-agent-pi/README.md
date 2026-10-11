@@ -14,6 +14,11 @@ Outside an onlyne session the extension is inert. The client injects `ONLYNE_ROL
 (`crates/onlyne-client/src/session/dispatch.rs`). With any of the three missing, this is an
 ordinary pi session: the plugin registers nothing and opens nothing.
 
+Only the session whose own id equals `ONLYNE_SESSION_ID` mounts. A pi process runs more
+than one session — a `task` subagent's sidechain, `/new` — and each of them loads this
+extension with the same inherited environment, so a session that is not the bound one
+stays inert and every onlyne tool it calls is refused.
+
 ```
 pi session (spawned by onlyne-client)
   │  env: ONLYNE_ROLE / ONLYNE_SESSION_ID / ONLYNE_TASK_ID
@@ -157,6 +162,14 @@ Each result is one plain sentence — the recipient for a send or a handoff, the
 for a completion. A tool result is model-visible, and nothing about the plugin's own
 bookkeeping belongs in it.
 
+The three tools belong to the session that mounted them. A pi process runs more than one
+session — a `task` subagent's sidechain, `/new` — and every one of them loads this
+extension with the same inherited environment, so a call from a session whose id is not
+`ONLYNE_SESSION_ID` is refused with a sentence naming both ids instead of settling the
+parent's task. A pi that does not expose a session id (there is no `getSessionId` in
+`ctx.sessionManager`) is allowed through: the env-bound mount is still the only one that
+connected.
+
 ### `onlyne_send{to, text, kind?, image?}`
 
 Sends one envelope on the `send` frame. `kind: "note"` (the default) is free text and
@@ -178,7 +191,10 @@ receive, with the client holding the ceiling and refusing an oversize body with 
 sentence (§3c of the contract). The call also ends the session's process: once the client
 has acknowledged the completion report (§4), the plugin asks pi to shut down through
 `ctx.shutdown()`. pi 0.85.1 has no tool-result `terminate` handling. The result is
-`reported <outcome>`.
+`reported <outcome>` — or, when a client that had already settled the task answers the
+report with its own record, `task already settled as <state> at <settled_at>: <head> —
+this call changed nothing`, which is the one case where the call did not cause the
+outcome it asked for.
 
 ### `onlyne_handoff{to, text, image?}`
 
@@ -196,33 +212,36 @@ of its own at hop 0.
 
 ## 4. Outcome rules
 
-`onlyne_complete` is the only path to `done`. The plugin sends one completion per task,
-at the first of these events:
+`onlyne_complete` is the only path to `done`, and it is the plugin's one completion path.
+The plugin sends one completion per task, at the first of these events:
 
 1. **`onlyne_complete`** — the model gives an explicit outcome: `done`, `failed`,
    `cancelled` or `blocked`. A later completion for the same task is refused (not
    re-reported). Its non-empty `summary` is the head.
-2. **An errored turn** — the turn ended with a provider error (`stopReason: "error"`).
-   That is proof on its own, so the plugin reports `failed` at once, with the error as
-   the head. The report itself waits until pi is waiting for input, so the beat that
-   carries it states a phase the session really has.
-3. **`recycle{outcome}`** — the host is tearing the session down. The plugin settles an
+2. **`recycle{outcome}`** — the host is tearing the session down. The plugin settles an
    unsettled task with the host's outcome first, then stops and exits pi.
 
-A turn that ends cleanly without a completion settles nothing here. The client owns that
-rule (`docs/v2-CONTRACT.md`, "3c. One turn-end rule"): it counts the endings, sends its
-own sentence as a `nudge`, and decides what a delivery that never reports becomes. The
-plugin hands the sentence to pi and answers only that it did, so the wording, the count
-and the settlement have one owner rather than two. A task whose injected message has not
-run a turn is left alone whatever a settle signal says: reporting now would claim work
-that never happened.
+A turn that ends without a completion settles nothing here, and neither does a turn that
+ends with one. The endings belong to the client (`docs/v2-CONTRACT.md`, "3c. One
+turn-end rule"): it counts them, sends its own sentence as a `nudge`, and decides what a
+delivery that never reports becomes; its own sweeps own a session whose agent died. The
+plugin hands the nudge to pi, answers only that it did, and reports only its phase and
+the completion the model asked for — one owner for the wording, the count and the
+settlement, rather than two. A task whose injected message has not run a turn is left
+alone whatever a settle signal says: reporting now would claim work that never happened.
+
+A turn that ended with a provider error (`stopReason: "error"`) is not a verdict either.
+pi retries a retryable provider error and stays inside the same run, and the client's
+nudge can restart a session a moment after it settles, so a report sent on the error
+would race work that is still going. The error only supplies the head fallback described
+below.
 
 `head` is a single line, capped at 200 characters; it matches what the client puts in
 `out_head` and what the receipt carries. Each task has one source for it: the `summary`
-of the explicit `onlyne_complete` call when that call carried one, or the error a failed
-turn reported. The last assistant text is the fallback for a call whose `summary` is
-empty — a sentence spoken after such a call cannot replace what the call handed over, and
-nothing else reads it.
+of the explicit `onlyne_complete` call when that call carried one. A call whose `summary`
+is empty falls back to what the session last said — the last assistant text, or the error
+of a turn that failed. The error is only ever that fallback: it is never a completion, and
+a sentence spoken after such a call cannot replace what the call handed over.
 
 A reported completion ends the session's process. `report.complete` goes out as a request,
 and the client answers it only after it has settled the session row, acked the delivery
@@ -230,6 +249,13 @@ and written the `Completion` envelope. The plugin asks pi to shut down at that a
 outcome the socket could not carry is queued and flushed after the next `hello`, and that
 flush's answer is the handover that ends the process. A completion the host refused leaves
 the process running, so an exit never loses the task.
+
+A client that had already settled this task answers the same request with
+`{"already_settled": {state, settled_at, head}}` instead of `null`. The plugin hands that
+record on rather than claiming an outcome it did not cause, and the tool result says so
+(§3); on the reconnect flush, where no tool result exists to carry it, the record reaches
+the `[pi-onlyne]` log. Either way the task stays settled: the client's row is the
+authority.
 
 The completion is the plugin's last report, and a session that has completed one answers
 no further beat and no `probe`. The terminal agent state is the client's own write: the
@@ -256,9 +282,9 @@ A background-task extension changes the question. `bg_run` and its siblings retu
 once and the work continues in a child process, so pi waits for input while the session's
 task is still in flight. The plugin recognises the extension by the tools it registered
 and asks its EventBus service for the live task list; a task in `running` status holds
-the session at `running`, and the one report the plugin owes at a turn end — the failure
-it witnessed itself — waits that out. On a session without the extension there is no tool
-to recognise, no query, and nothing to wait for.
+the session at `running`, so the beat states a phase the session really has. No report of
+the plugin's own waits on that: nothing is reported at a turn end any more. On a session
+without the extension there is no tool to recognise, no query, and nothing to wait for.
 
 ## 5. Protocol notes and deviations
 
@@ -403,6 +429,8 @@ agent's own output lands in `<ws>/.onlyne/logs/session-<task>.log`.
 
 在一个 onlyne 会话之外，扩展不会执行任何操作。客户端会向其启动的每个进程注入 `ONLYNE_ROLE`、`ONLYNE_SESSION_ID` 和 `ONLYNE_TASK_ID`（`crates/onlyne-client/src/session/dispatch.rs`）。任一变量缺失时，这就是一个普通的 pi 会话：插件不注册任何内容，也不打开任何内容。
 
+只有自身会话 id 等于 `ONLYNE_SESSION_ID` 的会话才会挂载。一个 pi 进程会跑不止一个会话——`task` 子代理的 sidechain、`/new`——它们都带着同一份继承来的环境变量加载本扩展，因此不是被绑定会话的那个会话保持静默，它发出的每一次 onlyne 工具调用都会被拒绝。
+
 ```
 pi session (spawned by onlyne-client)
   │  env: ONLYNE_ROLE / ONLYNE_SESSION_ID / ONLYNE_TASK_ID
@@ -522,6 +550,8 @@ pi API 缺失时会发生什么，以及主机随后如何处理：
 
 每个结果只有一句平实的话——send 与 handoff 给出发往的角色，complete 给出结果。工具结果是模型可见的，插件自己的簿记没有理由出现在里面。
 
+这三个工具属于挂载它们的那个会话。一个 pi 进程会跑不止一个会话——`task` 子代理的 sidechain、`/new`——它们都会带着同一份继承来的环境变量加载本扩展；因此，当调用的会话 id 不等于 `ONLYNE_SESSION_ID` 时，调用会被拒绝，并给出同时点名两个 id 的一句话，而不是去结算父任务。若该 pi 不暴露会话 id（`ctx.sessionManager` 没有 `getSessionId`），调用照常放行：此时唯一连上 socket 的仍然是那个由环境变量绑定的挂载。
+
 ### `onlyne_send{to, text, kind?, image?}`
 
 通过 `send` 帧发送一个信封。`kind: "note"`（默认值）是自由文本，不携带 `op_id`。`kind: "task"` 将工作移交给一个角色，因此携带 `o-<uuid>` 幂等键和新的 `causality.task`。`image` 是 `png/jpeg/gif/webp` 文件的绝对路径：插件读取该文件，进行 base64 编码，并将其作为 `body.image` 附加。核心将该文件限制为 2 MiB，并接受四种 mime 类型。
@@ -530,7 +560,7 @@ pi API 缺失时会发生什么，以及主机随后如何处理：
 
 ### `onlyne_complete{outcome, summary, details?, files?}`
 
-以明确结果结束当前任务——即 proto 的 `Outcome`：`done`、`failed`、`cancelled` 或 `blocked`。`summary` 是展示用的一行，原样成为账本的 `head`：空白折叠为一行，文本在 200 个字符处截断；`summary` 为空时不携带展示行，head 回退到最后一条助手文本。`details` 是完整结果，`files` 是它所点名的绝对路径：两者原样搭在 `report.complete` 帧上，也正是下游与发起方收到的东西，上限由客户端把守，超限正文由客户端用自己的句子拒绝（契约 §3c）。该调用也会结束会话进程：客户端确认完成报告后（见 §4），插件会通过 `ctx.shutdown()` 请求 pi 关闭。pi 0.85.1 没有工具结果的 `terminate` 处理。结果为 `reported <outcome>`。
+以明确结果结束当前任务——即 proto 的 `Outcome`：`done`、`failed`、`cancelled` 或 `blocked`。`summary` 是展示用的一行，原样成为账本的 `head`：空白折叠为一行，文本在 200 个字符处截断；`summary` 为空时不携带展示行，head 回退到最后一条助手文本。`details` 是完整结果，`files` 是它所点名的绝对路径：两者原样搭在 `report.complete` 帧上，也正是下游与发起方收到的东西，上限由客户端把守，超限正文由客户端用自己的句子拒绝（契约 §3c）。该调用也会结束会话进程：客户端确认完成报告后（见 §4），插件会通过 `ctx.shutdown()` 请求 pi 关闭。pi 0.85.1 没有工具结果的 `terminate` 处理。结果为 `reported <outcome>`；若客户端此前已经结算过该任务，它会用自己的记录作答，此时结果变成 `task already settled as <state> at <settled_at>: <head> — this call changed nothing`——这是调用并未造成它所请求的那个结果的唯一情形。
 
 ### `onlyne_handoff{to, text, image?}`
 
@@ -538,17 +568,20 @@ pi API 缺失时会发生什么，以及主机随后如何处理：
 
 ## 4. 结果规则
 
-`onlyne_complete` 是通向 `done` 的唯一路径。插件为每个任务发送一次完成报告，在以下事件中第一个发生时发送：
+`onlyne_complete` 是通向 `done` 的唯一路径，也是插件唯一的完成路径。插件为每个任务发送一次完成报告，在以下事件中第一个发生时发送：
 
 1. **`onlyne_complete`**——模型给出明确结果：`done`、`failed`、`cancelled` 或 `blocked`。同一任务后续的完成调用会被拒绝，不会再次报告。其非空 `summary` 就是 head。
-2. **出错的轮次**——该轮次以模型提供方错误结束（`stopReason: "error"`）。这本身即可证明出错，因此插件立即报告 `failed`，并将错误作为 head。报告本身要等到 pi 正在等待输入时才发出，因此承载它的那次心跳陈述的是会话真实的阶段。
-3. **`recycle{outcome}`**——主机正在拆除会话。插件先使用主机给出的结果确定尚未确定状态的任务，然后停止并退出 pi。
+2. **`recycle{outcome}`**——主机正在拆除会话。插件先使用主机给出的结果确定尚未确定状态的任务，然后停止并退出 pi。
 
-正常结束、但没有完成的轮次在这里不结算任何东西。那条规则由 client 拥有（`docs/v2-CONTRACT.md` 的「3c. One turn-end rule」）：它统计这类结束、把自己的一句话作为 `nudge` 发来，并决定一次始终不上报的投递会变成什么。插件把那句话交给 pi，并且只回答自己交出去了，于是措辞、计数与结算都只有一个拥有者，而不是两个。注入消息尚未跑过任何轮次的任务，无论结算信号说什么都不动：现在就上报等于宣称从未发生的工作已经完成。
+没有完成就结束的轮次在这里不结算任何东西，以错误结束的轮次同样不结算。结束这件事归 client（`docs/v2-CONTRACT.md` 的「3c. One turn-end rule」）：它统计这类结束、把自己的一句话作为 `nudge` 发来，并决定一次始终不上报的投递会变成什么；agent 已死的会话由它自己的清扫负责。插件把那句话交给 pi，并且只回答自己交出去了，同时只上报自己的阶段与模型主动要求的完成——措辞、计数与结算都只有一个拥有者，而不是两个。注入消息尚未跑过任何轮次的任务，无论结算信号说什么都不动：现在就上报等于宣称从未发生的工作已经完成。
 
-`head` 是单行文本，上限为 200 个字符；它与客户端写入 `out_head` 的内容以及回执携带的内容一致。每个任务的 `head` 只有一个来源：显式 `onlyne_complete` 调用携带 `summary` 时就是它，否则是失败轮次报告的错误。完全没有携带 `summary` 的调用，回退到最后一条助手文本；此类调用之后说出的句子不能替代调用已经交付的内容，也不会被其他任何内容读取。
+以提供方错误（`stopReason: "error"`）结束的轮次也不是结论：pi 会对可重试的提供方错误重试，并留在同一次运行里，而 client 的 nudge 可能在会话结算之后的一瞬间重新启动它，所以在这里发出报告只会与仍在进行的工作赛跑。错误只提供下面说的 head 回退。
+
+`head` 是单行文本，上限为 200 个字符；它与客户端写入 `out_head` 的内容以及回执携带的内容一致。每个任务的 `head` 只有一个来源：显式 `onlyne_complete` 调用携带 `summary` 时就是它。完全没有携带 `summary` 的调用回退到会话最后说过的话——最后一条助手文本，或失败轮次留下的错误。错误永远只是这个回退：它本身从不构成完成，而此类调用之后说出的句子不能替代调用已经交付的内容。
 
 已报告的完成会结束会话进程。`report.complete` 以请求形式发出；客户端仅在完成会话记录的处理、确认投递并写入 `Completion` 信封后才回复。插件在该回复到达时请求 pi 关闭。套接字无法传输的结果会进入队列，并在下一次 `hello` 之后刷新；该次刷新收到的回复即为结束进程的交接。主机拒绝的完成会让进程继续运行，因此进程退出不会导致任务丢失。
+
+若客户端此前已经结算过该任务，它会对同一个请求回答 `{"already_settled": {state, settled_at, head}}` 而不是 `null`。插件把这个记录原样转交，而不是声称一个并非由本次调用造成的结果，工具结果也照此说明（见 §3）；在重连补发那条路径上，没有工具结果可以承载它，记录会进入 `[pi-onlyne]` 日志。无论哪种情形任务都保持已结算：以客户端的那一行为准。
 
 完成报告是插件发出的最后一份报告；已经完成任务的会话不再回应心跳，也不再回应 `probe`。终态的 agent 维度由客户端自己写入：随后到达的 `detach` 会退役这个已无任务的会话，该路径会喂入 `AgentGone` 并发布这一行（`retire_idle_locked`，`crates/onlyne-client/src/session/dispatch/retire.rs`）。正在离开的进程不为自己声明阶段。
 
@@ -558,7 +591,7 @@ pi API 缺失时会发生什么，以及主机随后如何处理：
 
 插件向 pi 查询，而不是自行假设。`ctx.isIdle()` 回答是否还有运行、压缩或排队中的续跑，`ctx.hasPendingMessages()` 回答输入是否已经在路上；缺失或抛错的探针一律读作 `running`。`agent_settled` 通常是空闲声明落地的时刻，因为 pi 只在一次运行彻底结算之后才触发该事件；单个轮次的结束是另一个时刻。每 10 秒的心跳会在每次触发时重新向 pi 推导阶段，因此重新开始的运行不会留下过期的空闲读数。
 
-后台任务扩展改变了这个问题。`bg_run` 及其同类工具立即返回，工作继续在子进程中运行，于是 pi 在会话任务仍在进行时等待输入。插件通过该扩展注册的工具识别它，并向它的 EventBus 服务查询存活任务列表；处于 `running` 状态的任务会让会话保持 `running`，插件在轮次结束时欠下的那份报告——它自己目睹的失败——也要等它结束。没有安装该扩展的会话没有可识别的工具、没有查询，也就没有可等待的东西。
+后台任务扩展改变了这个问题。`bg_run` 及其同类工具立即返回，工作继续在子进程中运行，于是 pi 在会话任务仍在进行时等待输入。插件通过该扩展注册的工具识别它，并向它的 EventBus 服务查询存活任务列表；处于 `running` 状态的任务会让会话保持 `running`，于是心跳陈述的是会话真实的阶段。插件自己没有任何报告要等它结束：轮次结束时已经不再上报任何东西。没有安装该扩展的会话没有可识别的工具、没有查询，也就没有可等待的东西。
 
 ## 5. 协议说明与差异
 

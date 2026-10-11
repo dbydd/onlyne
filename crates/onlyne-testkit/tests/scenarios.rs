@@ -2789,3 +2789,140 @@ allowed_targets = ["peer"]"#,
     );
     println!("✓ Scenario 20: reach does not compel; a declared obligation does");
 }
+
+/// Scenario 21: a completion that meets a standing verdict is answered with it,
+/// and the first verdict keeps the row.
+///
+/// The live shape this comes from: a pi `task` subagent runs a sidechain in the
+/// same process, with the same inherited `ONLYNE_*` environment, and a
+/// `onlyne_complete` from it settled the parent's task while the parent kept
+/// writing (librarian task cfa73386). A sweep that ended a session mid-run did
+/// the same to another task (scriber 5ab3c749). Both sessions then read
+/// `reported done` for a row nobody would move, because the client answers a
+/// report as an applied frame whatever the verdict's history.
+///
+/// This case drives that second report off one live session: the script
+/// settles its delivery, keeps beating, and reports again; the client's answer
+/// is written to a workspace file (a fixture cannot testify about a body the
+/// host wrote) and read back here.
+#[tokio::test]
+async fn scenario_21_a_completion_behind_a_verdict_is_answered_with_it() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker"]
+max_sessions = 2"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+    // `task` scope: the session outlives the delivery that settled, which is the
+    // shape both live defects had — a session still working after its task died.
+    append_client_session_config(&worker_ws, "task", "0s");
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+    cluster
+        .start_fake_agent(
+            &worker_ws,
+            &AgentScript {
+                hello: ScriptHello {
+                    capabilities: vec![
+                        onlyne_proto::Capability::Register,
+                        onlyne_proto::Capability::Report,
+                        onlyne_proto::Capability::Inject,
+                    ],
+                },
+                steps: vec![
+                    json!({"wait_assign": true}),
+                    json!({"report": "ready"}),
+                    json!({"report": "heartbeat"}),
+                    json!({"complete": {"outcome": "done", "head": "the first verdict"}}),
+                    // The session keeps working after the delivery settled: a
+                    // beat, then a second report for the task the first
+                    // completion already answered.
+                    json!({"sleep_ms": 150}),
+                    json!({"report": "heartbeat"}),
+                    json!({"complete": {"outcome": "failed", "head": "the second report",
+                                        "settled_to": "settled-answer.json"}}),
+                ],
+                repeat: false,
+            },
+        )
+        .await
+        .expect("start agent");
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+
+    let receipt = cluster
+        .admin_send("worker", "worker", "one delivery")
+        .await
+        .expect("send delivery");
+    let task = task_of(&receipt);
+
+    // The second report's answer is the verdict the task already carried, not a
+    // claim that this call settled it.
+    let answer_path = worker_ws.join("settled-answer.json");
+    let mut answer = String::new();
+    for _ in 0..300 {
+        if let Ok(text) = std::fs::read_to_string(&answer_path) {
+            answer = text;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !answer.is_empty(),
+        "the second completion's answer was never written to {}",
+        answer_path.display()
+    );
+    let answer: serde_json::Value =
+        serde_json::from_str(&answer).expect("the answer is one JSON body");
+    assert_eq!(
+        answer["already_settled"]["state"], "done",
+        "the answer names the verdict the task already had: {answer}"
+    );
+    assert_eq!(
+        answer["already_settled"]["head"], "the first verdict",
+        "and the head that verdict wrote: {answer}"
+    );
+
+    // The first verdict keeps the row: the late report wrote nothing.
+    let rows = cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(task),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter().any(|row| {
+                    row.kind == onlyne_proto::MsgKind::Completion
+                        && row.out_head.as_deref() == Some("the first verdict")
+                })
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the delivery keeps the verdict that settled it");
+    assert!(
+        rows.iter()
+            .all(|row| row.out_head.as_deref() != Some("the second report")),
+        "a report behind a verdict writes no row of its own: {rows:#?}"
+    );
+    println!("✓ Scenario 21: a completion behind a verdict is answered with it");
+}

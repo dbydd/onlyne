@@ -75,6 +75,23 @@ the TUI rebuilt on it as three pages and no map, and `onlyne-web` as an optional
 separately-installed binary. `onlyne-web` is excluded from the workspace, so the core
 build needs no Node.
 
+Landed after phase three, as v2.2: the **IM gateway**, a host process rather than a role
+(`docs/v2.2-IM-GATEWAY-PLAN.md`, `docs/v2.2-IM-GATEWAY-3B.md`). One IM conversation is one
+role: each conversation is an ordinary `[[client]]` with its own key, ACL row, and inbox, and
+the gateway holds one ordinary role link per conversation. An inbound platform event runs the
+operator's `[[im.push]]` scripts; an outbound delivery is rendered by a platform backend the
+gateway spawns. The server changed not at all: a conversation's mail arrives as ordinary role
+delivery.
+
+Its own module, not a `onlyne` verb: `onlyne-im` is a separate binary (`init`, `generate`,
+`login`, `run`, `check`), the way `onlyne-web` is, and the core build links in no chat SDK. A
+gateway root holds `.onlyne/config.toml` (`[server]`, `[[im.backend]]`, `[[im.push]]`) and one
+workspace per conversation under `conversations/<role>/`, where **the directory name is the
+role** — the file names only the conversation's coordinates. A conversation's runtime files
+(`chat.jsonl`, `media/`) live in that workspace. `generate` writes both halves of a new
+conversation in one run: the workspace, and the cluster's `[[client]]` row plus both ACL lists
+through the server's admin socket.
+
 When you finish a phase-one or phase-two item, update this table and the section it
 touches in the same change.
 
@@ -121,9 +138,12 @@ One word, one meaning, in prose and in code:
 | plugin | an extension inside a runtime that speaks the adapter protocol to the client |
 | binding | the correspondence between one delivery and one session |
 | task family | a chain of handoffs keyed by `causality.family` |
+| gateway | the IM host process (v2.2): one ordinary role link per IM conversation, the operator's trigger scripts, one spawned backend. A host, never a role and never a `Principal` |
+| backend | the platform-facing child process a gateway spawns, speaking the IM backend protocol over stdio; the platform SDK and all display code live there |
 
-`host` means only the adapter protocol's host side (client or server). The terminal host
-is called placement, never host.
+`host` means the side of a protocol that owns the connection: the adapter protocol's host
+(client or server), or the IM gateway hosting its backends (v2.2). The terminal host is
+called placement, never host.
 
 ## 4. Technology choice
 
@@ -141,12 +161,18 @@ not add a heavyweight dependency for a single type or a single helper.
 | `onlyne-server` | one server root: the daemon plus the file verbs over it | `run`, `init`, `status`, `generate` |
 | `onlyne-client` | one role: the daemon plus the file verbs over a workspace | `run`, `init`, `status`, `roles`, `sessions`, `watch`, `history`, `agent`, `doctor` |
 | `onlyne-web` | optional graphical front end (phase three) | none; flags only (`--bind`, `--open`) |
+| `onlyne-im` | the IM gateway for one root (v2.2): one role link per conversation workspace, trigger scripts, one spawned backend per `[[im.backend]]` | `init`, `generate`, `login`, `run`, `check` |
+| `onlyne-im-backend-telegram` | the Telegram backend the gateway spawns over stdio (v2.2) | none; the gateway root's `[[im.backend]].run` names it |
 
 Rules:
 
 - **Forwarding is gone from the admin face, not from the process tree.** Every admin verb runs inside the `onlyne` process, but `onlyne client <anything>`, `onlyne client run`, and `onlyne server run` still exec a sibling binary — the `client` group forwards every remaining argument verbatim. Exit code 127 therefore still means one thing: that sibling binary is missing. v1's other defect, dropping the global flags at a forwarding point, is fixed: measured `onlyne client init` behaves as `onlyne-client init`.
 - **No `start`/`stop`.** Staying resident belongs to the terminal host or to launchd/systemd. Onlyne runs in the foreground.
 - **The TUI is a verb, not a default.** `onlyne tui` opens the cluster view. Bare `onlyne` prints help to stderr and exits 2; there is no TTY branch.
+- **The IM gateway has its own CLI.** `onlyne-im` is a separate optional binary, the way
+  `onlyne-web` is, and `onlyne` carries no `im` verb. Its `generate` writes one conversation
+  (a workspace and the cluster's `[[client]]` row plus both ACL lists), not a role template
+  workspace; `onlyne server generate` keeps the template path it has.
 - **Verbs are split by caller.** Operators and supervisors use admin-socket verbs: `send`, `reply`, `complete`, `ack`, `reject`, `handoff`, `control`, `repair`, `spec_diff`, `reload`, `ls`, `who`, `ping`, `watch`, `ledger`, `gateway status`. An operator reports a conclusion with `onlyne complete`, which on the admin face becomes `AdminOp::Report`; there is no `onlyne report` verb. A role's in-session actions go only through plugin tools or `onlyne mcp`: `onlyne_send`, `onlyne_handoff`, `onlyne_complete`.
 
 ## 6. Crate layout
@@ -165,11 +191,16 @@ Rules:
 | `onlyne-cli` | `onlyne`: CLI, TUI, `mcp` |
 | `onlyne-web` | optional graphical front end (phase three) |
 | `onlyne-testkit` | scenario harness, fake runtime |
+| `onlyne-im` | IM gateway host (v2.2): one role link per IM conversation, trigger scripts, backend host |
+| `onlyne-im-backend` | the standard protocol between the gateway and a platform backend: frames, payloads, the `Backend` trait |
+| `onlyne-im-backend-telegram` | Telegram platform backend (platform SDKs live here, never in the core) |
 
-Twelve active crates. Dependency rules:
+Fifteen active crates. Dependency rules:
 
 - `onlyne-proto` does not depend on tokio.
 - Plugins depend on `onlyne-adapter` and `onlyne-proto`.
+- An IM platform backend depends on `onlyne-im-backend` and its own platform SDK, never on
+  `onlyne-server`, `onlyne-client`, or `onlyne-im` (the binary firewall, §16).
 - Platform SDKs stay out of `onlyne-server` and `onlyne-client`.
 - One connection implementation, in `onlyne-wire`, shared by server, client, adapter SDK, CLI, TUI, and web. v1 had four.
 
@@ -177,12 +208,14 @@ The v1 rule that `onlyne-session` must not depend on `onlyne-proto` is withdrawn
 session reducer now lives in proto, and the two parallel phase vocabularies that rule
 produced are merged into one.
 
-The IM gateway crates are frozen and out of the main branch. The protocol keeps the
-`bridge` mount kind for them.
+v1's IM gateway crates stay frozen on the `frozen/gateway-v1` tag, and the protocol keeps the
+`bridge` mount kind for that shape. v2.2's gateway is the three crates above, and its
+conversations are ordinary roles.
 
 ## 7. Workspace model
 
-Two `.onlyne/` trees, and one machine-level runtime directory.
+Two `.onlyne/` trees the core owns, a gateway root the IM module owns, and one machine-level
+runtime directory.
 
 Server root, selected by `onlyne-server run --root <dir>`:
 
@@ -219,6 +252,27 @@ Role workspace, selected by `onlyne-client run --workspace <dir>`:
   agent/<pkg>/
   cache/
 ```
+
+Gateway root, selected by `onlyne-im run --root <dir>` (the optional IM module, §5):
+
+```text
+<gateway-root>/.onlyne/
+  config.toml            [server], [[im.backend]], [[im.push]]
+  credentials/           one credential file per backend gateway id, 0600
+  logs/gateway.log
+<gateway-root>/conversations/
+  <role>/                the directory name IS the role; the file names no role
+    .onlyne/config.toml  [chat] gateway + conversation
+    .onlyne/keys/role.key
+    chat.jsonl           inbound events and outbound payloads, one JSON per line
+    media/               attachments, both directions
+```
+
+Each `conversations/<role>/` is one IM conversation's workspace, and the gateway holds one
+ordinary role link per workspace. It is a role in the cluster — an ordinary `[[client]]` with
+its own key and ACL row — so nothing in `onlyne-server` knows an IM conversation exists. A
+gateway root and the server root it speaks to are separate trees and may be on separate
+machines.
 
 **Sockets live outside the workspace.** One machine-level runtime directory, `/tmp/onlyne-<uid>/`,
 mode `0700`, overridable with `ONLYNE_RUNTIME_DIR`. The socket is `<digest>.sock` and the
@@ -536,8 +590,8 @@ which brings up a real server and real clients in a temporary directory with a f
 runtime mounted on a real socket. The scenarios live in one test binary and guard:
 delivery loop, handoff chain, permissions, idempotency, link-drop recovery, server
 restart, session scopes, a hosting runtime serving every session from one connection,
-spec edits, delivery text, large-frame interleaving, migration refusal, heartbeat
-watchdog, plugin conformance.
+spec edits, delivery text, a completion that meets a standing verdict, large-frame
+interleaving, migration refusal, heartbeat watchdog, plugin conformance.
 
 The scenario suite is the safety net for the rewrite: it runs against v1 behavior first,
 and each crate's v1 unit tests are deleted as that crate is rewritten rather than ported.

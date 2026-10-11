@@ -250,9 +250,9 @@ struct ServerInitCmd {
 }
 
 /// The `gateway` group: a read-only view of the gateway mounts the server
-/// registered. The platform verbs that used to exec `onlyne-gateway` went with
-/// the frozen gateway crate; the mount vocabulary itself stays in
-/// `onlyne-proto` and `onlyne-adapter`.
+/// registered. The v1 platform verbs that exec'd `onlyne-gateway` are gone; the
+/// IM gateway ships as its own binary, `onlyne-im` (v2.2), and the mount
+/// vocabulary itself stays in `onlyne-proto` and `onlyne-adapter`.
 #[derive(clap::Args, Debug, Clone)]
 struct GatewayCmd {
     #[command(subcommand)]

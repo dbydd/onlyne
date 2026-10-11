@@ -139,12 +139,19 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
 /// resource. Only the completion and the fault answer for an extra case, where
 /// the client has already retired the session on its own command; see
 /// `ending_is_authorised`.
+///
+/// A completion answers with the verdict its task already carried, when it
+/// carried one before this frame: the frame is still applied (the drain, the
+/// binding hand-back, the held connections' retirement), and the answer is the
+/// one the sender reads ([`SettledNotice::answer`]). Every other report answers
+/// `None`, which the caller renders as the plain applied body.
 pub async fn on_plugin_report(
     state: &DispatchState,
     from: Option<&AdapterIo>,
     report: Report,
-) -> Result<()> {
+) -> Result<Option<SettledNotice>> {
     let subject = task_id_of(&report).to_string();
+    let mut answered: Option<SettledNotice> = None;
     let touched = match report {
         Report::Ready { task_id, .. } => {
             let verdict = {
@@ -241,7 +248,7 @@ pub async fn on_plugin_report(
                             seq,
                             "a heartbeat at or below the watermark was taken as a replay; it refreshes liveness only"
                         );
-                        return Ok(());
+                        return Ok(None);
                     }
                     let (ended, verdict) = match serde_json::from_value::<Observation>(observed) {
                         Ok(body) => {
@@ -348,12 +355,20 @@ pub async fn on_plugin_report(
             // plugin's own claim about work it did, and `on_out` reads the
             // session's row for that claim, refused whole when the row says no
             // turn ran.
+            //
+            // The standing verdict is read first, before the door is even
+            // judged, because the frame most in need of the answer is the one
+            // this door refuses: a session still working under a task a subagent
+            // or a sweep already settled is answered exactly like one the client
+            // accepted (a report that fails would be retried), so the notice is
+            // the only place that session can learn its verdict was not its own.
+            answered = state.settled_notice(&task_id);
             if !ending_is_authorised(state, from, &task_id) {
                 tracing::warn!(
                     task = %task_id,
                     "a completion from a connection serving no such session was refused"
                 );
-                return Ok(());
+                return Ok(answered);
             }
             let asked = if state.take_controlled_settle(&task_id) {
                 SettleAuthority::ControlDriven
@@ -379,7 +394,7 @@ pub async fn on_plugin_report(
                     kind = %kind,
                     "a fault from a connection serving no such session was refused"
                 );
-                return Ok(());
+                return Ok(None);
             }
             let inner = state.inner.lock();
             crate::reconcile::record_fault(&inner.store, &task_id, &kind, "plugin", &reason)?;
@@ -390,7 +405,7 @@ pub async fn on_plugin_report(
     if touched {
         sync_session(state, &subject).await?;
     }
-    Ok(())
+    Ok(answered)
 }
 
 /// Whether the sender of a report that ends or faults a session may do it.

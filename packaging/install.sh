@@ -6,7 +6,7 @@
 #   PREFIX=~/.local sh packaging/install.sh # another prefix
 #
 # The script picks the archive for this machine, checks it against the release's
-# SHA256SUMS, and installs the three binaries into PREFIX/bin. It writes nothing
+# SHA256SUMS, and installs the five binaries into PREFIX/bin. It writes nothing
 # outside that prefix and starts no service: the daemons run in the foreground,
 # and the launchd and systemd units under packaging/ are how an operator runs
 # them as services.
@@ -77,10 +77,14 @@ if [ "$got" != "$want" ]; then
   exit 1
 fi
 
+# `onlyne-im` and its Telegram backend are the optional IM module: installing
+# them beside the core costs nothing, and a machine that never runs a gateway
+# simply leaves them unused.
+binaries="onlyne onlyne-server onlyne-client onlyne-im onlyne-im-backend-telegram"
 tar -xzf "$work/$archive" -C "$work"
 mkdir -p "$prefix/bin"
-for bin in onlyne onlyne-server onlyne-client; do
+for bin in $binaries; do
   cp "$work/onlyne-$bare-$target/$bin" "$prefix/bin/$bin"
   chmod 755 "$prefix/bin/$bin"
 done
-echo "install: three binaries in $prefix/bin"
+echo "install: five binaries in $prefix/bin"

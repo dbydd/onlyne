@@ -96,7 +96,7 @@
           "minimum": 0.0
         },
         "owes_targets": {
-          "description": "The roles a session of this role owes a delivery to before it may report a terminal outcome. The obligation is declared here, separately from reach, because reach is permission and permission is not a duty: a role that may address ten others does not owe all ten a handoff. Absent or empty is the default, and it owes nothing; every name must be addressable through `allowed_targets`, or the loader refuses the spec.",
+          "description": "The roles a session of this role owes a delivery to before it may report a terminal outcome. The obligation is declared here, separately from reach, because reach is permission and permission is not a duty: a role that may address ten others does not owe all ten a handoff. Absent or empty is the default, and it owes nothing; every name must be reachable through the same two-sided edge the ACL builds — this role's `allowed_targets` names the receiver and the receiver's `allowed_senders` names this role, or the name is this role's own — or the loader refuses the spec.",
           "default": [],
           "type": "array",
           "items": {

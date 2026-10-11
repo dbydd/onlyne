@@ -49,6 +49,10 @@ onlyne-client    the client daemon, `run` only, owning the session backends
 onlyne-cli       the `onlyne` binary: every verb, the built-in TUI (crates/onlyne-cli/src/tui/),
                  `mcp`, and the compiled handbooks
 onlyne-testkit   the scenario harness, the fake runtime, the conformance fixtures
+onlyne-im        the IM gateway host (v2.2): one role link per IM conversation, trigger scripts,
+                 and the host that spawns one backend per bot connection
+onlyne-im-backend        the gateway-to-backend protocol: frames, payloads, the `Backend` trait
+onlyne-im-backend-telegram  the Telegram backend (platform SDKs live here, never in the core)
 ```
 
 `onlyne-server` and `onlyne-client` share no production dependency edge:
@@ -56,10 +60,19 @@ onlyne-testkit   the scenario harness, the fake runtime, the conformance fixture
 appears in `crates/onlyne-server/Cargo.toml` under `[dev-dependencies]`, a line no test uses).
 Platform SDKs must stay out of both binaries.
 After any dependency edit, prove it with
-`cargo tree -p onlyne-client | grep -E 'teloxide|openlark|wechat-ilink|resvg'`.
+`cargo tree -p onlyne-client | grep -E 'teloxide|openlark|wechat-ilink|resvg|reqwest'` —
+empty is the pass, and the same holds for `onlyne-server`. The live platform SDK is `reqwest`,
+which sits in the Telegram backend and nowhere near the core; the other four names were the v1
+plugins' SDKs and stay banned either way.
 
-The IM gateway crates and their four platform plugins are frozen and off this branch. The
-protocol keeps the `bridge` mount kind for them; nothing here builds or tests them.
+The IM gateway is `onlyne-im`: an independent optional module with its own CLI (`init`,
+`generate`, `login`, `run`, `check`), never a verb of `onlyne`, exactly like `onlyne-web`.
+`onlyne-im-backend` is the backend protocol SDK and `onlyne-im-backend-telegram` the first
+backend; one gateway process hosts many conversations, one ordinary role link each, and spawns
+one backend process per `[[im.backend]]` bot connection. Its design is
+`docs/v2.2-IM-GATEWAY-PLAN.md` and `docs/v2.2-IM-GATEWAY-3B.md`. It does not use the `bridge`
+mount kind — its conversations are ordinary roles — so the gateway mount the protocol and
+`onlyne gateway status` still report is exercised by `onlyne-gateway-fake` and `gateway-mount.sh`.
 
 ## Change procedures
 

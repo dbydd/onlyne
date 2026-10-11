@@ -10,6 +10,16 @@
 // surface, which is why the whole state machine is testable against a plain
 // Node unix socket.
 //
+// One completion path, and it is the model's: an explicit `onlyne_complete`
+// (`completeFromTool`) or the host's `recycle{outcome}`. A turn that ends
+// without one — cleanly or with a provider error — decides nothing here: the
+// client's own turn-end rule owns the ending (`docs/v2-CONTRACT.md` §3c: one
+// nudge, then the delivery settles `blocked`) and its own sweeps own a session
+// whose agent died. A failed turn only supplies the head fallback, because pi
+// retries a retryable provider error inside the same run and the client's nudge
+// can restart a session a moment after it settles — a report sent on the error
+// would race work that is still going.
+//
 // What the human sees travels through one funnel, `notice` below: the pi widget
 // panel when the host has `ctx.ui.setWidget`, the footer status line plus a
 // `[pi-onlyne]` stderr line when it has not. `log` keeps the diagnostics — a
@@ -46,11 +56,6 @@ export const RECONNECT_LADDER_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 export const HELLO_TIMEOUT_MS = 5_000;
 /** Default bound on one request round trip. */
 export const REQUEST_TIMEOUT_MS = 30_000;
-/**
- * How long after an errored turn the plugin waits for `agent_settled` before it
- * reports the failure it witnessed itself.
- */
-export const SETTLE_FALLBACK_MS = 2_000;
 
 /** Capabilities this plugin implements on the wire. */
 export const CAPABILITIES = ["register", "report", "inject", "recycle"];
@@ -71,7 +76,6 @@ export class OnlyneAgent {
    *   ladder?: number[],
    *   requestTimeoutMs?: number,
    *   helloTimeoutMs?: number,
-   *   settleFallbackMs?: number,
    *   createConnection?: (path: string) => any,
    *   timer?: { set: (fn: () => void, ms: number) => any, clear: (handle: any) => void },
    * }} options
@@ -92,7 +96,6 @@ export class OnlyneAgent {
     this.ladder = options.ladder ?? RECONNECT_LADDER_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.helloTimeoutMs = options.helloTimeoutMs ?? HELLO_TIMEOUT_MS;
-    this.settleFallbackMs = options.settleFallbackMs ?? SETTLE_FALLBACK_MS;
     this.createConnection = options.createConnection ?? ((path) => createConnection(path));
     // The pane this process was spawned in, reported on every heartbeat so the
     // supervisor board can attribute the tab (protocol.mjs `hostBinding`). Read
@@ -122,7 +125,6 @@ export class OnlyneAgent {
     this.attempt = 0;
     this.reconnectHandle = null;
     this.heartbeatHandle = null;
-    this.settleHandle = null;
     /**
      * The heartbeat round in flight, and what the next pass of it should say.
      * `heartbeat` never lets two rounds overlap, so `beatRound` doubles as the
@@ -710,10 +712,6 @@ export class OnlyneAgent {
       this.timer.clear(this.reconnectHandle);
       this.reconnectHandle = null;
     }
-    if (this.settleHandle) {
-      this.timer.clear(this.settleHandle);
-      this.settleHandle = null;
-    }
     this.rejectAll("agent stopped");
   }
 
@@ -775,9 +773,7 @@ export class OnlyneAgent {
     if (held && !held.completed) {
       // A new envelope for a task this session already holds — a follow-up, a
       // redirect, a bounce back through a handoff. The work record stays where
-      // it is, and the failure an errored turn proved belonged to the
-      // instruction being replaced, so it is cleared with that instruction.
-      held.errored = false;
+      // it is; the newest instruction re-points it at the newest envelope.
       held.envelopeId = envelope.id ?? held.envelopeId;
       // `lastSeq` deliberately does not reset here. It is the floor the next
       // allocation for this task must clear, and the host's row for the task
@@ -800,7 +796,6 @@ export class OnlyneAgent {
          * share the plugin's counter. Null until the first report.
          */
         lastSeq: null,
-        errored: false,
         head: "",
       });
     }
@@ -906,8 +901,10 @@ export class OnlyneAgent {
    *
    * How a turn end settles the work is the client's rule
    * (`docs/v2-CONTRACT.md` §3c): the plugin counts nothing, bounds nothing, and
-   * reports only the facts it alone can see — its own phase, and an errored
-   * turn.
+   * reports only its own phase and the completion the model asked for. A turn
+   * that ended without a completion is the client's case — its own one-nudge
+   * rule, and its own sweeps for a session whose agent died — so nothing here
+   * decides an outcome.
    */
   onTurnStart() {
     void this.heartbeat("running").catch((error) => this.log(`heartbeat refused: ${error.message}`));
@@ -925,40 +922,29 @@ export class OnlyneAgent {
   }
 
   /**
-   * pi has settled: the session is waiting for input, which is the moment an
-   * errored turn is reported from.
+   * pi has settled: the session is waiting for input. The phase is the whole of
+   * what this hook says — a settle is not a verdict, because the client's own
+   * nudge can restart a session a moment later and pi can still be inside a
+   * retry that settles it again.
    */
   onSettled() {
-    this.clearSettleFallback();
     void this.heartbeat().catch((error) => this.log(`heartbeat refused: ${error.message}`));
-    void this.trySettle().catch((error) => this.log(`failed-turn report refused: ${error.message}`));
   }
 
   /**
-   * Report a turn that failed, once pi is quiet. pi keeps `isIdle()` false while
-   * it is running, retrying, compacting, or holding a queued continuation, and
-   * a background task keeps work running after pi itself has settled, so a
-   * signal that arrives during any of those waits re-arms instead of reporting
-   * from a session that is still busy. The fallback timer and `agent_settled`
-   * both land here, and a task is reported once because the report completes it.
+   * A turn ended with an error (`stopReason: "error"`). The plugin sends
+   * nothing: an error is not proof of a terminal outcome, because pi retries a
+   * retryable provider error and stays inside the same run, and the client's
+   * nudge can restart a session a moment after it settles — so a report sent
+   * here would race work that is still going. What the error does supply is the
+   * head fallback for a later `onlyne_complete` whose `summary` carries nothing.
    */
-  async trySettle() {
-    if (this.closed || this.activeTasks().length === 0) return;
-    if (await this.derivedPhase() !== "idle") {
-      this.armSettleFallback();
-      return;
-    }
-    await this.reportFailedTurns().catch((error) => this.log(`failed-turn report refused: ${error.message}`));
-  }
-
-  /** A failed turn: the task's outcome is `failed`, with the error as its head. */
   onTurnError(text) {
     for (const task of this.tasks.values()) {
       if (task.completed) continue;
-      task.errored = true;
       if (text) task.head = headOf(text);
     }
-    void this.trySettle().catch((error) => this.log(`failed-turn report refused: ${error.message}`));
+    this.notice("warn", `turn ended with an error: ${headOf(text) || "no reason given"}`);
   }
 
   /**
@@ -976,38 +962,6 @@ export class OnlyneAgent {
     if (!flat) return;
     for (const task of this.tasks.values()) {
       if (!task.completed) task.head = flat;
-    }
-  }
-
-  armSettleFallback() {
-    this.clearSettleFallback();
-    if (this.closed || this.activeTasks().length === 0) return;
-    this.settleHandle = this.timer.set(() => {
-      this.settleHandle = null;
-      void this.trySettle().catch((error) => this.log(`failed-turn report refused: ${error.message}`));
-    }, this.settleFallbackMs);
-  }
-
-  clearSettleFallback() {
-    if (!this.settleHandle) return;
-    this.timer.clear(this.settleHandle);
-    this.settleHandle = null;
-  }
-
-  /**
-   * Report the failures this session witnessed itself, for every task it still
-   * holds.
-   *
-   * An errored turn is proof on its own — pi may skip the clean turn end — so
-   * its task is reported `failed` at once, with the error as its head. Nothing
-   * else is decided here: a turn that ends without a completion is the client's
-   * case, and it reaches the session as the host's nudge (`onNudge`), so a
-   * plugin that also decided it would be the second owner of the rule.
-   */
-  async reportFailedTurns() {
-    for (const task of [...this.tasks.values()]) {
-      if (task.completed || !task.errored) continue;
-      await this.complete(task.taskId, "failed", task.head);
     }
   }
 
@@ -1100,8 +1054,9 @@ export class OnlyneAgent {
     // flight. A refused or broken request handed nothing over, so the task
     // goes back to open and the caller sees why: a retry reports again, and
     // `completeFromTool` still finds the task.
+    let answer = null;
     try {
-      await this.request("report", report);
+      answer = await this.request("report", report);
     } catch (error) {
       if (task) task.completed = false;
       throw error;
@@ -1113,6 +1068,14 @@ export class OnlyneAgent {
     if (this.activeTasks().length === 0) {
       this.stopHeartbeat();
       if (exitProcess) this.exitSession(normalized);
+    }
+    // A client that had already settled this task says so with its own record
+    // of the terminal fact, and the caller hands that on rather than claiming
+    // the completion it just sent. The task is still left settled here: the
+    // client's row is the authority, and re-opening it would only ask the
+    // model to report an outcome nobody is waiting for.
+    if (isAlreadySettled(answer)) {
+      return { taskId, outcome: normalized, head: summary, alreadySettled: answer.already_settled };
     }
     return { taskId, outcome: normalized, head: summary };
   }
@@ -1143,7 +1106,15 @@ export class OnlyneAgent {
       if (!this.connected) return;
       const pending = this.pendingCompletions.shift();
       try {
-        await this.request("report", pending.report);
+        const answer = await this.request("report", pending.report);
+        // A queued completion has no tool result to carry the client's record
+        // back through, so the one thing worth saying is that the client had
+        // already settled the task and this report changed nothing.
+        if (isAlreadySettled(answer)) {
+          this.log(
+            `queued completion for ${pending.taskId.slice(0, 8)} was already settled by the client as ${answer.already_settled.state}`
+          );
+        }
         this.stats.completions += 1;
         this.activity.set({ taskId: this.activeTaskId() ?? null, phase: pending.outcome });
         this.notice("out", `complete ${pending.taskId.slice(0, 8)} ${pending.outcome} flushed after reconnect`);
@@ -1231,6 +1202,17 @@ export class OnlyneAgent {
     const name = typeof image.name === "string" ? image.name : null;
     return [{ type: "image", mime, data: image.data_base64, name }];
   }
+}
+
+/**
+ * Whether a client's answer to a `report.complete` says the task had already
+ * settled. The shape is the client's (`{"already_settled": {state, settled_at,
+ * head}}`); a normal accepted completion answers `data = null`, which is not an
+ * object and reads as no.
+ */
+function isAlreadySettled(answer) {
+  return Boolean(answer) && typeof answer === "object" && answer.already_settled !== null
+    && typeof answer.already_settled === "object";
 }
 
 /** Mime type for one attachment path the model asked to send. */

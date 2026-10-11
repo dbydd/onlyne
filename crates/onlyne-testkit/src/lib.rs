@@ -766,9 +766,24 @@ impl FakeAgent {
                     Some(_) => bail!("unknown step: complete.files"),
                     None => Vec::new(),
                 };
-                handle
-                    .report_complete(assign.task_id.clone(), outcome, head, details, files)
+                // `settled_to` is the case where somebody else already answered
+                // this task — a subagent's completion, a sweep — and the client
+                // must say so in the body beside the report instead of reading
+                // it as a report it took. The body is written to that file, in
+                // the workspace, for the scenario to assert on: the fixture
+                // cannot testify about an answer the host wrote.
+                let settled_to = value.get("settled_to").and_then(Value::as_str);
+                let sender = handle.report_sender();
+                let (_, answer) = sender
+                    .complete_answered(assign.task_id.clone(), outcome, head, details, files)
                     .await?;
+                if let Some(file) = settled_to {
+                    let path = path_in_workspace(&self.workspace, file);
+                    if let Some(parent) = path.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::write(&path, format!("{}\n", answer)).await?;
+                }
             }
             "fail" => {
                 let reason = value.as_str().unwrap_or("fake agent failure").to_string();

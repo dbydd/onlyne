@@ -117,6 +117,9 @@ async function waitFor(predicate, { timeoutMs = 2_000, stepMs = 5 } = {}) {
  * reports before answering the rest, the way a client whose settle failed would.
  * `request` sends a host frame carrying an id, which is how the plugin is asked
  * for an answer (`nudge`); `answers` reads what came back.
+ * `alreadySettled` answers every `complete` report with the client's
+ * already-settled shape in `data`, the way a client that had settled the task
+ * before the report arrived does.
  */
 class FakeHost {
   constructor({
@@ -125,6 +128,7 @@ class FakeHost {
     failSend = false,
     handoffError = null,
     failCompletions = 0,
+    alreadySettled = null,
   } = {}) {
     this.server = createServer((socket) => this.onConnection(socket));
     this.frames = [];
@@ -135,6 +139,7 @@ class FakeHost {
     this.failSend = failSend;
     this.handoffError = handoffError;
     this.failCompletions = failCompletions;
+    this.alreadySettled = alreadySettled;
     this.held = [];
   }
 
@@ -188,6 +193,9 @@ class FakeHost {
         error: { code: "invalid", message: "settle refused" },
       }));
       return;
+    }
+    if (this.alreadySettled && frame.op === "report" && frame.args?.kind === "complete") {
+      body = { ok: true, data: { already_settled: this.alreadySettled } };
     }
     if (this.failSend && frame.op === "send") {
       socket.write(encodeFrame({
@@ -293,10 +301,11 @@ async function startAgent({
   failSend = false,
   handoffError = null,
   failCompletions = 0,
+  alreadySettled = null,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "pi-onlyne-agent-"));
   const socketPath = join(dir, "s");
-  const host = new FakeHost({ coalesceAssign, holdCompletion, failSend, handoffError, failCompletions });
+  const host = new FakeHost({ coalesceAssign, holdCompletion, failSend, handoffError, failCompletions, alreadySettled });
   await host.listen(socketPath);
   const logs = [];
   const agent = new OnlyneAgent({
@@ -308,9 +317,6 @@ async function startAgent({
     surface,
     log: (line) => logs.push(line),
     ladder: [20, 40, 80],
-    // The fallback is the agent_settled-less path; a test that wants it asks for
-    // a short window, and every other test drives the exit explicitly.
-    settleFallbackMs: options.settleFallbackMs ?? 30_000,
     heartbeatMs: options.heartbeatMs ?? 60_000,
     ...(capabilities ? { capabilities } : {}),
     ...(options.host !== undefined ? { host: options.host } : {}),
@@ -688,30 +694,14 @@ test("a turn-end heartbeat after the completion never leaves the plugin", async 
   assert.deepEqual(host.of("report").slice(reports), [], "the completion is the last report");
 });
 
-// The plugin still owes one report at a turn end: the failure it witnessed
-// itself. That report waits for the idle it is about, exactly as the phase-based
-// signal always did.
-test("a busy pi holds the failed-turn report until it is waiting for input", async () => {
-  let waiting = false;
-  const surface = fakeSurface({ waiting: () => waiting });
-  const { agent, host } = await startAgent({ surface, options: { settleFallbackMs: 40 } });
-  agent.start();
-  await waitFor(() => host.of("report").length >= 1);
-  host.notify("assign", assignArgs());
-  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
-  agent.onTurnError("provider exploded");
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.deepEqual(completions(host), [], "a busy pi is not reported on yet");
-
-  waiting = true;
-  const complete = await waitFor(() => completions(host)[0] ?? null);
-  assert.deepEqual(complete.data, { task_id: TASK_ID, outcome: "failed", head: "provider exploded" });
-});
-
-test("a live background task holds the failed-turn report until its task is terminal", async () => {
-  let backgroundWork = true;
-  const surface = fakeSurface({ backgroundWork: () => backgroundWork });
-  const { agent, host } = await startAgent({ surface, options: { settleFallbackMs: 40 } });
+// A turn that ends with an error is not a verdict. pi retries a retryable
+// provider error and stays inside the same run, and the client's nudge can
+// restart a session a moment after it settles, so a report sent from here would
+// race work that is still going. The client's own turn-end rule (§3c) owns the
+// ending, and its sweeps own a session whose agent died; the plugin states its
+// phase and nothing else.
+test("a turn error sends no completion, even after a settle and a wait", async () => {
+  const { agent, host, surface } = await startAgent();
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
   host.notify("assign", assignArgs());
@@ -719,14 +709,34 @@ test("a live background task holds the failed-turn report until its task is term
 
   agent.onTurnStart();
   agent.onTurnError("provider exploded");
-  await waitFor(() => heartbeats(host).at(-1)?.agent === "running");
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.deepEqual(completions(host), [], "work off the agent loop keeps the report off");
-
-  backgroundWork = false;
+  await waitFor(() => heartbeats(host).some((observed) => observed.agent === "running"));
   agent.onSettled();
-  const complete = await waitFor(() => completions(host)[0] ?? null);
-  assert.deepEqual(complete.data, { task_id: TASK_ID, outcome: "failed", head: "provider exploded" });
+  // Past the window the deleted fallback used to fire in (40 ms in the harness
+  // that pinned it), so a plugin that still armed one would have reported here.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  assert.deepEqual(completions(host), [], "a failed turn reports no outcome nobody claimed");
+  assert.deepEqual(agent.status().tasks, [TASK_ID], "the task is still open");
+  assert.deepEqual(surface.calls.exits, [], "and the session stays mounted");
+});
+
+// What the error does supply is the head fallback: a completion whose summary
+// carries nothing still has a display line, and it is the sentence the failed
+// turn left behind.
+test("an explicit completion after a turn error uses the error as its head", async () => {
+  const { agent, host, surface } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+  host.notify("assign", assignArgs());
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+
+  agent.onTurnStart();
+  agent.onTurnError("provider exploded");
+  const result = await agent.completeFromTool({ outcome: "done" });
+
+  assert.equal(result.head, "provider exploded", "the error text is the head fallback");
+  const [complete] = completions(host);
+  assert.deepEqual(complete.data, { task_id: TASK_ID, outcome: "done", head: "provider exploded" });
 });
 
 // The turn-end rule has one owner, the client (`docs/v2-CONTRACT.md` §3c): a
@@ -735,15 +745,15 @@ test("a live background task holds the failed-turn report until its task is term
 // plugin's answer to a clean turn end is its beat and nothing else — no
 // injection, no count, and no outcome nobody claimed.
 test("a turn that ends without a completion settles nothing and says nothing", async () => {
-  const { agent, host, surface } = await startAgent({ options: { settleFallbackMs: 40 } });
+  const { agent, host, surface } = await startAgent();
   agent.start();
   await waitFor(() => host.of("report").length >= 1);
   host.notify("assign", assignArgs());
   await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
   agent.noteAssistantText("OK");
 
-  // Two clean turns and a settle after each: the fallback window and the
-  // settled signal both land, and neither has anything to decide.
+  // Two clean turns and a settle after each: the settled signal lands, and it
+  // has nothing to decide.
   agent.onTurnStart();
   agent.onTurnEnd();
   agent.onSettled();
@@ -770,18 +780,6 @@ test("an assigned task that never ran is not completed", async () => {
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.deepEqual(host.of("report").filter((report) => report.kind === "complete"), []);
   assert.deepEqual(agent.status().tasks, [TASK_ID]);
-});
-
-test("a failed turn settles the task as failed with the error as head", async () => {
-  const { agent, host, surface } = await startAgent();
-  agent.start();
-  await waitFor(() => host.of("report").length >= 1);
-  host.notify("assign", assignArgs());
-  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
-  agent.onTurnStart();
-  agent.onTurnError("provider exploded");
-  const complete = await waitFor(() => host.of("report").find((report) => report.kind === "complete"));
-  assert.deepEqual(complete.data, { task_id: TASK_ID, outcome: "failed", head: "provider exploded" });
 });
 
 test("an explicit tool outcome wins and a second completion is refused", async () => {
@@ -1277,7 +1275,6 @@ test("a host that never answers the hello is dropped and retried", async () => {
     log: (line) => logs.push(line),
     ladder: [20],
     helloTimeoutMs: 40,
-    settleFallbackMs: 30,
   });
   cleanups.push(async () => {
     agent.stop("test");
@@ -1312,6 +1309,40 @@ test("a completion sends the summary as the head and adds nothing else", async (
   await agent.completeFromTool({ outcome: "done", summary: "handed the token over" });
 
   assert.equal(JSON.stringify(completions(host)[0]), COMPLETE_VECTOR);
+});
+
+// A client that had already settled this task answers the report with its own
+// record instead of `data: null`. The completion still leaves the task settled —
+// the client's row is the authority — but the caller hands the record on, so the
+// tool result can say the call changed nothing rather than claim the outcome.
+test("a report the client answers as already settled comes back as the client's record", async () => {
+  const settled = {
+    state: "failed",
+    settled_at: "2026-10-11T05:15:47Z",
+    head: "provider exploded",
+  };
+  const { agent, host } = await startAgent({ alreadySettled: settled });
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  const result = await agent.completeFromTool({ outcome: "done", summary: "finished it" });
+  assert.deepEqual(result, {
+    taskId: TASK_ID,
+    outcome: "done",
+    head: "finished it",
+    alreadySettled: settled,
+  });
+  assert.equal(completions(host).length, 1, "the report still went out");
+  assert.deepEqual(agent.status().tasks, [], "the client's row is the authority");
+});
+
+test("a normal accepted completion carries no already-settled record", async () => {
+  const { agent, host } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  const result = await agent.completeFromTool({ outcome: "done", summary: "finished it" });
+  assert.deepEqual(result, { taskId: TASK_ID, outcome: "done", head: "finished it" });
 });
 
 test("details and files ride the completion unchanged", async () => {
@@ -1374,7 +1405,7 @@ test("a nudge hands the client's sentence over as it stands and answers ok", asy
   // A nudge is not a delivery and not a report: the task stays open, its record
   // is untouched, and no frame of the plugin's own follows.
   assert.equal(agent.tasks.get(TASK_ID), record);
-  assert.equal(record.errored, false);
+  assert.equal(record.head, "", "the nudge leaves the head fallback alone");
   assert.deepEqual(host.of("report").slice(reportsBefore), []);
 });
 

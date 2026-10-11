@@ -50,10 +50,11 @@ dispatch the workflow by hand with a `tag` input. Four jobs run in order:
    names no workspace version fails rather than publishing an unreproducible build.
 2. `build` — five targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`,
    `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`. Each builds
-   the three release binaries (`onlyne`, `onlyne-server`, `onlyne-client`) with `--locked`,
-   packages them beside `LICENSE` and the shell completions the CLI emits itself, and writes a
-   `.sha256` beside each archive. No job installs `protoc` any more: the gateway plugins that
-   pulled `openlark` are frozen off this branch, and nothing in the tree compiles a platform SDK.
+   the five release binaries (`onlyne`, `onlyne-server`, `onlyne-client`, plus the optional IM
+   module's `onlyne-im` and `onlyne-im-backend-telegram`) with `--locked`, packages them beside
+   `LICENSE` and the shell completions the CLI emits itself, and writes a `.sha256` beside each
+   archive. No job installs `protoc`: the v1 gateway plugins that pulled `openlark` are gone, and
+   the one shipped IM backend talks to the Bot API over plain HTTPS.
 3. `release` — publishes every archive, its checksum, and a combined `SHA256SUMS` to the GitHub
    Release, creating it with generated notes when the tag has none, and ends on a published
    release: a tag that was deleted and pushed again leaves its release a draft, and a draft serves
@@ -63,8 +64,9 @@ dispatch the workflow by hand with a `tag` input. Four jobs run in order:
 
 ## Homebrew
 
-The formula installs the prebuilt archives, so a machine needs no Rust toolchain. All three
-binaries are in them, which is what makes the install complete rather than partial. This
+The formula installs the prebuilt archives, so a machine needs no Rust toolchain. All five
+binaries are in them (the IM pair rides along, unused unless you run a gateway), which is what
+makes the install complete rather than partial. This
 repository is the tap — `Formula/` is where Homebrew looks — and the clone URL is part of the tap
 command because the repository is not named `homebrew-onlyne`:
 

@@ -10,6 +10,10 @@ socket——机器级运行目录里的 `<digest>.sock`（`/tmp/onlyne-<uid>/`�
 `ONLYNE_TASK_ID`（`crates/onlyne-client/src/session/dispatch.rs`）；三者缺一，就是普通 pi session，
 插件不注册任何工具、不打开任何 socket。
 
+只有自身 session id 等于 `ONLYNE_SESSION_ID` 的那个 session 才会挂载。一个 pi 进程会跑不止一个
+session——`task` 子代理的 sidechain、`/new`——它们都会带着同一份继承来的环境变量加载本扩展；
+因此不是被绑定 session 的那个保持静默，它发出的每一次 onlyne 工具调用都会被拒绝。
+
 ```
 pi session（由 onlyne-client spawn）
   │  环境变量：ONLYNE_ROLE / ONLYNE_SESSION_ID / ONLYNE_TASK_ID
@@ -145,6 +149,12 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 每个结果只有一句话——send 与 handoff 说发给谁，complete 说结果。工具结果模型看得见，
 插件自己的账本没有理由出现在里面。
 
+这三个工具属于挂载它们的那个 session。一个 pi 进程会跑不止一个 session——`task` 子代理的
+sidechain、`/new`——它们都会带着同一份继承来的环境变量加载本扩展；因此当调用的 session id
+不等于 `ONLYNE_SESSION_ID` 时，调用会被拒绝，并给出同时点名两个 id 的一句话，而不是去结算父
+任务。若该 pi 不暴露 session id（`ctx.sessionManager` 没有 `getSessionId`），调用照常放行：
+此时唯一连上 socket 的仍然是那个由环境变量绑定的挂载。
+
 ### `onlyne_send{to, text, kind?, image?}`
 
 经 `send` 帧提交一个 envelope。`kind: "note"`（默认）是自由文本，不带 `op_id`。
@@ -160,7 +170,10 @@ png/jpeg/gif/webp 的绝对路径：插件读出内容，base64 编码后挂成 
 `files` 是它点名的绝对路径：两者原样搭在 `report.complete` 帧上，也正是下游与发起方收到的东西，
 上限由 client 把守，超限正文由 client 用自己的句子拒绝（契约 §3c）。这一调用同时结束所在
 session 的进程。client 应答完 completion 报告（见 §4）之后，插件通过 `ctx.shutdown()` 让 pi
-退出。pi 0.85.1 没有 tool-result `terminate` 处理。结果是 `reported <outcome>`。
+退出。pi 0.85.1 没有 tool-result `terminate` 处理。结果是 `reported <outcome>`；若 client 此前
+已经结算过该任务，它会用自己的记录作答，此时结果变成 `task already settled as <state> at
+<settled_at>: <head> — this call changed nothing`——这是调用并未造成它所请求的那个结果的唯一
+情形。
 
 ### `onlyne_handoff{to, text, image?}`
 
@@ -175,31 +188,39 @@ hop 预算留在 envelope 的 `causality` 里，属于协议数据：投递文�
 
 ## 4. outcome 判定规则
 
-`onlyne_complete` 是通向 `done` 的唯一路径。插件每个任务只发一次 completion，取以下三者的先到者：
+`onlyne_complete` 是通向 `done` 的唯一路径，也是插件唯一的完成路径。插件每个任务只发一次
+completion，取以下两者的先到者：
 
 1. **`onlyne_complete`** —— 模型给显式 outcome：`done`、`failed`、`cancelled` 或 `blocked`。同一
    任务的第二次 completion 被拒（不重报）。`summary` 非空时即 head，原样写出。
-2. **turn 出错** —— turn 以 provider 错误告终（`stopReason: "error"`）。这本身就是证据，插件立即
-   报 `failed`，错误信息当 head。上报本身要等到 pi 正在等待输入时才发出，所以承载它的那次心跳
-   陈述的是 session 真实的阶段。
-3. **`recycle{outcome}`** —— 宿主拆 session。插件先按宿主给的 outcome 结算未终态的任务，再停
+2. **`recycle{outcome}`** —— 宿主拆 session。插件先按宿主给的 outcome 结算未终态的任务，再停
    插件并退出 pi。
 
-干净结束、却没有 completion 的 turn 在这里不结算任何东西。那条规则归 client
+没有 completion 就结束的 turn 在这里不结算任何东西，以错误结束的 turn 同样不结算。结束这件事归 client
 （`docs/v2-CONTRACT.md` 的 “3c. One turn-end rule”）：它数这类结束、把自己的一句话作为 `nudge`
-发来，并决定一次始终不上报的投递会变成什么。插件把那句话交给 pi，并且只回答自己交出去了，
-于是措辞、计数与结算都只有一个主人，而不是两个。注入的消息还没跑过任何 turn 的任务，无论结算
-信号说什么都不动：现在就报终态，等于声称干过一件没发生过的活。
+发来，并决定一次始终不上报的投递会变成什么；agent 已死的 session 由它自己的清扫负责。插件把那
+句话交给 pi，并且只回答自己交出去了，同时只上报自己的阶段与模型主动要求的 completion——措辞、
+计数与结算都只有一个主人，而不是两个。注入的消息还没跑过任何 turn 的任务，无论结算信号说什么都
+不动：现在就报终态，等于声称干过一件没发生过的活。
+
+以 provider 错误（`stopReason: "error"`）结束的 turn 也不是结论：pi 会对可重试的 provider 错误
+重试，并留在同一次 run 里，而 client 的 nudge 可能在 session 结算之后的一瞬重新启动它，所以在
+这里发报告只会与仍在进行的工作赛跑。错误只提供下面说的 head 退路。
 
 `head` 恒为单行、上限 200 字符，与 client 写入 `out_head` 和回执携带的内容一致。每个任务的 head
-只有一个来源：显式 `onlyne_complete` 带 `summary` 时就是它，否则是出错 turn 报的错误。最后一段
-assistant 文本只是 `summary` 完全缺失的 `onlyne_complete` 的退路——调用之后再说的话顶不掉调用
-交出的内容，此外没有任何东西读它。
+只有一个来源：显式 `onlyne_complete` 带 `summary` 时就是它。完全没有带 `summary` 的调用退到
+session 最后说过的话——最后一段 assistant 文本，或失败 turn 留下的错误。错误永远只是这个退路：
+它本身从不构成 completion，此外没有任何东西读它；而调用之后再说的话顶不掉调用交出的内容。
 
 报出去的 completion 会结束所在 session 的进程。`report.complete` 以请求形式发出，client 只有
 在结算 session 行、ack 掉投递、并写好 `Completion` envelope 之后才应答，插件就在这个应答处
 让 pi 退出。socket 当时送不出去的 outcome 会被记住，并在下一次 `hello` 后补发，那次补发的
 应答就是结束进程的交接点。被宿主拒掉的 completion 不会让进程退出，任务不会因为退出而丢失。
+
+若 client 此前已经结算过该任务，它会对同一个请求回答 `{"already_settled": {state, settled_at,
+head}}` 而不是 `null`。插件把这个记录原样转交，而不是声称一个并非由本次调用造成的结果，工具结果
+也照此说明（见 §3）；在重连补发那条路径上没有工具结果可以承载它，记录会进入 `[pi-onlyne]` 日志。
+无论哪种情形任务都保持已结算：以 client 的那一行为准。
 
 completion 是插件最后一份上报；已经交掉任务的 session 不再发心跳，也不再应答 `probe`。终态的
 agent 维度由 client 自己写：随后到达的 `detach` 会退役这个已无任务的 session，该路径会喂入
@@ -218,8 +239,9 @@ steer 或 follow-up 消息、重试、压缩，以及被后台任务扩展移出
 
 后台任务扩展改变了这个问题。`bg_run` 与同类工具立即返回，工作继续在子进程里跑，于是 pi 在任务
 仍在进行时就等待输入。插件通过该扩展注册的工具认出它，再向它的 EventBus 服务查存活任务列表；
-处于 `running` 的任务会把 session 按在 `running` 上，插件在轮次结束时欠下的那份报告——它自己
-目睹的失败——也要等它结束。没有装这个扩展的 session 没有工具可认、没有查询，也没有东西要等。
+处于 `running` 的任务会把 session 按在 `running` 上，于是心跳陈述的是 session 真实的阶段。插件
+自己没有任何报告要等它结束：轮次结束时已经不再上报任何东西。没有装这个扩展的 session 没有工具
+可认、没有查询，也没有东西要等。
 
 ## 5. 协议说明与偏差
 

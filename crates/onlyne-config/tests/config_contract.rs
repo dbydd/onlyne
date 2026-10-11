@@ -507,6 +507,60 @@ owes_targets = ["writer"]
     );
 }
 
+/// Reach is only the sender's half of an edge. The receiver has to admit the
+/// sender too, or the ACL never builds the row and the session could not
+/// deliver what it owes — the same two-sided rule `acl_edges` enforces, read
+/// here at load so the operator learns before the completion is refused.
+#[test]
+fn owes_targets_the_receiver_does_not_admit_is_refused() {
+    let text = format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[client]]
+role = "planner"
+key = "{KEY_A}"
+allowed_targets = ["builder"]
+owes_targets = ["builder"]
+
+[[client]]
+role = "builder"
+key = "{KEY_B}"
+allowed_targets = ["planner"]
+"#
+    );
+    let err = Spec::parse_str(&text).expect_err("an edge the receiver blocks must be refused");
+    let message = err.to_string();
+    assert!(message.contains("owes_targets"), "{message}");
+    assert!(message.contains("builder"), "{message}");
+    assert!(message.contains("allowed_senders"), "{message}");
+
+    // The receiver's own list closes the edge, and then the obligation loads.
+    let admitted = format!(
+        r#"[server]
+name = "cluster-a"
+listen = "0.0.0.0:7811"
+cert_pin = "{CERT_HEX}"
+
+[[client]]
+role = "planner"
+key = "{KEY_A}"
+allowed_targets = ["builder"]
+owes_targets = ["builder"]
+
+[[client]]
+role = "builder"
+key = "{KEY_B}"
+allowed_targets = ["planner"]
+allowed_senders = ["planner"]
+"#
+    );
+    let spec = Spec::parse_str(&admitted).expect("a two-sided obligation loads");
+    assert_eq!(spec.client[0].owes_targets, ["builder"]);
+}
+
 /// A spec whose single `[[hook]]` is written from the three lines as given, so
 /// a case can point at the line its own column lands on (7, 8, and 9).
 fn hook_spec(on: &str, run: &str, timeout: &str) -> String {

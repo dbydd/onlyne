@@ -62,8 +62,8 @@ release receipt above, the receipt is right about its own tag and wrong about to
 
 ### Binary shape
 
-Two daemons, the operator entry point, and the optional front end. `AGENTS.md` §5 is the
-table of record; this is the same list in prose.
+Two daemons, the operator entry point, the optional front end, and the optional IM gateway.
+`AGENTS.md` §5 is the table of record; this is the same list in prose.
 
 - `onlyne-server` routes envelopes, holds the ledger, mirrors session state, records faults, and
   exposes the admin operations. Subcommands: `init`, `run`, `status`, `generate`, all on one
@@ -79,9 +79,14 @@ table of record; this is the same list in prose.
   needs no Node. It has four known protocol gaps for a *hosting* runtime, listed in
   `crates/onlyne-adapter/HOSTING-RUNTIME.md`.
 
-There is no gateway process. The four IM gateway plugins and their shared kit are frozen and
-live off this branch; the protocol keeps the `bridge` mount kind for them. Agent plugins and
-bridge plugins still speak one adapter protocol over two mount kinds.
+There is an IM gateway process: `onlyne-im`, an optional module with its own CLI — `init`,
+`generate`, `login`, `run`, `check` — never a verb of `onlyne`, exactly like `onlyne-web`.
+One gateway process hosts many conversations, holding one ordinary role link per conversation
+workspace, and spawns one backend process per `[[im.backend]]` bot connection. The platform
+SDK lives in the backend crate — `onlyne-im-backend-telegram` today — never in the core, so
+`onlyne-server` and `onlyne-client` still compile no platform SDK. The protocol keeps the
+`bridge` mount kind in `AGENTS.md` §8's table for an external protocol bridge; the v2.2
+gateway does not mount on it, because its conversations are ordinary roles.
 
 Sockets bind in the machine-level runtime directory `/tmp/onlyne-<uid>/` (`ONLYNE_RUNTIME_DIR`
 overrides it), as `<digest>.sock` with a `<digest>.json` registration beside it. Nothing binds
@@ -89,8 +94,8 @@ inside a workspace tree.
 
 ### Crate state
 
-Eleven crates are workspace members, and `onlyne-web` is the twelfth crate, built and kept
-outside the workspace so the core build needs no Node.
+Fourteen crates are workspace members, and `onlyne-web` is the crate built and kept outside
+the workspace so the core build needs no Node.
 
 - [x] `onlyne-proto` — protocol vocabulary, ops, errors, events, and the session reducer. No
   tokio.
@@ -109,6 +114,13 @@ outside the workspace so the core build needs no Node.
   workspace's `placement`.
 - [x] `onlyne-cli` — the `onlyne` binary: the CLI verbs, the built-in TUI, `mcp`.
 - [x] `onlyne-testkit` — the scenario harness, the fake runtime, the conformance fixtures.
+- [x] `onlyne-im` — the IM gateway host (v2.2): one role link per conversation, trigger
+  scripts, and the host that spawns one backend process per bot connection. Its binary
+  `onlyne-im` carries its own `init`, `generate`, `login`, `run`, `check`.
+- [x] `onlyne-im-backend` — the standard protocol between the gateway and a platform
+  backend: frames, payloads, and the `Backend` trait.
+- [x] `onlyne-im-backend-telegram` — the Telegram backend. Platform SDKs live in backend
+  crates, never in the core.
 
 The gate reading recorded in the commit receipt for `aebbe11` is a green
 `ONLYNE_BACKEND=fake cargo test --workspace` with formatting and clippy clean, in which
@@ -120,7 +132,8 @@ figures (1029, then 1101 across 69 and 68 targets) are a record and live in `Dev
 Where the v1 crates went, for a reader who knows the old names: `onlyne-frame` is now
 `onlyne-wire`, `onlyne-layout` split into `onlyne-config::layout` and `onlyne-wire::socket`,
 `onlyne-session`'s reducer is in `onlyne-proto` and its backends are in `onlyne-client`, the TUI
-is a module of `onlyne-cli`, and `onlyne-gateway` is frozen.
+is a module of `onlyne-cli`, and v1's `onlyne-gateway`, sealed on the `frozen/gateway-v1`
+tag, was rebuilt in v2.2 as `onlyne-im` with its two sibling crates.
 
 ### Wave plan status
 
@@ -217,8 +230,8 @@ Both jobs are green on `main`.
 
 #### 二进制结构
 
-本分支上有两个 daemon、一个操作者入口，以及可选的前端。规范表格见 `AGENTS.md` §5，
-这里是同一份列表的文字版。
+本分支上有两个 daemon、一个操作者入口、可选的前端，以及可选的 IM 网关。规范表格见
+`AGENTS.md` §5，这里是同一份列表的文字版。
 
 - `onlyne-server` 路由 envelope、持有 ledger、镜像 session 状态、记录 fault，并暴露 admin 操作。
   子命令为 `init`、`run`、`status`、`generate`，都对应一个 server root。
@@ -231,17 +244,21 @@ Both jobs are green on `main`.
   它已构建，并被排除在 workspace 之外，因此核心构建不需要 Node。hosting 运行时所需的四个
   协议缺口列在 `crates/onlyne-adapter/HOSTING-RUNTIME.md`。
 
-本分支没有 gateway 进程。四个 IM gateway plugin 及其共享 kit 已冻结并移出本分支；协议为它们
-保留 `bridge` mount kind。Agent plugin 与 bridge plugin 仍通过同一 adapter protocol 使用两种
-mount kind。
+本分支有 IM 网关进程：`onlyne-im`，一个带自己 CLI 的可选模块 —— `init`、`generate`、
+`login`、`run`、`check` —— 它绝不是 `onlyne` 的一个 verb，正如 `onlyne-web` 一样。
+一个网关进程托管多个会话：每个会话 workspace 持一条普通 role link，并为每个
+`[[im.backend]]` bot 连接 spawn 一个后端进程。平台 SDK 只存在于后端 crate（目前即
+`onlyne-im-backend-telegram`），从不进入核心，所以 `onlyne-server` 与 `onlyne-client`
+依旧不编译任何平台 SDK。协议在 `AGENTS.md` §8 的表格里为外部协议 bridge 保留了
+`bridge` mount kind；v2.2 的网关不挂载它，因为它的会话就是普通 role。
 
 socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`（可由 `ONLYNE_RUNTIME_DIR` 覆盖），
 名为 `<digest>.sock`，旁边是 `<digest>.json` 注册文件。workspace 树内不再绑定任何东西。
 
 #### Crate 状态
 
-十一个 crate 是 workspace 成员；`onlyne-web` 是第十二个 crate，已构建，并放在 workspace
-之外，好让核心构建不需要 Node。
+十四个 crate 是 workspace 成员；`onlyne-web` 已构建，并放在 workspace 之外，好让核心
+构建不需要 Node。
 
 - `onlyne-proto` —— 协议词汇、ops、errors、events 与 session reducer。不依赖 tokio。
 - `onlyne-wire` —— 帧编解码、server/client/adapter SDK/CLI/TUI/web 共用的那一套连接实现、
@@ -257,6 +274,12 @@ socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`（可由 `ONLYNE_RUNT
   由 role 的 `[client.runtime]` drive 与工作区的 `placement` 选定。
 - `onlyne-cli` —— `onlyne` 二进制：CLI verb、内置 TUI、`mcp`。
 - `onlyne-testkit` —— scenario harness、fake runtime、conformance fixture。
+- `onlyne-im` —— IM 网关宿主（v2.2）：每个会话一条 role link、触发脚本，并为每个 bot
+  连接 spawn 一个后端进程。其二进制 `onlyne-im` 自带 `init`、`generate`、`login`、
+  `run`、`check`。
+- `onlyne-im-backend` —— 网关与平台后端之间的标准协议：frames、payloads 与 `Backend`
+  trait。
+- `onlyne-im-backend-telegram` —— Telegram 后端。平台 SDK 只住后端 crate，从不在核心。
 
 提交 `aebbe11` 的 commit receipt 记录的 gate 读数是 `ONLYNE_BACKEND=fake cargo test --workspace`
 全绿、formatting 与 clippy 干净，其中 `onlyne-client` 为 **324 passed、0 failed、1 ignored**。
@@ -267,7 +290,8 @@ socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`（可由 `ONLYNE_RUNT
 给认识旧名字的读者一个去处：`onlyne-frame` 现为 `onlyne-wire`；`onlyne-layout` 拆为
 `onlyne-config::layout` 与 `onlyne-wire::socket`；`onlyne-session` 的 reducer 在
 `onlyne-proto`、backends 在 `onlyne-client`；TUI 是 `onlyne-cli` 的一个模块；
-`onlyne-gateway` 已冻结。
+v1 的 `onlyne-gateway` 封存在 `frozen/gateway-v1` tag 上，v2.2 以 `onlyne-im` 及其两个
+兄弟 crate 将其重建。
 
 #### Wave plan 状态
 

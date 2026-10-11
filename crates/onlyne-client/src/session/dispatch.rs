@@ -60,7 +60,7 @@ pub use projection::{
 };
 pub use reports::{on_control, on_plugin_report};
 pub use retire::{SESSION_DEAD, close_all, on_recycled};
-pub use settle::{SETTLE_WITHOUT_TURN, SettleAuthority, on_out};
+pub use settle::{SETTLE_WITHOUT_TURN, SettleAuthority, SettledNotice, on_out};
 pub use state::{
     CONTROL_SETTLE_BOUND, ControlNote, ControlWord, DispatchState, FrameGuard, SessionSlot,
 };

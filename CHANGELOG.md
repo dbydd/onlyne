@@ -1,5 +1,46 @@
 # Changelog
 
+## 2.2.0 (2026-10-11)
+
+- **The IM gateway ships, as its own module.** `onlyne-im` bridges a chat platform and a
+  cluster: one IM conversation — a private chat, a group — is one **role**, so a platform
+  message becomes an ordinary delivery and a reply is an ordinary send. It is a separate
+  binary with its own `init`/`generate`/`login`/`run`/`check`, like `onlyne-web`; `onlyne`
+  carries no `im` verb, and the core (`onlyne-server`, `onlyne-client`) links in no chat SDK.
+  `onlyne-im-backend` is the protocol a platform backend implements, and
+  `onlyne-im-backend-telegram` is the first backend — a bot over the Bot API. All three
+  publish to crates.io, and the release archives gain `onlyne-im` and
+  `onlyne-im-backend-telegram`.
+- **A gateway root is a directory per conversation.** `.onlyne/config.toml` holds the cluster
+  endpoint, the `[[im.backend]]` processes to spawn, and the `[[im.push]]` scripts an event or
+  a beat runs. `conversations/<role>/` is one conversation's workspace, and the directory name
+  is the role: it holds its own coordinates, its own key (`.onlyne/keys/role.key`), its
+  `chat.jsonl`, and its `media/`. One gateway process serves every conversation under the root,
+  and one backend process serves every conversation its bot is in.
+- **`onlyne-im generate` writes both halves of a conversation.** It mints the workspace, then
+  registers the role in the cluster's `spec.toml` through the server's admin socket — the
+  `[[client]]` row and both sides of each ACL edge, so a new conversation is reachable the
+  moment it exists. It takes no template; a conversation follows from a gateway id, a
+  conversation id, and the roles it talks to.
+- **Inbound events and outbound payloads land in the conversation's own workspace.** An
+  inbound attachment is written to `<workspace>/media/`, and both directions are appended to
+  `<workspace>/chat.jsonl`. A push script receives `ONLYNE_IM_WORKSPACE` and `ONLYNE_IM_MEDIA`
+  so it reads them without path arithmetic.
+- **A completion that arrives behind a standing verdict is answered, not dropped.** A re-offered
+  delivery for a task this role already finished is answered with the verdict the task keeps —
+  `{"already_settled": {"state", "settled_at", "head"}}` — so the sender's tool sees one name for
+  what happened instead of a refusal that reads as its own failure.
+- **`plugin_handoff` refusal names its cause.** A handoff a session cannot make answers with the
+  reason the guard kept it: the task is already terminal, not "no route".
+- **A suspended run is not aged out by its sleep.** Resuming a run rebases the client's own
+  silence and idle clocks to the resume boundary (the operator-set `idle_close` deliberately
+  excepted), so a machine that slept does not come back to sessions the sleep itself expired.
+- **The pi plugin mounts only its own session.** A pi process runs subagent sidechains and `/new`
+  sessions inside the parent process with the parent's `ONLYNE_*` environment; each of those
+  loading the extension could mount a second connection and let a subagent settle the parent's
+  task, which happened live. The extension now binds to the one session the client spawned the
+  process for and ignores the rest.
+
 ## 2.1.2 (2026-10-10)
 
 - **`repair ack-many` closes faults in batches.** `onlyne repair ack-many --kind <kind>

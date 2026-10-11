@@ -33,7 +33,7 @@ Two decisions the user took on 2026-09-29, which override the plan's `migrate` p
 | phase | items | evidence |
 |---|---|---|
 | zero | 6/6 | `4fad380` |
-| one | 8/8 | crates 15→**11**; `onlyne-wire` present; runtime-dir sockets `837cc70`; forwarding layer deleted; gateway frozen (tag `frozen/gateway-v1`, `crates/onlyne-gateway` gone from the tree); test fns 1170→**1036**; `AGENTS.md` is the v2 contract; scenario suite 11 green + 1 ignore (federation) |
+| one | 8/8 | crates 15→**11**; `onlyne-wire` present; runtime-dir sockets `837cc70`; forwarding layer deleted; gateway frozen (tag `frozen/gateway-v1`, `crates/onlyne-gateway` gone from the tree; reintroduced in v2.2 as `onlyne-im` plus two sibling crates); test fns 1170→**1036**; `AGENTS.md` is the v2 contract; scenario suite 11 green + 1 ignore (federation) |
 | two | 12/15 | see below |
 | three | 3/3 | `da415f2` slice 8 reducer · `fa2fbe7` TUI · `c21889d` onlyne-web |
 | 验收 | 0/3 | |

@@ -565,6 +565,52 @@ fn away_secs(slot: &SessionSlot, now: Instant) -> Option<u64> {
 }
 
 impl DispatchState {
+    /// Rebase the two death windows after the process itself was suspended.
+    ///
+    /// Both windows that end a session — `dropped_at`'s reconnect grace and
+    /// `last_beat`'s silence margin — are durations this client measures, and a
+    /// machine that slept measures exactly the duration it would have measured
+    /// had everything kept running. The two differ in one way: nothing here ran
+    /// during the gap, so a session that was alive and beating when the lid
+    /// closed reads, on the other side of it, as an agent that has been quiet
+    /// for hours. That reading retires a live session and settles the delivery
+    /// it still holds — and no frame involved arrived late, so nothing in the
+    /// log looks wrong.
+    ///
+    /// `boundary` is the moment this client last saw before the gap and `now`
+    /// the moment it came back, both handed in by the caller's own tick: a stamp
+    /// at or before `boundary` belongs to the epoch this process stopped
+    /// watching, and it is reset to `now`. A stamp after it is refresh work that
+    /// landed once the process was running again and is left as it stands, so
+    /// the rebase is the caller's reading of the gap and never a second clock
+    /// invented here.
+    ///
+    /// The idle clock is deliberately not among them: `idle_close` is the bound
+    /// an operator set on a session with nothing to do, and a session that had
+    /// nothing to do when the machine slept is the case that bound is written
+    /// for.
+    ///
+    /// Answers how many slots were carried across, for the caller's log line.
+    pub fn note_resume(&self, boundary: Instant, now: Instant) -> usize {
+        let mut inner = self.inner.lock();
+        let mut rebased = 0;
+        for slot in inner.sessions.values_mut() {
+            let mut touched = false;
+            if slot.dropped_at.is_some_and(|at| at <= boundary) {
+                slot.dropped_at = Some(now);
+                touched = true;
+            }
+            if slot.last_beat.is_some_and(|at| at <= boundary) {
+                slot.last_beat = Some(now);
+                touched = true;
+            }
+            if touched {
+                rebased += 1;
+            }
+        }
+        rebased
+    }
+
     /// Retire tracked resources whose stored lifecycle has reached `Exited`.
     ///
     /// The periodic readiness tick calls this after completed work becomes an
@@ -818,5 +864,163 @@ impl DispatchState {
         drop(inner);
         close_retired(pending);
         retired
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::fake::FakeBackend;
+    use onlyne_proto::{Capability, Causality};
+    use onlyne_store::ClientStore;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    /// One dispatch state over its own store, the shape every sweep case needs.
+    fn state_over(store: ClientStore, dir: &std::path::Path) -> DispatchState {
+        DispatchState::new(
+            "planner",
+            dir,
+            Vec::new(),
+            8,
+            Arc::new(FakeBackend::new()),
+            store,
+        )
+    }
+
+    /// One live session holding an open delivery, with the two death clocks at
+    /// the readings the caller names.
+    ///
+    /// A session with an attached transport is judged by its beat alone and a
+    /// session whose connection is gone by the drop clock alone
+    /// (`dropped_past_window`, `silent_past_window`), so the case builds one of
+    /// each by attaching a transport to the first only.
+    fn live_session(
+        state: &DispatchState,
+        task: &str,
+        beat: Instant,
+        dropped: Option<Instant>,
+        attached: bool,
+    ) {
+        let mut inner = state.inner.lock();
+        inner
+            .store
+            .open_task(&Causality::root(task.to_string()), "root")
+            .expect("open the task record");
+        inner.bridge.track_live(SessionRef {
+            task_id: task.to_string(),
+            backend: "fake".into(),
+            backend_ref: serde_json::Value::Null,
+            generation: 1,
+        });
+        inner.sessions.insert(
+            task.to_string(),
+            SessionSlot {
+                keeps_idle: true,
+                family: None,
+                idle_since: None,
+                suspended: false,
+                opened_at: beat,
+                command: Vec::new(),
+                resume_handle: None,
+                session: SessionRef {
+                    task_id: task.to_string(),
+                    backend: "fake".into(),
+                    backend_ref: serde_json::Value::Null,
+                    generation: 1,
+                },
+                task_id: Some(task.to_string()),
+                ready: true,
+                payload: None,
+                msg_id: Some(format!("msg-{task}")),
+                origin: Some(Principal::role("reviewer")),
+                causality: Causality::root(task.to_string()),
+                dropped_at: dropped,
+                last_beat: Some(beat),
+                read_only: false,
+                tools_token: String::new(),
+                delivered_roles: BTreeSet::new(),
+            },
+        );
+        if attached {
+            let (client_side, _test_side) = tokio::io::duplex(64);
+            let serving =
+                AdapterIo::new(client_side, Duration::from_secs(5), Duration::from_secs(5));
+            inner
+                .transports
+                .insert(task.to_string(), (serving, vec![Capability::Report]));
+        }
+    }
+
+    /// A client that slept must not read the sleep as silence.
+    ///
+    /// Both windows that end a session are durations this process measures, and
+    /// a closed lid makes them read as hours of an agent that was never there.
+    /// The first sweep after the resume must therefore judge the session by what
+    /// it does next rather than by the gap: the beat that was fresh when the
+    /// machine stopped stays fresh across it, and a connection that died before
+    /// the sleep gets its whole grace window again.
+    #[tokio::test]
+    async fn a_resume_rebases_both_death_clocks_before_the_sweeps_read_them() {
+        let dir = tempdir().expect("tempdir");
+        let store = ClientStore::open(dir.path().join("client.db")).expect("client store");
+        let state = state_over(store, dir.path());
+        let window = Duration::from_secs(90);
+        let before = Instant::now();
+        // One session beating on a live connection and one whose connection had
+        // already gone, both read as dead by a sweep that trusts the gap.
+        live_session(&state, "task-beating", before, None, true);
+        live_session(&state, "task-dropped", before, Some(before), false);
+
+        // The control: without the rebase the sleep alone closes both windows.
+        let slept = before + Duration::from_secs(11 * 3_600);
+        let store = ClientStore::open(dir.path().join("control.db")).expect("client store");
+        let control = state_over(store, dir.path());
+        live_session(&control, "task-beating", before, None, true);
+        live_session(&control, "task-dropped", before, Some(before), false);
+        assert_eq!(
+            control.retire_dropped_ghosts(slept, 90).len(),
+            2,
+            "the fixture is stale enough for the sweep to take it without the rebase"
+        );
+
+        assert_eq!(
+            state.note_resume(before, slept),
+            2,
+            "every slot whose window started before the gap is carried across"
+        );
+        assert!(
+            state.retire_dropped_ghosts(slept, 90).is_empty(),
+            "a session that was alive when the machine stopped is not retired the moment it wakes"
+        );
+        assert_eq!(
+            state
+                .retire_dropped_ghosts(slept + window + Duration::from_secs(1), 90)
+                .len(),
+            2,
+            "and the window still runs in the time the process was actually running"
+        );
+    }
+
+    /// A stamp that landed after the gap is evidence, and the rebase leaves it.
+    ///
+    /// The rebase is the caller's reading of a gap, not a second clock: a session
+    /// that beat once the process was running again is judged by that beat.
+    #[tokio::test]
+    async fn a_beat_that_landed_after_the_gap_is_left_where_it_is() {
+        let dir = tempdir().expect("tempdir");
+        let store = ClientStore::open(dir.path().join("client.db")).expect("client store");
+        let state = state_over(store, dir.path());
+        let boundary = Instant::now();
+        let fresh = boundary + Duration::from_secs(1);
+        live_session(&state, "task-fresh", fresh, None, true);
+
+        assert_eq!(state.note_resume(boundary, fresh), 0);
+        assert!(
+            state
+                .retire_dropped_ghosts(fresh + Duration::from_secs(2), 90)
+                .is_empty(),
+            "a fresh stamp is the agent's own word and stays one"
+        );
     }
 }

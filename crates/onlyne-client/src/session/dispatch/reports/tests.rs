@@ -1,6 +1,7 @@
 use super::*;
 use crate::session::dispatch::transport::NUDGE_TEXT;
 use crate::session::dispatch::turn_end::{DELIVERY_BLOCKED, TURN_END_WITHOUT_COMPLETE};
+use onlyne_proto::adapter::HandoffArgs;
 use onlyne_proto::new_task_id;
 use serde_json::Value;
 use tempfile::{TempDir, tempdir};
@@ -488,5 +489,222 @@ async fn a_close_reaches_a_settled_session_that_serves_no_task() {
     assert_eq!(
         row.resource_state, "closed",
         "the close reaches the resource the settled session left behind"
+    );
+}
+
+/// A completion that arrived behind a verdict is answered with that verdict.
+///
+/// The frame itself is applied either way — a report the client refuses is one
+/// a plugin retries, so the answer carries the fact instead of blocking the
+/// sender. What the answer exists for is the session that is still working: a
+/// subagent settled its parent's task (or a sweep did), the parent keeps
+/// writing, and its next `onlyne_complete` used to read `reported done` for a
+/// row nobody would move. The notice names the standing verdict and the head it
+/// wrote, which is how the sender tells its own report from somebody else's.
+#[tokio::test]
+async fn a_completion_behind_a_verdict_answers_with_the_standing_one() {
+    let dir = tempdir().expect("tempdir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    opened_task(&state, &task);
+    serving_slot(&state, &task, "msg-open");
+    let (client_side, _test_side) = tokio::io::duplex(4096);
+    let serving = AdapterIo::new(client_side, Duration::from_secs(5), Duration::from_secs(5));
+    {
+        let mut inner = state.inner.lock();
+        inner
+            .transports
+            .insert(task.clone(), (serving.clone(), vec![Capability::Report]));
+    }
+
+    // Somebody else settled the task: a subagent's completion, a fault sweep,
+    // any door but this one.
+    on_out(
+        &state,
+        &task,
+        Outcome::Done,
+        Some("the subagent's line".to_string()),
+        None,
+        SettleAuthority::ClientOwned,
+    )
+    .await
+    .expect("the first verdict lands");
+
+    // The session that was still working reports its own ending.
+    let answered = on_plugin_report(
+        &state,
+        Some(&serving),
+        Report::Complete {
+            task_id: task.clone(),
+            outcome: Outcome::Failed,
+            head: Some("the real summary".to_string()),
+            details: None,
+            files: Vec::new(),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .expect("the frame is applied");
+
+    let notice = answered.expect("a task that already had a verdict answers with it");
+    assert_eq!(notice.state, TaskState::Done, "the first verdict stands");
+    assert_eq!(
+        notice.head.as_deref(),
+        Some("the subagent's line"),
+        "the notice names what the standing verdict said, not what this frame said"
+    );
+    assert!(notice.settled_at.is_some(), "and when it was stamped");
+    assert_eq!(
+        notice.answer(),
+        serde_json::json!({"already_settled": {
+            "state": "done",
+            "settled_at": notice.settled_at.clone(),
+            "head": "the subagent's line",
+        }}),
+        "the answer is the shape the plugin renders"
+    );
+    // The first verdict keeps the row: the second report moved nothing.
+    let (verdict, head) = verdict(&state, &task);
+    assert_eq!(verdict, TaskState::Done, "the first verdict stands");
+    assert_eq!(
+        head.as_deref(),
+        Some("the subagent's line"),
+        "a late report does not rewrite the head the row took"
+    );
+}
+
+/// A completion for an open task answers nothing, and one this client never
+/// held is not this client's to explain.
+#[tokio::test]
+async fn a_completion_with_no_standing_verdict_answers_nothing() {
+    let dir = tempdir().expect("tempdir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    opened_task(&state, &task);
+    serving_slot(&state, &task, "msg-open");
+
+    let answered = on_plugin_report(
+        &state,
+        None,
+        Report::Complete {
+            task_id: task.clone(),
+            outcome: Outcome::Done,
+            head: Some("mine".to_string()),
+            details: None,
+            files: Vec::new(),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .expect("the frame is applied");
+    assert!(
+        answered.is_none(),
+        "a completion the task was waiting for is an applied report and nothing else"
+    );
+
+    let stranger = new_task_id();
+    let answered = on_plugin_report(
+        &state,
+        None,
+        Report::Complete {
+            task_id: stranger,
+            outcome: Outcome::Done,
+            head: None,
+            details: None,
+            files: Vec::new(),
+            reply_to: None,
+            cluster_ref: None,
+        },
+    )
+    .await
+    .expect("the frame is applied");
+    assert!(
+        answered.is_none(),
+        "an id this role never held has no verdict to report and no advice to give"
+    );
+}
+
+/// A handoff for a family that is closed says so, and names the door out.
+///
+/// The live shape this answers: a session whose task was settled under it (a
+/// subagent's completion, a fault sweep) keeps working, and its handoff used to
+/// come back `no session serves task` — one sentence for two different
+/// situations, which left the agent to guess whether it had misspelled an id or
+/// lost its family. The terminal reading names the verdict and the one way to
+/// continue the work, and a task this role never held keeps the old sentence.
+#[tokio::test]
+async fn a_handoff_for_a_closed_family_names_the_verdict_and_the_way_out() {
+    let dir = tempdir().expect("tempdir");
+    let task = new_task_id();
+    let state = staged_state(&dir, &task);
+    seeded_ready(&state, &task);
+    opened_task(&state, &task);
+    serving_slot(&state, &task, "msg-open");
+    let (client_side, _test_side) = tokio::io::duplex(4096);
+    let serving = AdapterIo::new(client_side, Duration::from_secs(5), Duration::from_secs(5));
+    {
+        let mut inner = state.inner.lock();
+        inner
+            .transports
+            .insert(task.clone(), (serving.clone(), vec![Capability::Report]));
+    }
+    on_out(
+        &state,
+        &task,
+        Outcome::Failed,
+        Some("provider returned error".to_string()),
+        None,
+        SettleAuthority::ClientOwned,
+    )
+    .await
+    .expect("the sweep's verdict lands");
+
+    let refused = state.plugin_handoff(
+        &serving,
+        HandoffArgs {
+            task_id: task.clone(),
+            to: "reviewer".to_string(),
+            text: "handing on".to_string(),
+            image: None,
+        },
+    );
+    assert!(!refused.ok, "a closed family takes no handoff");
+    let message = refused
+        .error
+        .as_ref()
+        .map(|error| error.message.clone())
+        .expect("a refusal carries its sentence");
+    assert!(
+        message.contains(&task) && message.contains("failed"),
+        "the refusal names the task and the verdict it already took: {message}"
+    );
+    assert!(
+        message.contains("new one") && message.contains("onlyne_send"),
+        "and the one way to continue the work: {message}"
+    );
+
+    let stranger = new_task_id();
+    let unknown = state.plugin_handoff(
+        &serving,
+        HandoffArgs {
+            task_id: stranger.clone(),
+            to: "reviewer".to_string(),
+            text: "handing on".to_string(),
+            image: None,
+        },
+    );
+    let message = unknown
+        .error
+        .as_ref()
+        .map(|error| error.message.clone())
+        .expect("a refusal carries its sentence");
+    assert_eq!(
+        message,
+        format!("no session serves task {stranger}"),
+        "an id this role never held is a caller's mistake, not a closed family"
     );
 }

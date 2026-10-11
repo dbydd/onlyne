@@ -27,6 +27,19 @@ pub const PULL_HOLD_MS: u64 = 1_000;
 pub const PULL_LIMIT: u32 = 32;
 /// Poll interval for the readiness watcher.
 pub const READINESS_POLL_MS: u64 = 250;
+/// How late one readiness tick may be before the client reads the gap as a
+/// suspension rather than as scheduling jitter.
+///
+/// A tick is due every `READINESS_POLL_MS`, so a gap this size is more than
+/// twenty of them: no loaded machine stalls a 250 ms timer that long, while a
+/// closed laptop lid does it for minutes to hours. The distinction matters
+/// because the two windows that end a session — the reconnect grace and the
+/// heartbeat silence — are durations this process measures, and every duration
+/// that spans a suspension describes time in which nothing running here could
+/// have changed. A tick past this bound therefore rebases those clocks before
+/// the sweeps read them (`DispatchState::note_resume`); it is not a threshold
+/// of its own, and no session is retired or spared by it beyond that rebase.
+pub const SUSPEND_GAP_MS: u64 = 5_000;
 /// Bound on the session sweep the SIGTERM/SIGINT handler runs, short enough
 /// that an operator's own grace period still sees the process leave.
 pub const SHUTDOWN_CLOSE_BUDGET: Duration = Duration::from_secs(8);

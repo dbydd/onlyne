@@ -444,6 +444,14 @@ and names that, because a completion for a task nobody holds cannot be recorded.
 - A turn that ends in a `handoff` without a `complete` travels the same path — the nudge,
   then the same settlement.
 
+A turn that ended with a provider error is not a settlement either, and no drive reports one
+as a verdict. pi retries a retryable error inside the same run, and the client's own nudge can
+restart a session a moment after it settles, so a report sent from the error races work that is
+still going: the session keeps working under a task that already reads terminal, and its
+handoffs have nowhere to land. What the error supplies is the head fallback for a later
+completion, and nothing else — the plugin states its phase and the completion the model asked
+for (`plugins/onlyne-agent-pi`).
+
 Each step publishes an event: `turn_end_without_complete`, `delivery_blocked`, `handoff`.
 What to *do* about a blocked delivery is operator policy and belongs to hooks, never to
 the delivery path.
@@ -473,6 +481,29 @@ With this frame in place, the plugin's own idle ladder, its `idleReminders` knob
 reminder wording have no remaining caller: the client owns the count, the wording, and the
 settlement, and a second copy of them in a plugin is the bug this slice removes.
 
+#### 3c's interface: a completion that meets a standing verdict
+
+A task takes one verdict, and more than one door can hand it one: the model's `complete`, the
+client's own turn-end settlement, a sweep that ends a session, an operator's `control`. A
+completion arriving behind a verdict is therefore ordinary traffic, and the frame is still
+applied — the drain, the binding hand-back, the retirement of any connection that came back for
+the task — because a refused report is one a plugin treats as a dead link and sends again.
+
+What the sender reads instead is the verdict that was already there:
+
+```json
+{"already_settled": {"state": "failed", "settled_at": "2026-10-11T07:15:54.788Z",
+                     "head": "This operation was aborted"}}
+```
+
+The answer is `null` when the report was the task's first verdict. The field exists for the
+session that is still working: a subagent that settled its parent's task, or a sweep that ended
+one, otherwise left the parent reading `reported done` for a row nobody would move. The same
+reading is what `handoff` refuses with — a handoff follows a live family, so a task the client
+has already settled is refused with its state and the one way out (a new family through
+`onlyne_send kind=task`), while an id this role never held keeps the plain `no session serves
+task`.
+
 Constraints the client enforces while handling a tool call (hop budget, relay
 requirement) refuse with a message naming what is missing. The plan moves these checks
 here from the pi plugin, where they were the plugin's private guard.
@@ -484,6 +515,10 @@ here from the pi plugin, where they were the plugin's private guard.
 - A scripted session that never calls `complete` receives exactly one nudge and then
   settles `blocked`; its events are asserted in order.
 - A session that hands off and never completes follows the same two steps.
+- A turn that ends in a provider error reports nothing: the delivery is settled by the client's
+  own rule, not by the session that saw the error.
+- A completion behind a standing verdict is answered with that verdict, and a handoff for the
+  settled task is refused with the verdict and the way out.
 - An ACP session reaches `onlyne mcp`'s tools through `mcpServers` and completes through
   them.
 - No file under `.onlyne/out/` is written by any path, and grep finds no reader of it.
@@ -578,9 +613,12 @@ server's gate, unchanged — and nothing about the list obliges a delivery.
 
 **`[[client]].owes_targets` is the obligation.** A session of that role must have delivered to
 every name on it before it may report a terminal outcome. Absent or empty is the default and
-owes nothing; every name must be reachable through `allowed_targets` (through `"*"`, or as the
-role's own name), or the loader refuses the spec by name — an obligation the ACL forbids would
-make every terminal outcome impossible.
+owes nothing. Every name must be reachable through the same two-sided edge the ACL builds:
+this role's `allowed_targets` names the receiver *and* the receiver's `allowed_senders` names
+this role, or the name is this role's own (the ACL always admits a role's own name). The
+loader refuses the spec by name when either half is missing, because an obligation the ACL
+forbids would make every terminal outcome impossible. The supervisor's reach is one-sided, as
+its ACL row is, so its `allowed_senders` is read on no edge of its own.
 
 **The obligation keeps the fused shape's satisfiability rules.** The role the task arrived
 from is never owed a second delivery — completing is that delivery — so a self-addressed entry

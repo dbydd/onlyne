@@ -269,7 +269,10 @@ pub struct ClientEntry {
     /// from reach, because reach is permission and permission is not a duty:
     /// a role that may address ten others does not owe all ten a handoff.
     /// Absent or empty is the default, and it owes nothing; every name must be
-    /// addressable through `allowed_targets`, or the loader refuses the spec.
+    /// reachable through the same two-sided edge the ACL builds — this role's
+    /// `allowed_targets` names the receiver and the receiver's `allowed_senders`
+    /// names this role, or the name is this role's own — or the loader refuses
+    /// the spec.
     #[serde(default)]
     pub owes_targets: Vec<String>,
     /// The drive and the argv a session runs: `[client.runtime]`.
@@ -944,8 +947,11 @@ fn validate_relay_keys(value: &toml::Value, text: &str, file: &str) -> Result<()
 /// The obligation is enforced by refusing a completion, so a name the ACL
 /// never lets the session reach would make every terminal outcome impossible:
 /// the session could never deliver, and the guard would never let it finish.
-/// Every name must be reachable — through `allowed_targets`, through `"*"`,
-/// or as the role's own name, which the ACL always admits.
+/// Every name must be reachable through the same two-sided rule
+/// [`Spec::acl_edges`] builds from: the sender's `allowed_targets` names the
+/// receiver *and* the receiver's `allowed_senders` names the sender, or the
+/// name is the role's own (the ACL always admits a role's own name), or the
+/// sender is [`SUPERVISOR_ROLE`], whose reach is one-sided.
 fn validate_owes_targets(value: &toml::Value, text: &str, file: &str) -> Result<(), SpecError> {
     let clients = value
         .get("client")
@@ -953,39 +959,62 @@ fn validate_owes_targets(value: &toml::Value, text: &str, file: &str) -> Result<
         .into_iter()
         .flatten()
         .enumerate();
+    let clients: Vec<(usize, &toml::Value)> = clients.collect();
+    let names_of = |table: &toml::value::Table, key: &str| -> Vec<String> {
+        table
+            .get(key)
+            .and_then(toml::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    fn role_of(table: &toml::value::Table) -> &str {
+        table
+            .get("role")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default()
+    }
+    // The receiver's `allowed_senders`, by role name, so the pair rule reads
+    // the other side of the edge exactly as `acl_edges` does.
+    let senders_of: std::collections::HashMap<&str, Vec<String>> = clients
+        .iter()
+        .filter_map(|(_, entry)| entry.as_table())
+        .map(|table| {
+            let role = role_of(table);
+            (role, names_of(table, "allowed_senders"))
+        })
+        .collect();
+    let registered: Vec<&str> = clients
+        .iter()
+        .filter_map(|(_, entry)| entry.as_table())
+        .map(role_of)
+        .collect();
     for (idx, entry) in clients {
         let Some(table) = entry.as_table() else {
             continue;
         };
-        let names = |key: &str| -> Vec<String> {
-            table
-                .get(key)
-                .and_then(toml::Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(toml::Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let owes = names("owes_targets");
+        let owes = names_of(table, "owes_targets");
         if owes.is_empty() {
             continue;
         }
-        let role = table
-            .get("role")
-            .and_then(toml::Value::as_str)
-            .unwrap_or_default();
-        let allowed = names("allowed_targets");
+        let role = role_of(table);
+        let allowed = names_of(table, "allowed_targets");
         // A supervisor with an empty list reaches every registered role, which
         // is the one-sided reach its own ACL row keeps.
         let universal = allowed.iter().any(|name| name == "*")
             || (role == SUPERVISOR_ROLE && allowed.is_empty());
         for name in owes {
-            let reachable = universal || name == role || allowed.contains(&name);
-            if !reachable {
+            if name == role {
+                // The ACL always admits a role's own name.
+                continue;
+            }
+            let reached = universal || allowed.contains(&name);
+            if !reached {
                 return Err(SpecError::validate(
                     file,
                     crate::locate::key_line_in_array_entry(text, "client", idx, "owes_targets"),
@@ -993,6 +1022,27 @@ fn validate_owes_targets(value: &toml::Value, text: &str, file: &str) -> Result<
                         "`owes_targets` names `{name}`, which `allowed_targets` does not reach; \
                          the session could never deliver what it owes. Add `{name}` to \
                          `allowed_targets` (or `\"*\"`), or drop it from `owes_targets`"
+                    ),
+                ));
+            }
+            // Reach is the sender's half; the edge also needs the receiver to
+            // admit this role, unless this sender's reach is one-sided.
+            if role == SUPERVISOR_ROLE || !registered.contains(&name.as_str()) {
+                continue;
+            }
+            let admits = senders_of
+                .get(name.as_str())
+                .is_some_and(|list| list.iter().any(|sender| sender == "*" || sender == role));
+            let reachable = admits;
+            if !reachable {
+                return Err(SpecError::validate(
+                    file,
+                    crate::locate::key_line_in_array_entry(text, "client", idx, "owes_targets"),
+                    format!(
+                        "`owes_targets` names `{name}`, which does not admit `{role}`; \
+                         the edge is two-sided and the session could never deliver what it \
+                         owes. Add `{role}` to `{name}`'s `allowed_senders` (or `\"*\"`), or \
+                         drop `{name}` from `owes_targets`"
                     ),
                 ));
             }

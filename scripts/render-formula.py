@@ -59,7 +59,10 @@ class Onlyne < Formula
   end
 
   def install
-    bin.install "onlyne", "onlyne-server", "onlyne-client"
+    # The last two are the optional IM module (`onlyne-im` and its Telegram
+    # backend); they ride along with the core, since the archive carries them.
+    bin.install "onlyne", "onlyne-server", "onlyne-client", "onlyne-im",
+                "onlyne-im-backend-telegram"
   end
 
   test do

@@ -378,12 +378,44 @@ impl Session {
         };
         let details = optional_string(arguments, "details").filter(|text| !text.is_empty());
         let files = files_argument(arguments)?;
-        self.reports
-            .complete(String::new(), outcome, head, details, files)
+        let (_, answer) = self
+            .reports
+            .complete_answered(String::new(), outcome, head, details, files)
             .await
             .map_err(|error| refusal(&error))?;
-        Ok(format!("reported {}", outcome.as_str()))
+        Ok(match already_settled(&answer) {
+            Some(notice) => {
+                let head = notice
+                    .get("head")
+                    .and_then(Value::as_str)
+                    .filter(|head| !head.is_empty())
+                    .map(|head| format!(": {head}"))
+                    .unwrap_or_default();
+                format!(
+                    "task already settled as {} at {}{head} — this call changed nothing",
+                    notice.get("state").and_then(Value::as_str).unwrap_or("?"),
+                    notice
+                        .get("settled_at")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?"),
+                )
+            }
+            None => format!("reported {}", outcome.as_str()),
+        })
     }
+}
+
+/// The standing verdict a `report.complete` answer carries, when it carries one.
+///
+/// The client answers `null` for a report the task was waiting for and
+/// `{"already_settled": {state, settled_at, head}}` when the task had already
+/// taken its verdict (`docs/v2-CONTRACT.md` §3c). This is the tools drive's
+/// reading of that field, and it is the same shape the pi plugin renders in its
+/// own tool result.
+fn already_settled(answer: &Value) -> Option<&Value> {
+    answer
+        .get("already_settled")
+        .filter(|notice| notice.is_object())
 }
 
 /// One outbound envelope for the `send` frame.

@@ -1014,6 +1014,27 @@ impl ReportSender {
         details: Option<String>,
         files: Vec<String>,
     ) -> Result<Report> {
+        self.complete_answered(task_id, outcome, head, details, files)
+            .await
+            .map(|(report, _)| report)
+    }
+
+    /// File this session's verdict and answer with the client's body.
+    ///
+    /// The body is `null` for a report the task was waiting for, and carries the
+    /// verdict the task already had when the client had settled it before
+    /// (`{"already_settled": {state, settled_at, head}}`,
+    /// `docs/v2-CONTRACT.md` §3c). A drive that answers a model reads the second
+    /// form so a completion behind a standing verdict does not read as one this
+    /// call caused.
+    pub async fn complete_answered(
+        &self,
+        task_id: impl Into<String>,
+        outcome: Outcome,
+        head: Option<String>,
+        details: Option<String>,
+        files: Vec<String>,
+    ) -> Result<(Report, serde_json::Value)> {
         let report = Report::Complete {
             task_id: task_id.into(),
             outcome,
@@ -1023,8 +1044,15 @@ impl ReportSender {
             reply_to: None,
             cluster_ref: None,
         };
-        self.send(report.clone()).await?;
-        Ok(report)
+        let answer = self.send_answered(report.clone()).await?;
+        Ok((report, answer))
+    }
+
+    /// File one report and answer with the client's body verbatim.
+    pub async fn send_answered(&self, report: Report) -> Result<serde_json::Value> {
+        self.io
+            .request_ok(AdapterMsg::Plugin(PluginOp::Report(report)))
+            .await
     }
 
     pub async fn fault(
@@ -1048,10 +1076,7 @@ impl ReportSender {
     }
 
     pub async fn send(&self, report: Report) -> Result<()> {
-        self.io
-            .request_ok(AdapterMsg::Plugin(PluginOp::Report(report)))
-            .await
-            .map(|_| ())
+        self.send_answered(report).await.map(|_| ())
     }
 
     fn next_seq(&self) -> u64 {

@@ -5,6 +5,8 @@ target*
 /.pi*/
 # Runtime Onlyne trees stay out of the index: <server-root>/.onlyne/ and <workspace>/.onlyne/.
 .onlyne/
+# omp's own agent state at the repository root (memory, receipts).
+/.omp/
 # Role template content truth carries one .onlyne/config.toml local-override fragment per role (docs/v1-PLAN.md §11 line 374), so a .onlyne directory below a templates path stays trackable.
 !**/templates/**/.onlyne/
 __pycache__/

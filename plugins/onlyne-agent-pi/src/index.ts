@@ -7,20 +7,34 @@
 // `crates/onlyne-client/src/dispatch.rs`); with any of the three missing this is
 // a plain pi session and the extension stays silent rather than failing.
 //
-//   session_start      -> read env + .pi/onlyne.json, connect, register tools
+//   session_start      -> bind the env session id, read env + .pi/onlyne.json,
+//                         connect, register tools
 //   before_agent_start -> the role prose becomes one section of the system
 //                         prompt the run is about to send (the instruction layer)
 //   turn_start         -> heartbeat{running}
 //   turn_end           -> one turn of a run ended; the phase is re-derived from pi
-//                         and the fallback window for a witnessed failure opens
-//   message_end        -> keep the last assistant text; a failed turn is `failed`
-//   agent_settled      -> heartbeat{idle} when the session waits for input, and the
-//                         report a failed turn owes is sent from here
+//   message_end        -> keep the last assistant text as the head fallback
+//   agent_settled      -> heartbeat{idle} when the session waits for input
 //   session_shutdown   -> detach{reason}
+//
+// The plugin keeps exactly one completion path: the model's explicit
+// `onlyne_complete` (and `recycle{outcome}`). A turn that ends without one
+// decides nothing here — the client's own turn-end rule owns it
+// (`docs/v2-CONTRACT.md` §3c: one nudge, then the delivery settles `blocked`)
+// and its sweeps own a session whose agent died. A turn error only supplies the
+// head fallback, because pi retries a retryable provider error and stays inside
+// the same run, and the client's nudge can restart a session a moment after it
+// settles — a report sent on a turn error would race work that is still going.
 //
 // Host frames are dispatched in `agent.mjs`, not here: `assign` and `nudge` are
 // injected as user messages, `probe` is answered with a heartbeat, and `recycle`
 // settles the task and stops the plugin.
+//
+// Only the session whose id equals `ONLYNE_SESSION_ID` mounts: a pi process runs
+// a subagent sidechain and `/new` sessions too, all inheriting this extension's
+// environment, and a sidechain that called `onlyne_complete` would settle the
+// parent's task. `session-scope.mjs` carries the rule, the guard behind it, and
+// what a call from a foreign session is told.
 
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -29,6 +43,7 @@ import { OnlyneAgent } from "./agent.mjs";
 import { loadConfig, sessionIdentity } from "./config.mjs";
 import { resolveSocketPath } from "./socket.mjs";
 import { createSurface } from "./pi-surface.mjs";
+import { foreignSessionRefusal, mountsSession, ownsSession, sessionIdOf } from "./session-scope.mjs";
 
 /**
  * Node's process globals, declared here so the package needs no `@types/node`
@@ -131,10 +146,27 @@ export default function onlyne(pi: ExtensionAPI) {
   let agent: OnlyneAgent | null = null;
   let surface: PiSurface | null = null;
   let registered = false;
+  /**
+   * The session id that mounted this plugin. A pi process can host more than
+   * one session — a `task` subagent runs a sidechain in the same process and
+   * inherits `ONLYNE_*`, and `/new` starts another — and every one of them
+   * loads this extension. The env names the one session that is the onlyne
+   * session, so the tools belong to it alone; an unbound session must not be
+   * able to settle this task by calling `onlyne_complete` from its sidechain.
+   */
+  let boundSessionId: string | null = null;
 
   const log = (line: string, data?: unknown) => {
     const detail = data === undefined ? "" : ` ${JSON.stringify(data)}`;
     process?.stderr?.write(`[pi-onlyne] ${line}${detail}\n`);
+  };
+
+  /**
+   * Guard one tool call: the caller must be the session that mounted this
+   * plugin (`session-scope.mjs` carries the rule and the reason).
+   */
+  const refuseForeignSession = (caller: string | null): never => {
+    throw new Error(foreignSessionRefusal(boundSessionId, caller));
   };
 
   /** Tools and the `/onlyne` command exist only inside an onlyne session. */
@@ -157,7 +189,9 @@ export default function onlyne(pi: ExtensionAPI) {
           kind: Type.Optional(Type.String({ description: '"note" (default) or "task"' })),
           image: Type.Optional(Type.String({ description: "absolute path to a png/jpeg/gif/webp image to attach" })),
         }),
-        async execute(_toolCallId, params) {
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+          const caller = sessionIdOf(ctx?.sessionManager);
+          if (!ownsSession(boundSessionId, caller)) refuseForeignSession(caller);
           if (!agent) throw new Error("onlyne: session is not connected");
           const result = await agent.sendFromTool({
             to: params.to,
@@ -189,7 +223,9 @@ export default function onlyne(pi: ExtensionAPI) {
           details: Type.Optional(Type.String({ description: "the full result, delivered as it stands" })),
           files: Type.Optional(Type.Array(Type.String(), { description: "absolute paths of the files the result names" })),
         }),
-        async execute(_toolCallId, params) {
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+          const caller = sessionIdOf(ctx?.sessionManager);
+          if (!ownsSession(boundSessionId, caller)) refuseForeignSession(caller);
           if (!agent) throw new Error("onlyne: session is not connected");
           // The exit is not a tool-result flag: pi 0.85.1 has no tool-result
           // `terminate` handling. `agent.complete` asks the surface to shut the
@@ -202,6 +238,17 @@ export default function onlyne(pi: ExtensionAPI) {
             details: params.details,
             files: params.files,
           });
+          // The client that had already settled this task answers with its own
+          // record, and the sentence says so rather than claiming a completion
+          // this call did not cause.
+          if (result.alreadySettled) {
+            const settled = result.alreadySettled;
+            const head = settled.head ? `: ${settled.head}` : "";
+            return textResult(
+              `task already settled as ${settled.state} at ${settled.settled_at}${head} — this call changed nothing`,
+              { outcome: result.outcome, alreadySettled: settled }
+            );
+          }
           // The outcome and nothing else: the ledger's head stays a display
           // field (docs/v2-CONTRACT.md §3c), and the task's identity is not a
           // fact the model is meant to hold.
@@ -226,7 +273,9 @@ export default function onlyne(pi: ExtensionAPI) {
           text: Type.String({ description: "handoff text for the receiving role" }),
           image: Type.Optional(Type.String({ description: "absolute path to a png/jpeg/gif/webp image to attach" })),
         }),
-        async execute(_toolCallId, params) {
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+          const caller = sessionIdOf(ctx?.sessionManager);
+          if (!ownsSession(boundSessionId, caller)) refuseForeignSession(caller);
           if (!agent) throw new Error("onlyne: session is not connected");
           const result = await agent.handoffFromTool({
             to: params.to,
@@ -246,6 +295,17 @@ export default function onlyne(pi: ExtensionAPI) {
       pi.registerCommand("onlyne", {
         description: "Onlyne session status: connection, task, reports",
         handler: async (argLine, commandContext) => {
+          // The command drives this plugin's connection, so it belongs to the
+          // bound session for the same reason the tools do: a sidechain that
+          // issued `/onlyne disconnect` would detach the real session.
+          const caller = sessionIdOf(commandContext?.sessionManager);
+          if (!ownsSession(boundSessionId, caller)) {
+            commandContext.ui.notify(
+              foreignSessionRefusal(boundSessionId, caller),
+              "info"
+            );
+            return;
+          }
           if (!agent) {
             commandContext.ui.notify("onlyne: no session (ONLYNE_* env is absent)", "info");
             return;
@@ -270,9 +330,22 @@ export default function onlyne(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", async (_event, ctx) => {
-    context = ctx;
     const identity = sessionIdentity(env);
     if (!identity) return; // not an onlyne session: stay out of the way
+    // Only the session the client names may mount. A pi process runs more than
+    // one session — a `task` subagent's sidechain, `/new` — and each of them
+    // loads this extension with the same inherited environment, so without this
+    // check a subagent's `onlyne_complete` settles the parent's task (observed:
+    // librarian task cfa73386). An unknown id means an older pi that does not
+    // expose one; the env-bound mount is then the only candidate and stays the
+    // behaviour, with no line to explain.
+    const starting = sessionIdOf(ctx.sessionManager);
+    if (!mountsSession(identity.sessionId, starting)) {
+      log(`session ${starting} is not the onlyne session ${identity.sessionId}; staying inert`);
+      return;
+    }
+    context = ctx;
+    boundSessionId = identity.sessionId;
     const config = loadConfig(ctx.cwd);
     if (config.warning) log(config.warning);
     if (!config.enabled) {
@@ -351,5 +424,6 @@ export default function onlyne(pi: ExtensionAPI) {
     surface = null;
     registered = false;
     context = null;
+    boundSessionId = null;
   });
 }
