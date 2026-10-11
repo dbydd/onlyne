@@ -21,9 +21,11 @@ to you and the spec file.
   is the standing a client-held supervisor session sends with, and the flag the Control-class
   ACL bypass reads.
 - Lifecycle: `onlyne server init|run|status|generate|reload`, the top-level
-  `onlyne wait-ready`, `onlyne client run|init|status`, and `onlyne gateway status`. The
-  platform verbs that used to sit beside `gateway status` went with the frozen gateway
-  crate; the mount vocabulary itself stays in the protocol. Nothing detaches and there is
+  `onlyne wait-ready`, `onlyne client run|init|status`, and `onlyne gateway status`.
+  `onlyne gateway status` still reports the mounts the server knows; the platform verbs
+  that used to sit beside it are not verbs of `onlyne` — the gateway shipped as its own
+  binary `onlyne-im` (v2.2) with its own `init`/`generate`/`login`/`run`/`check`, and the
+  mount vocabulary itself stays in the protocol. Nothing detaches and there is
   no `start`/`stop`: both daemons
   run in the foreground, and a supervisor that wants one in the background starts `run`
   itself (a tab, `launchd`, `systemd`).
