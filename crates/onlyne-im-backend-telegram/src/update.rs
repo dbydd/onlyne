@@ -4,7 +4,7 @@
 //! chat id (the conversation), the sender, the text, and a button press's
 //! `callback_data`. Everything else Telegram sends rides past unread.
 
-use onlyne_im_backend::payload::{ImEvent, ImEventKind, ImSender};
+use onlyne_im_backend::payload::{ImEvent, ImEventKind, ImReply, ImSender};
 use serde_json::Value;
 
 /// Map one Telegram `Update` into the event a trigger script receives.
@@ -79,8 +79,43 @@ fn message_event(gateway: &str, platform: &str, message: &Value) -> Option<ImEve
         from: user_of(message.get("from")),
         text,
         attachments,
+        reply: reply_of(message),
         at: now(),
         ..ImEvent::default()
+    })
+}
+
+/// What this message answers, and what it quotes.
+///
+/// Telegram answers a *message*, not a thread, so there is no list coordinate
+/// to report: `parent` is the replied-to `message_id` and the root and the
+/// thread stay absent. The gateway then anchors on the parent, which is the
+/// reading `thread::assign_list` gives a platform with no list of its own.
+///
+/// The quoted message rides back as a **reference**, not as the text: the
+/// message's own words are `text` above, and the thing it answers is material
+/// the reader may want (and Telegram is kind enough to deliver in full here,
+/// where a history call would be needed elsewhere). It is not the parent in
+/// the structural sense — a reply *inside* a thread and a reply that *quotes*
+/// one are different things, and only the first forms a chain.
+fn reply_of(message: &Value) -> Option<ImReply> {
+    let quoted = message.get("reply_to_message");
+    let quoted_id = quoted
+        .and_then(|q| q.get("message_id"))
+        .map(|v| v.to_string())
+        .filter(|value| !value.trim().is_empty());
+    quoted_id.map(|parent| ImReply {
+        parent: Some(parent),
+        root: None,
+        thread: None,
+        quoted_text: quoted
+            .and_then(|q| {
+                q.get("text")
+                    .or_else(|| q.get("caption"))
+                    .and_then(Value::as_str)
+            })
+            .filter(|t| !t.trim().is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -220,5 +255,43 @@ mod tests {
         let event = event_from_update("g", "telegram", &update).unwrap();
         assert_eq!(event.attachments.len(), 1);
         assert_eq!(event.attachments[0].path, "telegram:file:big");
+    }
+
+    #[test]
+    fn a_reply_carries_the_message_it_answers_and_what_it_quotes() {
+        // Telegram answers a message, not a thread, and is kind enough to
+        // deliver the quoted message in full — the context a Feishu reply has
+        // to fetch and a QQ quote never has.
+        let update = json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 42,
+                "chat": {"id": -100},
+                "from": {"id": 7, "first_name": "dbydd"},
+                "text": "and another thing",
+                "reply_to_message": {
+                    "message_id": 41,
+                    "chat": {"id": -100},
+                    "from": {"id": 9, "first_name": "someone"},
+                    "text": "the original words"
+                }
+            }
+        });
+        let event = event_from_update("tg1", "telegram", &update).unwrap();
+        let reply = event.reply.expect("a reply carries its coordinate");
+        assert_eq!(reply.parent.as_deref(), Some("41"));
+        assert!(reply.root.is_none(), "Telegram has no list to name");
+        assert_eq!(reply.quoted_text.as_deref(), Some("the original words"));
+        assert_eq!(event.text.as_deref(), Some("and another thing"));
+    }
+
+    #[test]
+    fn a_message_that_replies_to_nothing_carries_no_coordinate() {
+        let update = json!({
+            "update_id": 2,
+            "message": {"message_id": 43, "chat": {"id": -100}, "text": "plain"}
+        });
+        let event = event_from_update("tg1", "telegram", &update).unwrap();
+        assert!(event.reply.is_none());
     }
 }

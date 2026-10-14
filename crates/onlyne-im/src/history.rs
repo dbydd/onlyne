@@ -74,6 +74,12 @@ pub struct HistoryEntry {
     /// The text, both directions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The sticker this message carried instead of words, when it carried one
+    /// (`crate::chatkey`: a `<sticker:…>` marker line). Metadata, next to the
+    /// references a backend reports: neither is text, and the record keeps
+    /// them apart from it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sticker: Option<String>,
 }
 
 /// Where a discussion forked from, in the terms the aggregate record uses.
@@ -126,6 +132,12 @@ impl HistoryEntry {
     /// Attach the text this entry carries, for either direction.
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
         self.text = Some(text.into());
+        self
+    }
+
+    /// Attach the sticker this entry carried instead of words.
+    pub fn with_sticker(mut self, sticker: impl Into<String>) -> Self {
+        self.sticker = Some(sticker.into());
         self
     }
 }

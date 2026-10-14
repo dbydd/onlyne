@@ -17,7 +17,7 @@
 //! | `AT_MESSAGE_CREATE` | `channel` | `channel_id` |
 //! | `DIRECT_MESSAGE_CREATE` | `direct` | `guild_id` |
 
-use onlyne_im_backend::payload::{ImAttachment, ImEvent, ImEventKind, ImSender};
+use onlyne_im_backend::payload::{ImAttachment, ImEvent, ImEventKind, ImReply, ImSender};
 use serde_json::Value;
 
 /// Map one QQ gateway dispatch into the event a trigger script receives.
@@ -88,8 +88,39 @@ pub fn event_from_dispatch(gateway: &str, platform: &str, dispatch: &Value) -> O
         from,
         text,
         attachments: attachments_of(data),
+        reply: reply_of(data),
         at: now(),
         ..ImEvent::default()
+    })
+}
+
+/// What this message quotes, as QQ reports it.
+///
+/// QQ has no threads: a quoted reply names one message and nothing else, so
+/// `parent` is the whole coordinate and the root and the thread stay absent —
+/// the `Chain` shape, one forward pointer per message.
+///
+/// The target rides in `message_scene.ext`, whose `msg_idx` is the
+/// `REFIDX_…` handle the platform uses for a quoted message
+/// (`发送群聊消息`'s `message_reference.message_id` names the same field for a
+/// non-bot message). The quoted *body* is not in the event; a reader who needs
+/// it either has it in this cluster's record or asks the platform.
+///
+/// Shape from the documented event, not yet measured: the live QQ traffic this
+/// backend has seen was plain text with no quote.
+fn reply_of(data: &Value) -> Option<ImReply> {
+    let ext = data.pointer("/message_scene/ext")?;
+    let entries = ext.as_array()?;
+    let msg_idx = entries
+        .iter()
+        .find_map(|entry| entry.get("msg_idx").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(ImReply {
+        parent: Some(msg_idx.to_string()),
+        root: None,
+        thread: None,
+        quoted_text: None,
     })
 }
 
@@ -324,5 +355,34 @@ mod tests {
             event.attachments[0].path,
             "qqbot:attachment:https://example.invalid/a.png"
         );
+    }
+
+    #[test]
+    fn a_quoted_group_message_names_the_ref_it_answers() {
+        // QQ carries one forward pointer and no list: an element of
+        // `message_scene.ext` names the `REFIDX_…` handle of the message
+        // quoted (the shape `发送群聊消息` documents for a quoted reply).
+        let dispatch = json!({
+            "op": 0,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "d": {
+                "id": "m9",
+                "content": "<@!bot> about that thing",
+                "group_openid": "group-1",
+                "author": {"member_openid": "member-1"},
+                "message_scene": {"ext": [{"msg_idx": "REFIDX_abc123=="}]}
+            }
+        });
+        let event = event_from_dispatch("qq1", "qqbot", &dispatch).unwrap();
+        let reply = event.reply.expect("a quoted reply carries its ref");
+        assert_eq!(reply.parent.as_deref(), Some("REFIDX_abc123=="));
+        assert!(reply.root.is_none(), "QQ has no list to name");
+        assert!(reply.thread.is_none());
+    }
+
+    #[test]
+    fn a_plain_message_carries_no_ref() {
+        let event = event_from_dispatch("qq1", "qqbot", &group_event()).unwrap();
+        assert!(event.reply.is_none(), "{:?}", event.reply);
     }
 }

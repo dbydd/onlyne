@@ -81,6 +81,10 @@ fn reply_of(message: &Value) -> Option<ImReply> {
         parent: field("parent_id"),
         root: field("root_id"),
         thread: field("thread_id"),
+        // Feishu reports the coordinate but not the quoted body. Fetching it
+        // is a history call the operator authorizes; the gateway states the
+        // gap rather than filling it, which is what `docs/v2.4` §8 asks for.
+        quoted_text: None,
     };
     (!reply.is_empty()).then_some(reply)
 }

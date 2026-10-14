@@ -57,50 +57,116 @@ pub fn validate(key: &str) -> bool {
 ///   first line is a reply that could be misfiled, so it is refused rather
 ///   than guessed at.
 pub fn extract(body: &str) -> Result<(String, String), Misplaced> {
-    let (key, _reply, rest) = extract_with_reply(body)?;
-    Ok((key, rest))
+    let markers = extract_markers(body)?;
+    Ok((markers.key, markers.rest))
 }
 
-/// Extract the chat key and, when the body names one on its second line, the
-/// platform event the reply answers; `rest` is the body after both lines.
+/// The marker lines a reply body opens with.
 ///
-/// A second line `<msg:id>` is optional and only meaningful to a platform
-/// whose passive reply is only passive with the id it answers (QQ). The
-/// default when it is absent is the conversation's own last inbound event,
-/// which [`crate::chatlog`] holds — the reply then answers the message the
-/// operator just read, which is the shape "reply to what came in" means.
-pub fn extract_with_reply(body: &str) -> Result<(String, Option<String>, String), Misplaced> {
-    // Line one: the key, or no key at all.
-    let (key, rest) = match body.split_once('\n') {
-        // A one-line body: it is either exactly one key or no key at all.
-        None => match unwrap(body) {
-            Some(key) => (key, String::new()),
-            None if contains_key_shaped(body) => return Err(Misplaced),
-            None => return Ok((String::new(), None, body.to_string())),
-        },
-        Some((first, rest)) => match unwrap(first) {
-            Some(key) => (key, rest.to_string()),
-            None if contains_key_shaped(body) => return Err(Misplaced),
-            None => return Ok((String::new(), None, body.to_string())),
-        },
-    };
-    // Line two, when it is one: the platform event this reply answers. An
-    // ordinary `<msg:…>`-free body keeps every byte of `rest` as the payload.
-    match rest.split_once('\n') {
-        Some((line, tail)) => match unwrap_msg(line) {
-            Some(id) => Ok((key, Some(id), tail.to_string())),
-            None => Ok((key, None, rest)),
-        },
-        None => match unwrap_msg(&rest) {
-            Some(id) => Ok((key, Some(id), String::new())),
-            None => Ok((key, None, rest)),
-        },
-    }
+/// One line each, in this order, each optional after the key:
+///
+/// ```text
+/// <chat:7f3a9c2e1b04d5a6f8c1e3b7a9d2f4c6>
+/// <msg:ROBOT1.0_AdAX>
+/// <sticker:CAACAgQAAxkBAAE>
+///
+/// the words the model wrote
+/// ```
+///
+/// A leading line that is not one of these ends the header: everything from
+/// that line on is the body, byte for byte. That is what keeps an ordinary
+/// message — no markers, or only the key — exactly as it was, and what lets a
+/// body quote another marker without it being read as one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Markers {
+    /// The chat key, empty when the body names none.
+    pub key: String,
+    /// The platform message this reply answers (`<msg:…>`).
+    pub reply_to: Option<String>,
+    /// A sticker to send instead of words (`<sticker:…>`), which the gateway
+    /// records as the message's metadata rather than as text.
+    pub sticker: Option<String>,
+    /// Everything after the header, verbatim.
+    pub rest: String,
 }
 
-/// The message id inside its `<msg:...>` wrapper, if the line is exactly that.
-fn unwrap_msg(line: &str) -> Option<String> {
-    let inner = line.strip_prefix("<msg:")?.strip_suffix('>')?;
+/// Pull the marker lines off a body.
+///
+/// Three answers, and the caller treats them differently
+/// (`docs/v2.3-CHAT-PROTOCOL.md` §6):
+///
+/// - `Ok(markers)` — the body opened with the key, and any other marker line
+///   that followed it. [`Markers::rest`] is the body after the header.
+/// - `Ok(markers)` with an empty [`Markers::key`] — the body names no key at
+///   all; the whole body comes back as `rest`, untouched. This is the *no key*
+///   case, which the protocol lets stand for deliveries that are not chat
+///   replies.
+/// - `Err(Misplaced)` — a key-shaped thing exists in the body but not as the
+///   whole first line, or the first line carries a key the shape check
+///   refuses. A reply that names its conversation somewhere other than the
+///   first line is a reply that could be misfiled, so it is refused rather
+///   than guessed at.
+pub fn extract_markers(body: &str) -> Result<Markers, Misplaced> {
+    // The first line, whether or not a newline follows it: a body that is
+    // exactly one key is a key with nothing under it.
+    let (first, after_first) = match body.split_once('\n') {
+        Some((first, tail)) => (first, tail),
+        None => (body, ""),
+    };
+    let Some(key) = unwrap(first) else {
+        return if contains_key_shaped(body) {
+            Err(Misplaced)
+        } else {
+            Ok(Markers {
+                rest: body.to_string(),
+                ..Markers::default()
+            })
+        };
+    };
+    // The key is the first line; the marker lines that follow it are read in
+    // order, and the first line that is not one of them starts the body.
+    let mut rest = after_first;
+    let mut markers = Markers {
+        key,
+        ..Markers::default()
+    };
+    for (slot, prefix) in [
+        (&mut markers.reply_to, "<msg:"),
+        (&mut markers.sticker, "<sticker:"),
+    ] {
+        if slot.is_some() {
+            continue;
+        }
+        let Some(line) = rest.split_once('\n').map(|(line, _)| line) else {
+            // The header ran to the end of the body with no trailing newline.
+            if let Some(value) = unwrap_prefixed(rest, prefix) {
+                *slot = Some(value);
+                rest = "";
+            }
+            continue;
+        };
+        if let Some(value) = unwrap_prefixed(line, prefix) {
+            *slot = Some(value);
+            rest = rest.split_once('\n').map(|(_, tail)| tail).unwrap_or("");
+        }
+    }
+    markers.rest = rest.to_string();
+    Ok(markers)
+}
+
+/// The chat key and, when the body names one, the platform event it answers.
+///
+/// The two-value shape callers already read; [`extract_markers`] is the one
+/// that carries everything.
+pub fn extract_with_reply(body: &str) -> Result<(String, Option<String>, String), Misplaced> {
+    let markers = extract_markers(body)?;
+    Ok((markers.key, markers.reply_to, markers.rest))
+}
+
+/// The value inside one `<prefix:…>` wrapper, if the line is exactly that.
+fn unwrap_prefixed(line: &str, prefix: &str) -> Option<String> {
+    let inner = line.strip_prefix(prefix)?.strip_suffix('>')?;
+    let inner = inner.trim();
     (!inner.is_empty() && inner.len() <= MAX_KEY_LEN).then(|| inner.to_string())
 }
 
@@ -198,6 +264,47 @@ mod tests {
         assert_eq!(rest, "\n在的\n<msg:not-first>\n");
         // `extract` stays the two-value shape its callers already read.
         assert_eq!(extract(&body).unwrap(), (got, rest));
+    }
+
+    #[test]
+    fn a_sticker_marker_is_read_as_metadata_not_as_words() {
+        let key = mint();
+        let body = format!("<chat:{key}>\n<sticker:CAACAgQAAxkBAAE>\n\n");
+        let markers = extract_markers(&body).expect("markers");
+        assert_eq!(markers.key, key);
+        assert_eq!(markers.sticker.as_deref(), Some("CAACAgQAAxkBAAE"));
+        assert!(markers.reply_to.is_none());
+        assert_eq!(markers.rest, "\n");
+    }
+
+    #[test]
+    fn the_markers_may_appear_together_in_their_documented_order() {
+        let key = mint();
+        let body = format!("<chat:{key}>\n<msg:ROBOT1.0_AdAX>\n<sticker:abc>\n\nhi");
+        let markers = extract_markers(&body).expect("markers");
+        assert_eq!(markers.reply_to.as_deref(), Some("ROBOT1.0_AdAX"));
+        assert_eq!(markers.sticker.as_deref(), Some("abc"));
+        assert_eq!(markers.rest, "\nhi");
+    }
+
+    #[test]
+    fn a_line_that_is_not_a_marker_starts_the_body() {
+        let key = mint();
+        let body = format!("<chat:{key}>\n\n<msg:not-a-marker-here>\n");
+        let markers = extract_markers(&body).expect("markers");
+        // The blank line ends the header, so a marker-shaped line inside the
+        // body stays in the body — quoting one must not move it.
+        assert!(markers.reply_to.is_none());
+        assert_eq!(markers.rest, "\n<msg:not-a-marker-here>\n");
+    }
+
+    #[test]
+    fn a_sticker_marker_with_nothing_in_it_is_not_a_marker() {
+        let key = mint();
+        let body = format!("<chat:{key}>\n<sticker:>\n\nhi");
+        let markers = extract_markers(&body).expect("markers");
+        assert!(markers.sticker.is_none());
+        assert_eq!(markers.rest, "<sticker:>\n\nhi");
     }
 
     #[test]

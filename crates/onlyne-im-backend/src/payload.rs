@@ -150,12 +150,25 @@ pub struct ImReply {
     pub root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,
+    /// The text of the message this one answers, when the platform deliveries
+    /// it inside the event — Telegram's `reply_to_message` does. A backend that
+    /// cannot get it leaves this absent and a reader falls back to the history
+    /// API under the operator's grant.
+    ///
+    /// It rides *here* rather than as the message's own text, because what the
+    /// message says is what the sender typed and what it quotes is material —
+    /// the distinction the delivery template already draws for upstream work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quoted_text: Option<String>,
 }
 
 impl ImReply {
     /// Whether any coordinate is present.
     pub fn is_empty(&self) -> bool {
-        self.parent.is_none() && self.root.is_none() && self.thread.is_none()
+        self.parent.is_none()
+            && self.root.is_none()
+            && self.thread.is_none()
+            && self.quoted_text.is_none()
     }
 
     /// The message this event answers, from whichever id names it.

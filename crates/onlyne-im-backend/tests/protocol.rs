@@ -137,6 +137,7 @@ fn an_inbound_event_is_the_shape_a_trigger_script_reads() {
             parent: Some("msg-8".into()),
             root: Some("msg-1".into()),
             thread: None,
+            quoted_text: Some("the message it answers".into()),
         }),
         at: "2026-10-10T12:00:00Z".into(),
     };
@@ -148,6 +149,7 @@ fn an_inbound_event_is_the_shape_a_trigger_script_reads() {
     // which is what lets a reply into an unrecorded discussion name its anchor.
     assert_eq!(value["reply"]["parent"], "msg-8");
     assert_eq!(value["reply"]["root"], "msg-1");
+    assert_eq!(value["reply"]["quoted_text"], "the message it answers");
     // A coordinate the platform did not report is absent, like `action`.
     assert!(value["reply"].get("thread").is_none(), "{value}");
     // An absent action is absent, not null: a script branches on presence.
