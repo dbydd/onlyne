@@ -22,6 +22,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    onlyne_im_backend::install_crypto_provider();
     init_logging();
     let cli = Cli::parse();
     let token = cli

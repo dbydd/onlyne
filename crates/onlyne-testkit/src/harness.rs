@@ -4,8 +4,8 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use onlyne_proto::{
-    AdminOp, EventRow, Frame, HistoryArgs, LedgerEntry, LedgerQuery, QuerySessionsArgs, ResBody,
-    SessionRow, new_id,
+    AdminOp, EventRow, Frame, HistoryArgs, LedgerEntry, LedgerQuery, QueryFaultsArgs,
+    QuerySessionsArgs, ResBody, SessionRow, new_id,
 };
 use onlyne_wire::socket::{connect_local, read_registration, registration_path, socket_path};
 use serde::{Deserialize, Serialize};
@@ -707,6 +707,53 @@ impl Cluster {
         Ok(rows)
     }
 
+    /// Read recorded faults, newest first.
+    pub async fn query_faults(&self, query: QueryFaultsArgs) -> Result<Vec<serde_json::Value>> {
+        let op = AdminOp::Faults(query);
+        let body = admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64).await?;
+        if !body.ok {
+            bail!("faults query failed: {:?}", body.error);
+        }
+        let data = body
+            .data
+            .ok_or_else(|| anyhow!("faults response missing data"))?;
+        Ok(data
+            .get("faults")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Poll until a fault of `kind` names `task_id`.
+    pub async fn poll_fault(
+        &self,
+        task_id: &str,
+        kind: &str,
+        timeout: Duration,
+    ) -> Result<Vec<serde_json::Value>> {
+        let start = Instant::now();
+        loop {
+            if start.elapsed() > timeout {
+                let seen = self
+                    .query_faults(QueryFaultsArgs::default())
+                    .await
+                    .unwrap_or_default();
+                bail!("poll_fault timeout after {timeout:?}; last read {seen:#?}");
+            }
+            let rows = self
+                .query_faults(QueryFaultsArgs {
+                    task_id: Some(task_id.to_string()),
+                    kind: Some(kind.to_string()),
+                    ..Default::default()
+                })
+                .await?;
+            if !rows.is_empty() {
+                return Ok(rows);
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
     /// Reload the server spec.
     pub async fn reload(&self) -> Result<()> {
         let op = AdminOp::Reload(serde_json::json!({}));
@@ -832,6 +879,30 @@ impl Cluster {
 
     pub fn server_root(&self) -> &Path {
         &self.server_root
+    }
+
+    /// The endpoint this cluster listens on, read out of its spec.
+    ///
+    /// A test that runs a second daemon against the same cluster — the IM
+    /// gateway — needs the address and the pin, and both live in the spec the
+    /// server was started with.
+    pub fn endpoint(&self) -> String {
+        let spec = std::fs::read_to_string(self.spec_path()).unwrap_or_default();
+        spec.lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("listen = "))
+            .map(|value| value.trim().trim_matches('"').to_string())
+            .unwrap_or_default()
+    }
+
+    /// The server certificate's SPKI pin, read out of its spec.
+    pub fn cert_pin(&self) -> String {
+        let spec = std::fs::read_to_string(self.spec_path()).unwrap_or_default();
+        spec.lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("cert_pin = "))
+            .map(|value| value.trim().trim_matches('"').to_string())
+            .unwrap_or_default()
     }
 
     /// The cluster's spec file, the one point of truth about its roles.

@@ -6,7 +6,7 @@
 //! stdin/stdout, the same codec every other Onlyne connection uses.
 
 use crate::backend::Backend;
-use crate::frame::{BackendOp, CoreOp};
+use crate::frame::{BackendOp, CoreOp, ImConversations, LoginResult};
 use anyhow::Result;
 use onlyne_wire::frame::{FrameReader, write_frame};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, stdin, stdout};
@@ -32,8 +32,20 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut backend = backend;
-    write_frame(&mut write, &BackendOp::Hello(backend.hello())).await?;
+    let hello = backend.hello();
+    let authenticated = hello.authenticated;
+    write_frame(&mut write, &BackendOp::Hello(hello)).await?;
     write.flush().await?;
+
+    // A backend with no credential does not poll. This is the one checkpoint
+    // that makes "the gateway keeps running while a platform is unauthenticated"
+    // true: polling a platform with an empty token fails on its first call
+    // (Telegram answers 404, Feishu and QQ cannot open their websocket), and a
+    // backend whose event stream ends is a backend the gateway loses — so the
+    // sentence `hello` already carried would be the last thing an operator ever
+    // heard from it. Parked, it keeps its process, answers `login`, and starts
+    // polling the moment a credential is accepted.
+    let mut polling = authenticated;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<CoreOp>(64);
     let reader = tokio::spawn(async move {
@@ -54,6 +66,39 @@ where
     loop {
         tokio::select! {
             op = rx.recv() => match op {
+                Some(CoreOp::Login(args)) => {
+                    // The answer goes back as a frame rather than an exit code:
+                    // a backend that refused a credential by dying would take
+                    // its platform's other conversations down with it, and the
+                    // gateway would have no sentence to show an operator.
+                    let result = match backend.login(args).await {
+                        Ok(identity) => LoginResult {
+                            ok: true,
+                            reason: None,
+                            identity,
+                        },
+                        Err(error) => LoginResult {
+                            ok: false,
+                            reason: Some(format!("{error:#}")),
+                            identity: None,
+                        },
+                    };
+                    // An accepted credential turns the poll on; a refused one
+                    // leaves it where it was, so a bad token cannot silence a
+                    // backend that was already working.
+                    polling |= result.ok;
+                    write_frame(&mut write, &BackendOp::Login(result)).await?;
+                    write.flush().await?;
+                }
+                Some(CoreOp::ListConversations(_)) => {
+                    let conversations = backend.list_conversations().await.unwrap_or_default();
+                    write_frame(
+                        &mut write,
+                        &BackendOp::Conversations(ImConversations { conversations }),
+                    )
+                    .await?;
+                    write.flush().await?;
+                }
                 Some(CoreOp::Send(args)) => {
                     if let Err(error) = backend.send(args).await {
                         eprintln!("backend send failed: {error:#}");
@@ -61,7 +106,7 @@ where
                 }
                 Some(CoreOp::Stop(_)) | None => break,
             },
-            event = backend.next_event() => match event {
+            event = backend.next_event(), if polling => match event {
                 Ok(Some(event)) => {
                     write_frame(&mut write, &BackendOp::Event(event)).await?;
                     write.flush().await?;
@@ -100,6 +145,8 @@ mod tests {
                 platform: "fake".into(),
                 version: "1".into(),
                 capabilities: vec!["message".into()],
+                authenticated: true,
+                onboarding: None,
             }
         }
         async fn next_event(&mut self) -> Result<Option<ImEvent>> {

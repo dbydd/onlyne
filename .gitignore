@@ -13,3 +13,6 @@ __pycache__/
 *.pyc
 # Runtime trees of the in-repo examples (server roots and generated workspaces).
 examples/*/cluster/
+# Operator credentials for the IM gateway example: filled in locally, never
+# committed. `.env.example` beside `.env` is the tracked template.
+.env

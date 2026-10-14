@@ -24,6 +24,8 @@ default-members = [
   "crates/onlyne-im-backend",
   "crates/onlyne-im",
   "crates/onlyne-im-backend-telegram",
+  "crates/onlyne-im-backend-feishu",
+  "crates/onlyne-im-backend-qqbot",
 ]
 
 [workspace.package]
@@ -51,12 +53,15 @@ onlyne-testkit = { path = "crates/onlyne-testkit", version = "2.2.0" }
 onlyne-im-backend = { path = "crates/onlyne-im-backend", version = "2.2.0" }
 onlyne-im = { path = "crates/onlyne-im", version = "2.2.0" }
 onlyne-im-backend-telegram = { path = "crates/onlyne-im-backend-telegram", version = "2.2.0" }
+onlyne-im-backend-feishu = { path = "crates/onlyne-im-backend-feishu", version = "2.2.0" }
+onlyne-im-backend-qqbot = { path = "crates/onlyne-im-backend-qqbot", version = "2.2.0" }
 
 # external
 anyhow = "1"
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+openlark = { version = "0.17.0", default-features = false, features = ["websocket"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
@@ -85,6 +90,9 @@ tokio = { version = "1", features = [
   "signal",
 ] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+# The QQ Open Platform's event gateway is a websocket; its backend binary is
+# the only crate that compiles this.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 toml = "0.8"
 # The editor behind `AdminOp::SpecApply`: a typed edit lands in the document
 # as text, so an operator's comments and formatting survive it.

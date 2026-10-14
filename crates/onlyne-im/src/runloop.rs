@@ -51,7 +51,7 @@ pub struct RunOptions {
 /// Run the gateway until a permanent failure or a shutdown signal.
 pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
     let gateway = Arc::new(gateway);
-    if gateway.conversations.is_empty() {
+    if gateway.conversations().is_empty() {
         tracing::warn!(
             root = %gateway.root.display(),
             "this gateway root has no conversation workspace; run `onlyne-im generate` to add one"
@@ -72,7 +72,8 @@ pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
     let mut backends: JoinSet<(String, Result<()>)> = JoinSet::new();
     let mut senders: BTreeMap<String, mpsc::Sender<BackendCommand>> = BTreeMap::new();
     for entry in &gateway.backends {
-        let host = BackendHost::spawn(&entry.run)
+        let credential = onlyne_im_backend::credential_path(&gateway.root, &entry.gateway);
+        let host = BackendHost::spawn(&entry.run, &entry.gateway, &credential)
             .await
             .with_context(|| format!("spawning the backend for gateway {}", entry.gateway))?;
         let (command_tx, command_rx) = mpsc::channel::<BackendCommand>(64);
@@ -99,24 +100,20 @@ pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
     // Keep one sender so the event channel never closes while links live.
     drop(events_tx);
 
-    // One link per conversation. The set is held so a link that ends for good is
-    // seen: a role the gateway can no longer speak for is a fault, not a silence.
+    // One link for the whole gateway: it speaks for the one role every
+    // conversation's traffic rides (`docs/v2.3-CHAT-PROTOCOL.md` §3). The set
+    // is held so a link that ends for good is seen: a role the gateway can no
+    // longer speak for is a fault, not a silence.
     let (renders_tx, mut renders_rx) = mpsc::channel::<RenderJob>(64);
     let mut links: JoinSet<(String, Result<()>)> = JoinSet::new();
     let mut reporters: BTreeMap<String, mpsc::Sender<Report>> = BTreeMap::new();
-    for conversation in &gateway.conversations {
-        let link = RoleLink::new(
-            conversation.clone(),
-            gateway.server.clone(),
-            gateway.cert_pin.clone(),
-        );
-        let rx = shutdown_rx.clone();
-        let tx = renders_tx.clone();
-        let (report_tx, report_rx) = mpsc::channel::<Report>(8);
-        reporters.insert(conversation.role.clone(), report_tx);
-        let role = conversation.role.clone();
-        links.spawn(async move { (role, link.run(tx, report_rx, rx).await) });
-    }
+    let link = RoleLink::new(gateway.as_ref().clone());
+    let rx = shutdown_rx.clone();
+    let tx = renders_tx.clone();
+    let (report_tx, report_rx) = mpsc::channel::<Report>(8);
+    reporters.insert(gateway.role.clone(), report_tx);
+    let role = gateway.role.clone();
+    links.spawn(async move { (role, link.run(tx, report_rx, rx).await) });
     drop(renders_tx);
 
     // Heartbeat scripts, one task each.
@@ -144,7 +141,7 @@ pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
                         }
                     }
                 }
-                for conversation in &gateway.conversations {
+                for conversation in gateway.conversations() {
                     let platform = platforms
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -152,17 +149,18 @@ pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
                         .cloned()
                         .unwrap_or_else(|| conversation.gateway.clone());
                     let input = PushInput::Heartbeat {
-                        role: conversation.role.clone(),
+                        role: gateway.role.clone(),
                         gateway: conversation.gateway.clone(),
                         platform,
+                        chat: conversation.chat_key.clone(),
                         at: Utc::now().to_rfc3339(),
                     };
                     run_one_push(
                         &script,
                         &input,
-                        conversation,
+                        &conversation,
                         socket.clone(),
-                        reporters.get(&conversation.role),
+                        reporters.get(&gateway.role),
                     )
                     .await;
                 }
@@ -269,6 +267,23 @@ async fn serve_backend(
         version = %hello.version,
         "a backend is up"
     );
+    // A backend with no credential is a gateway that will never see a message.
+    // Saying so at startup is the difference between an operator reading one
+    // sentence and reading a silently idle gateway.
+    if !hello.authenticated {
+        match &hello.onboarding {
+            Some(prompt) => tracing::error!(
+                gateway = %gateway,
+                "this backend is not authenticated: {} (`onlyne-im login --gateway {gateway}`)",
+                prompt.payload
+            ),
+            None => tracing::error!(
+                gateway = %gateway,
+                "this backend reported no credential and asked for none; \
+                 check its environment"
+            ),
+        }
+    }
     loop {
         tokio::select! {
             command = commands.recv() => match command {
@@ -308,28 +323,59 @@ async fn handle_backend_op(
 ) {
     match event.op {
         BackendOp::Event(inbound) => {
-            let Some(conversation) =
-                gateway.conversation_for(&event.gateway, &inbound.conversation)
-            else {
-                tracing::warn!(
-                    gateway = %event.gateway,
-                    conversation = %inbound.conversation,
-                    "an event named a conversation no workspace under `conversations/` carries"
-                );
-                return;
+            let conversation = match gateway.conversation_for(&event.gateway, &inbound.conversation)
+            {
+                Some(known) => known,
+                // A conversation nobody registered. The listen policy decides
+                // whether this gateway serves it; a refusal is the operator's
+                // own choice, so it is a sentence and not a fault.
+                None => {
+                    if !gateway.listen.admits(&inbound.conversation) {
+                        tracing::info!(
+                            gateway = %event.gateway,
+                            conversation = %inbound.conversation,
+                            "the listen policy refuses this conversation"
+                        );
+                        return;
+                    }
+                    match crate::adopt::adopt(gateway, &event.gateway, &inbound.conversation) {
+                        Ok(adopted) => {
+                            // Loud on purpose: a workspace and a chat key just
+                            // appeared, and an operator reading the log is how
+                            // they learn which conversation this root now serves.
+                            tracing::info!(
+                                gateway = %event.gateway,
+                                conversation = %adopted.conversation,
+                                slug = %adopted.slug,
+                                chat_key = %adopted.chat_key,
+                                "adopted a conversation nobody registered"
+                            );
+                            adopted
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                gateway = %event.gateway,
+                                conversation = %inbound.conversation,
+                                error = %format!("{error:#}"),
+                                "could not adopt this conversation; the event is dropped"
+                            );
+                            return;
+                        }
+                    }
+                }
             };
-            let conversation: Conversation = conversation.clone();
             // The log is a convenience, not the delivery: a failed append is
             // logged and the event still reaches its scripts.
             if let Err(error) = chatlog::append_inbound(&conversation, &inbound) {
-                tracing::warn!(role = %conversation.role, error = %error, "chat log write failed");
+                tracing::warn!(role = %gateway.role, error = %error, "chat log write failed");
             }
-            let reporter = reporters.get(&conversation.role).cloned();
+            let reporter = reporters.get(&gateway.role).cloned();
             let input = PushInput::Trigger {
-                role: conversation.role.clone(),
+                role: gateway.role.clone(),
                 gateway: event.gateway.clone(),
                 platform: inbound.platform.clone(),
                 conversation: inbound.conversation.clone(),
+                chat: conversation.chat_key.clone(),
                 event: Box::new(inbound),
                 at: Utc::now().to_rfc3339(),
             };
@@ -349,6 +395,26 @@ async fn handle_backend_op(
                 uptime_s = health.uptime_s,
                 "backend health"
             );
+        }
+        // A backend that says its credential stopped working is telling the
+        // operator what to do, not failing: it keeps its process and its other
+        // conversations. The sentence it sends is the one an operator acts on.
+        BackendOp::Onboarding(prompt) => {
+            tracing::warn!(
+                gateway = %event.gateway,
+                kind = ?prompt.kind,
+                "this backend needs a credential: {}",
+                prompt.payload
+            );
+        }
+        // The answers to calls this loop never makes: `login` and
+        // `list_conversations` are driven by the setup verbs, which own their
+        // own backend process.
+        BackendOp::Login(result) => {
+            tracing::debug!(gateway = %event.gateway, ok = result.ok, "an unsolicited login answer")
+        }
+        BackendOp::Conversations(_) => {
+            tracing::debug!(gateway = %event.gateway, "an unsolicited conversation listing")
         }
         BackendOp::Hello(_) => {}
     }

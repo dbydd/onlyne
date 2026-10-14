@@ -32,6 +32,23 @@ impl Bot {
         self
     }
 
+    /// The token this client sends. A backend reports whether it holds one in
+    /// its `hello` without contacting Telegram.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// The same client pointed at another token, reusing the connection pool.
+    /// A login check swaps the token in before asking `getMe`, so what it
+    /// verifies is exactly what it would send with.
+    pub fn with_token(&self, token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
+            http: self.http.clone(),
+            base: self.base.clone(),
+        }
+    }
+
     /// Long-poll `getUpdates`. `offset` is the last seen update id plus one;
     /// `timeout_s` is how long Telegram may hold the request.
     pub async fn get_updates(&self, offset: i64, timeout_s: u64) -> Result<Vec<Value>> {
@@ -46,6 +63,22 @@ impl Bot {
             )
             .await?;
         Ok(body.as_array().cloned().unwrap_or_default())
+    }
+
+    /// The bot this token belongs to: `getMe`.
+    ///
+    /// This is the whole of authentication. Telegram has no separate login —
+    /// the token *is* the credential — so verifying it is one call, and the
+    /// username it answers is what an operator reads back to know they pasted
+    /// the right bot's token.
+    pub async fn get_me(&self) -> Result<Value> {
+        self.call("getMe", json!({})).await
+    }
+
+    /// One chat's own description: `getChat`. An id the bot cannot see is an
+    /// error, which is how a bad chat id is told apart from a quiet chat.
+    pub async fn get_chat(&self, chat_id: &str) -> Result<Value> {
+        self.call("getChat", json!({ "chat_id": chat_id })).await
     }
 
     /// Perform one rendered call, uploading a file when the call carries one.
@@ -101,11 +134,17 @@ impl Bot {
             .json(&body)
             .send()
             .await
+            // Telegram puts the bot token in the request path, and reqwest's
+            // error Display carries the URL, so an un-stripped error writes the
+            // token into the operator's log. `POST <method>` says everything the
+            // documenter needs; the transport cause rides along as the source.
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("POST {method}"))?;
         let status = response.status();
         let value: Value = response
             .json()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("{method} answered no JSON"))?;
         if !value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
             bail!(
@@ -149,6 +188,7 @@ impl Bot {
             .multipart(form)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("POST {method}"))?;
         if !response.status().is_success() {
             bail!("{method} refused with HTTP {}", response.status());

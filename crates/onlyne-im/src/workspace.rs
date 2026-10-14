@@ -20,7 +20,6 @@ use anyhow::{Context, Result, bail};
 use onlyne_config::Spec;
 use onlyne_config::layout::ServerRoot;
 use onlyne_im::config::GatewayFile;
-use onlyne_net::KeyPair;
 use onlyne_proto::{
     AdminOp, Frame, ResBody, SetSenders, SetTargets, SpecApply, SpecEdit, SpecView, UpsertRole,
     new_id,
@@ -41,10 +40,15 @@ const ADMIN_TIMEOUT: Duration = Duration::from_secs(20);
 /// (`examples/supervisor/run.py`, `onlyne_config::spec::SUPERVISOR_ROLE`).
 pub const DEFAULT_PEER: &str = onlyne_config::SUPERVISOR_ROLE;
 
+/// The role `init` writes when `--role` names none.
+pub const DEFAULT_GATEWAY_ROLE: &str = "im";
+
 /// `onlyne-im init`.
 #[derive(Debug, Clone)]
 pub struct InitArgs {
     pub root: PathBuf,
+    /// The role this gateway is in the cluster. `None` writes the default.
+    pub role: Option<String>,
     /// The server endpoint, or `None` to take it from `--server-root`'s spec.
     pub server: Option<String>,
     /// The SPKI pin, or `None` to take it from `--server-root`'s spec.
@@ -82,6 +86,10 @@ pub struct LoginArgs {
 /// Write a gateway root: its document, and an empty `conversations/`.
 pub fn init(args: &InitArgs) -> Result<()> {
     let (server, cert_pin) = resolve_server(args)?;
+    let role = args
+        .role
+        .clone()
+        .unwrap_or_else(|| DEFAULT_GATEWAY_ROLE.to_string());
     let onlyne = args.root.join(".onlyne");
     std::fs::create_dir_all(&onlyne).with_context(|| format!("creating {}", onlyne.display()))?;
     let conversations = args.root.join(onlyne_im::config::CONVERSATIONS_DIR);
@@ -97,11 +105,16 @@ pub fn init(args: &InitArgs) -> Result<()> {
     }
     let document = format!(
         "# The IM gateway's own configuration.\n\
-         #\n\
-         # A conversation is a directory under `conversations/` whose name is its\n\
-         # role; this file holds what is the gateway's rather than one\n\
-         # conversation's: which cluster to speak to, which platform backends to\n\
-         # spawn, and which scripts an event runs.\n\
+         \n\
+        # One gateway root is one role. A conversation is a directory under\n\
+        # `conversations/` whose name is its slug, and its identity on the wire\n\
+        # is the chat key beside it. This file holds what is the gateway's\n\
+        # rather than one conversation's: which role it is in the cluster,\n\
+        # which cluster to speak to, which platform backends to spawn, and\n\
+        # which scripts an event runs (`docs/v2.3-CHAT-PROTOCOL.md` §3).\n\
+         \n\
+        [gateway]\n\
+        role = {role:?}\n\
          \n\
          [server]\n\
          endpoint = {server:?}\n\
@@ -128,13 +141,12 @@ pub fn init(args: &InitArgs) -> Result<()> {
     Ok(())
 }
 
-/// Mint one conversation workspace, then register its role in the cluster.
-///
-/// The cluster half is the reason this is one verb and not two: the workspace
-/// and the `[[client]]` row describe one role, and a run that wrote only the
-/// first would leave a conversation nothing can address. So the server is
-/// reached first, and a server that cannot be reached refuses before anything is
-/// minted.
+/// Mint one conversation workspace and its chat key. The cluster half is the
+/// gateway role's, and it is written once — by `init`-then-first-`generate`,
+/// through the `--peers` list — because one gateway root is one role
+/// (`docs/v2.3-CHAT-PROTOCOL.md` §7.5). A conversation nothing can address is
+/// not a conversation, so the server is reached first and a server that cannot
+/// be reached refuses before anything is minted.
 pub async fn generate(args: &GenerateArgs) -> Result<()> {
     let file = GatewayFile::load(&args.root)
         .with_context(|| format!("reading the gateway root {}", args.root.display()))?;
@@ -150,40 +162,31 @@ pub async fn generate(args: &GenerateArgs) -> Result<()> {
             }
         );
     }
-    let role = match &args.role {
-        Some(role) if !role.trim().is_empty() => role.clone(),
+    // The directory name is the slug, an operator-chosen label; the identity
+    // is the chat key this run mints.
+    let slug = match &args.role {
+        Some(slug) if !slug.trim().is_empty() => slug.clone(),
         Some(_) => bail!("`--role` is empty"),
-        None => derive_role(&args.gateway, &args.conversation),
+        None => derive_slug(&args.gateway, &args.conversation),
     };
-    validate_role(&role)?;
+    validate_slug(&slug)?;
 
     let workspace = args
         .root
         .join(onlyne_im::config::CONVERSATIONS_DIR)
-        .join(&role);
+        .join(&slug);
     if workspace.exists() {
         bail!(
-            "{} already exists; this role is already generated",
+            "{} already exists; this slug is already generated",
             workspace.display()
         );
     }
 
     // The cluster half first: a server we cannot reach is a refusal before any
-    // file exists, and the role name is checked against the live spec so a
-    // second `generate` for one role cannot silently overwrite a key.
+    // file exists, and the gateway role is checked against the live spec so a
+    // second `generate` cannot silently overwrite a key.
     let endpoint = resolve_admin(args)?;
     let spec = spec_get(&endpoint).await?;
-    if spec["spec"]["client"]
-        .as_array()
-        .is_some_and(|rows| rows.iter().any(|row| row["role"] == role.as_str()))
-    {
-        bail!(
-            "role {role} is already in this cluster's spec.toml; choose another name with --role"
-        );
-    }
-
-    let key = KeyPair::generate();
-    let public = key.public_str();
     let peers = if args.peers.is_empty() {
         vec![DEFAULT_PEER.to_string()]
     } else {
@@ -193,9 +196,10 @@ pub async fn generate(args: &GenerateArgs) -> Result<()> {
     // first byte is written: a `generate` that failed on a bad `--peer` after
     // minting a key and a directory would leave an operator cleaning up after a
     // command that reported nothing had happened.
-    let edits = spec_edits(&role, &public, &peers, &spec["spec"])?;
+    let role = file.role.clone();
+    let edits = spec_edits(&role, &peers, &spec["spec"])?;
 
-    write_workspace(&workspace, &role, &args.gateway, &args.conversation, &key)?;
+    let chat_key = write_workspace(&workspace, &args.gateway, &args.conversation)?;
 
     match spec_apply(&endpoint, &spec_source_hash(&spec)?, edits).await {
         Ok(()) => {}
@@ -205,7 +209,8 @@ pub async fn generate(args: &GenerateArgs) -> Result<()> {
             // not rather than deleting a key an operator may already have read.
             bail!(
                 "{error}\n\
-                 the conversation workspace at {} was written and its role is NOT registered; \
+                 the conversation workspace at {} was written and the gateway role is NOT \
+                 registered; \
                  fix the server and run `onlyne-im generate` again after removing that directory",
                 workspace.display()
             );
@@ -213,7 +218,11 @@ pub async fn generate(args: &GenerateArgs) -> Result<()> {
     }
 
     println!("{}", workspace.display());
-    println!("role {role} registered with peers: {}", peers.join(", "));
+    println!("chat key {chat_key}");
+    println!(
+        "gateway role {role} registered with peers: {}",
+        peers.join(", ")
+    );
     Ok(())
 }
 
@@ -250,9 +259,9 @@ pub fn login(args: &LoginArgs) -> Result<()> {
     Ok(())
 }
 
-/// Derive a role name from the two ids, in the shape the design's examples use
+/// Derive a slug from the two ids, in the shape the design's examples use
 /// (`tg-group-7788`).
-fn derive_role(gateway: &str, conversation: &str) -> String {
+pub(crate) fn derive_slug(gateway: &str, conversation: &str) -> String {
     let gateway = sanitize(gateway);
     let conversation = sanitize(conversation);
     if conversation.is_empty() {
@@ -278,9 +287,8 @@ fn sanitize(id: &str) -> String {
         .to_string()
 }
 
-/// The names a role may take: the same shape a directory can hold and a peer
-/// can address.
-fn validate_role(role: &str) -> Result<()> {
+/// The names a slug may take: the same shape a directory can hold.
+pub(crate) fn validate_slug(role: &str) -> Result<()> {
     if role.is_empty() {
         bail!("the derived role name is empty; pass --role");
     }
@@ -296,31 +304,28 @@ fn validate_role(role: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write one conversation workspace: its coordinates, its key, and the
-/// directories its runtime files live in.
-fn write_workspace(
-    workspace: &Path,
-    role: &str,
-    gateway: &str,
-    conversation: &str,
-    key: &KeyPair,
-) -> Result<()> {
+/// Write one conversation workspace: its coordinates, its minted chat key, and
+/// the directories its runtime files live in. The key is printed by the caller
+/// so an operator can carry it somewhere, and the gateway re-reads it from disk
+/// on every start.
+fn write_workspace(workspace: &Path, gateway: &str, conversation: &str) -> Result<String> {
     let onlyne = workspace.join(".onlyne");
-    let keys = onlyne.join("keys");
-    std::fs::create_dir_all(&keys).with_context(|| format!("creating {}", keys.display()))?;
+    std::fs::create_dir_all(&onlyne).with_context(|| format!("creating {}", onlyne.display()))?;
     std::fs::create_dir_all(workspace.join("media"))
         .with_context(|| format!("creating {}", workspace.join("media").display()))?;
 
-    let key_path = keys.join("role.key");
-    key.save(&key_path)
-        .map_err(|error| anyhow::anyhow!("{}: {error}", key_path.display()))?;
+    let chat_key = onlyne_im::mint_chat_key();
+    let key_path = onlyne.join("chat.key");
+    std::fs::write(&key_path, &chat_key)
+        .with_context(|| format!("writing {}", key_path.display()))?;
     apply_private_mode(&key_path)
         .map_err(|error| anyhow::anyhow!("{}: {error}", key_path.display()))?;
 
     let config_path = onlyne.join("config.toml");
     let document = format!(
         "# This conversation's platform coordinates. The directory name is the\n\
-         # role, so this file never names one.\n\
+        # slug, so this file never names one; the conversation's identity is\n\
+        # the chat key beside it.\n\
          \n\
          [chat]\n\
          gateway = {gateway:?}\n\
@@ -328,32 +333,38 @@ fn write_workspace(
     );
     std::fs::write(&config_path, document)
         .with_context(|| format!("writing {}", config_path.display()))?;
-    let _ = role;
-    Ok(())
+    Ok(chat_key)
 }
 
 /// The edits that make a role addressable: declare it, then set both sides of
 /// each edge the ACL reads.
 ///
 /// Reach is two-sided (`onlyne_config::Spec::acl_edges`): a peer reaches this
-/// conversation only when the peer's `allowed_targets` names the role **and**
-/// this role's `allowed_senders` names the peer. A half-written edge is the
-/// failure `docs/v2-CONTRACT.md` §"Slice 6" is about, so both halves are written
-/// here, and a peer whose own list is a `"*"` or already names the role is left
+/// gateway only when the peer's `allowed_targets` names the role **and** this
+/// role's `allowed_senders` names the peer. A half-written edge is the failure
+/// `docs/v2-CONTRACT.md` §"Slice 6" is about, so both halves are written here,
+/// and a peer whose own list is a `"*"` or already names the role is left
 /// alone.
-fn spec_edits(
-    role: &str,
-    public_key: &str,
-    peers: &[String],
-    spec: &Value,
-) -> Result<Vec<SpecEdit>> {
-    let mut edits = vec![SpecEdit::UpsertRole(UpsertRole {
-        role: role.to_string(),
-        key: Some(public_key.to_string()),
-        prose: None,
-        admin: None,
-        max_sessions: Some(1),
-    })];
+///
+/// The role row itself is written once: the first `generate` in a root declares
+/// it, and every later one only refreshes the edges, because the key beside the
+/// document is the operator's and must survive a second conversation.
+fn spec_edits(role: &str, peers: &[String], spec: &Value) -> Result<Vec<SpecEdit>> {
+    let declared = client_row(spec, role).is_some();
+    let mut edits = Vec::new();
+    if !declared {
+        // First conversation in this root declares the role. The key lives in
+        // the root's own `.onlyne/keys/role.key`, which `init`-then-`generate`
+        // leaves to the operator's own mint, so the row is declared without a
+        // key: a second `generate` for the same root must not overwrite it.
+        edits.push(SpecEdit::UpsertRole(UpsertRole {
+            role: role.to_string(),
+            key: None,
+            prose: None,
+            admin: None,
+            max_sessions: Some(1),
+        }));
+    }
     edits.push(SpecEdit::SetTargets(SetTargets {
         role: role.to_string(),
         targets: peers.to_vec(),
@@ -533,16 +544,16 @@ mod tests {
 
     #[test]
     fn a_role_name_is_derived_from_the_two_ids() {
-        assert_eq!(derive_role("tg1", "-1007788"), "tg1-1007788");
-        assert_eq!(derive_role("telegram", "42"), "telegram-42");
+        assert_eq!(derive_slug("tg1", "-1007788"), "tg1-1007788");
+        assert_eq!(derive_slug("telegram", "42"), "telegram-42");
     }
 
     #[test]
     fn a_role_name_refuses_what_a_directory_cannot_hold() {
-        assert!(validate_role("tg-group-1").is_ok());
-        assert!(validate_role("").is_err());
-        assert!(validate_role("a/b").is_err());
-        assert!(validate_role(".hidden").is_err());
+        assert!(validate_slug("tg-group-1").is_ok());
+        assert!(validate_slug("").is_err());
+        assert!(validate_slug("a/b").is_err());
+        assert!(validate_slug(".hidden").is_err());
     }
 
     #[test]
@@ -553,7 +564,7 @@ mod tests {
             ]
         });
         let peers = vec!["_supervisor".to_string()];
-        let edits = spec_edits("tg-group-1", "ed25519/x", &peers, &spec).unwrap();
+        let edits = spec_edits("tg-group-1", &peers, &spec).unwrap();
         // Declare the role, then its own two lists, then the peer's list.
         assert!(matches!(edits[0], SpecEdit::UpsertRole(_)));
         assert!(matches!(edits[1], SpecEdit::SetTargets(_)));
@@ -570,14 +581,31 @@ mod tests {
         // The supervisor's reach is one-sided and an empty list covers every
         // role, so appending would be a no-op edit that still rewrites the file.
         let spec = json!({ "client": [ { "role": "_supervisor" } ] });
-        let edits = spec_edits("tg-1", "ed25519/x", &["_supervisor".to_string()], &spec).unwrap();
+        let edits = spec_edits("tg-1", &["_supervisor".to_string()], &spec).unwrap();
+        // Declare the role, then its own two lists: the peer needs no edit.
         assert_eq!(edits.len(), 3);
     }
 
     #[test]
     fn a_peer_that_is_not_a_role_is_refused_before_anything_is_written() {
         let spec = json!({ "client": [ { "role": "other" } ] });
-        let error = spec_edits("tg-1", "ed25519/x", &["ghost".to_string()], &spec).unwrap_err();
+        let error = spec_edits("tg-1", &["ghost".to_string()], &spec).unwrap_err();
         assert!(error.to_string().contains("not a role"), "{error}");
+    }
+
+    #[test]
+    fn a_declared_gateway_role_is_not_redeclared() {
+        // The key beside the document is the operator's; a second conversation
+        // in the same root must not overwrite it.
+        let spec = json!({
+            "client": [ { "role": "im" }, { "role": "_supervisor" } ]
+        });
+        let edits = spec_edits("im", &["_supervisor".to_string()], &spec).unwrap();
+        assert!(
+            !edits
+                .iter()
+                .any(|edit| matches!(edit, SpecEdit::UpsertRole(_))),
+            "the role row is rewritten: {edits:?}"
+        );
     }
 }

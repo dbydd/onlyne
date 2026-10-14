@@ -8,12 +8,39 @@
 //! `op` field selecting the variant.
 
 pub mod backend;
+pub mod credential;
 pub mod frame;
 pub mod payload;
 pub mod serve;
 
+/// Pick the process-wide rustls `CryptoProvider`, once, before any TLS handshake.
+///
+/// A platform backend links rustls through more than one dependency, and those
+/// dependencies do not agree on a provider: `openlark`'s `reqwest 0.13` enables
+/// rustls' default (`aws-lc-rs`) while this workspace's own `reqwest` builds
+/// against `ring`, which is what `onlyne-net` uses everywhere. With both
+/// providers compiled into one image, rustls refuses to guess and panics on the
+/// first handshake — measured on a live Feishu run, where the backend died the
+/// moment its websocket connected.
+///
+/// So every backend process names the provider instead: `ring`, the one the
+/// rest of this workspace already carries. A process that installs it twice
+/// (two entry points, a test harness) is not an error — the first install wins
+/// and the second is the same provider.
+pub fn install_crypto_provider() {
+    // The error is the benign "already installed" case; a real failure would be
+    // a rustls built without the `ring` feature, which this crate's own
+    // dependency on it makes impossible.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 pub use backend::{Backend, BackendCapabilities};
-pub use frame::{BackendOp, CoreOp, HealthArgs, HelloArgs, SendArgs, StopArgs};
+pub use credential::{CREDENTIAL_ENV, GATEWAY_ENV, credential_path};
+pub use frame::{
+    BackendOp, CoreOp, HealthArgs, HelloArgs, ImConversation, ImConversations,
+    ListConversationsArgs, LoginArgs, LoginResult, OnboardingKind, OnboardingPrompt, SendArgs,
+    StopArgs,
+};
 pub use payload::{
     ImAction, ImAttachment, ImConversationId, ImEvent, ImEventKind, ImFormat, ImGatewayId,
     ImPayload, ImPlatform, ImSender,

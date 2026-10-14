@@ -9,13 +9,16 @@
 //!
 //! [`docs/v2.2-IM-GATEWAY-PLAN.md`]: ../../../docs/v2.2-IM-GATEWAY-PLAN.md
 
+pub mod adopt;
 pub mod backend_host;
+pub mod chatkey;
 pub mod chatlog;
 pub mod config;
 pub mod link;
 pub mod runloop;
 pub mod trigger;
 
+pub use chatkey::mint as mint_chat_key;
 pub use config::{BackendEntry, Conversation, Gateway, GatewayFile, PushMode, PushScript};
 pub use runloop::{RunOptions, run};
 

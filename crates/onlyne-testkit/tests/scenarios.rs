@@ -2415,6 +2415,31 @@ fn task_of(receipt: &serde_json::Value) -> String {
     receipt["task"].as_str().expect("task id").to_string()
 }
 
+/// A backend that answers the gateway's `hello` and then serves its frames
+/// forever, which is all the gateway needs to hold a link open: the platform
+/// side of a delivery is exercised by what the gateway itself writes into the
+/// conversation's own chat log, not by the backend's behaviour.
+fn write_gateway_backend(path: &std::path::Path) {
+    std::fs::write(
+        path,
+        r#"
+import json, struct, sys, time
+def frame(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
+    sys.stdout.buffer.flush()
+frame({"op": "hello", "args": {"platform": "telegram", "version": "test",
+                               "capabilities": ["message"]}})
+while True:
+    line = sys.stdin.buffer.readline()
+    if not line:
+        break
+    time.sleep(0.05)
+"#,
+    )
+    .expect("write the fake backend");
+}
+
 fn append_client_session_config(workspace: &std::path::Path, scope: &str, idle_close: &str) {
     let config = workspace.join(".onlyne/config.toml");
     let mut text = std::fs::read_to_string(&config).expect("read client config");
@@ -2925,4 +2950,243 @@ max_sessions = 2"#,
         "a report behind a verdict writes no row of its own: {rows:#?}"
     );
     println!("✓ Scenario 21: a completion behind a verdict is answered with it");
+}
+
+/// Scenario 22: one gateway role serves two conversations by chat key.
+///
+/// The gateway root is one `[[client]]` role with one link, and its registry
+/// holds two conversations (`docs/v2.3-CHAT-PROTOCOL.md` §3). A delivery whose
+/// body's first line names one key renders into that conversation's platform
+/// chat; the other conversation sees nothing. A key no conversation carries,
+/// and a key that is not the first line, are each refused and settled rather
+/// than guessed at (§6).
+#[tokio::test]
+async fn scenario_22_one_gateway_serves_two_conversations_by_key() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+
+[[client]]
+role = "im"
+key = "ed25519/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+allowed_senders = ["*"]
+allowed_targets = ["*"]
+
+"#,
+    )
+    .await
+    .expect("start cluster");
+
+    // The gateway root: one role, two conversations, two keys.
+    let root = cluster
+        .server_root()
+        .parent()
+        .expect("the temp root")
+        .join("gateway");
+    let backend = cluster
+        .server_root()
+        .parent()
+        .expect("the temp root")
+        .join("fake_backend.py");
+    std::fs::create_dir_all(root.join(".onlyne/keys")).unwrap();
+    // The key the gateway dials with is minted here and written into the
+    // cluster's spec row, so the hello is accepted.
+    let gateway_keypair = onlyne_net::KeyPair::generate();
+    gateway_keypair
+        .save(&root.join(".onlyne/keys/role.key"))
+        .expect("write the gateway key");
+    let gateway_key = gateway_keypair.public_str();
+    std::fs::write(
+        root.join(".onlyne/config.toml"),
+        format!(
+            r#"
+[gateway]
+role = "im"
+
+[server]
+endpoint = "{}"
+cert_pin = "{}"
+
+[[im.backend]]
+gateway = "tg1"
+run = ["python3", "{}"]
+"#,
+            cluster.endpoint(),
+            cluster.cert_pin(),
+            backend.display(),
+        ),
+    )
+    .unwrap();
+    const KEY_ALPHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const KEY_BETA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    // The gateway role's spec row must carry the key the gateway dials with.
+    let spec_path = cluster.spec_path();
+    let spec = std::fs::read_to_string(&spec_path).expect("read the cluster spec");
+    let patched = spec.replace(
+        "key = \"ed25519/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"",
+        &format!("key = \"{gateway_key}\""),
+    );
+    std::fs::write(&spec_path, patched).expect("write the gateway key into the spec");
+    cluster.reload().await.expect("reload with the gateway key");
+    for (slug, conversation, key) in [("alpha", "-100", KEY_ALPHA), ("beta", "-200", KEY_BETA)] {
+        let workspace = root.join("conversations").join(slug);
+        std::fs::create_dir_all(workspace.join(".onlyne")).unwrap();
+        std::fs::create_dir_all(workspace.join("media")).unwrap();
+        std::fs::write(workspace.join(".onlyne/chat.key"), key).unwrap();
+        std::fs::write(
+            workspace.join(".onlyne/config.toml"),
+            format!("[chat]\ngateway = \"tg1\"\nconversation = \"{conversation}\"\n"),
+        )
+        .unwrap();
+    }
+    write_gateway_backend(&backend);
+
+    // The gateway binary over this root: one link as `im`, and a delivery that
+    // names a key lands in that conversation's own log.
+    let gateway_bin = Cluster::bin_path("onlyne-im").expect("the gateway binary");
+    let gateway_log =
+        std::fs::File::create(root.join("gateway-run.log")).expect("gateway log file");
+    // A synchronous child: this scenario kills and reaps it at the end, and a
+    // std handle is the one that reliably does both from a test body.
+    let mut gateway = std::process::Command::new(&gateway_bin)
+        .args(["run", "--root"])
+        .arg(&root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(gateway_log))
+        .spawn()
+        .expect("the gateway starts");
+    // A delivery sent before the gateway has dialled has nothing to render it,
+    // so the scenario waits for the role to appear rather than for a sleep.
+    cluster
+        .wait_role_online("im")
+        .await
+        .expect("the gateway role comes online");
+
+    let agent_ws = cluster
+        .register_role(
+            "agent",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "agent"]
+allowed_targets = ["agent", "im"]"#,
+            ),
+        )
+        .await
+        .expect("register agent");
+    cluster.start_client(&agent_ws).await.expect("start client");
+
+    // The alpha key routes: the message reaches the alpha conversation's log.
+    cluster
+        .admin_send(
+            "agent",
+            "im",
+            &format!("<chat:{KEY_ALPHA}>\n\nfirst question"),
+        )
+        .await
+        .expect("send to alpha");
+
+    // The gateway pulls the delivery, resolves the key, and writes the rendered
+    // message into that conversation's own log: the log line is the visible
+    // outcome, and it carries the key the message arrived under.
+    let alpha_log = root.join("conversations/alpha/chat.jsonl");
+    let mut alpha_seen = String::new();
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(&alpha_log) {
+            alpha_seen = text;
+            if alpha_seen.contains("first question") {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        alpha_seen.contains("first question"),
+        "the alpha conversation's log never saw the delivery:\n{alpha_seen}"
+    );
+    assert!(
+        alpha_seen.contains(KEY_ALPHA),
+        "the log line does not name its own key:\n{alpha_seen}"
+    );
+    assert!(
+        !root.join("conversations/beta/chat.jsonl").exists(),
+        "the beta conversation's log exists although no delivery named its key"
+    );
+
+    // A key no conversation in this registry carries is refused: the gateway
+    // reports the refusal as a fault and neither conversation sees the text.
+    // A key that is not the first line, and a body with no key at all, refuse
+    // the same way, each with a sentence naming what was wrong.
+    let unknown = cluster
+        .admin_send(
+            "agent",
+            "im",
+            &format!("<chat:{}>\n\nwho are you", "f".repeat(32)),
+        )
+        .await
+        .expect("send with an unknown key");
+    let unknown_task = task_of(&unknown);
+    cluster
+        .poll_fault(
+            &unknown_task,
+            "im_unplaced_delivery",
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the unknown-key delivery is refused");
+    assert!(
+        !std::fs::read_to_string(&alpha_log)
+            .unwrap_or_default()
+            .contains("who are you"),
+        "a delivery with an unknown key reached the alpha conversation"
+    );
+
+    // A key that is not the body's first line is refused too: a reply that
+    // could be misfiled fails rather than landing in the wrong chat.
+    let misplaced = cluster
+        .admin_send("agent", "im", &format!("hello there\n\n<chat:{KEY_ALPHA}>"))
+        .await
+        .expect("send with a misplaced key");
+    let misplaced_task = task_of(&misplaced);
+    cluster
+        .poll_fault(
+            &misplaced_task,
+            "im_unplaced_delivery",
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the misplaced-key delivery is refused");
+    assert!(
+        !std::fs::read_to_string(&alpha_log)
+            .unwrap_or_default()
+            .contains("hello there"),
+        "a delivery whose key is not the first line reached the alpha conversation"
+    );
+
+    // A reply that names no conversation at all is refused as well: guessing
+    // one would post into the wrong chat.
+    let keyless = cluster
+        .admin_send("agent", "im", "hello there, no key at all")
+        .await
+        .expect("send with no key");
+    let keyless_task = task_of(&keyless);
+    cluster
+        .poll_fault(
+            &keyless_task,
+            "im_unplaced_delivery",
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the keyless delivery is refused");
+    assert!(
+        !std::fs::read_to_string(&alpha_log)
+            .unwrap_or_default()
+            .contains("no key at all"),
+        "a delivery with no key reached the alpha conversation"
+    );
+
+    let _ = gateway.kill();
+    let _ = gateway.wait();
+    println!("✓ Scenario 22: one gateway serves two conversations by key");
 }

@@ -9,8 +9,12 @@
 //! workspace that serves it.
 
 use anyhow::{Context, Result, bail};
-use onlyne_im_backend::frame::{BackendOp, CoreOp, SendArgs, StopArgs};
+use onlyne_im_backend::frame::{
+    BackendOp, CoreOp, ImConversation, ListConversationsArgs, LoginArgs, LoginResult, SendArgs,
+    StopArgs,
+};
 use onlyne_wire::frame::{FrameReader, write_frame};
+use std::path::Path;
 use std::process::Stdio;
 use tokio::io::AsyncRead;
 use tokio::process::{Child, Command};
@@ -24,13 +28,20 @@ pub struct BackendHost {
 }
 
 impl BackendHost {
-    /// Spawn `command` as a backend and read its `hello`.
-    pub async fn spawn(command: &[String]) -> Result<Self> {
+    /// Spawn `command` as a backend.
+    ///
+    /// Two variables ride in: the gateway id this backend serves, and the path
+    /// to the credential `onlyne-im login` wrote for it. Sending the *path*
+    /// rather than the secret keeps a token out of the process table, which is
+    /// readable by every process on the machine.
+    pub async fn spawn(command: &[String], gateway: &str, credential: &Path) -> Result<Self> {
         let Some(program) = command.first() else {
             bail!("the backend command is empty");
         };
         let mut child = Command::new(program)
             .args(&command[1..])
+            .env(onlyne_im_backend::GATEWAY_ENV, gateway)
+            .env(onlyne_im_backend::CREDENTIAL_ENV, credential)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -65,6 +76,47 @@ impl BackendHost {
     pub async fn send(&mut self, args: SendArgs) -> Result<()> {
         write_frame(&mut self.stdin, &CoreOp::Send(args)).await?;
         Ok(())
+    }
+
+    /// Hand the backend a credential and read its verdict.
+    ///
+    /// The answer arrives as a frame, so a refused credential is a sentence an
+    /// operator reads rather than a dead process. A frame of another kind in
+    /// between is skipped rather than mistaken for the answer: a backend may
+    /// still be reporting the events it saw before the login arrived.
+    pub async fn login(&mut self, args: LoginArgs) -> Result<LoginResult> {
+        write_frame(&mut self.stdin, &CoreOp::Login(args)).await?;
+        loop {
+            match self.next_op().await? {
+                Some(BackendOp::Login(result)) => return Ok(result),
+                Some(BackendOp::Hello(args)) => {
+                    bail!("the backend sent a second hello while logging in: {args:?}")
+                }
+                Some(_) => continue,
+                None => bail!("the backend closed before answering the login"),
+            }
+        }
+    }
+
+    /// Ask the backend which conversations it can see.
+    pub async fn list_conversations(&mut self) -> Result<Vec<ImConversation>> {
+        write_frame(
+            &mut self.stdin,
+            &CoreOp::ListConversations(ListConversationsArgs {
+                gateway: String::new(),
+            }),
+        )
+        .await?;
+        loop {
+            match self.next_op().await? {
+                Some(BackendOp::Conversations(list)) => return Ok(list.conversations),
+                Some(BackendOp::Hello(args)) => {
+                    bail!("the backend sent a second hello while listing: {args:?}")
+                }
+                Some(_) => continue,
+                None => bail!("the backend closed before answering the listing"),
+            }
+        }
     }
 
     /// Ask the backend to stop and wait for it to leave.
@@ -115,6 +167,8 @@ mod tests {
                 platform: "telegram".into(),
                 version: "1".into(),
                 capabilities: vec!["message".into()],
+                authenticated: true,
+                onboarding: None,
             }),
         )
         .await?;
@@ -136,8 +190,107 @@ mod tests {
                     .await?;
                 }
                 CoreOp::Stop(_) => return Ok(()),
+                // The auth half, scripted the way a real backend answers it:
+                // a login verdict naming the identity, and a conversation
+                // list. Both are the calls the setup wizard makes.
+                CoreOp::Login(args) => {
+                    let ok = args.credential == "good-token";
+                    write_frame(
+                        &mut write,
+                        &BackendOp::Login(onlyne_im_backend::frame::LoginResult {
+                            ok,
+                            reason: (!ok).then(|| "the token is not this bot's".to_string()),
+                            identity: ok.then(|| "onlyne_bot".to_string()),
+                        }),
+                    )
+                    .await?;
+                }
+                CoreOp::ListConversations(_) => {
+                    write_frame(
+                        &mut write,
+                        &BackendOp::Conversations(onlyne_im_backend::frame::ImConversations {
+                            conversations: vec![onlyne_im_backend::frame::ImConversation {
+                                id: "-1007788".into(),
+                                title: Some("Project".into()),
+                                kind: Some("group".into()),
+                            }],
+                        }),
+                    )
+                    .await?;
+                }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_login_verdict_and_a_conversation_list_read_the_same_way() {
+        let (client, server) = duplex(64 * 1024);
+        let backend = tokio::spawn(scripted(server));
+        let (mut read, mut write) = tokio::io::split(client);
+        let mut reader = FrameReader::default();
+
+        // The backend's own hello comes first.
+        let hello = read_op(&mut reader, &mut read).await.unwrap().unwrap();
+        assert!(matches!(hello, BackendOp::Hello(_)));
+
+        write_frame(
+            &mut write,
+            &CoreOp::Login(onlyne_im_backend::frame::LoginArgs {
+                gateway: "tg1".into(),
+                credential: "bad-token".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        match read_op(&mut reader, &mut read).await.unwrap().unwrap() {
+            BackendOp::Login(result) => {
+                assert!(!result.ok);
+                assert_eq!(
+                    result.reason.as_deref(),
+                    Some("the token is not this bot's")
+                );
+                assert!(result.identity.is_none());
+            }
+            other => panic!("expected a login verdict, got {other:?}"),
+        }
+
+        write_frame(
+            &mut write,
+            &CoreOp::Login(onlyne_im_backend::frame::LoginArgs {
+                gateway: "tg1".into(),
+                credential: "good-token".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        match read_op(&mut reader, &mut read).await.unwrap().unwrap() {
+            BackendOp::Login(result) => {
+                assert!(result.ok);
+                assert_eq!(result.identity.as_deref(), Some("onlyne_bot"));
+            }
+            other => panic!("expected an accepted login, got {other:?}"),
+        }
+
+        write_frame(
+            &mut write,
+            &CoreOp::ListConversations(onlyne_im_backend::frame::ListConversationsArgs {
+                gateway: "tg1".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        match read_op(&mut reader, &mut read).await.unwrap().unwrap() {
+            BackendOp::Conversations(list) => {
+                assert_eq!(list.conversations.len(), 1);
+                assert_eq!(list.conversations[0].id, "-1007788");
+                assert_eq!(list.conversations[0].title.as_deref(), Some("Project"));
+            }
+            other => panic!("expected a conversation list, got {other:?}"),
+        }
+
+        drop(read);
+        drop(write);
+        backend.await.unwrap().unwrap();
     }
 
     #[tokio::test]

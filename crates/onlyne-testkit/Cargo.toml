@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 onlyne-adapter = { path = "../onlyne-adapter", version = "2.2.0" }
 onlyne-config = { path = "../onlyne-config", version = "2.2.0" }
+onlyne-net = { path = "../onlyne-net", version = "2.2.0" }
 onlyne-wire = { path = "../onlyne-wire", version = "2.2.0" }
 onlyne-proto = { path = "../onlyne-proto", version = "2.2.0" }
 serde = { version = "1", features = ["derive"] }

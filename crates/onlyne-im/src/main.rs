@@ -14,9 +14,11 @@
 //! conversation reachable, so a `generate` that cannot reach the server refuses
 //! before it mints a workspace, and an operator is told which remedy to take.
 
+mod setup;
 mod workspace;
 
 use clap::{Parser, Subcommand};
+use setup::SetupArgs;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -36,8 +38,13 @@ enum Command {
     Init(InitCmd),
     /// Mint one conversation workspace and register its role in the cluster.
     Generate(GenerateCmd),
-    /// Store a platform credential under the gateway root.
+    /// Store a platform credential under the gateway root, optionally
+    /// authenticating a backend interactively and verifying it against the
+    /// platform first.
     Login(LoginCmd),
+    /// Guided setup: pick a backend, authenticate it, pick the conversations to
+    /// serve, and bind each one as a role of the cluster.
+    Setup(SetupCmd),
     /// Serve every conversation under this gateway root.
     Run(RunCmd),
     /// Parse and print the gateway's configuration, with the roles it serves.
@@ -50,6 +57,9 @@ struct InitCmd {
     /// Gateway root directory.
     #[arg(long)]
     root: PathBuf,
+    /// The role this gateway is in the cluster. One gateway root is one role.
+    #[arg(long)]
+    role: Option<String>,
     /// The server endpoint every conversation link dials, as `host:port`.
     /// Read from the server root's spec when `--server-root` is given instead.
     #[arg(long)]
@@ -80,8 +90,9 @@ struct GenerateCmd {
     /// is a value, not a flag.
     #[arg(long, allow_hyphen_values = true)]
     conversation: String,
-    /// The role name; defaults to a name derived from the gateway and
-    /// conversation ids. The directory name is the role.
+    /// The conversation's slug: the directory name under `conversations/`.
+    /// Defaults to a name derived from the gateway and conversation ids. The
+    /// slug names no identity — the chat key beside it does.
     #[arg(long)]
     role: Option<String>,
     /// A role this conversation may address and be addressed by; repeat for
@@ -111,6 +122,41 @@ struct LoginCmd {
     /// A file holding the token.
     #[arg(long)]
     token_file: Option<PathBuf>,
+    /// Ask the backend for the credential instead of taking it from a flag:
+    /// it is verified against the platform and written only once accepted.
+    #[arg(long)]
+    interactive: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct SetupCmd {
+    /// Gateway root directory.
+    #[arg(long)]
+    root: PathBuf,
+    /// The `[[im.backend]]` to set up; asked for when the root declares more
+    /// than one.
+    #[arg(long)]
+    gateway: Option<String>,
+    /// The credential, for a scripted run. Skipped when one is already stored
+    /// and the platform accepts it.
+    #[arg(long)]
+    credential: Option<String>,
+    /// A conversation id to bind; repeat for several. Asked for when omitted.
+    #[arg(long = "conversation", allow_hyphen_values = true)]
+    conversations: Vec<String>,
+    /// A role each conversation may address and be addressed by; repeat for
+    /// several. Defaults to `_supervisor`, the cluster's operator agent.
+    #[arg(long = "peer")]
+    peers: Vec<String>,
+    /// The server root whose `spec.toml` gains the roles.
+    #[arg(long)]
+    server_root: Option<PathBuf>,
+    /// The admin socket to apply the roles through; overrides discovery.
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    /// Answer with defaults and refuse anything that needs a human.
+    #[arg(long)]
+    non_interactive: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -133,6 +179,7 @@ struct CheckCmd {
 impl From<InitCmd> for workspace::InitArgs {
     fn from(cmd: InitCmd) -> Self {
         workspace::InitArgs {
+            role: cmd.role,
             root: cmd.root,
             server: cmd.server,
             cert_pin: cmd.cert_pin,
@@ -156,6 +203,21 @@ impl From<GenerateCmd> for workspace::GenerateArgs {
     }
 }
 
+impl From<SetupCmd> for setup::SetupArgs {
+    fn from(cmd: SetupCmd) -> Self {
+        setup::SetupArgs {
+            root: cmd.root,
+            gateway: cmd.gateway,
+            credential: cmd.credential,
+            conversations: cmd.conversations,
+            peers: cmd.peers,
+            server_root: cmd.server_root,
+            socket: cmd.socket,
+            non_interactive: cmd.non_interactive,
+        }
+    }
+}
+
 impl From<LoginCmd> for workspace::LoginArgs {
     fn from(cmd: LoginCmd) -> Self {
         workspace::LoginArgs {
@@ -167,14 +229,60 @@ impl From<LoginCmd> for workspace::LoginArgs {
     }
 }
 
+/// `login` is two verbs in one: a credential handed over on the command line is
+/// written and done with, while `--interactive` (or `setup`) asks the backend
+/// what it needs and verifies the answer against the platform before anything
+/// is stored.
+async fn login(cmd: LoginCmd) -> i32 {
+    if !cmd.interactive {
+        return report(workspace::login(&cmd.into()));
+    }
+    // The credential an interactive run starts from is whatever the flags
+    // named, read now so the wizard verifies exactly what the operator passed
+    // rather than a second copy read a moment later.
+    let credential = match (&cmd.token, &cmd.token_file) {
+        (Some(_), Some(_)) => {
+            eprintln!("onlyne-im: pass `--token` or `--token-file`, not both");
+            return 2;
+        }
+        (Some(token), None) => Some(token.clone()),
+        (None, Some(path)) => match std::fs::read_to_string(path) {
+            Ok(text) => Some(text.trim().to_string()),
+            Err(error) => {
+                eprintln!("onlyne-im: reading {}: {error}", path.display());
+                return 2;
+            }
+        },
+        (None, None) => None,
+    };
+    report(
+        setup::login(&SetupArgs {
+            root: cmd.root,
+            gateway: Some(cmd.gateway),
+            credential,
+            conversations: Vec::new(),
+            peers: Vec::new(),
+            server_root: None,
+            socket: None,
+            non_interactive: false,
+        })
+        .await,
+    )
+}
+
 #[tokio::main]
 async fn main() {
+    // Before any TLS: this process links rustls through both the core's net
+    // layer and the platform backends' HTTP clients, and the two do not agree on
+    // a provider (`onlyne_im_backend::install_crypto_provider`).
+    onlyne_im_backend::install_crypto_provider();
     init_logging();
     let cli = Cli::parse();
     let code = match cli.command {
         Command::Init(cmd) => report(workspace::init(&cmd.into())),
         Command::Generate(cmd) => report(workspace::generate(&cmd.into()).await),
-        Command::Login(cmd) => report(workspace::login(&cmd.into())),
+        Command::Login(cmd) => login(cmd).await,
+        Command::Setup(cmd) => report(setup::setup(&cmd.into()).await),
         Command::Run(cmd) => run(cmd.root, cmd.socket).await,
         Command::Check(cmd) => check(cmd.root),
     };
@@ -204,7 +312,7 @@ async fn run(root: PathBuf, socket: Option<String>) -> i32 {
     };
     tracing::info!(
         root = %root.display(),
-        conversations = gateway.conversations.len(),
+        conversations = gateway.conversations().len(),
         backends = gateway.backends.len(),
         "the IM gateway is starting"
     );
@@ -222,11 +330,12 @@ fn check(root: PathBuf) -> i32 {
     match onlyne_im::Gateway::load(&root) {
         Ok(gateway) => {
             let conversations: Vec<serde_json::Value> = gateway
-                .conversations
+                .conversations()
                 .iter()
                 .map(|conversation| {
                     serde_json::json!({
-                        "role": conversation.role,
+                        "slug": conversation.slug,
+                        "chat": conversation.chat_key,
                         "gateway": conversation.gateway,
                         "conversation": conversation.conversation,
                         "workspace": conversation.workspace.display().to_string(),
@@ -237,6 +346,7 @@ fn check(root: PathBuf) -> i32 {
                 "{}",
                 serde_json::json!({
                     "ok": true,
+                    "role": gateway.role,
                     "root": root.display().to_string(),
                     "server": gateway.server,
                     "backends": gateway.backends.iter().map(|b| &b.gateway).collect::<Vec<_>>(),

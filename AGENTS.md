@@ -17,6 +17,13 @@ is the record of what is in which state, and it is the one to read for that.
 | two | behavior: session table rekey and scopes, drive/placement split, delivery rendering, settlement rules, declarative routes, spec edit ops, event hooks, liveness in memory, one retry classification | done |
 | three | interfaces: `view` reducer, TUI, `onlyne-web` | done |
 
+Landed as v2.3: the **chat addressing protocol** (`docs/v2.3-CHAT-PROTOCOL.md`). A
+conversation's identity is an application-layer chat key carried in the delivery text's first
+line; the gateway is one `[[client]]` serving every conversation in its registry; a role is
+the synthesis of a set of conversations. The core changed not at all: `Principal`, both
+schemas, and `crates/onlyne-client/src/delivery.rs` are untouched, and the scenario suite's
+case 22 proves the shape end to end.
+
 One phase-two item is done with a named gap rather than closed: a **hosting
 runtime** — one that owns its sessions, like DSH — has an interface and a
 specification (`crates/onlyne-adapter/HOSTING-RUNTIME.md`) and four protocol
@@ -83,8 +90,14 @@ operator's `[[im.push]]` scripts; an outbound delivery is rendered by a platform
 gateway spawns. The server changed not at all: a conversation's mail arrives as ordinary role
 delivery.
 
+**That identity model was superseded by v2.3** (`docs/v2.3-CHAT-PROTOCOL.md`): a conversation's
+identity is now an application-layer chat key in the delivery text, the gateway is one
+`[[client]]` serving every conversation in its registry, and a role is the synthesis of a set
+of conversations — a persona that serves several of them at once. The paragraph above
+describes the 2.2.0 release, not the tree.
+
 Its own module, not a `onlyne` verb: `onlyne-im` is a separate binary (`init`, `generate`,
-`login`, `run`, `check`), the way `onlyne-web` is, and the core build links in no chat SDK. A
+`login` (with `--interactive`), `setup`, `run`, `check`), the way `onlyne-web` is, and the core build links in no chat SDK. A
 gateway root holds `.onlyne/config.toml` (`[server]`, `[[im.backend]]`, `[[im.push]]`) and one
 workspace per conversation under `conversations/<role>/`, where **the directory name is the
 role** — the file names only the conversation's coordinates. A conversation's runtime files
@@ -161,8 +174,11 @@ not add a heavyweight dependency for a single type or a single helper.
 | `onlyne-server` | one server root: the daemon plus the file verbs over it | `run`, `init`, `status`, `generate` |
 | `onlyne-client` | one role: the daemon plus the file verbs over a workspace | `run`, `init`, `status`, `roles`, `sessions`, `watch`, `history`, `agent`, `doctor` |
 | `onlyne-web` | optional graphical front end (phase three) | none; flags only (`--bind`, `--open`) |
-| `onlyne-im` | the IM gateway for one root (v2.2): one role link per conversation workspace, trigger scripts, one spawned backend per `[[im.backend]]` | `init`, `generate`, `login`, `run`, `check` |
-| `onlyne-im-backend-telegram` | the Telegram backend the gateway spawns over stdio (v2.2) | none; the gateway root's `[[im.backend]].run` names it |
+| `onlyne-im` | the IM gateway for one root: one role link, trigger scripts, one spawned backend per `[[im.backend]]` | `init`, `generate`, `login` (`--interactive` verifies against the platform first), `setup` (the guided path: backend → auth → conversations → bind), `run`, `check` |
+| `onlyne-im-backend-telegram` | the Telegram backend the gateway spawns over stdio | none; the gateway root's `[[im.backend]].run` names it |
+| `onlyne-im-backend-feishu` | the Feishu (Lark) backend: `openlark` websocket inbound, `im/v1/messages` outbound | none |
+| `onlyne-im-backend-qqbot` | the QQ Open Platform backend: websocket event gateway inbound, per-scene sends outbound | none |
+| `onlyne-im-backend-fake` | the scripted fake used by `smoke`, the e2e scripts, and any dry run; no platform SDK, no credential | none |
 
 Rules:
 
@@ -191,11 +207,13 @@ Rules:
 | `onlyne-cli` | `onlyne`: CLI, TUI, `mcp` |
 | `onlyne-web` | optional graphical front end (phase three) |
 | `onlyne-testkit` | scenario harness, fake runtime |
-| `onlyne-im` | IM gateway host (v2.2): one role link per IM conversation, trigger scripts, backend host |
-| `onlyne-im-backend` | the standard protocol between the gateway and a platform backend: frames, payloads, the `Backend` trait |
-| `onlyne-im-backend-telegram` | Telegram platform backend (platform SDKs live here, never in the core) |
+| `onlyne-im` | IM gateway host: one role link, trigger scripts, backend host, the guided `setup` |
+| `onlyne-im-backend` | the standard protocol between the gateway and a platform backend: frames, payloads, the `Backend` trait, the credential loader |
+| `onlyne-im-backend-feishu` | Feishu platform backend (the `openlark` websocket and the message API live here) |
+| `onlyne-im-backend-qqbot` | QQ Open Platform platform backend (`tokio-tungstenite` lives here and nowhere else) |
+| `onlyne-im-backend-telegram` | Telegram platform backend |
 
-Fifteen active crates. Dependency rules:
+Nineteen active crates. Dependency rules:
 
 - `onlyne-proto` does not depend on tokio.
 - Plugins depend on `onlyne-adapter` and `onlyne-proto`.
@@ -257,22 +275,25 @@ Gateway root, selected by `onlyne-im run --root <dir>` (the optional IM module, 
 
 ```text
 <gateway-root>/.onlyne/
-  config.toml            [server], [[im.backend]], [[im.push]]
+  config.toml            [gateway].role, [server], [[im.backend]], [[im.push]]
+  keys/role.key          the gateway role's key, 0600
   credentials/           one credential file per backend gateway id, 0600
   logs/gateway.log
 <gateway-root>/conversations/
-  <role>/                the directory name IS the role; the file names no role
+  <slug>/                an operator-chosen label; the file names no identity
     .onlyne/config.toml  [chat] gateway + conversation
-    .onlyne/keys/role.key
+    .onlyne/chat.key     the conversation's identity on the wire
     chat.jsonl           inbound events and outbound payloads, one JSON per line
     media/               attachments, both directions
 ```
 
-Each `conversations/<role>/` is one IM conversation's workspace, and the gateway holds one
-ordinary role link per workspace. It is a role in the cluster — an ordinary `[[client]]` with
-its own key and ACL row — so nothing in `onlyne-server` knows an IM conversation exists. A
-gateway root and the server root it speaks to are separate trees and may be on separate
-machines.
+One gateway root is one role in the cluster — an ordinary `[[client]]` with its own key and
+ACL row — and it holds one ordinary role link, which carries every conversation in its
+registry. Each `conversations/<slug>/` is one IM conversation's workspace; the slug is an
+operator label with no protocol meaning, and the conversation's identity is the chat key
+beside it (`docs/v2.3-CHAT-PROTOCOL.md` §4). Nothing in `onlyne-server` knows an IM
+conversation exists. A gateway root and the server root it speaks to are separate trees and
+may be on separate machines.
 
 **Sockets live outside the workspace.** One machine-level runtime directory, `/tmp/onlyne-<uid>/`,
 mode `0700`, overridable with `ONLYNE_RUNTIME_DIR`. The socket is `<digest>.sock` and the

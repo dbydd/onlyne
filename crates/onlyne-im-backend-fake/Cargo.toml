@@ -1,0 +1,22 @@
+[package]
+name = "onlyne-im-backend-fake"
+version = "2.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Scripted fake platform backend for the Onlyne IM gateway: tests, e2e scripts, and a dry run without a credential"
+
+[[bin]]
+name = "onlyne-im-backend-fake"
+path = "src/main.rs"
+
+[dependencies]
+onlyne-im-backend = { path = "../onlyne-im-backend", version = "2.2.0" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

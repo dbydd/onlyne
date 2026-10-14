@@ -25,7 +25,7 @@ use std::io::Write;
 pub fn append_inbound(entry: &Conversation, event: &ImEvent) -> Result<()> {
     let line = json!({
         "direction": "in",
-        "role": entry.role,
+        "chat": entry.chat_key,
         "gateway": event.gateway,
         "platform": event.platform,
         "conversation": event.conversation,
@@ -44,7 +44,7 @@ pub fn append_inbound(entry: &Conversation, event: &ImEvent) -> Result<()> {
 pub fn append_outbound(entry: &Conversation, payload: &ImPayload) -> Result<()> {
     let line = json!({
         "direction": "out",
-        "role": entry.role,
+        "chat": entry.chat_key,
         "gateway": entry.gateway,
         "conversation": entry.conversation,
         "payload": payload,
@@ -73,6 +73,24 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// The id of the last inbound event this conversation logged, if any.
+///
+/// QQ's passive reply is only passive when the send carries the message it
+/// answers (`msg_id`), so a reply must be able to name it; the event id is the
+/// one id the platform gave, and it is already in the log. Reading it back is a
+/// line scan, which is nothing next to the send it enables.
+pub fn last_inbound_id(entry: &Conversation) -> Option<String> {
+    let path = entry.chat_log();
+    let text = std::fs::read_to_string(path).ok()?;
+    let id = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|line| line.get("direction").and_then(|d| d.as_str()) == Some("in"))
+        .last()
+        .and_then(|line| line.get("id").and_then(|id| id.as_str()).map(str::to_owned))?;
+    (!id.trim().is_empty()).then_some(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,12 +98,12 @@ mod tests {
 
     fn conversation(dir: &std::path::Path) -> Conversation {
         Conversation {
-            role: "tg-group-1".into(),
+            slug: "tg-group-1".into(),
             workspace: dir.to_path_buf(),
             config_path: dir.join(".onlyne/config.toml"),
-            key_path: dir.join(".onlyne/keys/role.key"),
             gateway: "tg1".into(),
             conversation: "-100".into(),
+            chat_key: "abc123".into(),
         }
     }
 
@@ -125,8 +143,10 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0]["direction"], "in");
+        assert_eq!(lines[0]["chat"], "abc123");
         assert_eq!(lines[0]["id"], "msg-1");
         assert_eq!(lines[1]["direction"], "out");
+        assert_eq!(lines[1]["chat"], "abc123");
         assert_eq!(lines[1]["payload"]["text"], "hello");
     }
 }

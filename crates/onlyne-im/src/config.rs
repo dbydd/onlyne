@@ -8,28 +8,65 @@
 //!   one process per bot connection), and the scripts an event or a beat runs
 //!   (`[[im.push]]`, and nothing about where a script sends — that is the
 //!   script's own call).
-//! - `<root>/conversations/<role>/.onlyne/config.toml` is **one conversation's**:
-//!   its platform coordinates. The directory name *is* the role, so the file
-//!   never names one; the key lives at the fixed path beside it. Scanning
-//!   `conversations/` is the whole list of what this gateway serves — there is
-//!   no `[[link]]` table to keep in step with the directories.
+//! - `<root>/conversations/<slug>/.onlyne/config.toml` is **one conversation's**:
+//!   its platform coordinates, with its chat key beside it. The directory name
+//!   is the slug — an operator-chosen label with no protocol meaning, since the
+//!   conversation's identity on the wire is its chat key
+//!   (`docs/v2.3-CHAT-PROTOCOL.md`). Scanning `conversations/` is the whole list
+//!   of what this gateway serves — there is no `[[link]]` table to keep in step
+//!   with the directories.
 //!
 //! A conversation directory is complete on its own: coordinates, key, chat log,
 //! and attachments all live under it, so moving one moves that IM conversation.
 //!
 //! What the loader refuses is the set of shapes that make a conversation
 //! ambiguous: a duplicate `[[im.backend]]` id, a conversation whose `gateway` no
-//! backend answers, two conversations claiming one platform conversation, or a
-//! conversation with no key. Each refusal names the file and the remedy.
+//! backend answers, two conversations claiming one platform conversation, two
+//! conversations carrying one chat key, or a chat key no `mint` could have
+//! produced. Each refusal names the file and the remedy.
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 /// The directory under the gateway root that holds one workspace per
 /// conversation; each child's name is a role.
 pub const CONVERSATIONS_DIR: &str = "conversations";
+
+/// Which conversations a gateway may serve that no workspace on disk carries.
+///
+/// The default is **listen-all**: an event from a conversation nobody
+/// pre-registered is adopted (a workspace and a chat key are minted for it),
+/// because the chicken-and-egg it removes is real — a chat id is only readable
+/// after the bot has been in the conversation, and the bot was only started to
+/// serve conversations. An operator who wants the old closed posture names
+/// `allow` (only those ids are served) or `deny` (those ids are refused).
+///
+/// A `deny` entry always wins over `allow`, and both are matched against the
+/// *platform* conversation id as the backend reported it — `-1001234567890` for
+/// a Telegram group, `oc_…` for a Feishu chat — never against a slug or a key.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ListenPolicy {
+    /// Conversation ids this gateway serves. Empty means every conversation.
+    pub allow: Vec<String>,
+    /// Conversation ids this gateway refuses, whatever `allow` says.
+    pub deny: Vec<String>,
+}
+
+impl ListenPolicy {
+    /// Whether one platform conversation id may be served.
+    ///
+    /// `deny` first, then `allow`: an empty `allow` list is "everything", not
+    /// "nothing", which is the default this type exists to record.
+    pub fn admits(&self, conversation: &str) -> bool {
+        if self.deny.iter().any(|id| id == conversation) {
+            return false;
+        }
+        self.allow.is_empty() || self.allow.iter().any(|id| id == conversation)
+    }
+}
 
 /// How an `[[im.push]]` script is triggered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,28 +99,37 @@ pub struct BackendEntry {
     pub run: Vec<String>,
 }
 
-/// One conversation the gateway serves: a workspace directory whose name is its
-/// role, its platform coordinates, and the paths its runtime files live at.
+/// One conversation the gateway serves: a workspace directory, its platform
+/// coordinates, its chat key, and the paths its runtime files live at.
+///
+/// The directory name is the slug, an operator-chosen label the protocol reads
+/// nothing from. What identifies the conversation is [`Self::chat_key`], which
+/// the delivery text carries (`docs/v2.3-CHAT-PROTOCOL.md` §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conversation {
-    /// The role, taken from the directory name — never from the file.
-    pub role: String,
+    /// The slug, taken from the directory name — never from the file.
+    pub slug: String,
     /// `<root>/conversations/<role>`.
     pub workspace: PathBuf,
     /// Where this conversation's coordinates came from.
     pub config_path: PathBuf,
-    /// `<workspace>/.onlyne/keys/role.key`, a fixed path.
-    pub key_path: PathBuf,
     /// Which `[[im.backend]]` carries this conversation's traffic.
     pub gateway: String,
     /// The conversation's id on the platform.
     pub conversation: String,
+    /// The chat key this conversation answers to on the wire.
+    pub chat_key: String,
 }
 
 impl Conversation {
     /// The directory inbound downloads and outbound attachments share.
     pub fn media_dir(&self) -> PathBuf {
         self.workspace.join("media")
+    }
+
+    /// The chat key's file, beside the coordinates.
+    pub fn key_path(&self) -> PathBuf {
+        self.workspace.join(".onlyne/chat.key")
     }
 
     /// The append-only chat log: one JSON object per line, both directions.
@@ -93,8 +139,15 @@ impl Conversation {
 }
 
 /// Everything one gateway run reads from disk.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Clone` is cheap: the conversation registry is shared, so a clone made for
+/// the link and the clone the runloop holds see the same adopted conversations.
+#[derive(Debug, Clone)]
 pub struct Gateway {
+    /// The role this gateway is in the cluster, and the key it dials with.
+    /// One gateway root is one role, so every conversation's traffic rides one
+    /// link (`docs/v2.3-CHAT-PROTOCOL.md` §3).
+    pub role: String,
     /// The gateway root, as given to `--root`.
     pub root: PathBuf,
     /// The server endpoint every conversation link dials.
@@ -106,16 +159,107 @@ pub struct Gateway {
     /// The push scripts, in declaration order.
     pub pushes: Vec<PushScript>,
     /// The conversations found by scanning `conversations/`.
-    pub conversations: Vec<Conversation>,
+    ///
+    /// A shared, mutable registry rather than the scanned list, because a run
+    /// may **adopt** a conversation no workspace carried: `runloop` inserts the
+    /// entry it just minted so the trigger scripts run for this very event, and
+    /// `link` reads the same registry so the reply addressed to that new chat
+    /// key renders back through it. A plain `Vec` would hand each side its own
+    /// snapshot, and the adopted conversation would be answerable only after a
+    /// restart.
+    pub conversations: Arc<RwLock<Vec<Conversation>>>,
+    /// Which conversations may be adopted that no workspace carries.
+    pub listen: ListenPolicy,
+}
+
+impl Gateway {
+    /// The gateway's own key, beside the gateway document.
+    pub fn key_path(&self) -> PathBuf {
+        self.root.join(".onlyne/keys/role.key")
+    }
+
+    /// A snapshot of the conversations this gateway serves right now.
+    ///
+    /// A snapshot rather than a guard: a caller that holds the read lock across
+    /// an `await` would let an adoption in another task block the runloop.
+    pub fn conversations(&self) -> Vec<Conversation> {
+        self.read().clone()
+    }
+
+    /// The conversation one platform message belongs to.
+    pub fn conversation_for(&self, gateway: &str, conversation: &str) -> Option<Conversation> {
+        self.read()
+            .iter()
+            .find(|entry| entry.gateway == gateway && entry.conversation == conversation)
+            .cloned()
+    }
+
+    /// The conversation one chat key names.
+    pub fn conversation_for_key(&self, key: &str) -> Option<Conversation> {
+        self.read()
+            .iter()
+            .find(|entry| entry.chat_key == key)
+            .cloned()
+    }
+
+    /// Register one conversation this run adopted.
+    ///
+    /// Refuses a duplicate rather than replacing it: two entries claiming one
+    /// chat key would deliver a reply into the wrong chat, which is the failure
+    /// the loader's own cross-check is about (`Gateway::check`).
+    pub fn adopt(&self, entry: Conversation) -> Result<()> {
+        let mut entries = self
+            .conversations
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The same platform conversation twice is the ordinary second event,
+        // and it is a no-op — checked first, because the entry it would insert
+        // carries the key this check would otherwise refuse as a duplicate.
+        if entries.iter().any(|existing| {
+            existing.gateway == entry.gateway && existing.conversation == entry.conversation
+        }) {
+            return Ok(());
+        }
+        // A *different* conversation carrying this key would deliver a reply
+        // into the wrong chat, which is the failure the loader's own cross-check
+        // is about.
+        if entries
+            .iter()
+            .any(|existing| existing.chat_key == entry.chat_key)
+        {
+            bail!(
+                "chat key {} is already carried by another conversation",
+                entry.chat_key
+            );
+        }
+        entries.push(entry);
+        entries.sort_by(|left, right| left.slug.cmp(&right.slug));
+        Ok(())
+    }
+
+    /// The slugs this gateway serves, in registry order.
+    pub fn slugs(&self) -> Vec<String> {
+        self.read().iter().map(|entry| entry.slug.clone()).collect()
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<Conversation>> {
+        self.conversations
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 /// The gateway root's own document, before the conversation scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayFile {
+    /// The role this gateway is in the cluster.
+    pub role: String,
     pub server: String,
     pub cert_pin: String,
     pub backends: Vec<BackendEntry>,
     pub pushes: Vec<PushScript>,
+    /// Which conversations may be adopted that no workspace carries.
+    pub listen: ListenPolicy,
 }
 
 impl GatewayFile {
@@ -132,11 +276,19 @@ impl GatewayFile {
         let raw: RawConfig =
             toml::from_str(text).with_context(|| format!("{file} does not parse"))?;
         let mut parsed = GatewayFile {
+            role: raw.gateway.role,
             server: raw.server.endpoint,
             cert_pin: raw.server.cert_pin,
             backends: Vec::new(),
             pushes: Vec::new(),
+            listen: ListenPolicy {
+                allow: raw.im.listen.allow,
+                deny: raw.im.listen.deny,
+            },
         };
+        if parsed.role.trim().is_empty() {
+            bail!("{file}: `[gateway].role` is required; one gateway root is one role");
+        }
         if parsed.server.trim().is_empty() {
             bail!("{file}: `[server].endpoint` is required");
         }
@@ -187,15 +339,16 @@ impl Gateway {
     /// `conversations/`, then the cross-checks only both halves can answer.
     pub fn load(root: &Path) -> Result<Self> {
         let file = GatewayFile::load(root)?;
-        let mut gateway = Gateway {
+        let gateway = Gateway {
+            role: file.role,
             root: root.to_path_buf(),
             server: file.server,
             cert_pin: file.cert_pin,
             backends: file.backends,
             pushes: file.pushes,
-            conversations: Vec::new(),
+            conversations: Arc::new(RwLock::new(scan_conversations(root)?)),
+            listen: file.listen,
         };
-        gateway.conversations = scan_conversations(root)?;
         gateway.check()?;
         Ok(gateway)
     }
@@ -203,8 +356,10 @@ impl Gateway {
     /// The cross-checks a conversation needs its gateway for: a gateway no
     /// backend answers, and one platform conversation claimed twice.
     fn check(&self) -> Result<()> {
+        let entries = self.read();
         let mut claimed: BTreeMap<(&str, &str), &str> = BTreeMap::new();
-        for conversation in &self.conversations {
+        let mut keys: BTreeMap<&str, &str> = BTreeMap::new();
+        for conversation in entries.iter() {
             if self.backend(&conversation.gateway).is_none() {
                 bail!(
                     "{}: `[chat].gateway = \"{}\"` names no `[[im.backend]]`; add that backend \
@@ -217,36 +372,34 @@ impl Gateway {
                 conversation.gateway.as_str(),
                 conversation.conversation.as_str(),
             );
-            if let Some(other) = claimed.insert(key, conversation.role.as_str()) {
-                // Outbound would be ambiguous and inbound would fire two roles'
-                // scripts for one platform message.
+            if let Some(other) = claimed.insert(key, conversation.slug.as_str()) {
+                // Outbound would be ambiguous and inbound would fire two
+                // conversations' scripts for one platform message.
                 bail!(
-                    "{}: conversation {} is also claimed by role {}; one platform conversation \
-                     belongs to one role",
+                    "{}: platform conversation {} is also claimed by {}; one platform \
+                     conversation belongs to one conversation workspace",
                     conversation.config_path.display(),
                     conversation.conversation,
                     other
                 );
             }
+            // Two conversations answering one chat key would deliver a reply
+            // into the wrong person's chat, which is the failure the protocol's
+            // malformed table is about, so the mint is checked here and the
+            // answer is a load-time refusal rather than a misfiled message.
+            if let Some(other) =
+                keys.insert(conversation.chat_key.as_str(), conversation.slug.as_str())
+            {
+                bail!(
+                    "{}: chat key {} is also carried by {}; one chat key belongs to one \
+                     conversation — regenerate one of them",
+                    conversation.config_path.display(),
+                    conversation.chat_key,
+                    other
+                );
+            }
         }
         Ok(())
-    }
-
-    /// The conversation one platform message belongs to.
-    pub fn conversation_for(&self, gateway: &str, conversation: &str) -> Option<&Conversation> {
-        self.conversations
-            .iter()
-            .find(|entry| entry.gateway == gateway && entry.conversation == conversation)
-    }
-
-    /// The conversation one role names.
-    pub fn conversation(&self, role: &str) -> Option<&Conversation> {
-        self.conversations.iter().find(|entry| entry.role == role)
-    }
-
-    /// The roles this gateway serves, in scan order.
-    pub fn roles(&self) -> impl Iterator<Item = &str> {
-        self.conversations.iter().map(|entry| entry.role.as_str())
     }
 
     /// The backend one gateway id names.
@@ -277,7 +430,7 @@ fn scan_conversations(root: &Path) -> Result<Vec<Conversation>> {
             tracing::debug!(path = %path.display(), "a conversations/ entry is not a workspace");
         }
     }
-    // Sort so role order is the directory order, not the filesystem's.
+    // Sort so slug order is the directory order, not the filesystem's.
     entries.sort();
     let mut conversations = Vec::with_capacity(entries.len());
     for workspace in &entries {
@@ -287,8 +440,8 @@ fn scan_conversations(root: &Path) -> Result<Vec<Conversation>> {
 }
 
 /// Read one conversation workspace.
-fn load_conversation(workspace: &Path) -> Result<Conversation> {
-    let role = workspace
+pub(crate) fn load_conversation(workspace: &Path) -> Result<Conversation> {
+    let slug = workspace
         .file_name()
         .and_then(|name| name.to_str())
         .with_context(|| format!("{} has no readable name", workspace.display()))?
@@ -315,37 +468,54 @@ fn load_conversation(workspace: &Path) -> Result<Conversation> {
              this conversation"
         );
     }
-    if let Some(declared) = raw.role.filter(|name| !name.trim().is_empty())
-        && declared != role
-    {
-        // The directory name is the role: it is what a peer addresses and what
-        // this gateway dials with, so a file that names another role would make
-        // the same workspace answer to two names depending on the reader.
+    if let Some(declared) = raw.role.filter(|name| !name.trim().is_empty()) {
+        // v2.2 wrote the role here and read it back from the directory name.
+        // The role is not what a conversation is any more, so a leftover key is
+        // refused by name with its remedy rather than silently ignored: an
+        // operator who sees one is mid-migration (`docs/v2.3-CHAT-PROTOCOL.md`
+        // §8) and needs to be told.
         bail!(
-            "{file}: `role = \"{declared}\"` disagrees with the directory name \"{role}\"; the \
-             directory name is the role — rename the directory or drop the key"
+            "{file}: `role = \"{declared}\"` is the v2.2 key and no longer means anything; the \
+             directory name \"{slug}\" is the slug and the conversation's identity is its chat \
+             key — drop the key, or see `docs/v2.3-CHAT-PROTOCOL.md` §8 to migrate this root"
         );
     }
-    let key_path = workspace.join(".onlyne/keys/role.key");
-    if !key_path.is_file() {
+    let key_path = workspace.join(".onlyne/chat.key");
+    let chat_key = match std::fs::read_to_string(&key_path) {
+        Ok(text) => text.trim().to_string(),
+        Err(_) => bail!(
+            "{}: this conversation has no chat key; run `onlyne-im generate` in this gateway \
+             root to mint one",
+            key_path.display()
+        ),
+    };
+    if chat_key.is_empty() {
         bail!(
-            "{}: role {role} has no key; run `onlyne-im generate` in this gateway root to mint \
-             one",
+            "{}: the chat key is empty; run `onlyne-im generate` in this gateway root to mint one",
+            key_path.display()
+        );
+    }
+    if !crate::chatkey::validate(&chat_key) {
+        bail!(
+            "{}: chat key {chat_key} is not a key this gateway could have minted; regenerate it \
+             with `onlyne-im generate`",
             key_path.display()
         );
     }
     Ok(Conversation {
-        role,
+        slug,
         workspace: workspace.to_path_buf(),
         config_path,
-        key_path,
         gateway: chat.gateway,
         conversation: chat.conversation,
+        chat_key,
     })
 }
 
 #[derive(Debug, Deserialize)]
 struct RawConfig {
+    #[serde(default)]
+    gateway: RawGateway,
     #[serde(default)]
     server: RawServer,
     #[serde(default)]
@@ -361,11 +531,28 @@ struct RawServer {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct RawGateway {
+    #[serde(default)]
+    role: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct RawIm {
     #[serde(default)]
     backend: Vec<RawBackend>,
     #[serde(default)]
     push: Vec<RawPush>,
+    #[serde(default)]
+    listen: RawListen,
+}
+
+/// `[im.listen]`: which conversations may be adopted that no workspace carries.
+#[derive(Debug, Default, Deserialize)]
+struct RawListen {
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    deny: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -476,6 +663,9 @@ mod tests {
     use std::time::Duration;
 
     const ROOT: &str = r#"
+[gateway]
+role = "im"
+
 [server]
 endpoint = "127.0.0.1:7000"
 cert_pin = "sha256/abc"
@@ -486,14 +676,14 @@ run = ["onlyne-im-backend-telegram"]
 "#;
 
     /// Lay out a gateway root: the gateway document plus one workspace per
-    /// `(role, gateway, conversation)`, each with a real key.
+    /// `(slug, gateway, conversation)`, each with a minted chat key.
     fn root(dir: &Path, document: &str, conversations: &[(&str, &str, &str)]) {
         std::fs::create_dir_all(dir.join(".onlyne")).unwrap();
         std::fs::write(dir.join(".onlyne/config.toml"), document).unwrap();
         std::fs::create_dir_all(dir.join(CONVERSATIONS_DIR)).unwrap();
-        for (role, gateway, conversation) in conversations {
-            let workspace = dir.join("conversations").join(role);
-            write_conversation(&workspace, gateway, conversation, None, true);
+        for (slug, gateway, conversation) in conversations {
+            let workspace = dir.join("conversations").join(slug);
+            write_conversation(&workspace, gateway, conversation, None, None);
         }
     }
 
@@ -502,7 +692,7 @@ run = ["onlyne-im-backend-telegram"]
         gateway: &str,
         conversation: &str,
         role: Option<&str>,
-        with_key: bool,
+        chat_key: Option<&str>,
     ) {
         std::fs::create_dir_all(workspace.join(".onlyne/keys")).unwrap();
         std::fs::write(
@@ -514,8 +704,13 @@ run = ["onlyne-im-backend-telegram"]
             ),
         )
         .unwrap();
-        if with_key {
-            std::fs::write(workspace.join(".onlyne/keys/role.key"), [7u8; 32]).unwrap();
+        // A minted key unless the test is asserting the missing or malformed
+        // case: the mint is the gateway's, so the fixture borrows it.
+        match chat_key {
+            Some(key) => std::fs::write(workspace.join(".onlyne/chat.key"), key).unwrap(),
+            None => {
+                std::fs::write(workspace.join(".onlyne/chat.key"), crate::chatkey::mint()).unwrap()
+            }
         }
     }
 
@@ -532,17 +727,15 @@ run = ["onlyne-im-backend-telegram"]
             &[("tg-group-1", "tg1", "-100"), ("tg-dm-2", "tg1", "2")],
         );
         let gateway = Gateway::load(dir.path()).unwrap();
-        assert_eq!(
-            gateway.roles().collect::<Vec<_>>(),
-            vec!["tg-dm-2", "tg-group-1"]
-        );
+        assert_eq!(gateway.slugs(), vec!["tg-dm-2", "tg-group-1"]);
         assert_eq!(gateway.pushes.len(), 2);
         assert_eq!(gateway.pushes[1].mode, PushMode::Heartbeat);
         assert_eq!(gateway.pushes[1].every, Some(Duration::from_secs(300)));
         let found = gateway
             .conversation_for("tg1", "-100")
             .expect("the conversation");
-        assert_eq!(found.role, "tg-group-1");
+        assert_eq!(found.slug, "tg-group-1");
+        assert!(crate::chatkey::validate(&found.chat_key));
         // The runtime files hang off the conversation's own workspace.
         assert!(found.media_dir().starts_with(&found.workspace));
         assert!(found.chat_log().starts_with(&found.workspace));
@@ -554,7 +747,7 @@ run = ["onlyne-im-backend-telegram"]
         root(dir.path(), ROOT, &[]);
         std::fs::remove_dir_all(dir.path().join("conversations")).unwrap();
         let gateway = Gateway::load(dir.path()).unwrap();
-        assert!(gateway.conversations.is_empty());
+        assert!(gateway.conversations().is_empty());
     }
 
     #[test]
@@ -583,11 +776,43 @@ run = ["onlyne-im-backend-telegram"]
             &[("tg-a", "tg1", "-100"), ("tg-b", "tg1", "-100")],
         );
         let error = Gateway::load(dir.path()).unwrap_err();
-        assert!(error.to_string().contains("belongs to one role"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("one platform conversation belongs to one conversation workspace"),
+            "{error}"
+        );
     }
 
     #[test]
-    fn a_workspace_without_a_key_names_the_command_that_fixes_it() {
+    fn two_conversations_one_chat_key_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        root(dir.path(), ROOT, &[]);
+        write_conversation(
+            &dir.path().join("conversations/tg-a"),
+            "tg1",
+            "-100",
+            None,
+            Some("sharedkey"),
+        );
+        write_conversation(
+            &dir.path().join("conversations/tg-b"),
+            "tg1",
+            "-200",
+            None,
+            Some("sharedkey"),
+        );
+        let error = Gateway::load(dir.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("one chat key belongs to one conversation"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unmintable_chat_key_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         root(dir.path(), ROOT, &[]);
         write_conversation(
@@ -595,28 +820,42 @@ run = ["onlyne-im-backend-telegram"]
             "tg1",
             "-1",
             None,
-            false,
+            Some("has a space"),
         );
         let error = Gateway::load(dir.path()).unwrap_err();
-        assert!(error.to_string().contains("onlyne-im generate"), "{error}");
+        assert!(error.to_string().contains("could have minted"), "{error}");
     }
 
     #[test]
-    fn a_role_key_that_disagrees_with_the_directory_is_refused() {
+    fn the_v2_2_role_key_is_refused_with_its_migration_remedy() {
         let dir = tempfile::tempdir().unwrap();
         root(dir.path(), ROOT, &[]);
         write_conversation(
             &dir.path().join("conversations/tg-1"),
             "tg1",
             "-1",
-            Some("tg-other"),
-            true,
+            Some("tg-1"),
+            None,
         );
         let error = Gateway::load(dir.path()).unwrap_err();
-        assert!(
-            error.to_string().contains("directory name is the role"),
-            "{error}"
-        );
+        let message = error.to_string();
+        assert!(message.contains("v2.2 key"), "{message}");
+        assert!(message.contains("v2.3-CHAT-PROTOCOL.md"), "{message}");
+    }
+
+    #[test]
+    fn a_workspace_without_a_chat_key_names_the_command_that_fixes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        root(dir.path(), ROOT, &[]);
+        let workspace = dir.path().join("conversations/tg-1");
+        std::fs::create_dir_all(workspace.join(".onlyne")).unwrap();
+        std::fs::write(
+            workspace.join(".onlyne/config.toml"),
+            "[chat]\ngateway = \"tg1\"\nconversation = \"-1\"\n",
+        )
+        .unwrap();
+        let error = Gateway::load(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("onlyne-im generate"), "{error}");
     }
 
     #[test]

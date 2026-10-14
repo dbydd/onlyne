@@ -15,6 +15,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rustls = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 thiserror = "1.0"

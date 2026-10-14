@@ -13,11 +13,16 @@ use anyhow::{Context, Result};
 use api::Bot;
 use async_trait::async_trait;
 use onlyne_im_backend::backend::Backend;
-use onlyne_im_backend::frame::{HealthArgs, HelloArgs, SendArgs};
+use onlyne_im_backend::frame::{
+    HealthArgs, HelloArgs, ImConversation, LoginArgs, OnboardingKind, OnboardingPrompt, SendArgs,
+};
 use onlyne_im_backend::payload::ImEvent;
 
 /// How long Telegram holds a `getUpdates` when nothing arrives.
 const POLL_TIMEOUT_S: u64 = 30;
+/// The conventional token variable, for an operator who exports one instead of
+/// running `onlyne-im login`.
+pub const TOKEN_ENV: &str = "ONLYNE_TELEGRAM_TOKEN";
 
 /// One Telegram backend: a bot token and the poll cursor.
 pub struct TelegramBackend {
@@ -27,6 +32,9 @@ pub struct TelegramBackend {
     /// The next `update_id` to ask for.
     offset: i64,
     started: std::time::Instant,
+    /// Why no credential was found, when that is the case. It becomes the
+    /// onboarding sentence, so an operator reads the exact reason.
+    problem: Option<String>,
 }
 
 impl TelegramBackend {
@@ -37,6 +45,47 @@ impl TelegramBackend {
             platform: "telegram".to_string(),
             offset: 0,
             started: std::time::Instant::now(),
+            problem: None,
+        }
+    }
+
+    /// Build from the environment: `--token`, then the credential file the
+    /// gateway names, then `ONLYNE_TELEGRAM_TOKEN`. A missing credential is
+    /// carried as [`Self::problem`] rather than raised, because it is the state
+    /// `onlyne-im login` exists to fix and this backend has to be running to
+    /// answer that login.
+    pub fn from_env(
+        explicit: Option<String>,
+        gateway: impl Into<String>,
+        base: Option<String>,
+    ) -> Self {
+        let loaded = onlyne_im_backend::credential::load(explicit.as_deref(), TOKEN_ENV);
+        let mut bot = Bot::new(loaded.value);
+        if let Some(base) = base {
+            bot = bot.with_base(base);
+        }
+        let mut backend = Self::new(bot, gateway);
+        backend.problem = loaded.problem;
+        backend
+    }
+
+    /// The onboarding sentence an unauthenticated backend reports. Telegram's
+    /// Bot API has exactly one credential shape: a token string from
+    /// `@BotFather`, pasted.
+    ///
+    /// When the loader found a reason — an unreadable file, an unset variable —
+    /// the prompt carries it, so the sentence an operator reads names the exact
+    /// file or variable rather than repeating the general instruction.
+    fn token_prompt(problem: Option<&str>) -> OnboardingPrompt {
+        let base = "paste the bot token @BotFather gave you, or set ONLYNE_TELEGRAM_TOKEN";
+        let payload = match problem {
+            Some(problem) => format!("{base} ({problem})"),
+            None => base.to_string(),
+        };
+        OnboardingPrompt {
+            kind: OnboardingKind::ManualCode,
+            payload,
+            expires_in: None,
         }
     }
 }
@@ -44,11 +93,49 @@ impl TelegramBackend {
 #[async_trait]
 impl Backend for TelegramBackend {
     fn hello(&self) -> HelloArgs {
+        // Telegram has no credential-less mode: an empty token is a backend
+        // that cannot do anything, and saying so here is what lets the gateway
+        // print one actionable sentence instead of idling silently.
+        let authenticated = !self.bot.token().trim().is_empty();
         HelloArgs {
             platform: self.platform.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             capabilities: vec!["message".into(), "action".into()],
+            authenticated,
+            onboarding: (!authenticated).then(|| Self::token_prompt(self.problem.as_deref())),
         }
+    }
+
+    /// Verify a pasted token with `getMe` and answer the bot's username.
+    async fn login(&mut self, args: LoginArgs) -> Result<Option<String>> {
+        let token = args.credential.trim();
+        if token.is_empty() {
+            anyhow::bail!("the token is empty");
+        }
+        // The credential is swapped in before the check, so a wrong token
+        // leaves this backend holding a token it just proved bad rather than
+        // the caller's good one. The setup verb reads the answer and decides.
+        self.bot = self.bot.with_token(token);
+        let me =
+            self.bot.get_me().await.context(
+                "Telegram refused this token; check it against the one @BotFather gave you",
+            )?;
+        let username = me
+            .get("username")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        Ok(username)
+    }
+
+    /// The chats this bot can see by id.
+    ///
+    /// The Bot API has no "list my chats" call: a bot learns a chat when
+    /// something happens in it. So discovery here answers exactly the chats the
+    /// caller already names — which is what makes `getChat` the useful check:
+    /// it confirms a chat id is real and the bot can see it, and refuses one it
+    /// cannot, instead of the gateway discovering that on the first render.
+    async fn list_conversations(&mut self) -> Result<Vec<ImConversation>> {
+        Ok(Vec::new())
     }
 
     async fn next_event(&mut self) -> Result<Option<ImEvent>> {
@@ -92,9 +179,6 @@ impl Backend for TelegramBackend {
 
 /// Build the backend from the environment and run the standard protocol loop.
 pub async fn run(gateway: String, token: String, base: Option<String>) -> Result<()> {
-    let mut bot = Bot::new(token);
-    if let Some(base) = base {
-        bot = bot.with_base(base);
-    }
-    onlyne_im_backend::serve(TelegramBackend::new(bot, gateway)).await
+    let explicit = (!token.trim().is_empty()).then_some(token);
+    onlyne_im_backend::serve(TelegramBackend::from_env(explicit, gateway, base)).await
 }

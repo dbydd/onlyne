@@ -34,9 +34,15 @@ pub const PUSH_FAILED_KIND: &str = "im_push_failed";
 #[serde(rename_all = "snake_case", tag = "mode")]
 pub enum PushInput {
     Trigger {
+        /// The gateway role this run speaks for: one root is one role, and a
+        /// script sends to the cluster as this role.
         role: String,
         gateway: String,
         platform: String,
+        /// The chat key of the conversation the event came out of. This is
+        /// what a script puts in the delivery's first line so the reply comes
+        /// back here (`docs/v2.3-CHAT-PROTOCOL.md` §5.1).
+        chat: String,
         /// The platform conversation the event came out of. One `[[im.push]]`
         /// script serves every conversation of the gateway, so this is how a
         /// script tells two of them apart.
@@ -47,9 +53,12 @@ pub enum PushInput {
         at: String,
     },
     Heartbeat {
+        /// The gateway role this run speaks for.
         role: String,
         gateway: String,
         platform: String,
+        /// The chat key of the conversation this beat is for.
+        chat: String,
         at: String,
     },
 }
@@ -287,6 +296,7 @@ mod tests {
             role: "tg-group-1".into(),
             gateway: "tg1".into(),
             platform: "telegram".into(),
+            chat: "abc123".into(),
             conversation: "-100".into(),
             event: Box::new(event()),
             at: "2026-10-10T12:00:00Z".into(),
@@ -309,6 +319,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
         assert_eq!(body["mode"], "trigger");
         assert_eq!(body["role"], "tg-group-1");
+        assert_eq!(body["chat"], "abc123");
         assert_eq!(body["conversation"], "-100");
         assert_eq!(body["event"]["id"], "msg-1");
     }
@@ -336,6 +347,7 @@ mod tests {
             role: "tg-group-1".into(),
             gateway: "tg1".into(),
             platform: "telegram".into(),
+            chat: "abc123".into(),
             conversation: "-100".into(),
             event: Box::new(event()),
             at: "2026-10-10T12:00:00Z".into(),
@@ -370,6 +382,7 @@ mod tests {
             role: "tg-group-1".into(),
             gateway: "tg1".into(),
             platform: "telegram".into(),
+            chat: "abc123".into(),
             at: "2026-10-10T12:00:00Z".into(),
         };
         let retry = PushRetry {
@@ -398,6 +411,7 @@ mod tests {
             role: "tg-group-1".into(),
             gateway: "tg1".into(),
             platform: "telegram".into(),
+            chat: "abc123".into(),
             at: "2026-10-10T12:00:00Z".into(),
         };
         script.mode = PushMode::Heartbeat;
@@ -416,6 +430,7 @@ mod tests {
             role: "tg-group-1".into(),
             gateway: "tg1".into(),
             platform: "telegram".into(),
+            chat: "abc123".into(),
             at: "2026-10-10T12:00:00Z".into(),
         };
         script.mode = PushMode::Heartbeat;

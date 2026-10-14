@@ -13,6 +13,9 @@ manifest, so `cargo run --example <name>` finds nothing to build here.
 | `crates/onlyne-testkit/e2e/idempotency.sh` | duplicate and conflict answers for one repeated `op_id` |
 | `crates/onlyne-testkit/e2e/legacy-layout.sh` | refusal of a pre-v1 workspace, exit code 2 |
 | `crates/onlyne-testkit/e2e/running-lights.sh` | a six-role ring: a token handed on with `onlyne handoff` twelve times, and two TUI frames of it moving |
+| `crates/onlyne-testkit/e2e/im-live.sh` | v2.3 chat addressing on a real platform: one cluster, one gateway root, one real Telegram chat, plus the three refusals |
+
+`crates/onlyne-testkit/e2e/im-live.sh` is the only one that needs a credential (`ONLYNE_TELEGRAM_TOKEN`, `ONLYNE_IM_CHAT_ID`); the rest are hermetic.
 
 `crates/onlyne-testkit/e2e/lib.sh` holds the shared helpers. Callers set `SRC` and `tmp` first. Every
 script in the table above runs with `ONLYNE_BACKEND=fake` and the `fake`
@@ -23,6 +26,17 @@ No real platform credential enters the run.
 cargo build --workspace
 cd crates/onlyne-testkit/e2e
 bash local-task.sh
+```
+
+## The IM gateway cluster
+
+`examples/im-gateway/` lays a minimal cluster down with all three platform backends (Telegram, Feishu, QQ; WeChat is not built — its IoT-derived protocol drops after idle and needs a re-handshake) plus one credential-free fake for a hermetic round trip:
+
+```bash
+python3 examples/im-gateway/run.py up       # cluster + gateway root + one conversation per platform
+python3 examples/im-gateway/run.py smoke    # a real inbound → reply → outbound cycle, no credential needed
+python3 examples/im-gateway/run.py status   # roles, gateway check, each conversation's chat key
+python3 examples/im-gateway/run.py stop
 ```
 
 ## Configuration example tree

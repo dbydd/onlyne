@@ -569,9 +569,21 @@ pub fn pull(
         });
     };
     if row.state == LedgerState::Queued {
-        state.ledger.mark_in_flight(&row.msg_id)?;
-        let event = ledger_event(&row, LedgerState::InFlight, None, None);
-        events::publish(state, Event::LedgerState(event))?;
+        // The row moved between this read and this write when the sender's own
+        // delivery mark landed first: a send to an online role marks the row
+        // in flight before it hands the row over, so a pull that read the
+        // queue an instant earlier finds it already there. That is the same
+        // race `requeue_role_rows` tolerates, and it is not an error — the row
+        // is exactly as unacknowledged as the pull needs it to be.
+        let moved = match state.ledger.mark_in_flight(&row.msg_id) {
+            Ok(moved) => moved,
+            Err(onlyne_store::StoreError::InvalidState { .. }) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if moved {
+            let event = ledger_event(&row, LedgerState::InFlight, None, None);
+            events::publish(state, Event::LedgerState(event))?;
+        }
     }
     let session_row = row
         .task

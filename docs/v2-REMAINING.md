@@ -55,6 +55,25 @@ that mattered, and its absence was the real cause of a 1-in-8 drag-case flake), 
 `running-lights.sh` rewritten because it had been reading a `onlyne tui --page 2` flag
 that no longer exists.
 
+## Landed: v2.3, the chat addressing protocol
+
+`docs/v2.3-CHAT-PROTOCOL.md` is the design and it is built: one gateway root is one role
+(one `[[client]]`, one link), a conversation's identity is its chat key — minted into
+`conversations/<slug>/.onlyne/chat.key` — and that key is the delivery text's first line.
+The core's three files did not move: `Principal`, both schemas, and
+`crates/onlyne-client/src/delivery.rs`.
+
+| item | evidence |
+|---|---|
+| `chatkey.rs`: mint (uuid4, no dashes), shape check, first-line extract, misplaced refusal | `crates/onlyne-im/src/chatkey.rs` |
+| registry: `conversation` keyed by slug + chat key; duplicate-key and unmintable-key refusals; the v2.2 `role` key refused by name with its migration remedy | `crates/onlyne-im/src/config.rs` |
+| inbound: `PushInput::{Trigger,Heartbeat}` carry `chat`; `chat.jsonl` lines carry it | `crates/onlyne-im/src/trigger.rs`, `chatlog.rs` |
+| outbound: the gateway's one link extracts the key, resolves the conversation, renders to that backend, and refuses (fault `im_unplaced_delivery` + rejected ack) a missing, unknown, or misplaced key | `crates/onlyne-im/src/link.rs` |
+| `generate` mints the key, declares the gateway role once, and writes both ACL halves; `check` reports the registry | `crates/onlyne-im/src/workspace.rs`, `main.rs` |
+| scenario 22: one gateway, two conversations, routing by key; unknown and misplaced keys each refuse and record a fault | `crates/onlyne-testkit/tests/scenarios.rs` |
+
+Still open from the design: a v2.2 gateway tree migrates by hand (§8) — no command.
+
 ## Open, item by item
 
 ### A — reconnect jitter, retry classification, accept timeout (phase two)

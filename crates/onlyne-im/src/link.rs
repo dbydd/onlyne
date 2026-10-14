@@ -1,14 +1,17 @@
-//! One conversation's link: dial, hello, then pull deliveries and hand them to
-//! a backend for rendering.
+//! The gateway's one link: dial, hello, then pull deliveries and hand them to
+//! the backend of the conversation each one names.
 //!
-//! A gateway serving N conversations holds N of these, one per conversation
-//! directory, and each is an ordinary Onlyne client connection — the same
-//! `dial`, the same `hello`, the same `pull`/`ack` a role client uses. Nothing
-//! here is gateway-specific except what it *does* with a delivery: render it
-//! through the conversation's backend into its platform chat, leaving any media
-//! in the conversation's own workspace.
+//! One gateway root is one role in the cluster, so it holds one of these —
+//! an ordinary Onlyne client connection, the same `dial`, the same `hello`, the
+//! same `pull`/`ack` a role client uses. What it *does* with a delivery is the
+//! gateway-specific part: the body's first line names a chat key, the registry
+//! resolves that key to a conversation, and the conversation's backend renders
+//! the rest into that conversation's platform chat, with any media in the
+//! conversation's own workspace (`docs/v2.3-CHAT-PROTOCOL.md` §5.3).
 //!
-//! `docs/v2.2-IM-GATEWAY-PLAN.md` §2, §5.
+//! A delivery whose key is missing, unknown, or misplaced is refused and
+//! settled, never guessed at: a misfiled message lands in the wrong person's
+//! chat, which is worse than a refused one (§6).
 
 use crate::config::Conversation;
 use anyhow::{Context, Result};
@@ -36,23 +39,20 @@ pub struct RenderJob {
     pub gateway: String,
     /// The platform conversation the payload goes to.
     pub conversation: String,
+    /// The chat key the delivery named, for the backend and the chat log.
+    pub chat_key: String,
     pub payload: ImPayload,
 }
 
-/// Dials one conversation's link and runs it until the process ends.
+/// Dials the gateway role's link and runs it until the process ends.
 pub struct RoleLink {
-    entry: Conversation,
-    server: String,
-    cert_pin: String,
+    /// The gateway root: its role name, its server, its registry.
+    gateway: crate::config::Gateway,
 }
 
 impl RoleLink {
-    pub fn new(entry: Conversation, server: String, cert_pin: String) -> Self {
-        Self {
-            entry,
-            server,
-            cert_pin,
-        }
+    pub fn new(gateway: crate::config::Gateway) -> Self {
+        Self { gateway }
     }
 
     /// Connect this role and serve it: pull deliveries, render each through the
@@ -65,8 +65,8 @@ impl RoleLink {
         mut reports: mpsc::Receiver<onlyne_proto::Report>,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<()> {
-        let keypair = KeyPair::load(&self.entry.key_path)
-            .with_context(|| format!("loading {}'s key", self.entry.role))?;
+        let keypair = KeyPair::load(&self.gateway.key_path())
+            .with_context(|| format!("loading {}'s key", self.gateway.role))?;
         let settings = ConnSettings {
             agent: AGENT.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -78,23 +78,28 @@ impl RoleLink {
                 return Ok(());
             }
             let link: ClientConn = match dial(
-                &self.server,
+                &self.gateway.server,
                 &keypair,
-                &self.cert_pin,
-                &self.entry.role,
+                &self.gateway.cert_pin,
+                &self.gateway.role,
                 settings.clone(),
             )
             .await
             {
-                Ok(link) => {
-                    backoff.reset();
-                    link
-                }
+                // The backoff is not reset here: a server that accepts the
+                // dial and then refuses every pull would be redialed at the
+                // first rung of a fresh ladder forever. `serve` resets it once
+                // a pull has actually come back clean.
+                Ok(link) => link,
                 Err(error) => {
                     if onlyne_net::conn::retry_of(&error).ends_the_run() {
-                        anyhow::bail!("dialing the server for role {}: {error}", self.entry.role);
+                        anyhow::bail!("dialing the server for role {}: {error}", self.gateway.role);
                     }
-                    tracing::warn!(role = %self.entry.role, error = %error, "dial failed; retrying");
+                    tracing::warn!(
+                        role = %self.gateway.role,
+                        error = %error,
+                        "dial failed; retrying"
+                    );
                     sleep_or_shutdown(backoff.next_jittered(), &mut shutdown).await;
                     continue;
                 }
@@ -104,21 +109,31 @@ impl RoleLink {
                 // not this role's, a protocol two builds disagree on) ends the
                 // run rather than spinning; anything else is worth a redial.
                 if onlyne_net::conn::retry_of(&error).ends_the_run() {
-                    return Err(anyhow::Error::new(error)
-                        .context(format!("role {} could not open its link", self.entry.role)));
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "role {} could not open its link",
+                        self.gateway.role
+                    )));
                 }
-                tracing::warn!(role = %self.entry.role, error = %error, "hello failed; retrying");
+                tracing::warn!(
+                    role = %self.gateway.role,
+                    error = %error,
+                    "hello failed; retrying"
+                );
                 sleep_or_shutdown(backoff.next_jittered(), &mut shutdown).await;
                 continue;
             }
             match self
-                .serve(&link, &renders, &mut reports, &mut shutdown)
+                .serve(&link, &renders, &mut reports, &mut shutdown, &mut backoff)
                 .await
             {
                 // A clean shutdown ends the run.
                 Ok(()) => return Ok(()),
                 Err(error) if is_transient(&error) => {
-                    tracing::warn!(role = %self.entry.role, error = %error, "link lost; redialing");
+                    tracing::warn!(
+                        role = %self.gateway.role,
+                        error = %error,
+                        "link lost; redialing"
+                    );
                     sleep_or_shutdown(backoff.next_jittered(), &mut shutdown).await;
                 }
                 Err(error) => return Err(error),
@@ -133,6 +148,7 @@ impl RoleLink {
         renders: &mpsc::Sender<RenderJob>,
         reports: &mut mpsc::Receiver<onlyne_proto::Report>,
         shutdown: &mut tokio::sync::watch::Receiver<bool>,
+        backoff: &mut onlyne_net::Backoff,
     ) -> Result<()> {
         // Once every sender is gone, nothing can report again and the branch
         // parks instead of spinning on a closed channel.
@@ -155,6 +171,10 @@ impl RoleLink {
                 }
                 outcome = self.pull_and_render(link, renders) => {
                     outcome?;
+                    // A pull that came back is the run working: the next
+                    // failure earns a first-rung delay, not the one this link
+                    // was already sitting on.
+                    backoff.reset();
                 }
             }
         }
@@ -173,10 +193,14 @@ impl RoleLink {
         {
             Ok(body) if body.ok => {}
             Ok(body) => {
-                tracing::warn!(role = %self.entry.role, ?body.error, "a report was refused")
+                tracing::warn!(role = %self.gateway.role, ?body.error, "a report was refused")
             }
             Err(error) => {
-                tracing::warn!(role = %self.entry.role, error = %error, "a report was not sent")
+                tracing::warn!(
+                    role = %self.gateway.role,
+                    error = %error,
+                    "a report was not sent"
+                )
             }
         }
     }
@@ -185,10 +209,10 @@ impl RoleLink {
     /// net layer classifies a dial: `unauthorized` and a protocol mismatch mean
     /// a person, and the caller ends the run; anything else may be a redial.
     async fn hello(&self, link: &ClientConn) -> std::result::Result<(), NetError> {
-        let keypair = KeyPair::load(&self.entry.key_path)?;
+        let keypair = KeyPair::load(&self.gateway.key_path())?;
         let hello = HandshakeArgs {
             protocol: PROTOCOL_VERSION,
-            role: self.entry.role.clone(),
+            role: self.gateway.role.clone(),
             key: keypair.public_str(),
             signature: String::new(),
             agent: AGENT.to_string(),
@@ -244,7 +268,7 @@ impl RoleLink {
                 .error
                 .map(|error| error.message)
                 .unwrap_or_else(|| "pull refused".to_string());
-            anyhow::bail!("role {} pull refused: {message}", self.entry.role);
+            anyhow::bail!("role {} pull refused: {message}", self.gateway.role);
         }
         let reply: PullReply = serde_json::from_value(body.data().cloned().unwrap_or_default())
             .context("reading the pull reply")?;
@@ -261,16 +285,50 @@ impl RoleLink {
         renders: &mpsc::Sender<RenderJob>,
         delivery: Delivery,
     ) -> Result<()> {
-        let (accepted, reason) = match payload_from(&delivery, &self.entry) {
+        // The body's first line names the conversation; the registry says
+        // whether this gateway serves it (`docs/v2.3-CHAT-PROTOCOL.md` §5.3,
+        // §6). Every failure here is a refusal that settles the row rather than
+        // a crash of the link: one misfiled reply is not worth losing the link
+        // for every other conversation.
+        let text = delivery.envelope.body.text.clone().unwrap_or_default();
+        let (chat_key, rest) = match crate::chatkey::extract(&text) {
+            Ok(found) => found,
+            Err(_) => {
+                let reason = "the chat key is not the body's first line; a reply to a \
+                              conversation starts with <chat:KEY> on its own first line"
+                    .to_string();
+                self.refuse(link, delivery, reason).await?;
+                return Ok(());
+            }
+        };
+        if chat_key.is_empty() {
+            // No key anywhere: the sender meant this as an ordinary platform
+            // delivery, or forgot the key. Either way it names no conversation,
+            // and guessing one would post into the wrong chat.
+            let reason = "this delivery names no chat key; a reply to a conversation starts \
+                          with <chat:KEY> on its own first line"
+                .to_string();
+            self.refuse(link, delivery, reason).await?;
+            return Ok(());
+        }
+        let Some(entry) = self.gateway.conversation_for_key(&chat_key) else {
+            let reason = format!("no conversation in this gateway carries chat key {chat_key}");
+            self.refuse(link, delivery, reason).await?;
+            return Ok(());
+        };
+        let entry = &entry;
+        let reply_to = reply_target(&text, entry);
+        let (accepted, reason) = match payload_from(&rest, reply_to, entry, &delivery) {
             Some(payload) => {
-                if let Err(error) = crate::chatlog::append_outbound(&self.entry, &payload) {
+                if let Err(error) = crate::chatlog::append_outbound(entry, &payload) {
                     // The log is a convenience, not the delivery: a failed
                     // append must not cost the message.
-                    tracing::warn!(role = %self.entry.role, error = %error, "chat log write failed");
+                    tracing::warn!(role = %self.gateway.role, error = %error, "chat log write failed");
                 }
                 let job = RenderJob {
-                    gateway: self.entry.gateway.clone(),
-                    conversation: self.entry.conversation.clone(),
+                    gateway: entry.gateway.clone(),
+                    conversation: entry.conversation.clone(),
+                    chat_key: entry.chat_key.clone(),
                     payload,
                 };
                 match renders.send(job).await {
@@ -288,7 +346,7 @@ impl RoleLink {
         if !accepted {
             anyhow::bail!(
                 "role {}: {}",
-                self.entry.role,
+                self.gateway.role,
                 reason.as_deref().unwrap_or("render failed")
             );
         }
@@ -308,8 +366,48 @@ impl RoleLink {
             .await?;
         if !body.ok && body.error.is_some() {
             // A refused ack is not fatal to the link; the row is retried.
-            tracing::warn!(role = %self.entry.role, "ack refused");
+            tracing::warn!(role = %self.gateway.role, "ack refused");
         }
+        Ok(())
+    }
+
+    /// Settle one delivery as refused: the row is acked with its reason so the
+    /// ledger records the refusal, and the fault is reported on this role's
+    /// behalf so an operator sees a reply that could not be placed
+    /// (`docs/v2.3-CHAT-PROTOCOL.md` §6).
+    async fn refuse(&self, link: &ClientConn, delivery: Delivery, reason: String) -> Result<()> {
+        tracing::warn!(role = %self.gateway.role, %reason, "a delivery is refused");
+        self.report(
+            link,
+            onlyne_proto::Report::Fault {
+                task_id: delivery
+                    .envelope
+                    .causality
+                    .as_ref()
+                    .map(|causality| causality.task.clone()),
+                session_id: None,
+                generation: None,
+                seq: None,
+                kind: "im_unplaced_delivery".to_string(),
+                reason: reason.clone(),
+                desired: None,
+                observed: None,
+            },
+        )
+        .await;
+        link.request(
+            Frame::req(
+                String::new(),
+                ClientOp::Ack(AckArgs {
+                    msg_id: delivery.msg_id,
+                    op_id: delivery.envelope.op_id,
+                    accepted: false,
+                    reason: Some(reason),
+                }),
+            ),
+            REQUEST_TIMEOUT,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -317,11 +415,18 @@ impl RoleLink {
 /// Build the standard payload for one delivered envelope.
 ///
 /// The delivery carries `Body` (text plus an optional image); this maps it onto
-/// the platform-independent payload. The image arrives as inline base64, so it
-/// is decoded and written into the **conversation's own media directory**, and
-/// the attachment names that file. A body with neither text nor image is not
-/// renderable and answers `None`.
-fn payload_from(delivery: &Delivery, entry: &Conversation) -> Option<ImPayload> {
+/// the platform-independent payload, with `text` being the body after its
+/// first-line chat key has been taken off — the platform sees the words, not
+/// the key. The image arrives as inline base64, so it is decoded and written
+/// into the **conversation's own media directory**, and the attachment names
+/// that file. A body with neither text nor image is not renderable and answers
+/// `None`.
+fn payload_from(
+    text: &str,
+    reply_to: Option<String>,
+    entry: &Conversation,
+    delivery: &Delivery,
+) -> Option<ImPayload> {
     let body = &delivery.envelope.body;
     let mut attachments = Vec::new();
     if let Some(image) = &body.image {
@@ -339,17 +444,31 @@ fn payload_from(delivery: &Delivery, entry: &Conversation) -> Option<ImPayload> 
             }
         }
     }
-    let text = body.text.clone().unwrap_or_default();
     if text.trim().is_empty() && attachments.is_empty() {
         return None;
     }
     Some(ImPayload {
-        text,
+        text: text.to_string(),
         format: ImFormat::Plain,
         attachments,
         actions: Vec::new(),
-        reply_to: None,
+        reply_to,
     })
+}
+
+/// The platform event this reply answers.
+///
+/// A reply answers the message the operator read. The body may name that
+/// message on its second line (`<msg:id>`, read by
+/// [`crate::chatkey::extract_with_reply`]); without one the last inbound event
+/// this conversation logged is the answer. A platform whose passive reply is
+/// only passive with the id it answers needs this: QQ answers a group send
+/// `40034105 主动消息失败, 无权限` when `msg_id` is absent.
+fn reply_target(full_text: &str, entry: &Conversation) -> Option<String> {
+    match crate::chatkey::extract_with_reply(full_text) {
+        Ok((_key, Some(id), _rest)) => Some(id),
+        _ => crate::chatlog::last_inbound_id(entry),
+    }
 }
 
 /// Decode one inline image and write it into the conversation's media directory
@@ -427,12 +546,12 @@ mod tests {
 
     fn conversation(dir: &Path) -> Conversation {
         Conversation {
-            role: "tg-group-1".into(),
+            slug: "tg-group-1".into(),
             workspace: dir.to_path_buf(),
             config_path: dir.join(".onlyne/config.toml"),
-            key_path: dir.join(".onlyne/keys/role.key"),
             gateway: "tg1".into(),
             conversation: "-100".into(),
+            chat_key: "abc123".into(),
         }
     }
 
@@ -441,7 +560,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let entry = conversation(dir.path());
         let delivery = delivery(Body::text("hello"));
-        let payload = payload_from(&delivery, &entry).unwrap();
+        let payload = payload_from("hello", None, &entry, &delivery).unwrap();
         assert_eq!(payload.text, "hello");
         assert!(payload.attachments.is_empty());
     }
@@ -455,7 +574,7 @@ mod tests {
         // still has to answer `None` rather than panic.
         let mut delivery = delivery(Body::text("placeholder"));
         delivery.envelope.body = Body::default();
-        assert!(payload_from(&delivery, &entry).is_none());
+        assert!(payload_from("", None, &entry, &delivery).is_none());
     }
 
     #[test]
@@ -464,7 +583,7 @@ mod tests {
         let entry = conversation(dir.path());
         // `AAECAw==` is the base64 of [0, 1, 2, 3].
         let delivery = delivery(Body::image("AAECAw==", "image/png"));
-        let payload = payload_from(&delivery, &entry).unwrap();
+        let payload = payload_from("", None, &entry, &delivery).unwrap();
         assert_eq!(payload.attachments.len(), 1);
         let path = PathBuf::from(&payload.attachments[0].path);
         assert!(
