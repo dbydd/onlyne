@@ -1,4 +1,4 @@
-//! One role's message history: the aggregate record and each branch's own.
+//! One role's message history: the aggregate record and a file per discussion.
 //!
 //! `docs/v2.4-REPLY-THREADS.md` §6 is the design; this module is its storage
 //! half. The shapes and the reasons:
@@ -7,39 +7,38 @@
 //!   it, in arrival order, so a role's conversations read as one timeline
 //!   rather than a directory to walk. It is the seam a reader starts at and the
 //!   only file that always exists.
-//! * **Each branch is its own file**, `branches/<branch-id>.jsonl`. A
-//!   discussion that forked out carries its own thread, so reading one is
-//!   reading one file instead of filtering the aggregate by a predicate.
-//! * **The two are linked, not copied.** A branch file's first entry names the
-//!   message it forks from (`fork_of`, present only there), and every entry
-//!   carries its branch id, so a reader on either side can find the other: the
-//!   aggregate names the branch files, and a branch names its origin.
+//! * **Each discussion is its own file**, `discuss-session-<list>.jsonl`. A
+//!   list that forked out carries its own record, starting from the message
+//!   that was answered, so reading one discussion is reading one file instead
+//!   of filtering the aggregate by a predicate.
+//! * **The two are linked, not copied.** A discussion's first entry names the
+//!   aggregate row it forked from (`fork_of`, present only there), and every
+//!   entry carries its list id, so a reader on either side can find the other.
 //! * **Nothing here is authoritative.** These are the gateway's own record of
 //!   what passed through; the platform holds the truth and the server ledger
 //!   holds the delivery. A write that fails is warned about and costs nothing.
 //!
-//! A branch record keeps the message's `parent` (the platform id it answers)
-//! alongside the ids the role and the chat use, so a reply chain can be walked
-//! without consulting the platform.
+//! An entry keeps the message's `parent` (the platform id it answers) and its
+//! `list` (the root of its reply chain), so a reply chain can be walked without
+//! consulting the platform and a discussion can be found without walking it.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// The aggregate record's name inside a role's history directory.
 pub const MAIN_FILE: &str = "main.jsonl";
-/// The subdirectory holding one file per branch.
-pub const BRANCH_DIR: &str = "branches";
+/// The prefix of one discussion's own file, before its list id.
+pub const SESSION_PREFIX: &str = "discuss-session-";
 
 /// One message as the role's history records it.
 ///
 /// The fields are the union of what both writers know: the platform's own ids
 /// (`channel`, `conversation`, `platform_message`), the role's own
-/// (`chat_key`, `branch`), and the chain (`parent`). A field that does not
-/// apply is absent rather than null, so a line reads as the record it is.
+/// (`chat_key`, `list`), and the chain (`parent`). A field that does not apply
+/// is absent rather than null, so a line reads as the record it is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct HistoryEntry {
     /// `in` or `out`.
@@ -55,15 +54,15 @@ pub struct HistoryEntry {
     /// The platform's conversation id inside that backend.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
-    /// The branch this message belongs to.
+    /// The list this message belongs to: the root of its reply chain.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
+    pub list: Option<String>,
     /// The platform message id this one answers; absent for a root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
-    /// The message the fork started from, present only on a branch file's
-    /// first entry: the link from a branch back to the aggregate it forked out
-    /// of. Its `chat_key` and `platform_message` name the row in `main.jsonl`.
+    /// The message the discussion forked from, present only on a discussion
+    /// file's first entry: the link back to the aggregate row it forked out
+    /// of. Its `chat_key` and `platform_message` name that row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fork_of: Option<Fork>,
     /// The platform's own id for this message.
@@ -77,7 +76,7 @@ pub struct HistoryEntry {
     pub text: Option<String>,
 }
 
-/// Where a branch forked from, in the terms the aggregate record uses.
+/// Where a discussion forked from, in the terms the aggregate record uses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fork {
     pub chat_key: String,
@@ -85,7 +84,7 @@ pub struct Fork {
 }
 
 impl HistoryEntry {
-    /// One inbound message, already branched by the caller.
+    /// One inbound message, already listed by the caller.
     pub fn inbound(chat_key: &str, channel: &str, platform_message: &str) -> Self {
         Self {
             direction: "in".into(),
@@ -109,13 +108,13 @@ impl HistoryEntry {
         }
     }
 
-    /// Attach the branch this message belongs to.
-    pub fn with_branch(mut self, branch: impl Into<String>) -> Self {
-        self.branch = Some(branch.into());
+    /// Attach the list this message belongs to.
+    pub fn with_list(mut self, list: impl Into<String>) -> Self {
+        self.list = Some(list.into());
         self
     }
 
-    /// Mark this entry as the first of a forked branch.
+    /// Mark this entry as the first of a forked discussion.
     pub fn with_fork(mut self, chat_key: &str, platform_message: &str) -> Self {
         self.fork_of = Some(Fork {
             chat_key: chat_key.into(),
@@ -131,7 +130,7 @@ impl HistoryEntry {
     }
 }
 
-/// Where a role's history lives: the aggregate and the per-branch files.
+/// Where a role's history lives: the aggregate and the per-discussion files.
 #[derive(Debug, Clone)]
 pub struct History {
     root: PathBuf,
@@ -154,9 +153,9 @@ impl History {
         self.root.join(MAIN_FILE)
     }
 
-    /// One branch's file path, named by the branch id alone.
-    pub fn branch_path(&self, branch: &str) -> PathBuf {
-        self.root.join(BRANCH_DIR).join(format!("{branch}.jsonl"))
+    /// One discussion's file path, named by the list id alone.
+    pub fn session_path(&self, list: &str) -> PathBuf {
+        self.root.join(format!("{SESSION_PREFIX}{list}.jsonl"))
     }
 
     /// Append one entry to the aggregate record.
@@ -164,12 +163,12 @@ impl History {
         append_line(&self.main_path(), entry).context("writing the aggregate record")
     }
 
-    /// Append one entry to its branch's own file.
-    pub fn append_branch(&self, entry: &HistoryEntry) -> Result<()> {
-        let Some(branch) = entry.branch.as_deref() else {
-            anyhow::bail!("a branch append names no branch");
+    /// Append one entry to its discussion's own file.
+    pub fn append_session(&self, entry: &HistoryEntry) -> Result<()> {
+        let Some(list) = entry.list.as_deref() else {
+            anyhow::bail!("a discussion append names no list");
         };
-        append_line(&self.branch_path(branch), entry).context("writing a branch record")
+        append_line(&self.session_path(list), entry).context("writing a discussion record")
     }
 
     /// The last `window` entries of the aggregate, oldest first.
@@ -181,9 +180,9 @@ impl History {
         recent(&self.main_path(), window)
     }
 
-    /// Every entry of one branch, oldest first.
-    pub fn branch(&self, branch: &str) -> Vec<HistoryEntry> {
-        let path = self.branch_path(branch);
+    /// Every entry of one discussion, oldest first.
+    pub fn session(&self, list: &str) -> Vec<HistoryEntry> {
+        let path = self.session_path(list);
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Vec::new();
         };
@@ -222,10 +221,10 @@ fn append_line(path: &Path, entry: &HistoryEntry) -> Result<()> {
     Ok(())
 }
 
-/// Read one branch file's first entry's fork origin, if it names one.
+/// Read one discussion file's fork origin, if it names one.
 ///
-/// The other half of the two-way link: a reader holding a branch id learns
-/// which aggregate row it forked from without scanning the aggregate.
+/// The other half of the two-way link: a reader holding a list id learns which
+/// aggregate row it forked from without scanning the aggregate.
 pub fn fork_of(path: &Path) -> Option<Fork> {
     let text = std::fs::read_to_string(path).ok()?;
     text.lines()
@@ -261,15 +260,20 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_is_its_own_file_and_its_first_row_names_the_fork() {
+    fn a_discussion_is_its_own_file_and_its_first_row_names_the_fork() {
         let (_keep, history) = history();
-        let forked = HistoryEntry::inbound("k1", "qqbot", "qq-9").with_branch("b1");
+        let forked = HistoryEntry::inbound("k1", "qqbot", "qq-9").with_list("b1");
         let forked = forked.with_fork("k1", "qq-3");
         history.append_main(&forked).unwrap();
-        history.append_branch(&forked).unwrap();
+        history.append_session(&forked).unwrap();
 
-        let path = history.branch_path("b1");
+        let path = history.session_path("b1");
         assert!(path.is_file());
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            "discuss-session-b1.jsonl",
+            "the file is named after the discussion's list"
+        );
         assert_eq!(
             fork_of(&path),
             Some(Fork {
@@ -277,19 +281,19 @@ mod tests {
                 platform_message: "qq-3".into(),
             })
         );
-        // Both sides carry the link: the aggregate row names its branch, the
-        // branch file names where it came from.
+        // Both sides carry the link: the aggregate row names its list, the
+        // discussion file names where it came from.
         let rows = history.recent(10);
-        assert_eq!(rows[0].branch.as_deref(), Some("b1"));
-        assert_eq!(history.branch("b1").len(), 1);
+        assert_eq!(rows[0].list.as_deref(), Some("b1"));
+        assert_eq!(history.session("b1").len(), 1);
     }
 
     #[test]
-    fn a_branch_append_without_a_branch_is_refused() {
+    fn a_discussion_append_without_a_list_is_refused() {
         let (_keep, history) = history();
         let nameless = HistoryEntry::outbound("k1", "telegram", None);
-        let error = history.append_branch(&nameless).expect_err("no branch id");
-        assert!(error.to_string().contains("names no branch"), "{error}");
+        let error = history.append_session(&nameless).expect_err("no list id");
+        assert!(error.to_string().contains("names no list"), "{error}");
     }
 
     #[test]
@@ -313,7 +317,7 @@ mod tests {
     fn a_missing_record_reads_as_empty_rather_than_an_error() {
         let (_keep, history) = history();
         assert!(history.recent(10).is_empty());
-        assert!(history.branch("never").is_empty());
-        assert!(fork_of(&history.branch_path("never")).is_none());
+        assert!(history.session("never").is_empty());
+        assert!(fork_of(&history.session_path("never")).is_none());
     }
 }

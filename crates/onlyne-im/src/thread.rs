@@ -1,20 +1,25 @@
-//! A conversation as a message list, with replies that name any message in it.
+//! A conversation as a message tree, with replies that form it and references
+//! that only point.
 //!
-//! `docs/v2.4-REPLY-THREADS.md` is the design; this module is its code. Three
-//! things live here and nowhere else:
+//! `docs/v2.4-REPLY-THREADS.md` is the design; this module is its code. Two
+//! link kinds, and the difference is the whole model:
 //!
-//! * the **branch id** a message belongs to — derived from the link it answers,
-//!   so a reply to an older message lands in its own branch and a reply to the
-//!   newest stays in the current one;
-//! * **unique prefix resolution** — a reply may name a message by any prefix of
-//!   its id, and an ambiguous prefix is refused with the candidates rather than
-//!   guessed at;
-//! * the **participants** a conversation has seen, which is what a reply names
-//!   when it addresses someone.
+//! * **reply** ([`Message::parent`]) is *structural*: it is what forms the
+//!   tree. Every message belongs to exactly one **list** — the reply chain it
+//!   hangs from — and a list is anchored at its root, so a message's list is
+//!   the root of its reply chain, not its direct parent. That is what keeps
+//!   `m0 → m1 → m2` in one list instead of forking at every hop.
+//! * **reference** ([`Reference`]) is *not* structural: it points at any
+//!   message anywhere in the conversation and moves nothing. A quote, a
+//!   sticker's source, an edit's original, a forward — all of it rides in
+//!   [`Metadata`], where a sticker and a reaction already live.
 //!
-//! None of this touches the core: the list is the gateway's own record, the
-//! branch is a string, and a reply reaches the platform as the same
-//! `reply_to` message id it carried before.
+//! A platform whose reply list is flat (Slack's thread, Feishu's reply group)
+//! therefore needs no special case: every message in the list carries the same
+//! root, and the ones that point at an earlier sibling are references rather
+//! than replies. A platform whose reply link is a single forward pointer (QQ)
+//! carries only the parent and lets the chain *be* the list, which is what
+//! [`OutboundLink`] and [`LinkShape`] in `threadlink` encode.
 
 use serde::{Deserialize, Serialize};
 
@@ -41,12 +46,63 @@ impl Participant {
     }
 }
 
-/// One message in a conversation's list.
+/// A non-structural pointer to a message, carried as metadata.
+///
+/// Why this is not `parent`: a reply changes which list a message belongs to,
+/// and a reference changes nothing. A sticker a user sends *in response to*
+/// some message points at that message without joining its thread; a quote
+/// inside a reply points at material the reply itself is not answering.
+/// Modelling both as `parent` would fork a list for a sticker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reference {
+    /// The message this points at, by the platform's own id.
+    pub target: String,
+    #[serde(default)]
+    pub kind: RefKind,
+}
+
+/// What a reference is for. The core acts on none of it; it is what a backend
+/// renders and what a human reading the record understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefKind {
+    /// Material quoted inside the message.
+    #[default]
+    Quote,
+    /// A sticker or reaction sent because of that message.
+    Reaction,
+    /// A message forwarded on.
+    Forward,
+    /// A message edited by this one.
+    Edit,
+}
+
+/// What a message carries beyond its text and its reply link.
+///
+/// The core reads none of it. References ride here because they are
+/// non-structural; a sticker and a reaction ride here because they are not
+/// text. Everything is skipped on the wire when empty, so an ordinary text
+/// message records exactly the bytes it needs.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Metadata {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<Reference>,
+    /// The sticker or reaction id the platform assigned it, when the message
+    /// is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticker: Option<String>,
+}
+
+impl Metadata {
+    pub fn is_empty(&self) -> bool {
+        self.references.is_empty() && self.sticker.is_none()
+    }
+}
+
+/// One message in a conversation's tree.
 ///
 /// `id` is the platform's own id for it, which is the only id that can name a
-/// message when the message is sent back to the platform. `parent` is the id it
-/// answers, absent for the first message in a branch — the shape a mailing
-/// list's `In-Reply-To` has.
+/// message when the message is sent back to the platform.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub id: String,
@@ -55,61 +111,80 @@ pub struct Message {
     pub from: Option<Participant>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// The message this one answers; `None` for a root.
+    /// The message this one *replies to*: the structural link, which is what
+    /// forms the tree. `None` for a root, which starts its own list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The root of this message's reply chain — the list it belongs to.
+    ///
+    /// Recorded rather than derived, because a reply inherits its parent's
+    /// list when the parent has one and *is* the list when the parent is a
+    /// root: that is the ATProto `{root, parent}` pair, and it makes reading a
+    /// message's list `O(1)` with no walk and no chance of disagreeing with
+    /// the file that recorded it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list: Option<String>,
+    #[serde(default, skip_serializing_if = "Metadata::is_empty")]
+    pub metadata: Metadata,
     /// RFC 3339 UTC.
     pub at: String,
 }
 
 impl Message {
-    /// The branch this message belongs to: its own id when it answers nothing,
-    /// the parent's branch otherwise. `root` is the stable key of the
-    /// conversation (its chat key), which keeps two conversations' branches
-    /// apart without a shared registry.
-    ///
-    /// Deterministic and restart-stable: the same message in the same
-    /// conversation derives the same branch on every machine and every run.
-    pub fn branch(&self, root: &str) -> String {
-        let anchor = self.parent.as_deref().unwrap_or(&self.id);
-        branch_id(root, anchor)
+    /// A root message: it replies to nothing and anchors its own list.
+    pub fn root(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            from: None,
+            text: None,
+            parent: None,
+            list: None,
+            metadata: Metadata::default(),
+            at: String::new(),
+        }
     }
-}
 
-/// The branch id for one (conversation, anchor) pair: 12 hex characters of
-/// `sha256` over the two ids.
-///
-/// `sha256` rather than `DefaultHasher`, whose seed is drawn per process and
-/// would give one conversation a different branch id after every restart. The
-/// id lands in the chat log and in a backend's bookkeeping, so the same pair
-/// must give the same string on every machine and every run. It is the same
-/// function `onlyne-wire` derives a socket digest from, which is the
-/// workspace's existing choice for a short stable id.
-///
-/// Twelve hex characters is 48 bits: enough to keep two branches of one
-/// conversation apart (a birthday collision needs thousands), and short
-/// enough to quote in a log line.
-///
-/// Public because the history layout names its branch files by it: a writer
-/// that holds a message record can name the file the branch lives in without
-/// asking any registry.
-pub fn branch_id(root: &str, anchor: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(b"onlyne-im/branch/");
-    // The separator is written, not implied: `("ab", "c")` and `("a", "bc")`
-    // must not derive the same branch.
-    hasher.update(root.as_bytes());
-    hasher.update(b"/");
-    hasher.update(anchor.as_bytes());
-    let digest = hasher.finalize();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut hex = String::with_capacity(12);
-    for byte in &digest[..6] {
-        hex.push(HEX[(*byte >> 4) as usize] as char);
-        hex.push(HEX[(*byte & 0x0f) as usize] as char);
+    /// The list this message belongs to.
+    ///
+    /// The root's own id when the message is a root, its recorded list
+    /// otherwise, and its parent's id when it replies to something with no
+    /// list of its own — a reply to a root joins that root's list.
+    pub fn list_id(&self) -> &str {
+        self.list
+            .as_deref()
+            .or(self.parent.as_deref())
+            .unwrap_or(&self.id)
     }
-    hex
+
+    /// Attach the list this message belongs to.
+    pub fn with_list(mut self, list: impl Into<String>) -> Self {
+        self.list = Some(list.into());
+        self
+    }
+
+    /// Attach the message this one replies to.
+    pub fn answering(mut self, parent: impl Into<String>) -> Self {
+        self.parent = Some(parent.into());
+        self
+    }
+
+    /// Point at a message without answering it.
+    pub fn referencing(mut self, target: impl Into<String>, kind: RefKind) -> Self {
+        self.metadata.references.push(Reference {
+            target: target.into(),
+            kind,
+        });
+        self
+    }
+
+    /// Whether this message sits in the list the newest message is in.
+    ///
+    /// A reply to a message of another list is a fork; a reference to one is
+    /// not. This is the test a caller applies to "did this reply branch?", and
+    /// it is a plain string compare because the list is recorded on both.
+    pub fn same_list_as(&self, other: &Message) -> bool {
+        self.list_id() == other.list_id()
+    }
 }
 
 /// How many messages a delivery carries.
@@ -121,8 +196,8 @@ pub const DEFAULT_WINDOW: usize = 20;
 
 /// The messages a delivery names, oldest first.
 ///
-/// `root` is the conversation's stable key (its chat key) so branches derive
-/// the same way on every call.
+/// `root` is the conversation's stable key (its chat key), which scopes every
+/// list id derived for it to this conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct List {
     pub root: String,
@@ -154,6 +229,10 @@ impl List {
     /// match is over the ids this list carries: a message the window has
     /// already scrolled past is not resolvable, which the error says plainly
     /// rather than falling back to the closest.
+    ///
+    /// Prefix means *head of the id*. A mid-string match would make every
+    /// platform's id prefix-free, and `ROBOT1.0_…` would then be namable by a
+    /// fragment of its middle, which is not a prefix anybody reads.
     pub fn resolve(&self, prefix: &str) -> Result<&Message, Unresolved> {
         let prefix = prefix.trim();
         if prefix.is_empty() {
@@ -179,6 +258,11 @@ impl List {
     /// line answers.
     pub fn latest(&self) -> Option<&Message> {
         self.messages.last()
+    }
+
+    /// The messages of one list, oldest first.
+    pub fn in_list(&self, list: &str) -> impl Iterator<Item = &Message> {
+        self.messages.iter().filter(move |m| m.list_id() == list)
     }
 
     /// The participants of this conversation, in first-seen order.
@@ -223,18 +307,55 @@ impl std::fmt::Display for Unresolved {
 
 impl std::error::Error for Unresolved {}
 
+/// The branch id for one (conversation, anchor) pair: 12 hex characters of
+/// `sha256` over the two ids.
+///
+/// `sha256` rather than `DefaultHasher`, whose seed is drawn per process and
+/// would give one conversation a different branch id after every restart. The
+/// id lands in the history record and in a backend's bookkeeping, so the same
+/// pair must give the same string on every machine and every run. It is the
+/// same function `onlyne-wire` derives a socket digest from, which is the
+/// workspace's existing choice for a short stable id.
+///
+/// Twelve hex characters is 48 bits: enough to keep two branches of one
+/// conversation apart (a birthday collision needs thousands), and short enough
+/// to quote in a log line.
+///
+/// Public because the history layout names its branch files by it: a writer
+/// that holds a message record can name the file the branch lives in without
+/// asking any registry.
+pub fn branch_id(root: &str, anchor: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"onlyne-im/branch/");
+    // The separator is written, not implied: `("ab", "c")` and `("a", "bc")`
+    // must not derive the same branch.
+    hasher.update(root.as_bytes());
+    hasher.update(b"/");
+    hasher.update(anchor.as_bytes());
+    let digest = hasher.finalize();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(12);
+    for byte in &digest[..6] {
+        hex.push(HEX[(*byte >> 4) as usize] as char);
+        hex.push(HEX[(*byte & 0x0f) as usize] as char);
+    }
+    hex
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn message(id: &str, parent: Option<&str>) -> Message {
-        Message {
-            id: id.into(),
-            from: Some(Participant::new("u_1", Some("dbydd"))),
-            text: Some(format!("body of {id}")),
-            parent: parent.map(str::to_owned),
-            at: "2026-10-14T00:00:00.000Z".into(),
+        let mut m = Message::root(id);
+        m.from = Some(Participant::new("u_1", Some("dbydd")));
+        m.text = Some(format!("body of {id}"));
+        if let Some(parent) = parent {
+            m = m.answering(parent);
         }
+        m.at = "2026-10-14T00:00:00.000Z".into();
+        m
     }
 
     fn list() -> List {
@@ -250,47 +371,60 @@ mod tests {
     }
 
     #[test]
-    fn a_root_gets_its_own_branch_and_a_reply_gets_its_parents() {
-        let root = message("ROBOT1.0_AdAXNfwe", None);
-        let reply = message("0f3a9c2e1b04", Some("ROBOT1.0_AdAXNfwe"));
-        // Same anchor: the reply answers the root, so both sit in the root's
-        // branch.
-        assert_eq!(root.branch("k"), reply.branch("k"));
-        let deeper = message("a19b2c3d4e5f", Some("0f3a9c2e1b04"));
-        assert_ne!(deeper.branch("k"), root.branch("k"));
+    fn a_chain_of_replies_is_one_list() {
+        // The bug this model exists to prevent: anchoring at the immediate
+        // parent makes every hop a new list, so `m0 → m1 → m2` reads as three
+        // lists instead of one.
+        let r = message("m0", None).with_list("m0");
+        let m1 = message("m1", Some("m0")).with_list(r.list_id());
+        let m2 = message("m2", Some("m1")).with_list(m1.list_id());
+        assert_eq!(r.list_id(), "m0");
+        assert_eq!(m1.list_id(), "m0");
+        assert_eq!(m2.list_id(), "m0");
+        assert!(m1.same_list_as(&m2));
     }
 
     #[test]
-    fn branches_are_stable_and_scoped_to_one_conversation() {
-        let anchor = message("m1", None);
-        let again = message("m1", None);
-        assert_eq!(anchor.branch("k"), again.branch("k"));
-        // The same id in another conversation must not share a branch.
-        assert_ne!(anchor.branch("k1"), anchor.branch("k2"));
+    fn a_reply_to_a_root_from_elsewhere_joins_that_roots_list() {
+        // ATProto's `{root, parent}`: the reply names a parent and takes the
+        // parent's root as its own list.
+        let root = message("m0", None);
+        let late = Message::root("m7")
+            .answering("m0")
+            .with_list(root.list_id());
+        assert_eq!(
+            late.list_id(),
+            "m0",
+            "a reply to a root joins the root's list"
+        );
+        assert!(late.same_list_as(&root));
     }
 
     #[test]
-    fn a_branch_id_matches_what_the_message_computes() {
-        let root = message("m-root", None);
-        let reply = message("m-reply", Some("m-root"));
-        assert_eq!(reply.branch("k"), root.branch("k"));
-        assert_eq!(branch_id("k", "m-root"), root.branch("k"));
+    fn a_root_anchors_its_own_list() {
+        let root = message("m9", None);
+        assert_eq!(root.list_id(), "m9");
+        assert!(!root.same_list_as(&message("m8", None)));
     }
 
     #[test]
-    fn a_full_id_is_its_own_prefix() {
+    fn a_reference_is_metadata_and_moves_no_list() {
+        let sticker = message("m5", None).referencing("m1", RefKind::Reaction);
+        assert_eq!(sticker.list_id(), "m5", "a reaction does not join a thread");
+        assert_eq!(sticker.metadata.references.len(), 1);
+        assert_eq!(sticker.metadata.references[0].target, "m1");
+        assert!(!sticker.metadata.is_empty());
+        assert!(message("m6", None).metadata.is_empty());
+    }
+
+    #[test]
+    fn a_full_id_is_its_own_prefix_and_a_prefix_matches_the_head() {
         let list = list();
-        let found = list.resolve("0f3a9c2e1b04").expect("the full id resolves");
-        assert_eq!(found.id, "0f3a9c2e1b04");
-    }
-
-    #[test]
-    fn a_unique_prefix_resolves() {
-        let list = list();
+        assert_eq!(list.resolve("0f3a9c2e1b04").unwrap().id, "0f3a9c2e1b04");
         assert_eq!(list.resolve("ROBOT").unwrap().id, "ROBOT1.0_AdAXNfwe");
         assert_eq!(list.resolve("a19b").unwrap().id, "a19b2c3d4e5f");
-        // A prefix is the head of the id, not any substring: this is what
-        // makes `AdAX` a *longer* prefix rather than a mid-string match.
+        // A prefix is the head of the id, not any substring: `AdAX` sits in
+        // the middle of `ROBOT1.0_AdAXNfwe` and names nothing.
         assert!(list.resolve("AdAX").is_err());
     }
 
@@ -308,7 +442,6 @@ mod tests {
             }
             other => panic!("expected Ambiguous, got {other:?}"),
         }
-        // The sentence a model reads names every candidate.
         let said = error.to_string();
         assert!(
             said.contains("0f3a9c2e1b04") && said.contains("0f3a9c2e0000"),
@@ -347,18 +480,37 @@ mod tests {
         }
         let window = long.truncated(DEFAULT_WINDOW);
         assert_eq!(window.messages.len(), DEFAULT_WINDOW);
-        // The head is gone, the tail is complete, and the newest is last.
         assert_eq!(window.messages[0].id, "tail-02");
         assert_eq!(window.latest().unwrap().id, "tail-21");
-        // A dropped head is not resolvable any more — the refusal says so.
+        // A dropped head is not resolvable any more, and the refusal says so.
         assert!(window.resolve("head-").is_err());
     }
 
     #[test]
+    fn one_list_reads_out_of_the_window() {
+        let mut mixed = List::new("k");
+        mixed.messages.push(message("m0", None).with_list("m0"));
+        mixed.messages.push(message("n0", None).with_list("n0"));
+        mixed
+            .messages
+            .push(message("m1", Some("m0")).with_list("m0"));
+        let in_m: Vec<&str> = mixed.in_list("m0").map(|m| m.id.as_str()).collect();
+        assert_eq!(in_m, vec!["m0", "m1"]);
+    }
+
+    #[test]
     fn a_participant_without_a_name_is_still_addressable_by_id() {
-        let quiet = Participant::new("u_9", None::<String>);
-        assert_eq!(quiet.label(), "u_9");
-        let named = Participant::new("u_9", Some("dbydd"));
-        assert_eq!(named.label(), "dbydd");
+        assert_eq!(Participant::new("u_9", None::<String>).label(), "u_9");
+        assert_eq!(Participant::new("u_9", Some("dbydd")).label(), "dbydd");
+    }
+
+    #[test]
+    fn branch_ids_are_stable_and_scoped_to_one_conversation() {
+        let anchor = branch_id("k", "m1");
+        assert_eq!(anchor, branch_id("k", "m1"));
+        assert_ne!(anchor, branch_id("k2", "m1"));
+        // The separator is written, not implied.
+        assert_ne!(branch_id("ab", "c"), branch_id("a", "bc"));
+        assert_eq!(anchor.len(), 12);
     }
 }

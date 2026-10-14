@@ -18,6 +18,7 @@ pub mod history;
 pub mod link;
 pub mod runloop;
 pub mod thread;
+pub mod threadlink;
 pub mod trigger;
 
 pub use chatkey::mint as mint_chat_key;
