@@ -34,6 +34,30 @@ pub enum LinkShape {
     Flat,
 }
 
+/// Which shape one platform's backend carries, by its platform name.
+///
+/// A table rather than a wire field: the shape is a property of the platform,
+/// not of one run of its backend, and the gateway is the side that has to know
+/// it before a message arrives. An unknown platform reads as [`LinkShape::Flat`]
+/// — nothing structural rides outbound, which is the safe default for a channel
+/// whose reply handling nobody has measured.
+///
+/// Measured, one live session each (2026-10-14):
+///
+/// | platform | shape | what the platform actually takes |
+/// |---|---|---|
+/// | `qqbot` | `Chain` | `msg_id` only, one forward pointer |
+/// | `feishu` | `FlatList` | a reply group is flat, and a message in it may answer any earlier one |
+/// | `telegram` | `Flat` | `reply_to_message_id` exists but carries no list; the gateway keeps its own |
+/// | `fake` | `Flat` | nothing to carry |
+pub fn shape_of(platform: &str) -> LinkShape {
+    match platform {
+        "qqbot" => LinkShape::Chain,
+        "feishu" => LinkShape::FlatList,
+        _ => LinkShape::Flat,
+    }
+}
+
 /// What an outbound reply must carry on one platform.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OutboundLink {
@@ -183,6 +207,16 @@ mod tests {
         let back = Message::root("m3").answering("m1").with_list(m1.list_id());
         assert!(back.same_list_as(&m2));
         assert_eq!(back.list_id(), "m0");
+    }
+
+    #[test]
+    fn a_platform_names_its_own_shape() {
+        assert_eq!(shape_of("qqbot"), LinkShape::Chain);
+        assert_eq!(shape_of("feishu"), LinkShape::FlatList);
+        // A platform nobody has measured carries nothing structural, which is
+        // the reading that cannot send a link the platform cannot take.
+        assert_eq!(shape_of("telegram"), LinkShape::Flat);
+        assert_eq!(shape_of("a-platform-added-tomorrow"), LinkShape::Flat);
     }
 
     #[test]

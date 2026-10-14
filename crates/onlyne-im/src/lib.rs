@@ -11,6 +11,7 @@
 
 pub mod adopt;
 pub mod backend_host;
+pub mod chain;
 pub mod chatkey;
 pub mod chatlog;
 pub mod config;
