@@ -133,17 +133,45 @@ fn an_inbound_event_is_the_shape_a_trigger_script_reads() {
         text: Some("deploy please".into()),
         attachments: vec![],
         action: None,
+        reply: Some(onlyne_im_backend::payload::ImReply {
+            parent: Some("msg-8".into()),
+            root: Some("msg-1".into()),
+            thread: None,
+        }),
         at: "2026-10-10T12:00:00Z".into(),
     };
     let value = serde_json::to_value(&event).unwrap();
     assert_eq!(value["kind"], "message");
     assert_eq!(value["id"], "msg-9");
     assert_eq!(value["from"]["id"], "u-1");
+    // The coordinate a thread platform reports rides through to the script,
+    // which is what lets a reply into an unrecorded discussion name its anchor.
+    assert_eq!(value["reply"]["parent"], "msg-8");
+    assert_eq!(value["reply"]["root"], "msg-1");
+    // A coordinate the platform did not report is absent, like `action`.
+    assert!(value["reply"].get("thread").is_none(), "{value}");
     // An absent action is absent, not null: a script branches on presence.
     assert!(value.get("action").is_none(), "{value}");
     // The round trip is exact — this is the object a script receives.
     let back: ImEvent = serde_json::from_value(value).unwrap();
     assert_eq!(back, event);
+}
+
+#[test]
+fn an_event_that_answers_nothing_omits_the_coordinate_entirely() {
+    // The v2.3 shape byte for byte: a platform that reports no reply link
+    // sends the same object it always did.
+    let event = ImEvent {
+        gateway: "im-qq".into(),
+        platform: "qqbot".into(),
+        conversation: "c2c:u-1".into(),
+        id: "m-1".into(),
+        text: Some("hi".into()),
+        at: "2026-10-14T00:00:00Z".into(),
+        ..ImEvent::default()
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert!(value.get("reply").is_none(), "{value}");
 }
 
 #[test]

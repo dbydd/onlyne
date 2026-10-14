@@ -12,7 +12,7 @@
 //! `chat_id` (`oc_…`), for a p2p chat the sender's `open_id` (`ou_…`), the
 //! address `send()` accepts back. The message id (`om_…`) is the dedupe key.
 
-use onlyne_im_backend::payload::{ImEvent, ImEventKind, ImSender};
+use onlyne_im_backend::payload::{ImEvent, ImEventKind, ImReply, ImSender};
 use serde_json::Value;
 
 /// The message types translated into events; anything else is skipped.
@@ -55,9 +55,34 @@ pub fn event_from_payload(gateway: &str, platform: &str, payload: &Value) -> Opt
         id,
         from: sender_of(event),
         text: Some(text),
+        reply: reply_of(message),
         at: now(),
         ..ImEvent::default()
     })
+}
+
+/// What this message answers, as Feishu reports it.
+///
+/// Feishu returns `root_id` and `parent_id` **only in the reply scenario**, and
+/// `thread_id` only when the message belongs to a thread — so a message that
+/// opens its own discussion carries none of them and the field stays absent.
+/// A reply into a discussion this cluster has never recorded still names its
+/// anchor here, which is what lets the gateway start a list from the middle.
+fn reply_of(message: &Value) -> Option<ImReply> {
+    let field = |name: &str| {
+        message
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let reply = ImReply {
+        parent: field("parent_id"),
+        root: field("root_id"),
+        thread: field("thread_id"),
+    };
+    (!reply.is_empty()).then_some(reply)
 }
 
 /// Which chat id addresses this conversation, in the order v1 resolved it: a
@@ -167,6 +192,56 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn a_reply_names_the_anchor_the_platform_reported() {
+        let payload = json!({
+            "header": {"event_id": "evt-9", "event_type": "im.message.receive_v1"},
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou_user"}},
+                "message": {
+                    "message_id": "om_2",
+                    "parent_id": "om_1",
+                    "root_id": "om_1",
+                    "thread_id": "omt_9",
+                    "chat_type": "group",
+                    "chat_id": "oc_group",
+                    "message_type": "text",
+                    "content": "{\"text\":\"and another thing\"}"
+                }
+            }
+        });
+        let event = event_from_payload("g", "feishu", &payload).unwrap();
+        let reply = event.reply.expect("a reply carries its coordinate");
+        assert_eq!(reply.parent.as_deref(), Some("om_1"));
+        assert_eq!(reply.root.as_deref(), Some("om_1"));
+        assert_eq!(reply.thread.as_deref(), Some("omt_9"));
+        assert_eq!(reply.answers(), Some("om_1"));
+        assert_eq!(reply.anchor(), Some("om_1"));
+    }
+
+    #[test]
+    fn a_message_that_opens_its_own_discussion_carries_no_coordinate() {
+        // Feishu returns `root_id` and `parent_id` only in the reply scenario.
+        let payload = json!({
+            "header": {"event_id": "evt-10", "event_type": "im.message.receive_v1"},
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou_user"}},
+                "message": {
+                    "message_id": "om_3",
+                    "chat_type": "p2p",
+                    "message_type": "text",
+                    "content": "{\"text\":\"first\"}"
+                }
+            }
+        });
+        let event = event_from_payload("g", "feishu", &payload).unwrap();
+        assert!(
+            event.reply.is_none(),
+            "nothing to anchor on: {:?}",
+            event.reply
+        );
     }
 
     #[test]

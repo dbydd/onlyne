@@ -98,6 +98,10 @@ pub struct ImEvent {
     /// The pressed button's id, for `kind = action`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
+    /// What this event answers and which discussion it sits in, when the
+    /// platform says. Absent for a message that opens its own discussion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply: Option<ImReply>,
     /// RFC 3339 UTC.
     pub at: String,
 }
@@ -115,12 +119,62 @@ impl Default for ImEvent {
             text: None,
             attachments: Vec::new(),
             action: None,
+            reply: None,
             at: String::new(),
         }
     }
 }
 
+/// The platform's reply coordinate: what this event answers, and the
+/// discussion it sits in.
+///
+/// Three ids, because the platforms name three different things and collapsing
+/// them loses what a thread platform needs:
+///
+/// * `parent` — the message this one replies to (Feishu `parent_id`, QQ's
+///   quoted ref, Telegram's `reply_to_message`).
+/// * `root` — the anchor of the whole discussion (Feishu `root_id`, a thread's
+///   start). This is what names the list on a platform whose replies have no
+///   list of their own.
+/// * `thread` — a platform thread distinct from a reply (Feishu `thread_id`).
+///
+/// A platform that reports none of them leaves the field absent, and the
+/// gateway then has nothing but the message itself — which is the honest
+/// reading, and the shape every v2.3 backend already had.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct ImReply {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+}
+
+impl ImReply {
+    /// Whether any coordinate is present.
+    pub fn is_empty(&self) -> bool {
+        self.parent.is_none() && self.root.is_none() && self.thread.is_none()
+    }
+
+    /// The message this event answers, from whichever id names it.
+    pub fn answers(&self) -> Option<&str> {
+        self.parent.as_deref().or(self.root.as_deref())
+    }
+
+    /// The anchor of the discussion this event belongs to.
+    ///
+    /// The root when the platform names one, otherwise the parent — a reply
+    /// whose platform does not distinguish them anchors on what it answers,
+    /// which is the same reading `thread::assign_list` makes.
+    pub fn anchor(&self) -> Option<&str> {
+        self.root.as_deref().or(self.parent.as_deref())
+    }
+}
+
 /// Who sent an inbound event.
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", default)]
 pub struct ImSender {
