@@ -69,7 +69,7 @@ fn append(entry: &Conversation, line: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
@@ -82,11 +82,13 @@ fn now() -> String {
 pub fn last_inbound_id(entry: &Conversation) -> Option<String> {
     let path = entry.chat_log();
     let text = std::fs::read_to_string(path).ok()?;
+    // Read backwards: the answer is usually the last line, and `lines` is
+    // double-ended, so the common case parses one line rather than the log.
     let id = text
         .lines()
+        .rev()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|line| line.get("direction").and_then(|d| d.as_str()) == Some("in"))
-        .last()
+        .find(|line| line.get("direction").and_then(|d| d.as_str()) == Some("in"))
         .and_then(|line| line.get("id").and_then(|id| id.as_str()).map(str::to_owned))?;
     (!id.trim().is_empty()).then_some(id)
 }

@@ -14,8 +14,10 @@ pub mod backend_host;
 pub mod chatkey;
 pub mod chatlog;
 pub mod config;
+pub mod history;
 pub mod link;
 pub mod runloop;
+pub mod thread;
 pub mod trigger;
 
 pub use chatkey::mint as mint_chat_key;
