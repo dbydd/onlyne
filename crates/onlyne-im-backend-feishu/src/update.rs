@@ -85,6 +85,7 @@ fn reply_of(message: &Value) -> Option<ImReply> {
         // is a history call the operator authorizes; the gateway states the
         // gap rather than filling it, which is what `docs/v2.4` §8 asks for.
         quoted_text: None,
+        self_handle: None,
     };
     (!reply.is_empty()).then_some(reply)
 }

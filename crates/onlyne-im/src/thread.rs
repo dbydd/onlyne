@@ -126,6 +126,11 @@ pub struct Message {
     pub list: Option<String>,
     #[serde(default, skip_serializing_if = "Metadata::is_empty")]
     pub metadata: Metadata,
+    /// The platform's handle for quoting this message back, when it hands out
+    /// a second id for that purpose (QQ's `REFIDX_…`, delivered in the event
+    /// that carried the message). None on a platform with one id per message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
     /// RFC 3339 UTC.
     pub at: String,
 }
@@ -140,6 +145,7 @@ impl Message {
             parent: None,
             list: None,
             metadata: Metadata::default(),
+            handle: None,
             at: String::new(),
         }
     }

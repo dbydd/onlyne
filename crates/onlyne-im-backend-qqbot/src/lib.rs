@@ -206,6 +206,25 @@ impl Backend for QqBotBackend {
                 match dispatch {
                     Ok(Some(frame)) => {
                         self.session = Some(gateway.session.clone());
+                        // The one line that settles what a quoted QQ message
+                        // actually carries: the documented place is
+                        // `message_scene.ext[].msg_idx`, and this is the only
+                        // way to find out whether the platform puts it there
+                        // or somewhere else. Debug, so the gateway's own
+                        // output stays quiet unless `RUST_LOG` asks.
+                        if let Some(scene) = frame.pointer("/d/message_scene") {
+                            tracing::debug!(
+                                event = frame.get("t").and_then(|t| t.as_str()).unwrap_or("?"),
+                                message_scene = %scene,
+                                "a qq message carried a scene"
+                            );
+                        }
+                        if let Some(reference) = frame.pointer("/d/message_reference") {
+                            tracing::debug!(
+                                message_reference = %reference,
+                                "a qq message carried a reference"
+                            );
+                        }
                         if let Some(event) =
                             update::event_from_dispatch(&self.gateway, &self.platform, &frame)
                         {

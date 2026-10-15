@@ -59,6 +59,7 @@ mod tests {
             attachments: vec![],
             actions: vec![],
             reply_to: None,
+            reply_reference: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: ImPayload = serde_json::from_str(&json).unwrap();

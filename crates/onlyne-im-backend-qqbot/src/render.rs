@@ -93,7 +93,20 @@ pub fn render(conversation: &str, payload: &ImPayload, msg_seq: u64) -> Result<V
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
+        // `msg_id` is what makes the send a *passive* reply — accepted without
+        // the proactive-message grant.
         body["msg_id"] = json!(reply_to);
+    }
+    if let Some(handle) = payload
+        .reply_reference
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        // `message_reference` is what renders it as a *quote*. Two different
+        // fields on purpose: QQ puts the message id in one and the message's
+        // quote handle in the other, and setting only the first is why a reply
+        // that worked still showed the group no quote.
+        body["message_reference"] = json!({"message_id": handle});
     }
     Ok(body)
 }
@@ -187,5 +200,27 @@ mod tests {
         let body = render("group:g1", &payload, 1).unwrap();
         assert_eq!(body["content"], "**bold**");
         assert_eq!(body["msg_type"], 0);
+    }
+
+    #[test]
+    fn a_reply_carries_both_ids_the_platform_splits_the_link_across() {
+        // `msg_id` makes the send passive; `message_reference` renders it as a
+        // quote. Setting only the first is why a reply that the platform
+        // accepted still showed the group no quote — measured 2026-10-15.
+        let mut payload = payload("hello");
+        payload.reply_to = Some("ROBOT1.0_AdAXNfwe".to_string());
+        payload.reply_reference = Some("REFIDX_4y7F23NM".to_string());
+        let body = render("group:g1", &payload, 1).unwrap();
+        assert_eq!(body["msg_id"], "ROBOT1.0_AdAXNfwe");
+        assert_eq!(body["message_reference"]["message_id"], "REFIDX_4y7F23NM");
+    }
+
+    #[test]
+    fn a_reply_without_a_handle_quotes_nothing_but_stays_passive() {
+        let mut payload = payload("hello");
+        payload.reply_to = Some("ROBOT1.0_AdAXNfwe".to_string());
+        let body = render("group:g1", &payload, 1).unwrap();
+        assert_eq!(body["msg_id"], "ROBOT1.0_AdAXNfwe");
+        assert!(body.get("message_reference").is_none(), "{body}");
     }
 }

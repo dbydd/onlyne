@@ -378,7 +378,21 @@ impl RoleLink {
                 "a reply opened a discussion"
             );
         }
-        let (accepted, reason) = match payload_from(&rest, reply_to, entry, &delivery) {
+        // The handle a platform needs to *display* the quote, when it hands
+        // out a second id for that: QQ takes `msg_id` for the passive reply
+        // and `message_reference` for the rendered quote, and only the second
+        // shows the user what is being answered.
+        let reply_reference = reply_to
+            .as_deref()
+            .and_then(|target| window.messages.iter().find(|m| m.id == target))
+            .and_then(|message| message.handle.clone());
+        let (accepted, reason) = match payload_from(
+            &rest,
+            reply_to,
+            reply_reference,
+            entry,
+            &delivery,
+        ) {
             Some(payload) => {
                 if let Err(error) = crate::chatlog::append_outbound(entry, &payload) {
                     // The log is a convenience, not the delivery: a failed
@@ -484,6 +498,7 @@ impl RoleLink {
 fn payload_from(
     text: &str,
     reply_to: Option<String>,
+    reply_reference: Option<String>,
     entry: &Conversation,
     delivery: &Delivery,
 ) -> Option<ImPayload> {
@@ -513,6 +528,7 @@ fn payload_from(
         attachments,
         actions: Vec::new(),
         reply_to,
+        reply_reference,
     })
 }
 
@@ -652,7 +668,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let entry = conversation(dir.path());
         let delivery = delivery(Body::text("hello"));
-        let payload = payload_from("hello", None, &entry, &delivery).unwrap();
+        let payload = payload_from("hello", None, None, &entry, &delivery).unwrap();
         assert_eq!(payload.text, "hello");
         assert!(payload.attachments.is_empty());
     }
@@ -666,7 +682,7 @@ mod tests {
         // still has to answer `None` rather than panic.
         let mut delivery = delivery(Body::text("placeholder"));
         delivery.envelope.body = Body::default();
-        assert!(payload_from("", None, &entry, &delivery).is_none());
+        assert!(payload_from("", None, None, &entry, &delivery).is_none());
     }
 
     #[test]
@@ -675,7 +691,7 @@ mod tests {
         let entry = conversation(dir.path());
         // `AAECAw==` is the base64 of [0, 1, 2, 3].
         let delivery = delivery(Body::image("AAECAw==", "image/png"));
-        let payload = payload_from("", None, &entry, &delivery).unwrap();
+        let payload = payload_from("", None, None, &entry, &delivery).unwrap();
         assert_eq!(payload.attachments.len(), 1);
         let path = PathBuf::from(&payload.attachments[0].path);
         assert!(

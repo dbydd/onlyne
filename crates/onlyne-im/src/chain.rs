@@ -134,6 +134,7 @@ pub fn record_inbound(
     let mut row = crate::history::HistoryEntry::inbound(chat_key, &event.platform, &event.id);
     row.conversation = Some(event.conversation.clone());
     row.text = event.text.clone();
+    row.ref_handle = event.reply.as_ref().and_then(|r| r.self_handle.clone());
     row.parent = coordinate.and_then(|(_, parent)| parent.map(str::to_owned));
     let list = match coordinate {
         // A known anchor: the platform named a root, so that root *is* the list.
@@ -167,6 +168,7 @@ pub fn window_of(history: &crate::history::History, chat_key: &str) -> List {
         message.parent = row.parent.clone();
         message.list = row.list.clone();
         message.text = row.text.clone();
+        message.handle = row.ref_handle.clone();
         message.at = row.at.clone();
         list.messages.push(message);
     }

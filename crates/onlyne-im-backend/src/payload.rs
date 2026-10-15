@@ -55,6 +55,12 @@ pub struct ImAction {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", default)]
 pub struct ImPayload {
+    /// The id a platform needs to *display* this payload as a quote, when that
+    /// is a different id from `reply_to` (QQ: `msg_id` takes `ROBOT1.0_…`,
+    /// `message_reference` takes `REFIDX_…`). Absent when the platform has one
+    /// id or when the message being answered has no handle recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_reference: Option<String>,
     pub text: String,
     pub format: ImFormat,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -160,6 +166,17 @@ pub struct ImReply {
     /// the distinction the delivery template already draws for upstream work.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quoted_text: Option<String>,
+    /// The platform's own handle for quoting **this** message back.
+    ///
+    /// A platform can hand out two ids for one message and mean different
+    /// things by them: QQ accepts a passive reply against the message id it
+    /// sent (`ROBOT1.0_…`, `msg_id`) and renders a *displayed* quote only
+    /// against the message's quote handle (`REFIDX_…`, `message_reference`).
+    /// The handle arrives in the event that carries the message
+    /// (`message_scene.ext`'s `msg_idx`), so it rides here for the record to
+    /// keep — nothing outbound needs it until a later reply quotes this one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_handle: Option<String>,
 }
 
 impl ImReply {
@@ -169,6 +186,7 @@ impl ImReply {
             && self.root.is_none()
             && self.thread.is_none()
             && self.quoted_text.is_none()
+            && self.self_handle.is_none()
     }
 
     /// The message this event answers, from whichever id names it.

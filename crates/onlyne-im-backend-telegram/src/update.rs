@@ -116,6 +116,10 @@ fn reply_of(message: &Value) -> Option<ImReply> {
             })
             .filter(|t| !t.trim().is_empty())
             .map(str::to_string),
+        // Telegram hands out one id per message; there is no second handle to
+        // keep, and a displayed quote is `reply_to_message_id`, which the send
+        // path already sets.
+        self_handle: None,
     })
 }
 

@@ -105,6 +105,7 @@ fn a_send_frame_carries_the_standard_payload_not_a_platform_shape() {
                 style: Some("primary".into()),
             }],
             reply_to: Some("msg-7".into()),
+            reply_reference: None,
         },
     });
     let value = serde_json::to_value(&msg).unwrap();
@@ -138,6 +139,7 @@ fn an_inbound_event_is_the_shape_a_trigger_script_reads() {
             root: Some("msg-1".into()),
             thread: None,
             quoted_text: Some("the message it answers".into()),
+            self_handle: Some("REFIDX_quoted".into()),
         }),
         at: "2026-10-10T12:00:00Z".into(),
     };
@@ -150,6 +152,8 @@ fn an_inbound_event_is_the_shape_a_trigger_script_reads() {
     assert_eq!(value["reply"]["parent"], "msg-8");
     assert_eq!(value["reply"]["root"], "msg-1");
     assert_eq!(value["reply"]["quoted_text"], "the message it answers");
+    // A platform that hands out a second id for quoting rides it through too.
+    assert_eq!(value["reply"]["self_handle"], "REFIDX_quoted");
     // A coordinate the platform did not report is absent, like `action`.
     assert!(value["reply"].get("thread").is_none(), "{value}");
     // An absent action is absent, not null: a script branches on presence.

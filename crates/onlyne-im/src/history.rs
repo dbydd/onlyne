@@ -74,6 +74,10 @@ pub struct HistoryEntry {
     /// The text, both directions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The platform's handle for quoting this message back, when the platform
+    /// hands out a second id for that (QQ's `REFIDX_…`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_handle: Option<String>,
     /// The sticker this message carried instead of words, when it carried one
     /// (`crate::chatkey`: a `<sticker:…>` marker line). Metadata, next to the
     /// references a backend reports: neither is text, and the record keeps

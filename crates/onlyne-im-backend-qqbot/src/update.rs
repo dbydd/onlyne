@@ -100,27 +100,66 @@ pub fn event_from_dispatch(gateway: &str, platform: &str, dispatch: &Value) -> O
 /// `parent` is the whole coordinate and the root and the thread stay absent —
 /// the `Chain` shape, one forward pointer per message.
 ///
-/// The target rides in `message_scene.ext`, whose `msg_idx` is the
-/// `REFIDX_…` handle the platform uses for a quoted message
-/// (`发送群聊消息`'s `message_reference.message_id` names the same field for a
-/// non-bot message). The quoted *body* is not in the event; a reader who needs
-/// it either has it in this cluster's record or asks the platform.
+/// The place is `message_scene.ext`, which the event documentation sketches as
+/// a list of objects with a `msg_idx` field and which the live platform sends
+/// as a list of **`key=value` strings**. Measured 2026-10-15 on a real group:
 ///
-/// Shape from the documented event, not yet measured: the live QQ traffic this
-/// backend has seen was plain text with no quote.
+/// ```text
+/// ext = [
+///   "ref_msg_idx=REFIDX_4y7F23NM…",   the message this one quotes
+///   "msg_idx=REFIDX_guzHNYon…",       this message's own quote handle
+///   "auth_token=dchzbv6gqAXLWhw8…",   the token a quoted send carries back
+/// ]
+/// ```
+///
+/// So the reference target is the `ref_msg_idx` line and *not* the `msg_idx`
+/// line — reading `msg_idx` names the message itself, which is why the first
+/// implementation of this recorded `parent = None` while the platform plainly
+/// delivered a quote. The reader accepts either encoding, so an event that
+/// arrives in the documented shape still resolves.
+///
+/// The `REFIDX_…` handle is also what a **displayed** quote needs outbound:
+/// `msg_id` (`ROBOT1.0_…`) makes the send a passive reply, and
+/// `message_reference.message_id` (a `REFIDX_…`) is what renders it as a quote.
 fn reply_of(data: &Value) -> Option<ImReply> {
     let ext = data.pointer("/message_scene/ext")?;
-    let entries = ext.as_array()?;
-    let msg_idx = entries
-        .iter()
-        .find_map(|entry| entry.get("msg_idx").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+    let find = |key: &str| -> Option<String> {
+        // Both encodings, because one of them is the documentation's and the
+        // other is the platform's: an object with the field, and the string.
+        let mut from_objects = ext
+            .as_array()?
+            .iter()
+            .filter(|entry| entry.is_object())
+            .filter_map(|entry| {
+                entry
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+            })
+            .map(str::to_owned);
+        let found = from_objects.next();
+        if found.is_some() {
+            return found;
+        }
+        ext.as_array()?
+            .iter()
+            .filter_map(|entry| entry.as_str())
+            .find_map(|entry| {
+                let (name, value) = entry.split_once('=')?;
+                (name == key && !value.trim().is_empty()).then(|| value.to_string())
+            })
+    };
+    let quoted = find("ref_msg_idx").or_else(|| find("parent_id"));
+    let own = find("msg_idx");
+    if quoted.is_none() && own.is_none() {
+        return None;
+    }
     Some(ImReply {
-        parent: Some(msg_idx.to_string()),
+        parent: quoted,
         root: None,
         thread: None,
         quoted_text: None,
+        self_handle: own,
     })
 }
 
@@ -370,7 +409,7 @@ mod tests {
                 "content": "<@!bot> about that thing",
                 "group_openid": "group-1",
                 "author": {"member_openid": "member-1"},
-                "message_scene": {"ext": [{"msg_idx": "REFIDX_abc123=="}]}
+                "message_scene": {"ext": ["ref_msg_idx=REFIDX_abc123=="]}
             }
         });
         let event = event_from_dispatch("qq1", "qqbot", &dispatch).unwrap();
@@ -384,5 +423,68 @@ mod tests {
     fn a_plain_message_carries_no_ref() {
         let event = event_from_dispatch("qq1", "qqbot", &group_event()).unwrap();
         assert!(event.reply.is_none(), "{:?}", event.reply);
+    }
+
+    #[test]
+    fn the_scene_encoding_the_platform_actually_sends_is_read() {
+        // The shape a live group delivered (2026-10-15): strings, not objects,
+        // and the quoted message is the `ref_msg_idx` line rather than the
+        // `msg_idx` one — `msg_idx` names this message's own handle.
+        let dispatch = json!({
+            "op": 0,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "d": {
+                "id": "m10",
+                "content": "<@!bot> about this",
+                "group_openid": "group-1",
+                "author": {"member_openid": "member-1"},
+                "message_scene": {
+                    "source": "default",
+                    "ext": [
+                        "ref_msg_idx=REFIDX_4y7F23NM",
+                        "msg_idx=REFIDX_guzHNYon",
+                        "auth_token=dchzbv6gqAXLWhw8"
+                    ]
+                }
+            }
+        });
+        let event = event_from_dispatch("qq1", "qqbot", &dispatch).unwrap();
+        let reply = event.reply.expect("a quoted reply carries its ref");
+        assert_eq!(reply.parent.as_deref(), Some("REFIDX_4y7F23NM"));
+        assert!(reply.root.is_none(), "QQ has no list to name");
+    }
+
+    #[test]
+    fn the_documented_object_encoding_still_resolves() {
+        // The event documentation's shape. Accepting it costs nothing and
+        // keeps a platform change from silently dropping quotes.
+        let dispatch = json!({
+            "op": 0,
+            "t": "C2C_MESSAGE_CREATE",
+            "d": {
+                "id": "m11",
+                "content": "reply",
+                "author": {"user_openid": "u1"},
+                "message_scene": {
+                    "ext": [{"ref_msg_idx": "REFIDX_obj"}, {"msg_idx": "REFIDX_self"}]
+                }
+            }
+        });
+        let event = event_from_dispatch("qq1", "qqbot", &dispatch).unwrap();
+        assert_eq!(event.reply.unwrap().parent.as_deref(), Some("REFIDX_obj"));
+    }
+
+    #[test]
+    fn a_message_with_no_scene_carries_no_ref() {
+        let dispatch = json!({
+            "op": 0, "t": "C2C_MESSAGE_CREATE",
+            "d": {"id": "m12", "content": "plain", "author": {"user_openid": "u1"}}
+        });
+        assert!(
+            event_from_dispatch("qq1", "qqbot", &dispatch)
+                .unwrap()
+                .reply
+                .is_none()
+        );
     }
 }
