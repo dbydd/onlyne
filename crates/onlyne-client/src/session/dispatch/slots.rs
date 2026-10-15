@@ -366,6 +366,23 @@ impl DispatchState {
                 },
             );
         }
+        // The word also reaches the process, and this is the only path that
+        // still can: the plugin was asked and never answered, so no report of
+        // its own is coming to close anything. Settling the ledger is half of
+        // what the operator asked for — what they asked for is that this work
+        // stops, and a session that keeps writing files after the row settled
+        // is the incident this exists for (`docs/v2.5-CANCEL-NOT-ENFORCING.md`
+        // §B). The close is the answered path's own function, so one ending
+        // serves both routes.
+        if let Err(error) =
+            super::retire::release_locked(&mut inner, &note.task_id, Some(note.word.close_reason()))
+        {
+            tracing::warn!(
+                task = %note.task_id,
+                error = %error,
+                "the resource behind an unanswered control command did not close"
+            );
+        }
         true
     }
 

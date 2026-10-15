@@ -33,22 +33,39 @@ fn spec_reloaded_identical_role_slice_is_noop() {
     assert_eq!(state.dispatch.role_slice().max_sessions, 2);
 }
 
-/// A reload that adds or removes an edge has to reach a live connection, which
-/// never sees a second `welcome`: the role row is the only carrier, and the
-/// next completion reads the obligation off the dispatcher.
+/// A reload that adds or removes an obligation has to reach a live connection,
+/// which never sees a second `welcome`: the role row is the only carrier, and
+/// the next completion reads the obligation off the dispatcher.
+///
+/// The obligation is `owes_targets`; `edges` carries the reach, which is a
+/// different declaration and moves nothing here (`AGENTS.md` §"Declared route
+/// edges": reach and obligation are two lists).
 #[test]
-fn a_role_rows_edges_are_adopted_as_the_obligation() {
+fn a_role_rows_owes_targets_are_adopted_as_the_obligation() {
     let (state, _store) = test_state(2, vec!["pi".into()]);
     let mut armed = role_info(2, vec!["pi".into()]);
-    armed.edges = vec!["writer".into()];
+    armed.owes_targets = vec!["writer".into()];
     let changed = apply_role_info(&state, &armed);
-    assert_eq!(changed, vec!["allowed_targets"]);
+    assert_eq!(changed, vec!["owes_targets"]);
     let applied = state.dispatch.role_slice();
     assert_eq!(applied.required_targets, vec!["writer".to_string()]);
 
+    // An edge that is not an obligation arms nothing: the two lists are read
+    // apart on purpose. The armed row is the base, so what moves is the reach
+    // alone.
+    let mut reached = role_info(2, vec!["pi".into()]);
+    reached.owes_targets = vec!["writer".into()];
+    reached.edges = vec!["reader".into()];
+    let changed = apply_role_info(&state, &reached);
+    assert!(changed.is_empty(), "reach alone is not an obligation");
+    assert_eq!(
+        state.dispatch.role_slice().required_targets,
+        vec!["writer".to_string()]
+    );
+
     let disarmed = role_info(2, vec!["pi".into()]);
     let changed = apply_role_info(&state, &disarmed);
-    assert_eq!(changed, vec!["allowed_targets"]);
+    assert_eq!(changed, vec!["owes_targets"]);
     let applied = state.dispatch.role_slice();
     assert!(
         applied.required_targets.is_empty(),
@@ -496,6 +513,11 @@ async fn an_unanswered_cancel_settles_the_task_and_refuses_its_delivery() {
         store.open_tasks(10).expect("open tasks").is_empty(),
         "nothing is left open for the server to re-offer"
     );
+    // The word also reaches the process. A plugin that never answered is
+    // exactly the case where nothing else can stop the work, so the host
+    // resource closes here — the same close the answered path runs.
+    println!("OPS {:#?}", queued_ops(&state));
+    println!("SLOTS {}", state.dispatch.session_count());
 }
 
 /// A recycle no plugin ever answered settles the task `failed`.

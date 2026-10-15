@@ -278,6 +278,18 @@ impl ControlWord {
         }
     }
 
+    /// The close this word runs on the host-resource side.
+    ///
+    /// The same two reasons the answered path uses (`retire.rs`'s
+    /// `CloseReason` match), so a session closed because nobody answered the
+    /// word and one closed because the plugin did read the same in the log.
+    pub fn close_reason(self) -> crate::backend::CloseReason {
+        match self {
+            Self::Cancel => crate::backend::CloseReason::Cancelled,
+            Self::Recycle => crate::backend::CloseReason::Operator,
+        }
+    }
+
     /// The word as the refusal that names it reads on the wire.
     ///
     /// `operator cancel` and `operator recycle` stand in the same column as the
