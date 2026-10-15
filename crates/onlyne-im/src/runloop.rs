@@ -32,19 +32,8 @@ use tokio::task::JoinSet;
 /// What one backend task takes from the loop: a payload to render, or the
 /// instruction to stop and take its process with it.
 enum BackendCommand {
-    Send(SendRequest),
+    Send(RenderJob),
     Stop,
-}
-
-/// One outbound payload in flight: the frame, and the channel the platform's
-/// answer comes back on.
-///
-/// The answer is not optional. A send whose id is dropped leaves the gateway's
-/// own half of a conversation out of the reply chain, so the row is written
-/// where the id exists rather than where the reply was composed.
-struct SendRequest {
-    args: SendArgs,
-    answer: tokio::sync::oneshot::Sender<SentArgs>,
 }
 
 /// Record one outbound reply now that the platform has named it.
@@ -124,13 +113,15 @@ pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
         let events = events_tx.clone();
         let platforms = Arc::clone(&platforms);
         let gateway_id = entry.gateway.clone();
+        let backend_gateway = Arc::clone(&gateway);
         let mut shutdown = shutdown_rx.clone();
         backends.spawn(async move {
             (
                 gateway_id.clone(),
                 serve_backend(
                     host,
-                    gateway_id,
+                    gateway_id.clone(),
+                    backend_gateway,
                     command_rx,
                     events,
                     platforms,
@@ -230,25 +221,16 @@ pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
                     // Unreachable while a link holds a sender.
                     break;
                 };
-                match senders.get(&job.gateway) {
-                    Some(sender) => {
-                        // The row is written here rather than where the reply
-                        // was composed, because only here is the platform's id
-                        // for the message known — and that id is what a later
-                        // reply points at (`docs/v2.4-REPLY-THREADS.md` §6).
-                        let (tx, rx) = tokio::sync::oneshot::channel();
-                        let request = BackendCommand::Send(SendRequest {
-                            args: job.send_args(),
-                            answer: tx,
-                        });
-                        if sender.send(request).await.is_ok()
-                            && let Ok(sent) = rx.await
-                        {
-                            record_outbound(&gateway, &job, &sent);
-                        }
-                    }
-                    None => tracing::warn!(
-                        gateway = %job.gateway,
+                // The row this delivery becomes is written on the backend's
+                // own task, once the platform has named the message: only there
+                // is the id known, and that id is what a later reply points at
+                // (`docs/v2.4-REPLY-THREADS.md` §6). Waiting for it here would
+                // stall every other conversation on one platform's round trip.
+                let backend = job.gateway.clone();
+                match senders.get(&backend) {
+                    Some(sender) if sender.send(BackendCommand::Send(job)).await.is_ok() => {}
+                    _ => tracing::warn!(
+                        gateway = %backend,
                         "no backend is running to render this delivery; it stays unacked"
                     ),
                 }
@@ -305,7 +287,13 @@ pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
 /// on shutdown.
 async fn serve_backend(
     mut host: BackendHost,
-    gateway: String,
+    // The `[[im.backend]]` row's id: what an event names to reach the
+    // conversation it belongs to, and what the log lines below call the
+    // backend. It is *not* the role — the role is one for the whole gateway
+    // and carries every backend at once.
+    gateway_id: String,
+    // The gateway root itself: the record of a sent message is written here.
+    gateway: Arc<Gateway>,
     mut commands: mpsc::Receiver<BackendCommand>,
     events: mpsc::Sender<BackendEvent>,
     platforms: Arc<Mutex<BTreeMap<String, String>>>,
@@ -318,9 +306,9 @@ async fn serve_backend(
     platforms
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(gateway.clone(), hello.platform.clone());
+        .insert(gateway_id.clone(), hello.platform.clone());
     tracing::info!(
-        gateway = %gateway,
+        gateway = %gateway_id,
         platform = %hello.platform,
         version = %hello.version,
         "a backend is up"
@@ -331,12 +319,12 @@ async fn serve_backend(
     if !hello.authenticated {
         match &hello.onboarding {
             Some(prompt) => tracing::error!(
-                gateway = %gateway,
-                "this backend is not authenticated: {} (`onlyne-im login --gateway {gateway}`)",
+                gateway = %gateway_id,
+                "this backend is not authenticated: {} (`onlyne-im login --gateway {gateway_id}`)",
                 prompt.payload
             ),
             None => tracing::error!(
-                gateway = %gateway,
+                gateway = %gateway_id,
                 "this backend reported no credential and asked for none; \
                  check its environment"
             ),
@@ -345,20 +333,18 @@ async fn serve_backend(
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                Some(BackendCommand::Send(SendRequest { args, answer })) => {
-                    // The send and the id it earns are one round trip, because
-                    // the id is what a later reply points at.
-                    let sent = match host.send(args).await {
+                Some(BackendCommand::Send(job)) => {
+                    // The send and the id it earns are one round trip, and the
+                    // row is written here: a send that failed leaves the id
+                    // absent, which the record already handles.
+                    let sent = match host.send(job.send_args()).await {
                         Ok(sent) => sent,
                         Err(error) => {
-                            // The caller records the row either way; a send
-                            // that failed leaves the id absent, which the
-                            // record already handles.
-                            tracing::warn!(gateway = %gateway, error = %error, "a send failed");
+                            tracing::warn!(gateway = %gateway_id, error = %error, "a send failed");
                             SentArgs::default()
                         }
                     };
-                    let _ = answer.send(sent);
+                    record_outbound(&gateway, &job, &sent);
                 }
                 Some(BackendCommand::Stop) | None => {
                     let _ = host.stop("gateway shutdown").await;
@@ -367,14 +353,14 @@ async fn serve_backend(
             },
             op = host.next_op() => {
                 let Some(op) = op? else {
-                    tracing::warn!(gateway = %gateway, "a backend ended its stream");
+                    tracing::warn!(gateway = %gateway_id, "a backend ended its stream");
                     return Ok(());
                 };
                 if matches!(op, BackendOp::Hello(_)) {
-                    tracing::warn!(gateway = %gateway, "a backend sent a second hello");
+                    tracing::warn!(gateway = %gateway_id, "a backend sent a second hello");
                     continue;
                 }
-                if events.send(BackendEvent { gateway: gateway.clone(), op }).await.is_err() {
+                if events.send(BackendEvent { gateway: gateway_id.clone(), op }).await.is_err() {
                     return Ok(());
                 }
             }

@@ -609,6 +609,18 @@ def smoke() -> None:
         inbound = next(l for l in lines if l.get("direction") == "in")
         key = inbound["chat"]
         say(f"inbound landed, chat key {key}; replying as {PEER}")
+        # 角色记录里的出站行由后端任务在平台回话之后写（`Sent` 帧），比
+        # chat.jsonl 那行晚一步；计下已有的出站行数，等的是**这一次发送**带来的
+        # 新行，而不是文件里上一轮留下的旧行。
+        history = GW / ".onlyne" / "history" / "main.jsonl"
+
+        def read_history():
+            if not history.is_file():
+                return []
+            return [json.loads(line) for line in history.read_text().splitlines()
+                    if line.strip()]
+
+        outs_before = sum(1 for row in read_history() if row.get("direction") == "out")
         run([ONLYNE, "--server-root", CLUSTER, "send", "--as", "admin",
              "--from", PEER, "--to", GATEWAY_ROLE,
              "--text", f"<chat:{key}>\n\nsmoke hello back", "--force",
@@ -617,14 +629,6 @@ def smoke() -> None:
         while time.monotonic() < deadline and \
               not any(l.get("direction") == "out" for l in read_log()):
             time.sleep(0.5)
-        lines = read_log()
-        out = ""
-        if child.poll() is None:
-            child.terminate()
-        try:
-            child.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            child.kill()
         lines = read_log()
         directions = {line.get("direction") for line in lines}
         if "out" not in directions:
@@ -640,6 +644,32 @@ def smoke() -> None:
         assert "smoke hello back" in rendered, outbound
         say(f"PASS: inbound {said!r} -> outbound {rendered.strip()!r}")
         say(f"chat log: {log}")
+
+        recorded = []
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            recorded = [row for row in read_history() if row.get("direction") == "out"]
+            if len(recorded) > outs_before:
+                break
+            time.sleep(0.3)
+        # The gateway is stopped once both records have been read: a backend
+        # killed mid-send would take the row with it.
+        if child.poll() is None:
+            child.terminate()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+        if len(recorded) <= outs_before:
+            die(f"the send wrote no outbound row into the role's record: {history}")
+        # 那条行必须带着平台给的 id。没有它，网关自己的消息不在回复链上，
+        # `chain::forks` 数到第一跳就断——真机上抓到过的缺陷，症状是"来回
+        # 引用多少轮都不开分支"。
+        if not recorded[-1].get("platform_message"):
+            die("the outbound row carries no platform id, so a later reply cannot "
+                f"point at it; rows: {read_history()}")
+        say(f"PASS: the outbound row carries the platform's id "
+            f"{recorded[-1]['platform_message']!r}")
     finally:
         if child.poll() is None:
             child.kill()
