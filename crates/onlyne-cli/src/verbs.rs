@@ -555,6 +555,18 @@ async fn send_inner(
     // reports home to, the hops it may spend, its wall-clock bound, and its
     // labels.
     let mut causality = Causality::root(args.task.unwrap_or_else(new_task_id));
+    // A caller that names the family itself — an IM conversation naming its
+    // chat key — starts a new task *inside* a family that already exists, which
+    // is what makes a `task`-scope session serve every message of that
+    // conversation in turn (`AGENTS.md` §10). The id is the caller's: the core
+    // never reads one, so nothing here interprets, mints, or bounds it.
+    if let Some(family) = args
+        .family
+        .clone()
+        .filter(|family| !family.trim().is_empty())
+    {
+        causality.family = Some(family);
+    }
     causality.origin = Some(sender_role(sender, target));
     causality.hop_budget = args.hop_budget;
     causality.deadline = args.deadline;
@@ -1153,6 +1165,14 @@ pub struct SendArgs {
     /// Task family id to attach to; minted when omitted.
     #[arg(long)]
     pub task: Option<String>,
+    /// The family this send belongs to, when it is not the task it starts.
+    ///
+    /// One IM conversation passes its chat key here, so every message of that
+    /// conversation is one family and a `task`-scope session serves them in
+    /// turn instead of opening one session per message. The value is opaque:
+    /// the core carries it and never reads it.
+    #[arg(long)]
+    pub family: Option<String>,
     /// Message text; mutually exclusive with `--file`.
     #[arg(long, conflicts_with = "file")]
     pub text: Option<String>,

@@ -2952,6 +2952,178 @@ max_sessions = 2"#,
     println!("✓ Scenario 21: a completion behind a verdict is answered with it");
 }
 
+/// Scenario 24: one IM conversation is one task family, through the real CLI.
+///
+/// An IM conversation's chat key is the only identity that survives a gateway
+/// restart (`docs/v2.3-CHAT-PROTOCOL.md` §4), which makes it the natural key
+/// for a `task`-scope session: the conversation, not the message, is the work
+/// that continues. The trigger script is what wires the two together — it reads
+/// the key out of the event and hands it to `onlyne send --family` — so this
+/// case runs the **real CLI** for the same reason a script does, and asserts
+/// what the cluster then holds:
+///
+/// 1. the delivered task carries the chat key as its family, not its own id;
+/// 2. two messages of one conversation are two tasks of one family, and the
+///    `task`-scope session serves them both without opening a second one;
+/// 3. a message from a *different* conversation is a different family, and does
+///    open one.
+#[tokio::test]
+async fn scenario_24_a_chat_key_is_the_task_family_of_its_conversation() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    // The sender a conversation's script speaks as: the gateway role, in the
+    // live shape, because a script authenticates as the gateway it belongs to.
+    cluster
+        .register_role(
+            "agent",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "agent"]
+allowed_targets = ["peer"]"#,
+            ),
+        )
+        .await
+        .expect("register agent");
+    let peer_ws = cluster
+        .register_role(
+            "peer",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "peer"]
+allowed_targets = ["peer"]
+max_sessions = 4"#,
+            ),
+        )
+        .await
+        .expect("register peer");
+    append_client_session_config(&peer_ws, "task", "0s");
+    cluster.start_client(&peer_ws).await.expect("start client");
+    // A spawned agent serves one session, so a second conversation's session
+    // needs a second process to serve it: the shape `role` scope pools, and the
+    // one this case has to see fail to be a second session.
+    let script = serve_repeated(true, 6);
+    for _ in 0..2 {
+        cluster
+            .start_fake_agent(&peer_ws, &script)
+            .await
+            .expect("start an agent");
+    }
+    cluster.wait_role_online("peer").await.expect("peer online");
+
+    // What one conversation's script does, twice, through the CLI an operator
+    // runs: the key rides the body's first line and names the family.
+    let chat_key = "7f3a9c2e1b04d5a6f8c1e3b7a9d2f4c6";
+    let mut tasks = Vec::new();
+    for message in ["first question", "second question"] {
+        let text = format!("<chat:{chat_key}>\n\n{message}");
+        let out = cluster
+            .cli(&[
+                "send",
+                "--as",
+                "admin",
+                "--from",
+                "agent",
+                "--to",
+                "peer",
+                "--text",
+                &text,
+                "--family",
+                chat_key,
+                "--force",
+                "--yes-i-am-supervisor-not-other-role",
+            ])
+            .await
+            .expect("the CLI sends one message of the conversation");
+        // The CLI prints the whole answer body (`ok` + `data`), which is what an
+        // operator reads; the receipt is the `data` half of it.
+        let answer: serde_json::Value =
+            serde_json::from_str(out.trim().lines().last().expect("a receipt line"))
+                .expect("the receipt is JSON");
+        tasks.push(task_of(&answer["data"]));
+    }
+    assert_ne!(tasks[0], tasks[1], "每一跳都是自己的 task");
+    // 1. The family is the conversation, not the task.
+    for task in &tasks {
+        let rows = cluster
+            .query_ledger(LedgerQuery {
+                task: Some(task.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("read the ledger");
+        let row = rows
+            .iter()
+            .find(|row| row.kind == onlyne_proto::MsgKind::Task)
+            .expect("the delivery row");
+        assert_eq!(
+            row.family.as_deref(),
+            Some(chat_key),
+            "the delivery's family is the chat key, not the task id: {row:#?}"
+        );
+    }
+
+    // 2. One session serves both, because the family is what `task` scope keys
+    // on: two deliveries, one session.
+    let sessions = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                role: Some("peer".to_string()),
+                ..Default::default()
+            },
+            // One session, and it is serving the conversation: the second
+            // message of one family must not open a second.
+            |rows| rows.len() == 1 && rows[0].task_id.is_some(),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("one session serves the whole conversation");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "a conversation is one session, not one per message: {sessions:#?}"
+    );
+
+    // 3. A second conversation is a second family, and opens its own session.
+    let other_key = "0b1c2d3e4f5061728394a5b6c7d8e9f0";
+    cluster
+        .cli(&[
+            "send",
+            "--as",
+            "admin",
+            "--from",
+            "agent",
+            "--to",
+            "peer",
+            "--text",
+            &format!("<chat:{other_key}>\n\nanother conversation"),
+            "--family",
+            other_key,
+            "--force",
+            "--yes-i-am-supervisor-not-other-role",
+        ])
+        .await
+        .expect("a second conversation's message");
+    cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                role: Some("peer".to_string()),
+                ..Default::default()
+            },
+            |rows| rows.len() == 2,
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("another conversation opens its own session");
+    println!("✓ Scenario 24: a chat key is the task family of its conversation");
+}
+
 /// Scenario 23: a control word settles the task, and a restart does not revive it.
 ///
 /// The incident this guards (`docs/v2.5-CANCEL-NOT-ENFORCING.md`): an operator

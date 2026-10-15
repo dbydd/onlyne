@@ -124,7 +124,9 @@ cat >"$tmp/im-in.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 # stdin is the event JSON; $1 is the mode word. The chat key is the token this
-# conversation answers to, so it rides the delivery's first line.
+# conversation answers to, so it rides the delivery's first line — and it is
+# also the delivery's *family*, which is what makes a `task`-scope session
+# serve every message of this conversation instead of one per message.
 input=$(cat)
 chat=$(printf '%s' "$input" | python3 -c 'import json,sys; print(json.load(sys.stdin)["chat"])')
 text=$(printf '%s' "$input" | python3 -c 'import json,sys
@@ -135,7 +137,7 @@ printf '%s\n\n%s\n' "<chat:$chat>" "$text" > "$tmp/reply-body.txt"
 # and `--from` is an admin-surface flag. Discovery by `--server-root` would work
 # too, but the gateway hands a script the socket and nothing else.
 "$ONLYNE" send --socket "$ONLYNE_SOCKET" --as admin --from im --to "$PEER" \
-  --text "$(cat "$tmp/reply-body.txt")" --force --yes-i-am-supervisor-not-other-role
+  --text "$(cat "$tmp/reply-body.txt")" --family "$chat" --force --yes-i-am-supervisor-not-other-role
 SH
 chmod +x "$tmp/im-in.sh"
 python3 - "$tmp/gw/.onlyne/config.toml" "$tmp/im-in.sh" <<'PY'

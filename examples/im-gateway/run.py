@@ -331,7 +331,9 @@ node "{cli}" send --to "{notify_to}" --text "$notify_text" --json >/dev/null 2>&
     path.write_text(f"""#!/usr/bin/env bash
 set -euo pipefail
 # stdin 是事件 JSON，$1 是模式字。`chat` 是这条会话的令牌，投递文本第一行回带它，
-# 网关靠它把回复渲染回同一个会话。
+# 网关靠它把回复渲染回同一个会话；它同时也是这条投递的 **family**（`--family`），
+# 于是这条会话的每条消息都属于同一族，`[client.session] scope = "task"` 的那个
+# 会话会挨条服务它们，而不是一条消息开一个新会话。
 input=$(cat)
 eval "$(printf '%s' "$input" | python3 -c 'import json,shlex,sys
 d = json.load(sys.stdin)
@@ -341,7 +343,7 @@ print("where=" + shlex.quote(str(d.get("platform", "?")) + "/" + str(d.get("conv
 print("text=" + shlex.quote(str(e.get("text") or "(no text)")))')"
 printf '%s\\n\\n%s\\n' "<chat:$chat>" "$text" > "{CLUSTER}/body.txt"
 if out=$("{ONLYNE}" send --socket "$ONLYNE_SOCKET" --as admin --from {GATEWAY_ROLE} \\
-         --to {PEER} --text "$(cat "{CLUSTER}/body.txt")" --force \\
+         --to {PEER} --text "$(cat "{CLUSTER}/body.txt")" --family "$chat" --force \\
          --yes-i-am-supervisor-not-other-role 2>&1); then
   result="已投给 {PEER}"
 else
