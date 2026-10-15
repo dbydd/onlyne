@@ -22,7 +22,7 @@
 //! The rule is a pure function over recorded messages: the gateway asks it
 //! before recording an outbound reply, and no backend derives anything.
 
-use crate::thread::List;
+use crate::thread::{List, Message};
 
 /// How many hops along one chain must already exist before a reply forks.
 ///
@@ -44,7 +44,7 @@ pub fn forks(window: &List, parent: &str) -> bool {
     let mut hops = 0usize;
     let mut at = Some(parent.to_string());
     while let Some(id) = at {
-        let Some(message) = window.messages.iter().find(|m| m.id == id) else {
+        let Some(message) = find(window, &id) else {
             // The chain left the window; `hops` counts what was verifiable.
             break;
         };
@@ -87,7 +87,7 @@ pub fn record_reply(
         }
     };
     let forked = forks(window, parent);
-    let answered = window.messages.iter().find(|m| m.id == parent);
+    let answered = find(window, parent);
     let list = match answered {
         // A reply inherits its parent's list: that is what keeps a chain one
         // discussion instead of one per hop.
@@ -175,10 +175,26 @@ pub fn window_of(history: &crate::history::History, chat_key: &str) -> List {
     list
 }
 
+/// The message one id names, by either id the platform handed out.
+///
+/// A platform can address one message two ways and use them in different
+/// places: QQ's message id is a `ROBOT1.0_…` and its quote handle is a
+/// `REFIDX_…`, and an inbound quote names the message it answers by the
+/// **handle** while the record keys messages by their **id**. Looking up only
+/// the id leaves every such chain one link short, which reads as "this reply
+/// opens nothing" — the failure is silent and the branch simply never appears.
+/// Measured 2026-10-15: an inbound quote recorded `parent = REFIDX_…` against
+/// a window of `ROBOT1.0_…` ids.
+fn find<'a>(window: &'a List, id: &str) -> Option<&'a Message> {
+    window
+        .messages
+        .iter()
+        .find(|m| m.id == id || m.handle.as_deref() == Some(id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thread::Message;
 
     /// `a ← b ← c`, all in one chain, oldest first.
     fn window() -> List {
@@ -277,5 +293,24 @@ mod tests {
     #[test]
     fn the_constant_is_the_rule_the_operator_set() {
         assert_eq!(FORK_AFTER, 2);
+    }
+
+    #[test]
+    fn a_parent_named_by_quote_handle_still_walks_the_chain() {
+        // The live QQ shape: the replied-to message is named by its `REFIDX_…`
+        // handle, while the window holds `ROBOT1.0_…` ids.
+        let mut window = List::new("k");
+        let mut a = Message::root("ROBOT1.0_a").with_list("la");
+        a.handle = Some("REFIDX_a".into());
+        let mut b = Message::root("ROBOT1.0_b")
+            .answering("REFIDX_a")
+            .with_list("la");
+        b.handle = Some("REFIDX_b".into());
+        window.messages = vec![a, b];
+        // A reply to `b` is hop two: `b` answered `a`.
+        assert!(forks(&window, "REFIDX_b"), "the handle must resolve");
+        assert!(forks(&window, "ROBOT1.0_b"), "and so must the id");
+        // A reply to `a` is hop one.
+        assert!(!forks(&window, "REFIDX_a"));
     }
 }
