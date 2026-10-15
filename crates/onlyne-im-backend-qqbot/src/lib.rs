@@ -7,6 +7,24 @@
 //! (a standard payload becomes a QQ message body), and [`ws`] (the gateway
 //! protocol); [`api`] is the HTTP client and [`credential`] the credential
 //! encoding. This module is the [`Backend`] that joins them.
+//!
+//! # What QQ will not do
+//!
+//! **A bot cannot react to a message in a group or a c2c chat.** QQ's reaction
+//! API is `PUT /channels/{channel_id}/messages/{message_id}/reactions/{type}/{id}`
+//! and its own page says so in one line: *「目前表情表态仅支持在频道内使用」*
+//! (`wiki/develop/api-v2/server-inter/message/trans/emoji.html`, read
+//! 2026-10-15). There is no group or c2c form of it, and no group event that
+//! reports a user's reaction either — the `MESSAGE_REACTION_ADD` event is a
+//! guild event. The emoji vocabulary exists for the platform as a whole
+//! (`{id: string, type: uint32}`, type 1 = system, 2 = emoji), which is what
+//! makes the channel-only rule easy to misread as a general one.
+//!
+//! So a delivery asking this backend to react has nothing to call. A group
+//! reaction is therefore a platform fact and not a missing code path: an
+//! operator who wants one gets it on a platform that carries reactions
+//! (Feishu does, on the message itself), or they read it as the platform's
+//! limitation rather than this backend's.
 
 pub mod api;
 mod credential;
