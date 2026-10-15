@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use onlyne_im_backend::backend::Backend;
 use onlyne_im_backend::frame::{
     HealthArgs, HelloArgs, ImConversation, LoginArgs, OnboardingKind, OnboardingPrompt, SendArgs,
+    SentArgs,
 };
 use onlyne_im_backend::payload::ImEvent;
 
@@ -161,11 +162,23 @@ impl Backend for TelegramBackend {
         }
     }
 
-    async fn send(&mut self, args: SendArgs) -> Result<()> {
+    async fn send(&mut self, args: SendArgs) -> Result<SentArgs> {
+        let mut message_id = None;
         for call in render::render(&args.conversation, &args.payload) {
-            self.bot.perform(&call).await?;
+            // Telegram answers each send with the message it created, and one
+            // payload may render into several calls: the last id is the one a
+            // reply to this turn should point at.
+            if let Some(id) = self.bot.perform(&call).await? {
+                message_id = Some(id);
+            }
         }
-        Ok(())
+        Ok(SentArgs {
+            conversation: args.conversation,
+            message_id,
+            // One id per message on Telegram: a displayed quote is
+            // `reply_to_message_id`, which the render already sets.
+            ref_handle: None,
+        })
     }
 
     fn health(&self) -> HealthArgs {

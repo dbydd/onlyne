@@ -11,7 +11,7 @@
 use anyhow::{Context, Result, bail};
 use onlyne_im_backend::frame::{
     BackendOp, CoreOp, ImConversation, ListConversationsArgs, LoginArgs, LoginResult, SendArgs,
-    StopArgs,
+    SentArgs, StopArgs,
 };
 use onlyne_wire::frame::{FrameReader, write_frame};
 use std::path::Path;
@@ -72,10 +72,26 @@ impl BackendHost {
         read_op(&mut self.reader, &mut self.stdout).await
     }
 
-    /// Ask the backend to render and send one payload.
-    pub async fn send(&mut self, args: SendArgs) -> Result<()> {
+    /// Ask the backend to render and send one payload, and read what the
+    /// platform made of it.
+    ///
+    /// Waiting is the point: the platform's id for the message is what a later
+    /// reply points at. Shaped like [`BackendHost::login`], which also asks one
+    /// question and reads one answer.
+    pub async fn send(&mut self, args: SendArgs) -> Result<SentArgs> {
         write_frame(&mut self.stdin, &CoreOp::Send(args)).await?;
-        Ok(())
+        loop {
+            match self.next_op().await? {
+                Some(BackendOp::Sent(sent)) => return Ok(sent),
+                Some(BackendOp::Hello(args)) => {
+                    bail!("the backend sent a second hello while sending: {args:?}")
+                }
+                // An event that arrives while the send is in flight is ordinary
+                // traffic; the next read gets the answer.
+                Some(_) => continue,
+                None => bail!("the backend closed before answering the send"),
+            }
+        }
     }
 
     /// Hand the backend a credential and read its verdict.

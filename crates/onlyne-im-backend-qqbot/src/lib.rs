@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use credential::QqCredentials;
 use onlyne_im_backend::backend::Backend;
 use onlyne_im_backend::frame::{
-    HealthArgs, HelloArgs, ImConversation, LoginArgs, OnboardingPrompt, SendArgs,
+    HealthArgs, HelloArgs, ImConversation, LoginArgs, OnboardingPrompt, SendArgs, SentArgs,
 };
 use onlyne_im_backend::payload::ImEvent;
 use std::time::Instant;
@@ -254,7 +254,7 @@ impl Backend for QqBotBackend {
     }
 
     /// Send one payload into one conversation.
-    async fn send(&mut self, args: SendArgs) -> Result<()> {
+    async fn send(&mut self, args: SendArgs) -> Result<SentArgs> {
         let SendArgs {
             conversation,
             payload,
@@ -263,11 +263,19 @@ impl Backend for QqBotBackend {
             Scene::parse(&conversation).context("the send target is not a qqbot conversation")?;
         let body = render::render(&conversation, &payload, self.sequence.next())
             .map_err(anyhow::Error::msg)?;
-        self.api
+        let sent = self
+            .api
             .send_message(id, scene, body)
             .await
             .with_context(|| format!("sending to {conversation}"))?;
-        Ok(())
+        Ok(SentArgs {
+            conversation,
+            message_id: Some(sent.0),
+            // The handle a later reply quotes this message by: QQ returns it as
+            // `ext_info.ref_idx`, and it is exactly what that later message's
+            // `ref_msg_idx` will name.
+            ref_handle: sent.1,
+        })
     }
 
     fn health(&self) -> HealthArgs {

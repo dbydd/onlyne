@@ -6,7 +6,7 @@
 //! stdin/stdout, the same codec every other Onlyne connection uses.
 
 use crate::backend::Backend;
-use crate::frame::{BackendOp, CoreOp, ImConversations, LoginResult};
+use crate::frame::{BackendOp, CoreOp, ImConversations, LoginResult, SentArgs};
 use anyhow::Result;
 use onlyne_wire::frame::{FrameReader, write_frame};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, stdin, stdout};
@@ -100,9 +100,22 @@ where
                     write.flush().await?;
                 }
                 Some(CoreOp::Send(args)) => {
-                    if let Err(error) = backend.send(args).await {
-                        eprintln!("backend send failed: {error:#}");
-                    }
+                    // The answer goes back either way. A caller waiting for an
+                    // id must not wait forever on a send that failed, and an
+                    // absent id is a state the record already handles.
+                    let conversation = args.conversation.clone();
+                    let sent = match backend.send(args).await {
+                        Ok(sent) => sent,
+                        Err(error) => {
+                            eprintln!("backend send failed: {error:#}");
+                            SentArgs {
+                                conversation,
+                                ..SentArgs::default()
+                            }
+                        }
+                    };
+                    write_frame(&mut write, &BackendOp::Sent(sent)).await?;
+                    write.flush().await?;
                 }
                 Some(CoreOp::Stop(_)) | None => break,
             },
@@ -152,9 +165,14 @@ mod tests {
         async fn next_event(&mut self) -> Result<Option<ImEvent>> {
             Ok(self.events.recv().await)
         }
-        async fn send(&mut self, args: SendArgs) -> Result<()> {
+        async fn send(&mut self, args: SendArgs) -> Result<SentArgs> {
+            let conversation = args.conversation.clone();
             let _ = self.sends.send(args).await;
-            Ok(())
+            Ok(SentArgs {
+                conversation,
+                message_id: Some("fake-1".into()),
+                ref_handle: None,
+            })
         }
     }
 

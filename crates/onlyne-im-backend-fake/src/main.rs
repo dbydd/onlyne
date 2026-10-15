@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use onlyne_im_backend::backend::Backend;
 use onlyne_im_backend::frame::{
     HealthArgs, HelloArgs, ImConversation, LoginArgs, OnboardingKind, OnboardingPrompt, SendArgs,
+    SentArgs,
 };
 use onlyne_im_backend::payload::{ImEvent, ImEventKind};
 use std::collections::VecDeque;
@@ -172,9 +173,17 @@ impl Backend for FakeBackend {
         }
     }
 
-    async fn send(&mut self, args: SendArgs) -> Result<()> {
+    async fn send(&mut self, args: SendArgs) -> Result<SentArgs> {
+        // The fake platform names what it stored, so the core's own record
+        // exercises the id path instead of a permanent absence.
+        let conversation = args.conversation.clone();
+        let n = self.sent.len() + 1;
         self.sent.push(args);
-        Ok(())
+        Ok(SentArgs {
+            conversation,
+            message_id: Some(format!("fake-{n}")),
+            ref_handle: None,
+        })
     }
 
     fn health(&self) -> HealthArgs {

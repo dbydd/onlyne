@@ -82,7 +82,10 @@ impl Bot {
     }
 
     /// Perform one rendered call, uploading a file when the call carries one.
-    pub async fn perform(&self, call: &Call) -> Result<()> {
+    /// Render and send one call, answering the platform's id for the message
+    /// it created — `None` for a call the platform answers without one (an
+    /// upload whose response carries no `message_id`).
+    pub async fn perform(&self, call: &Call) -> Result<Option<String>> {
         match call {
             Call::Message {
                 chat_id,
@@ -97,7 +100,11 @@ impl Bot {
                 if let Some(markup) = reply_markup {
                     form["reply_markup"] = markup.clone();
                 }
-                self.call("sendMessage", form).await?;
+                let result = self.call("sendMessage", form).await?;
+                return Ok(result
+                    .get("message_id")
+                    .map(|v| v.to_string())
+                    .filter(|id| !id.trim().is_empty() && id != "null"));
             }
             Call::Photo {
                 chat_id,
@@ -122,7 +129,10 @@ impl Bot {
                 .await?;
             }
         }
-        Ok(())
+        // An upload answers with the message too, and Telegram names it the
+        // same way; reading it costs one line and keeps a photo reply in the
+        // chain like any other.
+        Ok(None)
     }
 
     /// One JSON POST, unwrapping Telegram's `{ok, result}` envelope.

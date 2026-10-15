@@ -205,3 +205,35 @@ fn an_action_event_names_the_button_that_was_pressed() {
     assert_eq!(value["kind"], "action");
     assert_eq!(value["action"], "approve");
 }
+
+#[test]
+fn a_send_answers_with_the_ids_the_platform_handed_back() {
+    // The frame that keeps a gateway's own messages in the reply chain: the
+    // message id a later reply is sent against, and — on a platform with a
+    // second one — the handle a later reply quotes it by.
+    let sent = onlyne_im_backend::frame::SentArgs {
+        conversation: "group:F67E0292".into(),
+        message_id: Some("ROBOT1.0_sohz".into()),
+        ref_handle: Some("REFIDX_4qO5".into()),
+    };
+    let value = serde_json::to_value(BackendOp::Sent(sent.clone())).unwrap();
+    assert_eq!(value["op"], "sent");
+    assert_eq!(value["args"]["message_id"], "ROBOT1.0_sohz");
+    assert_eq!(value["args"]["ref_handle"], "REFIDX_4qO5");
+    let back: BackendOp = serde_json::from_value(value).unwrap();
+    assert_eq!(back, BackendOp::Sent(sent));
+}
+
+#[test]
+fn a_send_a_platform_named_nothing_for_omits_both_ids() {
+    // A failed send still answers, so a caller waiting for an id is not left
+    // waiting; the absent id is a state the record already handles.
+    let sent = onlyne_im_backend::frame::SentArgs {
+        conversation: "-100".into(),
+        ..Default::default()
+    };
+    let value = serde_json::to_value(BackendOp::Sent(sent)).unwrap();
+    assert!(value["args"].get("message_id").is_none(), "{value}");
+    assert!(value["args"].get("ref_handle").is_none(), "{value}");
+    assert_eq!(value["args"]["conversation"], "-100");
+}

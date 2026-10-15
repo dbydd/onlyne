@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use onlyne_im_backend::backend::Backend;
 use onlyne_im_backend::frame::{
     HealthArgs, HelloArgs, ImConversation, LoginArgs, OnboardingKind, OnboardingPrompt, SendArgs,
+    SentArgs,
 };
 use onlyne_im_backend::payload::ImEvent;
 use std::time::Instant;
@@ -255,13 +256,25 @@ impl Backend for FeishuBackend {
         }
     }
 
-    async fn send(&mut self, args: SendArgs) -> Result<()> {
+    async fn send(&mut self, args: SendArgs) -> Result<SentArgs> {
+        let mut message_id = None;
         for request in render::render(&args.conversation, &args.payload) {
-            self.api
-                .post_message(&args.conversation, request.body)
-                .await?;
+            // Feishu answers every create with the message it made; a payload
+            // may render into several calls and the last id is the one a reply
+            // to this turn should point at.
+            message_id = Some(
+                self.api
+                    .post_message(&args.conversation, request.body)
+                    .await?,
+            );
         }
-        Ok(())
+        Ok(SentArgs {
+            conversation: args.conversation,
+            message_id,
+            // One id per message on Feishu: a quote is a new message, not a
+            // handle the platform hands back.
+            ref_handle: None,
+        })
     }
 
     fn health(&self) -> HealthArgs {

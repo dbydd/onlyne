@@ -22,7 +22,7 @@ use crate::trigger::{
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
-use onlyne_im_backend::frame::{BackendOp, SendArgs};
+use onlyne_im_backend::frame::{BackendOp, SendArgs, SentArgs};
 use onlyne_proto::Report;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -32,8 +32,51 @@ use tokio::task::JoinSet;
 /// What one backend task takes from the loop: a payload to render, or the
 /// instruction to stop and take its process with it.
 enum BackendCommand {
-    Send(SendArgs),
+    Send(SendRequest),
     Stop,
+}
+
+/// One outbound payload in flight: the frame, and the channel the platform's
+/// answer comes back on.
+///
+/// The answer is not optional. A send whose id is dropped leaves the gateway's
+/// own half of a conversation out of the reply chain, so the row is written
+/// where the id exists rather than where the reply was composed.
+struct SendRequest {
+    args: SendArgs,
+    answer: tokio::sync::oneshot::Sender<SentArgs>,
+}
+
+/// Record one outbound reply now that the platform has named it.
+///
+/// The inbound half's rule, applied to the outbound side
+/// (`crate::chain::record_inbound`): the row goes into the role's aggregate
+/// always, and into a discussion file of its own when this reply is the one
+/// that opened the branch. What the send adds is the two ids a platform hands
+/// back — the message's own id, and on a platform with a second one the handle
+/// a later reply quotes it by. Without them the chain of a gateway's own
+/// messages has no links, and no branch can ever form.
+fn record_outbound(gateway: &Gateway, job: &RenderJob, sent: &SentArgs) {
+    let history = crate::history::History::new(&gateway.root);
+    let window = crate::chain::window_of(&history, &job.chat_key);
+    let mut row = crate::history::HistoryEntry::outbound(
+        &job.chat_key,
+        &job.gateway,
+        job.payload.reply_to.as_deref(),
+    );
+    row.conversation = Some(job.conversation.clone());
+    row.text = Some(job.payload.text.clone());
+    row.platform_message = sent.message_id.clone();
+    row.ref_handle = sent.ref_handle.clone();
+    if crate::chain::record_reply(&history, &mut row, &window, job.payload.reply_to.as_deref()) {
+        tracing::info!(
+            role = %gateway.role,
+            chat_key = %job.chat_key,
+            list = row.list.as_deref().unwrap_or_default(),
+            answered = job.payload.reply_to.as_deref().unwrap_or_default(),
+            "a reply opened a discussion"
+        );
+    }
 }
 
 /// One event, tagged with the backend that reported it.
@@ -188,8 +231,23 @@ pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
                     break;
                 };
                 match senders.get(&job.gateway) {
-                    Some(sender) if sender.send(BackendCommand::Send(job.send_args())).await.is_ok() => {}
-                    _ => tracing::warn!(
+                    Some(sender) => {
+                        // The row is written here rather than where the reply
+                        // was composed, because only here is the platform's id
+                        // for the message known — and that id is what a later
+                        // reply points at (`docs/v2.4-REPLY-THREADS.md` §6).
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let request = BackendCommand::Send(SendRequest {
+                            args: job.send_args(),
+                            answer: tx,
+                        });
+                        if sender.send(request).await.is_ok()
+                            && let Ok(sent) = rx.await
+                        {
+                            record_outbound(&gateway, &job, &sent);
+                        }
+                    }
+                    None => tracing::warn!(
                         gateway = %job.gateway,
                         "no backend is running to render this delivery; it stays unacked"
                     ),
@@ -287,7 +345,21 @@ async fn serve_backend(
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                Some(BackendCommand::Send(args)) => host.send(args).await?,
+                Some(BackendCommand::Send(SendRequest { args, answer })) => {
+                    // The send and the id it earns are one round trip, because
+                    // the id is what a later reply points at.
+                    let sent = match host.send(args).await {
+                        Ok(sent) => sent,
+                        Err(error) => {
+                            // The caller records the row either way; a send
+                            // that failed leaves the id absent, which the
+                            // record already handles.
+                            tracing::warn!(gateway = %gateway, error = %error, "a send failed");
+                            SentArgs::default()
+                        }
+                    };
+                    let _ = answer.send(sent);
+                }
                 Some(BackendCommand::Stop) | None => {
                     let _ = host.stop("gateway shutdown").await;
                     return Ok(());
@@ -434,6 +506,16 @@ async fn handle_backend_op(
         // own backend process.
         BackendOp::Login(result) => {
             tracing::debug!(gateway = %event.gateway, ok = result.ok, "an unsolicited login answer")
+        }
+        // A send's answer is read on the send path itself, which is what needs
+        // the id; one that reaches here arrived with no caller waiting.
+        BackendOp::Sent(sent) => {
+            tracing::debug!(
+                gateway = %event.gateway,
+                conversation = %sent.conversation,
+                message_id = sent.message_id.as_deref().unwrap_or("(none)"),
+                "a send answered with no caller waiting"
+            );
         }
         BackendOp::Conversations(_) => {
             tracing::debug!(gateway = %event.gateway, "an unsolicited conversation listing")

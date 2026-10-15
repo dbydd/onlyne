@@ -4,7 +4,7 @@
 //! "what happened on the platform" and "send this standard payload" — and knows
 //! nothing about Onlyne roles, sessions, or routing.
 
-use crate::frame::{HealthArgs, HelloArgs, ImConversation, LoginArgs, SendArgs};
+use crate::frame::{HealthArgs, HelloArgs, ImConversation, LoginArgs, SendArgs, SentArgs};
 use crate::payload::ImEvent;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -30,7 +30,12 @@ pub trait Backend: Send + Sync {
     async fn next_event(&mut self) -> Result<Option<ImEvent>>;
 
     /// Render and send one standard payload into a conversation.
-    async fn send(&mut self, args: SendArgs) -> Result<()>;
+    /// Render and send one payload, answering what the platform made of it.
+    ///
+    /// The id is not decoration: it is the only thing that lets a later reply
+    /// point at this message, so a backend that drops it removes the gateway's
+    /// own half of a conversation from the reply chain.
+    async fn send(&mut self, args: SendArgs) -> Result<SentArgs>;
 
     /// Accept one credential and authenticate with it, answering the identity
     /// the platform reports back (a bot username, an app name) when it names

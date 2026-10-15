@@ -317,9 +317,8 @@ impl RoleLink {
             return Ok(());
         };
         let entry = &entry;
-        // The role's record, and the fork rule the chain shape needs: a reply
-        // that answers a message which itself answered something opens a
-        // discussion file of its own (`docs/v2.4-REPLY-THREADS.md` §5, §6).
+        // The window is what a reply target resolves against, and what the
+        // recorder reads later to decide whether this reply opens a discussion.
         let history = crate::history::History::new(&self.gateway.root);
         let window = crate::chain::window_of(&history, &entry.chat_key);
         // A prefix the window cannot place is a refusal, not a guess: the
@@ -360,23 +359,6 @@ impl RoleLink {
                 self.refuse(link, delivery, reason).await?;
                 return Ok(());
             }
-        }
-        let mut row = crate::history::HistoryEntry::outbound(
-            &entry.chat_key,
-            &entry.gateway,
-            reply_to.as_deref(),
-        );
-        row.conversation = Some(entry.conversation.clone());
-        row.text = Some(rest.clone());
-        let forked = crate::chain::record_reply(&history, &mut row, &window, reply_to.as_deref());
-        if forked {
-            tracing::info!(
-                role = %self.gateway.role,
-                chat_key = %entry.chat_key,
-                list = row.list.as_deref().unwrap_or_default(),
-                answered = reply_to.as_deref().unwrap_or_default(),
-                "a reply opened a discussion"
-            );
         }
         // The handle a platform needs to *display* the quote, when it hands
         // out a second id for that: QQ takes `msg_id` for the passive reply

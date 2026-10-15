@@ -24,6 +24,8 @@ pub enum BackendOp {
     Event(ImEvent),
     /// Report the backend's own health.
     Health(HealthArgs),
+    /// The answer to a [`CoreOp::Send`]: what the platform made of it.
+    Sent(SentArgs),
 }
 
 /// A core-to-backend frame.
@@ -38,6 +40,30 @@ pub enum CoreOp {
     ListConversations(ListConversationsArgs),
     /// Stop the backend; the process exits after this.
     Stop(StopArgs),
+}
+
+/// What a platform said about one send.
+///
+/// A send is not finished when the backend hands it over: the platform answers
+/// with an id, and that id is the only thing that lets a later reply point at
+/// this message. Without it a gateway's own messages carry no links, so an
+/// exchange can never reach the second hop the branch rule counts — which is
+/// exactly what a live QQ group showed (`chain::forks`, 2026-10-15).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct SentArgs {
+    /// The conversation the payload went to, echoed so the answer names the
+    /// row it belongs to without the caller holding state across the send.
+    #[serde(default)]
+    pub conversation: String,
+    /// The platform's id for the message it accepted, when it answered one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// The platform's handle for quoting this message back, when that is a
+    /// different id (QQ: `ROBOT1.0_…` in `message_id`, `REFIDX_…` here, and it
+    /// is what a later reply's `ref_msg_idx` will name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_handle: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

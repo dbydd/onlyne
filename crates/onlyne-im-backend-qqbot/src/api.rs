@@ -202,26 +202,34 @@ impl QqApi {
         serde_json::from_str(&text).with_context(|| format!("{path} answered no JSON"))
     }
 
-    /// Send one message body into one conversation, returning the platform
-    /// message id the response names (QQ's answer shape varies by scene).
+    /// Send one message body into one conversation, answering the platform's
+    /// ids for it: the message id (QQ's answer shape varies by scene) and, when
+    /// the platform names one, the handle a later reply quotes it by.
     pub async fn send_message(
         &mut self,
         conversation: &str,
         scene: Scene,
         body: Value,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<String>)> {
         let token = self.access_token().await?;
         let response = self
             .post_api(&token, &scene.endpoint(conversation), body)
             .await?;
-        Ok(response
+        let ref_handle = response
+            .pointer("/ext_info/ref_idx")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let id = response
             .get("id")
             .or_else(|| response.get("msg_id"))
             .or_else(|| response.get("message_id"))
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("qqbot-out")
-            .to_owned())
+            .to_owned();
+        Ok((id, ref_handle))
     }
 
     /// Connect to the event gateway and announce the app: the `IDENTIFY`
