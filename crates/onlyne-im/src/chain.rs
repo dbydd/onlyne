@@ -169,7 +169,6 @@ pub fn window_of(history: &crate::history::History, chat_key: &str) -> List {
         message.list = row.list.clone();
         message.text = row.text.clone();
         message.handle = row.ref_handle.clone();
-        message.at = row.at.clone();
         list.messages.push(message);
     }
     list

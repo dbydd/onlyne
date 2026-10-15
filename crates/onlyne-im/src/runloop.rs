@@ -29,11 +29,76 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 
+/// The fault a send the platform refused is recorded under.
+///
+/// The gateway keeps no clock for any platform's rules: a passive reply that
+/// arrived too late, a permission that is missing, a message id the platform
+/// has forgotten — the platform decides, and this names its answer where an
+/// operator reads it. A gateway that mirrored the platform's window instead
+/// would be wrong the day the platform changed it, and would refuse sends the
+/// platform would have taken.
+pub const SEND_FAILED_KIND: &str = "im_send_failed";
+
 /// What one backend task takes from the loop: a payload to render, or the
 /// instruction to stop and take its process with it.
+/// Which backend this task is, and where it reports.
+struct BackendIdentity {
+    /// The `[[im.backend]]` row's id: what an event names to reach the
+    /// conversation it belongs to, and what the log lines call the backend. It
+    /// is *not* the role — the role is one for the whole gateway and carries
+    /// every backend at once.
+    gateway_id: String,
+    /// The gateway root itself: the record of a sent message is written here.
+    gateway: Arc<Gateway>,
+    /// Where a send the platform refused is reported on the role's behalf.
+    reporter: Option<mpsc::Sender<Report>>,
+}
+
 enum BackendCommand {
     Send(RenderJob),
     Stop,
+}
+
+/// Record a send the platform refused, with the platform's own words.
+///
+/// The gateway's job here is to carry the answer, not to anticipate it: it has
+/// no clock, no permission table, and no list of what a platform will take. It
+/// tried, the platform answered, and this is that answer — a sentence an
+/// operator reads next to the conversation it belongs to.
+async fn report_send_failure(
+    reporter: &Option<mpsc::Sender<Report>>,
+    job: &RenderJob,
+    error: &anyhow::Error,
+) {
+    let reason = format!("{error:#}");
+    tracing::warn!(
+        gateway = %job.gateway,
+        conversation = %job.conversation,
+        reason,
+        "{SEND_FAILED_KIND}"
+    );
+    let Some(reporter) = reporter else {
+        tracing::warn!("no link was left to carry this {SEND_FAILED_KIND} fault");
+        return;
+    };
+    let report = Report::Fault {
+        task_id: None,
+        session_id: None,
+        generation: None,
+        seq: None,
+        kind: SEND_FAILED_KIND.to_string(),
+        reason,
+        desired: None,
+        observed: Some(serde_json::json!({
+            "gateway": job.gateway,
+            "conversation": job.conversation,
+            "chat_key": job.chat_key,
+            "reply_to": job.payload.reply_to,
+        })),
+    };
+    if reporter.send(report).await.is_err() {
+        tracing::warn!("the link that would carry this fault is gone");
+    }
 }
 
 /// Record one outbound reply now that the platform has named it.
@@ -101,6 +166,9 @@ pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
     // out. A backend that dies ends its own task and is reported; the others and
     // the links keep running, because a lost bot is an operator's to fix.
     let (events_tx, mut events_rx) = mpsc::channel::<BackendEvent>(64);
+    // The role's fault channel, made before the backends because a backend
+    // reports on the role's behalf the moment it refuses a send.
+    let (report_tx, report_rx) = mpsc::channel::<Report>(8);
     let mut backends: JoinSet<(String, Result<()>)> = JoinSet::new();
     let mut senders: BTreeMap<String, mpsc::Sender<BackendCommand>> = BTreeMap::new();
     for entry in &gateway.backends {
@@ -114,14 +182,18 @@ pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
         let platforms = Arc::clone(&platforms);
         let gateway_id = entry.gateway.clone();
         let backend_gateway = Arc::clone(&gateway);
+        let role_reports = report_tx.clone();
         let mut shutdown = shutdown_rx.clone();
         backends.spawn(async move {
             (
                 gateway_id.clone(),
                 serve_backend(
                     host,
-                    gateway_id.clone(),
-                    backend_gateway,
+                    BackendIdentity {
+                        gateway_id: gateway_id.clone(),
+                        gateway: backend_gateway,
+                        reporter: Some(role_reports.clone()),
+                    },
                     command_rx,
                     events,
                     platforms,
@@ -144,7 +216,6 @@ pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
     let link = RoleLink::new(gateway.as_ref().clone());
     let rx = shutdown_rx.clone();
     let tx = renders_tx.clone();
-    let (report_tx, report_rx) = mpsc::channel::<Report>(8);
     reporters.insert(gateway.role.clone(), report_tx);
     let role = gateway.role.clone();
     links.spawn(async move { (role, link.run(tx, report_rx, rx).await) });
@@ -287,18 +358,17 @@ pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
 /// on shutdown.
 async fn serve_backend(
     mut host: BackendHost,
-    // The `[[im.backend]]` row's id: what an event names to reach the
-    // conversation it belongs to, and what the log lines below call the
-    // backend. It is *not* the role — the role is one for the whole gateway
-    // and carries every backend at once.
-    gateway_id: String,
-    // The gateway root itself: the record of a sent message is written here.
-    gateway: Arc<Gateway>,
+    identity: BackendIdentity,
     mut commands: mpsc::Receiver<BackendCommand>,
     events: mpsc::Sender<BackendEvent>,
     platforms: Arc<Mutex<BTreeMap<String, String>>>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<()> {
+    let BackendIdentity {
+        gateway_id,
+        gateway,
+        reporter,
+    } = identity;
     // The hello is the first frame a backend must send; reading it here means a
     // backend that speaks another protocol is refused at once rather than on its
     // first event.
@@ -340,7 +410,9 @@ async fn serve_backend(
                     let sent = match host.send(job.send_args()).await {
                         Ok(sent) => sent,
                         Err(error) => {
-                            tracing::warn!(gateway = %gateway_id, error = %error, "a send failed");
+                            // The platform's own words, verbatim: it is the
+                            // side that knows why it refused.
+                            report_send_failure(&reporter, &job, &error).await;
                             SentArgs::default()
                         }
                     };

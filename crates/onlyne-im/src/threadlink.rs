@@ -50,23 +50,6 @@ pub enum LinkShape {
 /// | `feishu` | `FlatList` | a reply group is flat, and a message in it may answer any earlier one |
 /// | `telegram` | `Flat` | `reply_to_message_id` exists but carries no list; the gateway keeps its own |
 /// | `fake` | `Flat` | nothing to carry |
-/// How long a platform accepts a passive reply, measured from the message it
-/// answers.
-///
-/// QQ is the one that has a clock: `40034005 回复消息msg_id已过期` is what a
-/// passive reply past five minutes gets, and the operator then has to send from
-/// the platform's own client or wait for the next message. An explicit window
-/// makes the refusal a sentence the operator reads here rather than a platform
-/// error against a row that already left the queue.
-///
-/// A platform without a window answers `None` and nothing is checked.
-pub fn passive_window(platform: &str) -> Option<std::time::Duration> {
-    match platform {
-        "qqbot" => Some(std::time::Duration::from_secs(5 * 60)),
-        _ => None,
-    }
-}
-
 pub fn shape_of(platform: &str) -> LinkShape {
     match platform {
         "qqbot" => LinkShape::Chain,
@@ -224,16 +207,6 @@ mod tests {
         let back = Message::root("m3").answering("m1").with_list(m1.list_id());
         assert!(back.same_list_as(&m2));
         assert_eq!(back.list_id(), "m0");
-    }
-
-    #[test]
-    fn only_the_platform_with_a_clock_has_a_window() {
-        assert_eq!(
-            passive_window("qqbot"),
-            Some(std::time::Duration::from_secs(300))
-        );
-        assert_eq!(passive_window("feishu"), None);
-        assert_eq!(passive_window("telegram"), None);
     }
 
     #[test]

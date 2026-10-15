@@ -330,36 +330,6 @@ impl RoleLink {
                 return Ok(());
             }
         };
-        // A platform with a clock refuses a late passive reply, and it is
-        // better refused here with a sentence than by the platform against a
-        // row that has already left the queue (QQ: `40034005 回复消息msg_id
-        // 已过期`, five minutes from the message answered).
-        if let (Some(target), Some(limit)) = (
-            reply_to.as_deref(),
-            crate::threadlink::passive_window(&entry.gateway),
-        ) && let Some(sent) = window
-            .messages
-            .iter()
-            .find(|m| m.id == target)
-            .map(|m| m.at.clone())
-            && let Ok(sent) = chrono::DateTime::parse_from_rfc3339(&sent)
-        {
-            let age = chrono::Utc::now().signed_duration_since(sent.with_timezone(&chrono::Utc));
-            if let Ok(limit) = chrono::Duration::from_std(limit)
-                && age > limit
-            {
-                let reason = format!(
-                    "the message this reply answers is {} minutes old, and {} accepts a \
-                     passive reply only within {} minutes; send a new message on the platform \
-                     and answer that",
-                    age.num_minutes(),
-                    entry.gateway,
-                    limit.num_minutes()
-                );
-                self.refuse(link, delivery, reason).await?;
-                return Ok(());
-            }
-        }
         // The handle a platform needs to *display* the quote, when it hands
         // out a second id for that: QQ takes `msg_id` for the passive reply
         // and `message_reference` for the rendered quote, and only the second

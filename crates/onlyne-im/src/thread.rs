@@ -131,8 +131,6 @@ pub struct Message {
     /// that carried the message). None on a platform with one id per message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
-    /// RFC 3339 UTC.
-    pub at: String,
 }
 
 impl Message {
@@ -146,7 +144,6 @@ impl Message {
             list: None,
             metadata: Metadata::default(),
             handle: None,
-            at: String::new(),
         }
     }
 
@@ -360,7 +357,6 @@ mod tests {
         if let Some(parent) = parent {
             m = m.answering(parent);
         }
-        m.at = "2026-10-14T00:00:00.000Z".into();
         m
     }
 
