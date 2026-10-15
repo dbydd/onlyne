@@ -16,10 +16,6 @@ struct Cli {
     /// the credential file, then the environment.
     #[arg(long)]
     token: Option<String>,
-    /// The API root, overridable for a fake in tests. Defaults to the real
-    /// one; `--sandbox` is the documented shorthand for it.
-    #[arg(long)]
-    api_base: Option<String>,
     /// Talk to the sandbox environment.
     #[arg(long)]
     sandbox: bool,
@@ -35,14 +31,13 @@ async fn main() {
     } else {
         onlyne_im_backend_qqbot::Endpoint::Production
     };
-    let code =
-        match onlyne_im_backend_qqbot::run(cli.gateway, cli.token, cli.api_base, endpoint).await {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("onlyne-im-backend-qqbot: {error:#}");
-                1
-            }
-        };
+    let code = match onlyne_im_backend_qqbot::run(cli.gateway, cli.token, endpoint).await {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("onlyne-im-backend-qqbot: {error:#}");
+            1
+        }
+    };
     std::process::exit(code);
 }
 

@@ -403,34 +403,15 @@ impl QqBotBackend {
 }
 
 /// Build the backend from the environment and run the standard protocol loop.
-pub async fn run(
-    gateway: String,
-    token: Option<String>,
-    api_base: Option<String>,
-    endpoint: Endpoint,
-) -> Result<()> {
-    let mut backend = QqBotBackend::from_env(token, gateway, endpoint);
-    if let Some(base) = api_base {
-        // A test fake names its own root; the endpoint enum only knows the
-        // two documented ones, so an explicit base overrides both URLs.
-        backend.api = QqApi::new(
-            credential_from(&backend).unwrap_or_else(|| {
-                QqCredentials::parse("unconfigured:unconfigured").expect("literal pair")
-            }),
-            Endpoint::Production,
-        );
-        let _ = base;
-    }
+///
+/// The event-gateway address is the one thing an override is offered for
+/// ([`WS_URL_ENV`]), because a refused connection is what the reconnect path
+/// is tested against. The **API** root has no override: pointing it somewhere
+/// other than QQ — which the endpoint enum's `--sandbox` bracket already
+/// spans, with no gap in between — is what an `--api_base` flag would be for,
+/// and QQ has no second API root to use it with. The Telegram backend carries
+/// one because a local fake answers there; nothing does here.
+pub async fn run(gateway: String, token: Option<String>, endpoint: Endpoint) -> Result<()> {
+    let backend = QqBotBackend::from_env(token, gateway, endpoint);
     onlyne_im_backend::serve(backend).await
-}
-
-fn credential_from(_backend: &QqBotBackend) -> Option<QqCredentials> {
-    // The backend holds the parsed credential inside its api; a rebuild for
-    // a custom base re-parses from the same environment the constructor used.
-    // Same sources as `from_env`, in the same order: reading only `APP_ID_ENV`
-    // here would make an operator who exports the pair correct for the real
-    // endpoint and unauthenticated against a custom base.
-    let loaded =
-        onlyne_im_backend::credential::load_two(None, CREDENTIAL_ENV, APP_ID_ENV, APP_SECRET_ENV);
-    QqCredentials::parse(&loaded.value).ok()
 }
