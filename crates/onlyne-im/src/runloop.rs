@@ -68,9 +68,8 @@ enum BackendCommand {
 async fn report_send_failure(
     reporter: &Option<mpsc::Sender<Report>>,
     job: &RenderJob,
-    error: &anyhow::Error,
+    reason: &str,
 ) {
-    let reason = format!("{error:#}");
     tracing::warn!(
         gateway = %job.gateway,
         conversation = %job.conversation,
@@ -87,7 +86,7 @@ async fn report_send_failure(
         generation: None,
         seq: None,
         kind: SEND_FAILED_KIND.to_string(),
-        reason,
+        reason: reason.to_string(),
         desired: None,
         observed: Some(serde_json::json!({
             "gateway": job.gateway,
@@ -409,13 +408,17 @@ async fn serve_backend(
                     // absent, which the record already handles.
                     let sent = match host.send(job.send_args()).await {
                         Ok(sent) => sent,
-                        Err(error) => {
-                            // The platform's own words, verbatim: it is the
-                            // side that knows why it refused.
-                            report_send_failure(&reporter, &job, &error).await;
-                            SentArgs::default()
-                        }
+                        // The backend itself is gone or spoke past the
+                        // protocol. Also a send that did not happen, and the
+                        // transport's words are what there is to say about it.
+                        Err(error) => SentArgs {
+                            error: Some(format!("{error:#}")),
+                            ..SentArgs::default()
+                        },
                     };
+                    if let Some(reason) = sent.error.as_deref() {
+                        report_send_failure(&reporter, &job, reason).await;
+                    }
                     record_outbound(&gateway, &job, &sent);
                 }
                 Some(BackendCommand::Stop) | None => {

@@ -64,6 +64,17 @@ pub struct SentArgs {
     /// is what a later reply's `ref_msg_idx` will name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ref_handle: Option<String>,
+    /// Why the platform would not take it, in the platform's own words, when
+    /// it would not.
+    ///
+    /// In the answer rather than on the backend's stderr: a refusal the core
+    /// cannot read is a refusal nobody can act on, and the core is the side
+    /// that records what happened to a conversation. The trial-and-error
+    /// shape is deliberate — a platform's rules (a passive reply's window, a
+    /// permission, a message id it has forgotten) are the platform's, and the
+    /// gateway carries its answer rather than predicting it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

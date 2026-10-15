@@ -107,9 +107,13 @@ where
                     let sent = match backend.send(args).await {
                         Ok(sent) => sent,
                         Err(error) => {
-                            eprintln!("backend send failed: {error:#}");
+                            // The platform's answer travels in the frame, not
+                            // only on this process's stderr: the gateway is the
+                            // side that records what happened, and it cannot
+                            // read a log it does not own.
                             SentArgs {
                                 conversation,
+                                error: Some(format!("{error:#}")),
                                 ..SentArgs::default()
                             }
                         }
@@ -172,6 +176,7 @@ mod tests {
                 conversation,
                 message_id: Some("fake-1".into()),
                 ref_handle: None,
+                error: None,
             })
         }
     }

@@ -274,6 +274,7 @@ impl Backend for FeishuBackend {
             // One id per message on Feishu: a quote is a new message, not a
             // handle the platform hands back.
             ref_handle: None,
+            error: None,
         })
     }
 

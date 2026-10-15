@@ -275,6 +275,7 @@ impl Backend for QqBotBackend {
             // `ext_info.ref_idx`, and it is exactly what that later message's
             // `ref_msg_idx` will name.
             ref_handle: sent.1,
+            error: None,
         })
     }
 

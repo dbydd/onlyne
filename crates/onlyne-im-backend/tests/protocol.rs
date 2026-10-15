@@ -215,6 +215,7 @@ fn a_send_answers_with_the_ids_the_platform_handed_back() {
         conversation: "group:F67E0292".into(),
         message_id: Some("ROBOT1.0_sohz".into()),
         ref_handle: Some("REFIDX_4qO5".into()),
+        error: None,
     };
     let value = serde_json::to_value(BackendOp::Sent(sent.clone())).unwrap();
     assert_eq!(value["op"], "sent");
@@ -236,4 +237,28 @@ fn a_send_a_platform_named_nothing_for_omits_both_ids() {
     assert!(value["args"].get("message_id").is_none(), "{value}");
     assert!(value["args"].get("ref_handle").is_none(), "{value}");
     assert_eq!(value["args"]["conversation"], "-100");
+}
+
+/// A refusal travels in the answer, not only on the backend's stderr: the
+/// gateway is the side that records what happened to a conversation, and it
+/// cannot read a log it does not own.
+#[test]
+fn a_refused_send_answers_with_the_platforms_own_words() {
+    let sent = onlyne_im_backend::frame::SentArgs {
+        conversation: "group:F67E0292".into(),
+        error: Some(
+            "/v2/groups/…/messages refused (400 Bad Request): {\"message\":\"回复消息msg_id已过期\",\"code\":40034005}"
+                .into(),
+        ),
+        ..Default::default()
+    };
+    let value = serde_json::to_value(BackendOp::Sent(sent)).unwrap();
+    assert!(
+        value["args"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("40034005"),
+        "{value}"
+    );
+    assert!(value["args"].get("message_id").is_none(), "{value}");
 }

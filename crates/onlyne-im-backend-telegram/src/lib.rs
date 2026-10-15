@@ -178,6 +178,7 @@ impl Backend for TelegramBackend {
             // One id per message on Telegram: a displayed quote is
             // `reply_to_message_id`, which the render already sets.
             ref_handle: None,
+            error: None,
         })
     }
 

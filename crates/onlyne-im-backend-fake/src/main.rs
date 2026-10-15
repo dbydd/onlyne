@@ -183,6 +183,7 @@ impl Backend for FakeBackend {
             conversation,
             message_id: Some(format!("fake-{n}")),
             ref_handle: None,
+            error: None,
         })
     }
 
