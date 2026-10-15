@@ -21,6 +21,16 @@
 /// The longest body a key may be, between `chat:` and the closing bracket.
 const MAX_KEY_LEN: usize = 64;
 
+/// The longest platform id a `<msg:…>` or `<sticker:…>` marker may carry.
+///
+/// Not the chat key's bound: a key is minted here (32 hex characters) and a
+/// bound on it is a shape check, but a platform id is whatever the platform
+/// says. QQ's message ids are around 170 characters and its quote handles are
+/// longer still, so a 64-character bound silently demotes a real `<msg:…>`
+/// line to ordinary body text and the reader sees the id in the message.
+/// Measured 2026-10-15 on a live group.
+const MAX_ID_LEN: usize = 512;
+
 /// One freshly minted chat key: 32 hex characters, no dashes.
 pub fn mint() -> String {
     uuid::Uuid::new_v4().simple().to_string()
@@ -130,22 +140,22 @@ pub fn extract_markers(body: &str) -> Result<Markers, Misplaced> {
         key,
         ..Markers::default()
     };
-    for (slot, prefix) in [
-        (&mut markers.reply_to, "<msg:"),
-        (&mut markers.sticker, "<sticker:"),
+    for (slot, prefix, max) in [
+        (&mut markers.reply_to, "<msg:", MAX_ID_LEN),
+        (&mut markers.sticker, "<sticker:", MAX_ID_LEN),
     ] {
         if slot.is_some() {
             continue;
         }
         let Some(line) = rest.split_once('\n').map(|(line, _)| line) else {
             // The header ran to the end of the body with no trailing newline.
-            if let Some(value) = unwrap_prefixed(rest, prefix) {
+            if let Some(value) = unwrap_prefixed(rest, prefix, max) {
                 *slot = Some(value);
                 rest = "";
             }
             continue;
         };
-        if let Some(value) = unwrap_prefixed(line, prefix) {
+        if let Some(value) = unwrap_prefixed(line, prefix, max) {
             *slot = Some(value);
             rest = rest.split_once('\n').map(|(_, tail)| tail).unwrap_or("");
         }
@@ -164,10 +174,10 @@ pub fn extract_with_reply(body: &str) -> Result<(String, Option<String>, String)
 }
 
 /// The value inside one `<prefix:…>` wrapper, if the line is exactly that.
-fn unwrap_prefixed(line: &str, prefix: &str) -> Option<String> {
+fn unwrap_prefixed(line: &str, prefix: &str, max: usize) -> Option<String> {
     let inner = line.strip_prefix(prefix)?.strip_suffix('>')?;
     let inner = inner.trim();
-    (!inner.is_empty() && inner.len() <= MAX_KEY_LEN).then(|| inner.to_string())
+    (!inner.is_empty() && inner.len() <= max).then(|| inner.to_string())
 }
 
 /// Why [`extract`] refused: the body carries a key-shaped token, but not as
@@ -305,6 +315,28 @@ mod tests {
         let markers = extract_markers(&body).expect("markers");
         assert!(markers.sticker.is_none());
         assert_eq!(markers.rest, "<sticker:>\n\nhi");
+    }
+
+    #[test]
+    fn a_platform_id_far_longer_than_a_chat_key_is_still_a_marker() {
+        // The live QQ message id, at its real length: a bound meant for a
+        // minted key demoted this line to body text and the group saw it.
+        let key = mint();
+        let id = format!("ROBOT1.0_{}", "A".repeat(160));
+        let body = format!("<chat:{key}>\n<msg:{id}>\n\n正文");
+        let markers = extract_markers(&body).expect("markers");
+        assert_eq!(markers.reply_to.as_deref(), Some(id.as_str()));
+        assert_eq!(markers.rest, "\n正文", "the marker line must not leak");
+    }
+
+    #[test]
+    fn a_marker_longer_than_any_real_id_stays_in_the_body() {
+        let key = mint();
+        let absurd = "A".repeat(MAX_ID_LEN + 1);
+        let body = format!("<chat:{key}>\n<msg:{absurd}>\n\nhi");
+        let markers = extract_markers(&body).expect("markers");
+        assert!(markers.reply_to.is_none());
+        assert!(markers.rest.starts_with("<msg:"), "{}", markers.rest);
     }
 
     #[test]
