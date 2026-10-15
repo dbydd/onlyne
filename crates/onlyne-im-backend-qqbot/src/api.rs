@@ -229,6 +229,16 @@ impl QqApi {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("qqbot-out")
             .to_owned();
+        // The handle is what a later reply quotes this message by, so its
+        // absence is worth one line: a platform that answers in a shape nobody
+        // has seen yet is read from the log rather than guessed at.
+        if ref_handle.is_none() {
+            tracing::debug!(
+                conversation,
+                response = %response,
+                "qqbot named no quote handle (`ext_info.ref_idx`) for this send"
+            );
+        }
         Ok((id, ref_handle))
     }
 
