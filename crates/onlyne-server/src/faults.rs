@@ -473,6 +473,64 @@ fn retire_task_resource(state: &Arc<State>, task_id: &str, reason: &str) {
     }
 }
 
+/// Settle what an operator's control word settles, before the command that
+/// stops the work is issued.
+///
+/// `cancel` and `recycle` are the operator saying the task is over. The client
+/// is the side that stops the process, but the *ledger* is the server's, and
+/// leaving it open was an incident: an operator cancelled nine tasks, the rows
+/// stayed `in_flight`, the sessions kept writing files, and the next server
+/// start re-delivered every one of them — the cancellation undone by a restart
+/// (`docs/v2.5-CANCEL-NOT-ENFORCING.md`). A terminal state is not something a
+/// client's cooperation should be able to withhold.
+///
+/// So the word settles here, at the one place both control entry points pass
+/// through, and the command goes out **after**: [`settle_task`] rejects the
+/// task's outstanding rows, and the row carrying that command is created after
+/// this call, so it survives to reach the process it stops.
+///
+/// The reason is the fixed word the client writes for the same event
+/// (`ControlWord::Cancel.refusal()`), so a row settled on either side reads the
+/// same. The operator's own `--reason` rides on the control row's body, which
+/// is where a reader looks for their words.
+pub(crate) fn settle_controlled(state: &Arc<State>, op: &onlyne_proto::ControlOp) {
+    let (task_id, outcome, word) = match op {
+        onlyne_proto::ControlOp::Cancel { task_id, .. } => {
+            (task_id.as_str(), Outcome::Cancelled, "operator cancel")
+        }
+        onlyne_proto::ControlOp::Recycle { task_id, .. } => {
+            (task_id.as_str(), Outcome::Failed, "operator recycle")
+        }
+        // A probe, a snapshot and a focus are questions and a window switch.
+        // None of them ends anything.
+        _ => return,
+    };
+    match settle_task(state, task_id, outcome, word) {
+        Ok(Some(settlement)) => tracing::info!(
+            task = %task_id,
+            ?outcome,
+            seq_before = settlement.seq_before,
+            seq_after = settlement.seq_after,
+            "a control word settled the task it named"
+        ),
+        // No mirror row, or one that already carries the verdict: either way
+        // the operator's word has nothing left to write.
+        Ok(None) => tracing::info!(
+            task = %task_id,
+            ?outcome,
+            "a control word found nothing to settle; the verdict already stands"
+        ),
+        Err(error) => tracing::warn!(
+            task = %task_id,
+            error = %format!("{error:#}"),
+            "a control word could not settle its task; the command still goes out"
+        ),
+    }
+    if let Err(error) = transition_task_faults(state, task_id, "closed", word) {
+        tracing::warn!(task = %task_id, error = %error, "the task's open faults did not close");
+    }
+}
+
 fn unknown_task(task_id: &str) -> RelayReject {
     RelayReject::new(
         ErrorCode::Invalid,

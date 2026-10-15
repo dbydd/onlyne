@@ -2952,6 +2952,205 @@ max_sessions = 2"#,
     println!("✓ Scenario 21: a completion behind a verdict is answered with it");
 }
 
+/// Scenario 23: a control word settles the task, and a restart does not revive it.
+///
+/// The incident this guards (`docs/v2.5-CANCEL-NOT-ENFORCING.md`): an operator
+/// cancelled nine tasks, the rows stayed in flight, the sessions kept working,
+/// and the next server start re-delivered every one of them — the cancellation
+/// undone by a restart. The server settled nothing on a control word; it only
+/// forwarded the command, so the terminal state depended on the client
+/// answering, and the client is not always there to answer.
+///
+/// The client is killed before the word, so nothing on that side can settle
+/// anything: the only party left that can end this task is the server. That is
+/// the discriminating shape — with a live client the plugin answers and either
+/// build looks right, which is why the incident read as a platform gap.
+///
+/// Asserted, in the order the ledger records them:
+///
+/// 1. the task's delivery is in flight before the word (a row that was never
+///    delivered proves nothing about a restart re-delivering it);
+/// 2. after the word, no row of that task is `queued` or `in_flight` — which is
+///    what `onlyne ledger --state in_flight` reads — and the reason is the fixed
+///    word the client writes for the same event;
+/// 3. the operator's own reason is not lost: it rides on the command's row;
+/// 4. after a server restart, still nothing of that task is deliverable.
+#[tokio::test]
+async fn scenario_23_a_control_word_settles_and_a_restart_does_not_revive_it() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker"]
+max_sessions = 2"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+    append_client_session_config(&worker_ws, "task", "0s");
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+    // A session that takes the delivery and then keeps working: the shape the
+    // incident had, and the reason a client cannot be the only side that ends
+    // the task it is running.
+    cluster
+        .start_fake_agent(
+            &worker_ws,
+            &AgentScript {
+                hello: ScriptHello {
+                    capabilities: vec![
+                        onlyne_proto::Capability::Register,
+                        onlyne_proto::Capability::Report,
+                        onlyne_proto::Capability::Inject,
+                    ],
+                },
+                steps: vec![
+                    json!({"wait_assign": true}),
+                    json!({"report": "ready"}),
+                    json!({"report": "heartbeat"}),
+                    json!({"sleep_ms": 600_000}),
+                ],
+                repeat: false,
+            },
+        )
+        .await
+        .expect("start agent");
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+
+    let receipt = cluster
+        .admin_send("worker", "worker", "work that will be cancelled")
+        .await
+        .expect("send delivery");
+    let task = task_of(&receipt);
+    // 1. In flight before the word.
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(task.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter().any(|row| {
+                    row.kind == onlyne_proto::MsgKind::Task
+                        && row.state == onlyne_proto::LedgerState::InFlight
+                })
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the delivery is in flight before the cancel");
+
+    // The client goes away, taking with it every path that could settle this
+    // task by answering. The server is the only thing left that can.
+    cluster.kill_client(&worker_ws).await.expect("kill client");
+    cluster.kill_agent(&worker_ws).await.expect("kill agent");
+
+    cluster
+        .admin_control(
+            "worker",
+            onlyne_proto::ControlOp::Cancel {
+                task_id: task.clone(),
+                reason: "the operator's own words".to_string(),
+            },
+        )
+        .await
+        .expect("cancel the task");
+
+    // 2. The task's rows leave the deliverable states, on the operator's word.
+    let settled = cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(task.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                // The work rows, not the command's own row: the command stays
+                // deliverable on purpose, because the client that returns later
+                // is the one that stops the process.
+                let work: Vec<_> = rows
+                    .iter()
+                    .filter(|row| row.kind == onlyne_proto::MsgKind::Task)
+                    .collect();
+                !work.is_empty()
+                    && work.iter().all(|row| {
+                        !matches!(
+                            row.state,
+                            onlyne_proto::LedgerState::Queued | onlyne_proto::LedgerState::InFlight
+                        )
+                    })
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the cancel settles every work row the task holds");
+    let delivery = settled
+        .iter()
+        .find(|row| row.kind == onlyne_proto::MsgKind::Task)
+        .expect("the delivery row");
+    assert_eq!(
+        delivery.state,
+        onlyne_proto::LedgerState::Rejected,
+        "the delivery is rejected, not left to be delivered again: {delivery:#?}"
+    );
+    assert_eq!(
+        delivery.reason.as_deref(),
+        Some("operator cancel"),
+        "and the reason is the fixed word the client writes for the same event"
+    );
+
+    // 3. The operator's own words are not lost: they ride on the command's row.
+    let control = settled
+        .iter()
+        .find(|row| row.kind == onlyne_proto::MsgKind::Control)
+        .expect("the command's own row");
+    let body = control
+        .body_json
+        .as_deref()
+        .expect("a control row carries its command");
+    assert!(
+        body.contains("the operator's own words"),
+        "the reason the operator typed is on the command: {body}"
+    );
+
+    // 4. The one event that used to undo the cancellation.
+    cluster.restart_server().await.expect("restart server");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let after = cluster
+        .query_ledger(LedgerQuery {
+            task: Some(task.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("read the ledger after the restart");
+    assert!(
+        after
+            .iter()
+            .filter(|row| row.kind == onlyne_proto::MsgKind::Task)
+            .all(|row| !matches!(
+                row.state,
+                onlyne_proto::LedgerState::Queued | onlyne_proto::LedgerState::InFlight
+            )),
+        "a cancel survives the restart it used to be undone by: {after:#?}"
+    );
+    println!("✓ Scenario 23: a control word settles the task, and a restart does not revive it");
+}
+
 /// Scenario 22: one gateway role serves two conversations by chat key.
 ///
 /// The gateway root is one `[[client]]` role with one link, and its registry

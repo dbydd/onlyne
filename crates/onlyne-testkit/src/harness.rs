@@ -619,6 +619,33 @@ impl Cluster {
             .ok_or_else(|| anyhow!("send response missing data"))
     }
 
+    /// One admin control command, as `onlyne control` sends it.
+    ///
+    /// The op is the whole command: which verb, which task, and the operator's
+    /// own reason.
+    pub async fn admin_control(
+        &self,
+        from: &str,
+        op: onlyne_proto::ControlOp,
+    ) -> Result<serde_json::Value> {
+        let request = onlyne_proto::AdminControl {
+            from: from.to_string(),
+            op,
+            to: None,
+        };
+        let body = admin_request(
+            &self.server_root,
+            AdminOp::Control(request),
+            ADMIN_TIMEOUT.as_millis() as u64,
+        )
+        .await?;
+        if !body.ok {
+            bail!("admin control failed: {:?}", body.error);
+        }
+        body.data
+            .ok_or_else(|| anyhow!("control response missing data"))
+    }
+
     /// Send a task with an explicit family key. The family is the chain key
     /// `task` scope groups sessions by; no family falls back to its own task id.
     pub async fn admin_send_with_family(

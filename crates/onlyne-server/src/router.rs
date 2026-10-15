@@ -172,6 +172,9 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
             };
             let envelope = control_envelope(&role, &args.op, args.to.as_deref());
             let owner = relay::task_owner(state, args.op.task_id());
+            // A control word settles the same way whether an operator's socket
+            // or a supervisor role's link carried it: one rule, two doors.
+            crate::faults::settle_controlled(state, &args.op);
             reply_body(
                 state,
                 relay::send(state, &envelope, session.admin, owner.as_deref()),
@@ -295,6 +298,11 @@ pub async fn dispatch_admin(state: &Arc<State>, session: &mut Session, op: Admin
                 admin_control.to.as_deref(),
             );
             let owner = relay::task_owner(state, admin_control.op.task_id());
+            // The operator's word settles before the command that stops the
+            // process is issued: `settle_task` rejects the task's outstanding
+            // rows, and the row this sends is created after, so the client
+            // still receives the instruction to close the host resource.
+            crate::faults::settle_controlled(state, &admin_control.op);
             reply_body(state, relay::send(state, &envelope, true, owner.as_deref()))
         }
         AdminOp::Report(admin_report) => report_body(
