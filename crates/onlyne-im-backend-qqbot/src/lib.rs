@@ -25,7 +25,7 @@ use onlyne_im_backend::frame::{
 };
 use onlyne_im_backend::payload::ImEvent;
 use std::time::Instant;
-use ws::Session;
+use ws::{Session, reconnect_delay};
 
 /// The conventional credential variables, for an operator who exports them
 /// instead of running `onlyne-im login`.
@@ -33,6 +33,14 @@ pub const APP_ID_ENV: &str = credential::APP_ID_ENV;
 pub const APP_SECRET_ENV: &str = credential::APP_SECRET_ENV;
 /// The single combined variable the credential loader reads first.
 pub const CREDENTIAL_ENV: &str = "QQBOT_CREDENTIAL";
+/// An override for the event-gateway address, for a test that needs a
+/// connection to *fail*.
+///
+/// QQ's gateway accepts anything a valid credential asks of it, so the
+/// reconnect path cannot be reached by pointing the backend at the real
+/// platform: a refused connection needs an address that refuses. Set only for
+/// that; unset, the backend dials the endpoint's own URL.
+pub const WS_URL_ENV: &str = "ONLYNE_QQBOT_WS_URL";
 
 /// One QQ backend: the API client, the send-sequence counter, and the
 /// gateway session the events arrive through.
@@ -177,6 +185,23 @@ impl Backend for QqBotBackend {
     /// sequence), and only a gateway that closed before any session existed
     /// ends the backend. Errors between sessions propagate: the serve loop
     /// reports a stream that keeps failing rather than spinning on it.
+    /// Wait for one platform event, reconnecting under backoff.
+    ///
+    /// A websocket that dropped, a session QQ invalidated (`op 9, d=false`),
+    /// an `IDENTIFY` the gateway refused while it still held the old
+    /// connection: all of these are the same class of fact — the platform is
+    /// not talking *now* — and the answer to all of them is to reconnect. This
+    /// used to return on the first failure, which ended the backend process
+    /// (`serve_backend` reads a stream that ends as a backend that is done), so
+    /// one invalidated QQ session left the gateway running for the rest of its
+    /// life with every QQ conversation silently unserved. Measured live
+    /// 2026-10-15: `IDENTIFY` answered `op 9, d=false` once and the backend was
+    /// gone until the gateway was restarted.
+    ///
+    /// The delay doubles and is jittered from the clock, so a QQ gateway that
+    /// drops every bot at once does not get them all back in the same second.
+    /// Nothing here gives up: the platform is the one that decides when it will
+    /// answer again, and every attempt says so in the log.
     async fn next_event(&mut self) -> Result<Option<ImEvent>> {
         if !self.configured() {
             anyhow::bail!(
@@ -184,22 +209,45 @@ impl Backend for QqBotBackend {
                 self.problem.as_deref().unwrap_or("unknown reason")
             );
         }
-        let token = self.app_token_for_gateway().await;
-        let mut identify = self.api.identify_payload(&token, None, None);
-        let url = self.api.endpoint().ws_url().to_string();
+        let url = std::env::var(WS_URL_ENV)
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or_else(|| self.api.endpoint().ws_url().to_string());
+        let mut attempt = 0u32;
         loop {
-            let connect = ws::Gateway::connect(&url, "", identify.clone()).await;
+            let identify = match self.resume_payload().await {
+                Ok(identify) => identify,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %format!("{error:#}"),
+                        retry_in_ms = reconnect_delay(attempt).as_millis() as u64,
+                        "no credential for the qqbot event gateway; retrying"
+                    );
+                    tokio::time::sleep(reconnect_delay(attempt)).await;
+                    attempt += 1;
+                    continue;
+                }
+            };
+            let connect = ws::Gateway::connect(&url, "", identify)
+                .await
+                .context("the qqbot gateway stream failed");
             let mut gateway = match connect {
                 Ok(gateway) => gateway,
                 Err(error) => {
-                    return match self.session.take() {
-                        // A session existed: the drop is a hiccup the caller
-                        // may want surfaced, not a silent retry loop.
-                        Some(_) => Err(error.context("the qqbot gateway stream failed")),
-                        None => Ok(None),
-                    };
+                    tracing::warn!(
+                        error = %format!("{error:#}"),
+                        retry_in_ms = reconnect_delay(attempt).as_millis() as u64,
+                        "the qqbot event gateway refused a connection; retrying"
+                    );
+                    tokio::time::sleep(reconnect_delay(attempt)).await;
+                    attempt += 1;
+                    continue;
                 }
             };
+            // The connection is up: the next failure is a fresh one and earns
+            // the first rung of the ladder rather than the one this loop was
+            // already sitting on.
+            attempt = 0;
             self.session = Some(gateway.session.clone());
             loop {
                 let dispatch = gateway.next_dispatch().await;
@@ -233,23 +281,24 @@ impl Backend for QqBotBackend {
                         // A dispatch that maps to nothing (another event
                         // type, a non-message) keeps the loop waiting.
                     }
+                    // `Reconnect` (the platform is retiring this connection) or
+                    // an invalidated session: the inner loop ends and the outer
+                    // one dials again, with `RESUME` while the session stands
+                    // and a fresh `IDENTIFY` once it does not.
                     Ok(None) => break,
                     Err(error) => {
-                        return match self.session.take() {
-                            Some(_) => Err(error.context("the qqbot gateway stream failed")),
-                            None => Ok(None),
-                        };
+                        tracing::warn!(
+                            error = %format!("{error:#}"),
+                            "the qqbot event stream dropped; reconnecting"
+                        );
+                        break;
                     }
                 }
             }
-            // `op 9` can invalidate the old session inside `next_dispatch`.
-            // Carry that cleared value to `resume_payload`, so the next
-            // connection sends IDENTIFY rather than replaying the rejected id.
+            // `op 9` can invalidate the session inside `next_dispatch`; the
+            // clone carries that cleared value, so the next connection sends
+            // IDENTIFY rather than replaying the rejected id.
             self.session = Some(gateway.session.clone());
-            // The gateway closed a live session (`Reconnect` or a dropped
-            // socket): reconnect and RESUME instead of re-identifying, unless
-            // `op 9` cleared the session above.
-            identify.clone_from(&self.resume_payload().await);
         }
     }
 
@@ -300,25 +349,36 @@ impl Backend for QqBotBackend {
 impl QqBotBackend {
     /// The app access token a websocket `IDENTIFY` needs; fetching it here
     /// keeps the token cache the send path uses as the single source.
-    async fn app_token_for_gateway(&mut self) -> String {
-        self.api.access_token().await.unwrap_or_default()
+    ///
+    /// A failure is a failure. Reading it as an empty token — the shape this
+    /// had — put `"QQBot "` on the wire, which the platform answers with
+    /// `op 9`, so a token endpoint that was down looked like a refused
+    /// session and sent the reconnect path hunting the wrong problem.
+    async fn app_token_for_gateway(&mut self) -> Result<String> {
+        let token = self.api.access_token().await.context(
+            "QQ's Open Platform would not issue an app access token for this credential",
+        )?;
+        if token.trim().is_empty() {
+            anyhow::bail!("QQ's Open Platform answered the token request with no token");
+        }
+        Ok(token)
     }
 
     /// The `RESUME` payload for the reconnect path, or a fresh `IDENTIFY`
     /// when no session ever existed.
-    async fn resume_payload(&mut self) -> serde_json::Value {
+    async fn resume_payload(&mut self) -> Result<serde_json::Value> {
         match self.session.as_ref().and_then(|s| s.session_id.clone()) {
             Some(_) => {
-                let token = self.app_token_for_gateway().await;
+                let token = self.app_token_for_gateway().await?;
                 let session = self.session.clone();
-                session
+                Ok(session
                     .as_ref()
                     .expect("session checked above")
-                    .resume(&token)
+                    .resume(&token))
             }
             None => {
-                let token = self.app_token_for_gateway().await;
-                self.api.identify_payload(&token, None, None)
+                let token = self.app_token_for_gateway().await?;
+                Ok(self.api.identify_payload(&token, None, None))
             }
         }
     }

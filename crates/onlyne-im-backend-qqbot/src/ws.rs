@@ -246,8 +246,39 @@ impl Gateway {
     }
 }
 
+/// How long to wait before dialing QQ's event gateway again.
+///
+/// Doubling from a second and capped at a minute: long enough that a platform
+/// outage is not hammered, short enough that a bot is back while the operator
+/// is still looking at the log. The jitter comes from the clock rather than a
+/// random source — the same cheap trick `render::starting_sequence` uses — so
+/// bots that lost the gateway together do not all return in the same second.
+pub fn reconnect_delay(attempt: u32) -> Duration {
+    let base_ms = 1_000u64.saturating_mul(1u64 << attempt.min(6));
+    let capped = base_ms.min(60_000);
+    let jitter = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_millis() as u64)
+        .unwrap_or(0))
+        % 1_000;
+    Duration::from_millis(capped + jitter)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_reconnect_delay_doubles_up_to_a_minute_and_is_jittered() {
+        // The ladder, not the exact millisecond: the jitter is the clock's.
+        assert!(reconnect_delay(0).as_millis() < 2_000);
+        assert!(reconnect_delay(1).as_millis() >= 2_000);
+        assert!(reconnect_delay(2).as_millis() >= 4_000);
+        // Past the cap it holds, so a platform that stays down is not hammered
+        // and a bot that comes back is back within a minute.
+        for attempt in [6, 7, 20, u32::MAX] {
+            assert!(reconnect_delay(attempt).as_millis() <= 61_000);
+        }
+    }
+
     use super::*;
 
     #[test]
