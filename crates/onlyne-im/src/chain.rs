@@ -77,8 +77,11 @@ pub fn record_reply(
     let parent = match parent {
         Some(parent) => parent,
         None => {
-            // Nothing answered: its own root, no fork, no discussion file.
-            entry.list = Some(entry.platform_message.clone().unwrap_or_default());
+            // Nothing answered: no fork and no discussion file. The list would
+            // be this message's own id, which the gateway does not know until
+            // the platform answers the send — so the row records without one
+            // rather than with a placeholder that names nothing.
+            entry.list = entry.platform_message.clone().filter(|id| !id.is_empty());
             let _ = history.append_main(entry);
             return false;
         }
@@ -109,6 +112,65 @@ pub fn record_reply(
         let _ = history.append_session(entry);
     }
     forked
+}
+
+/// Record one inbound event in the role's history, in its list.
+///
+/// The inbound half of the same rule: a message lands in the list of what it
+/// answers (the platform's coordinate, when it reports one) or anchors a list
+/// of its own. Recording it is what gives a later reply a chain to count, so
+/// the fork rule has something to read.
+///
+/// `coordinate` is `ImEvent.reply`'s anchor, already resolved by the caller:
+/// the root when the platform names one, else the parent — a reply into a
+/// discussion this cluster never recorded lands in a list named by the message
+/// it answered, which is how a record starts from the middle.
+pub fn record_inbound(
+    history: &crate::history::History,
+    event: &onlyne_im_backend::payload::ImEvent,
+    chat_key: &str,
+    coordinate: Option<(&str, Option<&str>)>,
+) -> String {
+    let mut row = crate::history::HistoryEntry::inbound(chat_key, &event.platform, &event.id);
+    row.conversation = Some(event.conversation.clone());
+    row.text = event.text.clone();
+    row.parent = coordinate.and_then(|(_, parent)| parent.map(str::to_owned));
+    let list = match coordinate {
+        // A known anchor: the platform named a root, so that root *is* the list.
+        Some((anchor, _)) if !anchor.is_empty() => crate::thread::branch_id(chat_key, anchor),
+        // No coordinate: the message anchors its own list.
+        _ => crate::thread::branch_id(chat_key, &event.id),
+    };
+    row.list = Some(list.clone());
+    if let Err(error) = history.append_main(&row) {
+        tracing::warn!(error = %error, "history write failed");
+    }
+    list
+}
+
+/// The window of one conversation's messages, oldest first, rebuilt from the
+/// role's aggregate record.
+///
+/// The record is the source; the window is a read of it, bounded by
+/// [`crate::thread::DEFAULT_WINDOW`]. Rows of other conversations are skipped,
+/// because one role's aggregate carries every channel.
+pub fn window_of(history: &crate::history::History, chat_key: &str) -> List {
+    let mut list = List::new(chat_key);
+    for row in history.recent(crate::thread::DEFAULT_WINDOW) {
+        if row.chat_key.as_deref() != Some(chat_key) {
+            continue;
+        }
+        let Some(id) = row.platform_message.clone().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let mut message = crate::thread::Message::root(id);
+        message.parent = row.parent.clone();
+        message.list = row.list.clone();
+        message.text = row.text.clone();
+        message.at = row.at.clone();
+        list.messages.push(message);
+    }
+    list
 }
 
 #[cfg(test)]

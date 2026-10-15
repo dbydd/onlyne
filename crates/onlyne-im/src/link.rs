@@ -317,7 +317,67 @@ impl RoleLink {
             return Ok(());
         };
         let entry = &entry;
-        let reply_to = reply_target(&text, entry);
+        // The role's record, and the fork rule the chain shape needs: a reply
+        // that answers a message which itself answered something opens a
+        // discussion file of its own (`docs/v2.4-REPLY-THREADS.md` §5, §6).
+        let history = crate::history::History::new(&self.gateway.root);
+        let window = crate::chain::window_of(&history, &entry.chat_key);
+        // A prefix the window cannot place is a refusal, not a guess: the
+        // model that wrote it gets the candidates back and writes a longer one.
+        let reply_to = match reply_target(&text, &window, entry) {
+            Ok(target) => target,
+            Err(reason) => {
+                self.refuse(link, delivery, reason).await?;
+                return Ok(());
+            }
+        };
+        // A platform with a clock refuses a late passive reply, and it is
+        // better refused here with a sentence than by the platform against a
+        // row that has already left the queue (QQ: `40034005 回复消息msg_id
+        // 已过期`, five minutes from the message answered).
+        if let (Some(target), Some(limit)) = (
+            reply_to.as_deref(),
+            crate::threadlink::passive_window(&entry.gateway),
+        ) && let Some(sent) = window
+            .messages
+            .iter()
+            .find(|m| m.id == target)
+            .map(|m| m.at.clone())
+            && let Ok(sent) = chrono::DateTime::parse_from_rfc3339(&sent)
+        {
+            let age = chrono::Utc::now().signed_duration_since(sent.with_timezone(&chrono::Utc));
+            if let Ok(limit) = chrono::Duration::from_std(limit)
+                && age > limit
+            {
+                let reason = format!(
+                    "the message this reply answers is {} minutes old, and {} accepts a \
+                     passive reply only within {} minutes; send a new message on the platform \
+                     and answer that",
+                    age.num_minutes(),
+                    entry.gateway,
+                    limit.num_minutes()
+                );
+                self.refuse(link, delivery, reason).await?;
+                return Ok(());
+            }
+        }
+        let mut row = crate::history::HistoryEntry::outbound(
+            &entry.chat_key,
+            &entry.gateway,
+            reply_to.as_deref(),
+        );
+        row.conversation = Some(entry.conversation.clone());
+        row.text = Some(rest.clone());
+        let forked = crate::chain::record_reply(&history, &mut row, &window, reply_to.as_deref());
+        if forked {
+            tracing::info!(
+                role = %self.gateway.role,
+                chat_key = %entry.chat_key,
+                list = row.list.as_deref().unwrap_or_default(),
+                answered = reply_to.as_deref().unwrap_or_default(),
+                "a reply opened a discussion"
+            );
+        }
         let (accepted, reason) = match payload_from(&rest, reply_to, entry, &delivery) {
             Some(payload) => {
                 if let Err(error) = crate::chatlog::append_outbound(entry, &payload) {
@@ -456,20 +516,52 @@ fn payload_from(
     })
 }
 
-/// The platform event this reply answers.
+/// The platform event this reply answers, resolved against the window.
 ///
-/// A reply answers the message the operator read. The body may name that
-/// message on its second line (`<msg:id>`, read by
-/// [`crate::chatkey::extract_with_reply`]); without one the last inbound event
-/// this conversation logged is the answer. A platform whose passive reply is
-/// only passive with the id it answers needs this: QQ answers a group send
-/// `40034105 主动消息失败, 无权限` when `msg_id` is absent.
-fn reply_target(full_text: &str, entry: &Conversation) -> Option<String> {
-    match crate::chatkey::extract_with_reply(full_text) {
+/// A reply may name the message it answers by any **prefix** of its id
+/// (`docs/v2.4-REPLY-THREADS.md` §4): `ROBOT1.0_sohz` names the message whose
+/// id starts that way, and the gateway resolves it to the full id before the
+/// backend sends — a platform that wants the id it gave us will not take a
+/// truncation of it.
+///
+/// Three answers, and only the first sends:
+///
+/// * `Ok(Some(id))` — the marker named one message, unambiguously, or the body
+///   named none and the conversation's last inbound event answers.
+/// * `Ok(None)` — nothing to answer: no marker and no inbound history.
+/// * `Err(reason)` — the marker named something the window cannot resolve.
+///   Ambiguity and absence are refused with the candidates, never guessed at,
+///   because the reader of the refusal is a model that can fix its prefix.
+fn reply_target(
+    full_text: &str,
+    window: &crate::thread::List,
+    entry: &Conversation,
+) -> Result<Option<String>, String> {
+    let named = match crate::chatkey::extract_with_reply(full_text) {
         Ok((_key, Some(id), _rest)) => Some(id),
-        _ => crate::chatlog::last_inbound_id(entry),
+        _ => None,
+    };
+    let Some(prefix) = named else {
+        // No marker: the reply answers the message the operator just read.
+        return Ok(crate::chatlog::last_inbound_id(entry));
+    };
+    match window.resolve(&prefix) {
+        Ok(found) => Ok(Some(found.id.clone())),
+        // A prefix the window cannot place is still a usable id when it is the
+        // whole thing: a conversation whose history this cluster never saw
+        // (`§8`) has nothing to resolve against, and refusing would make the
+        // first reply into an unrecorded thread impossible.
+        Err(_unresolved) if prefix.len() >= FULL_ID_LEN => Ok(Some(prefix)),
+        Err(error) => Err(error.to_string()),
     }
 }
+
+/// The length at which an id is taken whole rather than as a prefix.
+///
+/// Platform ids are tens of characters; twelve is past what anybody types by
+/// hand and short of every real one, so a string this long that the window
+/// cannot place is a full id for a message this cluster never recorded.
+const FULL_ID_LEN: usize = 12;
 
 /// Decode one inline image and write it into the conversation's media directory
 /// for the backend to read.

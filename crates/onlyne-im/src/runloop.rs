@@ -369,6 +369,28 @@ async fn handle_backend_op(
             if let Err(error) = chatlog::append_inbound(&conversation, &inbound) {
                 tracing::warn!(role = %gateway.role, error = %error, "chat log write failed");
             }
+            // The role's own record, which is what a later reply counts its
+            // chain in. The coordinate the platform reported is the anchor: a
+            // reply into a discussion this cluster never recorded still names
+            // what it answered, so the record starts from the middle rather
+            // than refusing the message (`docs/v2.4-REPLY-THREADS.md` §8).
+            let coordinate = inbound
+                .reply
+                .as_ref()
+                .map(|reply| (reply.anchor().unwrap_or_default(), reply.parent.as_deref()));
+            let list = crate::chain::record_inbound(
+                &crate::history::History::new(&gateway.root),
+                &inbound,
+                &conversation.chat_key,
+                coordinate,
+            );
+            tracing::debug!(
+                role = %gateway.role,
+                conversation = %inbound.conversation,
+                list = %list,
+                answered = ?inbound.reply.as_ref().and_then(|r| r.parent.as_deref()),
+                "recorded an inbound event"
+            );
             let reporter = reporters.get(&gateway.role).cloned();
             let input = PushInput::Trigger {
                 role: gateway.role.clone(),
