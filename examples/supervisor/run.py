@@ -191,13 +191,13 @@ def seed_entries() -> str:
         ["pi", "--session-id", "{session}",
          "--session-dir", ".pi/sessions", "-ns"], ensure_ascii=False
     )
-    # The other half of the same runtime: `-c` continues a conversation this
-    # client released (`[client.session] idle_close`) instead of starting a
+    # The other half of the same runtime: `--session` opens a conversation
+    # this client released (`[client.session] idle_close`) instead of starting a
     # second one under the same id. Inert until the plugin declares `resume`,
     # so a role gains nothing it did not ask for. Kept equal to the seed
     # `onlyne-client init` prints.
     resume = json.dumps(
-        ["pi", "-c", "{session}", "--session-dir", ".pi/sessions", "-ns"],
+        ["pi", "--session", "{session}", "--session-dir", ".pi/sessions", "-ns"],
         ensure_ascii=False
     )
     supervisor_prose = (

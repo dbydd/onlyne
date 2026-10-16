@@ -3,8 +3,9 @@
 //! A released `task`-scope conversation is brought back by re-spawning its
 //! runtime, and the argv that does it is the role's `[client.runtime] resume`
 //! rather than the `command` the session opened with: `pi --session-id <id>`
-//! starts a conversation and `pi -c <id>` continues one, so running the first
-//! again would put a second conversation under a family that already has one —
+//! creates a conversation and `pi --session <id>` opens one that already
+//! exists, so running the first again would put a second conversation under a
+//! family that already has one —
 //! the leak the scope exists to prevent.
 
 use super::delivery::dispatch;
@@ -45,7 +46,7 @@ fn state_with_both_argvs() -> (crate::session::dispatch::DispatchState, Arc<Fake
     state.reconfigure(crate::session::slice::RoleSlice {
         drive: onlyne_config::Drive::Plugin,
         command: vec!["pi".into(), "--session-id".into(), "{session}".into()],
-        resume: vec!["pi".into(), "-c".into(), "{session}".into()],
+        resume: vec!["pi".into(), "--session".into(), "{session}".into()],
         max_sessions: 8,
         required_targets: Vec::new(),
     });
@@ -83,7 +84,7 @@ async fn a_revived_session_runs_the_resume_argv() {
     );
     assert_eq!(
         spawns[1][..2],
-        ["pi".to_string(), "-c".to_string()],
+        ["pi".to_string(), "--session".to_string()],
         "and comes back with the role's resume argv: {spawns:?}"
     );
     // `{session}` is the conversation's own id in both, so the revival asks for

@@ -528,7 +528,7 @@ server 在写账本前执行 ACL，并负责跨机器路由。每个 client 负�
 [client.runtime]
 drive = "plugin"        # plugin | acp | exec
 command = ["pi", "--session-id", "{session}", "--session-dir", ".pi/sessions", "-ns"]
-resume = ["pi", "-c", "{session}", "--session-dir", ".pi/sessions", "-ns"]
+resume = ["pi", "--session", "{session}", "--session-dir", ".pi/sessions", "-ns"]
 ```
 
 **placement** 是这台机器的属性，写在角色工作区的 `config.toml` 里：`orca`、`zellij`、`tern`、`headless` 或 `external`。

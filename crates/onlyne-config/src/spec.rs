@@ -228,7 +228,7 @@ impl std::fmt::Display for Drive {
 /// `command` and `resume` are two commands for two situations rather than one
 /// command with a mode flag: a conversation a `task`-scope session opens is a
 /// fresh process (`pi --session-id <id>`), and one it **comes back to** after
-/// the slot was released is a continuation (`pi -c <id>`). Which flag names the
+/// the slot was released is opened by id (`pi --session <id>`). Which flag names
 /// difference is the runtime author's knowledge, so the spec carries both and
 /// the client picks by what it is doing, never by guessing at a runtime it does
 /// not own.

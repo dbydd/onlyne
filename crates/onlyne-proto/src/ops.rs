@@ -475,7 +475,7 @@ pub struct RoleRuntime {
     ///
     /// Absent for every runtime that cannot continue a conversation — which is
     /// most of them, and the reason it is a second key rather than a variant of
-    /// the first: `pi -c <id>` and `pi --session-id <id>` are two commands for
+    /// the first: `pi --session <id>` and `pi --session-id <id>` are two commands for
     /// two situations, and only the runtime author knows which flag names the
     /// difference. An absent key reads as "no path back", so a released session
     /// is never revived and the next delivery of that family opens a fresh

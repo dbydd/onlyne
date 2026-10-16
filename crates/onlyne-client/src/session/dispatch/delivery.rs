@@ -251,7 +251,7 @@ fn bind_delivery(
 /// A suspended session's conversation lives in the runtime's own store, and the
 /// client's half of resuming it is to start the runtime again on that
 /// conversation: the role's `[client.runtime] resume` argv when it declares one
-/// — `pi -c <id>` — and the command the session was born with otherwise, with
+/// — `pi --session <id>` — and the command the session was born with otherwise, with
 /// `{session}` substituted so both name the session that was released and the
 /// environment rebuilt for the delivery being served. The runtime resumes the
 /// conversation it was asked for. This client never composes a history summary
@@ -268,9 +268,9 @@ fn resume_delivery(
     reject_unpaired_runtime(inner)?;
     // What brings this conversation back: the runtime's own resume argv when
     // the role declares one, and the command it was born with otherwise. The
-    // difference is the whole point of the key — `pi --session-id <id>` opens a
-    // conversation and `pi -c <id>` continues one, and only the spec knows
-    // which flag says which.
+    // difference is the whole point of the key — `pi --session-id <id>` opens or
+    // creates a conversation and `pi --session <id>` opens one that already
+    // exists, and only the spec knows which flag says which.
     let (session_id, command, tools_token) = inner
         .sessions
         .get(key)

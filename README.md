@@ -536,7 +536,7 @@ The **drive** is a property of the runtime and lives in that role's spec:
 [client.runtime]
 drive = "plugin"        # plugin | acp | exec
 command = ["pi", "--session-id", "{session}", "--session-dir", ".pi/sessions", "-ns"]
-resume = ["pi", "-c", "{session}", "--session-dir", ".pi/sessions", "-ns"]
+resume = ["pi", "--session", "{session}", "--session-dir", ".pi/sessions", "-ns"]
 ```
 
 The **placement** is a property of the machine and lives in the role workspace's
