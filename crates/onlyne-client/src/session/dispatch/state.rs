@@ -215,9 +215,11 @@ pub struct SessionSlot {
     /// out in: the one that has waited longest takes the delivery.
     pub(super) opened_at: Instant,
     /// The argv this session's runtime was started with, rendered when the
-    /// session was born. Resuming it starts this command again rather than a
-    /// freshly rendered one, because the command carries the runtime's own key
-    /// for the conversation and may interpolate the delivery into it.
+    /// session was born. It is kept rather than re-rendered because it carries
+    /// the runtime's own key for the conversation and may interpolate the
+    /// delivery it was born for.
+    ///
+    /// A **revival** runs [`Self::resume`] instead when the role declares one.
     pub(super) command: Vec<String>,
     /// The argv a **revival** of this session runs, rendered when the session
     /// was born from the role's `[client.runtime] resume`. Empty for a runtime

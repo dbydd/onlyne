@@ -249,9 +249,10 @@ fn bind_delivery(
 /// Resume one suspended session for a delivery, and bind it.
 ///
 /// A suspended session's conversation lives in the runtime's own store, and the
-/// client's half of resuming it is to start the command the session was born
-/// with again: the same argv — because the command carries the runtime's own
-/// session key, and it may interpolate the delivery into it — and the
+/// client's half of resuming it is to start the runtime again on that
+/// conversation: the role's `[client.runtime] resume` argv when it declares one
+/// — `pi -c <id>` — and the command the session was born with otherwise, with
+/// `{session}` substituted so both name the session that was released and the
 /// environment rebuilt for the delivery being served. The runtime resumes the
 /// conversation it was asked for. This client never composes a history summary
 /// to hand a model: a summary it wrote would be context pollution it also
