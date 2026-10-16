@@ -383,21 +383,12 @@ pub(super) async fn scan_control_settles(state: &RunState) {
 pub(super) async fn scan_idle_sessions(state: &RunState) {
     // The sessions this tick releases, and the rows their suspend just wrote.
     let suspended = state.dispatch.suspend_idle_sessions(Instant::now());
-    for close in state.dispatch.release_asks() {
-        // The runtime's own teardown, asked on its own connection: a `recycle`,
-        // the same send an operator's `recycle` command uses. A runtime that
-        // declared `resume` writes its conversation store when it ends *itself*;
-        // a container closed before that loses the conversation the release just
-        // saved.
-        state
-            .dispatch
-            .recycle_plugin(
-                &close.session.task_id,
-                &close.idle_reason.clone().unwrap_or_else(|| "idle".into()),
-                None,
-            )
-            .await;
-    }
+    // The runtime's own teardown, asked on the connection the suspension
+    // captured: a `recycle`, the same frame an operator's `recycle` command
+    // sends. A runtime that declared `resume` writes its conversation store when
+    // it ends *itself*; a container closed before that loses the conversation the
+    // release just saved.
+    state.dispatch.ask_releases().await;
     // A runtime that has still not let go past its grace is closed without a
     // second question: the ask was made, and a slot nobody releases is a slot
     // this client is holding for nothing.

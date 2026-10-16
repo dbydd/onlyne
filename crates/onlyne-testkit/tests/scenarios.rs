@@ -2304,6 +2304,159 @@ max_sessions = 2"#,
     println!("✓ Scenario 17: no resume [idle process stays, family reuses session]");
 }
 
+/// Scenario 25: an idle release asks the runtime before the host closes it.
+///
+/// The other half of the scope state machine. Scenario 16 proves the *slot* comes
+/// back and the family's next delivery resumes the same conversation; this proves
+/// how the **process** goes, which is the half that can lose work. A runtime that
+/// declared `resume` keeps its conversation in its own store, written when it ends
+/// *itself* — `AGENTS.md` §10 makes that the runtime's teardown on purpose — so
+/// the client asks on the plugin's own connection and closes the container only
+/// after a grace. A container closed first is a pane kill, and a runtime killed
+/// mid-teardown loses whatever it had not written yet.
+///
+/// The witness is the frame, not the end state. `await_recycle` parks the fixture
+/// on the connection it is serving and writes down the frame it was sent, so
+/// "asked and let go" stops looking like "closed without asking" from outside.
+/// They looked alike before: this release shipped with a scenario that asserted
+/// only the end state and passed with the ask deleted, which is why the fixture
+/// grew the step rather than the scenario growing a comment.
+#[tokio::test]
+async fn scenario_25_an_idle_release_asks_its_runtime_before_closing_it() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker"]"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+    append_client_session_config(&worker_ws, "task", "1s");
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+    // `serve_repeated(true, …)` declares `resume`, which is what makes the
+    // release a release rather than the "process stays" degradation of scenario
+    // 17 — and the ask itself is a `recycle`, so the fixture declares that too.
+    // A runtime that resumes but does not implement `recycle` has no way to be
+    // asked, and the client closes its container instead of sending a frame
+    // nobody there would read.
+    let mut script = serve_repeated(true, 1);
+    script
+        .hello
+        .capabilities
+        .push(onlyne_proto::Capability::Recycle);
+    script.steps.push(json!({
+        "await_recycle": {"mark": "recycle.marker", "timeout_ms": 30_000}
+    }));
+    cluster
+        .start_fake_agent(&worker_ws, &script)
+        .await
+        .expect("start resumable agent");
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+
+    let receipt = cluster
+        .admin_send_with_family("worker", "worker", "release me", "family-release")
+        .await
+        .expect("send");
+    let task = task_of(&receipt);
+    let rows = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(task.clone()),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| !row.session_id.is_empty()),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("session row");
+    let session_id = rows[0].session_id.clone();
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(task),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Acked),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the delivery settles");
+
+    let marker = worker_ws.join("recycle.marker");
+    for _ in 0..600 {
+        if marker.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        marker.exists(),
+        "the session was released without the runtime being asked to let it go: \
+         the fixture never received a `recycle`, so a runtime that writes its \
+         conversation when it ends itself would have had no chance to"
+    );
+    let frame: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker).expect("read the marker"))
+            .expect("the marker holds the frame that was sent");
+    // The ask names the session it is about. The protocol's field is `task_id`
+    // from v1's keying; in this table the value is the session id, which is what
+    // `recycle_plugin` resolves its transport by.
+    assert_eq!(
+        frame.get("task_id").and_then(serde_json::Value::as_str),
+        Some(session_id.as_str()),
+        "the ask names the session it is about: {frame}"
+    );
+    let reason = frame
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        reason.starts_with("idle for"),
+        "the ask is the idle release's and not some other recycle: {frame}"
+    );
+    assert!(
+        frame.get("outcome").is_none_or(serde_json::Value::is_null),
+        "an idle release settles nothing — the delivery it served already ended, \
+         and a task settled by its own release would report a verdict nobody gave: {frame}"
+    );
+    let suspended = cluster
+        .query_sessions(QuerySessionsArgs {
+            task_id: Some(session_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query the released session");
+    assert_eq!(
+        suspended[0].projection.resource,
+        onlyne_proto::ResourcePhase::Closed,
+        "and the row the release wrote is the suspended one: {suspended:#?}"
+    );
+    assert_eq!(
+        suspended[0].public_lifecycle,
+        onlyne_proto::Lifecycle::Idle,
+        "a released session keeps its conversation, which is the point: {suspended:#?}"
+    );
+    println!("✓ Scenario 25: idle release [runtime asked before the host closed it]");
+}
+
 /// Scenario 18: a heartbeat that only refreshes `last_seen` is not a projection write.
 #[tokio::test]
 async fn scenario_18_a_last_seen_only_heartbeat_writes_no_updated_at_and_no_event() {

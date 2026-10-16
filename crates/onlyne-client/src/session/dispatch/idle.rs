@@ -10,7 +10,7 @@
 
 use super::retire::{PendingClose, close_retired};
 use super::state::{DispatchInner, binding_task_state};
-use super::transport::names_session;
+use super::transport::{names_session, recycle_over};
 use super::*;
 
 impl DispatchState {
@@ -102,15 +102,26 @@ impl DispatchState {
         suspended
     }
 
-    /// The releases this tick made, for the sweep to ask on.
+    /// Ask every release whose runtime has not been asked yet to let its session
+    /// go.
     ///
-    /// A release *is* the close: the ask is a frame and the grace a duration, and
-    /// neither belongs under the dispatch lock, so the async sweep takes them out
-    /// here rather than this client's own caller waiting on a runtime that has
-    /// been asked to leave. Taking them moves them into the grace; the sweep
-    /// asks and then [`releases_due`](Self::releases_due) closes what ran out.
-    pub fn release_asks(&self) -> Vec<super::retire::PendingClose> {
-        self.inner.lock().releases.take_asks()
+    /// The ask is a frame over the connection the suspension captured, and a
+    /// frame is an await, so it cannot live in `suspend_idle_sessions`: that runs
+    /// under the dispatch lock, and holding the lock across a send would park
+    /// every adapter frame of this role behind a runtime that has been asked to
+    /// leave. The releases stay queued while this runs — [`releases_due`] is what
+    /// takes them out — so it is safe on every tick, and a runtime is asked once.
+    pub async fn ask_releases(&self) {
+        // The lock is taken and let go inside this statement: what the loop below
+        // awaits must not be holding it.
+        let asking = self.inner.lock().releases.unsent_asks();
+        for close in asking {
+            let Some(transport) = close.transport.as_ref() else {
+                continue;
+            };
+            let reason = close.idle_reason.as_deref().unwrap_or("idle");
+            recycle_over(transport, &close.session.task_id, reason, None).await;
+        }
     }
 
     /// Close what its grace has run out on.
@@ -208,7 +219,12 @@ pub(super) fn suspend_locked(
             "a suspended session's own binding was not handed back"
         );
     }
-    let transport = inner.transports.remove(&session_id).map(|(io, _)| io);
+    // Taken out of the map whole, and handed to the close rather than looked up
+    // again later: a suspended session is not one a runtime is attached to, and
+    // the ask that releases it has to travel the connection this suspension
+    // captured. A release that resolved its transport the ordinary way would
+    // find none and close the container without asking.
+    let transport = inner.transports.remove(&session_id);
     let idle_secs = slot
         .idle_since
         .map(|since| Instant::now().saturating_duration_since(since).as_secs())

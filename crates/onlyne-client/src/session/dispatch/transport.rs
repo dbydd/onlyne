@@ -428,6 +428,35 @@ fn attach_transport_locked(
     true
 }
 
+/// Send one `recycle` over a connection the caller already holds.
+///
+/// The two callers differ in how they got the connection and agree on everything
+/// else, which is the point: an operator's `recycle` and an idle release's ask
+/// are the same frame, with the same capability check and the same fate on a
+/// failed send.
+pub(super) async fn recycle_over(
+    (io, capabilities): &(AdapterIo, Vec<Capability>),
+    task_id: &str,
+    reason: &str,
+    outcome: Option<Outcome>,
+) {
+    if missing_capability(capabilities, Capability::Recycle) {
+        tracing::debug!(
+            task = %task_id,
+            "plugin does not implement recycle; the host closes the resource"
+        );
+        return;
+    }
+    let args = RecycleArgs {
+        task_id: task_id.to_string(),
+        reason: reason.to_string(),
+        outcome,
+    };
+    if let Err(error) = io.notify(AdapterMsg::Host(HostOp::Recycle(args))).await {
+        tracing::warn!(error = %error, task = %task_id, "recycle frame did not reach the plugin");
+    }
+}
+
 impl DispatchState {
     /// Hold `io` for as long as one of its inbound frames is being handled.
     pub fn hold_frame(&self, io: &AdapterIo) -> FrameGuard<'_> {
@@ -636,24 +665,10 @@ impl DispatchState {
     /// implements `recycle`. A plugin without the capability is skipped: the
     /// caller's backend close stops the process either way.
     pub async fn recycle_plugin(&self, task_id: &str, reason: &str, outcome: Option<Outcome>) {
-        let Some((io, capabilities)) = self.session_transport(task_id) else {
+        let Some(transport) = self.session_transport(task_id) else {
             return;
         };
-        if missing_capability(&capabilities, Capability::Recycle) {
-            tracing::debug!(
-                task = %task_id,
-                "plugin does not implement recycle; the host closes the resource"
-            );
-            return;
-        }
-        let args = RecycleArgs {
-            task_id: task_id.to_string(),
-            reason: reason.to_string(),
-            outcome,
-        };
-        if let Err(error) = io.notify(AdapterMsg::Host(HostOp::Recycle(args))).await {
-            tracing::warn!(error = %error, task = %task_id, "recycle frame did not reach the plugin");
-        }
+        recycle_over(&transport, task_id, reason, outcome).await;
     }
 
     /// Ask the plugin serving one session for a fresh observation.

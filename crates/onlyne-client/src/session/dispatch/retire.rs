@@ -158,12 +158,13 @@ fn unbind_transports(inner: &mut DispatchInner, key: &str, slot: &SessionSlot) {
 /// retires more than one session at a time must not spend that lock on the hosts
 /// it is calling. A retirement therefore records what it took down here and runs
 /// the closes once it is off the lock.
+#[derive(Clone)]
 pub struct PendingClose {
     pub(crate) backend: Arc<dyn SessionBackend>,
     pub(crate) session: SessionRef,
     pub(crate) reason: crate::backend::CloseReason,
-    /// The plugin's connection, when the session had one and its runtime
-    /// declared it could resume a conversation it released.
+    /// The plugin's connection and its declared capabilities, when the session
+    /// had one and its runtime could resume a conversation it released.
     ///
     /// A close that carries one **asks first**: a `recycle` frame over this
     /// connection, then [`CONTROL_SETTLE_BOUND`] of grace, then the host's own
@@ -171,7 +172,11 @@ pub struct PendingClose {
     /// exactly what a runtime declaring `resume` said — writes that store when
     /// it ends *itself*; a container closed before that loses whatever it had
     /// not written. See [`PendingCloses`], which is what holds the wait.
-    pub(crate) transport: Option<AdapterIo>,
+    ///
+    /// The capabilities travel with the connection because the ask is the same
+    /// send an operator's `recycle` is, including its check: a plugin that does
+    /// not implement `recycle` is skipped and its container closed instead.
+    pub(crate) transport: Option<(AdapterIo, Vec<Capability>)>,
     /// How long this session served nothing before the release, as one sentence
     /// the runtime's own log can name.
     pub(crate) idle_reason: Option<String>,
@@ -183,26 +188,49 @@ pub struct PendingClose {
 /// the sweep that produced it: the ask is an await and the close follows a
 /// grace, and the sweeps run under the dispatch lock's shadow — a close that
 /// blocked there would hold every adapter frame of this role behind a runtime
-/// that has been asked to leave. So the sweep hands them here, and
-/// [`close_asked`](PendingCloses::close_asked) runs the second step, once per
+/// that has been asked to leave. So the sweep hands them here, asks the ones
+/// nobody has asked yet, and [`due`](Self::due) runs the second step, once per
 /// tick, after the grace.
+///
+/// Only [`due`](Self::due) takes anything out. An earlier shape had the ask
+/// *take* the pending closes and hand them back for the wait, which emptied the
+/// queue before the grace could age anything: the close then never ran, and a
+/// release that never closed its container read exactly like one still inside a
+/// grace that had not passed. What is handed out for asking is therefore a copy.
 #[derive(Default)]
 pub(super) struct PendingCloses {
-    asked: Vec<(Instant, PendingClose)>,
+    asked: Vec<Pending>,
+}
+
+struct Pending {
+    asked_at: Instant,
+    close: PendingClose,
+    sent: bool,
 }
 
 impl PendingCloses {
     /// Record a close whose runtime was asked to release itself.
     pub(super) fn ask(&mut self, close: PendingClose) {
-        self.asked.push((Instant::now(), close));
+        self.asked.push(Pending {
+            asked_at: Instant::now(),
+            close,
+            sent: false,
+        });
     }
 
-    /// Take every release still inside its grace, for whoever will run them.
-    pub(super) fn take_asks(&mut self) -> Vec<PendingClose> {
-        std::mem::take(&mut self.asked)
-            .into_iter()
-            .map(|(_, close)| close)
-            .collect()
+    /// The releases whose runtime has not been asked yet, each marked as asked.
+    ///
+    /// A copy rather than a take: the entry stays for [`due`](Self::due) to age,
+    /// and a runtime asked once is not asked again on every tick.
+    pub(super) fn unsent_asks(&mut self) -> Vec<PendingClose> {
+        let mut asking = Vec::new();
+        for pending in &mut self.asked {
+            if !pending.sent {
+                pending.sent = true;
+                asking.push(pending.close.clone());
+            }
+        }
+        asking
     }
 
     /// Close what its grace has run out on, with [`BackendKey`] naming the row.
@@ -212,11 +240,11 @@ impl PendingCloses {
     /// question, because a slot nobody releases is a slot this client is holding
     /// for nothing.
     pub(super) fn due(&mut self, now: Instant) -> Vec<PendingClose> {
-        let (due, waiting): (Vec<_>, Vec<_>) = self.asked.drain(..).partition(|(asked_at, _)| {
-            now.saturating_duration_since(*asked_at) >= CONTROL_SETTLE_BOUND
+        let (due, waiting): (Vec<_>, Vec<_>) = self.asked.drain(..).partition(|pending| {
+            now.saturating_duration_since(pending.asked_at) >= CONTROL_SETTLE_BOUND
         });
         self.asked = waiting;
-        due.into_iter().map(|(_, close)| close).collect()
+        due.into_iter().map(|pending| pending.close).collect()
     }
 }
 
@@ -1082,6 +1110,57 @@ mod tests {
                 .retire_dropped_ghosts(fresh + Duration::from_secs(2), 90)
                 .is_empty(),
             "a fresh stamp is the agent's own word and stays one"
+        );
+    }
+
+    /// Asking a release out of the queue must not take it out of the queue.
+    ///
+    /// The two steps are ordered and they read the same queue: `unsent_asks` hands a
+    /// copy to whoever sends the frame, and `due` is what removes. An earlier
+    /// shape had the ask *take* the entries and hand them back for the wait,
+    /// which emptied the queue before the grace could age anything — the close
+    /// then never ran at all, and a release whose container never closed was
+    /// indistinguishable from one still inside a grace that had not passed.
+    #[tokio::test]
+    async fn a_release_survives_being_asked_until_its_grace_runs_out() {
+        let dir = tempdir().expect("tempdir");
+        let store = ClientStore::open(dir.path().join("client.db")).expect("client store");
+        let _state = state_over(store, dir.path());
+        // The queue on its own, without a suspension in front of it: what is
+        // under test is the order of `unsent_asks` and `due`, and a suspension would
+        // drag the whole store row chain in behind it — the scenario is where
+        // that half is proven.
+        let mut releases = PendingCloses::default();
+        releases.ask(PendingClose {
+            backend: Arc::new(FakeBackend::new()),
+            session: crate::backend::SessionRef {
+                task_id: "task-idle".to_string(),
+                backend: "fake".to_string(),
+                backend_ref: serde_json::Value::Null,
+                generation: 1,
+            },
+            reason: crate::backend::CloseReason::Operator,
+            transport: None,
+            idle_reason: Some("idle for 1s".to_string()),
+        });
+
+        assert_eq!(releases.unsent_asks().len(), 1, "the runtime is asked once");
+        assert!(
+            releases.unsent_asks().is_empty(),
+            "and asking is not a thing that happens again on every tick"
+        );
+        assert!(
+            releases
+                .due(Instant::now() + CONTROL_SETTLE_BOUND / 2)
+                .is_empty(),
+            "nothing is closed while the grace still runs"
+        );
+        assert_eq!(
+            releases
+                .due(Instant::now() + CONTROL_SETTLE_BOUND + Duration::from_secs(1))
+                .len(),
+            1,
+            "the release the runtime was asked about is closed when its grace runs out"
         );
     }
 }

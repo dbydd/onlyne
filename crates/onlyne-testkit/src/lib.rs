@@ -645,6 +645,73 @@ impl FakeAgent {
                 }
                 tokio::fs::write(&path, b"mounted").await?;
             }
+            "await_recycle" => {
+                // The mirror of `mark_mounted`, for the other direction of the
+                // same conversation. A scoped session that declared `resume` is
+                // released by *asking* the runtime to let it go — its own
+                // teardown is where a runtime flushes the conversation it was
+                // holding, so a host that closes the container first loses
+                // whatever had not been written.
+                //
+                // A fixture cannot witness that ask by walking away when its
+                // script ends: the frame arrives on a connection nobody is
+                // reading, which is exactly how the release path shipped with a
+                // scenario that passed with the ask deleted. This step parks on
+                // the frames that do arrive and writes the file when `recycle`
+                // is one of them, so "asked first" and "closed without asking"
+                // stop looking alike from outside.
+                let mark = value
+                    .get("mark")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("await_recycle requires a mark path"))?;
+                let millis = value
+                    .get("timeout_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(30_000);
+                let path = path_in_workspace(&self.workspace, mark);
+                let recycle = tokio::time::timeout(Duration::from_millis(millis), async {
+                    loop {
+                        match handle.next_host_frame().await? {
+                            (_, HostOp::Recycle(args)) => return Ok::<_, anyhow::Error>(args),
+                            // The host is holding a `max_sessions` pool and the
+                            // slot this session is in is already free, so a
+                            // second session opening here would not be the same
+                            // thing at all — it would mean the release was taken
+                            // without the runtime being asked.
+                            (_, HostOp::Assign(_)) => bail!(
+                                "the host handed this runtime another session before it \
+                                 released the one it holds: the slot was taken back \
+                                 without a `recycle`"
+                            ),
+                            (_, HostOp::Bye(bye)) => bail!(
+                                "the host said goodbye before asking this runtime to \
+                                 release the session: {}",
+                                bye.reason
+                            ),
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "no `recycle` frame arrived in {millis} ms: the host closed the \
+                         session without asking this runtime to release it"
+                    )
+                })??;
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent).await.ok();
+                }
+                tokio::fs::write(
+                    &path,
+                    serde_json::to_vec(&json!({
+                        "task_id": recycle.task_id,
+                        "reason": recycle.reason,
+                        "outcome": recycle.outcome,
+                    }))?,
+                )
+                .await?;
+            }
             "require_opened" => {
                 // The client asks a standing runtime for its session instead of
                 // handing the next staged one to whoever mounted. A script that
