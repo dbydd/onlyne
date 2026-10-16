@@ -370,9 +370,11 @@ So a `role` pool needs a runtime in one of exactly two shapes. **Resident**: the
 and its socket stay, and it does not `detach` when it runs out of work — that is what
 `idle_close = 0` asks for. **Resumable**: the runtime declares `resume`, so a non-zero
 `idle_close` suspends it instead, the conversation stays in the runtime's own store, and
-the next delivery resumes that conversation rather than starting a new one. `suspend` is
-the frame that asks for the release; a runtime declaring neither simply waits for its
-agent to leave.
+the next delivery resumes that conversation rather than starting a new one. The release is
+the runtime's own: a spawned runtime is sent a `recycle` on its own connection and ends
+itself, and a hosting runtime is handed a `suspend` request it answers. A runtime
+declaring no `resume` is never released at all — the client logs `an idle session's
+runtime cannot resume it; the process stays` — and simply waits for its agent to leave.
 
 **`pi` reads the scope and acts on it.** Each `assign` carries the role's scope, and
 the plugin ends its own process under `oneshot` and stays under `task` or `role` — so a
@@ -385,10 +387,14 @@ runtime's own, because the client's teardown is a pane kill and a runtime killed
 mid-teardown loses what it had not yet written — pi flushes its session file as it
 shuts down.
 
-`pi` declares `register`, `report`, `inject` and `recycle` with **no `resume`**, so the
-other door is shut to it: there is no setting that releases its process and brings the
-conversation back, and `idle_close` has to stay `0` rather than name a bound. Nothing
-in `spec.toml` can assert that half either; it is the agent's to keep.
+`pi` declares `register`, `report`, `inject`, `recycle` and `resume`, so both doors are
+open to it: a non-zero `idle_close` releases an idle `task` or `role` session's process,
+and the family's next delivery starts the role's `resume` argv — `pi --session <id>`,
+the same session store `pi --session-id <id>` wrote — so the conversation comes back
+rather than a second one starting. `idle_close = 0` is still the setting for a role that
+wants a standing process instead of a released one, and it is a real choice rather than a
+workaround: a released session costs a process start on its next delivery. Nothing in
+`spec.toml` can assert the capability half; it is the agent's to keep.
 
 The tell that a pool is *not* being reused is a `role` role whose `onlyne sessions` shows
 a new `session_id` per delivery and none of them left standing. A pool that works looks
@@ -406,10 +412,13 @@ by `retiring idle session resource`, for every delivery, with the tab going away
 time. A pool that empties *and* a tab that closes together means the binary is behind,
 not that the two problems cancelled.
 
-The same log line is how a reclaimed resource looks from the outside: an `idle_close`
-non-zero on a runtime that declares no `resume` suspends a session that cannot be
-brought back, which reads as a pool member vanishing for no stated reason. So when a
-`role` pool misbehaves, read those two lines before reading anything else.
+The other direction reads differently, and telling them apart is what these lines are
+for: a runtime that declares `resume` has its idle session released and logs `idle
+session suspended; its process was released`, and the same family's next delivery brings
+it back — that is the pool working, not leaking. A runtime that declares no `resume`
+cannot be released at all, so `idle_close` on it changes nothing and the client writes
+`an idle session's runtime cannot resume it; the process stays`. So when a `role` pool
+misbehaves, read those lines before reading anything else.
 
 ### Orca and Tern sessions
 

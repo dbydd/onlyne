@@ -435,9 +435,13 @@ one of exactly two shapes:
   the shape `role` needs when `idle_close = 0`.
 - **Resumable.** The runtime declares `resume`, so a non-zero `idle_close` suspends the
   process — the conversation stays in the runtime's own store, the slot stops spending
-  capacity — and the scope's next delivery resumes it. `suspend` is the frame that asks
-  for the release; without both capabilities the idle timeout has nothing to do and the
-  session simply waits for the runtime to leave.
+  capacity — and the scope's next delivery resumes it. For a spawned runtime the release
+  is a `recycle` on the plugin's own connection, which the plugin answers by ending
+  itself; the client closes the container only after `CONTROL_SETTLE_BOUND` of grace, so
+  the runtime's own teardown — the one that writes the store — runs before the host takes
+  the pane. A hosting runtime is handed a `suspend` request instead and answers it.
+  Without `resume` the idle timeout has nothing to do and the session simply waits for the
+  runtime to leave.
 
 The scope is what tells a runtime which one to be, and it rides the assignment in
 `assign`'s `scope` field. Neither party can decide alone, and both wrong answers are
@@ -453,12 +457,15 @@ something a spec can assert, so it is the runtime's own decision, made per scope
 `pi` is the worked example: it reads the scope off each assignment and acts on it,
 ending its own process under `oneshot` — the only way pi's store gets flushed, since
 the teardown that writes it runs at `agent_settled` — and staying under `task` or
-`role` so the conversation is what the next delivery lands in. What it does not do is
-declare `resume`: `pi --mode rpc` keeps its conversation in a session file, and a
-plugin that said so would let a non-zero `idle_close` release the process and the next
-delivery resume the same conversation rather than starting a new one. Until one does,
-`role` in front of `pi` works resident and `idle_close = 0` is the setting that keeps it
-that way.
+`role` so the conversation is what the next delivery lands in. It also declares
+`resume`, because pi keeps its conversation in its own session store
+(`--session-dir`): a non-zero `idle_close` releases an idle `task` or `role` session's
+process, and the family's next delivery starts the role's `resume` argv —
+`pi --session <id>` — on the conversation that was released rather than opening a new
+one. The release is pi's own exit and not a kill: the client sends `recycle`, the
+plugin's `onRecycle` stops and asks pi to shut down, and pi writes its session file at
+`agent_settled` — which is why the client asks first and closes the container only
+after a grace. A role that wants a standing process instead sets `idle_close = 0`.
 
 Scope takes effect entirely on the client: the server delivers by role, the client decides
 which session takes it, and the server keeps zero orchestration.

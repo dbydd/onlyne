@@ -57,8 +57,23 @@ export const HELLO_TIMEOUT_MS = 5_000;
 /** Default bound on one request round trip. */
 export const REQUEST_TIMEOUT_MS = 30_000;
 
-/** Capabilities this plugin implements on the wire. */
-export const CAPABILITIES = ["register", "report", "inject", "recycle"];
+/**
+ * Capabilities this plugin implements on the wire.
+ *
+ * `resume` is the one that changes what a `task` scope does with this runtime.
+ * Pi keeps its conversation in its own store (`--session-dir`), so a session the
+ * client releases is one it can bring back by starting the role's `resume` argv
+ * — `pi --session <id>` — over the same store. Without the declaration the
+ * client keeps the process instead and the scope degrades to "process alive,
+ * session alive"; with it, an idle `task` session has its process released and
+ * the family's next delivery lands in the same conversation.
+ *
+ * The release is this plugin's own exit, not a kill: `onRecycle` stops and calls
+ * `exitSession`, and pi flushes its session file at `agent_settled`. The client
+ * asks first and closes the container only after a grace, which is what makes
+ * the ordering safe (`AGENTS.md` §10).
+ */
+export const CAPABILITIES = ["register", "report", "inject", "recycle", "resume"];
 
 export class OnlyneAgent {
   /**

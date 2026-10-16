@@ -490,7 +490,7 @@ test("a fresh agent opens with hello, registers and reports ready", async () => 
     plugin: "pi-onlyne",
     version: PACKAGE_VERSION,
     kind: "agent",
-    capabilities: ["register", "report", "inject", "recycle"],
+    capabilities: ["register", "report", "inject", "recycle", "resume"],
     mount: { role: "planner", session: SESSION_ID, task_id: TASK_ID, pid: process.pid },
   });
 

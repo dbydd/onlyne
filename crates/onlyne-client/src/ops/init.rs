@@ -136,10 +136,11 @@ pub async fn init(args: InitArgs) -> Result<String> {
 ///
 /// `resume` is the same runtime asked for the *other* thing: `pi --session <id>`
 /// opens a conversation this client released (a `task` scope's `idle_close`,
-/// `AGENTS.md` §10) instead of starting a second one under the same id. It is
-/// inert until the plugin declares the `resume` capability — the client only
-/// releases a session whose runtime says it can come back — so a role that
-/// pastes this fragment gains nothing it did not ask for.
+/// `AGENTS.md` §10) instead of starting a second one under the same id. The key is
+/// only half the pair: the client releases a session only when the runtime's own
+/// mount declared the `resume` capability, and `pi`'s plugin declares it. A role
+/// that pastes this fragment onto a runtime that cannot come back is inert rather
+/// than wrong.
 const SEED_RUNTIME: &str = "\
 [client.runtime]\n\
 drive = \"plugin\"\n\

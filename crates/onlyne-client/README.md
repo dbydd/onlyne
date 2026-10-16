@@ -146,8 +146,9 @@ client releases the process and the slot, so a suspended session spends none of
 `max_sessions`. The next delivery bound to that session resumes it instead of opening a new
 one.
 
-Suspend depends on the runtime's own capability, declared as `resume` in its spec entry's
-capabilities. A runtime without it degrades to "process alive, session alive": the session
+Suspend depends on the runtime's own capability, declared as `resume` on the plugin's own
+mount rather than in any spec entry — the runtime is the only party that knows whether its
+conversation outlives its process. A runtime without it degrades to "process alive, session alive": the session
 is never suspended, its process and slot stay, and the family's next delivery still enters
 it. The client never writes a history summary of the journal to stand in for a resumed
 conversation; a runtime that cannot restore one keeps its process.
@@ -329,7 +330,7 @@ Hitting the ceiling records fault kind `intent_exhausted` and sends `report{kind
 
 空闲的 `task` 或 `role` 会话可以挂起：运行时保存对话，客户端释放进程与槽位，因此挂起的会话不占用 `max_sessions`。下一个绑定到该会话的投递会恢复它，而不是新开一个。
 
-挂起取决于运行时自己的能力，即 spec 条目能力列表中的 `resume`。没有该能力的运行时退化为“进程在，会话就在”：会话永不挂起，进程与槽位保留，该家族的后续投递仍然进入它。客户端绝不写一份日志摘要来顶替被恢复的对话；无法恢复对话的运行时只能继续持有进程。
+挂起取决于运行时自己的能力，而该能力由**插件自己的挂载**声明（`resume`），不在任何 spec 条目里——只有运行时自己知道它的对话是否能挺过进程退出。没有该能力的运行时退化为“进程在，会话就在”：会话永不挂起，进程与槽位保留，该家族的后续投递仍然进入它。客户端绝不写一份日志摘要来顶替被恢复的对话；无法恢复对话的运行时只能继续持有进程。
 
 ### 服务器链接
 

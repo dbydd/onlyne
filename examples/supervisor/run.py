@@ -193,9 +193,9 @@ def seed_entries() -> str:
     )
     # The other half of the same runtime: `--session` opens a conversation
     # this client released (`[client.session] idle_close`) instead of starting a
-    # second one under the same id. Inert until the plugin declares `resume`,
-    # so a role gains nothing it did not ask for. Kept equal to the seed
-    # `onlyne-client init` prints.
+    # second one under the same id. The key is only half the pair: the client
+    # releases a session only when the runtime's mount declared `resume`, which
+    # pi's plugin does. Kept equal to the seed `onlyne-client init` prints.
     resume = json.dumps(
         ["pi", "--session", "{session}", "--session-dir", ".pi/sessions", "-ns"],
         ensure_ascii=False
