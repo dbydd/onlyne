@@ -133,10 +133,18 @@ pub async fn init(args: InitArgs) -> Result<String> {
 /// The bytes match the seed `examples/supervisor/run.py` writes into its ring
 /// entries, so a pasted fragment spawns the same session the demo cluster runs.
 /// The table is written last, because a key after it belongs to it.
+///
+/// `resume` is the same runtime asked for the *other* thing: `pi -c <id>`
+/// continues a conversation this client released (a `task` scope's `idle_close`,
+/// `AGENTS.md` §10) instead of starting a second one under the same id. It is
+/// inert until the plugin declares the `resume` capability — the client only
+/// releases a session whose runtime says it can come back — so a role that
+/// pastes this fragment gains nothing it did not ask for.
 const SEED_RUNTIME: &str = "\
 [client.runtime]\n\
 drive = \"plugin\"\n\
-command = [\"pi\", \"--session-id\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]";
+command = [\"pi\", \"--session-id\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]\n\
+resume = [\"pi\", \"-c\", \"{session}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]";
 
 /// The `[[client]]` slice `init` prints for `spec.toml`.
 ///

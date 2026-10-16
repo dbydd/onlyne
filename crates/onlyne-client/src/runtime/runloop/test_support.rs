@@ -55,6 +55,7 @@ pub(super) fn role_info(max_sessions: u32, command: Vec<String>) -> RoleInfo {
         runtime: onlyne_proto::RoleRuntime {
             drive: onlyne_proto::Drive::Plugin,
             command,
+            resume: Vec::new(),
         },
         spec_hash: "hash".into(),
         prose: None,

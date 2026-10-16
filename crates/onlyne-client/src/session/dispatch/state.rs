@@ -13,6 +13,11 @@ pub(super) struct DispatchInner {
     pub(super) role: String,
     pub(super) workspace: PathBuf,
     pub(super) command: Vec<String>,
+    /// The argv a released session of this role is revived with
+    /// (`[client.runtime] resume`). Empty when the runtime cannot continue a
+    /// conversation, which is what a session falls back to its own `command`
+    /// for.
+    pub(super) resume: Vec<String>,
     /// The drive the role's spec declares (`[client.runtime] drive`). `None`
     /// until the first `welcome` names it.
     pub(super) drive: Option<onlyne_config::Drive>,
@@ -214,6 +219,11 @@ pub struct SessionSlot {
     /// freshly rendered one, because the command carries the runtime's own key
     /// for the conversation and may interpolate the delivery into it.
     pub(super) command: Vec<String>,
+    /// The argv a **revival** of this session runs, rendered when the session
+    /// was born from the role's `[client.runtime] resume`. Empty for a runtime
+    /// that cannot continue a conversation: the revival then starts `command`
+    /// again, which is what every session did before this key existed.
+    pub(super) resume: Vec<String>,
     /// What a hosting runtime called the conversation it opened, opaque to this
     /// client: stored beside the session, handed back on the next `open` for the
     /// same family, and read by nothing here. A session without one is a

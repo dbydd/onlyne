@@ -103,6 +103,10 @@ fn open_session(
     reject_unpaired_runtime(inner)?;
     let session_id = task_id.to_string();
     let command = render_tokens(&inner.command, &session_id, task_id);
+    // The revival argv is rendered at birth and kept: a session is born once,
+    // and what brings it back is a property of the role's runtime rather than
+    // of the delivery that happens to arrive next.
+    let resume = render_tokens(&inner.resume, &session_id, task_id);
     let env = session_env(
         &inner.role,
         &session_id,
@@ -161,6 +165,7 @@ fn open_session(
         Spawned {
             session: session.clone(),
             command,
+            resume,
             tools_token,
         },
         task_id,
@@ -260,13 +265,23 @@ fn resume_delivery(
     prose: &str,
 ) -> Result<SessionRef> {
     reject_unpaired_runtime(inner)?;
+    // What brings this conversation back: the runtime's own resume argv when
+    // the role declares one, and the command it was born with otherwise. The
+    // difference is the whole point of the key — `pi --session-id <id>` opens a
+    // conversation and `pi -c <id>` continues one, and only the spec knows
+    // which flag says which.
     let (session_id, command, tools_token) = inner
         .sessions
         .get(key)
         .map(|slot| {
+            let command = if slot.resume.is_empty() {
+                slot.command.clone()
+            } else {
+                render_tokens(&slot.resume, &slot.session.task_id, task_id)
+            };
             (
                 slot.session.task_id.clone(),
-                slot.command.clone(),
+                command,
                 slot.tools_token.clone(),
             )
         })
@@ -368,6 +383,9 @@ fn advance_session_row(inner: &mut DispatchInner, session_id: &str) {
 struct Spawned {
     session: SessionRef,
     command: Vec<String>,
+    /// The rendered revival argv, empty when the role's runtime cannot continue
+    /// a conversation.
+    resume: Vec<String>,
     tools_token: String,
 }
 
@@ -451,6 +469,7 @@ fn stage_slot(
                 delivered_roles: BTreeSet::new(),
                 opened_at: Instant::now(),
                 command: spawned.command,
+                resume: spawned.resume,
                 keeps_idle: !matches!(
                     inner.session_policy.scope,
                     onlyne_config::SessionScope::Oneshot

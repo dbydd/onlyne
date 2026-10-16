@@ -6,6 +6,13 @@ use std::sync::{Arc, Mutex};
 pub struct FakeBackend {
     state: Arc<Mutex<HashMap<String, SessionRef>>>,
     failed_probes: Arc<Mutex<HashSet<String>>>,
+    /// Every argv this backend was asked to spawn, in order.
+    ///
+    /// A client's spawn is where the rendered command leaves its own code, and
+    /// what it asked for is not visible in the session it got back: a revival
+    /// runs the role's `resume` argv and a birth runs its `command`, so a case
+    /// that cares which one was asked reads it here.
+    spawns: Arc<Mutex<Vec<Vec<String>>>>,
     pub fail_available: bool,
 }
 
@@ -22,6 +29,13 @@ impl FakeBackend {
         mutex
             .lock()
             .map_err(|_| anyhow::anyhow!("fake {what} lock poisoned for task {task_id}"))
+    }
+
+    /// The argv of every spawn this backend has been asked for, oldest first.
+    pub fn spawned_commands(&self) -> Vec<Vec<String>> {
+        Self::guard(&self.spawns, "<spawns>", "spawns")
+            .unwrap_or_else(|err| panic!("{err}"))
+            .clone()
     }
 
     pub fn sessions(&self) -> HashMap<String, SessionRef> {
@@ -63,6 +77,7 @@ impl SessionBackend for FakeBackend {
         Ok(!self.fail_available)
     }
     fn spawn(&self, spec: SpawnSpec) -> Result<SessionRef> {
+        Self::guard(&self.spawns, &spec.task_id, "spawns")?.push(spec.command.clone());
         let session = SessionRef {
             task_id: spec.task_id.clone(),
             backend: self.name().into(),

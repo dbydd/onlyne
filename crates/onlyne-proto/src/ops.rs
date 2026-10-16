@@ -463,11 +463,25 @@ pub struct RoleRuntime {
     /// which is what every role in the tree is today.
     #[serde(default)]
     pub drive: Drive,
-    /// The argv one session runs, with `{session}` and `{task}` substituted by
-    /// the client. An absent key reads as an empty list, which no drive can
-    /// start a session with.
+    /// The argv a session opens with, with `{session}` and `{task}`
+    /// substituted by the client. An absent key reads as an empty list, which
+    /// no drive can start a session with.
     #[serde(default)]
     pub command: Vec<String>,
+    /// The argv a session **comes back** with: what the client runs when a
+    /// delivery arrives for a family whose conversation was released
+    /// (`idle_close`) and this role's runtime can resume it. `{session}` and
+    /// `{task}` substitute the same way.
+    ///
+    /// Absent for every runtime that cannot continue a conversation — which is
+    /// most of them, and the reason it is a second key rather than a variant of
+    /// the first: `pi -c <id>` and `pi --session-id <id>` are two commands for
+    /// two situations, and only the runtime author knows which flag names the
+    /// difference. An absent key reads as "no path back", so a released session
+    /// is never revived and the next delivery of that family opens a fresh
+    /// conversation — the same behavior every role had before this key existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resume: Vec<String>,
 }
 
 impl Default for RoleRuntime {
@@ -475,6 +489,7 @@ impl Default for RoleRuntime {
         Self {
             drive: Drive::Plugin,
             command: Vec::new(),
+            resume: Vec::new(),
         }
     }
 }

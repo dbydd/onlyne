@@ -19,6 +19,10 @@ pub struct RoleSlice {
     /// How the client talks to the runtime (`[client.runtime] drive`).
     pub drive: Drive,
     pub command: Vec<String>,
+    /// The argv a released session is revived with (`[client.runtime] resume`).
+    /// Empty for a runtime that cannot continue a conversation, which is the
+    /// default and what every role was before the key existed.
+    pub resume: Vec<String>,
     pub max_sessions: u32,
     /// The roles a session of this role owes a delivery to (`owes_targets`).
     /// Reach and obligation are separate declarations: the server gates the
@@ -32,6 +36,7 @@ impl RoleSlice {
         Self {
             drive: drive_of(runtime.drive),
             command: runtime.command,
+            resume: runtime.resume,
             max_sessions: welcome.max_sessions,
             required_targets: welcome.owes_targets.clone(),
         }
@@ -41,6 +46,7 @@ impl RoleSlice {
         Self {
             drive: drive_of(info.runtime.drive),
             command: info.runtime.command.clone(),
+            resume: info.runtime.resume.clone(),
             max_sessions: info.max_sessions,
             required_targets: info.owes_targets.clone(),
         }
@@ -65,6 +71,9 @@ pub fn drive_of(wire: onlyne_proto::Drive) -> Drive {
 pub fn slice_diff(current: &RoleSlice, next: &RoleSlice) -> Vec<&'static str> {
     let mut fields = Vec::new();
     if current.drive != next.drive || current.command != next.command {
+        fields.push("runtime");
+    }
+    if current.resume != next.resume {
         fields.push("runtime");
     }
     if current.max_sessions != next.max_sessions {

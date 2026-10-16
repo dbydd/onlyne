@@ -916,6 +916,7 @@ mod tests {
         inner.sessions.insert(
             task.to_string(),
             SessionSlot {
+                resume: Vec::new(),
                 keeps_idle: true,
                 family: None,
                 idle_since: None,

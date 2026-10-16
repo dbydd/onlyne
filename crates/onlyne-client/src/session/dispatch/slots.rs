@@ -24,6 +24,7 @@ impl DispatchState {
                 role: role.into(),
                 workspace: workspace.into(),
                 command,
+                resume: Vec::new(),
                 drive: None,
                 placement: None,
                 runtime_refusal: None,
@@ -392,6 +393,7 @@ impl DispatchState {
         crate::session::slice::RoleSlice {
             drive: inner.drive.unwrap_or_default(),
             command: inner.command.clone(),
+            resume: inner.resume.clone(),
             max_sessions: inner.max_sessions,
             required_targets: inner.required_targets.clone(),
         }
@@ -524,6 +526,7 @@ impl DispatchState {
     pub fn reconfigure(&self, slice: crate::session::slice::RoleSlice) {
         let mut inner = self.inner.lock();
         inner.command = slice.command;
+        inner.resume = slice.resume;
         inner.max_sessions = slice.max_sessions;
         inner.required_targets = slice.required_targets;
     }

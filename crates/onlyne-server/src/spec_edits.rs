@@ -403,6 +403,7 @@ fn file_runtime(runtime: &RoleRuntime) -> RuntimeSection {
             WireDrive::Exec => FileDrive::Exec,
         },
         command: runtime.command.clone(),
+        resume: runtime.resume.clone(),
     }
 }
 

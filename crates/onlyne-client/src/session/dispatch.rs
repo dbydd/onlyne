@@ -49,6 +49,9 @@ mod state;
 mod transport;
 mod turn_end;
 
+#[cfg(test)]
+mod revive_tests;
+
 pub use delivery::{ReadyNotice, dispatch, on_ready};
 pub use env::{
     HEARTBEAT_INTERVAL, HEARTBEAT_SILENCE_MARGIN, REQUEST_TIMEOUT, missing_capability, plugin_gap,

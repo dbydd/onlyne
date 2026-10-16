@@ -224,6 +224,14 @@ impl std::fmt::Display for Drive {
 ///
 /// An absent table is `drive = "plugin"` with an empty command, which is what
 /// every role in the tree is today.
+///
+/// `command` and `resume` are two commands for two situations rather than one
+/// command with a mode flag: a conversation a `task`-scope session opens is a
+/// fresh process (`pi --session-id <id>`), and one it **comes back to** after
+/// the slot was released is a continuation (`pi -c <id>`). Which flag names the
+/// difference is the runtime author's knowledge, so the spec carries both and
+/// the client picks by what it is doing, never by guessing at a runtime it does
+/// not own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeSection {
     /// `plugin` | `acp` | `exec`. Absent means [`Drive::Plugin`].
@@ -234,6 +242,12 @@ pub struct RuntimeSection {
     /// list, which no drive can start a session with.
     #[serde(default)]
     pub command: Vec<String>,
+    /// The argv a released session is revived with, with the same two
+    /// substitutions. Absent — the state every role is in until its runtime
+    /// author writes one — means the conversation cannot be continued, so a
+    /// delivery for that family opens a fresh session instead of reviving one.
+    #[serde(default)]
+    pub resume: Vec<String>,
 }
 
 impl Default for RuntimeSection {
@@ -241,6 +255,7 @@ impl Default for RuntimeSection {
         Self {
             drive: Drive::Plugin,
             command: Vec::new(),
+            resume: Vec::new(),
         }
     }
 }
@@ -631,7 +646,24 @@ fn validate(spec: &Spec, value: &toml::Value, text: &str, file: &str) -> Result<
                 format!("role {} has invalid key: {message}", client.role),
             )
         })?;
-        validate_runtime_command(&client.role, &client.runtime.command, text, file, idx)?;
+        validate_runtime_command(
+            &client.role,
+            &client.runtime.command,
+            text,
+            file,
+            idx,
+            "command",
+        )?;
+        // A resume argv is optional, so an absent one is not refused; a present
+        // one is a command like any other and passes the same checks.
+        validate_runtime_command(
+            &client.role,
+            &client.runtime.resume,
+            text,
+            file,
+            idx,
+            "resume",
+        )?;
     }
 
     for (idx, gateway) in spec.gateway.iter().enumerate() {
@@ -1068,16 +1100,15 @@ fn validate_runtime_command(
     text: &str,
     file: &str,
     entry_index: usize,
+    key: &str,
 ) -> Result<(), SpecError> {
     for token in tokens {
         for placeholder in placeholders(token) {
             if !ALLOWED_PLACEHOLDERS.contains(&placeholder.as_str()) {
                 return Err(SpecError::validate(
                     file,
-                    runtime_command_line(text, entry_index),
-                    format!(
-                        "role {role} has unknown runtime command placeholder {{{placeholder}}}"
-                    ),
+                    runtime_command_line(text, entry_index, key),
+                    format!("role {role} has unknown runtime {key} placeholder {{{placeholder}}}"),
                 ));
             }
         }
@@ -1089,8 +1120,10 @@ fn validate_runtime_command(
 /// line of that entry when it is written as one, then the table header, then
 /// the entry itself. Every spelling the file accepts lands on the entry, and
 /// the ones a line scan can name land on the offending key.
-fn runtime_command_line(text: &str, entry_index: usize) -> usize {
-    ["command", "runtime", "drive"]
+fn runtime_command_line(text: &str, entry_index: usize, key: &str) -> usize {
+    // The key the caller is validating leads, so a refusal on `resume` names
+    // the `resume` line rather than the `command` one beside it.
+    [key, "runtime", "drive"]
         .into_iter()
         .find_map(|key| {
             crate::locate::find_key_line_in_array_entry(text, "client", entry_index, key)

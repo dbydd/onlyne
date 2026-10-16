@@ -477,8 +477,9 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
 /// The two vocabularies stay separate on purpose: `onlyne-config` owns the
 /// spelling a file uses and `onlyne-proto` owns the spelling a frame uses, so
 /// neither crate takes a dependency on the other's parsing — the same boundary
-/// `MsgKindClass` keeps. `drive` is the only field of the table that reaches a
-/// client; the placement is the machine's and never travels.
+/// `MsgKindClass` keeps. `drive` and the two argv lists are the fields of the
+/// table that reach a client, because a client is what starts (and revives) a
+/// runtime; the placement is the machine's and never travels.
 fn role_runtime(runtime: &onlyne_config::RuntimeSection) -> onlyne_proto::RoleRuntime {
     use onlyne_proto::Drive as WireDrive;
     onlyne_proto::RoleRuntime {
@@ -488,6 +489,7 @@ fn role_runtime(runtime: &onlyne_config::RuntimeSection) -> onlyne_proto::RoleRu
             onlyne_config::Drive::Exec => WireDrive::Exec,
         },
         command: runtime.command.clone(),
+        resume: runtime.resume.clone(),
     }
 }
 

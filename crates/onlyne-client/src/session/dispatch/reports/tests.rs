@@ -89,6 +89,7 @@ fn serving_slot(state: &DispatchState, task: &str, msg_id: &str) {
     inner.sessions.insert(
         task.to_string(),
         SessionSlot {
+            resume: Vec::new(),
             keeps_idle: false,
             family: None,
             idle_since: None,
