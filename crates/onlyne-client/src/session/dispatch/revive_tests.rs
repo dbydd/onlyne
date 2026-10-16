@@ -12,6 +12,7 @@ use crate::backend::fake::FakeBackend;
 use onlyne_proto::{Body, Causality, Envelope, MsgKind, Principal, new_envelope, new_task_id};
 use onlyne_store::ClientStore;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 
 /// One delivery of a family, in the shape the client's own door measures.
@@ -50,7 +51,7 @@ fn state_with_both_argvs() -> (crate::session::dispatch::DispatchState, Arc<Fake
     });
     state.inner.lock().session_policy = onlyne_config::SessionPolicy {
         scope: onlyne_config::SessionScope::Task,
-        idle_close: None,
+        idle_close: Some(Duration::from_secs(60)),
     };
     (state, backend)
 }

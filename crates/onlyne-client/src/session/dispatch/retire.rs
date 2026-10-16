@@ -158,10 +158,66 @@ fn unbind_transports(inner: &mut DispatchInner, key: &str, slot: &SessionSlot) {
 /// retires more than one session at a time must not spend that lock on the hosts
 /// it is calling. A retirement therefore records what it took down here and runs
 /// the closes once it is off the lock.
-pub(super) struct PendingClose {
-    pub(super) backend: Arc<dyn SessionBackend>,
-    pub(super) session: SessionRef,
-    pub(super) reason: crate::backend::CloseReason,
+pub struct PendingClose {
+    pub(crate) backend: Arc<dyn SessionBackend>,
+    pub(crate) session: SessionRef,
+    pub(crate) reason: crate::backend::CloseReason,
+    /// The plugin's connection, when the session had one and its runtime
+    /// declared it could resume a conversation it released.
+    ///
+    /// A close that carries one **asks first**: a `recycle` frame over this
+    /// connection, then [`CONTROL_SETTLE_BOUND`] of grace, then the host's own
+    /// close. A runtime whose conversation lives in its own store — which is
+    /// exactly what a runtime declaring `resume` said — writes that store when
+    /// it ends *itself*; a container closed before that loses whatever it had
+    /// not written. See [`PendingCloses`], which is what holds the wait.
+    pub(crate) transport: Option<AdapterIo>,
+    /// How long this session served nothing before the release, as one sentence
+    /// the runtime's own log can name.
+    pub(crate) idle_reason: Option<String>,
+}
+
+/// The closes a release asked for and is still waiting on.
+///
+/// A close with a transport is two steps, and the second one cannot run inside
+/// the sweep that produced it: the ask is an await and the close follows a
+/// grace, and the sweeps run under the dispatch lock's shadow — a close that
+/// blocked there would hold every adapter frame of this role behind a runtime
+/// that has been asked to leave. So the sweep hands them here, and
+/// [`close_asked`](PendingCloses::close_asked) runs the second step, once per
+/// tick, after the grace.
+#[derive(Default)]
+pub(super) struct PendingCloses {
+    asked: Vec<(Instant, PendingClose)>,
+}
+
+impl PendingCloses {
+    /// Record a close whose runtime was asked to release itself.
+    pub(super) fn ask(&mut self, close: PendingClose) {
+        self.asked.push((Instant::now(), close));
+    }
+
+    /// Take every release still inside its grace, for whoever will run them.
+    pub(super) fn take_asks(&mut self) -> Vec<PendingClose> {
+        std::mem::take(&mut self.asked)
+            .into_iter()
+            .map(|(_, close)| close)
+            .collect()
+    }
+
+    /// Close what its grace has run out on, with [`BackendKey`] naming the row.
+    ///
+    /// Returns the closes now due; the ask itself is not re-sent — a runtime
+    /// that has still not let go after its grace gets closed without a second
+    /// question, because a slot nobody releases is a slot this client is holding
+    /// for nothing.
+    pub(super) fn due(&mut self, now: Instant) -> Vec<PendingClose> {
+        let (due, waiting): (Vec<_>, Vec<_>) = self.asked.drain(..).partition(|(asked_at, _)| {
+            now.saturating_duration_since(*asked_at) >= CONTROL_SETTLE_BOUND
+        });
+        self.asked = waiting;
+        due.into_iter().map(|(_, close)| close).collect()
+    }
 }
 
 /// Run the closes a retirement collected.
@@ -279,6 +335,8 @@ pub(super) fn retire_idle_locked(
             backend: Arc::clone(&inner.backend),
             session,
             reason,
+            transport: None,
+            idle_reason: None,
         });
     }
     if reason == crate::backend::CloseReason::Completed {
@@ -494,6 +552,8 @@ pub fn close_all(state: &DispatchState, reason: crate::backend::CloseReason, bud
                 backend: Arc::clone(&inner.backend),
                 session,
                 reason,
+                transport: None,
+                idle_reason: None,
             });
         }
         pending

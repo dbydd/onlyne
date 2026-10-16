@@ -25,6 +25,7 @@ impl DispatchState {
                 workspace: workspace.into(),
                 command,
                 resume: Vec::new(),
+                releases: super::retire::PendingCloses::default(),
                 drive: None,
                 placement: None,
                 runtime_refusal: None,

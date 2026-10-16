@@ -100,6 +100,9 @@ pub(super) struct DispatchInner {
     /// a session whose live connection goes away hands itself to the first
     /// connection that was holding for it.
     pub(super) revived: Vec<(String, AdapterIo, Vec<Capability>)>,
+    /// The closes this client asked a runtime to let go of, inside their grace.
+    pub(super) releases: super::retire::PendingCloses,
+
     /// Tasks whose ending this client asked for with a `control` command.
     ///
     /// `recycle` and `cancel` reach the agent as a `notify`, so the completion

@@ -28,13 +28,24 @@ impl DispatchState {
     /// the dispatch lock is off them, the way the sweeps that retire sessions
     /// already do. Answers the sessions it released, which are the ones whose
     /// row and claim this caller has to publish.
+    /// Release the sessions whose idle bound has run out, and answer which rows
+    /// this caller has to publish.
+    ///
+    /// A close carrying a transport is *asked for* first, on the plugin's own
+    /// connection, by whoever runs it — the sweep in `runtime/runloop/sessions.rs`,
+    /// which is async and off the lock. The ask and the grace therefore live
+    /// there, not in here: a close that blocked under the dispatch lock would
+    /// hold every adapter frame of this role behind a runtime that has been asked
+    /// to leave.
+    ///
+    /// `now` is the caller's clock, so the sweep's own cadence is what ages a
+    /// session rather than a second reading of the wall clock.
     pub fn suspend_idle_sessions(&self, now: Instant) -> Vec<String> {
-        let mut pending: Vec<PendingClose> = Vec::new();
         let mut suspended: Vec<String> = Vec::new();
         {
             let mut inner = self.inner.lock();
             let Some(bound) = scope::idle_bound(&inner.session_policy) else {
-                return Vec::new();
+                return suspended;
             };
             let due: Vec<String> = inner
                 .sessions
@@ -68,22 +79,43 @@ impl DispatchState {
                     );
                     continue;
                 }
+                // A `task`/`role` session is at rest here: `at_rest` reads the
+                // same idle the sweep's own filter read, and the suspend below
+                // is the plan's state machine moving the row.
+                let mut pending = Vec::new();
                 if suspend_locked(&mut inner, &key, &mut pending) {
                     suspended.push(session_id);
+                    // The close waits for its ask: a transport means the ask is
+                    // worth making, and the ones with no transport go straight
+                    // out, so a runtime that never dialled is not held for a
+                    // grace nobody is watching.
+                    for close in pending {
+                        if close.transport.is_some() {
+                            inner.releases.ask(close);
+                        } else {
+                            close_retired(vec![close]);
+                        }
+                    }
                 }
             }
         }
-        close_retired(pending);
         suspended
     }
 
-    /// Whether one session's process is currently released.
-    pub fn is_suspended(&self, session_id: &str) -> bool {
-        let inner = self.inner.lock();
-        inner
-            .sessions
-            .iter()
-            .any(|(key, slot)| names_session(key, slot, session_id) && slot.suspended)
+    /// The releases this tick made, for the sweep to ask on.
+    ///
+    /// A release *is* the close: the ask is a frame and the grace a duration, and
+    /// neither belongs under the dispatch lock, so the async sweep takes them out
+    /// here rather than this client's own caller waiting on a runtime that has
+    /// been asked to leave. Taking them moves them into the grace; the sweep
+    /// asks and then [`releases_due`](Self::releases_due) closes what ran out.
+    pub fn release_asks(&self) -> Vec<super::retire::PendingClose> {
+        self.inner.lock().releases.take_asks()
+    }
+
+    /// Close what its grace has run out on.
+    pub fn releases_due(&self, now: Instant) -> Vec<super::retire::PendingClose> {
+        self.inner.lock().releases.due(now)
     }
 }
 
@@ -176,6 +208,11 @@ pub(super) fn suspend_locked(
             "a suspended session's own binding was not handed back"
         );
     }
+    let transport = inner.transports.remove(&session_id).map(|(io, _)| io);
+    let idle_secs = slot
+        .idle_since
+        .map(|since| Instant::now().saturating_duration_since(since).as_secs())
+        .unwrap_or_default();
     let now = Instant::now();
     if let Some(slot) = inner.sessions.get_mut(key) {
         slot.suspended = true;
@@ -186,7 +223,6 @@ pub(super) fn suspend_locked(
         slot.dropped_at = None;
         slot.last_beat = Some(now);
     }
-    inner.transports.remove(&session_id);
     tracing::info!(
         session = %session_id,
         backend = %session.backend,
@@ -196,6 +232,14 @@ pub(super) fn suspend_locked(
         backend: Arc::clone(&inner.backend),
         session,
         reason: crate::backend::CloseReason::Operator,
+        // The connection the runtime answers on, when it had one. The sweep that
+        // runs this close asks on it *before* the container goes: a runtime
+        // that declared `resume` writes its conversation store when it ends
+        // itself, and a pane killed before that loses the conversation.
+        transport,
+        // How long this session served nothing, which is what the runtime's own
+        // log reads beside the release it was asked for.
+        idle_reason: Some(format!("idle for {idle_secs}s")),
     });
     true
 }

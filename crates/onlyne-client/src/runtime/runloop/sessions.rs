@@ -381,7 +381,40 @@ pub(super) async fn scan_control_settles(state: &RunState) {
 /// alive, session alive" degradation the scope table names: this client will not
 /// release a process it cannot bring back.
 pub(super) async fn scan_idle_sessions(state: &RunState) {
-    for session_id in state.dispatch.suspend_idle_sessions(Instant::now()) {
+    // The sessions this tick releases, and the rows their suspend just wrote.
+    let suspended = state.dispatch.suspend_idle_sessions(Instant::now());
+    for close in state.dispatch.release_asks() {
+        // The runtime's own teardown, asked on its own connection: a `recycle`,
+        // the same send an operator's `recycle` command uses. A runtime that
+        // declared `resume` writes its conversation store when it ends *itself*;
+        // a container closed before that loses the conversation the release just
+        // saved.
+        state
+            .dispatch
+            .recycle_plugin(
+                &close.session.task_id,
+                &close.idle_reason.clone().unwrap_or_else(|| "idle".into()),
+                None,
+            )
+            .await;
+    }
+    // A runtime that has still not let go past its grace is closed without a
+    // second question: the ask was made, and a slot nobody releases is a slot
+    // this client is holding for nothing.
+    for close in state.dispatch.releases_due(Instant::now()) {
+        let backend = close.backend.clone();
+        if let Err(error) = backend.close(&close.session, close.reason, false) {
+            tracing::warn!(
+                session = %close.session.task_id,
+                backend = %close.session.backend,
+                error = %error,
+                "a released runtime's resource did not close"
+            );
+        }
+    }
+    // Publish each row: a released process sends no frame of its own, so without
+    // this the mirror still holds the last thing the living session said.
+    for session_id in suspended {
         if let Err(error) = dispatch::sync_session(&state.dispatch, &session_id).await {
             tracing::warn!(
                 session = %session_id,
