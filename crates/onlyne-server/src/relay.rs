@@ -650,7 +650,13 @@ pub fn ack(state: &State, args: &AckArgs) -> anyhow::Result<Result<LedgerStateEv
         state.ledger.mark_in_flight(&row.msg_id)?;
     }
     let settled = if args.accepted {
-        state.ledger.mark_acked(&row.msg_id, Utc::now())?;
+        // A control row's answer rides its ack: the recipient that acted on the
+        // command sends back the word the operator reads on the row — a probe's
+        // "the process is gone", a recycle's own reason. An ordinary completion
+        // sends none, and the row keeps the head it was written with.
+        state
+            .ledger
+            .mark_acked_with_reason(&row.msg_id, Utc::now(), args.reason.as_deref())?;
         LedgerState::Acked
     } else {
         state

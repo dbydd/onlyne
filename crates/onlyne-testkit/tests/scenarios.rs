@@ -2601,6 +2601,123 @@ max_sessions = 2"#,
     println!("✓ Scenario 26: family reclamation [open work keeps the conversation]");
 }
 
+/// Scenario 28: a probe's answer settles its own row, where the operator reads.
+///
+/// The draft's third point asked for the readout that says whether a stop took,
+/// without `ps`. The answer travels the row the command itself arrived on: the
+/// client that acted on a probe settles it `acked` with the backend's own word
+/// as its `reason`, and `onlyne ledger` already prints that column. No new
+/// surface, no projection write to fight the watermark for — the row is the
+/// answer's home, and "nobody asked" (a row settled with no reason) names itself
+/// apart from "the resource is gone".
+///
+/// The fake backend's `probe` answers `alive` with no detail for a process it
+/// still holds, which is what the fixture has: the client spawned it, it never
+/// left. The assertion is on the row's `reason`, which is the whole change —
+/// before it, a control row settled with no reason at all, because an ack could
+/// not carry one.
+#[tokio::test]
+async fn scenario_28_a_probe_answers_on_the_row_the_operator_reads() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker"]"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+    append_client_session_config(&worker_ws, "task", "0s");
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+    // `resume` keeps the session past its delivery, so the probe lands on a
+    // session this client still serves — the case the readout is for. An
+    // oneshot session would have retired with its task, and the row would
+    // answer `no session for this task`, which is its own honest answer.
+    cluster
+        .start_fake_agent(&worker_ws, &serve_repeated(true, 1))
+        .await
+        .expect("start a session-keeping agent");
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+
+    let sent = cluster
+        .admin_send("worker", "worker", "a task to probe")
+        .await
+        .expect("send");
+    let task_id = task_of(&sent);
+    cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(task_id.clone()),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter().any(|row| {
+                    !row.session_id.is_empty() && row.public_lifecycle == Lifecycle::Idle
+                })
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the session row goes idle");
+
+    cluster
+        .admin_control("worker", onlyne_proto::ControlOp::Probe { task_id })
+        .await
+        .expect("probe");
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                kind: Some(onlyne_proto::MsgKind::Control),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter()
+                    .any(|row| row.state == LedgerState::Acked && row.reason.is_some())
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the control row settles with its answer");
+    let rows = cluster
+        .query_ledger(LedgerQuery {
+            kind: Some(onlyne_proto::MsgKind::Control),
+            ..Default::default()
+        })
+        .await
+        .expect("read the control rows");
+    let probe_row = rows
+        .iter()
+        .find(|row| {
+            row.reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with("probed:"))
+        })
+        .expect("the probe's own row");
+    let reason = probe_row.reason.as_deref().expect("the reason above");
+    assert!(
+        reason.contains("alive"),
+        "the fixture's backend still holds the process: {reason}"
+    );
+    println!("✓ Scenario 28: probe readout [the answer settles its own row]");
+}
+
 /// Scenario 18: a heartbeat that only refreshes `last_seen` is not a projection write.
 #[tokio::test]
 async fn scenario_18_a_last_seen_only_heartbeat_writes_no_updated_at_and_no_event() {

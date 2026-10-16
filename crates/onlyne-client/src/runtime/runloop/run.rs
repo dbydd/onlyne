@@ -236,11 +236,16 @@ pub(super) async fn settle_control(state: &RunState, delivery: &Delivery) {
             tracing::info!(
                 op = op.name(),
                 task = %op.task_id(),
-                held,
+                held = held.is_some(),
                 "control command applied"
             );
-            state.dispatch.push_settled(ack(true, None));
-            if held && matches!(op, ControlOp::Recycle { .. } | ControlOp::Cancel { .. }) {
+            // The answer a probe brought back settles its own row: `reason` is
+            // the word an operator already reads on `onlyne ledger`, and it is
+            // why this row reads settled. Every other command answers nothing
+            // and settles silently, as it always has.
+            let answered = held.is_some();
+            state.dispatch.push_settled(ack(true, held));
+            if answered && matches!(op, ControlOp::Recycle { .. } | ControlOp::Cancel { .. }) {
                 // A published exit releases the task's in-flight rows. The
                 // command's own row is one of them until its ack is enqueued.
                 if let Err(error) = dispatch::sync_session(&state.dispatch, op.task_id()).await {

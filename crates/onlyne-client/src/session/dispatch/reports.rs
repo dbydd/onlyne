@@ -7,6 +7,40 @@ use super::state::{ControlWord, note_beat};
 use super::transport::{serves_ending, serves_task};
 use super::turn_end::on_turn_end;
 
+/// The word one session's host gives a probe, as the row settles with it.
+///
+/// `None` when there was nothing to ask — no session this role holds, or a
+/// backend that could not answer — and the row then settles without a reason,
+/// which reads as "the command went out and nothing came back". That is its own
+/// answer, and it is not the same sentence as a dead resource.
+fn probe_answer(state: &DispatchState, task_id: &str) -> Option<String> {
+    let (backend, session) = {
+        let inner = state.inner.lock();
+        // An idle scoped session has handed its task back, so the binding no
+        // longer names it; the session's own id does. `slot_key_named` reads
+        // both spellings, which is what every other host-side ask goes by.
+        let key = super::state::slot_key_named(&inner, task_id);
+        let session = key
+            .as_deref()
+            .and_then(|key| inner.sessions.get(key))
+            .map(|slot| slot.session.clone());
+        (inner.backend.clone(), session)
+    };
+    let session = session?;
+    match backend.probe(&session) {
+        Ok(probe) => Some(match (&probe.alive, &probe.detail) {
+            (true, Some(detail)) => format!("probed: alive ({detail})"),
+            (true, None) => "probed: alive".to_string(),
+            (false, Some(detail)) => format!("probed: resource gone ({detail})"),
+            (false, None) => "probed: resource gone".to_string(),
+        }),
+        Err(error) => {
+            tracing::warn!(task = %task_id, error = %error, "the host resource did not answer a probe");
+            Some(format!("probed: the backend refused ({error})"))
+        }
+    }
+}
+
 /// Act on one control command that arrived as a delivery.
 ///
 /// `recycle` and `cancel` reach the agent first, so it ends its own turn and
@@ -30,7 +64,7 @@ use super::turn_end::on_turn_end;
 /// answer is `Ok(false)` rather than an error because the row still has to
 /// settle: a command refused here is refused for good, and acking it as
 /// undelivered would have the server offer a command no client can ever act on.
-pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
+pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<Option<String>> {
     let task_id = op.task_id();
     let held = state.holds_task(task_id);
     if !held {
@@ -39,7 +73,7 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
             task = %task_id,
             "a control command naming no session this role holds was refused; nothing was applied"
         );
-        return Ok(false);
+        return Ok(None);
     }
     match op {
         ControlOp::Recycle { reason, .. } => {
@@ -53,6 +87,7 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
             state.owe_controlled_settle(task_id, ControlWord::Recycle, Instant::now());
             state.recycle_plugin(task_id, reason, None).await;
             on_recycled(state, task_id, crate::backend::CloseReason::Operator)?;
+            Ok(None)
         }
         ControlOp::Cancel { reason, .. } => {
             // The same note for the same reason: a cancel ends the task on the
@@ -62,6 +97,7 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
                 .recycle_plugin(task_id, reason, Some(Outcome::Cancelled))
                 .await;
             on_recycled(state, task_id, crate::backend::CloseReason::Cancelled)?;
+            Ok(None)
         }
         ControlOp::Probe { .. } => {
             // A probe that found no transport asked nothing, so there is no fresh
@@ -70,8 +106,22 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
             if state.probe_plugin(task_id).await {
                 sync_session(state, task_id).await?;
             }
+            // The row that carried the question settles `acked` with the answer
+            // as its reason, which is the one place an operator already reads:
+            // `onlyne ledger` prints the row's `reason`, and the answer is why
+            // this row reads settled. "Nobody asked" and "the resource is gone"
+            // name themselves apart, which is the separation the draft asked
+            // `ps` for.
+            Ok(Some(probe_answer(state, task_id).unwrap_or_else(|| {
+                // The session is gone from this role's books between the held
+                // check and the answer: a backend asked about nothing says so.
+                "probed: no session for this task".to_string()
+            })))
         }
-        ControlOp::Snapshot { .. } => sync_session(state, task_id).await?,
+        ControlOp::Snapshot { .. } => {
+            sync_session(state, task_id).await?;
+            Ok(None)
+        }
         ControlOp::Focus { .. } => {
             let (backend, session) = {
                 let inner = state.inner.lock();
@@ -116,9 +166,9 @@ pub async fn on_control(state: &DispatchState, op: &ControlOp) -> Result<bool> {
                     tracing::warn!(task = %task_id, "focus has no live session");
                 }
             }
+            Ok(None)
         }
     }
-    Ok(true)
 }
 
 /// `from` is the connection the frame arrived on, which is what decides whether

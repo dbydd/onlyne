@@ -881,7 +881,28 @@ impl ServerLedger {
     }
 
     pub fn mark_acked(&self, msg_id: &str, at: DateTime<Utc>) -> StoreResult<bool> {
-        self.transition_msg(msg_id, LedgerState::Acked, Some(rfc3339(at)), None)
+        self.mark_acked_with_reason(msg_id, at, None)
+    }
+
+    /// Settle one row `acked`, carrying the settling word its recipient gave.
+    ///
+    /// An ordinary completion needs no reason — the row's own body is the
+    /// delivery — but a control row is a question, and the answer the client
+    /// that acted on it sends back is the reason the row reads `acked` with.
+    /// `COALESCE` keeps an already-written word from being overwritten by an
+    /// empty one on a repeated ack.
+    pub fn mark_acked_with_reason(
+        &self,
+        msg_id: &str,
+        at: DateTime<Utc>,
+        reason: Option<&str>,
+    ) -> StoreResult<bool> {
+        self.transition_msg(
+            msg_id,
+            LedgerState::Acked,
+            Some(rfc3339(at)),
+            reason.map(str::to_string),
+        )
     }
 
     pub fn mark_rejected(&self, msg_id: &str, reason: &str) -> StoreResult<bool> {
