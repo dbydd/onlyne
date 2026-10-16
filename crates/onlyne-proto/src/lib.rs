@@ -64,8 +64,8 @@ pub use lifecycle::{
 };
 pub use ops::{
     AckArgs, AdminControl, AdminOp, AdminReport, AdminSend, ByeArgs, ClientOp, ControlArgs,
-    ConversationInfo, DETAILS_MAX_BYTES, Delivery, Drive, FreshRead, GatewayOp, GhostSweep,
-    HandshakeArgs, HealthArgs, HistoryArgs, LedgerEntry, LedgerQuery, LiveSession,
+    ConversationInfo, DETAILS_MAX_BYTES, Delivery, Drive, FamilyOpenArgs, FreshRead, GatewayOp,
+    GhostSweep, HandshakeArgs, HealthArgs, HistoryArgs, LedgerEntry, LedgerQuery, LiveSession,
     PublishEventArgs, PullArgs, PullReply, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs,
     Receipt, RegisterChannelArgs, RemoveRole, RepairAck, RepairAckMany, RepairAdopt, RepairFail,
     RepairRebind, RepairTarget, Report, RoleInfo, RoleRuntime, SessionProjection, SessionRow,

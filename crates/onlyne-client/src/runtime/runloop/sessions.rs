@@ -2,9 +2,11 @@ use super::config::{OUTCOME_POLL_MS, RunState};
 use super::run::settle_control;
 use crate::backend::SessionOutcome;
 use crate::session::accept::AcceptPath;
+use crate::session::dispatch::DispatchState;
 use crate::session::dispatch::{self, ClientLink};
 use anyhow::{Result, anyhow};
-use onlyne_proto::{AckArgs, ClientOp, Delivery, QueryRolesArgs, RoleInfo};
+use onlyne_proto::{AckArgs, ClientOp, Delivery, FamilyOpenArgs, QueryRolesArgs, RoleInfo};
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -369,6 +371,58 @@ pub(super) async fn scan_control_settles(state: &RunState) {
     }
 }
 
+/// How much work each family this tick could release still owes, asked of the
+/// server's ledger.
+///
+/// One read per distinct family, and each is a count rather than a listing: what
+/// the caller does with the answer is compare it to zero. A family in the map
+/// with `0` is finished; a family missing from it is one the ledger was not
+/// reachable to ask about, which the caller reads as "the time bound stands
+/// alone".
+///
+/// A read that fails is not retried in the tick and is not fatal to the sweep:
+/// the next tick asks again, and until it answers the fallback above is what
+/// this role runs on, which is exactly what it ran on before the ledger was
+/// consulted.
+async fn families_open(
+    link: &ClientLink,
+    dispatch: &DispatchState,
+    now: Instant,
+) -> HashMap<String, u64> {
+    let mut open: HashMap<String, u64> = HashMap::new();
+    for (_, family) in dispatch.idle_due(now) {
+        if family.is_empty() || open.contains_key(&family) {
+            continue;
+        }
+        let reply = link
+            .request(ClientOp::QueryFamilyOpen(FamilyOpenArgs {
+                family: family.clone(),
+            }))
+            .await;
+        match reply {
+            Ok(body) if body.ok => {
+                let count = body
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("open"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                open.insert(family, count);
+            }
+            // Unasked, and the time bound is the whole answer for it. Logged at
+            // debug because an offline link is the ordinary reason and it will
+            // be logged again by the link's own message.
+            Ok(body) => {
+                tracing::debug!(family = %family, error = ?body.error, "the family's open count was refused");
+            }
+            Err(error) => {
+                tracing::debug!(family = %family, error = %error, "the family's open count was not asked");
+            }
+        }
+    }
+    open
+}
+
 /// Release the process of every idle session whose scope bound has expired, and
 /// publish each one's row.
 ///
@@ -380,9 +434,22 @@ pub(super) async fn scan_control_settles(state: &RunState) {
 /// runtime cannot resume is left exactly where it is, which is the "process
 /// alive, session alive" degradation the scope table names: this client will not
 /// release a process it cannot bring back.
-pub(super) async fn scan_idle_sessions(state: &RunState) {
+pub(super) async fn scan_idle_sessions(link: &ClientLink, state: &RunState) {
+    // Which families still owe work, asked of the ledger that owns the answer
+    // before any conversation is let go. Only the families this tick could
+    // release are asked about, so the cost is one read per idle session per
+    // tick and nothing at all on a cluster with no idle scoped sessions.
+    //
+    // A family the client could not ask about is left out of the map, and
+    // `release_idle` then falls back to the time bound for it: the sweep is
+    // offline exactly when the link is down, and a link that is down is not a
+    // reason to hold every process this role owns. Nothing released on that
+    // fallback can lose a conversation, because `resumable` has already
+    // answered for the runtime.
+    let now = Instant::now();
+    let open = families_open(link, &state.dispatch, now).await;
     // The sessions this tick releases, and the rows their suspend just wrote.
-    let suspended = state.dispatch.suspend_idle_sessions(Instant::now());
+    let suspended = state.dispatch.release_idle(now, &open);
     // The runtime's own teardown, asked on the connection the suspension
     // captured: a `recycle`, the same frame an operator's `recycle` command
     // sends. A runtime that declared `resume` writes its conversation store when

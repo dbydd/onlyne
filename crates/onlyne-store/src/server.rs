@@ -151,6 +151,10 @@ CREATE TABLE IF NOT EXISTS ledger(
 CREATE INDEX IF NOT EXISTS ledger_state_enqueued_idx ON ledger(state,enqueued_at);
 CREATE INDEX IF NOT EXISTS ledger_task_idx ON ledger(task);
 CREATE INDEX IF NOT EXISTS ledger_kind_state_idx ON ledger(kind,state);
+-- The family-open count's own reading, and the family listing's: rows of one
+-- chain are few, so the index is on the family alone and the state pair is
+-- read from the rows it finds.
+CREATE INDEX IF NOT EXISTS ledger_family_idx ON ledger(family);
 -- The ledger listing's own reading order, on the same terms as the sessions
 -- index above. A listing filtered by `state` keeps using `ledger_state_enqueued_idx`
 -- and reads that backwards.
@@ -1090,6 +1094,29 @@ impl ServerLedger {
             .query_map(params_from_iter(args), ledger_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// How much work one task family still owes: the rows of that family which
+    /// have not settled.
+    ///
+    /// A count rather than a filtered listing, because the answer *is* the
+    /// total: [`ledger_list_sql`] caps every read with `LIMIT`, so counting a
+    /// page would report the page and not the family. `queued` is work accepted
+    /// but not yet handed out and `in_flight` is work a client holds, which are
+    /// the two states in which a family still owes something — `acked`,
+    /// `rejected` and `expired` are all settled, and none of them is work.
+    ///
+    /// A row minted with no `family` at all — a reply, a note, a control frame;
+    /// `verbs.rs` starts none of their causality chains — is not counted for any
+    /// family, and asking about one returns zero.
+    pub fn family_open_count(&self, family: &str) -> StoreResult<u64> {
+        let conn = self.read()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ledger WHERE family=? AND state IN ('queued','in_flight')",
+            params![family],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
     }
 
     /// The plan's task-keyed ledger read: every row of one task across roles, in

@@ -291,6 +291,29 @@ pub struct LedgerQuery {
     pub limit: u32,
 }
 
+/// `query_family_open` request: how much work one task family still owes.
+///
+/// The question a scoped session asks before it lets its process go. A `task`
+/// scope keeps one conversation for every delivery its family sends, so the
+/// release of that conversation has to know whether the family is finished or
+/// merely between two of its deliveries — and only the ledger knows, because a
+/// delivery's state is the server's fact (`AGENTS.md` §2.2). A client that
+/// counted this from its own view would be answering from a copy, and after its
+/// own restart from an empty one.
+///
+/// `open` counts rows that are `queued` or `in_flight`: work that exists and has
+/// not settled. It is a count and not a filter ([`LedgerQuery`]) on purpose —
+/// `family` is not a column that read filters on, its `LIMIT` would truncate an
+/// answer whose whole content is the total, and "unsettled" is a pair of states
+/// rather than the single one a filter can name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case", default)]
+pub struct FamilyOpenArgs {
+    /// The family whose open work is asked about, as `causality.family` spells
+    /// it on the rows themselves.
+    pub family: String,
+}
+
 /// `query_sessions` filter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case", default)]
@@ -672,6 +695,8 @@ pub enum ClientOp {
     Subscribe(Subscribe),
     /// Read the ledger.
     QueryLedger(LedgerQuery),
+    /// Read how much work one task family still owes.
+    QueryFamilyOpen(FamilyOpenArgs),
     /// Read the session projection table.
     QuerySessions(QuerySessionsArgs),
     /// Read registered roles and their presence.
@@ -700,6 +725,7 @@ impl ClientOp {
             ClientOp::Report(_) => "report",
             ClientOp::Subscribe(_) => "subscribe",
             ClientOp::QueryLedger(_) => "query_ledger",
+            ClientOp::QueryFamilyOpen(_) => "query_family_open",
             ClientOp::QuerySessions(_) => "query_sessions",
             ClientOp::QueryRoles(_) => "query_roles",
             ClientOp::QueryFaults(_) => "query_faults",
@@ -719,6 +745,7 @@ impl ClientOp {
         matches!(
             self,
             ClientOp::QueryLedger(_)
+                | ClientOp::QueryFamilyOpen(_)
                 | ClientOp::QuerySessions(_)
                 | ClientOp::QueryRoles(_)
                 | ClientOp::QueryFaults(_)

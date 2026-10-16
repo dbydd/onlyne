@@ -157,6 +157,13 @@ pub async fn dispatch_client(state: &Arc<State>, session: &mut Session, op: Clie
                 Err(error) => internal(error),
             }
         }
+        // The one question a scoped session asks of the ledger: does the family
+        // it holds a conversation for still owe work? The row count is the whole
+        // answer, and the client reads it back as `open`.
+        ClientOp::QueryFamilyOpen(args) => match state.ledger.family_open_count(&args.family) {
+            Ok(open) => ResBody::ok(json!({ "open": open })),
+            Err(error) => internal(error.into()),
+        },
         ClientOp::QueryRoles(query) => match roles(state, &query) {
             Ok(rows) => ResBody::ok(json!({ "roles": rows })),
             Err(error) => internal(error),

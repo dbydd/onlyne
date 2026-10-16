@@ -2457,6 +2457,150 @@ allowed_targets = ["worker"]"#,
     println!("✓ Scenario 25: idle release [runtime asked before the host closed it]");
 }
 
+/// Scenario 26: a family that still owes work keeps its conversation.
+///
+/// `task` scope exists so one family keeps one conversation, and the release
+/// that ends an idle session is the way that promise breaks: the family's next
+/// delivery would land in a fresh conversation and the context the scope was
+/// built to preserve is gone. The time bound cannot see the difference between
+/// a finished family and one between deliveries, so the client asks the ledger —
+/// which owns delivery state (`AGENTS.md` §2.2) — how much work the family still
+/// has out.
+///
+/// The witness is a row that stays open: a second delivery of the same family,
+/// addressed to a role whose client is not running, so it sits `queued` for as
+/// long as the scenario needs. The worker's session has been idle past its bound
+/// the whole time, and what separates pass from fail is whether the idle sweep
+/// looked at the family before letting the conversation go.
+///
+/// This case is the reason the fallback in the sweep is written the way it is.
+/// An unanswered query leaves the time bound standing alone, which is exactly
+/// the old behavior — so a scenario that asserted only "the idle session was
+/// released" would pass whether or not the ledger was ever consulted, which is
+/// how the release path itself shipped once already. What is asserted here is
+/// the opposite direction: work outstanding, release refused.
+#[tokio::test]
+async fn scenario_26_a_family_with_open_work_keeps_its_conversation() {
+    let cluster = Cluster::start(
+        r#"
+[server]
+name = "test"
+listen = "127.0.0.1:0"
+"#,
+    )
+    .await
+    .expect("start cluster");
+    let worker_ws = cluster
+        .register_role(
+            "worker",
+            E2E_PROSE,
+            Some(
+                r#"allowed_senders = ["*", "worker"]
+allowed_targets = ["worker", "peer"]
+max_sessions = 2"#,
+            ),
+        )
+        .await
+        .expect("register worker");
+    // Registered so the route resolves, and never started: a delivery addressed
+    // to it stays `queued`, which is the open row this case needs.
+    cluster
+        .register_role("peer", E2E_PROSE, Some("allowed_senders = [\"*\"]"))
+        .await
+        .expect("register peer");
+    append_client_session_config(&worker_ws, "task", "1s");
+    cluster
+        .start_client(&worker_ws)
+        .await
+        .expect("start client");
+    let family = onlyne_proto::new_task_id();
+    cluster
+        .start_fake_agent(&worker_ws, &serve_repeated(true, 1))
+        .await
+        .expect("start worker agent");
+    cluster
+        .wait_role_online("worker")
+        .await
+        .expect("worker online");
+
+    let first = cluster
+        .admin_send_with_family("worker", "worker", "the family begins", &family)
+        .await
+        .expect("send the first delivery");
+    let first_task = task_of(&first);
+    let rows = cluster
+        .poll_sessions(
+            QuerySessionsArgs {
+                task_id: Some(first_task.clone()),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| !row.session_id.is_empty()),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the family's session");
+    let session_id = rows[0].session_id.clone();
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(first_task),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Acked),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the first delivery settles, leaving the session idle");
+
+    // The family's next delivery, to a role that cannot take it. This row is the
+    // work the family still owes, and it is what the idle sweep has to see.
+    let pending = cluster
+        .admin_send_with_family("worker", "peer", "the family goes on", &family)
+        .await
+        .expect("send the family's next delivery");
+    let pending_task = task_of(&pending);
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                task: Some(pending_task),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Queued),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the family's next delivery is queued and unsettled");
+
+    // Well past the bound `idle_close` names, and several sweeps' worth of
+    // ticks: a release that was going to happen has had every chance to.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let idle = cluster
+        .query_sessions(QuerySessionsArgs {
+            task_id: Some(session_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query the family's session");
+    assert_eq!(
+        idle.len(),
+        1,
+        "the session is still the family's: {idle:#?}"
+    );
+    assert_eq!(
+        idle[0].projection.resource,
+        onlyne_proto::ResourcePhase::Attached,
+        "the family still owes work, so its conversation must not be released: {idle:#?}"
+    );
+    // The other direction — that a finished family *is* released — is scenario
+    // 16's, and it is the reason this case does not need to prove it twice: 16
+    // settles one delivery of a family and watches the session go
+    // `resource: Closed, lifecycle: Idle`, which under this predicate is a
+    // family whose open count reached zero. A client that never released
+    // anything would fail there, so the pair is what says the predicate
+    // discriminates rather than merely holds.
+    println!("✓ Scenario 26: family reclamation [open work keeps the conversation]");
+}
+
 /// Scenario 18: a heartbeat that only refreshes `last_seen` is not a projection write.
 #[tokio::test]
 async fn scenario_18_a_last_seen_only_heartbeat_writes_no_updated_at_and_no_event() {

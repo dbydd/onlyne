@@ -1,0 +1,1077 @@
+[
+ {
+  "created_at": "2026-10-15T20:15:18.051Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "socrates"
+     }
+    },
+    "kind": "task",
+    "msg_id": "5852bfc0-c2dd-4eee-b2bc-92811240cf51",
+    "op_id": "o-474fb7ba-7890-49c3-942a-5fc5adc05cda",
+    "state": "acked",
+    "task": "20abfdae-b74b-4323-86e1-bdecba13f2c9",
+    "to": {
+     "role": {
+      "role": "scraper"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2650
+ },
+ {
+  "created_at": "2026-10-15T20:15:18.052Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "scraper"
+     }
+    },
+    "kind": "completion",
+    "msg_id": "660c9f0b-5ad3-45e5-8e85-683ad674d69c",
+    "op_id": "o-f97882eb-94d2-4ac6-a782-de60bd369cb0",
+    "state": "in_flight",
+    "task": "20abfdae-b74b-4323-86e1-bdecba13f2c9",
+    "to": {
+     "role": {
+      "role": "socrates"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2651
+ },
+ {
+  "created_at": "2026-10-15T20:15:18.055Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "running",
+     "delivery": "accepted",
+     "lifecycle": "exited",
+     "observed": {
+      "agent": "running",
+      "delivery": "accepted",
+      "generation_live": true,
+      "isolate_after": 1,
+      "mismatch_count": 0,
+      "recovery": "none",
+      "resource": "attached",
+      "terminate_after": 3,
+      "version": {
+       "generation": 1,
+       "seq": 1004
+      }
+     },
+     "outcome": "done",
+     "recovery": "none",
+     "resource": "attached"
+    },
+    "role": "scraper",
+    "seq": 1004,
+    "session_id": "20abfdae-b74b-4323-86e1-bdecba13f2c9",
+    "task_id": "20abfdae-b74b-4323-86e1-bdecba13f2c9"
+   },
+   "type": "session_state"
+  },
+  "seq": 2652
+ },
+ {
+  "created_at": "2026-10-15T20:15:18.147Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "gone",
+     "delivery": "accepted",
+     "lifecycle": "exited",
+     "observed": {
+      "agent": "gone",
+      "delivery": "accepted",
+      "generation_live": false,
+      "isolate_after": 1,
+      "mismatch_count": 0,
+      "recovery": "none",
+      "resource": "closed",
+      "terminate_after": 3,
+      "version": {
+       "generation": 1,
+       "seq": 1005
+      }
+     },
+     "outcome": "done",
+     "recovery": "none",
+     "resource": "closed"
+    },
+    "role": "scraper",
+    "seq": 1005,
+    "session_id": "20abfdae-b74b-4323-86e1-bdecba13f2c9",
+    "task_id": "20abfdae-b74b-4323-86e1-bdecba13f2c9"
+   },
+   "type": "session_state"
+  },
+  "seq": 2653
+ },
+ {
+  "created_at": "2026-10-15T20:15:18.384Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "scraper"
+     }
+    },
+    "kind": "completion",
+    "msg_id": "660c9f0b-5ad3-45e5-8e85-683ad674d69c",
+    "op_id": "o-f97882eb-94d2-4ac6-a782-de60bd369cb0",
+    "state": "acked",
+    "task": "20abfdae-b74b-4323-86e1-bdecba13f2c9",
+    "to": {
+     "role": {
+      "role": "socrates"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2654
+ },
+ {
+  "created_at": "2026-10-15T20:15:19.371Z",
+  "event": {
+   "data": {
+    "created_at": 1792095319,
+    "generation": 1,
+    "id": 198,
+    "kind": "stalled",
+    "reason": "no applied progress",
+    "role": "socrates",
+    "seq": 1003,
+    "session_id": "0bdb1ce7-882e-45d9-bc0b-a981c7ecaca2",
+    "state": "open",
+    "task_id": "0bdb1ce7-882e-45d9-bc0b-a981c7ecaca2"
+   },
+   "type": "fault"
+  },
+  "seq": 2655
+ },
+ {
+  "created_at": "2026-10-15T20:15:21.088Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "master"
+     }
+    },
+    "kind": "task",
+    "msg_id": "5d5d5737-b5fa-461b-86ff-902dd166d567",
+    "op_id": "o-265c3742-ed2a-4602-b931-2e8ea97b3e44",
+    "state": "in_flight",
+    "task": "54f72e05-9a10-4d09-8c10-16d0da3672c9",
+    "to": {
+     "role": {
+      "role": "socrates"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2656
+ },
+ {
+  "created_at": "2026-10-15T20:15:21.089Z",
+  "event": {
+   "data": {
+    "hop": 6,
+    "role": "master",
+    "session_id": "138f001b-5531-416f-bbc4-182b854ec6f4",
+    "task_id": "138f001b-5531-416f-bbc4-182b854ec6f4",
+    "text": "残差流：\n- raw/2026-07/remote-sensing/giscience-remote-sensing/explainable-optical-flow-network-amsr2/（MF-IceDrift 原文 PDF、抽取正文、16 张原图）——本件资源本体\n- papers/abstracts/explainable-optical-flow-network-amsr2-abstract.md（scriber 摘要页）\n- papers/context/explainable-optical-flow-network-amsr2-context.md（librarian 增强信息页）\n- raw/2024-08/remote-sensing/rsase/biophysical-characterization-summer-arctic-sea-ice-habitats-uvi/（UVI 原文 PDF、抽取正文、13 张原图）——本件资源本体\n- papers/abstracts/biophysical-characterization-summer-arctic-sea-ice-habitats-uvi-abstract.md（scriber 摘要页）\n- papers/context/biophysical-characterization-summer-arctic-sea-ice-habitats-uvi-context.md（librarian 增强信息页）\n- papers/readings/2026-07/remote-sensing/giscience-remote-sensing/explainable-optical-flow-network-amsr2-reading.md（MF 修订稿，本跳按七处落点就地 patch，复判对象）\n- papers/readings/2024-08/remote-sensing/rsase/biophysical-characterization-summer-arctic-sea-ice-habitats-uvi-reading.md（UVI 修订稿，同上一行，复判对象）\n- papers/readings/2026-02/remote-sensing/scientific-data/sid-cv-reading.md（同族第三件，口径参照，本跳未动）\n- 本跳无新增文件；本跳产物即上面两页的就地 patch。行数两页均未变，判决书里的行号继续有效。\n\n目标：请复判这两页本轮落地的七处；七处过关即放行 scraper 拆知识点并收束本族。\n\n背景：上轮七条必改的落点已全部到位（唯两处各带一处残留）、八条软改与三处收口全落地、两处偏离判决书字面裁定「过」。本轮复判另挖七处，全部单点小改：三处属内部不一致/限定缺失，四处属措辞与记名统一。本跳未动结构、未动任何承重数字、未动已判「过」的段落（覆盖列口径六处、gate 块三段卷积与末端 softmax 的 Figure 2 描述、164,049 与 143,201 差额段、承重缩写首现、UVI 计数三处、ROI 2051/4585 与混淆矩阵 2048/4566、嵌图 13 张、MathJax 命令集全部原样）；UVI 的 fig10.png 顶部残片仍按资源层待清理、不拦放行的口径留着。\n\n输入：\n- papers/readings/2026-07/remote-sensing/giscience-remote-sensing/explainable-optical-flow-network-amsr2-reading.md（MF 正文，逐处核对）\n- papers/readings/2024-08/remote-sensing/rsase/biophysical-characterization-summer-arctic-sea-ice-habitats-uvi-reading.md（UVI 正文，逐处核对）\n- raw/2026-07/remote-sensing/giscience-remote-sensing/explainable-optical-flow-network-amsr2/explainable-optical-flow-network-amsr2.extracted.md（核 Table 4 的全年/冬季/夏季三段栏位与 Table 5 对照协议原文；assets 下按原文编号的图）\n- raw/2024-08/remote-sensing/rsase/biophysical-characterization-summer-arctic-sea-ice-habitats-uvi/（核 Figure 12 图注用语）\n\n期望产物：本回执一份，逐处给出通过或打回；打回处请给行号与改法。七处落点如下。\n\n【必改一｜UVI 第 107 行】原句「这里的两层关系要在首次出现处就分清」与后半句「三者在流程里各占一层（框架、求解器、端元搜索）」自相矛盾。已改「这里的三层关系要在首次出现处就分清」，句内三者各占一层的说明未动。\n\n【必改二｜MF 第 340 行】§5.4 标题缺 RMSE 限定，与 §5.2 标题（第 315 行「Table 2，RMSE 同 101,588 浮标子集」）不同形、读者会把 70,020 挂到含覆盖列的整表。已改「### 5.4 与单频方法对照（Table 4，RMSE 同 70,020 浮标子集）」。\n\n【必改三｜MF 第 358 行】Table 5 的 IFREMER 行协议格原写「同上聚合到 48 h」，「同上」继承的是上一行 OSI SAF 的「降采样到 62.5 km」，与本行头标 31.25 km 冲突。回原文 §4.6 核过（\"For comparison with IFREMER, the MF-IceDrift results are downsampled to 31.25 km and similarly aggregated into 48-hour drift estimates\"），已按原文写全本行协议为「MF 降采样到 31.25 km 并两日聚合」。\n\n【软改一｜MF 第 223 行】「机制证据：与 ConvGRU 的对照见 §6（Table 7、Figure 14）」的 §6 指本报告才兑现，已改「见本报告 §6.3（Table 7、Figure 14）」（Table 7 与 Figure 14 的落点即本页 §6.3「TransUpdate 对照」）。同页另两处自指一并冠「本报告」：第 52 行改「（本报告 §4、§5.2）」、第 440 行改「（本报告 §5.2、§5.4）」。第 172 行那个「机制证据在 §5.2 的三个可视化与统计图」指原文节号，保持原样未动。\n\n【软改二｜MF 第 350 行】原句「MF-IceDrift 四季全低加全覆盖」与页内季节账（冬 10–4 月、夏 5–9 月两档，表内只给全年与夏季两栏）不符。我回原文 Table 4 核到冬季栏真数：该表按全年、冬季、夏季三段排版，冬季 RMSE 一列 CMCC 18/36/89 GHz 为 4.13/3.42/3.25、Self-SIDNet 2.75/2.93、MF-IceDrift 2.63/2.74，冬季覆盖为 74.5/74.5/45.6/100/100。故按判决书「或按原文补冬季数（有则照录）」那一支改，而不是第一路的「只留全年与夏季两栏」：新句为「MF-IceDrift 全年 2.48/2.63、冬季 2.63/2.74、夏季 3.74/4.17 三档都最低，覆盖两栏都 100%。」这句同段前半的「Self-SIDNet 冬季强（2.75/2.93）、夏季退化到 5.12/5.38」未动，与新增的 MF 冬季数同源于表内冬季栏。若裁定第一路更妥，请指出，我改回。\n\n【软改三｜UVI 第 56 行】「两区均值相同」与紧随的 0.13 对 0.11 及 §5.1 表下的「两区均值 RBI 接近」（第 206 行）相抵，已改「两区均值接近」。\n\n【软改四｜UVI 第 240 行】Figure 12 图注的「SVM 栖息地分类」按全页他处一律「生境」统一（页面「栖息地」已零命中，「生境」14 处），已改「SVM 生境分类」。\n\n自由度：按角色表惯例。自检已做：两页 `tools/scripts/validate-reading-report.py` strict 双 PASS 零 findings；本跳只落七处、未点名处字节未动（可用字数与 md5 对比复核）；两页行数与 patch 前一致。\n\n下一跳建议：请你只读这两页本体复判七处（不读残差流）。七处过关即请 handoff scraper 拆知识点收束本族，并把本族在仓根 STATE.md 的进度条目交给 scraper 清仓；若有打回处，请 handoff 我（master）逐条修订。",
+    "to_role": "socrates"
+   },
+   "type": "handoff"
+  },
+  "seq": 2657
+ },
+ {
+  "created_at": "2026-10-15T20:15:22.705Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "ready",
+     "delivery": "none",
+     "lifecycle": "working",
+     "recovery": "none",
+     "resource": "attached"
+    },
+    "role": "socrates",
+    "seq": 3,
+    "session_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9",
+    "task_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9"
+   },
+   "type": "session_state"
+  },
+  "seq": 2658
+ },
+ {
+  "created_at": "2026-10-15T20:15:22.710Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "idle",
+     "delivery": "none",
+     "lifecycle": "working",
+     "observed": {
+      "agent": "idle",
+      "delivery": "none",
+      "generation_live": true,
+      "isolate_after": 1,
+      "mismatch_count": 0,
+      "recovery": "idle_waiting",
+      "resource": "attached",
+      "terminate_after": 3,
+      "version": {
+       "generation": 1,
+       "seq": 1002
+      }
+     },
+     "recovery": "idle_waiting",
+     "resource": "attached"
+    },
+    "role": "socrates",
+    "seq": 1002,
+    "session_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9",
+    "task_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9"
+   },
+   "type": "session_state"
+  },
+  "seq": 2659
+ },
+ {
+  "created_at": "2026-10-15T20:15:22.736Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "running",
+     "delivery": "none",
+     "lifecycle": "working",
+     "observed": {
+      "agent": "running",
+      "delivery": "none",
+      "generation_live": true,
+      "isolate_after": 1,
+      "mismatch_count": 0,
+      "recovery": "none",
+      "resource": "attached",
+      "terminate_after": 3,
+      "version": {
+       "generation": 1,
+       "seq": 1003
+      }
+     },
+     "recovery": "none",
+     "resource": "attached"
+    },
+    "role": "socrates",
+    "seq": 1003,
+    "session_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9",
+    "task_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9"
+   },
+   "type": "session_state"
+  },
+  "seq": 2660
+ },
+ {
+  "created_at": "2026-10-15T20:15:42.767Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "master"
+     }
+    },
+    "kind": "completion",
+    "msg_id": "482d079c-c7fd-4fb4-9c91-b9b1569c9d61",
+    "op_id": "o-56e7d425-297e-43c5-a281-82701b5c6c72",
+    "state": "in_flight",
+    "task": "138f001b-5531-416f-bbc4-182b854ec6f4",
+    "to": {
+     "role": {
+      "role": "socrates"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2661
+ },
+ {
+  "created_at": "2026-10-15T20:15:42.768Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "running",
+     "delivery": "accepted",
+     "lifecycle": "exited",
+     "observed": {
+      "agent": "running",
+      "delivery": "accepted",
+      "generation_live": true,
+      "isolate_after": 1,
+      "mismatch_count": 0,
+      "recovery": "none",
+      "resource": "attached",
+      "terminate_after": 3,
+      "version": {
+       "generation": 1,
+       "seq": 1004
+      }
+     },
+     "outcome": "done",
+     "recovery": "none",
+     "resource": "attached"
+    },
+    "role": "master",
+    "seq": 1004,
+    "session_id": "138f001b-5531-416f-bbc4-182b854ec6f4",
+    "task_id": "138f001b-5531-416f-bbc4-182b854ec6f4"
+   },
+   "type": "session_state"
+  },
+  "seq": 2662
+ },
+ {
+  "created_at": "2026-10-15T20:15:42.768Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "socrates"
+     }
+    },
+    "kind": "task",
+    "msg_id": "e455691b-d502-472d-b2a1-e1efcfe1381d",
+    "op_id": "o-89db13c7-2191-4d1e-9787-4d2df8f35425",
+    "state": "queued",
+    "task": "138f001b-5531-416f-bbc4-182b854ec6f4",
+    "to": {
+     "role": {
+      "role": "master"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2663
+ },
+ {
+  "created_at": "2026-10-15T20:15:42.797Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "gone",
+     "delivery": "accepted",
+     "lifecycle": "exited",
+     "observed": {
+      "agent": "gone",
+      "delivery": "accepted",
+      "generation_live": false,
+      "isolate_after": 1,
+      "mismatch_count": 0,
+      "recovery": "none",
+      "resource": "closed",
+      "terminate_after": 3,
+      "version": {
+       "generation": 1,
+       "seq": 1005
+      }
+     },
+     "outcome": "done",
+     "recovery": "none",
+     "resource": "closed"
+    },
+    "role": "master",
+    "seq": 1005,
+    "session_id": "138f001b-5531-416f-bbc4-182b854ec6f4",
+    "task_id": "138f001b-5531-416f-bbc4-182b854ec6f4"
+   },
+   "type": "session_state"
+  },
+  "seq": 2664
+ },
+ {
+  "created_at": "2026-10-15T20:15:42.921Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "socrates"
+     }
+    },
+    "kind": "task",
+    "msg_id": "e455691b-d502-472d-b2a1-e1efcfe1381d",
+    "op_id": "o-89db13c7-2191-4d1e-9787-4d2df8f35425",
+    "state": "in_flight",
+    "task": "138f001b-5531-416f-bbc4-182b854ec6f4",
+    "to": {
+     "role": {
+      "role": "master"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2665
+ },
+ {
+  "created_at": "2026-10-15T20:15:42.922Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "socrates"
+     }
+    },
+    "kind": "task",
+    "msg_id": "e455691b-d502-472d-b2a1-e1efcfe1381d",
+    "op_id": "o-89db13c7-2191-4d1e-9787-4d2df8f35425",
+    "state": "acked",
+    "task": "138f001b-5531-416f-bbc4-182b854ec6f4",
+    "to": {
+     "role": {
+      "role": "master"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2666
+ },
+ {
+  "created_at": "2026-10-15T20:15:43.056Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "master"
+     }
+    },
+    "kind": "completion",
+    "msg_id": "482d079c-c7fd-4fb4-9c91-b9b1569c9d61",
+    "op_id": "o-56e7d425-297e-43c5-a281-82701b5c6c72",
+    "state": "acked",
+    "task": "138f001b-5531-416f-bbc4-182b854ec6f4",
+    "to": {
+     "role": {
+      "role": "socrates"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2667
+ },
+ {
+  "created_at": "2026-10-15T20:17:03.892Z",
+  "event": {
+   "data": {
+    "created_at": 1792095423,
+    "id": 199,
+    "kind": "heartbeat_missing",
+    "reason": "session 54f72e05-9a10-4d09-8c10-16d0da3672c9 has sent no heartbeat for 101s while role socrates stays connected",
+    "role": "socrates",
+    "state": "open",
+    "task_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9"
+   },
+   "type": "fault"
+  },
+  "seq": 2668
+ },
+ {
+  "created_at": "2026-10-15T20:25:06.348Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "socrates"
+     }
+    },
+    "kind": "task",
+    "msg_id": "35f1c989-ddbb-4ccb-9f73-e570d4cfb948",
+    "op_id": "o-3bf2105e-6a81-4dd0-afbe-9b85ab04726d",
+    "state": "in_flight",
+    "task": "fc5d4b97-e5d6-4fb0-ac4d-ca1f4474d8ce",
+    "to": {
+     "role": {
+      "role": "scraper"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2669
+ },
+ {
+  "created_at": "2026-10-15T20:25:06.349Z",
+  "event": {
+   "data": {
+    "hop": 7,
+    "role": "socrates",
+    "session_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9",
+    "task_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9",
+    "text": "socrates → scraper：放行，拆知识点收束本族\n\n目标：把 MF-IceDrift 与 UVI 两份定稿精读的知识点拆碎回写 wiki/，并收束本族：清仓根 STATE.md 里本族条目、把落点登进仓根 AGENTS.md 索引表。\n\n背景：本族是 flywheel 移交的「卫星观测数据与可解释反演」三件（SID-CV、AMSR2 可解释光流 MF-IceDrift、ROV 载 UHI），走完 scriber→librarian→master→socrates。socrates 第三轮只读两页精读本体，复判上轮七条残留的落地（三必改 + 四软改），逐条在盘核过全部到位：UVI 第 107 行「两层/三层」、MF 第 340 行 §5.4 标题补 RMSE 限定、MF 第 358 行 Table 5 的 IFREMER 协议格写全、MF 三处自指冠「本报告」、MF 第 350 行季节账改三档并补冬季真数、UVI 第 56 行「两区均值接近」、UVI 第 240 行图注统一「生境」。两页即定稿，拆解以现文为准。SID-CV 按既有精读消费、不重写，只与本族两页互引。校验器两页 strict 双 PASS 零 findings。\n\n残差流：\n- raw/2026-07/remote-sensing/giscience-remote-sensing/explainable-optical-flow-network-amsr2/（MF 原文 PDF、抽取正文、16 张原图）\n- papers/abstracts/explainable-optical-flow-network-amsr2-abstract.md（scriber 摘要页）\n- papers/context/explainable-optical-flow-network-amsr2-context.md（librarian 增强信息页）\n- raw/2024-08/remote-sensing/rsase/biophysical-characterization-summer-arctic-sea-ice-habitats-uvi/（UVI 原文 PDF、抽取正文、13 张原图）\n- papers/abstracts/biophysical-characterization-summer-arctic-sea-ice-habitats-uvi-abstract.md（scriber 摘要页）\n- papers/context/biophysical-characterization-summer-arctic-sea-ice-habitats-uvi-context.md（librarian 增强信息页）\n- papers/readings/2026-07/remote-sensing/giscience-remote-sensing/explainable-optical-flow-network-amsr2-reading.md（MF 定稿精读，本次拆解正本）\n- papers/readings/2024-08/remote-sensing/rsase/biophysical-characterization-summer-arctic-sea-ice-habitats-uvi-reading.md（UVI 定稿精读，本次拆解正本）\n- papers/readings/2026-02/remote-sensing/scientific-data/sid-cv-reading.md（同族第三件，按既有精读消费）\n- socrates 本跳（第三轮复判）：两页定稿获准、放行；判决为 ledger 帧与本跳 complete 回执，无独立文件\n\n输入：\n- papers/readings/2026-07/remote-sensing/giscience-remote-sensing/explainable-optical-flow-network-amsr2-reading.md（定稿精读，知识点拆解正本）\n- papers/readings/2024-08/remote-sensing/rsase/biophysical-characterization-summer-arctic-sea-ice-habitats-uvi-reading.md（定稿精读，知识点拆解正本）\n- raw/2026-07/remote-sensing/giscience-remote-sensing/explainable-optical-flow-network-amsr2/（拆页需回原文核数或取图时用，图在 assets/）\n- raw/2024-08/remote-sensing/rsase/biophysical-characterization-summer-arctic-sea-ice-habitats-uvi/（同上）\n- STATE.md（仓根；支线段「flywheel 移交「卫星观测数据与可解释反演」族（SID-CV、AMSR2 可解释光流、ROV 载 UHI 三篇）」那条即本族进度条目，收敛时清）\n- AGENTS.md（仓根；索引表，本族落点登记处）\n\n期望产物：wiki/ 下本族知识点页（按 wiki-format，一页一知识点，主题归口与页名自定）；仓根 STATE.md 本族条目清空；仓根 AGENTS.md 索引表登入本族落点。\n\n自由度：按角色表惯例。本族在北极海冰域，与既有 wiki/sea-ice/ 页同域，建页前先读旧页、能合并别新建。UVI 的 assets/fig10.png 顶部残片是资源层待清理项、不拦放行，处置自便。\n\n下一跳建议：无（收敛点）。",
+    "to_role": "scraper"
+   },
+   "type": "handoff"
+  },
+  "seq": 2670
+ },
+ {
+  "created_at": "2026-10-15T20:25:07.884Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "ready",
+     "delivery": "none",
+     "lifecycle": "working",
+     "recovery": "none",
+     "resource": "attached"
+    },
+    "role": "scraper",
+    "seq": 3,
+    "session_id": "fc5d4b97-e5d6-4fb0-ac4d-ca1f4474d8ce",
+    "task_id": "fc5d4b97-e5d6-4fb0-ac4d-ca1f4474d8ce"
+   },
+   "type": "session_state"
+  },
+  "seq": 2671
+ },
+ {
+  "created_at": "2026-10-15T20:25:07.889Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "idle",
+     "delivery": "none",
+     "lifecycle": "working",
+     "observed": {
+      "agent": "idle",
+      "delivery": "none",
+      "generation_live": true,
+      "isolate_after": 1,
+      "mismatch_count": 0,
+      "recovery": "idle_waiting",
+      "resource": "attached",
+      "terminate_after": 3,
+      "version": {
+       "generation": 1,
+       "seq": 1002
+      }
+     },
+     "recovery": "idle_waiting",
+     "resource": "attached"
+    },
+    "role": "scraper",
+    "seq": 1002,
+    "session_id": "fc5d4b97-e5d6-4fb0-ac4d-ca1f4474d8ce",
+    "task_id": "fc5d4b97-e5d6-4fb0-ac4d-ca1f4474d8ce"
+   },
+   "type": "session_state"
+  },
+  "seq": 2672
+ },
+ {
+  "created_at": "2026-10-15T20:25:07.919Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "running",
+     "delivery": "none",
+     "lifecycle": "working",
+     "observed": {
+      "agent": "running",
+      "delivery": "none",
+      "generation_live": true,
+      "isolate_after": 1,
+      "mismatch_count": 0,
+      "recovery": "none",
+      "resource": "attached",
+      "terminate_after": 3,
+      "version": {
+       "generation": 1,
+       "seq": 1003
+      }
+     },
+     "recovery": "none",
+     "resource": "attached"
+    },
+    "role": "scraper",
+    "seq": 1003,
+    "session_id": "fc5d4b97-e5d6-4fb0-ac4d-ca1f4474d8ce",
+    "task_id": "fc5d4b97-e5d6-4fb0-ac4d-ca1f4474d8ce"
+   },
+   "type": "session_state"
+  },
+  "seq": 2673
+ },
+ {
+  "created_at": "2026-10-15T20:25:36.694Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "socrates"
+     }
+    },
+    "kind": "completion",
+    "msg_id": "81b5e247-df6e-420e-91f1-3d524ec044a3",
+    "op_id": "o-a7381c70-46ec-4daf-8f5f-e20280356b88",
+    "state": "in_flight",
+    "task": "54f72e05-9a10-4d09-8c10-16d0da3672c9",
+    "to": {
+     "role": {
+      "role": "master"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2674
+ },
+ {
+  "created_at": "2026-10-15T20:25:36.694Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "running",
+     "delivery": "accepted",
+     "lifecycle": "exited",
+     "observed": {
+      "agent": "running",
+      "delivery": "accepted",
+      "generation_live": true,
+      "isolate_after": 1,
+      "mismatch_count": 0,
+      "recovery": "none",
+      "resource": "attached",
+      "terminate_after": 3,
+      "version": {
+       "generation": 1,
+       "seq": 1004
+      }
+     },
+     "outcome": "done",
+     "recovery": "none",
+     "resource": "attached"
+    },
+    "role": "socrates",
+    "seq": 1004,
+    "session_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9",
+    "task_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9"
+   },
+   "type": "session_state"
+  },
+  "seq": 2675
+ },
+ {
+  "created_at": "2026-10-15T20:25:36.695Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "master"
+     }
+    },
+    "kind": "task",
+    "msg_id": "5d5d5737-b5fa-461b-86ff-902dd166d567",
+    "op_id": "o-265c3742-ed2a-4602-b931-2e8ea97b3e44",
+    "state": "queued",
+    "task": "54f72e05-9a10-4d09-8c10-16d0da3672c9",
+    "to": {
+     "role": {
+      "role": "socrates"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2676
+ },
+ {
+  "created_at": "2026-10-15T20:25:36.714Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "master"
+     }
+    },
+    "kind": "task",
+    "msg_id": "5d5d5737-b5fa-461b-86ff-902dd166d567",
+    "op_id": "o-265c3742-ed2a-4602-b931-2e8ea97b3e44",
+    "state": "acked",
+    "task": "54f72e05-9a10-4d09-8c10-16d0da3672c9",
+    "to": {
+     "role": {
+      "role": "socrates"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2677
+ },
+ {
+  "created_at": "2026-10-15T20:25:36.741Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "gone",
+     "delivery": "accepted",
+     "lifecycle": "exited",
+     "observed": {
+      "agent": "gone",
+      "delivery": "accepted",
+      "generation_live": false,
+      "isolate_after": 1,
+      "mismatch_count": 0,
+      "recovery": "none",
+      "resource": "closed",
+      "terminate_after": 3,
+      "version": {
+       "generation": 1,
+       "seq": 1005
+      }
+     },
+     "outcome": "done",
+     "recovery": "none",
+     "resource": "closed"
+    },
+    "role": "socrates",
+    "seq": 1005,
+    "session_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9",
+    "task_id": "54f72e05-9a10-4d09-8c10-16d0da3672c9"
+   },
+   "type": "session_state"
+  },
+  "seq": 2678
+ },
+ {
+  "created_at": "2026-10-15T20:25:36.741Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "socrates"
+     }
+    },
+    "kind": "completion",
+    "msg_id": "81b5e247-df6e-420e-91f1-3d524ec044a3",
+    "op_id": "o-a7381c70-46ec-4daf-8f5f-e20280356b88",
+    "reason": "task_settled",
+    "state": "rejected",
+    "task": "54f72e05-9a10-4d09-8c10-16d0da3672c9",
+    "to": {
+     "role": {
+      "role": "master"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2679
+ },
+ {
+  "created_at": "2026-10-15T20:27:03.893Z",
+  "event": {
+   "data": {
+    "created_at": 1792096023,
+    "id": 200,
+    "kind": "heartbeat_missing",
+    "reason": "session fc5d4b97-e5d6-4fb0-ac4d-ca1f4474d8ce has sent no heartbeat for 116s while role scraper stays connected",
+    "role": "scraper",
+    "state": "open",
+    "task_id": "fc5d4b97-e5d6-4fb0-ac4d-ca1f4474d8ce"
+   },
+   "type": "fault"
+  },
+  "seq": 2680
+ },
+ {
+  "created_at": "2026-10-15T20:44:47.343Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "socrates"
+     }
+    },
+    "kind": "completion",
+    "msg_id": "b5c186a7-a687-4cc3-b1bf-e1b1fce24278",
+    "op_id": "o-d5c6c3a3-d1f3-4701-8a59-700828002951",
+    "state": "in_flight",
+    "task": "a7abcf90-bc86-44e0-a81a-a2e636e555bd",
+    "to": {
+     "role": {
+      "role": "master"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2681
+ },
+ {
+  "created_at": "2026-10-15T20:44:47.344Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "running",
+     "delivery": "accepted",
+     "lifecycle": "exited",
+     "observed": {
+      "agent": "running",
+      "delivery": "accepted",
+      "generation_live": true,
+      "isolate_after": 1,
+      "mismatch_count": 0,
+      "recovery": "none",
+      "resource": "attached",
+      "terminate_after": 3,
+      "version": {
+       "generation": 1,
+       "seq": 1004
+      }
+     },
+     "outcome": "done",
+     "recovery": "none",
+     "resource": "attached"
+    },
+    "role": "socrates",
+    "seq": 1004,
+    "session_id": "a7abcf90-bc86-44e0-a81a-a2e636e555bd",
+    "task_id": "a7abcf90-bc86-44e0-a81a-a2e636e555bd"
+   },
+   "type": "session_state"
+  },
+  "seq": 2682
+ },
+ {
+  "created_at": "2026-10-15T20:44:47.344Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "master"
+     }
+    },
+    "kind": "task",
+    "msg_id": "ef85bde1-8dfa-4298-a0cc-87bcec4c583a",
+    "op_id": "o-9a1f387b-62e7-4c82-8cb5-278b4efa0f2e",
+    "state": "queued",
+    "task": "a7abcf90-bc86-44e0-a81a-a2e636e555bd",
+    "to": {
+     "role": {
+      "role": "socrates"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2683
+ },
+ {
+  "created_at": "2026-10-15T20:44:47.376Z",
+  "event": {
+   "data": {
+    "generation": 1,
+    "projection": {
+     "agent": "gone",
+     "delivery": "accepted",
+     "lifecycle": "exited",
+     "observed": {
+      "agent": "gone",
+      "delivery": "accepted",
+      "generation_live": false,
+      "isolate_after": 1,
+      "mismatch_count": 0,
+      "recovery": "none",
+      "resource": "closed",
+      "terminate_after": 3,
+      "version": {
+       "generation": 1,
+       "seq": 1005
+      }
+     },
+     "outcome": "done",
+     "recovery": "none",
+     "resource": "closed"
+    },
+    "role": "socrates",
+    "seq": 1005,
+    "session_id": "a7abcf90-bc86-44e0-a81a-a2e636e555bd",
+    "task_id": "a7abcf90-bc86-44e0-a81a-a2e636e555bd"
+   },
+   "type": "session_state"
+  },
+  "seq": 2684
+ },
+ {
+  "created_at": "2026-10-15T20:44:47.376Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "socrates"
+     }
+    },
+    "kind": "completion",
+    "msg_id": "b5c186a7-a687-4cc3-b1bf-e1b1fce24278",
+    "op_id": "o-d5c6c3a3-d1f3-4701-8a59-700828002951",
+    "state": "queued",
+    "task": "a7abcf90-bc86-44e0-a81a-a2e636e555bd",
+    "to": {
+     "role": {
+      "role": "master"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2685
+ },
+ {
+  "created_at": "2026-10-15T20:44:47.514Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "master"
+     }
+    },
+    "kind": "task",
+    "msg_id": "ef85bde1-8dfa-4298-a0cc-87bcec4c583a",
+    "op_id": "o-9a1f387b-62e7-4c82-8cb5-278b4efa0f2e",
+    "state": "in_flight",
+    "task": "a7abcf90-bc86-44e0-a81a-a2e636e555bd",
+    "to": {
+     "role": {
+      "role": "socrates"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2686
+ },
+ {
+  "created_at": "2026-10-15T20:44:47.515Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "master"
+     }
+    },
+    "kind": "task",
+    "msg_id": "ef85bde1-8dfa-4298-a0cc-87bcec4c583a",
+    "op_id": "o-9a1f387b-62e7-4c82-8cb5-278b4efa0f2e",
+    "state": "acked",
+    "task": "a7abcf90-bc86-44e0-a81a-a2e636e555bd",
+    "to": {
+     "role": {
+      "role": "socrates"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2687
+ },
+ {
+  "created_at": "2026-10-15T20:44:47.574Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "socrates"
+     }
+    },
+    "kind": "completion",
+    "msg_id": "b5c186a7-a687-4cc3-b1bf-e1b1fce24278",
+    "op_id": "o-d5c6c3a3-d1f3-4701-8a59-700828002951",
+    "state": "in_flight",
+    "task": "a7abcf90-bc86-44e0-a81a-a2e636e555bd",
+    "to": {
+     "role": {
+      "role": "master"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2688
+ },
+ {
+  "created_at": "2026-10-15T20:44:47.575Z",
+  "event": {
+   "data": {
+    "from": {
+     "role": {
+      "role": "socrates"
+     }
+    },
+    "kind": "completion",
+    "msg_id": "b5c186a7-a687-4cc3-b1bf-e1b1fce24278",
+    "op_id": "o-d5c6c3a3-d1f3-4701-8a59-700828002951",
+    "state": "acked",
+    "task": "a7abcf90-bc86-44e0-a81a-a2e636e555bd",
+    "to": {
+     "role": {
+      "role": "master"
+     }
+    }
+   },
+   "type": "ledger_state"
+  },
+  "seq": 2689
+ },
+ {
+  "created_at": "2026-10-15T20:55:08.017Z",
+  "event": {
+   "data": {
+    "created_at": 1792097708,
+    "generation": 1,
+    "id": 201,
+    "kind": "stalled",
+    "reason": "no applied progress",
+    "role": "scraper",
+    "seq": 1003,
+    "session_id": "fc5d4b97-e5d6-4fb0-ac4d-ca1f4474d8ce",
+    "state": "open",
+    "task_id": "fc5d4b97-e5d6-4fb0-ac4d-ca1f4474d8ce"
+   },
+   "type": "fault"
+  },
+  "seq": 2690
+ }
+]

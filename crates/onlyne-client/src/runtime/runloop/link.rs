@@ -138,7 +138,7 @@ pub(super) async fn watch_readiness(link: ClientLink, state: RunState) -> Result
         scan_control_settles(&state).await;
         // Last, behind every sweep that ends a session: a slot is this sweep's
         // to release only while the scopes that keep it still hold it.
-        scan_idle_sessions(&state).await;
+        scan_idle_sessions(&link, &state).await;
         match link.readiness() {
             ConnReadiness::Ready => {
                 if !ready {

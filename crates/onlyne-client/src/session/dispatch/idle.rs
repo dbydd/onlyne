@@ -12,35 +12,49 @@ use super::retire::{PendingClose, close_retired};
 use super::state::{DispatchInner, binding_task_state};
 use super::transport::{names_session, recycle_over};
 use super::*;
+use std::collections::HashMap;
 
 impl DispatchState {
-    /// Release the process of every idle session whose scope bound has expired.
+    /// The conversations this client's time bound alone would release, with the
+    /// family each holds.
     ///
-    /// A suspension is this client's own act and it is only worth doing for a
-    /// session the runtime can bring back: the conversation lives in the
-    /// runtime's own store, so the client starts the same command again when the
-    /// family's next delivery arrives and the runtime resumes the session it was
-    /// given. A runtime that declared no resume keeps its process instead — the
-    /// "process alive, session alive" degradation the scope table names — and
-    /// this sweep leaves it alone.
+    /// The first half of a release, and it exists so the second half has
+    /// something to ask about. A `task` session keeps one conversation for every
+    /// delivery its family sends, so releasing it *between* two of them is the
+    /// cold restart the scope exists to avoid — and whether the family still
+    /// owes work is a delivery fact, which belongs to the server's ledger and
+    /// nowhere else (`AGENTS.md` §2.2). The caller asks about the families named
+    /// here and hands the answers to [`release_idle`](Self::release_idle); this
+    /// client never decides that question from its own copy, which after a
+    /// restart would be no copy at all.
     ///
-    /// The closes are host round trips, so they are collected here and run once
-    /// the dispatch lock is off them, the way the sweeps that retire sessions
-    /// already do. Answers the sessions it released, which are the ones whose
-    /// row and claim this caller has to publish.
-    /// Release the sessions whose idle bound has run out, and answer which rows
-    /// this caller has to publish.
+    /// An empty family is a session that holds no family — a `role` pool member
+    /// serves whatever arrives next — and the caller asks about none of those.
+    pub fn idle_due(&self, now: Instant) -> Vec<(String, String)> {
+        let inner = self.inner.lock();
+        let Some(bound) = scope::idle_bound(&inner.session_policy) else {
+            return Vec::new();
+        };
+        inner
+            .sessions
+            .iter()
+            .filter(|(_, slot)| idle_past_bound(slot, now, bound))
+            .map(|(key, slot)| (key.clone(), slot.family.clone().unwrap_or_default()))
+            .collect()
+    }
+
+    /// Release the conversations whose time bound has run out and whose family
+    /// owes nothing.
     ///
-    /// A close carrying a transport is *asked for* first, on the plugin's own
-    /// connection, by whoever runs it — the sweep in `runtime/runloop/sessions.rs`,
-    /// which is async and off the lock. The ask and the grace therefore live
-    /// there, not in here: a close that blocked under the dispatch lock would
-    /// hold every adapter frame of this role behind a runtime that has been asked
-    /// to leave.
-    ///
-    /// `now` is the caller's clock, so the sweep's own cadence is what ages a
-    /// session rather than a second reading of the wall clock.
-    pub fn suspend_idle_sessions(&self, now: Instant) -> Vec<String> {
+    /// `open` is the ledger's answer per family, as [`idle_due`](Self::idle_due)
+    /// named them: the work that family still has queued or in flight. A family
+    /// the map does not carry is one nobody could ask about, and the time bound
+    /// stands alone for it — the same reading this sweep had before the ledger
+    /// was consulted at all. The degradation is safe on the one axis that would
+    /// matter: nothing is released here whose runtime cannot bring the
+    /// conversation back ([`resumable`]), so an unasked family costs a cold
+    /// restart and never a conversation.
+    pub fn release_idle(&self, now: Instant, open: &HashMap<String, u64>) -> Vec<String> {
         let mut suspended: Vec<String> = Vec::new();
         {
             let mut inner = self.inner.lock();
@@ -50,13 +64,16 @@ impl DispatchState {
             let due: Vec<String> = inner
                 .sessions
                 .iter()
-                .filter(|(_, slot)| {
-                    !slot.suspended
-                        && !slot.read_only
-                        && slot.task_id.is_none()
-                        && slot
-                            .idle_since
-                            .is_some_and(|since| now.saturating_duration_since(since) >= bound)
+                .filter(|(_, slot)| idle_past_bound(slot, now, bound))
+                .filter(|(_, slot)| match slot.family.as_deref() {
+                    // A `task` session holds a conversation for one family. It
+                    // may let it go only when that family owes nothing: a family
+                    // still working is the scope's next delivery, and the
+                    // conversation it would land in is this one.
+                    Some(family) => open.get(family).is_none_or(|queued| *queued == 0),
+                    // A `role` pool member holds no family, so there is nothing
+                    // to ask and the time bound is the whole answer.
+                    None => true,
                 })
                 .map(|(key, _)| key.clone())
                 .collect();
@@ -165,6 +182,26 @@ pub(super) fn resumable(inner: &DispatchInner, key: &str) -> bool {
 /// handed back once the row is final. A session that keeps a binding while
 /// serving nothing reads as bound to a delivery it has finished, which is the
 /// reading `hello.live_sessions` and the mirror's `task_id` both take.
+/// Whether one slot is a candidate for release on the time bound alone.
+///
+/// The shape every release question starts from, and it is deliberately one
+/// predicate for both halves of the decision: a slot that is not idle-past-bound
+/// is not asked about and not released, so the two halves can never disagree
+/// about which sessions the tick was looking at.
+///
+/// A session already suspended is not a candidate — its process is gone and its
+/// slot has been given back. A read-only slot is a connection that came back for
+/// a task a newer session already took, and it owns no delivery of this role. A
+/// session serving a delivery has no `idle_since` at all.
+fn idle_past_bound(slot: &super::state::SessionSlot, now: Instant, bound: Duration) -> bool {
+    !slot.suspended
+        && !slot.read_only
+        && slot.task_id.is_none()
+        && slot
+            .idle_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= bound)
+}
+
 /// Whether one session reads `idle`: the state a suspension is defined from.
 ///
 /// The row is the session's, and the delivery it last served is the binding's:
