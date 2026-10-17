@@ -125,7 +125,7 @@ where
             },
             event = backend.next_event(), if polling => match event {
                 Ok(Some(event)) => {
-                    write_frame(&mut write, &BackendOp::Event(event)).await?;
+                    write_frame(&mut write, &BackendOp::Event(Box::new(event))).await?;
                     write.flush().await?;
                 }
                 Ok(None) => break,

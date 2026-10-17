@@ -21,7 +21,10 @@ pub enum BackendOp {
     /// The answer to a [`CoreOp::ListConversations`].
     Conversations(ImConversations),
     /// Report one platform event (an inbound message or a button action).
-    Event(ImEvent),
+    ///
+    /// Boxed: one `ImEvent` dwarfs every other variant, and the enum crosses a
+    /// channel once per event. The wire shape is unchanged.
+    Event(Box<ImEvent>),
     /// Report the backend's own health.
     Health(HealthArgs),
     /// The answer to a [`CoreOp::Send`]: what the platform made of it.

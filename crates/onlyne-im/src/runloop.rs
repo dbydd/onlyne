@@ -531,7 +531,7 @@ async fn handle_backend_op(
                 platform: inbound.platform.clone(),
                 conversation: inbound.conversation.clone(),
                 chat: conversation.chat_key.clone(),
-                event: Box::new(inbound),
+                event: inbound,
                 at: Utc::now().to_rfc3339(),
             };
             spawn_pushes(
