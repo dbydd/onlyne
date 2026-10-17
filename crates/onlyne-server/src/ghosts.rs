@@ -59,10 +59,8 @@ pub fn settled_outcome(state: LedgerState) -> Option<Outcome> {
 ///
 /// `ServerLedger::ledger_task` reads in insertion order, so the first `task` row
 /// is the dispatch row that created the work. That is the row
-/// [`crate::relay::task_origin`] reads for its own question, and
-/// [`crate::relay::release_exited_delivery`] reads it to learn whether a task
-/// already carries a verdict. A task with no such row answers `None`, and the
-/// pass then has no evidence to act on.
+/// [`crate::relay::task_origin`] reads for its own question. A task with no
+/// such row answers `None`, and the pass then has no evidence to act on.
 pub(crate) fn task_ledger_state(
     state: &State,
     task_id: &str,

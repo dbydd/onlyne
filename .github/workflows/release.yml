@@ -14,11 +14,11 @@ permissions:
   contents: write
 
 env:
-  # The five binaries a release ships. `onlyne` is the entrypoint; it execs the
+  # The binaries a release ships. `onlyne` is the entrypoint; it execs the
   # two daemons and runs the observation board in process. The IM gateway is an
   # optional module with its own CLI and its own platform backend, so it ships
   # beside the core rather than inside it — `onlyne` has no `im` verb.
-  BINS: onlyne onlyne-server onlyne-client onlyne-im onlyne-im-backend-telegram
+  BINS: onlyne onlyne-server onlyne-client onlyne-im onlyne-im-backend-telegram onlyne-im-backend-qqbot onlyne-im-backend-slack onlyne-im-backend-linear onlyne-im-backend-feishu
 
 jobs:
   verify:

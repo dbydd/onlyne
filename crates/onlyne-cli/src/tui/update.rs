@@ -16,6 +16,7 @@ use crate::tui::rows;
 use crate::tui::state::{Action, Link, Notice, Page, Prompt, Repair, State};
 use crossterm::event::{self as term, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use onlyne_proto::Event as ProtoEvent;
+use onlyne_proto::LedgerEntry;
 use onlyne_proto::view::{self, Snapshot};
 
 /// One input the board folds.
@@ -25,6 +26,8 @@ pub enum Event {
     Snapshot(Box<Snapshot>),
     /// One event off the subscription.
     Stream(Box<ProtoEvent>),
+    /// One `ledger` read, taken to restore what a transition does not carry.
+    Ledger(Vec<LedgerEntry>),
     /// What the IO task's link is doing.
     Link(Link),
     /// What an op the operator asked for answered.
@@ -44,6 +47,9 @@ pub fn update(state: State, event: Event) -> State {
     match event {
         Event::Snapshot(snapshot) => state.view = view::snapshot_to_view(&snapshot),
         Event::Stream(event) => state.view = view::update(state.view, &event),
+        Event::Ledger(rows) => {
+            state.view.merge_ledger(&rows);
+        }
         Event::Link(link) => state.ui.link = link,
         Event::Answered { op, result } => {
             state.ui.notice = Some(match result {

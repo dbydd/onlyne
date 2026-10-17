@@ -26,7 +26,7 @@ The fake and Orca examples below intentionally use `target/debug/...`; the launc
 ### Prerequisites
 
 - **Registry install:** Cargo and Rust 1.85 or newer.
-- **Platform SDKs:** optional, and never in the core. `onlyne-server` and `onlyne-client` compile no IM SDK at all; the one shipped backend (`onlyne-im-backend-telegram`) talks to the Bot API over plain HTTPS. The gateway itself (`onlyne-im`) is an independent module with its own CLI, not a `onlyne` verb.
+- **Platform SDKs:** optional, and never in the core. `onlyne-server` and `onlyne-client` compile no IM SDK at all; the shipped backends (Telegram, Feishu, QQ, Slack, Linear) each live in their own crate and talk to their platform over HTTPS or a websocket. The gateway itself (`onlyne-im`) is an independent module with its own CLI, not a `onlyne` verb.
 - **Runtime:** an address and port reachable by every role client. The local admin and adapter sockets require a writable owner tree.
 - **Agent host:** a supported backend and an adapter. The real pi path needs the [pi coding agent](https://github.com/badlogic/pi-mono); use pi 0.85.1 for the path documented here.
 - **Services:** installation does not register a service, and there is no `start`/`stop`. Both daemons run in the foreground; a terminal host, `launchd`, or `systemd` keeps one resident.
@@ -56,16 +56,22 @@ built by the fake quickstart below.
 
 The IM gateway is its own module with its own binary, the way `onlyne-web` is: `onlyne` has no
 `im` verb, and the core build pulls in no chat SDK. Install it only if you want a chat platform
-to reach a cluster, and install the backend for the platform you use:
+to reach a cluster, and install the backend for the platform you use
+(`onlyne-im-backend-telegram`, `-feishu`, `-qqbot`, `-slack`, or `-linear`):
 
 ```bash
 cargo install onlyne-im onlyne-im-backend-telegram
+# Replace the backend package with -qqbot, -slack, -linear, or -feishu as needed.
 ```
 
 | Command | Role |
 |---|---|
 | `onlyne-im` | One gateway root: `init`, `generate`, `login`, `run`, `check`. It hosts every conversation under `conversations/` in one process and runs the operator's trigger scripts. |
 | `onlyne-im-backend-telegram` | A Telegram bot backend: one process, spawned by the gateway, speaking the standard backend protocol on stdio. |
+| `onlyne-im-backend-qqbot` | A QQ Open Platform backend: the websocket event gateway inbound, per-scene sends outbound (a group send quotes `msg_id` while the passive-message window is open, and is a proactive message after it). Credentials are an app id and secret, stored as `app_id:app_secret`. Reactions are channel-only on QQ; a group reaction is refused by the platform, not by this backend. |
+| `onlyne-im-backend-slack` | A Slack backend: Socket Mode inbound (needs an `xapp-` app token and an `xoxb-` bot token, stored as `xapp-…:xoxb-…`), Web API outbound. Replies thread under `thread_ts`. |
+| `onlyne-im-backend-linear` | A Linear backend: inbound is a poll of the workspace's comments (default every 10 s, `ONLYNE_LINEAR_POLL_SECS`), outbound is `commentCreate`. A conversation is one issue; a reply sets the comment's `parentId`. Authenticates with one API key. |
+| `onlyne-im-backend-feishu` | A Feishu backend: events over the long connection, groups listed from the real chat list, bot-added events adopted without a restart, and interactive cards whose buttons return a toast and an `action` event. The agent's answer arrives as a threaded follow-up message. |
 
 `onlyne-im-backend` — the protocol types a backend implements — arrives as a dependency of
 either binary. A new platform is a new `onlyne-im-backend-<platform>` crate; none of them is
@@ -314,12 +320,13 @@ and it holds one directory per conversation. See
 ```text
 <gateway-root>/.onlyne/
   config.toml                 [server], [[im.backend]], [[im.push]]
+  keys/role.key               the gateway role's key, mode 0600
   credentials/<gateway>.token platform credentials, mode 0600
   logs/gateway.log            gateway process log
 
-<gateway-root>/conversations/<role>/
+<gateway-root>/conversations/<slug>/
   .onlyne/config.toml         this conversation's platform coordinates
-  .onlyne/keys/role.key       role identity key
+  .onlyne/chat.key            this conversation's identity on the wire
   chat.jsonl                  inbound events and outbound payloads, one per line
   media/                      attachments, both directions
 ```
@@ -416,37 +423,46 @@ onlyne --server-root <root> repair ack    --fault-id <id> --reason <text>
 
 ### Operate an IM gateway
 
-An IM conversation — one private chat, one group — is one **role**. That is the whole trick: an
-agent sends an ordinary envelope to the conversation's role and it lands in the chat; a person
-types in the chat and the gateway hands the event to a script you write. The gateway carries no
-routing policy and knows no platform UI; the backend process owns the platform, and your scripts
-own what happens to a message.
+One gateway root is one **role** in the cluster, and it serves every conversation in its
+registry over that single role link. A conversation's identity is an application-layer **chat
+key**: the gateway puts it on the first line of the delivery text as `<chat:KEY>`, and an agent
+that answers brings it back verbatim so the reply lands in the same chat. The core never parses
+it — a conversation is not an address, so adding one costs a registry row rather than a key, an
+ACL pair and a link. The gateway carries no routing policy and knows no platform UI; the backend
+process owns the platform, and your scripts own what happens to a message.
 
 `onlyne-im` is its own binary, not a `onlyne` verb. A gateway root is a directory, not a template
 tree: `init` writes its document, `generate` mints one conversation, `login` stores the bot
-credential, and `run` serves every conversation under the root from one process.
+credential, `setup` walks the whole path interactively, and `run` serves every conversation under
+the root from one process.
 
 ```bash
 # 1. The gateway root: which cluster, and which backend processes to spawn.
 onlyne-im init --root ./im --server-root <server-root>
 
 # 2. One conversation. `--conversation` is the platform's own id, so a Telegram
-#    group id keeps its leading `-`. `--peer` is a role this conversation may
-#    address and be addressed by; it defaults to `_supervisor`, the cluster's
-#    operator agent. `generate` also registers the role in the cluster's
-#    spec.toml through the server's admin socket, writing both sides of the ACL.
+#    group id keeps its leading `-`. `--role` is the directory slug, an
+#    operator label with no protocol meaning; it defaults to one derived from
+#    the two ids. `--peer` is a role the gateway may reach and be reached by;
+#    it defaults to `_supervisor`, the cluster's operator agent. The first
+#    `generate` also registers the gateway role in the cluster's spec.toml
+#    through the server's admin socket, writing both sides of the ACL.
 onlyne-im generate --root ./im --gateway telegram --conversation -1007788 \
                    --server-root <server-root> --peer _supervisor
 
 # 3. The bot credential, stored under the gateway root at `0600`. Prefer
 #    `--token-file` over `--token`: an argument is visible in the process table.
+#    `--interactive` asks the backend for the credential and verifies it
+#    against the platform before swapping it in, so a bad token fails here
+#    rather than as a backend that polls nothing.
 onlyne-im login --root ./im --gateway telegram --token-file ~/.secrets/tg.token
+# onlyne-im setup --root ./im --server-root <server-root>   # the same, guided
 
 # 4. Serve. Foreground only, like the daemons; the terminal host or launchd owns
 #    staying resident.
 onlyne-im run --root ./im
 
-# Parse and print the root, with the roles and coordinates it would serve. Needs
+# Parse and print the root, with the coordinates it would serve. Needs
 # no server.
 onlyne-im check --root ./im
 ```
@@ -459,9 +475,9 @@ The root's layout:
     config.toml            # [server], [[im.backend]], [[im.push]]
     credentials/           # one file per backend gateway id, 0600
   conversations/
-    <role>/                # the directory name IS the role
+    <slug>/                # an operator label; the identity is the key beside it
       .onlyne/config.toml  # [chat] gateway + conversation; the key sits beside it
-      .onlyne/keys/role.key
+      .onlyne/chat.key     # the conversation's identity on the wire
       chat.jsonl           # one JSON object per line, both directions
       media/               # inbound downloads and outbound attachments
 ```
@@ -478,6 +494,12 @@ by name.
 (the conversation's directory), and `ONLYNE_IM_MEDIA` (its attachment directory). A failing
 script is retried, and the event's `id` is what a script dedups on.
 
+The input's `role` is the gateway's own role, `chat` is the conversation's chat key, and
+`conversation` is the platform's id for it. One `[[im.push]]` script serves every conversation
+under the root, so the script reads `chat` and sends it back: a delivery whose text begins with
+`<chat:KEY>` is a reply into that conversation, and the same key passed as `--family` keeps a
+`task`-scope session serving one conversation instead of opening one per message.
+
 ```toml
 [[im.push]]
 mode = "trigger"
@@ -487,13 +509,16 @@ timeout = "10s"
 
 ```sh
 #!/bin/sh
-# Forward a chat message to the cluster's operator agent, as this conversation's
-# own role.
+# Forward a chat message to the cluster's operator agent, as the gateway role,
+# and bring the chat key back so the agent's answer lands in the same chat.
 set -eu
 msg=$(cat)
 role=$(printf '%s' "$msg" | jq -r '.role')
+chat=$(printf '%s' "$msg" | jq -r '.chat')
 text=$(printf '%s' "$msg" | jq -r '.event.text')
-onlyne send --from "$role" --to _supervisor --text "$text"
+onlyne send --from "$role" --to _supervisor --family "$chat" --text "<chat:$chat>
+
+$text"
 ```
 
 ### Bridge mounts
@@ -502,11 +527,11 @@ onlyne send --from "$role" --to _supervisor --text "$text"
 `[[gateway]]` entry loads and is listed; the v1 `auth` verb and the per-platform `run` process
 no longer exist.
 
-The IM gateway does not use this mount. Its conversations are **ordinary roles** spoken for over
-ordinary role links, and its platform backend is a separate process on its own stdio protocol —
-so there is no `gateway`/`bridge` adapter mount to register, and `onlyne gateway status` stays
-quiet for it. The `bridge` mount kind remains a wire spelling the protocol keeps for the v1
-plugin shape; nothing on this branch drives it.
+The IM gateway does not use this mount. Its gateway root is **one ordinary role** spoken for over
+one ordinary role link, its conversations are chat keys inside the delivery text, and its platform
+backend is a separate process on its own stdio protocol — so there is no `gateway`/`bridge` adapter
+mount to register, and `onlyne gateway status` stays quiet for it. The `bridge` mount kind remains
+a wire spelling the protocol keeps for the v1 plugin shape; nothing on this branch drives it.
 
 ## Architecture
 
@@ -517,7 +542,7 @@ graph LR
   P[pi host + pi-onlyne] -->|adapter protocol| C[onlyne-client · role workspace]
   A[other agent adapters] -->|adapter protocol| C
   C -->|TLS frame| SRV[onlyne-server]
-  IM[onlyne-im · gateway root] -->|"TLS role link ×N, one per conversation"| SRV
+  IM[onlyne-im · gateway root] -->|"one TLS role link, every conversation"| SRV
   IM <-->|"backend protocol on stdio"| BE[onlyne-im-backend-<platform>]
   BE <-->|Bot API| H[human chat platform]
   SC[supervisor / aggregate client] -->|aggregate role link| PS[parent onlyne-server]

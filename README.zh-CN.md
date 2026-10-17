@@ -30,7 +30,7 @@ client 可以通过 TLS 在不同机器上运行。生成的工作区可以整�
 ### 前置条件
 
 - **从 crates.io 安装：** Cargo 和 Rust 1.85 或更新版本。
-- **平台 SDK：** 可选，且永不进入核心。`onlyne-server` 和 `onlyne-client` 完全不编译任何 IM SDK；目前唯一随包发布的 backend（`onlyne-im-backend-telegram`）只通过普通 HTTPS 调 Bot API。网关本体 `onlyne-im` 是独立模块，有自己的 CLI，不是 `onlyne` 的 verb。
+- **平台 SDK：** 可选，且永不进入核心。`onlyne-server` 和 `onlyne-client` 完全不编译任何 IM SDK；随包发布的 backend（Telegram、飞书、QQ、Slack、Linear）各自是独立 crate，通过 HTTPS 或 websocket 连接平台。网关本体 `onlyne-im` 是独立模块，有自己的 CLI，不是 `onlyne` 的 verb。
 - **运行时：** 每个 role client 都能访问的地址和端口；本地 admin socket 与 adapter socket 需要一个可写的 owner tree。
 - **agent 宿主：** 一个受支持的 backend 和对应 adapter。真实 pi 路径需要 [pi coding agent](https://github.com/badlogic/pi-mono)。
 - **服务：** 安装不会自动注册服务，也没有 `start`/`stop`。两个 daemon 都在前台运行；要常驻由终端宿主、`launchd` 或 `systemd` 负责。
@@ -62,12 +62,17 @@ IM 网关像 `onlyne-web` 一样是独立模块、独立二进制：`onlyne` 没
 
 ```bash
 cargo install onlyne-im onlyne-im-backend-telegram
+# 按平台将 backend 包替换为 -qqbot、-slack、-linear 或 -feishu。
 ```
 
 | 命令 | 职责 |
 |---|---|
 | `onlyne-im` | 一个网关根：`init`、`generate`、`login`、`run`、`check`。它在单个进程里托管 `conversations/` 下每条会话，并运行操作者的 trigger 脚本。 |
 | `onlyne-im-backend-telegram` | Telegram bot backend：一个进程，由网关通过 stdio 拉起，讲标准 backend 协议。 |
+| `onlyne-im-backend-qqbot` | QQ 开放平台 backend：入站走 websocket 事件网关，出站按场景发送（群消息在被动回复窗口内带 `msg_id`，超窗后变成主动消息）。凭据是 app id 与 secret，存为 `app_id:app_secret`。QQ 的表情表态只在频道内可用，群里的表态是平台拒绝，不是本 backend 缺代码。 |
+| `onlyne-im-backend-slack` | Slack backend：入站走 Socket Mode（需要 `xapp-` app token 和 `xoxb-` bot token，存为 `xapp-…:xoxb-…`），出站走 Web API；回复挂在 `thread_ts` 下。 |
+| `onlyne-im-backend-linear` | Linear backend：入站轮询工作区的评论（默认每 10 秒，`ONLYNE_LINEAR_POLL_SECS`），出站用 `commentCreate`。一条会话就是一个 issue，回复设置评论的 `parentId`。只需要一个 API key。 |
+| `onlyne-im-backend-feishu` | 飞书 backend：事件走长连接，群列表读真实群列表，机器人入群事件免重启接管，交互卡片按钮立即回 toast 并产生 `action` 事件；agent 的答案随后作为卡片线程回复发送。 |
 
 `onlyne-im-backend`（backend 要实现的协议类型）会作为上面任一依赖被装进来。新增一个平台就是新增
 一个 `onlyne-im-backend-<platform>` crate；它们无一被链进 `onlyne`、`onlyne-server` 或
@@ -315,12 +320,13 @@ verb 见 [运行 IM 网关](#运行-im-网关)。
 ```text
 <gateway-root>/.onlyne/
   config.toml                 [server]、[[im.backend]]、[[im.push]]
+  keys/role.key               网关这条 role 的密钥，权限 0600
   credentials/<gateway>.token 平台凭据，权限 0600
   logs/gateway.log            网关进程日志
 
-<gateway-root>/conversations/<role>/
+<gateway-root>/conversations/<slug>/
   .onlyne/config.toml         这条会话的平台坐标
-  .onlyne/keys/role.key       角色身份密钥
+  .onlyne/chat.key            这条会话在 wire 上的身份
   chat.jsonl                  入站事件与出站 payload，一行一条
   media/                      两个方向的附件
 ```
@@ -419,32 +425,38 @@ onlyne --server-root <root> repair ack    --fault-id <id> --reason <text>
 
 ### 运行 IM 网关
 
-一条 IM 会话——一个私聊、一个群——就是一条 **role**。这就是全部诀窍：agent 往这条会话的 role
-发一条普通 envelope，消息就落到那个聊天里；有人在聊天里说话，网关把事件交给你写的脚本。网关本身
-不含路由策略、不认识任何平台 UI：平台归 backend 进程，一条消息怎么处理归你的脚本。
+一个网关根就是集群里的一条 **role**，它用这一条 role 链路服务自己注册表里的全部会话。会话的身份
+是一个应用层的 **chat key**：网关把它写在投递文本第一行 `<chat:KEY>`，agent 回信时原样带回，
+回复就落回同一个聊天。core 永不解析它——会话不是一个地址，所以新增一条会话只花一行注册记录，
+而不是一把密钥、一对 ACL 和一条链路。网关本身不含路由策略、不认识任何平台 UI：平台归 backend
+进程，一条消息怎么处理归你的脚本。
 
 `onlyne-im` 是独立二进制，不是 `onlyne` 的 verb。网关根是一个目录，不是模板树：`init` 写它自己
-的配置，`generate` 铸出一条会话，`login` 存 bot 凭据，`run` 在一个进程里服务根下所有会话。
+的配置，`generate` 铸出一条会话，`login` 存 bot 凭据，`setup` 交互式走完全程，`run` 在一个
+进程里服务根下所有会话。
 
 ```bash
 # 1. 网关根：连哪个集群，拉哪几个 backend 进程。
 onlyne-im init --root ./im --server-root <server-root>
 
 # 2. 一条会话。`--conversation` 用平台自己的 id，所以 Telegram 群 id 保留开头的
-#    `-`。`--peer` 是这条会话可以寻址、也可以被其寻址的 role，默认 `_supervisor`
-#    （集群的操作 agent）。`generate` 同时通过 server 的 admin socket 把这个 role
-#    写进集群 spec.toml，ACL 边两侧一起补。
+#    `-`。`--role` 是会话目录的 slug，一个没有协议含义的操作者标签，缺省由两个 id
+#    推导。`--peer` 是网关可以寻址、也可以被其寻址的 role，默认 `_supervisor`（集群
+#    的操作 agent）。第一次 `generate` 还会通过 server 的 admin socket 把网关这条
+#    role 写进集群 spec.toml，ACL 边两侧一起补。
 onlyne-im generate --root ./im --gateway telegram --conversation -1007788 \
                    --server-root <server-root> --peer _supervisor
 
 # 3. bot 凭据，落在网关根下，权限 0600。优先用 `--token-file` 而不是 `--token`：
-#    命令行参数会出现在进程表里。
+#    命令行参数会出现在进程表里。`--interactive` 让 backend 反问凭据并先向平台验证，
+#    换入之前就失败，而不是留下一个什么都不轮询的 backend。
 onlyne-im login --root ./im --gateway telegram --token-file ~/.secrets/tg.token
+# onlyne-im setup --root ./im --server-root <server-root>   # 同一条路，交互式
 
 # 4. 前台运行，和 daemon 一样；常驻由终端宿主或 launchd 负责。
 onlyne-im run --root ./im
 
-# 解析并打印这个根会服务的 role 与坐标。不需要 server 在线。
+# 解析并打印这个根会服务的坐标。不需要 server 在线。
 onlyne-im check --root ./im
 ```
 
@@ -456,9 +468,9 @@ onlyne-im check --root ./im
     config.toml            # [server]、[[im.backend]]、[[im.push]]
     credentials/           # 每个 backend gateway id 一个文件，0600
   conversations/
-    <role>/                # 目录名就是 role
+    <slug>/                # 操作者标签；身份是旁边那把 key
       .onlyne/config.toml  # [chat]：gateway + conversation；密钥在它旁边
-      .onlyne/keys/role.key
+      .onlyne/chat.key     # 这条会话在 wire 上的身份
       chat.jsonl           # 一行一个 JSON，入站与出站都有
       media/               # 附件：入站下载、出站待发
 ```
@@ -473,6 +485,11 @@ onlyne-im check --root ./im
 `onlyne send`，不用自己找 socket）、`ONLYNE_IM_WORKSPACE`（这条会话的目录）、
 `ONLYNE_IM_MEDIA`（它的附件目录）。失败的脚本会重投，`event.id` 就是脚本去重的键。
 
+输入里的 `role` 是网关自己那条 role，`chat` 是这条会话的 chat key，`conversation` 是平台给它
+的 id。一个 `[[im.push]]` 脚本服务根下全部会话，所以脚本读 `chat` 并把它带回去：正文以
+`<chat:KEY>` 开头的投递就是回这条会话，同一个 key 传给 `--family` 则让 `task` scope 的会话
+一条条服务同一个会话，而不是每条消息开一个新会话。
+
 ```toml
 [[im.push]]
 mode = "trigger"
@@ -482,12 +499,16 @@ timeout = "10s"
 
 ```sh
 #!/bin/sh
-# 把聊天消息转给集群的操作 agent，发送身份就是这条会话自己的 role。
+# 把聊天消息转给集群的操作 agent，发送身份是网关那条 role，回带 chat key 好让
+# agent 的回答落回同一个聊天。
 set -eu
 msg=$(cat)
 role=$(printf '%s' "$msg" | jq -r '.role')
+chat=$(printf '%s' "$msg" | jq -r '.chat')
 text=$(printf '%s' "$msg" | jq -r '.event.text')
-onlyne send --from "$role" --to _supervisor --text "$text"
+onlyne send --from "$role" --to _supervisor --family "$chat" --text "<chat:$chat>
+
+$text"
 ```
 
 ### Bridge 挂载
@@ -495,10 +516,10 @@ onlyne send --from "$role" --to _supervisor --text "$text"
 `onlyne gateway status` 列出 server 已知的挂载，只读。`spec.toml` 里的 `[[gateway]]`
 条目仍能加载并被列出；v1 的 `auth` verb 和按平台起的 `run` 进程已不存在。
 
-IM 网关**不用**这个挂载。它的每条会话都是普通 role，通过普通 role 链路收发；平台 backend 是另
-一个进程，走自己的 stdio 协议——所以没有 `gateway`/`bridge` adapter 挂载要注册，
-`onlyne gateway status` 对它保持安静。`bridge` mount kind 是协议为 v1 插件形态保留的 wire
-拼法，本分支上没有任何东西驱动它。
+IM 网关**不用**这个挂载。网关根就是一条普通 role，走一条普通 role 链路；它的会话是投递文本里的
+chat key；平台 backend 是另一个进程，走自己的 stdio 协议——所以没有 `gateway`/`bridge`
+adapter 挂载要注册，`onlyne gateway status` 对它保持安静。`bridge` mount kind 是协议为 v1
+插件形态保留的 wire 拼法，本分支上没有任何东西驱动它。
 
 ## 架构
 
@@ -509,7 +530,7 @@ graph LR
   P[pi 宿主 + pi-onlyne] -->|adapter 协议| C[onlyne-client · role workspace]
   A[其他 agent adapter] -->|adapter 协议| C
   C -->|TLS frame| SRV[onlyne-server]
-  IM[onlyne-im · 网关根] -->|"TLS role 链路 ×N，每条会话一条"| SRV
+  IM[onlyne-im · 网关根] -->|"一条 TLS role 链路，承载全部会话"| SRV
   IM <-->|"stdio 上的 backend 协议"| BE[onlyne-im-backend-<platform>]
   BE <-->|Bot API| H[人类聊天平台]
   SC[supervisor / aggregate client] -->|aggregate role 链路| PS[父 onlyne-server]

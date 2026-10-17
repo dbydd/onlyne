@@ -13,8 +13,10 @@
 //! v1 asked the server for the same five reads once a second
 //! (`docs/v2-PLAN.md` line 395). Nothing here counts time: the snapshot is read
 //! once per connection, and after that every update is an event the
-//! subscription pushed. The only waiting is the reconnect pause, which exists
-//! so a server that is down is not dialed in a tight loop.
+//! subscription pushed. Both waits are one-shot deadlines armed by an event —
+//! the reconnect pause, so a server that is down is not dialed in a tight loop,
+//! and the heal pause, which fires once to read the causality and terminal
+//! state a transition does not carry.
 //!
 //! ## A gap is an input
 //!
@@ -33,9 +35,9 @@ use crate::wire::{self, ExchangeError, Outbound};
 use onlyne_proto::view::Snapshot;
 use onlyne_proto::{
     AdminControl, AdminOp, AdminReport, AdminSend, Body, Causality, ControlOp, EventRow, EventTier,
-    Frame, LedgerQuery, MsgKind, Principal, QueryFaultsArgs, QueryRolesArgs, QuerySessionsArgs,
-    RepairAck, RepairFail, RepairTarget, Report, ResBody, Subscribe, new_envelope, new_id,
-    new_task_id,
+    Frame, LedgerEntry, LedgerQuery, MsgKind, Principal, QueryFaultsArgs, QueryRolesArgs,
+    QuerySessionsArgs, RepairAck, RepairFail, RepairTarget, Report, ResBody, Subscribe,
+    new_envelope, new_id, new_task_id,
 };
 use onlyne_wire::FrameReader;
 use onlyne_wire::socket::LocalStream;
@@ -60,6 +62,14 @@ const RECONNECT_PAUSE: Duration = Duration::from_millis(250);
 /// board.
 const SNAPSHOT_LIMIT: u32 = 200;
 
+/// How long a transition waits before its row's causality is read off the
+/// ledger.
+///
+/// A burst of transitions settles into one read, and the pause is short enough
+/// that a single operator action is traced while the operator watches. The web
+/// link waits the same 250 ms for the same read.
+const HEAL_PAUSE: Duration = Duration::from_millis(250);
+
 /// The board's two channels to the IO task.
 pub struct Task {
     /// The ops the screen asks for.
@@ -77,6 +87,21 @@ pub fn spawn(path: PathBuf, timeout_ms: u64) -> Task {
     let (event_tx, events) = unbounded_channel();
     tokio::spawn(run(path, timeout_ms, event_tx, action_rx));
     Task { actions, events }
+}
+
+/// Whether this event is one the ledger can have moved further than the stream
+/// said.
+///
+/// A `ledger_state` event is a transition: it carries no causality, so a row
+/// this board had never read arrives with its causal columns empty. It is also
+/// one transition and not the row's whole life, so a row whose terminal
+/// transition the stream dropped stays nonterminal however much of its
+/// causality was filled. Both cases are settled by the same ledger read, and
+/// the read is safe because the merge only fills a column a row was missing and
+/// only adopts a terminal state over a nonterminal one — so every transition is
+/// owed the read, whether it arrived live or in a replay page.
+fn is_transition_row(event: &onlyne_proto::Event) -> bool {
+    matches!(event, onlyne_proto::Event::LedgerState(_))
 }
 
 /// Read the five admin reads into one snapshot.
@@ -141,6 +166,29 @@ pub async fn read_snapshot(path: &Path, timeout_ms: u64) -> Result<Snapshot, Str
     })
 }
 
+/// Read the `ledger` alone — the one read a heal needs.
+///
+/// A transition carries neither causality nor the terminal state the stream may
+/// have dropped, and the ledger owns both, so a heal reads this and nothing
+/// else: the other four reads would cost four more round trips to fill nothing.
+/// The window is [`SNAPSHOT_LIMIT`], the same one the snapshot's own `ledger`
+/// read uses, so a merge sees the rows the snapshot would have shown.
+async fn read_ledger(path: &Path, timeout_ms: u64) -> Result<Vec<LedgerEntry>, String> {
+    let mut stream = wire::connect(path, timeout_ms)
+        .await
+        .map_err(|error| local_error(&error))?;
+    read_list(
+        &mut stream,
+        AdminOp::Ledger(LedgerQuery {
+            limit: SNAPSHOT_LIMIT,
+            ..LedgerQuery::default()
+        }),
+        "ledger",
+        timeout_ms,
+    )
+    .await
+}
+
 /// The task's whole life: connect, read, subscribe, fold, and act.
 async fn run(
     path: PathBuf,
@@ -151,12 +199,22 @@ async fn run(
     let mut cursor: u64 = 0;
     let mut subscription: Option<Subscription> = None;
     let mut ready_at = Instant::now();
+    // When a transition the stream carried is due its one ledger read, if one
+    // is pending. `None` means idle, and a fresh snapshot has already filled
+    // every row it read, so the reconnect clears it with the view.
+    let mut heal_at: Option<Instant> = None;
     loop {
         tokio::select! {
             // The board dropping its handle is the shutdown signal.
             action = actions.recv() => match action {
                 None => return,
-                Some(action) => perform(&path, timeout_ms, &events, action).await,
+                Some(action) => {
+                    // A refresh is a full snapshot, and a snapshot fills every
+                    // row it reads: a heal left pending is its work now.
+                    if perform(&path, timeout_ms, &events, action).await {
+                        heal_at = None;
+                    }
+                }
             },
             frame = next_frame(&mut subscription, timeout_ms), if subscription.is_some() => {
                 match frame {
@@ -172,9 +230,23 @@ async fn run(
                         if !gap {
                             cursor = cursor.max(seq);
                         }
+                        // A `ledger_state` event is a transition: it carries no
+                        // family, no hop and no clock, and it says nothing about
+                        // the transitions the stream dropped. The ledger owns
+                        // both, so every transition is owed one read — armed
+                        // only when none is pending, so a burst costs one read
+                        // rather than one per event.
+                        let transition = is_transition_row(&event);
                         let _ = events.send(Event::Stream(event));
+                        if transition && heal_at.is_none() {
+                            heal_at = Some(Instant::now() + HEAL_PAUSE);
+                        }
                         if gap || reload {
                             subscription = None;
+                            // The snapshot this reconnect is about to take
+                            // fills every row it reads, so a pending heal is the
+                            // snapshot's work now, not this loop's.
+                            heal_at = None;
                             // The notice's `seq` is a drop count, not a
                             // cursor, so the last good cursor is what the
                             // reconnect asks from: the answer page carries
@@ -207,6 +279,9 @@ async fn run(
             }
             _ = tokio::time::sleep_until(ready_at), if subscription.is_none() => {
                 ready_at = Instant::now() + RECONNECT_PAUSE;
+                // The snapshot this reconnect is about to take fills every row
+                // it reads, so whatever heal was pending is its work now.
+                heal_at = None;
                 // A fresh read before every subscription: it is what the
                 // reducer clears `stale` with, and what heals a board that
                 // reconnected after a gap.
@@ -239,11 +314,19 @@ async fn run(
                             cursor = cursor.max(row.seq);
                             reread |= onlyne_proto::view::is_resync_lag(&row.event)
                                 || matches!(row.event, onlyne_proto::Event::SpecReloaded(_));
+                            // A page can carry the very events the snapshot did
+                            // not include, so a transition replayed here is owed
+                            // the same one ledger read a live transition is.
+                            let transition = is_transition_row(&row.event);
                             let _ = events.send(Event::Stream(Box::new(row.event)));
+                            if transition && heal_at.is_none() {
+                                heal_at = Some(Instant::now() + HEAL_PAUSE);
+                            }
                         }
                         let _ = events.send(Event::Link(Link::Live));
                         if reread {
                             drop(subscription_link);
+                            heal_at = None;
                             ready_at = Instant::now();
                         } else {
                             subscription = Some(subscription_link);
@@ -252,6 +335,18 @@ async fn run(
                     Err(reason) => {
                         let _ = events.send(Event::Link(Link::Offline(reason)));
                     }
+                }
+            }
+            _ = tokio::time::sleep_until(heal_at.unwrap_or(Instant::now() + HEAL_PAUSE)), if heal_at.is_some() => {
+                // The deadline is cleared before the read, so a failed read
+                // cannot spin this branch: a heal is not retried by its own
+                // timer, it is re-armed by the next ledger transition. Nothing
+                // here drops the subscription or replaces the view — the merge
+                // only fills a column a row was missing and adopts a terminal
+                // state over a nonterminal one.
+                heal_at = None;
+                if let Ok(rows) = read_ledger(&path, timeout_ms).await {
+                    let _ = events.send(Event::Ledger(rows));
                 }
             }
         }
@@ -337,17 +432,26 @@ fn page_rows(body: &ResBody) -> Result<Vec<EventRow>, String> {
 }
 
 /// Perform one action the screen asked for, and report what it answered.
-async fn perform(path: &Path, timeout_ms: u64, events: &UnboundedSender<Event>, action: Action) {
+///
+/// Answers whether the action took a fresh snapshot, which is the one answer
+/// that replaces the whole view and so settles a pending heal.
+async fn perform(
+    path: &Path,
+    timeout_ms: u64,
+    events: &UnboundedSender<Event>,
+    action: Action,
+) -> bool {
     if action == Action::Refresh {
         match read_snapshot(path, timeout_ms).await {
             Ok(snapshot) => {
                 let _ = events.send(Event::Snapshot(Box::new(snapshot)));
+                return true;
             }
             Err(reason) => {
                 let _ = events.send(Event::Link(Link::Offline(reason)));
             }
         }
-        return;
+        return false;
     }
     let word = action.word();
     let result = match op(action) {
@@ -355,6 +459,7 @@ async fn perform(path: &Path, timeout_ms: u64, events: &UnboundedSender<Event>, 
         Err(why) => Err(why),
     };
     let _ = events.send(Event::Answered { op: word, result });
+    false
 }
 
 /// The admin op one action carries.

@@ -45,16 +45,17 @@ push the tag that names the workspace version — `git tag v1.4.1 && git push or
 dispatch the workflow by hand with a `tag` input. Four jobs run in order:
 
 1. `verify` — the same gate as `ci.yml` (`cargo fmt --all --check`,
-   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`), plus a check
+   `cargo clippy --workspace --all-targets -- -D warnings -A clippy::double_must_use`,
+   `cargo test --workspace`), plus a check
    that the tag matches `[workspace.package].version`. A release never ships red, and a tag that
    names no workspace version fails rather than publishing an unreproducible build.
 2. `build` — five targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`,
    `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`. Each builds
-   the five release binaries (`onlyne`, `onlyne-server`, `onlyne-client`, plus the optional IM
-   module's `onlyne-im` and `onlyne-im-backend-telegram`) with `--locked`, packages them beside
+   the release binaries (`onlyne`, `onlyne-server`, `onlyne-client`, plus the optional IM
+   module's `onlyne-im` and its Telegram, QQ, Slack, Linear and Feishu backends) with `--locked`,
+   packages them beside
    `LICENSE` and the shell completions the CLI emits itself, and writes a `.sha256` beside each
-   archive. No job installs `protoc`: the v1 gateway plugins that pulled `openlark` are gone, and
-   the one shipped IM backend talks to the Bot API over plain HTTPS.
+   archive. No job installs `protoc`.
 3. `release` — publishes every archive, its checksum, and a combined `SHA256SUMS` to the GitHub
    Release, creating it with generated notes when the tag has none, and ends on a published
    release: a tag that was deleted and pushed again leaves its release a draft, and a draft serves
@@ -64,9 +65,9 @@ dispatch the workflow by hand with a `tag` input. Four jobs run in order:
 
 ## Homebrew
 
-The formula installs the prebuilt archives, so a machine needs no Rust toolchain. All five
-binaries are in them (the IM pair rides along, unused unless you run a gateway), which is what
-makes the install complete rather than partial. This
+The formula installs the prebuilt archives, so a machine needs no Rust toolchain. Every shipped
+binary is in them (the IM gateway and its five backends ride along, unused unless you run a
+gateway), which is what makes the install complete rather than partial. This
 repository is the tap — `Formula/` is where Homebrew looks — and the clone URL is part of the tap
 command because the repository is not named `homebrew-onlyne`:
 
@@ -82,7 +83,7 @@ platform's archive is missing from the `SHA256SUMS` it reads.
 
 `packaging/install.sh` is the no-Homebrew path. It resolves this machine's target, downloads the
 matching archive and `SHA256SUMS`, refuses to install anything whose checksum is absent or wrong,
-and puts the five binaries in `PREFIX/bin` (`/usr/local` by default). It writes nothing else and
+and puts the nine binaries in `PREFIX/bin` (`/usr/local` by default). It writes nothing else and
 starts no service. `sh packaging/install.sh <tag>` pins one release tag. The registry path, for
 an operator who wants the binaries built on the machine that runs them, is the Cargo command in
 the root README.

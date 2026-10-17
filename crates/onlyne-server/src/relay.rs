@@ -7,7 +7,6 @@
 
 use crate::events;
 use crate::gateway_host::{resolve_inbound_route, select_outbound_route};
-use crate::ghosts;
 use crate::state::{DeliveryTicket, State};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -894,31 +893,17 @@ pub fn requeue_role_rows(state: &State, role: &str, claim: &Claim) -> anyhow::Re
     Ok(requeued)
 }
 
-/// Release an in-flight row whose live pane has just gone `exited`.
+/// Release deliveries owned by the session whose exit just applied.
 ///
-/// A claimed hello leaves the row `in_flight` for the pane that still holds
-/// it. When that pane dies while the link is up, this is the path that returns
-/// the row to the queue. A ticket armed by a named pull holds that session's
-/// id, and it has to match the sync that landed, so a write from another
-/// session of the same task does not move the row. A ticket armed by a
-/// role-level pull holds no id — `pull` keys it by the puller so that pull can
-/// find it again — and falls back to the row's task: a client-held session's id
-/// *is* its task id, so the session that published this `exited` is exactly the
-/// session the row belongs to. Without that fallback no role-level ticket ever
-/// matched and the row stayed `in_flight` behind a pane that was gone. TTL and
-/// budget run in the same order as [`requeue_role_rows`].
-///
-/// A row whose task's own ledger row already carries a verdict is refused:
-/// [`crate::ghosts::task_ledger_state`] reads that row and
-/// [`crate::ghosts::settled_outcome`] maps its state, the same pair the ghost
-/// sweep asks. The refused row lands `rejected` carrying
-/// [`RELEASE_SETTLED_REASON`], its ticket goes with it, and the refusal is
-/// absent from the requeued count, so the row stays spent and nothing re-offers
-/// it. A task carrying no verdict rides the TTL and budget gates above.
+/// The applied write supplies the verdict. A session lookup can return a pooled
+/// session's next task, and a dispatch receipt cannot distinguish task outcomes.
+/// Completion rows belong to their recipients and keep their delivery tickets.
 pub fn release_exited_delivery(
     state: &State,
+    role: &str,
     task_id: &str,
     session_id: &str,
+    verdict: Option<Outcome>,
 ) -> anyhow::Result<usize> {
     let rows = state.ledger.ledger_query(LedgerQuery {
         task: Some(task_id.to_string()),
@@ -926,28 +911,61 @@ pub fn release_exited_delivery(
         limit: 32,
         ..LedgerQuery::default()
     })?;
-    let settled = ghosts::task_ledger_state(state, task_id)?.and_then(ghosts::settled_outcome);
+    // A completion row is the receipt the verdict travelled on. Its presence
+    // separates "the work finished and the client's ack is still queued" from
+    // "the completion was refused at the door" (an unpaid obligation): both
+    // publish a verdict on the exit, and only the first one earned an ack.
+    let receipt = state
+        .ledger
+        .ledger_query(LedgerQuery {
+            task: Some(task_id.to_string()),
+            limit: 32,
+            ..LedgerQuery::default()
+        })?
+        .into_iter()
+        .any(|row| row.kind == MsgKind::Completion && row.state != LedgerState::Rejected);
     let mut requeued = 0usize;
     for row in rows {
+        if row.kind == MsgKind::Completion {
+            continue;
+        }
         let Some(ticket) = state.delivery_ticket(&row.msg_id) else {
             continue;
         };
-        let released = match ticket.session_id.as_deref() {
-            Some(held) => held == session_id,
-            None => row.task.as_deref() == Some(session_id),
-        };
-        if !released {
+        // A ticket without a session id was armed by a role-level pull, and
+        // the write that brought us here just bound this session to the task,
+        // so the row is this session's by construction.
+        let owned = ticket.role == role
+            && ticket
+                .session_id
+                .as_deref()
+                .is_none_or(|held| held == session_id);
+        if !owned {
             continue;
         }
-        if settled.is_some() {
-            match state.ledger.fail_one(&row.msg_id, RELEASE_SETTLED_REASON) {
+        if let Some(verdict) = verdict
+            .filter(|_| row.kind == MsgKind::Task)
+            .filter(|_| receipt)
+        {
+            // The delivery whose work produced the verdict. The client acks it
+            // at completion, but that ack travels the durable intent queue and
+            // can arrive after this exit write. Acking here is the same fact
+            // the client's ack carries, and it is idempotent with it: the late
+            // ack finds a terminal row and answers the stored state.
+            match state.ledger.mark_acked_with_reason(
+                &row.msg_id,
+                Utc::now(),
+                Some(RELEASE_SETTLED_REASON),
+            ) {
                 Ok(_) => {
+                    let event = ledger_event(&row, LedgerState::Acked, Some(verdict), None);
+                    events::publish(state, Event::LedgerState(event))?;
                     state.forget_expiry(&row.msg_id);
                     tracing::info!(
                         task = %task_id,
                         msg_id = %row.msg_id,
-                        reason = RELEASE_SETTLED_REASON,
-                        "a delivery of a settled task is refused, so the row stays spent"
+                        ?verdict,
+                        "a completed delivery is acknowledged when its recipient's ack is still in flight"
                     );
                 }
                 Err(onlyne_store::StoreError::InvalidState { .. }) => {}

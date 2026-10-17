@@ -56,21 +56,19 @@ fn is_spec_reload(event: &onlyne_proto::Event) -> bool {
     matches!(event, onlyne_proto::Event::SpecReloaded(_))
 }
 
-/// Whether this event just left its row without the family the browser's trace
-/// is drawn from.
+/// Whether this event is one the ledger can have moved further than the stream
+/// said.
 ///
-/// A `ledger_state` event is a transition and carries no causality, so a row
-/// this view had never read arrives with `family` empty. A row the snapshot
-/// already read keeps the family it was read with, whatever the event says —
-/// and the fold never clears it — so this is true only for the rows a
-/// transition minted, which are exactly the rows owed one ledger read.
-fn needs_heal(view: &View, event: &onlyne_proto::Event) -> bool {
-    let onlyne_proto::Event::LedgerState(reported) = event else {
-        return false;
-    };
-    view.deliveries
-        .get(&reported.msg_id)
-        .is_some_and(|delivery| delivery.family.is_none())
+/// A `ledger_state` event is a transition: it carries no causality, so a row
+/// this view had never read arrives with its causal columns empty. It is also
+/// one transition and not the row's whole life, so a row whose terminal
+/// transition the stream dropped stays nonterminal however much of its
+/// causality was filled. Both cases are settled by the same ledger read, and
+/// the read is safe because the merge only fills a column a row was missing and
+/// only adopts a terminal state over a nonterminal one — so every transition is
+/// owed the read, whether it arrived live or in a replay page.
+fn needs_heal(event: &onlyne_proto::Event) -> bool {
+    matches!(event, onlyne_proto::Event::LedgerState(_))
 }
 
 /// What the link task last said about the admin connection. `View::stale` is
@@ -169,15 +167,14 @@ async fn run(socket: PathBuf, timeout_ms: u64, publish: watch::Sender<Arc<LinkSt
                         // spec no longer allows.
                         let reread = gap || is_spec_reload(&event);
                         // A `ledger_state` event is a transition: it carries no
-                        // family, no hop and no clock, so a row this view had
-                        // never read arrives with all eight of them empty and
-                        // the browser's family trace has nothing to draw.
-                        // The ledger owns those columns, so the row is owed one
-                        // read — armed only when none is pending, so a burst of
-                        // sends costs one read rather than one per event, and
-                        // so the deadline is never pushed out from under a
-                        // heal that is already due.
-                        if needs_heal(&view, &event) && heal_at.is_none() {
+                        // family, no hop and no clock, and it says nothing about
+                        // the transitions the stream dropped. The ledger owns
+                        // both, so every transition is owed one read — armed
+                        // only when none is pending, so a burst of sends costs
+                        // one read rather than one per event, and so the
+                        // deadline is never pushed out from under a heal that
+                        // is already due.
+                        if needs_heal(&event) && heal_at.is_none() {
                             heal_at = Some(Instant::now() + HEAL_PAUSE);
                         }
                         send(&publish, view.clone(), cursor, LinkStatus::Live);
@@ -213,6 +210,10 @@ async fn run(socket: PathBuf, timeout_ms: u64, publish: watch::Sender<Arc<LinkSt
             }
             _ = tokio::time::sleep_until(ready_at), if subscription.is_none() => {
                 ready_at = Instant::now() + RECONNECT_PAUSE;
+                // The snapshot this reconnect is about to take fills every row
+                // it reads and carries the newest state of each, so whatever
+                // heal was pending before the link dropped is its work now.
+                heal_at = None;
                 let snapshot = match read_snapshot(&socket, timeout_ms).await {
                     Ok(snapshot) => snapshot,
                     Err(reason) => {
@@ -244,10 +245,11 @@ async fn run(socket: PathBuf, timeout_ms: u64, publish: watch::Sender<Arc<LinkSt
                             reread |= is_resync_lag(&row.event) || is_spec_reload(&row.event);
                             view = onlyne_proto::view::update(view, &row.event);
                             // A page can carry the very events the snapshot
-                            // did not include, so a row minted here is owed the
-                            // same one ledger read a row minted on the live
-                            // stream is.
-                            if needs_heal(&view, &row.event) && heal_at.is_none() {
+                            // did not include, so a transition replayed here is
+                            // owed the same one ledger read a live transition
+                            // is — whether it minted the row or settled one the
+                            // stream had already left nonterminal.
+                            if needs_heal(&row.event) && heal_at.is_none() {
                                 heal_at = Some(Instant::now() + HEAL_PAUSE);
                             }
                         }
@@ -268,11 +270,11 @@ async fn run(socket: PathBuf, timeout_ms: u64, publish: watch::Sender<Arc<LinkSt
             _ = tokio::time::sleep_until(heal_at.unwrap_or(Instant::now() + HEAL_PAUSE)), if heal_at.is_some() => {
                 // The deadline is cleared before the read, so a failed read
                 // cannot spin this branch: a heal is not retried by its own
-                // timer, it is re-armed by the next ledger event that leaves a
-                // row without its family. Nothing here drops the subscription
-                // or replaces the view — a full re-read would throw away the
-                // event tail the browser is drawing — the merge only fills the
-                // columns a stream-born row is missing.
+                // timer, it is re-armed by the next ledger transition. Nothing
+                // here drops the subscription or replaces the view — a full
+                // re-read would throw away the event tail the browser is
+                // drawing — the merge only fills a missing column and adopts a
+                // terminal state over a nonterminal one.
                 heal_at = None;
                 if let Ok(rows) = read_ledger(&socket, timeout_ms).await {
                     view.merge_ledger(&rows);

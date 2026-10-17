@@ -80,11 +80,12 @@ Two daemons, the operator entry point, the optional front end, and the optional 
   `crates/onlyne-adapter/HOSTING-RUNTIME.md`.
 
 There is an IM gateway process: `onlyne-im`, an optional module with its own CLI — `init`,
-`generate`, `login`, `run`, `check` — never a verb of `onlyne`, exactly like `onlyne-web`.
-One gateway process hosts many conversations, holding one ordinary role link per conversation
-workspace, and spawns one backend process per `[[im.backend]]` bot connection. The platform
-SDK lives in the backend crate — `onlyne-im-backend-telegram` today — never in the core, so
-`onlyne-server` and `onlyne-client` still compile no platform SDK. The protocol keeps the
+`generate`, `login` (with `--interactive`), `setup`, `run`, `check` — never a verb of `onlyne`,
+exactly like `onlyne-web`. One gateway root is one cluster role serving every conversation in
+its registry (`docs/v2.3-CHAT-PROTOCOL.md`); a conversation's identity is its chat key, and
+the gateway spawns one backend process per `[[im.backend]]` bot connection. The platform SDK
+lives in the backend crate — Telegram, Feishu, QQ, Slack and Linear today — never in the core,
+so `onlyne-server` and `onlyne-client` still compile no platform SDK. The protocol keeps the
 `bridge` mount kind in `AGENTS.md` §8's table for an external protocol bridge; the v2.2
 gateway does not mount on it, because its conversations are ordinary roles.
 
@@ -94,7 +95,7 @@ inside a workspace tree.
 
 ### Crate state
 
-Fourteen crates are workspace members, and `onlyne-web` is the crate built and kept outside
+Nineteen crates are workspace members, and `onlyne-web` is the crate built and kept outside
 the workspace so the core build needs no Node.
 
 - [x] `onlyne-proto` — protocol vocabulary, ops, errors, events, and the session reducer. No
@@ -114,13 +115,23 @@ the workspace so the core build needs no Node.
   workspace's `placement`.
 - [x] `onlyne-cli` — the `onlyne` binary: the CLI verbs, the built-in TUI, `mcp`.
 - [x] `onlyne-testkit` — the scenario harness, the fake runtime, the conformance fixtures.
-- [x] `onlyne-im` — the IM gateway host (v2.2): one role link per conversation, trigger
-  scripts, and the host that spawns one backend process per bot connection. Its binary
-  `onlyne-im` carries its own `init`, `generate`, `login`, `run`, `check`.
+- [x] `onlyne-im` — the IM gateway host (v2.3): one role link per gateway root, trigger
+  scripts, reply-thread bookkeeping, and the host that spawns one backend process per bot
+  connection. Its binary `onlyne-im` carries its own `init`, `generate`, `login`,
+  `setup`, `run`, `check`.
 - [x] `onlyne-im-backend` — the standard protocol between the gateway and a platform
   backend: frames, payloads, and the `Backend` trait.
-- [x] `onlyne-im-backend-telegram` — the Telegram backend. Platform SDKs live in backend
-  crates, never in the core.
+- [x] `onlyne-im-backend-telegram` — the Telegram backend (long-poll Bot API).
+- [x] `onlyne-im-backend-feishu` — the Feishu backend (`openlark` long-connection inbound,
+  paged chat listing, interactive cards and reply APIs).
+- [x] `onlyne-im-backend-qqbot` — the QQ Open Platform backend (websocket event gateway,
+  per-scene sends).
+- [x] `onlyne-im-backend-slack` — the Slack backend (`slack-morphism`: Socket Mode inbound,
+  Web API outbound, external uploads).
+- [x] `onlyne-im-backend-linear` — the Linear backend (`linear-api` typed GraphQL plus a
+  direct file upload; comment polling inbound, `commentCreate` outbound).
+- [x] `onlyne-im-backend-fake` — the scripted fake behind `smoke`, the e2e scripts and any
+  dry run. Platform SDKs live in backend crates, never in the core.
 
 The gate reading recorded in the commit receipt for `aebbe11` is a green
 `ONLYNE_BACKEND=fake cargo test --workspace` with formatting and clippy clean, in which
@@ -133,7 +144,9 @@ Where the v1 crates went, for a reader who knows the old names: `onlyne-frame` i
 `onlyne-wire`, `onlyne-layout` split into `onlyne-config::layout` and `onlyne-wire::socket`,
 `onlyne-session`'s reducer is in `onlyne-proto` and its backends are in `onlyne-client`, the TUI
 is a module of `onlyne-cli`, and v1's `onlyne-gateway`, sealed on the `frozen/gateway-v1`
-tag, was rebuilt in v2.2 as `onlyne-im` with its two sibling crates.
+tag, was rebuilt first as v2.2's `onlyne-im` and then, in v2.3, as one gateway role serving
+every conversation in its registry through a chat key (`docs/v2.3-CHAT-PROTOCOL.md`). Its
+platform backends are one crate each: Telegram, Feishu, QQ, Slack, Linear, plus the fake.
 
 ### Wave plan status
 
@@ -149,14 +162,17 @@ runtime's protocol, specified and not yet implemented.
 
 **The scenario suite is the primary body.** `crates/onlyne-testkit/tests/scenarios.rs` is one
 test binary driven by `Cluster::start`, which brings up a real server and real clients in a
-temporary directory with a fake runtime mounted on a real socket. Eighteen scenarios, seventeen
+temporary directory with a fake runtime mounted on a real socket. Twenty-seven scenarios, twenty-six
 of them running: the delivery loop, the handoff chain, permissions, idempotency, link-drop
 recovery, server restart, large-frame interleaving, legacy-layout refusal, the heartbeat watchdog,
 plugin conformance, generate/relocate, and the v2 session cases — `oneshot` giving every delivery
 its own session, `task` keying a family to one session, the `role` pool filling to
 `max_sessions`, suspension freeing a slot for the same family to resume, a runtime without
 `resume` keeping its idle session's process, and a `last_seen`-only heartbeat writing no
-projection. `scenario_11_federation` stays `#[ignore]` with its reason on
+projection. It also carries the v2.3 shapes: one gateway serving two conversations by chat key
+(22), a control word settling so a restart cannot revive it (23), a chat key as a task family
+(24), an idle conversation waiting for its family rather than the clock (26), and a probe
+answering on the row the operator reads (28). `scenario_11_federation` stays `#[ignore]` with its reason on
 the attribute — the harness models one server, and the two-root case is the shell script below.
 Each scenario names the script it supersedes on the line above its attribute, so the port's
 progress is readable from the file itself.
@@ -245,19 +261,20 @@ Both jobs are green on `main`.
   协议缺口列在 `crates/onlyne-adapter/HOSTING-RUNTIME.md`。
 
 本分支有 IM 网关进程：`onlyne-im`，一个带自己 CLI 的可选模块 —— `init`、`generate`、
-`login`、`run`、`check` —— 它绝不是 `onlyne` 的一个 verb，正如 `onlyne-web` 一样。
-一个网关进程托管多个会话：每个会话 workspace 持一条普通 role link，并为每个
-`[[im.backend]]` bot 连接 spawn 一个后端进程。平台 SDK 只存在于后端 crate（目前即
-`onlyne-im-backend-telegram`），从不进入核心，所以 `onlyne-server` 与 `onlyne-client`
-依旧不编译任何平台 SDK。协议在 `AGENTS.md` §8 的表格里为外部协议 bridge 保留了
-`bridge` mount kind；v2.2 的网关不挂载它，因为它的会话就是普通 role。
+`login`（带 `--interactive`）、`setup`、`run`、`check` —— 它绝不是 `onlyne` 的一个 verb，
+正如 `onlyne-web` 一样。一个网关根就是集群里的一条 role，服务它注册表里的全部会话
+（`docs/v2.3-CHAT-PROTOCOL.md`）；会话的身份是它的 chat key，网关为每个
+`[[im.backend]]` bot 连接 spawn 一个后端进程。平台 SDK 只存在于后端 crate
+（今天是 Telegram、飞书、QQ、Slack、Linear），从不进入核心，所以 `onlyne-server` 与
+`onlyne-client` 依旧不编译任何平台 SDK。协议在 `AGENTS.md` §8 的表格里为外部协议
+bridge 保留了 `bridge` mount kind；v2.2 的网关不挂载它，因为它的会话就是普通 role。
 
 socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`（可由 `ONLYNE_RUNTIME_DIR` 覆盖），
 名为 `<digest>.sock`，旁边是 `<digest>.json` 注册文件。workspace 树内不再绑定任何东西。
 
 #### Crate 状态
 
-十四个 crate 是 workspace 成员；`onlyne-web` 已构建，并放在 workspace 之外，好让核心
+十九个 crate 是 workspace 成员；`onlyne-web` 已构建，并放在 workspace 之外，好让核心
 构建不需要 Node。
 
 - `onlyne-proto` —— 协议词汇、ops、errors、events 与 session reducer。不依赖 tokio。
@@ -274,12 +291,17 @@ socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`（可由 `ONLYNE_RUNT
   由 role 的 `[client.runtime]` drive 与工作区的 `placement` 选定。
 - `onlyne-cli` —— `onlyne` 二进制：CLI verb、内置 TUI、`mcp`。
 - `onlyne-testkit` —— scenario harness、fake runtime、conformance fixture。
-- `onlyne-im` —— IM 网关宿主（v2.2）：每个会话一条 role link、触发脚本，并为每个 bot
-  连接 spawn 一个后端进程。其二进制 `onlyne-im` 自带 `init`、`generate`、`login`、
-  `run`、`check`。
+- `onlyne-im` —— IM 网关宿主（v2.3）：每个网关根一条 role link、触发脚本、回复线程记账，
+  并为每个 bot 连接 spawn 一个后端进程。其二进制 `onlyne-im` 自带 `init`、`generate`、
+  `login`、`setup`、`run`、`check`。
 - `onlyne-im-backend` —— 网关与平台后端之间的标准协议：frames、payloads 与 `Backend`
   trait。
-- `onlyne-im-backend-telegram` —— Telegram 后端。平台 SDK 只住后端 crate，从不在核心。
+- `onlyne-im-backend-telegram` —— Telegram 后端（长轮询 Bot API）。
+- `onlyne-im-backend-feishu` —— 飞书后端（`openlark` 长连接入站、分页群列表、交互卡片与回复 API）。
+- `onlyne-im-backend-qqbot` —— QQ 开放平台后端（websocket 事件网关、分场景发送）。
+- `onlyne-im-backend-slack` —— Slack 后端（`slack-morphism`：Socket Mode 入站、Web API 出站、外部上传）。
+- `onlyne-im-backend-linear` —— Linear 后端（`linear-api` 类型化 GraphQL 加直连文件上传；评论轮询入站、`commentCreate` 出站）。
+- `onlyne-im-backend-fake` —— `smoke`、e2e 脚本与干跑共用的脚本化 fake。平台 SDK 只住后端 crate，从不在核心。
 
 提交 `aebbe11` 的 commit receipt 记录的 gate 读数是 `ONLYNE_BACKEND=fake cargo test --workspace`
 全绿、formatting 与 clippy 干净，其中 `onlyne-client` 为 **324 passed、0 failed、1 ignored**。
@@ -290,8 +312,10 @@ socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`（可由 `ONLYNE_RUNT
 给认识旧名字的读者一个去处：`onlyne-frame` 现为 `onlyne-wire`；`onlyne-layout` 拆为
 `onlyne-config::layout` 与 `onlyne-wire::socket`；`onlyne-session` 的 reducer 在
 `onlyne-proto`、backends 在 `onlyne-client`；TUI 是 `onlyne-cli` 的一个模块；
-v1 的 `onlyne-gateway` 封存在 `frozen/gateway-v1` tag 上，v2.2 以 `onlyne-im` 及其两个
-兄弟 crate 将其重建。
+v1 的 `onlyne-gateway` 封存在 `frozen/gateway-v1` tag 上，先由 v2.2 的 `onlyne-im` 重建，
+v2.3 再把它改成一条网关 role 通过 chat key 服务注册表里的全部会话
+（`docs/v2.3-CHAT-PROTOCOL.md`）。它的平台后端一家一个 crate：Telegram、飞书、QQ、
+Slack、Linear，外加 fake。
 
 #### Wave plan 状态
 
@@ -306,11 +330,14 @@ v2 不使用 wave。规范的状态表是 `AGENTS.md` §0 的阶段表：四个�
 
 **scenario suite 是主体。** `crates/onlyne-testkit/tests/scenarios.rs` 是单个测试二进制，
 由 `Cluster::start` 驱动：它在临时目录里拉起真实的 server 与真实的 client，并把 fake runtime
-挂到真实 socket 上。共十八个场景，十七个在跑：投递环、handoff 链、权限、幂等、断链恢复、
+挂到真实 socket 上。共二十七个场景，二十六个在跑：投递环、handoff 链、权限、幂等、断链恢复、
 server 重启、大帧交错、legacy 布局拒绝、heartbeat 看门狗、plugin conformance、
 generate/relocate，以及 v2 的会话用例 —— `oneshot` 让每次投递各起一个 session、`task` 把一个
 家族拴在同一个 session、`role` 池填到 `max_sessions`、挂起腾出槽位后同一家族恢复该 session、
 runtime 不支持 `resume` 时空闲 session 的进程保留、只刷新 `last_seen` 的 heartbeat 不写投影。
+它还承载 v2.3 的形状：一条网关按 chat key 服务两条会话（22）、控制词结算后重启也复活不了
+（23）、chat key 即 task family（24）、空闲会话等家族而不是等时钟（26）、probe 的答案落在
+操作者读的那一行（28）。
 `scenario_11_federation` 保持 `#[ignore]`，理由写在属性上 —— harness 只建模
 一个 server，双根那一例是下面的 shell 脚本。每个场景都在自己属性上方一行写明它取代哪个脚本，
 所以迁移进度可以直接从文件本身读出。

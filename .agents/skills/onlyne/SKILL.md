@@ -49,17 +49,18 @@ onlyne-client    the client daemon, `run` only, owning the session backends
 onlyne-cli       the `onlyne` binary: every verb, the built-in TUI (crates/onlyne-cli/src/tui/),
                  `mcp`, and the compiled handbooks
 onlyne-testkit   the scenario harness, the fake runtime, the conformance fixtures
+onlyne-im        the optional IM gateway, its backend protocol host and conversation workspaces
+onlyne-im-backend the standard IM backend protocol and credential loader
+onlyne-im-backend-{telegram,feishu,qqbot,slack,linear,fake}
+                 isolated platform binaries; each SDK and platform transport stays in its crate
 ```
 
 `onlyne-server` and `onlyne-client` share no production dependency edge:
 `cargo tree -p onlyne-server -e normal` names no `onlyne-client`, and the reverse holds (the name
 appears in `crates/onlyne-server/Cargo.toml` under `[dev-dependencies]`, a line no test uses).
-Platform SDKs must stay out of both binaries.
-After any dependency edit, prove it with
-`cargo tree -p onlyne-client | grep -E 'teloxide|openlark|wechat-ilink|resvg'`.
-
-The IM gateway crates and their four platform plugins are frozen and off this branch. The
-protocol keeps the `bridge` mount kind for them; nothing here builds or tests them.
+Platform SDKs stay out of `onlyne-server` and `onlyne-client`. The IM platform SDKs belong in
+their matching `onlyne-im-backend-*` crate. Check dependency boundaries after an edit with
+`cargo tree -p onlyne-server` and `cargo tree -p onlyne-client`.
 
 ## Change procedures
 

@@ -86,7 +86,6 @@ impl App {
         })
     }
 
-
     /// The router, guard and all.
     pub fn router(self: &Arc<Self>) -> Router {
         let state = Arc::clone(self);

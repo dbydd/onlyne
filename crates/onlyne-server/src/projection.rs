@@ -146,7 +146,8 @@ fn settle(
             // already-acked row is left alone. A bare beat never gets here: the
             // tuple inferred above is always `working`.
             if outcome.applied && exited {
-                relay::release_exited_delivery(state, task_id, session_id)?;
+                let verdict = outcome.row.as_ref().and_then(|row| row.projection.outcome);
+                relay::release_exited_delivery(state, role, task_id, session_id, verdict)?;
             }
             Ok(outcome)
         }

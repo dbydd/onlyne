@@ -24,6 +24,16 @@ the synthesis of a set of conversations. The core changed not at all: `Principal
 schemas, and `crates/onlyne-client/src/delivery.rs` are untouched, and the scenario suite's
 case 22 proves the shape end to end.
 
+Landed on top of it, in the same release, are four shapes the gateway needed rather than the
+core: **reply threads** (`docs/v2.4-REPLY-THREADS.md`) where a conversation is a message list,
+a reply names any message by a unique id prefix, and a reply and a reference are two different
+links; **a control word settles the task it names** (`docs/v2.5-CANCEL-NOT-ENFORCING.md`), so a
+`cancel` the server reported `ok` for cannot be revived by a restart; **the pi resume argv**
+(`[client.runtime].resume`), because re-running the command that opens a conversation starts a
+second one; and **a view that adopts a ledger's terminal state**
+(`docs/v2.6-VIEW-KEEPS-A-STATE-THE-STREAM-GOT-WRONG.md`), so a board stops showing a settled
+delivery as in flight.
+
 One phase-two item is done with a named gap rather than closed: a **hosting
 runtime** — one that owns its sessions, like DSH — has an interface and a
 specification (`crates/onlyne-adapter/HOSTING-RUNTIME.md`) and four protocol
@@ -99,11 +109,12 @@ describes the 2.2.0 release, not the tree.
 Its own module, not a `onlyne` verb: `onlyne-im` is a separate binary (`init`, `generate`,
 `login` (with `--interactive`), `setup`, `run`, `check`), the way `onlyne-web` is, and the core build links in no chat SDK. A
 gateway root holds `.onlyne/config.toml` (`[server]`, `[[im.backend]]`, `[[im.push]]`) and one
-workspace per conversation under `conversations/<role>/`, where **the directory name is the
-role** — the file names only the conversation's coordinates. A conversation's runtime files
-(`chat.jsonl`, `media/`) live in that workspace. `generate` writes both halves of a new
-conversation in one run: the workspace, and the cluster's `[[client]]` row plus both ACL lists
-through the server's admin socket.
+workspace per conversation under `conversations/<slug>/`, where the directory name is an
+operator label with no protocol meaning and the conversation's identity is the chat key beside
+it. A conversation's runtime files (`chat.jsonl`, `media/`) live in that workspace. `generate`
+writes the workspace; the cluster half is the gateway role's, written once by `init`-then-first-
+`generate` — one `[[client]]` row and both ACL lists through the server's admin socket, not one
+per conversation (`docs/v2.3-CHAT-PROTOCOL.md` §7.5).
 
 When you finish a phase-one or phase-two item, update this table and the section it
 touches in the same change.
@@ -176,8 +187,10 @@ not add a heavyweight dependency for a single type or a single helper.
 | `onlyne-web` | optional graphical front end (phase three) | none; flags only (`--bind`, `--open`) |
 | `onlyne-im` | the IM gateway for one root: one role link, trigger scripts, one spawned backend per `[[im.backend]]` | `init`, `generate`, `login` (`--interactive` verifies against the platform first), `setup` (the guided path: backend → auth → conversations → bind), `run`, `check` |
 | `onlyne-im-backend-telegram` | the Telegram backend the gateway spawns over stdio | none; the gateway root's `[[im.backend]].run` names it |
-| `onlyne-im-backend-feishu` | the Feishu (Lark) backend: `openlark` websocket inbound, `im/v1/messages` outbound | none |
+| `onlyne-im-backend-feishu` | the Feishu (Lark) backend: `openlark` long-connection inbound, paged chat listing, interactive cards and reply APIs | none |
 | `onlyne-im-backend-qqbot` | the QQ Open Platform backend: websocket event gateway inbound, per-scene sends outbound | none |
+| `onlyne-im-backend-slack` | the Slack backend: Socket Mode websocket inbound, Web API outbound | none |
+| `onlyne-im-backend-linear` | the Linear backend: GraphQL comment polling inbound, `commentCreate` outbound | none |
 | `onlyne-im-backend-fake` | the scripted fake used by `smoke`, the e2e scripts, and any dry run; no platform SDK, no credential | none |
 
 Rules:
@@ -209,8 +222,10 @@ Rules:
 | `onlyne-testkit` | scenario harness, fake runtime |
 | `onlyne-im` | IM gateway host: one role link, trigger scripts, backend host, the guided `setup` |
 | `onlyne-im-backend` | the standard protocol between the gateway and a platform backend: frames, payloads, the `Backend` trait, the credential loader |
-| `onlyne-im-backend-feishu` | Feishu platform backend (the `openlark` websocket and the message API live here) |
-| `onlyne-im-backend-qqbot` | QQ Open Platform platform backend (`tokio-tungstenite` lives here and nowhere else) |
+| `onlyne-im-backend-feishu` | Feishu platform backend (the `openlark` websocket, chat list, interactive cards and message API live here) |
+| `onlyne-im-backend-qqbot` | QQ Open Platform platform backend (`tokio-tungstenite` lives here and in the Slack backend) |
+| `onlyne-im-backend-slack` | Slack platform backend (Socket Mode and the Web API live here) |
+| `onlyne-im-backend-linear` | Linear platform backend (the GraphQL client lives here) |
 | `onlyne-im-backend-telegram` | Telegram platform backend |
 
 Nineteen active crates. Dependency rules:

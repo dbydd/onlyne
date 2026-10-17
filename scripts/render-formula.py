@@ -59,10 +59,12 @@ class Onlyne < Formula
   end
 
   def install
-    # The last two are the optional IM module (`onlyne-im` and its Telegram
-    # backend); they ride along with the core, since the archive carries them.
+    # The rest are the optional IM module: the gateway and its platform
+    # backends. They ride along with the core, since the archive carries them.
     bin.install "onlyne", "onlyne-server", "onlyne-client", "onlyne-im",
-                "onlyne-im-backend-telegram"
+                "onlyne-im-backend-telegram", "onlyne-im-backend-qqbot",
+                "onlyne-im-backend-slack", "onlyne-im-backend-linear",
+                "onlyne-im-backend-feishu"
   end
 
   test do

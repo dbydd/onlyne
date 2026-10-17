@@ -3,21 +3,26 @@
 //! Ported from `frozen/gateway-v1`'s outbound translation (`text_request`,
 //! `card_request`, `markdown_card` and the table/code-span renderers). This is
 //! the only place Feishu's own shapes appear: the core hands over `text`,
-//! `format`, and `reply_to`, and this module decides what `POST
-//! /open-apis/im/v1/messages` receives.
+//! `format`, `actions`, and `reply_to`, and this module decides what `POST
+//! /open-apis/im/v1/messages` (or its reply endpoint) receives.
 //!
-//! v1 routed between text and card with a `looks_like_markdown` heuristic
-//! because its `Outbound` carried no format field; the standard payload does,
-//! so the heuristic is gone: `ImFormat::Plain` renders a `text` message,
-//! `ImFormat::Markdown` renders an `interactive` card. v1 attached no buttons
-//! and uploaded no files on this path, so neither does this render.
+//! Three shapes:
+//!
+//! * `ImFormat::Plain` without actions — a `text` message.
+//! * `ImFormat::Markdown` without actions — an `interactive` card, first `# `
+//!   heading as header, markdown tables as card tables (v1's rendering,
+//!   unchanged).
+//! * A payload with [`ImPayload::actions`] — an `interactive` card whose last
+//!   element is a row of buttons. Each button's `value` carries
+//!   `{"action": <id>}`, which is what `card.action.trigger` reports back, so
+//!   a press maps to the [`ImAction::id`] the core minted.
 
-use onlyne_im_backend::payload::{ImFormat, ImPayload};
+use onlyne_im_backend::payload::{ImAction, ImFormat, ImPayload};
 use serde_json::{Value, json};
 
-/// One send-message request body (`POST /open-apis/im/v1/messages`), fully
-/// rendered. `receive_id_type` is decided by the conversation's shape at the
-/// API layer, not here.
+/// One send-message request body, fully rendered. `receive_id_type` is decided
+/// by the conversation's shape at the API layer, not here; the API layer sends
+/// `reply_id` through the reply endpoint.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Request {
     pub body: Value,
@@ -27,17 +32,28 @@ pub struct Request {
 ///
 /// A payload with text is one request — plain text as a `text` message,
 /// markdown as an interactive card with the first `# ` heading as its header.
-/// A payload with no text (v1's outbound had no attachments) renders nothing.
+/// A payload with actions is always a card, because buttons exist nowhere else,
+/// and it renders even with no text (a card of buttons is a payload).
 pub fn render(conversation: &str, payload: &ImPayload) -> Vec<Request> {
     let text = payload.text.trim();
-    if text.is_empty() {
+    if text.is_empty() && payload.actions.is_empty() {
         return Vec::new();
     }
-    let request = match payload.format {
-        ImFormat::Plain => text_request(conversation, text, payload.reply_to.as_deref()),
-        ImFormat::Markdown => card_request(conversation, text, payload.reply_to.as_deref()),
+    let reply_to = payload.reply_to.as_deref();
+    let body = if payload.actions.is_empty() {
+        match payload.format {
+            ImFormat::Plain => text_request(conversation, text, reply_to),
+            ImFormat::Markdown => card_request(conversation, text, reply_to),
+        }
+    } else {
+        wire_request(
+            conversation,
+            "interactive",
+            action_card(text, payload.format, &payload.actions),
+            reply_to,
+        )
     };
-    vec![Request { body: request }]
+    vec![Request { body }]
 }
 
 /// The wire request body for a plain-text message.
@@ -85,6 +101,70 @@ pub fn markdown_card(markdown: &str) -> Value {
             json!({"template": "blue", "title": {"tag": "plain_text", "content": title}});
     }
     card
+}
+
+/// An interactive card carrying the payload's buttons.
+///
+/// Markdown text keeps v1's card rendering (heading, tables, code spans); plain
+/// text becomes one plain-text element so it is shown verbatim rather than
+/// interpreted as markdown.
+pub fn action_card(text: &str, format: ImFormat, actions: &[ImAction]) -> Value {
+    let (title, body) = match format {
+        ImFormat::Markdown => split_first_heading(text),
+        ImFormat::Plain => (None, text.to_string()),
+    };
+    let mut elements = Vec::new();
+    if !body.trim().is_empty() {
+        match format {
+            ImFormat::Markdown => elements.extend(markdown_elements(&body)),
+            ImFormat::Plain => elements.push(json!({
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": body},
+            })),
+        }
+    }
+    elements.push(actions_element(actions));
+    let mut card = json!({
+        "config": {"wide_screen_mode": true},
+        "elements": elements,
+    });
+    if let Some(title) = title {
+        card["header"] =
+            json!({"template": "blue", "title": {"tag": "plain_text", "content": title}});
+    }
+    card
+}
+
+/// One `action` element holding every button.
+fn actions_element(actions: &[ImAction]) -> Value {
+    let buttons: Vec<Value> = actions
+        .iter()
+        .map(|action| {
+            let label = if action.label.trim().is_empty() {
+                action.id.clone()
+            } else {
+                action.label.clone()
+            };
+            json!({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": label},
+                "type": button_type(action.style.as_deref()),
+                // The callback reports this object back as `action.value`;
+                // `{"action": id}` is what `update::card_action_event` reads.
+                "value": {"action": action.id},
+            })
+        })
+        .collect();
+    json!({"tag": "action", "actions": buttons})
+}
+
+/// A standard style hint mapped onto Feishu's button types.
+fn button_type(style: Option<&str>) -> &'static str {
+    match style {
+        Some("primary") => "primary",
+        Some("danger") => "danger",
+        _ => "default",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,7 +244,7 @@ fn markdown_elements(markdown: &str) -> Vec<Value> {
             }
         }
     }
-    if elements.is_empty() {
+    if elements.is_empty() && !markdown.trim().is_empty() {
         elements.push(json!({"tag": "markdown", "content": markdown_body(markdown)}));
     }
     elements
@@ -287,6 +367,18 @@ mod tests {
         }
     }
 
+    fn action(id: &str, label: &str, style: Option<&str>) -> ImAction {
+        ImAction {
+            id: id.to_string(),
+            label: label.to_string(),
+            style: style.map(str::to_string),
+        }
+    }
+
+    fn card_of(request: &Request) -> Value {
+        serde_json::from_str(request.body["content"].as_str().unwrap()).unwrap()
+    }
+
     #[test]
     fn plain_text_is_one_text_message() {
         let requests = render("oc_group", &payload("hello"));
@@ -306,8 +398,7 @@ mod tests {
         let requests = render("oc_group", &p);
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].body["msg_type"], "interactive");
-        let card: Value =
-            serde_json::from_str(requests[0].body["content"].as_str().unwrap()).unwrap();
+        let card = card_of(&requests[0]);
         assert_eq!(
             card.pointer("/header/title/content")
                 .and_then(Value::as_str),
@@ -337,8 +428,7 @@ mod tests {
         let mut p = payload("# t\n\n| a | b |\n|---|---|\n| 1 | 2 |");
         p.format = ImFormat::Markdown;
         let requests = render("oc_group", &p);
-        let card: Value =
-            serde_json::from_str(requests[0].body["content"].as_str().unwrap()).unwrap();
+        let card = card_of(&requests[0]);
         assert_eq!(
             card.pointer("/elements/0/tag").and_then(Value::as_str),
             Some("table")
@@ -358,12 +448,87 @@ mod tests {
         let mut p = payload("run `cargo test` now");
         p.format = ImFormat::Markdown;
         let requests = render("oc_group", &p);
-        let card: Value =
-            serde_json::from_str(requests[0].body["content"].as_str().unwrap()).unwrap();
+        let card = card_of(&requests[0]);
         let content = card
             .pointer("/elements/0/content")
             .and_then(Value::as_str)
             .unwrap();
         assert!(content.contains("```\ncargo test\n```"), "{content}");
+    }
+
+    #[test]
+    fn actions_render_as_card_buttons_carrying_the_action_id() {
+        let mut p = payload("# Deploy\n\nready?");
+        p.format = ImFormat::Markdown;
+        p.actions = vec![
+            action("approve", "Approve", Some("primary")),
+            action("reject", "Reject", Some("danger")),
+            action("later", "", None),
+        ];
+        let requests = render("oc_group", &p);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].body["msg_type"], "interactive");
+        let card = card_of(&requests[0]);
+        assert_eq!(
+            card.pointer("/header/title/content")
+                .and_then(Value::as_str),
+            Some("Deploy")
+        );
+        assert_eq!(
+            card.pointer("/elements/1/tag").and_then(Value::as_str),
+            Some("action")
+        );
+        let buttons = card
+            .pointer("/elements/1/actions")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(buttons.len(), 3);
+        assert_eq!(buttons[0]["value"]["action"], "approve");
+        assert_eq!(buttons[0]["type"], "primary");
+        assert_eq!(buttons[1]["value"]["action"], "reject");
+        assert_eq!(buttons[1]["type"], "danger");
+        // An empty label falls back to the id, so a button is never blank.
+        assert_eq!(buttons[2]["text"]["content"], "later");
+        assert_eq!(buttons[2]["type"], "default");
+    }
+
+    #[test]
+    fn plain_text_with_actions_is_a_card_with_a_verbatim_text_element() {
+        let mut p = payload("**not markdown**");
+        p.actions = vec![action("ok", "OK", None)];
+        let requests = render("oc_group", &p);
+        assert_eq!(requests[0].body["msg_type"], "interactive");
+        let card = card_of(&requests[0]);
+        assert_eq!(
+            card.pointer("/elements/0/tag").and_then(Value::as_str),
+            Some("div")
+        );
+        assert_eq!(
+            card.pointer("/elements/0/text/content")
+                .and_then(Value::as_str),
+            Some("**not markdown**")
+        );
+    }
+
+    #[test]
+    fn buttons_alone_are_still_a_card() {
+        let mut p = payload("");
+        p.actions = vec![action("retry", "Retry", None)];
+        let requests = render("oc_group", &p);
+        assert_eq!(requests.len(), 1);
+        let card = card_of(&requests[0]);
+        assert_eq!(
+            card.pointer("/elements/0/tag").and_then(Value::as_str),
+            Some("action")
+        );
+    }
+
+    #[test]
+    fn a_card_reply_keeps_the_reply_id() {
+        let mut p = payload("do it");
+        p.actions = vec![action("go", "Go", None)];
+        p.reply_to = Some("om_card".into());
+        let requests = render("oc_group", &p);
+        assert_eq!(requests[0].body["reply_id"], "om_card");
     }
 }

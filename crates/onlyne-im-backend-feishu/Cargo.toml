@@ -1,6 +1,6 @@
 [package]
 name = "onlyne-im-backend-feishu"
-version = "2.2.0"
+version = "2.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,18 +12,19 @@ name = "onlyne-im-backend-feishu"
 path = "src/main.rs"
 
 [dependencies]
-onlyne-im-backend = { path = "../onlyne-im-backend", version = "2.2.0" }
+onlyne-im-backend = { path = "../onlyne-im-backend", version = "2.3.0" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
-openlark = { workspace = true }
+# `communication` exposes the typed IM requests this backend uses (chat list,
+# send, reply); the websocket feature stays on for inbound events.
+openlark = { workspace = true, features = ["communication"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

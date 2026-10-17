@@ -1,6 +1,6 @@
 [package]
 name = "onlyne-im-backend-qqbot"
-version = "2.2.0"
+version = "2.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,7 +12,7 @@ name = "onlyne-im-backend-qqbot"
 path = "src/main.rs"
 
 [dependencies]
-onlyne-im-backend = { path = "../onlyne-im-backend", version = "2.2.0" }
+onlyne-im-backend = { path = "../onlyne-im-backend", version = "2.3.0" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }

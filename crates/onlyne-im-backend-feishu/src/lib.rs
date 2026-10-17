@@ -1,9 +1,10 @@
 //! Feishu (Lark) platform backend for the Onlyne IM gateway.
 //!
 //! Implements the standard backend protocol (`onlyne-im-backend`) and speaks
-//! Feishu's Open API. The two translation halves live in [`update`] (a
-//! platform event becomes a standard event) and [`render`] (a standard payload
-//! becomes a send-message request body); [`api`] holds the two HTTP calls and
+//! Feishu's Open API through the `openlark` SDK. The two translation halves
+//! live in [`update`] (a platform event becomes a standard event) and
+//! [`render`] (a standard payload becomes a send-message request body);
+//! [`api`] holds the SDK requests (chat list, send, reply, token check) and
 //! [`auth`] the credential encoding. This module is the `Backend` that joins
 //! them.
 //!
@@ -12,6 +13,20 @@
 //! the SDK owns the connection and its token lifecycle. The websocket is
 //! spawned at construction and re-connects inside the SDK; this backend only
 //! drains the payload channel.
+//!
+//! The app must subscribe to three events in the Feishu developer console:
+//! `im.message.receive_v1`, `im.chat.member.bot.added_v1` (so a group the bot
+//! has just joined is adopted immediately), and `card.action.trigger` (button
+//! presses on interactive cards). The bot must also be granted
+//! `im:message`, `im:chat:readonly` and `im:resource`.
+//!
+//! A card callback is delivered as an inbound action, but it is **not**
+//! answered with an in-place card update: the websocket ACK must leave within
+//! Feishu's three-second deadline, and the agent's answer is not known then.
+//! The callback is acknowledged with a static info toast
+//! ([`CARD_ACK_TOAST`]) while the action itself reaches the gateway through
+//! the payload channel, so the trigger can answer with a normal message that
+//! the action event's `reply` coordinate threads under the card.
 
 mod api;
 mod auth;
@@ -30,6 +45,11 @@ use onlyne_im_backend::payload::ImEvent;
 use std::time::Instant;
 
 pub use auth::{APP_ID_ENV, APP_SECRET_ENV, DEFAULT_DOMAIN, DOMAIN_ENV};
+
+/// What a card press is told immediately: the callback must answer within
+/// three seconds, before the agent has decided anything. The answer itself
+/// arrives as the follow-up message the trigger sends.
+pub const CARD_ACK_TOAST: &str = "Received; the agent is working on it";
 
 /// One Feishu backend: the app identity and the websocket event pump.
 pub struct FeishuBackend {
@@ -146,22 +166,18 @@ fn spawn_websocket(
 ) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     tokio::spawn(async move {
-        // The `openlark` crate's library target is named `open_lark`, as v1
-        // referenced it.
         let base_url = creds.base_url();
-        #[allow(deprecated)]
-        let Ok(config) = open_lark::Config::builder()
+        let config = open_lark::Config::builder()
             .app_id(creds.app_id)
             .app_secret(creds.app_secret)
             .base_url(base_url)
-            .build()
-        else {
-            tracing::warn!("feishu sdk config was rejected; the websocket never starts");
+            .build();
+        let Ok(handler) = dispatcher(tx) else {
+            tracing::warn!(
+                "feishu sdk rejected the card callback handler; the websocket never starts"
+            );
             return;
         };
-        let handler = open_lark::ws_client::EventDispatcherHandler::builder()
-            .payload_sender(tx)
-            .build();
         let result =
             open_lark::ws_client::LarkWsClient::open(std::sync::Arc::new(config), handler).await;
         if let Err(e) = result {
@@ -169,6 +185,45 @@ fn spawn_websocket(
         }
     });
     rx
+}
+
+/// The SDK dispatcher: every payload goes to the channel the backend drains,
+/// and a card press additionally gets an immediate toast in the ACK.
+///
+/// `openlark` 0.21's `dispatch_with_response` forwards to `payload_sender`
+/// before it invokes a callback handler, so registering the card callback does
+/// not stop the action reaching the gateway — it only adds the response body.
+fn dispatcher(
+    payload_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+) -> Result<open_lark::ws_client::EventDispatcherHandler, String> {
+    Ok(open_lark::ws_client::EventDispatcherHandler::builder()
+        .payload_sender(payload_tx)
+        .register_card_action_trigger(CardAcknowledged)?
+        .build())
+}
+
+/// Answers a card callback with a toast while the action is handled.
+struct CardAcknowledged;
+
+impl open_lark::ws_client::CardActionTriggerHandler for CardAcknowledged {
+    fn handle(
+        &self,
+        _event: open_lark::ws_client::CardActionTrigger,
+    ) -> Result<
+        Option<open_lark::ws_client::CardActionTriggerResponse>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        Ok(Some(open_lark::ws_client::CardActionTriggerResponse {
+            toast: Some(open_lark::ws_client::CardToast {
+                r#type: "info".to_string(),
+                title: None,
+                content: Some(CARD_ACK_TOAST.to_string()),
+            }),
+            // An in-place card update would have to know the agent's answer
+            // now; it does not exist yet, so the follow-up message carries it.
+            card: None,
+        }))
+    }
 }
 
 #[async_trait]
@@ -181,7 +236,10 @@ impl Backend for FeishuBackend {
         HelloArgs {
             platform: self.platform.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            capabilities: vec!["message".into()],
+            // `action` is real now: a button press on an interactive card
+            // arrives as `card.action.trigger` and is reported as an `action`
+            // event.
+            capabilities: vec!["message".into(), "action".into()],
             authenticated,
             onboarding: (!authenticated).then(|| Self::credential_prompt(self.problem.as_deref())),
         }
@@ -210,14 +268,14 @@ impl Backend for FeishuBackend {
         Ok(Some(creds.app_id))
     }
 
-    /// The chats this app can see by id.
+    /// The chats this bot is in, from Feishu's own listing
+    /// (`GET /open-apis/im/v1/chats`, walked page by page).
     ///
-    /// Feishu's chat listing (`GET /open-apis/im/v1/chats`) exists, but v1
-    /// never called it and the port does not add what v1 did not do: a bot
-    /// learns a chat when something happens in it, and an operator names the
-    /// chat id by hand instead. Always empty.
+    /// This is the reach answer rather than a convenience: a chat the bot was
+    /// just added to is here even before an event arrives in it, and an
+    /// external group the bot was invited into is a row like any other.
     async fn list_conversations(&mut self) -> Result<Vec<ImConversation>> {
-        Ok(Vec::new())
+        self.api.list_chats().await
     }
 
     async fn next_event(&mut self) -> Result<Option<ImEvent>> {
@@ -297,6 +355,51 @@ pub async fn run(gateway: String, credential: String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+
+    const CARD_CALLBACK: &[u8] = br#"{"schema":"2.0","header":{"event_id":"evt-card","event_type":"card.action.trigger"},"event":{"operator":{"open_id":"ou_presser"},"action":{"tag":"button","value":{"action":"approve"}},"context":{"open_chat_id":"oc_group","open_message_id":"om_card"}}}"#;
+
+    /// A card press must both answer within the deadline and reach the
+    /// gateway: `dispatch_with_response` forwards to the channel before it
+    /// invokes the callback, and the callback's value becomes the ACK body.
+    #[test]
+    fn a_card_callback_answers_a_toast_and_still_reaches_the_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let handler = dispatcher(tx).expect("the dispatcher registers the callback");
+        let ack = handler
+            .dispatch_with_response(CARD_CALLBACK)
+            .expect("the callback is dispatched")
+            .expect("a card callback carries a response body");
+        let response: Value = serde_json::from_slice(&ack).expect("the ACK body is JSON");
+        assert_eq!(response["toast"]["type"], "info");
+        assert_eq!(response["toast"]["content"], CARD_ACK_TOAST);
+        assert!(
+            response.get("card").is_none(),
+            "no in-place card update: the answer is not known yet"
+        );
+        assert_eq!(
+            rx.try_recv().expect("the action reaches the gateway"),
+            CARD_CALLBACK
+        );
+    }
+
+    /// Any other event still reaches the channel, with no callback body.
+    #[test]
+    fn an_ordinary_event_has_no_callback_body_but_reaches_the_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let handler = dispatcher(tx).expect("the dispatcher builds");
+        let payload = br#"{"header":{"event_type":"im.message.receive_v1"},"event":{}}"#;
+        assert!(
+            handler
+                .dispatch_with_response(payload)
+                .expect("dispatched")
+                .is_none()
+        );
+        assert_eq!(
+            rx.try_recv().expect("the event reaches the gateway"),
+            payload
+        );
+    }
 
     #[tokio::test]
     async fn an_unparseable_credential_is_a_problem_not_a_panic() {
@@ -320,7 +423,10 @@ mod tests {
         assert!(hello.authenticated);
         assert_eq!(hello.platform, "feishu");
         assert!(hello.onboarding.is_none());
-        assert_eq!(hello.capabilities, vec!["message".to_string()]);
+        assert_eq!(
+            hello.capabilities,
+            vec!["message".to_string(), "action".to_string()]
+        );
     }
 
     #[test]

@@ -1,5 +1,95 @@
 # Changelog
 
+## 2.3.0 (2026-10-17)
+
+- **A conversation's identity is a chat key, not a role.** v2.2 made one IM conversation one
+  `[[client]]`, so N conversations meant N keys, N ACL rows and N role links, and "one persona
+  serving many chats" could not be said at all. A conversation is now an application-layer chat
+  key carried in the delivery text's first line; the gateway root is one ordinary role serving
+  every conversation in its registry, and a role is the synthesis of a set of conversations.
+  The core changed not at all — `Principal`, both schemas and the client's delivery renderer are
+  untouched — and scenario 22 proves the shape end to end (`docs/v2.3-CHAT-PROTOCOL.md`). A
+  v2.2 gateway tree migrates by hand (§8), as with every other v2 revision.
+- **A conversation is a message list, and a reply names where it lands.** A reply to the newest
+  message continues the list; a reply to anything older opens a branch. Reply and reference are
+  two separate links, because pointing at a message (a quote, a sticker, a reaction) is not
+  answering it, and a chain of sequential replies stays one list instead of forking at every hop.
+  Messages are addressable by any unique id prefix, an ambiguous prefix is refused with every
+  candidate rather than guessed, and a thread the gateway never saw is named from the platform's
+  own coordinate — no history required (`docs/v2.4-REPLY-THREADS.md`).
+- **QQ joins the IM gateway; five platform backends ship.** `onlyne-im-backend-qqbot` receives
+  over the Open Platform's websocket event gateway and sends per scene: a group send quotes
+  `msg_id` inside the passive-reply window and is a proactive message after it. Two live defects
+  are fixed and both were invisible to unit tests: the client must send `op 1` on the interval
+  `HELLO` names or the socket is reset after about a minute, and `op 9` with `d=false` is a dead
+  session that must identify fresh rather than resume the rejected id. A refused send now carries
+  the platform's own words back to the core as an `im_send_failed` fault, instead of the core
+  reading "accepted, no id" from a failure that only existed on the backend's stderr. Reactions
+  are channel-only on QQ; a group reaction is a platform fact, documented rather than faked.
+  `SentArgs` answers a send with the platform's ids, so the gateway's own replies join the chain
+  they belong to. Slack, Linear and Feishu ship as described below.
+- **Feishu reaches every conversation the bot is in, and its cards are interactive.**
+  `list_conversations` now reads Feishu's real chat list, so `onlyne-im setup` offers the groups
+  the bot belongs to instead of asking for ids. `im.chat.member.bot.added_v1` arrives as an
+  inbound event naming the new chat, so a bot just added to a group — internal or external —
+  is adoptable with no restart. Messages the backend used to skip (image, file, audio, video,
+  sticker, forwarded history, shared chat or contact) now arrive as attachments or labelled
+  placeholders, and @-mention placeholders resolve to `@Name`. `ImPayload.actions` renders
+  Feishu buttons carrying the action id, and a `card.action.trigger` callback arrives as an
+  `action` event threaded under the card and an immediate toast. Replies now use Feishu's reply
+  endpoint rather than an unsupported `reply_id` field. The crate uses `openlark` 0.21 for the
+  callback response. It cannot update the card in place, because the replacement content is
+  generated only after the agent answers; the answer arrives as a threaded follow-up message.
+- **Slack and Linear backends for the IM gateway.** `onlyne-im-backend-slack` receives over
+  Socket Mode and sends through the Web API. It takes two tokens, stored as `xapp-…:xoxb-…`,
+  checks both at login, and threads a reply under `thread_ts`. `onlyne-im-backend-linear`
+  polls the workspace's comments and sends with `commentCreate`. A conversation is one issue,
+  a reply sets the comment's `parentId`, and the poll drains every page before it moves its
+  high-water mark. Neither backend links into `onlyne-server` or `onlyne-client`. The gateway
+  records Slack as a flat-list platform and Linear as a chain platform.
+- **A control word settles the task it names.** `onlyne control cancel` reported `ok` and settled
+  nothing: the word was forwarded, one ledger row was written, and the task's verdict was left to
+  the client answering — so an operator read `in_flight` from the receipt, the row stayed
+  deliverable, and the next server start re-delivered work already cancelled. Both entry points
+  now settle at one choke point (`settle_controlled`): `cancel` settles `cancelled`, `recycle`
+  settles `failed`, under the fixed words the client already writes, with the operator's own
+  `--reason` on the command's row (`docs/v2.5-CANCEL-NOT-ENFORCING.md`).
+- **`onlyne control probe` answers in the ledger.** The readout that says whether a stop took,
+  without `ps`, lands where an operator already looks: the client settles the control row
+  `acked` with the backend's own words as its reason — `probed: alive ({"pid":4242})`,
+  `probed: resource gone`, `probed: the backend refused (…)`, `probed: no session for this task`.
+- **A released session revives on the argv that continues it.** `[client.runtime] command` was
+  the only argv, so a revived session re-ran the command that *opens* a conversation, starting a
+  second one under an id that already had one. `resume` is the second key — `pi --session <id>`
+  for the pi runtime — rendered with the same placeholders. The idle release also asks before it
+  closes: a runtime declaring `resume` writes its own store when it ends itself, so the client
+  sends `recycle` and closes the container only after a grace, rather than killing a pane
+  mid-teardown. pi declares the capability, verified against pi 1.2.0 rather than assumed.
+- **An idle conversation waits for its family, not just for the clock.** `idle_close` alone
+  cannot tell a family that has finished from one between two of its deliveries, so a `task`
+  scope could release a conversation whose family still owed work, and the next delivery landed
+  with the context the scope exists to preserve already gone. The client asks the ledger for the
+  family's unsettled count (`query_family_open`) and releases only when it is zero; a client whose
+  link is down falls back to the time bound, which can cost a cold restart and cannot cost a
+  conversation. `onlyne send --family <id>` starts a task *inside* a family that already exists,
+  so an operator's trigger script puts the conversation's chat key there and a `task`-scope
+  session serves every message of that conversation in turn instead of opening one per message.
+- **A finished task's last hop reaches its recipient.** When a session exited after it
+  completed, the server read the task's dispatch row, found it `acked`, and refused the
+  session's own in-flight completion as `task_settled`. The release now takes the verdict from
+  the exit that just applied, leaves every completion row and its ticket alone, and only
+  releases rows the exiting session's role received. When the verdict travelled on a
+  completion receipt, the task row that produced it lands `acked` even if the client's own ack
+  is still in its outbound queue; a verdict with no receipt (a completion refused for an unpaid
+  obligation) keeps the row on the grace path and settles `session_dead`. Two scenarios caught
+  the difference: a handoff child that never read `acked`, and an unpaid obligation that must
+  not read `acked` (`docs/v2.6-TASK-SETTLED-SWALLOWS-THE-LAST-HOP.md`).
+- **The board no longer keeps a delivery in flight after the ledger settled it.** A ledger read
+  now adopts `acked`, `rejected` or `expired` over a row the view still holds as queued or in
+  flight, with its reason and ack time. The web board and the TUI both arm one debounced
+  ledger read after every `ledger_state` event. Nothing polls
+  (`docs/v2.6-VIEW-KEEPS-A-STATE-THE-STREAM-GOT-WRONG.md`).
+
 ## 2.2.0 (2026-10-11)
 
 - **The IM gateway ships, as its own module.** `onlyne-im` bridges a chat platform and a

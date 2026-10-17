@@ -264,22 +264,22 @@ impl DeliveryView {
         self.reason = reported.reason.clone();
     }
 
-    /// Fill the causality columns a row born on the stream never carried,
-    /// from a `ledger` read of that same row. True when a column moved.
-    ///
-    /// This is the other half of [`Self::absorb`], and the two are written the
-    /// way they run: the event owns the state columns and the read owns the
-    /// ones a transition does not carry, and each leaves the other's alone.
-    /// Nothing here is unconditional. A row the snapshot already read carries
-    /// these columns and keeps them, and the only field this may overwrite is
-    /// one that is `None` and that the read has a value for — so a re-read can
-    /// restore a column without ever contradicting what a stream event said,
-    /// and a row already complete is a no-op rather than a second opinion. A
-    /// column the read has nothing for stays empty: filling it with the same
-    /// absence is not a fill, and reporting one would arm a heal that has
-    /// nothing left to find.
+    /// Restore missing columns and adopt a terminal state the stream missed.
     fn absorb_causality(&mut self, entry: &LedgerEntry) -> bool {
         let mut filled = false;
+        // Terminal ledger states cannot leave their state. Nonterminal reads
+        // can race queued/in-flight events and cannot safely replace them.
+        if matches!(self.state, LedgerState::Queued | LedgerState::InFlight)
+            && matches!(
+                entry.state,
+                LedgerState::Acked | LedgerState::Rejected | LedgerState::Expired
+            )
+        {
+            self.state = entry.state;
+            self.reason = entry.reason.clone();
+            self.acked_at = entry.acked_at;
+            filled = true;
+        }
         // `entry` names the row by key, and the map lookup already matched it,
         // so `msg_id` itself never needs this: it is the one column both
         // sources agree on by construction, and the caller keys on it.
@@ -647,17 +647,8 @@ impl View {
         })
     }
 
-    /// Fill the causality columns of rows this view first saw on the stream.
-    ///
-    /// A `ledger_state` event is a transition: it carries no family, no hop
-    /// and no clock, so a row born from one is untraceable until the ledger is
-    /// read again. This fills those columns and touches nothing else. Rows the
-    /// view does not hold are ignored: the projection is the union of what the
-    /// snapshot and the stream said, and a merge is not a fourth source.
-    ///
-    /// Returns how many rows a column moved on, which is the caller's cue for
-    /// whether another read is worth arming — a read that filled nothing has
-    /// already said everything the ledger holds.
+    /// Restore missing columns and missed terminal transitions on existing rows.
+    /// Return the number of changed rows. Preserve the event tail and outcomes.
     pub fn merge_ledger(&mut self, ledger: &[LedgerEntry]) -> usize {
         ledger
             .iter()
@@ -873,7 +864,9 @@ fn fill_absent<T>(slot: &mut Option<T>, value: Option<T>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LedgerEntry, Principal, Snapshot, View, snapshot_to_view, update};
+    use super::{
+        DeliveryAxis, LedgerEntry, Outcome, Principal, Snapshot, View, snapshot_to_view, update,
+    };
     use crate::envelope::MsgKind;
     use crate::event::{Event, LedgerState, LedgerStateEvent};
     use chrono::{DateTime, Utc};
@@ -1035,6 +1028,35 @@ mod tests {
             assert_eq!(view.deliveries.len(), 1, "{}", case.name);
             assert_eq!(view.event_tail, before.event_tail, "{}", case.name);
             assert_eq!(view.stale, before.stale, "{}", case.name);
+        }
+    }
+
+    #[test]
+    fn a_ledger_read_recovers_a_missed_settlement_without_reverting_live_events() {
+        for terminal in [
+            LedgerState::Acked,
+            LedgerState::Rejected,
+            LedgerState::Expired,
+        ] {
+            let mut view = update(view_with_read_row("m1"), &transition("m1"));
+            view.deliveries.get_mut("m1").unwrap().outcome = Some(Outcome::Blocked);
+            let tail = view.event_tail.clone();
+            let mut settled = entry("m1");
+            settled.state = terminal;
+            settled.reason = Some("settled".into());
+            settled.acked_at = Some(fixed_time());
+
+            assert_eq!(view.merge_ledger(&[settled.clone()]), 1);
+            let row = &view.deliveries["m1"];
+            assert_eq!(row.state, terminal);
+            assert_eq!(row.axis(), DeliveryAxis::Settled);
+            assert_eq!(row.reason.as_deref(), Some("settled"));
+            assert_eq!(row.acked_at, Some(fixed_time()));
+            assert_eq!(row.outcome, Some(Outcome::Blocked));
+            assert_eq!(view.event_tail, tail);
+            assert_eq!(view.merge_ledger(&[settled]), 0);
+            assert_eq!(view.merge_ledger(&[entry("m1")]), 0);
+            assert_eq!(view.deliveries["m1"].state, terminal);
         }
     }
 }

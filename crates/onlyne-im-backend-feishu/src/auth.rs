@@ -82,7 +82,7 @@ pub fn parse_credential(raw: &str) -> Result<FeishuCredentials, String> {
 /// loader's own problem string when there is one.
 pub fn onboarding_payload(problem: Option<&str>) -> String {
     let base = format!(
-        "paste app_id:app_secret from a Feishu custom app created at {DEFAULT_DOMAIN}/app (grant im:message and im:resource permissions), or export {APP_ID_ENV} and {APP_SECRET_ENV}; set {DOMAIN_ENV}=https://open.larksuite.com for Lark International"
+        "paste app_id:app_secret from a Feishu custom app created at {DEFAULT_DOMAIN}/app (grant im:message, im:chat:readonly and im:resource), or export {APP_ID_ENV} and {APP_SECRET_ENV}; set {DOMAIN_ENV}=https://open.larksuite.com for Lark International"
     );
     match problem {
         Some(problem) => format!("{base} ({problem})"),
@@ -138,6 +138,8 @@ mod tests {
         assert!(payload.contains(APP_SECRET_ENV), "{payload}");
         assert!(payload.contains(DOMAIN_ENV), "{payload}");
         assert!(payload.contains("app_id:app_secret"), "{payload}");
+        assert!(payload.contains("im:message"), "{payload}");
+        assert!(payload.contains("im:chat:readonly"), "{payload}");
         let with_problem = onboarding_payload(Some("FEISHU_APP_SECRET is not set"));
         assert!(with_problem.ends_with("(FEISHU_APP_SECRET is not set)"));
     }

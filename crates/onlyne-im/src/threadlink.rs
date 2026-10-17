@@ -52,8 +52,8 @@ pub enum LinkShape {
 /// | `fake` | `Flat` | nothing to carry |
 pub fn shape_of(platform: &str) -> LinkShape {
     match platform {
-        "qqbot" => LinkShape::Chain,
-        "feishu" => LinkShape::FlatList,
+        "qqbot" | "linear" => LinkShape::Chain,
+        "feishu" | "slack" => LinkShape::FlatList,
         _ => LinkShape::Flat,
     }
 }

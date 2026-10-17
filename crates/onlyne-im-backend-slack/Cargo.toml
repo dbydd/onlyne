@@ -1,0 +1,37 @@
+[package]
+name = "onlyne-im-backend-slack"
+version = "2.3.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Slack platform backend for the Onlyne IM gateway"
+
+[[bin]]
+name = "onlyne-im-backend-slack"
+path = "src/main.rs"
+
+[dependencies]
+onlyne-im-backend = { path = "../onlyne-im-backend", version = "2.3.0" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Slack's own Rust SDK: the Web API client, the Socket Mode listener, and the
+# typed models for both. `hyper` is its tokio/hyper connector feature; `axum`
+# is the Events API web listener, which a Socket Mode backend never mounts.
+slack-morphism = { version = "2.31", features = ["hyper"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+# The SDK's connector is built on this type; its `hyper` feature pins 0.27 with
+# the platform roots, and `http1` is what `enable_http1` needs.
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "ring", "tls12"] }
+
+[dev-dependencies]
+tokio-tungstenite = { workspace = true }
+tempfile = { workspace = true }
