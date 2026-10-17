@@ -3,37 +3,39 @@
 class Onlyne < Formula
   desc "Workspace-scoped channel and routing layer for agents"
   homepage "https://github.com/dbydd/onlyne"
-  url "https://github.com/dbydd/onlyne/releases/download/v2.2.0/onlyne-2.2.0-aarch64-apple-darwin.tar.gz"
-  version "2.2.0"
+  url "https://github.com/dbydd/onlyne/releases/download/v2.3.0/onlyne-2.3.0-aarch64-apple-darwin.tar.gz"
+  version "2.3.0"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/dbydd/onlyne/releases/download/v2.2.0/onlyne-2.2.0-aarch64-apple-darwin.tar.gz"
-      sha256 "fa04c542b41fa3109013b299f5a4e9903b4897c6aac7fb06c232f4f63f678a9b"
+      url "https://github.com/dbydd/onlyne/releases/download/v2.3.0/onlyne-2.3.0-aarch64-apple-darwin.tar.gz"
+      sha256 "b854089a2a38cc1952f0d2dbfdc667bfc47801c868fbbc5fd9e1f73240402a44"
     end
     on_intel do
-      url "https://github.com/dbydd/onlyne/releases/download/v2.2.0/onlyne-2.2.0-x86_64-apple-darwin.tar.gz"
-      sha256 "bcf3b83c17aac164ba9ffd757468efe7858cfdb987de0056dd79fa0659a42313"
+      url "https://github.com/dbydd/onlyne/releases/download/v2.3.0/onlyne-2.3.0-x86_64-apple-darwin.tar.gz"
+      sha256 "43b8fb38bc17b11754b7d358fa529232aaee790ddd5abe4cf59b0bab6f001f07"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/dbydd/onlyne/releases/download/v2.2.0/onlyne-2.2.0-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "bcbc900d0ac8ae4efee99bef78c002093e086dee2827c765c3ab309de38b1197"
+      url "https://github.com/dbydd/onlyne/releases/download/v2.3.0/onlyne-2.3.0-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "27d4b0f3a456cc4ba2e09fae52410d2df8a11d679cb22160602f000b8075b3e0"
     end
     on_intel do
-      url "https://github.com/dbydd/onlyne/releases/download/v2.2.0/onlyne-2.2.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "453959dccd228352598c04baa0d52bad5963653d6d39ea6225e9c6245501f781"
+      url "https://github.com/dbydd/onlyne/releases/download/v2.3.0/onlyne-2.3.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "2ec5f71bf1d75f05ae98b9e513dafee13b9f8148edc29bba450826d9ab09983b"
     end
   end
 
   def install
-    # The last two are the optional IM module (`onlyne-im` and its Telegram
-    # backend); they ride along with the core, since the archive carries them.
+    # The rest are the optional IM module: the gateway and its platform
+    # backends. They ride along with the core, since the archive carries them.
     bin.install "onlyne", "onlyne-server", "onlyne-client", "onlyne-im",
-                "onlyne-im-backend-telegram"
+                "onlyne-im-backend-telegram", "onlyne-im-backend-qqbot",
+                "onlyne-im-backend-slack", "onlyne-im-backend-linear",
+                "onlyne-im-backend-feishu"
   end
 
   test do
