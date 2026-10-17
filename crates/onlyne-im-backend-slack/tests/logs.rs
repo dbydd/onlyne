@@ -32,6 +32,13 @@ const REFUSING_SOCKET: &str = "ws://127.0.0.1:1/link";
 ///
 /// Stops when `stop` is set; nothing here waits on a request count, because the
 /// backend may ask for more than the test needs and would then block on join.
+///
+/// The accepted socket is put back into blocking mode and read to the end of
+/// the request headers. The listener polls `accept`, and on macOS the accepted
+/// socket inherits the non-blocking flag, so an unguarded read returned
+/// `WouldBlock`, the request came back empty, and the mint answer went out as
+/// the `auth.test` one — the SDK then dialled Slack's own URL instead of the
+/// refusing socket, which is a control run that proves nothing.
 fn minting_api(url: String) -> (String, Arc<AtomicBool>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the fake api");
     let addr = listener.local_addr().expect("addr");
@@ -44,10 +51,17 @@ fn minting_api(url: String) -> (String, Arc<AtomicBool>) {
                 std::thread::sleep(Duration::from_millis(5));
                 continue;
             };
+            let _ = socket.set_nonblocking(false);
             let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
+            let mut request = Vec::new();
             let mut buffer = [0u8; 8192];
-            let read = socket.read(&mut buffer).unwrap_or(0);
-            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            while let Ok(read) = socket.read(&mut buffer) {
+                request.extend_from_slice(&buffer[..read]);
+                if read == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request).into_owned();
             let body = if request.contains("/apps.connections.open") {
                 format!(r#"{{"ok":true,"url":"{url}"}}"#)
             } else {

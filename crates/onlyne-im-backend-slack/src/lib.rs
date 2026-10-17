@@ -585,6 +585,13 @@ mod tests {
     }
 
     /// Serve one HTTP answer per request, in order, and record what arrived.
+    ///
+    /// The accepted socket is put back into blocking mode: the listener is
+    /// non-blocking so this thread can poll `accept`, and on macOS the accepted
+    /// socket inherits that flag (`accept4`'s behaviour on Linux does not), so a
+    /// read here returned `WouldBlock`, which `unwrap_or(0)` recorded as an
+    /// empty request — and the response that belonged to it went to the next
+    /// caller. The empty entry and the mismatched answer are the same bug.
     fn fake_api(
         responses: Vec<(u16, &'static str)>,
     ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
@@ -604,12 +611,19 @@ mod tests {
                     }
                     continue;
                 };
+                let _ = socket.set_nonblocking(false);
                 use std::io::{Read, Write};
+                let mut request = Vec::new();
                 let mut buffer = [0u8; 8192];
-                let read = socket.read(&mut buffer).unwrap_or(0);
+                while let Ok(read) = socket.read(&mut buffer) {
+                    request.extend_from_slice(&buffer[..read]);
+                    if read == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
                 log.lock()
                     .expect("log")
-                    .push(String::from_utf8_lossy(&buffer[..read]).into_owned());
+                    .push(String::from_utf8_lossy(&request).into_owned());
                 let (status, body) = responses
                     .get(index)
                     .copied()

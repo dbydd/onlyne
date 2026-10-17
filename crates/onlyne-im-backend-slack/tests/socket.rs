@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 mod support;
 
-use support::{fake_api, recorded, wait_for};
+use support::{fake_api, recorded, stream_gate, wait_for};
 
 /// A local Socket Mode counterpart: greets, delivers one events_api envelope,
 /// records every ack, then keeps the connection open.
@@ -74,6 +74,7 @@ async fn fake_slack(listener: tokio::net::TcpListener) -> Arc<Mutex<Vec<Value>>>
 
 #[tokio::test]
 async fn an_event_is_queued_then_acknowledged_then_returned() {
+    let _gate = stream_gate().await;
     let socket = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind the socket");
@@ -124,6 +125,7 @@ async fn an_event_is_queued_then_acknowledged_then_returned() {
 
 #[tokio::test]
 async fn an_unanswered_stream_keeps_the_backend_polling() {
+    let _gate = stream_gate().await;
     // A local socket that accepts and then greets nothing: the connection is
     // open, and a stream with nothing to deliver waits rather than ending.
     // (A refused dial is the SDK's own reconnect loop, which parks outside
