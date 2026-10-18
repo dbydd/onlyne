@@ -19,6 +19,32 @@ Instead of generating free-form text or placing orchestration policy inside `onl
 | `ONLYNE_DECIDER_TIMEOUT_MS` | `1500` (1.5 seconds) | Per-request timeout in milliseconds. Any timeout or connection refusal degrades silently to standard deterministic behavior. |
 | `ONLYNE_DECIDER_SPEC` | `<root>/.onlyne/decider.json` → embedded `decider_defaults.json` | Path to a custom JSON spec file or an inline JSON object that deep-merges over the default instructions, rubrics, thresholds, and custom questions. |
 
+### 1.1 `.env` Auto-Discovery, Custom Env Variable Names & Auth Headers in `.onlyne/decider.json`
+
+You do not need to export environment variables in your shell manually. `DeciderSpec` includes a top-level `"client"` configuration block and automatically loads `.env` files (`<cluster-root>/.env`, `<cluster-root>/.onlyne/.env`, `<workspace>/.env`, `<workspace>/.onlyne/.env`, or a custom `"env_file"` path):
+
+- **Specify which environment variable names to read**: set `"base_url_env"`, `"model_env"`, and `"api_key_env"` in `<root>/.onlyne/decider.json` to point at any variable name in your process environment or `.env` file.
+- **Direct values or `$VAR` / `${VAR}` interpolation**: set `"base_url"`, `"model"`, or `"api_key"` directly in `.onlyne/decider.json` (supports `"$MY_SECRET"` and `"${MY_SECRET}"`).
+- **Authentication headers**: defaults to `Authorization: Bearer <token>` (`"auth_header": "Authorization"`, `"auth_scheme": "Bearer"`). Set `"auth_scheme": ""` and `"auth_header": "X-API-Key"` for custom header schemes.
+
+```json
+{
+  "client": {
+    "enabled": true,
+    "base_url": "http://127.0.0.1:8080",
+    "base_url_env": "MY_GATEWAY_URL",
+    "model": "jev-latest",
+    "model_env": "MY_DECIDER_MODEL",
+    "api_key": null,
+    "api_key_env": "MY_GATEWAY_TOKEN",
+    "auth_header": "Authorization",
+    "auth_scheme": "Bearer",
+    "timeout_ms": 1500,
+    "env_file": ".env"
+  }
+}
+```
+
 ---
 
 ## 2. The Five Edge Reflexes / 五大边缘神经反射弧

@@ -132,11 +132,22 @@ fn open_session(
     // runtime. The connection answers `open` with whatever *it* calls that
     // conversation, and `hosted_session_ready` puts the two together.
     let hosted = !inner.standing.is_empty();
+    let parked_external = !inner.parked.is_empty() && inner.backend.name() != "fake";
     let session = if hosted {
         SessionRef {
             task_id: session_id.clone(),
             backend: "hosting".into(),
             backend_ref: serde_json::Value::Null,
+            generation: 1,
+        }
+    } else if parked_external {
+        SessionRef {
+            task_id: session_id.clone(),
+            backend: "external".into(),
+            backend_ref: serde_json::json!({
+                "id": session_id,
+                "placement": "external",
+            }),
             generation: 1,
         }
     } else {
@@ -178,6 +189,7 @@ fn open_session(
         // itself on that side.
         let backend = Arc::clone(&inner.backend);
         if !hosted
+            && !parked_external
             && let Err(close_error) =
                 backend.close(&session, crate::backend::CloseReason::Fault, false)
         {

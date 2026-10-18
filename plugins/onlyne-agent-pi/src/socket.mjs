@@ -210,10 +210,55 @@ export function listClientRegistrations(env, options = {}) {
       path: join(dir, name),
       root: canonicalRoot(parsed.root, options),
       kind: parsed.kind,
+      role: typeof parsed.role === "string" && parsed.role !== "" ? parsed.role : null,
       runtime: typeof parsed.runtime === "string" && parsed.runtime !== "" ? parsed.runtime : null,
     });
   }
   return found;
+}
+
+/**
+ * Resolve the socket path for a resident or pre-started pi session.
+ *
+ * Unlike [`resolveSocketPath`], when `onlyne-client` has not been started yet
+ * (so `<runtime_dir>/<digest>.json` does not exist), this falls back to the
+ * deterministic `<runtime_dir>/<workspaceDigest(workspaceRoot)>.sock` path so
+ * the agent can enter its background reconnect loop and handshake automatically
+ * the moment `onlyne-client` binds the socket. When a client registration for
+ * `role` appears in `<runtime_dir>`, it prefers that registration's socket.
+ *
+ * @param {Record<string, string | undefined>} env
+ * @param {string} workspaceRoot
+ * @param {string} role
+ * @param {{ readFile?: (path: string) => string, readDir?: (path: string) => string[], realpath?: (path: string) => string, uid?: number | null, runtime?: string }} [options]
+ * @returns {string}
+ */
+export function resolveResidentSocketPath(env, workspaceRoot, role, options = {}) {
+  const injected = typeof env[SOCKET_ENV] === "string" ? env[SOCKET_ENV].trim() : "";
+  if (injected) return injected;
+
+  const dir = runtimeDir(env, options);
+  const here = canonicalRoot(workspaceRoot, options);
+  const candidates = listClientRegistrations(env, options);
+
+  const coveringRole = candidates.filter((entry) => covers(entry.root, here) && (!role || !entry.role || entry.role === role));
+  if (coveringRole.length > 0) {
+    const nearest = coveringRole.reduce((best, entry) => (entry.root.length > best.root.length ? entry : best));
+    return join(dir, `${workspaceDigest(nearest.root, options)}${SOCKET_SUFFIX}`);
+  }
+
+  if (role) {
+    const byRole = candidates.filter((entry) => entry.role === role);
+    if (byRole.length === 1) {
+      return join(dir, `${workspaceDigest(byRole[0].root, options)}${SOCKET_SUFFIX}`);
+    }
+  }
+
+  try {
+    return resolveSocketPath(env, workspaceRoot, options);
+  } catch {
+    return socketPath(workspaceRoot, env, options);
+  }
 }
 
 /**

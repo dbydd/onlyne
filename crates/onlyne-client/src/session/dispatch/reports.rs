@@ -228,9 +228,16 @@ pub async fn on_plugin_report(
             // and a gateway nobody configured, both skip the round trip
             // entirely, so the offline suite drives the same bytes it always
             // did.
-            if let Some(client) = onlyne_net::SystemOneClient::from_env()
-                && let Some(decider_meta) =
-                    super::decider::analyze_heartbeat_json(&client, &task_id, &observed).await
+            let ws_root = state.inner.lock().workspace.clone();
+            let decider_spec = onlyne_net::DeciderSpec::load_for_root(Some(&ws_root));
+            if let Some(client) = decider_spec.build_client(Some(&ws_root))
+                && let Some(decider_meta) = super::decider::analyze_heartbeat_json_with_spec(
+                    &client,
+                    &decider_spec.heartbeat,
+                    &task_id,
+                    &observed,
+                )
+                .await
                 && let Some(fields) = observed.as_object_mut()
             {
                 fields.insert("decider".to_string(), decider_meta);
@@ -449,23 +456,26 @@ pub async fn on_plugin_report(
             // have to clear before the verdict moves, and a gateway nobody
             // configured, or an endpoint that will not answer, leaves the
             // verdict exactly as the agent filed it.
-            if asked == SettleAuthority::PluginReport
-                && outcome == Outcome::Done
-                && let Some(client) = onlyne_net::SystemOneClient::from_env()
-                && let Some((adjusted, reason)) = super::decider::verify_done_outcome(
-                    &client,
-                    &task_id,
-                    head.as_deref(),
-                    details.as_deref(),
-                )
-                .await
-            {
-                tracing::warn!(
-                    task = %task_id,
-                    %reason,
-                    "decider adjusted contradicted done outcome"
-                );
-                outcome = adjusted;
+            if asked == SettleAuthority::PluginReport && outcome == Outcome::Done {
+                let ws_root = state.inner.lock().workspace.clone();
+                let decider_spec = onlyne_net::DeciderSpec::load_for_root(Some(&ws_root));
+                if let Some(client) = decider_spec.build_client(Some(&ws_root))
+                    && let Some((adjusted, reason)) = super::decider::verify_done_outcome_with_spec(
+                        &client,
+                        &decider_spec.complete_guard,
+                        &task_id,
+                        head.as_deref(),
+                        details.as_deref(),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        task = %task_id,
+                        %reason,
+                        "decider adjusted contradicted done outcome"
+                    );
+                    outcome = adjusted;
+                }
             }
             on_out(state, &task_id, outcome, head, details, asked).await?;
             false

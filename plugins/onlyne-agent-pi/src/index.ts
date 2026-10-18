@@ -40,8 +40,8 @@ import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-
 import { Type } from "typebox";
 
 import { OnlyneAgent } from "./agent.mjs";
-import { loadConfig, sessionIdentity } from "./config.mjs";
-import { resolveSocketPath } from "./socket.mjs";
+import { loadConfig, residentIdentity, sessionIdentity } from "./config.mjs";
+import { resolveResidentSocketPath, resolveSocketPath } from "./socket.mjs";
 import { createSurface } from "./pi-surface.mjs";
 import { foreignSessionRefusal, mountsSession, ownsSession, sessionIdOf } from "./session-scope.mjs";
 
@@ -330,7 +330,9 @@ export default function onlyne(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", async (_event, ctx) => {
-    const identity = sessionIdentity(env);
+    const spawned = sessionIdentity(env);
+    const resident = spawned ? null : residentIdentity(env, ctx.cwd);
+    const identity = spawned ?? resident;
     if (!identity) return; // not an onlyne session: stay out of the way
     // Only the session the client names may mount. A pi process runs more than
     // one session — a `task` subagent's sidechain, `/new` — and each of them
@@ -340,12 +342,18 @@ export default function onlyne(pi: ExtensionAPI) {
     // expose one; the env-bound mount is then the only candidate and stays the
     // behaviour, with no line to explain.
     const starting = sessionIdOf(ctx.sessionManager);
-    if (!mountsSession(identity.sessionId, starting)) {
-      log(`session ${starting} is not the onlyne session ${identity.sessionId}; staying inert`);
+    if (spawned) {
+      if (!mountsSession(spawned.sessionId, starting)) {
+        log(`session ${starting} is not the onlyne session ${spawned.sessionId}; staying inert`);
+        return;
+      }
+    } else if (boundSessionId !== null && starting !== null && starting !== boundSessionId) {
+      log(`session ${starting} is not the resident onlyne session ${boundSessionId}; staying inert`);
       return;
     }
+    const wireSessionId = identity.sessionId ?? starting;
     context = ctx;
-    boundSessionId = identity.sessionId;
+    boundSessionId = spawned ? spawned.sessionId : (starting ?? wireSessionId);
     const config = loadConfig(ctx.cwd);
     if (config.warning) log(config.warning);
     if (!config.enabled) {
@@ -357,23 +365,30 @@ export default function onlyne(pi: ExtensionAPI) {
     // neither has no socket to dial, and saying so is the whole answer: this
     // stays a plain pi session instead of retrying a path nothing serves.
     let socketPath: string | null = null;
+    const targetWorkspace = resident ? resident.workspaceRoot : ctx.cwd;
     try {
-      socketPath = resolveSocketPath(env, ctx.cwd);
+      socketPath = resident
+        ? resolveResidentSocketPath(env, targetWorkspace, identity.role)
+        : resolveSocketPath(env, ctx.cwd);
     } catch (error) {
       log(`socket unresolved: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (socketPath === null) return;
-    surface = createSurface({ pi, log, context: () => context, sessionId: identity.sessionId });
+    surface = createSurface({ pi, log, context: () => context, sessionId: boundSessionId });
     agent = new OnlyneAgent({
       socketPath,
+      resolveSocket: resident
+        ? () => resolveResidentSocketPath(env, targetWorkspace, identity.role)
+        : undefined,
       cwd: ctx.cwd,
       role: identity.role,
-      sessionId: identity.sessionId,
+      sessionId: wireSessionId,
       taskId: identity.taskId,
+      resident: Boolean(resident),
       surface,
       log,
     });
-    log(`session ${identity.sessionId} role=${identity.role} socket=${socketPath}`);
+    log(`session ${wireSessionId ?? "resident"} role=${identity.role} socket=${socketPath}`);
     registerSurface();
     if (!surface.available.wakeUser) {
       // Without an injection surface the payload travels through config_get,

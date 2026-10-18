@@ -281,5 +281,10 @@ one fake process. The shape the fixture takes:
 - a second session on the **same** connection, with its own counter, to prove the
   watermark is per session and not per connection.
 
-Until that fixture exists, "the protocol supports this" is a claim about this
-document and not about the tree.
+## Pre-started resident agents (`pi-onlyne` / `placement = "external"`)
+
+Alongside multi-session hosting runtimes that declare `Capability::Open`, a single-conversation resident agent (`omp` / `pi` with `pi-onlyne`) can be started **before** `onlyne-client` is running:
+
+1. Configure `placement = "external"` or `[client.session] session_id = "<alias>"` in `<workspace>/.onlyne/config.toml` (or launch with `ONLYNE_ROLE=<role>` / `.pi/onlyne.json` `{"role": "<role>", "resident": true}`).
+2. `pi-onlyne` computes the deterministic runtime socket `/tmp/onlyne-<uid>/<digest>.sock` (and checks `<digest>.json` registrations by `role` on each reconnect tick), polling quietly in the background until `onlyne-client` binds the socket.
+3. Once `onlyne-client` starts, the resident agent completes `hello`/`welcome` and parks on the role. Incoming deliveries bind directly to the parked resident connection without spawning a second runtime process, and the resident session remains open across task completions.

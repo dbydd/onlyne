@@ -1,4 +1,17 @@
 {
+  "client": {
+    "enabled": true,
+    "base_url": "http://127.0.0.1:8080",
+    "base_url_env": "ONLYNE_DECIDER_URL",
+    "model": "jev-latest",
+    "model_env": "ONLYNE_DECIDER_MODEL",
+    "api_key": null,
+    "api_key_env": "ONLYNE_DECIDER_API_KEY",
+    "auth_header": "Authorization",
+    "auth_scheme": "Bearer",
+    "timeout_ms": 1500,
+    "env_file": null
+  },
   "im_inbound": {
     "enabled": true,
     "questions": {

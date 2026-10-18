@@ -10,7 +10,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
-import { CONFIG_RELATIVE_PATH, DEFAULT_CONFIG, loadConfig, sessionIdentity } from "./config.mjs";
+import {
+  CONFIG_RELATIVE_PATH,
+  DEFAULT_CONFIG,
+  WORKSPACE_CONFIG_RELATIVE_PATH,
+  loadConfig,
+  residentIdentity,
+  sessionIdentity,
+} from "./config.mjs";
 
 const cleanups = [];
 afterEach(() => {
@@ -77,4 +84,33 @@ test("the session identity gate needs all three variables", () => {
   }
   assert.equal(sessionIdentity({}), null);
   assert.equal(sessionIdentity({ ONLYNE_ROLE: "", ONLYNE_SESSION_ID: "s", ONLYNE_TASK_ID: "t" }), null);
+});
+
+test("residentIdentity resolves pre-started sessions from env, .pi/onlyne.json, or .onlyne/config.toml", () => {
+  const dir = workspace();
+  // Plain workspace with no role or resident opt-in stays inert.
+  assert.equal(residentIdentity({}, dir), null);
+
+  // ONLYNE_ROLE alone activates resident mode for pre-started supervisor/agent.
+  assert.deepEqual(residentIdentity({ ONLYNE_ROLE: "supervisor" }, dir), {
+    role: "supervisor",
+    sessionId: null,
+    taskId: null,
+    resident: true,
+    workspaceRoot: dir,
+  });
+
+  // .onlyne/config.toml with placement = "external" and session_id activates resident mode.
+  mkdirSync(join(dir, ".onlyne"), { recursive: true });
+  writeFileSync(
+    join(dir, WORKSPACE_CONFIG_RELATIVE_PATH),
+    'role = "planner"\nplacement = "external"\n\n[client.session]\nscope = "role"\nsession_id = "planner-main"\n',
+  );
+  assert.deepEqual(residentIdentity({}, dir), {
+    role: "planner",
+    sessionId: "planner-main",
+    taskId: null,
+    resident: true,
+    workspaceRoot: dir,
+  });
 });

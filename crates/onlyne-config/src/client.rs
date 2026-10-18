@@ -172,6 +172,25 @@ pub struct SessionPolicy {
     // `Duration`'s own shape is a `{ secs, nanos }` struct TOML never sees.
     #[schemars(with = "Option<String>")]
     pub idle_close: Option<Duration>,
+    /// Optional predictable session identifier for a resident or external
+    /// session (`[client.session] session_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Alias for `session_id` (`[client.session] session_alias`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_alias: Option<String>,
+}
+
+impl SessionPolicy {
+    /// Return the configured persistent session identifier (`session_id` or
+    /// `session_alias`), if non-empty.
+    pub fn resolved_session_id(&self) -> Option<&str> {
+        self.session_id
+            .as_deref()
+            .or(self.session_alias.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
 }
 
 /// The `scope` of a `[client.session]` table: which deliveries one session
@@ -533,6 +552,21 @@ fn validate_session(parsed: &toml::Value, text: &str, file: &str) -> Result<(), 
                     toml_literal(idle_close)
                 ),
             ));
+        }
+    }
+    for key in ["session_id", "session_alias"] {
+        if let Some(val) = session.get(key) {
+            let valid = val.as_str().is_some_and(|s| !s.trim().is_empty());
+            if !valid {
+                return Err(SpecError::parse(
+                    file,
+                    session_key_line(text, key, val),
+                    format!(
+                        "client.session.{key} must be a non-empty string, got {}",
+                        toml_literal(val)
+                    ),
+                ));
+            }
         }
     }
     Ok(())

@@ -193,8 +193,16 @@ pub async fn on_turn_end(
             // label it chose — the spec decides both the option set and the
             // wording — and when it cannot, or the reflex is switched off, the
             // agent gets exactly the sentence it got before.
-            let suffix = if let Some(client) = onlyne_net::SystemOneClient::from_env() {
-                super::decider::diagnose_turn_end_suffix(&client, task_id, closing.as_deref()).await
+            let ws_root = state.inner.lock().workspace.clone();
+            let decider_spec = onlyne_net::DeciderSpec::load_for_root(Some(&ws_root));
+            let suffix = if let Some(client) = decider_spec.build_client(Some(&ws_root)) {
+                super::decider::diagnose_turn_end_suffix_with_spec(
+                    &client,
+                    &decider_spec.turn_end,
+                    task_id,
+                    closing.as_deref(),
+                )
+                .await
             } else {
                 None
             };

@@ -24,10 +24,7 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 
-use onlyne_net::{
-    Answer, DEFAULT_DECIDER_BASE_URL, DEFAULT_DECIDER_MODEL, DeciderSpec, ReflexSpec,
-    SystemOneClient,
-};
+use onlyne_net::{Answer, DeciderSpec, ReflexSpec, SystemOneClient};
 use onlyne_proto::{
     AdminControl, AdminOp, ControlOp, QueryFaultsArgs, RepairFail, RepairTarget, new_id,
 };
@@ -122,13 +119,6 @@ pub async fn evaluate_triage_with_spec(
     })
 }
 
-/// The client one triage run talks to: the environment's when it declares one,
-/// the default local System One gateway otherwise.
-fn client_from_env_or_default() -> SystemOneClient {
-    SystemOneClient::from_env()
-        .unwrap_or_else(|| SystemOneClient::new(DEFAULT_DECIDER_BASE_URL, DEFAULT_DECIDER_MODEL))
-}
-
 /// `onlyne triage`.
 pub fn run(flags: &GlobalFlags, args: TriageArgs) -> i32 {
     block_on(run_inner(flags, args))
@@ -156,7 +146,7 @@ async fn run_inner(flags: &GlobalFlags, args: TriageArgs) -> i32 {
              against a server with open faults",
         );
     }
-    let client = client_from_env_or_default();
+    let client = spec.build_client_or_default(flags.server_root.as_deref());
     let decision = match evaluate_triage_with_spec(&client, &spec.triage, context.state()).await {
         Ok(decision) => decision,
         Err(reason) => {

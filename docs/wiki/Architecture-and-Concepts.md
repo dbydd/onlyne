@@ -85,3 +85,44 @@ owes_targets    = ["reviewer"]
 
 - **`allowed_targets`** is the **ACL (reach)**: `coder` may send or hand off to `planner` and `reviewer`.
 - **`owes_targets`** is the **obligation**: before a session of `coder` may file a terminal `onlyne_complete`, it must have delivered at least one message or handoff to `reviewer`. If `owes_targets` is omitted, the role owes no outbound relay before completing.
+
+---
+
+## 6. Resident & Pre-Started Agent Handshake ("Session Before Client") / 先起常驻 Agent 再拉起集群
+
+In supervisor or federation workflows, operators often prefer to open an interactive coding agent (`omp` / `pi`) **first**, and start or restart `onlyne up` / `onlyne-client` **later**.
+
+### How It Works
+
+1. **Identity & Predictable Session ID (`residentIdentity`)**:
+   `pi-onlyne` enters resident mode without requiring a pre-existing `ONLYNE_TASK_ID` whenever any of the following is present:
+   - Environment variable `ONLYNE_ROLE=<role>` (with optional `ONLYNE_SESSION_ID=<alias>` and `ONLYNE_WORKSPACE=<dir>`),
+   - `<cwd>/.pi/onlyne.json` declaring `{"role": "<role>", "sessionId": "<alias>", "resident": true}`, or
+   - `<workspace>/.onlyne/config.toml` declaring `placement = "external"`, `[client.session] scope = "role"`, or `[client.session] session_id = "<alias>"` (or `session_alias = "<alias>"`).
+2. **Deterministic Socket Polling (`resolveResidentSocketPath`)**:
+   Before `onlyne-client` starts, `<runtime_dir>/<digest>.json` does not exist yet. `pi-onlyne` computes the deterministic v2 socket path `/tmp/onlyne-<uid>/<workspaceDigest>.sock` (and re-queries `/tmp/onlyne-<uid>/*.json` by `role` on each reconnect tick) while quietly polling in the background (`reconnecting`).
+3. **Automatic Handshake & Reuse**:
+   As soon as `onlyne up` or `onlyne-client run` binds the workspace socket, the resident `omp`/`pi` session completes `hello`/`welcome` automatically, injects the role prose into its system prompt, and parks in `onlyne-client`. When tasks arrive for that role, `onlyne-client` dispatches them directly to the parked resident session without spawning a duplicate terminal pane, and completing a task keeps the resident agent alive for subsequent deliveries.
+
+### Example Configuration
+
+```toml
+# <workspace>/.onlyne/config.toml
+role = "supervisor"
+placement = "external"
+
+[client.session]
+scope = "role"
+session_id = "supervisor-main"
+```
+
+Or start `omp` / `pi` directly from the shell before starting the cluster:
+
+```bash
+# Terminal 1: start resident supervisor agent first
+ONLYNE_ROLE=supervisor omp
+
+# Terminal 2: initialize and bring up the cluster later; Terminal 1 connects automatically
+onlyne server init --root ./my-cluster --roles supervisor,coder
+onlyne up --root ./my-cluster
+```

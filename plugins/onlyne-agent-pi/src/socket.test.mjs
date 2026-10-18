@@ -17,6 +17,7 @@ import {
   canonicalRoot,
   listClientRegistrations,
   registrationPath,
+  resolveResidentSocketPath,
   resolveSocketPath,
   runtimeDir,
   socketPath,
@@ -234,4 +235,30 @@ test("a registration read through the injected filesystem names the same socket"
   );
   // The env is what names the socket a client injected, and it is still first.
   assert.equal(resolveSocketPath({ ONLYNE_RUNTIME_DIR: dir, [SOCKET_ENV]: "/tmp/served" }, workspace, options), "/tmp/served");
+});
+
+test("resolveResidentSocketPath falls back to deterministic socket before client starts, then adopts registered role socket", () => {
+  const clusterRoot = scratch("pi-onlyne-cluster-");
+  const roleWs = join(clusterRoot, "supervisor");
+  mkdirSync(roleWs, { recursive: true });
+  const emptyDir = runtime([]);
+
+  // Before onlyne-client starts, no registration exists; returns deterministic socket path.
+  assert.equal(
+    resolveResidentSocketPath(envFor(emptyDir), roleWs, "supervisor"),
+    socketPath(roleWs, envFor(emptyDir)),
+  );
+
+  // Once onlyne-client starts and registers the role in the runtime directory, even if
+  // omp was started in the parent clusterRoot, it resolves the registered role's socket.
+  const liveDir = runtime([
+    {
+      name: registrationName(roleWs),
+      body: { kind: "client", role: "supervisor", root: canonicalRoot(roleWs), pid: 9001, version: "2.3.0", runtime: "pi" },
+    },
+  ]);
+  assert.equal(
+    resolveResidentSocketPath(envFor(liveDir), clusterRoot, "supervisor"),
+    socketPath(roleWs, envFor(liveDir)),
+  );
 });

@@ -497,6 +497,30 @@ pub(super) fn release_locked(
                         "delivery settled; the session stays idle for its scope's next one"
                 );
             } else {
+                // A resident external agent (started ahead of the client or under
+                // `placement = "external"`) stays alive across tasks even when
+                // `scope = "oneshot"`. Returning its live transport to `parked`
+                // before retiring the finished oneshot slot lets the slot close
+                // cleanly while the resident agent immediately serves the next task.
+                if inner
+                    .sessions
+                    .get(&key)
+                    .is_some_and(|s| s.session.backend == "external")
+                {
+                    let matched_keys: Vec<String> = inner
+                        .transports
+                        .keys()
+                        .filter(|served| *served == &key || *served == &session_id)
+                        .cloned()
+                        .collect();
+                    for matched in matched_keys {
+                        if let Some((io, caps)) = inner.transports.remove(&matched)
+                            && !inner.parked.iter().any(|(p, _)| p.same_connection(&io))
+                        {
+                            inner.parked.push((io, caps));
+                        }
+                    }
+                }
                 let mut pending = Vec::new();
                 retire_idle_locked(
                     inner,

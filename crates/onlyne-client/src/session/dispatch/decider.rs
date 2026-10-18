@@ -46,7 +46,9 @@ use super::*;
 
 use std::collections::BTreeMap;
 
-use onlyne_net::{DeciderSpec, ReflexSpec, SystemOneClient, interpolate_value};
+#[cfg(test)]
+use onlyne_net::DeciderSpec;
+use onlyne_net::{ReflexSpec, SystemOneClient, interpolate_value};
 use serde_json::Value;
 
 /// The shortest completion report worth asking about.
@@ -138,6 +140,7 @@ const HEARTBEAT_CORE_QUESTIONS: [&str; 3] = ["is_thrashing", "progress", "phase"
 ///
 /// The questions, the floors, and the shortest report worth asking about all
 /// come from `complete_guard` in [`DeciderSpec::from_env`].
+#[cfg(test)]
 pub async fn verify_done_outcome(
     client: &SystemOneClient,
     task_id: &str,
@@ -216,6 +219,7 @@ pub async fn verify_done_outcome_with_spec(
 ///
 /// The question, the floor, and every sentence it can answer come from
 /// `turn_end` in [`DeciderSpec::from_env`].
+#[cfg(test)]
 pub async fn diagnose_turn_end_suffix(
     client: &SystemOneClient,
     task_id: &str,
@@ -286,6 +290,7 @@ pub async fn diagnose_turn_end_suffix_with_spec(
 /// The three questions and the thrashing mark come from `heartbeat` in
 /// [`DeciderSpec::from_env`]; any question an operator adds beside them is
 /// asked in the same batch and carried through as `extra`.
+#[cfg(test)]
 pub async fn analyze_heartbeat_json(
     client: &SystemOneClient,
     task_id: &str,

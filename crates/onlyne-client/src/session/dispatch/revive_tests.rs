@@ -53,6 +53,7 @@ fn state_with_both_argvs() -> (crate::session::dispatch::DispatchState, Arc<Fake
     state.inner.lock().session_policy = onlyne_config::SessionPolicy {
         scope: onlyne_config::SessionScope::Task,
         idle_close: Some(Duration::from_secs(60)),
+        ..Default::default()
     };
     (state, backend)
 }

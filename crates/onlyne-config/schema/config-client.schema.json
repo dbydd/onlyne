@@ -240,6 +240,20 @@
               "$ref": "#/definitions/SessionScope"
             }
           ]
+        },
+        "session_alias": {
+          "description": "Alias for `session_id` (`[client.session] session_alias`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "description": "Optional predictable session identifier for a resident or external session (`[client.session] session_id`).",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

@@ -607,7 +607,8 @@ async fn decide_inbound(
     conversation: &Conversation,
     inbound: &ImEvent,
 ) -> Option<crate::decider::DeciderRouting> {
-    let client = onlyne_net::SystemOneClient::from_env()?;
+    let spec = onlyne_net::DeciderSpec::load_for_root(Some(&gateway.root));
+    let client = spec.build_client(Some(&gateway.root))?;
     let history = crate::history::History::new(&gateway.root);
     let window = crate::chain::window_of(&history, &conversation.chat_key);
     // The window was recorded a moment ago, so it already ends with this
@@ -620,7 +621,6 @@ async fn decide_inbound(
         .filter(|id| *id != inbound.id)
         .map(str::to_string)
         .collect();
-    let spec = onlyne_net::DeciderSpec::load_for_root(Some(&gateway.root));
     crate::decider::evaluate_inbound_with_spec(
         &client,
         &spec.im_inbound,

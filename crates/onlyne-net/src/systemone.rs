@@ -28,6 +28,21 @@ pub const DEFAULT_DECIDER_MODEL: &str = "jev-latest";
 /// Default per-call timeout (milliseconds) so an unreachable gateway degrades immediately.
 pub const DEFAULT_DECIDER_TIMEOUT_MS: u64 = 1_500;
 
+/// Default environment variable checked for the System One gateway URL.
+pub const DEFAULT_BASE_URL_ENV: &str = "ONLYNE_DECIDER_URL";
+
+/// Default environment variable checked for the System One model identifier.
+pub const DEFAULT_MODEL_ENV: &str = "ONLYNE_DECIDER_MODEL";
+
+/// Default environment variable checked for the System One API key / Bearer token.
+pub const DEFAULT_API_KEY_ENV: &str = "ONLYNE_DECIDER_API_KEY";
+
+/// Default HTTP header used for authentication.
+pub const DEFAULT_AUTH_HEADER: &str = "Authorization";
+
+/// Default HTTP authentication scheme prefix (`Bearer`).
+pub const DEFAULT_AUTH_SCHEME: &str = "Bearer";
+
 /// Optional descriptions for the `true` and `false` outcomes of a [`Question::Noul`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoulCriteria {
@@ -211,6 +226,84 @@ fn default_true() -> bool {
     true
 }
 
+fn default_base_url() -> String {
+    DEFAULT_DECIDER_BASE_URL.to_string()
+}
+
+fn default_base_url_env() -> String {
+    DEFAULT_BASE_URL_ENV.to_string()
+}
+
+fn default_model() -> String {
+    DEFAULT_DECIDER_MODEL.to_string()
+}
+
+fn default_model_env() -> String {
+    DEFAULT_MODEL_ENV.to_string()
+}
+
+fn default_api_key_env() -> String {
+    DEFAULT_API_KEY_ENV.to_string()
+}
+
+fn default_auth_header() -> String {
+    DEFAULT_AUTH_HEADER.to_string()
+}
+
+fn default_auth_scheme() -> String {
+    DEFAULT_AUTH_SCHEME.to_string()
+}
+
+fn default_timeout_ms() -> u64 {
+    DEFAULT_DECIDER_TIMEOUT_MS
+}
+
+/// Connection, model, `.env` file, environment-variable indirection, and HTTP
+/// authentication settings for the System One decision endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeciderClientSpec {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_base_url_env")]
+    pub base_url_env: String,
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default = "default_model_env")]
+    pub model_env: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default = "default_api_key_env")]
+    pub api_key_env: String,
+    #[serde(default = "default_auth_header")]
+    pub auth_header: String,
+    #[serde(default = "default_auth_scheme")]
+    pub auth_scheme: String,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub env_file: Option<String>,
+}
+
+impl Default for DeciderClientSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_url: default_base_url(),
+            base_url_env: default_base_url_env(),
+            model: default_model(),
+            model_env: default_model_env(),
+            api_key: None,
+            api_key_env: default_api_key_env(),
+            auth_header: default_auth_header(),
+            auth_scheme: default_auth_scheme(),
+            timeout_ms: default_timeout_ms(),
+            env_file: None,
+        }
+    }
+}
+
 impl Default for ReflexSpec {
     fn default() -> Self {
         Self {
@@ -252,6 +345,8 @@ impl ReflexSpec {
 /// from `<root>/.onlyne/decider.json` and `ONLYNE_DECIDER_SPEC`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeciderSpec {
+    #[serde(default)]
+    pub client: DeciderClientSpec,
     pub im_inbound: ReflexSpec,
     pub complete_guard: ReflexSpec,
     pub turn_end: ReflexSpec,
@@ -277,20 +372,23 @@ impl DeciderSpec {
         Self::load_for_root(None)
     }
 
-    /// Load defaults, deep-merge `<root>/.onlyne/decider.json` if present, and
-    /// then deep-merge `ONLYNE_DECIDER_SPEC` (inline JSON or file path) if set.
+    /// Load defaults, deep-merge any `<ancestor>/.onlyne/decider.json` from
+    /// outermost cluster root to innermost workspace `root`, and then deep-merge
+    /// `ONLYNE_DECIDER_SPEC` (inline JSON or file path) if set in the process
+    /// environment or `.env`.
     pub fn load_for_root(root: Option<&std::path::Path>) -> Self {
         let mut base: Value = serde_json::from_str(DECIDER_DEFAULTS_JSON)
             .expect("embedded decider_defaults.json is valid JSON");
-        if let Some(root) = root {
-            let candidate = root.join(".onlyne/decider.json");
+        for dir in ancestor_dirs(root) {
+            let candidate = dir.join(".onlyne/decider.json");
             if let Ok(text) = std::fs::read_to_string(&candidate)
                 && let Ok(overlay) = serde_json::from_str::<Value>(&text)
             {
                 merge_json(&mut base, overlay);
             }
         }
-        if let Some(spec_env) = non_empty_env("ONLYNE_DECIDER_SPEC") {
+        let dotenv = load_dotenv_map(root, None);
+        if let Some(spec_env) = resolve_env_var("ONLYNE_DECIDER_SPEC", &dotenv) {
             let overlay_opt = if spec_env.starts_with('{') {
                 serde_json::from_str::<Value>(&spec_env).ok()
             } else {
@@ -316,6 +414,103 @@ impl DeciderSpec {
         merge_json(&mut base, overlay);
         serde_json::from_value(base)
             .map_err(|e| NetError::Io(format!("invalid DeciderSpec in {}: {e}", path.display())))
+    }
+
+    /// Build a [`SystemOneClient`] from this spec's `client` block, resolving
+    /// `.env` files under `root` and environment variables named by `*_env` or
+    /// `$VAR` / `${VAR}` placeholders. Returns `None` when disabled.
+    pub fn build_client(&self, root: Option<&std::path::Path>) -> Option<SystemOneClient> {
+        let dotenv = load_dotenv_map(root, self.client.env_file.as_deref());
+        let toggle =
+            resolve_env_var("ONLYNE_DECIDER", &dotenv).map(|v| v.trim().to_ascii_lowercase());
+        if matches!(toggle.as_deref(), Some("0" | "false" | "off" | "no")) {
+            return None;
+        }
+        let explicitly_enabled = matches!(toggle.as_deref(), Some("1" | "true" | "on" | "yes"));
+        if !self.client.enabled && !explicitly_enabled {
+            return None;
+        }
+        if !explicitly_enabled
+            && std::env::var("ONLYNE_BACKEND")
+                .ok()
+                .is_some_and(|b| b.trim().eq_ignore_ascii_case("fake"))
+        {
+            return None;
+        }
+
+        Some(self.build_client_unchecked(root, &dotenv))
+    }
+
+    /// Build a [`SystemOneClient`] from this spec's `client` block even when
+    /// `ONLYNE_BACKEND=fake` is set (used by explicit CLI commands like `onlyne triage`).
+    pub fn build_client_or_default(&self, root: Option<&std::path::Path>) -> SystemOneClient {
+        let dotenv = load_dotenv_map(root, self.client.env_file.as_deref());
+        self.build_client_unchecked(root, &dotenv)
+    }
+
+    fn build_client_unchecked(
+        &self,
+        _root: Option<&std::path::Path>,
+        dotenv: &BTreeMap<String, String>,
+    ) -> SystemOneClient {
+        let cfg = &self.client;
+
+        let env_url = non_empty_trimmed(&cfg.base_url_env)
+            .and_then(|k| resolve_env_var(k, dotenv))
+            .or_else(|| {
+                if cfg.base_url == DEFAULT_DECIDER_BASE_URL {
+                    resolve_env_var("TYPESAFE_BASE_URL", dotenv)
+                } else {
+                    None
+                }
+            });
+        let base_url = env_url
+            .unwrap_or_else(|| expand_env_refs(&cfg.base_url, dotenv))
+            .trim_end_matches('/')
+            .to_string();
+
+        let env_model = non_empty_trimmed(&cfg.model_env)
+            .and_then(|k| resolve_env_var(k, dotenv))
+            .or_else(|| {
+                if cfg.model == DEFAULT_DECIDER_MODEL {
+                    resolve_env_var("TYPESAFE_DEFAULT_MODEL", dotenv)
+                } else {
+                    None
+                }
+            });
+        let model = env_model.unwrap_or_else(|| expand_env_refs(&cfg.model, dotenv));
+
+        let env_key = non_empty_trimmed(&cfg.api_key_env)
+            .and_then(|k| resolve_env_var(k, dotenv))
+            .or_else(|| resolve_env_var("TYPESAFE_API_KEY", dotenv));
+        let api_key = env_key.or_else(|| {
+            cfg.api_key
+                .as_deref()
+                .map(|raw| expand_env_refs(raw, dotenv))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+
+        let timeout_ms = resolve_env_var("ONLYNE_DECIDER_TIMEOUT_MS", dotenv)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(cfg.timeout_ms);
+
+        SystemOneClient {
+            base_url: if base_url.is_empty() {
+                DEFAULT_DECIDER_BASE_URL.to_string()
+            } else {
+                base_url
+            },
+            model: if model.trim().is_empty() {
+                DEFAULT_DECIDER_MODEL.to_string()
+            } else {
+                model
+            },
+            api_key,
+            auth_header: cfg.auth_header.clone(),
+            auth_scheme: cfg.auth_scheme.clone(),
+            timeout: Duration::from_millis(timeout_ms.max(100)),
+        }
     }
 }
 
@@ -449,6 +644,8 @@ pub struct SystemOneClient {
     base_url: String,
     model: String,
     api_key: Option<String>,
+    auth_header: String,
+    auth_scheme: String,
     timeout: Duration,
 }
 
@@ -460,59 +657,35 @@ impl SystemOneClient {
             base_url,
             model: model.into(),
             api_key: None,
+            auth_header: DEFAULT_AUTH_HEADER.to_string(),
+            auth_scheme: DEFAULT_AUTH_SCHEME.to_string(),
             timeout: Duration::from_millis(DEFAULT_DECIDER_TIMEOUT_MS),
         }
     }
 
     /// Build a client from environment variables, or `None` when disabled.
-    ///
-    /// - `ONLYNE_DECIDER=0|false|off` disables System One calls.
-    /// - Under `ONLYNE_BACKEND=fake`, System One calls are skipped unless
-    ///   `ONLYNE_DECIDER` is explicitly set to `1`, `true`, or `on`, keeping
-    ///   offline scenario suites free of network traffic.
-    /// - Base URL precedence: `ONLYNE_DECIDER_URL` -> `TYPESAFE_BASE_URL` ->
-    ///   [`DEFAULT_DECIDER_BASE_URL`].
-    /// - Model precedence: `ONLYNE_DECIDER_MODEL` -> `TYPESAFE_DEFAULT_MODEL` ->
-    ///   [`DEFAULT_DECIDER_MODEL`].
-    /// - API key precedence: `ONLYNE_DECIDER_API_KEY` -> `TYPESAFE_API_KEY`.
     pub fn from_env() -> Option<Self> {
-        let toggle = std::env::var("ONLYNE_DECIDER")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase());
-        if matches!(toggle.as_deref(), Some("0" | "false" | "off" | "no")) {
-            return None;
-        }
-        let explicitly_enabled = matches!(toggle.as_deref(), Some("1" | "true" | "on" | "yes"));
-        if !explicitly_enabled
-            && std::env::var("ONLYNE_BACKEND")
-                .ok()
-                .is_some_and(|b| b.trim().eq_ignore_ascii_case("fake"))
-        {
-            return None;
-        }
+        Self::from_root(None)
+    }
 
-        let base_url = non_empty_env("ONLYNE_DECIDER_URL")
-            .or_else(|| non_empty_env("TYPESAFE_BASE_URL"))
-            .unwrap_or_else(|| DEFAULT_DECIDER_BASE_URL.to_string());
-        let model = non_empty_env("ONLYNE_DECIDER_MODEL")
-            .or_else(|| non_empty_env("TYPESAFE_DEFAULT_MODEL"))
-            .unwrap_or_else(|| DEFAULT_DECIDER_MODEL.to_string());
-        let api_key =
-            non_empty_env("ONLYNE_DECIDER_API_KEY").or_else(|| non_empty_env("TYPESAFE_API_KEY"));
-        let timeout_ms = non_empty_env("ONLYNE_DECIDER_TIMEOUT_MS")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_DECIDER_TIMEOUT_MS);
-
-        Some(Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            model,
-            api_key,
-            timeout: Duration::from_millis(timeout_ms.max(100)),
-        })
+    /// Build a client by loading `<root>/.onlyne/decider.json`, `.env` files,
+    /// and environment variables, or `None` when disabled.
+    pub fn from_root(root: Option<&std::path::Path>) -> Option<Self> {
+        DeciderSpec::load_for_root(root).build_client(root)
     }
 
     pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
         self.api_key = api_key.filter(|k| !k.trim().is_empty());
+        self
+    }
+
+    pub fn with_auth_header(
+        mut self,
+        header: impl Into<String>,
+        scheme: impl Into<String>,
+    ) -> Self {
+        self.auth_header = header.into();
+        self.auth_scheme = scheme.into();
         self
     }
 
@@ -527,6 +700,10 @@ impl SystemOneClient {
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
     }
 
     /// Evaluate `questions` over `state` via a single batched `POST /v1/systemone` request.
@@ -596,7 +773,23 @@ impl SystemOneClient {
             payload.len()
         );
         if let Some(token) = &self.api_key {
-            request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+            let header_name = if self.auth_header.trim().is_empty() {
+                DEFAULT_AUTH_HEADER
+            } else {
+                self.auth_header.trim()
+            };
+            let scheme = self.auth_scheme.trim();
+            let trimmed_token = token.trim();
+            let already_prefixed = !scheme.is_empty()
+                && trimmed_token.len() > scheme.len()
+                && trimmed_token[..scheme.len()].eq_ignore_ascii_case(scheme)
+                && trimmed_token.as_bytes().get(scheme.len()) == Some(&b' ');
+            let header_val = if scheme.is_empty() || already_prefixed {
+                trimmed_token.to_string()
+            } else {
+                format!("{scheme} {trimmed_token}")
+            };
+            request.push_str(&format!("{header_name}: {header_val}\r\n"));
         }
         request.push_str("\r\n");
 
@@ -626,6 +819,134 @@ fn non_empty_env(key: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+fn non_empty_trimmed(s: &str) -> Option<&str> {
+    let t = s.trim();
+    if t.is_empty() { None } else { Some(t) }
+}
+
+fn ancestor_dirs(root: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let start = root
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
+    let Some(start) = start else {
+        return Vec::new();
+    };
+    let mut chain: Vec<std::path::PathBuf> = start
+        .ancestors()
+        .take(5)
+        .map(std::path::Path::to_path_buf)
+        .collect();
+    chain.reverse();
+    chain
+}
+
+/// Parse `.env` files discovered from `root` (and its ancestors) plus an optional
+/// explicit `env_file` path. Closer directories override parent directories.
+pub fn load_dotenv_map(
+    root: Option<&std::path::Path>,
+    env_file: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for dir in ancestor_dirs(root) {
+        for rel in [".env", ".onlyne/.env"] {
+            let path = dir.join(rel);
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                parse_dotenv_into(&content, &mut map);
+            }
+        }
+    }
+    if let Some(custom) = env_file.and_then(non_empty_trimmed) {
+        let custom_path = std::path::Path::new(custom);
+        let mut candidates = Vec::new();
+        if custom_path.is_absolute() {
+            candidates.push(custom_path.to_path_buf());
+        } else {
+            for dir in ancestor_dirs(root) {
+                candidates.push(dir.join(custom_path));
+            }
+        }
+        for path in candidates {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                parse_dotenv_into(&content, &mut map);
+            }
+        }
+    }
+    map
+}
+
+fn parse_dotenv_into(content: &str, out: &mut BTreeMap<String, String>) {
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line
+            .strip_prefix("export ")
+            .map(str::trim_start)
+            .unwrap_or(line);
+        let Some((raw_key, raw_val)) = line.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let val = raw_val.trim();
+        let parsed = if val.len() >= 2 && val.starts_with('"') && val.ends_with('"') {
+            val[1..val.len() - 1]
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\")
+                .replace("\\n", "\n")
+        } else if val.len() >= 2 && val.starts_with('\'') && val.ends_with('\'') {
+            val[1..val.len() - 1].to_string()
+        } else {
+            let without_comment = match val.find(" #") {
+                Some(idx) => val[..idx].trim_end(),
+                None => val,
+            };
+            without_comment.to_string()
+        };
+        if !parsed.is_empty() {
+            out.insert(key.to_string(), parsed);
+        }
+    }
+}
+
+fn resolve_env_var(key: &str, dotenv: &BTreeMap<String, String>) -> Option<String> {
+    non_empty_env(key).or_else(|| {
+        dotenv
+            .get(key)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    })
+}
+
+fn expand_env_refs(input: &str, dotenv: &BTreeMap<String, String>) -> String {
+    let trimmed = input.trim();
+    if let Some(var_name) = trimmed.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        return resolve_env_var(var_name.trim(), dotenv).unwrap_or_default();
+    }
+    if let Some(var_name) = trimmed.strip_prefix('$')
+        && !var_name.is_empty()
+        && var_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return resolve_env_var(var_name, dotenv).unwrap_or_default();
+    }
+    let mut out = input.to_string();
+    while let Some(start) = out.find("${") {
+        let Some(rel_end) = out[start + 2..].find('}') else {
+            break;
+        };
+        let end = start + 2 + rel_end;
+        let var_name = out[start + 2..end].trim();
+        let replacement = resolve_env_var(var_name, dotenv).unwrap_or_default();
+        out.replace_range(start..=end, &replacement);
+    }
+    out
 }
 
 fn parse_http_base(url: &str) -> Result<(String, String, String), NetError> {
@@ -835,5 +1156,75 @@ mod tests {
             }
             other => panic!("expected choice, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn loads_dotenv_custom_env_names_and_sends_auth_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cluster_root = tmp.path();
+        let ws_root = cluster_root.join("planner");
+        std::fs::create_dir_all(cluster_root.join(".onlyne")).unwrap();
+        std::fs::create_dir_all(ws_root.join(".onlyne")).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::fs::write(
+            cluster_root.join(".env"),
+            format!(
+                "# Cluster-level dotenv\n\
+                 export MY_GATEWAY_URL=\"http://{addr}\"\n\
+                 MY_DECIDER_MODEL=clef-pro # inline comment\n\
+                 MY_SECRET_TOKEN='tok_live_987654'\n"
+            ),
+        )
+        .unwrap();
+
+        std::fs::write(
+            cluster_root.join(".onlyne/decider.json"),
+            serde_json::to_string_pretty(&json!({
+                "client": {
+                    "base_url_env": "MY_GATEWAY_URL",
+                    "model_env": "MY_DECIDER_MODEL",
+                    "api_key_env": "MY_SECRET_TOKEN"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Role workspace is a child of cluster_root and inherits both .env and decider.json!
+        let spec = DeciderSpec::load_for_root(Some(&ws_root));
+        let client = spec.build_client_or_default(Some(&ws_root));
+        assert_eq!(client.base_url(), format!("http://{addr}"));
+        assert_eq!(client.model(), "clef-pro");
+        assert_eq!(client.api_key(), Some("tok_live_987654"));
+
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let req_text = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = seen_tx.send(req_text);
+            let body_bytes = br#"{"model":"clef-pro","answers":{"ok":{"type":"noul","noul":1.0}}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body_bytes.len()
+            );
+            stream.write_all(resp.as_bytes()).await.unwrap();
+            stream.write_all(body_bytes).await.unwrap();
+        });
+
+        let mut q = BTreeMap::new();
+        q.insert("ok".to_string(), Question::noul("ok?"));
+        let ans = client.evaluate(json!({}), q).await.unwrap();
+        assert_eq!(ans.noul("ok"), Some(1.0));
+
+        let raw_http = seen_rx.await.unwrap();
+        assert!(
+            raw_http.contains("\r\nAuthorization: Bearer tok_live_987654\r\n"),
+            "expected Bearer token header in HTTP request, got:\n{raw_http}"
+        );
     }
 }

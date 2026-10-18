@@ -97,10 +97,12 @@ export class OnlyneAgent {
    */
   constructor(options) {
     this.socketPath = options.socketPath;
+    this.resolveSocket = typeof options.resolveSocket === "function" ? options.resolveSocket : null;
     this.cwd = options.cwd;
     this.role = options.role;
     this.sessionId = options.sessionId;
     this.envTaskId = options.taskId;
+    this.resident = Boolean(options.resident);
     this.surface = options.surface;
     /** The widget panel's model (`activity.mjs`); seeded with the local role. */
     this.activity = options.activity ?? createActivity();
@@ -243,6 +245,16 @@ export class OnlyneAgent {
 
   connect() {
     if (this.closed || this.socket) return;
+    if (this.resolveSocket) {
+      try {
+        const refreshed = this.resolveSocket();
+        if (typeof refreshed === "string" && refreshed.length > 0) {
+          this.socketPath = refreshed;
+        }
+      } catch {
+        /* keep previous socketPath */
+      }
+    }
     let socket;
     try {
       socket = this.createConnection(this.socketPath);
@@ -482,7 +494,15 @@ export class OnlyneAgent {
   }
 
   noteFailure(error) {
+    const prevCode = this.lastError?.code ?? null;
     this.lastError = error;
+    if (
+      this.resident &&
+      (error?.code === "ENOENT" || error?.code === "ECONNREFUSED") &&
+      prevCode === error.code
+    ) {
+      return;
+    }
     this.log(`socket error: ${error?.message ?? error}`);
   }
 
@@ -745,11 +765,14 @@ export class OnlyneAgent {
    * that is what every such frame meant.
    */
   keepsSession() {
-    return this.scope === "task" || this.scope === "role";
+    return this.resident || this.scope === "task" || this.scope === "role";
   }
 
   async onAssign(args) {
     if (typeof args.scope === "string" && args.scope) this.scope = args.scope;
+    if (this.resident && typeof args.session_id === "string" && args.session_id) {
+      this.sessionId = args.session_id;
+    }
     const envelope = args.envelope ?? {};
     const taskId = args.task_id ?? envelope.causality?.task ?? null;
     if (!taskId) {
