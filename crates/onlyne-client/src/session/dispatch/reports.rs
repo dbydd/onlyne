@@ -218,9 +218,23 @@ pub async fn on_plugin_report(
             // below.
             generation: _,
             seq,
-            observed,
+            mut observed,
             ..
         } => {
+            // What the beat's own words say about the work, asked before the
+            // lock and before the reducer sees anything: a decision model reads
+            // the prose a plugin reports beside the dimensions, and its answer
+            // rides the beat as a sibling of `host`. A beat carrying no prose,
+            // and a gateway nobody configured, both skip the round trip
+            // entirely, so the offline suite drives the same bytes it always
+            // did.
+            if let Some(client) = onlyne_net::SystemOneClient::from_env()
+                && let Some(decider_meta) =
+                    super::decider::analyze_heartbeat_json(&client, &task_id, &observed).await
+                && let Some(fields) = observed.as_object_mut()
+            {
+                fields.insert("decider".to_string(), decider_meta);
+            }
             // The beat itself is the liveness fact. The server times
             // heartbeats. A quiet, alive session keeps landing fresh rows.
             let (touched, ended) = {
@@ -394,7 +408,7 @@ pub async fn on_plugin_report(
         }
         Report::Complete {
             task_id,
-            outcome,
+            mut outcome,
             head,
             details,
             ..
@@ -425,6 +439,34 @@ pub async fn on_plugin_report(
             } else {
                 SettleAuthority::PluginReport
             };
+            // A `done` the report's own words contradict is the one verdict a
+            // plugin can file wrong and nothing downstream can see: the board
+            // reads `done`, and the sentence saying the work is still waiting
+            // on a credential sits in `details` where no reader looks. The
+            // plugin's own ending is the only door a decision model can stand
+            // in — this client's own settlements are its own act, and the
+            // control-driven one arrived as the operator's word. Both floors
+            // have to clear before the verdict moves, and a gateway nobody
+            // configured, or an endpoint that will not answer, leaves the
+            // verdict exactly as the agent filed it.
+            if asked == SettleAuthority::PluginReport
+                && outcome == Outcome::Done
+                && let Some(client) = onlyne_net::SystemOneClient::from_env()
+                && let Some((adjusted, reason)) = super::decider::verify_done_outcome(
+                    &client,
+                    &task_id,
+                    head.as_deref(),
+                    details.as_deref(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    task = %task_id,
+                    %reason,
+                    "decider adjusted contradicted done outcome"
+                );
+                outcome = adjusted;
+            }
             on_out(state, &task_id, outcome, head, details, asked).await?;
             false
         }

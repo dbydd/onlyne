@@ -1,0 +1,1 @@
+Onlyne v2.9 · Local-first channel and routing layer for coding-agent clusters · [Repository](https://github.com/dbydd/onlyne) · [Design Plan (`docs/v2-PLAN.md`)](https://github.com/dbydd/onlyne/blob/main/docs/v2-PLAN.md)

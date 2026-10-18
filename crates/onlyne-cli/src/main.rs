@@ -31,6 +31,7 @@ mod render;
 mod runtime;
 mod skill;
 mod socket;
+mod triage;
 pub mod tui;
 mod up;
 mod verbs;
@@ -174,6 +175,8 @@ enum Verb {
     WaitReady(WaitReadyCmd),
     /// Drive the recovery verbs.
     Repair(RepairCmd),
+    /// Triage open faults or a hook event with the System-1 decision model.
+    Triage(triage::TriageArgs),
     /// Cluster-level verbs.
     Cluster(ClusterCmd),
     /// Observe the admin socket in a terminal.
@@ -239,6 +242,8 @@ enum ServerVerb {
     Ghosts(GhostsCmd),
     /// Drive the recovery verbs.
     Repair(RepairCmd),
+    /// Triage open faults or a hook event with the System-1 decision model.
+    Triage(triage::TriageArgs),
     /// A verb outside the server vocabulary.
     #[command(external_subcommand)]
     Unknown(Vec<String>),
@@ -562,6 +567,7 @@ fn run() -> i32 {
         Verb::Generate(cmd) => generate(flags, cmd),
         Verb::WaitReady(cmd) => admin::wait_ready(flags, cmd.args),
         Verb::Repair(cmd) => admin::repair(flags, cmd.verb),
+        Verb::Triage(args) => triage::run(flags, args),
         Verb::Tui(rest) => tui(flags, &rest),
         Verb::Skill(cmd) => match cmd.verb {
             skill::SkillVerb::Export(args) => skill::export(flags, &args),
@@ -685,6 +691,7 @@ fn server(flags: &GlobalFlags, cmd: ServerCmd) -> i32 {
         ServerVerb::Ghosts(cmd) => admin::ghosts(flags, cmd.args),
         ServerVerb::Shutdown(args) => admin::shutdown(flags, args),
         ServerVerb::Repair(cmd) => admin::repair(flags, cmd.verb),
+        ServerVerb::Triage(args) => triage::run(flags, args),
         ServerVerb::Unknown(args) => unknown_server_verb(&args),
     }
 }

@@ -18,6 +18,7 @@ onlyne-wire = { workspace = true }
 onlyne-proto = { workspace = true }
 onlyne-config = { workspace = true }
 onlyne-server = { workspace = true }
+onlyne-net = { workspace = true }
 interprocess = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }

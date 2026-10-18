@@ -421,6 +421,9 @@ The pair declares that the command is operating a role from outside its plugin s
 `repair` is the operator recovery surface. It records operator decisions without silently changing delivery policy:
 
 ```bash
+# System-1 autonomic fault triage (`POST /v1/systemone`, default http://127.0.0.1:3425 group/decider):
+onlyne --server-root <root> triage [--task <task-id>] [--from-hook] [--apply] [--min-confidence 0.60]
+
 onlyne --server-root <root> repair inspect --task <task-id>
 onlyne --server-root <root> repair retry  --task <task-id> --reason <text>
 onlyne --server-root <root> repair fail   --task <task-id> --reason <text>
@@ -634,8 +637,10 @@ The v2 crate map, lifecycle model, and formal design rationale live in [`AGENTS.
 
 ### User and operator guides
 
+- [`docs/wiki/Home.md`](docs/wiki/Home.md) — the complete Onlyne Wiki (`Quickstart`, `Architecture-and-Concepts`, `CLI-Reference`, `IM-Gateway`, `System-One-Decider`, `Operations-and-Troubleshooting`).
 - [`AGENTS.md`](AGENTS.md) and [`docs/v2-PLAN.md`](docs/v2-PLAN.md) — the v2 execution contract and authoritative architecture design.
-- [`docs/v2.7-OVERHAUL-PLAN.md`](docs/v2.7-OVERHAUL-PLAN.md) — document hierarchy and v2.7 overhaul specification.
+- [`docs/v2.7-OVERHAUL-PLAN.md`](docs/v2.7-OVERHAUL-PLAN.md) — document hierarchy and v2.7/v2.8 overhaul specification.
+- [`docs/v2.9-SYSTEMONE-DECIDER-PLAN.md`](docs/v2.9-SYSTEMONE-DECIDER-PLAN.md) — System-1 (`magpie/group/decider`) edge reflexes and protocol specification.
 - [`docs/operations.md`](docs/operations.md) — socket paths, configuration, fault inspection, recovery, requeue policy, exec/ACP sessions, and session ownership.
 - [`crates/onlyne-adapter/PROTOCOL.md`](crates/onlyne-adapter/PROTOCOL.md) — the external agent/gateway wire contract.
 - [`examples/supervisor/README.md`](examples/supervisor/README.md) — the real pi/Orca running-lights demo.

@@ -20,7 +20,7 @@ to you and the spec file.
   on every envelope it relays. Put `admin = true` on your own `[[client]]` entry too: that
   is the standing a client-held supervisor session sends with, and the flag the Control-class
   ACL bypass reads.
-- Lifecycle: `onlyne server init|up|run|status|generate|reload|shutdown` (also top-level `onlyne up` and `onlyne shutdown`), the top-level
+- Lifecycle: `onlyne server init|up|run|status|generate|reload|shutdown|triage` (also top-level `onlyne up`, `onlyne shutdown`, and `onlyne triage`), the top-level
   `onlyne wait-ready`, `onlyne client run|init|status`, and `onlyne gateway status`.
   `onlyne gateway status` still reports the mounts the server knows; the platform verbs
   that used to sit beside it are not verbs of `onlyne` — the gateway shipped as its own

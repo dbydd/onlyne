@@ -1,0 +1,570 @@
+//! Native client for the TypeSafe System One (`POST /v1/systemone`) decision API.
+//!
+//! System One models (such as TypeSafe Jev or the local Magpie `group/decider`
+//! route) evaluate a JSON `state` against a map of named typed questions
+//! ([`Question::Noul`], [`Question::Choice`], [`Question::Score`]) and return
+//! calibrated probabilities and confidence scores rather than generated text.
+//!
+//! This module speaks HTTP/1.1 directly over [`tokio::net::TcpStream`] so that
+//! `onlyne-client`, `onlyne-im`, and `onlyne-cli` can call a local or remote
+//! System One endpoint without pulling `reqwest` across the binary firewall.
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+use crate::NetError;
+
+/// Default local Magpie System One gateway base URL.
+pub const DEFAULT_DECIDER_BASE_URL: &str = "http://127.0.0.1:3425";
+
+/// Default System One model identifier on the local Magpie gateway.
+pub const DEFAULT_DECIDER_MODEL: &str = "group/decider";
+
+/// Default per-call timeout (milliseconds) so an unreachable gateway degrades immediately.
+pub const DEFAULT_DECIDER_TIMEOUT_MS: u64 = 1_500;
+
+/// Optional descriptions for the `true` and `false` outcomes of a [`Question::Noul`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoulCriteria {
+    #[serde(rename = "true", default, skip_serializing_if = "Option::is_none")]
+    pub yes: Option<Value>,
+    #[serde(rename = "false", default, skip_serializing_if = "Option::is_none")]
+    pub no: Option<Value>,
+}
+
+/// One typed question evaluated against the request `state`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Question {
+    /// Yes/no judgment returning the probability of "yes" in `[0.0, 1.0]`.
+    Noul {
+        instructions: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        criteria: Option<NoulCriteria>,
+    },
+    /// Multiple-choice judgment over a closed map of `label -> optional rubric`.
+    Choice {
+        instructions: Value,
+        criteria: BTreeMap<String, Option<Value>>,
+    },
+    /// Rubric-based rating over ordered descriptive levels (lowest to highest).
+    Score {
+        instructions: Value,
+        criteria: Vec<Value>,
+    },
+}
+
+impl Question {
+    /// Build a yes/no [`Question::Noul`] with plain-text instructions.
+    pub fn noul(instructions: impl Into<String>) -> Self {
+        Self::Noul {
+            instructions: Value::String(instructions.into()),
+            criteria: None,
+        }
+    }
+
+    /// Build a [`Question::Noul`] with explicit rubrics for `true` and `false`.
+    pub fn noul_with_criteria(
+        instructions: impl Into<String>,
+        yes: impl Into<String>,
+        no: impl Into<String>,
+    ) -> Self {
+        Self::Noul {
+            instructions: Value::String(instructions.into()),
+            criteria: Some(NoulCriteria {
+                yes: Some(Value::String(yes.into())),
+                no: Some(Value::String(no.into())),
+            }),
+        }
+    }
+
+    /// Build a multiple-choice [`Question::Choice`] from `(label, optional_rubric)` pairs.
+    pub fn choice<I, K>(instructions: impl Into<String>, options: I) -> Self
+    where
+        I: IntoIterator<Item = (K, Option<String>)>,
+        K: Into<String>,
+    {
+        let criteria = options
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.map(Value::String)))
+            .collect();
+        Self::Choice {
+            instructions: Value::String(instructions.into()),
+            criteria,
+        }
+    }
+
+    /// Build an ordered-rubric [`Question::Score`] from level descriptions (lowest to highest).
+    pub fn score<I, S>(instructions: impl Into<String>, levels: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let criteria = levels
+            .into_iter()
+            .map(|s| Value::String(s.into()))
+            .collect();
+        Self::Score {
+            instructions: Value::String(instructions.into()),
+            criteria,
+        }
+    }
+}
+
+/// Answer to a [`Question::Noul`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NoulAnswer {
+    /// Probability of "yes" in `[0.0, 1.0]`.
+    pub noul: f64,
+}
+
+/// Answer to a [`Question::Choice`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChoiceAnswer {
+    /// Highest-probability option label.
+    pub choice: String,
+    /// Every option mapped to its probability.
+    #[serde(default)]
+    pub probabilities: BTreeMap<String, f64>,
+    /// Concentration of the distribution in `[0.0, 1.0]`.
+    #[serde(default)]
+    pub confidence: f64,
+}
+
+/// Answer to a [`Question::Score`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScoreAnswer {
+    /// Probability-weighted level index.
+    pub score: f64,
+    /// Level index (as string key) mapped to its probability.
+    #[serde(default)]
+    pub probabilities: BTreeMap<String, f64>,
+    /// Concentration of the distribution in `[0.0, 1.0]`.
+    #[serde(default)]
+    pub confidence: f64,
+}
+
+/// One typed answer returned under its question key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Answer {
+    Noul(NoulAnswer),
+    Choice(ChoiceAnswer),
+    Score(ScoreAnswer),
+}
+
+/// Token and cost accounting reported by a System One endpoint.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SystemOneUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cost: Option<f64>,
+}
+
+/// Wire body sent to `POST /v1/systemone`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemOneRequest {
+    pub model: String,
+    pub state: Value,
+    pub questions: BTreeMap<String, Question>,
+}
+
+/// Wire body returned by `POST /v1/systemone`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemOneResponse {
+    #[serde(default)]
+    pub model: String,
+    pub answers: BTreeMap<String, Answer>,
+    #[serde(default)]
+    pub usage: Option<SystemOneUsage>,
+}
+
+impl SystemOneResponse {
+    /// Extract the `noul` probability (`0.0..=1.0`) for question `id`.
+    pub fn noul(&self, id: &str) -> Option<f64> {
+        match self.answers.get(id)? {
+            Answer::Noul(ans) => Some(ans.noul),
+            _ => None,
+        }
+    }
+
+    /// Extract the [`ChoiceAnswer`] for question `id`.
+    pub fn choice(&self, id: &str) -> Option<&ChoiceAnswer> {
+        match self.answers.get(id)? {
+            Answer::Choice(ans) => Some(ans),
+            _ => None,
+        }
+    }
+
+    /// Extract the [`ScoreAnswer`] for question `id`.
+    pub fn score(&self, id: &str) -> Option<&ScoreAnswer> {
+        match self.answers.get(id)? {
+            Answer::Score(ans) => Some(ans),
+            _ => None,
+        }
+    }
+}
+
+/// Async client for a TypeSafe System One endpoint (`POST /v1/systemone`).
+#[derive(Debug, Clone)]
+pub struct SystemOneClient {
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+    timeout: Duration,
+}
+
+impl SystemOneClient {
+    /// Construct a client targeting `base_url` and `model`.
+    pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        Self {
+            base_url,
+            model: model.into(),
+            api_key: None,
+            timeout: Duration::from_millis(DEFAULT_DECIDER_TIMEOUT_MS),
+        }
+    }
+
+    /// Build a client from environment variables, or `None` when disabled.
+    ///
+    /// - `ONLYNE_DECIDER=0|false|off` disables System One calls.
+    /// - Under `ONLYNE_BACKEND=fake`, System One calls are skipped unless
+    ///   `ONLYNE_DECIDER` is explicitly set to `1`, `true`, or `on`, keeping
+    ///   offline scenario suites free of network traffic.
+    /// - Base URL precedence: `ONLYNE_DECIDER_URL` -> `TYPESAFE_BASE_URL` ->
+    ///   [`DEFAULT_DECIDER_BASE_URL`].
+    /// - Model precedence: `ONLYNE_DECIDER_MODEL` -> `TYPESAFE_DEFAULT_MODEL` ->
+    ///   [`DEFAULT_DECIDER_MODEL`].
+    /// - API key precedence: `ONLYNE_DECIDER_API_KEY` -> `TYPESAFE_API_KEY`.
+    pub fn from_env() -> Option<Self> {
+        let toggle = std::env::var("ONLYNE_DECIDER")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase());
+        if matches!(toggle.as_deref(), Some("0" | "false" | "off" | "no")) {
+            return None;
+        }
+        let explicitly_enabled = matches!(toggle.as_deref(), Some("1" | "true" | "on" | "yes"));
+        if !explicitly_enabled
+            && std::env::var("ONLYNE_BACKEND")
+                .ok()
+                .is_some_and(|b| b.trim().eq_ignore_ascii_case("fake"))
+        {
+            return None;
+        }
+
+        let base_url = non_empty_env("ONLYNE_DECIDER_URL")
+            .or_else(|| non_empty_env("TYPESAFE_BASE_URL"))
+            .unwrap_or_else(|| DEFAULT_DECIDER_BASE_URL.to_string());
+        let model = non_empty_env("ONLYNE_DECIDER_MODEL")
+            .or_else(|| non_empty_env("TYPESAFE_DEFAULT_MODEL"))
+            .unwrap_or_else(|| DEFAULT_DECIDER_MODEL.to_string());
+        let api_key =
+            non_empty_env("ONLYNE_DECIDER_API_KEY").or_else(|| non_empty_env("TYPESAFE_API_KEY"));
+        let timeout_ms = non_empty_env("ONLYNE_DECIDER_TIMEOUT_MS")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_DECIDER_TIMEOUT_MS);
+
+        Some(Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            model,
+            api_key,
+            timeout: Duration::from_millis(timeout_ms.max(100)),
+        })
+    }
+
+    pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
+        self.api_key = api_key.filter(|k| !k.trim().is_empty());
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Evaluate `questions` over `state` via a single batched `POST /v1/systemone` request.
+    pub async fn evaluate(
+        &self,
+        state: Value,
+        questions: BTreeMap<String, Question>,
+    ) -> Result<SystemOneResponse, NetError> {
+        if questions.is_empty() {
+            return Err(NetError::Io(
+                "systemone request requires at least one question".to_string(),
+            ));
+        }
+        let req_body = SystemOneRequest {
+            model: self.model.clone(),
+            state,
+            questions,
+        };
+        let payload =
+            serde_json::to_vec(&req_body).map_err(|e| NetError::Io(format!("json encode: {e}")))?;
+        let timeout = self.timeout;
+        tokio::time::timeout(timeout, self.post_systemone(&payload))
+            .await
+            .map_err(|_| NetError::Io(format!("systemone request timed out after {timeout:?}")))?
+    }
+
+    async fn post_systemone(&self, payload: &[u8]) -> Result<SystemOneResponse, NetError> {
+        let (host_port, host_header, path_prefix) = parse_http_base(&self.base_url)?;
+        let path = if path_prefix.ends_with("/v1/systemone") || path_prefix.ends_with("/decisions")
+        {
+            path_prefix
+        } else if path_prefix.ends_with("/v1") {
+            format!("{path_prefix}/systemone")
+        } else {
+            format!("{path_prefix}/v1/systemone")
+        };
+
+        let addresses = tokio::net::lookup_host(&host_port).await?;
+        let mut last_err = None;
+        let mut stream_opt = None;
+        for addr in addresses {
+            match TcpStream::connect(addr).await {
+                Ok(s) => {
+                    stream_opt = Some(s);
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let mut stream = match stream_opt {
+            Some(s) => s,
+            None => {
+                return Err(last_err.map(NetError::from).unwrap_or_else(|| {
+                    NetError::Io(format!("endpoint {host_port} resolved to no addresses"))
+                }));
+            }
+        };
+
+        let mut request = format!(
+            "POST {path} HTTP/1.1\r\n\
+             Host: {host_header}\r\n\
+             User-Agent: onlyne\r\n\
+             Content-Type: application/json\r\n\
+             Accept: application/json\r\n\
+             Connection: close\r\n\
+             Content-Length: {}\r\n",
+            payload.len()
+        );
+        if let Some(token) = &self.api_key {
+            request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        }
+        request.push_str("\r\n");
+
+        let mut wire = Vec::with_capacity(request.len() + payload.len());
+        wire.extend_from_slice(request.as_bytes());
+        wire.extend_from_slice(payload);
+        stream.write_all(&wire).await?;
+        stream.flush().await?;
+
+        let mut raw = Vec::with_capacity(4096);
+        stream.read_to_end(&mut raw).await?;
+        let (status, body) = decode_http_response(&raw)?;
+        if !(200..300).contains(&status) {
+            let text = String::from_utf8_lossy(&body);
+            return Err(NetError::Io(format!(
+                "systemone HTTP {status}: {}",
+                text.trim()
+            )));
+        }
+        serde_json::from_slice::<SystemOneResponse>(&body)
+            .map_err(|e| NetError::Io(format!("systemone decode: {e}")))
+    }
+}
+
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn parse_http_base(url: &str) -> Result<(String, String, String), NetError> {
+    let rest = if let Some(stripped) = url.strip_prefix("http://") {
+        stripped
+    } else if url.starts_with("https://") {
+        return Err(NetError::Io(
+            "systemone client requires an http:// gateway URL (such as http://127.0.0.1:3425)"
+                .to_string(),
+        ));
+    } else {
+        url
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, ""),
+    };
+    if authority.is_empty() {
+        return Err(NetError::Io(format!("invalid systemone URL: {url}")));
+    }
+    let host_port = if authority.contains(':') {
+        authority.to_string()
+    } else {
+        format!("{authority}:80")
+    };
+    let path_prefix = path.trim_end_matches('/').to_string();
+    Ok((host_port, authority.to_string(), path_prefix))
+}
+
+fn decode_http_response(raw: &[u8]) -> Result<(u16, Vec<u8>), NetError> {
+    let Some(header_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return Err(NetError::Io("malformed HTTP response header".to_string()));
+    };
+    let header_str = String::from_utf8_lossy(&raw[..header_end]);
+    let mut lines = header_str.lines();
+    let status_line = lines
+        .next()
+        .ok_or_else(|| NetError::Io("empty HTTP status line".to_string()))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| NetError::Io(format!("invalid HTTP status line: {status_line}")))?;
+
+    let is_chunked = lines.any(|line| {
+        if let Some((k, v)) = line.split_once(':') {
+            k.trim().eq_ignore_ascii_case("transfer-encoding")
+                && v.to_ascii_lowercase().contains("chunked")
+        } else {
+            false
+        }
+    });
+
+    let body_slice = &raw[header_end + 4..];
+    let body = if is_chunked {
+        decode_chunked_body(body_slice)?
+    } else {
+        body_slice.to_vec()
+    };
+    Ok((status, body))
+}
+
+fn decode_chunked_body(mut input: &[u8]) -> Result<Vec<u8>, NetError> {
+    let mut out = Vec::new();
+    while let Some(line_end) = input.windows(2).position(|w| w == b"\r\n") {
+        let size_str = String::from_utf8_lossy(&input[..line_end]);
+        let size_hex = size_str.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_hex, 16)
+            .map_err(|e| NetError::Io(format!("invalid chunk size {size_hex:?}: {e}")))?;
+        input = &input[line_end + 2..];
+        if size == 0 {
+            break;
+        }
+        if input.len() < size {
+            return Err(NetError::Io("truncated chunked HTTP body".to_string()));
+        }
+        out.extend_from_slice(&input[..size]);
+        input = &input[size..];
+        if input.starts_with(b"\r\n") {
+            input = &input[2..];
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn evaluates_noul_choice_and_score_against_mock_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let req_text = String::from_utf8_lossy(&buf[..n]);
+            assert!(req_text.starts_with("POST /v1/systemone HTTP/1.1\r\n"));
+            let body_json = json!({
+                "model": "clef-flash",
+                "answers": {
+                    "should_handle": { "type": "noul", "noul": 0.94 },
+                    "route": {
+                        "type": "choice",
+                        "choice": "coder",
+                        "confidence": 0.89,
+                        "probabilities": { "coder": 0.89, "planner": 0.11 }
+                    },
+                    "severity": {
+                        "type": "score",
+                        "score": 1.75,
+                        "confidence": 0.82,
+                        "probabilities": { "0": 0.05, "1": 0.15, "2": 0.80 }
+                    }
+                },
+                "usage": { "input_tokens": 120, "output_tokens": 0 }
+            });
+            let body_bytes = serde_json::to_vec(&body_json).unwrap();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body_bytes.len()
+            );
+            stream.write_all(resp.as_bytes()).await.unwrap();
+            stream.write_all(&body_bytes).await.unwrap();
+        });
+
+        let client = SystemOneClient::new(format!("http://{addr}"), "group/decider");
+        let mut questions = BTreeMap::new();
+        questions.insert(
+            "should_handle".to_string(),
+            Question::noul("Is this a task for the cluster?"),
+        );
+        questions.insert(
+            "route".to_string(),
+            Question::choice(
+                "Which role should handle this?",
+                [
+                    ("coder", Some("Code changes and bug fixes".to_string())),
+                    ("planner", Some("Architecture and planning".to_string())),
+                ],
+            ),
+        );
+        questions.insert(
+            "severity".to_string(),
+            Question::score("How urgent is this?", ["low", "medium", "high"]),
+        );
+
+        let response = client
+            .evaluate(json!({"text": "Fix the panic in link.rs"}), questions)
+            .await
+            .unwrap();
+        assert_eq!(response.noul("should_handle"), Some(0.94));
+        assert_eq!(response.choice("route").unwrap().choice, "coder");
+        assert_eq!(response.choice("route").unwrap().confidence, 0.89);
+        assert_eq!(response.score("severity").unwrap().score, 1.75);
+    }
+
+    #[test]
+    fn decodes_chunked_http_response() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    1c\r\n{\"model\":\"jev\",\"answers\":{}}\r\n0\r\n\r\n";
+        let (status, body) = decode_http_response(raw).unwrap();
+        assert_eq!(status, 200);
+        let parsed: SystemOneResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.model, "jev");
+        assert!(parsed.answers.is_empty());
+    }
+}

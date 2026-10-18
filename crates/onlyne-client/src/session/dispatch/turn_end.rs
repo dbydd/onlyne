@@ -185,7 +185,22 @@ pub async fn on_turn_end(
             // beat would carry — before the backend starts the turn the
             // nudge asked for.
             state.feed_turn_started(task_id);
-            match backend.nudge(&session, task_id, NUDGE_TEXT) {
+            // The one sentence a backend hands its agent is a contract the
+            // plugin composes none of (`docs/v2-CONTRACT.md` §3c), and the
+            // ending turn's own last words say which of the three situations
+            // this ending actually is. When a decision model can read them,
+            // the sentence the agent gets names the outcome that situation
+            // calls for; when it cannot — no gateway configured, no closing
+            // text, an endpoint that will not answer — the agent gets exactly
+            // the sentence it got before.
+            let suffix = if let Some(client) = onlyne_net::SystemOneClient::from_env() {
+                super::decider::diagnose_turn_end_suffix(&client, task_id, closing.as_deref()).await
+            } else {
+                None
+            };
+            let nudge_msg =
+                suffix.map_or_else(|| NUDGE_TEXT.to_string(), |s| format!("{NUDGE_TEXT}{s}"));
+            match backend.nudge(&session, task_id, &nudge_msg) {
                 Ok(()) => Ok(()),
                 Err(error) => {
                     settle(

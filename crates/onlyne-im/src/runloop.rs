@@ -23,6 +23,7 @@ use crate::trigger::{
 use anyhow::{Context, Result};
 use chrono::Utc;
 use onlyne_im_backend::frame::{BackendOp, SendArgs, SentArgs};
+use onlyne_im_backend::payload::ImEvent;
 use onlyne_proto::Report;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -525,6 +526,11 @@ async fn handle_backend_op(
                 "recorded an inbound event"
             );
             let reporter = reporters.get(&gateway.role).cloned();
+            // Ask System One how this event should be routed, when the
+            // operator configured an endpoint. A gateway that never did, and
+            // an endpoint that will not answer, both leave `decider` absent:
+            // the scripts get exactly the input they had before.
+            let decider = decide_inbound(gateway, &conversation, &inbound).await;
             let input = PushInput::Trigger {
                 role: gateway.role.clone(),
                 gateway: event.gateway.clone(),
@@ -532,6 +538,7 @@ async fn handle_backend_op(
                 conversation: inbound.conversation.clone(),
                 chat: conversation.chat_key.clone(),
                 event: inbound,
+                decider: decider.clone(),
                 at: Utc::now().to_rfc3339(),
             };
             spawn_pushes(
@@ -583,6 +590,43 @@ async fn handle_backend_op(
         }
         BackendOp::Hello(_) => {}
     }
+}
+
+/// What the System One reflex decided about one inbound event, if anything.
+///
+/// The candidates are the gateway's own seat for now: one gateway root is one
+/// role, and the conversation's peers are what that role may reach
+/// (`crate::decider::DEFAULT_CANDIDATE`). The ids come from the window the
+/// gateway already holds for this conversation, which is the same read
+/// `crate::chain::forks` applies — a reader of the log can check them by hand.
+///
+/// A gateway that configured no endpoint, and an endpoint that will not
+/// answer, both yield `None` and cost the event nothing.
+async fn decide_inbound(
+    gateway: &Gateway,
+    conversation: &Conversation,
+    inbound: &ImEvent,
+) -> Option<crate::decider::DeciderRouting> {
+    let client = onlyne_net::SystemOneClient::from_env()?;
+    let history = crate::history::History::new(&gateway.root);
+    let window = crate::chain::window_of(&history, &conversation.chat_key);
+    // The window was recorded a moment ago, so it already ends with this
+    // event: offering a message its own id as the one it continues would ask
+    // the decision to pick itself.
+    let recent_ids: Vec<String> = window
+        .messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .filter(|id| *id != inbound.id)
+        .map(str::to_string)
+        .collect();
+    crate::decider::evaluate_inbound(
+        &client,
+        inbound,
+        &[crate::decider::DEFAULT_CANDIDATE.to_string()],
+        &recent_ids,
+    )
+    .await
 }
 
 impl RenderJob {
@@ -637,6 +681,10 @@ async fn run_one_push(
         socket,
         workspace: Some(conversation.workspace.to_string_lossy().into_owned()),
         media: Some(conversation.media_dir().to_string_lossy().into_owned()),
+        decider: match input {
+            PushInput::Trigger { decider, .. } => decider.clone(),
+            PushInput::Heartbeat { .. } => None,
+        },
     };
     let outcome =
         run_script_retrying(script, input, &env, &BTreeMap::new(), &PushRetry::default()).await;

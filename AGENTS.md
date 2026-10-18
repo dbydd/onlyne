@@ -202,7 +202,7 @@ Rules:
   `onlyne-web` is, and `onlyne` carries no `im` verb. Its `generate` writes one conversation
   (a workspace and the cluster's `[[client]]` row plus both ACL lists), not a role template
   workspace; `onlyne server generate` keeps the template path it has.
-- **Verbs are split by caller.** Operators and supervisors use admin-socket and lifecycle verbs: `up`, `shutdown`, `send`, `reply`, `complete`, `ack`, `reject`, `handoff`, `control`, `repair`, `spec_diff`, `reload`, `ls`, `who`, `ping`, `watch`, `ledger`, `gateway status`. An operator reports a conclusion with `onlyne complete`, which on the admin face becomes `AdminOp::Report`; there is no `onlyne report` verb. A role's in-session actions go only through plugin tools or `onlyne mcp`: `onlyne_send`, `onlyne_handoff`, `onlyne_complete`.
+- **Verbs are split by caller.** Operators and supervisors use admin-socket and lifecycle verbs: `up`, `shutdown`, `triage`, `send`, `reply`, `complete`, `ack`, `reject`, `handoff`, `control`, `repair`, `spec_diff`, `reload`, `ls`, `who`, `ping`, `watch`, `ledger`, `gateway status`. An operator reports a conclusion with `onlyne complete`, which on the admin face becomes `AdminOp::Report`; there is no `onlyne report` verb. A role's in-session actions go only through plugin tools or `onlyne mcp`: `onlyne_send`, `onlyne_handoff`, `onlyne_complete`.
 
 ## 6. Crate layout
 

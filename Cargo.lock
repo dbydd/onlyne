@@ -1952,6 +1952,7 @@ dependencies = [
  "interprocess",
  "onlyne-adapter",
  "onlyne-config",
+ "onlyne-net",
  "onlyne-proto",
  "onlyne-server",
  "onlyne-wire",

@@ -15,6 +15,7 @@ pub mod chain;
 pub mod chatkey;
 pub mod chatlog;
 pub mod config;
+pub mod decider;
 pub mod history;
 pub mod link;
 pub mod runloop;

@@ -420,6 +420,9 @@ onlyne tui --server-root <root> --once
 `repair` 是操作员的恢复面。它记录操作员决定，不会悄悄改变投递策略：
 
 ```bash
+# System-1 毫秒级故障自动分诊（默认连接本机 http://127.0.0.1:3425 的 group/decider）：
+onlyne --server-root <root> triage [--task <task-id>] [--from-hook] [--apply] [--min-confidence 0.60]
+
 onlyne --server-root <root> repair inspect --task <task-id>
 onlyne --server-root <root> repair retry  --task <task-id> --reason <text>
 onlyne --server-root <root> repair fail   --task <task-id> --reason <text>
@@ -610,8 +613,10 @@ v2 的 crate 地图、session 生命周期和形式化设计理由见 [`AGENTS.m
 
 ### 用户与操作员指南
 
+- [`docs/wiki/Home.md`](docs/wiki/Home.md) — 完整的中英双语 Wiki 文档集（`Quickstart`、`Architecture-and-Concepts`、`CLI-Reference`、`IM-Gateway`、`System-One-Decider`、`Operations-and-Troubleshooting`）。
 - [`AGENTS.md`](AGENTS.md) 与 [`docs/v2-PLAN.md`](docs/v2-PLAN.md) — v2 执行契约与权威架构设计。
-- [`docs/v2.7-OVERHAUL-PLAN.md`](docs/v2.7-OVERHAUL-PLAN.md) — 文档权威分层与 v2.7 改造清单。
+- [`docs/v2.7-OVERHAUL-PLAN.md`](docs/v2.7-OVERHAUL-PLAN.md) — 文档权威分层与 v2.7/v2.8 改造清单。
+- [`docs/v2.9-SYSTEMONE-DECIDER-PLAN.md`](docs/v2.9-SYSTEMONE-DECIDER-PLAN.md) — System-1（`magpie/group/decider`）五大边缘神经反射弧设计规格。
 - [`docs/operations.md`](docs/operations.md) — socket、配置、fault 检查、恢复、requeue policy、exec/ACP session 与 session 属主。
 - [`crates/onlyne-adapter/PROTOCOL.md`](crates/onlyne-adapter/PROTOCOL.md) — 外部 agent/gateway wire contract。
 - [`examples/supervisor/README.md`](examples/supervisor/README.md) — 真实 pi/Orca running-lights 演示。

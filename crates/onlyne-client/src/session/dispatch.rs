@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
+mod decider;
 mod delivery;
 mod env;
 mod guards;

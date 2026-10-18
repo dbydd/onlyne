@@ -50,6 +50,12 @@ pub enum PushInput {
         /// Boxed: one `ImEvent` dwarfs the heartbeat variant, and this enum
         /// crosses a channel once per event.
         event: Box<ImEvent>,
+        /// What the System One reflex decided about this event, when a
+        /// gateway had an endpoint to ask (`crate::decider`). Absent means
+        /// nothing was asked, which is every gateway that never configured
+        /// one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decider: Option<crate::decider::DeciderRouting>,
         at: String,
     },
     Heartbeat {
@@ -143,20 +149,36 @@ pub struct PushEnv {
     pub workspace: Option<String>,
     /// The attachment directory, as `ONLYNE_IM_MEDIA`.
     pub media: Option<String>,
+    /// What the System One reflex decided about this event, exported as the
+    /// `ONLYNE_DECIDER_*` variables a script routes on
+    /// (`crate::decider`).
+    pub decider: Option<crate::decider::DeciderRouting>,
 }
 
 impl PushEnv {
     /// The environment pairs this adds to what the child inherits.
-    fn pairs(&self) -> Vec<(&'static str, &str)> {
+    fn pairs(&self, input: &PushInput) -> Vec<(&'static str, String)> {
         let mut pairs = Vec::new();
         if let Some(socket) = &self.socket {
-            pairs.push(("ONLYNE_SOCKET", socket.as_str()));
+            pairs.push(("ONLYNE_SOCKET", socket.clone()));
         }
         if let Some(workspace) = &self.workspace {
-            pairs.push(("ONLYNE_IM_WORKSPACE", workspace.as_str()));
+            pairs.push(("ONLYNE_IM_WORKSPACE", workspace.clone()));
         }
         if let Some(media) = &self.media {
-            pairs.push(("ONLYNE_IM_MEDIA", media.as_str()));
+            pairs.push(("ONLYNE_IM_MEDIA", media.clone()));
+        }
+        let decider = self.decider.as_ref().or(match input {
+            PushInput::Trigger { decider, .. } => decider.as_ref(),
+            PushInput::Heartbeat { .. } => None,
+        });
+        if let Some(decider) = decider {
+            pairs.push(("ONLYNE_DECIDER_SHOULD_HANDLE", decider.should_handle_str()));
+            pairs.push(("ONLYNE_DECIDER_TARGET", decider.target_role.clone()));
+            pairs.push(("ONLYNE_DECIDER_CONFIDENCE", decider.target_confidence_str()));
+            if let Some(reply) = &decider.suggested_reply_to {
+                pairs.push(("ONLYNE_DECIDER_REPLY_TO", reply.clone()));
+            }
         }
         pairs
     }
@@ -220,7 +242,7 @@ pub async fn run_script(
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
     command.envs(env_extra);
-    command.envs(env.pairs());
+    command.envs(env.pairs(input));
     let body = serde_json::to_vec(input).expect("PushInput serialises");
     let mut child = command.spawn().map_err(PushFailure::Spawn)?;
     if let Some(mut stdin) = child.stdin.take() {
@@ -299,6 +321,7 @@ mod tests {
             chat: "abc123".into(),
             conversation: "-100".into(),
             event: Box::new(event()),
+            decider: None,
             at: "2026-10-10T12:00:00Z".into(),
         };
         run_script(
@@ -350,6 +373,7 @@ mod tests {
             chat: "abc123".into(),
             conversation: "-100".into(),
             event: Box::new(event()),
+            decider: None,
             at: "2026-10-10T12:00:00Z".into(),
         };
         let retry = PushRetry {
@@ -438,5 +462,72 @@ mod tests {
             Err(PushFailure::Timeout) => {}
             other => panic!("expected a timeout, got {other:?}"),
         }
+    }
+
+    /// The reflex's decision reaches a script as variables, so a shell script
+    /// routes on it without parsing JSON.
+    #[tokio::test]
+    async fn the_decider_reaches_a_script_as_environment_variables() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("seen.txt");
+        let path = out.to_string_lossy().into_owned();
+        let script = script(
+            dir.path(),
+            &format!(
+                "printf '%s\\n' \"$ONLYNE_DECIDER_SHOULD_HANDLE\" \
+                 \"$ONLYNE_DECIDER_TARGET\" \"$ONLYNE_DECIDER_CONFIDENCE\" \
+                 \"$ONLYNE_DECIDER_REPLY_TO\" > {path}"
+            ),
+        );
+        let input = PushInput::Trigger {
+            role: "tg-group-1".into(),
+            gateway: "tg1".into(),
+            platform: "telegram".into(),
+            chat: "abc123".into(),
+            conversation: "-100".into(),
+            event: Box::new(event()),
+            decider: Some(crate::decider::DeciderRouting {
+                should_handle: 0.8732,
+                target_role: "_supervisor".into(),
+                target_confidence: 0.5,
+                suggested_reply_to: Some("m-4".into()),
+                reply_confidence: 0.9,
+            }),
+            at: "2026-10-10T12:00:00Z".into(),
+        };
+        run_script(&script, &input, &PushEnv::default(), &BTreeMap::new())
+            .await
+            .expect("the script succeeds");
+        let text = std::fs::read_to_string(&out).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("0.8732"));
+        assert_eq!(lines.next(), Some("_supervisor"));
+        assert_eq!(lines.next(), Some("0.5000"));
+        assert_eq!(lines.next(), Some("m-4"));
+    }
+
+    /// A heartbeat carries no decision, so it exports none of them.
+    #[tokio::test]
+    async fn a_heartbeat_exports_no_decider_variables() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("seen.txt");
+        let path = out.to_string_lossy().into_owned();
+        let script = script(
+            dir.path(),
+            &format!("printf '[%s]' \"$ONLYNE_DECIDER_TARGET\" > {path}"),
+        );
+        let mut script = script;
+        script.mode = PushMode::Heartbeat;
+        let input = PushInput::Heartbeat {
+            role: "tg-group-1".into(),
+            gateway: "tg1".into(),
+            platform: "telegram".into(),
+            chat: "abc123".into(),
+            at: "2026-10-10T12:00:00Z".into(),
+        };
+        run_script(&script, &input, &PushEnv::default(), &BTreeMap::new())
+            .await
+            .expect("the script succeeds");
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "[]");
     }
 }

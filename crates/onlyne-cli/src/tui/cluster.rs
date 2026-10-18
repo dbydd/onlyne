@@ -15,6 +15,7 @@ use onlyne_proto::view::{BoardColumn, Card};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::Paragraph;
+use serde_json::Value;
 
 /// The five columns the board arranges its cards into, in the plan's order.
 const COLUMNS: [BoardColumn; 5] = [
@@ -173,14 +174,50 @@ fn board(frame: &mut Frame, state: &State, area: Rect) {
 
 /// The session half of a card: the state it is in, and the verdict that has it
 /// waiting rather than failed.
+///
+/// A session that published a decider verdict also carries its phase tag:
+/// `busy · coding`, and `busy · coding !thrash` when the client judged it
+/// thrashing. An observation with no `decider` object prints the bytes it
+/// always did, so a cluster running no decider reads unchanged.
 fn session_cell(card: &Card<'_>) -> String {
     match card.session {
         None => "—".to_string(),
         Some(session) if session.is_blocked() => {
-            format!("{} blocked", session_word(session.state()))
+            let suffix = decider_suffix(session.observed.as_ref());
+            format!("{} blocked{suffix}", session_word(session.state()))
         }
-        Some(session) => session_word(session.state()).to_string(),
+        Some(session) => {
+            let suffix = decider_suffix(session.observed.as_ref());
+            format!("{}{suffix}", session_word(session.state()))
+        }
     }
+}
+
+/// The `is_thrashing` score at or above which the board marks a phase. The
+/// client files its own `thrashing` alert at the same number
+/// (`docs/v2.9-SYSTEMONE-DECIDER-PLAN.md` §2.3).
+const THRASHING_MARK: f64 = 0.88;
+
+/// The decider's phase tag for one session's observation: ` · coding`, or
+/// ` · coding !thrash` beside a phase the client judged thrashing. Empty when
+/// the observation holds no `decider` object, or one that names no non-empty
+/// string phase.
+fn decider_suffix(observed: Option<&Value>) -> String {
+    let Some(decider) = observed.and_then(|observed| observed.get("decider")) else {
+        return String::new();
+    };
+    let Some(phase) = decider
+        .get("phase")
+        .and_then(Value::as_str)
+        .filter(|phase| !phase.is_empty())
+    else {
+        return String::new();
+    };
+    let thrash = decider
+        .get("thrashing")
+        .and_then(Value::as_f64)
+        .is_some_and(|score| score >= THRASHING_MARK);
+    format!(" · {phase}{}", if thrash { " !thrash" } else { "" })
 }
 
 /// The event tail: what the subscription just delivered, newest first.
@@ -216,4 +253,47 @@ fn tail_height(area: Rect) -> u16 {
 /// How wide the role column is: the rest of the page is the board.
 fn role_width(area: Rect) -> u16 {
     (area.width * 45 / 100).clamp(34, 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_observation_with_no_decider_reads_as_it_always_has() {
+        assert_eq!(decider_suffix(None), "");
+        assert_eq!(decider_suffix(Some(&serde_json::json!({}))), "");
+        assert_eq!(
+            decider_suffix(Some(&serde_json::json!({"decider": {}}))),
+            ""
+        );
+        // A decider key that is not an object, or a phase that is not a
+        // non-empty string, names no phase to print.
+        assert_eq!(
+            decider_suffix(Some(&serde_json::json!({"decider": "coding"}))),
+            ""
+        );
+        assert_eq!(
+            decider_suffix(Some(&serde_json::json!({"decider": {"phase": ""}}))),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_phase_rides_the_session_word() {
+        let observed = serde_json::json!({"decider": {"phase": "coding"}});
+        assert_eq!(decider_suffix(Some(&observed)), " · coding");
+    }
+
+    #[test]
+    fn a_thrashing_phase_is_marked() {
+        let observed = serde_json::json!({"decider": {"phase": "debugging", "thrashing": 0.92}});
+        assert_eq!(decider_suffix(Some(&observed)), " · debugging !thrash");
+    }
+
+    #[test]
+    fn a_score_under_the_mark_carries_no_thrash() {
+        let observed = serde_json::json!({"decider": {"phase": "testing", "thrashing": 0.4}});
+        assert_eq!(decider_suffix(Some(&observed)), " · testing");
+    }
 }
