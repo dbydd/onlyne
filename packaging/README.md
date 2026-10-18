@@ -8,6 +8,7 @@ never install or launch themselves as a service.
 | file | target |
 | --- | --- |
 | `launchd/se.onlyne.server.plist` | `~/Library/LaunchAgents/` or `/Library/LaunchDaemons/` |
+| `launchd/se.onlyne.client.plist` | `~/Library/LaunchAgents/` or `/Library/LaunchDaemons/` |
 | `systemd/onlyne-server.service` | `/etc/systemd/system/` |
 | `systemd/onlyne-client@.service` | `/etc/systemd/system/` |
 
@@ -19,14 +20,13 @@ Both shapes run one foreground command. Neither carries supervisor logic of its 
 - client: `onlyne-client run --workspace <workspace>`, working directory `<workspace>`
 
 The units carry `/srv/onlyne` and `/srv/onlyne-ws/%i` as the two roots. Replace them with the real
-roots before loading. Create a root first with `onlyne-server init --root <dir>`; that command also
+roots before loading, and on Apple Silicon Homebrew installs replace `/usr/local/bin` with `/opt/homebrew/bin`. Create a root first with `onlyne-server init --root <dir>`; that command also
 makes `.onlyne/logs/`, the directory the log files land in.
 
 ## Restart behavior
 
 On macOS, `KeepAlive` with `SuccessfulExit=false`; on Linux, `Restart=on-failure`. Both restart the
-daemon after an abnormal exit, and both leave a clean exit alone. `systemctl reload onlyne-server`
-sends SIGHUP. The daemon re-parses `spec.toml`, then swaps it atomically.
+daemon after an abnormal exit, and both leave a clean exit (`onlyne server shutdown`) alone. To stop a launchd-managed service without `KeepAlive` relaunching it, run `launchctl bootout gui/$(id -u)/se.onlyne.server` (or `onlyne server shutdown`). `systemctl reload onlyne-server` (or `onlyne reload` on macOS and Linux) re-parses `spec.toml` and swaps it atomically.
 
 ## Logs
 

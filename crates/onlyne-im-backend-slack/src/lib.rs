@@ -79,21 +79,16 @@ impl SlackCredentials {
     /// separator. A missing separator is the shape an operator pastes wrong,
     /// so the error names the encoding instead of reporting a bad credential.
     pub fn parse(value: &str) -> Result<Self> {
-        let (app, bot) = value.split_once(':').with_context(|| {
+        let (app_token, bot_token) = onlyne_im_backend::credential::parse_colon_pair(
+            value,
             "the credential must be `xapp-…:xoxb-…`: the app-level token, a colon, \
-             then the bot token"
-        })?;
-        let app_token = app.trim();
-        let bot_token = bot.trim();
-        if app_token.is_empty() {
-            bail!("the app-level token (`xapp-…`) is empty");
-        }
-        if bot_token.is_empty() {
-            bail!("the bot token (`xoxb-…`) is empty");
-        }
+             then the bot token",
+            "the app-level token (`xapp-…`) is empty",
+            "the bot token (`xoxb-…`) is empty",
+        )?;
         Ok(Self {
-            app_token: app_token.to_string(),
-            bot_token: bot_token.to_string(),
+            app_token,
+            bot_token,
         })
     }
 

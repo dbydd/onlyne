@@ -227,8 +227,9 @@ Rules:
 | `onlyne-im-backend-slack` | Slack platform backend (Socket Mode and the Web API live here) |
 | `onlyne-im-backend-linear` | Linear platform backend (the GraphQL client lives here) |
 | `onlyne-im-backend-telegram` | Telegram platform backend |
+| `onlyne-im-backend-fake` | scripted fake IM backend for hermetic tests and smoke runs; no platform SDK |
 
-Nineteen active crates. Dependency rules:
+Nineteen workspace member crates plus `onlyne-web` (excluded from the Cargo workspace so the core build needs no Node). Dependency rules:
 
 - `onlyne-proto` does not depend on tokio.
 - Plugins depend on `onlyne-adapter` and `onlyne-proto`.

@@ -280,6 +280,13 @@ impl DeliveryView {
             self.acked_at = entry.acked_at;
             filled = true;
         }
+        // A send the stream read as queued may already be in flight when the
+        // ledger read lands; flight is forward, so adopt it and never let a
+        // later queued read move the row back.
+        if self.state == LedgerState::Queued && entry.state == LedgerState::InFlight {
+            self.state = LedgerState::InFlight;
+            filled = true;
+        }
         // `entry` names the row by key, and the map lookup already matched it,
         // so `msg_id` itself never needs this: it is the one column both
         // sources agree on by construction, and the caller keys on it.
@@ -1058,5 +1065,23 @@ mod tests {
             assert_eq!(view.merge_ledger(&[entry("m1")]), 0);
             assert_eq!(view.deliveries["m1"].state, terminal);
         }
+    }
+
+    /// A queued row a ledger read catches already in flight moves forward to
+    /// in flight, and a later queued read of the same row does not move it
+    /// back.
+    #[test]
+    fn a_ledger_read_advances_a_queued_row_to_in_flight_and_never_back() {
+        let mut view = update(View::default(), &transition("m1"));
+        view.deliveries.get_mut("m1").unwrap().state = LedgerState::Queued;
+        let mut flying = entry("m1");
+        flying.state = LedgerState::InFlight;
+
+        assert_eq!(view.merge_ledger(&[flying.clone()]), 1);
+        assert_eq!(view.deliveries["m1"].state, LedgerState::InFlight);
+
+        assert_eq!(view.merge_ledger(&[entry("m1")]), 0);
+        assert_eq!(view.deliveries["m1"].state, LedgerState::InFlight);
+        assert_eq!(view.merge_ledger(&[flying]), 0);
     }
 }

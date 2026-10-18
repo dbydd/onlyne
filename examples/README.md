@@ -18,9 +18,8 @@ manifest, so `cargo run --example <name>` finds nothing to build here.
 `crates/onlyne-testkit/e2e/im-live.sh` is the only one that needs a credential (`ONLYNE_TELEGRAM_TOKEN`, `ONLYNE_IM_CHAT_ID`); the rest are hermetic.
 
 `crates/onlyne-testkit/e2e/lib.sh` holds the shared helpers. Callers set `SRC` and `tmp` first. Every
-script in the table above runs with `ONLYNE_BACKEND=fake` and the `fake`
-gateway, except `orca-live.sh` and `pi-live.sh`, which pick their own host.
-No real platform credential enters the run.
+hermetic script in the table above runs with `ONLYNE_BACKEND=fake` and the `fake`
+gateway; the live host scripts (`orca-live.sh`, `pi-live.sh`, `handoff-live.sh`) pick their own host.
 
 ```bash
 cargo build --workspace
@@ -46,9 +45,9 @@ planner, builder, and reviewer roles, and a README that maps every example file 
 
 ## CLI vocabulary
 
-`docs/v1-CONTRACT.md` lists the verbs for each binary: `onlyne-server run|init|reload|generate`,
-`onlyne-client run|init`, `onlyne send|reply|complete|handoff|control`, and
-`onlyne gateway run|list|status|auth`.
+`AGENTS.md` §5 lists the v2 verbs for each binary: `onlyne-server run|init|status|generate`,
+`onlyne-client run|init|status|roles|agent|doctor`, `onlyne send|reply|complete|handoff|ack|reject|control|repair|reload|shutdown|tui|mcp|ls|status|roles|sessions|ledger|faults|watch|history|ghosts|spec_diff|gateway status`, and
+`onlyne-im init|generate|login|setup|run|check`.
 
 # 中文
 
@@ -66,13 +65,25 @@ pre-v1 守护进程已经移除，随之移除的还有它的示例集。根目�
 | `crates/onlyne-testkit/e2e/idempotency.sh` | 对一个重复的 `op_id` 给出重复应答和冲突应答 |
 | `crates/onlyne-testkit/e2e/legacy-layout.sh` | 拒绝 pre-v1 工作区，退出代码为 2 |
 | `crates/onlyne-testkit/e2e/running-lights.sh` | 一个由六个角色组成的环：使用 `onlyne handoff` 传递令牌十二次，以及令牌移动过程中的两个 TUI 帧 |
+| `crates/onlyne-testkit/e2e/im-live.sh` | 真实平台上的 v2.3 聊天寻址：一个集群、一个网关根、一个真实 Telegram 会话，以及三类畸形拒绝验证 |
 
-`crates/onlyne-testkit/e2e/lib.sh` 包含共享辅助函数。调用方必须先设置 `SRC` 和 `tmp`。表中每个脚本都使用 `ONLYNE_BACKEND=fake` 和 `fake` 网关运行，只有 `orca-live.sh` 与 `pi-live.sh` 自行选择主机。运行过程中不会输入任何真实的平台凭据。
+`crates/onlyne-testkit/e2e/im-live.sh` 需要真实凭据（`ONLYNE_TELEGRAM_TOKEN`、`ONLYNE_IM_CHAT_ID`），其余脚本均为本地自含测试。`crates/onlyne-testkit/e2e/lib.sh` 包含共享辅助函数，调用方先设置 `SRC` 和 `tmp`。
 
 ```bash
 cargo build --workspace
 cd crates/onlyne-testkit/e2e
 bash local-task.sh
+```
+
+## IM 网关集群示例
+
+`examples/im-gateway/` 演示最小集群与平台后端（Telegram、飞书、QQ）及免凭据 `fake` 后端的完整往返：
+
+```bash
+python3 examples/im-gateway/run.py up       # 启动集群、网关根并为各平台生成一条会话
+python3 examples/im-gateway/run.py smoke    # 免凭据运行一次完整的入站 → 回复 → 出站循环
+python3 examples/im-gateway/run.py status   # 查看角色、网关检查结果与每条会话的 chat key
+python3 examples/im-gateway/run.py stop
 ```
 
 ## 配置示例目录树
@@ -81,4 +92,4 @@ bash local-task.sh
 
 ## CLI 词汇
 
-`docs/v1-CONTRACT.md` 列出了每个二进制文件的动词：`onlyne-server run|init|reload|generate`、`onlyne-client run|init`、`onlyne send|reply|complete|handoff|control`，以及 `onlyne gateway run|list|status|auth`。
+`AGENTS.md` §5 列出了每个二进制文件的 v2 动词：`onlyne-server run|init|status|generate`、`onlyne-client run|init|status|roles|agent|doctor`、`onlyne send|reply|complete|handoff|ack|reject|control|repair|reload|shutdown|tui|mcp|ls|status|roles|sessions|ledger|faults|watch|history|ghosts|spec_diff|gateway status`，以及 `onlyne-im init|generate|login|setup|run|check`。

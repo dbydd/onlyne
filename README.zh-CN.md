@@ -8,7 +8,7 @@
 
 **给 coding-agent 团队用的消息与传输层，跑在你自己的机器上。**
 
-Onlyne 把 coding agent 组织成持久的工作角色。**server** 在角色之间路由消息，并把每次投递记录进持久账本。每个角色工作区运行一个 **client**，负责该角色的 coding-agent 会话。可选的 **IM 网关**（`onlyne-im`）把一个聊天平台会话——一个私聊、一个群——变成一条普通 role，于是聊天里的人和 agent 面对的是同一个集群。agent 保留自己的运行时并负责决策；Onlyne 提供路由、排队、会话传输、回执和可审计记录。
+Onlyne 把 coding agent 组织成持久的工作角色。**server** 在角色之间路由消息，并把每次投递记录进持久账本。每个角色工作区运行一个 **client**，负责该角色的 coding-agent 会话。可选的 **IM 网关**（`onlyne-im`）作为集群中的一条角色接入，并通过投递正文首行的应用层 chat key 分流注册表中的全部会话，让聊天里的人和 agent 面对同一个集群。agent 保留自己的运行时并负责决策；Onlyne 提供路由、排队、会话传输、回执和可审计记录。
 
 client 可以通过 TLS 在不同机器上运行。生成的工作区可以整体搬移；supervisor client 也可以把一个子集群作为 aggregate role 暴露给父 server。
 
@@ -49,7 +49,7 @@ cargo install \
 | 命令 | 职责 |
 |---|---|
 | `onlyne` | 操作入口。所有 verb 都在这个进程里实现：查询、admin 操作、`init`/`generate`、内置 TUI，以及 MCP 工具桥。两个 daemon 不再向它转发任何东西。 |
-| `onlyne-server` | 一个集群的路由器、投递队列、持久账本、fault 记录和 admin socket。子命令只有 `run`。 |
+| `onlyne-server` | 一个集群的路由器、投递队列、持久账本、fault 记录和 admin socket。子命令包括 `init`、`run`、`status`、`generate`。 |
 | `onlyne-client` | 一个角色工作区的 server 链路、session 生命周期、backend 宿主、adapter socket 和持久出站 intent。 |
 
 观测面板是 `onlyne tui` 这个 verb，不是独立二进制。`onlyne-agent-fake` 是额外的
@@ -67,7 +67,7 @@ cargo install onlyne-im onlyne-im-backend-telegram
 
 | 命令 | 职责 |
 |---|---|
-| `onlyne-im` | 一个网关根：`init`、`generate`、`login`、`run`、`check`。它在单个进程里托管 `conversations/` 下每条会话，并运行操作者的 trigger 脚本。 |
+| `onlyne-im` | 一个网关根：`init`、`generate`、`login`、`setup`、`run`、`check`。它在单个进程里托管 `conversations/` 下每条会话，并运行操作者的 trigger 脚本。 |
 | `onlyne-im-backend-telegram` | Telegram bot backend：一个进程，由网关通过 stdio 拉起，讲标准 backend 协议。 |
 | `onlyne-im-backend-qqbot` | QQ 开放平台 backend：入站走 websocket 事件网关，出站按场景发送（群消息在被动回复窗口内带 `msg_id`，超窗后变成主动消息）。凭据是 app id 与 secret，存为 `app_id:app_secret`。QQ 的表情表态只在频道内可用，群里的表态是平台拒绝，不是本 backend 缺代码。 |
 | `onlyne-im-backend-slack` | Slack backend：入站走 Socket Mode（需要 `xapp-` app token 和 `xoxb-` bot token，存为 `xapp-…:xoxb-…`），出站走 Web API；回复挂在 `thread_ts` 下。 |
@@ -113,7 +113,7 @@ onlyne skill export --set supervisor        # supervisor handbook
 onlyne skill export --dest /path/to/skills
 ```
 
-`skill export` 把每份 handbook 写成普通 regular file。仓库中的编译副本也采用这一形式，并由 repository test 保证四份文件与各自源码手册逐字节相同。内容相同的文件会保持不变；已有文件内容不同会停止导出，传 `--force` 才会替换。`npx skills add dbydd/onlyne` 和 `npx skills add ./` 通过 skills CLI 安装同一套仓库文档。
+`skill export` 把每份 handbook 写成普通 regular file，写入字节来自编译进二进制的三份手册（`crates/onlyne-cli/skills/`）。内容相同的文件保持不变；已有文件内容不同会停止导出，传 `--force` 才会替换。`npx skills add dbydd/onlyne` 和 `npx skills add ./` 通过 skills CLI 安装同一套仓库文档。
 
 ## 最短本地任务：fake backend
 
@@ -137,7 +137,8 @@ target/debug/onlyne-client init \
   --workspace "$tmp/planner" \
   --role planner \
   --server-root "$tmp/server" \
-  --prose "v1 smoke prose" >>"$tmp/server/.onlyne/spec.toml"
+  --prose "v1 smoke prose" \
+  --register >/dev/null
 target/debug/onlyne --server-root "$tmp/server" reload
 
 ONLYNE_BACKEND=fake target/debug/onlyne-client run \
@@ -277,7 +278,7 @@ sequenceDiagram
 
 ### Server root
 
-`<server-root>/.onlyne/spec.toml` 是协议的 source of truth：server endpoint 和证书 pin、注册角色密钥、ACL 边、角色 prose、并发、超时、relay policy、每个角色的 `[client.runtime]` drive 与 command、路由和 gateway 配置都在这里。Onlyne 不会通过运行时 API 修改它。追加 `onlyne-client init` 片段或使用 `onlyne server generate`，然后运行 `onlyne reload`。
+`<server-root>/.onlyne/spec.toml` 是协议的 source of truth：server endpoint 和证书 pin、注册角色密钥、ACL 边（`allowed_senders` 与 `allowed_targets`）、路由义务（`owes_targets`）、角色 prose、并发、超时、每个角色的 `[client.runtime]` drive 与 command、事件钩子（`[[hook]]`）、路由和 gateway 配置都在这里。使用 `onlyne-client init --register` 或 `onlyne server generate` 注册角色，然后运行 `onlyne reload`。
 
 自动重投的年龄闸是 `[server].requeue_ttl_secs`。默认值为 `0`，表示关闭这道闸；启用后从 `enqueued_at` 计算排队行龄。自动重投发生时若已经超过这个年龄，该行会结清为 `expired`，reason 为 `requeue_ttl`；操作员发起的 `repair retry` 不经过这道年龄闸。
 
@@ -352,7 +353,7 @@ onlyne schema client --pretty
 <runtime-dir>/<digest>.json    注册文件：kind、role、root、pid、version、runtime
 ```
 
-注册文件让读取方无需遍历目录树就能知道谁在服务哪棵树：`kind` 说明是 server root 还是角色工作区的 client，`role` 给出角色名。调用方可以用 `onlyne_wire::socket::list_registrations` 列出目录中的全部注册，也可以用 `read_registration <root>` 读取单个注册。
+注册文件让读取方无需遍历目录树就能知道谁在服务哪棵树：`kind` 说明是 server root 还是角色工作区的 client，`role` 给出角色名。操作者可以用 `onlyne ls` 列出本机全部注册，Rust 调用方通过 `onlyne_wire::socket::list_registrations` 与 `onlyne_wire::socket::read_registration` 读取。
 
 路径长度规则已经不存在。深层工作区和浅层工作区解析到同一个短运行时路径，`.onlyne/run/` 下不会创建任何东西——`<owner>/.onlyne/run/s` 只作为操作者打印时的规范拼写保留。在 Windows 上，同样的两个文件保存 marker 和注册，socket 本身是 marker 中命名的 NPFS pipe。
 
@@ -367,12 +368,13 @@ client 会把实际服务路径以 `ONLYNE_SOCKET` 注入每个 session。socket
 ### 生命周期与观测
 
 ```bash
-# Server：前台、detached、显式停止
-onlyne server run   --root <server-root>
-onlyne server start --root <server-root>
-onlyne server stop  --root <server-root>
+# Server：前台运行；`shutdown` 通过 admin socket 排空并停止在线 server
+onlyne server init     --root <server-root>                  # --listen 默认 127.0.0.1:7811
+onlyne server run      --root <server-root>
+onlyne server shutdown --server-root <server-root> --drain-secs 5
 
 # Client：始终在前台；没有 start/stop 动词
+onlyne client init   --workspace <workspace> --role <role> --server-root <server-root> --register
 onlyne client run    --workspace <workspace>
 onlyne client status --workspace <workspace>
 onlyne-client doctor                         # 宿主检测 JSON；总是退出 0
@@ -391,11 +393,10 @@ onlyne --server-root <root> reload
 
 # TUI：交互面板或单帧文本
 onlyne tui --server-root <root>
-onlyne tui --server-root <root> --once --page 1 --state active
-onlyne tui --server-root <root> --once --page 2 --state all
+onlyne tui --server-root <root> --once
 ```
 
-TUI 第 1 页是角色网络和活动 session，第 2 页是 task/session 图、fault、历史、账本行和任务详情。单帧快照会明确写出状态过滤：`active` 是默认值并保留活动视图，`all` 还会包含已结清的 session 与账本行。在第 2 页使用 `--state all`，就能看到已结清行的 `reason=<text>`。TUI 只通过 admin socket 观测，不承载消息。
+`--once` 是看板唯一接受的旗标，用于将当前集群页渲染为单帧纯文本后退出。TUI 第 1 页是角色网络和活动 session，第 2 页是任务族跨角色路径、账本行和任务详情，第 3 页是打开的 fault 与恢复动作；翻页与过滤在面板内按 `1`/`2`/`3` 键切换。TUI 只通过 admin socket 观测，不承载消息。
 
 ### 七个 supervisor 动词的门禁
 
@@ -421,7 +422,7 @@ onlyne --server-root <root> repair rebind --task <task-id> --session-id <id> --b
 onlyne --server-root <root> repair ack    --fault-id <id> --reason <text>
 ```
 
-`onlyne --help` 会列出 socket backend 和退出码。简表：`0` 成功，`1` daemon/运行时失败，`2` 本地校验失败，`3` 找不到 socket，`4` 操作员输入被拒绝，`5` `client run` 找不到支持的 session host，`127` 缺少兄弟二进制。
+`onlyne --help` 会列出 socket backend 和退出码。简表：`0` 成功，`1` daemon/运行时失败，`2` 本地校验失败，`3` 找不到 socket，`4` 操作员输入被拒绝，`5` `client run` 找不到支持的 session host，`6` 数据库或工作区来自其他版本（`EXIT_NEEDS_MIGRATION`），`127` 缺少兄弟二进制。
 
 ### 运行 IM 网关
 
@@ -440,11 +441,12 @@ onlyne --server-root <root> repair ack    --fault-id <id> --reason <text>
 onlyne-im init --root ./im --server-root <server-root>
 
 # 2. 一条会话。`--conversation` 用平台自己的 id，所以 Telegram 群 id 保留开头的
-#    `-`。`--role` 是会话目录的 slug，一个没有协议含义的操作者标签，缺省由两个 id
-#    推导。`--peer` 是网关可以寻址、也可以被其寻址的 role，默认 `_supervisor`（集群
-#    的操作 agent）。第一次 `generate` 还会通过 server 的 admin socket 把网关这条
-#    role 写进集群 spec.toml，ACL 边两侧一起补。
+#    `-`。`--slug`（兼容别名 `--role`）是 `conversations/` 下的会话目录标签，没有
+#    协议含义，缺省由两个 id 推导。`--peer` 是网关可以寻址、也可以被其寻址的 role，
+#    默认 `_supervisor`（集群的操作 agent）。第一次 `generate` 还会通过 server 的
+#    admin socket 把网关这条 role 写进集群 spec.toml，ACL 边两侧一起补。
 onlyne-im generate --root ./im --gateway telegram --conversation -1007788 \
+                   --slug tg-main \
                    --server-root <server-root> --peer _supervisor
 
 # 3. bot 凭据，落在网关根下，权限 0600。优先用 `--token-file` 而不是 `--token`：
@@ -592,7 +594,7 @@ hello → welcome → report.ready → assign → assign_ack
 - task、completion 和 control 携带幂等键，至少投递一次；观测事件使用游标补发，慢观察者不会拖慢 worker。
 - 每个注册角色拥有 ed25519 身份；client 固定 server 证书并通过 TLS 1.3 认证。
 - 被拒绝的消息不写账本行。completion 有一条内建的返回路径，始终回到账本记录的 origin。
-- 一个 client session 服务一个 task。task 结清后，该 session 不再占用 `max_sessions` 容量；只要 plugin transport 仍挂着，client 会保留这个已结清 slot，transport 结束后才退役 slot 与宿主资源。仍绑定且未结清的 task session 若 transport 断开超过宽限窗口，或 transport 仍在线但连续三个心跳周期没有新帧，也会退役；client 随后把 task 结清为 `failed`，以 `session_dead` 拒收其持有的投递行，并发布 session 的退出投影。
+- 一个 client session 服务多少次投递由 `[client.session] scope` 决定：`oneshot`（默认）每次投递新建一个 session 并在结清后关闭，`task` 在同一任务家族的多跳投递间复用同一个 session，`role` 为角色维护至多 `max_sessions` 个常驻或可恢复会话池。投递结清后不再占用活动容量；仍绑定且未结清的会话若 transport 断开超过 `reconnect_grace_secs`，或连续三个心跳周期没有新帧，client 会将其退役并把任务结清为 `failed`（拒收理由 `session_dead`）。
 - aggregate role 把子集群暴露给父 server，不需要把子角色名或联邦操作加入 wire protocol。
 
 v2 的 crate 地图、session 生命周期和形式化设计理由见 [`AGENTS.md`](AGENTS.md) 与 [`docs/v2-PLAN.md`](docs/v2-PLAN.md)。[`docs/v1-ARCHITECTURE.md`](docs/v1-ARCHITECTURE.md) 是归档的 v1 地图，保留下来记录 v1 的形态；[`proofs/BRIEF.md`](proofs/BRIEF.md) 承载 v1 的设计理由。
@@ -601,7 +603,8 @@ v2 的 crate 地图、session 生命周期和形式化设计理由见 [`AGENTS.m
 
 ### 用户与操作员指南
 
-- [`docs/v1-PLAN.md`](docs/v1-PLAN.md) — 权威设计与验收用例总览。
+- [`AGENTS.md`](AGENTS.md) 与 [`docs/v2-PLAN.md`](docs/v2-PLAN.md) — v2 执行契约与权威架构设计。
+- [`docs/v2.7-OVERHAUL-PLAN.md`](docs/v2.7-OVERHAUL-PLAN.md) — 文档权威分层与 v2.7 改造清单。
 - [`docs/operations.md`](docs/operations.md) — socket、配置、fault 检查、恢复、requeue policy、exec/ACP session 与 session 属主。
 - [`crates/onlyne-adapter/PROTOCOL.md`](crates/onlyne-adapter/PROTOCOL.md) — 外部 agent/gateway wire contract。
 - [`examples/supervisor/README.md`](examples/supervisor/README.md) — 真实 pi/Orca running-lights 演示。

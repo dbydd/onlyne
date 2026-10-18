@@ -20,7 +20,7 @@ to you and the spec file.
   on every envelope it relays. Put `admin = true` on your own `[[client]]` entry too: that
   is the standing a client-held supervisor session sends with, and the flag the Control-class
   ACL bypass reads.
-- Lifecycle: `onlyne server init|run|status|generate|reload`, the top-level
+- Lifecycle: `onlyne server init|run|status|generate|reload|shutdown` (also top-level `onlyne shutdown`), the top-level
   `onlyne wait-ready`, `onlyne client run|init|status`, and `onlyne gateway status`.
   `onlyne gateway status` still reports the mounts the server knows; the platform verbs
   that used to sit beside it are not verbs of `onlyne` — the gateway shipped as its own
@@ -139,9 +139,8 @@ Seven verbs require both flags: `send`, `reply`, `handoff`, `complete`, `ack`, `
 call stands outside that role's plugin session. The refusal names the plugin tool that answers
 for a role where one exists (`onlyne_send` for `send`, `onlyne_handoff` for `handoff`,
 `onlyne_complete` for `complete`). A call missing either flag exits 2 before it opens a socket.
-`repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, `reload`, and `status`
-carry no such flag. There is no `shutdown` verb: both daemons run in the foreground and the
-terminal host owns stopping them.
+`repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, `reload`, `shutdown`, and `status`
+carry no such flag. Both daemons run in the foreground; `onlyne server shutdown [--drain-secs <n>] [--reason <text>]` requests a graceful server shutdown over the admin socket.
 
 **Material moves by path, not through the envelope.** A delivery's template renders an
 optional block quoting an upstream role's result, and nothing in the tree fills it —

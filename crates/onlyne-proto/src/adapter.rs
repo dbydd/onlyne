@@ -142,9 +142,7 @@ impl Capability {
 
     /// Whether this runtime declared that the host may ask it for a session.
     pub fn is_hosting(capabilities: &[Capability]) -> bool {
-        Self::HOSTING
-            .iter()
-            .any(|wanted| capabilities.contains(wanted))
+        capabilities.contains(&Capability::Open)
     }
 }
 
@@ -159,13 +157,16 @@ impl std::fmt::Display for Capability {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct AgentMount {
     pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     /// Process id, used for probe cross-checks on the local machine.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// The name this hosting runtime answers to, when mounted by a resident runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 /// Gateway-side mount data carried in the same `hello` frame.

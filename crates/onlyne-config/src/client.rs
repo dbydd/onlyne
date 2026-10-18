@@ -387,6 +387,7 @@ impl ClientConfig {
         // The fused key first: a file that still carries it is refused by the
         // move, not by whatever serde says about the keys that replaced it.
         validate_backend_key(&parsed, text, file)?;
+        validate_relay_keys(&parsed, text, file)?;
         validate_placement(&parsed, text, file)?;
         validate_session(&parsed, text, file)?;
         let config: Self = parsed.clone().try_into().map_err(|err: toml::de::Error| {
@@ -569,9 +570,55 @@ fn validate_backend_key(parsed: &toml::Value, text: &str, file: &str) -> Result<
         ));
     }
     if carries_backend(parsed) {
-        return Err(SpecError::parse(file, 1, BACKEND_IS_GONE));
+        return Err(SpecError::parse(
+            file,
+            nested_key_line(text, "backend"),
+            BACKEND_IS_GONE,
+        ));
     }
     Ok(())
+}
+
+/// Refuse `relay_required`, `relay_required_count`, and `relay_count` wherever
+/// they sit in the client `config.toml`. The keys were retired with the relay
+/// model; reach is now `allowed_targets` and the delivery obligation is
+/// `owes_targets` (`docs/v2-CONTRACT.md` §"Slice 6").
+fn validate_relay_keys(parsed: &toml::Value, text: &str, file: &str) -> Result<(), SpecError> {
+    const KEYS: &[&str] = &["relay_required", "relay_required_count", "relay_count"];
+    for key in KEYS {
+        if carries_key(parsed, key) {
+            return Err(SpecError::parse(
+                file,
+                root_key_line(text, key).max(nested_key_line(text, key)),
+                crate::RELAY_IS_GONE,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a parsed document carries `key` at its root or at any depth below.
+fn carries_key(value: &toml::Value, key: &str) -> bool {
+    match value {
+        toml::Value::Table(table) => {
+            table.contains_key(key) || table.values().any(|v| carries_key(v, key))
+        }
+        toml::Value::Array(items) => items.iter().any(|v| carries_key(v, key)),
+        _ => false,
+    }
+}
+
+/// Line of a key written anywhere in the document, `1` when no scan can name
+/// it (e.g. the key was written in a form a line scan cannot match).
+fn nested_key_line(text: &str, key: &str) -> usize {
+    let bare = format!("{key} =");
+    let tight = format!("{key}=");
+    text.lines()
+        .position(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with(&bare) || trimmed.starts_with(&tight)
+        })
+        .map_or(1, |idx| idx + 1)
 }
 
 /// Whether a parsed document carries a `backend` key below its root. The client
@@ -641,4 +688,33 @@ fn display_name(path: &Path) -> &str {
     path.file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_required_in_workspace_config_is_refused() {
+        let text = "placement = \"orca\"\nrelay_required = [\"reviewer\"]\n";
+        let err = ClientConfig::parse_str(text).expect_err("relay key must be refused");
+        assert_eq!(err.message(), crate::RELAY_IS_GONE);
+        assert_eq!(err.line(), Some(2));
+    }
+
+    #[test]
+    fn nested_relay_key_is_refused_with_its_line() {
+        let text = "[client.runtime]\nrelay_count = 3\n";
+        let err = ClientConfig::parse_str(text).expect_err("nested relay key must be refused");
+        assert_eq!(err.message(), crate::RELAY_IS_GONE);
+        assert_eq!(err.line(), Some(2));
+    }
+
+    #[test]
+    fn nested_backend_key_reports_its_actual_line() {
+        let text = "placement = \"orca\"\n\n[server]\nbackend = \"acp\"\n";
+        let err = ClientConfig::parse_str(text).expect_err("nested backend must be refused");
+        assert_eq!(err.message(), super::BACKEND_IS_GONE);
+        assert_eq!(err.line(), Some(4));
+    }
 }

@@ -33,6 +33,13 @@
         "role": {
           "type": "string"
         },
+        "runtime": {
+          "description": "The name this hosting runtime answers to, when mounted by a resident runtime.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "session": {
           "type": [
             "string",
@@ -117,6 +124,20 @@
         },
         "prose": {
           "type": "string"
+        },
+        "scope": {
+          "description": "The role's `[client.session] scope`, the same lowercase word the config and `OpenArgs` carry.\n\nA runtime needs it because the two scopes want opposite things from the moment a delivery lands. `oneshot` is finished: the runtime should end its own process, which is also the only way its own store gets flushed — killing it instead loses whatever the runtime had not yet written. `task` and `role` want the opposite: the session outlives this delivery, so the process stays and the conversation is what the next delivery lands in.\n\nThe client cannot decide this for the runtime either way. Retiring a session keeps its resource while the agent is still reachable, so a runtime that stays mounted keeps its pane open forever; and closing the pane from here kills a runtime before it has written its own last words. So the scope rides the assignment and the runtime acts on it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "description": "The session this delivery is for.\n\nA runtime that declared `open` opens one conversation and may keep it across several deliveries, so a task id is not enough to say where the work goes: the same task retried, or a family served by one conversation over several turns, both land in one session. The session id is the key every other lookup uses, and a mount serving several sessions has no other way to route.\n\nAbsent from a frame written by a host that predates it, and a runtime reading such a frame serves it as the only session it has — one connection, one conversation, which is what every runtime did before.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "task_id": {
           "type": "string"
@@ -219,10 +240,31 @@
           ]
         },
         {
-          "description": "Keep session conversation in the runtime store so its process can be released and resumed.",
+          "description": "Keep session conversation in the runtime store so its process can be released and resumed.\n\nThis is a statement about a **spawned** runtime: the client started the process, the conversation outlives it, and resuming means starting the same argv again with the session's own key. It is not what a hosting runtime does — a runtime that was already resident never released the conversation, so it has nothing to resume. The three below are what separates the two.",
           "type": "string",
           "enum": [
             "resume"
+          ]
+        },
+        {
+          "description": "Open a session on request: the host asks this runtime for a conversation and the runtime names one back.\n\nA runtime declaring it is **hosting**: it owns its sessions rather than serving the one the client spawned it for, and the connection it holds is this role's standing transport instead of one session's. A runtime declaring none of the three is spawned, and everything the host does with it is exactly what it did before.",
+          "type": "string",
+          "enum": [
+            "open"
+          ]
+        },
+        {
+          "description": "Keep a session's process released while its conversation stays where the runtime keeps it.",
+          "type": "string",
+          "enum": [
+            "suspend"
+          ]
+        },
+        {
+          "description": "End a session, for the same reason [`Capability::Suspend`] exists and with the same answer when it cannot: a refusal, never silence. A dropped `close` reads to the host as a session that will not let go.",
+          "type": "string",
+          "enum": [
+            "close"
           ]
         }
       ]
@@ -1027,6 +1069,25 @@
           }
         },
         {
+          "description": "Open a session on a runtime that owns its own.\n\nSent only to a connection whose runtime declared `open`, and only when the client needs a session and would otherwise start a process for it. A hosting runtime is already resident: asking it is the whole difference between one process serving a role's sessions and the client spawning one process per session, which is the shape this capability exists to avoid.\n\nThe answer carries the `session_id` the runtime knows the conversation by, and an optional `resume_handle` — whatever *this* runtime needs to find that conversation again, which the client stores without reading. A runtime that cannot resume says so by omitting the handle, and the client opens a fresh conversation rather than composing a history summary to stand in for one.",
+          "type": "object",
+          "required": [
+            "args",
+            "op"
+          ],
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/OpenArgs"
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "open"
+              ]
+            }
+          }
+        },
+        {
           "description": "The host is going away.",
           "type": "object",
           "required": [
@@ -1078,7 +1139,7 @@
       ]
     },
     "Mount": {
-      "description": "Plugin and gateway mount data, discriminated by [`MountKind`].\n\nThe mount names the configured instance the connection serves, and that is the identity the ACL and the routing use: `gateway` holds a `[[gateway]]` id and `role` holds a spec role name, both taken from the server's spec, because one plugin crate can back several configured instances with their own credentials, channels, and `[[route]]` bindings.\n\nThe program name travels in its own field. `HelloArgs::plugin` on this surface and `HandshakeArgs::agent` on a role connection name the crate that connected, which is the thing a protocol or version mismatch is about. Deriving the instance from the program would collapse the several-instances case.\n\nThe enum is untagged, so the wire form is the plan's own `hello` example at §7 line 298 — `\"mount\":{\"role\":\"planner\",\"session\":\"8b1c...\"}` — with `kind` beside it in the same args object rather than nested under a tag.\n\nUntagged matching is first-match-wins, so the variant order below is the disambiguation rule: `Agent`, then `Gateway`, then `Cluster`, then `Tools`, then `Admin`. Each payload denies unknown fields, and that guard is what makes the order safe to read rather than a silent mis-decode: `AgentMount` and `ClusterMount` both carry `role`, so without it a cluster mount would decode as an agent mount. A new field belongs to the earliest variant that owns it, and making one collide with an earlier variant's set is a wire change this list must be updated for.\n\nA bare `Admin` mount serializes as JSON `null`; the sibling `kind` field is what identifies it.",
+      "description": "Plugin and gateway mount data, discriminated by [`MountKind`].\n\nThe mount names the configured instance the connection serves, and that is the identity the ACL and the routing use: `gateway` holds a `[[gateway]]` id and `role` holds a spec role name, both taken from the server's spec, because one plugin crate can back several configured instances with their own credentials, channels, and `[[route]]` bindings.\n\nThe program name travels in its own field. `HelloArgs::plugin` on this surface and `HandshakeArgs::agent` on a role connection name the crate that connected, which is the thing a protocol or version mismatch is about. Deriving the instance from the program would collapse the several-instances case.\n\nThe enum is untagged, so the wire form is the plan's own `hello` example at §7 line 298 — `\"mount\":{\"role\":\"planner\",\"session\":\"8b1c...\"}` — with `kind` beside it in the same args object rather than nested under a tag. `kind` is not decoration: it is what names the variant, so the two are read together by [`HelloArgs`]'s own decoder rather than the enum guessing.\n\n[`Mount::decode`] is the one place that pairing lives, and it is what every connection on the wire goes through. The `untagged` derive stays for a caller that holds a mount on its own, and it is first-match-wins there: the variant order above is the disambiguation rule for that path, and each payload denies unknown fields, which is what keeps the order a decision rather than a silent mis-decode. `AgentMount` and `ClusterMount` both carry `role`, so without that guard they would be told apart by nothing.\n\nA bare `Admin` mount serializes as JSON `null`; the sibling `kind` field is what identifies it.",
       "anyOf": [
         {
           "$ref": "#/definitions/AgentMount"
@@ -1128,6 +1189,20 @@
           "enum": [
             "admin"
           ]
+        },
+        {
+          "description": "Cluster-level tooling on the server socket.\n\n`Mount::Cluster` has existed since v1 and carried `role`, which is also what `AgentMount` carries — so under untagged decoding a cluster mount was told apart from an agent mount only by a field the earlier variant happened to deny. Naming the kind is what makes that unnecessary.",
+          "type": "string",
+          "enum": [
+            "cluster"
+          ]
+        },
+        {
+          "description": "The protocol name for a platform bridge, kept after the IM gateway crates were frozen (`AGENTS.md` §6). It carries a `GatewayMount`: the wire shape did not change, only the name the kind goes by.",
+          "type": "string",
+          "enum": [
+            "bridge"
+          ]
         }
       ]
     },
@@ -1163,6 +1238,48 @@
           ]
         }
       ]
+    },
+    "OpenArgs": {
+      "description": "`open`: the host asking a hosting runtime for one session.\n\nThe `scope` travels because it is the runtime's own decision what a session *is* on its side — a fresh conversation, or a family it already holds — and because `max_sessions` is the host's count while the runtime may be serving this role from a pool of its own.",
+      "type": "object",
+      "required": [
+        "scope",
+        "session_id",
+        "task_id"
+      ],
+      "properties": {
+        "family": {
+          "description": "The task family, so a `task` scope can hand back the conversation it already holds rather than opening a second one for one chain.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prose": {
+          "description": "The role's own instruction text, for a runtime that has no instruction file of its own to put it in.",
+          "default": "",
+          "type": "string"
+        },
+        "resume_handle": {
+          "description": "The handle this client stored for the family's previous session, so a `task` scope can hand back the conversation the runtime already holds instead of opening a second one for one chain. Opaque in both directions: the host stores what the runtime said and gives it back unread.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "description": "The scope the role runs in: `oneshot`, `task` or `role`.",
+          "type": "string"
+        },
+        "session_id": {
+          "description": "The session the host is opening. The runtime echoes it back, so a connection carrying several sessions has one name for each.",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "The delivery the session is being opened for.",
+          "type": "string"
+        }
+      }
     },
     "Outcome": {
       "description": "Task result dimension.",
@@ -1573,7 +1690,6 @@
       }
     },
     "Report": {
-      "description": "The report envelope kinds a client pushes (§6, §7).\n\n`cluster_ref` names the origin cluster on a relayed report, so a federated projection can say where it came from. Only the three state-carrying kinds hold it: `Fault` carries no projection, and a ninth optional field there would push `Report` and `ClientOp` from 192 to 224 bytes on the hot path.\n\n`heartbeat` is the one frame that carries a session's state to the server. Two shapes travel under the same kind, and both are optional-skipped so neither writes a field the other has no use for: - the adapter's beat — a plugin telling its host it is alive — holds `observed` alone. The host reduces that tuple into the session row it keeps, and `session_id`/`projection` stay absent. - the client's publish to the server holds `projection`, the whole [`SessionProjection`] it stores for the task, beside the same `observed` tuple so the two never disagree. The server mirrors that projection verbatim; `session_id` names the row it belongs to.\n\nA beat holding no `projection` is liveness only: the server keeps the working/running/pending/attached tuple it has always inferred from it.",
       "oneOf": [
         {
           "description": "The ready barrier passed; the server may now deliver the payload.",
@@ -1708,7 +1824,7 @@
                   ]
                 },
                 "details": {
-                  "description": "The full result, delivered verbatim to the next hop and the originator.",
+                  "description": "The full result, delivered verbatim to the next hop and the originator.\n\nCapped at [`DETAILS_MAX_BYTES`]. The cap is a fact about this field, so it lives beside it rather than in whichever door happens to check it: a plugin, a tools mount and `onlyne complete` all refuse the same number, in the same words.",
                   "type": [
                     "string",
                     "null"

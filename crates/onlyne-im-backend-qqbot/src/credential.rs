@@ -24,26 +24,16 @@ impl QqCredentials {
     /// A missing separator is the one shape an operator pastes wrong, so the
     /// error names the encoding rather than reporting a bare "bad credential".
     pub fn parse(value: &str) -> anyhow::Result<Self> {
-        let value = value.trim();
-        if value.is_empty() {
-            anyhow::bail!("the credential is empty");
-        }
-        let (app_id, app_secret) = value.split_once(':').ok_or_else(|| {
-            anyhow::anyhow!(
+        let (app_id, app_secret) = onlyne_im_backend::credential::parse_colon_pair(
+            value,
+            &format!(
                 "the credential must be `{APP_ID_ENV}:{APP_SECRET_ENV}` \
                  (app id and app secret separated by one colon)"
-            )
-        })?;
-        if app_id.trim().is_empty() {
-            anyhow::bail!("the app id (before the colon) is empty");
-        }
-        if app_secret.trim().is_empty() {
-            anyhow::bail!("the app secret (after the colon) is empty");
-        }
-        Ok(Self {
-            app_id: app_id.trim().to_string(),
-            app_secret: app_secret.trim().to_string(),
-        })
+            ),
+            "the app id (before the colon) is empty",
+            "the app secret (after the colon) is empty",
+        )?;
+        Ok(Self { app_id, app_secret })
     }
 
     /// The encoded form, what a credential file holds.

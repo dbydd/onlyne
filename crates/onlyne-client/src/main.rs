@@ -54,6 +54,11 @@ enum Command {
             help = "Role control plane text; spec.toml holds it per plan §5 and the client caches it from welcome into prose_cache"
         )]
         prose: String,
+        #[arg(
+            long,
+            help = "Append the generated [[client]] entry directly to <server-root>/.onlyne/spec.toml"
+        )]
+        register: bool,
     },
     /// Report the client answering this workspace's socket. Prints uptime, the
     /// served socket path, and the recorded fault count, and says whether the
@@ -70,16 +75,19 @@ enum Command {
         workspace: PathBuf,
     },
     /// Point at `onlyne sessions`, the admin verb that answers this query.
+    #[command(hide = true)]
     Sessions {
         #[arg(long)]
         workspace: PathBuf,
     },
     /// Point at `onlyne watch`, the admin verb that answers this stream.
+    #[command(hide = true)]
     Watch {
         #[arg(long)]
         workspace: PathBuf,
     },
     /// Point at `onlyne history`, the admin verb that answers this replay.
+    #[command(hide = true)]
     History {
         #[arg(long)]
         workspace: PathBuf,
@@ -133,15 +141,24 @@ async fn main() {
             role,
             server_root,
             prose,
+            register,
         } => match onlyne_client::ops::init::init(InitArgs {
             workspace,
-            role,
-            server_root,
+            role: role.clone(),
+            server_root: server_root.clone(),
             prose,
         })
         .await
         {
             Ok(fragment) => {
+                if register {
+                    if let Err(error) =
+                        onlyne_client::ops::init::register_in_spec(&server_root, &role, &fragment)
+                    {
+                        eprintln!("onlyne-client: {error}");
+                        std::process::exit(1);
+                    }
+                }
                 print!("{fragment}");
                 0
             }

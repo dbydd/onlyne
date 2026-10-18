@@ -93,7 +93,7 @@ struct GenerateCmd {
     /// The conversation's slug: the directory name under `conversations/`.
     /// Defaults to a name derived from the gateway and conversation ids. The
     /// slug names no identity — the chat key beside it does.
-    #[arg(long)]
+    #[arg(long = "slug", visible_alias = "role")]
     role: Option<String>,
     /// A role this conversation may address and be addressed by; repeat for
     /// several. Defaults to `_supervisor`, the cluster's operator agent.
@@ -297,7 +297,14 @@ fn report(outcome: anyhow::Result<()>) -> i32 {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("onlyne-im: {error:#}");
-            2
+            if error
+                .chain()
+                .any(|e| e.is::<onlyne_im::config::NeedsMigration>())
+            {
+                onlyne_proto::EXIT_NEEDS_MIGRATION
+            } else {
+                2
+            }
         }
     }
 }
@@ -307,7 +314,14 @@ async fn run(root: PathBuf, socket: Option<String>) -> i32 {
         Ok(gateway) => gateway,
         Err(error) => {
             eprintln!("onlyne-im: {error:#}");
-            return 2;
+            return if error
+                .chain()
+                .any(|e| e.is::<onlyne_im::config::NeedsMigration>())
+            {
+                onlyne_proto::EXIT_NEEDS_MIGRATION
+            } else {
+                2
+            };
         }
     };
     tracing::info!(
@@ -358,7 +372,14 @@ fn check(root: PathBuf) -> i32 {
         }
         Err(error) => {
             eprintln!("onlyne-im: {error:#}");
-            2
+            if error
+                .chain()
+                .any(|e| e.is::<onlyne_im::config::NeedsMigration>())
+            {
+                onlyne_proto::EXIT_NEEDS_MIGRATION
+            } else {
+                2
+            }
         }
     }
 }

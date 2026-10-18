@@ -34,7 +34,7 @@ pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-pub use backend::{Backend, BackendCapabilities};
+pub use backend::Backend;
 pub use credential::{CREDENTIAL_ENV, GATEWAY_ENV, credential_path};
 pub use frame::{
     BackendOp, CoreOp, HealthArgs, HelloArgs, ImConversation, ImConversations,

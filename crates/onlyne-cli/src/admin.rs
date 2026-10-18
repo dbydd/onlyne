@@ -699,6 +699,30 @@ pub fn reload(flags: &GlobalFlags) -> i32 {
     )
 }
 
+/// Flags for `shutdown`.
+#[derive(Debug, Clone, clap::Args)]
+pub struct ShutdownArgs {
+    /// Reason recorded with the shutdown.
+    #[arg(long, default_value = "operator shutdown")]
+    pub reason: String,
+    /// Let connected clients drain for this many seconds before the listener
+    /// closes.
+    #[arg(long = "drain-secs", default_value_t = 0)]
+    pub drain_secs: u64,
+}
+
+/// `shutdown` asks the server for an ordered shutdown.
+pub fn shutdown(flags: &GlobalFlags, args: ShutdownArgs) -> i32 {
+    admin(
+        flags,
+        "shutdown",
+        AdminOp::Shutdown(onlyne_proto::ShutdownArgs {
+            reason: args.reason,
+            grace_ms: args.drain_secs.checked_mul(1000),
+        }),
+    )
+}
+
 enum Probe {
     /// `status` answered `ok: true`.
     Ready(ResBody),

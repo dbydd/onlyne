@@ -125,19 +125,20 @@ host's own record and still seeds the runtime's bookkeeping.
 The client needs a session for a role and this runtime is the one serving it.
 
 ```json
-{"op":"open","args":{
-  "role": "builder",
+{"id":12,"op":"open","args":{
+  "session_id": "s-7c1e",
   "task_id": "9f2c…",
   "scope": "task",
-  "family": "9f2c…"
+  "family": "9f2c…",
+  "prose": "…"
 }}
 ```
 
 ```json
-{"op":"res","reply_to":"…","body":{"ok":true,"session_id":"s-7c1e","resume_handle":"dsh://conv/8f21"}}
+{"reply_to":12,"ok":true,"data":{"session_id":"s-7c1e","resume_handle":"dsh://conv/8f21"}}
 ```
 
-`session_id` is the runtime's own identifier for the conversation it opened.
+`session_id` in `open` is the key the host generated; the runtime echoes it in `OpenedArgs`, or answers with its own identifier (which the client records in `slot.session.backend_ref` while keeping its own session key).
 `resume_handle` is optional and opaque: it is whatever this runtime needs to find
 that conversation again, and the client stores it without reading it.
 
@@ -198,19 +199,17 @@ across five sessions would have four of them reporting as stale.
 | need | where | state |
 |---|---|---|
 | registration files carry `runtime` **and** `placement` | `onlyne-wire/src/socket.rs:222-249` | done; `placement` is the field an external runtime filters on |
-| per-session identity on `assign` | `AssignArgs`, `onlyne-proto/src/adapter.rs:373` | **missing** — it carries `task_id` and `generation`; see G1 |
-| `hello` declares capabilities | `HelloArgs::capabilities` | done, but the set is short — see G3 |
+| per-session identity on `assign` | `AssignArgs`, `onlyne-proto/src/adapter.rs:602-603` | done — carries optional `session_id` and `scope`, filled at both client dispatch sites |
+| `hello` declares capabilities | `HelloArgs::capabilities` | done — includes `open`, `suspend`, `close` (`Capability::HOSTING`) |
 | per-session `(generation, seq)` watermark | `onlyne-proto/src/adapter.rs` | done |
 | registration files in the runtime directory | `onlyne-wire/src/socket.rs` | done; `runtime` is on the registration |
 | plugin dials client | `onlyne-client/src/session/adapter_socket/` | done |
-| `placement = "external"` accepted for the plugin drive | `onlyne-config/src/client.rs:649-676` | done; `acp × external` is refused because stdio is the ACP channel |
+| `placement = "external"` accepted for the plugin drive | `onlyne-config/src/client.rs:124-127` | done; `acp × external` is refused because stdio is the ACP channel |
 | the client never replays a journal to rebuild a session | — | holds; nothing does this |
 
 ## The gaps
 
-Four, each with the change it needs. They are stated here rather than fixed,
-because the DSH side is landing on another line and a wire change made twice is
-a wire change made wrongly.
+See `docs/v2.1-HOSTING-RUNTIME-GAPS.md` for the detailed audit. G2 (`Mount::decode(kind, value)`) and G4 (`MountKind::Cluster` and `MountKind::Bridge`) are closed in the tree; `AgentMount.runtime`, `Capability::Open` gating, and per-session `ReportSender` counters in `onlyne-adapter` are closed in v2.7 (`docs/v2.7-OVERHAUL-PLAN.md`). Host-initiated `suspend` and `close` frames remain deferred until the external hosting runtime line connects.
 
 ### G1 — the connection is still a session
 

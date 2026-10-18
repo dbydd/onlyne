@@ -41,7 +41,7 @@ Pick the mount by `kind`. Agent plugins send `kind: agent` with `mount.role` and
 
 `kind` names the connection class. The mount payload is flat and untagged. `kind` sits beside it inside `hello.args`, not inside a wrapper: `{"role":"planner","session":"8b1c..."}` for an agent, `{"gateway":"gw1","platform":"telegram"}` for a gateway, `{"cluster":"cluster-b","role":"cluster-b"}` for a cluster.
 
-The host matches the payload's field set against the variants in declaration order — agent, gateway, cluster, tools, admin. Every payload denies unknown fields. So adding a field to one payload changes which variant answers, and the new field belongs to the earliest variant that owns it.
+The host decodes `mount` by the `kind` field beside it (`Mount::decode(kind, value)`): `agent` decodes `AgentMount`, `gateway` and `bridge` decode `GatewayMount`, `cluster` decodes `ClusterMount`, `tools` decodes `ToolsMount`, and `admin` requires an absent payload. Every payload struct denies unknown fields, so adding a field to one payload affects only readers of that mount kind.
 
 An agent connection may send `report`, `session_register`, `assign_ack`, `send`, `handoff`, and `detach`. A gateway connection may send `deliver`, `register_channel`, `health`, `typing`, and `detach`. A tools connection may send `send`, `handoff`, `report`, and `detach`. A forbidden operation returns `forbidden` with an `op` field and a message naming the operation and the mount kind.
 

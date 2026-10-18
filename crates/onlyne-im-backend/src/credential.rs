@@ -241,6 +241,38 @@ pub fn resolve_with(value: &str, lookup: &Lookup<'_>) -> Result<String> {
     }
 }
 
+/// Split one credential string carrying two values as `first:second`.
+///
+/// Every platform whose credential is a colon-separated pair (QQ's
+/// `app_id:app_secret`, Feishu's, Slack's `xapp-…:xoxb-…`) reads it back the
+/// same way — trim, split on the first colon, refuse an empty half — so the
+/// three parsers share this one. The caller supplies the sentences: `missing`
+/// names the encoding when no colon is present, `first_empty` and
+/// `second_empty` name which half an operator left out.
+pub fn parse_colon_pair(
+    value: &str,
+    missing: &str,
+    first_empty: &str,
+    second_empty: &str,
+) -> anyhow::Result<(String, String)> {
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("the credential is empty");
+    }
+    let (first, second) = value
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("{}", missing))?;
+    let first = first.trim();
+    let second = second.trim();
+    if first.is_empty() {
+        anyhow::bail!("{}", first_empty);
+    }
+    if second.is_empty() {
+        anyhow::bail!("{}", second_empty);
+    }
+    Ok((first.to_string(), second.to_string()))
+}
+
 /// The path a gateway root keeps one backend's credential at.
 ///
 /// `onlyne-im login` writes this and the gateway hands the same path to the

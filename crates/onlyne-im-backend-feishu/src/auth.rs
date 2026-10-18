@@ -60,21 +60,15 @@ impl FeishuCredentials {
 /// Split one `app_id:app_secret` credential string. The first `:` separates;
 /// anything else is a sentence the operator reads, not a panic.
 pub fn parse_credential(raw: &str) -> Result<FeishuCredentials, String> {
-    let raw = raw.trim();
-    let (app_id, app_secret) = raw
-        .split_once(':')
-        .ok_or_else(|| {
-            format!(
-                "the credential must be app_id:app_secret (create a Feishu custom app at {DEFAULT_DOMAIN}/app)"
-            )
-        })?;
-    let app_id = app_id.trim();
-    let app_secret = app_secret.trim();
-    if app_id.is_empty() || app_secret.is_empty() {
-        return Err(
-            "the credential must be app_id:app_secret with both halves non-empty".to_string(),
-        );
-    }
+    let (app_id, app_secret) = onlyne_im_backend::credential::parse_colon_pair(
+        raw,
+        &format!(
+            "the credential must be app_id:app_secret (create a Feishu custom app at {DEFAULT_DOMAIN}/app)"
+        ),
+        "the credential must be app_id:app_secret with both halves non-empty",
+        "the credential must be app_id:app_secret with both halves non-empty",
+    )
+    .map_err(|error| error.to_string())?;
     Ok(FeishuCredentials::new(app_id, app_secret, DEFAULT_DOMAIN))
 }
 

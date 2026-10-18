@@ -9,17 +9,6 @@ use crate::payload::ImEvent;
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// What a backend can do. Absence is a declared gap the core degrades around.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct BackendCapabilities {
-    /// The backend reports message events.
-    pub message: bool,
-    /// The backend reports button-action events.
-    pub action: bool,
-    /// The backend renders a typing indicator.
-    pub typing: bool,
-}
-
 #[async_trait]
 pub trait Backend: Send + Sync {
     /// What this backend bridges and what it can do.

@@ -166,7 +166,7 @@ pub async fn generate(args: &GenerateArgs) -> Result<()> {
     // is the chat key this run mints.
     let slug = match &args.role {
         Some(slug) if !slug.trim().is_empty() => slug.clone(),
-        Some(_) => bail!("`--role` is empty"),
+        Some(_) => bail!("`--slug` is empty"),
         None => derive_slug(&args.gateway, &args.conversation),
     };
     validate_slug(&slug)?;
@@ -290,16 +290,16 @@ fn sanitize(id: &str) -> String {
 /// The names a slug may take: the same shape a directory can hold.
 pub(crate) fn validate_slug(role: &str) -> Result<()> {
     if role.is_empty() {
-        bail!("the derived role name is empty; pass --role");
+        bail!("the derived slug is empty; pass --slug");
     }
     if !role
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
     {
-        bail!("role {role:?} carries characters a role name cannot hold; pass --role");
+        bail!("slug {role:?} carries characters a slug cannot hold; pass --slug");
     }
     if role.starts_with('.') {
-        bail!("role {role:?} begins with a dot; pass --role");
+        bail!("slug {role:?} begins with a dot; pass --slug");
     }
     Ok(())
 }

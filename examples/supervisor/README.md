@@ -67,7 +67,7 @@ Every step performed by `up` is expressed in the product's own terms (idempotent
    template content). The script uses the printed `[[client]]` fragment to **replace** the placeholder
    entry. Putting the keys in the spec is something the script does on the operator's behalf by
    following the precedent of e2e case 9; in a real deployment, a person makes that decision.
-4. `onlyne server start` + `onlyne-client run` ×5: the script puts the foreground clients in the
+4. `onlyne-server run` + `onlyne-client run` ×5: the script puts the foreground daemons in the
    background (in their own session, with logs at `<ws>/.onlyne/logs/client.log`) and records their
    pids for `stop`.
 5. It waits for the five ring roles to come online, opens `_supervisor`'s pi as a tab (`orca terminal
@@ -126,9 +126,7 @@ The appeal of this demo is that it really moves. Run `run.py up` in an Orca tab 
    with no client process and therefore no box on the graph. The work it dispatches and the queued
    receipts are still visible in the ledger and through `ledger` on page 2. Page 2 is the per-task
    swarm view, with ten rows laid out by hop and their status advancing with each ack. For a single-frame
-   reading, use
-   `target/debug/onlyne --server-root /tmp/onlyne-sup tui --once --page 2 --state all`,
-   which reveals the `reason` field on settled rows. See the TUI's own help line for key bindings.
+   plain-text snapshot, use `target/debug/onlyne --server-root /tmp/onlyne-sup tui --once`; inside the interactive board, press `1`/`2`/`3` to switch pages.
 4. **Teardown**: `run.py stop` closes the supervisor tab it opened (checking again and reporting an
    error if it could not close it), removes leftover session tabs from Orca, and then sends SIGTERM to
    the five clients and server the script launched.
@@ -161,7 +159,7 @@ onlyne --server-root /tmp/onlyne-sup sessions --json | jq '.data[0].observed'
 
 ## Dashboard Wiring (Optional)
 
-Point `onlyne-board`'s `serverRoots` at the cluster root (`~/.config/onlyne-sessions/config.json`),
+Point `onlyne-sessions`'s `serverRoots` at the cluster root (`~/.config/onlyne-sessions/config.json`),
 and refreshing gives you the connection view: tabs ∩ live sessions, with only panes connected to this
 workspace lit.
 
@@ -246,7 +244,7 @@ python3 examples/supervisor/run.py stop            # 收摊
    `/tmp/onlyne-sup/ws/demo/{_supervisor,a,b,c,d,e}` 六个工作区（含真实密钥与模板
    内容）。脚本用打印出的 `[[client]]` 片段**替换**掉占位条目。密钥进 spec 这一步，
    是脚本照 e2e case 9 的先例替操作者做的；真实部署里这由人决定。
-4. `onlyne server start` + `onlyne-client run` ×5：脚本自己把前台 client 放到后台
+4. `onlyne-server run` + `onlyne-client run` ×5：脚本自己把前台守护进程放到后台
    （自己的 session，日志在 `<ws>/.onlyne/logs/client.log`），并记下 pid 供 `stop` 用。
 5. 等环上五个角色上线，把 `_supervisor` 的 pi 开成一个标签页（`orca terminal
    create`），第一句话就是 `up` 的参数。**脚本不等环跑完**：派活由 supervisor 自己
@@ -294,9 +292,8 @@ RING=a,b,c,d,e FILE=/tmp/onlyne-sup/lights.txt K=1 TOTAL=10
    第 1 页是角色网络：五个环成员在线。`_supervisor` 不上图——它是操作者自己的位置，
    `[[client]]` 条目只登记操作者身份，没有客户端进程，图上不给它盒子；它派出去的活和
    排队的回执，在第 2 页的账本和 `ledger` 里照样看得到。第 2 页是逐任务的 swarm
-   视图，十行按 hop 排开，状态跟着 ack 往前走。单帧读取用
-   `target/debug/onlyne --server-root /tmp/onlyne-sup tui --once --page 2 --state all`，
-   这样可以看到已结清行的 `reason` 字段。按键看 TUI 自己的帮助行。
+   视图，十行按 hop 排开，状态跟着 ack 往前走。单帧纯文本快照用
+   `target/debug/onlyne --server-root /tmp/onlyne-sup tui --once`；在交互面板内按 `1`/`2`/`3` 切换页面。
 4. **收摊**：`run.py stop` 关掉它开的 supervisor 标签页（关完会再查一遍，没关掉就
    报错），清掉留在 Orca 里的会话标签页，再 SIGTERM 掉脚本自己拉起的五个 client
    和服务器。
@@ -327,7 +324,7 @@ onlyne --server-root /tmp/onlyne-sup sessions --json | jq '.data[0].observed'
 
 ## 看板接线（可选）
 
-把 `onlyne-board` 的 `serverRoots` 指向集群根（`~/.config/onlyne-sessions/config.json`），
+把 `onlyne-sessions` 的 `serverRoots` 指向集群根（`~/.config/onlyne-sessions/config.json`），
 刷新就得到连接视图：标签页 ∩ 活着的会话，亮着的只有连着这个 workspace 的 pane。
 
 ## 边界

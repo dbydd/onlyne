@@ -331,7 +331,7 @@ def server_running() -> bool:
 
 
 def client_running(workspace: Path) -> bool:
-    """`onlyne-client status` exits 0 either way; the answer is in its text."""
+    """`onlyne-client status` exits 0 when running and 2 when stopped; check its text."""
     out = run([BIN / "onlyne-client", "status", "--workspace", workspace],
               capture=True, check=False)
     return "client running" in out
@@ -363,12 +363,27 @@ def start_server() -> None:
     run([ONLYNE, "--server-root", CLUSTER, "wait-ready"])
 
 
+def pid_owns_process(pid: int, needle: str) -> bool:
+    """Verify that `pid` is still an Onlyne process matching `needle`."""
+    res = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        capture_output=True, text=True, check=False)
+    return res.returncode == 0 and needle in res.stdout
+
+
 def stop_server() -> None:
     """SIGTERM the backgrounded server this driver started, and wait it out."""
     pid_file = server_pid_file()
     if not pid_file.is_file():
         return
-    pid = int(pid_file.read_text().strip())
+    raw = pid_file.read_text().strip()
+    if not raw.isdigit():
+        pid_file.unlink(missing_ok=True)
+        return
+    pid = int(raw)
+    if not pid_owns_process(pid, "onlyne-server"):
+        pid_file.unlink(missing_ok=True)
+        return
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -417,7 +432,14 @@ def stop_client(workspace: Path) -> None:
     pid_file = client_pid_file(workspace)
     if not pid_file.is_file():
         return
-    pid = int(pid_file.read_text().strip())
+    raw = pid_file.read_text().strip()
+    if not raw.isdigit():
+        pid_file.unlink(missing_ok=True)
+        return
+    pid = int(raw)
+    if not pid_owns_process(pid, "onlyne-client"):
+        pid_file.unlink(missing_ok=True)
+        return
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:

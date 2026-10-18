@@ -984,10 +984,10 @@ impl ReportSender {
     pub async fn heartbeat(&self, task_id: impl Into<String>, observed: Value) -> Result<Report> {
         let report = Report::Heartbeat {
             task_id: task_id.into(),
-            // A plugin's beat reaches its host, not the server: it names no
-            // session and publishes no projection. The client reduces the
-            // observation into the row it keeps and publishes that itself.
-            session_id: String::new(),
+            // A sender bound to one session names it; an unbound sender's beat
+            // reaches its host with no session and no projection, and the
+            // client reduces the observation into the row it keeps itself.
+            session_id: self.session_id.lock().await.clone().unwrap_or_default(),
             generation: self.generation(),
             seq: self.next_seq(),
             observed,
@@ -1369,6 +1369,7 @@ impl AgentHandle {
             capabilities,
             mount: Some(Mount::Agent(AgentMount {
                 role: role.into(),
+                runtime: None,
                 session: None,
                 task_id: None,
                 pid: Some(std::process::id()),
@@ -1546,6 +1547,22 @@ impl AgentHandle {
 
     pub fn report_sender(&self) -> ReportSender {
         self.reports.clone()
+    }
+
+    /// Build an independent [`ReportSender`] for one hosted session, with its
+    /// own `(generation, seq)` counter and bound `session_id`.
+    pub fn report_sender_for(
+        &self,
+        session_id: impl Into<String>,
+        generation: u64,
+    ) -> ReportSender {
+        let sender = ReportSender::new(self.io.clone(), generation);
+        // The sender is freshly built, so nothing else holds the lock yet and
+        // the binding cannot wait for an await inside this sync constructor.
+        if let Ok(mut bound) = sender.session_id.try_lock() {
+            *bound = Some(session_id.into());
+        }
+        sender
     }
 
     pub async fn exit(&self, reason: impl Into<String>) -> Result<()> {
@@ -1833,4 +1850,117 @@ pub fn image_envelope(
         },
         causality,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onlyne_proto::{Capability, Mount, MountKind};
+
+    #[tokio::test]
+    async fn agent_mount_runtime_roundtrips_and_defaults() {
+        let json = serde_json::json!({"role": "reviewer", "runtime": "pi"});
+        let mount: AgentMount = serde_json::from_value(json).unwrap();
+        assert_eq!(mount.runtime.as_deref(), Some("pi"));
+        assert_eq!(mount.session, None);
+        assert_eq!(mount.task_id, None);
+        assert_eq!(mount.pid, None);
+
+        let bare: AgentMount = serde_json::from_value(serde_json::json!({"role": "r"})).unwrap();
+        assert_eq!(bare.runtime, None);
+
+        let wire = serde_json::to_value(Mount::Agent(mount)).unwrap();
+        assert_eq!(wire["runtime"], "pi");
+        assert!(Mount::decode(MountKind::Agent, wire).is_ok());
+    }
+
+    #[tokio::test]
+    async fn is_hosting_requires_open() {
+        assert!(Capability::is_hosting(&[Capability::Open]));
+        assert!(Capability::is_hosting(&[
+            Capability::Report,
+            Capability::Open
+        ]));
+        assert!(!Capability::is_hosting(&[
+            Capability::Suspend,
+            Capability::Close
+        ]));
+        assert!(!Capability::is_hosting(&[]));
+    }
+
+    #[tokio::test]
+    async fn per_session_senders_count_and_bind_independently() {
+        let (client_side, server_side) = tokio::net::UnixStream::pair().unwrap();
+        let (server_io, mut inbound) = AdapterIo::new_with_inbound(
+            server_side,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        tokio::spawn(async move {
+            while let Some(frame) = inbound.recv().await {
+                if let Some(id) = frame.id {
+                    let _ = server_io.respond(id, ResBody::ok(Value::Null)).await;
+                }
+            }
+        });
+        let handle = AdapterClient::connect(client_side);
+
+        let first = handle.report_sender_for("session-a", 2);
+        let second = handle.report_sender_for("session-b", 3);
+
+        assert_eq!(first.generation(), 2);
+        assert_eq!(second.generation(), 3);
+
+        let a1 = first
+            .heartbeat("task-1", serde_json::json!({"beat": 1}))
+            .await
+            .unwrap();
+        let a2 = first
+            .heartbeat("task-1", serde_json::json!({"beat": 2}))
+            .await
+            .unwrap();
+        let b1 = second
+            .heartbeat("task-1", serde_json::json!({"beat": 1}))
+            .await
+            .unwrap();
+
+        let Report::Heartbeat {
+            session_id, seq, ..
+        } = a1
+        else {
+            panic!("expected a heartbeat");
+        };
+        assert_eq!(session_id, "session-a");
+        assert_eq!(seq, 1);
+        let Report::Heartbeat {
+            session_id, seq, ..
+        } = a2
+        else {
+            panic!("expected a heartbeat");
+        };
+        assert_eq!(session_id, "session-a");
+        assert_eq!(seq, 2);
+        let Report::Heartbeat {
+            session_id, seq, ..
+        } = b1
+        else {
+            panic!("expected a heartbeat");
+        };
+        assert_eq!(session_id, "session-b");
+        assert_eq!(seq, 1);
+
+        // The shared handle sender is untouched by the per-session ones.
+        let shared = handle
+            .report_heartbeat("task-1", serde_json::json!({"beat": 1}))
+            .await
+            .unwrap();
+        let Report::Heartbeat {
+            session_id, seq, ..
+        } = shared
+        else {
+            panic!("expected a heartbeat");
+        };
+        assert_eq!(session_id, "");
+        assert_eq!(seq, 1);
+    }
 }

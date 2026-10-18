@@ -16,9 +16,9 @@ TimeoutStopSec=20
 StandardOutput=append:/srv/onlyne/.onlyne/logs/server.log
 StandardError=append:/srv/onlyne/.onlyne/logs/server.log
 NoNewPrivileges=true
-PrivateTmp=true
+PrivateTmp=false
 ProtectSystem=strict
-ReadWritePaths=/srv/onlyne
+ReadWritePaths=/srv/onlyne /tmp
 
 [Install]
 WantedBy=multi-user.target

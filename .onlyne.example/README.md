@@ -1,6 +1,6 @@
-# Onlyne v1.0.0 example tree
+# Onlyne v2 example tree
 
-v1.0.0 has two roots.
+Core clusters use two roots (an optional IM gateway adds a third root; see `README.md` §"Operate an IM gateway").
 
 Server root, passed as `onlyne-server run --root <dir>`:
 
@@ -13,7 +13,6 @@ Server root, passed as `onlyne-server run --root <dir>`:
   keys/server.key        # ed25519 + TLS private key, PEM 0600
   templates/<topology>/<role>/   # generate content source (§11)
   ws/<topology>/<role>/  # generate default output, movable as a directory
-  cache/                 # gateway render scratch files
 ```
 
 Role workspace, passed as `onlyne-client run --workspace <dir>`:
@@ -41,13 +40,12 @@ Role workspace, passed as `onlyne-client run --workspace <dir>`:
 
 ## Registration flow
 
-1. `onlyne-client init --workspace W --role R --server-root S` writes `W/.onlyne/keys/role.key` and
-   `W/.onlyne/config.toml`, then prints a paste-ready fragment whose first line is exactly
-   `[[client]]`.
-2. Append that fragment to `S/.onlyne/spec.toml`.
+1. `onlyne-client init --workspace W --role R --server-root S [--register]` writes `W/.onlyne/keys/role.key` and
+   `W/.onlyne/config.toml`, and prints a paste-ready fragment whose first line is `[[client]]` (when `--register` is passed, it also appends the entry directly to `S/.onlyne/spec.toml`).
+2. Append that fragment to `S/.onlyne/spec.toml` (when `--register` was omitted).
 3. `onlyne --server-root S reload` re-parses the spec, then swaps it atomically.
 
-`init` never writes `spec.toml`. A key that no spec entry lists gets `error{code:"unauthorized"}`
+A key that no spec entry lists gets `error{code:"unauthorized"}`
 on connect.
 
 ## Truth split

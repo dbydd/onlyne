@@ -980,15 +980,18 @@ pub fn release_exited_delivery(
 }
 
 fn requeue_spec(state: &State) -> (u32, u64) {
-    state
-        .spec_snapshot()
-        .map(|spec| {
-            (
-                spec.server.requeue_max_attempts,
-                spec.server.requeue_ttl_secs,
-            )
-        })
-        .unwrap_or((0, 0))
+    match state.spec_snapshot() {
+        Some(spec) => (
+            spec.server.requeue_max_attempts,
+            spec.server.requeue_ttl_secs,
+        ),
+        None => {
+            tracing::warn!(
+                "cannot read spec snapshot for automatic requeue bounds; falling back to unbounded"
+            );
+            (0, 0)
+        }
+    }
 }
 
 /// TTL, then budget, then `requeue_one`. True when the row moved to `queued`.

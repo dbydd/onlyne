@@ -1,7 +1,7 @@
 [package]
 name = "onlyne-web"
 version = "2.3.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 description = "The optional graphical front end: boards and the route graph over one view reducer"
@@ -10,7 +10,7 @@ publish = false
 # This crate deliberately stands outside the workspace (`exclude` in the root
 # `Cargo.toml`): its dependency tree — axum and a Node-made bundle behind
 # `rust-embed` — is not something the core build should need. Dependencies are
-# pinned here, not inherited, for the same reason (`docs/v2-PLAN.md` line 391).
+# pinned here, not inherited, for the same reason (`docs/v2-PLAN.md` line 399).
 
 [dependencies]
 onlyne-proto = { path = "../onlyne-proto" }

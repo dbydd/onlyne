@@ -36,6 +36,7 @@ fn hello(caps: Vec<Capability>) -> HelloArgs {
         capabilities: caps,
         mount: Some(Mount::Agent(onlyne_proto::AgentMount {
             role: "planner".to_string(),
+            runtime: None,
             session: None,
             task_id: None,
             pid: None,

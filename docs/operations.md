@@ -439,7 +439,7 @@ The CLI gate belongs to supervisors and to `exec` roles whose sessions have no p
 
 An `exec` role uses the CLI form and identifies itself with those two flags.
 
-The read verbs `repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, and `status`, plus `reload`, do not carry those two flags. There is no `shutdown` verb: both daemons run in the foreground and the terminal host owns stopping them.
+The read verbs `repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, and `status`, plus `reload` and `shutdown`, do not carry those two flags. Both daemons run in the foreground; `onlyne server shutdown [--drain-secs <n>] [--reason <text>]` requests a graceful server shutdown over the admin socket.
 
 ## Task families and metadata
 
@@ -494,7 +494,7 @@ The session child's stdout/stderr is merged into `<workspace>/.onlyne/logs/sessi
 The closure ladder is:
 
 - unix: the session is an independent process group. `close` uses `kill(2)` to signal only the recorded pgid (`backend_ref.pgid`, identical to the leader pid), sends `SIGTERM` first, waits 5 seconds, then sends `SIGKILL`, and finally uses `child.kill` to reap the process. If signaling the group fails, it falls back to the same signal for the leader pid. It refuses to send to pid 0/`-1` (those mean “this process group / every killable process,” not the session). It never kills processes by a cmdline wildcard.
-- windows: spawn uses `CREATE_NEW_PROCESS_GROUP`; shutdown first sends `GenerateConsoleCtrlEvent(CTRL_BREAK)`, waits for the grace period, then calls `child.kill()` (TerminateProcess). CTRL_BREAK fails when the client has no console, so termination proceeds directly. Windows has no SIGTERM; the supervisor stops the server from the host that runs it — Ctrl-C, a console close, or terminating the process — and no `onlyne` verb stops a daemon.
+- windows: spawn uses `CREATE_NEW_PROCESS_GROUP`; shutdown first sends `GenerateConsoleCtrlEvent(CTRL_BREAK)`, waits for the grace period, then calls `child.kill()` (TerminateProcess). CTRL_BREAK fails when the client has no console, so termination proceeds directly. Windows has no SIGTERM; the supervisor stops the server with `onlyne server shutdown` over the admin socket, or from the host that runs it (Ctrl-C, console close, or terminating the process).
 
 `pi --mode rpc` is a typical command for this path: the client holds stdin open (EOF means operator departure for rpc), stdout goes to the session log, and the message plane uses the adapter socket rather than the child's stdio.
 
@@ -564,7 +564,7 @@ ACP sessions have no terminal: the agent is a child process held by the client, 
 
 ## Windows shutdown
 
-Windows has no SIGTERM / SIGHUP. `tokio::signal::windows::ctrl_c` connects to the existing SIGINT shutdown path. The supervisor stops the server the way it stops anything else on that host — Ctrl-C, a console close, or terminating the process — because no `onlyne` verb stops a daemon; spec hot reload uses `onlyne reload`. See the previous section for the exec-session child-process kill ladder.
+Windows has no SIGTERM / SIGHUP. `tokio::signal::windows::ctrl_c` connects to the existing SIGINT shutdown path. The supervisor stops the server with `onlyne server shutdown` over the admin socket or from the host console (Ctrl-C, console close, or terminating the process); spec hot reload uses `onlyne reload`. See the previous section for the exec-session child-process kill ladder.
 
 On Windows the runtime directory holds a marker and a registration instead of a filesystem socket, and the named-pipe name is derived from the lowercase sha256 of the tree's lexical-absolute form. `--socket \\.\pipe\` passes through unchanged. `ERROR_PIPE_BUSY` is retried within the CLI `--timeout`. On Unix, AF_UNIX remains a filesystem UDS.
 
@@ -1006,7 +1006,7 @@ CLI 门属于 supervisor，也属于会话不挂插件的 `exec` 角色。
 
 `exec` 角色用 CLI 形态，并以这两个旗标声明自己。
 
-`repair *`、`ledger`、`sessions`、`roles`、`faults`、`watch`、`history`、`status` 这些读动词、`reload` 与 `shutdown` 不带这两个旗标。
+`repair *`、`ledger`、`sessions`、`roles`、`faults`、`watch`、`history`、`status` 这些读动词，以及 `reload` 与 `shutdown` 不带这两个旗标。两个守护进程都在前台运行；`onlyne server shutdown [--drain-secs <n>] [--reason <text>]` 通过 admin socket 请求服务端排空并优雅停机。
 
 ## 任务家族与元信息
 
@@ -1061,7 +1061,7 @@ placement 的解析次序：非空 `ONLYNE_BACKEND` 点名 placement，其次是
 关闭阶梯：
 
 - unix：会话是独立进程组。`close` 用 `kill(2)` 只打记录的 pgid（`backend_ref.pgid`，与 leader pid 相同），先 `SIGTERM`，宽限 5 秒后再 `SIGKILL`，最后 `child.kill` 收尸。组信号失败时退回到对 leader pid 的同名信号。pid 0/`-1` 拒绝发送（那是“本进程组 / 一切可杀进程”，不是会话）。从不按 cmdline 通配杀进程。
-- windows：spawn 带 `CREATE_NEW_PROCESS_GROUP`，停机先 `GenerateConsoleCtrlEvent(CTRL_BREAK)`，宽限后再 `child.kill()`（TerminateProcess）。客户端没有控制台时 CTRL_BREAK 失败，直接走终止。Windows 没有 SIGTERM；关停由 supervisor 在 server root 所在主机执行 `onlyne server stop`。
+- windows：spawn 带 `CREATE_NEW_PROCESS_GROUP`，停机先 `GenerateConsoleCtrlEvent(CTRL_BREAK)`，宽限后再 `child.kill()`（TerminateProcess）。客户端没有控制台时 CTRL_BREAK 失败，直接走终止。Windows 没有 SIGTERM；关停由 supervisor 通过 admin socket 执行 `onlyne server shutdown`，或在宿主控制台通过 Ctrl-C 结束进程。
 
 `pi --mode rpc` 是这条路径的典型命令：stdin 由 client 持开（EOF 对 rpc 意味着操作者离开），stdout 进 session log，消息面走 adapter socket，不走子进程的 stdio。
 
@@ -1114,6 +1114,6 @@ ACP 会话没有终端：agent 是 client 持有的子进程，会话对 client 
 
 ## Windows 关停
 
-Windows 没有 SIGTERM / SIGHUP。`tokio::signal::windows::ctrl_c` 接到现有 SIGINT 收尾路径。关停由 supervisor 在 server root 所在主机执行 `onlyne server stop`；spec 热加载走 `onlyne reload`。exec 会话子进程的杀阶梯见上一节。
+Windows 没有 SIGTERM / SIGHUP。`tokio::signal::windows::ctrl_c` 接到现有 SIGINT 收尾路径。关停由 supervisor 通过 admin socket 执行 `onlyne server shutdown` 或在宿主控制台停止进程；spec 热加载走 `onlyne reload`。exec 会话子进程的杀阶梯见上一节。
 
 Windows 上运行目录里放的是 marker 与注册，不是文件系统 socket；named pipe 名由该树 lexical-absolute 路径的小写 sha256 派生。`--socket \\.\pipe\` 原样透传。`ERROR_PIPE_BUSY` 在 CLI `--timeout` 内重试。Unix 上 AF_UNIX 仍是文件系统 UDS。

@@ -163,6 +163,8 @@ enum Verb {
     SpecDiff,
     /// Ask the server to re-read its configuration.
     Reload,
+    /// Ask the server for an ordered shutdown.
+    Shutdown(admin::ShutdownArgs),
     /// Render role workspaces from the templates under a server root.
     Generate(GenerateCmd),
     /// Poll status until the server answers ok.
@@ -213,6 +215,8 @@ enum ServerVerb {
     Generate(GenerateCmd),
     /// Re-read the spec on disk.
     Reload(RestArgs),
+    /// Ask the server for an ordered shutdown.
+    Shutdown(admin::ShutdownArgs),
     /// List roles, optionally filtered by `--role`.
     Roles(AdminRolesCmd),
     /// List sessions.
@@ -242,7 +246,7 @@ struct ServerInitCmd {
     #[arg(long)]
     root: Option<PathBuf>,
     /// TCP address the routing daemon binds, as `host:port`.
-    #[arg(long)]
+    #[arg(long, default_value = "127.0.0.1:7811")]
     listen: String,
     /// Overwrite an existing `spec.toml`.
     #[arg(long)]
@@ -545,6 +549,7 @@ fn run() -> i32 {
         Verb::Ghosts(cmd) => admin::ghosts(flags, cmd.args),
         Verb::SpecDiff => admin::spec_diff(flags),
         Verb::Reload => admin::reload(flags),
+        Verb::Shutdown(args) => admin::shutdown(flags, args),
         Verb::Generate(cmd) => generate(flags, cmd),
         Verb::WaitReady(cmd) => admin::wait_ready(flags, cmd.args),
         Verb::Repair(cmd) => admin::repair(flags, cmd.verb),
@@ -668,6 +673,7 @@ fn server(flags: &GlobalFlags, cmd: ServerCmd) -> i32 {
         ServerVerb::Watch(cmd) => admin::watch(flags, cmd.args),
         ServerVerb::History(cmd) => admin::history(flags, cmd.args),
         ServerVerb::Ghosts(cmd) => admin::ghosts(flags, cmd.args),
+        ServerVerb::Shutdown(args) => admin::shutdown(flags, args),
         ServerVerb::Repair(cmd) => admin::repair(flags, cmd.verb),
         ServerVerb::Unknown(args) => unknown_server_verb(&args),
     }

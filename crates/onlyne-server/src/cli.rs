@@ -38,7 +38,7 @@ enum Command {
         #[arg(long)]
         root: PathBuf,
         /// TCP address the routing daemon binds, as `host:port`.
-        #[arg(long)]
+        #[arg(long, default_value = "127.0.0.1:7811")]
         listen: String,
         /// Overwrite an existing `spec.toml`.
         #[arg(long)]

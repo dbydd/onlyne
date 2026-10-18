@@ -31,6 +31,86 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+/// A configuration error that only a migration can fix, not an edit: the
+/// message names what was found and the path out.
+#[derive(Debug)]
+pub struct NeedsMigration(pub String);
+
+impl std::fmt::Display for NeedsMigration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NeedsMigration {}
+
+/// Warn for each key a table carries that it does not accept. `path` is the
+/// dotted prefix already walked, empty at the document root.
+fn warn_unknown_keys(file: &str, table: Option<&toml::Value>, path: &str, known: &[&str]) {
+    let Some(table) = table.and_then(toml::Value::as_table) else {
+        return;
+    };
+    for key in table.keys() {
+        if known.contains(&key.as_str()) {
+            continue;
+        }
+        let path = if path.is_empty() {
+            key.clone()
+        } else {
+            format!("{path}.{key}")
+        };
+        tracing::warn!("{file}: ignoring unknown key '{path}'");
+    }
+}
+
+/// The keys each part of a gateway document accepts.
+fn warn_unknown_gateway_keys(file: &str, value: &toml::Value) {
+    warn_unknown_keys(file, Some(value), "", &["gateway", "server", "im"]);
+    warn_unknown_keys(file, value.get("gateway"), "gateway", &["role"]);
+    warn_unknown_keys(
+        file,
+        value.get("server"),
+        "server",
+        &["endpoint", "cert_pin"],
+    );
+    warn_unknown_keys(file, value.get("im"), "im", &["backend", "push", "listen"]);
+    let Some(im) = value.get("im").and_then(toml::Value::as_table) else {
+        return;
+    };
+    if let Some(backends) = im.get("backend").and_then(toml::Value::as_array) {
+        for (index, backend) in backends.iter().enumerate() {
+            warn_unknown_keys(
+                file,
+                Some(backend),
+                &format!("im.backend[{index}]"),
+                &["gateway", "run"],
+            );
+        }
+    }
+    if let Some(pushes) = im.get("push").and_then(toml::Value::as_array) {
+        for (index, push) in pushes.iter().enumerate() {
+            warn_unknown_keys(
+                file,
+                Some(push),
+                &format!("im.push[{index}]"),
+                &["mode", "run", "every", "timeout"],
+            );
+        }
+    }
+    warn_unknown_keys(file, im.get("listen"), "im.listen", &["allow", "deny"]);
+}
+
+/// The keys a conversation document accepts.
+fn warn_unknown_conversation_keys(file: &str, value: &toml::Value) {
+    warn_unknown_keys(file, Some(value), "", &["chat", "role"]);
+    warn_unknown_keys(
+        file,
+        value.get("chat"),
+        "chat",
+        &["gateway", "conversation"],
+    );
+}
+
 /// The directory under the gateway root that holds one workspace per
 /// conversation; each child's name is a role.
 pub const CONVERSATIONS_DIR: &str = "conversations";
@@ -273,8 +353,12 @@ impl GatewayFile {
 
     /// Parse a gateway document, refusing the shapes the design forbids.
     pub fn parse(text: &str, file: &str) -> Result<Self> {
-        let raw: RawConfig =
+        let value: toml::Value =
             toml::from_str(text).with_context(|| format!("{file} does not parse"))?;
+        warn_unknown_gateway_keys(file, &value);
+        let raw: RawConfig = value
+            .try_into()
+            .with_context(|| format!("{file} does not parse"))?;
         let mut parsed = GatewayFile {
             role: raw.gateway.role,
             server: raw.server.endpoint,
@@ -454,8 +538,12 @@ pub(crate) fn load_conversation(workspace: &Path) -> Result<Conversation> {
              is one conversation workspace, and `onlyne-im generate` writes this file"
         )
     })?;
-    let raw: RawConversation =
+    let value: toml::Value =
         toml::from_str(&text).with_context(|| format!("{file} does not parse"))?;
+    warn_unknown_conversation_keys(&file, &value);
+    let raw: RawConversation = value
+        .try_into()
+        .with_context(|| format!("{file} does not parse"))?;
     let chat = raw
         .chat
         .context(format!("{file}: a `[chat]` table is required"))?;
@@ -474,11 +562,16 @@ pub(crate) fn load_conversation(workspace: &Path) -> Result<Conversation> {
         // refused by name with its remedy rather than silently ignored: an
         // operator who sees one is mid-migration (`docs/v2.3-CHAT-PROTOCOL.md`
         // §8) and needs to be told.
-        bail!(
+        return Err(anyhow::Error::new(NeedsMigration(format!(
             "{file}: `role = \"{declared}\"` is the v2.2 key and no longer means anything; the \
              directory name \"{slug}\" is the slug and the conversation's identity is its chat \
              key — drop the key, or see `docs/v2.3-CHAT-PROTOCOL.md` §8 to migrate this root"
-        );
+        ))));
+    }
+    if let Some(reason) = onlyne_config::layout::detect_legacy(workspace) {
+        return Err(anyhow::Error::new(NeedsMigration(
+            onlyne_proto::legacy_workspace_message(&[reason.to_string()]),
+        )));
     }
     let key_path = workspace.join(".onlyne/chat.key");
     let chat_key = match std::fs::read_to_string(&key_path) {

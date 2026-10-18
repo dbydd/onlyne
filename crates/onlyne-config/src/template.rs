@@ -218,13 +218,32 @@ pub fn load_tree(template: &Template) -> Result<Vec<(String, Vec<u8>)>, Template
 /// Load the optional `.onlyne/config.toml` local override fragment.
 ///
 /// The fragment is parsed as a TOML value and is carried separately from the
-/// opaque template file list. A missing file, non-UTF8 bytes, or invalid TOML
-/// yields `None`.
+/// opaque template file list. A missing file yields `None` quietly; a file
+/// that exists but is non-UTF8 or invalid TOML yields `None` with a warning.
 pub fn local_override(template: &Template) -> Option<toml::Value> {
     let path = template.role_dir.join(".onlyne/config.toml");
-    let bytes = fs::read(path).ok()?;
-    let text = std::str::from_utf8(&bytes).ok()?;
-    text.parse().ok()
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "ignoring malformed template .onlyne/config.toml override");
+            return None;
+        }
+    };
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "ignoring malformed template .onlyne/config.toml override");
+            return None;
+        }
+    };
+    match text.parse::<toml::Value>() {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "ignoring malformed template .onlyne/config.toml override");
+            None
+        }
+    }
 }
 
 /// Deep merge a local fragment with derived values.

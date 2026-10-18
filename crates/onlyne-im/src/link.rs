@@ -518,8 +518,15 @@ fn reply_target(
         // A prefix the window cannot place is still a usable id when it is the
         // whole thing: a conversation whose history this cluster never saw
         // (`§8`) has nothing to resolve against, and refusing would make the
-        // first reply into an unrecorded thread impossible.
-        Err(_unresolved) if prefix.len() >= FULL_ID_LEN => Ok(Some(prefix)),
+        // first reply into an unrecorded thread impossible. An empty window is
+        // the only state that licenses this: with messages recorded, a full id
+        // the window cannot place is a full id this conversation never
+        // carried, and an ambiguous prefix is still ambiguous.
+        Err(crate::thread::Unresolved::Absent { ref window })
+            if window.is_empty() && prefix.len() >= FULL_ID_LEN =>
+        {
+            Ok(Some(prefix))
+        }
         Err(error) => Err(error.to_string()),
     }
 }
@@ -623,6 +630,49 @@ mod tests {
         let payload = payload_from("hello", None, None, &entry, &delivery).unwrap();
         assert_eq!(payload.text, "hello");
         assert!(payload.attachments.is_empty());
+    }
+
+    #[test]
+    fn a_full_id_prefix_on_an_empty_window_is_taken_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = conversation(dir.path());
+        let window = crate::thread::List::new("abc123");
+        let body = "<chat:abc123>\n<msg:ROBOT1.0_AdAX>\n\n在的\n";
+        let target = reply_target(body, &window, &entry).unwrap();
+        assert_eq!(target, Some("ROBOT1.0_AdAX".to_string()));
+    }
+
+    #[test]
+    fn an_ambiguous_prefix_on_a_recorded_window_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = conversation(dir.path());
+        let mut window = crate::thread::List::new("abc123");
+        window
+            .messages
+            .push(crate::thread::Message::root("ROBOT1.0_AdAX1"));
+        window
+            .messages
+            .push(crate::thread::Message::root("ROBOT1.0_AdAX2"));
+        let body = "<chat:abc123>\n<msg:ROBOT1.0_AdA>\n\n在的\n";
+        let error = reply_target(body, &window, &entry).unwrap_err();
+        assert!(error.contains("ROBOT1.0_AdAX1"), "{error}");
+        assert!(error.contains("ROBOT1.0_AdAX2"), "{error}");
+    }
+
+    #[test]
+    fn an_absent_prefix_on_a_recorded_window_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = conversation(dir.path());
+        let mut window = crate::thread::List::new("abc123");
+        window
+            .messages
+            .push(crate::thread::Message::root("ROBOT1.0_AdAX1"));
+        let body = "<chat:abc123>\n<msg:ROBOT1.0_ZZZZ>\n\n在的\n";
+        let error = reply_target(body, &window, &entry).unwrap_err();
+        assert!(
+            error.contains("ROBOT1.0_ZZZZ") || error.contains("no message"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- macOS launchd job for the onlyne client. Edit the /srv/onlyne/ws/dev/planner paths before loading. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>se.onlyne.client</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/onlyne-client</string>
+    <string>run</string>
+    <string>--workspace</string>
+    <string>/srv/onlyne/ws/dev/planner</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/srv/onlyne/ws/dev/planner</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>2</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/srv/onlyne/ws/dev/planner/.onlyne/logs/client.log</string>
+  <key>StandardErrorPath</key>
+  <string>/srv/onlyne/ws/dev/planner/.onlyne/logs/client.log</string>
+</dict>
+</plist>

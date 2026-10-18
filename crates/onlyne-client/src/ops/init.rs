@@ -128,6 +128,29 @@ pub async fn init(args: InitArgs) -> Result<String> {
     Ok(fragment(&args.role, &key.public_str(), &args.prose))
 }
 
+/// Append an already-rendered `[[client]]` fragment to the server's
+/// `spec.toml`. The fragment arrives as plain text from the caller; this
+/// function answers whether the spec survives it. A role the spec already
+/// declares is a refusal, not a second entry: two entries with one role is
+/// an ambiguity no reader resolves.
+pub fn register_in_spec(server_root: &Path, role: &str, fragment: &str) -> Result<()> {
+    let spec_path = ServerRoot::resolve(server_root).spec_path();
+    let spec = Spec::load(&spec_path)?;
+    if spec.client.iter().any(|c| c.role == role) {
+        return Err(anyhow!(
+            "spec.toml already declares a `[client]` entry for role {role:?}; \
+             remove it before registering again"
+        ));
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).open(&spec_path)?;
+    file.write_all(b"\n")?;
+    file.write_all(fragment.as_bytes())?;
+    drop(file);
+    Spec::load(&spec_path)?;
+    Ok(())
+}
+
 /// The `[client.runtime]` seed the printed fragment ships.
 ///
 /// The bytes match the seed `examples/supervisor/run.py` writes into its ring
@@ -209,4 +232,32 @@ pub fn toml_string(text: &str) -> String {
 
 pub fn legacy_error_code() -> i32 {
     2
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_appends_and_refuses_duplicates() {
+        let root = tempfile::tempdir().unwrap();
+        let spec_path = ServerRoot::resolve(root.path()).spec_path();
+        std::fs::create_dir_all(spec_path.parent().unwrap()).unwrap();
+        let planner_key = KeyPair::generate().public_str();
+        let witness_frag = fragment("witness", &KeyPair::generate().public_str(), "prose");
+        std::fs::write(
+            &spec_path,
+            format!(
+                "[server]\nname = \"test\"\nlisten = \"127.0.0.1:1\"\ncert_pin = \"sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n\n[[client]]\nrole = \"planner\"\nkey = {planner_key:?}\n"
+            ),
+        )
+        .unwrap();
+
+        register_in_spec(root.path(), "witness", &witness_frag).unwrap();
+        let spec = Spec::load(&spec_path).unwrap();
+        assert!(spec.client.iter().any(|c| c.role == "witness"));
+
+        let duplicate = register_in_spec(root.path(), "witness", &witness_frag);
+        assert!(duplicate.is_err());
+    }
 }

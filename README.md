@@ -2,7 +2,7 @@
 
 **Message plumbing for coding-agent teams, running on your own machines.**
 
-Onlyne ties a fleet of coding agents into a durable cluster. A **server** routes messages between roles and records every delivery in an append-only ledger. A **client** in each role workspace runs that role's coding-agent sessions. An optional **IM gateway** (`onlyne-im`) turns one chat platform conversation — a private chat, a group — into one ordinary role, so a person in a chat talks to the same cluster the agents do. Agents keep their own runtimes and make the decisions; Onlyne provides routing, queueing, session transport, receipts, and an auditable record.
+Onlyne ties a fleet of coding agents into a durable cluster. A **server** routes messages between roles and records every delivery in an append-only ledger. A **client** in each role workspace runs that role's coding-agent sessions. An optional **IM gateway** (`onlyne-im`) connects as one cluster role and routes every conversation in its registry by a first-line chat key, so a person in a chat talks to the same cluster the agents do. Agents keep their own runtimes and make the decisions; Onlyne provides routing, queueing, session transport, receipts, and an auditable record.
 
 [中文文档](README.zh-CN.md) · English is the default reading copy.
 
@@ -45,7 +45,7 @@ That produces the operator entry point and its two daemons:
 | Command | Role |
 |---|---|
 | `onlyne` | Operator entry point. Every verb is implemented in this process: the queries, the admin operations, `init`/`generate`, the built-in TUI, and the MCP tool bridge. The two daemons forward nothing back. |
-| `onlyne-server` | One cluster's router, delivery queue, durable ledger, fault record, and admin socket. Subcommand: `run`. |
+| `onlyne-server` | One cluster's router, delivery queue, durable ledger, fault record, and admin socket. Subcommands: `init`, `run`, `status`, `generate`. |
 | `onlyne-client` | One role workspace's server link, session lifecycle, backend host, adapter socket, and durable outbound intents. |
 
 The observation board is the `onlyne tui` verb, not a separate binary. `onlyne-agent-fake` is an
@@ -66,7 +66,7 @@ cargo install onlyne-im onlyne-im-backend-telegram
 
 | Command | Role |
 |---|---|
-| `onlyne-im` | One gateway root: `init`, `generate`, `login`, `run`, `check`. It hosts every conversation under `conversations/` in one process and runs the operator's trigger scripts. |
+| `onlyne-im` | One gateway root: `init`, `generate`, `login`, `setup`, `run`, `check`. It hosts every conversation under `conversations/` in one process and runs the operator's trigger scripts. |
 | `onlyne-im-backend-telegram` | A Telegram bot backend: one process, spawned by the gateway, speaking the standard backend protocol on stdio. |
 | `onlyne-im-backend-qqbot` | A QQ Open Platform backend: the websocket event gateway inbound, per-scene sends outbound (a group send quotes `msg_id` while the passive-message window is open, and is a proactive message after it). Credentials are an app id and secret, stored as `app_id:app_secret`. Reactions are channel-only on QQ; a group reaction is refused by the platform, not by this backend. |
 | `onlyne-im-backend-slack` | A Slack backend: Socket Mode inbound (needs an `xapp-` app token and an `xoxb-` bot token, stored as `xapp-…:xoxb-…`), Web API outbound. Replies thread under `thread_ts`. |
@@ -138,7 +138,8 @@ target/debug/onlyne-client init \
   --workspace "$tmp/planner" \
   --role planner \
   --server-root "$tmp/server" \
-  --prose "v1 smoke prose" >>"$tmp/server/.onlyne/spec.toml"
+  --prose "v1 smoke prose" \
+  --register >/dev/null
 target/debug/onlyne --server-root "$tmp/server" reload
 
 ONLYNE_BACKEND=fake target/debug/onlyne-client run \
@@ -276,7 +277,7 @@ Onlyne's four core message kinds are:
 
 ### Server root
 
-`<server-root>/.onlyne/spec.toml` is the protocol source of truth: server endpoint and certificate pin, registered role keys, ACL edges, prose, concurrency, timeouts, relay policy, each role's `[client.runtime]` drive and command, routes, and gateways. Onlyne never edits this file through a runtime API. Append `onlyne-client init` fragments or use `onlyne server generate`, then run `onlyne reload`.
+`<server-root>/.onlyne/spec.toml` is the protocol source of truth: server endpoint and certificate pin, registered role keys, ACL edges (`allowed_senders` and `allowed_targets`), route obligations (`owes_targets`), prose, concurrency, timeouts, each role's `[client.runtime]` drive and command, event hooks (`[[hook]]`), routes, and gateways. Register roles with `onlyne-client init --register` or `onlyne server generate`, then run `onlyne reload`.
 
 The automatic requeue age gate is `[server].requeue_ttl_secs`. It defaults to `0`, which leaves the gate off, and measures queued-row age from `enqueued_at`. When an automatic requeue would happen after that age, the row settles as `expired` with reason `requeue_ttl`; operator-led `repair retry` bypasses the age gate.
 
@@ -352,7 +353,7 @@ One owner tree owns two files there, both named by `<digest>` — the first 16 h
 <runtime-dir>/<digest>.json    the registration: kind, role, root, pid, version, runtime
 ```
 
-The registration is how a reader learns who serves a tree without walking one: `kind` says whether a server root or a role workspace's client serves it, and `role` names the role. A caller can list every registration in the directory with `onlyne_wire::socket::list_registrations`, or read one with `read_registration <root>`.
+The registration is how a reader learns who serves a tree without walking one: `kind` says whether a server root or a role workspace's client serves it, and `role` names the role. An operator lists every registration on the machine with `onlyne ls`, and Rust callers read them through `onlyne_wire::socket::list_registrations` and `onlyne_wire::socket::read_registration`.
 
 There is no path length rule any more. A deeply nested workspace and a shallow one resolve to the same short runtime path, and nothing is created under `.onlyne/run/` — `<owner>/.onlyne/run/s` survives only as the spelling operators print. On Windows the same two files hold a marker and a registration; the socket itself is an NPFS pipe named inside the marker.
 
@@ -367,11 +368,14 @@ The client injects the actual served path as `ONLYNE_SOCKET` into every session.
 ### Lifecycle and observation
 
 ```bash
-# Server: foreground only. There is no start/stop verb; the terminal host or
-# launchd/systemd owns staying resident.
-onlyne server run   --root <server-root>
+# Server: runs in the foreground; `shutdown` drains and stops a live server over
+# the admin socket.
+onlyne server init     --root <server-root>                  # defaults --listen to 127.0.0.1:7811
+onlyne server run      --root <server-root>
+onlyne server shutdown --server-root <server-root> --drain-secs 5
 
 # Client: foreground; same rule
+onlyne client init   --workspace <workspace> --role <role> --server-root <server-root> --register
 onlyne client run    --workspace <workspace>
 onlyne client status --workspace <workspace>
 onlyne-client doctor                         # host detection JSON; always exits 0
@@ -419,7 +423,7 @@ onlyne --server-root <root> repair rebind --task <task-id> --session-id <id> --b
 onlyne --server-root <root> repair ack    --fault-id <id> --reason <text>
 ```
 
-`onlyne --help` lists the socket backends and exit codes. In short: `0` success, `1` runtime/daemon failure, `2` local validation, `3` no socket, `4` operator-input refusal, `5` no supported session host, and `127` a missing sibling binary.
+`onlyne --help` lists the socket backends and exit codes. In short: `0` success, `1` runtime/daemon failure, `2` local validation, `3` no socket, `4` operator-input refusal, `5` no supported session host, `6` database or workspace from another revision (`EXIT_NEEDS_MIGRATION`), and `127` a missing sibling binary.
 
 ### Operate an IM gateway
 
@@ -441,13 +445,15 @@ the root from one process.
 onlyne-im init --root ./im --server-root <server-root>
 
 # 2. One conversation. `--conversation` is the platform's own id, so a Telegram
-#    group id keeps its leading `-`. `--role` is the directory slug, an
-#    operator label with no protocol meaning; it defaults to one derived from
-#    the two ids. `--peer` is a role the gateway may reach and be reached by;
-#    it defaults to `_supervisor`, the cluster's operator agent. The first
-#    `generate` also registers the gateway role in the cluster's spec.toml
-#    through the server's admin socket, writing both sides of the ACL.
+#    group id keeps its leading `-`. `--slug` (alias `--role`) is the directory
+#    slug under `conversations/`, an operator label with no protocol meaning; it
+#    defaults to one derived from the two ids. `--peer` is a role the gateway
+#    may reach and be reached by; it defaults to `_supervisor`, the cluster's
+#    operator agent. The first `generate` also registers the gateway role in the
+#    cluster's spec.toml through the server's admin socket, writing both sides
+#    of the ACL.
 onlyne-im generate --root ./im --gateway telegram --conversation -1007788 \
+                   --slug tg-main \
                    --server-root <server-root> --peer _supervisor
 
 # 3. The bot credential, stored under the gateway root at `0600`. Prefer
@@ -612,7 +618,7 @@ External adapters implement [`crates/onlyne-adapter/PROTOCOL.md`](crates/onlyne-
 - Tasks, completions, and control operations carry idempotency keys and are delivered at least once. Observation events use cursor resync and never slow a worker.
 - Each registered role owns an ed25519 identity. Clients pin the server certificate and authenticate over TLS 1.3.
 - A denied message writes no ledger row. A completion has one built-in return path to the task's durable origin.
-- One client session serves one task. Once the task settles, the session stops consuming `max_sessions` capacity; the client keeps a settled slot only while its plugin transport is attached, then retires the slot and host resource. An unsettled task-bound session is also retired when its transport disconnects past the grace window or remains attached but silent for three heartbeat intervals; the client then settles the task `failed`, refuses its held delivery with `session_dead`, and publishes the exit.
+- How many deliveries one client session serves is governed by `[client.session] scope`: `oneshot` (the default) serves one delivery and closes when that delivery settles, `task` reuses the session across every delivery in the same task family, and `role` keeps a standing pool of up to `max_sessions` sessions for the role. Once a delivery settles, the slot stops consuming active capacity; an unsettled task-bound session is retired when its transport disconnects past `reconnect_grace_secs` or remains silent for three heartbeat intervals, settling the task `failed` with reason `session_dead`.
 - Aggregate roles expose a child cluster to a parent without adding child role names or federation operations to the wire protocol.
 
 The v2 crate map, lifecycle model, and formal design rationale live in [`AGENTS.md`](AGENTS.md) and [`docs/v2-PLAN.md`](docs/v2-PLAN.md). [`docs/v1-ARCHITECTURE.md`](docs/v1-ARCHITECTURE.md) is the archived v1 map, kept as a record of how v1 was shaped; [`proofs/BRIEF.md`](proofs/BRIEF.md) carries the v1 design rationale.
@@ -621,6 +627,8 @@ The v2 crate map, lifecycle model, and formal design rationale live in [`AGENTS.
 
 ### User and operator guides
 
+- [`AGENTS.md`](AGENTS.md) and [`docs/v2-PLAN.md`](docs/v2-PLAN.md) — the v2 execution contract and authoritative architecture design.
+- [`docs/v2.7-OVERHAUL-PLAN.md`](docs/v2.7-OVERHAUL-PLAN.md) — document hierarchy and v2.7 overhaul specification.
 - [`docs/operations.md`](docs/operations.md) — socket paths, configuration, fault inspection, recovery, requeue policy, exec/ACP sessions, and session ownership.
 - [`crates/onlyne-adapter/PROTOCOL.md`](crates/onlyne-adapter/PROTOCOL.md) — the external agent/gateway wire contract.
 - [`examples/supervisor/README.md`](examples/supervisor/README.md) — the real pi/Orca running-lights demo.

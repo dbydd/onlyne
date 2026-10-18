@@ -1,6 +1,6 @@
 [package]
 name = "onlyne-im-backend-qqbot"
-version = "2.3.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

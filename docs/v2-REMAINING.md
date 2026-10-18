@@ -2,7 +2,7 @@
 
 Written 2026-09-29 at the end of the wave that landed `onlyne-web`. This file exists so the
 next context can recover every open task without re-deriving it. It is a status record, not
-a design document: the design lives in `docs/v2-PLAN.md` and `docs/v2-CONTRACT.md`.
+a design document: the design lives in `docs/v2-PLAN.md`, `docs/v2-CONTRACT.md`, and `docs/v2.7-OVERHAUL-PLAN.md`.
 
 ## Where the task list came from
 
@@ -76,7 +76,7 @@ Still open from the design: a v2.2 gateway tree migrates by hand (§8) — no co
 
 ## Open, item by item
 
-### A — reconnect jitter, retry classification, accept timeout (phase two)
+### A — reconnect jitter, retry classification, accept timeout (phase two) — **closed**
 
 The audit item is *partly* closed and the part that is open is the part that was the
 finding.
@@ -95,7 +95,7 @@ finding.
 Done means: one retry classification, one answer for `unauthorized`, and a reconnect
 delay that actually varies per client.
 
-### B — the v2 migration path (phase two)
+### B — the v2 migration path (phase two) — **closed**
 
 Per the user's 2026-09-29 decision there is **no `migrate` verb**. The deliverable is a
 refusal that is accurate and actionable:

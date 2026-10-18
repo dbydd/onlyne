@@ -1,12 +1,12 @@
-# Onlyne v1.0.0 example spec: the single central truth of one server root.
+# Onlyne v2 example spec: the single central truth of one server root.
 # Copy this file to <server-root>/.onlyne/spec.toml.
-# Replace every ed25519/REPLACE_ME value with the output of `onlyne-client init` and every
+# Replace every ed25519/REPLACE_ME value with the output of `onlyne-client init` (or pass `onlyne-client init --register`) and every
 # sha256/REPLACE_ME value with the SPKI fingerprint printed by `onlyne-server init`.
 # A key no field declares is ignored: the file still loads, and each ignored key gets one
 # `ignoring unknown key` warning line in the log of the process that read it. A real key holding a
 # wrong value still refuses the start with `spec.toml:<line>: <message>`.
 #
-# Loading semantics (docs/v1-PLAN.md §5 line 270):
+# Loading semantics (AGENTS.md §7, §9):
 # 1. `onlyne-server run` parses the whole file at startup. A type error or a missing required key
 #    refuses the start and prints `spec.toml:<line>: <message>`. An unrecognized key is skipped and
 #    named in the log.
@@ -14,8 +14,8 @@
 #    into a temporary structure, validate it, then swap atomically. A failed validation keeps the
 #    running spec and records fault{kind:"spec_reload_failed"}. The reload answer carries the applied
 #    change through SpecDiff::render.
-# 3. No runtime op writes this file. `onlyne-client init` and `onlyne server generate` print a
-#    `[[client]]` fragment on stdout for an operator to append, then `onlyne reload` applies it.
+# 3. `onlyne-client init` (`--register`) and `onlyne server generate` produce `[[client]]` fragments,
+#    and `onlyne reload` (or `AdminOp::SpecApply`) applies changes atomically.
 
 # docs/v1-PLAN.md §5 line 221
 [server]
@@ -29,7 +29,7 @@ cert_pin = "sha256/REPLACE_ME"
 note_queue = false
 # fault_history_days sets fault record retention. Read by onlyne-server fault pruning. Default: 14.
 fault_history_days = 14
-# resync_lag sets the event lag that makes a client resubscribe. Read by the client runloop while it tracks server_seq. Default: 256.
+# resync_lag sets the server event-stream replay gap threshold before emitting a resync notice (`crates/onlyne-server/src/events.rs`). Default: 256.
 resync_lag = 256
 # heartbeat_timeout_ms sets the presence liveness timeout. Read by onlyne-server presence tracking. Default: 30000.
 heartbeat_timeout_ms = 30000
