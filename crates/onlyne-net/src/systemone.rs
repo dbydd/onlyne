@@ -1,7 +1,7 @@
 //! Native client for the TypeSafe System One (`POST /v1/systemone`) decision API.
 //!
-//! System One models (such as TypeSafe Jev or the local Magpie `group/decider`
-//! route) evaluate a JSON `state` against a map of named typed questions
+//! System One decision models (such as TypeSafe Jev or Clef) evaluate a JSON
+//! `state` against a map of named typed questions
 //! ([`Question::Noul`], [`Question::Choice`], [`Question::Score`]) and return
 //! calibrated probabilities and confidence scores rather than generated text.
 //!
@@ -19,11 +19,11 @@ use tokio::net::TcpStream;
 
 use crate::NetError;
 
-/// Default local Magpie System One gateway base URL.
-pub const DEFAULT_DECIDER_BASE_URL: &str = "http://127.0.0.1:3425";
+/// Default local System One gateway base URL when `ONLYNE_DECIDER_URL` / `TYPESAFE_BASE_URL` is unset.
+pub const DEFAULT_DECIDER_BASE_URL: &str = "http://127.0.0.1:8080";
 
-/// Default System One model identifier on the local Magpie gateway.
-pub const DEFAULT_DECIDER_MODEL: &str = "group/decider";
+/// Default System One model identifier (`jev-latest`).
+pub const DEFAULT_DECIDER_MODEL: &str = "jev-latest";
 
 /// Default per-call timeout (milliseconds) so an unreachable gateway degrades immediately.
 pub const DEFAULT_DECIDER_TIMEOUT_MS: u64 = 1_500;
@@ -185,6 +185,236 @@ pub struct SystemOneResponse {
     pub answers: BTreeMap<String, Answer>,
     #[serde(default)]
     pub usage: Option<SystemOneUsage>,
+}
+
+/// Embedded default meta-programmable specification for all five System-1 edge reflexes.
+pub const DECIDER_DEFAULTS_JSON: &str = include_str!("decider_defaults.json");
+
+/// Declarative, meta-programmable specification for one System-1 edge reflex.
+///
+/// Holds the question templates (`noul`, `choice`, `score`), numeric thresholds,
+/// and string templates for one checkpoint so that no prompt text or rubric is
+/// hardcoded in procedural Rust logic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReflexSpec {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub questions: BTreeMap<String, Question>,
+    #[serde(default)]
+    pub thresholds: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub templates: BTreeMap<String, String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for ReflexSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            questions: BTreeMap::new(),
+            thresholds: BTreeMap::new(),
+            templates: BTreeMap::new(),
+        }
+    }
+}
+
+impl ReflexSpec {
+    /// Look up a numeric threshold by key, returning `default` when absent.
+    pub fn threshold(&self, key: &str, default: f64) -> f64 {
+        self.thresholds.get(key).copied().unwrap_or(default)
+    }
+
+    /// Look up a string template by key, returning `default` when absent.
+    pub fn template<'a>(&'a self, key: &str, default: &'a str) -> &'a str {
+        self.templates
+            .get(key)
+            .map(String::as_str)
+            .unwrap_or(default)
+    }
+
+    /// Render this reflex's questions with `{var}` interpolation against top-level
+    /// keys of `state`.
+    pub fn render_questions(&self, state: &Value) -> BTreeMap<String, Question> {
+        self.questions
+            .iter()
+            .map(|(id, q)| (id.clone(), interpolate_question(q, state)))
+            .collect()
+    }
+}
+
+/// Complete meta-programmable specification for Onlyne's five System-1 edge reflexes.
+///
+/// Loaded from [`DECIDER_DEFAULTS_JSON`] and deep-merged with optional overrides
+/// from `<root>/.onlyne/decider.json` and `ONLYNE_DECIDER_SPEC`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeciderSpec {
+    pub im_inbound: ReflexSpec,
+    pub complete_guard: ReflexSpec,
+    pub turn_end: ReflexSpec,
+    pub heartbeat: ReflexSpec,
+    pub triage: ReflexSpec,
+}
+
+impl Default for DeciderSpec {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
+impl DeciderSpec {
+    /// Parse the embedded [`DECIDER_DEFAULTS_JSON`] baseline.
+    pub fn defaults() -> Self {
+        serde_json::from_str(DECIDER_DEFAULTS_JSON)
+            .expect("embedded decider_defaults.json is valid DeciderSpec")
+    }
+
+    /// Load defaults and apply any `ONLYNE_DECIDER_SPEC` override (file path or inline JSON).
+    pub fn from_env() -> Self {
+        Self::load_for_root(None)
+    }
+
+    /// Load defaults, deep-merge `<root>/.onlyne/decider.json` if present, and
+    /// then deep-merge `ONLYNE_DECIDER_SPEC` (inline JSON or file path) if set.
+    pub fn load_for_root(root: Option<&std::path::Path>) -> Self {
+        let mut base: Value = serde_json::from_str(DECIDER_DEFAULTS_JSON)
+            .expect("embedded decider_defaults.json is valid JSON");
+        if let Some(root) = root {
+            let candidate = root.join(".onlyne/decider.json");
+            if let Ok(text) = std::fs::read_to_string(&candidate)
+                && let Ok(overlay) = serde_json::from_str::<Value>(&text)
+            {
+                merge_json(&mut base, overlay);
+            }
+        }
+        if let Some(spec_env) = non_empty_env("ONLYNE_DECIDER_SPEC") {
+            let overlay_opt = if spec_env.starts_with('{') {
+                serde_json::from_str::<Value>(&spec_env).ok()
+            } else {
+                std::fs::read_to_string(&spec_env)
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            };
+            if let Some(overlay) = overlay_opt {
+                merge_json(&mut base, overlay);
+            }
+        }
+        serde_json::from_value(base).unwrap_or_else(|_| Self::defaults())
+    }
+
+    /// Load defaults and deep-merge an explicit JSON file at `path`.
+    pub fn load_from_path(path: &std::path::Path) -> Result<Self, NetError> {
+        let mut base: Value = serde_json::from_str(DECIDER_DEFAULTS_JSON)
+            .expect("embedded decider_defaults.json is valid JSON");
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| NetError::Io(format!("reading {}: {e}", path.display())))?;
+        let overlay: Value = serde_json::from_str(&text)
+            .map_err(|e| NetError::Io(format!("parsing {}: {e}", path.display())))?;
+        merge_json(&mut base, overlay);
+        serde_json::from_value(base)
+            .map_err(|e| NetError::Io(format!("invalid DeciderSpec in {}: {e}", path.display())))
+    }
+}
+
+/// Deep-merge `overlay` into `base` (objects merge recursively; scalars and arrays replace).
+pub fn merge_json(base: &mut Value, overlay: Value) {
+    match (base, overlay) {
+        (Value::Object(base_map), Value::Object(overlay_map)) => {
+            for (k, v) in overlay_map {
+                match base_map.get_mut(&k) {
+                    Some(existing) => merge_json(existing, v),
+                    None => {
+                        base_map.insert(k, v);
+                    }
+                }
+            }
+        }
+        (base_slot, replacement) => *base_slot = replacement,
+    }
+}
+
+/// Substitute `{key}` placeholders in `value` using top-level fields of `state`.
+pub fn interpolate_value(value: &Value, state: &Value) -> Value {
+    match value {
+        Value::String(s) => Value::String(interpolate_str(s, state)),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| interpolate_value(item, state))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), interpolate_value(v, state)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn interpolate_str(template: &str, state: &Value) -> String {
+    let Some(obj) = state.as_object() else {
+        return template.to_string();
+    };
+    if !template.contains('{') {
+        return template.to_string();
+    }
+    let mut out = template.to_string();
+    for (k, v) in obj {
+        let needle = format!("{{{k}}}");
+        if out.contains(&needle) {
+            let replacement = match v {
+                Value::String(s) => s.clone(),
+                Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            out = out.replace(&needle, &replacement);
+        }
+    }
+    out
+}
+
+fn interpolate_question(q: &Question, state: &Value) -> Question {
+    match q {
+        Question::Noul {
+            instructions,
+            criteria,
+        } => Question::Noul {
+            instructions: interpolate_value(instructions, state),
+            criteria: criteria.as_ref().map(|c| NoulCriteria {
+                yes: c.yes.as_ref().map(|v| interpolate_value(v, state)),
+                no: c.no.as_ref().map(|v| interpolate_value(v, state)),
+            }),
+        },
+        Question::Choice {
+            instructions,
+            criteria,
+        } => Question::Choice {
+            instructions: interpolate_value(instructions, state),
+            criteria: criteria
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_ref().map(|val| interpolate_value(val, state)),
+                    )
+                })
+                .collect(),
+        },
+        Question::Score {
+            instructions,
+            criteria,
+        } => Question::Score {
+            instructions: interpolate_value(instructions, state),
+            criteria: criteria
+                .iter()
+                .map(|v| interpolate_value(v, state))
+                .collect(),
+        },
+    }
 }
 
 impl SystemOneResponse {
@@ -403,7 +633,7 @@ fn parse_http_base(url: &str) -> Result<(String, String, String), NetError> {
         stripped
     } else if url.starts_with("https://") {
         return Err(NetError::Io(
-            "systemone client requires an http:// gateway URL (such as http://127.0.0.1:3425)"
+            "systemone client requires an http:// gateway URL (set ONLYNE_DECIDER_URL or TYPESAFE_BASE_URL)"
                 .to_string(),
         ));
     } else {
@@ -526,7 +756,7 @@ mod tests {
             stream.write_all(&body_bytes).await.unwrap();
         });
 
-        let client = SystemOneClient::new(format!("http://{addr}"), "group/decider");
+        let client = SystemOneClient::new(format!("http://{addr}"), "jev-latest");
         let mut questions = BTreeMap::new();
         questions.insert(
             "should_handle".to_string(),
@@ -566,5 +796,44 @@ mod tests {
         let parsed: SystemOneResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.model, "jev");
         assert!(parsed.answers.is_empty());
+    }
+
+    #[test]
+    fn decider_spec_deep_merges_overrides_and_interpolates_state() {
+        let mut base = serde_json::to_value(DeciderSpec::defaults()).unwrap();
+        merge_json(
+            &mut base,
+            json!({
+                "triage": {
+                    "thresholds": { "min_confidence": 0.82 },
+                    "questions": {
+                        "action": {
+                            "instructions": "Triage task {task_id} on role {role}"
+                        },
+                        "custom_noul": {
+                            "type": "noul",
+                            "instructions": "Does {task_id} need immediate paging?"
+                        }
+                    }
+                }
+            }),
+        );
+        let spec: DeciderSpec = serde_json::from_value(base).unwrap();
+        assert_eq!(spec.triage.threshold("min_confidence", 0.60), 0.82);
+        let rendered = spec
+            .triage
+            .render_questions(&json!({"task_id": "t-99", "role": "coder"}));
+        assert!(rendered.contains_key("severity"));
+        assert!(rendered.contains_key("custom_noul"));
+        match &rendered["action"] {
+            Question::Choice {
+                instructions,
+                criteria,
+            } => {
+                assert_eq!(instructions, &json!("Triage task t-99 on role coder"));
+                assert!(criteria.contains_key("retry"));
+            }
+            other => panic!("expected choice, got {other:?}"),
+        }
     }
 }

@@ -492,6 +492,7 @@ mod tests {
                 target_confidence: 0.5,
                 suggested_reply_to: Some("m-4".into()),
                 reply_confidence: 0.9,
+                extra: BTreeMap::new(),
             }),
             at: "2026-10-10T12:00:00Z".into(),
         };

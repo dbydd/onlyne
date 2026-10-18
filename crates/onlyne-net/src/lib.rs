@@ -26,9 +26,10 @@ pub use handshake::{
 };
 pub use identity::{KEY_PREFIX, KeyPair, challenge_message, parse_public};
 pub use systemone::{
-    Answer, ChoiceAnswer, DEFAULT_DECIDER_BASE_URL, DEFAULT_DECIDER_MODEL,
-    DEFAULT_DECIDER_TIMEOUT_MS, NoulAnswer, NoulCriteria, Question, ScoreAnswer, SystemOneClient,
-    SystemOneRequest, SystemOneResponse, SystemOneUsage,
+    Answer, ChoiceAnswer, DECIDER_DEFAULTS_JSON, DEFAULT_DECIDER_BASE_URL, DEFAULT_DECIDER_MODEL,
+    DEFAULT_DECIDER_TIMEOUT_MS, DeciderSpec, NoulAnswer, NoulCriteria, Question, ReflexSpec,
+    ScoreAnswer, SystemOneClient, SystemOneRequest, SystemOneResponse, SystemOneUsage,
+    interpolate_value, merge_json,
 };
 pub use tls::{
     ServerCert, client_config, gen_self_signed, load_or_create, server_config, spki_pin_of,

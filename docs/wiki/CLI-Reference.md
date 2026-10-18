@@ -102,7 +102,10 @@ Inside a session (`pi` plugin or `onlyne mcp` for ACP), agents call `onlyne_send
 
 ```bash
 # System-1 autonomic fault triage (evaluates open faults or a hook event via POST /v1/systemone)
-onlyne --server-root ./cluster triage [--task <task-id>] [--apply] [--min-confidence 0.60]
+onlyne --server-root ./cluster triage [--task <task-id>] [--from-hook] [--apply] [--min-confidence 0.60] [--spec <path>]
+
+# Export the embedded baseline System-1 DeciderSpec for meta-programming
+onlyne schema decider --pretty > ./cluster/.onlyne/decider.json
 
 # Operator repair verbs
 onlyne --server-root ./cluster repair inspect --task <task-id>

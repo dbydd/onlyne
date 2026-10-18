@@ -459,11 +459,14 @@ enum SchemaTarget {
     Client,
     /// `<server-root>/.onlyne/spec.toml`, the cluster's shared file.
     Spec,
+    /// The meta-programmable System-1 decider specification
+    /// (`.onlyne/decider.json`).
+    Decider,
 }
 
 #[derive(clap::Args, Debug, Clone)]
 struct SchemaCmd {
-    /// Which schema to print: `client` or `spec`.
+    /// Which schema to print: `client`, `spec`, or `decider`.
     #[arg(value_enum)]
     target: SchemaTarget,
 }
@@ -473,9 +476,18 @@ struct SchemaCmd {
 /// a document that no longer parses as JSON is a build fault, refused as a
 /// local validation failure with exit 2.
 fn schema(flags: &GlobalFlags, target: SchemaTarget) -> i32 {
+    let name = match target {
+        SchemaTarget::Client => "client",
+        SchemaTarget::Spec => "spec",
+        SchemaTarget::Decider => "decider",
+    };
+    // The decider document is not a JSON Schema: it is the specification the
+    // schema would describe, and printing it is what lets an operator copy the
+    // stock reflex set out of an installed binary.
     let raw = match target {
         SchemaTarget::Client => onlyne_config::config_client_schema(),
         SchemaTarget::Spec => onlyne_config::spec_schema(),
+        SchemaTarget::Decider => onlyne_net::DECIDER_DEFAULTS_JSON,
     };
     let text = if flags.pretty {
         match serde_json::from_str::<serde_json::Value>(raw) {
@@ -489,11 +501,7 @@ fn schema(flags: &GlobalFlags, target: SchemaTarget) -> i32 {
             },
             Err(error) => {
                 return runtime::usage_error(format!(
-                    "onlyne: the embedded {} schema is not JSON: {error}",
-                    match target {
-                        SchemaTarget::Client => "client",
-                        SchemaTarget::Spec => "spec",
-                    }
+                    "onlyne: the embedded {name} schema is not JSON: {error}"
                 ));
             }
         }

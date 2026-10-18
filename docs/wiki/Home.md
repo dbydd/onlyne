@@ -7,7 +7,7 @@ Onlyne ties a fleet of coding agents into a durable, workspace-scoped cluster:
 - **`onlyne-server`** routes envelopes between roles, enforces declarative ACLs, records every delivery in an append-only SQLite ledger (`state.db`), and streams durable events to subscribers and hooks.
 - **`onlyne-client`** runs in each role workspace, manages that role's agent sessions across terminal hosts (`orca`, `zellij`, `tern`, `headless`, `external`) and drives (`plugin`, `acp`, `exec`), and enforces turn-end and completion obligations.
 - **`onlyne-im`** (optional) connects chat platforms (Telegram, Feishu/Lark, QQ, Slack, Linear) as one cluster role, multiplexing conversations by a first-line `<chat:KEY>` token and threading replies via `<msg:PREFIX>`.
-- **System-1 Decider Reflexes** (optional, powered by `POST /v1/systemone` / `magpie/group/decider`) add millisecond-level structured judgments (`noul`, `choice`, `score`) at five edge checkpoints without adding orchestration policy to the server.
+- **System One Decider Reflexes** (optional, powered by the TypeSafe System One API `POST /v1/systemone`) add millisecond-level structured judgments (`noul`, `choice`, `score`) at five edge checkpoints without adding orchestration policy to the server.
 
 ---
 
@@ -38,7 +38,7 @@ flowchart TB
     end
 
     subgraph S1["Optional System-1 Edge Reflexes"]
-        DEC["SystemOneClient (POST /v1/systemone)\nmagpie/group/decider · TypeSafe Jev / Clef"]
+        DEC["SystemOneClient (POST /v1/systemone)\nSystem One Models (Jev / Clef)"]
     end
 
     CLI <-->|"Admin UDS\n/tmp/onlyne-<uid>/<digest>.sock"| SRV
@@ -65,5 +65,5 @@ flowchart TB
 | **[Architecture & Concepts](Architecture-and-Concepts)** | Roles, clients, runtimes, session scopes (`oneshot`, `task`, `role`), `drive × placement` matrix, and fact ownership. | 角色、客户端、运行时、三种会话作用域、驱动与放置矩阵，以及双轴状态机与数据所有权。 |
 | **[CLI Reference](CLI-Reference)** | Complete verb table across `onlyne`, `onlyne-server`, `onlyne-client`, and `onlyne-im`, plus exit codes `0..127`. | 四大二进制的完整子命令速查、Supervisor 双旗标门禁、MCP 工具桥与退出码定义。 |
 | **[IM Gateway](IM-Gateway)** | v2.3 `<chat:KEY>` addressing, v2.4 `<msg:PREFIX>` reply threads, and platform backend setup for Telegram, Feishu, QQ, Slack, and Linear. | v2.3 聊天键协议、v2.4 回复线程模型，以及五大聊天平台后端的凭据与触发器配置。 |
-| **[System-One Decider](System-One-Decider)** | Millisecond-level edge reflexes using TypeSafe System One (`magpie/group/decider`): IM routing, completion guard, adaptive nudge, thrash detection, and `onlyne triage`. | 基于 System-1（`magpie/group/decider`）的五大边缘神经反射弧、环境变量与 `[[hook]]` 自动分诊配置。 |
+| **[System-One Decider](System-One-Decider)** | Millisecond-level edge reflexes using System One models (`POST /v1/systemone`): IM routing, completion guard, adaptive nudge, thrash detection, and `onlyne triage`. | 基于 System One 决策模型的五大边缘神经反射弧、可元编程 `DeciderSpec` 与 `[[hook]]` 自动分诊配置。 |
 | **[Operations & Troubleshooting](Operations-and-Troubleshooting)** | Running under `launchd` and `systemd`, ordered shutdown, socket discovery under `/tmp/onlyne-<uid>/`, and `repair` workflows. | `launchd` / `systemd` 生产托管、优雅排空停机、运行时目录诊断与 `repair` 故障恢复流程。 |

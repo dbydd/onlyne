@@ -26,8 +26,9 @@
 use std::collections::BTreeMap;
 
 use onlyne_im_backend::payload::ImEvent;
-use onlyne_net::{Question, SystemOneClient};
+use onlyne_net::{Answer, DeciderSpec, Question, ReflexSpec, SystemOneClient};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// The role an unroutable message is left with: not the cluster's business.
 pub const IGNORE_ROLE: &str = "ignore";
@@ -63,6 +64,9 @@ pub struct DeciderRouting {
     pub suggested_reply_to: Option<String>,
     /// Concentration of that reply decision in `[0.0, 1.0]`.
     pub reply_confidence: f64,
+    /// Additional answers from custom questions declared in `im_inbound.questions`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Answer>,
 }
 
 impl DeciderRouting {
@@ -94,33 +98,28 @@ pub async fn evaluate_inbound(
     candidate_roles: &[String],
     recent_msg_ids: &[String],
 ) -> Option<DeciderRouting> {
-    let mut questions = BTreeMap::new();
-    questions.insert(
-        "should_handle".to_string(),
-        Question::noul_with_criteria(
-            "Should the coding-agent cluster handle or respond to this message?",
-            "Message asks for work, answers, status, or provides task context",
-            "Unrelated human smalltalk or noise to ignore",
-        ),
-    );
-    questions.insert(
-        "target_role".to_string(),
-        Question::choice(
-            "Which role in the cluster should handle this message?",
-            role_options(candidate_roles),
-        ),
-    );
-    let wants_reply = inbound.reply.is_none() && !recent_msg_ids.is_empty();
-    if wants_reply {
-        questions.insert(
-            "reply_to_msg".to_string(),
-            Question::choice(
-                "Which recent message ID is this message continuing or replying to?",
-                reply_options(recent_msg_ids),
-            ),
-        );
-    }
+    let spec = DeciderSpec::from_env();
+    evaluate_inbound_with_spec(
+        client,
+        &spec.im_inbound,
+        inbound,
+        candidate_roles,
+        recent_msg_ids,
+    )
+    .await
+}
 
+/// Ask System One how one inbound event should be routed using `spec`.
+pub async fn evaluate_inbound_with_spec(
+    client: &SystemOneClient,
+    spec: &ReflexSpec,
+    inbound: &ImEvent,
+    candidate_roles: &[String],
+    recent_msg_ids: &[String],
+) -> Option<DeciderRouting> {
+    if !spec.enabled {
+        return None;
+    }
     let state = serde_json::json!({
         "platform": inbound.platform,
         "conversation": inbound.conversation,
@@ -128,21 +127,68 @@ pub async fn evaluate_inbound(
         "text": inbound.text,
         "recent_message_ids": recent_msg_ids,
     });
+    let mut questions = spec.render_questions(&state);
+
+    let default_candidate = spec.template("default_candidate", DEFAULT_CANDIDATE);
+    let ignore_role = spec.template("ignore_role", IGNORE_ROLE);
+    let ignore_rubric = spec.template("ignore_rubric", "Human chatter not directed at any agent");
+    let none_reply_label = spec.template("none_reply_label", "none");
+    let none_reply_rubric = spec.template("none_reply_rubric", "Starts a new topic");
+    let max_reply = spec.threshold("max_reply_candidates", MAX_REPLY_CANDIDATES as f64) as usize;
+
+    if let Some(Question::Choice { criteria, .. }) = questions.get_mut("target_role") {
+        for (role, rubric) in role_options_with(
+            candidate_roles,
+            default_candidate,
+            ignore_role,
+            ignore_rubric,
+        ) {
+            criteria
+                .entry(role)
+                .or_insert_with(|| rubric.map(Value::String));
+        }
+    }
+
+    let wants_reply = inbound.reply.is_none() && !recent_msg_ids.is_empty();
+    if wants_reply {
+        if let Some(Question::Choice { criteria, .. }) = questions.get_mut("reply_to_msg") {
+            for (id, rubric) in reply_options_with(
+                recent_msg_ids,
+                max_reply,
+                none_reply_label,
+                none_reply_rubric,
+            ) {
+                criteria
+                    .entry(id)
+                    .or_insert_with(|| rubric.map(Value::String));
+            }
+        }
+    } else {
+        questions.remove("reply_to_msg");
+    }
+
     let response = client.evaluate(state, questions).await.ok()?;
 
     let should_handle = response.noul("should_handle")?;
     let target = response.choice("target_role")?;
+    let extra: BTreeMap<String, Answer> = response
+        .answers
+        .iter()
+        .filter(|(k, _)| !matches!(k.as_str(), "should_handle" | "target_role" | "reply_to_msg"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let mut routing = DeciderRouting {
         should_handle,
         target_role: target.choice.clone(),
         target_confidence: target.confidence,
         suggested_reply_to: None,
         reply_confidence: 0.0,
+        extra,
     };
     if wants_reply {
         if let Some(reply) = response.choice("reply_to_msg") {
             routing.reply_confidence = reply.confidence;
-            if reply.choice != "none" {
+            if reply.choice != none_reply_label {
                 routing.suggested_reply_to = Some(reply.choice.clone());
             }
         }
@@ -152,9 +198,25 @@ pub async fn evaluate_inbound(
 
 /// The closed set the role question answers over: the cluster's roles, then
 /// the way out.
+#[cfg(test)]
 fn role_options(candidate_roles: &[String]) -> Vec<(String, Option<String>)> {
+    let spec = DeciderSpec::defaults().im_inbound;
+    role_options_with(
+        candidate_roles,
+        spec.template("default_candidate", DEFAULT_CANDIDATE),
+        spec.template("ignore_role", IGNORE_ROLE),
+        spec.template("ignore_rubric", "Human chatter not directed at any agent"),
+    )
+}
+
+fn role_options_with(
+    candidate_roles: &[String],
+    default_candidate: &str,
+    ignore_role: &str,
+    ignore_rubric: &str,
+) -> Vec<(String, Option<String>)> {
     // Bound before the branch, so the empty case has a slice that outlives it.
-    let default = [DEFAULT_CANDIDATE.to_string()];
+    let default = [default_candidate.to_string()];
     let roles: &[String] = if candidate_roles.is_empty() {
         &default
     } else {
@@ -162,21 +224,23 @@ fn role_options(candidate_roles: &[String]) -> Vec<(String, Option<String>)> {
     };
     let mut options: Vec<(String, Option<String>)> =
         roles.iter().map(|role| (role.clone(), None)).collect();
-    options.push((
-        IGNORE_ROLE.to_string(),
-        Some("Human chatter not directed at any agent".to_string()),
-    ));
+    options.push((ignore_role.to_string(), Some(ignore_rubric.to_string())));
     options
 }
 
 /// The reply question's set: the newest few ids, then the way out.
-fn reply_options(recent_msg_ids: &[String]) -> Vec<(String, Option<String>)> {
-    let start = recent_msg_ids.len().saturating_sub(MAX_REPLY_CANDIDATES);
+fn reply_options_with(
+    recent_msg_ids: &[String],
+    max_reply: usize,
+    none_label: &str,
+    none_rubric: &str,
+) -> Vec<(String, Option<String>)> {
+    let start = recent_msg_ids.len().saturating_sub(max_reply);
     let mut options: Vec<(String, Option<String>)> = recent_msg_ids[start..]
         .iter()
         .map(|id| (id.clone(), None))
         .collect();
-    options.push(("none".to_string(), Some("Starts a new topic".to_string())));
+    options.push((none_label.to_string(), Some(none_rubric.to_string())));
     options
 }
 
@@ -232,14 +296,14 @@ mod tests {
             stream.write_all(&bytes).await.unwrap();
         });
         (
-            SystemOneClient::new(format!("http://{addr}"), "group/decider"),
+            SystemOneClient::new(format!("http://{addr}"), "jev-latest"),
             seen_rx,
         )
     }
 
     fn answers_json(should_handle: f64, role: &str, confidence: f64) -> serde_json::Value {
         serde_json::json!({
-            "model": "group/decider",
+            "model": "jev-latest",
             "answers": {
                 "should_handle": { "type": "noul", "noul": should_handle },
                 "target_role": {
@@ -281,6 +345,7 @@ mod tests {
                 target_confidence: 0.77,
                 suggested_reply_to: None,
                 reply_confidence: 0.1,
+                extra: BTreeMap::new(),
             }
         );
 
@@ -363,7 +428,7 @@ mod tests {
     #[tokio::test]
     async fn a_chosen_message_becomes_the_suggested_reply_to() {
         let answers = serde_json::json!({
-            "model": "group/decider",
+            "model": "jev-latest",
             "answers": {
                 "should_handle": { "type": "noul", "noul": 0.8 },
                 "target_role": { "type": "choice", "choice": "builder", "confidence": 0.6 },
@@ -401,7 +466,7 @@ mod tests {
     async fn a_dead_endpoint_degrades_to_nothing() {
         // A port nothing listens on: the client's own timeout and the
         // connection refusal both have to land as `None`.
-        let client = SystemOneClient::new("http://127.0.0.1:1", "group/decider")
+        let client = SystemOneClient::new("http://127.0.0.1:1", "jev-latest")
             .with_timeout(std::time::Duration::from_millis(200));
         let routing = evaluate_inbound(&client, &event(), &["_supervisor".to_string()], &[]).await;
         assert!(routing.is_none());
@@ -411,7 +476,7 @@ mod tests {
     #[tokio::test]
     async fn an_unusable_answer_degrades_to_nothing() {
         let answers = serde_json::json!({
-            "model": "group/decider",
+            "model": "jev-latest",
             "answers": { "target_role": { "type": "choice", "choice": "builder" } }
         });
         let (client, _seen_rx) = mock_server(answers).await;
@@ -426,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn a_mistyped_answer_degrades_to_nothing() {
         let answers = serde_json::json!({
-            "model": "group/decider",
+            "model": "jev-latest",
             "answers": {
                 "should_handle": { "type": "score", "score": 1.0 },
                 "target_role": { "type": "choice", "choice": "builder" }
@@ -449,6 +514,7 @@ mod tests {
             target_confidence: 0.25,
             suggested_reply_to: Some("m2".into()),
             reply_confidence: 0.75,
+            extra: BTreeMap::new(),
         };
         let text = serde_json::to_string(&routing).unwrap();
         assert!(text.contains("\"suggested_reply_to\":\"m2\""));
@@ -461,6 +527,7 @@ mod tests {
             target_confidence: 0.0,
             suggested_reply_to: None,
             reply_confidence: 0.0,
+            extra: BTreeMap::new(),
         };
         assert!(
             !serde_json::to_string(&bare)
@@ -481,6 +548,45 @@ mod tests {
         assert_eq!(
             options.last().unwrap().1.as_deref(),
             Some("Human chatter not directed at any agent")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_custom_spec_interpolates_state_and_captures_extra_answers() {
+        let answers = serde_json::json!({
+            "model": "jev-latest",
+            "answers": {
+                "should_handle": { "type": "noul", "noul": 0.95 },
+                "target_role": { "type": "choice", "choice": "builder", "confidence": 0.85 },
+                "is_urgent": { "type": "noul", "noul": 0.99 }
+            }
+        });
+        let (client, seen_rx) = mock_server(answers).await;
+        let mut spec = DeciderSpec::defaults().im_inbound;
+        spec.questions.insert(
+            "should_handle".to_string(),
+            Question::noul("Custom prompt for {platform}"),
+        );
+        spec.questions.insert(
+            "is_urgent".to_string(),
+            Question::noul("Is chat {conversation} urgent?"),
+        );
+        let routing =
+            evaluate_inbound_with_spec(&client, &spec, &event(), &["builder".to_string()], &[])
+                .await
+                .unwrap();
+        assert_eq!(
+            routing.extra.get("is_urgent"),
+            Some(&Answer::Noul(onlyne_net::NoulAnswer { noul: 0.99 }))
+        );
+        let body: serde_json::Value = serde_json::from_str(&seen_rx.await.unwrap()).unwrap();
+        assert_eq!(
+            body["questions"]["should_handle"]["instructions"],
+            "Custom prompt for telegram"
+        );
+        assert_eq!(
+            body["questions"]["is_urgent"]["instructions"],
+            "Is chat -100 urgent?"
         );
     }
 }

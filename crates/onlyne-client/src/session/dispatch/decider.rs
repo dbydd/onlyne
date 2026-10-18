@@ -30,15 +30,29 @@
 //! scenario suite runs `ONLYNE_BACKEND=fake`, which
 //! `SystemOneClient::from_env` already refuses, so both gates are a second lock
 //! on a door that is already shut.
+//!
+//! No prompt text, rubric, or threshold lives in this module. Each reflex
+//! reads its questions, thresholds, and answer templates from a
+//! [`ReflexSpec`] — the `complete_guard`, `turn_end`, and `heartbeat` sections
+//! of `onlyne_net`'s [`DeciderSpec`], which defaults to the embedded
+//! `decider_defaults.json` and takes overrides from `<root>/.onlyne/decider.json`
+//! and `ONLYNE_DECIDER_SPEC`. An operator can rewrite an instruction, add a
+//! `turn_end.templates` entry for a custom `reason` option, or move a floor
+//! without touching this file. The `*_with_spec` functions take the spec
+//! explicitly; the three names the callers use load [`DeciderSpec::from_env`]
+//! and delegate.
 
 use super::*;
 
 use std::collections::BTreeMap;
 
-use onlyne_net::{Question, SystemOneClient};
+use onlyne_net::{DeciderSpec, ReflexSpec, SystemOneClient, interpolate_value};
 use serde_json::Value;
 
 /// The shortest completion report worth asking about.
+///
+/// The default, used whenever `complete_guard` does not name
+/// `min_report_bytes` itself.
 ///
 /// A real report names what it did: a file, a command, a verdict. A synthetic
 /// one — the unit test's `"done"`, the probe's `"mine"` — is a handful of bytes
@@ -48,11 +62,17 @@ pub const MIN_REPORT_BYTES: usize = 24;
 
 /// The shortest closing text worth diagnosing.
 ///
+/// The default, used whenever `turn_end` does not name `min_closing_bytes`
+/// itself.
+///
 /// Shorter than a sentence is a fragment, and a fragment says nothing about
 /// whether the agent finished, is waiting, or broke.
 pub const MIN_CLOSING_BYTES: usize = 16;
 
 /// How sure the contradiction judgement has to be before a `done` is rewritten.
+///
+/// The default, used whenever `complete_guard` does not name
+/// `contradiction_floor` itself.
 ///
 /// The question is loaded: it asks whether the report *states* the work is
 /// unfinished, so a high probability is the model saying the sentence is there
@@ -62,6 +82,9 @@ pub const CONTRADICTION_FLOOR: f64 = 0.85;
 
 /// How sure the status judgement has to be before a `done` is rewritten.
 ///
+/// The default, used whenever `complete_guard` does not name `status_floor`
+/// itself.
+///
 /// The choice is over three labels the model has to separate, and its
 /// `confidence` is the concentration of that distribution. A near-uniform
 /// answer is the model saying it cannot tell, which is not grounds to override
@@ -69,6 +92,8 @@ pub const CONTRADICTION_FLOOR: f64 = 0.85;
 pub const STATUS_FLOOR: f64 = 0.65;
 
 /// How sure the turn-end diagnosis has to be before the nudge changes.
+///
+/// The default, used whenever `turn_end` does not name `diagnosis_floor` itself.
 ///
 /// A nudge that names the wrong tool call is worse than the neutral one, so the
 /// bar is where a confident answer starts rather than where a probable one does.
@@ -81,6 +106,14 @@ pub const DIAGNOSIS_FLOOR: f64 = 0.60;
 /// beside them are the session's own account of its work, and that is the only
 /// evidence a thrashing loop or a phase ever appears in.
 const PROSE_KEYS: [&str; 4] = ["note", "text", "tool", "output"];
+
+/// The question ids [`analyze_heartbeat_json_with_spec`] reads out of a beat's
+/// answer by name.
+///
+/// Any further question an operator adds to `heartbeat.questions` is asked in
+/// the same batch and carried through as `observed.decider.extra`, so the spec
+/// can grow a field the board reads without a code change here.
+const HEARTBEAT_CORE_QUESTIONS: [&str; 3] = ["is_thrashing", "progress", "phase"];
 
 /// Read one completion report against its own claim, and answer the outcome it
 /// should have carried.
@@ -102,54 +135,50 @@ const PROSE_KEYS: [&str; 4] = ["note", "text", "tool", "output"];
 /// `None` is every other answer: the text agrees, the model is unsure, the
 /// endpoint did not answer, or the report is too short to hold a contradiction.
 /// The caller then settles exactly what the agent reported.
+///
+/// The questions, the floors, and the shortest report worth asking about all
+/// come from `complete_guard` in [`DeciderSpec::from_env`].
 pub async fn verify_done_outcome(
     client: &SystemOneClient,
     task_id: &str,
     head: Option<&str>,
     details: Option<&str>,
 ) -> Option<(Outcome, String)> {
-    let head = head.unwrap_or("");
-    let details = details.unwrap_or("");
-    if head.len() + details.len() < MIN_REPORT_BYTES {
+    let spec = DeciderSpec::from_env();
+    verify_done_outcome_with_spec(client, &spec.complete_guard, task_id, head, details).await
+}
+
+/// [`verify_done_outcome`] against one explicit `complete_guard` spec.
+pub async fn verify_done_outcome_with_spec(
+    client: &SystemOneClient,
+    spec: &ReflexSpec,
+    task_id: &str,
+    head: Option<&str>,
+    details: Option<&str>,
+) -> Option<(Outcome, String)> {
+    if !spec.enabled {
         return None;
     }
+    let min_bytes = spec.threshold("min_report_bytes", MIN_REPORT_BYTES as f64) as usize;
+    let contradiction_floor = spec.threshold("contradiction_floor", CONTRADICTION_FLOOR);
+    let status_floor = spec.threshold("status_floor", STATUS_FLOOR);
 
-    let mut questions = BTreeMap::new();
-    questions.insert(
-        "contradicts_done".to_string(),
-        Question::noul_with_criteria(
-            "Does this completion report state that the work is actually unfinished, blocked on external input, or failed with an unresolved error?",
-            "States the task could not be finished, is blocked, or failed",
-            "Reports completed work",
-        ),
-    );
-    questions.insert(
-        "actual_status".to_string(),
-        Question::choice(
-            "What is the true status described by this report?",
-            [
-                ("done", Some("Work was completed".to_string())),
-                (
-                    "blocked",
-                    Some("Blocked waiting on user, permission, or external dependency".to_string()),
-                ),
-                (
-                    "failed",
-                    Some("Failed due to an unrecoverable error".to_string()),
-                ),
-            ],
-        ),
-    );
+    let head = head.unwrap_or("");
+    let details = details.unwrap_or("");
+    if head.len() + details.len() < min_bytes {
+        return None;
+    }
 
     let state = serde_json::json!({
         "task_id": task_id,
         "head": head,
         "details": details,
     });
+    let questions = spec.render_questions(&state);
     let response = client.evaluate(state, questions).await.ok()?;
     let contradicts_done = response.noul("contradicts_done")?;
     let status = response.choice("actual_status")?;
-    if contradicts_done < CONTRADICTION_FLOOR || status.confidence < STATUS_FLOOR {
+    if contradicts_done < contradiction_floor || status.confidence < status_floor {
         return None;
     }
     let adjusted = match status.choice.as_str() {
@@ -184,59 +213,59 @@ pub async fn verify_done_outcome(
 /// standard sentence is a contract the plugin composes none of
 /// (`docs/v2-CONTRACT.md` §3c), so what this adds is a second sentence naming
 /// the one outcome the situation calls for. `None` keeps the neutral nudge.
+///
+/// The question, the floor, and every sentence it can answer come from
+/// `turn_end` in [`DeciderSpec::from_env`].
 pub async fn diagnose_turn_end_suffix(
     client: &SystemOneClient,
     task_id: &str,
     closing: Option<&str>,
-) -> Option<&'static str> {
-    let closing = closing?;
-    if closing.len() < MIN_CLOSING_BYTES {
+) -> Option<String> {
+    let spec = DeciderSpec::from_env();
+    diagnose_turn_end_suffix_with_spec(client, &spec.turn_end, task_id, closing).await
+}
+
+/// [`diagnose_turn_end_suffix`] against one explicit `turn_end` spec.
+///
+/// The sentence answered is the template filed under the model's chosen label,
+/// interpolated against the request state, so a label an operator added to
+/// `turn_end.questions.reason.criteria` together with its `turn_end.templates`
+/// entry reaches the agent with no code change here. A label with no template
+/// is a half-written spec, and the neutral nudge is the safer answer.
+pub async fn diagnose_turn_end_suffix_with_spec(
+    client: &SystemOneClient,
+    spec: &ReflexSpec,
+    task_id: &str,
+    closing: Option<&str>,
+) -> Option<String> {
+    if !spec.enabled {
         return None;
     }
+    let min_bytes = spec.threshold("min_closing_bytes", MIN_CLOSING_BYTES as f64) as usize;
+    let diagnosis_floor = spec.threshold("diagnosis_floor", DIAGNOSIS_FLOOR);
 
-    let mut questions = BTreeMap::new();
-    questions.insert(
-        "reason".to_string(),
-        Question::choice(
-            "Why did the agent end its turn without calling onlyne_complete?",
-            [
-                (
-                    "forgot_complete",
-                    Some(
-                        "Finished the work and summarized it without calling onlyne_complete"
-                            .to_string(),
-                    ),
-                ),
-                (
-                    "blocked",
-                    Some("Waiting on external input or blocker".to_string()),
-                ),
-                ("error", Some("Hit an error and stopped".to_string())),
-            ],
-        ),
-    );
+    let closing = closing?;
+    if closing.len() < min_bytes {
+        return None;
+    }
 
     let state = serde_json::json!({
         "task_id": task_id,
         "closing": closing,
     });
-    let response = client.evaluate(state, questions).await.ok()?;
+    let questions = spec.render_questions(&state);
+    let response = client.evaluate(state.clone(), questions).await.ok()?;
     let reason = response.choice("reason")?;
-    if reason.confidence < DIAGNOSIS_FLOOR {
+    if reason.confidence < diagnosis_floor {
         return None;
     }
-    Some(match reason.choice.as_str() {
-        "forgot_complete" => {
-            " If your work is finished, call onlyne_complete with outcome=\"done\" now."
-        }
-        "blocked" => {
-            " If you are blocked on an external dependency, call onlyne_complete with outcome=\"blocked\" now."
-        }
-        "error" => {
-            " If the task cannot succeed due to an error, call onlyne_complete with outcome=\"failed\" now."
-        }
-        _ => return None,
-    })
+    let template = spec.templates.get(&reason.choice)?;
+    // `{task_id}` and `{closing}` in a template are the operator's to use.
+    let Value::String(sentence) = interpolate_value(&Value::String(template.clone()), &state)
+    else {
+        return None;
+    };
+    Some(sentence)
 }
 
 /// Read one beat's prose, and answer the projection a board renders.
@@ -253,64 +282,60 @@ pub async fn diagnose_turn_end_suffix(
 /// after the fact. It is a sibling of `host` rather than a dimension: nothing in
 /// the reducer reads it and `is_legal` never constrains it, so a beat that
 /// carries no prose keeps the exact bytes it carried before.
+///
+/// The three questions and the thrashing mark come from `heartbeat` in
+/// [`DeciderSpec::from_env`]; any question an operator adds beside them is
+/// asked in the same batch and carried through as `extra`.
 pub async fn analyze_heartbeat_json(
     client: &SystemOneClient,
     task_id: &str,
     observed: &Value,
 ) -> Option<Value> {
+    let spec = DeciderSpec::from_env();
+    analyze_heartbeat_json_with_spec(client, &spec.heartbeat, task_id, observed).await
+}
+
+/// [`analyze_heartbeat_json`] against one explicit `heartbeat` spec.
+pub async fn analyze_heartbeat_json_with_spec(
+    client: &SystemOneClient,
+    spec: &ReflexSpec,
+    task_id: &str,
+    observed: &Value,
+) -> Option<Value> {
+    if !spec.enabled {
+        return None;
+    }
     if !carries_prose(observed) {
         return None;
     }
-
-    let mut questions = BTreeMap::new();
-    questions.insert(
-        "is_thrashing".to_string(),
-        Question::noul(
-            "Is the agent stuck in a repetitive error loop repeating the same failing action?",
-        ),
-    );
-    questions.insert(
-        "progress".to_string(),
-        Question::score(
-            "How well is the session progressing?",
-            [
-                "0: stuck in repetitive error loop",
-                "1: debugging errors",
-                "2: making steady progress",
-                "3: verifying and wrapping up",
-            ],
-        ),
-    );
-    questions.insert(
-        "phase".to_string(),
-        Question::choice(
-            "Which activity phase is the agent currently in?",
-            [
-                ("reading", None),
-                ("planning", None),
-                ("coding", None),
-                ("testing", None),
-                ("debugging", None),
-                ("waiting", None),
-                ("wrapping_up", None),
-            ],
-        ),
-    );
 
     let state = serde_json::json!({
         "task_id": task_id,
         "observed": observed,
     });
+    let questions = spec.render_questions(&state);
     let response = client.evaluate(state, questions).await.ok()?;
     let is_thrashing = response.noul("is_thrashing")?;
     let progress = response.score("progress")?;
     let phase = response.choice("phase")?;
-    Some(serde_json::json!({
+    let mut projection = serde_json::json!({
         "phase": phase.choice,
         "confidence": phase.confidence,
         "progress": progress.score,
         "thrashing": is_thrashing,
-    }))
+    });
+
+    let extra: BTreeMap<String, Value> = spec
+        .questions
+        .keys()
+        .filter(|id| !HEARTBEAT_CORE_QUESTIONS.contains(&id.as_str()))
+        .filter_map(|id| response.answers.get(id).map(|answer| (id.clone(), answer)))
+        .map(|(id, answer)| (id, serde_json::json!(answer)))
+        .collect();
+    if !extra.is_empty() {
+        projection["extra"] = serde_json::json!(extra);
+    }
+    Some(projection)
 }
 
 /// Whether one observation carries any prose about the work.
@@ -378,7 +403,7 @@ mod tests {
             let _ = stream.write_all(&bytes).await;
         });
         (
-            SystemOneClient::new(format!("http://{addr}"), "group/decider"),
+            SystemOneClient::new(format!("http://{addr}"), "jev-latest"),
             seen_rx,
             hits,
         )
@@ -397,14 +422,14 @@ mod tests {
             }
         });
         (
-            SystemOneClient::new(format!("http://{addr}"), "group/decider"),
+            SystemOneClient::new(format!("http://{addr}"), "jev-latest"),
             hits,
         )
     }
 
-    fn answers(contradicts: f64, status: &str, confidence: f64) -> serde_json::Value {
+    fn answers(contradicts: f64, status: &str, confidence: f64) -> Value {
         serde_json::json!({
-            "model": "group/decider",
+            "model": "jev-latest",
             "answers": {
                 "contradicts_done": { "type": "noul", "noul": contradicts },
                 "actual_status": {
@@ -546,7 +571,7 @@ mod tests {
     /// An endpoint that does not answer is a `None`, not a failure.
     #[tokio::test]
     async fn a_dead_endpoint_leaves_the_verdict_alone() {
-        let client = SystemOneClient::new("http://127.0.0.1:1", "group/decider")
+        let client = SystemOneClient::new("http://127.0.0.1:1", "jev-latest")
             .with_timeout(std::time::Duration::from_millis(200));
         assert!(
             verify_done_outcome(
@@ -562,9 +587,9 @@ mod tests {
 
     /// An answer missing the noul is not a judgement.
     #[tokio::test]
-    async fn an_unusable_answer_leaves_the_verdict_alone() {
+    async fn a_missing_noul_answer_leaves_the_verdict_alone() {
         let answers = serde_json::json!({
-            "model": "group/decider",
+            "model": "jev-latest",
             "answers": {
                 "actual_status": { "type": "choice", "choice": "blocked", "confidence": 0.9 }
             }
@@ -584,7 +609,7 @@ mod tests {
 
     fn closing_answers(reason: &str, confidence: f64) -> serde_json::Value {
         serde_json::json!({
-            "model": "group/decider",
+            "model": "jev-latest",
             "answers": {
                 "reason": {
                     "type": "choice",
@@ -677,6 +702,81 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 0, "no request was made");
     }
 
+    /// The spec is the whole reflex: an operator's own option, its own
+    /// instruction, and a template carrying `{task_id}` reach the nudge without
+    /// any of those strings having been written in this module.
+    #[tokio::test]
+    async fn a_custom_turn_end_spec_names_its_own_nudge() {
+        let spec: ReflexSpec = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "questions": {
+                "reason": {
+                    "type": "choice",
+                    "instructions": "Why did the agent end its turn on {task_id}?",
+                    "criteria": {
+                        "forgot_complete": "Finished the work and summarized it",
+                        "needs_review": "Stopped to hand the work back for review"
+                    }
+                }
+            },
+            "thresholds": { "min_closing_bytes": 16.0, "diagnosis_floor": 0.60 },
+            "templates": {
+                "forgot_complete": " Call onlyne_complete on {task_id} with outcome=\"done\" now.",
+                "needs_review": " Call onlyne_complete on {task_id} with outcome=\"blocked\" and name the reviewer."
+            }
+        }))
+        .expect("a custom turn_end ReflexSpec");
+
+        let (client, seen_rx, _hits) = mock(closing_answers("needs_review", 0.81)).await;
+        let suffix = diagnose_turn_end_suffix_with_spec(
+            &client,
+            &spec,
+            "t-21",
+            Some("I stopped here so the bridge change can be reviewed first"),
+        )
+        .await
+        .expect("the endpoint answered");
+        assert_eq!(
+            suffix,
+            " Call onlyne_complete on t-21 with outcome=\"blocked\" and name the reviewer."
+        );
+
+        let body: Value = serde_json::from_str(&seen_rx.await.unwrap()).expect("a JSON body");
+        assert_eq!(
+            body["questions"]["reason"]["instructions"],
+            "Why did the agent end its turn on t-21?"
+        );
+        let options = body["questions"]["reason"]["criteria"]
+            .as_object()
+            .expect("a closed option set");
+        assert!(options.contains_key("needs_review"));
+        assert!(
+            !options.contains_key("error"),
+            "the spec's option set replaced the default one"
+        );
+    }
+
+    /// A reflex an operator switched off asks nothing at all.
+    #[tokio::test]
+    async fn a_disabled_reflex_is_never_asked_about() {
+        let spec = ReflexSpec {
+            enabled: false,
+            ..ReflexSpec::default()
+        };
+        let (client, hits) = unreachable_client().await;
+        assert!(
+            diagnose_turn_end_suffix_with_spec(
+                &client,
+                &spec,
+                "t-22",
+                Some("I have finished the refactor and here is what changed in the bridge"),
+            )
+            .await
+            .is_none()
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "no request was made");
+    }
+
     fn heartbeat_answers(
         thrashing: f64,
         progress: f64,
@@ -684,7 +784,7 @@ mod tests {
         confidence: f64,
     ) -> serde_json::Value {
         serde_json::json!({
-            "model": "group/decider",
+            "model": "jev-latest",
             "answers": {
                 "is_thrashing": { "type": "noul", "noul": thrashing },
                 "progress": {
@@ -824,7 +924,7 @@ mod tests {
     #[tokio::test]
     async fn an_unusable_answer_is_not_a_projection() {
         let answers = serde_json::json!({
-            "model": "group/decider",
+            "model": "jev-latest",
             "answers": {
                 "is_thrashing": { "type": "noul", "noul": 0.5 },
                 "phase": { "type": "choice", "choice": "coding", "confidence": 0.9 }
@@ -843,7 +943,7 @@ mod tests {
     #[tokio::test]
     async fn a_mistyped_answer_is_not_a_projection() {
         let answers = serde_json::json!({
-            "model": "group/decider",
+            "model": "jev-latest",
             "answers": {
                 "is_thrashing": { "type": "score", "score": 2.0 },
                 "progress": { "type": "score", "score": 2.0, "confidence": 0.9 },

@@ -1,636 +1,167 @@
 # Onlyne
 
-> **English version:** [README.md](README.md) is the complete, default documentation. This page is the complete Chinese mirror. Use the section links below to compare the two documents directly.
+![Onlyne — 面向 Coding-Agent 团队的本地优先消息路由与会话传输层](assets/promo/onlyne-hero.svg)
 
-**English navigation:** [Overview](README.md#onlyne) · [Choose a starting path](README.md#choose-a-starting-path) · [Install](README.md#install) · [Fake quickstart](README.md#shortest-local-task-fake-backend) · [Real pi + Orca demo](README.md#real-pi--orca-demo) · [Task flow](README.md#follow-one-task-end-to-end) · [Configuration and stored data](README.md#configuration-and-stored-data) · [Operate a cluster](README.md#operate-a-cluster) · [Architecture](README.md#architecture) · [Further reading](README.md#further-reading)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![rust](https://img.shields.io/badge/rust-1.85%2B-orange)](Cargo.toml)
+[![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#安装)
 
-**中文导航：** [概览](#onlyne) · [选择起点](#选择起点) · [安装](#安装) · [fake 快速开始](#最短本地任务fake-backend) · [真实 pi + Orca 演示](#真实-pi--orca-演示) · [任务流程](#跟随一个任务) · [配置与存储](#配置与存储) · [操作集群](#操作集群) · [架构](#架构) · [继续阅读](#继续阅读)
+**[English README](README.md)** · **[Wiki 首页](docs/wiki/Home.md)** · **[快速上手](docs/wiki/Quickstart.md)** · **[CLI 速查](docs/wiki/CLI-Reference.md)** · **[IM 网关](docs/wiki/IM-Gateway.md)** · **[System One 决策反射弧](docs/wiki/System-One-Decider.md)**
 
-**给 coding-agent 团队用的消息与传输层，跑在你自己的机器上。**
+Onlyne 是运行在你自己机器上的 Coding-Agent 团队消息路由与会话传输层：
 
-Onlyne 把 coding agent 组织成持久的工作角色。**server** 在角色之间路由消息，并把每次投递记录进持久账本。每个角色工作区运行一个 **client**，负责该角色的 coding-agent 会话。可选的 **IM 网关**（`onlyne-im`）作为集群中的一条角色接入，并通过投递正文首行的应用层 chat key 分流注册表中的全部会话，让聊天里的人和 agent 面对同一个集群。agent 保留自己的运行时并负责决策；Onlyne 提供路由、排队、会话传输、回执和可审计记录。
+- **单一追加式持久账本（`onlyne-server`）**：在角色之间路由信封，执行声明式路由权限（`allowed_targets`）与交接义务（`owes_targets`），并将每次投递记录在 SQLite 账本（`state.db`）中。
+- **工作区级角色会话（`onlyne-client`）**：在各类终端宿主（`orca`、`tern`、`zellij`、`headless`、`external`）上驱动智能体（`pi`、ACP 智能体、外部驻留运行时或命令行脚本），支持 `oneshot`、`task`、`role` 三种会话作用域。
+- **多平台 IM 聊天网关（`onlyne-im`）**：作为集群中的一条角色接入 Telegram、飞书、QQ、Slack 与 Linear，通过正文首行的 `<chat:KEY>` 寻址多条会话，并通过 `<msg:PREFIX>` 组织回复线程。
+- **可元编程的 System One 边缘反射弧**：在边缘检查点通过单次打包的 `POST /v1/systemone` 请求评估结构化 `noul`、`choice`、`score` 问题，实现入站语义路由、结项自相矛盾拦截、回合结束自适应追问、活锁检测以及故障自动分诊（`onlyne triage`）。
 
-client 可以通过 TLS 在不同机器上运行。生成的工作区可以整体搬移；supervisor client 也可以把一个子集群作为 aggregate role 暴露给父 server。
+---
 
-![license](https://img.shields.io/badge/license-MIT-green) ![rust](https://img.shields.io/badge/rust-1.85-orange) ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey)
-![Onlyne — supervisor 向五个 pi agent 派十跳环任务，账本逐跳结清](assets/promo/onlyne-hero.png)
+## 快速开始
 
-## 选择起点
+只需两条命令即可初始化双角色集群，并在当前前台终端一并拉起服务端与全部角色客户端：
 
-| 路径 | 适合什么时候 | 额外要求 |
-|---|---|---|
-| **已安装的二进制** | 把 Onlyne 接到已有 agent、宿主或服务管理器。 | 一套匹配版本的 Onlyne，以及你自己的 agent adapter 或 ACP 命令。 |
-| **源码 checkout：fake 快速开始** | 想在没有模型和终端宿主的情况下跑通最短本地任务。 | Rust 1.85+、POSIX shell 和源码 checkout。`onlyne-agent-fake` 由 `onlyne-testkit` 构建，不随发布二进制安装。 |
-| **源码 checkout：pi + Orca 演示** | 想看到真实 pi 会话出现在 Orca 标签页里。 | fake 路径的要求，加上 Python 3、pi、模型凭证、Orca 应用和 `orca` CLI；可见路径应从 Orca 标签页中运行。 |
+```bash
+# 1. 创建 ./cluster/.onlyne/spec.toml 并在 ./cluster/planner 与 ./cluster/coder 下生成角色密钥与工作区配置
+onlyne server init --root ./cluster --roles planner,coder
 
-下面的 fake 和 Orca 示例使用 `target/debug/...`，因为它们直接运行源码构建出的二进制。
+# 2. 在前台启动 onlyne-server 与自动发现的角色客户端（按 Ctrl-C 自动排空停机）
+onlyne up --server-root ./cluster
+```
+
+打开第二个终端，即可派发任务、查看终端看板或在线热注册新角色（无需重启服务端）：
+
+```bash
+# 从操作员面派发任务
+onlyne --server-root ./cluster send \
+  --from planner --to coder \
+  --text "检查 src/lib.rs 并总结公开 API" \
+  --force --yes-i-am-supervisor-not-other-role
+
+# 打开三页式交互终端看板（传入 --once 可输出单帧纯文本快照）
+onlyne --server-root ./cluster tui
+
+# 在服务端运行时通过 SpecApply 在线热注册新角色（免手动 reload）
+onlyne-client init \
+  --workspace ./cluster/reviewer \
+  --role reviewer \
+  --server-root ./cluster \
+  --register
+
+# 通过管理 socket 请求排空并优雅停机
+onlyne --server-root ./cluster shutdown --drain-secs 5
+```
+
+> 希望在源码仓库中不配置任何模型凭据、直接跑通端到端验证？请参考 **[免模型 Fake 快速自测](docs/wiki/Quickstart.md#5-zero-model-scripted-quickstart-fake-backend--免模型脚本化自测)**，或运行 `python3 examples/supervisor/run.py up` 体验五角色 Orca + `pi` 环形任务演示。
+
+---
 
 ## 安装
 
-### 前置条件
-
-- **从 crates.io 安装：** Cargo 和 Rust 1.85 或更新版本。
-- **平台 SDK：** 可选，且永不进入核心。`onlyne-server` 和 `onlyne-client` 完全不编译任何 IM SDK；随包发布的 backend（Telegram、飞书、QQ、Slack、Linear）各自是独立 crate，通过 HTTPS 或 websocket 连接平台。网关本体 `onlyne-im` 是独立模块，有自己的 CLI，不是 `onlyne` 的 verb。
-- **运行时：** 每个 role client 都能访问的地址和端口；本地 admin socket 与 adapter socket 需要一个可写的 owner tree。
-- **agent 宿主：** 一个受支持的 backend 和对应 adapter。真实 pi 路径需要 [pi coding agent](https://github.com/badlogic/pi-mono)。
-- **服务：** 安装不会自动注册服务，也没有 `start`/`stop`。两个 daemon 都在前台运行；要常驻由终端宿主、`launchd` 或 `systemd` 负责。
-
-### crates.io 安装
-
-从当前发布的软件包安装核心。整套包一起安装，保证兄弟二进制来自同一构建：
+### 预编译二进制（macOS 与 Linux）
 
 ```bash
-cargo install \
-  onlyne-cli onlyne-server onlyne-client
-```
-
-这会安装操作入口和它的两个 daemon：
-
-| 命令 | 职责 |
-|---|---|
-| `onlyne` | 操作入口。所有 verb 都在这个进程里实现：查询、admin 操作、`init`/`generate`、内置 TUI，以及 MCP 工具桥。两个 daemon 不再向它转发任何东西。 |
-| `onlyne-server` | 一个集群的路由器、投递队列、持久账本、fault 记录和 admin socket。子命令包括 `init`、`run`、`status`、`generate`。 |
-| `onlyne-client` | 一个角色工作区的 server 链路、session 生命周期、backend 宿主、adapter socket 和持久出站 intent。 |
-
-观测面板是 `onlyne tui` 这个 verb，不是独立二进制。`onlyne-agent-fake` 是额外的
-源码/testkit 命令，不包含在从 registry 安装的命令中。下面的 fake 快速路径会构建它。
-
-### IM 网关（可选）
-
-IM 网关像 `onlyne-web` 一样是独立模块、独立二进制：`onlyne` 没有 `im` 这个 verb，核心构建也不会
-拉进任何聊天平台 SDK。只有想让聊天平台接到集群时才装它，并为你在用的平台装上对应 backend：
-
-```bash
-cargo install onlyne-im onlyne-im-backend-telegram
-# 按平台将 backend 包替换为 -qqbot、-slack、-linear 或 -feishu。
-```
-
-| 命令 | 职责 |
-|---|---|
-| `onlyne-im` | 一个网关根：`init`、`generate`、`login`、`setup`、`run`、`check`。它在单个进程里托管 `conversations/` 下每条会话，并运行操作者的 trigger 脚本。 |
-| `onlyne-im-backend-telegram` | Telegram bot backend：一个进程，由网关通过 stdio 拉起，讲标准 backend 协议。 |
-| `onlyne-im-backend-qqbot` | QQ 开放平台 backend：入站走 websocket 事件网关，出站按场景发送（群消息在被动回复窗口内带 `msg_id`，超窗后变成主动消息）。凭据是 app id 与 secret，存为 `app_id:app_secret`。QQ 的表情表态只在频道内可用，群里的表态是平台拒绝，不是本 backend 缺代码。 |
-| `onlyne-im-backend-slack` | Slack backend：入站走 Socket Mode（需要 `xapp-` app token 和 `xoxb-` bot token，存为 `xapp-…:xoxb-…`），出站走 Web API；回复挂在 `thread_ts` 下。 |
-| `onlyne-im-backend-linear` | Linear backend：入站轮询工作区的评论（默认每 10 秒，`ONLYNE_LINEAR_POLL_SECS`），出站用 `commentCreate`。一条会话就是一个 issue，回复设置评论的 `parentId`。只需要一个 API key。 |
-| `onlyne-im-backend-feishu` | 飞书 backend：事件走长连接，群列表读真实群列表，机器人入群事件免重启接管，交互卡片按钮立即回 toast 并产生 `action` 事件；agent 的答案随后作为卡片线程回复发送。 |
-
-`onlyne-im-backend`（backend 要实现的协议类型）会作为上面任一依赖被装进来。新增一个平台就是新增
-一个 `onlyne-im-backend-<platform>` crate；它们无一被链进 `onlyne`、`onlyne-server` 或
-`onlyne-client`。`init`/`generate`/`login` 的用法见下面的
-[运行 IM 网关](#运行-im-网关)。
-
-### 预编译二进制
-
-发行 tag 带五个平台的归档、各自的 `.sha256`，以及合并后的 `SHA256SUMS`。安装脚本挑出本机
-归档，先与该列表比对，再写入二进制：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/dbydd/onlyne/main/packaging/install.sh | sh
-# PREFIX=~/.local sh packaging/install.sh v1.4.1   # 指定 tag，指定 prefix
-```
-
-Homebrew 装的是同一批归档。发布 pipeline 依据该 release 自带的 checksum 渲染
-[`Formula/onlyne.rb`](Formula/onlyne.rb) 并提交回本仓库，所以本仓库就是 tap：
-
-```bash
+# Homebrew
 brew tap dbydd/onlyne https://github.com/dbydd/onlyne.git
 brew install dbydd/onlyne/onlyne
+
+# 或使用带 SHA-256 校验的安装脚本
+curl -fsSL https://raw.githubusercontent.com/dbydd/onlyne/main/packaging/install.sh | sh
 ```
 
-clone URL 是 tap 命令的一部分：Homebrew 会把短名 `dbydd/onlyne` 读成一个叫
-`homebrew-onlyne` 的仓库，那不是本仓库。
-
-这些二进制装进 Homebrew 的 prefix，安装机上不需要 Rust toolchain。
-
-### agent handbook
-
-安装的 `onlyne` 二进制携带与自身版本匹配的 handbook：
+### Cargo 源码安装（Rust 1.85+）
 
 ```bash
-onlyne skill export                         # 导出全部集合到 .agents/skills
-onlyne skill export --set role              # 角色工作区 handbook
-onlyne skill export --set supervisor        # supervisor handbook
-onlyne skill export --dest /path/to/skills
+# 核心集群二进制
+cargo install onlyne-cli onlyne-server onlyne-client
+
+# 可选 IM 网关与对应平台后端（-telegram、-feishu、-qqbot、-slack 或 -linear）
+cargo install onlyne-im onlyne-im-backend-telegram
 ```
 
-`skill export` 把每份 handbook 写成普通 regular file，写入字节来自编译进二进制的三份手册（`crates/onlyne-cli/skills/`）。内容相同的文件保持不变；已有文件内容不同会停止导出，传 `--force` 才会替换。`npx skills add dbydd/onlyne` 和 `npx skills add ./` 通过 skills CLI 安装同一套仓库文档。
-
-## 最短本地任务：fake backend
-
-从仓库根目录运行下面的命令。它只构建本地 fake 路径需要的包，创建临时集群，并使用仓库内的脚本 agent。fake 从分配文本完成任务，不调用模型。
+安装后可随时从 `onlyne` 二进制导出与当前版本匹配的内置操作手册（`onlyne`、`onlyne-role`、`onlyne-supervisor`）：
 
 ```bash
-cargo build -p onlyne-cli -p onlyne-server -p onlyne-client -p onlyne-testkit
-
-tmp=$(mktemp -d)
-server_pid=
-client_pid=
-fake_pid=
-
-target/debug/onlyne-server init \
-  --root "$tmp/server" --listen 127.0.0.1:17899
-target/debug/onlyne-server run --root "$tmp/server" >"$tmp/server.log" 2>&1 &
-server_pid=$!
-target/debug/onlyne --server-root "$tmp/server" wait-ready
-
-target/debug/onlyne-client init \
-  --workspace "$tmp/planner" \
-  --role planner \
-  --server-root "$tmp/server" \
-  --prose "v1 smoke prose" \
-  --register >/dev/null
-
-ONLYNE_BACKEND=fake target/debug/onlyne-client run \
-  --workspace "$tmp/planner" >"$tmp/client-process.log" 2>&1 &
-client_pid=$!
-target/debug/onlyne-agent-fake \
-  --workspace "$tmp/planner" \
-  --script crates/onlyne-testkit/scripts/echo-complete.json \
-  >"$tmp/fake.log" 2>&1 &
-fake_pid=$!
-
-until target/debug/onlyne --server-root "$tmp/server" roles --json \
-  | grep -q '"state":"online"'; do
-  sleep 0.2
-done
-
-send=$(
-  target/debug/onlyne --server-root "$tmp/server" send \
-    --from planner --to planner --text "hello v1" \
-    --force --yes-i-am-supervisor-not-other-role
-)
-printf '%s\n' "$send"
-task=$(printf '%s\n' "$send" | sed -n 's/.*"task":"\([^"]*\)".*/\1/p')
-
-until target/debug/onlyne --server-root "$tmp/server" ledger \
-  --task "$task" --json | grep -q '"state":"acked"'; do
-  sleep 0.2
-done
-
-target/debug/onlyne --server-root "$tmp/server" ledger --task "$task" --json
-target/debug/onlyne --server-root "$tmp/server" sessions --task "$task" --json
+onlyne skill export
 ```
 
-任务行最终会以 `acked` 结算，`out_head` 中包含 `hello v1`；session 投影会变成 `exited`，`outcome` 为 `done`。如果 `17899` 已被占用，请替换 init 命令中的端口。
+---
 
-完成后清理临时进程和目录：
-
-```bash
-kill "$fake_pid" "$client_pid" "$server_pid" 2>/dev/null || true
-wait "$fake_pid" "$client_pid" "$server_pid" 2>/dev/null || true
-rm -rf "$tmp"
-```
-
-### 以无头 placement 运行真实 agent
-
-同样的 server/client 拓扑不需要终端宿主。准备可用的 pi 安装和 adapter 后，在上面启动 client 的位置只运行下面的 client 命令，并省略 fake agent：
-
-```bash
-pi install npm:pi-onlyne
-ONLYNE_BACKEND=headless target/debug/onlyne-client run --workspace "$tmp/planner"
-```
-
-角色的 `[client.runtime] command` 已经指向 pi。client 会为每个任务启动一个 pi 子进程，保持 stdin 打开，并把 stdout/stderr 写到 `<workspace>/.onlyne/logs/session-<task>.log`。发送、账本和 session 查询命令保持不变。这条路径需要可用的模型/提供商凭证。
-
-对于生成的工作区，`onlyne server generate` 可以把仓库中的 `plugins/onlyne-agent-pi` 包放进工作区，并写入项目范围的 `.pi/settings.json` 配置项。普通 pi 会话不会因用户级 npm 安装而自动激活扩展；Onlyne 注入 `ONLYNE_ROLE`、`ONLYNE_SESSION_ID` 和 `ONLYNE_TASK_ID` 时它才会挂载。
-
-## 真实 pi + Orca 演示
-
-仓库包含一个五角色 running-lights 演示：它生成集群、启动五个真实 pi worker、打开一个 supervisor pi session，并把每个 worker 显示在 Orca 标签页中。任务完成后标签页会回收。
-
-在仓库所在的 Orca 标签页中运行：
-
-```bash
-cargo build -p onlyne-cli -p onlyne-server -p onlyne-client
-python3 examples/supervisor/run.py up
-python3 examples/supervisor/run.py status
-python3 examples/supervisor/run.py stop
-```
-
-Orca 路径需要：
-
-- Orca 桌面应用正在运行，且 `orca` CLI 在 `PATH` 中；
-- 在 Orca 标签页里的 shell，让 `ORCA_WORKTREE_ID` 选中宿主 worktree；
-- `pi` 在 `PATH` 中，并配置好模型/提供商凭证；
-- Python 3；启动器只使用标准库。
-
-启动器使用仓库本地的 pi adapter 包和 `target/debug` 下的二进制。要在 Orca 外以无头方式运行同一个真实 agent 演示：
-
-```bash
-ONLYNE_BACKEND=headless python3 examples/supervisor/run.py up
-```
-
-此时 supervisor 输出写入演示根目录，不打开可见的 supervisor 标签页。可以在另一个终端检查演示：
-
-```bash
-target/debug/onlyne --server-root /tmp/onlyne-sup tui
-```
-
-完整步骤见 [`examples/supervisor/README.md`](examples/supervisor/README.md)。[research-flywheel](https://github.com/dbydd/research-flywheel) 是建立在 Onlyne 上的更大 agent 环示例。
-
-## 跟随一个任务
+## 架构概览
 
 ```mermaid
-sequenceDiagram
-  participant O as 操作者 / supervisor
-  participant S as onlyne-server
-  participant C as role client
-  participant A as agent adapter
-  participant R as origin client
-
-  O->>S: send task (ACL + op_id)
-  S->>S: 写入 queued 或 in_flight 账本行
-  C->>S: pull delivery
-  S-->>C: envelope；标记 in_flight
-  C->>A: ready，然后 assign
-  A-->>C: assign_ack + progress
-  A-->>C: complete(outcome, head)
-  C->>C: 结算本地任务；排队 delivery ack 与回执
-  C->>S: ack 原始 delivery
-  S-->>C: accepted receipt
-  C->>S: 把 completion 发给任务 origin
-  R->>S: pull completion
-  S-->>R: receipt envelope
-  R->>S: ack receipt
+flowchart LR
+    CLI["onlyne CLI / TUI / Web"] <-->|"Admin UDS"| SRV["onlyne-server\n账本 (state.db)"]
+    C1["onlyne-client\n(角色工作区)"] <-->|"固定证书 TLS 1.3"| SRV
+    GW["onlyne-im\n(<chat:KEY>)"] <-->|"固定证书 TLS 1.3"| SRV
+    C1 <-->|"Adapter UDS / ACP"| RT["pi / ACP / exec\n(orca · tern · zellij · headless)"]
+    GW <-->|"Stdio 帧协议"| BK["onlyne-im-backend-*\n(TG · 飞书 · QQ · Slack · Linear)"]
 ```
 
-1. **发送。** 带门禁的 `send` 动词打开 server 的本地 admin socket，指定发送者和目标，并携带 `op_id` 幂等键。相同操作重复发送会得到持久回执；同一个键配不同正文则是 conflict。
-2. **接受并记录。** server 在写账本前验证 envelope、发送者、目标和 ACL。接受后追加一行并发布回执；可立即投递时状态为 `in_flight`，角色离线或达到容量时为 `queued`。
-3. **拉取并分配。** role client 拉取最老的可用任务，server 将其标记为 `in_flight` 并绑定 delivery ticket。client 检查容量、启动由 drive 与 placement 选中的 session，等待 session 的 `ready` barrier，再发送 `assign`。任务正文随 assignment frame 传递；角色的 `[client.runtime] command` 中的 `{task}` 渲染为任务 id，不是正文。
-4. **完成。** adapter 报告终态和摘要；pi 插件的 `onlyne_complete` 工具提供这两项。client 记录本地任务结论，排队原始 delivery 的 acknowledgement，释放 session slot，并为账本记录的 origin 创建 completion envelope。
-5. **回执。** client 的持久 intent 在重连后按顺序通过 TLS 发出。原任务行变为 `acked`；completion receipt 在 origin client 拉取前保持 `queued`，拉取后结清，不会启动新的 session。
-
-任务家族起跑时，带门禁的 `send` 形式接受 `--hop-budget <n>`、`--deadline <rfc3339>`，以及最多重复 8 次的 `--label <key=value>`。server 记录新建的 family 与根 task id、hop budget、origin、RFC3339 deadline 和 labels。角色可以用 `onlyne_handoff` 延续这个家族；server 会创建挂在父任务下的子任务，每次 handoff 都继承完整的家族元信息。即使普通角色 ACL 没有返回边，completion 也会回到任务的 origin。
-
-### 四种核心消息
-
-| Kind | 用途 | 投递语义 |
+| 二进制 | 职责 | 核心子命令 |
 |---|---|---|
-| `task` | 把工作交给角色并创建一个 session。 | 至少一次；角色离线时排队。 |
-| `completion` | 携带任务的终态结果。 | 至少一次；在 origin 处排队。 |
-| `note` | 人、agent 和 gateway 之间的自由文本。 | 默认尽力投递；`note_queue` 可以在角色没有 session 时暂存一条。 |
-| `control` | 对任务执行 `recycle`、`probe`、`snapshot`、`cancel` 或 `focus`。 | 仅任务属主或 admin。 |
+| `onlyne` | 操作员入口、集群前台看护、TUI 看板、故障分诊与 MCP 工具桥 | `up`、`shutdown`、`triage`、`send`、`handoff`、`complete`、`control`、`repair`、`status`、`roles`、`sessions`、`ledger`、`faults`、`watch`、`tui`、`mcp`、`schema`、`skill` |
+| `onlyne-server` | 路由守护进程、投递队列、SQLite 账本与事件钩子 | `init`、`run`、`status`、`generate` |
+| `onlyne-client` | 角色工作区守护进程、会话表与宿主放置管理 | `init`、`run`、`status`、`roles`、`agent`、`doctor` |
+| `onlyne-im` | 可选 IM 聊天网关宿主进程与触发器执行器 | `init`、`generate`、`login`、`setup`、`run`、`check` |
 
-消息正文是文本加至多一张内联图片。媒体管线位于 agent 一侧；Onlyne 负责送达和记账。
+在智能体会话内部（`pi` 插件或面向 ACP 的 `onlyne mcp`），模型直接调用三个工具完成通信与结项：
+- `onlyne_send(to, text, kind?, image?)`
+- `onlyne_handoff(to, text, image?)`
+- `onlyne_complete(outcome, summary, details?, files?)`
 
-## 配置与存储
+---
 
-### Server root
+## IM 聊天网关与可元编程 System One 反射弧
 
-`<server-root>/.onlyne/spec.toml` 是协议的 source of truth：server endpoint 和证书 pin、注册角色密钥、ACL 边（`allowed_senders` 与 `allowed_targets`）、路由义务（`owes_targets`）、角色 prose、并发、超时、每个角色的 `[client.runtime]` drive 与 command、事件钩子（`[[hook]]`）、路由和 gateway 配置都在这里。使用 `onlyne-client init --register` 或 `onlyne server generate` 注册角色，然后运行 `onlyne reload`。
-
-自动重投的年龄闸是 `[server].requeue_ttl_secs`。默认值为 `0`，表示关闭这道闸；启用后从 `enqueued_at` 计算排队行龄。自动重投发生时若已经超过这个年龄，该行会结清为 `expired`，reason 为 `requeue_ttl`；操作员发起的 `repair retry` 不经过这道年龄闸。
-
-```text
-<server-root>/.onlyne/
-  spec.toml                 协议与角色真相
-  state.db                  ledger、fault、事件、ghost sweep 审计
-  run/                      owner-only 运行时目录；v2 在这里不创建任何东西
-  keys/server.key           TLS 与 server 身份密钥
-  templates/                generate 使用的角色内容
-  ws/                       默认生成的工作区
-  cache/                    gateway 临时状态
-  logs/server.log           detached server 日志
-```
-
-### Role workspace
-
-`<workspace>/.onlyne/config.toml` 是角色本地配置：身份、server endpoint、证书 pin、密钥路径、placement、Orca policy、ACP 选项，以及 reconnect/stall 定时器。`cert_pin`、`key_path` 和 `server.host` 可以使用 `$NAME` 环境引用，启动时解析。
-
-```text
-<workspace>/.onlyne/
-  config.toml                 角色、placement 与 ACP 配置
-  client.db                   task/session 状态与持久 intent
-  run/                        owner-only 运行时目录；其中不绑定任何东西
-  keys/role.key               角色身份密钥
-  agent/                      工作区范围的 agent 包
-  logs/client.log             client 进程日志
-  logs/session-<task>.log     exec/ACP session 渲染输出
-  logs/session-<task>.events.jsonl
-  logs/content.index.jsonl    持久内容偏移
-```
-
-`onlyne server generate` 生成可搬移的工作区：移动目录后运行 `onlyne client run --workspace <new-path>` 即可。server 和 role client 必须使用同一版 Onlyne。旧 schema 和旧布局会在入口拒绝，不会在原地迁移。
-
-### 网关根
-
-IM 网关根是它自己的一棵树，独立于 server root 与任何角色工作区，里面每条会话一个目录。布局与
-verb 见 [运行 IM 网关](#运行-im-网关)。
-
-```text
-<gateway-root>/.onlyne/
-  config.toml                 [server]、[[im.backend]]、[[im.push]]
-  keys/role.key               网关这条 role 的密钥，权限 0600
-  credentials/<gateway>.token 平台凭据，权限 0600
-  logs/gateway.log            网关进程日志
-
-<gateway-root>/conversations/<slug>/
-  .onlyne/config.toml         这条会话的平台坐标
-  .onlyne/chat.key            这条会话在 wire 上的身份
-  chat.jsonl                  入站事件与出站 payload，一行一条
-  media/                      两个方向的附件
-```
-
-网关根与 server root 可以在不同机器上：`init` 能读到 `--server-root` 的 spec 时就从它取 endpoint
-和证书 pin，读不到时两个值都要显式给。
-
-用下面的命令打印编译期配置 schema：
+### 接入聊天平台（`onlyne-im`）
 
 ```bash
-onlyne schema spec --pretty
-onlyne schema client --pretty
+# 交互式引导配置（选择平台 -> 验证凭据 -> 选择会话 -> 绑定集群角色 ACL）
+onlyne-im setup --root ./im --server-root ./cluster
+
+# 或按步骤命令行配置
+onlyne-im init     --root ./im --server-root ./cluster
+onlyne-im login    --root ./im --gateway telegram --token "$TELEGRAM_TOKEN" --interactive
+onlyne-im generate --root ./im --gateway telegram --conversation -100123456 --slug tg-dev --server-root ./cluster
+onlyne-im run      --root ./im
 ```
 
-### Socket discovery
+### 可元编程 System One 边缘反射弧（`DeciderSpec`）
 
-所有本地 socket 都位于同一个机器级运行时目录中，绝不落在工作区目录树内。在 macOS 和 Linux 上该目录是 `/tmp/onlyne-<uid>/`，以 `0700` 创建；`$ONLYNE_RUNTIME_DIR` 在设置且非空时替换整个目录。
+当通过 `ONLYNE_DECIDER_URL` 或 `TYPESAFE_BASE_URL`（以及可选的 `TYPESAFE_API_KEY` / `ONLYNE_DECIDER_MODEL`）配置了 System One 决策模型端点（`POST /v1/systemone`，默认模型标识 `jev-latest`）时，Onlyne 会在五个边缘检查点并行评估 `noul`、`choice`、`score` 问题：
 
-一个 owner 树在该目录中拥有两个文件，文件名都由 `<digest>` 决定——该树规范绝对根路径的 `sha256` 前 16 个十六进制字符：
+1. **IM 入站语义路由（`im_inbound`）**：自动过滤群聊人类闲聊、选择目标角色，并在用户未点击原生引用时自动关联回复线程。
+2. **结项自相矛盾守门员（`complete_guard`）**：当模型上报 `outcome="done"` 而正文声明被阻塞或失败时，自动修正为 `blocked` 或 `failed`。
+3. **回合结束自适应追问（`turn_end`）**：根据未调 `onlyne_complete` 就结束回合的具体原因，追加针对性的工具调用提示。
+4. **心跳活锁检测与阶段标签（`heartbeat`）**：检测重复报错死循环，并在 `onlyne tui` 第 1 页实时展示 `busy · coding` 或 `busy · debugging !thrash`。
+5. **故障自动分诊（`onlyne triage`）**：对打开的故障或 `[[hook]]` 事件自动判定 `retry`、`recycle`、`fail` 或 `escalate`。
 
-```text
-<runtime-dir>/<digest>.sock    已绑定的 socket，权限 0600
-<runtime-dir>/<digest>.json    注册文件：kind、role、root、pid、version、runtime
-```
-
-注册文件让读取方无需遍历目录树就能知道谁在服务哪棵树：`kind` 说明是 server root 还是角色工作区的 client，`role` 给出角色名。操作者可以用 `onlyne ls` 列出本机全部注册，Rust 调用方通过 `onlyne_wire::socket::list_registrations` 与 `onlyne_wire::socket::read_registration` 读取。
-
-路径长度规则已经不存在。深层工作区和浅层工作区解析到同一个短运行时路径，`.onlyne/run/` 下不会创建任何东西——`<owner>/.onlyne/run/s` 只作为操作者打印时的规范拼写保留。在 Windows 上，同样的两个文件保存 marker 和注册，socket 本身是 marker 中命名的 NPFS pipe。
-
-client 会把实际服务路径以 `ONLYNE_SOCKET` 注入每个 session。socket 选择顺序是：
-
-```text
---socket → ONLYNE_SOCKET → --server-root → --workspace 或从当前目录向上查找
-```
-
-## 操作集群
-
-### 生命周期与观测
+所有指令（`instructions`）、选项判据（`criteria`）、阈值（`thresholds`）与自定义附加问题均可通过 `.onlyne/decider.json` 或 `ONLYNE_DECIDER_SPEC` 元编程定制（支持 `{var}` 状态变量插值与局部 JSON 深度合并）：
 
 ```bash
-# 一键初始化多角色集群并前台拉起：
-# `--roles` 在 `<server-root>/<role>` 下生成角色工作区并写入 spec.toml；
-# `onlyne up` 在前台启动 `onlyne-server`、自动发现的角色 client 与可选 `onlyne-im`，
-# 按 `[server]`、`[client:<role>]`、`[im]` 前缀汇聚输出，并在 Ctrl-C 时排空停机。
-onlyne server init --root <server-root> --roles planner,coder
-onlyne up          --server-root <server-root>
+# 导出内置默认 DeciderSpec 模板以按需定制指令、判据、阈值或新增自定义问题
+onlyne schema decider --pretty > ./cluster/.onlyne/decider.json
 
-# 单独运行守护进程：前台运行；`shutdown` 通过 admin socket 排空并停止在线 server
-onlyne server init     --root <server-root>                  # --listen 默认 127.0.0.1:7811
-onlyne server run      --root <server-root>
-onlyne server shutdown --server-root <server-root> --drain-secs 5
-
-# Client：前台运行；`--register` 在服务端在线时通过 SpecApply 热注册免 reload，
-# 服务端离线时自动追加至 spec.toml
-onlyne client init   --workspace <workspace> --role <role> --server-root <server-root> --register
-onlyne client run    --workspace <workspace>
-onlyne client status --workspace <workspace>
-onlyne-client doctor                         # 宿主检测 JSON；总是退出 0
-
-# Admin 读取
-onlyne --server-root <root> status
-onlyne --server-root <root> roles
-onlyne --server-root <root> sessions --task <task-id>
-onlyne --server-root <root> sessions --fresh --task <task-id>
-onlyne --server-root <root> ledger --task <task-id>
-onlyne --server-root <root> faults --open-only
-onlyne --server-root <root> watch --follow --tier durable
-onlyne --server-root <root> history
-onlyne --server-root <root> spec_diff
-onlyne --server-root <root> reload
-
-# TUI：交互面板或单帧文本
-onlyne tui --server-root <root>
-onlyne tui --server-root <root> --once
+# 对当前集群故障执行 System One 分诊（或挂入 spec.toml [[hook]] 自动执行）
+onlyne --server-root ./cluster triage --apply --min-confidence 0.65
 ```
 
-`--once` 是看板唯一接受的旗标，用于将当前集群页渲染为单帧纯文本后退出。TUI 第 1 页是角色网络和活动 session，第 2 页是任务族跨角色路径、账本行和任务详情，第 3 页是打开的 fault 与恢复动作；翻页与过滤在面板内按 `1`/`2`/`3` 键切换。TUI 只通过 admin socket 观测，不承载消息。
+---
 
-### 七个 supervisor 动词的门禁
+## 文档与扩展阅读
 
-从 shell 代角色发言的七个动词是 `send`、`reply`、`handoff`、`complete`、`ack`、`reject`、`control`。每个动词都必须同时带上：
-
-```text
---force --yes-i-am-supervisor-not-other-role
-```
-
-这对 flag 表示命令是在 plugin session 之外代表该角色操作。缺少任意一个都会在解析 socket 之前以退出码 2 拒绝。pi session 内的插件工具映射是 `send` → `onlyne_send`、`handoff` → `onlyne_handoff`、`complete` → `onlyne_complete`；通过这些工具发言，session 自己的记录才会保持权威。
-
-`ack` 和 `reject` 需要 `--msg-id` 与 `--reason`；`control` 的 `recycle`、`cancel` 需要 `--reason`，而 `probe`、`snapshot`、`focus` 不接受 reason。
-
-`repair` 是操作员的恢复面。它记录操作员决定，不会悄悄改变投递策略：
-
-```bash
-# System-1 毫秒级故障自动分诊（默认连接本机 http://127.0.0.1:3425 的 group/decider）：
-onlyne --server-root <root> triage [--task <task-id>] [--from-hook] [--apply] [--min-confidence 0.60]
-
-onlyne --server-root <root> repair inspect --task <task-id>
-onlyne --server-root <root> repair retry  --task <task-id> --reason <text>
-onlyne --server-root <root> repair fail   --task <task-id> --reason <text>
-onlyne --server-root <root> repair close  --task <task-id> --reason <text>
-onlyne --server-root <root> repair adopt  --task <task-id> --backend <name> --reason <text>
-onlyne --server-root <root> repair rebind --task <task-id> --session-id <id> --backend <name> --reason <text>
-onlyne --server-root <root> repair ack    --fault-id <id> --reason <text>
-```
-
-`onlyne --help` 会列出 socket backend 和退出码。简表：`0` 成功，`1` daemon/运行时失败，`2` 本地校验失败，`3` 找不到 socket，`4` 操作员输入被拒绝，`5` `client run` 找不到支持的 session host，`6` 数据库或工作区来自其他版本（`EXIT_NEEDS_MIGRATION`），`127` 缺少兄弟二进制。
-
-### 运行 IM 网关
-
-一个网关根就是集群里的一条 **role**，它用这一条 role 链路服务自己注册表里的全部会话。会话的身份
-是一个应用层的 **chat key**：网关把它写在投递文本第一行 `<chat:KEY>`，agent 回信时原样带回，
-回复就落回同一个聊天。core 永不解析它——会话不是一个地址，所以新增一条会话只花一行注册记录，
-而不是一把密钥、一对 ACL 和一条链路。网关本身不含路由策略、不认识任何平台 UI：平台归 backend
-进程，一条消息怎么处理归你的脚本。
-
-`onlyne-im` 是独立二进制，不是 `onlyne` 的 verb。网关根是一个目录，不是模板树：`init` 写它自己
-的配置，`generate` 铸出一条会话，`login` 存 bot 凭据，`setup` 交互式走完全程，`run` 在一个
-进程里服务根下所有会话。
-
-```bash
-# 1. 网关根：连哪个集群，拉哪几个 backend 进程。
-onlyne-im init --root ./im --server-root <server-root>
-
-# 2. 一条会话。`--conversation` 用平台自己的 id，所以 Telegram 群 id 保留开头的
-#    `-`。`--slug`（兼容别名 `--role`）是 `conversations/` 下的会话目录标签，没有
-#    协议含义，缺省由两个 id 推导。`--peer` 是网关可以寻址、也可以被其寻址的 role，
-#    默认 `_supervisor`（集群的操作 agent）。第一次 `generate` 还会通过 server 的
-#    admin socket 把网关这条 role 写进集群 spec.toml，ACL 边两侧一起补。
-onlyne-im generate --root ./im --gateway telegram --conversation -1007788 \
-                   --slug tg-main \
-                   --server-root <server-root> --peer _supervisor
-
-# 3. bot 凭据，落在网关根下，权限 0600。优先用 `--token-file` 而不是 `--token`：
-#    命令行参数会出现在进程表里。`--interactive` 让 backend 反问凭据并先向平台验证，
-#    换入之前就失败，而不是留下一个什么都不轮询的 backend。
-onlyne-im login --root ./im --gateway telegram --token-file ~/.secrets/tg.token
-# onlyne-im setup --root ./im --server-root <server-root>   # 同一条路，交互式
-
-# 4. 前台运行，和 daemon 一样；常驻由终端宿主或 launchd 负责。
-onlyne-im run --root ./im
-
-# 解析并打印这个根会服务的坐标。不需要 server 在线。
-onlyne-im check --root ./im
-```
-
-目录形状：
-
-```text
-<gateway-root>/
-  .onlyne/
-    config.toml            # [server]、[[im.backend]]、[[im.push]]
-    credentials/           # 每个 backend gateway id 一个文件，0600
-  conversations/
-    <slug>/                # 操作者标签；身份是旁边那把 key
-      .onlyne/config.toml  # [chat]：gateway + conversation；密钥在它旁边
-      .onlyne/chat.key     # 这条会话在 wire 上的身份
-      chat.jsonl           # 一行一个 JSON，入站与出站都有
-      media/               # 附件：入站下载、出站待发
-```
-
-`[[im.backend]]` 命名一个 backend 进程和它事件所属的 `gateway` id。一个进程服务它在里的所有会话，
-所以一个 Telegram bot 覆盖它被拉进的每个群；会话通过自己的 `[chat].gateway` 归到某个 backend。
-没有 backend 应答的 gateway id、被两条会话争用的同一个平台聊天、缺密钥的会话，都在加载期按名字
-拒收。
-
-`[[im.push]]` 是事件或节拍到来时跑的东西。脚本拿到 `argv[1]` 作为模式（`trigger` 或
-`heartbeat`）、stdin 上一个 JSON 对象，以及三个环境变量：`ONLYNE_SOCKET`（可以直接
-`onlyne send`，不用自己找 socket）、`ONLYNE_IM_WORKSPACE`（这条会话的目录）、
-`ONLYNE_IM_MEDIA`（它的附件目录）。失败的脚本会重投，`event.id` 就是脚本去重的键。
-
-输入里的 `role` 是网关自己那条 role，`chat` 是这条会话的 chat key，`conversation` 是平台给它
-的 id。一个 `[[im.push]]` 脚本服务根下全部会话，所以脚本读 `chat` 并把它带回去：正文以
-`<chat:KEY>` 开头的投递就是回这条会话，同一个 key 传给 `--family` 则让 `task` scope 的会话
-一条条服务同一个会话，而不是每条消息开一个新会话。
-
-```toml
-[[im.push]]
-mode = "trigger"
-run = ["/abs/path/im-in.sh"]
-timeout = "10s"
-```
-
-```sh
-#!/bin/sh
-# 把聊天消息转给集群的操作 agent，发送身份是网关那条 role，回带 chat key 好让
-# agent 的回答落回同一个聊天。
-set -eu
-msg=$(cat)
-role=$(printf '%s' "$msg" | jq -r '.role')
-chat=$(printf '%s' "$msg" | jq -r '.chat')
-text=$(printf '%s' "$msg" | jq -r '.event.text')
-onlyne send --from "$role" --to _supervisor --family "$chat" --text "<chat:$chat>
-
-$text"
-```
-
-### Bridge 挂载
-
-`onlyne gateway status` 列出 server 已知的挂载，只读。`spec.toml` 里的 `[[gateway]]`
-条目仍能加载并被列出；v1 的 `auth` verb 和按平台起的 `run` 进程已不存在。
-
-IM 网关**不用**这个挂载。网关根就是一条普通 role，走一条普通 role 链路；它的会话是投递文本里的
-chat key；平台 backend 是另一个进程，走自己的 stdio 协议——所以没有 `gateway`/`bridge`
-adapter 挂载要注册，`onlyne gateway status` 对它保持安静。`bridge` mount kind 是协议为 v1
-插件形态保留的 wire 拼法，本分支上没有任何东西驱动它。
-
-## 架构
-
-### 进程与协议地图
-
-```mermaid
-graph LR
-  P[pi 宿主 + pi-onlyne] -->|adapter 协议| C[onlyne-client · role workspace]
-  A[其他 agent adapter] -->|adapter 协议| C
-  C -->|TLS frame| SRV[onlyne-server]
-  IM[onlyne-im · 网关根] -->|"一条 TLS role 链路，承载全部会话"| SRV
-  IM <-->|"stdio 上的 backend 协议"| BE[onlyne-im-backend-<platform>]
-  BE <-->|Bot API| H[人类聊天平台]
-  SC[supervisor / aggregate client] -->|aggregate role 链路| PS[父 onlyne-server]
-  SRV --- AD[/tmp/onlyne-<uid>/ 里的 admin socket]
-```
-
-server 在写账本前执行 ACL，并负责跨机器路由。每个 client 负责一个角色的 session 执行，并在发送前把出站消息写入持久 intent 队列。TLS 链路断开时，运行中的 session 保留本地状态；重连后队列按顺序发出。admin 与 adapter socket 绑定在机器级运行目录 `/tmp/onlyne-<uid>/`，旁边是点名其服务面的 `<digest>.json` 注册文件；workspace 树内不再绑定任何东西。
-
-### Session 的 drive 与 placement
-
-角色的 runtime 是什么、跑在哪里，是两个独立的问题。
-
-**drive** 是 runtime 的属性，写在那个角色的 spec 里：
-
-```toml
-[client.runtime]
-drive = "plugin"        # plugin | acp | exec
-command = ["pi", "--session-id", "{session}", "--session-dir", ".pi/sessions", "-ns"]
-resume = ["pi", "--session", "{session}", "--session-dir", ".pi/sessions", "-ns"]
-```
-
-**placement** 是这台机器的属性，写在角色工作区的 `config.toml` 里：`orca`、`zellij`、`tern`、`headless` 或 `external`。
-
-placement 的选择次序，从高到低：
-
-```text
-非空 ONLYNE_BACKEND → 工作区 config.toml 的 placement → 探测 tern、orca、zellij → headless
-```
-
-| Placement | 宿主行为 |
+| 文档 | 内容说明 |
 |---|---|
-| `orca` | 在 Orca terminal/tab 中运行角色命令，任务结束后回收 tab。 |
-| `zellij` | 在 zellij pane 中运行 session。 |
-| `tern` | 把每个 session 作为角色 tab 里的 block 运行——整个集群共用一个 Tern session，一个角色一个 tab——会话结束后移除该 block。 |
-| `headless` | 把角色的 `[client.runtime] command` 作为子进程运行，保持 stdin 打开，并把输出写入任务日志。 |
-| `external` | 什么都不启动：runtime 已经常驻，自己挂到该 session 的 socket 上。 |
+| **[Wiki 首页](docs/wiki/Home.md)** | 完整文档导航与系统拓扑总览 |
+| **[快速上手](docs/wiki/Quickstart.md)** | 两条命令建集群、在线热注册与免模型 `fake` 自测脚本 |
+| **[架构与核心概念](docs/wiki/Architecture-and-Concepts.md)** | 核心术语表、数据所有权、`oneshot`/`task`/`role` 会话作用域与 `drive × placement` 矩阵 |
+| **[命令与退出码速查](docs/wiki/CLI-Reference.md)** | 全部子命令、Supervisor 双旗标门禁、`repair` 恢复指令与 `0..127` 退出码 |
+| **[IM 网关指南](docs/wiki/IM-Gateway.md)** | `<chat:KEY>` 寻址协议、`<msg:PREFIX>` 回复线程与五大平台后端凭据格式 |
+| **[System One 决策反射弧](docs/wiki/System-One-Decider.md)** | 五大边缘反射弧详解、环境变量与 `.onlyne/decider.json` 元编程配置示例 |
+| **[运维与故障排查](docs/wiki/Operations-and-Troubleshooting.md)** | `/tmp/onlyne-<uid>/` 运行时目录、`systemd` / `launchd` 服务单元与常见故障修复 |
+| **[工程执行契约 (`AGENTS.md`)](AGENTS.md)** | 核心设计不变量、crate 依赖边界与测试门禁规范 |
 
-`fake` 是进程内的测试 runtime，`exec` 是 `headless` 的 v1 拼法；两者都只能通过 `ONLYNE_BACKEND` 点名。显式点名却不匹配任何名字的取值按名字拒收，绝不回落到探测，`onlyne-client run` 退出码为 5。
+## 许可证
 
-校验器的 drive × placement 矩阵是唯一的检查点：`acp` 只与 `headless` 配对，因为 stdio 承载 ACP 通道，不可能同时是 pane 的终端。
-
-ACP 角色读取本地 `[acp]` 表：`mode`、`model`、`reasoning_effort` 和 `permission = "deny" | "allow"`（默认 deny）。对话写入任务日志和 events journal，session 通过 client 经 `onlyne mcp` 挂上的三个工具上报——`onlyne_send`、`onlyne_handoff` 和 `onlyne_complete`——与 pi session 经自己插件拿到的三个工具是同一套。
-
-### Adapter 协议
-
-agent adapter 和 gateway 使用同一种带长度前缀的 JSON 协议：四字节大端 body 长度，后跟一个 UTF-8 JSON object。第一帧必须是 `hello`，宿主返回 `welcome`。能力位决定注册、生命周期报告、assignment 注入、回收和 probe；活动 agent 连接还可以把工作交给另一个角色。
-
-普通 pi assignment 的顺序是：
-
-```text
-hello → welcome → report.ready → assign → assign_ack
-      → heartbeat/progress → report.complete → detach
-```
-
-外部 adapter 的实现契约见 [`crates/onlyne-adapter/PROTOCOL.md`](crates/onlyne-adapter/PROTOCOL.md)，仓库内的 TypeScript 实现见 [`plugins/onlyne-agent-pi`](plugins/onlyne-agent-pi/README.md)。
-
-### 投递与信任
-
-- task、completion 和 control 携带幂等键，至少投递一次；观测事件使用游标补发，慢观察者不会拖慢 worker。
-- 每个注册角色拥有 ed25519 身份；client 固定 server 证书并通过 TLS 1.3 认证。
-- 被拒绝的消息不写账本行。completion 有一条内建的返回路径，始终回到账本记录的 origin。
-- 一个 client session 服务多少次投递由 `[client.session] scope` 决定：`oneshot`（默认）每次投递新建一个 session 并在结清后关闭，`task` 在同一任务家族的多跳投递间复用同一个 session，`role` 为角色维护至多 `max_sessions` 个常驻或可恢复会话池。投递结清后不再占用活动容量；仍绑定且未结清的会话若 transport 断开超过 `reconnect_grace_secs`，或连续三个心跳周期没有新帧，client 会将其退役并把任务结清为 `failed`（拒收理由 `session_dead`）。
-- aggregate role 把子集群暴露给父 server，不需要把子角色名或联邦操作加入 wire protocol。
-
-v2 的 crate 地图、session 生命周期和形式化设计理由见 [`AGENTS.md`](AGENTS.md) 与 [`docs/v2-PLAN.md`](docs/v2-PLAN.md)。[`docs/v1-ARCHITECTURE.md`](docs/v1-ARCHITECTURE.md) 是归档的 v1 地图，保留下来记录 v1 的形态；[`proofs/BRIEF.md`](proofs/BRIEF.md) 承载 v1 的设计理由。
-
-## 继续阅读
-
-### 用户与操作员指南
-
-- [`docs/wiki/Home.md`](docs/wiki/Home.md) — 完整的中英双语 Wiki 文档集（`Quickstart`、`Architecture-and-Concepts`、`CLI-Reference`、`IM-Gateway`、`System-One-Decider`、`Operations-and-Troubleshooting`）。
-- [`AGENTS.md`](AGENTS.md) 与 [`docs/v2-PLAN.md`](docs/v2-PLAN.md) — v2 执行契约与权威架构设计。
-- [`docs/v2.7-OVERHAUL-PLAN.md`](docs/v2.7-OVERHAUL-PLAN.md) — 文档权威分层与 v2.7/v2.8 改造清单。
-- [`docs/v2.9-SYSTEMONE-DECIDER-PLAN.md`](docs/v2.9-SYSTEMONE-DECIDER-PLAN.md) — System-1（`magpie/group/decider`）五大边缘神经反射弧设计规格。
-- [`docs/operations.md`](docs/operations.md) — socket、配置、fault 检查、恢复、requeue policy、exec/ACP session 与 session 属主。
-- [`crates/onlyne-adapter/PROTOCOL.md`](crates/onlyne-adapter/PROTOCOL.md) — 外部 agent/gateway wire contract。
-- [`examples/supervisor/README.md`](examples/supervisor/README.md) — 真实 pi/Orca running-lights 演示。
-- [`skills/onlyne-supervisor/SKILL.md`](skills/onlyne-supervisor/SKILL.md) — supervisor agent 的操作 handbook。
-- [`skills/onlyne-role/SKILL.md`](skills/onlyne-role/SKILL.md) — 角色侧任务与结项 handbook。
-- [`.agents/skills/onlyne/SKILL.md`](.agents/skills/onlyne/SKILL.md) — 本仓库的开发指导。
-
-### 项目记录
-
-这份 README 专注于部署、操作和架构。版本记录、实现状态、实地验收证据与开发过程分别保存在：
-
-- [`CHANGELOG.md`](CHANGELOG.md) — 按版本记录的产品变化。
-- [`docs/STATUS.md`](docs/STATUS.md) — 当前实现与验证状态。
-- `docs/` — 现场验收证据。
-- [`Devlogs.md`](Devlogs.md) — 按时间记录的开发日志。
-
-MIT © dbydd
+[MIT](LICENSE) © dbydd

@@ -187,12 +187,12 @@ pub async fn on_turn_end(
             state.feed_turn_started(task_id);
             // The one sentence a backend hands its agent is a contract the
             // plugin composes none of (`docs/v2-CONTRACT.md` §3c), and the
-            // ending turn's own last words say which of the three situations
-            // this ending actually is. When a decision model can read them,
-            // the sentence the agent gets names the outcome that situation
-            // calls for; when it cannot — no gateway configured, no closing
-            // text, an endpoint that will not answer — the agent gets exactly
-            // the sentence it got before.
+            // ending turn's own last words say which situation this ending
+            // actually is. When a decision model can read them, the sentence
+            // the agent gets is the one `turn_end.templates` files under the
+            // label it chose — the spec decides both the option set and the
+            // wording — and when it cannot, or the reflex is switched off, the
+            // agent gets exactly the sentence it got before.
             let suffix = if let Some(client) = onlyne_net::SystemOneClient::from_env() {
                 super::decider::diagnose_turn_end_suffix(&client, task_id, closing.as_deref()).await
             } else {

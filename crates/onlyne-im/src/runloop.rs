@@ -620,8 +620,10 @@ async fn decide_inbound(
         .filter(|id| *id != inbound.id)
         .map(str::to_string)
         .collect();
-    crate::decider::evaluate_inbound(
+    let spec = onlyne_net::DeciderSpec::load_for_root(Some(&gateway.root));
+    crate::decider::evaluate_inbound_with_spec(
         &client,
+        &spec.im_inbound,
         inbound,
         &[crate::decider::DEFAULT_CANDIDATE.to_string()],
         &recent_ids,

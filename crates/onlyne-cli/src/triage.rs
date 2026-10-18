@@ -2,11 +2,18 @@
 //!
 //! The verb gathers a fault context — from a `[[hook]]` event on stdin or from
 //! the admin socket's own `query_faults` — packs it into one `state` object, and
-//! sends one batched `POST /v1/systemone` request asking the two questions that
-//! decide a recovery: which action (`action`) and how serious it is
-//! (`severity`). The model returns calibrated probabilities rather than text,
-//! so the confidence bound is read off the answer and compared against
-//! `--min-confidence` here, in code.
+//! sends one batched `POST /v1/systemone` request asking the questions the
+//! [`ReflexSpec`] behind `triage` declares — the stock pair being which action
+//! (`action`) and how serious it is (`severity`). The model returns calibrated
+//! probabilities rather than text, so the confidence bound is read off the
+//! answer and compared against `--min-confidence` here, in code.
+//!
+//! No prompt text lives in this file. The instructions, the rubrics, the
+//! thresholds, and any questions beyond the stock pair come from the decider
+//! spec — `<root>/.onlyne/decider.json`, `ONLYNE_DECIDER_SPEC`, or
+//! `--spec <path>` — so an operator retunes the reflex without a rebuild.
+//! Answers to questions this code does not interpret by name land in
+//! [`TriageDecision::extra`].
 //!
 //! Nothing runs unless the operator says `--apply`: the default is a printed
 //! diagnosis, which is what a supervisor reads before deciding. A gateway that
@@ -17,7 +24,10 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 
-use onlyne_net::{DEFAULT_DECIDER_BASE_URL, DEFAULT_DECIDER_MODEL, Question, SystemOneClient};
+use onlyne_net::{
+    Answer, DEFAULT_DECIDER_BASE_URL, DEFAULT_DECIDER_MODEL, DeciderSpec, ReflexSpec,
+    SystemOneClient,
+};
 use onlyne_proto::{
     AdminControl, AdminOp, ControlOp, QueryFaultsArgs, RepairFail, RepairTarget, new_id,
 };
@@ -51,10 +61,14 @@ pub struct TriageArgs {
     /// recovery action.
     #[arg(long, default_value_t = 0.60)]
     pub min_confidence: f64,
+    /// Path to a custom decider JSON spec file (overrides `.onlyne/decider.json`
+    /// and `ONLYNE_DECIDER_SPEC`).
+    #[arg(long)]
+    pub spec: Option<std::path::PathBuf>,
 }
 
 /// The decision one triage run reaches.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TriageDecision {
     /// The action the `action` question chose: `retry`, `recycle`, `fail`, or
     /// `escalate`.
@@ -65,72 +79,26 @@ pub struct TriageDecision {
     pub probabilities: BTreeMap<String, f64>,
     /// The severity score the `severity` question returned.
     pub severity: f64,
+    /// Answers to questions this verb does not interpret by name, keyed by
+    /// question id. An operator who adds a third question to the triage reflex
+    /// reads its answer here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Answer>,
 }
 
-/// The two questions one triage run asks, packed into the single request the
-/// plan's speculative fan-out calls for.
-fn questions() -> BTreeMap<String, Question> {
-    let mut questions = BTreeMap::new();
-    questions.insert(
-        "action".to_string(),
-        Question::choice(
-            "What recovery action does this fault call for?",
-            [
-                (
-                    "retry",
-                    Some(
-                        "Transient network error, rate limit (429), lock contention, or \
-                         temporary blip"
-                            .to_string(),
-                    ),
-                ),
-                (
-                    "recycle",
-                    Some(
-                        "Session process is stuck, looping, or unresponsive and needs a fresh \
-                         session slot"
-                            .to_string(),
-                    ),
-                ),
-                (
-                    "fail",
-                    Some(
-                        "Unrecoverable configuration, permission, or deterministic failure"
-                            .to_string(),
-                    ),
-                ),
-                (
-                    "escalate",
-                    Some(
-                        "Ambiguous state or requirement question that requires human operator \
-                         judgment"
-                            .to_string(),
-                    ),
-                ),
-            ],
-        ),
-    );
-    questions.insert(
-        "severity".to_string(),
-        Question::score(
-            "How severe is this fault?",
-            [
-                "0: low — transient blip",
-                "1: medium — stuck session",
-                "2: high — unrecoverable or needs human",
-            ],
-        ),
-    );
-    questions
-}
-
-/// Ask the System One endpoint to triage `state`, in one batched request.
-pub async fn evaluate_triage(
+/// Ask the System One endpoint to triage `state` using one explicit reflex spec.
+///
+/// The spec supplies the questions, so their text and their set are the
+/// operator's to change. `action` and `severity` are the two this verb acts on;
+/// anything else the spec asks is passed through in [`TriageDecision::extra`].
+pub async fn evaluate_triage_with_spec(
     client: &SystemOneClient,
+    spec: &ReflexSpec,
     state: Value,
 ) -> Result<TriageDecision, String> {
+    let questions = spec.render_questions(&state);
     let response = client
-        .evaluate(state, questions())
+        .evaluate(state, questions)
         .await
         .map_err(|error| error.to_string())?;
     let action = response
@@ -139,16 +107,23 @@ pub async fn evaluate_triage(
     let severity = response
         .score("severity")
         .ok_or_else(|| "the systemone answer carries no `severity` score".to_string())?;
+    let extra = response
+        .answers
+        .iter()
+        .filter(|(id, _)| id.as_str() != "action" && id.as_str() != "severity")
+        .map(|(id, answer)| (id.clone(), answer.clone()))
+        .collect();
     Ok(TriageDecision {
         action: action.choice.clone(),
         confidence: action.confidence,
         probabilities: action.probabilities.clone(),
         severity: severity.score,
+        extra,
     })
 }
 
 /// The client one triage run talks to: the environment's when it declares one,
-/// the local Magpie gateway's otherwise.
+/// the default local System One gateway otherwise.
 fn client_from_env_or_default() -> SystemOneClient {
     SystemOneClient::from_env()
         .unwrap_or_else(|| SystemOneClient::new(DEFAULT_DECIDER_BASE_URL, DEFAULT_DECIDER_MODEL))
@@ -165,6 +140,15 @@ async fn run_inner(flags: &GlobalFlags, args: TriageArgs) -> i32 {
     } else {
         None
     };
+    // `--spec <path>` wins outright; without it the tree's own
+    // `.onlyne/decider.json` and `ONLYNE_DECIDER_SPEC` apply.
+    let spec = match &args.spec {
+        Some(path) => match DeciderSpec::load_from_path(path) {
+            Ok(spec) => spec,
+            Err(error) => return crate::runtime::usage_error(error.to_string()),
+        },
+        None => DeciderSpec::load_for_root(flags.server_root.as_deref()),
+    };
     let context = gather(flags, &args, hook.as_ref()).await;
     if context.is_empty() {
         return crate::runtime::usage_error(
@@ -173,7 +157,7 @@ async fn run_inner(flags: &GlobalFlags, args: TriageArgs) -> i32 {
         );
     }
     let client = client_from_env_or_default();
-    let decision = match evaluate_triage(&client, context.state()).await {
+    let decision = match evaluate_triage_with_spec(&client, &spec.triage, context.state()).await {
         Ok(decision) => decision,
         Err(reason) => {
             // An unreachable gateway is not a verb failure: the operator asked
@@ -433,7 +417,7 @@ fn print_decision(
     error: Option<String>,
     flags: &GlobalFlags,
 ) {
-    let data = json!({
+    let mut data = json!({
         "task_id": context.target_task(),
         "action": decision.map(|d| d.action.clone()),
         "confidence": decision.map(|d| d.confidence),
@@ -442,6 +426,14 @@ fn print_decision(
         "applied": applied,
         "error": error,
     });
+    // `extra` carries the answers to custom questions the spec added, so it is
+    // omitted entirely when the reflex asks only the stock pair.
+    if let Some(decision) = decision
+        && !decision.extra.is_empty()
+        && let Some(map) = data.as_object_mut()
+    {
+        map.insert("extra".to_string(), json!(decision.extra));
+    }
     let body = json!({ "ok": true, "data": data });
     println!("{}", render::encode(flags.pretty, &body));
 }
@@ -449,13 +441,21 @@ fn print_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use onlyne_net::Question;
+    use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    /// A mock System One endpoint answering `answers` on its one connection.
-    async fn serve_once(answers: Value) -> String {
+    /// A mock System One endpoint answering `answers` on its one connection,
+    /// handing the request it received back to the test.
+    ///
+    /// The request is captured rather than asserted inside the server task: a
+    /// panic in a spawned task would not fail the test that caused it.
+    async fn serve_once(answers: Value) -> (String, Arc<Mutex<Option<Value>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let capture = Arc::clone(&seen);
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = vec![0u8; 8192];
@@ -466,9 +466,7 @@ mod tests {
                 .map(|(_, body)| body)
                 .unwrap_or_default();
             let parsed: Value = serde_json::from_str(body).unwrap();
-            assert_eq!(parsed["questions"]["action"]["type"], "choice");
-            assert_eq!(parsed["questions"]["severity"]["type"], "score");
-            assert_eq!(parsed["state"]["task_id"], "t-1");
+            *capture.lock().unwrap() = Some(parsed);
             let bytes = serde_json::to_vec(&answers).unwrap();
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
@@ -477,13 +475,13 @@ mod tests {
             stream.write_all(header.as_bytes()).await.unwrap();
             stream.write_all(&bytes).await.unwrap();
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), seen)
     }
 
     #[tokio::test]
     async fn evaluate_triage_reads_action_confidence_and_severity() {
-        let base = serve_once(json!({
-            "model": "group/decider",
+        let (base, seen) = serve_once(json!({
+            "model": "jev-latest",
             "answers": {
                 "action": {
                     "type": "choice",
@@ -503,39 +501,126 @@ mod tests {
         }))
         .await;
 
-        let client = SystemOneClient::new(base, "group/decider");
-        let decision = evaluate_triage(&client, json!({"task_id": "t-1"}))
+        let client = SystemOneClient::new(base, "jev-latest");
+        let spec = DeciderSpec::defaults().triage;
+        let decision = evaluate_triage_with_spec(&client, &spec, json!({"task_id": "t-1"}))
             .await
             .unwrap();
         assert_eq!(decision.action, "recycle");
         assert_eq!(decision.confidence, 0.87);
         assert_eq!(decision.severity, 1.5);
         assert_eq!(decision.probabilities.get("retry"), Some(&0.10));
+        // The stock reflex asks exactly the two questions the verb acts on, so
+        // nothing is left over for `extra`.
+        assert!(decision.extra.is_empty());
+        let request = seen.lock().unwrap().clone().expect("the request arrived");
+        assert_eq!(request["questions"]["action"]["type"], "choice");
+        assert_eq!(request["questions"]["severity"]["type"], "score");
+        assert_eq!(request["state"]["task_id"], "t-1");
     }
 
     #[tokio::test]
     async fn evaluate_triage_refuses_an_answer_with_no_action() {
-        let base = serve_once(json!({
-            "model": "group/decider",
+        let (base, _seen) = serve_once(json!({
+            "model": "jev-latest",
             "answers": {
                 "severity": { "type": "score", "score": 0.0, "confidence": 0.5 }
             }
         }))
         .await;
 
-        let client = SystemOneClient::new(base, "group/decider");
-        let error = evaluate_triage(&client, json!({"task_id": "t-1"}))
+        let client = SystemOneClient::new(base, "jev-latest");
+        let spec = DeciderSpec::defaults().triage;
+        let error = evaluate_triage_with_spec(&client, &spec, json!({"task_id": "t-1"}))
             .await
             .unwrap_err();
         assert!(error.contains("action"), "unexpected error: {error}");
     }
 
     #[test]
-    fn questions_pack_both_checks_into_one_request() {
-        let questions = questions();
+    fn the_stock_spec_asks_action_and_severity() {
+        let spec = DeciderSpec::defaults().triage;
+        let questions = spec.render_questions(&json!({}));
         assert_eq!(questions.len(), 2);
         assert!(matches!(questions["action"], Question::Choice { .. }));
         assert!(matches!(questions["severity"], Question::Score { .. }));
+    }
+
+    /// A spec is the operator's to author: `{task_id}` in an instruction is
+    /// filled from the state, and a question the verb does not interpret by
+    /// name comes back in `extra` rather than being dropped.
+    #[tokio::test]
+    async fn a_custom_spec_interpolates_state_and_keeps_extra_answers() {
+        let mut spec = DeciderSpec::defaults().triage;
+        spec.questions.insert(
+            "action".to_string(),
+            Question::choice(
+                "What recovery does task {task_id} need?",
+                [("retry", Some("transient".to_string()))],
+            ),
+        );
+        spec.questions.insert(
+            "owner".to_string(),
+            Question::choice(
+                "Who should pick up task {task_id}?",
+                [("_coder", Some("the coding role".to_string()))],
+            ),
+        );
+
+        let (base, seen) = serve_once(json!({
+            "model": "jev-latest",
+            "answers": {
+                "action": {
+                    "type": "choice",
+                    "choice": "retry",
+                    "confidence": 0.75,
+                    "probabilities": { "retry": 0.75 }
+                },
+                "severity": {
+                    "type": "score",
+                    "score": 0.0,
+                    "confidence": 0.6,
+                    "probabilities": { "0": 0.8, "1": 0.2 }
+                },
+                "owner": {
+                    "type": "choice",
+                    "choice": "_coder",
+                    "confidence": 0.91,
+                    "probabilities": { "_coder": 0.91 }
+                }
+            }
+        }))
+        .await;
+
+        let client = SystemOneClient::new(base, "jev-latest");
+        let decision = evaluate_triage_with_spec(&client, &spec, json!({"task_id": "t-42"}))
+            .await
+            .unwrap();
+        assert_eq!(decision.action, "retry");
+        assert_eq!(decision.severity, 0.0);
+
+        let request = seen.lock().unwrap().clone().expect("the request arrived");
+        assert_eq!(
+            request["questions"]["action"]["instructions"],
+            "What recovery does task t-42 need?"
+        );
+        assert_eq!(
+            request["questions"]["owner"]["instructions"],
+            "Who should pick up task t-42?"
+        );
+        assert_eq!(
+            request["questions"]["owner"]["criteria"]["_coder"],
+            "the coding role"
+        );
+
+        let owner = decision
+            .extra
+            .get("owner")
+            .expect("the custom answer is kept");
+        assert!(matches!(owner, Answer::Choice(answer) if answer.choice == "_coder"));
+        // The two the verb interprets are not duplicated into `extra`.
+        assert!(!decision.extra.contains_key("action"));
+        assert!(!decision.extra.contains_key("severity"));
     }
 
     #[test]

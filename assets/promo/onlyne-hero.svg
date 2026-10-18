@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" width="100%" height="100%" role="img" aria-label="Onlyne — Local-first message routing and session layer for coding-agent teams">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0A101C"/>
+      <stop offset="60%" stop-color="#0D1626"/>
+      <stop offset="100%" stop-color="#111D33"/>
+    </linearGradient>
+    <radialGradient id="glowCyan" cx="74%" cy="42%" r="44%">
+      <stop offset="0%" stop-color="#33D6EE" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#33D6EE" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowSlate" cx="14%" cy="92%" r="52%">
+      <stop offset="0%" stop-color="#46587A" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#46587A" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#E9EEF6" stroke-opacity="0.045" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <!-- Canvas -->
+  <rect width="1200" height="420" rx="16" fill="url(#bg)"/>
+  <rect width="1200" height="420" rx="16" fill="url(#glowCyan)"/>
+  <rect width="1200" height="420" rx="16" fill="url(#glowSlate)"/>
+  <rect width="1200" height="420" rx="16" fill="url(#grid)"/>
+  <rect x="0.5" y="0.5" width="1199" height="419" rx="15.5" fill="none" stroke="#8FA3C2" stroke-opacity="0.22"/>
+
+  <!-- Left Column: Brand Lockup & Copy -->
+  <g transform="translate(72, 58)">
+    <!-- Onlyne Logo Mark + Wordmark -->
+    <g transform="translate(-12, 0) scale(0.95)">
+      <path d="M 36.911 12.303 A 20.3000 20.3000 0 0 1 50.398 23.4208 Q 47.8914 18.3431 50.324 25.3306 Q 52.155 30.3613 40.4346 21.2043 A 13.7000 13.7000 0 0 0 35.3143 18.7069 A 3.3000 3.3000 0 0 1 36.911 12.303 Z" fill="#33D6EE"/>
+      <path d="M 48.96 30.81 A 17.00 17.00 0 0 1 45.02 42.93" fill="none" stroke="#8FA3C2" stroke-width="6.6" stroke-linecap="round"/>
+      <path d="M 38.37 47.76 A 17.00 17.00 0 0 1 25.63 47.76" fill="none" stroke="#8FA3C2" stroke-width="6.6" stroke-linecap="round"/>
+      <path d="M 18.98 42.93 A 17.00 17.00 0 0 1 15.04 30.81" fill="none" stroke="#8FA3C2" stroke-width="6.6" stroke-linecap="round"/>
+      <path d="M 17.58 22.99 A 17.00 17.00 0 0 1 27.89 15.50" fill="none" stroke="#8FA3C2" stroke-width="6.6" stroke-linecap="round"/>
+      <circle cx="32" cy="32" r="4.6" fill="#E9EEF6"/>
+      <g transform="translate(64.07 43.80) scale(0.0217 -0.0217)"><path d="M578.002 -21.6Q419.201 -21.6 302.101 45Q185 111.6 120.9 235.9Q56.8 360.2 56.8 532.4V534.4Q56.8 706 121.7 829.9Q186.6 953.802 303.701 1020.502Q420.801 1087.202 577.402 1087.202Q735.003 1087.202 852.103 1020.702Q969.204 954.202 1034.104 830.501Q1099.005 706.801 1099.005 534.401V532.401Q1099.005 359.2 1034.704 235.2Q970.404 111.2 853.604 44.8Q736.803 -21.6 578.002 -21.6ZM579.002 192.404Q654.601 192.404 709.9 232.303Q765.2 272.203 795.499 348.302Q825.799 424.402 825.799 532.401V534.401Q825.799 642 795.099 717.799Q764.4 793.599 708.5 833.398Q652.601 873.198 577.402 873.198Q503.403 873.198 447.504 833.098Q391.605 792.999 360.805 717.499Q330.005 642 330.005 534.401V532.401Q330.005 424.402 360.605 348.302Q391.205 272.203 447.104 232.303Q503.003 192.404 579.002 192.404Z" fill="#E9EEF6"/></g>
+      <g transform="translate(89.16 43.80) scale(0.0217 -0.0217)"><path d="M98.599 0V1065.602H367.005V894.8H372.605Q414.205 983.401 495.805 1035.301Q577.405 1087.202 698.205 1087.202Q873.606 1087.202 969.706 981.102Q1065.806 875.001 1065.806 688.601V0H797.4V633.999Q797.4 743.398 746.101 803.098Q694.801 862.797 592.002 862.797Q523.603 862.797 473.004 831.698Q422.404 800.598 394.705 744.999Q367.005 689.399 367.005 615.2V0Z" fill="#E9EEF6"/></g>
+      <g transform="translate(114.32 43.80) scale(0.0217 -0.0217)"><path d="M105.999 0V1443H374.405V0Z" fill="#E9EEF6"/></g>
+      <g transform="translate(124.72 43.80) scale(0.0217 -0.0217)"><path d="M252.602 -352.4Q213.602 -352.4 176.501 -348.7Q139.4 -345 115.2 -340.8V-138.796Q129.8 -141.596 152.7 -144.596Q175.601 -147.596 204.802 -147.596Q273.801 -147.596 314.3 -124.397Q354.8 -101.197 376.199 -40.399L390.399 -0.6L10.399 1065.602H304.006L557.603 167.202L519.403 222.003H573.403L534.803 167.202L788.6 1065.602H1071.606L696.408 -28.598Q655.408 -149.199 595.407 -220.2Q535.406 -291.2 451.205 -321.8Q367.004 -352.4 252.602 -352.4Z" fill="#E9EEF6"/></g>
+      <g transform="translate(148.22 43.80) scale(0.0217 -0.0217)"><path d="M98.599 0V1065.602H367.005V894.8H372.605Q414.205 983.401 495.805 1035.301Q577.405 1087.202 698.205 1087.202Q873.606 1087.202 969.706 981.102Q1065.806 875.001 1065.806 688.601V0H797.4V633.999Q797.4 743.398 746.101 803.098Q694.801 862.797 592.002 862.797Q523.603 862.797 473.004 831.698Q422.404 800.598 394.705 744.999Q367.005 689.399 367.005 615.2V0Z" fill="#E9EEF6"/></g>
+      <g transform="translate(173.37 43.80) scale(0.0217 -0.0217)"><path d="M574.602 -21.6Q413.601 -21.6 297.501 45.6Q181.4 112.8 119.1 236.9Q56.8 361 56.8 530.401V531.401Q56.8 700.001 119.2 824.901Q181.6 949.802 295.201 1018.502Q408.801 1087.202 562.802 1087.202Q716.803 1087.202 828.903 1020.702Q941.004 954.202 1001.804 833.801Q1062.605 713.401 1062.605 552.601V467.8H189.002V642.202H935.002L806.6 479.4V582.802Q806.6 682.201 776.1 748.8Q745.6 815.399 691.601 848.699Q637.602 881.999 566.602 881.999Q495.603 881.999 440.404 847.499Q385.204 812.999 353.805 746.1Q322.405 679.201 322.405 582.802V478.6Q322.405 385.801 353.705 319.802Q385.004 253.802 442.804 218.703Q500.603 183.603 580.202 183.603Q641.402 183.603 687.001 202.603Q732.601 221.603 761.801 251.803Q791 282.002 802 315.402L804.2 322.001H1052.805L1050.405 310.801Q1037.805 250.802 1002.705 191.801Q967.605 132.801 908.605 84.301Q849.605 35.801 766.404 7.1Q683.203 -21.6 574.602 -21.6Z" fill="#E9EEF6"/></g>
+    </g>
+
+    <text x="0" y="128" fill="#E9EEF6" font-family="-apple-system, 'SF Pro Display', 'Segoe UI', Helvetica, Arial, sans-serif" font-size="42" font-weight="600" letter-spacing="-0.8">
+      Message plumbing for
+    </text>
+    <text x="0" y="176" fill="#E9EEF6" font-family="-apple-system, 'SF Pro Display', 'Segoe UI', Helvetica, Arial, sans-serif" font-size="42" font-weight="600" letter-spacing="-0.8">
+      coding-agent teams.
+    </text>
+
+    <text x="0" y="222" fill="#8FA3C2" font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16.5">
+      One append-only ledger, workspace-scoped role sessions,
+    </text>
+    <text x="0" y="246" fill="#8FA3C2" font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16.5">
+      multi-platform IM gateway, and System One edge reflexes.
+    </text>
+  </g>
+
+  <!-- Right Column: Cluster Ring Schematic -->
+  <g transform="translate(690, 20)">
+    <!-- Outer Ring Arcs -->
+    <path d="M 248.8 58.2 A 135 135 0 0 1 312.5 102.6" fill="none" stroke="#33D6EE" stroke-width="2.6" stroke-linecap="round"/>
+    <circle cx="282.5" cy="76.5" r="11" fill="#33D6EE" opacity="0.2"/>
+    <circle cx="282.5" cy="76.5" r="5.2" fill="#33D6EE"/>
+    <path d="M 336.0 192.0 A 135 135 0 0 1 312.0 264.0" fill="none" stroke="#55688C" stroke-width="2.4" stroke-linecap="round"/>
+    <path d="M 238.0 318.0 A 135 135 0 0 1 162.0 318.0" fill="none" stroke="#55688C" stroke-width="2.4" stroke-linecap="round"/>
+    <path d="M 88.0 264.0 A 135 135 0 0 1 64.0 192.0" fill="none" stroke="#55688C" stroke-width="2.4" stroke-linecap="round"/>
+    <path d="M 88.0 106.0 A 135 135 0 0 1 152.0 58.2" fill="none" stroke="#55688C" stroke-width="2.4" stroke-linecap="round"/>
+
+    <!-- Spokes to Central Ledger -->
+    <line x1="200" y1="78" x2="200" y2="154" stroke="#8FA3C2" stroke-opacity="0.28" stroke-dasharray="4 4"/>
+    <line x1="312" y1="146" x2="236" y2="174" stroke="#33D6EE" stroke-opacity="0.45" stroke-dasharray="4 4"/>
+    <line x1="272" y1="280" x2="222" y2="212" stroke="#8FA3C2" stroke-opacity="0.28" stroke-dasharray="4 4"/>
+    <line x1="128" y1="280" x2="178" y2="212" stroke="#8FA3C2" stroke-opacity="0.28" stroke-dasharray="4 4"/>
+    <line x1="88" y1="146" x2="164" y2="174" stroke="#8FA3C2" stroke-opacity="0.28" stroke-dasharray="4 4"/>
+
+    <!-- Central Server Hub -->
+    <rect x="150" y="156" width="100" height="54" rx="12" fill="#111A2B" stroke="#33D6EE" stroke-opacity="0.65" stroke-width="1.4"/>
+    <text x="200" y="180" text-anchor="middle" fill="#E9EEF6" font-family="'SF Mono', Menlo, Consolas, monospace" font-size="13" font-weight="600">server</text>
+    <text x="200" y="198" text-anchor="middle" fill="#33D6EE" font-family="'SF Mono', Menlo, Consolas, monospace" font-size="11">state.db</text>
+
+    <!-- Node 1: planner (top) -->
+    <rect x="156" y="34" width="88" height="38" rx="10" fill="#111A29" stroke="#8FA3C2" stroke-opacity="0.45" stroke-width="1.2"/>
+    <text x="200" y="58" text-anchor="middle" fill="#E9EEF6" font-family="'SF Mono', Menlo, Consolas, monospace" font-size="13">planner</text>
+
+    <!-- Node 2: coder (top-right, active) -->
+    <rect x="304" y="122" width="84" height="38" rx="10" fill="#111A29" stroke="#33D6EE" stroke-width="1.5"/>
+    <text x="346" y="146" text-anchor="middle" fill="#33D6EE" font-family="'SF Mono', Menlo, Consolas, monospace" font-size="13" font-weight="600">coder</text>
+
+    <!-- Node 3: reviewer (bottom-right) -->
+    <rect x="246" y="282" width="92" height="38" rx="10" fill="#111A29" stroke="#8FA3C2" stroke-opacity="0.45" stroke-width="1.2"/>
+    <text x="292" y="306" text-anchor="middle" fill="#8FA3C2" font-family="'SF Mono', Menlo, Consolas, monospace" font-size="13">reviewer</text>
+
+    <!-- Node 4: system-one (bottom-left) -->
+    <rect x="58" y="282" width="98" height="38" rx="10" fill="#111A29" stroke="#8FA3C2" stroke-opacity="0.45" stroke-width="1.2"/>
+    <text x="107" y="306" text-anchor="middle" fill="#8FA3C2" font-family="'SF Mono', Menlo, Consolas, monospace" font-size="12.5">system-one</text>
+
+    <!-- Node 5: onlyne-im (top-left) -->
+    <rect x="14" y="122" width="88" height="38" rx="10" fill="#111A29" stroke="#8FA3C2" stroke-opacity="0.45" stroke-width="1.2"/>
+    <text x="58" y="146" text-anchor="middle" fill="#8FA3C2" font-family="'SF Mono', Menlo, Consolas, monospace" font-size="13">onlyne-im</text>
+  </g>
+
+  <!-- Bottom Band -->
+  <line x1="72" y1="358" x2="1128" y2="358" stroke="#E9EEF6" stroke-opacity="0.14"/>
+  <text x="72" y="386" fill="#8FA3C2" font-family="'SF Mono', Menlo, Consolas, monospace" font-size="13" letter-spacing="0.5">
+    onlyne · onlyne-server · onlyne-client · onlyne-im
+  </text>
+  <text x="1128" y="386" text-anchor="end" fill="#8FA3C2" font-family="'SF Mono', Menlo, Consolas, monospace" font-size="13" letter-spacing="0.5">
+    queued <tspan fill="#33D6EE">→</tspan> <tspan fill="#E9EEF6">in_flight</tspan> <tspan fill="#33D6EE">→</tspan> <tspan fill="#E9EEF6">acked</tspan>
+  </text>
+</svg>

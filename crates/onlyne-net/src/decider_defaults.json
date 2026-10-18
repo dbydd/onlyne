@@ -1,0 +1,151 @@
+{
+  "im_inbound": {
+    "enabled": true,
+    "questions": {
+      "should_handle": {
+        "type": "noul",
+        "instructions": "Should the coding-agent cluster handle or respond to this message?",
+        "criteria": {
+          "true": "Message asks for work, answers, status, or provides task context",
+          "false": "Unrelated human smalltalk or noise to ignore"
+        }
+      },
+      "target_role": {
+        "type": "choice",
+        "instructions": "Which role in the cluster should handle this message?",
+        "criteria": {}
+      },
+      "reply_to_msg": {
+        "type": "choice",
+        "instructions": "Which recent message ID is this message continuing or replying to?",
+        "criteria": {}
+      }
+    },
+    "thresholds": {
+      "max_reply_candidates": 8.0,
+      "reply_confidence_floor": 0.70
+    },
+    "templates": {
+      "default_candidate": "_supervisor",
+      "ignore_role": "ignore",
+      "ignore_rubric": "Human chatter not directed at any agent",
+      "none_reply_label": "none",
+      "none_reply_rubric": "Starts a new topic"
+    }
+  },
+  "complete_guard": {
+    "enabled": true,
+    "questions": {
+      "contradicts_done": {
+        "type": "noul",
+        "instructions": "Does this completion report state that the work is actually unfinished, blocked on external input, or failed with an unresolved error?",
+        "criteria": {
+          "true": "States the task could not be finished, is blocked, or failed",
+          "false": "Reports completed work"
+        }
+      },
+      "actual_status": {
+        "type": "choice",
+        "instructions": "What is the true status described by this report?",
+        "criteria": {
+          "done": "Work was completed",
+          "blocked": "Blocked waiting on user, permission, or external dependency",
+          "failed": "Failed due to an unrecoverable error"
+        }
+      }
+    },
+    "thresholds": {
+      "min_report_bytes": 24.0,
+      "contradiction_floor": 0.85,
+      "status_floor": 0.65
+    },
+    "templates": {}
+  },
+  "turn_end": {
+    "enabled": true,
+    "questions": {
+      "reason": {
+        "type": "choice",
+        "instructions": "Why did the agent end its turn without calling onlyne_complete?",
+        "criteria": {
+          "forgot_complete": "Finished the work and summarized it without calling onlyne_complete",
+          "blocked": "Waiting on external input or blocker",
+          "error": "Hit an error and stopped"
+        }
+      }
+    },
+    "thresholds": {
+      "min_closing_bytes": 16.0,
+      "diagnosis_floor": 0.60
+    },
+    "templates": {
+      "forgot_complete": " If your work is finished, call onlyne_complete with outcome=\"done\" now.",
+      "blocked": " If you are blocked on an external dependency, call onlyne_complete with outcome=\"blocked\" now.",
+      "error": " If the task cannot succeed due to an error, call onlyne_complete with outcome=\"failed\" now."
+    }
+  },
+  "heartbeat": {
+    "enabled": true,
+    "questions": {
+      "is_thrashing": {
+        "type": "noul",
+        "instructions": "Is the agent stuck in a repetitive error loop repeating the same failing action?"
+      },
+      "progress": {
+        "type": "score",
+        "instructions": "How well is the session progressing?",
+        "criteria": [
+          "0: stuck in repetitive error loop",
+          "1: debugging errors",
+          "2: making steady progress",
+          "3: verifying and wrapping up"
+        ]
+      },
+      "phase": {
+        "type": "choice",
+        "instructions": "Which activity phase is the agent currently in?",
+        "criteria": {
+          "reading": null,
+          "planning": null,
+          "coding": null,
+          "testing": null,
+          "debugging": null,
+          "waiting": null,
+          "wrapping_up": null
+        }
+      }
+    },
+    "thresholds": {
+      "thrashing_mark": 0.88
+    },
+    "templates": {}
+  },
+  "triage": {
+    "enabled": true,
+    "questions": {
+      "action": {
+        "type": "choice",
+        "instructions": "What recovery action does this fault call for?",
+        "criteria": {
+          "retry": "Transient network error, rate limit (429), lock contention, or temporary blip",
+          "recycle": "Session process is stuck, looping, or unresponsive and needs a fresh session slot",
+          "fail": "Unrecoverable configuration, permission, or deterministic failure",
+          "escalate": "Ambiguous state or requirement question that requires human operator judgment"
+        }
+      },
+      "severity": {
+        "type": "score",
+        "instructions": "How severe is this fault?",
+        "criteria": [
+          "0: low — transient blip",
+          "1: medium — stuck session",
+          "2: high — unrecoverable or needs human"
+        ]
+      }
+    },
+    "thresholds": {
+      "min_confidence": 0.60
+    },
+    "templates": {}
+  }
+}
