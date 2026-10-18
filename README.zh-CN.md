@@ -139,7 +139,6 @@ target/debug/onlyne-client init \
   --server-root "$tmp/server" \
   --prose "v1 smoke prose" \
   --register >/dev/null
-target/debug/onlyne --server-root "$tmp/server" reload
 
 ONLYNE_BACKEND=fake target/debug/onlyne-client run \
   --workspace "$tmp/planner" >"$tmp/client-process.log" 2>&1 &
@@ -368,12 +367,20 @@ client 会把实际服务路径以 `ONLYNE_SOCKET` 注入每个 session。socket
 ### 生命周期与观测
 
 ```bash
-# Server：前台运行；`shutdown` 通过 admin socket 排空并停止在线 server
+# 一键初始化多角色集群并前台拉起：
+# `--roles` 在 `<server-root>/<role>` 下生成角色工作区并写入 spec.toml；
+# `onlyne up` 在前台启动 `onlyne-server`、自动发现的角色 client 与可选 `onlyne-im`，
+# 按 `[server]`、`[client:<role>]`、`[im]` 前缀汇聚输出，并在 Ctrl-C 时排空停机。
+onlyne server init --root <server-root> --roles planner,coder
+onlyne up          --server-root <server-root>
+
+# 单独运行守护进程：前台运行；`shutdown` 通过 admin socket 排空并停止在线 server
 onlyne server init     --root <server-root>                  # --listen 默认 127.0.0.1:7811
 onlyne server run      --root <server-root>
 onlyne server shutdown --server-root <server-root> --drain-secs 5
 
-# Client：始终在前台；没有 start/stop 动词
+# Client：前台运行；`--register` 在服务端在线时通过 SpecApply 热注册免 reload，
+# 服务端离线时自动追加至 spec.toml
 onlyne client init   --workspace <workspace> --role <role> --server-root <server-root> --register
 onlyne client run    --workspace <workspace>
 onlyne client status --workspace <workspace>

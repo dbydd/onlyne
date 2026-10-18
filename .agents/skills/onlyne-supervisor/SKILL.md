@@ -20,7 +20,7 @@ to you and the spec file.
   on every envelope it relays. Put `admin = true` on your own `[[client]]` entry too: that
   is the standing a client-held supervisor session sends with, and the flag the Control-class
   ACL bypass reads.
-- Lifecycle: `onlyne server init|run|status|generate|reload|shutdown` (also top-level `onlyne shutdown`), the top-level
+- Lifecycle: `onlyne server init|up|run|status|generate|reload|shutdown` (also top-level `onlyne up` and `onlyne shutdown`), the top-level
   `onlyne wait-ready`, `onlyne client run|init|status`, and `onlyne gateway status`.
   `onlyne gateway status` still reports the mounts the server knows; the platform verbs
   that used to sit beside it are not verbs of `onlyne` — the gateway shipped as its own
@@ -63,9 +63,10 @@ to you and the spec file.
 
 ## Onboard a cluster
 
-1. `onlyne server init --root <root> --listen 127.0.0.1:<port>` writes the `[server]` spec,
-   the server key pair, and a fresh `cert_pin` in it. An existing `spec.toml` stops the verb
-   with exit 4 until `--force`, and an existing readable key pair keeps its own pin.
+1. `onlyne server init --root <root> [--listen 127.0.0.1:<port>] [--roles r1,r2]` writes the `[server]` spec
+   (`--listen` defaults to `127.0.0.1:7811`), the server key pair, and a fresh `cert_pin` in it; passing `--roles`
+   also seeds `<root>/<role>` workspaces and their `[[client]]` entries in `spec.toml`. An existing `spec.toml` stops
+   the verb with exit 4 until `--force`, and an existing readable key pair keeps its own pin.
 2. Put role content in `<root>/.onlyne/templates/<topo>/<role>/`. The basename is the spec
    role name. Templates hold AGENTS.md, prompts, and `.pi/` settings — opaque bytes, plus a
    closed set of placeholders: `{{role}} {{cluster}} {{server_name}} {{listen}} {{cert_pin}} {{admin}} {{max_sessions}} {{agent_package}}`.

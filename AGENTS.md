@@ -196,13 +196,13 @@ not add a heavyweight dependency for a single type or a single helper.
 Rules:
 
 - **Forwarding is gone from the admin face, not from the process tree.** Every admin verb runs inside the `onlyne` process, but `onlyne client <anything>`, `onlyne client run`, and `onlyne server run` still exec a sibling binary — the `client` group forwards every remaining argument verbatim. Exit code 127 therefore still means one thing: that sibling binary is missing. v1's other defect, dropping the global flags at a forwarding point, is fixed: measured `onlyne client init` behaves as `onlyne-client init`.
-- **No `start`/`stop`.** Staying resident belongs to the terminal host or to launchd/systemd. Onlyne runs in the foreground.
+- **No background `start`/`stop` daemonizer.** Every daemon runs in the foreground; `onlyne up` runs a local cluster tree (`onlyne-server` plus discovered `onlyne-client` workspaces and optional `onlyne-im`) in the foreground with prefixed output and ordered drain on Ctrl-C, while long-lived background residency belongs to the terminal host or to launchd/systemd.
 - **The TUI is a verb, not a default.** `onlyne tui` opens the cluster view. Bare `onlyne` prints help to stderr and exits 2; there is no TTY branch.
 - **The IM gateway has its own CLI.** `onlyne-im` is a separate optional binary, the way
   `onlyne-web` is, and `onlyne` carries no `im` verb. Its `generate` writes one conversation
   (a workspace and the cluster's `[[client]]` row plus both ACL lists), not a role template
   workspace; `onlyne server generate` keeps the template path it has.
-- **Verbs are split by caller.** Operators and supervisors use admin-socket verbs: `send`, `reply`, `complete`, `ack`, `reject`, `handoff`, `control`, `repair`, `spec_diff`, `reload`, `ls`, `who`, `ping`, `watch`, `ledger`, `gateway status`. An operator reports a conclusion with `onlyne complete`, which on the admin face becomes `AdminOp::Report`; there is no `onlyne report` verb. A role's in-session actions go only through plugin tools or `onlyne mcp`: `onlyne_send`, `onlyne_handoff`, `onlyne_complete`.
+- **Verbs are split by caller.** Operators and supervisors use admin-socket and lifecycle verbs: `up`, `shutdown`, `send`, `reply`, `complete`, `ack`, `reject`, `handoff`, `control`, `repair`, `spec_diff`, `reload`, `ls`, `who`, `ping`, `watch`, `ledger`, `gateway status`. An operator reports a conclusion with `onlyne complete`, which on the admin face becomes `AdminOp::Report`; there is no `onlyne report` verb. A role's in-session actions go only through plugin tools or `onlyne mcp`: `onlyne_send`, `onlyne_handoff`, `onlyne_complete`.
 
 ## 6. Crate layout
 

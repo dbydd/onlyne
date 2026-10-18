@@ -34,6 +34,39 @@ pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// Install the crypto provider and initialize `tracing` for a backend process.
+///
+/// Pass no arguments for the `"info"` default, or a filter expression to use
+/// when `RUST_LOG` is unset.
+#[macro_export]
+macro_rules! init_backend_runtime {
+    () => {
+        $crate::init_backend_runtime!("info")
+    };
+    ($default_filter:expr) => {{
+        $crate::install_crypto_provider();
+        use tracing_subscriber::EnvFilter;
+        let filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new($default_filter));
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .try_init();
+    }};
+}
+
+/// Await the backend's future and exit the process with its result's code,
+/// printing `Err` payloads to stderr.
+pub async fn exit_on_result(bin_name: &str, fut: impl Future<Output = anyhow::Result<()>>) -> ! {
+    match fut.await {
+        Ok(()) => std::process::exit(0),
+        Err(error) => {
+            eprintln!("{bin_name}: {error:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
 pub use backend::Backend;
 pub use credential::{CREDENTIAL_ENV, GATEWAY_ENV, credential_path};
 pub use frame::{

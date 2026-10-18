@@ -1,53 +1,39 @@
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+//! The server store: `ServerLedger` and the shared SQL helpers behind it.
+//!
+//! The module is split into `conn` (connections, schema gate, read pool) and
+//! `rows` (row types, mappers, timestamp/text helpers); everything those two
+//! hold is re-exported here, so `crate::server`'s surface is unchanged.
 
-use chrono::{DateTime, SecondsFormat, Utc};
-use onlyne_proto::text::SchemaMismatch;
-use onlyne_proto::{
-    Envelope, Event, FaultEvent, LedgerQuery, LedgerState, LedgerStateEvent, Lifecycle, MsgKind,
-    Outcome, Principal, QueryFaultsArgs, QuerySessionsArgs,
+mod conn;
+mod rows;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use conn::{ReadPool, SERVER_MARKER, SERVER_SCHEMA_VERSION, open_connection, sql_limit};
+pub use rows::{Append, CursorRow, EventRecord, FaultQuery, GhostSweepRow, LedgerRow, RoleRow};
+pub use rows::{ServerFaultRow, ServerSessionRow, SessionBindingRow};
+pub use rows::{SessionWrite, rfc3339};
+pub(crate) use rows::{
+    bool_int, current_ledger_state, cursor_row, ensure_transition_allowed, event_row, fault_event,
+    fault_row_by_id, ghost_sweep_row, head_preview, insert_ledger_row, ledger_by_msg_id,
+    ledger_by_op_id, ledger_row, ledger_state_event, rfc3339_to_unix, role_row, server_fault_row,
+    session_binding_row, session_row, string_tag, unix_to_rfc3339,
 };
-use rusqlite::types::{Type, Value as SqlValue};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params, params_from_iter};
-use serde::{Deserialize, Serialize};
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use chrono::{DateTime, Utc};
+use onlyne_proto::{
+    LedgerQuery, LedgerState, Lifecycle, MsgKind, QueryFaultsArgs, QuerySessionsArgs,
+};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde_json::Value;
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::error::{StoreError, StoreResult};
 use crate::liveness::LiveSessions;
-use crate::transition_allowed;
-
-/// Server store schema revision. The `hop` column set this to 2: the ledger
-/// keeps the hop count of `Causality`, which `onlyne handoff` reads back to
-/// extend a chain. The `expires_at` and `requeued` columns were applied in
-/// place, so they never moved the marker. Version 3 is the tuple rebuild: the
-/// `sessions` row lost its `public_lifecycle` column, which cannot be taken
-/// back from an existing file, so an old layout is refused rather than carried.
-/// Version 4 adds the `ghost_sweeps` audit table: the server settles a `working`
-/// mirror row whose task ledger row already reached a terminal state, and each
-/// settlement writes one row there. A marker-3 file carries no such table, so it
-/// stops at the door on the same string every other mismatch prints.
-/// The ledger's five family-metadata columns — `family`, `hop_budget`,
-/// `origin`, `deadline`, `labels_json` — were applied in place beside
-/// `expires_at` and `requeued`, so they never moved the marker.
-/// Version 5 rekeys the mirror: a session row is addressed by `session_id`
-/// rather than by the delivery it happens to serve, carries `last_seen` beside
-/// `updated_at`, and the deliveries it serves are recorded in `session_tasks`.
-/// A marker-4 file holds rows under the old key and no bindings table, which
-/// cannot be read back as this layout, so it stops at the door on the same
-/// string every other mismatch prints.
-/// Version 6 adds the `hook_cursors` table: an event hook is delivered
-/// at-least-once, so each declared hook records the last event `seq` it
-/// handled successfully and resumes from there after a restart. A marker-5
-/// file holds no such row, so it stops at the door on the same string every
-/// other mismatch prints.
-/// The client store keeps its own revision.
-const SERVER_SCHEMA_VERSION: i64 = 6;
-const PROTOCOL_VERSION: i64 = 1;
-const SERVER_MARKER: &str = "onlyne-server";
-const DEFAULT_LIMIT: i64 = 100;
 
 pub const SERVER_DDL: &str = r#"CREATE TABLE IF NOT EXISTS roles(
   name TEXT PRIMARY KEY,
@@ -218,252 +204,178 @@ CREATE TABLE IF NOT EXISTS hook_cursors(
   updated_at TEXT NOT NULL
 );"#;
 
-const SCHEMA_MARKER_DDL: &str = "CREATE TABLE IF NOT EXISTS schema_marker(name TEXT PRIMARY KEY, version INTEGER NOT NULL, protocol_version INTEGER NOT NULL);";
+pub(crate) const LEDGER_COLUMNS: &str = "msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json,hop,expires_at,requeued,family,hop_budget,origin,deadline,labels_json";
+pub(crate) const FAULT_COLUMNS: &str = "id,task_id,role,session_id,generation,seq,desired_json,observed_json,intent,attempt,backend_ref,kind,reason,state,created_at";
+pub(crate) const GHOST_SWEEP_COLUMNS: &str =
+    "id,task_id,role,session_id,generation,seq_before,seq_after,outcome,evidence,swept_at";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoleRow {
-    pub name: String,
-    pub key: String,
-    pub admin: bool,
-    pub max_sessions: i64,
-    pub spec_hash: String,
-    pub updated_at: String,
-}
-
-/// One mirror row as a writer hands it over, and as a reader gets it back.
+/// The delivery one session is serving right now, as a subquery over its
+/// bindings: an unbound session answers with nothing, which is the state a
+/// claim reports as a session with no delivery.
 ///
-/// The address is `session_id`, which is the table's key: a session serves one
-/// delivery at a time, and the deliveries it serves live in `session_tasks`
-/// rather than in this row. `task_id` is the delivery the write is about — the
-/// binding a writer opens — and on a read it is the delivery the session is
-/// serving now, derived from its open `session_tasks` row and absent when the
-/// session is on no delivery.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionWrite {
-    pub session_id: String,
-    pub task_id: Option<String>,
-    pub role: String,
-    pub generation: i64,
-    pub seq: i64,
-    pub agent_state: String,
-    pub delivery_state: String,
-    pub resource_state: String,
-    pub recovery_substate: String,
-    pub desired_json: String,
-    pub observed_json: String,
-    pub mismatch_count: i64,
-    /// When the mirror last saw this session, in unix seconds. Stored as the
-    /// RFC 3339 text the crate's helpers produce.
-    pub last_seen: i64,
-    /// When the projection content last moved, in unix seconds.
-    pub updated_at: i64,
-}
+/// No ordering: at most one binding of a session is open, which is what
+/// `open_binding_conn` maintains, and an ordered subquery would have SQLite
+/// spill a sorter into a temporary file on every listing read.
+pub(crate) const OPEN_BINDING_TASK: &str =
+    "(SELECT st.task_id FROM session_tasks st WHERE st.session_id=sessions.session_id
+   AND st.released_at IS NULL LIMIT 1)";
 
-pub type ServerSessionRow = SessionWrite;
-
-/// One `session_tasks` row: which delivery a session serves, and whether it
-/// still serves it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionBindingRow {
-    pub session_id: String,
-    pub task_id: String,
-    /// When this session took the delivery, in unix seconds.
-    pub bound_at: i64,
-    /// When it stopped serving it, in unix seconds. `None` while the delivery
-    /// is the one the session is on.
-    pub released_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LedgerRow {
-    pub msg_id: String,
-    pub op_id: Option<String>,
-    pub fingerprint: Option<String>,
-    pub kind: MsgKind,
-    pub from_json: String,
-    pub to_json: String,
-    pub task: Option<String>,
-    pub parent_task: Option<String>,
-    pub attempt: i64,
-    pub state: LedgerState,
-    pub out_head: Option<String>,
-    pub reason: Option<String>,
-    pub enqueued_at: String,
-    pub acked_at: Option<String>,
-    pub body_json: Option<String>,
-    /// Causality's hop count from the root task, which is what turns the
-    /// `parent_task` links into a measurable depth.
-    pub hop: i64,
-    /// The persisted expiry deadline of a ttl note, so a restarted server can
-    /// re-arm its sweep.
-    pub expires_at: Option<String>,
-    /// Times this row has moved from in_flight back to queued.
-    #[serde(default)]
-    pub requeued: i64,
-    /// The family's root task id, read off the envelope's causality. Every row
-    /// of one run carries it unchanged, and `onlyne handoff` reads it back to
-    /// mint the next hop into the same family.
-    #[serde(default)]
-    pub family: Option<String>,
-    /// The hops the family may spend, carried on every row of the run.
-    #[serde(default)]
-    pub hop_budget: Option<i64>,
-    /// The role the family reports home to, carried on every row of the run.
-    #[serde(default)]
-    pub origin: Option<String>,
-    /// Wall-clock bound for the whole family, in the RFC 3339 text this
-    /// crate's helpers produce.
-    #[serde(default)]
-    pub deadline: Option<String>,
-    /// The causality's labels as JSON text, so the column keeps whatever map
-    /// the sender attached.
-    #[serde(default)]
-    pub labels_json: Option<String>,
-}
-
-impl LedgerRow {
-    pub fn from_envelope(envelope: &Envelope, fingerprint: &str) -> StoreResult<Self> {
-        let body_json = serde_json::to_string(&envelope.body)?;
-        let causality = envelope.causality.as_ref();
-        let expires_at = match (envelope.kind, envelope.ttl_ms) {
-            (MsgKind::Note, Some(ttl)) => Some(rfc3339(
-                envelope.ts + chrono::Duration::milliseconds(ttl as i64),
-            )),
-            _ => None,
-        };
-        Ok(Self {
-            msg_id: envelope.id.clone(),
-            op_id: envelope.op_id.clone(),
-            fingerprint: Some(fingerprint.to_string()),
-            kind: envelope.kind,
-            from_json: sender_column(&envelope.from, envelope.admin)?,
-            to_json: serde_json::to_string(&envelope.to)?,
-            task: causality.map(|c| c.task.clone()),
-            parent_task: causality.and_then(|c| c.parent_task.clone()),
-            attempt: causality.map(|c| i64::from(c.attempt)).unwrap_or(0),
-            hop: causality.map(|c| i64::from(c.hop)).unwrap_or(0),
-            state: LedgerState::Queued,
-            out_head: Some(body_head(envelope, &body_json)),
-            reason: None,
-            enqueued_at: rfc3339(envelope.ts),
-            acked_at: None,
-            body_json: Some(body_json),
-            expires_at,
-            requeued: 0,
-            family: causality.and_then(|c| c.family.clone()),
-            hop_budget: causality.and_then(|c| c.hop_budget).map(i64::from),
-            origin: causality.and_then(|c| c.origin.clone()),
-            deadline: causality.and_then(|c| c.deadline).map(rfc3339),
-            labels_json: match causality.and_then(|c| c.labels.as_ref()) {
-                Some(labels) => Some(serde_json::to_string(labels)?),
-                None => None,
-            },
-        })
-    }
-}
-
-impl LedgerRow {
-    /// The sender principal this row recorded.
-    ///
-    /// The sender column carries the principal beside the admin marker, so a
-    /// row states whether an admin-surface send wrote it (plan §8 line 320)
-    /// without a second column. A column holding a bare principal decodes too.
-    pub fn sender(&self) -> Result<Principal, serde_json::Error> {
-        let value: Value = serde_json::from_str(&self.from_json)?;
-        serde_json::from_value(value.get("principal").cloned().unwrap_or(value))
-    }
-
-    /// Whether the send behind this row arrived on the admin surface.
-    pub fn sender_is_admin(&self) -> bool {
-        serde_json::from_str::<Value>(&self.from_json)
-            .ok()
-            .and_then(|value| value.get("admin").and_then(Value::as_bool))
-            .unwrap_or(false)
-    }
-}
-
-/// Encode the sender column: the principal plus the admin marker.
-fn sender_column(from: &Principal, admin: bool) -> StoreResult<String> {
-    Ok(serde_json::to_string(&serde_json::json!({
-        "admin": admin,
-        "principal": from,
-    }))?)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Append {
-    Accepted(LedgerRow),
-    Duplicate {
-        existing: LedgerRow,
-        fingerprint_matches: bool,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EventRecord {
-    pub seq: i64,
-    pub kind: String,
-    pub data: Value,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServerFaultRow {
-    pub id: i64,
-    pub task_id: Option<String>,
-    pub role: Option<String>,
-    pub session_id: Option<String>,
-    pub generation: Option<i64>,
-    pub seq: Option<i64>,
-    pub desired_json: Option<String>,
-    pub observed_json: Option<String>,
-    pub intent: Option<String>,
-    pub attempt: Option<i64>,
-    pub backend_ref: Option<String>,
-    pub kind: String,
-    pub reason: String,
-    pub state: String,
-    pub created_at: i64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FaultQuery {
-    pub task_id: Option<String>,
-    pub role: Option<String>,
-    pub kind: Option<String>,
-    pub open_only: bool,
-    pub limit: u32,
-}
-
-/// One settlement the server's ghost sweep recorded in its own audit table.
+/// One mirror row's columns, as every read of the table selects them.
 ///
-/// `seq_before` and `seq_after` are the mirror row's two versions. The sweep
-/// writes through the same settlement path a `repair_*` verb uses, and that path
-/// bumps `seq` by one, so the pair names the exact write an operator is reading
-/// about. `swept_at` holds the kernel's unix seconds and the column holds the
-/// RFC 3339 text this crate's conversion helpers produce.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GhostSweepRow {
-    pub id: i64,
-    pub task_id: String,
-    pub role: String,
-    pub session_id: String,
-    pub generation: i64,
-    pub seq_before: i64,
-    pub seq_after: i64,
-    /// The verdict written onto the mirror row, read off the task's ledger row.
-    pub outcome: Outcome,
-    /// What justified the sweep: the evidence tag plus the ledger state it read.
-    pub evidence: String,
-    pub swept_at: i64,
+/// `task_id` is not a column of `sessions`: it is the delivery the row is
+/// labelled with — the one its session is on now, selected in the second
+/// position `session_row` reads.
+pub(crate) fn session_columns() -> String {
+    format!(
+        "session_id,{OPEN_BINDING_TASK},\
+         role,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,\
+         desired_json,observed_json,mismatch_count,last_seen,updated_at"
+    )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CursorRow {
-    pub role: String,
-    pub last_msg_id: Option<String>,
-    pub last_seq: i64,
-    pub updated_at: String,
+/// The session serving one task, as a subquery over the bindings.
+///
+/// The open binding is the session on that delivery now; the fallback to the
+/// last binding taken keeps a settled delivery readable, exactly as the row it
+/// used to be keyed by stayed readable.
+pub(crate) const SESSION_ID_FOR_TASK: &str = "(SELECT session_id FROM session_tasks WHERE task_id=?
+   ORDER BY (released_at IS NULL) DESC, bound_at DESC, session_id DESC LIMIT 1)";
+
+/// Apply one mirror write, and bind its delivery when the write lands.
+///
+/// Shared by the plain write and the operator's rebind, which differ only in
+/// where the row is addressed before the write.
+pub(crate) fn project_session_conn(conn: &Connection, write: &SessionWrite) -> StoreResult<bool> {
+    let changed = conn.execute(
+        "INSERT INTO sessions(session_id,role,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,last_seen,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(session_id) DO UPDATE SET role=excluded.role,generation=excluded.generation,seq=excluded.seq,agent_state=excluded.agent_state,delivery_state=excluded.delivery_state,resource_state=excluded.resource_state,recovery_substate=excluded.recovery_substate,desired_json=excluded.desired_json,observed_json=excluded.observed_json,mismatch_count=excluded.mismatch_count,last_seen=excluded.last_seen,updated_at=excluded.updated_at
+         WHERE excluded.generation > sessions.generation OR (excluded.generation = sessions.generation AND excluded.seq > sessions.seq)",
+        params![
+            write.session_id,
+            write.role,
+            write.generation,
+            write.seq,
+            write.agent_state,
+            write.delivery_state,
+            write.resource_state,
+            write.recovery_substate,
+            write.desired_json,
+            write.observed_json,
+            write.mismatch_count,
+            unix_to_rfc3339(write.last_seen),
+            unix_to_rfc3339(write.updated_at)
+        ],
+    )?;
+    if changed == 1 {
+        if let Some(task_id) = write.task_id.as_deref() {
+            open_binding_conn(conn, &write.session_id, task_id, write.last_seen)?;
+        }
+    }
+    Ok(changed == 1)
+}
+
+/// Take one delivery for a session, releasing whatever it was on before.
+///
+/// A session serves one delivery at a time, so this is the one place that rule
+/// is enforced: the session's other open binding is released at the clock this
+/// take carries. A pair already open stays as it stands — its `bound_at` is
+/// when this session took that delivery, not when it was last written about —
+/// and a pair whose binding was released is taken again under this clock.
+pub(crate) fn open_binding_conn(
+    conn: &Connection,
+    session_id: &str,
+    task_id: &str,
+    bound_at: i64,
+) -> StoreResult<usize> {
+    let at = unix_to_rfc3339(bound_at);
+    conn.execute(
+        "UPDATE session_tasks SET released_at=? WHERE session_id=? AND released_at IS NULL AND task_id<>?",
+        params![at, session_id, task_id],
+    )?;
+    Ok(conn.execute(
+        "INSERT INTO session_tasks(session_id,task_id,bound_at,released_at) VALUES(?,?,?,NULL)
+         ON CONFLICT(session_id,task_id) DO UPDATE SET bound_at=excluded.bound_at,released_at=NULL
+         WHERE session_tasks.released_at IS NOT NULL",
+        params![session_id, task_id, at],
+    )?)
+}
+
+/// Stop serving one delivery. Only an open binding is released, so the first
+/// release is the one the row keeps.
+pub(crate) fn release_binding_conn(
+    conn: &Connection,
+    session_id: &str,
+    task_id: &str,
+    released_at: i64,
+) -> StoreResult<usize> {
+    Ok(conn.execute(
+        "UPDATE session_tasks SET released_at=? WHERE session_id=? AND task_id=? AND released_at IS NULL",
+        params![unix_to_rfc3339(released_at), session_id, task_id],
+    )?)
+}
+
+/// The sessions listing read, as SQL. Named so the caller and the plan test run
+/// one text: the order's tie key is the primary key because an explicit `rowid`
+/// cannot be an index column, and an order SQLite cannot satisfy from an index
+/// makes it spill a sorter to a temporary file on every read.
+pub(crate) fn sessions_list_sql(where_sql: &str) -> String {
+    format!(
+        "SELECT {} FROM sessions{where_sql} ORDER BY updated_at DESC,rowid DESC LIMIT ?",
+        session_columns()
+    )
+}
+
+/// The ledger listing read, as SQL, on the same terms as the sessions listing.
+pub(crate) fn ledger_list_sql(where_sql: &str) -> String {
+    format!(
+        "SELECT {LEDGER_COLUMNS} FROM ledger{where_sql} ORDER BY enqueued_at DESC,rowid DESC LIMIT ?"
+    )
+}
+
+/// The ghost-sweep listing read, as SQL, on the same terms as the two listings
+/// above. Named for the same reason: the plan test runs this one text.
+pub(crate) fn ghost_sweeps_list_sql() -> String {
+    format!(
+        "SELECT {GHOST_SWEEP_COLUMNS} FROM ghost_sweeps ORDER BY swept_at DESC,rowid DESC LIMIT ?"
+    )
+}
+
+pub(crate) fn events_since_conn(
+    conn: &Connection,
+    seq: i64,
+    limit: u32,
+) -> StoreResult<Vec<EventRecord>> {
+    let rows = conn
+        .prepare(
+            "SELECT seq,type,data_json,created_at FROM events WHERE seq>? ORDER BY seq LIMIT ?",
+        )?
+        .query_map(params![seq, sql_limit(limit)], event_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn event_head_conn(conn: &Connection) -> StoreResult<i64> {
+    Ok(conn.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))?)
+}
+
+pub(crate) fn append_event_conn(conn: &Connection, kind: &str, data: &Value) -> StoreResult<i64> {
+    conn.execute(
+        "INSERT INTO events(type,data_json,created_at) VALUES(?,?,?)",
+        params![kind, serde_json::to_string(data)?, rfc3339(Utc::now())],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub(crate) fn repeat_placeholders(len: usize) -> String {
+    std::iter::repeat_n("?", len).collect::<Vec<_>>().join(",")
+}
+
+pub(crate) fn where_sql(clauses: &[String]) -> String {
+    if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1004,8 +916,6 @@ impl ServerLedger {
         Ok(updated)
     }
 
-    /// Move one queued row to `expired` and publish its `ledger_state` event in
-    /// the same transaction.
     /// Settle one row whose deadline passed.
     ///
     /// A row reaches this from `queued` while it waits for its role, and from
@@ -1468,800 +1378,4 @@ impl ServerLedger {
     pub fn session_row_writes(&self) -> u64 {
         self.session_rows_written.load(Ordering::Relaxed)
     }
-}
-
-/// How many read-only connections the query paths share.
-///
-/// WAL lets readers run beside the writer, so the pool is about *width*: a
-/// board, a TUI, and an operator's `onlyne sessions` are three reads that may
-/// be in flight at once, and four leaves room for the server's own scans
-/// without any of them waiting on another. Each of these is one file handle;
-/// the pool never grows, because every read behind it is a point lookup or an
-/// indexed listing.
-const READ_POOL_SIZE: usize = 4;
-
-/// The read-only handles a query runs on.
-///
-/// These are opened `SQLITE_OPEN_READ_ONLY`, so a statement that tried to write
-/// here would fail instead of quietly becoming a second writer: the one writer
-/// is the connection above, and this pool is the answer to "the reader should
-/// not queue behind it".
-#[derive(Clone, Debug)]
-struct ReadPool {
-    path: PathBuf,
-    conns: Arc<Vec<Mutex<Connection>>>,
-    next: Arc<AtomicUsize>,
-}
-
-impl ReadPool {
-    fn open(path: &Path) -> StoreResult<Self> {
-        let mut conns = Vec::with_capacity(READ_POOL_SIZE);
-        for _ in 0..READ_POOL_SIZE {
-            conns.push(Mutex::new(open_reader(path)?));
-        }
-        Ok(Self {
-            path: path.to_path_buf(),
-            conns: Arc::new(conns),
-            next: Arc::new(AtomicUsize::new(0)),
-        })
-    }
-
-    /// One connection, round-robin, so two reads in flight land on two.
-    fn get(&self) -> StoreResult<MutexGuard<'_, Connection>> {
-        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.conns.len();
-        self.conns[index].lock().map_err(|_| {
-            StoreError::Sqlite(format!(
-                "read connection mutex poisoned for {}",
-                self.path.display()
-            ))
-        })
-    }
-}
-
-/// The DDL revision travels beside the marker: the two databases evolve apart,
-/// so the server store states its own number instead of sharing one constant
-/// that a change to either DDL would invalidate for both.
-pub(crate) fn open_connection(
-    path: &Path,
-    which: &'static str,
-    marker: &str,
-    ddl: &str,
-    schema_version: i64,
-) -> StoreResult<Connection> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| StoreError::Sqlite(e.to_string()))?;
-    }
-    let conn = Connection::open(path)?;
-    conn.busy_timeout(Duration::from_millis(5000))?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-    ensure_schema(&conn, which, marker, ddl, schema_version)?;
-    Ok(conn)
-}
-
-fn ensure_schema(
-    conn: &Connection,
-    which: &'static str,
-    marker: &str,
-    ddl: &str,
-    schema_version: i64,
-) -> StoreResult<()> {
-    let tables = user_tables(conn)?;
-    let legacy: Vec<String> = tables
-        .iter()
-        .filter(|name| is_legacy_table(name))
-        .cloned()
-        .collect();
-    if !legacy.is_empty() {
-        return Err(StoreError::unsupported_schema(
-            which,
-            SchemaMismatch::LegacyTables { names: legacy },
-        ));
-    }
-    conn.execute_batch(SCHEMA_MARKER_DDL)?;
-    let marker_row = conn
-        .query_row(
-            "SELECT version,protocol_version FROM schema_marker WHERE name=?",
-            params![marker],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-        )
-        .optional()?;
-    match marker_row {
-        Some((version, protocol)) if version == schema_version && protocol == PROTOCOL_VERSION => {}
-        Some((version, protocol)) => {
-            // The two revisions are reported apart: a file from an older build
-            // and a file from a build that speaks another protocol are different
-            // problems, and an operator who is told only "unsupported" has to
-            // guess which one they have.
-            return Err(if version != schema_version {
-                StoreError::unsupported_schema(
-                    which,
-                    SchemaMismatch::Version {
-                        found: version,
-                        expected: schema_version,
-                    },
-                )
-            } else {
-                StoreError::unsupported_schema(
-                    which,
-                    SchemaMismatch::Protocol {
-                        found: protocol,
-                        expected: PROTOCOL_VERSION,
-                    },
-                )
-            });
-        }
-        None => {
-            let marker_count: i64 =
-                conn.query_row("SELECT COUNT(*) FROM schema_marker", [], |r| r.get(0))?;
-            if marker_count > 0 || !tables.is_empty() {
-                return Err(StoreError::unsupported_schema(
-                    which,
-                    SchemaMismatch::NotEmpty {
-                        tables: tables.len(),
-                    },
-                ));
-            }
-            conn.execute(
-                "INSERT INTO schema_marker(name,version,protocol_version) VALUES(?,?,?)",
-                params![marker, schema_version, PROTOCOL_VERSION],
-            )?;
-        }
-    }
-    conn.execute_batch(ddl)?;
-    ensure_ledger_expires_at(conn)?;
-    ensure_ledger_requeued(conn)?;
-    ensure_ledger_causality_columns(conn)?;
-    Ok(())
-}
-
-/// Open one read-only handle on a server database that already exists.
-///
-/// No pragmas and no DDL: the writer set `journal_mode=WAL` on the file and ran
-/// the schema gate before any of these open, and a read-only connection cannot
-/// change either. The busy timeout is the writer's, so a reader that meets a
-/// checkpoint waits it out instead of failing a board refresh.
-fn open_reader(path: &Path) -> StoreResult<Connection> {
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    conn.busy_timeout(Duration::from_millis(5000))?;
-    Ok(conn)
-}
-
-/// Add `ledger.expires_at` to a file whose ledger lacks it.
-///
-/// The column landed in place, so an existing database keeps its rows and a
-/// file at the current marker keeps opening.
-fn ensure_ledger_expires_at(conn: &Connection) -> StoreResult<()> {
-    let columns = conn
-        .prepare("PRAGMA table_info(ledger)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if columns.is_empty() || columns.iter().any(|name| name == "expires_at") {
-        return Ok(());
-    }
-    conn.execute("ALTER TABLE ledger ADD COLUMN expires_at TEXT", [])?;
-    Ok(())
-}
-
-/// Add `ledger.requeued` to a file whose ledger lacks it.
-///
-/// The column landed in place, so an existing database keeps its rows and a
-/// file at the current marker keeps opening.
-fn ensure_ledger_requeued(conn: &Connection) -> StoreResult<()> {
-    let columns = conn
-        .prepare("PRAGMA table_info(ledger)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if columns.is_empty() || columns.iter().any(|name| name == "requeued") {
-        return Ok(());
-    }
-    conn.execute(
-        "ALTER TABLE ledger ADD COLUMN requeued INTEGER NOT NULL DEFAULT 0",
-        [],
-    )?;
-    Ok(())
-}
-
-/// Add the five ledger columns the envelope's causality feeds to a file whose
-/// ledger lacks them: `family`, `hop_budget`, `origin`, `deadline`,
-/// `labels_json`.
-///
-/// The columns landed in place, so an existing database keeps its rows and a
-/// file at the current marker keeps opening.
-fn ensure_ledger_causality_columns(conn: &Connection) -> StoreResult<()> {
-    let columns = conn
-        .prepare("PRAGMA table_info(ledger)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if columns.is_empty() {
-        return Ok(());
-    }
-    for (name, kind) in [
-        ("family", "TEXT"),
-        ("hop_budget", "INTEGER"),
-        ("origin", "TEXT"),
-        ("deadline", "TEXT"),
-        ("labels_json", "TEXT"),
-    ] {
-        if columns.iter().any(|column| column == name) {
-            continue;
-        }
-        conn.execute(&format!("ALTER TABLE ledger ADD COLUMN {name} {kind}"), [])?;
-    }
-    Ok(())
-}
-
-fn user_tables(conn: &Connection) -> StoreResult<Vec<String>> {
-    let rows = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
-// Rejection-path markers only: these names identify pre-v1 tables and the `swarm` prefix that the schema gate refuses (plan §10 line 370).
-fn is_legacy_table(name: &str) -> bool {
-    matches!(
-        name,
-        "io_cursors" | "loopback_idempotency" | "pending_replies"
-    ) || name.starts_with("swarm")
-}
-
-/// One moment as RFC 3339 text.
-///
-/// Milliseconds rather than whole seconds: three acks inside one second are a
-/// normal run, and plan §Verification case 4 reads the stamps of a reconnect
-/// burst as the order they were settled in, which whole seconds collapse.
-pub fn rfc3339(now: DateTime<Utc>) -> String {
-    now.to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-pub(crate) fn append_event_conn(conn: &Connection, kind: &str, data: &Value) -> StoreResult<i64> {
-    conn.execute(
-        "INSERT INTO events(type,data_json,created_at) VALUES(?,?,?)",
-        params![kind, serde_json::to_string(data)?, rfc3339(Utc::now())],
-    )?;
-    Ok(conn.last_insert_rowid())
-}
-
-pub(crate) fn events_since_conn(
-    conn: &Connection,
-    seq: i64,
-    limit: u32,
-) -> StoreResult<Vec<EventRecord>> {
-    let rows = conn
-        .prepare(
-            "SELECT seq,type,data_json,created_at FROM events WHERE seq>? ORDER BY seq LIMIT ?",
-        )?
-        .query_map(params![seq, sql_limit(limit)], event_row)?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
-pub(crate) fn event_head_conn(conn: &Connection) -> StoreResult<i64> {
-    Ok(conn.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0))?)
-}
-
-fn current_ledger_state(conn: &Connection, msg_id: &str) -> StoreResult<LedgerState> {
-    let state = conn
-        .query_row(
-            "SELECT state FROM ledger WHERE msg_id=?",
-            params![msg_id],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?
-        .ok_or(StoreError::NotFound)?;
-    parse_ledger_state(&state).ok_or(StoreError::Serialization(format!(
-        "invalid ledger state {state}"
-    )))
-}
-
-fn ensure_transition_allowed(from: LedgerState, to: LedgerState) -> StoreResult<()> {
-    if transition_allowed(from, to) {
-        return Ok(());
-    }
-    Err(StoreError::InvalidState {
-        from: from.as_str().to_string(),
-        to: to.as_str().to_string(),
-    })
-}
-
-fn insert_ledger_row(conn: &Connection, row: &LedgerRow) -> StoreResult<()> {
-    conn.execute(
-        "INSERT INTO ledger(msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,hop,state,out_head,reason,enqueued_at,acked_at,body_json,expires_at,requeued,family,hop_budget,origin,deadline,labels_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        params![
-            row.msg_id,
-            row.op_id,
-            row.fingerprint,
-            row.kind.as_str(),
-            row.from_json,
-            row.to_json,
-            row.task,
-            row.parent_task,
-            row.attempt,
-            row.hop,
-            row.state.as_str(),
-            row.out_head,
-            row.reason,
-            row.enqueued_at,
-            row.acked_at,
-            row.body_json,
-            row.expires_at,
-            row.requeued,
-            row.family,
-            row.hop_budget,
-            row.origin,
-            row.deadline,
-            row.labels_json
-        ],
-    )?;
-    Ok(())
-}
-
-fn ledger_by_op_id(conn: &Connection, op_id: &str) -> StoreResult<Option<LedgerRow>> {
-    Ok(conn
-        .query_row(
-            &format!("SELECT {LEDGER_COLUMNS} FROM ledger WHERE op_id=?"),
-            params![op_id],
-            ledger_row,
-        )
-        .optional()?)
-}
-
-const LEDGER_COLUMNS: &str = "msg_id,op_id,fingerprint,kind,from_json,to_json,task,parent_task,attempt,state,out_head,reason,enqueued_at,acked_at,body_json,hop,expires_at,requeued,family,hop_budget,origin,deadline,labels_json";
-const FAULT_COLUMNS: &str = "id,task_id,role,session_id,generation,seq,desired_json,observed_json,intent,attempt,backend_ref,kind,reason,state,created_at";
-const GHOST_SWEEP_COLUMNS: &str =
-    "id,task_id,role,session_id,generation,seq_before,seq_after,outcome,evidence,swept_at";
-
-/// The delivery one session is serving right now, as a subquery over its
-/// bindings: an unbound session answers with nothing, which is the state a
-/// claim reports as a session with no delivery.
-///
-/// No ordering: at most one binding of a session is open, which is what
-/// `open_binding_conn` maintains, and an ordered subquery would have SQLite
-/// spill a sorter into a temporary file on every listing read.
-pub(crate) const OPEN_BINDING_TASK: &str =
-    "(SELECT st.task_id FROM session_tasks st WHERE st.session_id=sessions.session_id
-   AND st.released_at IS NULL LIMIT 1)";
-
-/// One mirror row's columns, as every read of the table selects them.
-///
-/// `task_id` is not a column of `sessions`: it is the delivery the row is
-/// labelled with — the one its session is on now, selected in the second
-/// position `session_row` reads.
-pub(crate) fn session_columns() -> String {
-    format!(
-        "session_id,{OPEN_BINDING_TASK},\
-         role,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,\
-         desired_json,observed_json,mismatch_count,last_seen,updated_at"
-    )
-}
-
-/// The session serving one task, as a subquery over the bindings.
-///
-/// The open binding is the session on that delivery now; the fallback to the
-/// last binding taken keeps a settled delivery readable, exactly as the row it
-/// used to be keyed by stayed readable.
-pub(crate) const SESSION_ID_FOR_TASK: &str = "(SELECT session_id FROM session_tasks WHERE task_id=?
-   ORDER BY (released_at IS NULL) DESC, bound_at DESC, session_id DESC LIMIT 1)";
-
-/// Apply one mirror write, and bind its delivery when the write lands.
-///
-/// Shared by the plain write and the operator's rebind, which differ only in
-/// where the row is addressed before the write.
-fn project_session_conn(conn: &Connection, write: &SessionWrite) -> StoreResult<bool> {
-    let changed = conn.execute(
-        "INSERT INTO sessions(session_id,role,generation,seq,agent_state,delivery_state,resource_state,recovery_substate,desired_json,observed_json,mismatch_count,last_seen,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT(session_id) DO UPDATE SET role=excluded.role,generation=excluded.generation,seq=excluded.seq,agent_state=excluded.agent_state,delivery_state=excluded.delivery_state,resource_state=excluded.resource_state,recovery_substate=excluded.recovery_substate,desired_json=excluded.desired_json,observed_json=excluded.observed_json,mismatch_count=excluded.mismatch_count,last_seen=excluded.last_seen,updated_at=excluded.updated_at
-         WHERE excluded.generation > sessions.generation OR (excluded.generation = sessions.generation AND excluded.seq > sessions.seq)",
-        params![
-            write.session_id,
-            write.role,
-            write.generation,
-            write.seq,
-            write.agent_state,
-            write.delivery_state,
-            write.resource_state,
-            write.recovery_substate,
-            write.desired_json,
-            write.observed_json,
-            write.mismatch_count,
-            unix_to_rfc3339(write.last_seen),
-            unix_to_rfc3339(write.updated_at)
-        ],
-    )?;
-    if changed == 1 {
-        if let Some(task_id) = write.task_id.as_deref() {
-            open_binding_conn(conn, &write.session_id, task_id, write.last_seen)?;
-        }
-    }
-    Ok(changed == 1)
-}
-
-/// Take one delivery for a session, releasing whatever it was on before.
-///
-/// A session serves one delivery at a time, so this is the one place that rule
-/// is enforced: the session's other open binding is released at the clock this
-/// take carries. A pair already open stays as it stands — its `bound_at` is
-/// when this session took that delivery, not when it was last written about —
-/// and a pair whose binding was released is taken again under this clock.
-pub(crate) fn open_binding_conn(
-    conn: &Connection,
-    session_id: &str,
-    task_id: &str,
-    bound_at: i64,
-) -> StoreResult<usize> {
-    let at = unix_to_rfc3339(bound_at);
-    conn.execute(
-        "UPDATE session_tasks SET released_at=? WHERE session_id=? AND released_at IS NULL AND task_id<>?",
-        params![at, session_id, task_id],
-    )?;
-    Ok(conn.execute(
-        "INSERT INTO session_tasks(session_id,task_id,bound_at,released_at) VALUES(?,?,?,NULL)
-         ON CONFLICT(session_id,task_id) DO UPDATE SET bound_at=excluded.bound_at,released_at=NULL
-         WHERE session_tasks.released_at IS NOT NULL",
-        params![session_id, task_id, at],
-    )?)
-}
-
-/// Stop serving one delivery. Only an open binding is released, so the first
-/// release is the one the row keeps.
-pub(crate) fn release_binding_conn(
-    conn: &Connection,
-    session_id: &str,
-    task_id: &str,
-    released_at: i64,
-) -> StoreResult<usize> {
-    Ok(conn.execute(
-        "UPDATE session_tasks SET released_at=? WHERE session_id=? AND task_id=? AND released_at IS NULL",
-        params![unix_to_rfc3339(released_at), session_id, task_id],
-    )?)
-}
-
-/// The sessions listing read, as SQL. Named so the caller and the plan test run
-/// one text: the order's tie key is the primary key because an explicit `rowid`
-/// cannot be an index column, and an order SQLite cannot satisfy from an index
-/// makes it spill a sorter to a temporary file on every read.
-fn sessions_list_sql(where_sql: &str) -> String {
-    format!(
-        "SELECT {} FROM sessions{where_sql} ORDER BY updated_at DESC,rowid DESC LIMIT ?",
-        session_columns()
-    )
-}
-
-/// The ledger listing read, as SQL, on the same terms as the sessions listing.
-fn ledger_list_sql(where_sql: &str) -> String {
-    format!(
-        "SELECT {LEDGER_COLUMNS} FROM ledger{where_sql} ORDER BY enqueued_at DESC,rowid DESC LIMIT ?"
-    )
-}
-
-/// The ghost-sweep listing read, as SQL, on the same terms as the two listings
-/// above. Named for the same reason: the plan test runs this one text.
-fn ghost_sweeps_list_sql() -> String {
-    format!(
-        "SELECT {GHOST_SWEEP_COLUMNS} FROM ghost_sweeps ORDER BY swept_at DESC,rowid DESC LIMIT ?"
-    )
-}
-
-fn ledger_row(r: &Row<'_>) -> rusqlite::Result<LedgerRow> {
-    let kind: String = r.get(3)?;
-    let state: String = r.get(9)?;
-    Ok(LedgerRow {
-        msg_id: r.get(0)?,
-        op_id: r.get(1)?,
-        fingerprint: r.get(2)?,
-        kind: parse_msg_kind(&kind)
-            .ok_or_else(|| conversion_error(3, format!("invalid message kind {kind}")))?,
-        from_json: r.get(4)?,
-        to_json: r.get(5)?,
-        task: r.get(6)?,
-        parent_task: r.get(7)?,
-        attempt: r.get(8)?,
-        state: parse_ledger_state(&state)
-            .ok_or_else(|| conversion_error(9, format!("invalid ledger state {state}")))?,
-        out_head: r.get(10)?,
-        reason: r.get(11)?,
-        enqueued_at: r.get(12)?,
-        acked_at: r.get(13)?,
-        body_json: r.get(14)?,
-        hop: r.get(15)?,
-        expires_at: r.get(16)?,
-        requeued: r.get(17)?,
-        family: r.get(18)?,
-        hop_budget: r.get(19)?,
-        origin: r.get(20)?,
-        deadline: r.get(21)?,
-        labels_json: r.get(22)?,
-    })
-}
-
-fn role_row(r: &Row<'_>) -> rusqlite::Result<RoleRow> {
-    let admin: i64 = r.get(2)?;
-    Ok(RoleRow {
-        name: r.get(0)?,
-        key: r.get(1)?,
-        admin: admin != 0,
-        max_sessions: r.get(3)?,
-        spec_hash: r.get(4)?,
-        updated_at: r.get(5)?,
-    })
-}
-
-/// One [`session_columns`] row. `task_id` is the derived binding, so it is the
-/// second column rather than one of the table's own.
-fn session_row(r: &Row<'_>) -> rusqlite::Result<ServerSessionRow> {
-    Ok(ServerSessionRow {
-        session_id: r.get(0)?,
-        task_id: r.get(1)?,
-        role: r.get(2)?,
-        generation: r.get(3)?,
-        seq: r.get(4)?,
-        agent_state: r.get(5)?,
-        delivery_state: r.get(6)?,
-        resource_state: r.get(7)?,
-        recovery_substate: r.get(8)?,
-        desired_json: r.get(9)?,
-        observed_json: r.get(10)?,
-        mismatch_count: r.get(11)?,
-        last_seen: rfc3339_to_unix(&r.get::<_, String>(12)?),
-        updated_at: rfc3339_to_unix(&r.get::<_, String>(13)?),
-    })
-}
-
-fn session_binding_row(r: &Row<'_>) -> rusqlite::Result<SessionBindingRow> {
-    Ok(SessionBindingRow {
-        session_id: r.get(0)?,
-        task_id: r.get(1)?,
-        bound_at: rfc3339_to_unix(&r.get::<_, String>(2)?),
-        released_at: r
-            .get::<_, Option<String>>(3)?
-            .map(|text| rfc3339_to_unix(&text)),
-    })
-}
-
-fn event_row(r: &Row<'_>) -> rusqlite::Result<EventRecord> {
-    let text: String = r.get(2)?;
-    let data = serde_json::from_str(&text).map_err(|e| conversion_error(2, e.to_string()))?;
-    Ok(EventRecord {
-        seq: r.get(0)?,
-        kind: r.get(1)?,
-        data,
-        created_at: r.get(3)?,
-    })
-}
-
-fn server_fault_row(r: &Row<'_>) -> rusqlite::Result<ServerFaultRow> {
-    Ok(ServerFaultRow {
-        id: r.get(0)?,
-        task_id: r.get(1)?,
-        role: r.get(2)?,
-        session_id: r.get(3)?,
-        generation: r.get(4)?,
-        seq: r.get(5)?,
-        desired_json: r.get(6)?,
-        observed_json: r.get(7)?,
-        intent: r.get(8)?,
-        attempt: r.get(9)?,
-        backend_ref: r.get(10)?,
-        kind: r.get(11)?,
-        reason: r.get(12)?,
-        state: r.get(13)?,
-        created_at: rfc3339_to_unix(&r.get::<_, String>(14)?),
-    })
-}
-
-fn ghost_sweep_row(r: &Row<'_>) -> rusqlite::Result<GhostSweepRow> {
-    let outcome: String = r.get(7)?;
-    Ok(GhostSweepRow {
-        id: r.get(0)?,
-        task_id: r.get(1)?,
-        role: r.get(2)?,
-        session_id: r.get(3)?,
-        generation: r.get(4)?,
-        seq_before: r.get(5)?,
-        seq_after: r.get(6)?,
-        outcome: parse_outcome(&outcome)
-            .ok_or_else(|| conversion_error(7, format!("invalid outcome {outcome}")))?,
-        evidence: r.get(8)?,
-        swept_at: rfc3339_to_unix(&r.get::<_, String>(9)?),
-    })
-}
-
-fn ledger_by_msg_id(conn: &Connection, msg_id: &str) -> StoreResult<LedgerRow> {
-    conn.query_row(
-        &format!("SELECT {LEDGER_COLUMNS} FROM ledger WHERE msg_id=?"),
-        params![msg_id],
-        ledger_row,
-    )
-    .optional()?
-    .ok_or(StoreError::NotFound)
-}
-
-fn fault_row_by_id(conn: &Connection, id: i64) -> StoreResult<ServerFaultRow> {
-    conn.query_row(
-        &format!("SELECT {FAULT_COLUMNS} FROM faults WHERE id=?"),
-        params![id],
-        server_fault_row,
-    )
-    .optional()?
-    .ok_or(StoreError::NotFound)
-}
-
-/// The exact `Event::LedgerState` payload `State::emit` stores, so a store-side
-/// transition and a server-side one produce the same event row.
-fn ledger_state_event(
-    row: &LedgerRow,
-    state: LedgerState,
-    reason: Option<String>,
-) -> StoreResult<Value> {
-    let event = Event::LedgerState(LedgerStateEvent {
-        msg_id: row.msg_id.clone(),
-        op_id: row.op_id.clone(),
-        kind: row.kind,
-        from: row.sender().unwrap_or_else(|_| Principal::role("unknown")),
-        to: serde_json::from_str(&row.to_json).unwrap_or_else(|_| Principal::role("unknown")),
-        task: row.task.clone(),
-        state,
-        outcome: None,
-        reason,
-    });
-    Ok(serde_json::to_value(&event)?)
-}
-
-/// The exact `Event::Fault` payload for one stored fault row.
-fn fault_event(row: &ServerFaultRow) -> StoreResult<Value> {
-    let event = Event::Fault(FaultEvent {
-        id: row.id,
-        task_id: row.task_id.clone(),
-        role: row.role.clone(),
-        session_id: row.session_id.clone(),
-        generation: row.generation.map(|value| value.max(0) as u64),
-        seq: row.seq.map(|value| value.max(0) as u64),
-        kind: row.kind.clone(),
-        reason: row.reason.clone(),
-        desired: row
-            .desired_json
-            .as_deref()
-            .and_then(|text| serde_json::from_str(text).ok()),
-        observed: row
-            .observed_json
-            .as_deref()
-            .and_then(|text| serde_json::from_str(text).ok()),
-        intent: row.intent.clone(),
-        attempt: row.attempt.map(|value| value.max(0) as u64),
-        backend_ref: row
-            .backend_ref
-            .as_deref()
-            .and_then(|text| serde_json::from_str(text).ok()),
-        state: Some(row.state.clone()),
-        created_at: Some(row.created_at),
-    });
-    Ok(serde_json::to_value(&event)?)
-}
-
-fn cursor_row(r: &Row<'_>) -> rusqlite::Result<CursorRow> {
-    Ok(CursorRow {
-        role: r.get(0)?,
-        last_msg_id: r.get(1)?,
-        last_seq: r.get(2)?,
-        updated_at: r.get(3)?,
-    })
-}
-
-fn bool_int(value: bool) -> i64 {
-    if value { 1 } else { 0 }
-}
-
-/// Grapheme clusters kept by [`head_preview`].
-pub const OUT_HEAD_CLUSTERS: usize = 200;
-
-/// The one-line preview of a message body: the first [`OUT_HEAD_CLUSTERS`]
-/// grapheme clusters, cut on a cluster boundary, so a combining sequence, a ZWJ
-/// emoji, and a flag survive whole. `docs/v1-PLAN.md` line 358 keeps the first
-/// 200 字 of the body in `ledger.out_head` for the operator-facing ledger view,
-/// and the unit is grapheme clusters: a code-point cut lands inside a cluster
-/// and the preview renders as a broken glyph.
-pub fn head_preview(text: &str) -> String {
-    text.graphemes(true).take(OUT_HEAD_CLUSTERS).collect()
-}
-
-fn body_head(envelope: &Envelope, body_json: &str) -> String {
-    // An explicit `head` on the body wins: it is the one display line the
-    // sender named, and a body that carries its full result in `text` would
-    // otherwise show the first clusters of the result rather than the line the
-    // caller wrote. A body with no `head` of its own — the CLI's own
-    // completion, a plain delivery — falls back to its text, which is the only
-    // content it has.
-    if let Some(head) = envelope.body.head.as_deref().filter(|h| !h.is_empty()) {
-        return head_preview(head);
-    }
-    let text = envelope.body.text.as_deref().unwrap_or(body_json);
-    head_preview(text)
-}
-
-/// Encode a kernel timestamp, unix seconds, as the RFC 3339 text every other
-/// column in this schema uses. A value outside the representable range encodes
-/// as the epoch.
-pub(crate) fn unix_to_rfc3339(seconds: i64) -> String {
-    DateTime::from_timestamp(seconds, 0)
-        .map(rfc3339)
-        .unwrap_or_else(|| rfc3339(DateTime::UNIX_EPOCH))
-}
-
-/// Decode an RFC 3339 column back to the kernel's unix seconds.
-pub(crate) fn rfc3339_to_unix(text: &str) -> i64 {
-    DateTime::parse_from_rfc3339(text)
-        .map(|value| value.timestamp())
-        .unwrap_or(0)
-}
-
-fn parse_msg_kind(value: &str) -> Option<MsgKind> {
-    match value {
-        "task" => Some(MsgKind::Task),
-        "completion" => Some(MsgKind::Completion),
-        "note" => Some(MsgKind::Note),
-        "control" => Some(MsgKind::Control),
-        _ => None,
-    }
-}
-
-fn parse_ledger_state(value: &str) -> Option<LedgerState> {
-    match value {
-        "queued" => Some(LedgerState::Queued),
-        "in_flight" => Some(LedgerState::InFlight),
-        "acked" => Some(LedgerState::Acked),
-        "rejected" => Some(LedgerState::Rejected),
-        "expired" => Some(LedgerState::Expired),
-        _ => None,
-    }
-}
-
-fn parse_outcome(value: &str) -> Option<Outcome> {
-    match value {
-        "done" => Some(Outcome::Done),
-        "failed" => Some(Outcome::Failed),
-        "cancelled" => Some(Outcome::Cancelled),
-        "blocked" => Some(Outcome::Blocked),
-        _ => None,
-    }
-}
-
-pub(crate) fn string_tag<T: Serialize>(value: &T) -> StoreResult<String> {
-    match serde_json::to_value(value)? {
-        Value::String(text) => Ok(text),
-        other => Err(StoreError::Serialization(format!(
-            "state serialized as {other}"
-        ))),
-    }
-}
-
-fn sql_limit(limit: u32) -> i64 {
-    if limit == 0 {
-        DEFAULT_LIMIT
-    } else {
-        i64::from(limit.min(500))
-    }
-}
-
-fn repeat_placeholders(len: usize) -> String {
-    std::iter::repeat_n("?", len).collect::<Vec<_>>().join(",")
-}
-
-fn where_sql(clauses: &[String]) -> String {
-    if clauses.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", clauses.join(" AND "))
-    }
-}
-
-fn conversion_error(index: usize, message: String) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        index,
-        Type::Text,
-        Box::new(StoreError::Serialization(message)),
-    )
 }

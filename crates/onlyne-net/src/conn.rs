@@ -235,11 +235,29 @@ async fn connect_tcp(endpoint: &str) -> Result<(String, TcpStream), NetError> {
                 .map_err(|_| NetError::Io(format!("invalid endpoint {endpoint}")))?,
         )
     };
-    let mut addresses = tokio::net::lookup_host(endpoint).await?;
-    let address = addresses
-        .next()
-        .ok_or_else(|| NetError::Io(format!("endpoint {endpoint} has no addresses")))?;
-    Ok((host, TcpStream::connect(address).await?))
+    let addresses = tokio::net::lookup_host(endpoint).await?;
+    let stream = connect_addrs(addresses)
+        .await
+        .map_err(|error| NetError::Io(error.to_string()))?;
+    Ok((host, stream))
+}
+
+async fn connect_addrs(
+    addrs: impl IntoIterator<Item = SocketAddr>,
+) -> Result<TcpStream, std::io::Error> {
+    let mut last_error = None;
+    for addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "endpoint has no addresses",
+        )
+    }))
 }
 
 fn map_frame_error(error: std::io::Error) -> NetError {
@@ -995,4 +1013,26 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_addrs_falls_back_to_next_address() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let closed =
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
+        let stream = connect_addrs([closed, addr]).await;
+        assert!(stream.is_ok());
+    }
+
+    #[tokio::test]
+    async fn connect_addrs_fails_when_all_closed() {
+        let closed =
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
+        assert!(connect_addrs([closed, closed]).await.is_err());
+    }
 }

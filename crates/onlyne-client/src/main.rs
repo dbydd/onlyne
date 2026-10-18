@@ -142,40 +142,57 @@ async fn main() {
             server_root,
             prose,
             register,
-        } => match onlyne_client::ops::init::init(InitArgs {
-            workspace,
-            role: role.clone(),
-            server_root: server_root.clone(),
-            prose,
-        })
-        .await
-        {
-            Ok(fragment) => {
-                if register {
-                    if let Err(error) =
-                        onlyne_client::ops::init::register_in_spec(&server_root, &role, &fragment)
-                    {
-                        eprintln!("onlyne-client: {error}");
-                        std::process::exit(1);
-                    }
-                }
-                print!("{fragment}");
-                0
-            }
-            Err(error)
-                if error
-                    .downcast_ref::<onlyne_client::ops::init::LegacyWorkspace>()
-                    .is_some() =>
+        } => {
+            match onlyne_client::ops::init::init(InitArgs {
+                workspace: workspace.clone(),
+                role: role.clone(),
+                server_root: server_root.clone(),
+                prose: prose.clone(),
+            })
+            .await
             {
-                // The sentence was already printed by `init`, which knows which
-                // marker decided it. This only picks the code.
-                onlyne_proto::EXIT_NEEDS_MIGRATION
+                Ok(fragment) => {
+                    if register {
+                        match onlyne_client::ops::init::register_role(
+                            &server_root,
+                            &workspace,
+                            &role,
+                            &prose,
+                            &fragment,
+                        )
+                        .await
+                        {
+                            Ok(true) => eprintln!(
+                                "onlyne-client: role {role:?} registered on the running server"
+                            ),
+                            Ok(false) => eprintln!(
+                                "onlyne-client: no server is running; the fragment was appended to \
+                             spec.toml and takes effect at the next start"
+                            ),
+                            Err(error) => {
+                                eprintln!("onlyne-client: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    print!("{fragment}");
+                    0
+                }
+                Err(error)
+                    if error
+                        .downcast_ref::<onlyne_client::ops::init::LegacyWorkspace>()
+                        .is_some() =>
+                {
+                    // The sentence was already printed by `init`, which knows which
+                    // marker decided it. This only picks the code.
+                    onlyne_proto::EXIT_NEEDS_MIGRATION
+                }
+                Err(error) => {
+                    eprintln!("onlyne-client: {error}");
+                    1
+                }
             }
-            Err(error) => {
-                eprintln!("onlyne-client: {error}");
-                1
-            }
-        },
+        }
         Command::Run { workspace } => {
             // The operator may name the workspace relatively. `absolute_path`
             // canonicalizes what exists and falls back to a lexical absolute

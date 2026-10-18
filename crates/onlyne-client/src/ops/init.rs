@@ -1,7 +1,14 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use onlyne_config::Spec;
 use onlyne_config::layout::{RoleWorkspace, ServerRoot, detect_legacy};
 use onlyne_net::KeyPair;
+use onlyne_proto::{
+    AdminOp, Drive, Frame, RoleRuntime, SetRuntime, SetSenders, SetTargets, SpecApply, SpecEdit,
+    SpecView, UpsertRole, new_id,
+};
+use onlyne_wire::socket::{connect_local, socket_path};
+use onlyne_wire::{FrameReader, write_frame};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// the placement key `init` seeds (as a comment) among the top-level keys of a
@@ -151,6 +158,141 @@ pub fn register_in_spec(server_root: &Path, role: &str, fragment: &str) -> Resul
     Ok(())
 }
 
+/// Register a role on a running server, or fall back to the spec file.
+///
+/// When the server's admin socket answers, the role is declared through
+/// `spec_apply` — the same path the IM gateway's `generate` walks — so the
+/// server reloads on the way out and `spec.toml` never holds a role the
+/// running process does not know. When the socket does not answer, the
+/// rendered fragment is appended to `spec.toml` for the next start and the
+/// caller learns the registration is deferred with `Ok(false)`.
+pub async fn register_role(
+    server_root: &Path,
+    workspace: &Path,
+    role: &str,
+    prose: &str,
+    fragment_text: &str,
+) -> Result<bool> {
+    let socket = socket_path(server_root)?;
+    let Ok(mut stream) = connect_local(&socket).await else {
+        register_in_spec(server_root, role, fragment_text)?;
+        return Ok(false);
+    };
+
+    let key_path = RoleWorkspace::resolve(workspace).key_path();
+    let key = KeyPair::load(&key_path)?.public_str();
+
+    let view = spec_get(&mut stream, &socket).await?;
+    let edits = vec![
+        SpecEdit::UpsertRole(UpsertRole {
+            role: role.to_string(),
+            key: Some(key),
+            prose: Some(prose.to_string()),
+            admin: Some(false),
+            max_sessions: Some(1),
+        }),
+        SpecEdit::SetTargets(SetTargets {
+            role: role.to_string(),
+            targets: vec![role.to_string()],
+        }),
+        SpecEdit::SetSenders(SetSenders {
+            role: role.to_string(),
+            senders: vec!["*".to_string(), role.to_string()],
+        }),
+        SpecEdit::SetRuntime(SetRuntime {
+            role: role.to_string(),
+            runtime: RoleRuntime {
+                drive: Drive::Plugin,
+                command: vec![
+                    "pi".into(),
+                    "--session-id".into(),
+                    "{session}".into(),
+                    "--session-dir".into(),
+                    ".pi/sessions".into(),
+                    "-ns".into(),
+                ],
+                resume: vec![
+                    "pi".into(),
+                    "--session".into(),
+                    "{session}".into(),
+                    "--session-dir".into(),
+                    ".pi/sessions".into(),
+                    "-ns".into(),
+                ],
+            },
+        }),
+    ];
+
+    let request: Frame<AdminOp> = Frame::req(
+        new_id(),
+        AdminOp::SpecApply(SpecApply {
+            base_hash: view.source_hash,
+            edits,
+        }),
+    );
+    write_frame(&mut stream, &request).await?;
+    let mut reader = FrameReader::new();
+    let answer = tokio::time::timeout(ADMIN_TIMEOUT, reader.next::<_, Frame<AdminOp>>(&mut stream))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "{} did not answer spec_apply in {ADMIN_TIMEOUT:?}",
+                socket.display()
+            )
+        })?
+        .map_err(|error| anyhow!("reading from {}: {error}", socket.display()))?
+        .context("the socket closed before an answer")?;
+    match answer {
+        Frame::Res { body, .. } if body.ok => Ok(true),
+        Frame::Res { body, .. } => Err(anyhow!(
+            "the server refused the registration: {}",
+            refusal(&body)
+        )),
+        other => Err(anyhow!("expected a response frame, got {other:?}")),
+    }
+}
+
+/// How long one admin exchange may take.
+const ADMIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Read the live spec through `spec_get`, as one admin exchange.
+async fn spec_get(
+    stream: &mut onlyne_wire::socket::LocalStream,
+    socket: &Path,
+) -> Result<SpecView> {
+    let request: Frame<AdminOp> = Frame::req(new_id(), AdminOp::SpecGet(Value::Null));
+    write_frame(stream, &request).await?;
+    let mut reader = FrameReader::new();
+    let answer = tokio::time::timeout(ADMIN_TIMEOUT, reader.next::<_, Frame<AdminOp>>(stream))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "{} did not answer spec_get in {ADMIN_TIMEOUT:?}",
+                socket.display()
+            )
+        })?
+        .map_err(|error| anyhow!("reading from {}: {error}", socket.display()))?
+        .context("the socket closed before an answer")?;
+    match answer {
+        Frame::Res { body, .. } => {
+            if !body.ok {
+                return Err(anyhow!("spec_get refused: {}", refusal(&body)));
+            }
+            serde_json::from_value(body.data.context("the spec_get answer carried no data")?)
+                .context("the spec_get answer is not a spec view")
+        }
+        other => Err(anyhow!("expected a response frame, got {other:?}")),
+    }
+}
+
+/// One refusal body as the sentence an operator reads.
+fn refusal(body: &onlyne_proto::ResBody) -> String {
+    match &body.error {
+        Some(error) => format!("{}: {}", error.code, error.message),
+        None => "refused".to_string(),
+    }
+}
+
 /// The `[client.runtime]` seed the printed fragment ships.
 ///
 /// The bytes match the seed `examples/supervisor/run.py` writes into its ring
@@ -237,6 +379,36 @@ pub fn legacy_error_code() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn register_role_falls_back_when_server_offline() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let spec_path = ServerRoot::resolve(root.path()).spec_path();
+        std::fs::create_dir_all(spec_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &spec_path,
+            "[server]\nname = \"test\"\nlisten = \"127.0.0.1:1\"\ncert_pin = \
+             \"sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n",
+        )
+        .unwrap();
+
+        let keys = RoleWorkspace::resolve(workspace.path()).keys_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        KeyPair::generate()
+            .save(&RoleWorkspace::resolve(workspace.path()).key_path())
+            .unwrap();
+
+        let witness_key = KeyPair::generate().public_str();
+        let frag = fragment("witness", &witness_key, "prose");
+        let live = register_role(root.path(), workspace.path(), "witness", "prose", &frag)
+            .await
+            .unwrap();
+        assert!(!live);
+
+        let spec = Spec::load(&spec_path).unwrap();
+        assert!(spec.client.iter().any(|c| c.role == "witness"));
+    }
 
     #[test]
     fn register_appends_and_refuses_duplicates() {

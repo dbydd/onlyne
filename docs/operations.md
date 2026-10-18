@@ -1006,7 +1006,7 @@ CLI 门属于 supervisor，也属于会话不挂插件的 `exec` 角色。
 
 `exec` 角色用 CLI 形态，并以这两个旗标声明自己。
 
-`repair *`、`ledger`、`sessions`、`roles`、`faults`、`watch`、`history`、`status` 这些读动词，以及 `reload` 与 `shutdown` 不带这两个旗标。两个守护进程都在前台运行；`onlyne server shutdown [--drain-secs <n>] [--reason <text>]` 通过 admin socket 请求服务端排空并优雅停机。
+`repair *`、`ledger`、`sessions`、`roles`、`faults`、`watch`、`history`、`status` 这些读动词，以及 `up`、`reload` 与 `shutdown` 不带这两个旗标。守护进程都在前台运行；`onlyne up --server-root <root>` 可在前台一并拉起服务端与发现的角色客户端，`onlyne server shutdown [--drain-secs <n>] [--reason <text>]` 通过 admin socket 请求服务端排空并优雅停机。
 
 ## 任务家族与元信息
 

@@ -7,7 +7,7 @@ members = ["crates/*"]
 # Node-made bundle behind `rust-embed`), so it stays out of the workspace: the
 # core build — `cargo build` and `cargo build --workspace` alike — never needs
 # Node or axum, and `cargo build -p onlyne-web` inside `crates/onlyne-web` is
-# the step that does (`docs/v2-PLAN.md` line 391).
+# the step that does (`docs/v2-PLAN.md` line 399).
 exclude = ["crates/onlyne-web"]
 default-members = [
   "crates/onlyne-wire",
@@ -28,6 +28,7 @@ default-members = [
   "crates/onlyne-im-backend-qqbot",
   "crates/onlyne-im-backend-slack",
   "crates/onlyne-im-backend-linear",
+  "crates/onlyne-im-backend-fake",
 ]
 
 [workspace.package]
@@ -94,8 +95,7 @@ tokio = { version = "1", features = [
   "signal",
 ] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
-# The QQ Open Platform's event gateway is a websocket; its backend binary is
-# the only crate that compiles this.
+# The QQ Open Platform and Slack backends use websockets, so both compile this.
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 toml = "0.8"
 # The editor behind `AdminOp::SpecApply`: a typed edit lands in the document

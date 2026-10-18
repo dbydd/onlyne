@@ -189,14 +189,34 @@ fn yes_no(value: bool) -> &'static str {
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     use std::process::{Command, Stdio};
-    Command::new("kill")
+    let signaled = Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !signaled {
+        return false;
+    }
+    // `kill -0` also answers "yes" for a recycled pid that now belongs to an
+    // unrelated process, so confirm the command line names onlyne.
+    match Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+    {
+        Ok(output) => command_looks_like_onlyne(&String::from_utf8_lossy(&output.stdout)),
+        Err(_) => true,
+    }
+}
+
+/// Whether a process command line looks like an onlyne binary. An empty
+/// command line (the process may not be readable) cannot disprove anything.
+#[cfg(unix)]
+fn command_looks_like_onlyne(cmdline: &str) -> bool {
+    let trimmed = cmdline.trim();
+    trimmed.is_empty() || trimmed.to_lowercase().contains("onlyne")
 }
 
 #[cfg(windows)]
@@ -214,5 +234,29 @@ fn pid_alive(pid: u32) -> bool {
         let ok = GetExitCodeProcess(handle, &mut code);
         CloseHandle(handle);
         ok != 0 && code == STILL_ACTIVE as u32
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::command_looks_like_onlyne;
+
+    #[test]
+    fn matches_onlyne_server_command_line() {
+        assert!(command_looks_like_onlyne(
+            "target/debug/onlyne-server run --root /tmp/s"
+        ));
+    }
+
+    #[test]
+    fn matches_onlyne_client_command_line() {
+        assert!(command_looks_like_onlyne(
+            "/usr/local/bin/onlyne-client run"
+        ));
+    }
+
+    #[test]
+    fn rejects_unrelated_command_line() {
+        assert!(!command_looks_like_onlyne("/bin/zsh"));
     }
 }

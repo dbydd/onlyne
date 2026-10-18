@@ -24,28 +24,11 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
-    onlyne_im_backend::install_crypto_provider();
-    init_logging();
     let cli = Cli::parse();
-    let code = match onlyne_im_backend_slack::run(cli.gateway, cli.token, cli.api_base).await {
-        Ok(()) => 0,
-        Err(error) => {
-            eprintln!("onlyne-im-backend-slack: {error:#}");
-            1
-        }
-    };
-    std::process::exit(code);
-}
-
-fn init_logging() {
-    use tracing_subscriber::EnvFilter;
-    // An explicit `RUST_LOG` wins over the shipped default; the default keeps
-    // the SDK's socket client quiet, because its dial failures name the minted
-    // URL and that URL carries a live ticket (`lib.rs`, `DEFAULT_LOG_FILTER`).
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(onlyne_im_backend_slack::DEFAULT_LOG_FILTER));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
+    onlyne_im_backend::init_backend_runtime!(onlyne_im_backend_slack::DEFAULT_LOG_FILTER);
+    onlyne_im_backend::exit_on_result(
+        "onlyne-im-backend-slack",
+        onlyne_im_backend_slack::run(cli.gateway, cli.token, cli.api_base),
+    )
+    .await
 }

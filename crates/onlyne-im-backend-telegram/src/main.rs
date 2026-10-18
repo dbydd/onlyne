@@ -22,28 +22,15 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
-    onlyne_im_backend::install_crypto_provider();
-    init_logging();
     let cli = Cli::parse();
     let token = cli
         .token
         .or_else(|| std::env::var("ONLYNE_TELEGRAM_TOKEN").ok())
         .unwrap_or_default();
-    let code = match onlyne_im_backend_telegram::run(cli.gateway, token, cli.api_base).await {
-        Ok(()) => 0,
-        Err(error) => {
-            eprintln!("onlyne-im-backend-telegram: {error:#}");
-            1
-        }
-    };
-    std::process::exit(code);
-}
-
-fn init_logging() {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
+    onlyne_im_backend::init_backend_runtime!();
+    onlyne_im_backend::exit_on_result(
+        "onlyne-im-backend-telegram",
+        onlyne_im_backend_telegram::run(cli.gateway, token, cli.api_base),
+    )
+    .await
 }

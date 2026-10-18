@@ -3,7 +3,9 @@
 pub mod backend;
 pub mod content;
 pub mod delivery;
-pub mod host;
+pub mod host {
+    pub use crate::backend::doctor_report;
+}
 pub mod ops;
 pub mod reconcile;
 pub mod runtime;

@@ -37,6 +37,9 @@ pub fn target(flags: &GlobalFlags) -> Option<SocketTarget> {
         Ok(target) => Some(target),
         Err(NoSocket) => {
             eprintln!("{}", NoSocket::MESSAGE);
+            if let Some(hint) = crate::socket::unstarted_tree_hint(flags) {
+                eprintln!("{hint}");
+            }
             None
         }
     }

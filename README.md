@@ -140,7 +140,6 @@ target/debug/onlyne-client init \
   --server-root "$tmp/server" \
   --prose "v1 smoke prose" \
   --register >/dev/null
-target/debug/onlyne --server-root "$tmp/server" reload
 
 ONLYNE_BACKEND=fake target/debug/onlyne-client run \
   --workspace "$tmp/planner" >"$tmp/client-process.log" 2>&1 &
@@ -368,13 +367,21 @@ The client injects the actual served path as `ONLYNE_SOCKET` into every session.
 ### Lifecycle and observation
 
 ```bash
-# Server: runs in the foreground; `shutdown` drains and stops a live server over
-# the admin socket.
+# One-shot cluster bootstrap and foreground launcher:
+# `--roles` seeds `<server-root>/<role>` workspaces and registers them in spec.toml;
+# `onlyne up` starts `onlyne-server`, all discovered role clients, and optional `onlyne-im`
+# in the foreground with prefixed output (`[server]`, `[client:<role>]`, `[im]`) and drains on Ctrl-C.
+onlyne server init --root <server-root> --roles planner,coder
+onlyne up          --server-root <server-root>
+
+# Individual daemons: run in the foreground; `shutdown` drains and stops a live server
+# over the admin socket.
 onlyne server init     --root <server-root>                  # defaults --listen to 127.0.0.1:7811
 onlyne server run      --root <server-root>
 onlyne server shutdown --server-root <server-root> --drain-secs 5
 
-# Client: foreground; same rule
+# Client: foreground; `--register` hot-applies to a running server via SpecApply
+# (or appends to spec.toml when the server is offline).
 onlyne client init   --workspace <workspace> --role <role> --server-root <server-root> --register
 onlyne client run    --workspace <workspace>
 onlyne client status --workspace <workspace>

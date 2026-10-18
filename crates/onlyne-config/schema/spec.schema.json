@@ -114,7 +114,8 @@
           "description": "The drive and the argv a session runs: `[client.runtime]`.",
           "default": {
             "command": [],
-            "drive": "plugin"
+            "drive": "plugin",
+            "resume": []
           },
           "allOf": [
             {
@@ -286,7 +287,7 @@
       }
     },
     "RuntimeSection": {
-      "description": "`[client.runtime]` — the drive and the argv one session of this role runs.\n\nAn absent table is `drive = \"plugin\"` with an empty command, which is what every role in the tree is today.",
+      "description": "`[client.runtime]` — the drive and the argv one session of this role runs.\n\nAn absent table is `drive = \"plugin\"` with an empty command, which is what every role in the tree is today.\n\n`command` and `resume` are two commands for two situations rather than one command with a mode flag: a conversation a `task`-scope session opens is a fresh process (`pi --session-id <id>`), and one it **comes back to** after the slot was released is opened by id (`pi --session <id>`). Which flag names difference is the runtime author's knowledge, so the spec carries both and the client picks by what it is doing, never by guessing at a runtime it does not own.",
       "type": "object",
       "properties": {
         "command": {
@@ -305,6 +306,14 @@
               "$ref": "#/definitions/Drive"
             }
           ]
+        },
+        "resume": {
+          "description": "The argv a released session is revived with, with the same two substitutions. Absent — the state every role is in until its runtime author writes one — means the conversation cannot be continued, so a delivery for that family opens a fresh session instead of reviving one.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },

@@ -108,6 +108,51 @@ fn owner_root(dir: &Path) -> Option<PathBuf> {
         .and_then(|parent| (parent != dir).then(|| owner_root(parent)).flatten())
 }
 
+/// The start-not-run hint for the tree `dir` belongs to, or `None` when `dir`
+/// sits outside any owner tree or the owner tree has a live socket.
+///
+/// `NoSocket::MESSAGE` says what failed; this names the command that fixes it,
+/// and which command depends on which marker the tree carries: `spec.toml` is
+/// a server root, `config.toml` a role workspace.
+pub fn unstarted_tree_hint_from(flags: &GlobalFlags, cwd: &Path) -> Option<String> {
+    let start = root_from_flags(flags)
+        .map(|root| std::path::absolute(&root).unwrap_or(root))
+        .or_else(|| cwd.to_path_buf().canonicalize().ok())?;
+    for dir in start.ancestors() {
+        let onlyne = dir.join(OWNER_DIR);
+        if !onlyne.is_dir() {
+            continue;
+        }
+        let live = socket_path(dir).ok().is_some_and(|path| path.exists());
+        if live {
+            return None;
+        }
+        let root = dir.display();
+        if onlyne.join("spec.toml").is_file() {
+            return Some(format!(
+                "onlyne: hint: server root at {root} is not running; \
+                 start it with 'onlyne up --server-root {root}' or \
+                 'onlyne server run --root {root}'"
+            ));
+        }
+        if onlyne.join("config.toml").is_file() {
+            return Some(format!(
+                "onlyne: hint: workspace at {root} is not running; \
+                 start it with 'onlyne client run --workspace {root}'"
+            ));
+        }
+        return None;
+    }
+    None
+}
+
+/// [`unstarted_tree_hint_from`] for the flags' own tree, or the current
+/// directory when no flag names one.
+pub fn unstarted_tree_hint(flags: &GlobalFlags) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    unstarted_tree_hint_from(flags, &cwd)
+}
+
 /// The socket for the owner tree containing the current directory, or
 /// [`NoSocket`] when the caller's tree has no daemon running.
 pub fn resolve_socket_from_cwd() -> Result<SocketTarget, NoSocket> {
@@ -188,4 +233,85 @@ fn flagged_surface(flags: &GlobalFlags, fallback: impl FnOnce() -> Surface) -> S
         .or_else(|| flags.server_root.as_ref().map(|_| Surface::Admin))
         .or_else(|| flags.workspace.as_ref().map(|_| Surface::Client))
         .unwrap_or_else(fallback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flags::DEFAULT_TIMEOUT_MS;
+    use std::fs;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("onlyne-sock-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn flags() -> GlobalFlags {
+        GlobalFlags {
+            socket: None,
+            server_root: None,
+            workspace: None,
+            surface_hint: AsArg::Auto,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            pretty: false,
+            quiet: false,
+            json: false,
+            request: None,
+        }
+    }
+
+    fn empty_global() -> &'static GlobalFlags {
+        static EMPTY: std::sync::LazyLock<GlobalFlags> = std::sync::LazyLock::new(flags);
+        &EMPTY
+    }
+
+    #[test]
+    fn names_the_server_start_command_for_an_unstarted_server_root() {
+        let dir = temp_root("srv");
+        fs::create_dir_all(dir.join(".onlyne")).unwrap();
+        fs::write(dir.join(".onlyne/spec.toml"), "").unwrap();
+        let canon = dir.canonicalize().unwrap();
+        let hint = unstarted_tree_hint_from(empty_global(), &canon)
+            .expect("unstarted server root names the start command");
+        let root = canon.display().to_string();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            hint,
+            format!(
+                "onlyne: hint: server root at {root} is not running; \
+                 start it with 'onlyne up --server-root {root}' or \
+                 'onlyne server run --root {root}'"
+            )
+        );
+    }
+
+    #[test]
+    fn names_the_client_start_command_for_an_unstarted_workspace() {
+        let dir = temp_root("ws");
+        fs::create_dir_all(dir.join(".onlyne")).unwrap();
+        fs::write(dir.join(".onlyne/config.toml"), "").unwrap();
+        let canon = dir.canonicalize().unwrap();
+        let hint = unstarted_tree_hint_from(empty_global(), &canon)
+            .expect("unstarted workspace names the start command");
+        let root = canon.display().to_string();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            hint,
+            format!(
+                "onlyne: hint: workspace at {root} is not running; \
+                 start it with 'onlyne client run --workspace {root}'"
+            )
+        );
+    }
+
+    #[test]
+    fn carries_no_hint_outside_any_owner_tree() {
+        let dir = temp_root("empty");
+        let canon = dir.canonicalize().unwrap();
+        let got = unstarted_tree_hint_from(empty_global(), &canon);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(got, None);
+    }
 }

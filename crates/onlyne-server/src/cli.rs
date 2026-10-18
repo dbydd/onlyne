@@ -5,10 +5,10 @@ use std::time::SystemTime;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use onlyne_config::Spec;
-use onlyne_config::layout::ServerRoot;
+use onlyne_config::layout::{RoleWorkspace, ServerRoot};
 use onlyne_wire::socket::{
-    RegistrationFile, SOCKET_SUFFIX, read_registration, registration_path, runtime_dir_path,
-    workspace_digest,
+    RegistrationFile, SOCKET_SUFFIX, apply_private_mode, read_registration, registration_path,
+    runtime_dir_path, workspace_digest,
 };
 
 use crate::generate::{GenerateArgs, GenerateError, generate};
@@ -43,6 +43,10 @@ enum Command {
         /// Overwrite an existing `spec.toml`.
         #[arg(long)]
         force: bool,
+        /// Seed role workspaces under `<root>/<role>` and register their `[[client]]`
+        /// entries in `spec.toml` (comma-separated or repeated).
+        #[arg(long = "roles", visible_alias = "role", value_delimiter = ',')]
+        roles: Vec<String>,
     },
     /// Bind the listeners and serve the cluster.
     Run {
@@ -167,7 +171,8 @@ pub async fn entrypoint_with(args: Vec<String>) -> i32 {
             root,
             listen,
             force,
-        }) => init_command(&root, &listen, force, output),
+            roles,
+        }) => init_command_with_roles(&root, &listen, &roles, force, output),
         Some(Command::Run { root }) => run_command(&root, output).await,
         Some(Command::Status { root }) => status_command(&root, output),
         Some(Command::Generate {
@@ -202,8 +207,31 @@ pub async fn entrypoint_with(args: Vec<String>) -> i32 {
 /// `onlyne server init` both land here, so `--server-root` cannot be lost at a
 /// process boundary.
 pub fn init_command(root: &Path, listen: &str, force: bool, output: Output) -> i32 {
+    init_command_with_roles(root, listen, &[], force, output)
+}
+
+/// Write one server root, then optionally seed one role workspace per
+/// `--roles` name under `<root>/<role>` and register each in `spec.toml`.
+///
+/// The seeded role shares the server's listen address and certificate pin, so
+/// a one-command cluster only needs `onlyne-server init --roles planner,coder`
+/// followed by `run`: no per-role `onlyne-client init`, no manual fragment
+/// paste.
+pub fn init_command_with_roles(
+    root: &Path,
+    listen: &str,
+    roles: &[String],
+    force: bool,
+    output: Output,
+) -> i32 {
     let layout = ServerRoot::resolve(root);
     let spec_path = layout.spec_path();
+    if !roles.is_empty() {
+        if let Err(error) = validate_roles(roles) {
+            eprintln!("onlyne-server: {error}");
+            return 1;
+        }
+    }
     if spec_path.exists() && !force {
         return refuse(GenerateError::RefuseOverwrite { path: spec_path });
     }
@@ -220,6 +248,20 @@ pub fn init_command(root: &Path, listen: &str, force: bool, output: Output) -> i
         }
     };
     let text = spec_template(&name, listen, &cert.spki_pin);
+    let mut text = text;
+    if !roles.is_empty() {
+        let mut keys = Vec::with_capacity(roles.len());
+        for role in roles {
+            match seed_role_workspace(root, listen, &cert.spki_pin, role) {
+                Ok(key) => keys.push((role.as_str(), key)),
+                Err(error) => {
+                    eprintln!("onlyne-server: {error}");
+                    return 1;
+                }
+            }
+        }
+        text.push_str(&role_entries(&keys));
+    }
     if let Err(error) = Spec::parse_named(&text, "spec.toml") {
         eprintln!("onlyne-server: generated spec does not parse: {error}");
         return 1;
@@ -242,6 +284,87 @@ pub fn init_command(root: &Path, listen: &str, force: bool, output: Output) -> i
         println!("{}", cert.spki_pin);
     }
     0
+}
+
+/// One role name is empty, duplicated, or not a single safe path component.
+fn validate_roles(roles: &[String]) -> Result<(), String> {
+    for (index, role) in roles.iter().enumerate() {
+        if role.is_empty() {
+            return Err(format!("--roles: name {} is empty", index + 1));
+        }
+        if role.starts_with('.') || role.contains(['/', '\\']) || role == ".." {
+            return Err(format!("--roles: {role:?} is not a single directory name"));
+        }
+        if roles[..index].contains(role) {
+            return Err(format!("--roles: {role:?} is named twice"));
+        }
+    }
+    Ok(())
+}
+
+/// Bootstrap one role workspace and write its `.onlyne/config.toml`.
+///
+/// Returns the public key the `[[client]]` entry publishes.
+fn seed_role_workspace(
+    root: &Path,
+    listen: &str,
+    cert_pin: &str,
+    role: &str,
+) -> Result<String, String> {
+    let workspace = RoleWorkspace::resolve(root.join(role));
+    workspace
+        .bootstrap()
+        .map_err(|error| format!("{}: {error}", root.join(role).display()))?;
+    let key_path = workspace.key_path();
+    let key = if key_path.exists() {
+        onlyne_net::KeyPair::load(&key_path).map_err(|error| error.to_string())?
+    } else {
+        let key = onlyne_net::KeyPair::generate();
+        key.save(&key_path).map_err(|error| error.to_string())?;
+        key
+    };
+    apply_private_mode(&key_path).map_err(|error| format!("{}: {error}", key_path.display()))?;
+    let (host, port) = match listen.rsplit_once(':') {
+        Some((host, port)) => match port.parse::<u16>() {
+            Ok(port) => (host.to_string(), port),
+            Err(_) => (listen.to_string(), 0),
+        },
+        None => (listen.to_string(), 0),
+    };
+    let config = format!(
+        "role = {role:?}\ncert_pin = {cert_pin:?}\nkey_path = {key_path:?}\nplugins = []\n\n[server]\nhost = {host:?}\nport = {port}\n",
+        role = role,
+        cert_pin = cert_pin,
+        key_path = workspace.key_path().display().to_string(),
+        host = host,
+        port = port,
+    );
+    std::fs::write(workspace.config_path(), config)
+        .map_err(|error| format!("{}: {error}", workspace.config_path().display()))?;
+    Ok(key.public_str())
+}
+
+/// The `[[client]]` entries for the seeded roles, appended to `spec.toml`.
+///
+/// Every seeded role reaches every other seeded role and itself; `["*"]`
+/// covers the rest of the cluster without naming it.
+fn role_entries(seeded: &[(&str, String)]) -> String {
+    let names: Vec<&str> = seeded.iter().map(|(role, _)| *role).collect();
+    let all = names
+        .iter()
+        .map(|role| format!("{role:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut text = String::new();
+    for (role, key) in seeded {
+        text.push_str(&format!(
+            "\n[[client]]\nrole = {role:?}\nkey = {key:?}\nadmin = false\nmax_sessions = 1\nallowed_senders = [\"*\", {all}]\nallowed_targets = [{all}]\nprose = \"\"\n\n[client.runtime]\ndrive = \"plugin\"\ncommand = [\"pi\", \"--session-id\", \"{{session}}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]\nresume = [\"pi\", \"--session\", \"{{session}}\", \"--session-dir\", \".pi/sessions\", \"-ns\"]\n",
+            role = role,
+            key = key,
+            all = all,
+        ));
+    }
+    text
 }
 
 fn refuse(error: GenerateError) -> i32 {
@@ -515,5 +638,51 @@ fn generate_command(root: &Path, args: GenerateArgs, output: Output) -> i32 {
             0
         }
         Err(error) => refuse(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_with_roles_seeds_workspaces_and_spec() {
+        let dir = tempfile::tempdir().expect("temporary root");
+        let root = dir.path().join("cluster");
+        let output = Output {
+            json: false,
+            quiet: true,
+            verbose: false,
+        };
+        let code = init_command_with_roles(
+            &root,
+            "127.0.0.1:7811",
+            &["planner".into(), "coder".into()],
+            false,
+            output,
+        );
+        assert_eq!(code, 0);
+
+        let spec = Spec::load(ServerRoot::resolve(&root).spec_path()).expect("spec parses");
+        let roles: Vec<&str> = spec
+            .client
+            .iter()
+            .map(|entry| entry.role.as_str())
+            .collect();
+        assert_eq!(roles, vec!["planner", "coder"]);
+
+        for role in ["planner", "coder"] {
+            let workspace = RoleWorkspace::resolve(root.join(role));
+            assert!(
+                workspace.config_path().is_file(),
+                "{} config should exist",
+                role
+            );
+            let config = std::fs::read_to_string(workspace.config_path()).expect("read config");
+            assert!(config.contains(&format!("role = {role:?}")));
+            assert!(config.contains("plugins = []"));
+            assert!(config.contains("[server]"));
+            assert!(workspace.key_path().is_file());
+        }
     }
 }

@@ -32,6 +32,7 @@ mod runtime;
 mod skill;
 mod socket;
 pub mod tui;
+mod up;
 mod verbs;
 mod wire;
 
@@ -113,6 +114,8 @@ struct Cli {
 enum Verb {
     /// Create a server root, run the daemon, or query it on the admin socket.
     Server(ServerCmd),
+    /// Start the server and discovered role clients in the foreground.
+    Up(up::UpArgs),
     /// Run the onlyne client, forwarding every remaining argument to it.
     Client(RestArgs),
     /// Report the gateway mounts the server knows.
@@ -207,6 +210,8 @@ struct ServerCmd {
 enum ServerVerb {
     /// Create the server root and its `[server]` spec template.
     Init(ServerInitCmd),
+    /// Start the server and discovered role clients in the foreground.
+    Up(up::UpArgs),
     /// Bind the listeners and serve the cluster; execs `onlyne-server run`.
     Run(RestArgs),
     /// Report server status through the admin socket.
@@ -251,6 +256,9 @@ struct ServerInitCmd {
     /// Overwrite an existing `spec.toml`.
     #[arg(long)]
     force: bool,
+    /// Seed role workspaces under `<root>/<role>` and register their `[[client]]` entries in `spec.toml` (comma-separated or repeated).
+    #[arg(long = "roles", visible_alias = "role", value_delimiter = ',')]
+    roles: Vec<String>,
 }
 
 /// The `gateway` group: a read-only view of the gateway mounts the server
@@ -501,6 +509,7 @@ fn run() -> i32 {
     let flags = &cli.flags;
     match verb {
         Verb::Server(cmd) => server(flags, cmd),
+        Verb::Up(args) => up::run(flags, args),
         Verb::Client(rest) => client(flags, &rest),
         Verb::Gateway(cmd) => gateway(flags, cmd),
         Verb::Send(cmd) => verbs::send(flags, &cmd.sender, cmd.args),
@@ -648,6 +657,7 @@ fn server(flags: &GlobalFlags, cmd: ServerCmd) -> i32 {
     };
     match verb {
         ServerVerb::Init(cmd) => server_init(flags, cmd),
+        ServerVerb::Up(args) => up::run(flags, args),
         ServerVerb::Run(rest) => sibling_exec(
             "onlyne-server",
             "run",
@@ -690,7 +700,7 @@ fn server_init(flags: &GlobalFlags, cmd: ServerInitCmd) -> i32 {
     // `--json` stays the CLI's documented no-op, so the answer shape does not
     // move with it; `--quiet` is the CLI's own switch for the progress line.
     let output = onlyne_server::cli::Output::new(false, flags.quiet, false);
-    onlyne_server::cli::init_command(&root, &cmd.listen, cmd.force, output)
+    onlyne_server::cli::init_command_with_roles(&root, &cmd.listen, &cmd.roles, cmd.force, output)
 }
 
 /// The answer a bare `onlyne server` gets: the group's own help, with the exit
@@ -748,7 +758,9 @@ fn unknown_server_verb(args: &[String]) -> i32 {
     if name == "start" || name == "stop" {
         return runtime::usage_error(format!(
             "onlyne: server {name} is gone; Onlyne runs in the foreground, so staying resident \
-             belongs to the terminal host or to launchd/systemd"
+             belongs to the terminal host or to launchd/systemd; `onlyne up` starts the server \
+             and the discovered role clients together, and `onlyne server shutdown` stops a \
+             running cluster"
         ));
     }
     runtime::usage_error(format!("onlyne: unknown server verb {name}"))
