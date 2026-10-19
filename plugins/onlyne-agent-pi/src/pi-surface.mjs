@@ -95,7 +95,9 @@ export function createSurface({ pi, log, context, sessionId = null }) {
   const available = {
     wakeUser: has(pi.sendUserMessage),
     customEntry: has(pi.appendEntry),
-    widget: has(ctx()?.ui?.setWidget),
+    get widget() {
+      return has(ctx()?.ui?.setWidget);
+    },
     status: true,
     exit: true,
     isIdle: true,

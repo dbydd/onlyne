@@ -348,6 +348,11 @@ export class OnlyneAgent {
     }
     this.welcome = welcome;
     this.connected = true;
+    const hadConnectFailure = this.lastError !== null;
+    this.lastError = null;
+    if (this.resident && hadConnectFailure) {
+      this.log(`connected role=${welcome.role} session=${this.sessionId ?? "resident"} socket=${this.socketPath}`);
+    }
     // The client names every delivery it already handed to this session, so a
     // process that restarts under a live client does not re-inject work its
     // predecessor read: the delivery guard is process memory, and this is how it
@@ -516,12 +521,12 @@ export class OnlyneAgent {
    */
   notice(kind, text) {
     this.activity.note(kind, text);
+    this.surface.status?.(this.activity.lines()[0]);
     if (this.surface.available?.widget) {
       this.surface.widget?.(this.activity.lines());
       return;
     }
-    // No panel: the footer carries the steady header line, stderr the event.
-    this.surface.status?.(this.activity.lines()[0]);
+    // No panel: stderr carries the event.
     this.log(`${kind}: ${text}`);
   }
 
