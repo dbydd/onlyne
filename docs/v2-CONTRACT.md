@@ -96,6 +96,14 @@ session, and neither borrows the other's key.
   An absent or empty list requeues every unacknowledged row, which is what a client from
   an earlier build sends: the field is additive and the old spelling is the old behavior.
 
+- `HandshakeArgs.direct_notes: bool` defaults to `false` and serializes when true.
+  A connection declares this capability when it consumes notes without an agent session.
+  `onlyne-im` declares it and keeps `live_sessions` empty.
+  The server uses the current non-draining connection's capability in both send and pull.
+  Replacement connections supply their own capability through `hello`.
+  Ordinary clients need a mirrored `working` or `idle` session to receive notes.
+  Undeliverable notes follow `[server].note_queue`, and all notes retain the existing ACL and expiry rules.
+
 **Client session scopes** (`<workspace>/.onlyne/config.toml`, parsed in
 `crates/onlyne-config`):
 

@@ -19,6 +19,13 @@ fn is_zero(count: &u32) -> bool {
     *count == 0
 }
 
+/// Whether a capability flag is off, so its key stays off the wire. A
+/// connection that does not claim the capability writes the bytes an earlier
+/// build wrote, and a server that predates the field has nothing to ignore.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Server's durable answer to an accepted send (§8 `send`, §10 `ledger`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -654,6 +661,11 @@ pub struct HandshakeArgs {
     pub version: String,
     /// True when the connection serves an aggregate role for a sub-cluster.
     pub aggregate: bool,
+    /// True when this connection consumes a note itself instead of waking a
+    /// session: `onlyne-im` renders every delivery to a platform backend and
+    /// opens no agent session.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub direct_notes: bool,
     /// The sessions the client still holds on this role. A reconnecting client
     /// sends this list at `hello`, and the adoption requeue leaves the
     /// deliveries those sessions are bound to `in_flight` with their tickets

@@ -129,10 +129,19 @@ fn every_vector_matches_its_published_type() {
             .entry(vector_family(name).to_string())
             .or_insert(0usize) += 1;
 
-        if let Some(op) = name.strip_prefix("req_client_") {
+        if let Some(rest) = name.strip_prefix("req_client_") {
             let value = round_trip::<Frame<ClientOp>>(name, frame);
             assert_eq!(value["f"], "req", "{name}");
-            assert_eq!(value["op"], op, "{name}: op name follows the file name");
+            let op = value["op"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name}: a client request names its op"));
+            assert!(
+                rest == op
+                    || rest
+                        .strip_prefix(op)
+                        .is_some_and(|suffix| suffix.starts_with('_')),
+                "{name}: op name leads the file name, and a suffix names the shape pinned"
+            );
         } else if let Some(op) = name.strip_prefix("req_gateway_") {
             let value = round_trip::<GatewayFrame>(name, frame);
             assert_eq!(value["f"], "req", "{name}");
@@ -194,7 +203,7 @@ fn every_vector_matches_its_published_type() {
     }
 
     let expected = [
-        ("req_client", 13usize),
+        ("req_client", 14usize),
         ("req_gateway", 5),
         ("req_admin", 25),
         ("res", 15),
@@ -210,7 +219,7 @@ fn every_vector_matches_its_published_type() {
             "{family}: vector count"
         );
     }
-    assert_eq!(vectors.len(), 100, "total vector count");
+    assert_eq!(vectors.len(), 101, "total vector count");
 }
 
 #[test]

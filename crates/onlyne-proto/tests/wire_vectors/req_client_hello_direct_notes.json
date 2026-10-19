@@ -1,0 +1,5 @@
+{
+  "frame": "{\"f\":\"req\",\"id\":\"r1\",\"op\":\"hello\",\"args\":{\"protocol\":1,\"role\":\"planner\",\"key\":\"ed25519/AAA\",\"signature\":\"sig\",\"agent\":\"onlyne-im\",\"version\":\"1.0.0\",\"aggregate\":false,\"direct_notes\":true}}",
+  "encoding": "u32_be_length_prefix_plus_utf8_json",
+  "note": "a link that sets direct_notes=true consumes notes itself and opens no session; a false hello omits the field"
+}

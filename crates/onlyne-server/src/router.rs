@@ -402,6 +402,7 @@ fn hello(state: &Arc<State>, session: &mut Session, args: onlyne_proto::Handshak
     if let Some(sender) = session.sender.clone() {
         session.generation = state.register_role(crate::state::RoleConnection {
             role: entry.role.clone(),
+            direct_notes: args.direct_notes,
             sender,
             last_seq: state.event_head().max(0) as u64,
             connected_at: Utc::now(),

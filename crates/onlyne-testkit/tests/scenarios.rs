@@ -10,11 +10,11 @@
 //! plugin whose completions the host refuses (`settle_without_turn`), so every script
 //! that completes reports a heartbeat first: see the capability note on scenario 2.
 
-use onlyne_proto::{LedgerQuery, LedgerState, Lifecycle, QuerySessionsArgs};
+use onlyne_proto::{LedgerQuery, LedgerState, Lifecycle, QueryFaultsArgs, QuerySessionsArgs};
 use onlyne_testkit::harness::Cluster;
 use onlyne_testkit::{AgentScript, ScriptHello};
 use serde_json::json;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Default prose passed through onlyne-client init --prose.
 const E2E_PROSE: &str = "v1 smoke prose";
@@ -2829,26 +2829,55 @@ fn task_of(receipt: &serde_json::Value) -> String {
     receipt["task"].as_str().expect("task id").to_string()
 }
 
-/// A backend that answers the gateway's `hello` and then serves its frames
-/// forever, which is all the gateway needs to hold a link open: the platform
-/// side of a delivery is exercised by what the gateway itself writes into the
-/// conversation's own chat log, not by the backend's behaviour.
+/// A backend that answers the gateway's `hello` and then answers every `send`
+/// with a platform message id. The conversation's own chat log is written
+/// before the send, so the answer is what makes the gateway's outbound record
+/// (`.onlyne/history/main.jsonl`) observable — a send left unanswered would
+/// leave that record unwritten.
 fn write_gateway_backend(path: &std::path::Path) {
     std::fs::write(
         path,
         r#"
-import json, struct, sys, time
+import json, struct, sys
+
+def read_exact(stream, size):
+    data = b""
+    while len(data) < size:
+        chunk = stream.read(size - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data
+
+def read_frame(stream):
+    head = read_exact(stream, 4)
+    if head is None:
+        return None
+    (length,) = struct.unpack(">I", head)
+    body = read_exact(stream, length)
+    if body is None:
+        return None
+    return json.loads(body)
+
 def frame(obj):
     body = json.dumps(obj).encode()
     sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
     sys.stdout.buffer.flush()
+
 frame({"op": "hello", "args": {"platform": "telegram", "version": "test",
                                "capabilities": ["message"]}})
+sent = 0
 while True:
-    line = sys.stdin.buffer.readline()
-    if not line:
+    message = read_frame(sys.stdin.buffer)
+    if message is None:
         break
-    time.sleep(0.05)
+    if message.get("op") == "send":
+        sent += 1
+        args = message.get("args") or {}
+        frame({"op": "sent", "args": {
+            "conversation": args.get("conversation", ""),
+            "message_id": "platform-%d" % sent,
+        }})
 "#,
     )
     .expect("write the fake backend");
@@ -3744,7 +3773,9 @@ max_sessions = 2"#,
 /// body's first line names one key renders into that conversation's platform
 /// chat; the other conversation sees nothing. A key no conversation carries,
 /// and a key that is not the first line, are each refused and settled rather
-/// than guessed at (§6).
+/// than guessed at (§6). The gateway role is also a direct note consumer: a
+/// well-formed note reaches its platform backend and settles without a session,
+/// and a malformed one is refused rather than left queued.
 #[tokio::test]
 async fn scenario_22_one_gateway_serves_two_conversations_by_key() {
     let cluster = Cluster::start(
@@ -3897,6 +3928,188 @@ allowed_targets = ["agent", "im"]"#,
     assert!(
         !root.join("conversations/beta/chat.jsonl").exists(),
         "the beta conversation's log exists although no delivery named its key"
+    );
+
+    // A stateless `kind = note` (the default `onlyne_send` kind) addressed to
+    // the sessionless `onlyne-im` gateway role is pulled and rendered through
+    // the platform backend: the ledger settles it `acked`, the role's outbound
+    // history names the platform's own message handle, and no session row is
+    // invented for a role that never opens one.
+    let beta_note_text = "note for beta";
+    let beta_note = cluster
+        .admin_send_note(
+            "agent",
+            "im",
+            &format!("<chat:{KEY_BETA}>\n\n{beta_note_text}"),
+        )
+        .await
+        .expect("send note to beta");
+    let beta_note_id = beta_note["msg_id"]
+        .as_str()
+        .expect("note msg_id")
+        .to_string();
+    let beta_note_rows = cluster
+        .poll_ledger(
+            LedgerQuery {
+                msg_id: Some(beta_note_id.clone()),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Acked),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the note to the IM gateway settles as acked");
+    assert!(
+        beta_note_rows
+            .iter()
+            .all(|row| row.state != LedgerState::Queued),
+        "the note settled but a ledger row for it is still queued: {beta_note_rows:#?}"
+    );
+
+    // The platform side of the same note: `record_outbound` writes its row only
+    // after the backend answers the send with the platform's message id, so the
+    // record proves the note left the gateway rather than only that the ledger
+    // moved. The chat log beside it is written before the send and cannot.
+    let gateway_history = root.join(".onlyne/history/main.jsonl");
+    let mut outbound = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while outbound.is_none() && Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(&gateway_history) {
+            outbound = text
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|row| {
+                    row["direction"].as_str() == Some("out")
+                        && row["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains(beta_note_text))
+                        && row["platform_message"]
+                            .as_str()
+                            .is_some_and(|handle| !handle.is_empty())
+                });
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let outbound = outbound.unwrap_or_else(|| {
+        panic!(
+            "the gateway wrote no outbound record for the note:\n{}",
+            std::fs::read_to_string(&gateway_history).unwrap_or_default()
+        )
+    });
+    assert_eq!(
+        outbound["chat_key"].as_str(),
+        Some(KEY_BETA),
+        "the outbound record names another conversation: {outbound}"
+    );
+
+    // The gateway is not a session: its note eligibility comes from the role
+    // being connected and taking deliveries directly, so taking the note must
+    // leave the session table untouched.
+    let im_sessions = cluster
+        .query_sessions(QuerySessionsArgs {
+            role: Some("im".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query the gateway role's sessions");
+    assert!(
+        im_sessions.is_empty(),
+        "the gateway took a note and left a session row behind: {im_sessions:#?}"
+    );
+
+    // A help request is the same note path with an in-band answer: the gateway
+    // intercepts it before any chat key is read, acks it as `im_help_answered`,
+    // and sends the manual back as a note to the asker. Letting it reach a
+    // platform would post the request to a chat and log it as outbound.
+    let help_note = cluster
+        .admin_send_note("agent", "im", "<help>")
+        .await
+        .expect("send help note to im");
+    let help_note_id = help_note["msg_id"]
+        .as_str()
+        .expect("help msg_id")
+        .to_string();
+    cluster
+        .poll_ledger(
+            LedgerQuery {
+                msg_id: Some(help_note_id),
+                ..Default::default()
+            },
+            |rows| {
+                rows.iter().any(|row| {
+                    row.state == LedgerState::Acked
+                        && row.reason.as_deref() == Some("im_help_answered")
+                })
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the help note is intercepted and acked as im_help_answered");
+    let help_history = std::fs::read_to_string(&gateway_history).unwrap_or_default();
+    assert!(
+        !help_history
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|row| {
+                row["direction"].as_str() == Some("out")
+                    && row["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("<help>"))
+            }),
+        "the help request was rendered to a platform:\n{help_history}"
+    );
+
+    // A keyless `kind = note` is refused the same way a keyless task is, and
+    // the refusal settles its row instead of leaving it queued. A note carries
+    // no causality, so its fault names the role and kind rather than a task.
+    let keyless_note = cluster
+        .admin_send_note("agent", "im", "keyless note to gateway")
+        .await
+        .expect("send keyless note to im");
+    let keyless_note_id = keyless_note["msg_id"]
+        .as_str()
+        .expect("keyless note msg_id")
+        .to_string();
+    let mut note_fault = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while note_fault.is_none() && Instant::now() < deadline {
+        let faults = cluster
+            .query_faults(QueryFaultsArgs {
+                role: Some("im".to_string()),
+                kind: Some("im_unplaced_delivery".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("query the gateway's faults");
+        note_fault = faults.into_iter().find(|fault| {
+            fault["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("names no chat key"))
+        });
+        if note_fault.is_none() {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    assert!(
+        note_fault.is_some(),
+        "the keyless note produced no im_unplaced_delivery fault"
+    );
+    let keyless_note_rows = cluster
+        .poll_ledger(
+            LedgerQuery {
+                msg_id: Some(keyless_note_id),
+                ..Default::default()
+            },
+            |rows| rows.iter().any(|row| row.state == LedgerState::Rejected),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the keyless note settles as rejected");
+    assert!(
+        keyless_note_rows
+            .iter()
+            .all(|row| row.state != LedgerState::Queued),
+        "the keyless note was refused but its ledger row is still queued: {keyless_note_rows:#?}"
     );
 
     // A key no conversation in this registry carries is refused: the gateway

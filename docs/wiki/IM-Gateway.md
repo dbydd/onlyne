@@ -107,3 +107,23 @@ onlyne-im check --root ./im
 # 5. Run the gateway (or pass --im-root ./im to `onlyne up`)
 onlyne-im run --root ./im
 ```
+
+---
+
+## 6. Notes to the Gateway Role / note 直达网关角色
+
+A `note` opens no session, so the server must be told who consumes one. A gateway root holds no agent session: its one role link renders every delivery to a platform backend. `onlyne-im` therefore declares `direct_notes` in its `hello`, and the server offers a note addressed to that role to that link's own `pull`. The declaration belongs to the live connection, so a replaced or draining link loses it.
+
+```bash
+# An agent asks a gateway role for its manual; nothing reaches external chat users.
+onlyne send --note --from agent --to im --text "<help>" --force --yes-i-am-supervisor-not-other-role
+
+# A note to one conversation: line 1 is the chat key, then a blank line and the body.
+onlyne send --note --from agent --to im --file - --force --yes-i-am-supervisor-not-other-role <<'EOF'
+<chat:7f3a9c2e1b04d5a6f8c1e3b7a9d2f4c6>
+
+hello from a note
+EOF
+```
+
+A note that the gateway renders settles as `acked`. A malformed one settles as rejected with the gateway's own sentence on the row, which is what an operator reads in `onlyne ledger`. A note to a role with no session and no direct consumer follows the spec's `[server].note_queue` setting: queued when true, and refused with `recipient_offline` when false.

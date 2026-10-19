@@ -80,6 +80,10 @@ pub fn acl_from_spec(spec: &Spec) -> anyhow::Result<AclTable> {
 #[derive(Debug, Clone)]
 pub struct RoleConnection {
     pub role: String,
+    /// True when this link declared at `hello` that it consumes a note itself
+    /// instead of waking a session: `onlyne-im` renders every delivery to a
+    /// platform backend and opens no agent session.
+    pub direct_notes: bool,
     pub sender: mpsc::Sender<Frame>,
     pub last_seq: u64,
     pub connected_at: DateTime<Utc>,
@@ -366,6 +370,23 @@ impl Server {
                 })
                 .is_ok_and(|rows| !rows.is_empty())
         })
+    }
+
+    /// Whether one role can take a `note` right now.
+    ///
+    /// A note owns no session, so it has two targets: a connected, non-draining
+    /// link that declared `direct_notes` at `hello` and renders the delivery
+    /// itself, and a role holding a session a note can wake
+    /// ([`Self::has_session_to_wake`]). Draining excludes only the first: a link
+    /// that said its goodbye stops rendering, while the session branch reads the
+    /// mirrored projections and does not consult the link at all.
+    pub fn can_receive_note(&self, role: &str) -> bool {
+        let direct = self.roles.read().is_ok_and(|table| {
+            table
+                .get(role)
+                .is_some_and(|link| link.direct_notes && !link.draining)
+        });
+        direct || self.has_session_to_wake(role)
     }
 
     pub fn role_sender(&self, role: &str) -> Option<mpsc::Sender<Frame>> {
@@ -676,7 +697,8 @@ mod tests {
             ),
         )
         .expect("write spec.toml");
-        let state = Server::open(&ServerInit { root, listen: None }).expect("open the server state");
+        let state =
+            Server::open(&ServerInit { root, listen: None }).expect("open the server state");
         (dir, state)
     }
 
@@ -694,8 +716,18 @@ mod tests {
             outcome: None,
             observed: None,
         };
-        crate::projection::write(&state, "resident", "", "resident-main", 1, 1, idle, None, None)
-            .expect("publish the idle row");
+        crate::projection::write(
+            &state,
+            "resident",
+            "",
+            "resident-main",
+            1,
+            1,
+            idle,
+            None,
+            None,
+        )
+        .expect("publish the idle row");
         assert!(state.has_session_to_wake("resident"));
         assert!(!state.has_session_to_wake("sender"));
     }

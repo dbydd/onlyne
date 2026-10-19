@@ -488,6 +488,16 @@ after a grace. A role that wants a standing process instead sets `idle_close = 0
 Scope takes effect entirely on the client: the server delivers by role, the client decides
 which session takes it, and the server keeps zero orchestration.
 
+**A sessionless consumer carries its own delivery rights, and only a note needs them.** One
+role holds no session at all: the IM gateway, whose single link renders every delivery to a
+platform backend. Its `hello` sets `direct_notes`, and the server then offers a note addressed
+to that role to that connection's own `pull`. `State::can_receive_note` is the one definition
+of note eligibility, and it reads the live connection, so a draining or replaced link loses
+the eligibility with the link. A note to a role that has neither a `working`/`idle` session nor
+a direct consumer keeps the older rule: it queues when `[server].note_queue` is true, and it
+earns `recipient_offline` when that setting is false. Sessions are untouched by this: the
+gateway opens none, and no delivery path invents one for it.
+
 Suspend and resume depend entirely on the runtime's own capability. The client never
 assembles a history summary to feed back to a model — an assembled summary is itself
 context pollution.

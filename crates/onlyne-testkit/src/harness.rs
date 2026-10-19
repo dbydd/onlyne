@@ -619,6 +619,34 @@ impl Cluster {
             .ok_or_else(|| anyhow!("send response missing data"))
     }
 
+    /// Admin send operation for a stateless `MsgKind::Note`.
+    pub async fn admin_send_note(
+        &self,
+        from: &str,
+        to: &str,
+        text: &str,
+    ) -> Result<serde_json::Value> {
+        let envelope = Box::new(onlyne_proto::new_envelope(
+            onlyne_proto::MsgKind::Note,
+            onlyne_proto::Principal::role(from),
+            onlyne_proto::Principal::role(to),
+            onlyne_proto::Body::text(text.to_string()),
+            None,
+        )?);
+
+        let op = AdminOp::Send(onlyne_proto::AdminSend {
+            from: from.to_string(),
+            envelope,
+        });
+
+        let body = admin_request(&self.server_root, op, ADMIN_TIMEOUT.as_millis() as u64).await?;
+        if !body.ok {
+            bail!("admin send note failed: {:?}", body.error);
+        }
+        body.data
+            .ok_or_else(|| anyhow!("send note response missing data"))
+    }
+
     /// One admin control command, as `onlyne control` sends it.
     ///
     /// The op is the whole command: which verb, which task, and the operator's

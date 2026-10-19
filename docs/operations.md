@@ -156,6 +156,10 @@ Takeover requeueing when a new link lands follows the same path, with a rule rea
 
 If a declared session dies before completion, the client publishes an `exited` projection. When the server sees an `in_flight` row with the same `session_id` as that session ticket, it requeues the row, again through the gates below.
 
+### Note delivery and direct consumers
+
+A `Note` opens no session. The server offers a note to a pull in two cases: the receiving role holds a mirrored session whose lifecycle is `working` or `idle`, so the note can wake it, or the receiving connection declared `direct_notes` at `hello`. `onlyne-im` is the direct consumer: one link renders every delivery to a platform backend, holds no agent session, and takes its notes from its own `pull`. The server reads the declaration from the live connection, so a draining or replaced link loses the eligibility with the link. A note addressed to a role with no session and no direct consumer follows the older rule: it queues when `[server].note_queue` is true, and it earns `recipient_offline` when that setting is false. A connection that declares the field still decides what a note means: the gateway settles a note it rendered as `acked`, and settles a malformed one as rejected with its own words on the row.
+
 Automatic requeueing is governed by two budget knobs; manual `onlyne repair retry` does not pass through the gates. An `in_flight` row returned to `queued` is evaluated first by `requeue_ttl_secs`, then by `requeue_max_attempts`. A task, completion, or control row for a receiving role with no live connection that has never been pulled expires after the same TTL when `requeue_ttl_secs` is nonzero; with the default value of 0, it remains queued.
 
 | Configuration file | Field | Default | Effect |
@@ -723,6 +727,10 @@ role link 死亡时，服务端把该 role 的 `in_flight` 投递行重投回 `q
 新 link 落地时的接管重投走同一条路，只是多一条从申报里读出的规则。`hello` 的 `live_sessions` 字段申报该 client 内存里仍活着的会话，以及每个会话绑定的那个投递；被申报的投递由该会话持有：其行保持 `in_flight`，若断掉的 link 在拆除时已经把它退回队列，则在这里被取回 `in_flight` —— 持有它的会话还在跑这件活，否则一次 pull 会把同一个 task 交给第二个会话。它的 delivery ticket 改挂新 link 的 generation，并记下持有它的 session，因此该 link 随后终止时照常重投，而该会话死去时该行被释放。没有被任何活会话申报的未确认行照常重投并丢弃 ticket，这才让它重新可领。`suspended` 的会话不申报任何投递：只有两次投递之间的会话才会被挂起，它留下的那一行按上一条规则重投。若真有会话在还欠着活的时候被挂起，它会申报那个投递，server 便与运行中的会话一样持有它 —— 活无论如何都还欠着。
 
 被申报的会话若在结清之前死亡，client 发布 `exited` 投影，服务端见到与该会话 ticket 同 `session_id` 的 `in_flight` 行时把该行重投回队列，同样经过下面的闸。
+
+### note 的投递与直取方
+
+`note` 不建会话。server 在两种情况下把 note 交给 pull：收件 role 持有 lifecycle 为 `working` 或 `idle` 的镜像会话，note 因此能唤醒它；或者这条连接在 `hello` 里申报了 `direct_notes`。`onlyne-im` 就是这样的直取方：一条 link 把每条投递渲染给平台后端，不持有任何 agent 会话，自己的 pull 取走属于它的 note。申报读自活着的连接，因此 draining 或被替换的 link 随之失去这个资格。目标角色既无会话又无直取方时，note 按旧规则走：`[server].note_queue` 为真时排队，为假时以 `recipient_offline` 拒收。申报了这个字段的连接仍自己决定 note 的含义：网关把渲染成功的 note 结为 `acked`，把畸形的 note 以拒收结账，并在行上写下自己的理由。
 
 自动重投受两个预算旋钮约束；手动 `onlyne repair retry` 不经过闸。回到 `queued` 的
 `in_flight` 行按 `requeue_ttl_secs` 再按 `requeue_max_attempts` 判定。收件 role 没有

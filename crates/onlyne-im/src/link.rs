@@ -28,7 +28,8 @@ use tokio::sync::mpsc;
 const PULL_HOLD_MS: u64 = 20_000;
 /// Bound on one request frame.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// The agent word this connection reports; the server logs it and reads nothing.
+/// One role link renders every delivery itself to a platform backend, so it
+/// declares `direct_notes` and opens no agent session.
 const AGENT: &str = "onlyne-im";
 
 /// One outbound render the backend must perform, tagged with the conversation
@@ -219,6 +220,7 @@ impl RoleLink {
             version: env!("CARGO_PKG_VERSION").to_string(),
             aggregate: false,
             live_sessions: Vec::new(),
+            direct_notes: true,
         };
         let body = link
             .request(

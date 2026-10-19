@@ -67,6 +67,8 @@ The first frame must be `hello`, and the server waits exactly five seconds for i
 
 `welcome` carries `delivered_tasks`: the task ids the host has already dispatched to a session of this role, taken from the host's own durable record. It is always an array and empty when the host holds nothing. A plugin that restarts and says `hello` again seeds its delivery bookkeeping from this list, so a task the host already handed out is never injected twice.
 
+The separate server role link uses `HandshakeArgs`. Its `direct_notes` field declares that the connection consumes notes without an agent session. `onlyne-im` sends `direct_notes: true` and an empty `live_sessions` list. Ordinary clients default to `false` and omit the field. The server stores the declaration on the current connection. Send and pull accept notes for a non-draining direct consumer or a role with a working or idle session. ACL and note queue rules apply to both. Reconnection replaces the declaration through the new hello. This additive field keeps protocol version 1 and preserves existing hello bytes when false. Adapter `HelloArgs` and session projections remain unchanged.
+
 Platform-owned data stays on the gateway side. A gateway plugin that receives `RenderSendArgs` gets the envelope plus rendered text and image, nothing more. An agent that receives `AssignArgs` gets the envelope, the delivery text, the role prose, and the intent, nothing more. Neither serialized payload carries `platform_metadata`, `raw`, or `channel_id`. The SDK states this rule, and the conformance suite inspects the delivered bytes. The wire types carry no raw metadata field at all, so a plugin cannot smuggle platform data into an agent payload through these frames.
 
 ## Report sequencing and the ready barrier

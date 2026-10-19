@@ -141,6 +141,15 @@ placement but `headless`, by name, before any session exists. Nothing refuses a 
 time: the dispatch-time guard that sniffed a pane's argv for protocol tokens is deleted, and with it
 the refusal of the ordinary `plugin` drive whose command is `pi --mode rpc`.
 
+**Server delivery eligibility** (`onlyne-server/src/{relay,state}.rs`): `State::can_receive_note` is
+the one definition of what may take a `Note`, and both the send gate and the two pull candidate
+lists read it. It answers yes for a role holding a mirrored `working` or `idle` session, and yes for
+a connection that declared `HandshakeArgs.direct_notes` at `hello` — the field `onlyne-im` sets,
+because one gateway link renders every delivery itself and opens no session. The same predicate
+covers queued and in-flight candidates, since the send path marks an eligible row in flight before
+any pull. Keep `PULLABLE_KINDS` free of notes: that constant governs task and session claim
+adoption, not note eligibility.
+
 ## Gates
 
 ```bash

@@ -3,6 +3,7 @@ use super::*;
 use super::env::missing_capability;
 use super::idle::{resumable, suspend_locked};
 use super::outbound::queue_outbound_locked;
+use super::projection::stored_task_state;
 use super::retire::{
     PendingClose, close_retired, keeps_idle, retire_idle_locked, stored_close_reason,
 };
@@ -10,7 +11,6 @@ use super::state::{
     DispatchInner, DispatchState, FrameGuard, SessionSlot, has_attached_transport,
     rebase_generation, slot_key_named, slot_key_serving_task, slot_task,
 };
-use super::projection::stored_task_state;
 
 /// The one sentence a session that ended a turn without a completion reads.
 ///

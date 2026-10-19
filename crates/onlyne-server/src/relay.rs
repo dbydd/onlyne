@@ -30,8 +30,10 @@ pub const SWEEP_INTERVAL_MS: u64 = 1000;
 
 /// Deliverable kinds whose queued rows wait for a role pull.
 ///
-/// A note is absent because `pull` never returns one and the sender's
-/// `ttl_ms` deadline owns its lifetime.
+/// A note is absent because a note is never held through a task or session
+/// claim: it carries no task for a claim to name as its holder, its own
+/// `ttl_ms` deadline owns its lifetime, and `pull` hands one out only while the
+/// role can take it (`State::can_receive_note`).
 const PULLABLE_KINDS: [MsgKind; 3] = [MsgKind::Task, MsgKind::Completion, MsgKind::Control];
 
 /// How many of a role's queued rows one `hello` reads for the deliveries it
@@ -421,11 +423,12 @@ pub fn send(
         return Ok(RelayReply::Rejected(reject));
     }
     let online = state.is_connected(to_role.as_str());
-    // A note lands inside a session that is already running (§7): it opens no
-    // session of its own, and `pull` hands out no row for one, so the only
-    // target a note has is a role whose session is live. Presence on its own is
-    // not a target — a push to an idle role would come back as a refusal.
-    let note_wakeup = envelope.kind != MsgKind::Note || state.has_session_to_wake(&to_role);
+    // A note lands inside a session that is already running (§7), or inside a
+    // link that renders it itself: it opens no session of its own and `pull`
+    // hands out no row for one, so the only target a note has is a role that can
+    // take it. Presence on its own is not a target — a push to a role that can
+    // take nothing would come back as a refusal.
+    let note_wakeup = envelope.kind != MsgKind::Note || state.can_receive_note(&to_role);
     // A control row keeps its command in the body, because the ledger has no
     // column for `Envelope::control` and `pull` rebuilds the envelope from the
     // row alone. Normalizing before the fingerprint keeps the stored bytes and
@@ -537,22 +540,25 @@ pub fn pull(
             seq: head,
         });
     }
-    // A `note` owns no session and is pulled only while the role has one a note
-    // can wake. §3 line 152 leaves it out of the queue otherwise, so a note for
-    // an offline role keeps waiting for its TTL instead of becoming a refusal
-    // the client's accept path answers for an envelope with no task.
-    let can_wake_note = state.has_session_to_wake(role);
+    // A `note` owns no session, so a queued or in-flight row of one is pulled
+    // only while the role can take it — a session a note can wake, or a link
+    // that declared `direct_notes`. §3 line 152 leaves it out of the queue
+    // otherwise, so a note for a role that can take neither keeps waiting for
+    // its TTL instead of becoming a refusal the client's accept path answers
+    // for an envelope with no task.
+    let can_take_note = state.can_receive_note(role);
     let mut candidates: Vec<_> = state
         .ledger
         .queued_for(role, 8)?
         .into_iter()
-        .filter(|row| (row.kind != MsgKind::Note || can_wake_note) && wanted(row))
+        .filter(|row| (row.kind != MsgKind::Note || can_take_note) && wanted(row))
         .collect();
     for row in state.ledger.in_flight_for(role)? {
         // A row stays handed to the pull that took it. Another session may still
         // claim it, which is how a replacement session inherits work its
         // predecessor died without acknowledging.
-        if wanted(&row)
+        if (row.kind != MsgKind::Note || can_take_note)
+            && wanted(&row)
             && state
                 .delivery_ticket(&row.msg_id)
                 .is_none_or(|ticket| ticket.session_id.as_deref() != session_id)

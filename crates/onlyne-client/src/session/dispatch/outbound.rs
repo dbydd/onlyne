@@ -94,6 +94,7 @@ impl ClientLink {
             agent: AGENT.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             aggregate: false,
+            direct_notes: false,
             live_sessions: Vec::new(),
         };
         let body = handle
