@@ -8,8 +8,8 @@ repository.workspace = true
 description = "IM gateway backend protocol: standard frames and payload types between core and platform backends"
 
 [dependencies]
-onlyne-proto = { path = "../onlyne-proto", version = "2.3.0" }
-onlyne-wire = { path = "../onlyne-wire", version = "2.3.0" }
+onlyne-proto = { path = "../onlyne-proto", version = "2.4.0" }
+onlyne-wire = { path = "../onlyne-wire", version = "2.4.0" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

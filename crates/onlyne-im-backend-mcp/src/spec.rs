@@ -303,10 +303,7 @@ pub fn render_template(template: &Value, vars: &BTreeMap<String, Value>) -> Valu
             if let Some(var_name) = s.strip_prefix("{{").and_then(|r| r.strip_suffix("}}"))
                 && !var_name.contains("{{")
             {
-                return vars
-                    .get(var_name.trim())
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                return vars.get(var_name.trim()).cloned().unwrap_or(Value::Null);
             }
             let mut out = s.clone();
             for (k, v) in vars {

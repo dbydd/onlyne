@@ -26,9 +26,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use client::McpClient;
 use onlyne_im_backend::backend::Backend;
-use onlyne_im_backend::frame::{
-    HealthArgs, HelloArgs, ImConversation, SendArgs, SentArgs,
-};
+use onlyne_im_backend::frame::{HealthArgs, HelloArgs, ImConversation, SendArgs, SentArgs};
 use onlyne_im_backend::payload::ImEvent;
 use serde_json::{Value, json};
 use spec::{EventMapping, McpImSpec, render_template, select_str, select_value};
@@ -202,10 +200,7 @@ impl Backend for McpImBackend {
                 .title
                 .as_deref()
                 .and_then(|p| select_str(&item, p));
-            let kind = list_spec
-                .kind
-                .as_deref()
-                .and_then(|p| select_str(&item, p));
+            let kind = list_spec.kind.as_deref().and_then(|p| select_str(&item, p));
             out.push(ImConversation { id, title, kind });
         }
         Ok(out)
@@ -274,10 +269,7 @@ impl Backend for McpImBackend {
             "conversation".to_string(),
             Value::String(args.conversation.clone()),
         );
-        vars.insert(
-            "text".to_string(),
-            Value::String(args.payload.text.clone()),
-        );
+        vars.insert("text".to_string(), Value::String(args.payload.text.clone()));
         vars.insert(
             "format".to_string(),
             Value::String(
@@ -508,7 +500,10 @@ message_id_pointer = "/created_id"
         assert!(backend.hello().authenticated);
 
         // 1. list_conversations
-        let convs = backend.list_conversations().await.expect("list_conversations");
+        let convs = backend
+            .list_conversations()
+            .await
+            .expect("list_conversations");
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].id, "room-1");
         assert_eq!(convs[0].title.as_deref(), Some("General"));

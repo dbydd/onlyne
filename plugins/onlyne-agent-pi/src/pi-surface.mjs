@@ -133,7 +133,7 @@ export function createSurface({ pi, log, context, sessionId = null }) {
   };
 
   /**
-   * One pi user message; images ride along as pi image content parts.
+   * One delivery, one message; images ride along as pi image content parts.
    *
    * pi reads an image part as the flat `ImageContent` of its message types —
    * `data` plus `mimeType` — and normalizes every part before the message is
@@ -142,17 +142,18 @@ export function createSurface({ pi, log, context, sessionId = null }) {
    * plugin, so an unusable part is dropped here and the assignment still
    * travels: the delivery text already names the path the client wrote.
    *
-   * When the session is idle (`ctx.isIdle() === true`), `sendUserMessage` is
-   * called without `deliverAs` so an empty or settled session starts a turn
-   * immediately (`deliverAs: "followUp"` only enqueues and requires a prior
-   * assistant/toolResult tail to auto-continue). When the session is busy,
-   * `{ deliverAs: "followUp" }` queues behind the running turn without
-   * interrupting tool execution.
+   * With `meta` and `pi.sendMessage`, the `onlyne_assign` card IS the delivery:
+   * a custom message reaches the model, and it is what the transcript draws, so
+   * a delivery does not also arrive as a second user message. `triggerTurn` is
+   * what an idle session owes it (a `display: true` custom message renders
+   * without starting a turn of its own); while a turn is running the card queues
+   * behind it as a follow-up instead of interrupting tool execution.
    *
-   * When `meta` is supplied and `pi.sendMessage` is available, a visible
-   * `onlyne_assign` custom message card is emitted first so the human operator
-   * can distinguish cluster deliveries from hand-typed prompts in the
-   * transcript.
+   * A pi without `sendMessage` takes the plain `sendUserMessage` below — idle
+   * without `deliverAs` so the delivery starts the turn it owes, `followUp` when
+   * busy (`deliverAs: "followUp"` only enqueues and requires a prior
+   * assistant/toolResult tail to auto-continue). That path is the pre-card
+   * shape, kept so an older pi still receives a delivery.
    */
   const wakeUser = (text, parts = [], meta = null) => {
     if (!available.wakeUser) {
@@ -198,10 +199,12 @@ export function createSurface({ pi, log, context, sessionId = null }) {
               bodyText: meta.bodyText ?? text,
             },
           },
-          idle ? undefined : { deliverAs: "followUp" },
+          idle ? { triggerTurn: true } : { deliverAs: "followUp" },
         );
-      } catch {
-        /* custom display card is optional; user prompt below is the authority */
+        return true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log(`sendMessage refused: ${message}; the delivery takes the user-message route`);
       }
     }
     try {

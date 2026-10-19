@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.4.0 (2026-10-19)
+
+- **Sessionless IM gateways receive note deliveries.** A role connection can declare
+  `HandshakeArgs.direct_notes` when it consumes notes without opening agent sessions. The
+  server uses that live connection capability for note sends and pulls while preserving the
+  existing session wake path for ordinary clients. A replacement connection supplies its own
+  capability during `hello`, and ACL checks still run before the server writes a ledger row.
+  The `onlyne-im` gateway declares the capability and records platform sends without adding a
+  session projection. Scenario 22 verifies delivery through the backend and the platform
+  receipt. The role-link field defaults to false and stays out of false handshakes, so protocol
+  version 1 and existing ordinary-client bytes remain unchanged.
+- **The pi plugin delivers one message and starts idle turns.** The plugin sends a visible
+  `onlyne_assign` card with `triggerTurn: true` for an idle session and queues that card as a
+  follow-up while the session is busy. A pi without `sendMessage` receives a plain user message.
+  This keeps the delivery in one transcript entry and starts a turn for an empty resident
+  session. The `pi-onlyne` npm package is version `2.3.0` and contains this change.
+
 ## 2.3.0 (2026-10-17)
 
 - **A conversation's identity is a chat key, not a role.** v2.2 made one IM conversation one

@@ -1045,7 +1045,10 @@ impl DispatchState {
 /// path invented.
 fn feed_resident_idle(inner: &DispatchInner, resident: &str) {
     let feeds = [
-        ("created", feed_created(&inner.bridge, &inner.store, resident)),
+        (
+            "created",
+            feed_created(&inner.bridge, &inner.store, resident),
+        ),
         (
             "resource attached",
             crate::reconcile::feed_resource_attached(&inner.bridge, &inner.store, resident),

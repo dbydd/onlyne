@@ -347,7 +347,10 @@ mod tests {
         assert_eq!(markers.actions[0].label, "批准");
         assert_eq!(markers.actions[0].style.as_deref(), Some("primary"));
         assert_eq!(markers.actions[1].id, "reject");
-        assert_eq!(markers.files, vec![("file".into(), "/tmp/report.pdf".into())]);
+        assert_eq!(
+            markers.files,
+            vec![("file".into(), "/tmp/report.pdf".into())]
+        );
         assert_eq!(markers.rest, "\n# 审批请求\n请确认\n");
     }
 

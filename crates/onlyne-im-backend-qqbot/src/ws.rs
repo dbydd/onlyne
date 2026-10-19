@@ -105,13 +105,17 @@ impl Session {
                 match frame.get("t").and_then(Value::as_str) {
                     Some("READY") => {
                         if self.session_id.is_none() {
-                            bail!("the gateway answered IDENTIFY with no READY session id: {frame}");
+                            bail!(
+                                "the gateway answered IDENTIFY with no READY session id: {frame}"
+                            );
                         }
                         Ok(Some(true))
                     }
                     Some("RESUMED") => {
                         if self.session_id.is_none() {
-                            bail!("the gateway answered RESUME with RESUMED but no prior session id was held: {frame}");
+                            bail!(
+                                "the gateway answered RESUME with RESUMED but no prior session id was held: {frame}"
+                            );
                         }
                         Ok(Some(true))
                     }
@@ -134,7 +138,9 @@ impl Session {
                 if !resumable {
                     self.invalidate();
                 }
-                bail!("the gateway rejected the session during handshake (op 9, resumable={resumable}): {frame}");
+                bail!(
+                    "the gateway rejected the session during handshake (op 9, resumable={resumable}): {frame}"
+                );
             }
             GatewayOp::Reconnect => {
                 bail!("the gateway asked to reconnect during handshake (op 7): {frame}");
@@ -217,7 +223,10 @@ impl Gateway {
                 .next_json()
                 .await
                 .context("waiting for READY or RESUMED after IDENTIFY/RESUME")?;
-            if let Some(done) = gateway.session.accept_handshake_frame(frame, &mut gateway.buffered)? {
+            if let Some(done) = gateway
+                .session
+                .accept_handshake_frame(frame, &mut gateway.buffered)?
+            {
                 if done {
                     break;
                 }

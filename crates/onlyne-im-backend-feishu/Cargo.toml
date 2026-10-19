@@ -12,7 +12,7 @@ name = "onlyne-im-backend-feishu"
 path = "src/main.rs"
 
 [dependencies]
-onlyne-im-backend = { path = "../onlyne-im-backend", version = "2.3.0" }
+onlyne-im-backend = { path = "../onlyne-im-backend", version = "2.4.0" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

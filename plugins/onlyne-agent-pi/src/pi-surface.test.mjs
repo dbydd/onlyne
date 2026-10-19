@@ -127,33 +127,28 @@ test("delivery asks for followUp and a refusal of that option retries with the s
   assert.deepEqual(refusing.lines, [], "a delivery that landed on the retry is not a failure");
 });
 
-test("an idle session wakes directly without followUp queueing and emits an onlyne_assign card", () => {
-  // Simulate omp's real queue rule (`agent-session.ts:8483-8505`, `:8952-8972`):
-  // `deliverAs: "followUp"` only enqueues and auto-continues only when the
-  // transcript ends with an assistant or toolResult message; an omitted
-  // `deliverAs` starts a turn even on a brand-new empty session.
-  const transcript = [];
-  const followUpQueue = [];
-  let turnsStarted = 0;
+test("a card delivery is one message: it starts the idle turn and queues while busy", () => {
+  // One delivery, one message. omp's rule for a custom message decides the
+  // option: with no `deliverAs` a `display: true` message renders without
+  // starting a turn, `triggerTurn` starts one when the session is idle, and
+  // `deliverAs: "followUp"` only queues behind a running turn.
+  const turns = [];
+  const queued = [];
+  const userMessages = [];
+  const cards = [];
   let idle = true;
-  const customCards = [];
   const surface = createSurface({
     pi: {
       sendMessage(message, options) {
-        customCards.push({ message, options });
-      },
-      sendUserMessage(content, options) {
-        if (options?.deliverAs === "followUp") {
-          followUpQueue.push(content);
-          const last = transcript.at(-1);
-          if (idle && (last?.role === "assistant" || last?.role === "toolResult")) {
-            turnsStarted += 1;
-            transcript.push({ role: "user", content: followUpQueue.shift() });
-          }
+        cards.push({ message, options });
+        if (options?.triggerTurn === true && idle) {
+          turns.push(message.content);
           return;
         }
-        turnsStarted += 1;
-        transcript.push({ role: "user", content });
+        if (options?.deliverAs === "followUp") queued.push(message.content);
+      },
+      sendUserMessage(content, options) {
+        userMessages.push({ content, options });
       },
     },
     log: () => {},
@@ -168,22 +163,43 @@ test("an idle session wakes directly without followUp queueing and emits an only
     envelopeId: "env-1",
     bodyText: "ping from supervisor",
   };
-  assert.equal(surface.wakeUser("From _supervisor:\n\nping from supervisor", [], meta), true);
-  assert.equal(turnsStarted, 1, "an empty idle session must start a turn immediately");
-  assert.equal(followUpQueue.length, 0, "the note must not be stranded in followUpQueue");
-  assert.equal(customCards.length, 1);
-  assert.equal(customCards[0].message.customType, ASSIGN_MESSAGE_TYPE);
-  assert.equal(customCards[0].message.display, true);
-  assert.equal(customCards[0].message.details.kind, "note");
-  assert.equal(customCards[0].message.details.from, "role:_supervisor");
-  assert.equal(customCards[0].options, undefined);
+  const text = "From _supervisor:\n\nping from supervisor";
+  assert.equal(surface.wakeUser(text, [], meta), true);
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].message.customType, ASSIGN_MESSAGE_TYPE);
+  assert.equal(cards[0].message.display, true);
+  assert.equal(cards[0].message.details.kind, "note");
+  assert.equal(cards[0].message.details.from, "role:_supervisor");
+  assert.deepEqual(cards[0].options, { triggerTurn: true });
+  assert.deepEqual(turns, [text], "an idle session starts its turn from the card");
+  assert.deepEqual(userMessages, [], "the delivery is one message, never a card plus a prompt");
 
-  // While busy (`isIdle() === false`), the next delivery queues as followUp instead of interrupting.
+  // While busy (`isIdle() === false`), the next card queues as followUp instead
+  // of interrupting the running turn.
   idle = false;
-  assert.equal(surface.wakeUser("From _supervisor:\n\nsecond note while busy", [], meta), true);
-  assert.equal(turnsStarted, 1, "busy session queues rather than starting a second concurrent turn");
-  assert.equal(followUpQueue.length, 1);
-  assert.deepEqual(customCards[1].options, { deliverAs: "followUp" });
+  const second = "From _supervisor:\n\nsecond note while busy";
+  assert.equal(surface.wakeUser(second, [], meta), true);
+  assert.equal(cards.length, 2);
+  assert.deepEqual(cards[1].options, { deliverAs: "followUp" });
+  assert.deepEqual(queued, [second]);
+  assert.deepEqual(turns, [text], "a busy session queues rather than starting a second turn");
+  assert.deepEqual(userMessages, []);
+});
+
+test("a pi without sendMessage takes the delivery as a plain user message", () => {
+  const calls = [];
+  const surface = createSurface({
+    pi: {
+      sendUserMessage(content, options) {
+        calls.push({ content, options });
+      },
+    },
+    log: () => {},
+    context: () => ({ isIdle: () => true }),
+  });
+
+  assert.equal(surface.wakeUser(TASK_TEXT, [], { kind: "note" }), true);
+  assert.deepEqual(calls, [{ content: TASK_TEXT, options: undefined }]);
 });
 
 /** One role prose, in the shape the client renders and `agent.mjs` hands over. */

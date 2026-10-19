@@ -12,11 +12,11 @@ name = "onlyne-im"
 path = "src/main.rs"
 
 [dependencies]
-onlyne-proto = { path = "../onlyne-proto", version = "2.3.0" }
-onlyne-wire = { path = "../onlyne-wire", version = "2.3.0" }
-onlyne-net = { path = "../onlyne-net", version = "2.3.0" }
-onlyne-config = { path = "../onlyne-config", version = "2.3.0" }
-onlyne-im-backend = { path = "../onlyne-im-backend", version = "2.3.0" }
+onlyne-proto = { path = "../onlyne-proto", version = "2.4.0" }
+onlyne-wire = { path = "../onlyne-wire", version = "2.4.0" }
+onlyne-net = { path = "../onlyne-net", version = "2.4.0" }
+onlyne-config = { path = "../onlyne-config", version = "2.4.0" }
+onlyne-im-backend = { path = "../onlyne-im-backend", version = "2.4.0" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

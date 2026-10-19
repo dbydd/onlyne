@@ -183,9 +183,7 @@ pub fn unwrap_tool_result(result: Value) -> Value {
     {
         return structured.clone();
     }
-    if let Some(text) = result
-        .pointer("/content/0/text")
-        .and_then(Value::as_str)
+    if let Some(text) = result.pointer("/content/0/text").and_then(Value::as_str)
         && let Ok(parsed) = serde_json::from_str::<Value>(text)
     {
         return parsed;
