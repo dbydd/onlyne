@@ -34,6 +34,7 @@ export const PROSE_SECTION = "onlyne-role-prose";
  * @param {{ pi: any, log: (line: string) => void, context: () => any, sessionId?: string | null }} options
  */
 export function createSurface({ pi, log, context, sessionId = null }) {
+  let currentSessionId = typeof sessionId === "function" ? sessionId : () => sessionId;
   const has = (value) => typeof value === "function";
   const ctx = () => {
     try {
@@ -71,7 +72,7 @@ export function createSurface({ pi, log, context, sessionId = null }) {
   // leave a subagent running with no tool event to bracket it. Scoped to this
   // session's own missions when the plugin knows its id.
   const subagents = createSubagentProbe({
-    getSessionId: () => sessionId,
+    getSessionId: () => currentSessionId(),
     log,
   });
 
@@ -105,9 +106,19 @@ export function createSurface({ pi, log, context, sessionId = null }) {
     registerCommand: has(pi.registerCommand),
   };
 
-  const widget = (lines) => {
+  const widget = (lines, activity = null) => {
     try {
-      ctx()?.ui?.setWidget?.(WIDGET_KEY, lines);
+      const ui = ctx()?.ui;
+      if (!has(ui?.setWidget)) return;
+      if (lines === undefined) {
+        ui.setWidget(WIDGET_KEY, undefined);
+        return;
+      }
+      if (activity && typeof activity.component === "function") {
+        ui.setWidget(WIDGET_KEY, (tui, theme) => activity.component(theme, tui));
+        return;
+      }
+      ui.setWidget(WIDGET_KEY, lines);
     } catch {
       /* widget is decoration; never let it break the protocol */
     }

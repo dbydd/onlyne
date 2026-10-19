@@ -12,7 +12,10 @@ socket——机器级运行目录里的 `<digest>.sock`（`/tmp/onlyne-<uid>/`�
 
 只有自身 session id 等于 `ONLYNE_SESSION_ID` 的那个 session 才会挂载。一个 pi 进程会跑不止一个
 session——`task` 子代理的 sidechain、`/new`——它们都会带着同一份继承来的环境变量加载本扩展；
-因此不是被绑定 session 的那个保持静默，它发出的每一次 onlyne 工具调用都会被拒绝。
+因此不是被绑定 session 的那个保持静默，它发出的每一次 onlyne 工具调用都会被拒绝。在常驻模式
+（`ONLYNE_ROLE`、`.pi/onlyne.json` `"resident": true` 或 `.onlyne/config.toml`
+`placement = "external"`）下，扩展同时监听顶层 `session_switch`、`session_branch` 与
+`session_tree` 事件，使 `/resume`、`/new` 及上下文切换后工具自动跟随当前顶层会话。
 
 ```
 pi session（由 onlyne-client spawn）
@@ -139,7 +142,7 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 
 ### 活动面板
 
-宿主报告有 UI 时（`ctx.hasUI`：TUI 与 RPC 模式为 true，print 与 JSON 模式为 false）且 `ctx.ui.setWidget` 可用，日常 onlyne 通知显示在编辑器上方，widget key 为 `onlyne`。标题行显示 role、连接状态、generation、当前 task id 与阶段。其下最多六条事件，按最新在前排列：`<=` 入站，`=>` 出站，`!!` 警告，`..` 状态，`~~` 重复投递。连续相同事件折成一行并带 `xN`；面板最多八行，每行最多 96 个显示单元，`session_shutdown` 时清除。
+宿主报告有 UI 时（`ctx.hasUI`：TUI 与 RPC 模式为 true，print 与 JSON 模式为 false）且 `ctx.ui.setWidget` 可用，日常 onlyne 通知显示在编辑器上方，widget key 为 `onlyne`。小组件支持 ANSI 与 Tern Surface Protocol（TSP）双渲染面：在 ANSI 终端下使用主题令牌为标题、连接状态、时间戳和方向标记着色排版；在支持 TSP 的 Tern 终端下通过 `describe()` 输出原生可折叠 `card` 组件（`role: "omp.widget.onlyne"`，`variant: "bare"`）与语义化 span。标题行显示 role、连接状态、generation、当前 task id 与阶段。其下最多六条事件，按最新在前排列：`<=` 入站，`=>` 出站，`!!` 警告，`..` 状态，`~~` 重复投递。连续相同事件折成一行并带 `xN`（常驻会话在客户端首次连通前的后台探测保持静默，不刷屏 `reconnecting`）；面板最多八行，每行最多 96 个显示单元，`session_shutdown` 时清除。
 
 ## 3. 工具面
 
@@ -157,7 +160,8 @@ sidechain、`/new`——它们都会带着同一份继承来的环境变量加�
 
 ### `onlyne_send{to, text, kind?, image?}`
 
-经 `send` 帧提交一个 envelope。`kind: "note"`（默认）是自由文本，不带 `op_id`。
+经 `send` 帧提交一个 envelope。`kind: "note"`（默认）向运行中、空闲或常驻待命的会话发送无状态交流消息，
+不带 `op_id`，不创建任务记录，也不要求调用 `onlyne_complete`。
 `kind: "task"` 是派人办事，因此带 `o-<uuid>` 幂等键和新生成的 `causality.task`。`image` 是
 png/jpeg/gif/webp 的绝对路径：插件读出内容，base64 编码后挂成 `body.image`。核心限 2 MiB，
 只收四种 mime。结果是 `sent to <role>`。

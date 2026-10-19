@@ -8,7 +8,12 @@
 // a plain pi session and the extension stays silent rather than failing.
 //
 //   session_start      -> bind the env session id, read env + .pi/onlyne.json,
-//                         connect, register tools
+//                         connect, register tools; a resident plugin that is
+//                         already connected only follows the switch
+//   session_switch     -> /new, /resume and /fork on a host that names them;
+//   session_branch       the same re-point a resident plugin does when current
+//   session_tree         pi reports the switch through session_start, and
+//                        after tree navigation
 //   before_agent_start -> the role prose becomes one section of the system
 //                         prompt the run is about to send (the instruction layer)
 //   turn_start         -> heartbeat{running}
@@ -86,7 +91,7 @@ interface PiSurface {
   roleProse(text: string): boolean;
   applyRoleProse(event: { systemPromptOptions?: { sections?: Record<string, string> } }): boolean;
   customEntry(customType: string, data: unknown): boolean;
-  widget(lines: string[] | undefined): void;
+  widget(lines: string[] | undefined, activity?: unknown): void;
   status(text: string): void;
   welcome(welcome: WelcomeLike): void;
   isIdle(): boolean;
@@ -329,7 +334,26 @@ export default function onlyne(pi: ExtensionAPI) {
     }
   };
 
-  pi.on("session_start", async (_event, ctx) => {
+  /**
+   * Re-point the plugin at the session pi made current. The socket belongs to
+   * the role, not to the session file that mounted it: /new, /resume, /fork and
+   * a tree jump replace the live session in this process, and the tools must
+   * follow it instead of refusing every call as foreign.
+   */
+  const syncSessionContext = (_event: unknown, ctx: ExtensionContext) => {
+    if (!agent) return;
+    context = ctx;
+    const currentId = sessionIdOf(ctx?.sessionManager);
+    if (currentId) {
+      boundSessionId = currentId;
+    }
+    if (surface?.available.widget) {
+      surface.widget(agent.activity.lines(), agent.activity);
+    }
+    surface?.status(agent.activity.lines()[0]);
+  };
+
+  pi.on("session_start", async (event, ctx) => {
     const spawned = sessionIdentity(env);
     const resident = spawned ? null : residentIdentity(env, ctx.cwd);
     const identity = spawned ?? resident;
@@ -342,6 +366,15 @@ export default function onlyne(pi: ExtensionAPI) {
     // expose one; the env-bound mount is then the only candidate and stays the
     // behaviour, with no line to explain.
     const starting = sessionIdOf(ctx.sessionManager);
+    // A resident plugin already holds its connection, so another session_start
+    // in this process is a re-point, not a mount: /new, /resume and /fork
+    // replace the live session, and pi can re-bind this same session's
+    // extensions. The sidechain a `task` subagent runs re-binds every extension
+    // with reason "startup" and a different id, and stays inert.
+    if (!spawned && agent !== null && (event.reason !== "startup" || starting === boundSessionId)) {
+      syncSessionContext(event, ctx);
+      return;
+    }
     if (spawned) {
       if (!mountsSession(spawned.sessionId, starting)) {
         log(`session ${starting} is not the onlyne session ${spawned.sessionId}; staying inert`);
@@ -374,7 +407,7 @@ export default function onlyne(pi: ExtensionAPI) {
       log(`socket unresolved: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (socketPath === null) return;
-    surface = createSurface({ pi, log, context: () => context, sessionId: boundSessionId });
+    surface = createSurface({ pi, log, context: () => context, sessionId: () => boundSessionId });
     agent = new OnlyneAgent({
       socketPath,
       resolveSocket: resident
@@ -398,6 +431,18 @@ export default function onlyne(pi: ExtensionAPI) {
     }
     if (config.autoStart) agent.start();
   });
+
+  // `session_switch` and `session_branch` name the same transitions in the omp
+  // lineage of this API; current pi reports them as `session_start` with a
+  // reason and keeps `session_tree` for navigation, so one helper serves all.
+  // The installed typings no longer declare the first two, but the host stores
+  // handlers by name, which this narrow cast is the whole boundary of.
+  const legacySessionEvents = pi as unknown as {
+    on(event: "session_switch" | "session_branch", handler: (event: unknown, ctx: ExtensionContext) => void): void;
+  };
+  legacySessionEvents.on("session_switch", syncSessionContext);
+  legacySessionEvents.on("session_branch", syncSessionContext);
+  pi.on("session_tree", async (event, ctx) => syncSessionContext(event, ctx));
 
   // The role prose is instruction-layer text: `before_agent_start` hands the
   // handler the prompt options the run is about to render, and a section written

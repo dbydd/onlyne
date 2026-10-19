@@ -689,6 +689,19 @@ impl AdapterSocket {
                 return;
             }
             self.dispatch.park_transport(io, capabilities);
+            // A resident agent is idle from the moment it parks: it holds an
+            // attached process and no delivery. Publishing that row is what lets
+            // a note to this role find it, and what keeps the mirror from
+            // reading the role as sessionless between tasks.
+            if let Some(resident) = self.dispatch.seed_resident_parked_session(session_id) {
+                if let Err(error) = sync_session(&self.dispatch, &resident).await {
+                    tracing::warn!(
+                        session = %resident,
+                        error = %error,
+                        "a resident session's idle row was not published"
+                    );
+                }
+            }
             // Work that arrived ahead of this agent is staged with a payload and
             // no connection. The connection is available now, so the wait ends
             // here, and the claim binds the session to this plugin.

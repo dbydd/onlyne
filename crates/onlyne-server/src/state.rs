@@ -347,14 +347,25 @@ impl Server {
     /// state at this boundary, and the client keeps its own refusal for a session
     /// that ends between the projection and the delivery.
     pub fn has_session_to_wake(&self, role: &str) -> bool {
-        self.ledger
-            .list_sessions(onlyne_proto::QuerySessionsArgs {
-                role: Some(role.to_string()),
-                lifecycle: Some(onlyne_proto::Lifecycle::Working),
-                limit: 8,
-                ..onlyne_proto::QuerySessionsArgs::default()
-            })
-            .is_ok_and(|rows| !rows.is_empty())
+        // A note reaches a session that is running work and one that is waiting
+        // for it alike: `working` still owes a turn, `idle` holds an attached
+        // agent between deliveries (the resident case). `created` and `exited`
+        // wake nothing, so a note queued for the role keeps waiting for its TTL.
+        [
+            onlyne_proto::Lifecycle::Working,
+            onlyne_proto::Lifecycle::Idle,
+        ]
+        .into_iter()
+        .any(|lifecycle| {
+            self.ledger
+                .list_sessions(onlyne_proto::QuerySessionsArgs {
+                    role: Some(role.to_string()),
+                    lifecycle: Some(lifecycle),
+                    limit: 8,
+                    ..onlyne_proto::QuerySessionsArgs::default()
+                })
+                .is_ok_and(|rows| !rows.is_empty())
+        })
     }
 
     pub fn role_sender(&self, role: &str) -> Option<mpsc::Sender<Frame>> {
@@ -622,5 +633,70 @@ impl Server {
     /// Wait for the shutdown request.
     pub async fn await_shutdown(&self) {
         self.shutdown.notified().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onlyne_config::layout::ServerRoot;
+    use onlyne_proto::{
+        AgentPhase, DeliveryPhase, Lifecycle, RecoveryPhase, ResourcePhase, SessionProjection,
+    };
+
+    /// A server over a temporary root with two roles that may address each other.
+    fn server() -> (tempfile::TempDir, Arc<State>) {
+        let dir = tempfile::tempdir().expect("temporary root");
+        let root = dir.path().join("server");
+        let layout = ServerRoot::resolve(&root);
+        layout.bootstrap().expect("bootstrap the server root");
+        let key = "ed25519/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let pin = format!("sha256/{}", "0".repeat(64));
+        std::fs::write(
+            layout.spec_path(),
+            format!(
+                "[server]\n\
+                 name = \"wake-regression\"\n\
+                 listen = \"127.0.0.1:0\"\n\
+                 cert_pin = {pin:?}\n\
+                 requeue_max_attempts = 0\n\
+                 requeue_ttl_secs = 0\n\
+                 \n\
+                 [[client]]\n\
+                 role = \"sender\"\n\
+                 key = {key:?}\n\
+                 allowed_targets = [\"resident\"]\n\
+                 allowed_senders = [\"resident\"]\n\
+                 \n\
+                 [[client]]\n\
+                 role = \"resident\"\n\
+                 key = {key:?}\n\
+                 allowed_targets = [\"sender\"]\n\
+                 allowed_senders = [\"sender\"]\n"
+            ),
+        )
+        .expect("write spec.toml");
+        let state = Server::open(&ServerInit { root, listen: None }).expect("open the server state");
+        (dir, state)
+    }
+
+    /// A session waiting between deliveries is one a note can wake.
+    #[tokio::test]
+    async fn an_idle_session_wakes_a_note() {
+        let (_dir, state) = server();
+        assert!(!state.has_session_to_wake("resident"));
+        let idle = SessionProjection {
+            lifecycle: Lifecycle::Idle,
+            agent: AgentPhase::Idle,
+            delivery: DeliveryPhase::NoIntent,
+            resource: ResourcePhase::Attached,
+            recovery: RecoveryPhase::NoRecovery,
+            outcome: None,
+            observed: None,
+        };
+        crate::projection::write(&state, "resident", "", "resident-main", 1, 1, idle, None, None)
+            .expect("publish the idle row");
+        assert!(state.has_session_to_wake("resident"));
+        assert!(!state.has_session_to_wake("sender"));
     }
 }

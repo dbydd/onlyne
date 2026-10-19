@@ -298,6 +298,7 @@ export class OnlyneAgent {
   /** Tear the current socket down and schedule the next attempt. */
   dropSocket() {
     const socket = this.socket;
+    const wasConnected = this.connected;
     this.socket = null;
     this.connected = false;
     this.handshaking = false;
@@ -305,7 +306,13 @@ export class OnlyneAgent {
     this.rejectAll("connection lost");
     this.stopHeartbeat();
     this.activity.set({ connection: this.closed ? "detached" : "reconnecting" });
-    this.notice("state", this.closed ? "detached" : "reconnecting");
+    if (!this.closed && (!this.resident || wasConnected)) {
+      this.notice("state", "reconnecting");
+    } else if (this.closed) {
+      this.notice("state", "detached");
+    } else {
+      this.redraw();
+    }
     if (socket && !socket.destroyed) socket.destroy();
     this.scheduleReconnect();
   }
@@ -519,11 +526,17 @@ export class OnlyneAgent {
    * @param {"in" | "dup" | "out" | "warn" | "state"} kind
    * @param {string} text
    */
-  notice(kind, text) {
-    this.activity.note(kind, text);
+  redraw() {
     this.surface.status?.(this.activity.lines()[0]);
     if (this.surface.available?.widget) {
-      this.surface.widget?.(this.activity.lines());
+      this.surface.widget?.(this.activity.lines(), this.activity);
+    }
+  }
+
+  notice(kind, text) {
+    this.activity.note(kind, text);
+    this.redraw();
+    if (this.surface.available?.widget) {
       return;
     }
     // No panel: stderr carries the event.
@@ -810,7 +823,27 @@ export class OnlyneAgent {
       this.surface.roleProse?.(prose);
     }
 
+    const kind = envelope.kind ?? "task";
     const held = this.tasks.get(taskId);
+    // A note is a message, not work: it is injected and acknowledged, and it
+    // opens no task record, so nothing beats for it, no turn end owes it an
+    // outcome and `onlyne_complete` is never required of it. A note naming a
+    // task this session is still working on lands mid-task, below.
+    if (kind === "note" && (!held || held.completed)) {
+      if (this.tasks.size > 0) this.agentState = "running";
+      this.surface.wakeUser?.(text, this.imageParts(envelope));
+      this.surface.customEntry?.("onlyne-assign", {
+        taskId,
+        envelopeId: envelope.id ?? null,
+        kind: "note",
+        proseInjected: proseIsNew,
+        prose,
+        attachments: attachmentPaths,
+      });
+      this.notice("in", `note ${taskId.slice(0, 8)} from ${describePrincipal(envelope.from)}: ${headOf(envelope.body?.text)}`);
+      await this.ack(taskId, true, null);
+      return;
+    }
     // A completed record is not a live one: a new envelope for a task that
     // already settled is fresh work under an old id, so it gets a fresh record.
     if (held && !held.completed) {
@@ -847,13 +880,13 @@ export class OnlyneAgent {
     this.surface.customEntry?.("onlyne-assign", {
       taskId,
       envelopeId: envelope.id ?? null,
-      kind: envelope.kind ?? "task",
+      kind,
       proseInjected: proseIsNew,
       prose,
       attachments: attachmentPaths,
     });
     this.activity.set({ taskId, phase: "running" });
-    this.notice("in", `task ${taskId.slice(0, 8)} from ${describePrincipal(envelope.from)} (${envelope.kind ?? "task"}): ${headOf(envelope.body?.text)}`);
+    this.notice("in", `task ${taskId.slice(0, 8)} from ${describePrincipal(envelope.from)} (${kind}): ${headOf(envelope.body?.text)}`);
     this.startHeartbeat();
     await this.ack(taskId, true, null);
   }

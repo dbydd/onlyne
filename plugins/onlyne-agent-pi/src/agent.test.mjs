@@ -540,6 +540,27 @@ test("an assign is injected once, acked, and a redelivery changes nothing", asyn
   assert.deepEqual(second[1], { task_id: TASK_ID, accepted: true, reason: "duplicate" });
 });
 
+// A note is communication, not work: the session is woken and the delivery is
+// acknowledged, and no task record opens, so nothing beats for it and no turn
+// end can demand a completion.
+test("a note is injected, acked, and opens no task", async () => {
+  const { agent, host, surface } = await startAgent();
+  agent.start();
+  await waitFor(() => host.of("report").length >= 1);
+
+  const args = structuredClone(assignArgs());
+  args.envelope.kind = "note";
+  args.text = "From planner:\n\nwhich way is the flag?";
+  host.notify("assign", args);
+  await waitFor(() => (surface.calls.wakeUser.length === 1 ? true : null));
+
+  assert.equal(surface.calls.wakeUser[0].text, args.text, "the frame's text is injected unchanged");
+  assert.equal(surface.calls.entries[0].data.kind, "note");
+  const acks = await waitFor(() => (host.of("assign_ack").length >= 1 ? host.of("assign_ack") : null));
+  assert.deepEqual(acks[0], { task_id: TASK_ID, accepted: true });
+  assert.deepEqual(agent.status().tasks, []);
+});
+
 // A follow-up arrives as its own envelope under the task id the session is
 // already running. Keying the injection guard on the task swallowed it: the
 // panel said `already injected`, nothing reached the model, and the row the

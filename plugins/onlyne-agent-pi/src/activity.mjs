@@ -19,6 +19,21 @@ const MARKERS = {
   state: "..",
 };
 
+const EVENT_STYLES = {
+  in: { fg: "accent" },
+  dup: { fg: "dim" },
+  out: { fg: "success" },
+  warn: { fg: "warning" },
+  state: { fg: "muted" },
+};
+
+const CONNECTION_STYLES = {
+  connected: { fg: "success", status: "done" },
+  reconnecting: { fg: "warning", status: "running" },
+  detached: { fg: "muted", status: "cancelled" },
+  connecting: { fg: "accent", status: "pending" },
+};
+
 const clean = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 const points = (value) => Array.from(String(value ?? ""));
 
@@ -62,6 +77,140 @@ function eventLine(event) {
   return cut(`${timeOf(event.at)}  ${marker} ${event.text}${count}`, MAX_WIDTH);
 }
 
+function toneFg(theme, color, text) {
+  if (!theme || typeof theme.fg !== "function") return text;
+  try {
+    return theme.fg(color, text);
+  } catch {
+    return text;
+  }
+}
+
+function toneBold(theme, text) {
+  if (!theme || typeof theme.bold !== "function") return text;
+  try {
+    return theme.bold(text);
+  } catch {
+    return text;
+  }
+}
+
+function styledHeaderLine(state, theme, width) {
+  if (!theme || typeof theme.fg !== "function") return headerLine(state);
+  const role = clean(state.role);
+  const connection = clean(state.connection) || "connecting";
+  const connStyle = CONNECTION_STYLES[connection] ?? CONNECTION_STYLES.connecting;
+  const sep = toneFg(theme, "dim", " · ");
+  const head = role
+    ? `${toneBold(theme, toneFg(theme, "accent", "onlyne"))} ${toneBold(theme, cut(role, 16, false))}`
+    : toneBold(theme, toneFg(theme, "accent", "onlyne"));
+  const parts = [head, toneFg(theme, connStyle.fg, connection)];
+  if (state.generation !== undefined && state.generation !== null) {
+    parts.push(toneFg(theme, "muted", `gen ${state.generation}`));
+  }
+  const taskId = clean(state.taskId);
+  if (taskId) {
+    const phase = clean(state.phase);
+    const phaseTone = phase === "done"
+      ? "success"
+      : phase === "failed" || phase === "blocked"
+        ? "error"
+        : phase.includes("queued") || phase === "running"
+          ? "warning"
+          : "muted";
+    const taskPart = `${toneFg(theme, "muted", "task")} ${toneFg(theme, "accent", cut(taskId, 8, false))}${
+      phase ? ` ${toneFg(theme, phaseTone, phase)}` : ""
+    }`;
+    parts.push(taskPart);
+  }
+  return parts.join(sep);
+}
+
+function styledEventLine(event, theme, maxTextWidth) {
+  if (!theme || typeof theme.fg !== "function") return eventLine(event);
+  const marker = MARKERS[event.kind] ?? MARKERS.state;
+  const style = EVENT_STYLES[event.kind] ?? EVENT_STYLES.state;
+  const count = event.repeats > 0 ? toneFg(theme, "warning", ` ×${event.repeats + 1}`) : "";
+  const bodyBudget = Math.max(12, maxTextWidth - 14 - (event.repeats > 0 ? String(event.repeats + 1).length + 2 : 0));
+  const body = cut(event.text, bodyBudget);
+  const bodyStyled = event.kind === "warn"
+    ? toneFg(theme, "warning", body)
+    : event.kind === "dup"
+      ? toneFg(theme, "dim", body)
+      : body;
+  return `${toneFg(theme, "dim", timeOf(event.at))}  ${toneFg(theme, style.fg, marker)} ${bodyStyled}${count}`;
+}
+
+function describeHeaderSpans(state) {
+  const role = clean(state.role);
+  const connection = clean(state.connection) || "connecting";
+  const connStyle = CONNECTION_STYLES[connection] ?? CONNECTION_STYLES.connecting;
+  const spans = [{ t: "onlyne", s: "accent strong" }];
+  if (role) spans.push({ t: ` ${cut(role, 16, false)}`, s: "strong" });
+  spans.push({ t: " · ", s: "dim" }, { t: connection, s: connStyle.fg });
+  if (state.generation !== undefined && state.generation !== null) {
+    spans.push({ t: " · ", s: "dim" }, { t: `gen ${state.generation}`, s: "muted" });
+  }
+  const taskId = clean(state.taskId);
+  if (taskId) {
+    const phase = clean(state.phase);
+    const phaseTone = phase === "done"
+      ? "success"
+      : phase === "failed" || phase === "blocked"
+        ? "error"
+        : phase.includes("queued") || phase === "running"
+          ? "warning"
+          : "muted";
+    spans.push(
+      { t: " · ", s: "dim" },
+      { t: "task ", s: "muted" },
+      { t: cut(taskId, 8, false), s: "accent mono" },
+    );
+    if (phase) spans.push({ t: ` ${phase}`, s: phaseTone });
+  }
+  return spans;
+}
+
+function describeEventRow(event, index) {
+  const marker = MARKERS[event.kind] ?? MARKERS.state;
+  const style = EVENT_STYLES[event.kind] ?? EVENT_STYLES.state;
+  const bodyTone = event.kind === "warn" ? "warning" : event.kind === "dup" ? "dim" : undefined;
+  const spans = [
+    { t: timeOf(event.at), s: "dim mono" },
+    { t: `  ${marker} `, s: `${style.fg} mono strong` },
+    bodyTone ? { t: event.text, s: bodyTone } : { t: event.text },
+  ];
+  if (event.repeats > 0) {
+    spans.push({ t: ` ×${event.repeats + 1}`, s: "warning mono" });
+  }
+  return {
+    k: "text",
+    p: { spans, truncate: "end", role: `onlyne.event.${event.kind}` },
+    key: `ev-${index}`,
+  };
+}
+
+/**
+ * Build a TSP `NativeNode` card for Tern surfaces (`Component.describe()`).
+ */
+export function describeActivityNode(state, events, shown = SHOW_EVENTS, collapsed = false) {
+  const connection = clean(state.connection) || "connecting";
+  const connStyle = CONNECTION_STYLES[connection] ?? CONNECTION_STYLES.connecting;
+  const visible = events.slice(0, shown);
+  return {
+    k: "card",
+    p: {
+      role: "omp.widget.onlyne",
+      variant: "bare",
+      status: connStyle.status,
+      head: describeHeaderSpans(state),
+      collapsible: visible.length > 0,
+      collapsed: visible.length > 0 ? Boolean(collapsed) : false,
+    },
+    c: visible.map((ev, index) => describeEventRow(ev, index)),
+  };
+}
+
 /**
  * Activity is a pure panel model: header state plus newest-first event history.
  * `lines()` reads stored state only, so identical state gives identical output.
@@ -70,6 +219,7 @@ export function createActivity({ maxEvents = SHOW_EVENTS, clock = () => new Date
   const state = { connection: "connecting" };
   const events = [];
   const shown = Math.max(0, Math.min(Number(maxEvents) || 0, MAX_LINES - 1));
+  let collapsed = false;
   const api = {
     note(kind, text) {
       const next = noteText(text);
@@ -89,6 +239,51 @@ export function createActivity({ maxEvents = SHOW_EVENTS, clock = () => new Date
     },
     lines() {
       return [headerLine(state), ...events.slice(0, shown).map(eventLine)].slice(0, MAX_LINES);
+    },
+    ansiLines(theme, width = MAX_WIDTH) {
+      const padX = width >= 4 ? " " : "";
+      const innerWidth = Math.max(24, Math.min(MAX_WIDTH, width - padX.length * 2));
+      if (collapsed) {
+        return [`${padX}${styledHeaderLine(state, theme, innerWidth)}`];
+      }
+      return [
+        `${padX}${styledHeaderLine(state, theme, innerWidth)}`,
+        ...events.slice(0, shown).map((ev) => `${padX}${styledEventLine(ev, theme, innerWidth)}`),
+      ].slice(0, MAX_LINES);
+    },
+    describe() {
+      return describeActivityNode(state, events, shown, collapsed);
+    },
+    component(theme, tui = null) {
+      let cachedWidth = -1;
+      let cachedRows = null;
+      let cachedNode = null;
+      return {
+        render(width = MAX_WIDTH) {
+          if (cachedRows && cachedWidth === width) return cachedRows;
+          cachedWidth = width;
+          cachedRows = api.ansiLines(theme, width);
+          return cachedRows;
+        },
+        describe() {
+          cachedNode ??= api.describe();
+          return cachedNode;
+        },
+        handleNativeEvent(event) {
+          if (event?.type === "toggle" && typeof event.collapsed === "boolean") {
+            collapsed = event.collapsed;
+            cachedRows = null;
+            cachedNode = null;
+            tui?.requestRender?.();
+          }
+        },
+        invalidate() {
+          cachedWidth = -1;
+          cachedRows = null;
+          cachedNode = null;
+        },
+        dispose() {},
+      };
     },
     events,
   };

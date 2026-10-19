@@ -831,26 +831,27 @@ impl DispatchState {
     /// Hand one note to the session already serving this role's work.
     ///
     /// A note carries no task, so it owns no session: §3's note is a message to
-    /// an agent that is already running, and the plan refuses one whose role is
-    /// offline (`note_queue` off). A role with no running agent has nothing to
-    /// answer it, which is what the caller reports. Answers whether an agent
-    /// took the note.
+    /// an agent that is already running or waiting, and the plan refuses one
+    /// whose role is offline (`note_queue` off). The session that takes it is
+    /// the one serving a task, else an idle one with a live transport, else a
+    /// parked resident agent — which keeps its place in the park and takes the
+    /// next task as before. A role with no such agent has nothing to answer it,
+    /// which is what the caller reports. Answers whether an agent took the note.
     pub async fn inject_note(&self, envelope: &Envelope) -> bool {
-        let Some((task_id, session_id)) = self.ready_session() else {
+        let Some(target) = self.note_target(envelope) else {
             return false;
         };
-        let Some((io, capabilities)) = self.session_transport(&session_id) else {
-            return false;
-        };
-        if missing_capability(&capabilities, Capability::Inject) {
-            tracing::debug!(task = %task_id, "plugin takes no message mid-task");
+        if missing_capability(&target.capabilities, Capability::Inject) {
+            tracing::debug!(
+                task = %target.task_id,
+                "plugin takes no message; the note has no channel"
+            );
             return false;
         }
-        let generation = self.session_generation(&task_id).unwrap_or(1);
         // A note reaches a live agent the way a task does, so it travels the same
         // one template and its image is written under the workspace first.
         let workspace = self.inner.lock().workspace.clone();
-        let attachments = write_attachment(&workspace, &task_id, envelope)
+        let attachments = write_attachment(&workspace, &target.task_id, envelope)
             .into_iter()
             .collect::<Vec<_>>();
         let text = render(
@@ -864,30 +865,142 @@ impl DispatchState {
             prose: self.role_prose(),
             text,
             attachments,
-            task_id,
-            generation,
-            session_id: Some(session_id.to_string()),
+            task_id: target.task_id,
+            generation: target.generation,
+            session_id: Some(target.session_id),
             scope: Some(scope_word(&self.session_policy().scope)),
             parent: None,
         };
-        io.notify(AdapterMsg::Host(HostOp::Assign(assign)))
+        target
+            .io
+            .notify(AdapterMsg::Host(HostOp::Assign(assign)))
             .await
             .is_ok()
     }
 
-    /// The session a mid-task message can join: a ready slot serving a task,
-    /// answered as (task, session key).
-    fn ready_session(&self) -> Option<(String, String)> {
+    /// The session one note can join, and the connection that serves it.
+    ///
+    /// Three sources, in the order that keeps a running agent's behaviour:
+    /// the session serving a task, an idle session with a live transport, and
+    /// a parked resident agent. The park is read, never spent: the connection
+    /// that takes the note still waits for the role's next task.
+    fn note_target(&self, envelope: &Envelope) -> Option<NoteTarget> {
         let inner = self.inner.lock();
-        inner
+        if let Some((key, slot)) = inner
             .sessions
             .iter()
             .find(|(_, slot)| slot.ready && slot.task_id.is_some() && !slot.read_only)
-            .map(|(key, slot)| {
-                (
-                    slot.task_id.clone().unwrap_or_else(|| key.clone()),
-                    key.clone(),
-                )
-            })
+            && let Some((io, capabilities)) = transport_of(&inner, key, slot)
+        {
+            return Some(NoteTarget {
+                task_id: slot.task_id.clone().unwrap_or_else(|| key.clone()),
+                session_id: key.clone(),
+                generation: slot.session.generation,
+                io,
+                capabilities,
+            });
+        }
+        if let Some((key, slot)) = inner
+            .sessions
+            .iter()
+            .find(|(_, slot)| slot.task_id.is_none() && !slot.read_only && !slot.suspended)
+            && let Some((io, capabilities)) = transport_of(&inner, key, slot)
+        {
+            return Some(NoteTarget {
+                task_id: slot.session.task_id.clone(),
+                session_id: key.clone(),
+                generation: slot.session.generation,
+                io,
+                capabilities,
+            });
+        }
+        let (io, capabilities) = inner.parked.first()?;
+        Some(NoteTarget {
+            task_id: envelope.id.clone(),
+            session_id: inner
+                .session_policy
+                .resolved_session_id()
+                .unwrap_or("resident")
+                .to_string(),
+            generation: 1,
+            io: io.clone(),
+            capabilities: capabilities.clone(),
+        })
+    }
+}
+
+/// One session a note can be handed to, with the connection that serves it.
+struct NoteTarget {
+    task_id: String,
+    session_id: String,
+    generation: u64,
+    io: AdapterIo,
+    capabilities: Vec<Capability>,
+}
+
+/// The live transport of one slot, under whichever name it was bound.
+fn transport_of(
+    inner: &DispatchInner,
+    key: &str,
+    slot: &SessionSlot,
+) -> Option<(AdapterIo, Vec<Capability>)> {
+    inner
+        .transports
+        .iter()
+        .find(|(served, _)| names_session(key, slot, served))
+        .map(|(_, transport)| transport.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::fake::FakeBackend;
+    use onlyne_proto::new_envelope;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn a_note_wakes_a_parked_resident_transport() {
+        let dir = tempdir().unwrap();
+        let store = ClientStore::open(dir.path().join("client.db")).expect("client store");
+        let state = DispatchState::new(
+            "caerulea",
+            dir.path(),
+            Vec::new(),
+            8,
+            Arc::new(FakeBackend::new()),
+            store,
+        );
+        let (stream, mut peer) = tokio::io::duplex(4096);
+        let io = AdapterIo::new(stream, Duration::from_secs(5), Duration::from_secs(5));
+        state.park_transport(io.clone(), vec![Capability::Inject]);
+        let note = new_envelope(
+            MsgKind::Note,
+            Principal::role("planner"),
+            Principal::role("caerulea"),
+            Body::text("say 1"),
+            None,
+        )
+        .expect("note envelope");
+        assert!(
+            state.inject_note(&note).await,
+            "the parked agent takes the note"
+        );
+        {
+            let inner = state.inner.lock();
+            assert_eq!(inner.parked.len(), 1, "the note does not spend the park");
+            assert!(inner.parked[0].0.same_connection(&io));
+        }
+        let frame = onlyne_wire::read_frame::<_, onlyne_adapter::WireMessage>(&mut peer)
+            .await
+            .expect("read the assign")
+            .expect("one frame");
+        match frame.msg {
+            AdapterMsg::Host(HostOp::Assign(assign)) => {
+                assert_eq!(assign.task_id, note.id);
+                assert_eq!(assign.session_id.as_deref(), Some("resident"));
+                assert!(assign.text.contains("say 1"), "the body reaches the agent");
+            }
+            other => panic!("expected an assign frame, got {other:?}"),
+        }
     }
 }

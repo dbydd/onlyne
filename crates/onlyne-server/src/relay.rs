@@ -537,14 +537,16 @@ pub fn pull(
             seq: head,
         });
     }
-    // `note` rows are logged and expired, never pulled: §3 line 152 gives them
-    // no session, and the client's accept path refuses an envelope without a
-    // task, which would turn a chat line into a rejection.
+    // A `note` owns no session and is pulled only while the role has one a note
+    // can wake. §3 line 152 leaves it out of the queue otherwise, so a note for
+    // an offline role keeps waiting for its TTL instead of becoming a refusal
+    // the client's accept path answers for an envelope with no task.
+    let can_wake_note = state.has_session_to_wake(role);
     let mut candidates: Vec<_> = state
         .ledger
         .queued_for(role, 8)?
         .into_iter()
-        .filter(|row| row.kind != MsgKind::Note && wanted(row))
+        .filter(|row| (row.kind != MsgKind::Note || can_wake_note) && wanted(row))
         .collect();
     for row in state.ledger.in_flight_for(role)? {
         // A row stays handed to the pull that took it. Another session may still

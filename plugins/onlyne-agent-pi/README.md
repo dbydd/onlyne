@@ -17,7 +17,11 @@ ordinary pi session: the plugin registers nothing and opens nothing.
 Only the session whose own id equals `ONLYNE_SESSION_ID` mounts. A pi process runs more
 than one session — a `task` subagent's sidechain, `/new` — and each of them loads this
 extension with the same inherited environment, so a session that is not the bound one
-stays inert and every onlyne tool it calls is refused.
+stays inert and every onlyne tool it calls is refused. In resident mode (`ONLYNE_ROLE` or
+`.pi/onlyne.json` `"resident": true` / `.onlyne/config.toml` `placement = "external"`), the
+extension also tracks top-level `session_switch`, `session_branch`, and `session_tree`
+events so `/resume`, `/new`, and context rollover keep the tools bound to the active
+top-level session.
 
 ```
 pi session (spawned by onlyne-client)
@@ -150,7 +154,7 @@ What happens when a pi API is missing, and what the host does then:
 
 ### Activity panel
 
-When the host reports a UI (`ctx.hasUI`, true in the TUI and RPC modes, false in print and JSON modes) and `ctx.ui.setWidget` is available, routine onlyne notices draw in the panel above the editor with widget key `onlyne`. The header shows role, connection state, generation, the current task id, and phase. Below it, up to six newest-first events use `<=` for inbound frames, `=>` for outbound frames, `!!` for warnings, `..` for state changes, and `~~` for duplicate deliveries. Repeated identical events fold into one line with `xN`; the panel holds at most eight lines, each capped at 96 cells, and `session_shutdown` clears it.
+When the host reports a UI (`ctx.hasUI`, true in the TUI and RPC modes, false in print and JSON modes) and `ctx.ui.setWidget` is available, routine onlyne notices draw in the panel above the editor with widget key `onlyne`. The widget registers a dual-surface component: on ANSI terminals it renders theme-styled lines (`accent` role badge, status-toned connection state, dimmed timestamps, and semantic event markers), and on Tern Surface Protocol (TSP) hosts it implements `describe()` to emit a native collapsible `card` (`role: "omp.widget.onlyne"`, `variant: "bare"`) with structured spans. The header shows role, connection state, generation, the current task id, and phase. Below it, up to six newest-first events use `<=` for inbound frames, `=>` for outbound frames, `!!` for warnings, `..` for state changes, and `~~` for duplicate deliveries. Repeated identical events fold into one line with `xN` (and pre-connection resident polling stays quiet until a socket connects); the panel holds at most eight lines, each capped at 96 cells, and `session_shutdown` clears it.
 
 ## 3. Tools
 
@@ -172,8 +176,10 @@ connected.
 
 ### `onlyne_send{to, text, kind?, image?}`
 
-Sends one envelope on the `send` frame. `kind: "note"` (the default) is free text and
-carries no `op_id`. `kind: "task"` hands work to a role, so it carries an `o-<uuid>`
+Sends one envelope on the `send` frame. `kind: "note"` (the default) sends stateless
+conversational text to a working, idle, or parked resident session, carries no `op_id`,
+opens no task record, and requires no `onlyne_complete`. `kind: "task"` hands tracked work
+to a role, so it carries an `o-<uuid>`
 idempotency key and a fresh `causality.task`. `image` is an absolute path to a
 png/jpeg/gif/webp file: the plugin reads it, base64-encodes it and attaches it as
 `body.image`. The core caps that at 2 MiB and accepts four mime types. The result is

@@ -105,8 +105,10 @@ onlyne handoff --to <next-role> --task <task-id> --text "<same task text>" \
 ```
 
 `onlyne_send{to, text, kind, image}` starts a fresh family instead: `kind:"task"` mints a task with
-no `parent_task` and `hop = 0`, `kind:"note"` (the default) is free text with no session on the
-other side, and `image` attaches one image, 2 MiB of decoded bytes. The server gates the target of
+no `parent_task` and `hop = 0`, `kind:"note"` (the default) sends stateless conversational text to a
+working, idle, or parked resident session without opening a task or requiring `onlyne_complete`, and
+`image` attaches one image, 2 MiB of decoded bytes. When you receive a `note`, reply with
+`onlyne_send{to, text, kind:"note"}` and do not call `onlyne_complete`. The server gates the target of
 every route on your spec entry's `allowed_targets`, and any other name returns `acl_denied` before
 a row exists. Ring and fan-out shapes live in your prose. The mechanics here never change.
 

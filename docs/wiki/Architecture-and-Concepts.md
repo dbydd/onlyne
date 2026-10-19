@@ -90,19 +90,28 @@ owes_targets    = ["reviewer"]
 
 ## 6. Resident & Pre-Started Agent Handshake ("Session Before Client") / 先起常驻 Agent 再拉起集群
 
-In supervisor or federation workflows, operators often prefer to open an interactive coding agent (`omp` / `pi`) **first**, and start or restart `onlyne up` / `onlyne-client` **later**.
+In supervisor and federation workflows, operators can start an interactive coding agent (`omp` or `pi`) first and start `onlyne up` or `onlyne-client` afterward.
 
 ### How It Works
 
 1. **Identity & Predictable Session ID (`residentIdentity`)**:
-   `pi-onlyne` enters resident mode without requiring a pre-existing `ONLYNE_TASK_ID` whenever any of the following is present:
+   `pi-onlyne` enters resident mode without `ONLYNE_TASK_ID` when any of the following is configured:
    - Environment variable `ONLYNE_ROLE=<role>` (with optional `ONLYNE_SESSION_ID=<alias>` and `ONLYNE_WORKSPACE=<dir>`),
    - `<cwd>/.pi/onlyne.json` declaring `{"role": "<role>", "sessionId": "<alias>", "resident": true}`, or
    - `<workspace>/.onlyne/config.toml` declaring `placement = "external"`, `[client.session] scope = "role"`, or `[client.session] session_id = "<alias>"` (or `session_alias = "<alias>"`).
 2. **Deterministic Socket Polling (`resolveResidentSocketPath`)**:
-   Before `onlyne-client` starts, `<runtime_dir>/<digest>.json` does not exist yet. `pi-onlyne` computes the deterministic v2 socket path `/tmp/onlyne-<uid>/<workspaceDigest>.sock` (and re-queries `/tmp/onlyne-<uid>/*.json` by `role` on each reconnect tick) while quietly polling in the background (`reconnecting`).
-3. **Automatic Handshake & Reuse**:
-   As soon as `onlyne up` or `onlyne-client run` binds the workspace socket, the resident `omp`/`pi` session completes `hello`/`welcome` automatically, injects the role prose into its system prompt, and parks in `onlyne-client`. When tasks arrive for that role, `onlyne-client` dispatches them directly to the parked resident session without spawning a duplicate terminal pane, and completing a task keeps the resident agent alive for subsequent deliveries.
+   Before `onlyne-client` starts, `pi-onlyne` computes the deterministic socket path `/tmp/onlyne-<uid>/<workspaceDigest>.sock` and re-reads `/tmp/onlyne-<uid>/*.json` by `role` on each reconnect tick.
+3. **Automatic Handshake, Idle Projection & Session Switch Tracking**:
+   When `onlyne up` or `onlyne-client run` binds the workspace socket, the resident `omp` or `pi` session completes `hello` and `welcome`, loads the role prose into its system prompt, and parks in `onlyne-client`. `onlyne-client` publishes an `idle` session projection to `onlyne-server` immediately so the cluster sees the resident session as online and ready. When the user runs `/resume`, `/new`, `/fork`, or context rollover (`session_switch`, `session_branch`, `session_tree`), `pi-onlyne` updates `boundSessionId` to the active top-level session ID and redraws the panel.
+
+### 6.1 Stateless `note` vs. Stateful `task` in Resident Sessions / 常驻会话中的轻量交流（`note`）与正式派工（`task`）
+
+Onlyne separates conversational messages from tracked work assignments using `MsgKind`:
+
+| Message Kind | How to Send | Lifecycle & Obligations | When to Use |
+|---|---|---|---|
+| **`note`** (`MsgKind::Note`) | `onlyne_send{to, text, kind: "note"}` (default in `onlyne_send`) or `onlyne send --note` | Stateless delivery. Reaches any `working`, `idle`, or parked resident session. The plugin injects the text into the conversation and sends `assign_ack`. It opens no task row, starts no turn-end nudge timer, and requires no `onlyne_complete` call. | Ping-pong chat, status checks, clarifications, and lightweight coordination between resident agents. |
+| **`task`** (`MsgKind::Task`) | `onlyne_send{to, text, kind: "task"}` or `onlyne send` | Stateful assignment. Opens a task row and session binding, tracks heartbeats and turn-end nudges, enforces `owes_targets`, and settles through `onlyne_complete{outcome, summary, details, files}`. | Assigned deliverables that require a tracked ledger verdict (`done`, `failed`, `blocked`, `cancelled`) and a completion receipt back to the origin role. |
 
 ### Example Configuration
 

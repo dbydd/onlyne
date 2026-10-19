@@ -10,6 +10,7 @@ use super::state::{
     DispatchInner, DispatchState, FrameGuard, SessionSlot, has_attached_transport,
     rebase_generation, slot_key_named, slot_key_serving_task, slot_task,
 };
+use super::projection::stored_task_state;
 
 /// The one sentence a session that ended a turn without a completion reads.
 ///
@@ -30,6 +31,23 @@ pub(super) fn names_session(key: &str, slot: &SessionSlot, session_id: &str) -> 
     key == session_id
         || slot.session.task_id == session_id
         || slot.task_id.as_deref() == Some(session_id)
+}
+
+/// The session id a parked mount's resident row publishes under.
+///
+/// A mount that names its session owns that name. A mount that names nothing is
+/// resident only when this role's configuration says so: a configured
+/// `session_id`, an external placement (the runtime dials the client itself), or
+/// a `role` pool (the session outlives every delivery). A plain `oneshot` mount
+/// answers `None`, so the rows it produces stay exactly what they were before
+/// resident rows existed.
+fn resident_session_name(inner: &DispatchInner, mounted: Option<&str>) -> Option<String> {
+    if let Some(id) = mounted.or_else(|| inner.session_policy.resolved_session_id()) {
+        return Some(id.to_string());
+    }
+    let external = inner.placement.map(|placement| placement.as_str()) == Some("external");
+    let role_scope = inner.session_policy.scope == onlyne_config::SessionScope::Role;
+    (external || role_scope).then(|| "resident".to_string())
 }
 
 /// Whether a connection other than `io` is the one serving one slot.
@@ -542,6 +560,97 @@ impl DispatchState {
         }
     }
 
+    /// Seed the idle row one parked resident agent publishes.
+    ///
+    /// A resident agent holds an attached process and no delivery the moment it
+    /// mounts, which is a `Lifecycle::Idle` session. Publishing that row is what
+    /// lets a note addressed to the role find it, and what keeps the server's
+    /// mirror from showing the role sessionless between tasks.
+    ///
+    /// Answers the session id it wrote. `None` is a mount the resident rule does
+    /// not cover — a plain `oneshot` agent that named no session — or one whose
+    /// session this client already serves.
+    pub fn seed_resident_parked_session(&self, mounted: Option<&str>) -> Option<String> {
+        let inner = self.inner.lock();
+        let resident = resident_session_name(&inner, mounted)?;
+        // A session this client already serves has a row of its own: the parked
+        // connection is not a second session of the role.
+        if inner
+            .sessions
+            .iter()
+            .any(|(key, slot)| names_session(key, slot, &resident))
+        {
+            return None;
+        }
+        let stored = inner.store.get_session(&resident).ok().flatten();
+        let lifecycle = stored
+            .as_ref()
+            .map(|row| projection_of(row, stored_task_state(&inner, &row.task_id)).lifecycle);
+        match lifecycle {
+            // A fresh mount: the binding makes the session known to the reducer,
+            // and the feeds below write the resident tuple.
+            None => {
+                if let Err(error) = inner.store.bind_task(&resident, &resident) {
+                    tracing::warn!(
+                        session = %resident,
+                        error = %error,
+                        "a resident session's binding was not written"
+                    );
+                    return None;
+                }
+                feed_resident_idle(&inner, &resident);
+            }
+            // A connection that came back for a session this client had already
+            // ended: the old generation is gone, so the resident opens a new one.
+            Some(Lifecycle::Exited) => {
+                match crate::reconcile::apply_from_stored(
+                    &inner.bridge,
+                    &inner.store,
+                    &resident,
+                    |current, _| LifecycleEvent::AdoptNewGeneration {
+                        v: Version::new(current.version.generation.saturating_add(1), 0),
+                    },
+                ) {
+                    Ok(verdict) => tracing::info!(
+                        session = %resident,
+                        ?verdict,
+                        "a returning resident agent opened a new generation"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(
+                            session = %resident,
+                            error = %error,
+                            "a returning resident agent's generation was not adopted"
+                        );
+                        return None;
+                    }
+                }
+                let current = stored_observation(
+                    &inner.store,
+                    inner.store.get_session(&resident).ok().flatten().as_ref(),
+                );
+                match current.resource {
+                    ResourcePhase::Detached => {
+                        let _ = crate::reconcile::feed_resource_attached(
+                            &inner.bridge,
+                            &inner.store,
+                            &resident,
+                        );
+                    }
+                    ResourcePhase::Closing | ResourcePhase::Closed => {
+                        let _ = feed_resource_closed(&inner.bridge, &inner.store, &resident);
+                        let _ = feed_resumed(&inner.bridge, &inner.store, &resident);
+                    }
+                    ResourcePhase::Attached => {}
+                }
+                feed_resident_idle(&inner, &resident);
+            }
+            // Already idle, or busy with work this path must not overwrite.
+            Some(_) => {}
+        }
+        Some(resident)
+    }
+
     /// Claim the longest-waiting agent of this role for one staged session.
     ///
     /// An always-running plugin mounts naming no session, so the park holds the
@@ -770,9 +879,48 @@ impl DispatchState {
         };
         // A waiting agent whose socket ended leaves the queue and nothing else:
         // the agents behind it are other connections, still waiting for work.
+        let was_parked = inner
+            .parked
+            .iter()
+            .any(|(parked, _)| parked.same_connection(io));
         inner
             .parked
             .retain(|(parked, _)| !parked.same_connection(io));
+        // A resident agent that stopped waiting is the role losing its idle
+        // session: its row goes `gone`, which projects `exited`, so the server
+        // stops treating the role as one a note can wake. A row this client has
+        // no record of, or one a live slot already speaks for, is left alone.
+        let resident_exit = was_parked
+            .then(|| resident_session_name(&inner, session_id))
+            .flatten()
+            .filter(|resident| {
+                !inner
+                    .sessions
+                    .iter()
+                    .any(|(key, slot)| names_session(key, slot, resident))
+                    && inner.store.get_session(resident).ok().flatten().is_some()
+            });
+        if let Some(resident) = resident_exit.as_deref() {
+            for (step, result) in [
+                (
+                    "agent gone",
+                    feed_agent_gone(&inner.bridge, &inner.store, resident),
+                ),
+                (
+                    "resource closed",
+                    feed_resource_closed(&inner.bridge, &inner.store, resident),
+                ),
+            ] {
+                if let Err(error) = result {
+                    tracing::warn!(
+                        session = %resident,
+                        step,
+                        error = %error,
+                        "a resident session's exit was not written"
+                    );
+                }
+            }
+        }
         let released: Vec<String> = inner
             .transports
             .iter()
@@ -881,9 +1029,49 @@ impl DispatchState {
         // The goodbye above took the idle slots; the host work their sessions owe
         // runs with the dispatch lock off it, so a plugin leaving does not make
         // every other session of this role wait out a pane close.
+        retired.extend(resident_exit);
         drop(inner);
         close_retired(pending);
         retired
+    }
+}
+
+/// Write the idle tuple of one resident session.
+///
+/// Four facts in the reducer's own order: a booting session, its attached
+/// resource, a ready agent, and the turn end that leaves it idle with no
+/// delivery. A step the reducer refuses is logged: the row keeps the state it
+/// reached, and the caller's publish reports that state rather than a tuple this
+/// path invented.
+fn feed_resident_idle(inner: &DispatchInner, resident: &str) {
+    let feeds = [
+        ("created", feed_created(&inner.bridge, &inner.store, resident)),
+        (
+            "resource attached",
+            crate::reconcile::feed_resource_attached(&inner.bridge, &inner.store, resident),
+        ),
+        ("ready", feed_ready(&inner.bridge, &inner.store, resident)),
+        (
+            "turn ended",
+            crate::reconcile::feed_turn_ended(&inner.bridge, &inner.store, resident),
+        ),
+    ];
+    for (step, result) in feeds {
+        match result {
+            Ok(Verdict::Applied(_)) | Ok(Verdict::Ignored(_)) => {}
+            Ok(Verdict::Rejected(reason)) => tracing::warn!(
+                session = %resident,
+                step,
+                ?reason,
+                "a resident session's idle tuple was refused"
+            ),
+            Err(error) => tracing::warn!(
+                session = %resident,
+                step,
+                error = %error,
+                "a resident session's idle tuple was not written"
+            ),
+        }
     }
 }
 

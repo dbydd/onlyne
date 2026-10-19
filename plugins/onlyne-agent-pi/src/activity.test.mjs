@@ -61,3 +61,43 @@ test("default render shows the newest SHOW_EVENTS events", () => {
   assert.match(lines[1], /event 9$/);
   assert.match(lines.at(-1), new RegExp(`event ${SHOW_EVENTS + 4 - SHOW_EVENTS}$`));
 });
+
+test("describe() produces a Tern TSP card node and component() supports toggle", () => {
+  const activity = createActivity({ clock }).set({
+    role: "dpdp",
+    connection: "connected",
+    generation: 1,
+    taskId: "abcdef012345",
+    phase: "running",
+  });
+  activity.note("state", "connected role=dpdp gen=1 host=probe,recycle");
+  activity.note("warn", "heartbeat refused").note("warn", "heartbeat refused");
+
+  const node = activity.describe();
+  assert.equal(node.k, "card");
+  assert.equal(node.p.role, "omp.widget.onlyne");
+  assert.equal(node.p.variant, "bare");
+  assert.equal(node.p.status, "done");
+  assert.equal(node.p.collapsible, true);
+  assert.equal(node.p.collapsed, false);
+  assert.equal(node.c.length, 2);
+  assert.equal(node.c[0].k, "text");
+  assert.equal(node.c[0].p.role, "onlyne.event.warn");
+  assert.ok(node.c[0].p.spans.some((s) => s.t === " ×2"));
+
+  const theme = {
+    fg: (color, text) => `<${color}>${text}</${color}>`,
+    bold: (text) => `<b>${text}</b>`,
+  };
+  let rendered = 0;
+  const comp = activity.component(theme, { requestRender: () => { rendered += 1; } });
+  const rows = comp.render(80);
+  assert.equal(rows.length, 3);
+  assert.ok(rows[0].startsWith(" <b><accent>onlyne</accent></b> <b>dpdp</b>"));
+  assert.equal(comp.render(80), rows, "same width returns cached rows reference");
+
+  comp.handleNativeEvent({ type: "toggle", collapsed: true });
+  assert.equal(rendered, 1);
+  assert.equal(comp.describe().p.collapsed, true);
+  assert.equal(comp.render(80).length, 1);
+});
