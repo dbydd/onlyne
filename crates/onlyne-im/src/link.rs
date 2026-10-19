@@ -291,11 +291,20 @@ impl RoleLink {
         // a crash of the link: one misfiled reply is not worth losing the link
         // for every other conversation.
         let text = delivery.envelope.body.text.clone().unwrap_or_default();
+        // A help request is answered here and never reaches a platform
+        // (`docs/v2.10-IM-PROGRESSIVE-HELP.md` §3): the row is settled as
+        // answered and the manual page rides back as a stateless note.
+        if let Some(query) = crate::help::parse_help_query(&text) {
+            self.answer_help(link, delivery, &query).await?;
+            return Ok(());
+        }
         let markers = match crate::chatkey::extract_markers(&text) {
             Ok(found) => found,
             Err(_) => {
                 let reason = "the chat key is not the body's first line; a reply to a \
-                              conversation starts with <chat:KEY> on its own first line"
+                              conversation starts with <chat:KEY> on its own first line \
+                              (send <help> to this gateway role for full syntax and \
+                              active chat keys)"
                     .to_string();
                 self.refuse(link, delivery, reason).await?;
                 return Ok(());
@@ -307,7 +316,8 @@ impl RoleLink {
             // delivery, or forgot the key. Either way it names no conversation,
             // and guessing one would post into the wrong chat.
             let reason = "this delivery names no chat key; a reply to a conversation starts \
-                          with <chat:KEY> on its own first line"
+                          with <chat:KEY> on its own first line (send <help> to this gateway \
+                          role for full syntax and active chat keys)"
                 .to_string();
             self.refuse(link, delivery, reason).await?;
             return Ok(());
@@ -319,13 +329,93 @@ impl RoleLink {
             // policy admits it, adopt the conversation on demand so the first
             // message need not wait for an inbound event or a manual API call.
             if let Some(adopted) = self.try_adopt_outbound(&chat_key) {
-                return self.render_entry(link, renders, delivery, &text, &markers, &adopted).await;
+                return self
+                    .render_entry(link, renders, delivery, &text, &markers, &adopted)
+                    .await;
             }
-            let reason = format!("no conversation in this gateway carries chat key {chat_key}");
+            let reason = format!(
+                "no conversation in this gateway carries chat key {chat_key}; send \
+                 <help:chats> to this gateway role to list registered keys or use \
+                 <chat:GATEWAY:CONVERSATION_ID> for first contact"
+            );
             self.refuse(link, delivery, reason).await?;
             return Ok(());
         };
-        self.render_entry(link, renders, delivery, &text, &markers, &entry).await
+        self.render_entry(link, renders, delivery, &text, &markers, &entry)
+            .await
+    }
+
+    /// Answer one in-band help request
+    /// (`docs/v2.10-IM-PROGRESSIVE-HELP.md` §3).
+    ///
+    /// The original delivery is settled as answered — no render job, no
+    /// platform traffic — and the requested manual page travels back to the
+    /// sender as a `note` from this gateway role, which is injected into an
+    /// idle session without opening a task. A reply that cannot be sent is
+    /// logged and does not fail the link: the help request itself was already
+    /// answered, and losing the link would cost every conversation.
+    async fn answer_help(
+        &self,
+        link: &ClientConn,
+        delivery: Delivery,
+        query: &crate::help::HelpQuery,
+    ) -> Result<()> {
+        let ack = link
+            .request(
+                Frame::req(
+                    String::new(),
+                    ClientOp::Ack(AckArgs {
+                        msg_id: delivery.msg_id.clone(),
+                        op_id: delivery.envelope.op_id.clone(),
+                        accepted: true,
+                        reason: Some("im_help_answered".to_string()),
+                    }),
+                ),
+                REQUEST_TIMEOUT,
+            )
+            .await?;
+        if !ack.ok {
+            tracing::warn!(role = %self.gateway.role, "a help ack was refused");
+        }
+        let text = crate::help::render_help(&self.gateway, query);
+        let mut envelope = match onlyne_proto::new_envelope(
+            onlyne_proto::MsgKind::Note,
+            onlyne_proto::Principal::role(self.gateway.role.clone()),
+            delivery.envelope.from.clone(),
+            onlyne_proto::Body::text(text),
+            None,
+        ) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                tracing::warn!(
+                    role = %self.gateway.role,
+                    error = %error,
+                    "a help answer could not be built"
+                );
+                return Ok(());
+            }
+        };
+        envelope.op_id = Some(onlyne_proto::new_op_id());
+        match link
+            .request(
+                Frame::req(String::new(), ClientOp::Send(Box::new(envelope))),
+                REQUEST_TIMEOUT,
+            )
+            .await
+        {
+            Ok(body) if body.ok => {}
+            Ok(body) => tracing::warn!(
+                role = %self.gateway.role,
+                ?body.error,
+                "a help answer was refused"
+            ),
+            Err(error) => tracing::warn!(
+                role = %self.gateway.role,
+                error = %error,
+                "a help answer was not sent"
+            ),
+        }
+        Ok(())
     }
 
     /// Attempt to resolve an unknown `<chat:...>` token as a direct platform
@@ -610,7 +700,9 @@ fn reply_target(
         {
             Ok(Some(prefix))
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(format!(
+            "{error} (send <help:markers:reply> for reply thread rules)"
+        )),
     }
 }
 

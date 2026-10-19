@@ -143,6 +143,22 @@ for a role where one exists (`onlyne_send` for `send`, `onlyne_handoff` for `han
 `repair *`, `ledger`, `sessions`, `roles`, `faults`, `watch`, `history`, `reload`, `shutdown`, and `status`
 carry no such flag. Both daemons run in the foreground; `onlyne server shutdown [--drain-secs <n>] [--reason <text>]` requests a graceful server shutdown over the admin socket.
 
+### Dispatching and introspecting `onlyne-im` gateways
+
+When a cluster includes an `onlyne-im` gateway role (e.g. `im` or `feishu-im`), never call raw
+platform HTTP APIs to send chat replies, cards, or files. Send through the gateway role with line 1
+set to `<chat:KEY>` (or `<chat:GATEWAY:CONVERSATION_ID>` for outbound first-contact auto-adoption),
+followed by optional header lines (`<msg:PREFIX>`, `<format:markdown>`,
+`<action:ID|LABEL|STYLE>`, `<image:/abs/path>`, `<file:/abs/path>`), a blank line, and the body.
+
+Any role or supervisor can query the live gateway's progressive built-in manual by sending `<help>`
+(`--note`) to the gateway role:
+- `<help>` — Level 0 overview, header syntax cheatsheet, live backend/chat count, and subtopics.
+- `<help:markers>`, `<help:chats>`, `<help:feishu>`, `<help:qqbot>`, `<help:mcp>`, `<help:examples>`
+  (plus Level 2 subtopics such as `<help:markers:action>` or `<help:feishu:card>`).
+The gateway ACKs the help query without sending anything to external chat platforms and replies to
+the sender role with a stateless `note` containing the requested manual page.
+
 **Material moves by path, not through the envelope.** A delivery's template renders an
 optional block quoting an upstream role's result, and nothing in the tree fills it —
 that is the decision, not a gap: moving material between roles is the roles' business

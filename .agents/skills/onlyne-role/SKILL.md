@@ -110,6 +110,56 @@ other side, and `image` attaches one image, 2 MiB of decoded bytes. The server g
 every route on your spec entry's `allowed_targets`, and any other name returns `acl_denied` before
 a row exists. Ring and fan-out shapes live in your prose. The mechanics here never change.
 
+## Talking to an IM gateway (`onlyne-im`) and progressive `<help>`
+
+Never bypass Onlyne to call raw platform HTTP APIs (`curl`, SDKs, or external scripts) just to send
+messages, cards, buttons, images, or files to Feishu, QQ, Telegram, Slack, Linear, or MCP-bridged
+chats. Always send through the cluster's IM gateway role (e.g. `im`, `feishu-im`) using `onlyne_send`
+(or `onlyne send` on the CLI).
+
+### 1. Progressive in-band `--help` (`<help>`)
+
+Whenever you do not know the gateway's accepted markers, active `<chat:KEY>` list, or platform card
+capabilities, send a `note` to the gateway role with `<help>` on the first line. The gateway
+intercepts `<help>` locally (nothing is sent to external users) and immediately replies to you with
+a stateless `note`:
+
+```text
+onlyne_send{to: "<im-gateway-role>", kind: "note", text: "<help>"}
+```
+
+Drill down progressively like `--help` subcommands:
+- `<help>` (or `--help`) — Level 0 overview, header cheatsheet, active backend/chat counts, and topic list.
+- `<help:markers>` — All header markers (`<help:markers:format>`, `<help:markers:action>`, `<help:markers:media>`, `<help:markers:reply>`).
+- `<help:chats>` — Live list of registered `<chat:KEY>` values and platform coordinates (`<help:chats:adopt>` for first-contact auto-adoption).
+- `<help:feishu>` — Feishu interactive cards, tables, buttons, media upload/download, and `lark-cli`/MCP boundaries (`<help:feishu:card>`, `<help:feishu:media>`, `<help:feishu:events>`).
+- `<help:qqbot>` — QQ `c2c:<openid>` / `group:<openid>` addressing and reply rules.
+- `<help:mcp>` — Meta-programmable `onlyne-im-backend-mcp` TOML rules.
+- `<help:examples>` — Copy-paste ready `onlyne_send` templates.
+- `<chat:KEY>\n<help>` — Inspect a specific conversation's bound backend, coordinate, and last inbound `<msg:ID>`.
+
+### 2. Outbound IM message header syntax
+
+Line 1 of `text` **must** be `<chat:KEY>` (or `<chat:GATEWAY:CONVERSATION_ID>` such as
+`<chat:feishu:oc_xxx>` / `<chat:qqbot:c2c:OPENID>` to auto-adopt on first outbound contact). Optional
+marker lines follow immediately in any order before a blank line and the message body:
+
+```text
+<chat:7f3a9c2e1b04d5a6f8c1e3b7a9d2f4c6>
+<msg:om_dc1326>
+<format:markdown>
+<action:approve|批准|primary>
+<action:reject|驳回|danger>
+<image:/abs/path/to/image.png>
+<file:/abs/path/to/report.pdf>
+
+# 卡片标题（飞书 Markdown 模式自动渲染为蓝底标题）
+正文内容...
+```
+
+- Use `onlyne_send` to the IM gateway for all chat messages, Markdown cards, buttons, and media.
+- Reserve `lark-cli` or platform MCP tools for non-chat workspace operations (docs, bitable, calendar, approvals, or fetching historical thread context by `oc_xxx` / `om_xxx`).
+
 That reach is permission, not a duty. What your session owes before it may report a terminal
 outcome is its entry's `owes_targets` — its own list, apart from the reach, and often empty.
 The role that handed you the task is never owed one of them — completing is itself the delivery

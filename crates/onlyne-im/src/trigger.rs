@@ -235,8 +235,8 @@ pub async fn run_script(
     debug_assert_eq!(input.mode_word(), mode_word(script.mode));
     let mut command = Command::new(&script.run[0]);
     command
-        .arg(input.mode_word())
         .args(&script.run[1..])
+        .arg(input.mode_word())
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -345,6 +345,39 @@ mod tests {
         assert_eq!(body["chat"], "abc123");
         assert_eq!(body["conversation"], "-100");
         assert_eq!(body["event"]["id"], "msg-1");
+    }
+
+    #[tokio::test]
+    async fn an_interpreter_prefixed_run_receives_mode_after_the_script_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("push.sh");
+        let out = dir.path().join("mode.txt");
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/sh\nprintf '%s' \"$1\" > {}\n", out.display()),
+        )
+        .unwrap();
+        let script = PushScript {
+            mode: PushMode::Trigger,
+            run: vec!["/bin/sh".into(), script_path.to_string_lossy().into_owned()],
+            timeout: Duration::from_secs(10),
+            every: None,
+        };
+        let input = PushInput::Trigger {
+            role: "tg-group-1".into(),
+            gateway: "tg1".into(),
+            platform: "telegram".into(),
+            chat: "abc123".into(),
+            conversation: "-100".into(),
+            event: Box::new(event()),
+            decider: None,
+            at: "2026-10-10T12:00:00Z".into(),
+        };
+
+        run_script(&script, &input, &PushEnv::default(), &BTreeMap::new())
+            .await
+            .expect("the interpreter script succeeds");
+        assert_eq!(std::fs::read_to_string(out).unwrap(), "trigger");
     }
 
     /// A failing script is tried again, and the event it was handed repeats

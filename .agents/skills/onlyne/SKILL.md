@@ -51,7 +51,7 @@ onlyne-cli       the `onlyne` binary: every verb, the built-in TUI (crates/onlyn
 onlyne-testkit   the scenario harness, the fake runtime, the conformance fixtures
 onlyne-im        the optional IM gateway, its backend protocol host and conversation workspaces
 onlyne-im-backend the standard IM backend protocol and credential loader
-onlyne-im-backend-{telegram,feishu,qqbot,slack,linear,fake}
+onlyne-im-backend-{telegram,feishu,qqbot,slack,linear,mcp,fake}
                  isolated platform binaries; each SDK and platform transport stays in its crate
 ```
 
