@@ -18,7 +18,7 @@
 //   subagentRegistry  ~/.pi/subagents/missions  (background-subagents.mjs)
 //   registerTool / registerCommand are probed by index.ts itself.
 
-import { WIDGET_KEY } from "./activity.mjs";
+import { ASSIGN_MESSAGE_TYPE, WIDGET_KEY } from "./activity.mjs";
 import { createSubagentProbe } from "./background-subagents.mjs";
 import { createBackgroundProbe } from "./background-work.mjs";
 
@@ -141,8 +141,20 @@ export function createSurface({ pi, log, context, sessionId = null }) {
    * pi reports that failure in its own pane and hands nothing back to this
    * plugin, so an unusable part is dropped here and the assignment still
    * travels: the delivery text already names the path the client wrote.
+   *
+   * When the session is idle (`ctx.isIdle() === true`), `sendUserMessage` is
+   * called without `deliverAs` so an empty or settled session starts a turn
+   * immediately (`deliverAs: "followUp"` only enqueues and requires a prior
+   * assistant/toolResult tail to auto-continue). When the session is busy,
+   * `{ deliverAs: "followUp" }` queues behind the running turn without
+   * interrupting tool execution.
+   *
+   * When `meta` is supplied and `pi.sendMessage` is available, a visible
+   * `onlyne_assign` custom message card is emitted first so the human operator
+   * can distinguish cluster deliveries from hand-typed prompts in the
+   * transcript.
    */
-  const wakeUser = (text, parts = []) => {
+  const wakeUser = (text, parts = [], meta = null) => {
     if (!available.wakeUser) {
       log("pi has no sendUserMessage; the assignment reached the session log only");
       return false;
@@ -163,8 +175,41 @@ export function createSurface({ pi, log, context, sessionId = null }) {
             mimeType: part.mime,
           })),
         ];
+    const current = ctx();
+    let idle = false;
     try {
-      pi.sendUserMessage(content, { deliverAs: "followUp" });
+      if (has(current?.isIdle)) idle = current.isIdle() === true;
+    } catch {
+      idle = false;
+    }
+    if (meta && typeof meta === "object" && has(pi.sendMessage)) {
+      try {
+        pi.sendMessage(
+          {
+            customType: ASSIGN_MESSAGE_TYPE,
+            content,
+            display: true,
+            details: {
+              role: meta.role ?? null,
+              taskId: meta.taskId ?? null,
+              kind: meta.kind ?? "task",
+              from: meta.from ?? null,
+              envelopeId: meta.envelopeId ?? null,
+              bodyText: meta.bodyText ?? text,
+            },
+          },
+          idle ? undefined : { deliverAs: "followUp" },
+        );
+      } catch {
+        /* custom display card is optional; user prompt below is the authority */
+      }
+    }
+    try {
+      if (idle) {
+        pi.sendUserMessage(content);
+      } else {
+        pi.sendUserMessage(content, { deliverAs: "followUp" });
+      }
       return true;
     } catch (error) {
       try {

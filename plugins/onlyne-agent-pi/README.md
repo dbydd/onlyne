@@ -34,8 +34,9 @@ hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{r
   ├─ report.ready ──► the barrier the task payload waits behind
   ◀── assign{envelope, prose, text, attachments, task_id, generation}
   ├─ prose, when the welcome did not already deliver it ──► the same section
-  ├─ text ──► pi user message (deliverAs:"followUp"), byte for byte; `body.image`
-  │    rides as a pi image part, and `attachments` names files the client wrote
+  ├─ text ──► `onlyne_assign` display card (`From <sender> · <kind> · <id>`) + pi user message
+  │    (direct prompt when `ctx.isIdle()`, `deliverAs:"followUp"` while busy), byte for byte;
+  │    `body.image` rides as a pi image part, and `attachments` names files the client wrote
   ├─ assign_ack{accepted:true}
   ├─ report.heartbeat{agent} — `running` per turn and every 10s while a task is live,
   │    `idle` only while pi waits for input; every beat re-derives it from pi
@@ -154,7 +155,7 @@ What happens when a pi API is missing, and what the host does then:
 
 ### Activity panel
 
-When the host reports a UI (`ctx.hasUI`, true in the TUI and RPC modes, false in print and JSON modes) and `ctx.ui.setWidget` is available, routine onlyne notices draw in the panel above the editor with widget key `onlyne`. The widget registers a dual-surface component: on ANSI terminals it renders theme-styled lines (`accent` role badge, status-toned connection state, dimmed timestamps, and semantic event markers), and on Tern Surface Protocol (TSP) hosts it implements `describe()` to emit a native collapsible `card` (`role: "omp.widget.onlyne"`, `variant: "bare"`) with structured spans. The header shows role, connection state, generation, the current task id, and phase. Below it, up to six newest-first events use `<=` for inbound frames, `=>` for outbound frames, `!!` for warnings, `..` for state changes, and `~~` for duplicate deliveries. Repeated identical events fold into one line with `xN` (and pre-connection resident polling stays quiet until a socket connects); the panel holds at most eight lines, each capped at 96 cells, and `session_shutdown` clears it.
+When the host reports a UI (`ctx.hasUI`, true in the TUI and RPC modes, false in print and JSON modes) and `ctx.ui.setWidget` is available, routine onlyne notices draw in the panel above the editor with widget key `onlyne`. The widget registers a dual-surface component: on ANSI terminals it renders theme-styled lines (`accent` role badge, status-toned connection state, dimmed timestamps, and semantic event markers), and on Tern Surface Protocol (TSP) hosts it implements `describe()` to emit a native collapsible `card` (`role: "omp.widget.onlyne"`, `variant: "bare"`) with structured spans. Inbound deliveries (`assign` and `nudge`) also emit a visible `onlyne_assign` custom message card (`From <sender> · <kind> · <id>`) rendered by `registerMessageRenderer("onlyne_assign", ...)`, and `wakeUser` dispatches without `deliverAs` when `ctx.isIdle()` is true so an empty or settled resident session starts a turn immediately (falling back to `{ deliverAs: "followUp" }` while busy). The header shows role, connection state, generation, the current task id, and phase. Below it, up to six newest-first events use `<=` for inbound frames, `=>` for outbound frames, `!!` for warnings, `..` for state changes, and `~~` for duplicate deliveries. Repeated identical events fold into one line with `xN` (and pre-connection resident polling stays quiet until a socket connects); the panel holds at most eight lines, each capped at 96 cells, and `session_shutdown` clears it.
 
 ## 3. Tools
 

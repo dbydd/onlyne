@@ -45,6 +45,7 @@ import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-
 import { Type } from "typebox";
 
 import { OnlyneAgent } from "./agent.mjs";
+import { ASSIGN_MESSAGE_TYPE, createAssignMessageComponent } from "./activity.mjs";
 import { loadConfig, residentIdentity, sessionIdentity } from "./config.mjs";
 import { resolveResidentSocketPath, resolveSocketPath } from "./socket.mjs";
 import { createSurface } from "./pi-surface.mjs";
@@ -87,7 +88,7 @@ interface PiSurface {
     registerTool: boolean;
     registerCommand: boolean;
   };
-  wakeUser(text: string, parts?: ImagePartInput[]): boolean;
+  wakeUser(text: string, parts?: ImagePartInput[], meta?: unknown): boolean;
   roleProse(text: string): boolean;
   applyRoleProse(event: { systemPromptOptions?: { sections?: Record<string, string> } }): boolean;
   customEntry(customType: string, data: unknown): boolean;
@@ -178,6 +179,16 @@ export default function onlyne(pi: ExtensionAPI) {
   const registerSurface = () => {
     if (registered || !surface) return;
     registered = true;
+    if ("registerMessageRenderer" in pi && typeof pi.registerMessageRenderer === "function") {
+      try {
+        pi.registerMessageRenderer(ASSIGN_MESSAGE_TYPE, (message, options, theme) => {
+          if (!message?.details || typeof message.details !== "object") return undefined;
+          return createAssignMessageComponent(message.details, message.content, theme, !options?.expanded);
+        });
+      } catch (error) {
+        log(`registerMessageRenderer(${ASSIGN_MESSAGE_TYPE}) refused: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     try {
       pi.registerTool(defineTool({
         name: "onlyne_send",

@@ -10,9 +10,12 @@ you are handed belongs to it. Do the work, then report it with a completion.
 
 ## How work reaches you
 
-- The task arrives as a user-role injection that names its source: a first line
-  `From <role>:`, the body, and then the paths of any attachments written for you under
-  `<workspace>/.onlyne/tmp/attachments/`. Your role prose comes from the cluster spec and is
+- The task (or stateless `note`) arrives as an injected message that names its source: an
+  `onlyne_assign` transcript card (`From <sender> · <kind> · <id>`) paired with a user prompt
+  carrying a first line `From <role>:`, the body, and then the paths of any attachments written
+  for you under `<workspace>/.onlyne/tmp/attachments/`. Idle sessions wake immediately into a
+  turn; busy sessions queue the delivery as a follow-up. Your role prose comes from the cluster
+  spec and is
   already in your context: pi takes it as a system-prompt section, and an ACP session reads
   it from the client's block in the workspace's `AGENTS.md`.
 - The `{task}` placeholder in the role's `[client.runtime] command` is the task **id**,

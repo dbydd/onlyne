@@ -825,13 +825,22 @@ export class OnlyneAgent {
 
     const kind = envelope.kind ?? "task";
     const held = this.tasks.get(taskId);
+    const fromLabel = describePrincipal(envelope.from);
+    const wakeMeta = {
+      role: this.role,
+      taskId,
+      kind,
+      from: fromLabel,
+      envelopeId: envelope.id ?? null,
+      bodyText: envelope.body?.text ?? text,
+    };
     // A note is a message, not work: it is injected and acknowledged, and it
     // opens no task record, so nothing beats for it, no turn end owes it an
     // outcome and `onlyne_complete` is never required of it. A note naming a
     // task this session is still working on lands mid-task, below.
     if (kind === "note" && (!held || held.completed)) {
       if (this.tasks.size > 0) this.agentState = "running";
-      this.surface.wakeUser?.(text, this.imageParts(envelope));
+      this.surface.wakeUser?.(text, this.imageParts(envelope), wakeMeta);
       this.surface.customEntry?.("onlyne-assign", {
         taskId,
         envelopeId: envelope.id ?? null,
@@ -840,7 +849,7 @@ export class OnlyneAgent {
         prose,
         attachments: attachmentPaths,
       });
-      this.notice("in", `note ${taskId.slice(0, 8)} from ${describePrincipal(envelope.from)}: ${headOf(envelope.body?.text)}`);
+      this.notice("in", `note ${taskId.slice(0, 8)} from ${fromLabel}: ${headOf(envelope.body?.text)}`);
       await this.ack(taskId, true, null);
       return;
     }
@@ -876,7 +885,7 @@ export class OnlyneAgent {
       });
     }
     this.agentState = "running";
-    this.surface.wakeUser?.(text, this.imageParts(envelope));
+    this.surface.wakeUser?.(text, this.imageParts(envelope), wakeMeta);
     this.surface.customEntry?.("onlyne-assign", {
       taskId,
       envelopeId: envelope.id ?? null,
@@ -886,7 +895,7 @@ export class OnlyneAgent {
       attachments: attachmentPaths,
     });
     this.activity.set({ taskId, phase: "running" });
-    this.notice("in", `task ${taskId.slice(0, 8)} from ${describePrincipal(envelope.from)} (${kind}): ${headOf(envelope.body?.text)}`);
+    this.notice("in", `task ${taskId.slice(0, 8)} from ${fromLabel} (${kind}): ${headOf(envelope.body?.text)}`);
     this.startHeartbeat();
     await this.ack(taskId, true, null);
   }
@@ -919,7 +928,13 @@ export class OnlyneAgent {
   onNudge(frame, args) {
     const text = typeof args.text === "string" ? args.text : "";
     const taskId = typeof args.task_id === "string" && args.task_id ? args.task_id.slice(0, 8) : "?";
-    const handedOver = text.length > 0 && this.surface.wakeUser?.(text, []) === true;
+    const handedOver = text.length > 0 && this.surface.wakeUser?.(text, [], {
+      role: this.role,
+      taskId: args.task_id ?? null,
+      kind: "nudge",
+      from: "host",
+      bodyText: text,
+    }) === true;
     if (handedOver) this.notice("in", `nudge for task ${taskId}`);
     else this.notice("warn", `nudge for task ${taskId} was not handed to the model`);
     if (frame?.id === undefined || frame?.id === null) return;

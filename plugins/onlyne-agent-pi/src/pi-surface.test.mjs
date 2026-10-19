@@ -16,6 +16,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { ASSIGN_MESSAGE_TYPE } from "./activity.mjs";
 import { PROSE_SECTION, createSurface } from "./pi-surface.mjs";
 
 /**
@@ -40,7 +41,7 @@ const PNG_CONTENT = [
  * know an option does.
  * @param {{ refuse?: (content: unknown, options: unknown) => boolean }} [options]
  */
-function fakeSurface({ refuse = null } = {}) {
+function fakeSurface({ refuse = null, ctx = null } = {}) {
   const calls = [];
   const messages = [];
   const lines = [];
@@ -50,14 +51,12 @@ function fakeSurface({ refuse = null } = {}) {
         calls.push({ content, options });
         if (refuse?.(content, options)) throw new Error("this pi does not take that option");
       },
-      // Recorded, never expected: no part of this plugin is a conversation
-      // message any more, and the prose is the one that could creep back.
       sendMessage(message, options) {
         messages.push({ message, options });
       },
     },
     log: (line) => lines.push(line),
-    context: () => null,
+    context: () => ctx,
   });
   return { calls, messages, lines, surface };
 }
@@ -126,6 +125,65 @@ test("delivery asks for followUp and a refusal of that option retries with the s
   assert.equal(refusing.calls[1].options, undefined);
   assert.deepEqual(refusing.calls[1].content, PNG_CONTENT);
   assert.deepEqual(refusing.lines, [], "a delivery that landed on the retry is not a failure");
+});
+
+test("an idle session wakes directly without followUp queueing and emits an onlyne_assign card", () => {
+  // Simulate omp's real queue rule (`agent-session.ts:8483-8505`, `:8952-8972`):
+  // `deliverAs: "followUp"` only enqueues and auto-continues only when the
+  // transcript ends with an assistant or toolResult message; an omitted
+  // `deliverAs` starts a turn even on a brand-new empty session.
+  const transcript = [];
+  const followUpQueue = [];
+  let turnsStarted = 0;
+  let idle = true;
+  const customCards = [];
+  const surface = createSurface({
+    pi: {
+      sendMessage(message, options) {
+        customCards.push({ message, options });
+      },
+      sendUserMessage(content, options) {
+        if (options?.deliverAs === "followUp") {
+          followUpQueue.push(content);
+          const last = transcript.at(-1);
+          if (idle && (last?.role === "assistant" || last?.role === "toolResult")) {
+            turnsStarted += 1;
+            transcript.push({ role: "user", content: followUpQueue.shift() });
+          }
+          return;
+        }
+        turnsStarted += 1;
+        transcript.push({ role: "user", content });
+      },
+    },
+    log: () => {},
+    context: () => ({ isIdle: () => idle }),
+  });
+
+  const meta = {
+    role: "caerulea",
+    taskId: "97971b93-0000-4000-8000-000000000000",
+    kind: "note",
+    from: "role:_supervisor",
+    envelopeId: "env-1",
+    bodyText: "ping from supervisor",
+  };
+  assert.equal(surface.wakeUser("From _supervisor:\n\nping from supervisor", [], meta), true);
+  assert.equal(turnsStarted, 1, "an empty idle session must start a turn immediately");
+  assert.equal(followUpQueue.length, 0, "the note must not be stranded in followUpQueue");
+  assert.equal(customCards.length, 1);
+  assert.equal(customCards[0].message.customType, ASSIGN_MESSAGE_TYPE);
+  assert.equal(customCards[0].message.display, true);
+  assert.equal(customCards[0].message.details.kind, "note");
+  assert.equal(customCards[0].message.details.from, "role:_supervisor");
+  assert.equal(customCards[0].options, undefined);
+
+  // While busy (`isIdle() === false`), the next delivery queues as followUp instead of interrupting.
+  idle = false;
+  assert.equal(surface.wakeUser("From _supervisor:\n\nsecond note while busy", [], meta), true);
+  assert.equal(turnsStarted, 1, "busy session queues rather than starting a second concurrent turn");
+  assert.equal(followUpQueue.length, 1);
+  assert.deepEqual(customCards[1].options, { deliverAs: "followUp" });
 });
 
 /** One role prose, in the shape the client renders and `agent.mjs` hands over. */

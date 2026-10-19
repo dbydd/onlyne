@@ -1,5 +1,7 @@
 /** The widget key shared with pi-surface. */
 export const WIDGET_KEY = "onlyne";
+/** The custom message type registered for visible inbound delivery cards. */
+export const ASSIGN_MESSAGE_TYPE = "onlyne_assign";
 /** Render budget below pi's own ten-line cap. */
 export const MAX_LINES = 8;
 /** Line budget that keeps the panel inside one terminal row. */
@@ -208,6 +210,103 @@ export function describeActivityNode(state, events, shown = SHOW_EVENTS, collaps
       collapsed: visible.length > 0 ? Boolean(collapsed) : false,
     },
     c: visible.map((ev, index) => describeEventRow(ev, index)),
+  };
+}
+
+/**
+ * Render an inbound Onlyne delivery (`customType: "onlyne_assign"`) as a
+ * framed transcript block on ANSI terminals and a native TSP card on Tern.
+ */
+export function createAssignMessageComponent(details, messageContent, theme, collapsed = false) {
+  const from = clean(details?.from) || "cluster";
+  const kind = clean(details?.kind) || "task";
+  const taskId = clean(details?.taskId);
+  const shortId = taskId ? cut(taskId, 8, false) : "";
+  const rawBody = clean(details?.bodyText)
+    || (typeof messageContent === "string"
+      ? messageContent
+      : Array.isArray(messageContent)
+        ? messageContent.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n")
+        : "");
+  const bodyLines = String(details?.bodyText ?? (typeof messageContent === "string" ? messageContent : rawBody))
+    .replace(/\r\n/g, "\n")
+    .split("\n");
+  const headLabel = `From ${from} · ${kind}${shortId ? ` · ${shortId}` : ""}`;
+  const kindTone = kind === "note" ? "info" : kind === "nudge" ? "warning" : "accent";
+  let cachedWidth = -1;
+  let cachedRows = null;
+  let cachedNode = null;
+  let isCollapsed = Boolean(collapsed);
+
+  const buildNode = () => {
+    const headSpans = [
+      { t: `From ${from}`, s: "accent strong" },
+      { t: " · ", s: "dim" },
+      { t: kind, s: `${kindTone} mono` },
+    ];
+    if (shortId) {
+      headSpans.push({ t: " · ", s: "dim" }, { t: shortId, s: "muted mono" });
+    }
+    const mdText = String(details?.bodyText ?? (typeof messageContent === "string" ? messageContent : rawBody)).trim();
+    return {
+      k: "card",
+      p: {
+        role: `omp.custom.onlyne.${kind}`,
+        tone: kind === "nudge" ? "warning" : "accent",
+        head: headSpans,
+        collapsible: true,
+        collapsed: isCollapsed,
+      },
+      c: mdText ? [{ k: "md", p: { text: mdText }, key: "body" }] : [],
+    };
+  };
+
+  const buildRows = (width = MAX_WIDTH) => {
+    const w = Math.max(16, Math.min(width, MAX_WIDTH));
+    const inner = Math.max(12, w - 4);
+    const topText = ` ${cut(headLabel, inner - 2)} `;
+    const topFill = "─".repeat(Math.max(0, w - 2 - points(topText).length));
+    const rows = [
+      `${toneFg(theme, "muted", "╭")}${toneBold(theme, toneFg(theme, "accent", topText))}${toneFg(theme, "muted", `${topFill}╮`)}`,
+    ];
+    const visibleBody = isCollapsed
+      ? [cut(clean(rawBody), inner)]
+      : bodyLines.flatMap((line) => {
+          const trimmed = line.replace(/\t/g, "  ");
+          return trimmed.length === 0 ? [""] : [cut(trimmed, inner)];
+        });
+    for (const line of visibleBody) {
+      const pad = " ".repeat(Math.max(0, inner - points(line).length));
+      rows.push(`${toneFg(theme, "muted", "│")} ${toneFg(theme, "text", line)}${pad} ${toneFg(theme, "muted", "│")}`);
+    }
+    rows.push(`${toneFg(theme, "muted", `╰${"─".repeat(Math.max(0, w - 2))}╯`)}`);
+    return rows;
+  };
+
+  return {
+    render(width = MAX_WIDTH) {
+      if (cachedRows && cachedWidth === width) return cachedRows;
+      cachedWidth = width;
+      cachedRows = buildRows(width);
+      return cachedRows;
+    },
+    describe() {
+      cachedNode ??= buildNode();
+      return cachedNode;
+    },
+    handleNativeEvent(event) {
+      if (event?.type === "toggle" && typeof event.collapsed === "boolean") {
+        isCollapsed = event.collapsed;
+        cachedRows = null;
+        cachedNode = null;
+      }
+    },
+    invalidate() {
+      cachedWidth = -1;
+      cachedRows = null;
+      cachedNode = null;
+    },
+    dispose() {},
   };
 }
 

@@ -28,8 +28,9 @@ hello{protocol:1, plugin:"pi-onlyne", kind:"agent", capabilities:[…], mount:{r
   ├─ report.ready ──► 载荷等待的那道 barrier
   ◀── assign{envelope, prose, text, attachments, task_id, generation}
   ├─ prose（仅当 welcome 尚未投递过） ──► 同一个 section
-  ├─ text ──► pi user message（deliverAs:"followUp"），逐字节原样；`body.image`
-  │    作为 pi image part 同行，`attachments` 里的路径是 client 已写好的文件
+  ├─ text ──► `onlyne_assign` 展示卡片（`From <sender> · <kind> · <id>`）+ pi user message
+  │    （`ctx.isIdle()` 空闲时直接触发 turn，繁忙时 `deliverAs:"followUp"` 排队），逐字节原样；
+  │    `body.image` 作为 pi image part 同行，`attachments` 里的路径是 client 已写好的文件
   ├─ assign_ack{accepted:true}
   ├─ report.heartbeat{agent} —— 每个 turn 以及任务存续期间每 10 秒发 `running`，
   │    只有 pi 等待输入时才发 `idle`；每次心跳都重新向 pi 推导
@@ -142,7 +143,7 @@ role。client 不读这个文件（计划 §11 已把旧 readiness 门降级为 
 
 ### 活动面板
 
-宿主报告有 UI 时（`ctx.hasUI`：TUI 与 RPC 模式为 true，print 与 JSON 模式为 false）且 `ctx.ui.setWidget` 可用，日常 onlyne 通知显示在编辑器上方，widget key 为 `onlyne`。小组件支持 ANSI 与 Tern Surface Protocol（TSP）双渲染面：在 ANSI 终端下使用主题令牌为标题、连接状态、时间戳和方向标记着色排版；在支持 TSP 的 Tern 终端下通过 `describe()` 输出原生可折叠 `card` 组件（`role: "omp.widget.onlyne"`，`variant: "bare"`）与语义化 span。标题行显示 role、连接状态、generation、当前 task id 与阶段。其下最多六条事件，按最新在前排列：`<=` 入站，`=>` 出站，`!!` 警告，`..` 状态，`~~` 重复投递。连续相同事件折成一行并带 `xN`（常驻会话在客户端首次连通前的后台探测保持静默，不刷屏 `reconnecting`）；面板最多八行，每行最多 96 个显示单元，`session_shutdown` 时清除。
+宿主报告有 UI 时（`ctx.hasUI`：TUI 与 RPC 模式为 true，print 与 JSON 模式为 false）且 `ctx.ui.setWidget` 可用，日常 onlyne 通知显示在编辑器上方，widget key 为 `onlyne`。小组件支持 ANSI 与 Tern Surface Protocol（TSP）双渲染面：在 ANSI 终端下使用主题令牌为标题、连接状态、时间戳和方向标记着色排版；在支持 TSP 的 Tern 终端下通过 `describe()` 输出原生可折叠 `card` 组件（`role: "omp.widget.onlyne"`，`variant: "bare"`）与语义化 span。入站投递（`assign` 与 `nudge`）还会通过 `pi.sendMessage({ customType: "onlyne_assign", display: true, details })` 与 `registerMessageRenderer("onlyne_assign", ...)` 在对话流中渲染带 `From <sender> · <kind> · <id>` 抬头的独立卡片，以区分集群投递与手工输入；同时 `wakeUser` 按 `ctx.isIdle()` 分流（空闲时直接启动 turn 唤醒空会话，繁忙时走 `deliverAs: "followUp"` 排队）。标题行显示 role、连接状态、generation、当前 task id 与阶段。其下最多六条事件，按最新在前排列：`<=` 入站，`=>` 出站，`!!` 警告，`..` 状态，`~~` 重复投递。连续相同事件折成一行并带 `xN`（常驻会话在客户端首次连通前的后台探测保持静默，不刷屏 `reconnecting`）；面板最多八行，每行最多 96 个显示单元，`session_shutdown` 时清除。
 
 ## 3. 工具面
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createActivity, MAX_LINES, MAX_TEXT, MAX_WIDTH, SHOW_EVENTS } from "./activity.mjs";
+import { createActivity, createAssignMessageComponent, MAX_LINES, MAX_TEXT, MAX_WIDTH, SHOW_EVENTS } from "./activity.mjs";
 
 const clock = () => new Date("2026-09-13T09:08:07");
 
@@ -100,4 +100,32 @@ test("describe() produces a Tern TSP card node and component() supports toggle",
   assert.equal(rendered, 1);
   assert.equal(comp.describe().p.collapsed, true);
   assert.equal(comp.render(80).length, 1);
+});
+
+test("createAssignMessageComponent renders ANSI box and TSP card for onlyne_assign", () => {
+  const theme = {
+    fg: (color, text) => `<${color}>${text}</${color}>`,
+    bold: (text) => `<b>${text}</b>`,
+  };
+  const comp = createAssignMessageComponent(
+    {
+      role: "caerulea",
+      taskId: "97971b93-1111-2222-3333-444444444444",
+      kind: "note",
+      from: "role:_supervisor",
+      bodyText: "hello caerulea",
+    },
+    "From _supervisor:\n\nhello caerulea",
+    theme,
+    false,
+  );
+  const rows = comp.render(72);
+  assert.ok(rows[0].includes("From role:_supervisor · note · 97971b93"));
+  assert.ok(rows.some((r) => r.includes("hello caerulea")));
+
+  const node = comp.describe();
+  assert.equal(node.k, "card");
+  assert.equal(node.p.role, "omp.custom.onlyne.note");
+  assert.equal(node.c[0].k, "md");
+  assert.equal(node.c[0].p.text, "hello caerulea");
 });
