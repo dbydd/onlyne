@@ -37,12 +37,17 @@ pub struct Api {
     /// once per credential pair so every request this backend makes shares one
     /// token cache. `None` when the backend holds no usable credential.
     config: Option<CoreConfig>,
+    http: reqwest::Client,
 }
 
 impl Api {
     pub fn new(creds: crate::auth::FeishuCredentials) -> Self {
         let config = sdk_config(&creds);
-        Self { creds, config }
+        Self {
+            creds,
+            config,
+            http: reqwest::Client::new(),
+        }
     }
 
     /// The same client pointed at another credential pair. A login check swaps
@@ -151,6 +156,156 @@ impl Api {
             }
         })
         .await
+    }
+
+    /// Download an inbound message resource (`image` or `file`) via
+    /// `GET /open-apis/im/v1/messages/{message_id}/resources/{file_key}?type={resource_type}`.
+    pub async fn download_resource(
+        &self,
+        message_id: &str,
+        file_key: &str,
+        resource_type: &str,
+    ) -> Result<Vec<u8>> {
+        let token = self.tenant_token().await?;
+        let url = format!(
+            "{}/open-apis/im/v1/messages/{}/resources/{}?type={}",
+            self.creds.base_url(),
+            message_id,
+            file_key,
+            resource_type
+        );
+        let response = self
+            .http
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("feishu download resource")?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "feishu download resource refused with HTTP {}",
+                response.status()
+            );
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("reading feishu resource bytes")?;
+        Ok(bytes.to_vec())
+    }
+
+    /// Upload an outbound image via `POST /open-apis/im/v1/images` and return
+    /// its `image_key`.
+    pub async fn upload_image(&self, path: &str) -> Result<String> {
+        let bytes = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("reading {path} for feishu image upload"))?;
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image.png".to_string());
+        let token = self.tenant_token().await?;
+        let form = reqwest::multipart::Form::new()
+            .text("image_type", "message")
+            .part(
+                "image",
+                reqwest::multipart::Part::bytes(bytes).file_name(file_name),
+            );
+        let url = format!("{}/open-apis/im/v1/images", self.creds.base_url());
+        let value: Value = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("POST /open-apis/im/v1/images")?
+            .json()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("feishu image upload answered no JSON")?;
+        if value.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
+            anyhow::bail!(
+                "feishu image upload refused: {}",
+                value
+                    .get("msg")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error")
+            );
+        }
+        value
+            .pointer("/data/image_key")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("feishu image upload returned no image_key: {value}"))
+    }
+
+    /// Upload an outbound file via `POST /open-apis/im/v1/files` and return
+    /// its `file_key`.
+    pub async fn upload_file(&self, path: &str) -> Result<String> {
+        let bytes = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("reading {path} for feishu file upload"))?;
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file.bin".to_string());
+        let file_type = match std::path::Path::new(&file_name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "opus" => "opus",
+            "mp4" => "mp4",
+            "pdf" => "pdf",
+            "doc" | "docx" => "doc",
+            "xls" | "xlsx" => "xls",
+            "ppt" | "pptx" => "ppt",
+            _ => "stream",
+        };
+        let token = self.tenant_token().await?;
+        let form = reqwest::multipart::Form::new()
+            .text("file_type", file_type.to_string())
+            .text("file_name", file_name.clone())
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(bytes).file_name(file_name),
+            );
+        let url = format!("{}/open-apis/im/v1/files", self.creds.base_url());
+        let value: Value = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("POST /open-apis/im/v1/files")?
+            .json()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("feishu file upload answered no JSON")?;
+        if value.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
+            anyhow::bail!(
+                "feishu file upload refused: {}",
+                value
+                    .get("msg")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error")
+            );
+        }
+        value
+            .pointer("/data/file_key")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("feishu file upload returned no file_key: {value}"))
     }
 }
 

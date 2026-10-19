@@ -189,9 +189,10 @@ not add a heavyweight dependency for a single type or a single helper.
 | `onlyne-im-backend-telegram` | the Telegram backend the gateway spawns over stdio | none; the gateway root's `[[im.backend]].run` names it |
 | `onlyne-im-backend-feishu` | the Feishu (Lark) backend: `openlark` long-connection inbound, paged chat listing, interactive cards and reply APIs | none |
 | `onlyne-im-backend-qqbot` | the QQ Open Platform backend: websocket event gateway inbound, per-scene sends outbound | none |
-| `onlyne-im-backend-slack` | the Slack backend: Socket Mode websocket inbound, Web API outbound | none |
-| `onlyne-im-backend-linear` | the Linear backend: GraphQL comment polling inbound, `commentCreate` outbound | none |
-| `onlyne-im-backend-fake` | the scripted fake used by `smoke`, the e2e scripts, and any dry run; no platform SDK, no credential | none |
+|`onlyne-im-backend-slack`|the Slack backend: Socket Mode websocket inbound, Web API outbound|none|
+|`onlyne-im-backend-linear`|the Linear backend: GraphQL comment polling inbound, `commentCreate` outbound|none|
+|`onlyne-im-backend-mcp`|the meta-programmable MCP backend: spawns any stdio MCP server and maps its notifications, poll tool, send tool, and conversation-list tool to the standard backend protocol via a declarative TOML spec (`--spec`)|none|
+|`onlyne-im-backend-fake`|the scripted fake used by `smoke`, the e2e scripts, and any dry run; no platform SDK, no credential|none|
 
 Rules:
 
@@ -225,8 +226,9 @@ Rules:
 | `onlyne-im-backend-feishu` | Feishu platform backend (the `openlark` websocket, chat list, interactive cards and message API live here) |
 | `onlyne-im-backend-qqbot` | QQ Open Platform platform backend (`tokio-tungstenite` lives here and in the Slack backend) |
 | `onlyne-im-backend-slack` | Slack platform backend (Socket Mode and the Web API live here) |
-| `onlyne-im-backend-linear` | Linear platform backend (the GraphQL client lives here) |
-| `onlyne-im-backend-telegram` | Telegram platform backend |
+|`onlyne-im-backend-linear`|Linear platform backend (the GraphQL client lives here)|
+|`onlyne-im-backend-mcp`|meta-programmable stdio MCP platform backend (declarative TOML mapping for notifications, polling, send, and conversation list)|
+|`onlyne-im-backend-telegram`|Telegram platform backend|
 | `onlyne-im-backend-fake` | scripted fake IM backend for hermetic tests and smoke runs; no platform SDK |
 
 Nineteen workspace member crates plus `onlyne-web` (excluded from the Cargo workspace so the core build needs no Node). Dependency rules:

@@ -28,6 +28,7 @@ default-members = [
   "crates/onlyne-im-backend-qqbot",
   "crates/onlyne-im-backend-slack",
   "crates/onlyne-im-backend-linear",
+  "crates/onlyne-im-backend-mcp",
   "crates/onlyne-im-backend-fake",
 ]
 
@@ -60,6 +61,7 @@ onlyne-im-backend-feishu = { path = "crates/onlyne-im-backend-feishu", version =
 onlyne-im-backend-qqbot = { path = "crates/onlyne-im-backend-qqbot", version = "2.3.0" }
 onlyne-im-backend-slack = { path = "crates/onlyne-im-backend-slack", version = "2.3.0" }
 onlyne-im-backend-linear = { path = "crates/onlyne-im-backend-linear", version = "2.3.0" }
+onlyne-im-backend-mcp = { path = "crates/onlyne-im-backend-mcp", version = "2.3.0" }
 
 # external
 anyhow = "1"

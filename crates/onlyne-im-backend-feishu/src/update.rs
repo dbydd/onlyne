@@ -45,12 +45,74 @@ pub fn event_from_payload(gateway: &str, platform: &str, payload: &Value) -> Opt
         .and_then(Value::as_str)
         .unwrap_or_default();
     let event = payload.get("event")?;
-    match event_type {
+    let mut mapped = match event_type {
         "im.message.receive_v1" => message_event(gateway, platform, event, event_id),
         "im.chat.member.bot.added_v1" => bot_added_event(gateway, platform, event, event_id),
         "card.action.trigger" => card_action_event(gateway, platform, event, event_id),
-        _ => None,
+        _ => generic_event_from_env(gateway, platform, event_type, event, event_id),
+    }?;
+    mapped.event_type = Some(event_type.to_string());
+    mapped.raw = Some(payload.clone());
+    Some(mapped)
+}
+
+/// When `FEISHU_PASS_ALL_EVENTS=1` (or `true`), translate non-IM business events
+/// (calendar, approval, task, reaction, etc.) into an `ImEvent` carrying
+/// `event_type` and `raw` so trigger scripts and MCP tools can act on them.
+fn generic_event_from_env(
+    gateway: &str,
+    platform: &str,
+    event_type: &str,
+    event: &Value,
+    event_id: &str,
+) -> Option<ImEvent> {
+    let pass_all = std::env::var("FEISHU_PASS_ALL_EVENTS")
+        .ok()
+        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"));
+    if !pass_all {
+        return None;
     }
+    generic_event(gateway, platform, event_type, event, event_id)
+}
+
+pub fn generic_event(
+    gateway: &str,
+    platform: &str,
+    event_type: &str,
+    event: &Value,
+    event_id: &str,
+) -> Option<ImEvent> {
+    let conversation = resolve_conversation(event)
+        .or_else(|| {
+            event
+                .get("chat_id")
+                .or_else(|| event.pointer("/context/open_chat_id"))
+                .or_else(|| event.pointer("/operator/open_id"))
+                .or_else(|| event.pointer("/operator_id/open_id"))
+                .or_else(|| event.pointer("/user_id/open_id"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "feishu_events".to_string());
+    let id = if event_id.is_empty() {
+        format!("event:{event_type}:{}", now())
+    } else {
+        event_id.to_string()
+    };
+    Some(ImEvent {
+        gateway: gateway.to_string(),
+        platform: platform.to_string(),
+        channel: platform.to_string(),
+        conversation,
+        kind: ImEventKind::Message,
+        id,
+        from: operator_of(event).or_else(|| sender_of(event)),
+        text: Some(format!("[feishu event: {event_type}]")),
+        event_type: Some(event_type.to_string()),
+        at: now(),
+        ..ImEvent::default()
+    })
 }
 
 /// A message the bot received.
@@ -570,6 +632,30 @@ mod tests {
         assert_eq!(reply.thread.as_deref(), Some("omt_9"));
         assert_eq!(reply.answers(), Some("om_1"));
         assert_eq!(reply.anchor(), Some("om_1"));
+        assert_eq!(event.event_type.as_deref(), Some("im.message.receive_v1"));
+        assert!(event.raw.is_some());
+    }
+
+    #[test]
+    fn generic_event_translates_non_im_business_events_with_fallback_conversation() {
+        let event_body = json!({
+            "operator": {"open_id": "ou_actor"},
+            "calendar_id": "cal_123"
+        });
+        let mapped = generic_event(
+            "feishu",
+            "feishu",
+            "calendar.calendar.event.changed_v4",
+            &event_body,
+            "evt-cal-1",
+        )
+        .expect("generic event mapped");
+        assert_eq!(mapped.conversation, "ou_actor");
+        assert_eq!(mapped.id, "evt-cal-1");
+        assert_eq!(
+            mapped.event_type.as_deref(),
+            Some("calendar.calendar.event.changed_v4")
+        );
     }
 
     #[test]

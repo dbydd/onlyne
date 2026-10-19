@@ -61,6 +61,26 @@ pub fn text_request(conversation: &str, text: &str, reply_to: Option<&str>) -> V
     wire_request(conversation, "text", json!({"text": text}), reply_to)
 }
 
+/// The wire request body for an uploaded image (`msg_type = "image"`).
+pub fn image_request(conversation: &str, image_key: &str, reply_to: Option<&str>) -> Value {
+    wire_request(
+        conversation,
+        "image",
+        json!({"image_key": image_key}),
+        reply_to,
+    )
+}
+
+/// The wire request body for an uploaded file (`msg_type = "file"`).
+pub fn file_request(conversation: &str, file_key: &str, reply_to: Option<&str>) -> Value {
+    wire_request(
+        conversation,
+        "file",
+        json!({"file_key": file_key}),
+        reply_to,
+    )
+}
+
 /// The wire request body for an interactive card built from markdown.
 pub fn card_request(conversation: &str, markdown: &str, reply_to: Option<&str>) -> Value {
     wire_request(
@@ -389,6 +409,11 @@ mod tests {
             serde_json::from_str(requests[0].body["content"].as_str().unwrap()).unwrap();
         assert_eq!(content["text"], "hello");
         assert!(requests[0].body.get("reply_id").is_none());
+        let img = image_request("oc_group", "img_v2_abc", Some("om_reply"));
+        assert_eq!(img["msg_type"], "image");
+        assert_eq!(img["reply_id"], "om_reply");
+        let file = file_request("oc_group", "file_v2_xyz", None);
+        assert_eq!(file["msg_type"], "file");
     }
 
     #[test]

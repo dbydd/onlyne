@@ -291,7 +291,7 @@ impl RoleLink {
         // a crash of the link: one misfiled reply is not worth losing the link
         // for every other conversation.
         let text = delivery.envelope.body.text.clone().unwrap_or_default();
-        let (chat_key, rest) = match crate::chatkey::extract(&text) {
+        let markers = match crate::chatkey::extract_markers(&text) {
             Ok(found) => found,
             Err(_) => {
                 let reason = "the chat key is not the body's first line; a reply to a \
@@ -301,6 +301,7 @@ impl RoleLink {
                 return Ok(());
             }
         };
+        let chat_key = markers.key.clone();
         if chat_key.is_empty() {
             // No key anywhere: the sender meant this as an ordinary platform
             // delivery, or forgot the key. Either way it names no conversation,
@@ -318,13 +319,13 @@ impl RoleLink {
             // policy admits it, adopt the conversation on demand so the first
             // message need not wait for an inbound event or a manual API call.
             if let Some(adopted) = self.try_adopt_outbound(&chat_key) {
-                return self.render_entry(link, renders, delivery, &text, &rest, &adopted).await;
+                return self.render_entry(link, renders, delivery, &text, &markers, &adopted).await;
             }
             let reason = format!("no conversation in this gateway carries chat key {chat_key}");
             self.refuse(link, delivery, reason).await?;
             return Ok(());
         };
-        self.render_entry(link, renders, delivery, &text, &rest, &entry).await
+        self.render_entry(link, renders, delivery, &text, &markers, &entry).await
     }
 
     /// Attempt to resolve an unknown `<chat:...>` token as a direct platform
@@ -384,7 +385,7 @@ impl RoleLink {
         renders: &mpsc::Sender<RenderJob>,
         delivery: Delivery,
         text: &str,
-        rest: &str,
+        markers: &crate::chatkey::Markers,
         entry: &Conversation,
     ) -> Result<()> {
         // The window is what a reply target resolves against, and what the
@@ -409,7 +410,7 @@ impl RoleLink {
             .and_then(|target| window.messages.iter().find(|m| m.id == target))
             .and_then(|message| message.handle.clone());
         let (accepted, reason) = match payload_from(
-            rest,
+            markers,
             reply_to,
             reply_reference,
             entry,
@@ -518,12 +519,13 @@ impl RoleLink {
 /// that file. A body with neither text nor image is not renderable and answers
 /// `None`.
 fn payload_from(
-    text: &str,
+    markers: &crate::chatkey::Markers,
     reply_to: Option<String>,
     reply_reference: Option<String>,
     entry: &Conversation,
     delivery: &Delivery,
 ) -> Option<ImPayload> {
+    let text = &markers.rest;
     let body = &delivery.envelope.body;
     let mut attachments = Vec::new();
     if let Some(image) = &body.image {
@@ -541,14 +543,25 @@ fn payload_from(
             }
         }
     }
-    if text.trim().is_empty() && attachments.is_empty() {
+    for (kind, path) in &markers.files {
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string);
+        attachments.push(ImAttachment {
+            kind: kind.clone(),
+            path: path.clone(),
+            alt: file_name,
+        });
+    }
+    if text.trim().is_empty() && attachments.is_empty() && markers.actions.is_empty() {
         return None;
     }
     Some(ImPayload {
         text: text.to_string(),
-        format: ImFormat::Plain,
+        format: markers.format.unwrap_or(ImFormat::Plain),
         attachments,
-        actions: Vec::new(),
+        actions: markers.actions.clone(),
         reply_to,
         reply_reference,
     })
@@ -698,7 +711,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let entry = conversation(dir.path());
         let delivery = delivery(Body::text("hello"));
-        let payload = payload_from("hello", None, None, &entry, &delivery).unwrap();
+        let markers = crate::chatkey::Markers {
+            rest: "hello".into(),
+            ..Default::default()
+        };
+        let payload = payload_from(&markers, None, None, &entry, &delivery).unwrap();
         assert_eq!(payload.text, "hello");
         assert!(payload.attachments.is_empty());
     }
@@ -755,7 +772,8 @@ mod tests {
         // still has to answer `None` rather than panic.
         let mut delivery = delivery(Body::text("placeholder"));
         delivery.envelope.body = Body::default();
-        assert!(payload_from("", None, None, &entry, &delivery).is_none());
+        let markers = crate::chatkey::Markers::default();
+        assert!(payload_from(&markers, None, None, &entry, &delivery).is_none());
     }
 
     #[test]
@@ -764,7 +782,8 @@ mod tests {
         let entry = conversation(dir.path());
         // `AAECAw==` is the base64 of [0, 1, 2, 3].
         let delivery = delivery(Body::image("AAECAw==", "image/png"));
-        let payload = payload_from("", None, None, &entry, &delivery).unwrap();
+        let markers = crate::chatkey::Markers::default();
+        let payload = payload_from(&markers, None, None, &entry, &delivery).unwrap();
         assert_eq!(payload.attachments.len(), 1);
         let path = PathBuf::from(&payload.attachments[0].path);
         assert!(

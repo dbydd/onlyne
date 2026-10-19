@@ -306,7 +306,10 @@ impl Backend for FeishuBackend {
                 bytes = payload.len(),
                 "feishu event received"
             );
-            if let Some(event) = update::event_from_payload(&self.gateway, &self.platform, &value) {
+            if let Some(mut event) =
+                update::event_from_payload(&self.gateway, &self.platform, &value)
+            {
+                self.materialize_inbound_attachments(&mut event).await;
                 return Ok(Some(event));
             }
             // An event this backend does not translate is the ordinary case
@@ -316,6 +319,7 @@ impl Backend for FeishuBackend {
 
     async fn send(&mut self, args: SendArgs) -> Result<SentArgs> {
         let mut message_id = None;
+        let reply_to = args.payload.reply_to.as_deref();
         for request in render::render(&args.conversation, &args.payload) {
             // Feishu answers every create with the message it made; a payload
             // may render into several calls and the last id is the one a reply
@@ -325,6 +329,25 @@ impl Backend for FeishuBackend {
                     .post_message(&args.conversation, request.body)
                     .await?,
             );
+        }
+        for attachment in &args.payload.attachments {
+            let body = if attachment.kind == "image" {
+                let image_key = if let Some(key) = attachment.path.strip_prefix("feishu:image_key:")
+                {
+                    key.to_string()
+                } else {
+                    self.api.upload_image(&attachment.path).await?
+                };
+                render::image_request(&args.conversation, &image_key, reply_to)
+            } else {
+                let file_key = if let Some(key) = attachment.path.strip_prefix("feishu:file_key:") {
+                    key.to_string()
+                } else {
+                    self.api.upload_file(&attachment.path).await?
+                };
+                render::file_request(&args.conversation, &file_key, reply_to)
+            };
+            message_id = Some(self.api.post_message(&args.conversation, body).await?);
         }
         Ok(SentArgs {
             conversation: args.conversation,
@@ -341,6 +364,62 @@ impl Backend for FeishuBackend {
             state: "online".to_string(),
             detail: None,
             uptime_s: self.started.elapsed().as_secs(),
+        }
+    }
+}
+
+impl FeishuBackend {
+    /// Download inbound `feishu:image_key:<key>` and `feishu:file_key:<key>`
+    /// resources to disk so the agent and trigger script receive a readable
+    /// local path alongside the original key in `alt`.
+    async fn materialize_inbound_attachments(&self, event: &mut ImEvent) {
+        if event.attachments.is_empty() || self.api.credentials().app_id.is_empty() {
+            return;
+        }
+        let media_dir = std::env::var("FEISHU_MEDIA_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("onlyne-feishu-media"));
+        for att in &mut event.attachments {
+            let (res_type, key) = if let Some(k) = att.path.strip_prefix("feishu:image_key:") {
+                ("image", k.to_string())
+            } else if let Some(k) = att.path.strip_prefix("feishu:file_key:") {
+                ("file", k.to_string())
+            } else {
+                continue;
+            };
+            match self.api.download_resource(&event.id, &key, res_type).await {
+                Ok(bytes) => {
+                    if std::fs::create_dir_all(&media_dir).is_ok() {
+                        let safe_key: String = key
+                            .chars()
+                            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                            .collect();
+                        let ext = att
+                            .alt
+                            .as_deref()
+                            .and_then(|n| std::path::Path::new(n).extension())
+                            .and_then(|e| e.to_str())
+                            .unwrap_or(if res_type == "image" { "png" } else { "bin" });
+                        let file_path = media_dir.join(format!("{}-{safe_key}.{ext}", event.id));
+                        if std::fs::write(&file_path, &bytes).is_ok() {
+                            let prev_alt = att.alt.take();
+                            att.alt = Some(match prev_alt {
+                                Some(name) => format!("{name} (feishu:{res_type}_key:{key})"),
+                                None => format!("feishu:{res_type}_key:{key}"),
+                            });
+                            att.path = file_path.to_string_lossy().into_owned();
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        message_id = %event.id,
+                        key = %key,
+                        error = %format!("{error:#}"),
+                        "feishu inbound resource download skipped; keeping handle in path"
+                    );
+                }
+            }
         }
     }
 }

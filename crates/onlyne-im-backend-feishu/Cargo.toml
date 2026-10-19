@@ -20,6 +20,7 @@ clap = { workspace = true }
 # `communication` exposes the typed IM requests this backend uses (chat list,
 # send, reply); the websocket feature stays on for inbound events.
 openlark = { workspace = true, features = ["communication"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

@@ -142,6 +142,7 @@ fn an_inbound_event_is_the_shape_a_trigger_script_reads() {
             self_handle: Some("REFIDX_quoted".into()),
         }),
         at: "2026-10-10T12:00:00Z".into(),
+        ..ImEvent::default()
     };
     let value = serde_json::to_value(&event).unwrap();
     assert_eq!(value["kind"], "message");

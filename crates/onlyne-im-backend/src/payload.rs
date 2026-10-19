@@ -108,6 +108,15 @@ pub struct ImEvent {
     /// platform says. Absent for a message that opens its own discussion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply: Option<ImReply>,
+    /// The platform's original event type name (e.g. `im.message.receive_v1`,
+    /// `card.action.trigger`, `calendar.calendar.event.changed_v4`), when the
+    /// backend records one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
+    /// Optional raw platform event JSON, preserved for downstream trigger
+    /// scripts and MCP tools that inspect platform-specific resource IDs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<serde_json::Value>,
     /// RFC 3339 UTC.
     pub at: String,
 }
@@ -126,6 +135,8 @@ impl Default for ImEvent {
             attachments: Vec::new(),
             action: None,
             reply: None,
+            event_type: None,
+            raw: None,
             at: String::new(),
         }
     }

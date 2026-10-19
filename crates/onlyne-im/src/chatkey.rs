@@ -18,6 +18,8 @@
 //! first line or nothing — because a reply that misfiles into another person's
 //! conversation is worse than a reply that fails.
 
+use onlyne_im_backend::payload::{ImAction, ImFormat};
+
 /// The longest body a key may be, between `chat:` and the closing bracket.
 const MAX_KEY_LEN: usize = 128;
 
@@ -96,6 +98,16 @@ pub struct Markers {
     /// A sticker to send instead of words (`<sticker:…>`), which the gateway
     /// records as the message's metadata rather than as text.
     pub sticker: Option<String>,
+    /// Explicit body format (`<format:markdown>` or `<format:plain>`).
+    /// Defaults to `None` (which the caller reads as `ImFormat::Plain` unless
+    /// explicitly specified).
+    pub format: Option<ImFormat>,
+    /// Interactive buttons declared via `<action:ID|LABEL>` or
+    /// `<action:ID|LABEL|STYLE>`.
+    pub actions: Vec<ImAction>,
+    /// Local file/image paths declared via `<file:/abs/path>` or
+    /// `<image:/abs/path>` for outbound attachment upload.
+    pub files: Vec<(String, String)>,
     /// Everything after the header, verbatim.
     pub rest: String,
 }
@@ -133,35 +145,83 @@ pub fn extract_markers(body: &str) -> Result<Markers, Misplaced> {
             })
         };
     };
-    // The key is the first line; the marker lines that follow it are read in
-    // order, and the first line that is not one of them starts the body.
+    // The key is the first line; the optional marker lines (`<msg:...>`,
+    // `<sticker:...>`, `<format:...>`, `<action:...>`, `<file:...>`,
+    // `<image:...>`) may appear in any order immediately after the key, and the
+    // first line that is not one of them starts the body.
     let mut rest = after_first;
     let mut markers = Markers {
         key,
         ..Markers::default()
     };
-    for (slot, prefix, max) in [
-        (&mut markers.reply_to, "<msg:", MAX_ID_LEN),
-        (&mut markers.sticker, "<sticker:", MAX_ID_LEN),
-    ] {
-        if slot.is_some() {
-            continue;
-        }
-        let Some(line) = rest.split_once('\n').map(|(line, _)| line) else {
-            // The header ran to the end of the body with no trailing newline.
-            if let Some(value) = unwrap_prefixed(rest, prefix, max) {
-                *slot = Some(value);
-                rest = "";
-            }
-            continue;
+    while !rest.is_empty() {
+        let (line, next_rest) = match rest.split_once('\n') {
+            Some((l, t)) => (l.trim_end_matches('\r'), t),
+            None => (rest.trim_end_matches('\r'), ""),
         };
-        if let Some(value) = unwrap_prefixed(line, prefix, max) {
-            *slot = Some(value);
-            rest = rest.split_once('\n').map(|(_, tail)| tail).unwrap_or("");
+        if markers.reply_to.is_none()
+            && let Some(value) = unwrap_prefixed(line, "<msg:", MAX_ID_LEN)
+        {
+            markers.reply_to = Some(value);
+            rest = next_rest;
+            continue;
         }
+        if markers.sticker.is_none()
+            && let Some(value) = unwrap_prefixed(line, "<sticker:", MAX_ID_LEN)
+        {
+            markers.sticker = Some(value);
+            rest = next_rest;
+            continue;
+        }
+        if markers.format.is_none()
+            && let Some(value) = unwrap_prefixed(line, "<format:", 32)
+            && let Some(fmt) = parse_format(&value)
+        {
+            markers.format = Some(fmt);
+            rest = next_rest;
+            continue;
+        }
+        if let Some(value) = unwrap_prefixed(line, "<action:", MAX_ID_LEN)
+            && let Some(action) = parse_action(&value)
+        {
+            markers.actions.push(action);
+            rest = next_rest;
+            continue;
+        }
+        if let Some(value) = unwrap_prefixed(line, "<file:", MAX_ID_LEN) {
+            markers.files.push(("file".to_string(), value));
+            rest = next_rest;
+            continue;
+        }
+        if let Some(value) = unwrap_prefixed(line, "<image:", MAX_ID_LEN) {
+            markers.files.push(("image".to_string(), value));
+            rest = next_rest;
+            continue;
+        }
+        break;
     }
     markers.rest = rest.to_string();
     Ok(markers)
+}
+
+fn parse_format(raw: &str) -> Option<ImFormat> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "markdown" | "md" | "card" => Some(ImFormat::Markdown),
+        "plain" | "text" => Some(ImFormat::Plain),
+        _ => None,
+    }
+}
+
+fn parse_action(raw: &str) -> Option<ImAction> {
+    let mut parts = raw.splitn(3, '|').map(str::trim);
+    let id = parts.next().filter(|s| !s.is_empty())?.to_string();
+    let label = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&id)
+        .to_string();
+    let style = parts.next().filter(|s| !s.is_empty()).map(str::to_string);
+    Some(ImAction { id, label, style })
 }
 
 /// The chat key and, when the body names one, the platform event it answers.
@@ -262,6 +322,33 @@ mod tests {
         assert_eq!(reply.as_deref(), Some("ROBOT1.0_abc"));
         // The payload keeps its own blank line and text, byte for byte.
         assert_eq!(rest, "\n在的\n");
+    }
+
+    #[test]
+    fn format_action_and_file_markers_parse_in_any_order() {
+        let key = mint();
+        let body = format!(
+            "<chat:{key}>\n\
+             <format:markdown>\n\
+             <msg:om_parent>\n\
+             <action:approve|批准|primary>\n\
+             <action:reject|驳回|danger>\n\
+             <file:/tmp/report.pdf>\n\
+             \n\
+             # 审批请求\n\
+             请确认\n"
+        );
+        let markers = extract_markers(&body).expect("valid header");
+        assert_eq!(markers.key, key);
+        assert_eq!(markers.format, Some(ImFormat::Markdown));
+        assert_eq!(markers.reply_to.as_deref(), Some("om_parent"));
+        assert_eq!(markers.actions.len(), 2);
+        assert_eq!(markers.actions[0].id, "approve");
+        assert_eq!(markers.actions[0].label, "批准");
+        assert_eq!(markers.actions[0].style.as_deref(), Some("primary"));
+        assert_eq!(markers.actions[1].id, "reject");
+        assert_eq!(markers.files, vec![("file".into(), "/tmp/report.pdf".into())]);
+        assert_eq!(markers.rest, "\n# 审批请求\n请确认\n");
     }
 
     #[test]
