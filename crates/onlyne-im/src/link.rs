@@ -312,18 +312,88 @@ impl RoleLink {
             return Ok(());
         }
         let Some(entry) = self.gateway.conversation_for_key(&chat_key) else {
+            // Outbound first-contact: when the header carries a direct platform
+            // coordinate (`<chat:GATEWAY:CONVERSATION_ID>`, or `<chat:CONVERSATION_ID>`
+            // when this gateway root declares a single backend) and the listen
+            // policy admits it, adopt the conversation on demand so the first
+            // message need not wait for an inbound event or a manual API call.
+            if let Some(adopted) = self.try_adopt_outbound(&chat_key) {
+                return self.render_entry(link, renders, delivery, &text, &rest, &adopted).await;
+            }
             let reason = format!("no conversation in this gateway carries chat key {chat_key}");
             self.refuse(link, delivery, reason).await?;
             return Ok(());
         };
-        let entry = &entry;
+        self.render_entry(link, renders, delivery, &text, &rest, &entry).await
+    }
+
+    /// Attempt to resolve an unknown `<chat:...>` token as a direct platform
+    /// coordinate (`<gateway>:<conversation>` or, when only one backend is
+    /// configured, `<conversation>` if it is not a 32-hex minted chat key) and
+    /// adopt it into `conversations/`.
+    fn try_adopt_outbound(&self, token: &str) -> Option<Conversation> {
+        let (backend, conversation) = if let Some((gw, conv)) = token.split_once(':') {
+            if self.gateway.backends.iter().any(|b| b.gateway == gw) && !conv.is_empty() {
+                (gw.to_string(), conv.to_string())
+            } else if self.gateway.backends.len() == 1 {
+                // A platform conversation id that itself contains a colon
+                // (e.g. `group:88` on a single-backend gateway root).
+                (self.gateway.backends[0].gateway.clone(), token.to_string())
+            } else {
+                return None;
+            }
+        } else {
+            // A bare 32-hex string is an unknown minted chat key, never a
+            // platform coordinate: keep refusing it so a typoed chat key never
+            // mints a bogus conversation.
+            let is_minted_hex = token.len() == 32 && token.chars().all(|c| c.is_ascii_hexdigit());
+            if is_minted_hex || self.gateway.backends.len() != 1 {
+                return None;
+            }
+            (self.gateway.backends[0].gateway.clone(), token.to_string())
+        };
+        if !self.gateway.listen.admits(&conversation) {
+            return None;
+        }
+        match crate::adopt::adopt(&self.gateway, &backend, &conversation) {
+            Ok(adopted) => {
+                tracing::info!(
+                    gateway = %backend,
+                    conversation = %adopted.conversation,
+                    slug = %adopted.slug,
+                    chat_key = %adopted.chat_key,
+                    "adopted an outbound conversation on first contact"
+                );
+                Some(adopted)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    gateway = %backend,
+                    conversation = %conversation,
+                    error = %format!("{error:#}"),
+                    "could not adopt outbound conversation"
+                );
+                None
+            }
+        }
+    }
+
+    async fn render_entry(
+        &self,
+        link: &ClientConn,
+        renders: &mpsc::Sender<RenderJob>,
+        delivery: Delivery,
+        text: &str,
+        rest: &str,
+        entry: &Conversation,
+    ) -> Result<()> {
         // The window is what a reply target resolves against, and what the
         // recorder reads later to decide whether this reply opens a discussion.
         let history = crate::history::History::new(&self.gateway.root);
         let window = crate::chain::window_of(&history, &entry.chat_key);
         // A prefix the window cannot place is a refusal, not a guess: the
         // model that wrote it gets the candidates back and writes a longer one.
-        let reply_to = match reply_target(&text, &window, entry) {
+        let reply_to = match reply_target(text, &window, entry) {
             Ok(target) => target,
             Err(reason) => {
                 self.refuse(link, delivery, reason).await?;
@@ -339,7 +409,7 @@ impl RoleLink {
             .and_then(|target| window.messages.iter().find(|m| m.id == target))
             .and_then(|message| message.handle.clone());
         let (accepted, reason) = match payload_from(
-            &rest,
+            rest,
             reply_to,
             reply_reference,
             entry,
@@ -608,6 +678,7 @@ async fn sleep_or_shutdown(delay: Duration, shutdown: &mut tokio::sync::watch::R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Gateway;
     use onlyne_proto::{Body, Envelope, MsgKind, Principal, new_envelope};
     use std::path::{Path, PathBuf};
 
@@ -704,6 +775,88 @@ mod tests {
         );
         assert!(path.is_file());
         assert_eq!(std::fs::read(&path).unwrap(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn outbound_first_contact_adopts_coordinate_and_refuses_unknown_minted_hex() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".onlyne")).unwrap();
+        std::fs::write(
+            dir.path().join(".onlyne/config.toml"),
+            r#"
+[gateway]
+role = "im-gateway"
+[server]
+endpoint = "127.0.0.1:9443"
+cert_pin = "sha256/0000000000000000000000000000000000000000000="
+[[im.backend]]
+gateway = "qqbot"
+run = ["onlyne-im-backend-qqbot"]
+[[im.backend]]
+gateway = "feishu"
+run = ["onlyne-im-backend-feishu"]
+"#,
+        )
+        .unwrap();
+        let gateway = Gateway::load(dir.path()).unwrap();
+        let link = RoleLink::new(gateway.clone());
+
+        // 1. `<chat:qqbot:c2c:OPENID>` adopts on first outbound contact.
+        let adopted = link
+            .try_adopt_outbound("qqbot:c2c:437CD65AC133C7DC")
+            .expect("coordinate is adopted");
+        assert_eq!(adopted.gateway, "qqbot");
+        assert_eq!(adopted.conversation, "c2c:437CD65AC133C7DC");
+        assert!(gateway.conversation_for_key(&adopted.chat_key).is_some());
+
+        // 2. An unknown 32-hex minted chat key is refused, never mistaken for a coordinate.
+        assert!(
+            link.try_adopt_outbound("0123456789abcdef0123456789abcdef")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn live_gateway_picks_up_disk_generated_conversation_without_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".onlyne")).unwrap();
+        std::fs::write(
+            dir.path().join(".onlyne/config.toml"),
+            r#"
+[gateway]
+role = "im-gateway"
+[server]
+endpoint = "127.0.0.1:9443"
+cert_pin = "sha256/0000000000000000000000000000000000000000000="
+[[im.backend]]
+gateway = "feishu"
+run = ["onlyne-im-backend-feishu"]
+"#,
+        )
+        .unwrap();
+        let gateway = Gateway::load(dir.path()).unwrap();
+        assert!(gateway.conversations().is_empty());
+
+        // Simulate `onlyne-im generate` writing a workspace while `Gateway` is already loaded.
+        let ws = dir.path().join("conversations/feishu-oc_new");
+        std::fs::create_dir_all(ws.join(".onlyne")).unwrap();
+        std::fs::write(
+            ws.join(".onlyne/config.toml"),
+            "[chat]\ngateway = \"feishu\"\nconversation = \"oc_new\"\n",
+        )
+        .unwrap();
+        let key = "fedcba9876543210fedcba9876543210";
+        std::fs::write(ws.join(".onlyne/chat.key"), format!("{key}\n")).unwrap();
+
+        // `conversation_for_key` and `conversation_for` rescan on a cache miss.
+        let by_key = gateway
+            .conversation_for_key(key)
+            .expect("disk workspace discovered on key lookup");
+        assert_eq!(by_key.conversation, "oc_new");
+        let by_coord = gateway
+            .conversation_for("feishu", "oc_new")
+            .expect("disk workspace discovered on coordinate lookup");
+        assert_eq!(by_coord.chat_key, key);
     }
 
     /// A delivery over a note, which needs no causality and no `op_id`, so the

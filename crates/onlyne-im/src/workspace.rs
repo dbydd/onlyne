@@ -182,47 +182,51 @@ pub async fn generate(args: &GenerateArgs) -> Result<()> {
         );
     }
 
-    // The cluster half first: a server we cannot reach is a refusal before any
-    // file exists, and the gateway role is checked against the live spec so a
-    // second `generate` cannot silently overwrite a key.
-    let endpoint = resolve_admin(args)?;
-    let spec = spec_get(&endpoint).await?;
-    let peers = if args.peers.is_empty() {
-        vec![DEFAULT_PEER.to_string()]
-    } else {
-        args.peers.clone()
-    };
-    // Every refusal that can be decided offline is decided here, before the
-    // first byte is written: a `generate` that failed on a bad `--peer` after
-    // minting a key and a directory would leave an operator cleaning up after a
-    // command that reported nothing had happened.
     let role = file.role.clone();
-    let edits = spec_edits(&role, &peers, &spec["spec"])?;
+    let wants_cluster = args.server_root.is_some()
+        || args.socket.is_some()
+        || !args.peers.is_empty()
+        || std::env::var("ONLYNE_SOCKET")
+            .ok()
+            .is_some_and(|s| !s.is_empty());
+    let cluster_plan = if wants_cluster {
+        let endpoint = resolve_admin(args)?;
+        let spec = spec_get(&endpoint).await?;
+        let edits = spec_edits(&role, &args.peers, &spec["spec"])?;
+        Some((endpoint, spec, edits))
+    } else {
+        None
+    };
 
     let chat_key = write_workspace(&workspace, &args.gateway, &args.conversation)?;
 
-    match spec_apply(&endpoint, &spec_source_hash(&spec)?, edits).await {
-        Ok(()) => {}
-        Err(error) => {
-            // The workspace is already on disk; a half-registered role is worse
-            // than a named leftover, so say exactly what stands and what does
-            // not rather than deleting a key an operator may already have read.
-            bail!(
-                "{error}\n\
-                 the conversation workspace at {} was written and the gateway role is NOT \
-                 registered; \
-                 fix the server and run `onlyne-im generate` again after removing that directory",
-                workspace.display()
-            );
+    if let Some((endpoint, spec, edits)) = cluster_plan
+        && !edits.is_empty()
+    {
+        match spec_apply(&endpoint, &spec_source_hash(&spec)?, edits).await {
+            Ok(()) => {}
+            Err(error) => {
+                bail!(
+                    "{error}\n\
+                     the conversation workspace at {} was written and the gateway role is NOT \
+                     registered; \
+                     fix the server and run `onlyne-im generate` again after removing that directory",
+                    workspace.display()
+                );
+            }
         }
     }
 
     println!("{}", workspace.display());
     println!("chat key {chat_key}");
-    println!(
-        "gateway role {role} registered with peers: {}",
-        peers.join(", ")
-    );
+    if !args.peers.is_empty() {
+        println!(
+            "gateway role {role} registered with peers: {}",
+            args.peers.join(", ")
+        );
+    } else {
+        println!("gateway role {role} ready");
+    }
     Ok(())
 }
 
@@ -350,7 +354,20 @@ fn write_workspace(workspace: &Path, gateway: &str, conversation: &str) -> Resul
 /// it, and every later one only refreshes the edges, because the key beside the
 /// document is the operator's and must survive a second conversation.
 fn spec_edits(role: &str, peers: &[String], spec: &Value) -> Result<Vec<SpecEdit>> {
-    let declared = client_row(spec, role).is_some();
+    let existing_row = client_row(spec, role);
+    let declared = existing_row.is_some();
+    // When the gateway role is already declared and the operator did not pass
+    // `--peer`, leave its ACL untouched: a second `generate` only mints a
+    // conversation workspace under the shared gateway role and must never
+    // clobber the role's existing `allowed_targets` / `allowed_senders`.
+    if declared && peers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let effective_peers: Vec<String> = if peers.is_empty() {
+        vec![DEFAULT_PEER.to_string()]
+    } else {
+        peers.to_vec()
+    };
     let mut edits = Vec::new();
     if !declared {
         // First conversation in this root declares the role. The key lives in
@@ -365,15 +382,43 @@ fn spec_edits(role: &str, peers: &[String], spec: &Value) -> Result<Vec<SpecEdit
             max_sessions: Some(1),
         }));
     }
-    edits.push(SpecEdit::SetTargets(SetTargets {
-        role: role.to_string(),
-        targets: peers.to_vec(),
-    }));
-    edits.push(SpecEdit::SetSenders(SetSenders {
-        role: role.to_string(),
-        senders: peers.to_vec(),
-    }));
-    for peer in peers {
+    let existing_targets = existing_row
+        .as_ref()
+        .map(|row| string_list(&row["allowed_targets"]))
+        .unwrap_or_default();
+    if !existing_targets.iter().any(|name| name == "*") {
+        let mut merged_targets = existing_targets.clone();
+        for peer in &effective_peers {
+            if !merged_targets.iter().any(|name| name == peer) {
+                merged_targets.push(peer.clone());
+            }
+        }
+        if !declared || merged_targets != existing_targets {
+            edits.push(SpecEdit::SetTargets(SetTargets {
+                role: role.to_string(),
+                targets: merged_targets,
+            }));
+        }
+    }
+    let existing_senders = existing_row
+        .as_ref()
+        .map(|row| string_list(&row["allowed_senders"]))
+        .unwrap_or_default();
+    if !existing_senders.iter().any(|name| name == "*") {
+        let mut merged_senders = existing_senders.clone();
+        for peer in &effective_peers {
+            if !merged_senders.iter().any(|name| name == peer) {
+                merged_senders.push(peer.clone());
+            }
+        }
+        if !declared || merged_senders != existing_senders {
+            edits.push(SpecEdit::SetSenders(SetSenders {
+                role: role.to_string(),
+                senders: merged_senders,
+            }));
+        }
+    }
+    for peer in &effective_peers {
         let Some(row) = client_row(spec, peer) else {
             // A peer that is not in the cluster cannot be owed an edge, and the
             // loader would refuse the `allowed_targets` entry by name anyway.
@@ -607,5 +652,48 @@ mod tests {
                 .any(|edit| matches!(edit, SpecEdit::UpsertRole(_))),
             "the role row is rewritten: {edits:?}"
         );
+    }
+
+    #[test]
+    fn a_declared_gateway_role_with_no_peers_flag_leaves_acl_untouched() {
+        let spec = json!({
+            "client": [
+                {
+                    "role": "im-gateway",
+                    "allowed_targets": ["*","_supervisor"],
+                    "allowed_senders": ["*"]
+                },
+                { "role": "_supervisor" }
+            ]
+        });
+        let edits = spec_edits("im-gateway", &[], &spec).unwrap();
+        assert!(
+            edits.is_empty(),
+            "generating a second conversation without --peer must not clobber existing ACL: {edits:?}"
+        );
+    }
+
+    #[test]
+    fn a_declared_gateway_role_merges_new_peers_without_dropping_existing_edges() {
+        let spec = json!({
+            "client": [
+                {
+                    "role": "im-gateway",
+                    "allowed_targets": ["dpdp"],
+                    "allowed_senders": ["dpdp"]
+                },
+                { "role": "dpdp" },
+                { "role": "helper", "allowed_targets": ["dpdp"] }
+            ]
+        });
+        let edits = spec_edits("im-gateway", &["helper".to_string()], &spec).unwrap();
+        let SpecEdit::SetTargets(t) = &edits[0] else {
+            panic!("expected SetTargets: {edits:?}");
+        };
+        assert_eq!(t.targets, vec!["dpdp", "helper"]);
+        let SpecEdit::SetSenders(s) = &edits[1] else {
+            panic!("expected SetSenders: {edits:?}");
+        };
+        assert_eq!(s.senders, vec!["dpdp", "helper"]);
     }
 }

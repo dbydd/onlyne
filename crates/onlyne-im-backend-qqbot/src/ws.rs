@@ -22,6 +22,7 @@
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -83,6 +84,64 @@ impl Session {
         self.last_seq = None;
     }
 
+    /// Process one frame received while waiting for the `IDENTIFY`/`RESUME`
+    /// handshake to complete.
+    ///
+    /// - `Ok(Some(true))`: handshake succeeded (`READY` with a `session_id`, or
+    ///   `RESUMED` with an existing `session_id`).
+    /// - `Ok(Some(false))`: non-terminal frame handled (event dispatch buffered
+    ///   into `buffered` so no replayed message is dropped, or `HeartbeatAck`).
+    /// - `Ok(None)`: server requested an immediate `Heartbeat` (`op 1`).
+    /// - `Err(_)`: handshake rejected (`op 9` invalidates the session when
+    ///   `d != true`, or `op 7` asks for reconnect).
+    pub fn accept_handshake_frame(
+        &mut self,
+        frame: Value,
+        buffered: &mut VecDeque<Value>,
+    ) -> Result<Option<bool>> {
+        match classify(&frame) {
+            GatewayOp::Dispatch => {
+                self.note_dispatch(&frame);
+                match frame.get("t").and_then(Value::as_str) {
+                    Some("READY") => {
+                        if self.session_id.is_none() {
+                            bail!("the gateway answered IDENTIFY with no READY session id: {frame}");
+                        }
+                        Ok(Some(true))
+                    }
+                    Some("RESUMED") => {
+                        if self.session_id.is_none() {
+                            bail!("the gateway answered RESUME with RESUMED but no prior session id was held: {frame}");
+                        }
+                        Ok(Some(true))
+                    }
+                    _ => {
+                        buffered.push_back(frame);
+                        if self.session_id.is_some() {
+                            // During a RESUME or active session, an event frame arriving
+                            // means the stream is live; keep it buffered and finish handshake.
+                            Ok(Some(true))
+                        } else {
+                            Ok(Some(false))
+                        }
+                    }
+                }
+            }
+            GatewayOp::Heartbeat => Ok(None),
+            GatewayOp::HeartbeatAck | GatewayOp::Hello | GatewayOp::Other => Ok(Some(false)),
+            GatewayOp::InvalidSession => {
+                let resumable = frame.get("d").and_then(Value::as_bool).unwrap_or(false);
+                if !resumable {
+                    self.invalidate();
+                }
+                bail!("the gateway rejected the session during handshake (op 9, resumable={resumable}): {frame}");
+            }
+            GatewayOp::Reconnect => {
+                bail!("the gateway asked to reconnect during handshake (op 7): {frame}");
+            }
+        }
+    }
+
     /// Record one dispatch's sequence.
     pub fn note_dispatch(&mut self, frame: &Value) {
         if let Some(seq) = frame.get("s").and_then(Value::as_u64) {
@@ -122,18 +181,27 @@ pub struct Gateway {
     >,
     pub session: Session,
     pub heartbeat_ms: u64,
+    buffered: VecDeque<Value>,
 }
 
 impl Gateway {
-    /// Connect, answer `HELLO` with `IDENTIFY`, and wait for `READY`.
-    pub async fn connect(url: &str, token: &str, identify: Value) -> Result<Self> {
+    /// Connect, answer `HELLO` with `IDENTIFY` or `RESUME`, and wait for the
+    /// handshake to complete (`READY` or `RESUMED`), buffering any missed
+    /// dispatch frames that arrive along the way.
+    pub async fn connect(
+        url: &str,
+        token: &str,
+        identify: Value,
+        prior: Option<Session>,
+    ) -> Result<Self> {
         let (socket, _response) = tokio_tungstenite::connect_async(url)
             .await
             .with_context(|| format!("connecting to {url}"))?;
         let mut gateway = Self {
             sink: socket,
-            session: Session::default(),
+            session: prior.unwrap_or_default(),
             heartbeat_ms: 30_000,
+            buffered: VecDeque::new(),
         };
         // HELLO names the heartbeat interval and must arrive first.
         let hello = gateway.next_json().await.with_context(
@@ -144,13 +212,19 @@ impl Gateway {
         }
         gateway.heartbeat_ms = heartbeat_interval_ms(&hello).unwrap_or(30_000);
         gateway.send_json(&identify).await?;
-        let ready = gateway
-            .next_json()
-            .await
-            .context("waiting for READY after IDENTIFY")?;
-        gateway.session.note_dispatch(&ready);
-        if gateway.session.session_id.is_none() {
-            bail!("the gateway answered IDENTIFY with no READY session id: {ready}");
+        loop {
+            let frame = gateway
+                .next_json()
+                .await
+                .context("waiting for READY or RESUMED after IDENTIFY/RESUME")?;
+            if let Some(done) = gateway.session.accept_handshake_frame(frame, &mut gateway.buffered)? {
+                if done {
+                    break;
+                }
+            } else {
+                // Heartbeat request during handshake.
+                gateway.send_json(&gateway.session.heartbeat()).await?;
+            }
         }
         let _ = token;
         Ok(gateway)
@@ -201,6 +275,9 @@ impl Gateway {
     /// `next_json` is cancellation-safe — frames already read stay in the
     /// stream's buffer — so the timeout loses nothing.
     pub async fn next_dispatch(&mut self) -> Result<Option<Value>> {
+        if let Some(frame) = self.buffered.pop_front() {
+            return Ok(Some(frame));
+        }
         let interval = Duration::from_millis(self.heartbeat_ms.max(1_000));
         loop {
             let frame = match tokio::time::timeout(interval, self.next_json()).await {
@@ -344,6 +421,63 @@ mod tests {
         session.invalidate();
         assert_eq!(session.session_id, None);
         assert_eq!(session.last_seq, None);
+    }
+
+    #[test]
+    fn resumed_and_replayed_events_complete_handshake_without_dropping_messages() {
+        let mut session = Session {
+            session_id: Some("sess-live-1".to_string()),
+            last_seq: Some(1),
+        };
+        let mut buffered = VecDeque::new();
+
+        // 1. A RESUMED frame with empty `d` succeeds and preserves `session_id`.
+        let done = session
+            .accept_handshake_frame(
+                json!({"op": 0, "s": 2, "t": "RESUMED", "d": ""}),
+                &mut buffered,
+            )
+            .expect("RESUMED is valid");
+        assert_eq!(done, Some(true));
+        assert_eq!(session.session_id.as_deref(), Some("sess-live-1"));
+        assert_eq!(session.last_seq, Some(2));
+        assert!(buffered.is_empty());
+
+        // 2. A C2C_MESSAGE_CREATE arriving before READY/RESUMED is buffered and never dropped.
+        let mut fresh = Session::default();
+        let msg = json!({
+            "op": 0,
+            "s": 9,
+            "t": "C2C_MESSAGE_CREATE",
+            "d": {"id": "m-9", "content": "来看看qq，能收到吗"}
+        });
+        let step1 = fresh
+            .accept_handshake_frame(msg.clone(), &mut buffered)
+            .expect("event buffered while waiting for READY");
+        assert_eq!(step1, Some(false));
+        assert_eq!(buffered.len(), 1);
+        let step2 = fresh
+            .accept_handshake_frame(
+                json!({"op": 0, "s": 10, "t": "READY", "d": {"session_id": "sess-new"}}),
+                &mut buffered,
+            )
+            .expect("READY completes handshake");
+        assert_eq!(step2, Some(true));
+        assert_eq!(fresh.session_id.as_deref(), Some("sess-new"));
+        assert_eq!(fresh.last_seq, Some(10));
+        assert_eq!(buffered.pop_front(), Some(msg));
+
+        // 3. op 9, d=false during handshake invalidates the prior session so the next attempt sends IDENTIFY.
+        let mut dead = Session {
+            session_id: Some("sess-stale".to_string()),
+            last_seq: Some(5),
+        };
+        let err = dead
+            .accept_handshake_frame(json!({"op": 9, "d": false}), &mut buffered)
+            .unwrap_err();
+        assert!(err.to_string().contains("op 9"));
+        assert_eq!(dead.session_id, None);
+        assert_eq!(dead.last_seq, None);
     }
 
     #[test]

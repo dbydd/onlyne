@@ -268,6 +268,15 @@ impl Gateway {
 
     /// The conversation one platform message belongs to.
     pub fn conversation_for(&self, gateway: &str, conversation: &str) -> Option<Conversation> {
+        if let Some(found) = self
+            .read()
+            .iter()
+            .find(|entry| entry.gateway == gateway && entry.conversation == conversation)
+            .cloned()
+        {
+            return Some(found);
+        }
+        self.rescan_from_disk();
         self.read()
             .iter()
             .find(|entry| entry.gateway == gateway && entry.conversation == conversation)
@@ -276,10 +285,34 @@ impl Gateway {
 
     /// The conversation one chat key names.
     pub fn conversation_for_key(&self, key: &str) -> Option<Conversation> {
+        if let Some(found) = self
+            .read()
+            .iter()
+            .find(|entry| entry.chat_key == key)
+            .cloned()
+        {
+            return Some(found);
+        }
+        self.rescan_from_disk();
         self.read()
             .iter()
             .find(|entry| entry.chat_key == key)
             .cloned()
+    }
+
+    /// Re-scan `<root>/conversations/*` on a cache miss so workspaces added by
+    /// `onlyne-im generate` while `onlyne-im run` is alive are picked up
+    /// immediately without restarting the gateway.
+    fn rescan_from_disk(&self) {
+        let Ok(disk_entries) = scan_conversations(&self.root) else {
+            return;
+        };
+        for entry in disk_entries {
+            if self.backend(&entry.gateway).is_none() {
+                continue;
+            }
+            let _ = self.adopt(entry);
+        }
     }
 
     /// Register one conversation this run adopted.

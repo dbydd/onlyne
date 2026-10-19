@@ -246,12 +246,16 @@ impl Backend for QqBotBackend {
                     continue;
                 }
             };
-            let connect = ws::Gateway::connect(&url, "", identify)
+            let prior = self.session.clone();
+            let connect = ws::Gateway::connect(&url, "", identify, prior)
                 .await
                 .context("the qqbot gateway stream failed");
             let mut gateway = match connect {
                 Ok(gateway) => gateway,
                 Err(error) => {
+                    if error.to_string().contains("resumable=false") {
+                        self.session = None;
+                    }
                     tracing::warn!(
                         error = %format!("{error:#}"),
                         retry_in_ms = reconnect_delay(attempt).as_millis() as u64,

@@ -149,9 +149,10 @@ pub struct RunOptions {
 pub async fn run(gateway: Gateway, options: RunOptions) -> Result<()> {
     let gateway = Arc::new(gateway);
     if gateway.conversations().is_empty() {
-        tracing::warn!(
+        tracing::info!(
             root = %gateway.root.display(),
-            "this gateway root has no conversation workspace; run `onlyne-im generate` to add one"
+            "this gateway root has no pre-registered conversation workspace; \
+             inbound events and outbound `<chat:GATEWAY:CONVERSATION_ID>` deliveries will adopt conversations on demand (or run `onlyne-im generate` to pre-register one)"
         );
     }
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -398,6 +399,24 @@ async fn serve_backend(
                 "this backend reported no credential and asked for none; \
                  check its environment"
             ),
+        }
+    } else if let Ok(listed) = host.list_conversations().await {
+        for conv in listed {
+            if gateway.conversation_for(&gateway_id, &conv.id).is_some() {
+                continue;
+            }
+            if !gateway.listen.admits(&conv.id) {
+                continue;
+            }
+            if let Ok(adopted) = crate::adopt::adopt(&gateway, &gateway_id, &conv.id) {
+                tracing::info!(
+                    gateway = %gateway_id,
+                    conversation = %adopted.conversation,
+                    slug = %adopted.slug,
+                    chat_key = %adopted.chat_key,
+                    "adopted a platform conversation at startup"
+                );
+            }
         }
     }
     loop {

@@ -19,7 +19,7 @@
 //! conversation is worse than a reply that fails.
 
 /// The longest body a key may be, between `chat:` and the closing bracket.
-const MAX_KEY_LEN: usize = 64;
+const MAX_KEY_LEN: usize = 128;
 
 /// The longest platform id a `<msg:…>` or `<sticker:…>` marker may carry.
 ///
@@ -37,7 +37,7 @@ pub fn mint() -> String {
 }
 
 /// Whether `key` is a well-formed chat key value: 1-64 characters from the
-/// alphabet `[A-Za-z0-9_-]`.
+/// alphabet `[A-Za-z0-9_:-]`.
 ///
 /// This is the shape check only. Whether the key is *known* — minted by this
 /// gateway root and present in its registry — is the registry's answer, not
@@ -47,7 +47,7 @@ pub fn validate(key: &str) -> bool {
         && key.len() <= MAX_KEY_LEN
         && key
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ':')
 }
 
 /// Pull the chat key off a body: the first line, wrapped as
