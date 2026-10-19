@@ -11,6 +11,8 @@
 //! * **`target_role`** (`choice`) — which role of the cluster should take it?
 //! * **`reply_to_msg`** (`choice`) — which recent message this one continues,
 //!   when the platform reported no reply of its own.
+//! * **`delivery_kind`** (`choice`) — does the agent want this as a stateless
+//!   note, or as a tracked task?
 //!
 //! The answers ride along with the event: on [`crate::trigger::PushInput`], so
 //! an operator's script reads them off stdin, and as `ONLYNE_DECIDER_*`
@@ -50,7 +52,8 @@ pub const MAX_REPLY_CANDIDATES: usize = 8;
 /// `target_role` and `target_confidence` name where it belongs; the reply pair
 /// is what an implicit thread link would ride on, and is `None` when the
 /// platform already reported a reply or the decision found nothing to
-/// continue.
+/// continue; `delivery_kind` asks whether the event is a conversational note or
+/// a tracked task, and falls back to a note when the endpoint says nothing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeciderRouting {
     /// Probability in `[0.0, 1.0]` that the cluster should take this message.
@@ -64,9 +67,19 @@ pub struct DeciderRouting {
     pub suggested_reply_to: Option<String>,
     /// Concentration of that reply decision in `[0.0, 1.0]`.
     pub reply_confidence: f64,
+    /// Suggested delivery kind (`"note"` or `"task"`), defaulting to `"note"`.
+    #[serde(default = "default_delivery_kind")]
+    pub delivery_kind: String,
+    /// Concentration of the delivery kind decision in `[0.0, 1.0]`.
+    #[serde(default)]
+    pub kind_confidence: f64,
     /// Additional answers from custom questions declared in `im_inbound.questions`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Answer>,
+}
+
+fn default_delivery_kind() -> String {
+    "note".to_string()
 }
 
 impl DeciderRouting {
@@ -125,6 +138,7 @@ pub async fn evaluate_inbound_with_spec(
         "conversation": inbound.conversation,
         "sender": inbound.from.as_ref().map(|from| from.id.clone()),
         "text": inbound.text,
+        "has_reply_parent": inbound.reply.is_some(),
         "recent_message_ids": recent_msg_ids,
     });
     let mut questions = spec.render_questions(&state);
@@ -174,15 +188,28 @@ pub async fn evaluate_inbound_with_spec(
     let extra: BTreeMap<String, Answer> = response
         .answers
         .iter()
-        .filter(|(k, _)| !matches!(k.as_str(), "should_handle" | "target_role" | "reply_to_msg"))
+        .filter(|(k, _)| {
+            !matches!(
+                k.as_str(),
+                "should_handle" | "target_role" | "reply_to_msg" | "delivery_kind"
+            )
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    let (delivery_kind, kind_confidence) = match response.choice("delivery_kind") {
+        Some(choice) if choice.choice == "task" || choice.choice == "note" => {
+            (choice.choice.clone(), choice.confidence)
+        }
+        _ => (default_delivery_kind(), 0.0),
+    };
     let mut routing = DeciderRouting {
         should_handle,
         target_role: target.choice.clone(),
         target_confidence: target.confidence,
         suggested_reply_to: None,
         reply_confidence: 0.0,
+        delivery_kind,
+        kind_confidence,
         extra,
     };
     if wants_reply {
@@ -345,6 +372,8 @@ mod tests {
                 target_confidence: 0.77,
                 suggested_reply_to: None,
                 reply_confidence: 0.1,
+                delivery_kind: "note".into(),
+                kind_confidence: 0.0,
                 extra: BTreeMap::new(),
             }
         );
@@ -356,9 +385,10 @@ mod tests {
         assert_eq!(state["conversation"], "-100");
         assert_eq!(state["sender"], "u1");
         assert_eq!(state["text"], "please fix the build");
+        assert_eq!(state["has_reply_parent"], false);
         assert_eq!(state["recent_message_ids"], serde_json::json!(["m1", "m2"]));
         let questions = body["questions"].as_object().expect("a question map");
-        assert_eq!(questions.len(), 3, "one batched request, three questions");
+        assert_eq!(questions.len(), 4, "one batched request, four questions");
         assert_eq!(questions["should_handle"]["type"], "noul");
         assert_eq!(
             questions["should_handle"]["criteria"]["true"],
@@ -376,6 +406,11 @@ mod tests {
         assert!(reply.contains_key("m1"));
         assert!(reply.contains_key("m2"));
         assert!(reply.contains_key("none"));
+        let kind = questions["delivery_kind"]["criteria"]
+            .as_object()
+            .expect("a closed option set");
+        assert!(kind.contains_key("note"));
+        assert!(kind.contains_key("task"));
     }
 
     /// An empty candidate list still asks over a role: the operator's seat.
@@ -385,11 +420,12 @@ mod tests {
         let routing = evaluate_inbound(&client, &event(), &[], &[]).await.unwrap();
         assert_eq!(routing.target_role, "ignore");
         assert!(routing.suggested_reply_to.is_none());
+        assert_eq!(routing.delivery_kind, "note");
 
         let body: serde_json::Value = serde_json::from_str(&seen_rx.await.unwrap()).unwrap();
         let questions = body["questions"].as_object().unwrap();
         // No history to continue, so the reply question is not asked at all.
-        assert_eq!(questions.len(), 2, "no reply question without history");
+        assert_eq!(questions.len(), 3, "no reply question without history");
         assert!(
             questions["target_role"]["criteria"]
                 .get("_supervisor")
@@ -418,10 +454,36 @@ mod tests {
         assert_eq!(routing.reply_confidence, 0.0);
 
         let body: serde_json::Value = serde_json::from_str(&seen_rx.await.unwrap()).unwrap();
+        assert_eq!(body["state"]["has_reply_parent"], true);
         assert!(
             body["questions"].get("reply_to_msg").is_none(),
             "the platform already said which message this answers"
         );
+    }
+
+    /// The delivery-kind answer rides out, and is not also left in `extra`.
+    #[tokio::test]
+    async fn a_returned_delivery_kind_becomes_task() {
+        let answers = serde_json::json!({
+            "model": "jev-latest",
+            "answers": {
+                "should_handle": { "type": "noul", "noul": 0.9 },
+                "target_role": { "type": "choice", "choice": "builder", "confidence": 0.7 },
+                "delivery_kind": {
+                    "type": "choice",
+                    "choice": "task",
+                    "confidence": 0.83,
+                    "probabilities": { "task": 0.83, "note": 0.17 }
+                }
+            }
+        });
+        let (client, _seen_rx) = mock_server(answers).await;
+        let routing = evaluate_inbound(&client, &event(), &["builder".to_string()], &[])
+            .await
+            .unwrap();
+        assert_eq!(routing.delivery_kind, "task");
+        assert_eq!(routing.kind_confidence, 0.83);
+        assert!(routing.extra.is_empty(), "the answer is not duplicated");
     }
 
     /// A decision that names a message to continue rides out as one.
@@ -514,10 +576,13 @@ mod tests {
             target_confidence: 0.25,
             suggested_reply_to: Some("m2".into()),
             reply_confidence: 0.75,
+            delivery_kind: "task".into(),
+            kind_confidence: 0.6,
             extra: BTreeMap::new(),
         };
         let text = serde_json::to_string(&routing).unwrap();
         assert!(text.contains("\"suggested_reply_to\":\"m2\""));
+        assert!(text.contains("\"delivery_kind\":\"task\""));
         let back: DeciderRouting = serde_json::from_str(&text).unwrap();
         assert_eq!(back, routing);
 
@@ -527,6 +592,8 @@ mod tests {
             target_confidence: 0.0,
             suggested_reply_to: None,
             reply_confidence: 0.0,
+            delivery_kind: "note".into(),
+            kind_confidence: 0.0,
             extra: BTreeMap::new(),
         };
         assert!(
@@ -535,6 +602,13 @@ mod tests {
                 .contains("suggested_reply_to"),
             "an absent reply stays absent"
         );
+
+        let partial: DeciderRouting = serde_json::from_str(
+            r#"{"should_handle":0.0,"target_role":"ignore","target_confidence":0.0,"reply_confidence":0.0}"#,
+        )
+        .unwrap();
+        assert_eq!(partial.delivery_kind, "note");
+        assert_eq!(partial.kind_confidence, 0.0);
     }
 
     /// The question set is a closed one over the roles offered, whatever the

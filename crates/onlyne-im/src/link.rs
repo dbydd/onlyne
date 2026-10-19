@@ -285,6 +285,26 @@ impl RoleLink {
         renders: &mpsc::Sender<RenderJob>,
         delivery: Delivery,
     ) -> Result<()> {
+        // A task completion receipt is a terminal row of the task it names, not
+        // something a chat platform renders: settle it here so a role handing
+        // work back to this gateway never leaves it unplaced.
+        if delivery.envelope.kind == onlyne_proto::MsgKind::Completion {
+            let _ = link
+                .request(
+                    Frame::req(
+                        String::new(),
+                        ClientOp::Ack(AckArgs {
+                            msg_id: delivery.msg_id,
+                            op_id: delivery.envelope.op_id,
+                            accepted: true,
+                            reason: Some("im_completion_receipt".to_string()),
+                        }),
+                    ),
+                    REQUEST_TIMEOUT,
+                )
+                .await?;
+            return Ok(());
+        }
         // The body's first line names the conversation; the registry says
         // whether this gateway serves it (`docs/v2.3-CHAT-PROTOCOL.md` §5.3,
         // §6). Every failure here is a refusal that settles the row rather than

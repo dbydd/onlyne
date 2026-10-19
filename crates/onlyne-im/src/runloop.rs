@@ -483,36 +483,55 @@ async fn handle_backend_op(
                 // whether this gateway serves it; a refusal is the operator's
                 // own choice, so it is a sentence and not a fault.
                 None => {
-                    if !gateway.listen.admits(&inbound.conversation) {
+                    // Some platforms report a normalized conversation that
+                    // differs from the id the conversation was registered
+                    // under. The raw payload still carries the platform's own
+                    // chat id, so a registered conversation is found by that
+                    // before a second workspace is adopted for the same chat.
+                    let raw_chat_id = inbound
+                        .raw
+                        .as_ref()
+                        .and_then(|raw| {
+                            raw.pointer("/event/message/chat_id")
+                                .or_else(|| raw.pointer("/event/chat/chat_id"))
+                        })
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|chat_id| !chat_id.is_empty());
+                    let known = raw_chat_id
+                        .and_then(|chat_id| gateway.conversation_for(&event.gateway, chat_id));
+                    if let Some(known) = known {
+                        known
+                    } else if !gateway.listen.admits(&inbound.conversation) {
                         tracing::info!(
                             gateway = %event.gateway,
                             conversation = %inbound.conversation,
                             "the listen policy refuses this conversation"
                         );
                         return;
-                    }
-                    match crate::adopt::adopt(gateway, &event.gateway, &inbound.conversation) {
-                        Ok(adopted) => {
-                            // Loud on purpose: a workspace and a chat key just
-                            // appeared, and an operator reading the log is how
-                            // they learn which conversation this root now serves.
-                            tracing::info!(
-                                gateway = %event.gateway,
-                                conversation = %adopted.conversation,
-                                slug = %adopted.slug,
-                                chat_key = %adopted.chat_key,
-                                "adopted a conversation nobody registered"
-                            );
-                            adopted
-                        }
-                        Err(error) => {
-                            tracing::error!(
-                                gateway = %event.gateway,
-                                conversation = %inbound.conversation,
-                                error = %format!("{error:#}"),
-                                "could not adopt this conversation; the event is dropped"
-                            );
-                            return;
+                    } else {
+                        match crate::adopt::adopt(gateway, &event.gateway, &inbound.conversation) {
+                            Ok(adopted) => {
+                                // Loud on purpose: a workspace and a chat key just
+                                // appeared, and an operator reading the log is how
+                                // they learn which conversation this root now serves.
+                                tracing::info!(
+                                    gateway = %event.gateway,
+                                    conversation = %adopted.conversation,
+                                    slug = %adopted.slug,
+                                    chat_key = %adopted.chat_key,
+                                    "adopted a conversation nobody registered"
+                                );
+                                adopted
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    gateway = %event.gateway,
+                                    conversation = %inbound.conversation,
+                                    error = %format!("{error:#}"),
+                                    "could not adopt this conversation; the event is dropped"
+                                );
+                                return;
+                            }
                         }
                     }
                 }

@@ -32,6 +32,14 @@
         "type": "choice",
         "instructions": "Which recent message ID is this message continuing or replying to?",
         "criteria": {}
+      },
+      "delivery_kind": {
+        "type": "choice",
+        "instructions": "Should this inbound IM message be delivered to the agent as a stateless conversational 'note' (default for Q&A, chat, status checks, and quick instructions) or as a tracked 'task' (for multi-step engineering/research work, handoff chains, or continuing an active task thread)?",
+        "criteria": {
+          "note": "Direct 1-on-1 or group chat Q&A, greetings, status checks, or conversational turns that do not require opening a tracked task slot",
+          "task": "Substantive multi-step work request, cross-role handoff workflow, or continuation of an active task chain"
+        }
       }
     },
     "thresholds": {

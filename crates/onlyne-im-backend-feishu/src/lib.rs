@@ -11,7 +11,8 @@
 //! Inbound runs over the `openlark` websocket client, exactly as in v1
 //! (`frozen/gateway-v1`'s `spawn_websocket`): Feishu has no polling API, and
 //! the SDK owns the connection and its token lifecycle. The websocket is
-//! spawned at construction and re-connects inside the SDK; this backend only
+//! spawned at construction, re-connects inside the SDK, and is reopened by
+//! [`spawn_websocket`] whenever the SDK's session returns; this backend only
 //! drains the payload channel.
 //!
 //! The app must subscribe to three events in the Feishu developer console:
@@ -42,7 +43,7 @@ use onlyne_im_backend::frame::{
     SentArgs,
 };
 use onlyne_im_backend::payload::ImEvent;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub use auth::{APP_ID_ENV, APP_SECRET_ENV, DEFAULT_DOMAIN, DOMAIN_ENV};
 
@@ -161,30 +162,84 @@ fn noop_events() -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
 
 /// Spawn the `openlark` websocket client, ported from v1's
 /// `spawn_websocket`: raw event payloads land in the channel this returns.
+///
+/// `open` runs one session and returns when it ends, so the pump reopens it
+/// for as long as the receiver is alive. A session that lasted at least
+/// [`NORMAL_SESSION`] was working, and its return is treated as a restart
+/// rather than a failure: it retries at once and the failure count resets. A
+/// session that returned sooner failed, so each consecutive failure doubles
+/// the delay ([`reconnect_delay`]) instead of hammering a platform that is
+/// down.
 fn spawn_websocket(
     creds: auth::FeishuCredentials,
 ) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     tokio::spawn(async move {
         let base_url = creds.base_url();
-        let config = open_lark::Config::builder()
-            .app_id(creds.app_id)
-            .app_secret(creds.app_secret)
-            .base_url(base_url)
-            .build();
-        let Ok(handler) = dispatcher(tx) else {
-            tracing::warn!(
-                "feishu sdk rejected the card callback handler; the websocket never starts"
-            );
-            return;
-        };
-        let result =
-            open_lark::ws_client::LarkWsClient::open(std::sync::Arc::new(config), handler).await;
-        if let Err(e) = result {
-            tracing::warn!(error = ?e, "feishu websocket closed");
+        let mut consecutive_failures: u32 = 0;
+        loop {
+            // The gateway dropped the receiver: no reason to hold a connection.
+            if tx.is_closed() {
+                break;
+            }
+            let config = open_lark::Config::builder()
+                .app_id(creds.app_id.as_str())
+                .app_secret(creds.app_secret.as_str())
+                .base_url(base_url.as_str())
+                .build();
+            let Ok(handler) = dispatcher(tx.clone()) else {
+                tracing::warn!(
+                    "feishu sdk rejected the card callback handler; the websocket never starts"
+                );
+                return;
+            };
+            let started = Instant::now();
+            let result =
+                open_lark::ws_client::LarkWsClient::open(std::sync::Arc::new(config), handler)
+                    .await;
+            if tx.is_closed() {
+                break;
+            }
+            if started.elapsed() >= NORMAL_SESSION {
+                consecutive_failures = 0;
+                tracing::debug!(
+                    error = ?result.err(),
+                    "feishu websocket session closed; reconnecting"
+                );
+                tokio::time::sleep(reconnect_delay(0)).await;
+            } else {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                tracing::warn!(
+                    error = ?result.err(),
+                    retry_in_ms = reconnect_delay(consecutive_failures).as_millis() as u64,
+                    "feishu websocket session closed immediately; reconnecting"
+                );
+                tokio::time::sleep(reconnect_delay(consecutive_failures)).await;
+            }
         }
     });
     rx
+}
+
+/// How long a websocket session must have lasted to count as working rather
+/// than failing: a session that had been up this long is reopened without
+/// backoff.
+const NORMAL_SESSION: Duration = Duration::from_secs(30);
+
+/// The delay before the next connection attempt: a fifth of a second after a
+/// normal close, then doubling per consecutive fast failure up to half a
+/// minute, so a platform that stays down is retried steadily instead of in a
+/// tight loop.
+fn reconnect_delay(consecutive_failures: u32) -> Duration {
+    match consecutive_failures {
+        0 => Duration::from_millis(200),
+        1 => Duration::from_secs(1),
+        2 => Duration::from_secs(2),
+        3 => Duration::from_secs(4),
+        4 => Duration::from_secs(8),
+        5 => Duration::from_secs(16),
+        _ => Duration::from_secs(30),
+    }
 }
 
 /// The SDK dispatcher: every payload goes to the channel the backend drains,
@@ -492,6 +547,22 @@ mod tests {
             "{}",
             onboarding.payload
         );
+    }
+
+    /// The backoff ladder: a fifth of a second after a normal close, doubling
+    /// per consecutive fast failure to a half-minute cap.
+    #[test]
+    fn the_reconnect_delay_doubles_from_a_fifth_of_a_second_to_half_a_minute() {
+        assert_eq!(reconnect_delay(0), Duration::from_millis(200));
+        assert_eq!(reconnect_delay(1), Duration::from_secs(1));
+        assert_eq!(reconnect_delay(2), Duration::from_secs(2));
+        assert_eq!(reconnect_delay(3), Duration::from_secs(4));
+        assert_eq!(reconnect_delay(4), Duration::from_secs(8));
+        assert_eq!(reconnect_delay(5), Duration::from_secs(16));
+        // Past the cap it holds, so a platform that stays down is not hammered.
+        for failures in [6, 7, 30, u32::MAX] {
+            assert_eq!(reconnect_delay(failures), Duration::from_secs(30));
+        }
     }
 
     #[tokio::test]

@@ -176,6 +176,11 @@ impl PushEnv {
             pairs.push(("ONLYNE_DECIDER_SHOULD_HANDLE", decider.should_handle_str()));
             pairs.push(("ONLYNE_DECIDER_TARGET", decider.target_role.clone()));
             pairs.push(("ONLYNE_DECIDER_CONFIDENCE", decider.target_confidence_str()));
+            pairs.push(("ONLYNE_DECIDER_KIND", decider.delivery_kind.clone()));
+            pairs.push((
+                "ONLYNE_DECIDER_KIND_CONFIDENCE",
+                format!("{:.4}", decider.kind_confidence),
+            ));
             if let Some(reply) = &decider.suggested_reply_to {
                 pairs.push(("ONLYNE_DECIDER_REPLY_TO", reply.clone()));
             }
@@ -509,6 +514,7 @@ mod tests {
             &format!(
                 "printf '%s\\n' \"$ONLYNE_DECIDER_SHOULD_HANDLE\" \
                  \"$ONLYNE_DECIDER_TARGET\" \"$ONLYNE_DECIDER_CONFIDENCE\" \
+                 \"$ONLYNE_DECIDER_KIND\" \"$ONLYNE_DECIDER_KIND_CONFIDENCE\" \
                  \"$ONLYNE_DECIDER_REPLY_TO\" > {path}"
             ),
         );
@@ -525,6 +531,8 @@ mod tests {
                 target_confidence: 0.5,
                 suggested_reply_to: Some("m-4".into()),
                 reply_confidence: 0.9,
+                delivery_kind: "task".into(),
+                kind_confidence: 0.25,
                 extra: BTreeMap::new(),
             }),
             at: "2026-10-10T12:00:00Z".into(),
@@ -537,6 +545,8 @@ mod tests {
         assert_eq!(lines.next(), Some("0.8732"));
         assert_eq!(lines.next(), Some("_supervisor"));
         assert_eq!(lines.next(), Some("0.5000"));
+        assert_eq!(lines.next(), Some("task"));
+        assert_eq!(lines.next(), Some("0.2500"));
         assert_eq!(lines.next(), Some("m-4"));
     }
 
